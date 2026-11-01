@@ -1160,37 +1160,63 @@ def test_writing_a_block_counts_each_row_at_its_widest(
         monkeypatch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", chunk_bytes)
     store, receptors = _edge_receptors(tmp_path)
     group = artifact_group(store.zw, receptors)
+    fields = ("sequence_id", "v_call", "v_identity")
 
     def plan(limit):
-        contigs = _edge_contigs(store, receptors, limit)
+        contigs = _edge_contigs(store, receptors, limit, fields)
         contigs.hold_text()
         contigs.measure(10**9)
         return contigs.plan_blocks(
-            n_columns=15, cell_width=5, clone_width=None, block_bytes=32 * 2**20
+            n_columns=16, cell_width=5, clone_width=None, block_bytes=32 * 2**20
         )
 
     refusals = _walk(plan)
     held = group["contig_v_call_values"].nbytes + group["contig_v_call_offsets"].nbytes
-    # Each row at its widest: 15 separators, a cell ID of 5 bytes, an ID of 14
-    # and a V call of 8 rendered, the ID read beside it, and 96 bytes for the
-    # row, 24 for the ID's offsets and 12 for the V call's codes.
-    rendered = 15 + 5 + 14 + 8
-    per_row = rendered + 14 + 96 + 24 + 12
+    # Each row at its widest: 16 separators, a cell ID of 5 bytes, an ID of
+    # 14, a V call of 8 and a V identity of 2, the whole numbers 0 and 1 with
+    # a sign, rendered; the ID and the identity read and rendered beside it;
+    # 96 bytes for the row, 24 for the ID's offsets, 12 for the V call's
+    # codes and 16 for the identity's offsets; and rendering the identity,
+    # 136 bytes and 4 per byte of its widest text.
+    rendered = 16 + 5 + 14 + 8 + 2
+    per_row = rendered + (14 + 2) + (96 + 24 + 12 + 16) + (136 + 4 * 2)
     reading = max(
         _chunk(group[name])
         for name in (
             "contig_cells",
             "contig_sequence_id_offsets",
             "contig_v_call",
+            "contig_v_identity",
             "contig_sequence_id",
         )
     )
     if chunk_bytes is None:
         # One block of the ten contigs; windows of their ten int32 positions,
-        # eleven int64 offsets and ten int32 codes, each in one chunk.
-        rows, windows = 10, 10 * 4 + 11 * 8 + 10 * 4
+        # eleven int64 offsets, ten int32 codes and ten float64 identities,
+        # each in one chunk.
+        rows, windows = 10, 10 * 4 + 11 * 8 + 10 * 4 + 10 * 8
     else:
-        # Blocks of four contigs, a stored chunk of positions; the window of
-        # offsets spans three chunks of two, and the codes one chunk of four.
-        rows, windows = 4, 4 * 4 + 6 * 8 + 4 * 4
+        # Blocks of four contigs, a stored chunk of positions; the windows of
+        # offsets and of identities span three chunks of two, and the codes
+        # one chunk of four.
+        rows, windows = 4, 4 * 4 + 6 * 8 + 4 * 4 + 6 * 8
     assert refusals[-1] == held + per_row * rows + 2 * rendered + windows + reading
+
+
+def test_renamed_ids_stay_held_while_the_blocks_are_written(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    plan = repertoire_operations._ExportContigs.plan_blocks
+    held = []
+
+    def recorded(contigs, **options):
+        held.append(contigs.reads.held)
+        return plan(contigs, **options)
+
+    monkeypatch.setattr(repertoire_operations._ExportContigs, "plan_blocks", recorded)
+    store.repertoire.export_airr(receptors, tmp_path / "named.tsv")
+    monkeypatch.setattr(repertoire_operations, "_ID_BYTES", 1_200)
+    store.repertoire.export_airr(receptors, tmp_path / "renamed.tsv")
+    # X_3, X_4 and Z_3 stay held with their new names, 1,000 bytes more each.
+    assert held[1] - held[0] == 3 * 1_000
