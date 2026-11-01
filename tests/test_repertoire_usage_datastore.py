@@ -712,3 +712,20 @@ def test_figures_of_clonotypes_need_the_store_to_name_them(tmp_path) -> None:
             plot(bare, clonotypes, count="clonotypes", show=False)
         # Cells need no name from the store.
         plot(bare, clonotypes, show=False).close()
+
+
+def test_a_read_only_store_counts_as_a_writable_one(tmp_path) -> None:
+    store, receptors, clonotypes = _sources(tmp_path)
+    expected = {
+        "usage": store.repertoire.gene_usage(clonotypes, group_by="sample").table,
+        "lengths": store.repertoire.spectratype(receptors, sequence="nt").table,
+    }
+    # Nothing is saved, so a store opened read-only gives the same tables.
+    reader = receptor_store(tmp_path, zarr_mode="r")
+    found = {
+        "usage": reader.repertoire.gene_usage(clonotypes, group_by="sample").table,
+        "lengths": reader.repertoire.spectratype(receptors, sequence="nt").table,
+    }
+    for name, table in expected.items():
+        pd.testing.assert_frame_equal(found[name], table)
+    reader.plots.gene_pairing(receptors, show=False).close()
