@@ -77,7 +77,7 @@ def _figure_noun(store: Any, clones: ArtifactRef) -> str:
     """What figures call the clones: clones, clonotypes or clonotype clusters."""
     method = getattr(store, "_clone_figure_noun", None)
     if not callable(method):
-        raise TypeError("store does not provide the figure labels of clones")
+        raise TypeError("store does not provide what figures call clones")
     return str(method(clones))
 
 
@@ -284,7 +284,12 @@ def clone_abundance(
             left += widths
         ax.set_yticks(positions, top_table["label"].tolist(), fontsize="small")
         ax.set_xlabel("Cells")
-        ax.set_title(f"Largest {len(top_table)} {drawn}")
+        # One clone drawn is named in the singular: "Largest clonotype".
+        ax.set_title(
+            f"Largest {len(top_table)} {drawn}"
+            if len(top_table) > 1
+            else f"Largest {drawn.removesuffix('s')}"
+        )
         if show_legend and grouped:
             ax.legend(frameon=False, fontsize="small", loc="lower right")
         apply_figure_chrome(figure, theme)

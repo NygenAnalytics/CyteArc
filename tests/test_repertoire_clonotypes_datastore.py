@@ -601,7 +601,7 @@ def test_clone_abundance_needs_a_store_that_labels_clones(tmp_path) -> None:
         plotting.clone_abundance(loader, ref, show=False)
     # Labels without the name of the clones drawn do not title the figure.
     loader._clone_figure_labels = store._clone_figure_labels
-    with pytest.raises(TypeError, match="does not provide the figure labels"):
+    with pytest.raises(TypeError, match="does not provide what figures call clones"):
         plotting.clone_abundance(loader, ref, show=False)
 
 
@@ -748,6 +748,17 @@ def test_figures_name_clonotype_clusters_as_their_definition_does(tmp_path) -> N
         assert two.tables["top"]["label"].tolist() == ["CASSA", "CARW"]
     finally:
         two.close()
+    # One clone drawn is named in the singular, of each kind.
+    for ref, title in (
+        (near, "Largest clonotype cluster"),
+        (identical, "Largest clonotype"),
+        (imported, "Largest clone"),
+    ):
+        one = plotting.clone_abundance(store, ref, top=1, show=False)
+        try:
+            assert one.axes["top"].get_title() == title
+        finally:
+            one.close()
     tracked = store.plots.clone_tracking(near, group_by="sample", top=2, show=False)
     try:
         assert _legend(tracked) == ["CASSA 1", "CARW", "CASSA 3"]
