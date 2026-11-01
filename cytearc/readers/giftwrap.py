@@ -136,6 +136,7 @@ class GiftwrapSource:
     count_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
+    alleles_overlap: bool
     open_alleles: bool
     notes: dict[str, Any]
     _probes: _Probes = field(repr=False)
@@ -314,6 +315,7 @@ def _h5_source(path: str) -> GiftwrapSource:
         count_fields=("reads", "support"),
         depth_roles=None,
         reference_from_depth=False,
+        alleles_overlap=False,
         open_alleles=True,
         notes={"layout": layout, "same_gapfills": list(probes.same_gapfills)},
         _probes=probes,
@@ -467,6 +469,7 @@ def _table_source(folder: str) -> GiftwrapSource:
         count_fields=("reads", "support"),
         depth_roles=None,
         reference_from_depth=False,
+        alleles_overlap=False,
         open_alleles=True,
         notes={
             "layout": "per-UMI table",

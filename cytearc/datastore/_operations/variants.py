@@ -323,6 +323,7 @@ class _ImportRules:
     depth_definition: str
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
+    alleles_overlap: bool
     open_alleles: bool
     count_fields: tuple[str, ...]
     field_paths: dict[str, str]
@@ -343,8 +344,9 @@ def _distinct_calls(rows: np.ndarray) -> tuple[np.ndarray, int | None, int]:
     """Keep the first of each run of calls of one cell, allele and source.
 
     Returns:
-        The kept rows; for repeats that differ in their call, the row of the
-        first such repeat, or None; and the number of rows dropped.
+        The kept rows; for repeats that differ in their call or its quality,
+        the row of the first such repeat, or None; and the number of rows
+        dropped.
     """
     if len(rows) < 2:
         return rows, None, 0
@@ -353,7 +355,11 @@ def _distinct_calls(rows: np.ndarray) -> tuple[np.ndarray, int | None, int]:
         & (rows["key"][1:] == rows["key"][:-1])
         & (rows["source"][1:] == rows["source"][:-1])
     )
-    differing = same & (rows["value"][1:] != rows["value"][:-1])
+    quality = rows["quality"]
+    same_quality = (quality[1:] == quality[:-1]) | (
+        np.isnan(quality[1:]) & np.isnan(quality[:-1])
+    )
+    differing = same & ((rows["value"][1:] != rows["value"][:-1]) | ~same_quality)
     if differing.any():
         return rows, int(np.flatnonzero(differing)[0]) + 1, 0
     kept = np.r_[True, ~same]
@@ -984,6 +990,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             first.depth_definition,
             first.depth_roles,
             first.reference_from_depth,
+            first.alleles_overlap,
             first.open_alleles,
         )
         field_paths: dict[str, str] = {}
@@ -999,6 +1006,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 reader.depth_definition,
                 reader.depth_roles,
                 reader.reference_from_depth,
+                reader.alleles_overlap,
                 reader.open_alleles,
             ) != depth_rules:
                 raise ValueError(
@@ -1014,6 +1022,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             depth_definition=first.depth_definition,
             depth_roles=first.depth_roles,
             reference_from_depth=first.reference_from_depth,
+            alleles_overlap=first.alleles_overlap,
             open_alleles=first.open_alleles,
             count_fields=tuple(name for name in COUNT_FIELDS if name in field_paths),
             field_paths=field_paths,
@@ -1040,6 +1049,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "call_alleles",
                 "call_sources",
                 "call_values",
+                "call_quality",
                 "site_contigs",
                 "site_positions",
                 "site_names",
@@ -1136,6 +1146,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 np.full(len(rows), batch.call_source, dtype=object)
             )
             rows["value"] = call_values.codes(batch.calls[kept])
+            if len(batch.call_quality):
+                if len(batch.call_quality) != batch.n_rows:
+                    raise ValueError(
+                        f"{path} gives {len(batch.call_quality)} call qualities for "
+                        f"{batch.n_rows} calls"
+                    )
+                rows["quality"] = np.asarray(batch.call_quality)[kept]
+            else:
+                rows["quality"] = np.nan
             sorter.add("calls", rows)
             return
         values = np.asarray(batch.values, dtype=np.int64)[kept]
@@ -1223,6 +1242,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     "call_alleles": (np.int32, n_call_rows),
                     "call_sources": (np.int32, n_call_rows),
                     "call_values": (np.int32, n_call_rows),
+                    "call_quality": (np.float32, n_call_rows),
                 },
             )
             for first, stop, rows in sorter.bands(band_rows):
@@ -1267,6 +1287,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     depth_roles=rules.depth_roles,
                     reference_from_depth=rules.reference_from_depth,
                     name_cell=name_cell,
+                    alleles_overlap=rules.alleles_overlap,
                 )
                 width = stop - first
                 band_cells = depth_out["cell"].astype(np.int64) - first
@@ -1300,6 +1321,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 appender.append("call_alleles", call_rows["key"])
                 appender.append("call_sources", call_rows["source"])
                 appender.append("call_values", value_remap[call_rows["value"]])
+                appender.append("call_quality", call_rows["quality"])
             mean_depth = np.where(listed, depth_total / max(sites.n_sites, 1), np.nan)
             _write_array(group, "mean_depth", mean_depth)
             _write_array(group, "covered_sites", covered)
@@ -1491,7 +1513,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 {
                     "depth": ("depth_sites", "depth"),
                     "count": count_arrays,
-                    "call": ("call_alleles", "call_sources", "call_values"),
+                    "call": (
+                        "call_alleles",
+                        "call_sources",
+                        "call_values",
+                        "call_quality",
+                    ),
                 },
             )
         if resident > self.memoryBytes:
@@ -1549,7 +1576,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         )
         call_cells, call_values = collect(
             "call",
-            ("call_alleles", "call_sources", "call_values"),
+            ("call_alleles", "call_sources", "call_values", "call_quality"),
             "call_alleles",
             allele_kept,
         )
@@ -1580,6 +1607,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 call_values["call_alleles"],
                 call_values["call_sources"],
                 call_values["call_values"],
+                call_values["call_quality"],
             ),
             call_sources=_read(group, "call_source_names").astype(str).tolist(),
             call_values=_read(group, "call_value_names").astype(str).tolist(),

@@ -72,6 +72,7 @@ class MitoAfmSource:
     count_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
+    alleles_overlap: bool
     open_alleles: bool
     notes: dict[str, Any]
     _sites: SiteTable = field(repr=False)
@@ -257,6 +258,7 @@ def mito_afm_source(path: str | os.PathLike[str]) -> MitoAfmSource:
         count_fields=(),
         depth_roles=frozenset(ALLELE_ROLES),
         reference_from_depth=False,
+        alleles_overlap=False,
         open_alleles=False,
         notes=notes,
         _sites=sites,

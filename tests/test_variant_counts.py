@@ -413,8 +413,68 @@ def test_derived_reference_counts_have_no_quality() -> None:
     )
 
 
-def test_calls_rows_hold_codes() -> None:
-    assert CALL_DTYPE.names == ("cell", "key", "source", "value")
+def test_calls_rows_hold_codes_and_a_quality() -> None:
+    assert CALL_DTYPE.names == ("cell", "key", "source", "value", "quality")
+    assert CALL_DTYPE["quality"] == np.dtype(np.float32)
+
+
+def test_overlapping_alleles_bound_each_count_by_the_depth() -> None:
+    # Tapestri gives each variant of a position its own allele frequency
+    # over the position's depth, so one read can count toward two
+    # alternatives: at depth 1 both alternatives show 1 read.
+    roles = frozenset({"reference", "alternative", "other"})
+    sites = _coordinate_table(
+        [7], [[("A", "reference"), ("C", "alternative"), ("G", "alternative")]]
+    )
+    counts = _rows(count_dtype(()), [(0, 1, 1), (0, 2, 1), (1, 2, 2)])
+    stated = _rows(DEPTH_DTYPE, [(0, 0, 1), (1, 0, 2)])
+    depth, stored = finish_band(
+        counts,
+        stated,
+        sites=sites,
+        depth_roles=roles,
+        reference_from_depth=False,
+        name_cell=_name,
+        alleles_overlap=True,
+    )
+    # The stated depth is kept whole, and no count is derived or dropped.
+    assert depth.tolist() == [(0, 0, 1), (1, 0, 2)]
+    assert stored[["cell", "key", "count"]].tolist() == [(0, 1, 1), (0, 2, 1), (1, 2, 2)]
+    with pytest.raises(ValueError, match="add up to 2, more than its depth 1"):
+        finish_band(
+            counts,
+            stated,
+            sites=sites,
+            depth_roles=roles,
+            reference_from_depth=False,
+            name_cell=_name,
+        )
+    # One count above the depth is still refused.
+    over = _rows(count_dtype(()), [(1, 1, 1), (1, 2, 3)])
+    with pytest.raises(
+        ValueError,
+        match="A count of cell 'cell1' at the site chrM:7 is 3, more than its depth 2",
+    ):
+        finish_band(
+            over,
+            stated,
+            sites=sites,
+            depth_roles=roles,
+            reference_from_depth=False,
+            name_cell=_name,
+            alleles_overlap=True,
+        )
+    for depth_roles, derive in ((None, False), (roles, True)):
+        with pytest.raises(ValueError, match="Overlapping alleles need a stated depth"):
+            finish_band(
+                counts,
+                stated,
+                sites=sites,
+                depth_roles=depth_roles,
+                reference_from_depth=derive,
+                name_cell=_name,
+                alleles_overlap=True,
+            )
 
 
 def test_merge_names_named_sites_in_its_errors() -> None:
