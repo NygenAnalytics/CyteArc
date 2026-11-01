@@ -1349,20 +1349,24 @@ def _wide_dabseq(
     return path
 
 
-@pytest.mark.parametrize("variable_length", [False, True])
+@pytest.mark.parametrize(
+    ("alternative_length", "variable_length"),
+    [(1, False), (1_000, False), (1_000, True)],
+)
 @pytest.mark.parametrize("file_format", ["tapestri", "dabseq"])
 def test_describing_a_file_holds_no_more_than_the_smallest_budget_accepted(
-    tmp_path, file_format, variable_length
+    tmp_path, file_format, alternative_length, variable_length
 ) -> None:
     from cytearc.readers.tapestri import dabseq_source, tapestri_source
     from tests.clone_helpers import traced_peak
 
-    # Insertions of 1,000 bases make the variants' texts most of what the
-    # description holds, however the file stores them.
+    # SNVs make what the description holds for each variant most of it, and
+    # insertions of 1,000 bases the variants' texts, however the file stores
+    # them.
     options = {
         "n_cells": 50,
         "n_variants": 2_000,
-        "alternative_length": 1_000,
+        "alternative_length": alternative_length,
         "variable_length": variable_length,
     }
     if file_format == "tapestri":
