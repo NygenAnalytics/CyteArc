@@ -12,6 +12,7 @@ import pandas as pd
 from scipy.sparse import coo_matrix
 
 from ..utils.progress import iter_progress
+from ._contigs import header_fields, parse_contig_columns, read_options
 from ._assay_names import (
     AUTO_ASSAY_NAMES,
     auto_name_feat_table,
@@ -933,3 +934,118 @@ def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
         features=features,
         umis=umi_values.astype(np.int64),
     )
+
+
+#: The format name of Cell Ranger's contig annotation files.
+CELLRANGER_VDJ_FORMAT = "cellranger"
+# Cell Ranger's contig annotation columns and their AIRR names. Cell Ranger
+# writes the junction, with its conserved cysteine and phenylalanine or
+# tryptophan, as cdr3 and cdr3_nt, and the amino-acid and nucleotide sequence
+# of each other region as fwr1 and fwr1_nt, and so on, from version 6.
+_VDJ_COLUMNS = {
+    "barcode": "cell_id",
+    "contig_id": "sequence_id",
+    "chain": "locus",
+    "v_gene": "v_call",
+    "d_gene": "d_call",
+    "j_gene": "j_call",
+    "c_gene": "c_call",
+    "cdr3": "junction_aa",
+    "cdr3_nt": "junction",
+    "productive": "productive",
+    "umis": "umi_count",
+    "reads": "consensus_count",
+    "is_cell": "is_cell",
+    "high_confidence": "high_confidence",
+    "full_length": "full_length",
+    "fwr1": "fwr1_aa",
+    "fwr1_nt": "fwr1",
+    "cdr1": "cdr1_aa",
+    "cdr1_nt": "cdr1",
+    "fwr2": "fwr2_aa",
+    "fwr2_nt": "fwr2",
+    "cdr2": "cdr2_aa",
+    "cdr2_nt": "cdr2",
+    "fwr3": "fwr3_aa",
+    "fwr3_nt": "fwr3",
+    "fwr4": "fwr4_aa",
+    "fwr4_nt": "fwr4",
+    "raw_clonotype_id": "raw_clonotype_id",
+    "raw_consensus_id": "raw_consensus_id",
+    "exact_subclonotype_id": "exact_subclonotype_id",
+}
+_VDJ_REQUIRED = ("barcode", "contig_id", "chain", "cdr3", "productive")
+
+
+def vdj_contig_columns(path: str | os.PathLike[str]) -> tuple[str, ...]:
+    """Return the header columns of a Cell Ranger contig annotation file, as written.
+
+    Raises:
+        ValueError: If the file has no header line.
+    """
+    return header_fields(path, ",")
+
+
+def iter_vdj_contigs(
+    path: str | os.PathLike[str],
+    *,
+    chunk_rows: int = 50_000,
+) -> Iterator[tuple[int, pd.DataFrame]]:
+    """Parse Cell Ranger's contig annotations in chunks of rows.
+
+    Cell Ranger's V(D)J pipeline writes ``filtered_contig_annotations.csv``,
+    the contigs of the barcodes that it calls cells and that it assembled with
+    high confidence, and ``all_contig_annotations.csv``, every contig. Each row
+    is one contig. Its columns take their AIRR names: ``barcode`` becomes
+    ``cell_id``, ``contig_id`` ``sequence_id``, ``chain`` ``locus``,
+    ``v_gene`` ``v_call`` (and so for ``d_gene``, ``j_gene`` and ``c_gene``),
+    ``cdr3`` ``junction_aa`` and ``cdr3_nt`` ``junction``, since Cell Ranger's
+    CDR3 includes the conserved residues of the junction, ``umis``
+    ``umi_count`` and ``reads`` ``consensus_count``. The region sequences of
+    Cell Ranger 6 and later, such as ``fwr1`` and ``fwr1_nt``, become
+    ``fwr1_aa`` and ``fwr1``. ``is_cell``, ``high_confidence``,
+    ``full_length``, ``raw_clonotype_id``, ``raw_consensus_id`` and
+    ``exact_subclonotype_id`` keep their names, and other columns are not
+    kept. A plain or gzip-compressed file is read, and blank lines hold no
+    contig.
+
+    Args:
+        path: ``filtered_contig_annotations.csv`` or
+            ``all_contig_annotations.csv``.
+        chunk_rows: The most rows to parse at once.
+
+    Yields:
+        The file line where each chunk starts and the chunk's parsed fields:
+        ``cell_id`` and each AIRR field that the file holds, text as Python
+        strings with None where missing, flags as int8 and counts as int64.
+
+    Raises:
+        ValueError: If a required column is missing, a column is repeated, a
+            barcode is empty, or a value is of the wrong kind.
+    """
+    columns = vdj_contig_columns(path)
+    repeated = sorted({name for name in columns if columns.count(name) > 1})
+    if repeated:
+        raise ValueError(
+            "The contig file repeats the columns " + ", ".join(map(repr, repeated))
+        )
+    missing = [name for name in _VDJ_REQUIRED if name not in columns]
+    if missing:
+        raise ValueError(
+            "The contig file lacks the columns "
+            + ", ".join(repr(name) for name in missing)
+            + "; Cell Ranger's contig annotations hold "
+            + ", ".join(_VDJ_REQUIRED)
+        )
+    line = 2
+    reader = pd.read_csv(
+        path,
+        usecols=lambda name: str(name).strip() in _VDJ_COLUMNS,
+        chunksize=max(1, int(chunk_rows)),
+        **read_options(path),
+    )
+    with reader:
+        for chunk in reader:
+            chunk.columns = [_VDJ_COLUMNS[str(name).strip()] for name in chunk.columns]
+            yield line, parse_contig_columns(chunk, first_line=line, infer_locus=False)
+            line += len(chunk)

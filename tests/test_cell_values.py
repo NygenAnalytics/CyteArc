@@ -588,6 +588,25 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
     clones = store.clones.import_clones(numbat, cell_selection=cells)
     # Clone 1 holds three cells and clone 2 two.
     expansion = store.clones.expansion(clones)
+    # Contigs of a T cell pair, a lone beta chain, a B cell pair, a pair and
+    # three beta chains; cell2 has none.
+    contigs = tmp_path / "filtered_contig_annotations.csv"
+    contigs.write_text(
+        "barcode,contig_id,chain,cdr3,productive,umis\n"
+        + "".join(
+            f"cell{cell},cell{cell}_contig_{index},{chain},C{chain}{index}F,true,"
+            f"{9 - index}\n"
+            for cell, chains in (
+                (0, "TRA TRB"),
+                (1, "TRB"),
+                (3, "IGH IGK"),
+                (4, "TRA TRB"),
+                (5, "TRB TRB TRB"),
+            )
+            for index, chain in enumerate(chains.split())
+        )
+    )
+    receptors = store.repertoire.import_receptors(contigs, cell_selection=cells)
 
     for ref, expected in (
         (clusters, np.array(list("aabbcc"))),
@@ -599,6 +618,7 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
             expansion,
             np.array(["2 cells", "2 cells", "3 to 5 cells", ""] + ["3 to 5 cells"] * 2),
         ),
+        (receptors, np.array(["TCR", "TCR", "no IR", "BCR", "TCR", "multichain"])),
     ):
         loaded = store.artifacts.load_values(ref)
         np.testing.assert_array_equal(loaded.values, expected)
@@ -609,6 +629,12 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
             for name in group.array_keys()
             if group[name].shape[0] == len(SELECTED)
             and not name.startswith(MISSING_MASK_PREFIX)
+            # Immune receptors' chain_slots hold positions among the contigs,
+            # and their contig_ arrays one row per contig or distinct value.
+            and not (
+                ref.kind == "immune_receptors"
+                and (name == "chain_slots" or name.startswith("contig_"))
+            )
         }
         # An enrichment also stores the cell row of each score row, which
         # CellValues.cell_idx gives.

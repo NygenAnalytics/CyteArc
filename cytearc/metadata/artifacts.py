@@ -205,11 +205,14 @@ def write_cell_data_artifact(
     *,
     fingerprint_payload: bool = False,
     attributes: Mapping[str, Any] | None = None,
+    chunk_lengths: Mapping[str, int] | None = None,
 ) -> zarr.Group:
     """Write and publish a planned cell-data artifact, or return the reused one.
 
     ``attributes`` are JSON values stored on the artifact group before it is
-    published.
+    published. Arrays are chunked in 100,000 rows; ``chunk_lengths`` sets the
+    rows of each chunk of named numeric arrays instead, such as packed bytes,
+    which read and write faster in chunks of megabytes.
     """
     if planned.reused:
         return reused_artifact_group(root, planned)
@@ -233,8 +236,13 @@ def write_cell_data_artifact(
                     chunkSize=min(max(int(values.shape[0]), 1), 100_000),
                 )
             else:
+                length = (
+                    100_000
+                    if chunk_lengths is None
+                    else chunk_lengths.get(name, 100_000)
+                )
                 chunks = (
-                    min(max(int(values.shape[0]), 1), 100_000),
+                    min(max(int(values.shape[0]), 1), max(int(length), 1)),
                     *values.shape[1:],
                 )
                 output = create_zarr_dataset(

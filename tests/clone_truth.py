@@ -4,7 +4,9 @@
 clones of known sizes. The writers emit the experiment as each tool writes
 its files, with the quirks an importer must handle: headers that start with
 ``#``, R row names, unnamed index columns, gzip, a missing final newline,
-``NA`` and barcodes of droplets that are not cells. Tests check that an
+``NA`` and barcodes of droplets that are not cells. ``receptor_truth`` gives
+the clones T cell and B cell receptor chains and fixes, for each cell, the
+chains and labels that an import of its contigs must give. Tests check that an
 import recovers the truth, which this module fixes and the code under test
 never computes.
 """
@@ -17,6 +19,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import pandas as pd
 
 SAMPLES = ("d2", "d4")
 TIME_POINTS = {"d2": 2, "d4": 4}
@@ -546,3 +549,397 @@ def write_anndata_h5ad(truth: CloneTruth, path: Path, *, content: str) -> Path:
     with anndata.settings.override(allow_write_nullable_strings=True):
         anndata.AnnData(obs=obs, obsm=obsm).write_h5ad(path)
     return path
+
+
+# Receptors of the truth's clones: clones 0 to 5 are T cell clones with an
+# alpha (TRA) and a beta (TRB) chain, and clones 6 and 7 B cell clones with a
+# heavy chain (IGH) and a kappa (IGK) or lambda (IGL) light chain.
+B_CELL_LIGHT_LOCI = {6: "IGK", 7: "IGL"}
+RECEPTOR_SLOTS = ("VJ_1", "VJ_2", "VDJ_1", "VDJ_2")
+# Each cell's receptor profile: how its contigs differ from its clone's two
+# chains. A cell of a clone has the clone's chains ("pair"), lacks its VJ or
+# VDJ chain ("orphan_vdj", "orphan_vj"), has a second alpha chain with fewer
+# UMIs ("extra_vj"), a non-productive alpha chain with more UMIs
+# ("nonproductive_vj"), two more beta chains ("multichain"), or a heavy chain
+# beside its T cell receptor ("ambiguous"). A cell without a clone has no
+# contig ("none"), or one contig that Cell Ranger's all_contig_annotations.csv
+# alone lists, outside a called cell ("outside_cell") or of low confidence
+# ("low_confidence").
+RECEPTOR_PROFILES = (
+    "pair",
+    "orphan_vdj",
+    "orphan_vj",
+    "extra_vj",
+    "nonproductive_vj",
+    "multichain",
+    "ambiguous",
+    "none",
+    "outside_cell",
+    "low_confidence",
+)
+# The gene calls that the chains of each locus draw from: V, D, J and C.
+_GENE_CALLS = {
+    "TRA": (
+        ("TRAV1-2*01", "TRAV12-2*01", "TRAV29/DV5*01"),
+        (),
+        ("TRAJ33*01", "TRAJ20*01"),
+        ("TRAC",),
+    ),
+    "TRB": (
+        ("TRBV20-1*01", "TRBV6-5*01"),
+        ("TRBD1*01", "TRBD2*01"),
+        ("TRBJ2-7*01", "TRBJ1-1*01"),
+        ("TRBC1", "TRBC2"),
+    ),
+    "IGH": (
+        ("IGHV3-30*01", "IGHV1-69*01"),
+        ("IGHD3-10*01",),
+        ("IGHJ4*02", "IGHJ6*02"),
+        ("IGHM", "IGHG1"),
+    ),
+    "IGK": (("IGKV1-39*01", "IGKV3-20*01"), (), ("IGKJ1*01", "IGKJ2*01"), ("IGKC",)),
+    "IGL": (("IGLV2-14*01", "IGLV1-40*01"), (), ("IGLJ2*01", "IGLJ3*02"), ("IGLC2",)),
+}
+_AMINO_ACIDS = np.asarray(list("ACDEFGHIKLMNPQRSTVWY"))
+
+
+@dataclass(frozen=True, slots=True)
+class ReceptorTruth:
+    """The receptor contigs of the truth's cells and what an import must give.
+
+    Attributes:
+        contigs: One row per contig: ``cell`` (the cell's position among the
+            truth's cells, -1 for a barcode outside the store), ``sample``,
+            ``barcode`` (as Cell Ranger writes it, with ``-1``),
+            ``contig_id``, ``locus``, ``v_call``, ``d_call``, ``j_call``,
+            ``c_call`` (None where a chain has no such gene), ``junction``,
+            ``junction_aa``, ``productive``, ``umis``, ``reads``,
+            ``is_cell``, ``high_confidence`` and ``sequence``.
+        expected: One row per cell, indexed by cell ID, of what an import of
+            all its contigs with ``productive_only=True`` gives:
+            ``profile``, ``receptor_type``, ``receptor_subtype``,
+            ``chain_pairing``, ``n_vj``, ``n_vdj``, and the junction
+            amino-acid sequence of each slot, such as ``VDJ_1_junction_aa``,
+            None for an empty slot.
+    """
+
+    contigs: pd.DataFrame
+    expected: pd.DataFrame
+
+    def sample_contigs(
+        self,
+        sample: str,
+        *,
+        receptor: str | None = None,
+        all_contigs: bool = False,
+    ) -> pd.DataFrame:
+        """The contigs of one sample's barcodes that a V(D)J file lists.
+
+        Args:
+            sample: The sample.
+            receptor: ``"TCR"`` for the TRA and TRB contigs, ``"BCR"`` for
+                IGH, IGK and IGL, or None for both.
+            all_contigs: List every contig, as ``all_contig_annotations.csv``
+                does, rather than those of called cells with high confidence.
+        """
+        rows = self.contigs[self.contigs["sample"] == sample]
+        if receptor is not None:
+            loci = ("TRA", "TRB") if receptor == "TCR" else ("IGH", "IGK", "IGL")
+            rows = rows[rows["locus"].isin(loci)]
+        if not all_contigs:
+            rows = rows[rows["is_cell"] & rows["high_confidence"]]
+        return rows
+
+
+def _receptor_profiles(truth: CloneTruth) -> np.ndarray:
+    profiles = np.full(N_CELLS, "none", dtype=object)
+    profiles[truth.clones >= 0] = "pair"
+    for clone, changed in (
+        (0, ("orphan_vdj", "extra_vj", "nonproductive_vj", "multichain", "ambiguous")),
+        (1, ("orphan_vj",)),
+        (6, ("orphan_vdj",)),
+    ):
+        members = np.flatnonzero(truth.clones == clone)
+        profiles[members[: len(changed)]] = changed
+    unclonal = np.flatnonzero(truth.clones < 0)
+    profiles[unclonal[:2]] = ("outside_cell", "low_confidence")
+    return profiles
+
+
+def _expected_labels(profile: str, clone: int) -> tuple[str, str, str, int, int]:
+    """The receptor type, subtype, chain pairing and chains of each arm.
+
+    Written from scirpy's documented categories for each profile.
+    """
+    if profile in ("none", "outside_cell", "low_confidence"):
+        return "no IR", "no IR", "no IR", 0, 0
+    if profile == "multichain":
+        return "multichain", "multichain", "multichain", 1, 3
+    if profile == "ambiguous":
+        return "ambiguous", "ambiguous", "ambiguous", 1, 2
+    light = B_CELL_LIGHT_LOCI.get(clone)
+    receptor_type = "TCR" if light is None else "BCR"
+    subtype = "TRA+TRB" if light is None else f"IGH+{light}"
+    if profile in ("pair", "nonproductive_vj"):
+        return receptor_type, subtype, "single pair", 1, 1
+    if profile == "orphan_vdj":
+        return receptor_type, "TRA+TRB" if light is None else "IGH", "orphan VDJ", 0, 1
+    if profile == "orphan_vj":
+        return receptor_type, subtype, "orphan VJ", 1, 0
+    if profile == "extra_vj":
+        return receptor_type, subtype, "extra VJ", 2, 1
+    raise ValueError(f"Unknown receptor profile {profile!r}")
+
+
+class _ChainDraws:
+    """Draws distinct junctions and gene calls of chains."""
+
+    def __init__(self, rng: np.random.Generator) -> None:
+        self._rng = rng
+        self._junctions: set[str] = set()
+
+    def chain(self, locus: str) -> dict[str, object]:
+        """A productive chain of ``locus`` with its genes and junction."""
+        while True:
+            length = int(self._rng.integers(9, 16))
+            junction_aa = (
+                "C" + "".join(self._rng.choice(_AMINO_ACIDS, length - 2)) + "F"
+            )
+            if junction_aa not in self._junctions:
+                self._junctions.add(junction_aa)
+                break
+        bases = "".join(self._rng.choice(list("ACGT"), 3 * (length - 2)))
+        v_calls, d_calls, j_calls, c_calls = _GENE_CALLS[locus]
+        return {
+            "locus": locus,
+            "v_call": str(self._rng.choice(v_calls)),
+            "d_call": str(self._rng.choice(d_calls)) if d_calls else None,
+            "j_call": str(self._rng.choice(j_calls)),
+            "c_call": str(self._rng.choice(c_calls)),
+            "junction": "TGT" + bases + "TTT",
+            "junction_aa": junction_aa,
+            "productive": True,
+        }
+
+
+def receptor_truth(truth: CloneTruth, seed: int = 0) -> ReceptorTruth:
+    """Give the truth's clones receptor chains and each cell its contigs.
+
+    Each cell's contigs follow its profile in ``RECEPTOR_PROFILES``. A clone's
+    chains carry 8 to 20 UMIs in each cell, so a second alpha chain (3 UMIs),
+    a non-productive one (40), extra beta chains (2 and 1) and a heavy chain
+    beside a T cell receptor (4) rank as the expected slots say. Each barcode
+    outside the store has one beta chain.
+    """
+    rng = np.random.default_rng([seed, 5])
+    draws = _ChainDraws(rng)
+    clone_chains = []
+    for clone in range(truth.n_clones):
+        light = B_CELL_LIGHT_LOCI.get(clone)
+        vj, vdj = ("TRA", "TRB") if light is None else (light, "IGH")
+        clone_chains.append((draws.chain(vj), draws.chain(vdj)))
+    profiles = _receptor_profiles(truth)
+    rows: list[dict[str, object]] = []
+    expected_rows = []
+
+    def add(cell: int, sample: str, barcode: str, chain: dict, umis: int, **flags):
+        rows.append(
+            {
+                "cell": cell,
+                "sample": sample,
+                "barcode": barcode,
+                "contig_id": f"{barcode}_contig_{sum(row['barcode'] == barcode for row in rows) + 1}",
+                **chain,
+                "umis": umis,
+                "reads": 37 * umis,
+                "is_cell": flags.get("is_cell", True),
+                "high_confidence": flags.get("high_confidence", True),
+                "sequence": "".join(rng.choice(list("ACGT"), 30)),
+            }
+        )
+
+    for cell in range(N_CELLS):
+        sample = str(truth.samples[cell])
+        barcode = f"{truth.barcodes[cell]}-1"
+        profile = str(profiles[cell])
+        clone = int(truth.clones[cell])
+        slots: dict[str, str | None] = dict.fromkeys(RECEPTOR_SLOTS)
+        if clone >= 0:
+            vj, vdj = clone_chains[clone]
+            if profile == "nonproductive_vj":
+                add(
+                    cell,
+                    sample,
+                    barcode,
+                    {**draws.chain(vj["locus"]), "productive": False},
+                    40,
+                )
+            if profile != "orphan_vdj":
+                add(cell, sample, barcode, vj, int(rng.integers(8, 21)))
+                slots["VJ_1"] = str(vj["junction_aa"])
+            if profile != "orphan_vj":
+                add(cell, sample, barcode, vdj, int(rng.integers(8, 21)))
+                slots["VDJ_1"] = str(vdj["junction_aa"])
+            if profile == "extra_vj":
+                second = draws.chain(vj["locus"])
+                add(cell, sample, barcode, second, 3)
+                slots["VJ_2"] = str(second["junction_aa"])
+            elif profile == "multichain":
+                extra = [draws.chain(vdj["locus"]) for _ in range(2)]
+                add(cell, sample, barcode, extra[0], 2)
+                add(cell, sample, barcode, extra[1], 1)
+                slots["VDJ_2"] = str(extra[0]["junction_aa"])
+            elif profile == "ambiguous":
+                heavy = draws.chain("IGH")
+                add(cell, sample, barcode, heavy, 4)
+                slots["VDJ_2"] = str(heavy["junction_aa"])
+        elif profile == "outside_cell":
+            add(cell, sample, barcode, draws.chain("TRB"), 2, is_cell=False)
+        elif profile == "low_confidence":
+            add(cell, sample, barcode, draws.chain("TRB"), 1, high_confidence=False)
+        receptor_type, subtype, pairing, n_vj, n_vdj = _expected_labels(profile, clone)
+        expected_rows.append(
+            {
+                "ids": str(truth.cell_ids[cell]),
+                "profile": profile,
+                "receptor_type": receptor_type,
+                "receptor_subtype": subtype,
+                "chain_pairing": pairing,
+                "n_vj": n_vj,
+                "n_vdj": n_vdj,
+                **{f"{slot}_junction_aa": slots[slot] for slot in RECEPTOR_SLOTS},
+            }
+        )
+    for barcode in truth.outside:
+        add(-1, SAMPLES[0], f"{barcode}-1", draws.chain("TRB"), 5)
+    return ReceptorTruth(
+        contigs=pd.DataFrame(rows),
+        expected=pd.DataFrame(expected_rows).set_index("ids"),
+    )
+
+
+# Cell Ranger's contig annotation columns, in the order it writes them.
+_CELLRANGER_VDJ_COLUMNS = (
+    "barcode",
+    "is_cell",
+    "contig_id",
+    "high_confidence",
+    "length",
+    "chain",
+    "v_gene",
+    "d_gene",
+    "j_gene",
+    "c_gene",
+    "full_length",
+    "productive",
+    "cdr3",
+    "cdr3_nt",
+    "reads",
+    "umis",
+    "raw_clonotype_id",
+    "raw_consensus_id",
+)
+
+
+def write_cellranger_contigs(
+    receptors: ReceptorTruth,
+    path: Path,
+    *,
+    sample: str,
+    receptor: str | None = None,
+    all_contigs: bool = False,
+    release: str = "5",
+    compress: bool = False,
+) -> Path:
+    """Cell Ranger's contig annotations of one sample's barcodes.
+
+    ``filtered_contig_annotations.csv`` lists the contigs of the barcodes that
+    Cell Ranger calls cells, of high confidence; ``all_contigs=True`` writes
+    ``all_contig_annotations.csv``, every contig. ``receptor`` keeps the
+    contigs of ``"TCR"`` or ``"BCR"`` loci, as the ``vdj_t`` and ``vdj_b``
+    outputs of ``cellranger multi`` hold them. Release ``"5"`` writes flags
+    as ``true`` and ``false`` and a missing D gene empty; release ``"4"``
+    writes ``True``, ``False`` and ``None``, as Cell Ranger 4.0.0 did.
+    """
+    true, false, missing = (
+        ("true", "false", "") if release == "5" else ("True", "False", "None")
+    )
+    lines = [",".join(_CELLRANGER_VDJ_COLUMNS)]
+    rows = receptors.sample_contigs(sample, receptor=receptor, all_contigs=all_contigs)
+    for row in rows.itertuples(index=False):
+        called = row.is_cell and row.high_confidence
+        clonotype = f"clonotype{row.cell + 2}" if called else "None"
+        fields = (
+            row.barcode,
+            true if row.is_cell else false,
+            row.contig_id,
+            true if row.high_confidence else false,
+            "500",
+            row.locus,
+            row.v_call,
+            missing if pd.isna(row.d_call) else row.d_call,
+            row.j_call,
+            row.c_call,
+            true,
+            true if row.productive else false,
+            row.junction_aa,
+            row.junction,
+            str(row.reads),
+            str(row.umis),
+            clonotype,
+            f"{clonotype}_consensus_1" if called else "None",
+        )
+        lines.append(",".join(fields))
+    return _write(path, lines, compress=compress)
+
+
+def write_airr_contigs(
+    receptors: ReceptorTruth,
+    path: Path,
+    *,
+    sample: str,
+    with_locus: bool = True,
+    compress: bool = False,
+) -> Path:
+    """An AIRR Rearrangement file of one sample's called barcodes.
+
+    The file lists the contigs of the barcodes that Cell Ranger calls cells,
+    of high confidence, as ``airr_rearrangement.tsv`` does: tab-separated,
+    flags ``T`` and ``F``, a missing value empty, and each contig's sequence.
+    Without ``locus``, an import infers each contig's locus from its gene
+    calls.
+    """
+    columns = [
+        "cell_id",
+        "sequence_id",
+        *(["locus"] if with_locus else []),
+        "v_call",
+        "d_call",
+        "j_call",
+        "c_call",
+        "junction",
+        "junction_aa",
+        "productive",
+        "umi_count",
+        "consensus_count",
+        "sequence",
+    ]
+    lines = ["\t".join(columns)]
+    for row in receptors.sample_contigs(sample).itertuples(index=False):
+        values = {
+            "cell_id": row.barcode,
+            "sequence_id": row.contig_id,
+            "locus": row.locus,
+            "v_call": row.v_call,
+            "d_call": "" if pd.isna(row.d_call) else row.d_call,
+            "j_call": row.j_call,
+            "c_call": row.c_call,
+            "junction": row.junction,
+            "junction_aa": row.junction_aa,
+            "productive": "T" if row.productive else "F",
+            "umi_count": str(row.umis),
+            "consensus_count": str(row.reads),
+            "sequence": row.sequence,
+        }
+        lines.append("\t".join(str(values[name]) for name in columns))
+    return _write(path, lines, compress=compress)

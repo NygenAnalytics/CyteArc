@@ -22,6 +22,7 @@ mapping
 regulons
 perturbation
 clones
+repertoire
 plotting
 datasets
 utilities

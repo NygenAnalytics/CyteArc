@@ -166,3 +166,87 @@ def benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
     adjusted = np.empty_like(p)
     adjusted[order] = np.minimum(np.minimum.accumulate(ranked[::-1])[::-1], 1.0)
     return adjusted
+
+
+# The cells of the receptor store are cell0 to cell7.
+N_RECEPTOR_CELLS = 8
+CELLRANGER_HEADER = (
+    "barcode,is_cell,contig_id,high_confidence,length,chain,v_gene,d_gene,j_gene,"
+    "c_gene,full_length,productive,cdr3,cdr3_nt,reads,umis,raw_clonotype_id,"
+    "raw_consensus_id"
+)
+# T cell contigs of cells cell0 to cell5 and of a barcode outside the store.
+TCR_ROWS = [
+    # cell0: one alpha and one beta chain.
+    "cell0,true,cell0_contig_1,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,true,CAVF,TGTGCTGTGTTT,100,5,ct1,ct1_1",
+    "cell0,true,cell0_contig_2,true,500,TRB,TRBV1,TRBD1,TRBJ1,TRBC1,true,true,CASSF,TGTGCCAGCAGCTTT,200,8,ct1,ct1_2",
+    # cell1: a second alpha chain with fewer UMIs.
+    "cell1,true,cell1_contig_1,true,500,TRA,TRAV2,,TRAJ2,TRAC,true,true,CAVG,TGTGCTGTGGGT,90,6,ct2,ct2_1",
+    "cell1,true,cell1_contig_2,true,500,TRA,TRAV3,,TRAJ3,TRAC,true,true,CAVH,TGTGCTGTGCAT,50,2,ct2,ct2_2",
+    "cell1,true,cell1_contig_3,true,500,TRB,TRBV2,,TRBJ2,TRBC2,true,true,CASSG,TGTGCCAGCAGCGGT,300,9,ct2,ct2_3",
+    # cell2: a beta chain and a non-productive alpha chain.
+    "cell2,true,cell2_contig_1,true,500,TRB,TRBV3,,TRBJ3,TRBC1,true,true,CASSH,TGTGCCAGCAGCCAT,80,4,ct3,ct3_1",
+    "cell2,true,cell2_contig_2,true,500,TRA,TRAV4,,TRAJ4,TRAC,true,false,CAVI,TGTGCTGTGATT,30,3,ct3,ct3_2",
+    # cell3: three beta chains.
+    "cell3,true,cell3_contig_1,true,500,TRB,TRBV4,,TRBJ4,TRBC1,true,true,CASSI,TGTGCCAGCAGCATT,10,3,ct4,ct4_1",
+    "cell3,true,cell3_contig_2,true,500,TRB,TRBV5,,TRBJ5,TRBC1,true,true,CASSK,TGTGCCAGCAGCAAA,10,2,ct4,ct4_2",
+    "cell3,true,cell3_contig_3,true,500,TRB,TRBV6,,TRBJ6,TRBC1,true,true,CASSL,TGTGCCAGCAGCCTT,10,1,ct4,ct4_3",
+    # cell5: a low-confidence contig outside a called cell.
+    "cell5,false,cell5_contig_1,false,300,TRB,TRBV7,,TRBJ7,TRBC1,true,true,CASSM,TGTGCCAGCAGCATG,5,1,None,None",
+    # A barcode that is not a cell of the store.
+    "outside-1,true,outside-1_contig_1,true,500,TRB,TRBV8,,TRBJ8,TRBC1,true,true,CASSN,TGTGCCAGCAGCAAT,40,3,ct5,ct5_1",
+]
+# B cell contigs: cell4 is a B cell and cell0 also has a heavy chain.
+BCR_ROWS = [
+    "cell4,true,cell4_contig_1,true,500,IGH,IGHV1,IGHD1,IGHJ1,IGHM,true,true,CARW,TGTGCGAGATGG,500,20,cb1,cb1_1",
+    "cell4,true,cell4_contig_2,true,500,IGK,IGKV1,,IGKJ1,IGKC,true,true,CQQY,TGTCAGCAGTAT,400,15,cb1,cb1_2",
+    "cell0,true,cell0_contig_1,true,500,IGH,IGHV2,,IGHJ2,IGHG1,true,true,CARX,TGTGCGAGATAA,50,2,cb2,cb2_1",
+]
+AIRR_HEADER = (
+    "cell_id\tsequence_id\tv_call\td_call\tj_call\tc_call\tjunction\tjunction_aa"
+    "\tproductive\tduplicate_count\tconsensus_count\tv_identity\tsequence"
+    "\tsequence_alignment"
+)
+# B cell contigs of cell6, without a locus field.
+AIRR_ROWS = [
+    "cell6\tcell6_contig_1\tIGHV3-30*01\t\tIGHJ4*02\tIGHG1\tTGTGCG\tCARW\tT\t12\t300\t0.95\tACGTACGT\tACGT-ACGT",
+    "cell6\tcell6_contig_2\tIGLV1-40*01\t\tIGLJ2*01\tIGLC2\tTGTCAG\tCQSY\tT\t9\t200\t\tGGCC\t",
+]
+
+
+def receptor_store(folder: Path, **options: object) -> "DataStore":
+    """Open the store of cells cell0 to cell7 in ``folder``, writing it once."""
+    from cytearc.datastore.datastore import DataStore
+
+    path = folder / "store.zarr"
+    if not path.exists():
+        counts = np.random.default_rng(5).poisson(2.0, size=(N_RECEPTOR_CELLS, 6)) + 1
+        write_count_store(str(path), {"RNA": counts}, "uint16")
+    return DataStore(
+        str(path),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        **{"nthreads": 1, **options},  # type: ignore[arg-type]
+    )
+
+
+def write_lines(folder: Path, name: str, header: str, rows: list[str]) -> Path:
+    """Write a header and rows, one per line, as ``folder / name``."""
+    path = folder / name
+    path.write_text("\n".join([header, *rows]) + "\n")
+    return path
+
+
+def tcr_file(folder: Path, rows: list[str] = TCR_ROWS, name: str = "tcr.csv") -> Path:
+    """Cell Ranger's contig annotations of the T cell rows."""
+    return write_lines(folder, name, CELLRANGER_HEADER, rows)
+
+
+def bcr_file(folder: Path) -> Path:
+    """Cell Ranger's contig annotations of the B cell rows."""
+    return write_lines(folder, "bcr.csv", CELLRANGER_HEADER, BCR_ROWS)
+
+
+def airr_file(folder: Path) -> Path:
+    """An AIRR Rearrangement file of cell6's B cell rows."""
+    return write_lines(folder, "bcr.tsv", AIRR_HEADER, AIRR_ROWS)

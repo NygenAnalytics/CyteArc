@@ -684,6 +684,22 @@ class DataStorePlotAccessor:
         """Plot the fates of the clones of early cells, each clone's late cells by fate."""
         return self._forward(PlotResult, "clone_fates", locals())
 
+    def receptor_qc(
+        self,
+        receptors: ArtifactRef,
+        *,
+        group_by: str | None = None,
+        groups: ArtifactRef | None = None,
+        normalize: bool | None = None,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the receptor types, chain pairings and chains per cell of imported receptors."""
+        return self._forward(PlotResult, "receptor_qc", locals())
+
     def guide_calls(
         self,
         calls: ArtifactRef,

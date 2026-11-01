@@ -189,6 +189,20 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         "hto_identity": CellValueSpec(
             "values", True, {"max_id": True, "second_id": True, "margin": False}
         ),
+        # chain_slots holds one row per cell and one column per chain slot,
+        # positions among the contigs, which are not cell-aligned.
+        "immune_receptors": CellValueSpec(
+            "values",
+            True,
+            {
+                "receptor_subtype": True,
+                "chain_pairing": True,
+                "multichain": True,
+                "n_vj": False,
+                "n_vdj": False,
+                "n_contigs": False,
+            },
+        ),
         "imported_coordinates": CellValueSpec("data", False),
         "label_transfer": CellValueSpec(
             "labels",

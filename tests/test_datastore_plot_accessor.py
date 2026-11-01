@@ -52,6 +52,7 @@ _STORE_PLOT_METHODS = (
     "modality_weights",
     "perturbation_clusters",
     "pseudotime_heatmap",
+    "receptor_qc",
     "run_recipe",
 )
 
@@ -165,6 +166,11 @@ _COUPLING = CloneCoupling(
     group_by=(),
     groups=None,
     cell_selection=None,
+)
+_RECEPTORS_REF = ArtifactRef(
+    scope="datastore",
+    kind="immune_receptors",
+    artifact_id="a" * 64,
 )
 
 
@@ -402,6 +408,11 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
         ),
         ("clone_coupling", (_COUPLING,), {"value": "coupling", "theme": "paper"}),
         ("clone_fates", (_FATE_BIAS_REF,), {"top": 12, "normalize": True}),
+        (
+            "receptor_qc",
+            (_RECEPTORS_REF,),
+            {"group_by": "sample", "normalize": False},
+        ),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -460,6 +471,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("coupling"))
     elif name == "clone_fates":
         expected_args.append(expected_kwargs.pop("bias"))
+    elif name == "receptor_qc":
+        expected_args.append(expected_kwargs.pop("receptors"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

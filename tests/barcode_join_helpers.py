@@ -145,3 +145,19 @@ def write_clone_file(path: Path, barcodes: list[str]) -> Path:
         "clone_nr\tcell_id\n" + "".join(f"1\t{barcode}\n" for barcode in barcodes)
     )
     return path
+
+
+def write_contig_file(path: Path, barcodes: list[str]) -> Path:
+    """Cell Ranger's contig annotations with one productive beta chain per barcode."""
+    from tests.clone_helpers import CELLRANGER_HEADER
+
+    path.write_text(
+        CELLRANGER_HEADER
+        + "\n"
+        + "".join(
+            f"{barcode},true,{barcode}_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,"
+            "true,true,CASSF,TGTGCCAGCAGCTTT,100,5,ct1,ct1_1\n"
+            for barcode in barcodes
+        )
+    )
+    return path
