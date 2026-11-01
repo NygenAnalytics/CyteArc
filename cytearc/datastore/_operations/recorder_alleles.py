@@ -159,11 +159,13 @@ _STORE_BYTES_PER_ALLELE_BYTE = 2
 # The columns of the table of loaded clones, which a within column may not
 # share.
 _CLONE_COLUMNS = frozenset({"clone", "clone_size", "n_alleles"})
-# Bytes of each row of a bank while it is checked and held: its allele as a
-# Python string with its references, sorted copies and packed bytes for the
-# fingerprint, its frequency and samples with their copies, and its entry in
-# the table that looks alleles up; and of each character of its text.
-_BANK_ROW_BYTES = 200
+# Bytes of each row of a bank while it is checked: its allele as a Python
+# string with its references, sorted copies and packed bytes for the
+# fingerprint, and its frequency and samples with their copies, 73 as traced
+# on 300,000 rows; of each row once checked: its string, reference,
+# frequency and samples; and of each character of its text.
+_BANK_ROW_BYTES = 128
+_BANK_HELD_ROW_BYTES = 80
 _BANK_CHARACTER_BYTES = 4
 # Calling clones holds, for each cell, its group and whether it has an edit;
 # while the states are read, each record's state and whether it is an edit;
@@ -1101,13 +1103,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         banks = None
         bank_bytes = 0
         if frequencies is not None:
-            bank_bytes = _bank_bytes(frequencies)
-            if bank_bytes > self.memoryBytes:
-                raise MemoryError(
-                    f"Reading the banks of frequencies holds about {bank_bytes} bytes, "
-                    f"more than the memory budget of {self.memoryBytes} bytes. Raise "
-                    "mem_budget."
-                )
+            checking, bank_bytes = _bank_bytes(frequencies)
+            _check_calling(
+                checking + _FIXED_BYTES, self.memoryBytes, "the banks of frequencies"
+            )
             banks = allele_banks(frequencies)
         settings = allele_call_settings(
             method,
@@ -1169,21 +1168,18 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         width = len(f"clone_{n_cells}")
         writing = n_cells * (_WRITE_CELL_BYTES + _WRITE_CLONE_BYTES + 8 * width)
         held = bank_bytes + _CALL_CELL_BYTES * n_cells
-        if held + writing > self.memoryBytes:
-            raise MemoryError(
-                f"Calling clones from the alleles of {n_cells} cells holds about "
-                f"{held + writing} bytes as they are written, more than the memory "
-                f"budget of {self.memoryBytes} bytes. Raise mem_budget."
-            )
+        _check_calling(
+            held + writing + _FIXED_BYTES,
+            self.memoryBytes,
+            f"the clones of {n_cells} cells as they are written",
+        )
         # The states are read first, so that only the records of edited sites
         # are read on.
-        reading = held + _STATE_READ_BYTES * n_records + _FIXED_BYTES
-        if reading > self.memoryBytes:
-            raise MemoryError(
-                f"Calling clones from the {n_records} allele records of {n_cells} "
-                f"cells holds about {reading} bytes as their states are read, more "
-                f"than the memory budget of {self.memoryBytes} bytes. Raise mem_budget."
-            )
+        _check_calling(
+            held + _STATE_READ_BYTES * n_records + _FIXED_BYTES,
+            self.memoryBytes,
+            f"the states of {n_records} allele records",
+        )
         states = read_array(group, f"{_RECORDS}_state")
         edited = (states == MARK) | (states == UNKNOWN_MARK)
         del states
@@ -1194,20 +1190,16 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             + 2 * counts["allele_bytes"]
             + _CALL_TEXT_BYTES * (counts["integrations"] + counts["sites"])
         )
-        reading = (
+        _check_calling(
             held
             + n_records
             + _COLUMN_READ_BYTES * n_records
             + _CALL_EDIT_BYTES * n_edited
             + texts
-            + _FIXED_BYTES
+            + _FIXED_BYTES,
+            self.memoryBytes,
+            f"the {n_edited} edited sites of {n_cells} cells as they are read",
         )
-        if reading > self.memoryBytes:
-            raise MemoryError(
-                f"Calling clones from the {n_edited} edited sites of {n_cells} cells "
-                f"holds about {reading} bytes as they are read, more than the memory "
-                f"budget of {self.memoryBytes} bytes. Raise mem_budget."
-            )
         observations = _allele_observations(group, edited)
         del edited
         held += _HELD_EDIT_BYTES * n_edited + texts
@@ -1258,27 +1250,34 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         return planned.ref
 
 
-def _bank_bytes(frequencies: Any) -> int:
-    """The bytes that checking and holding the banks of ``frequencies`` takes.
+def _check_calling(needed: int, budget: int, what: str) -> None:
+    """Raise MemoryError before calling clones holds more than the budget."""
+    if needed > budget:
+        raise MemoryError(
+            f"Calling clones from recorder alleles holds about {needed} bytes for "
+            f"{what}, more than the memory budget of {budget} bytes. Raise mem_budget."
+        )
+
+
+def _bank_bytes(frequencies: Any) -> tuple[int, int]:
+    """The bytes that checking the banks of ``frequencies`` takes, and holding them.
 
     Values of the wrong type count nothing, so that the check of the banks
     refuses them by name.
     """
     if not isinstance(frequencies, Mapping):
-        return 0
-    total = 0
+        return 0, 0
+    checking = holding = 0
     for table in frequencies.values():
         if not isinstance(table, pd.DataFrame) or "allele" not in table.columns:
             continue
-        lengths = pd.to_numeric(
-            table["allele"]
-            .astype(object)
-            .map(lambda value: len(value) if isinstance(value, str) else 0),
-            errors="coerce",
+        lengths = table["allele"].map(
+            lambda value: len(value) if isinstance(value, str) else 0
         )
-        characters = int(np.nansum(lengths.to_numpy(dtype=np.float64)))
-        total += _BANK_ROW_BYTES * len(table) + _BANK_CHARACTER_BYTES * characters
-    return total + _FIXED_BYTES
+        text = _BANK_CHARACTER_BYTES * int(lengths.sum())
+        checking += _BANK_ROW_BYTES * len(table) + text
+        holding += _BANK_HELD_ROW_BYTES * len(table) + text
+    return checking, holding
 
 
 def _banks_fingerprint(banks: Mapping[str, AlleleBank]) -> str:
