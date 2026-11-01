@@ -700,6 +700,64 @@ class DataStorePlotAccessor:
         """Plot the receptor types, chain pairings and chains per cell of imported receptors."""
         return self._forward(PlotResult, "receptor_qc", locals())
 
+    def gene_usage(
+        self,
+        source: ArtifactRef,
+        *,
+        gene: str = "v_call",
+        level: str = "gene",
+        slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
+        count: str = "cells",
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        cell_selection: ArtifactRef | None = None,
+        top: int = 30,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the gene usage of groups of cells, one panel per locus."""
+        return self._forward(PlotResult, "gene_usage", locals())
+
+    def gene_pairing(
+        self,
+        source: ArtifactRef,
+        *,
+        level: str = "gene",
+        slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
+        count: str = "cells",
+        cell_selection: ArtifactRef | None = None,
+        top: int = 20,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot how the V and J genes of each locus pair, one panel per locus."""
+        return self._forward(PlotResult, "gene_pairing", locals())
+
+    def spectratype(
+        self,
+        source: ArtifactRef,
+        *,
+        sequence: str = "aa",
+        slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
+        count: str = "cells",
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        cell_selection: ArtifactRef | None = None,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the junction lengths of groups of cells, one panel per locus."""
+        return self._forward(PlotResult, "spectratype", locals())
+
     def guide_calls(
         self,
         calls: ArtifactRef,
