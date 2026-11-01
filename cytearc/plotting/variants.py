@@ -612,12 +612,12 @@ def genotypes(
     np.add.at(counted, (row_sites[grouped], row_groups[grouped], row_calls[grouped]), 1)
     totals = np.bincount(cell_group[cell_group >= 0], minlength=len(names))
     counted[:, :, missing] += totals[None, :] - counted.sum(axis=2)
+    # Every group holds a cell of the genotypes, as cell_groups names only
+    # the groups that some cell holds.
     records = []
     for site_rank, name in enumerate(site_names):
         for group_rank, group in enumerate(names):
             total = int(totals[group_rank])
-            if not total:
-                continue
             found = counted[site_rank, group_rank]
             for code, call in enumerate(calls):
                 records.append(
@@ -665,9 +665,9 @@ def genotypes(
                 "call": np.asarray(calls, dtype=object)[chosen],
             }
         )
-    # One bar for each site and group with cells, from the calls counted.
-    bar_sites, bar_groups = np.nonzero(
-        np.broadcast_to(totals[None, :] > 0, (len(site_names), len(names)))
+    # One bar for each site and group, from the calls counted.
+    bar_sites, bar_groups = (
+        grid.reshape(-1) for grid in np.indices((len(site_names), len(names)))
     )
     bar_shares = counted[bar_sites, bar_groups] / totals[bar_groups][:, None]
     panel_keys = ["calls"] + (["layout"] if cells_table is not None else [])

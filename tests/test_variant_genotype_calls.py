@@ -189,6 +189,17 @@ def test_a_cell_read_without_a_call_of_the_source_is_filtered(store, tmp_path) -
     }
 
 
+def test_a_call_column_without_a_vocabulary_is_refused(store, tmp_path) -> None:
+    counts = _got(store, tmp_path, "geo_total")
+    # A tool's call column that the vocabulary does not know, here GoT's
+    # renamed in the saved counts.
+    group = artifact_group(store.zw, counts)
+    del group["call_source_names"]
+    group.create_array("call_source_names", data=np.asarray(["call"], dtype="<U4"))
+    with pytest.raises(ValueError, match="column 'call' at the site .* no vocabulary"):
+        store.variants.genotypes(counts, method="source")
+
+
 def test_gotchas_labels_keep_heterozygotes_apart(store, tmp_path) -> None:
     counts = _import(store, write_gotcha(TRUTH, tmp_path / "CALR.csv"))
     found = _calls(store, store.variants.genotypes(counts, method="source"))
@@ -437,6 +448,13 @@ def test_one_site_is_genotyped_alone_and_named_sites_follow_the_counts(
     assert set(shown.calls["site"].astype(str)) == {"SF3B1"}
     with pytest.raises(ValueError, match="no site 'KRAS'"):
         store.variants.load_genotypes(both, sites=["KRAS"])
+    with pytest.raises(TypeError, match="a sequence of site labels"):
+        store.variants.load_genotypes(both, sites="CALR")
+    with pytest.raises(TypeError, match="must hold site labels, not int"):
+        store.variants.load_genotypes(both, sites=[1])
+    store.memoryBytes = 1_000
+    with pytest.raises(MemoryError, match="Loading the genotype calls"):
+        store.variants.load_genotypes(both)
 
 
 def test_saved_genotypes_are_reused_by_their_rules(store, tmp_path) -> None:
@@ -469,7 +487,16 @@ def test_saved_genotypes_that_lost_an_array_are_called_again(store, tmp_path) ->
     again = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
     assert again != first
     assert "posterior_heterozygous" in store.artifacts.load(again)
-    # A long array cut short is no array of the calls either.
+    # Offsets of another number of cells, and a long array cut short, are no
+    # arrays of the calls either.
+    offsets = artifact_group(store.zw, again)["call_offsets"]
+    offsets.resize((offsets.shape[0] + 1,))
+    assert store.variants.genotypes(counts, method="threshold", min_mutant_umis=1) != (
+        again
+    )
+    again = store.variants.genotypes(
+        counts, method="threshold", min_mutant_umis=1, invalidate_cache=True
+    )
     group = artifact_group(store.zw, again)
     short = group["call_reference"][:-1]
     del group["call_reference"]

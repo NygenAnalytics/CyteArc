@@ -378,6 +378,7 @@ def test_gift_calls_need_a_posterior_above_the_bound_and_confident_umis() -> Non
         ("gift", {"min_posterior": 1.0}, ValueError, "from 0.0 to below 1.0"),
         ("gift", {"alleles": ["A", "C"]}, TypeError, "must map site labels"),
         ("gift", {"alleles": {"p": "AC"}}, TypeError, "a wild-type and an"),
+        ("gift", {"alleles": {3: ("A", "C")}}, TypeError, "keyed by site labels"),
         ("gift", {"alleles": {"p": ("A", 3)}}, TypeError, "must be text"),
         ("gift", {"alleles": {"p": ("A", "A")}}, ValueError, "as both the wild"),
     ],

@@ -502,6 +502,14 @@ def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
         plt.close(figure)
 
 
+def test_genotypes_show_and_close_the_figure_they_own(plotted) -> None:
+    store, targets, _positions = plotted
+    called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
+    result = genotypes(store, called, show=True)
+    assert result.owns_figure
+    assert result.figure.number not in plt.get_fignums()
+
+
 def test_genotypes_refuse_what_they_cannot_draw(plotted) -> None:
     store, targets, _positions = plotted
     called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
