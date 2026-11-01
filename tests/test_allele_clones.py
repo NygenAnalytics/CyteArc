@@ -1036,17 +1036,18 @@ def test_each_step_on_millions_of_records_holds_no_more_than_its_check_states(
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("ending", ["é", "😀"])
+@pytest.mark.parametrize("ending", ["é", "語", "😀"])
 def test_each_step_on_wide_alleles_holds_no_more_than_its_check_states(
     tmp_path, monkeypatch, ending
 ) -> None:
     """1,000 alleles of 5,000 characters, each shared by two cells, 5 MB of text.
 
     An allele that ends in a character beyond ASCII is a Python string with
-    a longer header; one beyond U+FFFF, such as an emoji, makes Python hold
-    each of the allele's characters in four bytes, so decoding the text
-    holds up to ten bytes per stored byte and the decoded alleles four,
-    which the checks count by the alleles' largest UTF-8 byte.
+    a longer header; one beyond U+00FF makes Python hold each of the
+    allele's characters in two bytes, and one beyond U+FFFF, such as an
+    emoji, in four, so decoding the text holds up to ten bytes per stored
+    byte and the decoded alleles four, which the checks count by the
+    alleles' largest UTF-8 byte.
     """
     rng = np.random.default_rng(24)
     n_cells = 2_000
@@ -1088,6 +1089,56 @@ def test_each_step_on_wide_alleles_holds_no_more_than_its_check_states(
     assert store.clones.load_clones(call()).clones["n_cells"].tolist() == [2] * (
         n_cells // 2
     )
+    _assert_steps_within(traced_steps(monkeypatch, call, budget))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("ending", ["", "é"])
+def test_each_step_on_few_long_alleles_holds_no_more_than_its_check_states(
+    tmp_path, monkeypatch, ending
+) -> None:
+    """100 alleles of 50,000 characters, each shared by two of 200 cells.
+
+    Few cells and nodes leave the steps of the calls little room beyond
+    their counts, so what the operation holds whatever its size, such as
+    its arrays' headers and objects, must be left out of their budget.
+    """
+    rng = np.random.default_rng(25)
+    n_cells = 200
+    cells = [f"cell{index:06d}" for index in range(n_cells)]
+    letters = np.asarray(list("ACGT"))
+    texts = [
+        "".join(rng.choice(letters, 49_987)) + f"{pair:012d}{ending}"
+        for pair in range(n_cells // 2)
+    ]
+    path = tmp_path / "alleles.tsv"
+    path.write_text(
+        "cell\tallele\n"
+        + "".join(f"{cell}\t{texts[index // 2]}\n" for index, cell in enumerate(cells)),
+        encoding="utf-8",
+    )
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((n_cells, 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=cells,
+    )
+    store = open_clone_store(tmp_path / "store.zarr")
+    alleles = store.clones.import_alleles(
+        path,
+        cell_selection=store.snapshot_cell_selection(),
+        columns={"cell": "cell", "allele": "allele"},
+        integrations="I",
+    )
+    budget = 1 << 34
+    monkeypatch.setattr(store, "memoryBytes", budget)
+
+    def call() -> object:
+        return store.clones.allele_clones(
+            alleles, method="graph", max_frequency=0.5, invalidate_cache=True
+        )
+
+    call()
     _assert_steps_within(traced_steps(monkeypatch, call, budget))
 
 

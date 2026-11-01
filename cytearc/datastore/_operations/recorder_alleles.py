@@ -1237,13 +1237,15 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         observations = _allele_observations(group, edited, texts)
         del edited, texts
         held += _HELD_EDIT_BYTES * n_edited
+        # The calls get what the budget leaves beside what the operation holds
+        # and its fixed bytes, which every check of the operation counts.
         called = allele_clone_calls(
             observations,
             n_cells,
             groups=group_codes,
             settings=settings,
             banks=banks,
-            max_bytes=self.memoryBytes - held,
+            max_bytes=self.memoryBytes - held - _FIXED_BYTES,
         )
         del observations, banks
         # The clones are written beside each cell's group and calls, now that
