@@ -1359,6 +1359,67 @@ def test_texts_that_cannot_pair_by_chance_expect_nothing() -> None:
     assert both == pytest.approx(sum(alone), rel=1e-12)
 
 
+def test_texts_of_one_length_expect_the_same_pairs_within_one_edit_or_substitution() -> (
+    None
+):
+    # Texts of one length are within one edit only through one substitution,
+    # so the edit distance's chance is the substitutions' exactly, distinct
+    # texts leaving out the same identical pairs, on skewed composition.
+    rng = np.random.default_rng(23)
+    texts = _random_texts(rng, 2_000, [8], (0.55, 0.25, 0.15, 0.05))
+    substitutions = neighbor_pairs(texts, "hamming", 1, return_expected=True)[2]
+    edits = neighbor_pairs(texts, "levenshtein", 1, return_expected=True)[2]
+    assert substitutions > 100
+    assert edits == pytest.approx(substitutions, rel=1e-9)
+
+
+def test_lengths_of_texts_that_share_no_character_expect_no_pair_across() -> None:
+    # Texts of 6 bases of A and C, and of 7 of G and T, agree at no pair of
+    # positions, so the pairs across lengths add nothing to each length's own.
+    rng = np.random.default_rng(29)
+    letters = np.asarray(list("ACGT"))
+    short = sorted({"".join(letters[rng.integers(0, 2, size=6)]) for _ in range(60)})
+    long = sorted({"".join(letters[rng.integers(2, 4, size=7)]) for _ in range(120)})
+    alone = [
+        neighbor_pairs(texts, "levenshtein", 2, return_expected=True)[2]
+        for texts in (short, long)
+    ]
+    both = neighbor_pairs(short + long, "levenshtein", 2, return_expected=True)[2]
+    assert both == pytest.approx(sum(alone), rel=1e-12)
+
+
+def test_the_frequencies_of_one_block_are_let_go_before_the_next() -> None:
+    # Each block's frequencies are held while its pairs of lengths are
+    # followed, and the search holds as much as before once they are done.
+    rng = np.random.default_rng(31)
+    codes = rng.integers(0, 4, size=(90, 9)).astype(np.uint8)
+    lengths = [7, 8, 9]
+    groups = [np.arange(0, 30), np.arange(30, 60), np.arange(60, 90)]
+    memory = sequences._Memory(None, held=12_345)
+    expected = sequences._edit_chance_pairs(codes, groups, lengths, 2, memory)
+    assert expected > 0 and memory.held == 12_345
+
+
+def test_each_pair_of_groups_agrees_as_its_rows_do() -> None:
+    # Counting each group's characters once gives the chances of agreeing
+    # that the rows of each pair of groups give.
+    rng = np.random.default_rng(37)
+    first = rng.choice(4, size=(40, 12), p=(0.4, 0.3, 0.2, 0.1)).astype(np.uint8)
+    second = rng.choice(4, size=(25, 12), p=(0.1, 0.2, 0.3, 0.4)).astype(np.uint8)
+
+    def counts(rows: np.ndarray) -> np.ndarray:
+        return np.stack([np.bincount(column, minlength=4) for column in rows.T]).astype(
+            np.float64
+        )
+
+    columns = np.asarray([0, 2, 3, 7, 11])
+    across = sequences._group_agreement(counts(first), counts(second), 40, 25, columns)
+    rows = np.concatenate([first, second])[:, columns]
+    assert across == pytest.approx(sequences._agreement(rows, split=40), rel=1e-12)
+    within = sequences._group_agreement(counts(first), counts(first), 40, 40, columns)
+    assert within == pytest.approx(sequences._agreement(first[:, columns]), rel=1e-12)
+
+
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
 def test_a_cutoff_beyond_every_length_expects_every_pair(metric) -> None:
     rng = np.random.default_rng(3)

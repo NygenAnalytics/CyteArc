@@ -1260,18 +1260,20 @@ def _substitution_pairs(
     found: _Found,
     split: int = 0,
     chance: _Chance | None = None,
+    agree: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Every pair of rows within ``limit`` substitutions, by keys or by loops.
 
     The rows are texts of one length; with a ``split`` above 0, only the rows
     below it pair, with those at or above it. With ``chance``, the pairs of
     rows expected within ``limit`` by chance are added to it, from the same
-    chances of agreeing at each position that time the search.
+    chances of agreeing at each position that time the search: ``agree``,
+    when the caller has them, or those of :func:`_agreement`.
     """
     limit = min(limit, codes.shape[1])
-    agree = None
     if chance is not None:
-        agree = _agreement(codes, split)
+        if agree is None:
+            agree = _agreement(codes, split)
         chance.expected += _chance_pairs(
             len(codes), split, _mismatch_chances(1.0 - agree, limit)
         )
@@ -1281,6 +1283,22 @@ def _substitution_pairs(
             codes, lengths, limit, False, table, memory, segments, split
         )
     return found.looped(_hamming_pairs(_words(codes), limit, found.most(), split))
+
+
+def _group_agreement(
+    first: np.ndarray,
+    second: np.ndarray,
+    n_first: int,
+    n_second: int,
+    columns: np.ndarray,
+) -> np.ndarray:
+    """The chance that a text of one group agrees with one of another, at some positions.
+
+    ``first`` and ``second`` hold each group's count of each character at
+    each position, ``columns`` the positions; within one group, both are its
+    counts, as :func:`_agreement` gives them for the group's rows.
+    """
+    return np.sum(first[columns] / n_first * second[columns] / n_second, axis=1)
 
 
 def _partial_pairs(
@@ -1305,7 +1323,8 @@ def _partial_pairs(
     keys or by loops, the texts of two groups paired across them; a text
     that holds fewer bases than that has no pairs. With ``chance``, the pairs
     expected by chance are added to it for each pair of groups searched, on
-    the positions searched.
+    the positions searched, from each group's count of each character at
+    each position, counted once.
     """
     n_words = max(-(-length // 64), 1)
     held = len(members) * (_MASK_TEXT_BYTES + 16 * n_words)
@@ -1327,6 +1346,11 @@ def _partial_pairs(
     ends = np.append(starts[1:], len(order))
     group_masks = ordered_masks[starts]
     del ordered_masks
+    group_counts = None
+    if chance is not None:
+        group_counts, counts_held = _group_counts(
+            matrix, members, order, starts, ends, length, memory
+        )
     positions = np.arange(length)
     words = positions >> 6
     shifts = (positions & 63).astype(np.uint64)
@@ -1347,13 +1371,65 @@ def _partial_pairs(
             union = unions[offset]
             columns = np.flatnonzero(((union[words] >> shifts) & np.uint64(1)) == 0)
             codes = matrix[np.ix_(rows, columns)]
+            agree = None
+            if group_counts is not None:
+                agree = _group_agreement(
+                    group_counts[first_group],
+                    group_counts[second_group],
+                    int(ends[first_group] - starts[first_group]),
+                    int(ends[second_group] - starts[second_group]),
+                    columns,
+                )
             first, second = _substitution_pairs(
-                codes, limit, table, memory, found, split, chance
+                codes, limit, table, memory, found, split, chance, agree
             )
             del codes
             first, second = _ordered(rows[first], rows[second])
             found.add(first, second)
+    if group_counts is not None:
+        memory.held -= counts_held
     memory.held -= held
+
+
+def _group_counts(
+    matrix: np.ndarray,
+    members: np.ndarray,
+    order: np.ndarray,
+    starts: np.ndarray,
+    ends: np.ndarray,
+    length: int,
+    memory: _Memory,
+) -> tuple[np.ndarray, int]:
+    """Each group's count of each character at each position, and the bytes it holds.
+
+    The groups are the slices of ``order`` from ``starts`` to ``ends``, rows
+    of ``members``. Only the characters that the texts hold are counted, so
+    the counts hold a few per position rather than 256, and they are held
+    while the groups are searched.
+    """
+    present = np.zeros(256, dtype=np.bool_)
+    largest = int(np.max(ends - starts)) if len(starts) else 0
+    # Counting one position copies its codes, widened to 8 bytes each.
+    counting = _COUNTED_CODE_BYTES * max(len(members), 1) + _FREQUENCY_BYTES
+    memory.check(counting, "the characters of each group of texts")
+    for position in range(length):
+        present |= np.bincount(matrix[members, position], minlength=256) > 0
+    ranks = np.cumsum(present) - 1
+    n_characters = int(np.count_nonzero(present))
+    held = 8 * len(starts) * length * n_characters
+    memory.check(
+        held + _COUNTED_CODE_BYTES * max(largest, 1),
+        "the characters of each group of texts",
+    )
+    counts = np.zeros((len(starts), length, n_characters), dtype=np.float64)
+    for group in range(len(starts)):
+        rows = members[order[starts[group] : ends[group]]]
+        for position in range(length):
+            counts[group, position] = np.bincount(
+                ranks[matrix[rows, position]], minlength=n_characters
+            )
+    memory.held += held
+    return counts, held
 
 
 @overload
