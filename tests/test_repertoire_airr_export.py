@@ -1330,26 +1330,30 @@ def test_clonotypes_hold_their_codes_and_labels_while_blocks_are_written(
 
 
 @pytest.mark.parametrize(
-    ("source", "suffix", "small"),
+    ("source", "suffix", "large"),
     [
-        ("receptors", ".tsv", False),
-        ("clonotypes", ".tsv", False),
-        ("receptors", ".tsv.gz", False),
-        ("clonotypes", ".tsv", True),
+        ("receptors", ".tsv", "every"),
+        ("clonotypes", ".tsv", "every"),
+        ("receptors", ".tsv.gz", "every"),
+        ("clonotypes", ".tsv", "contig_"),
+        ("receptors", ".tsv", "contig_j_identity"),
     ],
 )
 def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
-    tmp_path, monkeypatch, source, suffix, small
+    tmp_path, monkeypatch, source, suffix, large
 ) -> None:
     # Zarr's decoding thread may hold a read's decoded chunk a moment after
     # the read returns. Each read here holds a chunk of 50 MiB, as the
     # store's model counts it, until after the next read, so every step's
     # traced peak must stay within the check made before it, also while a
-    # compressed file's deflate state is held. With ``small``, arrays other
-    # than the contigs' keep the store's own model, a few MiB at most, so a
-    # step reads chunks larger than the one left behind before it. Zarr
-    # decodes inline here, so the chunks that this test holds are the only
-    # ones left behind.
+    # compressed file's deflate state is held. Unless ``large`` is "every",
+    # only the arrays whose names start with it hold chunks of 50 MiB, and
+    # the others keep the store's own model, a few MiB at most: a step then
+    # reads chunks larger than the one left behind before it, or, with the J
+    # identities, the last field that measuring reads and the blocks next,
+    # smaller ones.
+    # Zarr decodes inline here, so the chunks that this test holds are the
+    # only ones left behind.
     async def inline(function, /, *args, **kwargs):
         return function(*args, **kwargs)
 
@@ -1361,10 +1365,10 @@ def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
     parts = metadata_rows.array_row_selection_parts
 
     def size(array) -> int:
-        contig = (
-            str(getattr(array, "path", "")).rsplit("/", 1)[-1].startswith("contig_")
-        )
-        return parts(array)[0] if small and not contig else 50 * 2**20
+        name = str(getattr(array, "path", "")).rsplit("/", 1)[-1]
+        if large == "every" or name.startswith(large):
+            return 50 * 2**20
+        return parts(array)[0]
 
     def model(array):
         return size(array), parts(array)[1]
