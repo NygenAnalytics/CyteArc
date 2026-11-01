@@ -65,6 +65,7 @@ from .cell_barcodes import (
     store_sha256,
     warn_unmatched_barcodes,
 )
+from .clone_artifacts import plan_clones, write_clones
 
 if TYPE_CHECKING:
     from ...readers.phylogeny import FileTrees, TreeFileLayout
@@ -816,7 +817,8 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             invalidate_cache=invalidate_cache,
         )
         n_cells = len(cell_selection_indices(self.zw, selection))
-        planned = self._plan_clones(
+        planned = plan_clones(
+            self.zw,
             arguments,
             selection,
             n_cells,
@@ -892,7 +894,8 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             "time_unit": None if unit is None else str(unit),
             "leaf_time_spread": group.attrs.get("leaf_time_spread"),
         }
-        self._write_clones(
+        write_clones(
+            self.zw,
             planned,
             CloneAssignment(
                 codes=ranked,

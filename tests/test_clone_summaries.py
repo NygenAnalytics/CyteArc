@@ -200,15 +200,17 @@ def _ranked_label(clone: int) -> str:
 
 #: How each source that keeps no labels apart labels the truth's clones: the
 #: rule its labels follow from the truth, such as the labels of imported
-#: clones' files and the numbers by size of barcode, genotype and allele
-#: clones, or None for a source whose labels follow from something else,
-#: such as variant clones, which number their clones by cluster.
+#: clones' files and of the clade roots that phylogeny clones are named by,
+#: and the numbers by size of barcode, genotype and allele clones, or None for
+#: a source whose labels follow from something else, such as variant clones,
+#: which number their clones by cluster.
 LABELS: dict[str, Callable[[int], str] | None] = {
     "imported clones": number_label,
     "barcode clones": _ranked_label,
     "variant clones": None,
     "genotype clones": _ranked_label,
     "allele clones": _ranked_label,
+    "phylogeny clones": number_label,
 }
 
 
