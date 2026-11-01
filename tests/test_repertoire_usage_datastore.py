@@ -782,22 +782,24 @@ def test_the_groups_keys_are_checked_before_their_frame_is_built(tmp_path) -> No
         repertoire_operations._KEY_BYTES_PER_GROUP
         + repertoire_operations._KEY_BYTES_PER_GROUP_COLUMN * n_columns
     )
-    assert refusals[last_grouping + 1] == (
-        "Counting the junction lengths of the chains of 4096 cells",
-        n_cells * 2 * 4 + n_cells * 8 + keys,
-    )
+    counting = "Counting the junction lengths of the chains of 4096 cells"
+    held = n_cells * 2 * 4 + n_cells * 8 + keys
+    assert refusals[last_grouping + 1] == (counting, held)
+    # Then the mask of the chains of the grouped cells in the two slots:
+    # whether each cell has a group, whether each slot holds a chain, and both.
+    assert refusals[last_grouping + 2] == (counting, held + n_cells * (2 * 2 + 1))
 
 
 def test_counting_is_checked_with_its_table_before_it_runs(tmp_path) -> None:
     store, _receptors, _clonotypes = _sources(tmp_path)
     keys = pd.DataFrame({"group": ["s1", "s2"], "sample": ["s1", "s2"]})
 
-    def needs(n_chains: int, widths: list[int], count: str) -> int:
+    def needs(n_chains: int, widths: list[int], once: bool) -> int:
         reads = repertoire_operations._Reads(
             limit=0, held=0, what="Counting", remedy=""
         )
         with pytest.raises(MemoryError) as refused:
-            store._check_count_budget(reads, keys, n_chains, widths, count)
+            store._check_count_budget(reads, keys, n_chains, widths, once=once)
         found = re.search(r"holds about (\d+) bytes", str(refused.value))
         assert found is not None
         return int(found.group(1))
@@ -805,9 +807,182 @@ def test_counting_is_checked_with_its_table_before_it_runs(tmp_path) -> None:
     # The table holds a row for each group, locus and value that the chains
     # hold, at most 2 * 3 * 5 = 30 for 1,000 chains, each with its group,
     # sample, locus, value, count and fraction: 120 + 6 * 16 bytes.
-    assert needs(1_000, [3, 5], "cells") == 30 * (120 + 6 * 16)
+    assert needs(1_000, [3, 5], once=False) == 30 * (120 + 6 * 16)
     # At most one row per chain for 20 chains.
-    assert needs(20, [3, 5], "cells") == 20 * (120 + 6 * 16)
-    # Counting each clonotype once also holds each chain's row of group,
-    # locus, value and clonotype: 32 + 4 * 16 bytes.
-    assert needs(1_000, [3, 5], "clonotypes") == 30 * 216 + 1_000 * (32 + 4 * 16)
+    assert needs(20, [3, 5], once=False) == 20 * (120 + 6 * 16)
+    # Counting each clonotype, or each cell, once also holds each chain's row
+    # of group, locus, value and clonotype or cell: 32 + 4 * 16 bytes.
+    assert needs(1_000, [3, 5], once=True) == 30 * 216 + 1_000 * (32 + 4 * 16)
+
+
+def test_two_slots_of_one_arm_count_a_cell_once_per_value(tmp_path) -> None:
+    # cell1's second alpha chain, with fewer UMIs, has the V gene and the
+    # junction length of its first.
+    rows = [
+        *CLONAL_ROWS,
+        "cell1,true,cell1_contig_3,true,500,TRA,TRAV1,,TRAJ2,TRAC,true,true,CAVZ,"
+        "TGTGCTGTGTAT,20,2,ct1,ct1_3",
+    ]
+    store = receptor_store(tmp_path)
+    path = write_lines(tmp_path, "second_alpha.csv", CELLRANGER_HEADER, rows)
+    receptors = store.repertoire.import_receptors(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    alpha = ["VJ_1", "VJ_2"]
+
+    def tra(table):
+        return table[table["locus"] == "TRA"]
+
+    usage = tra(store.repertoire.gene_usage(receptors, slots=alpha).table)
+    # cell0, cell1 and cell4 carry TRAV1, cell2 TRAV2 and cell4 TRAV3.
+    assert usage[["v_call", "cells"]].values.tolist() == [
+        ["TRAV1", 3],
+        ["TRAV2", 1],
+        ["TRAV3", 1],
+    ]
+    assert usage["fraction"].tolist() == [3 / 5, 1 / 5, 1 / 5]
+    # By pairs, cell1's TRAV1 chains are two, with TRAJ1 and TRAJ2.
+    pairs = store.repertoire.gene_usage(
+        receptors, genes=("v_call", "j_call"), slots=alpha
+    )
+    assert _counts(tra(pairs.table), "v_call", "j_call") == {
+        ("TRAV1", "TRAJ1"): 3,
+        ("TRAV1", "TRAJ2"): 1,
+        ("TRAV2", "TRAJ1"): 1,
+        ("TRAV3", "TRAJ2"): 1,
+    }
+    # Every alpha chain has 4 residues, so each of the four T cells with one
+    # counts once, cell1 and cell4 with two alpha chains among them.
+    lengths = tra(store.repertoire.spectratype(receptors, slots=alpha).table)
+    assert lengths[["length", "cells"]].values.tolist() == [[4, 4]]
+
+
+def test_grouped_gene_usage_names_the_group_of_a_locus_held_by_one(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    # The B cells, cell5 and cell6, are all of group b, and the T cells of t.
+    store.cells.insert("kind", np.asarray(["t"] * 5 + ["b", "b", "t"], dtype=object))
+    result = store.plots.gene_usage(receptors, group_by="kind", show=False)
+    try:
+        for locus, group in (("IGH", "b"), ("IGK", "b"), ("TRA", "t"), ("TRB", "t")):
+            ax = result.axes[locus]
+            assert not ax.patches, locus
+            assert [tick.get_text() for tick in ax.get_xticklabels()] == [group]
+    finally:
+        result.close()
+
+
+def test_the_gene_usage_plot_checks_its_gene_before_counting(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    for gene in (("v_call", "j_call"), "junction", 3):
+        with pytest.raises(ValueError, match="gene must be one of v_call"):
+            store.plots.gene_usage(receptors, gene=gene, show=False)
+
+
+def test_pairing_puts_j_genes_in_natural_order_and_v_genes_by_count(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    rows = [
+        f"cell{cell},true,cell{cell}_contig_1,true,500,TRA,{v},,{j},TRAC,true,true,"
+        f"CAV{letter},TGTGCTGTG{codon},90,9,ct{cell},ct{cell}_1"
+        for cell, (v, j, letter, codon) in enumerate(
+            [
+                ("TRAV3", "TRAJ10", "A", "GCC"),
+                ("TRAV3", "TRAJ10", "C", "TGT"),
+                ("TRAV3", "TRAJ10", "D", "GAT"),
+                ("TRAV12", "TRAJ2", "E", "GAA"),
+            ]
+        )
+    ]
+    path = write_lines(tmp_path, "pairs.csv", CELLRANGER_HEADER, rows)
+    receptors = store.repertoire.import_receptors(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    result = store.plots.gene_pairing(receptors, show=False)
+    try:
+        ax = result.axes["TRA"]
+        # TRAJ2 comes before TRAJ10, though TRAJ10 holds three chains.
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == ["TRAJ2", "TRAJ10"]
+        assert [tick.get_text() for tick in ax.get_yticklabels()] == ["TRAV3", "TRAV12"]
+    finally:
+        result.close()
+
+
+def test_two_rows_of_panels_make_the_figure_twice_as_tall(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    usage = store.plots.gene_usage(receptors, show=False)
+    pairing = store.plots.gene_pairing(receptors, top=4, show=False)
+    lengths = store.plots.spectratype(receptors, show=False)
+    try:
+        # Four loci stand in two rows of two panels.
+        for result, height in (
+            (usage, 0.22 * 30 + 1.5),
+            (pairing, 4.0),
+            (lengths, 3.8),
+        ):
+            assert result.figure.get_size_inches()[1] == pytest.approx(2 * height)
+    finally:
+        for result in (usage, pairing, lengths):
+            result.close()
+
+
+def test_the_ranks_of_stored_values_are_checked_before_they_are_held(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    group = artifact_group(store.zw, receptors)
+    for name, measure in (
+        ("v_call", store._value_names),
+        ("junction_aa", store._value_measures),
+    ):
+        # Each stored value's presence and rank, before any value is read.
+        n_values = group[f"contig_{name}_offsets"].shape[0] - 1
+        needed = repertoire_operations._RANK_BYTES_PER_VALUE * n_values
+        reads = repertoire_operations._Reads(
+            limit=1_000 + needed - 1, held=1_000, what="Counting", remedy=""
+        )
+        with pytest.raises(MemoryError, match=f"holds about {1_000 + needed} bytes"):
+            measure(reads, group, name, np.asarray([0, -1]))
+
+
+def test_junctions_that_span_stored_chunks_are_measured_whole(
+    tmp_path, monkeypatch
+) -> None:
+    # Chunks of 7 bytes split the junctions, and the characters of two and
+    # four bytes, between them.
+    monkeypatch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", 7)
+    junctions = ["CAŚSF", "C\U0001f600\U0001f600F", "CASSLGQAYEQYF", "Cé"]
+    rows = [
+        f"cell{cell},true,cell{cell}_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,"
+        f"{junction},TGTGCC,100,9,ct{cell},ct{cell}_1"
+        for cell, junction in enumerate(junctions)
+    ]
+    store = receptor_store(tmp_path)
+    path = write_lines(tmp_path, "spanning.csv", CELLRANGER_HEADER, rows)
+    receptors = store.repertoire.import_receptors(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    packed = artifact_group(store.zw, receptors)["contig_junction_aa_values"]
+    assert packed.chunks == (7,) and packed.shape[0] > 3 * 7
+    lengths = store.repertoire.spectratype(receptors).table
+    assert _counts(lengths, "length") == {(len(junction),): 1 for junction in junctions}
+
+
+def test_each_refusal_names_the_remedy_that_its_step_allows(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    messages = []
+    budget, full = 1, store.memoryBytes
+    try:
+        for _attempt in range(3):
+            store.memoryBytes = budget
+            with pytest.raises(MemoryError) as refused:
+                store.repertoire.gene_usage(receptors)
+            messages.append(str(refused.value))
+            found = re.search(r"holds about (\d+) bytes", messages[-1])
+            assert found is not None
+            budget = int(found.group(1))
+    finally:
+        store.memoryBytes = full
+    # Reading every cell's slots does not shrink with fewer cells; counting
+    # the chains does.
+    assert messages[0].endswith("Raise mem_budget.")
+    assert messages[1].endswith(
+        "Raise mem_budget, or count fewer chains, of a smaller cell_selection "
+        "or of fewer slots."
+    )

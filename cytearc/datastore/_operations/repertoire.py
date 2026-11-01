@@ -74,6 +74,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.async_execution import zarr_io_concurrency
 from ...storage.geometry import array_geometry
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
@@ -222,9 +223,11 @@ _ONCE_BYTES_PER_COLUMN = 16
 # Ranking the codes of a field among its stored values holds, for each
 # value, whether a chain names it and its rank.
 _RANK_BYTES_PER_VALUE = 17
-# Measuring a junction holds its bounds, its length and its bytes'
-# continuations, and text beyond ASCII also a mask and a running count of
-# its continuation bytes, as int32, for each packed byte.
+# Measuring a junction holds its bounds, its length and the bounds of its
+# part of each chunk it spans, and text beyond ASCII also a mask and a running
+# count of its continuation bytes, as int32, for each byte of the chunk read.
+# On 5,000 to 400,000 junctions of 5 to 906 characters, ASCII or of four bytes
+# each, the traced peak stayed at 0.35 to 0.88 of what the checks count.
 _LENGTH_BYTES_PER_VALUE = 48
 _CONTINUED_BYTES_PER_BYTE = 5
 
@@ -604,6 +607,12 @@ def _byte_ranges(array: Any, starts: np.ndarray, ends: np.ndarray) -> np.ndarray
     return joined
 
 
+def _shares_an_arm(slots: tuple[str, ...]) -> bool:
+    """Whether two of the slots hold chains of one arm, which may share values."""
+    chosen = set(slots)
+    return {"VJ_1", "VJ_2"} <= chosen or {"VDJ_1", "VDJ_2"} <= chosen
+
+
 def _value_ranks(codes: np.ndarray, n_values: int) -> tuple[np.ndarray, np.ndarray]:
     """The distinct stored values that some codes name, and each code's rank.
 
@@ -630,10 +639,13 @@ def _value_lengths(
 ) -> np.ndarray:
     """Measure the stored values of some codes of a contig text field.
 
-    The packed bytes and their offsets are read whole, since the junctions
-    of a repertoire's chains are most of the junctions it stores, and each
-    value is measured in characters without being decoded. Each read is
-    checked first; the lengths stay counted in ``reads``.
+    The bounds of the values are read as :func:`_value_bounds` reads them,
+    and their bytes a stored chunk at a time, only the chunks that hold
+    them, so the read holds one chunk whatever the field stores. Each value
+    is measured in characters without being decoded: in a chunk beyond
+    ASCII, the bytes that continue a character are counted, which adds up
+    over the chunks that one value spans. Each read is checked first; the
+    lengths stay counted in ``reads``.
 
     Args:
         reads: What the caller holds, and the budget.
@@ -645,25 +657,37 @@ def _value_lengths(
         The length of each code's value, in characters.
     """
     packed = as_zarr_array(group[f"contig_{name}_values"], name=name)
-    offsets = as_zarr_array(group[f"contig_{name}_offsets"], name=name)
+    n_bytes = int(packed.shape[0])
+    geometry = array_geometry(packed)
+    step = max(1, n_bytes if geometry is None else geometry.axisChunk(0))
+    starts, ends = _value_bounds(reads, group, name, codes)
+    # One chunk as it is read and as the block of bytes that the read
+    # returns, and for text beyond ASCII the block's mask and running count
+    # as int32, beside each value's bounds and length.
     reads.reserve(
         array_row_selection_parts(packed)[0]
-        + int(packed.nbytes)
-        + array_row_selection_parts(offsets)[0]
-        + int(offsets.nbytes)
+        + (1 + _CONTINUED_BYTES_PER_BYTE) * min(step, n_bytes)
         + _LENGTH_BYTES_PER_VALUE * len(codes)
     )
-    data = _read(group, f"contig_{name}_values")
-    bounds = _read(group, f"contig_{name}_offsets")
-    if len(data) and int(data.max()) >= 0x80:
-        # Counts of up to 2**31 bytes are int32, of more int64.
-        per_byte = _CONTINUED_BYTES_PER_BYTE + (4 if len(data) >= 2**31 else 0)
-        reads.reserve(
-            int(data.nbytes + bounds.nbytes)
-            + _LENGTH_BYTES_PER_VALUE * len(codes)
-            + per_byte * len(data)
-        )
-    lengths = text_lengths(data, bounds, codes)
+    lengths: np.ndarray = ends - starts
+    filled = np.flatnonzero(lengths > 0)
+    first = int(starts[filled[0]]) // step if len(filled) else 0
+    last = int(ends[filled[-1]] - 1) // step if len(filled) else -1
+    for chunk in range(first, last + 1):
+        low, high = chunk * step, min((chunk + 1) * step, n_bytes)
+        # The values that end after the chunk starts and start before it ends.
+        begin = int(np.searchsorted(ends, low, side="right"))
+        stop = int(np.searchsorted(starts, high, side="left"))
+        if begin >= stop:
+            continue
+        block = np.asarray(packed[low:high], dtype=np.uint8)
+        parts = np.empty(2 * (stop - begin), dtype=np.int64)
+        parts[0::2] = np.clip(starts[begin:stop], low, high) - low
+        parts[1::2] = np.clip(ends[begin:stop], low, high) - low
+        # Each part's characters, its bytes less those that continue one.
+        characters = text_lengths(block, parts, np.arange(0, len(parts), 2))
+        lengths[begin:stop] -= np.diff(parts)[0::2] - characters
+        del block
     reads.held += int(lengths.nbytes)
     return lengths
 
@@ -1668,11 +1692,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         stored_slots = as_zarr_array(group["chain_slots"], name="chain_slots")
         n_cells = int(stored_slots.shape[0])
         kept = len(chosen) * stored_slots.dtype.itemsize
+        # Reading the slots and the codes of every contig is sized by every
+        # cell and contig of the receptors; the chains and their counting by
+        # the chains of the cells and slots counted.
         reads = _Reads(
             limit=self.memoryBytes,
             held=0,
             what=f"{what} of {n_cells} cells",
-            remedy="Raise mem_budget, or pass a cell_selection of fewer cells.",
+            remedy="Raise mem_budget.",
         )
         # The slots are read whole, beside the chosen ones and the cells with
         # a chain in them; the clonotypes' codes with their int64 copy.
@@ -1735,6 +1762,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             stored_locus.dtype.itemsize + _CODE_BYTES
         )
         chains = n_chains * (_CHAIN_BYTES + _CHAIN_BYTES_PER_FIELD * n_fields)
+        reads.remedy = (
+            "Raise mem_budget, or count fewer chains, of a smaller cell_selection "
+            "or of fewer slots."
+        )
         reads.reserve(len(counted.reshape(-1)) + code_read + chains)
         cells, positions = np.nonzero(counted)
         del counted
@@ -1768,25 +1799,47 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             return local, np.empty(0, dtype=object)
         return local, _decoded_values(reads, group, name, needed)
 
+    def _value_measures(
+        self, reads: _Reads, group: zarr.Group, name: str, codes: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Measure the distinct values of a stored text field among some codes.
+
+        Only the values that the codes name are measured, through
+        :func:`_value_lengths`, which checks each read against the budget.
+
+        Returns:
+            Each code's length in characters, -1 for a missing value, and
+            every length up to the longest, the names of those lengths.
+        """
+        offsets = as_zarr_array(group[f"contig_{name}_offsets"], name=name)
+        n_values = int(offsets.shape[0]) - 1
+        reads.reserve(_RANK_BYTES_PER_VALUE * n_values)
+        local, needed = _value_ranks(codes, n_values)
+        lengths = _value_lengths(reads, group, name, needed)
+        measured = np.full(len(local), -1, dtype=np.int64)
+        known = local >= 0
+        measured[known] = lengths[local[known]]
+        return measured, np.arange(int(lengths.max(initial=-1)) + 1, dtype=np.int64)
+
     def _check_count_budget(
         self,
         reads: _Reads,
         keys: pd.DataFrame,
         n_chains: int,
         widths: list[int],
-        count: str,
+        once: bool,
     ) -> None:
         """Check the counting and its table against the budget before they run.
 
         The table holds a row for each distinct group, locus and values that
         a chain holds, at most one per chain and per combination of codes.
-        Counting each clonotype once also holds each chain's row with its
-        clonotype among the distinct rows.
+        Counting each clonotype, or each cell, once also holds each chain's
+        row with its clonotype or cell among the distinct rows.
         """
         n_rows = min(n_chains, math.prod([len(keys), *widths]))
         n_columns = len(keys.columns) + len(widths) + 2
         needed = n_rows * (_ROW_BYTES + _ROW_BYTES_PER_COLUMN * n_columns)
-        if count == "clonotypes":
+        if once:
             needed += n_chains * (
                 _ONCE_BYTES_PER_CHAIN + _ONCE_BYTES_PER_COLUMN * (len(widths) + 2)
             )
@@ -1867,31 +1920,34 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 f"genes must hold distinct fields from {', '.join(GENE_FIELDS)}"
             )
         gene_names(np.asarray([], dtype=object), level)
-        keys, units, chosen, group, reads = self._slot_units(
-            source,
-            fields,
-            slots=slots,
-            count=count,
-            group_by=group_by,
-            groups=groups,
-            cell_selection=cell_selection,
-            reserved=_USAGE_COLUMNS,
-            what="Counting the genes of the chains",
-        )
-        # Each distinct call is decoded and named once.
-        named = {
-            name: gene_codes(
-                *self._value_names(reads, group, name, units.pop(name)), level
+        # Each stored array is read a chunk at a time, as the checks count.
+        with zarr_io_concurrency(1):
+            keys, units, chosen, group, reads = self._slot_units(
+                source,
+                fields,
+                slots=slots,
+                count=count,
+                group_by=group_by,
+                groups=groups,
+                cell_selection=cell_selection,
+                reserved=_USAGE_COLUMNS,
+                what="Counting the genes of the chains",
             )
-            for name in fields
-        }
-        loci = self._value_names(reads, group, "locus", units.pop("locus"))
+            # Each distinct call is decoded and named once.
+            named = {
+                name: gene_codes(
+                    *self._value_names(reads, group, name, units.pop(name)), level
+                )
+                for name in fields
+            }
+            loci = self._value_names(reads, group, "locus", units.pop("locus"))
+        once_per_cell = count == "cells" and _shares_an_arm(chosen)
         self._check_count_budget(
             reads,
             keys,
             len(units["cell"]),
             [len(loci[1]), *(len(names) for _codes, names in named.values())],
-            count,
+            once=count == "clonotypes" or once_per_cell,
         )
         table, n_cells = count_chains(
             keys,
@@ -1901,6 +1957,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             named,
             count,
             clonotypes=units.get("clonotype"),
+            once_per_cell=once_per_cell,
         )
         return GeneUsage(
             table=table,
@@ -1971,33 +2028,32 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if sequence not in SEQUENCES:
             raise ValueError(f"sequence must be one of {', '.join(SEQUENCES)}")
         field_name = "junction_aa" if sequence == "aa" else "junction"
-        keys, units, chosen, group, reads = self._slot_units(
-            source,
-            (field_name,),
-            slots=slots,
-            count=count,
-            group_by=group_by,
-            groups=groups,
-            cell_selection=cell_selection,
-            reserved=_SPECTRATYPE_COLUMNS,
-            what="Counting the junction lengths of the chains",
-        )
-        # Each distinct junction is measured once, and a chain without one
-        # is not counted.
-        junction_codes = units.pop(field_name)
-        offsets = as_zarr_array(group[f"contig_{field_name}_offsets"], name=field_name)
-        reads.reserve(_RANK_BYTES_PER_VALUE * (int(offsets.shape[0]) - 1))
-        local, needed = _value_ranks(junction_codes, int(offsets.shape[0]) - 1)
-        del junction_codes
-        lengths = _value_lengths(reads, group, field_name, needed)
-        measured = np.full(len(local), -1, dtype=np.int64)
-        known = local >= 0
-        measured[known] = lengths[local[known]]
-        del local, known
-        names = np.arange(int(lengths.max(initial=-1)) + 1, dtype=np.int64)
-        loci = self._value_names(reads, group, "locus", units.pop("locus"))
+        # Each stored array is read a chunk at a time, as the checks count.
+        with zarr_io_concurrency(1):
+            keys, units, chosen, group, reads = self._slot_units(
+                source,
+                (field_name,),
+                slots=slots,
+                count=count,
+                group_by=group_by,
+                groups=groups,
+                cell_selection=cell_selection,
+                reserved=_SPECTRATYPE_COLUMNS,
+                what="Counting the junction lengths of the chains",
+            )
+            # Each distinct junction is measured once, and a chain without
+            # one is not counted.
+            measured, names = self._value_measures(
+                reads, group, field_name, units.pop(field_name)
+            )
+            loci = self._value_names(reads, group, "locus", units.pop("locus"))
+        once_per_cell = count == "cells" and _shares_an_arm(chosen)
         self._check_count_budget(
-            reads, keys, len(units["cell"]), [len(loci[1]), len(names)], count
+            reads,
+            keys,
+            len(units["cell"]),
+            [len(loci[1]), len(names)],
+            once=count == "clonotypes" or once_per_cell,
         )
         # Rows follow the groups' natural order, then the locus and length.
         table, n_cells = count_chains(
@@ -2009,6 +2065,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             count,
             clonotypes=units.get("clonotype"),
             by_count=False,
+            once_per_cell=once_per_cell,
         )
         table["length"] = table["length"].astype(np.int64)
         return Spectratype(

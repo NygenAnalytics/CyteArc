@@ -183,13 +183,15 @@ def count_chains(
     *,
     clonotypes: np.ndarray | None = None,
     by_count: bool = True,
+    once_per_cell: bool = False,
 ) -> tuple[pd.DataFrame, int]:
     """Count chains by group, locus and values, with each count's share of its keys.
 
     Each chain's locus and values are codes, positions among names in the
     order of the table, and a chain with a missing value, a code of -1, is
     left out. ``count="clonotypes"`` counts each clonotype once per group,
-    locus and values.
+    locus and values, and ``once_per_cell`` each cell, such as one whose two
+    chains of an arm share their values.
 
     Args:
         keys: One row per group: ``group``, its name, and its label in each
@@ -202,6 +204,8 @@ def count_chains(
         clonotypes: Each chain's clonotype code, to count clonotypes.
         by_count: Order the rows of each group and locus by count, most
             first, and then by value; otherwise by value.
+        once_per_cell: With ``count="cells"``, count each cell once per
+            group, locus and values rather than each chain.
 
     Returns:
         One row per group, locus and values with a chain, by group and
@@ -218,16 +222,25 @@ def count_chains(
         known &= chain_codes >= 0
     n_cells = len(sorted_unique(np.asarray(cells, dtype=np.int64)[known]))
     if not known.any():
-        return pd.DataFrame(columns=columns), n_cells
+        # The table keeps its columns and their types without rows.
+        empty = keys.iloc[:0].reset_index(drop=True)
+        empty["locus"] = pd.Series(dtype=object)
+        for name, (_codes, names) in values.items():
+            empty[name] = pd.Series(dtype=np.asarray(names).dtype)
+        empty[count] = pd.Series(dtype=np.int64)
+        empty["fraction"] = pd.Series(dtype=np.float64)
+        return empty[columns], n_cells
     rows = [
         np.asarray(groups, dtype=np.int64)[known],
         np.asarray(loci[0], dtype=np.int64)[known],
         *(chain_codes[known] for chain_codes in codes),
     ]
     widths = [len(keys), len(loci[1]), *(len(names) for _, names in values.values())]
-    if count == "clonotypes":
-        # Each clonotype once per group, locus and values.
-        identities = np.asarray(clonotypes, dtype=np.int64)[known]
+    if count == "clonotypes" or once_per_cell:
+        # Each clonotype, or each cell, once per group, locus and values.
+        identities = np.asarray(
+            clonotypes if count == "clonotypes" else cells, dtype=np.int64
+        )[known]
         with_clonotypes = _distinct(
             [*rows, identities], [*widths, int(identities.max()) + 1]
         )[0]

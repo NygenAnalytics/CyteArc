@@ -55,6 +55,8 @@ N_EXTRA_CELLS = 10_000
 N_LABELLED = 5_000
 # Clonotypes of one cell each, of one chain of each arm.
 N_OWN_CLONOTYPES = 20_000
+# Cells of long beta chains, whose junctions span many stored chunks.
+N_LONG_JUNCTIONS = 20_000
 
 
 @pytest.fixture(scope="module")
@@ -1096,3 +1098,56 @@ def test_usage_of_clonotypes_of_one_cell_each_counted_once_fits_the_budget(
     ):
         peak, budget = _traced_at_smallest_budget(store, run)
         assert peak <= budget, (peak, budget)
+
+
+@pytest.fixture(scope="module")
+def long_junctions(tmp_path_factory) -> SimpleNamespace:
+    """Cells of beta chains of 302 residues, whose nucleotides span many chunks.
+
+    The junctions are ASCII, so nothing beyond their bytes is counted for
+    them, and their 18 MB of nucleotides fill nine stored chunks.
+    """
+    rng = np.random.default_rng(19)
+    path = tmp_path_factory.mktemp("long_junctions") / "store.zarr"
+    ids = [f"cell{i:06d}-1" for i in range(N_LONG_JUNCTIONS)]
+    counts = np.ones((N_LONG_JUNCTIONS, 2), dtype=np.uint16)
+    write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=np.asarray(ids))
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    residues = np.asarray(list("ACDEFGHIKLMNPQRSTVWY"))
+    bases = np.asarray(list("ACGT"))
+    rows = []
+    for cell, name in enumerate(ids):
+        for contig, (locus, length) in enumerate((("TRA", 14), ("TRB", 302))):
+            residue_text = "".join(rng.choice(residues, size=length))
+            base_text = "".join(rng.choice(bases, size=3 * length))
+            rows.append(
+                f"{name},true,{name}_contig_{contig + 1},true,500,{locus},{locus}V1,,"
+                f"{locus}J1,{locus}C,true,true,{residue_text},{base_text},100,9,"
+                f"ct{cell},ct{cell}_{contig + 1}"
+            )
+    contigs = write_lines(path.parent, "contigs.csv", CELLRANGER_HEADER, rows)
+    receptors = store.repertoire.import_receptors(
+        contigs, cell_selection=store.snapshot_cell_selection()
+    )
+    return SimpleNamespace(store=store, receptors=receptors)
+
+
+@pytest.mark.parametrize("sequence", ["aa", "nt"])
+def test_lengths_of_long_ascii_junctions_fit_the_smallest_budget(
+    long_junctions, sequence
+) -> None:
+    # Reading the stored junctions whole decoded several chunks at once,
+    # beyond the one that the check counts.
+    store, receptors = long_junctions.store, long_junctions.receptors
+    lengths = store.repertoire.spectratype(receptors, sequence=sequence).table
+    factor = 1 if sequence == "aa" else 3
+    assert dict(zip(lengths["locus"], lengths["length"], strict=True)) == {
+        "TRA": 14 * factor,
+        "TRB": 302 * factor,
+    }
+    peak, budget = _traced_at_smallest_budget(
+        store, lambda: store.repertoire.spectratype(receptors, sequence=sequence)
+    )
+    assert peak <= budget, (peak, budget)

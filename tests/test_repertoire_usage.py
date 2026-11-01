@@ -264,3 +264,58 @@ def test_text_lengths_count_wide_characters_without_decoding() -> None:
         0,
         0,
     ]
+
+
+def test_gene_calls_lose_the_spaces_around_them() -> None:
+    calls = np.asarray(
+        [" TRBV12-3*01 ", "TRAV1-2 , TRAV2", "\tIGHV3-30*01"], dtype=object
+    )
+    assert gene_names(calls, "gene").tolist() == ["TRBV12-3", "TRAV1-2", "IGHV3-30"]
+    assert gene_names(calls, "allele").tolist() == [
+        "TRBV12-3*01",
+        "TRAV1-2",
+        "IGHV3-30*01",
+    ]
+
+
+def test_a_cell_counts_once_per_value_on_request() -> None:
+    # Cell 0 holds two chains of TRA with one V gene, as two alpha slots may;
+    # cell 1 one chain of it and one of another gene.
+    keys = pd.DataFrame({"group": ["all cells"]})
+    options = {
+        "keys": keys,
+        "groups": np.zeros(4, dtype=np.int64),
+        "cells": np.asarray([0, 0, 1, 1]),
+        "loci": (np.zeros(4, dtype=np.int64), np.asarray(["TRA"], dtype=object)),
+        "values": {
+            "v_call": (np.asarray([0, 0, 0, 1]), np.asarray(["A", "B"], dtype=object))
+        },
+        "count": "cells",
+    }
+    chains, n_cells = count_chains(**options)
+    assert chains[["v_call", "cells"]].values.tolist() == [["A", 3], ["B", 1]]
+    cells, same = count_chains(**options, once_per_cell=True)
+    assert cells[["v_call", "cells"]].values.tolist() == [["A", 2], ["B", 1]]
+    assert cells["fraction"].tolist() == [2 / 3, 1 / 3]
+    assert n_cells == same == 2
+
+
+def test_an_empty_table_keeps_the_types_of_its_columns() -> None:
+    def counted(length: int) -> tuple[pd.DataFrame, int]:
+        return count_chains(
+            pd.DataFrame({"group": ["all cells"], "sample": ["s1"]}),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            (np.zeros(1, dtype=np.int64), np.asarray(["TRB"], dtype=object)),
+            {"length": (np.asarray([length]), np.arange(3))},
+            "cells",
+        )
+
+    # A chain without a length leaves no row, and the counts, fractions,
+    # lengths and key columns keep the types that a row gives them.
+    empty, n_cells = counted(-1)
+    full, _n_cells = counted(2)
+    assert empty.empty and n_cells == 0 and len(full) == 1
+    for column in ("group", "sample", "length", "cells", "fraction"):
+        assert empty[column].dtype == full[column].dtype, column
+    assert empty["cells"].dtype == np.int64 and empty["fraction"].dtype == np.float64

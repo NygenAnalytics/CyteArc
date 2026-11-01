@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from ..repertoire.chains import CHAIN_PAIRINGS, RECEPTOR_TYPES
+from ..repertoire.usage import GENE_FIELDS
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import sort_categories
 from ._contracts import PlotProvenance
@@ -359,16 +360,20 @@ def gene_usage(
 
     ``source`` and the options are those of ``ds.repertoire.gene_usage`` for
     one ``gene`` field. Each panel holds one locus, such as TRA or TRB, and
-    its ``top`` genes with the most chains over all groups: a heatmap of
-    each gene's fraction of each group's chains of that locus, or bars
-    without groups. Panels stand two to a row. With ``count="clonotypes"``
-    the bars count clonotypes, or clonotype clusters for clonotypes that a
-    distance metric linked. The plot raises ``ValueError`` when no chain has
-    a call of ``gene``.
+    its ``top`` genes with the most chains over all groups: with
+    ``group_by`` or ``groups``, a heatmap of each gene's fraction of each
+    group's chains of that locus, which names the group even where one group
+    holds the locus; without, bars. Panels stand two to a row. With
+    ``count="clonotypes"`` the bars count clonotypes, or clonotype clusters
+    for clonotypes that a distance metric linked. The plot raises
+    ``ValueError`` when ``gene`` is not one gene field or no chain has a call
+    of it.
 
     Tables: ``usage``, the rows of ``ds.repertoire.gene_usage``.
     """
     top = _top(top)
+    if not isinstance(gene, str) or gene not in GENE_FIELDS:
+        raise ValueError(f"gene must be one of {', '.join(GENE_FIELDS)}")
     result = _store_method(store, "gene_usage")(
         source,
         genes=gene,
@@ -382,6 +387,7 @@ def gene_usage(
     table = result.table
     loci = _locus_panels(table, f"a {gene}")
     counted = _counted(store, source, count)
+    grouped = bool(result.group_by) or result.groups is not None
     by_locus = dict(tuple(table.groupby("locus", sort=False)))
     n_columns, size = _panel_grid(
         loci,
@@ -407,7 +413,7 @@ def gene_usage(
                 index=gene, columns="group", values="fraction", fill_value=0
             ).reindex(index=shown)
             wide = wide.reindex(columns=sort_categories(wide.columns))
-            if wide.shape[1] == 1:
+            if not grouped:
                 positions = np.arange(len(shown))[::-1]
                 ax.barh(positions, wide.iloc[:, 0].to_numpy(), color="#2b6cb0")
                 ax.set_yticks(positions, shown, fontsize="small")
@@ -557,9 +563,10 @@ def spectratype(
     ``source`` and the options are those of ``ds.repertoire.spectratype``.
     Each panel draws, for one locus, each group's fraction of chains at each
     junction length, one line per group, or bars without groups; the legend
-    names the first 80 groups. Panels stand two to a row. With ``count="clonotypes"`` the fractions count
-    clonotypes, or clonotype clusters for clonotypes that a distance metric
-    linked. The plot raises ``ValueError`` when no chain has a junction.
+    names the first 80 groups. Panels stand two to a row. With
+    ``count="clonotypes"`` the fractions count clonotypes, or clonotype
+    clusters for clonotypes that a distance metric linked. The plot raises
+    ``ValueError`` when no chain has a junction.
 
     Tables: ``spectratype``, the rows of ``ds.repertoire.spectratype``.
     """
