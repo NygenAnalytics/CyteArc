@@ -119,9 +119,10 @@ SOURCE_CALLS: Mapping[str, Mapping[str, int]] = {
         "3": MISSING,
     },
 }
-#: Which call column a site's calls come from when its source wrote several:
-#: GoT-Multi's refined call, then its merged call of both channels, then the
-#: call of a single column, and its channels' own calls last.
+#: The order of a site's call columns, from which each cell takes the first
+#: call it holds: GoT-Multi's refined call, then its merged call of both
+#: channels, then the call of a single column, and its channels' own calls
+#: last.
 SOURCE_PRECEDENCE: tuple[str, ...] = (
     "genotype_final",
     "genotype_merged",

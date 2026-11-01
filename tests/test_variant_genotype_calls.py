@@ -110,9 +110,12 @@ def test_got_multi_adopts_its_merged_call_and_its_refined_one(store, tmp_path) -
     loaded = store.variants.load_genotypes(
         store.variants.genotypes(stage, method="source")
     )
-    # The target holds the merged call; its channels hold counts alone.
+    # The target holds the merged call and the channels' calls, in the order
+    # a cell's call is taken; its channels hold counts alone.
     assert loaded.sites.index.tolist() == list(TARGETS)
-    assert set(loaded.sites["source"]) == {"genotype_merged"}
+    assert set(loaded.sites["source"]) == {
+        "genotype_merged, genotype_geneseq, genotype_probebc"
+    }
     refined = _import(
         store,
         write_got_multi(TRUTH, tmp_path / "got_multi_out_refined.csv", refined=True),
@@ -130,6 +133,39 @@ def test_got_multi_adopts_its_merged_call_and_its_refined_one(store, tmp_path) -
             else:
                 call = "wild_type" if label == "WT" else "alternative_present"
                 assert found[(cell, site)] == (call, label)
+
+
+def test_cells_without_a_refined_call_keep_their_merged_one(store, tmp_path) -> None:
+    # The refined table holds the even rows alone, as GoT-Multi's model
+    # refines the cells it can judge.
+    stage = write_got_multi(TRUTH, tmp_path / "ironthrone_out_pp.csv")
+    refined = write_got_multi(
+        TRUTH, tmp_path / "got_multi_out_refined.csv", refined=True
+    )
+    rows = {cell: row for row, cell in enumerate(TRUTH.row_ids)}
+    lines = refined.read_text().splitlines()
+    kept = [lines[0]] + [
+        line for line in lines[1:] if rows[line.split(",")[0]] % 2 == 0
+    ]
+    refined.write_text("\n".join(kept) + "\n")
+    genotypes = store.variants.genotypes(
+        _import(store, [stage, refined]), method="source"
+    )
+    assert set(store.variants.load_genotypes(genotypes).sites["source"]) == {
+        "genotype_final, genotype_merged, genotype_geneseq, genotype_probebc"
+    }
+    expected = {}
+    for row, cell in enumerate(TRUTH.row_ids[: TRUTH.n_cells]):
+        for target, site in enumerate(TARGETS):
+            label = TRUTH.got_call(row, target)
+            if label == "NA":
+                continue
+            if row % 4 == 0 and label == "MUT":
+                expected[(cell, site)] = ("filtered", "FalsePositive")
+            else:
+                call = "wild_type" if label == "WT" else "alternative_present"
+                expected[(cell, site)] = (call, label)
+    assert _calls(store, genotypes) == expected
 
 
 def test_gotchas_labels_keep_heterozygotes_apart(store, tmp_path) -> None:
@@ -642,36 +678,54 @@ def test_genotypes_of_many_cells_hold_no_more_than_a_budget_of_wide_bands(
         except _Accepted:
             high = middle
     monkeypatch.setattr(variants, "_variant_bands", read)
-    rows = 60_000
-    budget = (
-        high
-        + (rows - variants._MIN_GENOTYPE_BAND_ROWS)
-        * (variants._GENOTYPE_BYTES_PER_ROW[method])
-    )
+    per_row = variants._GENOTYPE_BYTES_PER_ROW[method]
     bands = _recorded_bands(monkeypatch)
-    peak = traced_peak(lambda: call(budget))
-    assert {allowed for allowed, _held in bands} == {rows}
-    assert max(held for _allowed, held in bands) > rows // 2
-    assert peak <= budget
+    peaks = {}
+    for rows in (20_000, 60_000):
+        budget = high + (rows - variants._MIN_GENOTYPE_BAND_ROWS) * per_row
+        bands.clear()
+        peaks[rows] = traced_peak(lambda budget=budget: call(budget))
+        assert {allowed for allowed, _held in bands} == {rows}
+        assert max(held for _allowed, held in bands) > rows // 2
+        assert peaks[rows] <= budget
+    # What 40,000 more rows a band add stays within their bytes per row,
+    # whatever the bytes held beside the rows.
+    assert peaks[60_000] - peaks[20_000] <= 40_000 * per_row
 
 
 @pytest.mark.slow
 def test_loaded_genotypes_of_many_cells_hold_no_more_than_the_smallest_budget(
     tmp_path,
 ) -> None:
-    # 128,000 call rows of 2,000 cells at 80 targets outweigh what the
-    # cells hold and the read of their IDs.
+    from cytearc.datastore._operations import variants
+
+    # 64,000 and 128,000 call rows of 2,000 cells at 40 and 80 targets, which
+    # outweigh what the cells hold and the read of their IDs.
     ids = [f"c{cell:06d}-1" for cell in range(2_000)]
-    store = write_cells_store(tmp_path / "store.zarr", ids)
-    counts = _many_cell_counts(store, ids, tmp_path, "source", n_sites=80)
-    genotypes = store.variants.genotypes(counts, method="source")
+    peaks = {}
+    for n_sites in (40, 80):
+        folder = tmp_path / str(n_sites)
+        folder.mkdir()
+        store = write_cells_store(folder / "store.zarr", ids)
+        counts = _many_cell_counts(store, ids, folder, "source", n_sites=n_sites)
+        genotypes = store.variants.genotypes(counts, method="source")
+        n_rows = int(artifact_group(store.zw, genotypes)["calls"].shape[0])
 
-    def load(budget: int) -> object:
-        store.memoryBytes = budget
-        try:
-            return store.variants.load_genotypes(genotypes)
-        finally:
-            store.memoryBytes = 1 << 30
+        def load(budget: int, store=store, genotypes=genotypes) -> object:
+            store.memoryBytes = budget
+            try:
+                return store.variants.load_genotypes(genotypes)
+            finally:
+                store.memoryBytes = 1 << 30
 
-    budget = smallest_budget(load, 1 << 30)
-    assert traced_peak(lambda: load(budget)) <= budget
+        budget = smallest_budget(load, 1 << 30)
+        peaks[n_sites] = (
+            n_rows,
+            traced_peak(lambda load=load, budget=budget: load(budget)),
+        )
+        assert peaks[n_sites][1] <= budget
+    # The bytes of each call row stay within what the check counts for it.
+    (rows_40, peak_40), (rows_80, peak_80) = peaks[40], peaks[80]
+    assert peak_80 - peak_40 <= (rows_80 - rows_40) * (
+        variants._LOADED_GENOTYPE_BYTES_PER_ROW
+    )

@@ -213,9 +213,10 @@ _GENOTYPE_BYTES_PER_ALLELE = 24
 # Bytes per stored row of a band that genotypes read, by method: the rows of
 # the depth, counts or calls with their cells, the keys of their cells and
 # sites and their order, and what the method derives per key, the UMIs and
-# calls, the source's labels, or GIFT's scores and posteriors; 73, 58 and 248
-# bytes as traced on bands of 20,000 to 80,000 rows.
-_GENOTYPE_BYTES_PER_ROW = {"threshold": 96, "source": 80, "gift": 320}
+# calls, the source's labels and the order of its columns, or GIFT's scores
+# and posteriors; at most 110, 129 and 277 bytes as traced between bands of
+# 20,000 and 80,000 rows on two shapes of counts.
+_GENOTYPE_BYTES_PER_ROW = {"threshold": 144, "source": 168, "gift": 360}
 # Bytes per call row of loaded genotypes: its row of the table of calls and
 # the stored arrays read beside it, 174 as traced on 128,000 rows.
 _LOADED_GENOTYPE_BYTES_PER_ROW = 220
@@ -2231,10 +2232,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         - ``"source"`` adopts the calls that the tool wrote into the imported
           files, such as GoT's ``Genotype``, GoT-Multi's ``genotype_merged``
           or ``genotype_final`` and Gotcha's ``genotype_pred``, keeping each
-          call's own label. A site whose files wrote several call columns
-          takes GoT-Multi's refined call first, then its merged call, then a
-          single call column, and its channels' calls last. A label of no
-          call at a site where the cell holds evidence, such as
+          call's own label. Where the files wrote several call columns for a
+          site, each cell takes its call from the first that holds one for
+          it: GoT-Multi's refined call, then its merged call, then a single
+          call column, and its channels' calls last. A label of no call where
+          the cell holds evidence at the site or at its channels, such as
           ``Unprofiled`` beside ambiguous UMIs, is ``filtered``, and a cell
           with evidence but no call is ``filtered`` too.
         - ``"threshold"`` calls each cell from its UMIs of the site's wild type
@@ -2332,15 +2334,17 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "not hold; import the files with their reads, or call without it"
             )
         if method == "source":
-            genotyped, site_sources = self._source_call_sites(
+            genotyped, site_columns = self._source_call_sites(
                 group, table, chosen, explicit, n_cells
             )
+            site_sources = [", ".join(columns) for columns in site_columns]
             site_alleles: list[tuple[str, str]] = [("", "") for _ in genotyped]
             reference_alleles = alternative_alleles = np.empty(0, dtype=np.int64)
         else:
             genotyped, site_alleles, reference_alleles, alternative_alleles = (
                 _compared_alleles(table, chosen, explicit, rules)
             )
+            site_columns = [() for _ in genotyped]
             site_sources = ["" for _ in genotyped]
         if not len(genotyped):
             raise ValueError(
@@ -2427,6 +2431,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         site_rank = np.full(table.n_sites, -1, dtype=np.int64)
         site_rank[genotyped] = np.arange(len(genotyped))
         allele_rank = site_rank[np.asarray(table.allele_site, dtype=np.int64)]
+        cover_rank = _cover_ranks(table, site_rank)
         wild_type_probabilities = np.zeros(0)
         if method == "gift":
             # Each stored gapfill of a genotyped probe, against its probe's
@@ -2438,11 +2443,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 [site_alleles[allele_rank[allele]][0] for allele in of_probe],
                 [site_alleles[allele_rank[allele]][1] for allele in of_probe],
             )
+        # Each source column's place among a site's adopted columns, -1 where
+        # the site does not adopt it.
         source_codes = _read(group, "call_source_names").astype(str)
-        site_source_code = np.full(len(genotyped), -1, dtype=np.int64)
-        for rank, column in enumerate(site_sources):
-            if column:
-                site_source_code[rank] = int(np.flatnonzero(source_codes == column)[0])
+        column_place = np.full((len(genotyped), len(source_codes)), -1, dtype=np.int64)
+        for rank, columns in enumerate(site_columns):
+            for place, column in enumerate(columns):
+                column_place[rank, int(np.flatnonzero(source_codes == column)[0])] = (
+                    place
+                )
         labels_out = _Vocabulary()
         n_mutant = np.zeros(n_cells, dtype=np.int32)
         n_called = np.zeros(n_cells, dtype=np.int32)
@@ -2472,13 +2481,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     rules=rules,
                     first=first,
                     n_genotyped=len(genotyped),
-                    site_rank=site_rank,
+                    cover_rank=cover_rank,
                     allele_rank=allele_rank,
                     reference_alleles=reference_alleles,
                     alternative_alleles=alternative_alleles,
                     wild_type_probabilities=wild_type_probabilities,
-                    site_source_code=site_source_code,
-                    site_sources=site_sources,
+                    column_place=column_place,
+                    source_columns=source_codes,
                     call_value_names=call_value_names,
                 )
                 cells_of_rows = result.cells
@@ -2555,8 +2564,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         chosen: np.ndarray,
         explicit: bool,
         n_cells: int,
-    ) -> tuple[np.ndarray, list[str]]:
-        """The chosen sites that hold source calls, and each one's call column."""
+    ) -> tuple[np.ndarray, list[tuple[str, ...]]]:
+        """The chosen sites that hold source calls, and each one's call columns.
+
+        A site's columns come in the order of ``SOURCE_PRECEDENCE``, which a
+        cell's call follows: the first column that holds one for the cell.
+        """
         alleles = as_zarr_array(group["call_alleles"], name="call_alleles")
         sources = as_zarr_array(group["call_sources"], name="call_sources")
         names = _read(group, "call_source_names").astype(str)
@@ -2588,7 +2601,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             columns.setdefault(site, []).append(str(names[code]))
         labels = table.labels()
         kept: list[int] = []
-        chosen_columns: list[str] = []
+        chosen_columns: list[tuple[str, ...]] = []
         for site in chosen.tolist():
             present = columns.get(site, [])
             if not present:
@@ -2607,14 +2620,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     column,
                 ),
             )
-            if ranked[0] not in SOURCE_CALLS:
+            unknown = [column for column in ranked if column not in SOURCE_CALLS]
+            if unknown:
                 raise ValueError(
-                    f"The calls of the column {ranked[0]!r} at the site "
+                    f"The calls of the column {unknown[0]!r} at the site "
                     f"{labels[site]!r} have no vocabulary; the known call columns "
                     f"are {', '.join(SOURCE_CALLS)}"
                 )
             kept.append(site)
-            chosen_columns.append(ranked[0])
+            chosen_columns.append(tuple(ranked))
         return np.asarray(kept, dtype=np.int64), chosen_columns
 
     def _plan_variant_genotypes(
@@ -3068,6 +3082,27 @@ def _compared_alleles(
     )
 
 
+def _cover_ranks(table: SiteTable, site_rank: np.ndarray) -> np.ndarray:
+    """Each site's genotyped site whose evidence its reads are, or -1.
+
+    A genotyped site's reads are its own; a channel of a named target, such
+    as GoT-Multi's ``BCOR (geneseq)``, that is not genotyped itself reads
+    the evidence of its target, which holds the calls.
+    """
+    cover = np.asarray(site_rank, dtype=np.int64).copy()
+    names = [str(name) for name in table.site_name]
+    channels = [str(channel) for channel in table.site_channel]
+    targets = {
+        name: site
+        for site, (name, channel) in enumerate(zip(names, channels, strict=True))
+        if name and not channel
+    }
+    for site, (name, channel) in enumerate(zip(names, channels, strict=True)):
+        if channel and cover[site] < 0 and name in targets:
+            cover[site] = site_rank[targets[name]]
+    return cover
+
+
 def _most_cell_rows(group: zarr.Group, tables: Mapping[str, Sequence[str]]) -> int:
     """The most rows that one cell holds in ``tables`` together."""
     combined = np.sum([_read(group, f"{name}_offsets") for name in tables], axis=0)
@@ -3123,43 +3158,51 @@ def _band_genotypes(
     rules: GenotypeRules,
     first: int,
     n_genotyped: int,
-    site_rank: np.ndarray,
+    cover_rank: np.ndarray,
     allele_rank: np.ndarray,
     reference_alleles: np.ndarray,
     alternative_alleles: np.ndarray,
     wild_type_probabilities: np.ndarray,
-    site_source_code: np.ndarray,
-    site_sources: Sequence[str],
+    column_place: np.ndarray,
+    source_columns: np.ndarray,
     call_value_names: np.ndarray,
 ) -> _BandCalls:
     """Call the genotypes of a band's cells at the genotyped sites."""
     covered = np.empty(0, dtype=np.int64)
     if "depth" in rows:
         depth_cells, depth = rows["depth"]
-        ranks = site_rank[depth["depth_sites"].astype(np.int64)]
+        ranks = cover_rank[depth["depth_sites"].astype(np.int64)]
         on = (ranks >= 0) & (depth["depth"] > 0)
         covered = np.unique(_band_keys(depth_cells[on], ranks[on], first, n_genotyped))
     labels: np.ndarray
     if method == "source":
         call_cells, values = rows["call"]
-        alleles = values["call_alleles"].astype(np.int64)
-        ranks = allele_rank[alleles]
+        ranks = allele_rank[values["call_alleles"].astype(np.int64)]
+        columns = values["call_sources"].astype(np.int64)
+        place = np.full(len(ranks), -1, dtype=np.int64)
         on = ranks >= 0
-        on[on] = (
-            values["call_sources"][on].astype(np.int64) == site_source_code[ranks[on]]
-        )
-        call_keys = _band_keys(call_cells[on], ranks[on], first, n_genotyped)
-        call_labels = call_value_names[values["call_values"][on].astype(np.int64)]
+        place[on] = column_place[ranks[on], columns[on]]
+        adopted = np.flatnonzero(place >= 0)
+        # Each cell's call at a site comes from the first of the site's
+        # columns that holds one.
+        all_keys = _band_keys(call_cells[adopted], ranks[adopted], first, n_genotyped)
+        order = np.lexsort((place[adopted], all_keys))
+        leading = np.ones(len(order), dtype=bool)
+        leading[1:] = all_keys[order[1:]] != all_keys[order[:-1]]
+        picked = adopted[order[leading]]
+        call_keys = all_keys[order[leading]]
+        del all_keys, order, leading, adopted
+        call_labels = call_value_names[values["call_values"][picked].astype(np.int64)]
+        call_columns = columns[picked]
         keys = np.union1d(covered, call_keys)
         calls = np.full(len(keys), FILTERED, dtype=np.int8)
         labels = np.full(len(keys), "", dtype=object)
         at = np.searchsorted(keys, call_keys)
-        call_ranks = ranks[on]
         is_covered = np.isin(call_keys, covered)
-        for rank in np.unique(call_ranks).tolist():
-            of_site = call_ranks == rank
-            calls[at[of_site]] = source_call_codes(
-                site_sources[rank], call_labels[of_site], is_covered[of_site]
+        for code in np.unique(call_columns).tolist():
+            of_column = call_columns == code
+            calls[at[of_column]] = source_call_codes(
+                str(source_columns[code]), call_labels[of_column], is_covered[of_column]
             )
         labels[at] = call_labels
         reference = alternative = np.full(len(keys), -1, dtype=np.int64)

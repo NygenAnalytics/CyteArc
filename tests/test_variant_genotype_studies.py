@@ -151,11 +151,10 @@ def test_got_multi_example_calls_each_channel_by_the_rule(tmp_path) -> None:
             # Unprofiled rows hold an ambiguous UMI at each channel, which
             # reads the cell but supports neither allele.
             assert rule[(row.BC, f"{row.target} ({channel})")] == (CALL[label], "")
-        # The target holds the calls and its channels the UMIs, so an
-        # Unprofiled call at the target is no evidence there.
+        # The target holds the calls and its channels the UMIs, which an
+        # Unprofiled call beside ambiguous UMIs does not call.
         merged = row.genotype_merged
-        call = "missing" if merged == "Unprofiled" else CALL[merged]
-        assert adopted[(row.BC, row.target)] == (call, merged)
+        assert adopted[(row.BC, row.target)] == (CALL[merged], merged)
     # Every row is one cell at one target, called at both channels by the
     # rule and at the target by the source.
     assert len(rule) == 2 * len(table)
@@ -174,12 +173,24 @@ def test_got_multi_example_adopts_its_refined_calls(tmp_path) -> None:
     adopted = _calls(
         store, store.variants.genotypes(_counts(store, paths), method="source")
     )
-    # The refined call takes precedence over the merged one; a mutant call
-    # that the model rejected is filtered.
+    # A cell's refined call takes precedence over its merged one, which the
+    # cells that the model did not refine keep; a mutant call that the model
+    # rejected is filtered.
     final = {**CALL, "FalsePositive": "filtered"}
     expected = {
-        (row.BC, row.target): (final[row.genotype_final], row.genotype_final)
-        for row in refined.itertuples(index=False)
+        (row.BC, row.target): (CALL[row.genotype_merged], row.genotype_merged)
+        for row in stage.itertuples(index=False)
     }
-    assert {key: adopted[key] for key in expected} == expected
-    assert "FalsePositive" in set(refined["genotype_final"])
+    expected.update(
+        {
+            (row.BC, row.target): (final[row.genotype_final], row.genotype_final)
+            for row in refined.itertuples(index=False)
+        }
+    )
+    assert adopted == expected
+    # 626 refined calls, 19 of them filtered, and 809 merged ones.
+    refined_keys = set(zip(refined["BC"], refined["target"], strict=True))
+    assert len(refined_keys) == 626 and len(expected) - len(refined_keys) == 809
+    assert sum(call == "filtered" for call, _label in expected.values()) == 19 + sum(
+        label == "Unprofiled" for _call, label in expected.values()
+    )
