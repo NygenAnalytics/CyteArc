@@ -4,7 +4,6 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -121,26 +120,40 @@ _PROBABILITY = "clone_probability"
 _SOURCE_ARRAYS = {_PROBABILITY: np.float64, "n_barcodes": np.int64, "doublet": bool}
 
 
-def _stored_diagnostics(group: zarr.Group) -> Mapping[str, int | float]:
-    """Read the numbers a clone artifact records about its calling, none if absent.
+def _stored_diagnostics(group: zarr.Group, operation: str) -> dict[str, int | float]:
+    """Read the numbers that a clone artifact's operation records about its calling.
+
+    Clones called from lineage barcodes record exactly ``BARCODE_DIAGNOSTICS``;
+    other operations record none.
 
     Raises:
-        ValueError: If the artifact records them as anything but a mapping of
-            names to numbers.
+        ValueError: If the artifact records other names, a value that is not
+            a number, or diagnostics that its operation does not record.
     """
-    recorded = group.attrs.get("diagnostics", {})
+    # The clone operations load no calling code until barcode clones are read.
+    from ...clones.barcode_clones import BARCODE_DIAGNOSTICS
+
+    names = BARCODE_DIAGNOSTICS if operation == BarcodeCloneArguments.operation else ()
+    recorded = group.attrs.get("diagnostics")
+    if not names:
+        if recorded is not None:
+            raise ValueError(
+                f"Clones saved by {operation!r} record no diagnostics, and this "
+                f"artifact records {recorded!r}"
+            )
+        return {}
+    if not isinstance(recorded, Mapping) or set(recorded) != set(names):
+        raise ValueError(
+            f"Clones saved by {operation!r} must record exactly the diagnostics "
+            f"{', '.join(names)}, and this artifact records {recorded!r}"
+        )
     numbers: dict[str, int | float] = {}
-    if isinstance(recorded, Mapping):
-        for name, value in recorded.items():
-            if not isinstance(value, int | float) or isinstance(value, bool):
-                break
-            numbers[name] = value
-        else:
-            return MappingProxyType(numbers)
-    raise ValueError(
-        "The clones artifact's diagnostics attribute must map names to numbers, "
-        f"not {recorded!r}"
-    )
+    for name in names:
+        value = recorded[name]
+        if not isinstance(value, int | float) or isinstance(value, bool):
+            raise ValueError(f"The diagnostic {name!r} must be a number, not {value!r}")
+        numbers[name] = value
+    return numbers
 
 
 # Bytes held for each selected cell while clones are gathered: its clone code,
@@ -972,12 +985,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             extra=extra,
             kept_apart=dict(source.kept_apart),
         )
+        operation = str(inspect_artifact(self.zw, clones).operation)
         return Clones(
             cells=cells,
             clones=table,
-            source=str(inspect_artifact(self.zw, clones).operation),
+            source=operation,
             kept_apart=tuple(name for name, _labels in source.kept_apart),
-            diagnostics=_stored_diagnostics(group),
+            diagnostics=_stored_diagnostics(group, operation),
         )
 
     @validation_scoped

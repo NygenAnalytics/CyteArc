@@ -17,7 +17,7 @@ from cytearc.clones.barcode_clones import (
 )
 from cytearc.clones.sequences import neighbor_pairs
 from cytearc.metadata.records import pack_text
-from tests.clone_helpers import smallest_budget, traced_peak
+from tests.clone_helpers import clone_partition, smallest_budget, traced_peak
 
 A = "ACGTACGTACGTACGTACGTACGTACGT"
 # One substitution from A, and one more.
@@ -63,13 +63,6 @@ def _call(records, n_cells, groups=None, allowlist=None, **options):
         settings=settings,
         allowlist=None if allowlist in (None, False) else allowlist_texts(allowlist),
     )
-
-
-def _partition(codes) -> set[frozenset[int]]:
-    return {
-        frozenset(np.flatnonzero(codes == clone).tolist())
-        for clone in range(int(codes.max()) + 1)
-    }
 
 
 # The published rules of each preset, as INPUT_FORMATS states them.
@@ -330,7 +323,7 @@ def test_min_reads_refuses_molecules_without_reads_and_libraries_of_pairs() -> N
 def test_an_error_merges_into_the_more_abundant_barcode() -> None:
     rows = _molecules(0, A, 5) + _molecules(1, A1, 1) + _molecules(2, A, 2)
     calls = _call(_records(rows), 3, method="sets", distance=1, metric="hamming")
-    assert _partition(calls.calls.codes) == {frozenset({0, 1, 2})}
+    assert clone_partition(calls.calls.codes) == {frozenset({0, 1, 2})}
     assert calls.counts["barcodes_corrected"] == 1
     assert calls.counts["records_corrected"] == 1
 
@@ -363,7 +356,7 @@ def test_a_chain_of_close_barcodes_merges_into_one_component() -> None:
     # within one substitution the three are one component, merged into A.
     rows = _molecules(0, A, 3) + _molecules(1, A1, 1) + _molecules(2, A2, 2)
     calls = _call(_records(rows), 3, method="sets", distance=1, metric="hamming")
-    assert _partition(calls.calls.codes) == {frozenset({0, 1, 2})}
+    assert clone_partition(calls.calls.codes) == {frozenset({0, 1, 2})}
     assert calls.counts["barcodes_corrected"] == 2
 
 
@@ -385,8 +378,8 @@ def test_correction_counts_the_distinct_barcodes_of_each_block_and_those_it_merg
     libraries = (("lib", "molecules"), ("other", "molecules"))
     records = _records(rows, libraries)
     corrected = _call(records, 3, method="sets", distance=3, metric="hamming")
-    assert corrected.diagnostics["distinct_barcodes"] == 6
-    assert corrected.diagnostics["merged_barcodes"] == 2
+    assert corrected.diagnostics["distinctBarcodes"] == 6
+    assert corrected.diagnostics["mergedBarcodes"] == 2
     assert corrected.counts["barcodes_corrected"] == 2
     # Groups split the blocks too: A counts once in each group of the first
     # library, beside A1 in one and A2 and B in the other.
@@ -398,30 +391,63 @@ def test_correction_counts_the_distinct_barcodes_of_each_block_and_those_it_merg
         distance=3,
         metric="hamming",
     )
-    assert within.diagnostics["distinct_barcodes"] == 7
-    assert within.diagnostics["merged_barcodes"] == 2
+    assert within.diagnostics["distinctBarcodes"] == 7
+    assert within.diagnostics["mergedBarcodes"] == 2
     # Without correction, the same barcodes are counted, and none is merged
     # or expected to match.
     plain = _call(records, 3, method="sets")
-    assert plain.diagnostics["distinct_barcodes"] == 6
-    assert plain.diagnostics["merged_barcodes"] == 0
-    assert plain.diagnostics["expected_chance_matches"] == 0.0
+    assert plain.diagnostics["distinctBarcodes"] == 6
+    assert plain.diagnostics["mergedBarcodes"] == 0
+    assert plain.diagnostics["expectedChanceMatches"] == 0.0
     # A barcode whose only molecule falls below min_reads is never compared.
     shallow = _records(rows + [(3, 0, C, "U3_C", 1, 1)], libraries)
     for options in ({}, {"distance": 3, "metric": "hamming"}):
         counted = _call(shallow, 4, method="sets", **options)
         filtered = _call(shallow, 4, method="sets", min_reads=2, **options)
-        assert counted.diagnostics["distinct_barcodes"] == 7
-        assert filtered.diagnostics["distinct_barcodes"] == 6
+        assert counted.diagnostics["distinctBarcodes"] == 7
+        assert filtered.diagnostics["distinctBarcodes"] == 6
 
 
-def test_trex_counts_its_cloneids_after_dropping_those_of_low_complexity() -> None:
+@pytest.mark.parametrize("distance", [None, 0])
+def test_trex_counts_the_cloneids_it_compares(distance) -> None:
+    # A cloneID of low complexity is dropped before correction, and one of
+    # 19 bases is never compared, since TREX compares 20: neither counts.
     low = "A" * 29 + "C"
-    rows = _molecules(0, T, 3) + _molecules(1, low, 3) + _molecules(2, T, 2)
-    calls = _call(_records(rows), 3, preset="trex")
+    short = T[:19] + "-" * 11
+    rows = (
+        _molecules(0, T, 3)
+        + _molecules(1, low, 3)
+        + _molecules(2, T, 2)
+        + _molecules(3, short, 2)
+    )
+    calls = _call(_records(rows), 4, preset="trex", distance=distance)
     assert calls.counts["molecules_of_low_complexity"] == 3
-    assert calls.diagnostics["distinct_barcodes"] == 1
-    assert calls.diagnostics["merged_barcodes"] == 0
+    assert calls.diagnostics["distinctBarcodes"] == 1
+    assert calls.diagnostics["mergedBarcodes"] == 0
+
+
+def test_a_doublet_is_not_among_the_cells_given_a_clone() -> None:
+    # Two clones of three cells each, and a cell that holds the barcodes of
+    # both: it links them alone, so TREX's rule removes it as a doublet, and
+    # the largest clone holds 3 of the 6 cells given a clone.
+    rows = []
+    for cell in range(3):
+        rows += _molecules(cell, A, 3) + _molecules(cell, B, 3)
+    for cell in range(3, 6):
+        rows += _molecules(cell, C, 3) + _molecules(cell, T, 3)
+    for barcode in (A, B, C, T):
+        rows += _molecules(6, barcode, 3)
+    calls = _call(
+        _records(rows),
+        7,
+        method="jaccard",
+        similarity=0.4,
+        inclusive=False,
+        prune=False,
+        doublets=True,
+    )
+    assert calls.calls.doublets.tolist() == [False] * 6 + [True]
+    assert calls.diagnostics["largestCloneShare"] == 3 / 6
 
 
 def test_the_largest_clone_shares_the_cells_given_a_clone() -> None:
@@ -436,15 +462,15 @@ def test_the_largest_clone_shares_the_cells_given_a_clone() -> None:
     # A's clone holds 3 of the 5 cells given a clone; C's cell is in a clone
     # too small to keep, and cell 6 holds no barcode.
     calls = _call(_records(rows), 7, method="sets", min_size=2)
-    assert calls.diagnostics["largest_clone_share"] == 3 / 5
+    assert calls.diagnostics["largestCloneShare"] == 3 / 5
     # With no cell given a clone, the share is 0.
     none = _call(_records(rows), 7, method="sets", min_size=4)
-    assert none.diagnostics["largest_clone_share"] == 0.0
+    assert none.diagnostics["largestCloneShare"] == 0.0
     assert _call(_records([]), 2, method="sets").diagnostics == {
-        "distinct_barcodes": 0,
-        "expected_chance_matches": 0.0,
-        "merged_barcodes": 0,
-        "largest_clone_share": 0.0,
+        "distinctBarcodes": 0,
+        "expectedChanceMatches": 0.0,
+        "mergedBarcodes": 0,
+        "largestCloneShare": 0.0,
     }
 
 
@@ -498,10 +524,10 @@ def test_the_expected_matches_are_the_searchs_over_each_library_as_correction_ru
         neighbor_pairs(barcodes, metric, cutoff, return_expected=True, **search)[2]
         for barcodes in texts
     ]
-    expected = calls.diagnostics["expected_chance_matches"]
+    expected = calls.diagnostics["expectedChanceMatches"]
     assert expected == pytest.approx(sum(alone), rel=1e-12)
     assert expected > 0
-    assert calls.diagnostics["distinct_barcodes"] == sum(map(len, texts))
+    assert calls.diagnostics["distinctBarcodes"] == sum(map(len, texts))
     # Compared together, the two libraries would expect more.
     together = neighbor_pairs(
         texts[0] + texts[1], metric, cutoff, return_expected=True, **search
@@ -515,8 +541,8 @@ def test_counting_the_distinct_barcodes_without_correction_checks_the_budget() -
     settings = barcode_call_settings(method="sets")
     groups = np.zeros(3, dtype=np.int64)
     # Every rule holds 40 bytes per cell and 18 per record; counting the
-    # distinct barcodes, 40 more per record kept.
-    counting = 40 * 3 + 18 * 12 + 40 * 12
+    # distinct barcodes, 48 more per record kept.
+    counting = 40 * 3 + 18 * 12 + 48 * 12
     with pytest.raises(MemoryError, match="counting the distinct barcodes of 12"):
         barcode_clone_calls(
             records, 3, groups=groups, settings=settings, max_bytes=counting - 1
@@ -596,7 +622,7 @@ def test_pairs_of_a_library_without_umis_rank_by_reads() -> None:
     )
     assert calls.units == ("reads",)
     assert calls.counts["barcodes_corrected"] == 1
-    assert _partition(calls.calls.codes) == {frozenset({0, 1, 2})}
+    assert clone_partition(calls.calls.codes) == {frozenset({0, 1, 2})}
 
 
 def test_correction_refuses_a_library_whose_counts_are_partly_unknown() -> None:
@@ -721,7 +747,7 @@ def test_trex_merges_partial_cloneids_over_the_bases_both_hold() -> None:
     rows = _molecules(0, T, 5, reads=3) + _molecules(1, T[:24] + "-" * 6, 2, reads=3)
     calls = _call(_records(rows), 2, preset="trex")
     assert calls.counts["barcodes_corrected"] == 1
-    assert _partition(calls.calls.codes) == {frozenset({0, 1})}
+    assert clone_partition(calls.calls.codes) == {frozenset({0, 1})}
     rows = _molecules(0, T, 5, reads=3) + _molecules(1, "-" * 11 + T[11:], 2, reads=3)
     calls = _call(_records(rows), 2, preset="trex")
     assert calls.counts["barcodes_corrected"] == 0
@@ -810,9 +836,9 @@ def test_a_similarity_across_libraries_compares_cells_of_two_libraries() -> None
         rows += [(1, 1, barcode, None, -1, 5)]
     records = _records(rows, (("rna", "molecules"), ("atac", "pairs")))
     across = _call(records, 2, method="jaccard", similarity=(0.6, 0.5), inclusive=False)
-    assert _partition(across.calls.codes) == {frozenset({0, 1})}
+    assert clone_partition(across.calls.codes) == {frozenset({0, 1})}
     within = _call(records, 2, method="jaccard", similarity=0.6, inclusive=False)
-    assert _partition(within.calls.codes) == {frozenset({0}), frozenset({1})}
+    assert clone_partition(within.calls.codes) == {frozenset({0}), frozenset({1})}
 
 
 @pytest.mark.parametrize(

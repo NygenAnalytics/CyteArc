@@ -24,7 +24,7 @@ from cytearc.clones.calling import (
     pruned_edges,
     set_clones,
 )
-from tests.clone_helpers import smallest_budget, traced_peak
+from tests.clone_helpers import clone_partition, smallest_budget, traced_peak
 
 
 def _sets(rows: list[list[int]]) -> CellSets:
@@ -55,13 +55,6 @@ def _graph_sets(n_nodes: int, pairs: list[tuple[int, int]]) -> list[list[int]]:
         rows[a].append(n_nodes + offset)
         rows[b].append(n_nodes + offset)
     return [sorted(row) for row in rows]
-
-
-def _partition(codes: np.ndarray) -> set[frozenset[int]]:
-    return {
-        frozenset(np.flatnonzero(codes == clone).tolist())
-        for clone in range(int(codes.max()) + 1 if len(codes) else 0)
-    }
 
 
 # Sets built from pairs.
@@ -427,7 +420,7 @@ def test_the_graph_with_unknown_items_matches_python_sets() -> None:
         (int(groups[cell]), frozenset(rows[cell]), frozenset(unknown_rows[cell]))
         for cell in range(len(rows))
     ]
-    assert _partition(nodes.cell_nodes) == {
+    assert clone_partition(nodes.cell_nodes) == {
         frozenset(cell for cell in range(len(rows)) if keys[cell] == key)
         for key in set(keys)
     }
@@ -455,13 +448,13 @@ def test_a_cell_that_agrees_with_two_clones_where_it_knows_is_a_doublet() -> Non
     sets, unknown = _unknown_sets(rows, unknown_rows)
     options = {"method": "jaccard", "similarity": 1.0, "inclusive": True}
     calls = set_clones(sets, unknown=unknown, doublets=True, **options)
-    assert _partition(calls.codes) == {frozenset({0, 1}), frozenset({2, 3})}
+    assert clone_partition(calls.codes) == {frozenset({0, 1}), frozenset({2, 3})}
     assert calls.doublets.tolist() == [False, False, False, False, True]
     joined = set_clones(sets, unknown=unknown, **options)
-    assert _partition(joined.codes) == {frozenset(range(5))}
+    assert clone_partition(joined.codes) == {frozenset(range(5))}
     # As identical sets, the uncovered cell is a clone of its own.
     alone = set_clones(sets, unknown=unknown, method="sets")
-    assert _partition(alone.codes) == {
+    assert clone_partition(alone.codes) == {
         frozenset({0, 1}),
         frozenset({2, 3}),
         frozenset({4}),
@@ -487,7 +480,7 @@ def test_nodes_that_share_any_item_are_one_clone_as_networkx_finds_them() -> Non
         if groups[a] == groups[b] and set(rows[a]) & set(rows[b])
     )
     expected = {frozenset(part) for part in nx.connected_components(graph)}
-    assert _partition(calls.codes) == expected
+    assert clone_partition(calls.codes) == expected
     assert any(len(part) > 2 for part in expected)
     jaccard = set_clones(
         _sets(rows), groups=groups, method="jaccard", similarity=0.0, inclusive=False
@@ -538,7 +531,7 @@ def test_components_match_networkx_on_random_graphs() -> None:
         graph.add_nodes_from(range(n_nodes))
         graph.add_edges_from(pairs)
         expected = {frozenset(part) for part in nx.connected_components(graph)}
-        assert _partition(components) == expected
+        assert clone_partition(components) == expected
         # Each component's number follows its lowest node.
         lowest = [
             min(np.flatnonzero(components == c)) for c in range(components.max() + 1)
@@ -570,7 +563,7 @@ def test_the_jaccard_graph_joins_similar_sets_into_one_clone() -> None:
     # A clone of four barcodes, and cells that lost one of them.
     rows = [[1, 2, 3, 4], [1, 2, 3], [1, 2, 3, 4], [7, 8], [1, 2, 3]]
     calls = set_clones(_sets(rows), method="jaccard", similarity=0.7, inclusive=False)
-    assert _partition(calls.codes) == {frozenset({0, 1, 2, 4}), frozenset({3})}
+    assert clone_partition(calls.codes) == {frozenset({0, 1, 2, 4}), frozenset({3})}
 
 
 def test_trex_removes_a_doublet_that_links_two_clones() -> None:
@@ -598,14 +591,14 @@ def test_trex_removes_a_doublet_that_links_two_clones() -> None:
         prune=True,
         doublets=True,
     )
-    assert _partition(calls.codes) == {frozenset({0, 1, 2}), frozenset({3, 4, 5})}
+    assert clone_partition(calls.codes) == {frozenset({0, 1, 2}), frozenset({3, 4, 5})}
     assert calls.doublets.tolist() == [False] * 6 + [True]
     assert calls.n_doublet_nodes == (1, 0)
     # Without the doublet rule the cell joins the two clones into one.
     joined = set_clones(
         _sets(rows), method="jaccard", similarity=0.0, inclusive=False, prune=True
     )
-    assert _partition(joined.codes) == {frozenset(range(7))}
+    assert clone_partition(joined.codes) == {frozenset(range(7))}
     assert not joined.doublets.any() and joined.n_doublet_nodes == ()
 
 
@@ -618,7 +611,7 @@ def test_a_cut_vertex_of_several_cells_is_kept() -> None:
         _sets(rows), method="jaccard", similarity=0.0, inclusive=False, doublets=True
     )
     assert not calls.doublets.any()
-    assert _partition(calls.codes) == {frozenset(range(4))}
+    assert clone_partition(calls.codes) == {frozenset(range(4))}
 
 
 def test_the_second_round_prunes_what_the_first_round_of_doublets_left() -> None:
@@ -638,7 +631,7 @@ def test_the_second_round_prunes_what_the_first_round_of_doublets_left() -> None
         prune=True,
         doublets=True,
     )
-    assert _partition(calls.codes) == {
+    assert clone_partition(calls.codes) == {
         frozenset({0, 1, 2, 3}),
         frozenset({4}),
         frozenset({6, 7}),
@@ -663,7 +656,7 @@ def test_pruning_isolates_a_doublet_whose_ends_share_no_neighbour() -> None:
         prune=True,
         doublets=True,
     )
-    assert _partition(calls.codes) == {
+    assert clone_partition(calls.codes) == {
         frozenset({0, 1, 2}),
         frozenset({3, 4, 5}),
         frozenset({6}),
@@ -740,7 +733,7 @@ def test_the_calls_follow_trexs_documented_sequence_on_random_graphs(
         frozenset(index for index, node in enumerate(cells) if node in part)
         for part in expected
     }
-    assert _partition(calls.codes) == cells_of
+    assert clone_partition(calls.codes) == cells_of
     assert {cells[index] for index in np.flatnonzero(calls.doublets)} == removed
 
 
@@ -814,7 +807,7 @@ def test_modalities_of_cells_give_their_nodes_one_modality_or_several() -> None:
         across=0.5,
         modalities=np.asarray([0, 0, 0]),
     )
-    assert _partition(one.codes) == {frozenset({0, 1}), frozenset({2})}
+    assert clone_partition(one.codes) == {frozenset({0, 1}), frozenset({2})}
     several = set_clones(
         _sets(rows),
         method="jaccard",
@@ -823,7 +816,7 @@ def test_modalities_of_cells_give_their_nodes_one_modality_or_several() -> None:
         across=0.5,
         modalities=np.asarray([0, 1, 0]),
     )
-    assert _partition(several.codes) == {frozenset({0, 1, 2})}
+    assert clone_partition(several.codes) == {frozenset({0, 1, 2})}
 
 
 # Memory.

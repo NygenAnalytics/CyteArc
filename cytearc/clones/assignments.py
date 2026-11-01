@@ -13,7 +13,6 @@ by rank. These functions never touch storage.
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import Any, Literal
 
 import numpy as np
@@ -438,8 +437,8 @@ class Clones:
         diagnostics: Numbers that the operation recorded about how it
             defined the clones, by name, which callers can turn into
             warnings. Clones called from lineage barcodes record
-            ``distinct_barcodes``, ``expected_chance_matches``,
-            ``merged_barcodes`` and ``largest_clone_share``; other sources
+            ``distinctBarcodes``, ``expectedChanceMatches``,
+            ``mergedBarcodes`` and ``largestCloneShare``; other sources
             record none.
     """
 
@@ -447,9 +446,7 @@ class Clones:
     clones: pd.DataFrame = field(repr=False)
     source: str
     kept_apart: tuple[str, ...] = ()
-    diagnostics: Mapping[str, int | float] = field(
-        default_factory=lambda: MappingProxyType({})
-    )
+    diagnostics: dict[str, int | float] = field(default_factory=dict)
 
 
 def clone_frames(

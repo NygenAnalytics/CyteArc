@@ -7,8 +7,10 @@ checked in: ``preset="trex"`` on their ``molecules.txt`` must give the clones
 of their ``clones.txt``.
 """
 
+import copy
 import gzip
 import json
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -102,8 +104,8 @@ def test_each_preset_recovers_the_truth_under_the_noise_its_rules_remove(
     # The largest of the truth's clones over the cells of every clone.
     diagnostics = store.clones.load_clones(clones).diagnostics
     sizes = sorted(map(len, expected))
-    assert diagnostics["largest_clone_share"] == sizes[-1] / sum(sizes)
-    assert diagnostics["distinct_barcodes"] >= diagnostics["merged_barcodes"]
+    assert diagnostics["largestCloneShare"] == sizes[-1] / sum(sizes)
+    assert diagnostics["distinctBarcodes"] >= diagnostics["mergedBarcodes"]
     # The noise is there to remove: the same barcodes without the rules call
     # other clones.
     loose = store.clones.barcode_clones(barcodes, method="sets")
@@ -217,14 +219,14 @@ def test_the_artifact_holds_barcodes_doublets_and_what_each_rule_removed(
     diagnostics = attributes["diagnostics"]
     assert dict(loaded.diagnostics) == diagnostics
     assert list(diagnostics) == [
-        "distinct_barcodes",
-        "expected_chance_matches",
-        "merged_barcodes",
-        "largest_clone_share",
+        "distinctBarcodes",
+        "expectedChanceMatches",
+        "mergedBarcodes",
+        "largestCloneShare",
     ]
-    assert diagnostics["merged_barcodes"] == counts["barcodes_corrected"]
-    assert 0 < diagnostics["expected_chance_matches"] < diagnostics["merged_barcodes"]
-    assert diagnostics["largest_clone_share"] == (
+    assert diagnostics["mergedBarcodes"] == counts["barcodes_corrected"]
+    assert 0 < diagnostics["expectedChanceMatches"] < diagnostics["mergedBarcodes"]
+    assert diagnostics["largestCloneShare"] == (
         loaded.clones["n_cells"].max() / loaded.clones["n_cells"].sum()
     )
 
@@ -349,16 +351,47 @@ def test_reused_and_recomputed_clones_give_the_same_diagnostics(
     assert dict(store.clones.load_clones(called).diagnostics) == diagnostics
 
 
-def test_diagnostics_that_are_not_numbers_are_refused_on_loading(
+def test_diagnostics_other_than_the_four_numbers_are_refused_on_loading(
     store, tmp_path
 ) -> None:
     _calling, barcodes = _imported(store, tmp_path, "larry")
     clones = store.clones.barcode_clones(barcodes, preset="larry")
     attributes = artifact_group(store.zw, clones).attrs
-    for wrong in ({"merged_barcodes": "3"}, {"merged_barcodes": True}, [1, 2]):
+    recorded = dict(attributes["diagnostics"])
+    for wrong, message in (
+        ({**recorded, "mergedBarcodes": "3"}, "must be a number"),
+        ({**recorded, "mergedBarcodes": True}, "must be a number"),
+        ({**recorded, "rate": 0.5}, "exactly the diagnostics"),
+        (
+            {name: recorded[name] for name in list(recorded)[:3]},
+            "exactly the diagnostics",
+        ),
+        ([1, 2], "exactly the diagnostics"),
+    ):
         attributes["diagnostics"] = wrong
-        with pytest.raises(ValueError, match="must map names to numbers"):
+        with pytest.raises(ValueError, match=message):
             store.clones.load_clones(clones)
+    # Clones called from barcodes without them were saved before they were
+    # recorded, and loading them fails as reuse refuses them.
+    del attributes["diagnostics"]
+    with pytest.raises(ValueError, match="exactly the diagnostics"):
+        store.clones.load_clones(clones)
+    # Other clones record none.
+    imported = store.clones.from_column("sample", cell_selection=every_cell(store))
+    artifact_group(store.zw, imported).attrs["diagnostics"] = recorded
+    with pytest.raises(ValueError, match="record no diagnostics"):
+        store.clones.load_clones(imported)
+
+
+def test_loaded_clones_pickle_and_copy_with_their_diagnostics(store, tmp_path) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "trex")
+    loaded = store.clones.load_clones(
+        store.clones.barcode_clones(barcodes, preset="trex")
+    )
+    for copied in (pickle.loads(pickle.dumps(loaded)), copy.deepcopy(loaded)):
+        assert copied.diagnostics == loaded.diagnostics
+        assert copied.source == loaded.source
+        pd.testing.assert_frame_equal(copied.cells, loaded.cells)
 
 
 def test_a_read_only_store_reuses_saved_clones_and_refuses_new_ones(
@@ -429,7 +462,7 @@ def test_calls_follow_neither_file_order_nor_chunks_nor_threads(
         stored[-1]["diagnostics"] = dict(group.attrs)["diagnostics"]
     # The files of about 400 reads or molecules came in chunks of 7 rows.
     assert chunks[0] > 40
-    assert stored[0]["diagnostics"]["expected_chance_matches"] > 0
+    assert stored[0]["diagnostics"]["expectedChanceMatches"] > 0
     for other in stored[1:]:
         for name, values in stored[0].items():
             if name in ("rule_counts", "diagnostics"):

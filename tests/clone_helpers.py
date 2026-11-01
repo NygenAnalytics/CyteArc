@@ -426,6 +426,14 @@ def budget_refusals(
     raise AssertionError("the budget did not settle")
 
 
+def clone_partition(codes: np.ndarray) -> set[frozenset[int]]:
+    """The positions of the cells of each clone, from each cell's clone code, -1 for none."""
+    return {
+        frozenset(np.flatnonzero(codes == clone).tolist())
+        for clone in range(int(codes.max()) + 1 if len(codes) else 0)
+    }
+
+
 def smallest_budget(call: Callable[[int], object], high: int) -> int:
     """The smallest budget below ``high`` at which ``call`` raises no MemoryError.
 

@@ -761,11 +761,11 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         resolved rules. Its ``diagnostics`` attribute, which
         :meth:`~cytearc.datastore.namespaces.ClonesAccessor.load_clones`
         returns, shows when correction merges unrelated barcodes:
-        ``distinct_barcodes``, the distinct barcodes of each group and
-        library that correction compares; ``expected_chance_matches``, the
+        ``distinctBarcodes``, the distinct barcodes of each group and
+        library that correction compares; ``expectedChanceMatches``, the
         pairs of them expected within ``distance`` by chance;
-        ``merged_barcodes``, those that correction merged into another; and
-        ``largest_clone_share``, the cells of the largest clone over the
+        ``mergedBarcodes``, those that correction merged into another; and
+        ``largestCloneShare``, the cells of the largest clone over the
         cells given a clone.
 
         Args:

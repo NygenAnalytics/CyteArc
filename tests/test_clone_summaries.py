@@ -254,10 +254,10 @@ def test_only_barcode_clones_record_diagnostics(source) -> None:
         "call_barcode_clones"
     ):
         assert list(loaded.diagnostics) == [
-            "distinct_barcodes",
-            "expected_chance_matches",
-            "merged_barcodes",
-            "largest_clone_share",
+            "distinctBarcodes",
+            "expectedChanceMatches",
+            "mergedBarcodes",
+            "largestCloneShare",
         ]
     else:
         assert dict(loaded.diagnostics) == {}

@@ -23,12 +23,13 @@ barcodes. :func:`barcode_clone_calls` applies the rules in this order:
    barcodes, by identical sets or a Jaccard graph, with TREX's pruning and
    doublets, and clones of at least ``min_size`` cells.
 
-Beside the clones, calling gives four numbers that show when correction
-merges barcodes that are unrelated, which happens more often the more
-barcodes it compares: the distinct barcodes of each group and library that
-correction compares, the pairs of them expected within ``distance`` by
-chance, the distinct barcodes that it merged into another, and the share of
-the cells given a clone that the largest clone holds.
+Beside the clones, calling gives four numbers, named in
+``BARCODE_DIAGNOSTICS``, that show when correction merges barcodes that are
+unrelated, which happens more often the more barcodes it compares: the
+distinct barcodes of each group and library that correction compares, the
+pairs of them expected within ``distance`` by chance, the distinct barcodes
+that it merged into another, and the share of the cells given a clone that
+the largest clone holds.
 
 ``PRESETS`` holds the published rules of LARRY, TREX, CellTagR and
 CellTag-multi; every value a preset sets can be given instead.
@@ -71,6 +72,7 @@ from .calling import SetClones, cell_sets, set_clones
 from .sequences import MAX_CHANCE_EDITS, neighbor_pairs
 
 __all__ = [
+    "BARCODE_DIAGNOSTICS",
     "BARCODE_METRICS",
     "PRESETS",
     "BarcodeCallSettings",
@@ -85,6 +87,14 @@ type Unit = Literal["umis", "reads"]
 
 #: The metrics of barcode correction.
 BARCODE_METRICS: tuple[str, ...] = ("hamming", "levenshtein")
+#: The numbers that barcode clone calling records about its correction and its
+#: clones, in the order the artifact records them.
+BARCODE_DIAGNOSTICS: tuple[str, ...] = (
+    "distinctBarcodes",
+    "expectedChanceMatches",
+    "mergedBarcodes",
+    "largestCloneShare",
+)
 # A value of PRESETS that the user must give, such as a library's allowlist.
 _REQUIRED = "required"
 #: The published rules of each preset, by argument of ``barcode_clones``.
@@ -194,8 +204,8 @@ _FLAG_BYTES = 1
 _ALLOWED_BYTES = 200
 # Counting the distinct barcodes of each block without correction holds, for
 # each kept record, its block and barcode, their key, its sorted copy and its
-# flag.
-_DISTINCT_RECORD_BYTES = 40
+# flag, at most 41 bytes as traced.
+_DISTINCT_RECORD_BYTES = 48
 # Each pair of a cell and a barcode is held as its cell, library, barcode,
 # UMIs, reads and kept flag; the pair filters hold its count, its block's
 # total or its cell's top count with their sorts; and building the sets, the
@@ -558,14 +568,14 @@ class BarcodeClones:
         units: Each library's unit, ``"umis"``, ``"reads"`` or None.
         counts: What each rule removed or changed, by name.
         diagnostics: The numbers that show when correction merges unrelated
-            barcodes: ``distinct_barcodes``, the distinct barcodes of each
-            group and library after the molecule filters, added up;
-            ``expected_chance_matches``, the pairs of them expected within
-            the distance by chance; ``merged_barcodes``, those that
-            correction merged into another; and ``largest_clone_share``, the
-            cells of the largest clone over the cells given a clone, 0 when
-            none is. Without correction, the expectation and the merged
-            barcodes are 0.
+            barcodes, named in ``BARCODE_DIAGNOSTICS``: ``distinctBarcodes``,
+            the distinct barcodes of each group and library that correction
+            compares, after the molecule filters, added up;
+            ``expectedChanceMatches``, the pairs of them expected within the
+            distance by chance; ``mergedBarcodes``, those that correction
+            merged into another; and ``largestCloneShare``, the cells of the
+            largest clone over the cells given a clone, 0 when none is.
+            Without correction, the expectation and the merged barcodes are 0.
     """
 
     calls: SetClones
@@ -716,6 +726,7 @@ def _corrected(
     counts: np.ndarray,
     settings: BarcodeCallSettings,
     room: _Room,
+    uncompared: np.ndarray | None,
 ) -> _Correction:
     """Merge each kept record's barcode into its component's most abundant one.
 
@@ -724,7 +735,9 @@ def _corrected(
     component of linked barcodes merges into the barcode with the most
     UMIs, or reads, in the block, and of those the one that sorts last. The
     search that links them also gives the pairs it expects within the
-    distance by chance, on the barcodes and positions it compares.
+    distance by chance, on the barcodes and positions it compares; the
+    distinct barcodes it compares leave out those that ``uncompared`` flags
+    by stored code, TREX's cloneIDs of fewer bases than it compares.
     """
     from .calling import Edges, connected_components
 
@@ -780,18 +793,38 @@ def _corrected(
     representative = np.empty(int(components.max()) + 1 if n_entries else 0, np.int64)
     representative[components[by_rank][last]] = entry_codes[by_rank][last]
     merged = representative[components]
+    compared = (
+        n_entries
+        if uncompared is None
+        else int(np.count_nonzero(~uncompared[entry_codes]))
+    )
     return _Correction(
         codes=merged[entry_of],
-        distinct=n_entries,
+        distinct=compared,
         merged=int(np.count_nonzero(merged != entry_codes)),
         expected=expected,
     )
 
 
-def _distinct_barcodes(blocks: np.ndarray, barcodes: np.ndarray, n_stored: int) -> int:
-    """The distinct barcodes of each block, added up over the blocks."""
+def _distinct_barcodes(
+    blocks: np.ndarray,
+    barcodes: np.ndarray,
+    n_stored: int,
+    uncompared: np.ndarray | None,
+) -> int:
+    """The distinct barcodes of each block, added up over the blocks.
+
+    The barcodes that ``uncompared`` flags by stored code are left out.
+    """
+    if uncompared is not None:
+        compared = ~uncompared[barcodes]
+        blocks = blocks[compared]
+        barcodes = barcodes[compared]
+        del compared
     keys = blocks * max(n_stored, 1)
+    del blocks
     keys += barcodes
+    del barcodes
     return len(sorted_unique(keys))
 
 
@@ -847,6 +880,7 @@ def barcode_clone_calls(
     is_molecule = levels[sources] if n_libraries else np.zeros(0, dtype=bool)
     keep = np.ones(n_records, dtype=bool)
     n_stored = max(0, len(records.barcode_offsets) - 1)
+    uncompared: np.ndarray | None = None
     if settings.trex:
         for detail in details:
             if detail["level"] != "molecules" and detail["records"]:
@@ -872,21 +906,31 @@ def barcode_clone_calls(
         room.check(
             _LOOKUP_RECORD_BYTES * n_records
             + _texts_bytes(records, n_stored)
-            + _FLAG_BYTES * n_stored,
+            + 2 * _FLAG_BYTES * n_stored,
             "the cloneIDs' complexity",
         )
         distinct = sorted_unique(barcodes)
+        texts = records.texts(distinct)
         low = np.zeros(n_stored, dtype=bool)
         low[distinct] = np.fromiter(
-            (_entropy(text) < _TREX_MIN_ENTROPY for text in records.texts(distinct)),
+            (_entropy(text) < _TREX_MIN_ENTROPY for text in texts),
             dtype=bool,
             count=len(distinct),
         )
-        del distinct
+        # CloneIDs of fewer bases than TREX compares are never compared, so
+        # the diagnostics do not count them among the barcodes compared.
+        uncompared = np.zeros(n_stored, dtype=bool)
+        uncompared[distinct] = np.fromiter(
+            (_known_bases(text) < _TREX_MIN_BASES for text in texts),
+            dtype=bool,
+            count=len(distinct),
+        )
+        del distinct, texts
         dropped = low[barcodes]
         keep &= ~dropped
         counted["molecules_of_low_complexity"] = int(np.count_nonzero(dropped))
         del low, dropped
+        room.held += _FLAG_BYTES * n_stored
     if settings.min_reads:
         if not np.any(levels):
             raise ValueError(
@@ -927,16 +971,18 @@ def barcode_clone_calls(
             details,
             "Barcode correction",
         )
-        correction = _corrected(records, keep, blocks, counts, settings, room)
+        correction = _corrected(
+            records, keep, blocks, counts, settings, room, uncompared
+        )
         corrected[kept_index] = correction.codes
         counted["barcodes_corrected"] = correction.merged
         counted["records_corrected"] = int(
             np.count_nonzero(corrected[keep] != barcodes[keep])
         )
         diagnostics = {
-            "distinct_barcodes": correction.distinct,
-            "expected_chance_matches": correction.expected,
-            "merged_barcodes": correction.merged,
+            "distinctBarcodes": correction.distinct,
+            "expectedChanceMatches": correction.expected,
+            "mergedBarcodes": correction.merged,
         }
         del counts, kept_index, correction
         room.held -= _CORRECTION_RECORD_BYTES * n_kept
@@ -946,12 +992,15 @@ def barcode_clone_calls(
             f"counting the distinct barcodes of {n_kept} molecules and pairs",
         )
         diagnostics = {
-            "distinct_barcodes": _distinct_barcodes(
-                blocks[keep], barcodes[keep], n_stored
+            "distinctBarcodes": _distinct_barcodes(
+                blocks[keep], barcodes[keep], n_stored, uncompared
             ),
-            "expected_chance_matches": 0.0,
-            "merged_barcodes": 0,
+            "expectedChanceMatches": 0.0,
+            "mergedBarcodes": 0,
         }
+    if uncompared is not None:
+        del uncompared
+        room.held -= _FLAG_BYTES * n_stored
     if allowlist is not None or settings.trex:
         room.check(
             _LOOKUP_RECORD_BYTES * n_records
@@ -1091,7 +1140,7 @@ def barcode_clone_calls(
     # The share of the cells given a clone that the largest clone holds;
     # clones are numbered by size, the largest first.
     n_assigned = int(calls.sizes.sum())
-    diagnostics["largest_clone_share"] = (
+    diagnostics["largestCloneShare"] = (
         float(calls.sizes[0]) / n_assigned if n_assigned else 0.0
     )
     return BarcodeClones(
