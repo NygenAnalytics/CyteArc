@@ -94,6 +94,24 @@ _BASES = re.compile(r"[ACGTN]+")
 _ITD_PREFIX = "FLT3-ITD:"
 # Examples named in the warning about skipped variants.
 _EXAMPLES = 5
+# Bytes that describing a file holds for each candidate variant beside the
+# copies of its text: its name, alleles and contig as Python text, the parts
+# of its name, and its entries in the lookups of names and positions, as
+# traced at 636 to 668 bytes (Tapestri) and 860 to 1,059 bytes (DAb-seq,
+# whose names it splits further), with room.
+_TAPESTRI_VARIANT_BYTES = 700
+_DABSEQ_VARIANT_BYTES = 1_100
+# And for each cell: its barcode, sample and ID as Python text and their
+# entry in the lookup of repeated IDs, 251 bytes as traced with 8-character
+# samples, with room.
+_CELL_BYTES = 300
+# The copies of each text byte that the description holds at once.
+_DESCRIBED_TEXT_COPIES = 2
+# The text bytes assumed for variable-length text.
+_VARIABLE_TEXT_WIDTH = 64
+# A block of cells counts each cell's ID as this many entries, since an ID
+# holds about as much as two entries of reads and calls.
+_ID_ENTRIES = 2
 
 
 def tapestri_cell_ids(samples: Sequence[str], barcodes: Sequence[str]) -> np.ndarray:
@@ -696,7 +714,8 @@ class TapestriSource:
     alternative reads as ``AF × DP / 100`` and no reference reads, and its
     ``NGT`` with ``GQ`` as calls; the frequencies of the variants of one
     position may add up to more than 100%, so their alleles overlap. DAb-seq
-    gives ``AD`` and ``RD`` and its ``GT`` with ``GQ``.
+    gives ``AD`` and ``RD`` and its ``GT`` with ``GQ``. The cells' IDs are
+    read with each block of cells, so the source holds none of them.
     """
 
     path: str
@@ -711,7 +730,8 @@ class TapestriSource:
     open_alleles: bool
     notes: dict[str, Any]
     _columns: _Columns = field(repr=False)
-    _cell_ids: np.ndarray = field(repr=False)
+    _n_cells: int = field(repr=False)
+    _cell_arrays: tuple[str, ...] = field(repr=False)
     _layers: dict[str, str] = field(repr=False)
 
     def sites(self) -> SiteTable:
@@ -719,44 +739,49 @@ class TapestriSource:
         return self._columns.sites
 
     def batches(self, chunk_rows: int) -> Iterator[EntryBatch]:
-        """The file's cells, then each block of cells' depth, counts and calls.
+        """Each block of cells: its cells, then their depth, counts and calls.
 
         A block holds as many cells as keep its entries, cells by chosen
-        variants, within ``chunk_rows``.
+        variants, and its cells' IDs, counted as two entries each, within
+        ``chunk_rows``.
         """
-        cells = self._cell_ids
-        yield EntryBatch(
-            kind="cells",
-            barcodes=cells,
-            barcode_codes=np.arange(len(cells), dtype=np.int64),
-        )
         chosen = self._columns
-        block = max(1, int(chunk_rows) // max(1, len(chosen.columns)))
+        block = max(1, int(chunk_rows) // (len(chosen.columns) + _ID_ENTRIES))
         with h5py.File(self.path, "r") as handle:
             layers = {name: handle[path] for name, path in self._layers.items()}
             for name, layer in layers.items():
-                if layer.shape != (len(cells), self.notes["n_variants"]):
+                if layer.shape != (self._n_cells, self.notes["n_variants"]):
                     raise ValueError(
                         f"{self._layers[name]} of {self.path} is {layer.shape[0]} by "
-                        f"{layer.shape[1]}, but the file lists {len(cells)} cells and "
-                        f"{self.notes['n_variants']} variants"
+                        f"{layer.shape[1]}, but the file lists {self._n_cells} cells "
+                        f"and {self.notes['n_variants']} variants"
                     )
-            for start in range(0, len(cells), block):
-                stop = min(len(cells), start + block)
+            for start in range(0, self._n_cells, block):
+                stop = min(self._n_cells, start + block)
+                ids = self._block_ids(handle, start, stop)
+                yield EntryBatch(
+                    kind="cells",
+                    barcodes=ids,
+                    barcode_codes=np.arange(len(ids), dtype=np.int64),
+                )
                 if self.format == "tapestri":
-                    yield from self._tapestri_block(layers, start, stop)
+                    yield from self._tapestri_block(layers, start, stop, ids)
                 else:
-                    yield from self._dabseq_block(layers, start, stop)
+                    yield from self._dabseq_block(layers, start, stop, ids)
+
+    def _block_ids(self, handle: h5py.File, start: int, stop: int) -> np.ndarray:
+        """The IDs of cells ``[start, stop)``: Tapestri's ``<sample>__<barcode>``,
+        or DAb-seq's barcodes."""
+        parts = [_texts(handle[name][start:stop]) for name in self._cell_arrays]
+        if len(parts) == 1:
+            return parts[0]
+        samples, barcodes = parts
+        return tapestri_cell_ids(samples.tolist(), barcodes.tolist())
 
     def _read(self, layer: h5py.Dataset, start: int, stop: int) -> np.ndarray:
         return np.asarray(layer[start:stop, self._columns.columns])
 
-    def _cell(self, start: int, row: int) -> str:
-        return str(self._cell_ids[start + row])
-
-    def _site_depth(
-        self, depth: np.ndarray, start: int, what: str = "DP"
-    ) -> np.ndarray:
+    def _site_depth(self, depth: np.ndarray, ids: np.ndarray) -> np.ndarray:
         """Each cell's depth at each site, which its variants must agree on."""
         chosen = self._columns
         site_depth = depth[:, chosen.site_first]
@@ -767,18 +792,17 @@ class TapestriSource:
             raise ValueError(
                 f"The variants {chosen.labels[first]!r} and "
                 f"{chosen.labels[column]!r} of {self.path} share a position but "
-                f"give the cell {self._cell(start, row)!r} the {what} "
-                f"{int(depth[row, first])} and {int(depth[row, column])}; import "
-                "them apart"
+                f"give the cell {ids[row]!r} the DP {int(depth[row, first])} and "
+                f"{int(depth[row, column])}; import them apart"
             )
         return site_depth
 
-    def _depth_batch(self, site_depth: np.ndarray, start: int) -> EntryBatch:
+    def _depth_batch(self, site_depth: np.ndarray, ids: np.ndarray) -> EntryBatch:
         rows, sites = np.nonzero(site_depth > 0)
         return EntryBatch(
             kind="depth",
-            barcodes=self._cell_ids,
-            barcode_codes=rows.astype(np.int64) + start,
+            barcodes=ids,
+            barcode_codes=rows.astype(np.int64),
             keys=sites.astype(np.int64),
             values=site_depth[rows, sites].astype(np.int64),
         )
@@ -788,7 +812,7 @@ class TapestriSource:
         calls: np.ndarray,
         depth: np.ndarray,
         quality: np.ndarray,
-        start: int,
+        ids: np.ndarray,
         source: str,
     ) -> EntryBatch:
         """The calls of a block: every call, and no-calls where the cell has reads.
@@ -798,47 +822,50 @@ class TapestriSource:
         rows, columns = np.nonzero((calls != _NO_CALL) | (depth > 0))
         return EntryBatch(
             kind="calls",
-            barcodes=self._cell_ids,
-            barcode_codes=rows.astype(np.int64) + start,
+            barcodes=ids,
+            barcode_codes=rows.astype(np.int64),
             keys=self._columns.column_allele[columns],
             call_source=source,
             calls=_CALL_LABELS[calls[rows, columns]],
             call_quality=quality[rows, columns],
         )
 
-    def _check_codes(self, calls: np.ndarray, start: int, layer: str) -> None:
+    def _check_codes(self, calls: np.ndarray, ids: np.ndarray, layer: str) -> None:
         bad = (calls < 0) | (calls > _NO_CALL)
         if bad.any():
             row, column = (int(value) for value in np.argwhere(bad)[0])
             raise ValueError(
-                f"{layer} of {self.path} gives the cell {self._cell(start, row)!r} "
-                f"at {self._columns.labels[column]!r} the genotype "
+                f"{layer} of {self.path} gives the cell {ids[row]!r} at "
+                f"{self._columns.labels[column]!r} the genotype "
                 f"{int(calls[row, column])}; genotypes are 0 to 3"
             )
 
     def _tapestri_block(
-        self, layers: dict[str, h5py.Dataset], start: int, stop: int
+        self,
+        layers: dict[str, h5py.Dataset],
+        start: int,
+        stop: int,
+        ids: np.ndarray,
     ) -> Iterator[EntryBatch]:
         depth = self._read(layers["DP"], start, stop).astype(np.int64)
         if np.any(depth < 0):
             row, column = (int(value) for value in np.argwhere(depth < 0)[0])
             raise ValueError(
-                f"{self._layers['DP']} of {self.path} gives the cell "
-                f"{self._cell(start, row)!r} at {self._columns.labels[column]!r} "
-                f"the depth {int(depth[row, column])}"
+                f"{self._layers['DP']} of {self.path} gives the cell {ids[row]!r} "
+                f"at {self._columns.labels[column]!r} the depth "
+                f"{int(depth[row, column])}"
             )
-        site_depth = self._site_depth(depth, start)
-        yield self._depth_batch(site_depth, start)
+        site_depth = self._site_depth(depth, ids)
+        yield self._depth_batch(site_depth, ids)
         del site_depth
         frequency = self._read(layers["AF"], start, stop).astype(np.float64)
         outside = ~np.isfinite(frequency) | (frequency < 0) | (frequency > 100)
         if outside.any():
             row, column = (int(value) for value in np.argwhere(outside)[0])
             raise ValueError(
-                f"{self._layers['AF']} of {self.path} gives the cell "
-                f"{self._cell(start, row)!r} at {self._columns.labels[column]!r} "
-                f"the allele frequency {float(frequency[row, column])!r}; frequencies lie "
-                "from 0 to 100%"
+                f"{self._layers['AF']} of {self.path} gives the cell {ids[row]!r} "
+                f"at {self._columns.labels[column]!r} the allele frequency "
+                f"{float(frequency[row, column])!r}; frequencies lie from 0 to 100%"
             )
         reads = frequency * depth
         reads /= 100
@@ -851,53 +878,54 @@ class TapestriSource:
             )
             raise ValueError(
                 f"The allele frequency {float(frequency[row, column])!r} and depth "
-                f"{int(depth[row, column])} of the cell {self._cell(start, row)!r} "
-                f"at {self._columns.labels[column]!r} in {self.path} do not give a "
+                f"{int(depth[row, column])} of the cell {ids[row]!r} at "
+                f"{self._columns.labels[column]!r} in {self.path} do not give a "
                 "whole number of reads as AF × DP / 100"
             )
         del reads, frequency
         rows, columns = np.nonzero(whole > 0)
         yield EntryBatch(
             kind="counts",
-            barcodes=self._cell_ids,
-            barcode_codes=rows.astype(np.int64) + start,
+            barcodes=ids,
+            barcode_codes=rows.astype(np.int64),
             keys=self._columns.column_allele[columns],
             values=whole[rows, columns].astype(np.int64),
         )
         del whole, rows, columns
         calls = self._read(layers["NGT"], start, stop).astype(np.int64)
-        self._check_codes(calls, start, self._layers["NGT"])
+        self._check_codes(calls, ids, self._layers["NGT"])
         quality = self._read(layers["GQ"], start, stop).astype(np.float64)
-        yield self._calls_batch(calls, depth, quality, start, "NGT")
+        yield self._calls_batch(calls, depth, quality, ids, "NGT")
 
     def _dabseq_block(
-        self, layers: dict[str, h5py.Dataset], start: int, stop: int
+        self,
+        layers: dict[str, h5py.Dataset],
+        start: int,
+        stop: int,
+        ids: np.ndarray,
     ) -> Iterator[EntryBatch]:
         chosen = self._columns
         depth = self._read(layers["DP"], start, stop).astype(np.int64)
-        self._check_missing(depth, start, "DP")
-        site_depth = self._site_depth(depth, start)
-        yield self._depth_batch(site_depth, start)
+        self._check_missing(depth, ids, "DP")
+        site_depth = self._site_depth(depth, ids)
+        yield self._depth_batch(site_depth, ids)
         del site_depth
         alternative = self._read(layers["AD"], start, stop).astype(np.int64)
-        self._check_missing(alternative, start, "AD")
+        self._check_missing(alternative, ids, "AD")
         rows, columns = np.nonzero(alternative > 0)
         yield EntryBatch(
             kind="counts",
-            barcodes=self._cell_ids,
-            barcode_codes=rows.astype(np.int64) + start,
+            barcodes=ids,
+            barcode_codes=rows.astype(np.int64),
             keys=chosen.column_allele[columns],
             values=alternative[rows, columns],
         )
         del alternative, rows, columns
         reference = self._read(layers["RD"], start, stop).astype(np.int64)
-        self._check_missing(reference, start, "RD")
-        counted = chosen.reference_column >= 0
-        sites = np.flatnonzero(counted)
+        self._check_missing(reference, ids, "RD")
+        sites = np.flatnonzero(chosen.reference_column >= 0)
         site_reference = reference[:, chosen.reference_column[sites]]
         # Every variant of a site but FLT3-ITD counts the same reference reads.
-        own = np.full(len(chosen.columns), -1, dtype=np.int64)
-        own[chosen.reference_column[sites]] = np.arange(len(sites))
         rank = np.full(chosen.sites.n_sites, -1, dtype=np.int64)
         rank[sites] = np.arange(len(sites))
         itd = np.asarray(
@@ -915,7 +943,7 @@ class TapestriSource:
             raise ValueError(
                 f"The variants {chosen.labels[first]!r} and "
                 f"{chosen.labels[column]!r} of {self.path} share a position but "
-                f"give the cell {self._cell(start, row)!r} the reference reads "
+                f"give the cell {ids[row]!r} the reference reads "
                 f"{int(reference[row, first])} and {int(reference[row, column])}; "
                 "import them apart"
             )
@@ -923,44 +951,81 @@ class TapestriSource:
         rows, at = np.nonzero(site_reference > 0)
         yield EntryBatch(
             kind="counts",
-            barcodes=self._cell_ids,
-            barcode_codes=rows.astype(np.int64) + start,
+            barcodes=ids,
+            barcode_codes=rows.astype(np.int64),
             keys=chosen.site_reference[sites[at]],
             values=site_reference[rows, at],
         )
         del site_reference, rows, at
         calls = self._read(layers["GT"], start, stop).astype(np.int64)
-        self._check_codes(calls, start, self._layers["GT"])
+        self._check_codes(calls, ids, self._layers["GT"])
         quality = self._read(layers["GQ"], start, stop).astype(np.float64)
-        self._check_missing(quality, start, "GQ")
+        self._check_missing(quality, ids, "GQ")
         quality[quality == _MISSING] = np.nan
-        yield self._calls_batch(calls, depth, quality, start, "GT")
+        yield self._calls_batch(calls, depth, quality, ids, "GT")
 
-    def _check_missing(self, values: np.ndarray, start: int, name: str) -> None:
+    def _check_missing(self, values: np.ndarray, ids: np.ndarray, name: str) -> None:
         """Refuse a negative value other than DAb-seq's -1 for a missing one."""
         bad = values < _MISSING
         if bad.any():
             row, column = (int(value) for value in np.argwhere(bad)[0])
             raise ValueError(
-                f"{name} of {self.path} gives the cell {self._cell(start, row)!r} "
-                f"at {self._columns.labels[column]!r} the value "
+                f"{name} of {self.path} gives the cell {ids[row]!r} at "
+                f"{self._columns.labels[column]!r} the value "
                 f"{values[row, column].item()!r}; DAb-seq writes a missing value as -1"
             )
 
 
+def _text_width(dataset: h5py.Dataset) -> int:
+    """The bytes of a text dataset's longest value, or a nominal 64 for
+    variable-length text."""
+    dtype = dataset.dtype
+    return int(dtype.itemsize) if dtype.kind == "S" else _VARIABLE_TEXT_WIDTH
+
+
+def _check_description(
+    path: str,
+    memory_bytes: int | None,
+    *,
+    n_variants: int,
+    variant_bytes: int,
+    n_cells: int,
+    cell_bytes: int,
+) -> None:
+    """Refuse to describe a file whose variants and cells outgrow the budget.
+
+    Raises:
+        MemoryError: If reading the variants' names and alleles and the
+            cells' IDs, and finding the chosen variants and repeated cells,
+            holds more than ``memory_bytes``.
+    """
+    needed = n_variants * variant_bytes + n_cells * cell_bytes
+    if memory_bytes is not None and needed > memory_bytes:
+        raise MemoryError(
+            f"Reading the {n_variants} variants and {n_cells} cells of {path} holds "
+            f"about {needed} bytes, more than the memory budget of {memory_bytes} "
+            "bytes. Raise mem_budget."
+        )
+
+
 def tapestri_source(
-    path: str | os.PathLike[str], variants: Sequence[str] = ()
+    path: str | os.PathLike[str],
+    variants: Sequence[str] = (),
+    memory_bytes: int | None = None,
 ) -> TapestriSource:
     """Describe the DNA variants of a Tapestri ``.h5`` file as a source of counts.
 
     The variants that pass the pipeline's default filters (``filtered`` 0)
-    are read, with those that ``variants`` names.
+    are read, with those that ``variants`` names. Before it reads them, the
+    description checks what it holds against ``memory_bytes``.
 
     Raises:
         ValueError: If the file lacks the DNA variants or their arrays, a
             variant's ``id`` disagrees with its ``CHROM``, ``POS``, ``REF``
             and ``ALT``, ``variants`` names an unknown or unreadable variant,
-            or no variant is left to import.
+            a cell repeats, or no variant is left to import.
+        MemoryError: If describing the variants and cells does not fit
+            ``memory_bytes``.
     """
     text = os.fspath(path)
     requested = tuple(variants)
@@ -971,15 +1036,30 @@ def tapestri_source(
                 f"{text} lacks {_VARIANTS}; it is not a Tapestri file of DNA "
                 "variants (a DAb-seq file reads with format='dabseq')"
             )
-        cells = _assay_cells(handle, "dna_variants", text)
         columns_group = group.get("ca")
         if not isinstance(columns_group, h5py.Group):
             raise ValueError(f"{text} lacks {_VARIANTS}/ca")
-        ids = _texts(_dataset(columns_group, "id", text)[:])
-        chrom = _texts(_dataset(columns_group, "CHROM", text)[:])
+        rows = group.get("ra")
+        if not isinstance(rows, h5py.Group):
+            raise ValueError(f"{text} lacks {_VARIANTS}/ra")
+        texts = [
+            _dataset(columns_group, name, text)
+            for name in ("id", "CHROM", "REF", "ALT")
+        ]
+        cell_texts = [_dataset(rows, name, text) for name in ("barcode", "sample_name")]
+        _check_description(
+            text,
+            memory_bytes,
+            n_variants=int(texts[0].shape[0]),
+            variant_bytes=_TAPESTRI_VARIANT_BYTES
+            + _DESCRIBED_TEXT_COPIES * sum(map(_text_width, texts)),
+            n_cells=int(cell_texts[0].shape[0]),
+            cell_bytes=_CELL_BYTES
+            + _DESCRIBED_TEXT_COPIES * sum(map(_text_width, cell_texts)),
+        )
+        cells = _assay_cells(handle, "dna_variants", text)
+        ids, chrom, ref, alt = (_texts(dataset[:]) for dataset in texts)
         pos = np.asarray(_dataset(columns_group, "POS", text)[:]).reshape(-1)
-        ref = _texts(_dataset(columns_group, "REF", text)[:])
-        alt = _texts(_dataset(columns_group, "ALT", text)[:])
         filtered = np.asarray(_dataset(columns_group, "filtered", text)[:]).reshape(-1)
         assays_metadata = _metadata(group.get("metadata"))
     lengths = {len(ids), len(chrom), len(pos), len(ref), len(alt), len(filtered)}
@@ -1019,6 +1099,7 @@ def tapestri_source(
         alternative=np.asarray([value.upper() for value in alt.tolist()], dtype=object),
         passing=filtered == 0,
     )
+    del chrom, ref, alt, contigs
     chosen, record = _chosen_columns(
         parsed, requested, short_names=ids, path=text, what="Tapestri"
     )
@@ -1045,7 +1126,8 @@ def tapestri_source(
         open_alleles=False,
         notes=notes,
         _columns=columns,
-        _cell_ids=cells.ids,
+        _n_cells=len(cells.ids),
+        _cell_arrays=(f"{_VARIANTS}/ra/sample_name", f"{_VARIANTS}/ra/barcode"),
         _layers={
             name: f"{_VARIANTS}/layers/{name}" for name in ("DP", "AF", "NGT", "GQ")
         },
@@ -1053,30 +1135,49 @@ def tapestri_source(
 
 
 def dabseq_source(
-    path: str | os.PathLike[str], variants: Sequence[str] = ()
+    path: str | os.PathLike[str],
+    variants: Sequence[str] = (),
+    memory_bytes: int | None = None,
 ) -> TapestriSource:
     """Describe a DAb-seq ``.hdf5`` file of genotypes as a source of counts.
 
     DAb-seq flags no variant as failing, so every variant whose alleles are
     bases is read, and ``variants`` may name others only to check that the
-    file holds them.
+    file holds them. Before it reads them, the description checks what it
+    holds against ``memory_bytes``.
 
     Raises:
         ValueError: If the file lacks one of its arrays, a variant name is
             not ``gene:chrom:pos:ref/alt``, a barcode repeats, ``variants``
             names an unknown or unreadable variant, or no variant is left to
             import.
+        MemoryError: If describing the variants and cells does not fit
+            ``memory_bytes``.
     """
     text = os.fspath(path)
     requested = tuple(variants)
     with h5py.File(text, "r") as handle:
-        names = _texts(_dataset(handle, "VARIANTS", text)[:])
-        barcodes = _texts(_dataset(handle, "CELL_BARCODES", text)[:])
+        names_dataset = _dataset(handle, "VARIANTS", text)
+        barcode_dataset = _dataset(handle, "CELL_BARCODES", text)
+        _check_description(
+            text,
+            memory_bytes,
+            n_variants=int(names_dataset.shape[0]),
+            variant_bytes=_DABSEQ_VARIANT_BYTES
+            + 2 * _DESCRIBED_TEXT_COPIES * _text_width(names_dataset),
+            n_cells=int(barcode_dataset.shape[0]),
+            cell_bytes=_CELL_BYTES
+            + _DESCRIBED_TEXT_COPIES * _text_width(barcode_dataset),
+        )
+        names = _texts(names_dataset[:])
+        barcodes = _texts(barcode_dataset[:])
     repeated = pd.Index(barcodes).duplicated()
     if repeated.any():
         raise ValueError(
             f"CELL_BARCODES of {text} lists the barcode {barcodes[repeated][0]!r} twice"
         )
+    n_cells = len(barcodes)
+    del barcodes, repeated
     contigs, positions, references, alternatives, shorts = [], [], [], [], []
     for index, name in enumerate(names.tolist()):
         parts = name.split(":")
@@ -1099,6 +1200,7 @@ def dabseq_source(
         alternative=np.asarray(alternatives, dtype=object),
         passing=np.ones(len(names), dtype=bool),
     )
+    del contigs, positions, references, alternatives
     chosen, record = _chosen_columns(
         parsed,
         requested,
@@ -1123,6 +1225,7 @@ def dabseq_source(
         open_alleles=False,
         notes=record,
         _columns=columns,
-        _cell_ids=barcodes,
+        _n_cells=n_cells,
+        _cell_arrays=("CELL_BARCODES",),
         _layers={name: name for name in ("DP", "AD", "RD", "GQ", "GT")},
     )

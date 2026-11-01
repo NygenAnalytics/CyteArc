@@ -269,8 +269,13 @@ def _read_source(
     swap_strands: bool,
     threads: int,
     variants: tuple[str, ...] = (),
+    memory_bytes: int | None = None,
 ) -> VariantSource:
-    """Read the description of one file or folder of variant counts."""
+    """Read the description of one file or folder of variant counts.
+
+    Tapestri and DAb-seq files check their description against
+    ``memory_bytes`` before they read their candidate variants and cells.
+    """
     from ...readers import _variant_files as files
 
     if not os.path.exists(path):
@@ -298,11 +303,11 @@ def _read_source(
     if detected == "tapestri":
         from ...readers.tapestri import tapestri_source
 
-        return tapestri_source(path, variants)
+        return tapestri_source(path, variants, memory_bytes)
     if detected == "dabseq":
         from ...readers.tapestri import dabseq_source
 
-        return dabseq_source(path, variants)
+        return dabseq_source(path, variants, memory_bytes)
     if detected in ("mgatk", "maegatk"):
         from ...readers.mgatk import mgatk_source
 
@@ -870,7 +875,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             key = os.fspath(path)
             if key not in readers:
                 reader = _read_source(
-                    key, format, swap_strands, threads, chosen_variants
+                    key,
+                    format,
+                    swap_strands,
+                    threads,
+                    chosen_variants,
+                    self.memoryBytes,
                 )
                 digest, digests = source_sha256(reader.files)
                 readers[key] = (reader, digest, digests)

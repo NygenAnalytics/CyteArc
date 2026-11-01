@@ -826,3 +826,89 @@ def test_a_source_must_give_each_call_one_quality() -> None:
         rows = next(sorter.bands(10))[2]["calls"]
     assert rows["quality"][np.isfinite(rows["quality"])].tolist() == [30.0, 99.0]
     assert int(np.isnan(rows["quality"]).sum()) == 2
+
+
+def _wide_tapestri(path: Path, *, n_cells: int, n_variants: int, sample: str) -> Path:
+    """A Tapestri file of many candidate variants of which two pass."""
+    rng = np.random.default_rng(3)
+    with h5py.File(path, "w") as handle:
+        variants = handle.create_group("assays/dna_variants")
+        columns = variants.create_group("ca")
+        positions = 1_000 + np.arange(n_variants)
+        names = [f"chr1:{position}:A/G" for position in positions]
+        for name, values in (
+            ("id", names),
+            ("CHROM", ["1"] * n_variants),
+            ("REF", ["A"] * n_variants),
+            ("ALT", ["G"] * n_variants),
+        ):
+            columns.create_dataset(name, data=np.char.encode(np.asarray(values)))
+        columns.create_dataset("POS", data=positions.astype(np.int32))
+        filtered = np.ones(n_variants, dtype=np.uint8)
+        filtered[[0, n_variants // 2]] = 0
+        columns.create_dataset("filtered", data=filtered)
+        rows = variants.create_group("ra")
+        barcodes = [
+            "".join("ACGT"[(cell >> (2 * digit)) & 3] for digit in range(18))
+            for cell in range(n_cells)
+        ]
+        rows.create_dataset("barcode", data=np.char.encode(np.asarray(barcodes)))
+        rows.create_dataset(
+            "sample_name", data=np.char.encode(np.asarray([sample] * n_cells))
+        )
+        depth = rng.poisson(20, size=(n_cells, n_variants)).astype(np.int16)
+        for name, values in (
+            ("DP", depth),
+            ("AF", np.zeros(depth.shape)),
+            ("NGT", np.zeros(depth.shape, dtype=np.int8)),
+            ("GQ", np.full(depth.shape, 99, dtype=np.int8)),
+        ):
+            variants.create_dataset(
+                f"layers/{name}",
+                data=values,
+                chunks=(min(64, n_cells), 64),
+                compression="gzip",
+            )
+    return path
+
+
+def test_a_description_beyond_the_budget_is_refused_before_it_is_read(tmp_path) -> None:
+    from cytearc.readers.tapestri import dabseq_source, tapestri_source
+
+    path = _wide_tapestri(
+        tmp_path / "wide.h5", n_cells=50, n_variants=2_000, sample="s"
+    )
+    # 2,000 variants of 700 bytes and 2 copies of their 13-byte IDs, such as
+    # chr1:1000:A/G, and 1-byte CHROM, REF and ALT; and 50 cells of 300 bytes
+    # and 2 copies of their 18-byte barcode and 1-byte sample.
+    needed = 2_000 * (700 + 2 * (13 + 1 + 1 + 1)) + 50 * (300 + 2 * (18 + 1))
+    with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
+        tapestri_source(path, memory_bytes=needed - 1)
+    assert tapestri_source(path, memory_bytes=needed).notes["n_imported_variants"] == 2
+    dabseq = write_dabseq(TRUTH, tmp_path / "GSM0.hdf5")
+    with pytest.raises(MemoryError, match="11 variants and 52 cells"):
+        dabseq_source(dabseq, memory_bytes=1_000)
+
+
+@pytest.mark.slow
+def test_the_traced_peak_of_a_wide_tapestri_import_fits_the_smallest_budget(
+    tmp_path,
+) -> None:
+    # Describing 50,000 candidate variants holds about 31 MB, far more than
+    # their two that pass and the 200 cells need, which without the check of
+    # the description would let the import accept a budget of 17 MB.
+    path = _wide_tapestri(
+        tmp_path / "wide.h5", n_cells=200, n_variants=50_000, sample="s"
+    )
+    store = _large_store(tmp_path, path)
+    cells = every_cell(store)
+
+    def run() -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            store.variants.import_counts(
+                path, cell_selection=cells, invalidate_cache=True
+            )
+
+    budget, peak = _smallest_and_peak(store, run)
+    assert peak <= budget, (peak, budget)
