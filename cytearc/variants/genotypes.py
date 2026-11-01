@@ -345,16 +345,23 @@ def source_call_codes(
             f"columns are {', '.join(SOURCE_CALLS)}. Call genotypes from the "
             "counts with method='threshold' instead"
         )
-    texts = np.asarray(labels, dtype=object)
-    distinct, inverse = np.unique(texts.astype(str), return_inverse=True)
-    unknown = [label for label in distinct.tolist() if label not in mapping]
+    # Hashing the labels takes a pass over them, where sorting millions of
+    # Python strings, as dense calls such as Tapestri's hold, takes seconds.
+    inverse, distinct = pd.factorize(np.asarray(labels, dtype=object).reshape(-1))
+    if np.any(inverse < 0):
+        raise ValueError(f"The column {column!r} holds a call that is not text")
+    unknown = sorted(
+        str(label) for label in distinct.tolist() if str(label) not in mapping
+    )
     if unknown:
         raise ValueError(
             f"The column {column!r} holds the call {unknown[0]!r}, which is none of "
             f"its labels: {', '.join(mapping)}"
         )
-    codes = np.asarray([mapping[label] for label in distinct.tolist()], dtype=np.int8)
-    calls = codes[inverse].reshape(-1)
+    codes = np.asarray(
+        [mapping[str(label)] for label in distinct.tolist()], dtype=np.int8
+    )
+    calls = codes[np.asarray(inverse, dtype=np.int64)].reshape(-1)
     covered = np.asarray(covered, dtype=bool).reshape(-1)
     calls[(calls == MISSING) & covered] = FILTERED
     return calls

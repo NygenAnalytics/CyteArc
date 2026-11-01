@@ -404,6 +404,33 @@ def _distinct_calls(rows: np.ndarray) -> tuple[np.ndarray, int | None, int]:
     return rows[kept], None, int(np.count_nonzero(same))
 
 
+def _sorted_unique(values: np.ndarray) -> np.ndarray:
+    """The distinct values, ascending.
+
+    NumPy 2.5's ``unique`` hashes arrays of many distinct integers, which
+    takes several times as long as sorting them, as each band's keys are.
+    """
+    ordered = np.sort(np.asarray(values).reshape(-1))
+    if len(ordered) < 2:
+        return ordered
+    keep = np.empty(len(ordered), dtype=bool)
+    keep[0] = True
+    np.not_equal(ordered[1:], ordered[:-1], out=keep[1:])
+    return ordered[keep]
+
+
+def _factorized(texts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Each text's position among the distinct texts, and the distinct texts.
+
+    Raises:
+        ValueError: If a value is missing rather than text.
+    """
+    inverse, distinct = pd.factorize(np.asarray(texts, dtype=object).reshape(-1))
+    if np.any(inverse < 0):
+        raise ValueError("A call or label is missing where text was expected")
+    return np.asarray(inverse, dtype=np.int64), np.asarray(distinct, dtype=object)
+
+
 class _Vocabulary:
     """Text coded in order of first appearance, sorted when stored."""
 
@@ -411,14 +438,17 @@ class _Vocabulary:
         self._codes: dict[str, int] = {}
 
     def codes(self, texts: np.ndarray) -> np.ndarray:
-        distinct, inverse = np.unique(
-            np.asarray(texts, dtype=object), return_inverse=True
-        )
+        # Hashing the texts takes a pass over them, where sorting millions of
+        # Python strings, as dense calls hold, takes seconds.
+        inverse, distinct = _factorized(texts)
         lookup = np.asarray(
-            [self._codes.setdefault(str(text), len(self._codes)) for text in distinct],
-            dtype=np.int32,
+            [self.code(str(text)) for text in distinct.tolist()], dtype=np.int32
         )
-        return lookup[inverse]
+        return np.asarray(lookup[inverse], dtype=np.int32)
+
+    def code(self, text: str) -> int:
+        """The code of one text."""
+        return self._codes.setdefault(text, len(self._codes))
 
     def sorted(self) -> tuple[list[str], np.ndarray]:
         """The texts in order, and each code's position among them."""
@@ -1207,9 +1237,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             rows = np.empty(int(kept.sum()), dtype=CALL_DTYPE)
             rows["cell"] = row_cells[kept]
             rows["key"] = allele_map[batch.keys[kept]]
-            rows["source"] = call_sources.codes(
-                np.full(len(rows), batch.call_source, dtype=object)
-            )
+            rows["source"] = call_sources.code(batch.call_source)
             rows["value"] = call_values.codes(batch.calls[kept])
             if len(batch.call_quality):
                 if len(batch.call_quality) != batch.n_rows:
@@ -2712,8 +2740,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             stop = min(n_rows, start + int(step))
             allele_codes = np.asarray(alleles[start:stop], dtype=np.int64)
             codes = np.asarray(sources[start:stop], dtype=np.int64)
-            distinct = np.unique(np.stack([allele_codes, codes], axis=1), axis=0)
-            pairs.update((int(allele), int(code)) for allele, code in distinct.tolist())
+            # One integer per pair sorts fast, where unique rows sort slowly.
+            keys = _sorted_unique(allele_codes * len(names) + codes)
+            pairs.update(
+                (int(key) // len(names), int(key) % len(names)) for key in keys.tolist()
+            )
         # The columns of each unit: (site, allele) at a site with coordinates,
         # (site, -1) at a named site.
         columns: dict[tuple[int, int], list[str]] = {}
@@ -3331,11 +3362,11 @@ def _cover_ranks(table: SiteTable, site_rank: np.ndarray) -> np.ndarray:
 
 def _label_codes(index: Mapping[str, int], labels: np.ndarray) -> np.ndarray:
     """Each label's position in the vocabulary that ``index`` numbers."""
-    distinct, inverse = np.unique(np.asarray(labels, dtype=object), return_inverse=True)
+    inverse, distinct = _factorized(labels)
     lookup = np.asarray(
         [index[str(text)] for text in distinct.tolist()], dtype=np.int32
     )
-    return lookup[np.asarray(inverse).reshape(-1)]
+    return np.asarray(lookup[inverse], dtype=np.int32)
 
 
 def _most_cell_rows(group: zarr.Group, tables: Mapping[str, Sequence[str]]) -> int:
@@ -3435,7 +3466,7 @@ def _band_genotypes(
                         ),
                     ]
                 )
-        covered = np.unique(covered)
+        covered = _sorted_unique(covered)
     labels: np.ndarray
     if method == "source":
         call_cells, values = rows["call"]
@@ -3456,7 +3487,7 @@ def _band_genotypes(
         del all_keys, order, leading, adopted
         call_labels = call_value_names[values["call_values"][picked].astype(np.int64)]
         call_columns = columns[picked]
-        keys = np.union1d(covered, call_keys)
+        keys = _sorted_unique(np.concatenate([covered, call_keys]))
         calls = np.full(len(keys), FILTERED, dtype=np.int8)
         labels = np.full(len(keys), "", dtype=object)
         at = np.searchsorted(keys, call_keys)
@@ -3477,7 +3508,7 @@ def _band_genotypes(
         alleles, ranks = alleles[on], ranks[on]
         umis = values["counts"][on].astype(np.int64)
         count_keys = _band_keys(count_cells[on], ranks, first, n_genotyped)
-        keys = np.union1d(covered, count_keys)
+        keys = _sorted_unique(np.concatenate([covered, count_keys]))
         at = np.searchsorted(keys, count_keys)
         is_reference = alleles == reference_alleles[ranks]
         is_alternative = alleles == alternative_alleles[ranks]
