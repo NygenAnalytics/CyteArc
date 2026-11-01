@@ -489,8 +489,9 @@ def _refuse_shared_cells(
 ) -> None:
     """Refuse a call file whose barcodes name one cell twice.
 
-    Cell Ranger lists each barcode once, so only a suffix or pattern that
-    makes two barcodes alike can name a cell twice.
+    Cell Ranger lists each barcode once, and a prefix and a suffix keep
+    distinct barcodes distinct, so only a pattern that keeps the same part of
+    two barcodes can name a cell twice.
     """
     matched = np.flatnonzero(row_cells >= 0)
     order = matched[np.argsort(row_cells[matched], kind="stable")]
@@ -500,7 +501,7 @@ def _refuse_shared_cells(
         raise ValueError(
             f"Barcodes {str(barcodes[first])!r} and {str(barcodes[second])!r} of "
             f"the call file name one cell, {str(cell_ids[row_cells[first]])!r}; "
-            "check barcode_suffix and barcode_pattern"
+            "check barcode_pattern"
         )
 
 
