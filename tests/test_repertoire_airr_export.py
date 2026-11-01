@@ -1280,3 +1280,25 @@ def test_a_block_is_let_go_before_the_next_is_read(tmp_path, monkeypatch) -> Non
     assert store.repertoire.export_airr(receptors, tmp_path / "blocks.tsv") == 10
     # Ten blocks were written, and no block was held while the next was read.
     assert len(written) == 10 and len(alive) > 10 and not any(alive)
+
+
+def test_clonotypes_hold_their_codes_and_labels_while_blocks_are_written(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    clonotypes = store.repertoire.clonotypes(receptors)
+    plan = repertoire_operations._ExportContigs.plan_blocks
+    held = []
+
+    def recorded(contigs, **options):
+        held.append(contigs.reads.held)
+        return plan(contigs, **options)
+
+    monkeypatch.setattr(repertoire_operations._ExportContigs, "plan_blocks", recorded)
+    store.repertoire.export_airr(receptors, tmp_path / "receptors.tsv")
+    store.repertoire.export_airr(clonotypes, tmp_path / "clonotypes.tsv")
+    labels = store.repertoire.load_clonotypes(clonotypes).clonotypes["clonotype"]
+    # Each of the eight cells' int32 code, and the labels as packed bytes
+    # with their offsets.
+    packed = sum(len(str(label).encode()) for label in labels)
+    assert held[1] - held[0] == 4 * 8 + 8 * (len(labels) + 1) + packed
