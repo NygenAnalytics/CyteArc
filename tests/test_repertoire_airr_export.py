@@ -531,10 +531,16 @@ def test_repeated_ids_take_the_next_free_suffix() -> None:
     assert rows.tolist() == [] and names.tolist() == []
 
 
-@pytest.mark.parametrize("block_bytes", [None, 1])
+@pytest.mark.parametrize(
+    ("block_bytes", "chunk_bytes"), [(None, None), (1, None), (None, 16)]
+)
 def test_streamed_exports_match_the_exports_of_one_table(
-    tmp_path, monkeypatch, block_bytes
+    tmp_path, monkeypatch, block_bytes, chunk_bytes
 ) -> None:
+    if chunk_bytes is not None:
+        # Cell positions stored four to a chunk and offsets two, so blocks of
+        # four contigs read their windows across stored chunks.
+        monkeypatch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", chunk_bytes)
     store, receptors = _edge_receptors(tmp_path)
     clonotypes = store.repertoire.clonotypes(receptors)
     if block_bytes is not None:
@@ -1048,3 +1054,136 @@ def test_packing_text_counts_each_slice_and_their_join() -> None:
     ]
     assert bytes(packed.data).decode("utf-8") == "".join(values.tolist())
     assert longest == 1_997 and reads.held == offsets + 1_997 * 30
+
+
+def _walk(run) -> list[int]:
+    """Each refusal's estimate, from a limit of one byte to one that runs."""
+    refusals = []
+    limit = 1
+    while True:
+        try:
+            run(limit)
+            return refusals
+        except MemoryError as error:
+            found = re.search(r"holds about (\d+) bytes", str(error))
+            assert found is not None and int(found.group(1)) > limit
+            refusals.append(int(found.group(1)))
+            limit = refusals[-1]
+
+
+def _edge_contigs(store, receptors, limit, fields=("sequence_id", "v_call")):
+    """The edge receptors' contigs of some fields, read within ``limit``."""
+    return repertoire_operations._ExportContigs(
+        artifact_group(store.zw, receptors),
+        fields,
+        chains_only=False,
+        reads=repertoire_operations._Reads(limit=limit, held=0, what="", remedy=""),
+    )
+
+
+def _chunk(array) -> int:
+    """The bytes of one chunk that reading an array holds, by the store's model."""
+    return repertoire_operations.array_row_selection_parts(array)[0]
+
+
+def test_measuring_is_checked_with_a_span_of_contigs(tmp_path) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    group = artifact_group(store.zw, receptors)
+    fields = ("sequence_id", "sequence", "v_identity", "d_identity")
+    refusals = _walk(
+        lambda limit: _edge_contigs(store, receptors, limit, fields).measure(10**9)
+    )
+    # One stored chunk of the arrays read, and 64 bytes for each of the ten
+    # contigs of the span.
+    reading = max(
+        _chunk(group[name])
+        for name in (
+            "contig_sequence_id_offsets",
+            "contig_sequence_offsets",
+            "contig_v_identity",
+            "contig_d_identity",
+        )
+    )
+    assert refusals == [reading + 64 * 10]
+
+
+def test_hashing_the_ids_is_checked_with_the_hashes(tmp_path) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    group = artifact_group(store.zw, receptors)
+
+    def scan(limit):
+        contigs = _edge_contigs(store, receptors, 10**9, ("sequence_id",))
+        contigs.measure(10**9)
+        contigs.reads.limit = limit
+        return contigs.scan(10**9)
+
+    # The hashes of the ten contigs; a block of all ten IDs, 300 bytes and 6
+    # per byte of the longest, cell5_contig_1, as they are decoded and hashed;
+    # the window of the eleven offsets; and one stored chunk.
+    reading = max(
+        _chunk(group[name])
+        for name in ("contig_sequence_id_offsets", "contig_sequence_id")
+    )
+    assert _walk(scan) == [8 * 10 + (300 + 6 * 14) * 10 + 11 * 8 + reading]
+
+
+def test_naming_repeated_ids_keeps_the_ids_read_before(tmp_path, monkeypatch) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    # Naming outweighs every other step, so its checks refuse last.
+    monkeypatch.setattr(repertoire_operations, "_ID_BYTES", 10**8)
+    refusals = budget_refusals(
+        store, lambda: store.repertoire.export_airr(receptors, tmp_path / "named.tsv")
+    )
+    (five, first), (seven, second) = refusals[-2:]
+    # The five X and Z are read, then X_2 and Z_2, whose hashes the suffixed
+    # names take, while the five stay held: each 10**8 bytes and 4 per byte
+    # of the longest ID.
+    assert (five, seven) == (
+        "Naming 5 repeated contig IDs",
+        "Naming 7 repeated contig IDs",
+    )
+    assert second - first == 2 * (10**8 + 4 * 14)
+
+
+@pytest.mark.parametrize("chunk_bytes", [None, 16])
+def test_writing_a_block_counts_each_row_at_its_widest(
+    tmp_path, monkeypatch, chunk_bytes
+) -> None:
+    if chunk_bytes is not None:
+        monkeypatch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", chunk_bytes)
+    store, receptors = _edge_receptors(tmp_path)
+    group = artifact_group(store.zw, receptors)
+
+    def plan(limit):
+        contigs = _edge_contigs(store, receptors, limit)
+        contigs.hold_text()
+        contigs.measure(10**9)
+        return contigs.plan_blocks(
+            n_columns=15, cell_width=5, clone_width=None, block_bytes=32 * 2**20
+        )
+
+    refusals = _walk(plan)
+    held = group["contig_v_call_values"].nbytes + group["contig_v_call_offsets"].nbytes
+    # Each row at its widest: 15 separators, a cell ID of 5 bytes, an ID of 14
+    # and a V call of 8 rendered, the ID read beside it, and 96 bytes for the
+    # row, 24 for the ID's offsets and 12 for the V call's codes.
+    rendered = 15 + 5 + 14 + 8
+    per_row = rendered + 14 + 96 + 24 + 12
+    reading = max(
+        _chunk(group[name])
+        for name in (
+            "contig_cells",
+            "contig_sequence_id_offsets",
+            "contig_v_call",
+            "contig_sequence_id",
+        )
+    )
+    if chunk_bytes is None:
+        # One block of the ten contigs; windows of their ten int32 positions,
+        # eleven int64 offsets and ten int32 codes, each in one chunk.
+        rows, windows = 10, 10 * 4 + 11 * 8 + 10 * 4
+    else:
+        # Blocks of four contigs, a stored chunk of positions; the window of
+        # offsets spans three chunks of two, and the codes one chunk of four.
+        rows, windows = 4, 4 * 4 + 6 * 8 + 4 * 4
+    assert refusals[-1] == held + per_row * rows + 2 * rendered + windows + reading
