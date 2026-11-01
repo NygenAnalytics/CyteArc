@@ -91,6 +91,10 @@ _MAX_CHUNK_ROWS = 2_000_000
 _LOADED_BYTES_PER_ROW = 120
 # Bytes per cell of the loaded cells table and its index.
 _LOADED_BYTES_PER_CELL = 200
+# Bytes held for each cell of the counts, loaded or not: its store row and
+# rank, and each table's offsets and each per-cell array, which are read
+# whole one at a time; 32 bytes as traced on 500,000 cells.
+_LOADED_BYTES_PER_COUNTS_CELL = 40
 # The per-cell arrays of a variant_counts artifact, its canonical one first.
 _CELL_ARRAYS = ("mean_depth", "covered_sites", "listed")
 _FILES_TEXT = ("the variant file", "the variant files")
@@ -1232,9 +1236,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         all cells.
 
         The budget counts each row read, at about 120 bytes, the two stored
-        chunks that a read's first and last rows decompress whole, and the
-        cells' IDs as text, whose read decodes a stored chunk of them; cells
-        named by ID are found among the IDs of every cell of the counts.
+        chunks that a read's first and last rows decompress whole, the cells'
+        IDs as text, whose read decodes a stored chunk of them, and 40 bytes
+        for each cell of the counts, whose offsets and per-cell arrays are
+        read whole; cells named by ID are found among the IDs of every cell
+        of the counts.
 
         Args:
             counts: A ``variant_counts`` artifact, such as one from
@@ -1270,7 +1276,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "counts",
             *(f"counts_{name}" for name in fields),
         )
-        resident = _LOADED_BYTES_PER_CELL * len(positions)
+        resident = _LOADED_BYTES_PER_COUNTS_CELL * len(
+            cell_index
+        ) + _LOADED_BYTES_PER_CELL * len(positions)
         if len(positions):
             # The cells' IDs are read as text, a stored chunk at a time.
             resident += text_read_bytes(self.cells._get_array("ids"), len(positions))

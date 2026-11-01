@@ -1564,3 +1564,56 @@ def test_the_traced_peaks_of_import_and_load_fit_the_smallest_budget_accepted(
         finally:
             tracemalloc.stop()
         assert peak <= budget, (name, peak, budget)
+
+
+@pytest.mark.slow
+def test_loading_a_few_cells_of_many_fits_the_smallest_budget_accepted(
+    tmp_path,
+) -> None:
+    """Counts of 500,000 cells hold offsets and per-cell arrays for each one."""
+    import tracemalloc
+
+    from cytearc.datastore.datastore import DataStore
+    from tests.storage_helpers import write_count_store
+
+    n_cells = 500_000
+    ids = [f"c{cell}" for cell in range(n_cells)]
+    write_count_store(
+        str(tmp_path / "many.zarr"),
+        {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
+        "uint16",
+        cell_ids=ids,
+    )
+    store = DataStore(
+        str(tmp_path / "many.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        nthreads=1,
+    )
+    got = tmp_path / "CALR.tsv"
+    got.write_text(
+        "BC\twtUMIs\tmutUMIs\n"
+        + "".join(f"{ids[cell]}\t1\t0\n" for cell in range(0, n_cells, 2_000))
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        counts = store.variants.import_counts(
+            got, cell_selection=store.snapshot_cell_selection()
+        )
+    store.cells.insert("first", np.arange(n_cells) == 0)
+    first = store.snapshot_cell_selection("first")
+    for name, run in {
+        "one cell": lambda: store.variants.load_counts(counts, cells=first),
+        "no cell": lambda: store.variants.load_counts(counts, cells=[]),
+    }.items():
+        store.memoryBytes = 1 << 33
+        run()
+        budget = _smallest_accepted_budget(store, run)
+        store.memoryBytes = budget
+        tracemalloc.start()
+        try:
+            run()
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak <= budget, (name, peak, budget)

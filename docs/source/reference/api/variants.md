@@ -82,7 +82,7 @@ table = loaded.counts.merge(loaded.depth, on=["cell", "site"])
 table["frequency"] = table["count"] / table["depth"]
 ```
 
-`sites` takes site labels, or positions on an artifact of one contig, and `cells` a cell selection within the counts' cells or cell IDs, as a list, a NumPy array or a pandas index; `cells=[]` reads only the sites with their sums. The tables are checked against the memory budget, at about 120 bytes per row, with the two stored chunks that a read's first and last rows decompress whole and the cells' IDs as text, whose read decodes a stored chunk of them. Cells named by ID are found among the IDs of every cell of the counts, which a cell selection does not need.
+`sites` takes site labels, or positions on an artifact of one contig, and `cells` a cell selection within the counts' cells or cell IDs, as a list, a NumPy array or a pandas index; `cells=[]` reads only the sites with their sums. The tables are checked against the memory budget, at about 120 bytes per row, with the two stored chunks that a read's first and last rows decompress whole, the cells' IDs as text, whose read decodes a stored chunk of them, and 40 bytes for each cell of the counts, whose offsets and per-cell arrays are read whole, so loading a few cells of many counts needs room for every cell. Cells named by ID are found among the IDs of every cell of the counts, which a cell selection does not need.
 
 ## The variant_counts artifact
 
