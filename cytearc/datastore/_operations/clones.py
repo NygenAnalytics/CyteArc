@@ -1920,10 +1920,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         )
         tracked = np.asarray(identifiers[chosen].tolist(), dtype=object)
         # Without rows, the table keeps its columns and their types; clone
-        # labels are text, as the groups' labels are.
+        # labels are text of the groups' labels' type, which pandas 3 stores
+        # as its string type and pandas 2 as Python objects, never fixed-width.
         sizes = _group_sizes(keys, pair_groups, pair_cells)
         table = keys.take(rows).reset_index(drop=True)
-        table.insert(0, "clone", pd.array(tracked[followed], dtype="str"))
+        table.insert(
+            0, "clone", pd.array(tracked[followed], dtype=table["group"].dtype)
+        )
         table["cells"] = counts
         table["fraction"] = counts / sizes["cells"].to_numpy()[rows]
         return CloneTracking(
