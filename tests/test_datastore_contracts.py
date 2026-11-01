@@ -576,7 +576,7 @@ def test_datastore_private_mixin_order_is_stable():
         _VariantOperationsMixin,
         MappingDatastore,
     )
-    assert DataStore.mro()[:19] == [
+    assert DataStore.mro()[:20] == [
         DataStore,
         _CellCallingOperationsMixin,
         _QualityControlOperationsMixin,
