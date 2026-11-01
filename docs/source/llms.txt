@@ -91,6 +91,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 - [Artifacts and lineage](api/artifacts.html): find saved results, trace their inputs, and summarize analyses
 - [Import and export](api/import_export.html): readers, writers, dataset merging, and storage controls
 - [Perturbation](api/perturbation.html): guide calls, perturbation labels, efficiency, E-distances, Mixscape, association tests, and perturbation profiles and clusters of pooled CRISPR screens, with their records
+- [Clones](api/clones.html): import the clones that lineage tracing tools write or take them from a cell metadata column, join their cells to a store's cells by barcode, read them as a `Clones` record, and export them as clone tables or matrices
 - [Plotting](api/plotting.html): embeddings, expression, clusters, trajectories, and diagnostics
 - [Example datasets](api/datasets.html): list and download the public example datasets that the tutorials use
 - [Utilities](api/utilities.html): store loading, computation settings, gene sets, logging, standard-library log forwarding, and progress

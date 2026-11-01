@@ -481,6 +481,7 @@ def test_matrix_has_no_domain_or_orchestration_dependencies():
             "matrix",
             {
                 "assay",
+                "clones",
                 "clustering",
                 "datastore",
                 "embeddings",
@@ -549,6 +550,7 @@ def test_algorithm_domains_do_not_import_orchestration_or_io():
     # validating domain payloads without moving their semantics into DataStore.
     forbidden = {"datastore", "plotting", "readers", "writers"}
     storage_exceptions = {
+        "clones": set(),
         "clustering": set(),
         "embeddings": {"imported_storage.py"},
         "perturbation": set(),
@@ -1086,6 +1088,7 @@ def test_reader_implementations_are_runtime_isolated():
         "_text.py",
         "_sparse.py",
         "cellranger.py",
+        "clone_tables.py",
         "csv.py",
         "h5ad.py",
         "mtx.py",
@@ -1100,6 +1103,7 @@ def test_reader_implementations_are_runtime_isolated():
     forbidden_roots = {"datastore", "merge", "plotting", "storage", "writers"}
     format_modules = {
         "readers.cellranger",
+        "readers.clone_tables",
         "readers.csv",
         "readers.h5ad",
         "readers.mtx",
@@ -1107,6 +1111,7 @@ def test_reader_implementations_are_runtime_isolated():
     }
     shared_reader_imports = {
         "cellranger.py": {"readers._assay_names", "readers._sparse", "readers._text"},
+        "clone_tables.py": {"readers._h5ad_columns", "readers._text"},
         "csv.py": {"readers._text"},
         "h5ad.py": {
             "readers._assay_names",
@@ -1178,6 +1183,7 @@ def test_writer_implementations_are_runtime_isolated():
         "_materialize.py",
         "_store.py",
         "cellranger.py",
+        "clone_tables.py",
         "counts_t.py",
         "csv.py",
         "export.py",
@@ -1197,6 +1203,7 @@ def test_writer_implementations_are_runtime_isolated():
     allowed_assay_imports = {"assay.classification", "assay.normalization"}
     format_modules = {
         "writers.cellranger",
+        "writers.clone_tables",
         "writers.csv",
         "writers.h5ad",
         "writers.sparse",
@@ -1316,6 +1323,7 @@ def test_assay_implementations_are_runtime_isolated():
 def test_datastore_operation_mixins_are_runtime_isolated():
     from cytearc.datastore._operations.ambient import _AmbientOperationsMixin
     from cytearc.datastore._operations.cell_calling import _CellCallingOperationsMixin
+    from cytearc.datastore._operations.clones import _CloneOperationsMixin
     from cytearc.datastore._operations.clustering import _ClusteringOperationsMixin
     from cytearc.datastore._operations.embeddings import _EmbeddingOperationsMixin
     from cytearc.datastore._operations.features import _FeatureOperationsMixin
@@ -1360,6 +1368,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         "datastore.mapping_datastore",
     }
     allowed_operation_helpers = {
+        "datastore._operations.cell_barcodes",
         "datastore._operations.enrichment_store",
         "datastore._operations.paris_persistence",
         "datastore._operations.perturbation_store",
@@ -1396,6 +1405,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         _PerturbationMixscapeOperationsMixin,
         _PerturbationAssociationOperationsMixin,
         _PerturbationProfileOperationsMixin,
+        _CloneOperationsMixin,
     )
     assert all("__init__" not in mixin.__dict__ for mixin in mixins)
     assert all(mixin.__bases__ == (object,) for mixin in mixins)

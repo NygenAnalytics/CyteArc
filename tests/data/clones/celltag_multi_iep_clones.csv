@@ -1,0 +1,25 @@
+,clone_id,cell.bc,edge.den,day,assay,clone.size (RNA & ATAC),# of D3 cells (RNA & ATAC),# of D12 cells (RNA & ATAC),# of D21 cells (RNA & ATAC),# of D12/21 cells (RNA & ATAC),clone.size (RNA),# of D3 cells (RNA),# of D12 cells (RNA),# of D21 cells (RNA),# of D12/21 cells (RNA),clone.size (ATAC),# of D3 cells (ATAC),# of D12 cells (ATAC),# of D21 cells (ATAC),# of D12/21 cells (ATAC),state/fate,cell_type,most_dominant_fate,most_dominant_fate_pct
+35933,r1_1001,B4D12-RNA-r1-1-CTCATGCCACCATATG-1,1.0,D12,RNA,2,1,1,0,1,2,1,1,0,1,0,0,0,0,0,fate,reprogramming,reprogramming,100.0
+35934,r1_1001,B4D3-RNA-r1-4-ATTCCTAAGGCGTTAG-1,1.0,D3,RNA,2,1,1,0,1,2,1,1,0,1,0,0,0,0,0,state,early,reprogramming,100.0
+35935,r1_1002,B4D12-RNA-r1-1-CTCCAACAGGAAAGAC-1,1.0,D12,RNA,2,0,2,0,2,2,0,2,0,2,0,0,0,0,0,fate,reprogramming,reprogramming,100.0
+35936,r1_1002,B4D12-RNA-r1-1-TGGTAGTGTTAGCTAC-1,1.0,D12,RNA,2,0,2,0,2,2,0,2,0,2,0,0,0,0,0,fate,reprogramming,reprogramming,100.0
+31044,r1_101,B4D21-ATAC-r1-2-GGCGTTGCATTTCTTG-1,1.0,D21,ATAC,6,0,0,6,6,1,0,0,1,1,5,0,0,5,5,fate,transition,transition,66.66666666666667
+31045,r1_101,B4D21-ATAC-r1-2-GTGGCGTTCGGTCCGA-1,1.0,D21,ATAC,6,0,0,6,6,1,0,0,1,1,5,0,0,5,5,fate,transition,transition,66.66666666666667
+31046,r1_101,B4D21-ATAC-r1-3-TCAGTTTAGATGCGAC-1,1.0,D21,ATAC,6,0,0,6,6,1,0,0,1,1,5,0,0,5,5,fate,dead-end,transition,66.66666666666667
+31047,r1_101,B4D21-ATAC-r1-5-AACCTTTAGATGGGAA-1,1.0,D21,ATAC,6,0,0,6,6,1,0,0,1,1,5,0,0,5,5,fate,transition,transition,66.66666666666667
+31048,r1_101,B4D21-ATAC-r1-6-TCGCAGGGTATGGGTG-1,1.0,D21,ATAC,6,0,0,6,6,1,0,0,1,1,5,0,0,5,5,fate,dead-end,transition,66.66666666666667
+31049,r1_101,B4D21-RNA-r1-3-CTAGACACAGCTACCG-1,1.0,D21,RNA,6,0,0,6,6,1,0,0,1,1,5,0,0,5,5,fate,transition,transition,66.66666666666667
+36087,r1_1036,B4D12-RNA-r1-1-GCTACAACACTCAAGT-1,1.0,D12,RNA,3,2,1,0,1,2,1,1,0,1,1,1,0,0,0,fate,transition,transition,100.0
+36088,r1_1036,B4D3-ATAC-r1-2-CGGTGCACACAGTTAC-1,1.0,D3,ATAC,3,2,1,0,1,2,1,1,0,1,1,1,0,0,0,state,early,transition,100.0
+36089,r1_1036,B4D3-RNA-r1-1-TTTACGTAGCGCATCC-1,1.0,D3,RNA,3,2,1,0,1,2,1,1,0,1,1,1,0,0,0,state,early,transition,100.0
+12001,r2_1817,B4D12-ATAC-r2-1-AATGTCGTCACTTACT-1,1.0,D12,ATAC,7,3,1,3,4,5,2,0,3,3,2,1,1,0,1,fate,transition,reprogramming,50.0
+12002,r2_1817,B4D21-RNA-r2-1-AGGGCTCAGGGAGAAT-1,1.0,D21,RNA,7,3,1,3,4,5,2,0,3,3,2,1,1,0,1,fate,reprogramming,reprogramming,50.0
+12003,r2_1817,B4D21-RNA-r2-3-CAGGGCTGTGGTAATA-1,1.0,D21,RNA,7,3,1,3,4,5,2,0,3,3,2,1,1,0,1,fate,reprogramming,reprogramming,50.0
+12004,r2_1817,B4D21-RNA-r2-3-TTGCTGCTCCAAAGGG-1,1.0,D21,RNA,7,3,1,3,4,5,2,0,3,3,2,1,1,0,1,fate,transition,reprogramming,50.0
+12005,r2_1817,B4D3-ATAC-r2-3-TTTGGTTCATATTGGC-1,1.0,D3,ATAC,7,3,1,3,4,5,2,0,3,3,2,1,1,0,1,state,early,reprogramming,50.0
+12006,r2_1817,B4D3-RNA-r2-1-AGATGCTCAGTTGAAA-1,1.0,D3,RNA,7,3,1,3,4,5,2,0,3,3,2,1,1,0,1,state,early,reprogramming,50.0
+12007,r2_1817,B4D3-RNA-r2-3-TATCCTATCTATCGGA-1,1.0,D3,RNA,7,3,1,3,4,5,2,0,3,3,2,1,1,0,1,state,early,reprogramming,50.0
+12008,r2_1818,B4D12-ATAC-r2-1-ACAAACCTCAGCCGGT-1,1.0,D12,ATAC,4,1,3,0,3,3,1,2,0,2,1,0,1,0,1,fate,dead-end,transition,66.66666666666667
+12009,r2_1818,B4D12-RNA-r2-1-TGTAGACTCCTAGCGG-1,1.0,D12,RNA,4,1,3,0,3,3,1,2,0,2,1,0,1,0,1,fate,transition,transition,66.66666666666667
+12010,r2_1818,B4D12-RNA-r2-2-TTGGTTTCAAGCTACT-1,1.0,D12,RNA,4,1,3,0,3,3,1,2,0,2,1,0,1,0,1,fate,transition,transition,66.66666666666667
+12011,r2_1818,B4D3-RNA-r2-5-GCTACCTTCACGAGGA-1,1.0,D3,RNA,4,1,3,0,3,3,1,2,0,2,1,0,1,0,1,state,early,transition,66.66666666666667

@@ -17,6 +17,9 @@ from ..storage.partition import (
 
 
 _SELECTION_INDEX_ARRAYS = 16
+# A Python string's header and its slot in an object array, beside up to four
+# bytes for each character.
+_STRING_BYTES = 64
 
 
 class _RowReadableMetaData(Protocol):
@@ -68,6 +71,33 @@ def array_row_selection_parts(array: Any) -> tuple[int, int]:
         return 0, int(per_row)
     decoded = geometry.nominalChunkBytes()
     return int(decoded + _encoded_chunk_bound(decoded)), int(per_row)
+
+
+def text_width(array: Any) -> int:
+    """Return the characters of each value of a stored text array, 0 for other values.
+
+    The store writes text as fixed-width unicode, four bytes per character.
+    """
+    dtype = np.dtype(array.dtype)
+    return int(dtype.itemsize) // 4 if dtype.kind == "U" else 0
+
+
+def text_row_selection_parts(array: Any) -> tuple[int, int]:
+    """Return fixed and per-row bytes of reading stored rows as Python strings.
+
+    The store keeps text at the width of its longest value and decodes whole
+    chunks, so one long value widens every row that is read. Each row is held
+    as :func:`array_row_selection_parts` counts it, and then becomes a Python
+    string of up to four bytes per character.
+    """
+    fixed, per_row = array_row_selection_parts(array)
+    return fixed, per_row + _STRING_BYTES + 4 * text_width(array)
+
+
+def text_read_bytes(array: Any, n_rows: int) -> int:
+    """Return the bytes of reading ``n_rows`` stored rows as Python strings."""
+    fixed, per_row = text_row_selection_parts(array)
+    return fixed + int(n_rows) * per_row
 
 
 def read_array_rows_chunkwise(array: Any, rows: np.ndarray) -> np.ndarray:

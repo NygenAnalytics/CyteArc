@@ -132,6 +132,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "THEMES",
     "association_calibration",
     "association_volcano",
+    "clone_abundance",
     "cluster_tree",
     "cluster_connectivity",
     "compose_results",
@@ -415,7 +416,8 @@ import cytearc.plotting as plotting
 
 exports = {_EXPECTED_PLOTTING_EXPORTS!r}
 concrete = (
-        "cytearc.plotting.cluster_connectivity",
+        "cytearc.plotting.clones",
+    "cytearc.plotting.cluster_connectivity",
     "cytearc.plotting.composition",
     "cytearc.plotting.diagnostics",
     "cytearc.plotting.distribution",

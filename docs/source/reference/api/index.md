@@ -21,6 +21,7 @@ integration
 mapping
 regulons
 perturbation
+clones
 plotting
 datasets
 utilities

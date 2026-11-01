@@ -30,15 +30,16 @@ def write_count_store(
     dtype: DTypeLike,
     *,
     feature_ids: Mapping[str, Sequence[str]] | None = None,
+    cell_ids: Sequence[str] | None = None,
 ) -> None:
     """Write a store whose count matrices have the storage dtype ``dtype``.
 
     ``counts`` maps assay names to cells-by-features matrices over the same
     cells. Each assay takes the preset type of its name, such as RNA, ADT,
     or ATAC, and RNA assays also get ``countsT``. Features are named
-    ``f"{assay}{index}"``, or by ``feature_ids`` for the assays it names. The
-    values must be exactly representable in ``dtype``, so the stored counts
-    equal them.
+    ``f"{assay}{index}"``, or by ``feature_ids`` for the assays it names, and
+    cells ``f"cell{index}"`` unless ``cell_ids`` names them. The values must
+    be exactly representable in ``dtype``, so the stored counts equal them.
     """
     from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
     from cytearc.storage.stores import load_zarr
@@ -49,8 +50,14 @@ def write_count_store(
     n_cells = {len(values) for values in counts.values()}
     if len(n_cells) != 1:
         raise ValueError("Every assay must have the same cells")
-    cell_ids = np.array([f"cell{index}" for index in range(n_cells.pop())])
-    create_cell_data(root, None, ids=cell_ids, names=cell_ids)
+    n_rows = n_cells.pop()
+    if cell_ids is None:
+        cells = np.array([f"cell{index}" for index in range(n_rows)])
+    else:
+        cells = np.asarray(list(cell_ids), dtype=str)
+        if len(cells) != n_rows:
+            raise ValueError("cell_ids must name every cell")
+    create_cell_data(root, None, ids=cells, names=cells)
     for assay, values in counts.items():
         stored = np.asarray(values).astype(storage_dtype)
         if not np.array_equal(stored, values):
@@ -65,7 +72,7 @@ def write_count_store(
             root,
             assay,
             None,
-            len(cell_ids),
+            len(cells),
             feat_ids=ids,
             feat_names=ids,
             dtype=storage_dtype.name,

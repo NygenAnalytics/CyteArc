@@ -17,6 +17,7 @@ from cytearc.metadata.selection import (
     FeatureRef,
     NamedCellArtifact,
     NormalizationSpec,
+    category_codes,
     cell_value_array,
     grouping_value_name,
     resolve_cell_aligned_artifact,
@@ -41,6 +42,9 @@ from cytearc.metadata.rows import (
     read_metadata_missing_rows,
     read_metadata_rows,
     read_metadata_rows_chunkwise,
+    text_read_bytes,
+    text_row_selection_parts,
+    text_width,
 )
 from cytearc.metadata.table import MetaData as implementation_metadata
 from cytearc.storage import ArtifactRef
@@ -366,6 +370,26 @@ def test_chunkwise_metadata_rows_preserve_order_and_decode_one_chunk():
     narrow = group.create_array("narrow", shape=(6,), dtype="f8", chunks=(2,))
     wide = group.create_array("wide", shape=(6, 4), dtype="f8", chunks=(2, 4))
     assert array_row_selection_parts(wide)[1] > array_row_selection_parts(narrow)[1]
+
+
+def test_reading_text_rows_counts_a_string_for_each_row():
+    group = zarr.open_group(store=MemoryStore(), mode="w")
+    text = group.create_array("text", shape=(6,), dtype="<U5", chunks=(2,))
+    numbers = group.create_array("numbers", shape=(6,), dtype="f8", chunks=(2,))
+    chunk, per_row = array_row_selection_parts(text)
+    # A row of five characters is held three times, 20 bytes each, beside 16
+    # int64 positions, and then as a string of 64 bytes and four per character.
+    assert text_width(text) == 5
+    assert per_row == 3 * 20 + 16 * 8
+    assert text_row_selection_parts(text) == (chunk, per_row + 64 + 4 * 5)
+    assert text_read_bytes(text, 3) == chunk + 3 * (per_row + 64 + 4 * 5)
+    # Reading no row still decodes a chunk.
+    assert chunk > 0
+    assert text_read_bytes(text, 0) == chunk
+    # Values that are not text have no characters, but each becomes a string.
+    chunk, per_row = array_row_selection_parts(numbers)
+    assert text_width(numbers) == 0
+    assert text_read_bytes(numbers, 3) == chunk + 3 * (per_row + 64)
 
 
 def test_metadata_column_blocks_respect_source_chunk_boundaries():
@@ -1087,6 +1111,32 @@ def test_category_mask_accepts_labels_whose_missing_test_is_ambiguous():
     np.testing.assert_array_equal(
         valid_category_mask(values), [True, True, False, False]
     )
+
+
+def test_category_codes_name_labels_by_text_in_natural_order():
+    values = np.asarray(["b10", "b2", " ", "", "b2", "a"], dtype="<U3")
+    codes, names = category_codes(values, missing_mask=[False] * 5 + [True])
+    assert names == ["b2", "b10"]
+    assert codes.tolist() == [1, 0, -1, -1, 0, -1]
+    assert codes.dtype == np.int64
+    # Values that read alike share a code; numbers sort by value.
+    mixed = np.asarray([2, "2", 10, None, float("nan"), 1.5], dtype=object)
+    codes, names = category_codes(mixed)
+    assert names == ["1.5", "2", "10"]
+    assert codes.tolist() == [1, 1, 2, -1, -1, 0]
+    integers, names = category_codes(np.asarray([3, 1, 3]))
+    assert (integers.tolist(), names) == ([1, 0, 1], ["1", "3"])
+    # Unhashable labels are coded by their text.
+    unhashable = np.empty(3, dtype=object)
+    unhashable[:] = [["a", "b"], "c", None]
+    codes, names = category_codes(unhashable)
+    assert (codes.tolist(), names) == ([0, 1, -1], ["['a', 'b']", "c"])
+    empty, names = category_codes(np.asarray([], dtype=object))
+    assert (empty.tolist(), names) == ([], [])
+    with pytest.raises(ValueError, match="one-dimensional"):
+        category_codes(np.zeros((2, 2)))
+    with pytest.raises(ValueError, match="must align"):
+        category_codes(["a", "b"], missing_mask=[True])
 
 
 def test_complete_labels_require_an_artifact_ref():
