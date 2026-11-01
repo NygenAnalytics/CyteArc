@@ -39,19 +39,22 @@ Formats:
 Text may be plain or gzip-compressed, separated by tabs, commas or spaces,
 with R's double quotes and without a final newline. A header that starts
 with ``#``, as TREX writes, is a header. A header with one field fewer than
-its rows is R's row-name layout, whose first field is the row name, unless
-the rows' last field is empty, which a delimiter at the end of each row
-leaves; R's ``write.csv`` writes the row names under an empty first name
-instead. Blank lines hold no rows.
+its rows is R's row-name layout, whose first field is the row name; R's
+``write.csv`` writes the row names under an empty first name instead. A
+delimiter after each row's last field also gives one field more than the
+header, an empty one, so when every row ends in its delimiter with nothing
+after it the table is refused, since the two layouts read alike there.
+Blank lines hold no rows.
 """
 
 import csv
 import gzip
 import io
+import itertools
 import os
 import re
 import zlib
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -220,8 +223,8 @@ class _TextLayout:
     """A delimited text file's header, delimiter and compression.
 
     Attributes:
-        trailing_delimiter: Whether each row ends in a delimiter that the
-            header lacks, which leaves an empty last field.
+        row_names: Whether the first field of each row names its cell, under
+            an empty name or one that the header leaves out, as R writes it.
         row_chars: The characters of the longest of the first rows.
     """
 
@@ -230,7 +233,6 @@ class _TextLayout:
     delimiter: str
     compression: str | None
     row_names: bool
-    trailing_delimiter: bool = False
     row_chars: int = 0
 
 
@@ -337,30 +339,59 @@ def _first_lines(path: str, compression: str | None, n_lines: int) -> list[str]:
     return lines
 
 
+def _records(lines: Iterable[str]) -> Iterator[str]:
+    """Yield the rows of a table's text, each without its line ending.
+
+    Blank lines are skipped, and a row whose quotes are open goes on to the
+    next line.
+    """
+    record = ""
+    for line in lines:
+        text = line.rstrip("\r\n")
+        record = f"{record}\n{text}" if record else text
+        if not record.strip():
+            record = ""
+        elif not record.count('"') % 2:
+            yield record
+            record = ""
+
+
 def _header_and_rows(path: str, compression: str | None) -> tuple[str, list[str]]:
     """Return a table's first line and up to ``_SAMPLE_ROWS`` rows after it.
 
     Blank lines after the first are skipped.
     """
-    header: str | None = None
-    rows: list[str] = []
-    record = ""
     with _text_errors(path), _open_text(path, compression) as handle:
-        for line in handle:
-            text = line.rstrip("\r\n")
-            if header is None:
-                header = text
-                continue
-            # A row whose quotes are open goes on to the next line.
-            record = f"{record}\n{text}" if record else text
-            if record.count('"') % 2 or not record.strip():
-                record = "" if not record.strip() else record
-                continue
-            rows.append(record)
-            record = ""
-            if len(rows) == _SAMPLE_ROWS:
-                break
-    return header or "", rows
+        header = next(handle, "").rstrip("\r\n")
+        rows = list(itertools.islice(_records(handle), _SAMPLE_ROWS))
+    return header, rows
+
+
+def _ends_in_delimiter(row: str, delimiter: str) -> bool:
+    """Return whether a row ends in its delimiter, with nothing after it.
+
+    Space-separated rows lose the spaces at their ends when they are split,
+    so none ends in its delimiter.
+    """
+    return delimiter != " " and row.endswith(delimiter)
+
+
+def _rows_hold_values_after_their_names(
+    path: str, compression: str | None, delimiter: str, n_names: int
+) -> bool:
+    """Return whether a row of a table holds anything after its named columns.
+
+    Each row is read until one holds a field after the header's ``n_names``
+    columns that is not empty: a value, or quoted empty text as R writes it.
+    """
+    with _text_errors(path), _open_text(path, compression) as handle:
+        next(handle, "")
+        for row in _records(handle):
+            if len(_fields(row, delimiter)) == n_names + 1 and not _ends_in_delimiter(
+                row, delimiter
+            ):
+                return True
+    return False
 
 
 def _delimiter(lines: list[str]) -> str:
@@ -400,12 +431,28 @@ def _text_layout(path: str) -> _TextLayout:
     # TREX starts its headers with "#", which marks no comment.
     if header and header[0].startswith("#"):
         header[0] = header[0][1:]
-    row_names = trailing_delimiter = False
+    row_names = False
     if rows:
         fields = _fields(rows[0], delimiter)
-        if len(fields) == len(header) + 1 and not fields[-1].strip():
-            trailing_delimiter = True
-        elif len(fields) == len(header) + 1:
+        if len(fields) == len(header) + 1:
+            # R's write.table leaves its row names out of the header, and a
+            # delimiter after each row's last field gives one field more too,
+            # an empty one. The two differ only where a row holds something
+            # after its last named column.
+            if _ends_in_delimiter(
+                rows[0], delimiter
+            ) and not _rows_hold_values_after_their_names(
+                path, compression, delimiter, len(header)
+            ):
+                raise ValueError(
+                    f"The header of {path} names {len(header)} columns, and each "
+                    f"of its rows holds {len(header) + 1} fields, the last one "
+                    "empty: R's row names under a header that leaves them out, "
+                    "with an empty last column, or a delimiter after each row's "
+                    "last field. Name the row names in the header, as R's "
+                    "write.table(..., col.names=NA) writes them, or end the header "
+                    "with the delimiter too"
+                )
             row_names = True
             header = ["", *header]
         elif len(fields) != len(header):
@@ -422,7 +469,6 @@ def _text_layout(path: str) -> _TextLayout:
         delimiter=delimiter,
         compression=compression,
         row_names=row_names,
-        trailing_delimiter=trailing_delimiter,
         row_chars=max((len(row) for row in rows), default=0),
     )
 
@@ -926,16 +972,6 @@ def _text_chunks(
     )
     line = 2
     for chunk in chunks:
-        if text.trailing_delimiter:
-            last = chunk.columns[-1]
-            filled = np.flatnonzero(chunk[last].to_numpy(dtype=object) != "")
-            if len(filled):
-                raise ValueError(
-                    f"{text.path} ends its rows in a delimiter, but holds a value "
-                    f"after its last column on line "
-                    f"{_line_list(filled[:1], line, text)}"
-                )
-            chunk = chunk.drop(columns=last)
         yield line, chunk
         line += len(chunk)
 

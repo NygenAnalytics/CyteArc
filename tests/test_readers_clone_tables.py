@@ -153,26 +153,74 @@ def test_r_write_csv_row_names_hold_the_cells(tmp_path) -> None:
     )
 
 
-@pytest.mark.parametrize("delimiter", [",", "\t"])
-def test_a_delimiter_after_every_rows_last_field_ends_no_column(
-    tmp_path, delimiter
-) -> None:
-    # One field more than the header, the last one empty, is a delimiter at
-    # the end of each row rather than R's row-name layout.
+@pytest.mark.parametrize("quote", ["", '"'])
+def test_r_row_names_whose_first_row_ends_in_an_empty_value(tmp_path, quote) -> None:
+    # R's write.table leaves the row names out of its header. Its first row
+    # here holds no clone, written as quoted empty text by default and as
+    # nothing with quote=FALSE, which a delimiter after each row's last field
+    # would give too; the later rows' clones show the row names.
+    q = quote
     path = _write(
         tmp_path / "clones.txt",
-        f"clone_nr{delimiter}cell_id\n1{delimiter}AAA{delimiter}\n"
-        f"2{delimiter}CCC{delimiter}\n",
+        f"{q}sample{q}\t{q}clone{q}\n{q}AAA-1{q}\t{q}s1{q}\t{q}{q}\n"
+        f"{q}CCC-1{q}\t{q}s1{q}\t{q}c2{q}\n{q}GGG-1{q}\t{q}s1{q}\t{q}c2{q}\n",
     )
 
-    assert clone_layout(path).cell == ("cell_id",)
-    assert _rows(path)[:2] == (["AAA", "CCC"], ["1", "2"])
+    assert clone_layout(path, columns={"clone": "clone"}).cell == ()
+    assert _rows(path, columns={"clone": "clone"})[:2] == (
+        ["AAA-1", "CCC-1", "GGG-1"],
+        [None, "c2", "c2"],
+    )
 
 
-def test_a_value_after_the_last_column_of_a_row_is_refused(tmp_path) -> None:
-    path = _write(tmp_path / "clones.csv", "Cell_ID,Clone_ID\nAAA,1,\n\nCCC,2,x\n")
-    with pytest.raises(ValueError, match="value after its last column on line 4"):
-        _rows(path, chunk_rows=10)
+def test_rows_past_the_first_ones_can_show_r_row_names(tmp_path) -> None:
+    # The first 150 cells hold no clone; the 151st shows that the field
+    # after the named columns holds values.
+    rows = [f"cell{index}\ts1\t" for index in range(150)] + ["cell150\ts1\tc1"]
+    path = _write(tmp_path / "clones.txt", "sample\tclone\n" + "\n".join(rows) + "\n")
+
+    barcodes, clones, _ = _rows(path, chunk_rows=40, columns={"clone": "clone"})
+
+    assert barcodes == [f"cell{index}" for index in range(151)]
+    assert clones == [None] * 150 + ["c1"]
+
+
+@pytest.mark.parametrize("delimiter", [",", "\t"])
+def test_rows_that_each_end_in_an_empty_field_need_a_header_that_says_why(
+    tmp_path, delimiter
+) -> None:
+    # One field more than the header, empty in every row, is R's row names
+    # with an empty last column, or a delimiter after each row's last field:
+    # the reader cannot tell which, so it refuses rather than shift every
+    # column.
+    d = delimiter
+    path = _write(
+        tmp_path / "clones.txt", f"clone_nr{d}cell_id\n1{d}AAA{d}\n2{d}CCC{d}\n"
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"names 2 columns, and each of its rows holds 3 fields, the last one "
+        r"empty: R's row names .* or a delimiter after each row's last field. Name "
+        r"the row names in the header, as R's write.table\(\.\.\., col.names=NA\) "
+        r"writes them, or end the header with the delimiter too",
+    ):
+        clone_layout(path)
+    # A header that ends in the delimiter too names the empty last field.
+    ended = _write(
+        tmp_path / "ended.txt", f"clone_nr{d}cell_id{d}\n1{d}AAA{d}\n2{d}CCC{d}\n"
+    )
+    assert clone_layout(ended).cell == ("cell_id",)
+    assert _rows(ended)[:2] == (["AAA", "CCC"], ["1", "2"])
+    # A header that names the row names under an empty name, as
+    # write.table(..., col.names=NA) writes them, makes them the cells.
+    named = _write(
+        tmp_path / "named.txt",
+        f"{d}clone_nr{d}cell_id\nAAA{d}1{d}\nCCC{d}2{d}\n",
+    )
+    assert _rows(named, columns={"clone": "clone_nr"})[:2] == (
+        ["AAA", "CCC"],
+        ["1", "2"],
+    )
 
 
 def test_blank_lines_hold_no_rows(tmp_path) -> None:
