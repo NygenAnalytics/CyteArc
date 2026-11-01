@@ -21,8 +21,8 @@ from ...metadata.rows import (
     array_row_selection_parts,
     metadata_missing_mask,
     previous_read_bytes,
-    read_metadata_missing_rows,
-    read_metadata_rows,
+    read_metadata_missing_rows_chunkwise,
+    read_metadata_rows_chunkwise,
 )
 from ...metadata.selection import (
     category_codes,
@@ -274,7 +274,8 @@ def cell_groups(
         + GROUPING_BYTES_PER_LABEL_BYTE * label_bytes
     )
     # Reading a column, or the label artifact, also holds the rest of its
-    # last chunk; they are read one at a time.
+    # last chunk; they are read one at a time, a column a stored chunk at a
+    # time.
     chunk = max((_column_chunk_bytes(cells, column) for column in columns), default=0)
     # A cell selection and a label artifact are read whole, whatever cells
     # the artifact holds.
@@ -336,8 +337,8 @@ def cell_groups(
     # texts, and only the distinct labels are checked and named.
     coded: list[tuple[np.ndarray, list[str]]] = [
         coded_labels(
-            np.asarray(read_metadata_rows(cells, column, cell_index)),
-            read_metadata_missing_rows(cells, column, cell_index),
+            np.asarray(read_metadata_rows_chunkwise(cells, column, cell_index)),
+            read_metadata_missing_rows_chunkwise(cells, column, cell_index),
         )
         for column in columns
     ]

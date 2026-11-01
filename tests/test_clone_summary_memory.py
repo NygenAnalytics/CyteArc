@@ -248,3 +248,73 @@ def test_the_budgets_count_the_read_that_zarr_still_holds(data) -> None:
     }
     for case, (peak, budget) in results.items():
         assert peak <= budget, (case, peak, budget)
+
+
+# Grouping by two text columns stored in chunks of 1,000 rows, for 400 cells
+# spread over every chunk of 20,000, in a fresh process whose finished Zarr
+# tasks are held until the next one finishes.
+_CHUNKED_GROUPS_SCRIPT = """
+import json, re, sys, threading, tracemalloc
+from concurrent.futures import thread
+import numpy as np
+from cytearc.datastore.datastore import DataStore
+from tests.storage_helpers import write_count_store
+
+n_cells, path = 20_000, sys.argv[1]
+rng = np.random.default_rng(3)
+ids = np.asarray([f"cell{i:06d}-1" for i in range(n_cells)])
+write_count_store(path, {"RNA": np.ones((n_cells, 2), dtype=np.uint16)}, "uint16", cell_ids=ids)
+store = DataStore(path, default_assay="RNA", min_features_per_cell=0, nthreads=1)
+alphabet = np.asarray(list("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"))
+for name in ("a", "b"):
+    labels = np.asarray(["".join(row) for row in rng.choice(alphabet, size=(n_cells, 24))])
+    store.zw["cellData"].create_array(name, data=labels, chunks=(1_000,))
+store.cells.insert("few", np.arange(n_cells) % 50 == 0)
+store.cells.insert("clone", np.asarray([f"clone{i % 7}" for i in range(n_cells)]))
+store = DataStore(path, default_assay="RNA", min_features_per_cell=0, nthreads=1)
+assert store.cells._get_array("a").chunks == (1_000,)
+clones = store.clones.from_column("clone", cell_selection=store.snapshot_cell_selection("few"))
+
+def call():
+    return store.clones.diversity(clones, group_by=["a", "b"])
+
+call()
+budget = 1
+while True:
+    store.memoryBytes = budget
+    try:
+        call()
+        break
+    except MemoryError as error:
+        budget = int(re.search(r"about (\\d+) bytes", str(error)).group(1))
+lock, held, run = threading.Lock(), [None], thread._WorkItem.run
+
+def run_and_hold(item, *args):
+    run(item, *args)
+    with lock:
+        held[0] = item
+
+thread._WorkItem.run = run_and_hold
+tracemalloc.start()
+call()
+print(json.dumps([tracemalloc.get_traced_memory()[1], budget]))
+"""
+
+
+def test_grouping_by_columns_of_several_chunks_holds_its_budget(tmp_path) -> None:
+    import json
+    import subprocess
+    import sys
+
+    # The grouping counts one stored chunk of each column, so the cells'
+    # labels are read a chunk at a time rather than every chunk they touch at
+    # once, even while the read of each chunk still holds the chunk before.
+    traced = subprocess.run(
+        [sys.executable, "-c", _CHUNKED_GROUPS_SCRIPT, str(tmp_path / "store.zarr")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    peak, budget = json.loads(traced.stdout.strip().splitlines()[-1])
+
+    assert peak <= budget, (peak, budget)
