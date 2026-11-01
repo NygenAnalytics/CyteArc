@@ -286,3 +286,27 @@ def test_genotype_clones_hold_no_more_than_the_smallest_budget_they_accept(
         lambda: store.variants.genotype_clones(genotypes, invalidate_cache=True)
     )
     assert peak <= budget
+
+
+@pytest.mark.slow
+def test_genotype_clones_of_many_cells_hold_no_more_than_the_smallest_budget(
+    tmp_path,
+) -> None:
+    from tests.test_variant_genotype_calls import _many_cell_counts
+
+    # 4,000 cells at 40 targets: the calls, the cells' sets and their masks
+    # of known sites outweigh what the store's objects hold.
+    ids = [f"c{cell:06d}-1" for cell in range(4_000)]
+    store = write_cells_store(tmp_path / "store.zarr", ids)
+    counts = _many_cell_counts(store, ids, tmp_path, "threshold", n_sites=40)
+    genotypes = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
+
+    def call(budget: int):
+        store.memoryBytes = budget
+        try:
+            return store.variants.genotype_clones(genotypes, invalidate_cache=True)
+        finally:
+            store.memoryBytes = 1 << 30
+
+    budget = smallest_budget(call, 1 << 30)
+    assert traced_peak(lambda: call(budget)) <= budget
