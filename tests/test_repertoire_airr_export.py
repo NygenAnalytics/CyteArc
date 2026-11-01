@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import dataclasses
 import gc
 import gzip
@@ -36,17 +37,19 @@ from tests.clone_helpers import (
     budget_refusals,
     receptor_store,
     traced_peak,
+    write_cells_store,
     write_lines,
 )
 
 # Contig IDs repeat across the three files: X takes _3 and then _4, since the
 # TCR file names a contig X_2, and Z takes _3, or _2 when only chains are
-# written, since the contig named Z_2 is not a chain. Values hold a tab, a
-# double quote, a newline and text beyond ASCII, and some are missing.
+# written, since the contig named Z_2 is not a chain. Values hold @, double
+# quotes, one at the start of a constant gene call, ', # and text beyond
+# ASCII, which are written as they are, and some are missing.
 EDGE_TCR = [
-    'cell0,true,X,true,500,TRA,"TRAV1\tB",,TRAJ1,TRAC,true,true,CAVA,TGTGCTGTGGCC,90,9,"ct""1",ct1_1',
+    'cell0,true,X,true,500,TRA,TRAV1@B,,TRAJ1,TRAC,true,true,CAVA,TGTGCTGTGGCC,90,9,"ct""1",ct1_1',
     "cell0,true,X_2,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,80,8,ct1,ct1_2",
-    'cell1,true,Y,true,500,TRB,TRBVé,,TRBJ2,"TR\nBC1",true,true,CASSB,TGTGCCAGCAGCGCA,80,8,ct2,ct2_1',
+    """cell1,true,Y,true,500,TRB,TRBVé,,TRBJ2,\"\"\"TR'BC#1",true,true,CASSB,TGTGCCAGCAGCGCA,80,8,ct2,ct2_1""",
     "cell2,true,Z,true,500,TRA,TRAV2,,TRAJ2,,true,true,CAVB,TGTGCTGTGGCA,60,6,ct3,ct3_1",
 ]
 EDGE_BCR = [
@@ -76,7 +79,8 @@ EDGE_FIELDS = [
 ]
 # The edge receptors' files as the export wrote them before it streamed its
 # contigs, which loaded every contig into one table and wrote it with
-# DataFrame.to_csv. v_identity holds whole numbers only, so it is written as
+# DataFrame.to_csv, but with every value as it is, unquoted, as the AIRR file
+# format asks. v_identity holds whole numbers only, so it is written as
 # integers.
 EXPECTED_EDGE = (
     "sequence_id\tsequence\trev_comp\tproductive\tv_call\td_call\tj_call"
@@ -84,9 +88,9 @@ EXPECTED_EDGE = (
     "\td_cigar\tj_cigar\tcell_id\tc_call\tumi_count\tv_identity\td_identity"
     "\tj_identity\traw_clonotype_id\n"
     "X\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell0\tIGHM\t20\t\t\t\tcb1\n"
-    'X_3\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell0\tTRAC\t9\t\t\t\t"ct""1"\n'
+    'X_3\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell0\tTRAC\t9\t\t\t\tct"1\n'
     "X_2\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell0\tTRBC1\t8\t\t\t\tct1\n"
-    'Y\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell1\t"TR\nBC1"\t8\t\t\t\tct2\n'
+    "Y\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell1\t\"TR'BC#1\t8\t\t\t\tct2\n"
     "Z\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell2\t\t6\t\t\t\tct3\n"
     "Z_3\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell3\tIGHM\t\t\t\t\tcb2\n"
     "Z_2\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell4\tIGKC\t15\t\t\t\tcb3\n"
@@ -100,9 +104,9 @@ EXPECTED_EDGE_CHAINS = (
     "\td_cigar\tj_cigar\tcell_id\tc_call\tumi_count\tv_identity\td_identity"
     "\tj_identity\traw_clonotype_id\n"
     "X\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell0\tIGHM\t20\t\t\t\tcb1\n"
-    'X_3\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell0\tTRAC\t9\t\t\t\t"ct""1"\n'
+    'X_3\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell0\tTRAC\t9\t\t\t\tct"1\n'
     "X_2\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell0\tTRBC1\t8\t\t\t\tct1\n"
-    'Y\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell1\t"TR\nBC1"\t8\t\t\t\tct2\n'
+    "Y\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell1\t\"TR'BC#1\t8\t\t\t\tct2\n"
     "Z\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell2\t\t6\t\t\t\tct3\n"
     "Z_2\t\t\t\t\t\t\t\t\t\t\t\t\t\tcell3\tIGHM\t\t\t\t\tcb2\n"
     "cell5_contig_1\tACGTACGT\tF\t\t\t\t\t\t\t\t\t\t\t\tcell5\tIGHG1\t12\t1\t0.25\t\t\n"
@@ -115,7 +119,7 @@ EXPECTED_EDGE_CLONOTYPES = (
     "\tsequence_alignment\tgermline_alignment\tjunction\tjunction_aa\tv_cigar"
     "\td_cigar\tj_cigar\tcell_id\tclone_id\n"
     "X\t\t\t\tIGHV1\t\t\t\t\t\t\t\t\t\tcell0\t{cell0}\n"
-    'X_3\t\t\t\t"TRAV1\tB"\t\t\t\t\t\t\t\t\t\tcell0\t{cell0}\n'
+    "X_3\t\t\t\tTRAV1@B\t\t\t\t\t\t\t\t\t\tcell0\t{cell0}\n"
     "X_2\t\t\t\tTRBV1\t\t\t\t\t\t\t\t\t\tcell0\t{cell0}\n"
     "Y\t\t\t\tTRBVé\t\t\t\t\t\t\t\t\t\tcell1\t{cell1}\n"
     "Z\t\t\t\tTRAV2\t\t\t\t\t\t\t\t\t\tcell2\t{cell2}\n"
@@ -133,12 +137,12 @@ EXPECTED_EDGE_ALL = (
     "\traw_clonotype_id\traw_consensus_id\n"
     "X\t\t\tT\tIGHV1\t\tIGHJ1\t\t\tTGTGCGAGATGG\tCARW\t\t\t\tcell0\tIGH\tIGHM"
     "\t20\t500\tT\tT\tT\t\t\t\tcb1\tcb1_1\n"
-    'X_3\t\t\tT\t"TRAV1\tB"\t\tTRAJ1\t\t\tTGTGCTGTGGCC\tCAVA\t\t\t\tcell0\tTRA'
-    '\tTRAC\t9\t90\tT\tT\tT\t\t\t\t"ct""1"\tct1_1\n'
+    "X_3\t\t\tT\tTRAV1@B\t\tTRAJ1\t\t\tTGTGCTGTGGCC\tCAVA\t\t\t\tcell0\tTRA"
+    '\tTRAC\t9\t90\tT\tT\tT\t\t\t\tct"1\tct1_1\n'
     "X_2\t\t\tT\tTRBV1\t\tTRBJ1\t\t\tTGTGCCAGCAGCGCC\tCASSA\t\t\t\tcell0\tTRB"
     "\tTRBC1\t8\t80\tT\tT\tT\t\t\t\tct1\tct1_2\n"
     "Y\t\t\tT\tTRBVé\t\tTRBJ2\t\t\tTGTGCCAGCAGCGCA\tCASSB\t\t\t\tcell1\tTRB"
-    '\t"TR\nBC1"\t8\t80\tT\tT\tT\t\t\t\tct2\tct2_1\n'
+    "\t\"TR'BC#1\t8\t80\tT\tT\tT\t\t\t\tct2\tct2_1\n"
     "Z\t\t\tT\tTRAV2\t\tTRAJ2\t\t\tTGTGCTGTGGCA\tCAVB\t\t\t\tcell2\tTRA\t\t6"
     "\t60\tT\tT\tT\t\t\t\tct3\tct3_1\n"
     "Z_3\t\t\tT\tIGHV2\t\tIGHJ2\t\t\tTGTGCGAGATGA\tCARX\t\t\t\tcell3\tIGH\tIGHM"
@@ -151,6 +155,12 @@ EXPECTED_EDGE_ALL = (
     "\tIGL\tIGLC2\t\t\t\t\t\t0\t\t\t\t\n"
     "X_4\tGG\tT\tT\tTRBV5*01\t\tTRBJ1*01\t\t\tTGTGCC\tCASS\t\t\t\tcell6\tTRB"
     "\tTRBC1\t3\t\t\t\t\t1\t0.5\t\t\t\n"
+)
+
+
+# The IDs of the receptor store's cells, packed as the export packs them.
+_CELLS = EncodedText.from_categories(
+    np.empty(0, dtype=np.int32), [f"cell{k}" for k in range(8)]
 )
 
 
@@ -174,7 +184,10 @@ def _text(path) -> str:
 
 
 def _read(path) -> pd.DataFrame:
-    return pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    # The AIRR file format quotes no value, so quotes are read as text.
+    return pd.read_csv(
+        path, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE
+    )
 
 
 def test_the_writer_puts_required_fields_first_and_renders_values(tmp_path) -> None:
@@ -435,37 +448,130 @@ def test_the_writer_refuses_blocks_without_their_columns(tmp_path) -> None:
     assert path.read_text() == "\t".join([*AIRR_REQUIRED_FIELDS, "cell_id"]) + "\n"
 
 
-def test_the_writer_quotes_values_as_pandas_to_csv_does(tmp_path) -> None:
-    path = tmp_path / "quoted.tsv"
-    ids = np.array(["a\tb", 'q"x', "l\nm", "r\rs", "é"], dtype=object)
+def test_the_writer_writes_values_as_they_are(tmp_path) -> None:
+    path = tmp_path / "unquoted.tsv"
+    # Double quotes at the start, within and at the end, ', @, # and text
+    # beyond ASCII: the AIRR file format quotes no value.
+    ids = np.array(['"a', 'q"x', 'b""', "o'k", "@c#", "é"], dtype=object)
+    cells = encode_text(['"c1', None, "c1", "c'2", "c'2", "c1"])
     with AirrRearrangementWriter(path, ["cell_id", "c_call"]) as writer:
-        writer.write(
-            {
-                "sequence_id": ids,
-                "cell_id": encode_text(["c1", None, "c1", "c2", "c2"]),
-                "c_call": ids,
-            }
-        )
+        writer.write({"sequence_id": ids, "cell_id": cells, "c_call": ids})
     empty = "\t" * (len(AIRR_REQUIRED_FIELDS) - 1)
     rows = path.read_bytes().decode("utf-8").split("\n", 1)[1]
     assert rows == (
-        f'"a\tb"{empty}\tc1\t"a\tb"\n'
-        f'"q""x"{empty}\t\t"q""x"\n'
-        f'"l\nm"{empty}\tc1\t"l\nm"\n'
-        f'"r\rs"{empty}\tc2\t"r\rs"\n'
-        f"é{empty}\tc2\té\n"
+        f'"a{empty}\t"c1\t"a\n'
+        f'q"x{empty}\t\tq"x\n'
+        f'b""{empty}\tc1\tb""\n'
+        f"o'k{empty}\tc'2\to'k\n"
+        f"@c#{empty}\tc'2\t@c#\n"
+        f"é{empty}\tc1\té\n"
     )
+    # Read without quoting, as the format asks, each value is as written.
+    written = _read(path)
+    assert written["sequence_id"].tolist() == ids.tolist()
+    assert written["c_call"].tolist() == ids.tolist()
+    assert written["cell_id"].tolist() == ['"c1', "", "c1", "c'2", "c'2", "c1"]
+    # Five IDs, the same five calls and three cells hold such characters.
+    assert writer.n_discouraged == 13
+
+
+def test_values_the_format_advises_against_warn_outside_phred_scores(
+    tmp_path,
+) -> None:
     table = pd.DataFrame(
         {
-            "sequence_id": ids,
-            **{name: "" for name in AIRR_REQUIRED_FIELDS[1:]},
-            "cell_id": ["c1", "", "c1", "c2", "c2"],
-            "c_call": ids,
+            "sequence_id": ["s1", "s2", "s3"],
+            "v_call": ["IGHV1@2", "IGHV1", "IGHV#3"],
+            "junction_aa": ["CAR'W", 'CAR"W', "CARW"],
+            # Phred scores, ASCII 33 to 126, hold these characters by the
+            # format's own encoding.
+            "quality": ["II#@\"'", "IIII", "@@@@"],
+            "quality_alignment": ["#'\"@", "", "IIII"],
         }
     )
-    assert rows == table.to_csv(
-        sep="\t", index=False, header=False, lineterminator="\n"
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="WARNING"
     )
+    try:
+        assert write_airr_rearrangements(table, tmp_path / "phred.tsv") == 3
+        with AirrRearrangementWriter(tmp_path / "scores.tsv", ["quality"]) as writer:
+            writer.write({"sequence_id": ["s9"], "quality": ['@"#']})
+            writer.write({"sequence_id": ["t9"], "quality": ["'"], "d_call": ["D'1"]})
+    finally:
+        logger.remove(sink)
+    assert messages == [
+        "4 values of v_call and junction_aa hold @, #, a double quote or ', which "
+        "the AIRR format advises against since readers may take them differently; "
+        "they are written as they are",
+        "1 value of d_call holds @, #, a double quote or ', which the AIRR format "
+        "advises against since readers may take them differently; they are "
+        "written as they are",
+    ]
+    assert writer.n_discouraged == 1
+    written = _read(tmp_path / "phred.tsv")
+    for name in table.columns:
+        assert written[name].tolist() == table[name].tolist()
+    # A tab is no Phred score, so quality is refused for it as any field is.
+    with pytest.raises(ValueError, match="1 value of quality, in contig 's2'"):
+        write_airr_rearrangements(
+            table.assign(quality=["II", "I\tI", "II"]), tmp_path / "tab.tsv"
+        )
+
+
+@pytest.mark.parametrize("character", ["\t", "\n", "\r"])
+def test_tables_of_values_that_hold_a_tab_or_a_line_break_are_refused(
+    tmp_path, character
+) -> None:
+    path = tmp_path / "refused.tsv"
+    table = pd.DataFrame(
+        {
+            "sequence_id": ["s0", "s1", "s2", "s3"],
+            "v_call": ["V0", f"V{character}1", "V2", f"V{character}3"],
+            "c_call": pd.Categorical(["C0", "C1", f"C{character}2", "C3"]),
+            "umi_count": [1, 2, 3, 4],
+        }
+    )
+    with pytest.raises(ValueError) as refused:
+        write_airr_rearrangements(table, path)
+    assert str(refused.value) == (
+        "AIRR values must not hold a tab, a newline or a carriage return, which "
+        "these values of the table do: 2 values of v_call, the first in contig "
+        "'s1'; 1 value of c_call, in contig 's2'"
+    )
+    # An ID that holds one names itself.
+    ids = table.assign(sequence_id=["s0", "s1", f"s{character}2", "s3"])
+    ids = ids.assign(v_call="V", c_call="C")
+    with pytest.raises(ValueError) as refused:
+        write_airr_rearrangements(ids, path)
+    assert str(refused.value).endswith(
+        f"1 value of sequence_id, in contig {'s' + character + '2'!r}"
+    )
+    assert not path.exists()
+
+
+def test_the_writer_refuses_a_block_before_writing_any_of_it(tmp_path) -> None:
+    path = tmp_path / "blocks.tsv"
+    with AirrRearrangementWriter(path, ["cell_id"]) as writer:
+        writer.write({"sequence_id": ["a"], "cell_id": ["c1"]})
+        with pytest.raises(ValueError) as refused:
+            writer.write(
+                {
+                    "sequence_id": np.array(["b", "c", "d"], dtype=object),
+                    "cell_id": encode_text(["c1", "c\r2", "c\r2"]),
+                }
+            )
+        writer.write({"sequence_id": ["e"], "cell_id": ["c3"]})
+    assert str(refused.value) == (
+        "AIRR values must not hold a tab, a newline or a carriage return, which "
+        "these values of the block do: 2 values of cell_id, the first in contig 'c'"
+    )
+    empty = "\t" * (len(AIRR_REQUIRED_FIELDS) - 1)
+    header = "\t".join([*AIRR_REQUIRED_FIELDS, "cell_id"])
+    assert path.read_bytes().decode("utf-8") == (
+        f"{header}\na{empty}\tc1\ne{empty}\tc3\n"
+    )
+    assert writer.n_rows == 2
 
 
 def test_the_writer_renders_each_kind_of_column(tmp_path) -> None:
@@ -698,7 +804,8 @@ def test_measuring_finds_the_longest_value_of_each_field(tmp_path) -> None:
                 limit=10**9, held=0, what="Measuring", remedy=""
             ),
         )
-        contigs.measure(10**9)
+        contigs.hold_text()
+        contigs.measure(10**9, cells=_CELLS, clones=None)
         widths[chains_only] = {
             name: contigs.width(name)
             for name in ("sequence_id", "sequence", "umi_count", "productive")
@@ -762,7 +869,7 @@ def test_the_longest_value_sizes_the_blocks(tmp_path) -> None:
             ),
         )
         contigs.hold_text()
-        contigs.measure(10**9)
+        contigs.measure(10**9, cells=_CELLS, clones=None)
         planned[name] = contigs.plan_blocks(
             n_columns=20,
             cell_width=5,
@@ -773,53 +880,6 @@ def test_the_longest_value_sizes_the_blocks(tmp_path) -> None:
     # One sequence of 20,000 bytes, read and rendered, leaves room for at
     # most two rows of 40,000 bytes in 100,000 bytes; short rows all fit.
     assert planned["short"] == 40 and planned["long"] <= 2
-
-
-def test_quoted_rows_render_in_slices_as_pandas_quotes_them(tmp_path) -> None:
-    # Values of double quotes double in width, so the quoted rows take more
-    # than the bytes of the first rendering, and are rendered in slices.
-    rng = np.random.default_rng(3)
-    letters = np.asarray(list('ab"\t\n\r\u00e9'))
-    ids = np.asarray(
-        ["".join(rng.choice(letters, rng.integers(0, 12))) for _ in range(300)],
-        dtype=object,
-    )
-    ids[7] = '"' * 40
-    labels = ["c1", 'q"', None, "t\tu"]
-    codes = rng.integers(-1, len(labels) - 1, size=len(ids))
-    cells = EncodedText.from_categories(codes, [label or "" for label in labels[:-1]])
-    path = tmp_path / "quoted.tsv"
-    block = {"sequence_id": ids, "cell_id": cells, "c_call": ids}
-    with AirrRearrangementWriter(path, ["cell_id", "c_call"]) as writer:
-        writer.write(block)
-        columns = [
-            airr_writer._bytes_column(block[name], name, False)
-            if name in block
-            else None
-            for name in writer.columns
-        ]
-    expected = pd.DataFrame(
-        {
-            "sequence_id": ids,
-            **{name: "" for name in AIRR_REQUIRED_FIELDS[1:]},
-            "cell_id": [labels[code] or "" if code >= 0 else "" for code in codes],
-            "c_call": ids,
-        }
-    ).to_csv(sep="\t", index=False, header=False, lineterminator="\n")
-    assert path.read_bytes().decode("utf-8").split("\n", 1)[1] == expected
-    quoted: list[int] = []
-    pieces = [bytes(piece) for piece in airr_writer._rows(columns, len(ids), quoted)]
-    assert len(pieces) > 1 and b"".join(pieces).decode("utf-8") == expected
-    # Each ID twice, and each cell of the label q", is a quoted value.
-    special = set('\t\n\r"')
-    n_quoted = 2 * sum(bool(special & set(text)) for text in ids)
-    n_quoted += int((codes == 1).sum())
-    assert quoted == [n_quoted] and writer.n_quoted == n_quoted
-    # One row whose quoted value takes more than the row's first rendering.
-    one = [airr_writer._packed(np.asarray(['"' * 9], dtype=object))]
-    assert [bytes(piece) for piece in airr_writer._rows(one, 1, [])] == [
-        b'"' * 20 + b"\n"
-    ]
 
 
 def test_rendered_rows_reach_the_file_in_bounded_writes(tmp_path, monkeypatch) -> None:
@@ -1106,25 +1166,49 @@ def _chunk(array) -> int:
     return repertoire_operations.array_row_selection_parts(array)[0]
 
 
-def test_measuring_is_checked_with_a_span_of_contigs(tmp_path) -> None:
+@pytest.mark.parametrize("wider", [0, 2**20])
+def test_measuring_is_checked_with_a_span_of_contigs(
+    tmp_path, monkeypatch, wider
+) -> None:
     store, receptors = _edge_receptors(tmp_path)
     group = artifact_group(store.zw, receptors)
+    parts = repertoire_operations.array_row_selection_parts
+
+    def model(array):
+        # The bytes of the ragged fields, which measuring reads to check
+        # each value, may come in stored chunks larger than their offsets'.
+        name = str(array.path).rsplit("/", 1)[-1]
+        fixed, per_row = parts(array)
+        if name in ("contig_sequence_id", "contig_sequence"):
+            fixed += wider
+        return fixed, per_row
+
+    monkeypatch.setattr(repertoire_operations, "array_row_selection_parts", model)
     fields = ("sequence_id", "sequence", "v_identity", "d_identity")
     refusals = _walk(
-        lambda limit: _edge_contigs(store, receptors, limit, fields).measure(10**9)
+        lambda limit: _edge_contigs(store, receptors, limit, fields).measure(
+            10**9, cells=_CELLS, clones=None
+        )
     )
     # Two stored chunks of the arrays read, one decoded and one held from
-    # the read before, and 64 bytes for each of the ten contigs of the span.
+    # the read before; a stored chunk of a ragged field's bytes as read, here
+    # all 40 bytes of the ten IDs, X, X_2, Y and Z, X, Z and Z_2, two of 14
+    # and X, against the 10 of the sequences; and 64 bytes for each of the
+    # ten contigs of the span.
     reading = max(
-        _chunk(group[name])
+        model(group[name])[0]
         for name in (
             "contig_sequence_id_offsets",
             "contig_sequence_offsets",
+            "contig_sequence_id",
+            "contig_sequence",
             "contig_v_identity",
             "contig_d_identity",
         )
     )
-    assert refusals == [2 * reading + 64 * 10]
+    if wider:
+        assert reading == parts(group["contig_sequence_id"])[0] + wider
+    assert refusals == [2 * reading + 40 + 64 * 10]
 
 
 def test_hashing_the_ids_is_checked_with_the_hashes(tmp_path) -> None:
@@ -1133,7 +1217,7 @@ def test_hashing_the_ids_is_checked_with_the_hashes(tmp_path) -> None:
 
     def scan(limit):
         contigs = _edge_contigs(store, receptors, 10**9, ("sequence_id",))
-        contigs.measure(10**9)
+        contigs.measure(10**9, cells=_CELLS, clones=None)
         contigs.reads.limit = limit
         return contigs.scan(10**9)
 
@@ -1186,7 +1270,7 @@ def test_writing_a_block_counts_each_row_at_its_widest(
     def plan(limit):
         contigs = _edge_contigs(store, receptors, limit, fields)
         contigs.hold_text()
-        contigs.measure(10**9)
+        contigs.measure(10**9, cells=_CELLS, clones=None)
         return contigs.plan_blocks(
             n_columns=16,
             cell_width=5,
@@ -1226,7 +1310,7 @@ def test_writing_a_block_counts_each_row_at_its_widest(
         # one chunk of four.
         rows, windows = 4, 4 * 4 + 6 * 8 + 4 * 4 + 6 * 8
     # Two stored chunks, one decoded and one held from the read before.
-    assert refusals[-1] == held + per_row * rows + 2 * rendered + windows + 2 * reading
+    assert refusals[-1] == held + per_row * rows + windows + 2 * reading
 
 
 def test_renamed_ids_stay_held_while_the_blocks_are_written(
@@ -1421,7 +1505,9 @@ def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
     assert len(steps) > 10 and not over, over
 
 
-def test_the_export_warns_of_quoted_values_and_repeated_ids(tmp_path) -> None:
+def test_the_export_warns_of_discouraged_characters_and_repeated_ids(
+    tmp_path, monkeypatch
+) -> None:
     store, receptors = _edge_receptors(tmp_path)
     messages: list[str] = []
     sink = logger.add(
@@ -1429,16 +1515,229 @@ def test_the_export_warns_of_quoted_values_and_repeated_ids(tmp_path) -> None:
     )
     try:
         store.repertoire.export_airr(receptors, tmp_path / "all.tsv")
+        # One contig per block names the same fields in the file's order.
+        monkeypatch.setattr(repertoire_operations, "_EXPORT_BLOCK_BYTES", 1)
+        store.repertoire.export_airr(receptors, tmp_path / "blocks.tsv")
     finally:
         logger.remove(sink)
-    # The second and third X and the second Z take suffixes; a V call holds a
-    # tab, a constant gene call a newline and a clonotype ID a double quote.
+    # The second and third X and the second Z take suffixes; a V call holds
+    # @, a constant gene call a double quote, ' and #, and a clonotype ID a
+    # double quote.
     assert (
-        "3 contig IDs repeat; their later occurrences are written with a suffix "
-        "such as _2"
-    ) in messages
-    quoting = [message for message in messages if "AIRR TSV dialect" in message]
-    assert len(quoting) == 1 and quoting[0].startswith("3 values hold a tab")
+        messages.count(
+            "3 contig IDs repeat; their later occurrences are written with a "
+            "suffix such as _2"
+        )
+        == 2
+    )
+    discouraged = [message for message in messages if "advises against" in message]
+    assert discouraged == 2 * [
+        "3 values of v_call, c_call and raw_clonotype_id hold @, #, a double quote "
+        "or ', which the AIRR format advises against since readers may take them "
+        "differently; they are written as they are"
+    ]
+
+
+# T cell rows with a tab in three V calls, a newline in two constant gene
+# calls and a carriage return in one ID, all of which the AIRR format forbids
+# within a value; the contig with the carriage return is not a chain. Stored
+# four contigs to a chunk of cells and 16 bytes to a chunk of IDs, the first
+# span's IDs take three pieces, the carriage return in the third, and the V
+# calls hold a tab in both spans.
+FORBIDDEN_TCR = [
+    'cell0,true,x_contig_1,true,500,TRA,"TRAV1\tB",,TRAJ1,TRAC,true,true,CAVA,TGTGCTGTGGCC,90,9,ct1,ct1_1',
+    "cell0,true,x_contig_2,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,80,8,ct1,ct1_2",
+    'cell1,true,y_contig_1,true,500,TRB,TRBV2,,TRBJ2,"TR\nBC1",true,true,CASSB,TGTGCCAGCAGCGCA,80,8,ct2,ct2_1',
+    'cell2,true,"z_con\rtig_1",true,500,TRA,"TRAV1\tB",,TRAJ2,"TR\nBC1",true,false,CAVB,TGTGCTGTGGCA,60,6,ct3,ct3_1',
+    "cell3,true,w_contig_1,true,500,TRB,TRBV3,,TRBJ3,TRBC1,true,true,CASSC,TGTGCCAGCAGCTGT,70,7,ct4,ct4_1",
+    'cell4,true,v_contig_1,true,500,TRA,"TRAV1\tB",,TRAJ4,TRAC,true,true,CAVD,TGTGCTGTGGAT,50,5,ct5,ct5_1',
+]
+_FORBIDDEN = (
+    "AIRR values must not hold a tab, a newline or a carriage return, which these "
+    "values of the contigs do: "
+)
+
+
+def _forbidden_receptors(tmp_path):
+    store = receptor_store(tmp_path)
+    receptors = store.repertoire.import_receptors(
+        write_lines(tmp_path, "tcr.csv", CELLRANGER_HEADER, FORBIDDEN_TCR),
+        cell_selection=store.snapshot_cell_selection(),
+    )
+    return store, receptors
+
+
+@pytest.mark.parametrize(
+    ("source", "chunk_bytes"),
+    [("receptors", None), ("clonotypes", None), ("receptors", 16)],
+)
+def test_export_refuses_values_the_format_forbids_before_the_file(
+    tmp_path, monkeypatch, source, chunk_bytes
+) -> None:
+    if chunk_bytes is not None:
+        # Contigs stored four to a chunk of cells and IDs 16 bytes to a chunk,
+        # so measuring reads spans of four contigs and IDs in pieces.
+        monkeypatch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", chunk_bytes)
+    store, receptors = _forbidden_receptors(tmp_path)
+    ref = (
+        store.repertoire.clonotypes(receptors) if source == "clonotypes" else receptors
+    )
+    path = tmp_path / "refused.tsv.gz"
+    cases = [
+        (
+            {},
+            "3 values of v_call, the first in contig 'x_contig_1'; 2 values of "
+            "c_call, the first in contig 'y_contig_1'; 1 value of sequence_id, in "
+            "contig 'z_con\\rtig_1'",
+        ),
+        # Only the chains are written, and z_con\rtig_1 is no chain.
+        (
+            {"chains_only": True},
+            "2 values of v_call, the first in contig 'x_contig_1'; 1 value of "
+            "c_call, in contig 'y_contig_1'",
+        ),
+        (
+            {"fields": ["umi_count"]},
+            "1 value of sequence_id, in contig 'z_con\\rtig_1'",
+        ),
+    ]
+    for options, found in cases:
+        with pytest.raises(ValueError) as refused:
+            store.repertoire.export_airr(ref, path, **options)
+        assert str(refused.value) == _FORBIDDEN + found
+        assert not path.exists()
+    # Without the fields that hold them, the five chains are written.
+    assert (
+        store.repertoire.export_airr(
+            ref, path, chains_only=True, fields=["umi_count", "j_call"]
+        )
+        == 5
+    )
+
+
+def test_export_refuses_cell_ids_and_labels_the_format_forbids(tmp_path) -> None:
+    # Cells whose IDs hold a tab within them, as the store holds them.
+    store = write_cells_store(tmp_path / "store.zarr", ["ce\tll0", "cell1"])
+    rows = [
+        '"ce\tll0",true,a_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCC,80,8,ct1,ct1_1',
+        "cell1,true,b_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCC,80,8,ct1,ct1_1",
+        '"ce\tll0",true,a_2,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,true,CAVA,TGTGCT,80,8,ct1,ct1_1',
+    ]
+    receptors = store.repertoire.import_receptors(
+        write_lines(tmp_path, "tcr.csv", CELLRANGER_HEADER, rows),
+        cell_selection=store.snapshot_cell_selection(),
+    )
+    path = tmp_path / "cells.tsv"
+    with pytest.raises(ValueError) as refused:
+        store.repertoire.export_airr(receptors, path)
+    assert str(refused.value) == (
+        _FORBIDDEN + "2 values of cell_id, the first in contig 'a_1'"
+    )
+    assert not path.exists()
+    # A clonotype label that holds a newline, through each cell's code: cell1
+    # and cell2 of the edge receptors hold it, so do their contigs Y and Z.
+    edge, edge_receptors = _edge_receptors(tmp_path / "edge")
+    group = artifact_group(edge.zw, edge_receptors)
+    clones = EncodedText.from_categories(
+        np.asarray([0, 1, 1, -1, 0, 2, 2, -1]), ["a", "b\nc", "d"]
+    )
+    contigs = repertoire_operations._ExportContigs(
+        group,
+        tuple(group.attrs["fields"]),
+        chains_only=False,
+        reads=repertoire_operations._Reads(limit=10**9, held=0, what="", remedy=""),
+    )
+    contigs.hold_text()
+    with pytest.raises(ValueError) as refused:
+        contigs.measure(10**9, cells=_CELLS, clones=clones)
+    assert str(refused.value) == (
+        _FORBIDDEN + "2 values of clone_id, the first in contig 'Y'"
+    )
+
+
+def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
+    tmp_path,
+) -> None:
+    store, receptors = _forbidden_receptors(tmp_path)
+    group = artifact_group(store.zw, receptors)
+    fields = ("sequence_id", "v_call")
+    base = []
+
+    def contigs_within(limit):
+        contigs = _edge_contigs(store, receptors, 10**9, fields)
+        contigs.hold_text()
+        base[:] = [contigs.reads.held, contigs.reads.lingering]
+        contigs.reads.limit = limit
+        return contigs
+
+    def run(limit):
+        with pytest.raises(ValueError, match="3 values of v_call"):
+            contigs_within(limit).measure(10**9, cells=_CELLS, clones=None)
+
+    refusals = _walk(run)
+    held, lingering = base
+    reading = max(
+        _chunk(group[name])
+        for name in (
+            "contig_sequence_id_offsets",
+            "contig_sequence_id",
+            "contig_v_call",
+        )
+    )
+    # The code of the one V call that holds a tab, 8 bytes, stays held; then
+    # the span, as without such a value, but with a chunk of the V calls'
+    # codes, and a stored chunk of IDs, all 61 bytes of the six, five of 10
+    # bytes and z_con\rtig_1 of 11, and 64 bytes for each of the six contigs.
+    assert refusals == [
+        held + lingering + 8,
+        held + 8 + lingering + reading + max(0, reading - lingering) + 61 + 64 * 6,
+    ]
+    # Reading the ID of the V call's first contig, x_contig_1, is checked too:
+    # a stored chunk of the IDs' arrays beside the span's last, 16 bytes of
+    # offsets and the 11 of the longest ID.
+    contigs = contigs_within(10**9)
+    with pytest.raises(ValueError):
+        contigs.measure(10**9, cells=_CELLS, clones=None)
+    contigs.reads.limit = 1
+    ids = max(
+        _chunk(group[name])
+        for name in ("contig_sequence_id_offsets", "contig_sequence_id")
+    )
+    reading_ids = held + 8 + reading + ids + max(0, ids - reading) + 16 + 11
+    with pytest.raises(MemoryError, match=f"holds about {reading_ids} bytes"):
+        contigs._contig_id(0)
+
+
+def test_rows_are_marked_by_the_value_that_holds_a_forbidden_byte() -> None:
+    # Five values: one that starts with a tab, an empty one, as a missing
+    # value is, one that ends with a newline, one without, and one of a
+    # carriage return and a tab within it.
+    data = np.frombuffer(b"\tabcd\nef\rg\th", dtype=np.uint8)
+    bounds = np.asarray([0, 3, 3, 6, 7, 12], dtype=np.int64)
+    # Pieces of each length, as stored chunks of each length give them.
+    for step in range(1, 13):
+        marks = np.zeros(5, dtype=np.bool_)
+        for start in range(0, 12, step):
+            piece = data[start : start + step].copy()
+            airr_writer._mark_forbidden_rows(piece, start, bounds, marks)
+        assert marks.tolist() == [True, False, True, False, True], step
+
+
+def test_exported_values_read_back_through_an_import_as_they_were(tmp_path) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    path = tmp_path / "all.tsv"
+    store.repertoire.export_airr(receptors, path)
+    again = store.repertoire.import_receptors(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    store.repertoire.export_airr(again, tmp_path / "again.tsv")
+    # The import reads each value as it was written, the constant gene call
+    # that starts with a double quote too, so the export of what it read is
+    # the first export.
+    assert _text(tmp_path / "again.tsv") == _text(path) == EXPECTED_EDGE_ALL
+    cells = store.repertoire.load_receptors(again).cells
+    assert cells.loc["cell1", "VDJ_1_c_call"] == "\"TR'BC#1"
+    assert cells.loc["cell0", "VJ_1_v_call"] == "TRAV1@B"
 
 
 def test_integers_of_every_length_are_written_whole(tmp_path) -> None:
@@ -1596,27 +1895,3 @@ def test_fields_may_name_the_columns_that_are_always_written(tmp_path) -> None:
     # Receptors from Cell Ranger CSVs store no clone_id.
     with pytest.raises(ValueError, match="store no field 'clone_id'"):
         store.repertoire.export_airr(receptors, tmp_path / "x.tsv", fields=["clone_id"])
-
-
-def test_a_quoted_slice_is_let_go_before_the_next_is_rendered(
-    tmp_path, monkeypatch
-) -> None:
-    rows = airr_writer._rows
-    alive: list[bool] = []
-
-    def watched(columns, n_rows, quoted):
-        previous = None
-        for piece in rows(columns, n_rows, quoted):
-            if previous is not None:
-                alive.append(previous() is not None)
-            previous = weakref.ref(piece)
-            yield piece
-            del piece
-
-    monkeypatch.setattr(airr_writer, "_rows", watched)
-    ids = np.asarray(['"' * 20] * 200, dtype=object)
-    with AirrRearrangementWriter(tmp_path / "quoted.tsv") as writer:
-        writer.write({"sequence_id": ids})
-    # Quoted values double, so the rows take two slices, and the first is
-    # gone before the second is rendered.
-    assert alive == [False]

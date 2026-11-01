@@ -2135,14 +2135,17 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         ``clone_id``, the cell's clonotype label, empty for a cell without
         one, replacing any imported ``clone_id``. The schema's required
         fields come first, empty when the receptors do not store them;
-        logical fields are written ``T`` and ``F``. A value that holds a tab,
-        a newline, a carriage return or a double quote is quoted as pandas'
-        ``to_csv`` quotes it; the AIRR TSV dialect leaves such values out, so
-        the export warns with their number. A ``sequence_id`` that repeats,
-        such as ``<barcode>_contig_1`` of the TCR and the BCR files of one
-        cell, gets ``_2``, ``_3`` and so on from its second occurrence, in
-        the order of the contigs, since the schema requires unique
-        identifiers. A path ending in ``.gz`` is gzip-compressed at level 6.
+        logical fields are written ``T`` and ``F``, and other values as they
+        are, unquoted, as the AIRR file format asks. The format forbids tabs
+        and newlines in values, so a value that holds a tab, a newline or a
+        carriage return is refused before the file is opened; it advises
+        against ``@``, ``#``, ``"`` and ``'``, so the export warns with the
+        number of values that hold them and their fields. A ``sequence_id``
+        that repeats, such as ``<barcode>_contig_1`` of the TCR and the BCR
+        files of one cell, gets ``_2``, ``_3`` and so on from its second
+        occurrence, in the order of the contigs, since the schema requires
+        unique identifiers. A path ending in ``.gz`` is gzip-compressed at
+        level 6.
 
         The contigs are read and written in blocks of about 32 MiB, at most a
         sixteenth of the memory budget, as many contigs as fit when each
@@ -2169,7 +2172,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``source`` is not an ``immune_receptors`` or
-                ``clonotypes`` artifact, or a field is not stored.
+                ``clonotypes`` artifact, a field is not stored, or a value to
+                be written holds a tab, a newline or a carriage return.
             KeyError: If the store holds no such ``source`` artifact, or not
                 the receptors of the clonotypes.
             RuntimeError: If the ``source`` artifact or the receptors of the
@@ -2276,7 +2280,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             cells, cell_width = self._export_cell_ids(
                 reads, receptors, n_cells, block_bytes
             )
-            contigs.measure(block_bytes)
+            contigs.measure(block_bytes, cells=cells, clones=clones)
             hashes, id_rows = contigs.scan(block_bytes)
             # Sorting the hashes and finding those that repeat.
             reads.reserve(_NAMING_BYTES_PER_ROW * len(hashes))
@@ -2585,14 +2589,36 @@ class _ExportContigs:
             self._widths[name] = int(np.diff(offsets).max()) if len(offsets) > 1 else 0
             self._texts[name] = (data, offsets)
 
-    def measure(self, span_bytes: int) -> None:
+    def measure(
+        self, span_bytes: int, *, cells: EncodedText, clones: EncodedText | None
+    ) -> None:
         """Find the widest value of each field and the whole number fields.
 
-        The ragged fields' offsets and the number fields' values are read a
-        span of contigs at a time, at most a stored chunk of contigs, after
-        one check of what a span holds. With ``chains_only``, only the
-        chains' values count.
+        The ragged fields' offsets and bytes and the number fields' values are
+        read a span of contigs at a time, at most a stored chunk of contigs,
+        after one check of what a span holds; a span's bytes are read a stored
+        chunk at a time. Every value that the file would hold is checked for
+        a tab, a newline or a carriage return, which the AIRR format forbids:
+        the ragged fields' bytes as they are read, and the distinct values of
+        the text fields, the cells' IDs and the clonotypes' labels once each;
+        only for a distinct value that holds one are the codes or the cells of
+        the contigs read, to find the contigs that would write it. With
+        ``chains_only``, only the chains' values count. Call ``hold_text``
+        first.
+
+        Args:
+            span_bytes: About the most bytes that measuring a span holds.
+            cells: Each cell's ID, as the blocks write it.
+            clones: Each cell's clonotype label, or None to write none.
+
+        Raises:
+            ValueError: If a value that the file would hold has a tab, a
+                newline or a carriage return. The error names each such field,
+                the number of its values that hold one and the ``sequence_id``
+                of the first contig whose value does.
         """
+        from ...writers.airr import _NO_CODES, _forbidden_message, _mark_coded_rows
+
         ragged = [name for name in self._fields if FIELDS[name] == RAGGED]
         numbers = [name for name in self._fields if FIELDS[name] == NUMBER]
         for name in self._fields:
@@ -2600,21 +2626,40 @@ class _ExportContigs:
                 self._widths[name] = _INTEGER_TEXT_BYTES
             elif FIELDS[name] == FLAG:
                 self._widths[name] = _FLAG_TEXT_BYTES
+        coded = self._forbidden_codes(cells, clones)
         read = [
             *(f"contig_{name}_offsets" for name in ragged),
+            *(f"contig_{name}" for name in ragged),
             *(f"contig_{name}" for name in numbers),
             *(["contig_chain"] if self._chains_only else []),
+            *(array for array, _marked, _through in coded.values()),
         ]
         span = max(1, min(self._chunk, span_bytes // _MEASURE_BYTES_PER_ROW))
         chunk = self._read_bytes(read)
         self.reads.reserve(
             self.reads.read_bytes(chunk)
+            + self._piece_bytes(ragged)
             + _MEASURE_BYTES_PER_ROW * min(span, self.n_contigs)
         )
         ends = dict.fromkeys(ragged, 0)
         longest = dict.fromkeys(ragged, 0)
         whole = dict.fromkeys(numbers, True)
         largest = dict.fromkeys(numbers, 0.0)
+        # The values of each field that hold a forbidden character, and the
+        # first contig whose value does.
+        counts: dict[str, int] = {}
+        firsts: dict[str, int] = {}
+
+        def count(name: str, marks: np.ndarray, kept: np.ndarray | None) -> None:
+            chosen = _kept(marks, kept)
+            n_marked = int(np.count_nonzero(chosen))
+            if n_marked:
+                counts[name] = counts.get(name, 0) + n_marked
+                row = int(np.argmax(chosen))
+                firsts.setdefault(
+                    name, first + (row if kept is None else int(kept[row]))
+                )
+
         for first in range(0, self.n_contigs, span):
             last = min(first + span, self.n_contigs)
             kept = (
@@ -2622,18 +2667,36 @@ class _ExportContigs:
                 if self._chains_only
                 else None
             )
+            marks = np.zeros(last - first, dtype=np.bool_)
             for name in ragged:
-                stored = self._array(f"contig_{name}_offsets")[first + 1 : last + 1]
+                stored = np.asarray(
+                    self._array(f"contig_{name}_offsets")[first + 1 : last + 1]
+                )
                 bounds = np.empty(last - first + 1, dtype=np.int64)
                 bounds[0] = ends[name]
                 # A missing value's end is -1: it ends where the one before does.
-                np.maximum.accumulate(
-                    np.maximum(np.asarray(stored), ends[name]), out=bounds[1:]
-                )
+                np.maximum.accumulate(np.maximum(stored, ends[name]), out=bounds[1:])
+                del stored
                 ends[name] = int(bounds[-1])
                 lengths = _kept(np.diff(bounds), kept)
                 if len(lengths):
                     longest[name] = max(longest[name], int(lengths.max()))
+                del lengths
+                marks[:] = False
+                self._mark_ragged(name, bounds, marks)
+                count(name, marks, kept)
+            for name, (array, marked, through) in coded.items():
+                values = np.asarray(self._array(array)[first:last])
+                marks[:] = False
+                _mark_coded_rows(
+                    values,
+                    marked,
+                    _NO_CODES if through is None else through,
+                    through is not None,
+                    marks,
+                )
+                del values
+                count(name, marks, kept)
             for name in numbers:
                 if not whole[name]:
                     continue
@@ -2655,6 +2718,103 @@ class _ExportContigs:
                 len(str(int(largest[name]))) + 1 if whole[name] else _REAL_TEXT_BYTES
             )
         self.whole = {name for name, flag in whole.items() if flag}
+        if counts:
+            found = sorted(counts, key=firsts.__getitem__)
+            raise ValueError(
+                _forbidden_message(
+                    [
+                        (name, counts[name], self._contig_id(firsts[name]))
+                        for name in found
+                    ],
+                    "the contigs",
+                )
+            )
+        # The codes of values that no contig of the file holds are let go.
+        self.reads.held -= sum(8 * len(marked) for _, marked, _ in coded.values())
+
+    def _forbidden_codes(
+        self, cells: EncodedText, clones: EncodedText | None
+    ) -> dict[str, tuple[str, np.ndarray, np.ndarray | None]]:
+        """Find the distinct values that hold a tab, a newline or a carriage return.
+
+        The text fields' values, the cells' IDs and the clonotypes' labels are
+        each checked once; the codes of the values that hold one are checked
+        first and stay counted in ``reads``.
+
+        Returns:
+            For each field with such a value, the stored array that gives each
+            contig's code or cell, the codes of those values, ascending, and
+            for clonotypes, each cell's clonotype code, through which a
+            contig's cell names its label.
+        """
+        from ...writers.airr import _count_forbidden_values, _forbidden_values
+
+        sources: list[tuple[str, str, np.ndarray, np.ndarray, np.ndarray | None]] = [
+            (name, f"contig_{name}", *self._texts[name], None)
+            for name in self._fields
+            if FIELDS[name] == TEXT
+        ]
+        sources.append(("cell_id", "contig_cells", cells.data, cells.offsets, None))
+        if clones is not None:
+            sources.append(
+                (
+                    "clone_id",
+                    "contig_cells",
+                    clones.data,
+                    clones.offsets,
+                    np.asarray(clones.codes),
+                )
+            )
+        coded = {}
+        for name, array, data, offsets, through in sources:
+            n_values = _count_forbidden_values(data, offsets)
+            if n_values:
+                self.reads.reserve(8 * n_values)
+                coded[name] = (
+                    array,
+                    _forbidden_values(data, offsets, n_values),
+                    through,
+                )
+                self.reads.held += 8 * n_values
+        return coded
+
+    def _piece_bytes(self, ragged: list[str]) -> int:
+        """The most bytes of a ragged field that reading a stored chunk gives."""
+        held = 0
+        for name in ragged:
+            data = self._array(f"contig_{name}")
+            rows = min(max(1, int(data.chunks[0])), int(data.shape[0]))
+            held = max(held, rows * data.dtype.itemsize)
+        return held
+
+    def _mark_ragged(self, name: str, bounds: np.ndarray, marks: np.ndarray) -> None:
+        """Mark the rows whose value of a ragged field holds a forbidden character.
+
+        The bytes ``bounds[0]:bounds[-1]`` are read a stored chunk at a time.
+        """
+        from ...writers.airr import _mark_forbidden_rows
+
+        data = self._array(f"contig_{name}")
+        step = max(1, int(data.chunks[0]))
+        start, end = int(bounds[0]), int(bounds[-1])
+        while start < end:
+            stop = min(end, (start // step + 1) * step)
+            piece = np.asarray(data[start:stop])
+            _mark_forbidden_rows(piece, start, bounds, marks)
+            # A piece is let go before the next is read.
+            del piece
+            start = stop
+
+    def _contig_id(self, position: int) -> str:
+        """Read the ``sequence_id`` of one contig, checked first."""
+        names = ["contig_sequence_id_offsets", "contig_sequence_id"]
+        self.reads.reserve(
+            self.reads.read_bytes(self._read_bytes(names))
+            + 16
+            + self.width("sequence_id")
+        )
+        start, end = np.asarray(self._array(names[0])[position : position + 2]).tolist()
+        return bytes(np.asarray(self._array(names[1])[start:end])).decode("utf-8")
 
     def _window_bytes(self, names: list[tuple[str, int]], block_rows: int) -> int:
         """The most bytes that windows on stored arrays hold for blocks of contigs.
@@ -2744,10 +2904,9 @@ class _ExportContigs:
 
         A block holds as many contigs as fit in ``block_bytes`` when each
         field holds its widest value: each row as rendered, the text that it
-        reads and renders beside its row, the bytes of each field and of the
-        rendering of one field, and one row quoted again. The windows of
-        stored chunks, two chunks' reads and, for a compressed file, its
-        compressor come beside it.
+        reads and renders beside its row, and the bytes of each field and of
+        the rendering of one field. The windows of stored chunks, two chunks'
+        reads and, for a compressed file, its compressor come beside it.
 
         Args:
             n_columns: The columns of the file.
@@ -2798,7 +2957,6 @@ class _ExportContigs:
             )
         self.reads.reserve(
             per_row * min(block_rows, self.n_contigs)
-            + 2 * rendered
             + (_GZIP_BYTES if compressed else 0)
             + self._window_bytes(windows, block_rows)
             + self.reads.read_bytes(

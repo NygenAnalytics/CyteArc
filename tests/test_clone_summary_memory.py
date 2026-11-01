@@ -15,10 +15,11 @@ them, and clonotype clusters, whose smallest budget is found by bisection.
 Gene usage and junction lengths count the chains of receptors and clonotypes
 within the same labels, of every slot, of cells with contigs beside their
 chains and of junctions of wide characters. AIRR exports write contigs whose
-IDs repeat, values that need quoting, long cell IDs, and sequences and
-alignments, from contigs stored in small chunks.
+IDs repeat, values that hold characters the AIRR format advises against, long
+cell IDs, and sequences and alignments, from contigs stored in small chunks.
 """
 
+import csv
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -1159,9 +1160,9 @@ def test_lengths_of_long_ascii_junctions_fit_the_smallest_budget(
 
 # AIRR exports, of contigs stored in chunks of 64 KiB, so that every pass
 # crosses stored chunks and their windows move: Cell Ranger files of T and B
-# cells whose contig IDs repeat across the files, with gene calls that need
-# quoting, of many clonotypes; cells of 78-digit IDs; and AIRR files of
-# sequences and alignments, with identities that are not whole.
+# cells whose contig IDs repeat across the files, with gene calls that hold @,
+# # and a double quote, of many clonotypes; cells of 78-digit IDs; and AIRR
+# files of sequences and alignments, with identities that are not whole.
 N_EXPORT_CELLS = 20_000
 N_SEQUENCE_CELLS = 8_000
 _EXPORT_CHUNK_BYTES = 64 * 2**10
@@ -1195,7 +1196,9 @@ def _cellranger_export(folder: Path, *, id_width: int, both: bool) -> SimpleName
         # Each clone's own junctions, so cells of a clone share a clonotype.
         bases = "".join("ACGT"[(clone >> (2 * k)) & 3] for k in range(10))
         v_call = (
-            f'"TRAV{clone % 40}\tB"' if both and cell % 50 == 0 else f"TRAV{clone % 40}"
+            f'"TRAV{clone % 40}@""B#"'
+            if both and cell % 50 == 0
+            else f"TRAV{clone % 40}"
         )
         for contig, locus in enumerate(("TRA", "TRB")):
             junction = "C" + "".join(rng.choice(residues, size=12)) + "F"
@@ -1223,7 +1226,7 @@ def _cellranger_export(folder: Path, *, id_width: int, both: bool) -> SimpleName
 
 @pytest.fixture(scope="module")
 def cellranger_export(tmp_path_factory) -> SimpleNamespace:
-    """T and B cells whose contig_1 IDs repeat, some gene calls quoted."""
+    """T and B cells whose contig_1 IDs repeat, some gene calls of @, # and quotes."""
     return _cellranger_export(
         tmp_path_factory.mktemp("cellranger_export"), id_width=12, both=True
     )
@@ -1274,7 +1277,7 @@ def sequence_export(tmp_path_factory) -> SimpleNamespace:
 
 
 EXPORT_CASES = {
-    "repeated IDs and quoted calls": ("cellranger_export", "receptors", {}),
+    "repeated IDs and calls of @, # and quotes": ("cellranger_export", "receptors", {}),
     "clonotypes of repeated IDs": ("cellranger_export", "clonotypes", {}),
     "chains of repeated IDs, compressed": (
         "cellranger_export",
@@ -1298,5 +1301,7 @@ def test_airr_exports_fit_the_smallest_budget_accepted(request, tmp_path, case) 
         data.store, lambda: data.store.repertoire.export_airr(ref, path, **options)
     )
     assert peak <= budget, (peak, budget)
-    written = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    written = pd.read_csv(
+        path, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE
+    )
     assert written["sequence_id"].is_unique

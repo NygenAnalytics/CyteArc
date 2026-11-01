@@ -11,10 +11,16 @@ caller that streams its contigs holds one block at once, and
 ``write_airr_rearrangements`` writes a table through it. Each block's values
 are rendered as UTF-8 bytes and copied into its rows by a compiled loop; text
 given as ``EncodedText`` is copied from its packed bytes without being
-decoded. A value holding a tab, a newline, a carriage return or a double
-quote is quoted as pandas' ``to_csv`` quotes it, by a compiled loop too; the
-AIRR TSV dialect leaves such values out, so a file that holds them warns with
-their number when it is closed.
+decoded.
+
+Values are written as they are, unquoted, as the dialect of the AIRR file
+format asks. The format forbids tabs and newlines in values, so a value that
+holds a tab, a newline or a carriage return, which readers take for the end
+of a line, is refused. The format advises against ``@``, ``#``, ``"`` and
+``'``, which readers may take differently, so a file whose values hold them
+warns with their number and fields when it is closed; ``quality`` and
+``quality_alignment`` hold them by the format's own Phred encoding, and are
+not counted.
 
 The schema requires unique ``sequence_id`` values. ``suffix_repeated_ids``
 names the later occurrences of a repeated ID from 64-bit hashes of every ID,
@@ -23,7 +29,7 @@ reading the text of only the IDs whose hashes repeat.
 
 import gzip
 import os
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from types import TracebackType
 from typing import Any, NamedTuple, Self
 
@@ -169,6 +175,14 @@ _FLAG_OFFSETS = np.arange(3, dtype=np.int64)
 _TAB = 9
 _NEWLINE = 10
 _NO_CODES = np.empty(0, dtype=np.int64)
+# The class of each byte: 1 for a byte that values must not hold, a tab, a
+# newline or a carriage return; 2 for one that they should avoid, a double
+# quote, #, ' or @; 0 for any other.
+_BYTE_CLASSES = np.zeros(256, dtype=np.uint8)
+_BYTE_CLASSES[[9, 10, 13]] = 1
+_BYTE_CLASSES[[34, 35, 39, 64]] = 2
+# The fields of Phred scores, which the format writes as ASCII 33 to 126.
+_PHRED_FIELDS = frozenset({"quality", "quality_alignment"})
 
 
 def _packed(strings: Any) -> _Bytes:
@@ -240,26 +254,157 @@ def _scatter(
     codes: np.ndarray,
     coded: bool,
     separator: int,
-) -> bool:
+    count_discouraged: bool,
+) -> tuple[int, int, int]:
     """Copy each row's value and then ``separator`` to the row's cursor.
 
-    Returns whether a copied value holds a tab, a newline, a carriage return
-    or a double quote, which make a value quoted.
+    Returns:
+        The number of rows whose value holds a tab, a newline or a carriage
+        return, the first of them or -1, and with ``count_discouraged`` the
+        number of rows whose value holds a double quote, #, ' or @.
     """
-    special = False
+    n_forbidden = 0
+    first = -1
+    n_discouraged = 0
     for row in range(cursor.shape[0]):
         code = codes[row] if coded else row
         position = cursor[row]
         if code >= 0:
+            found = 0
             for index in range(offsets[code], offsets[code + 1]):
                 byte = data[index]
-                if byte == 9 or byte == 10 or byte == 13 or byte == 34:
-                    special = True
+                found |= _BYTE_CLASSES[byte]
                 out[position] = byte
                 position += 1
+            if found & 1:
+                n_forbidden += 1
+                if first < 0:
+                    first = row
+            if found & 2 and count_discouraged:
+                n_discouraged += 1
         out[position] = separator
         cursor[row] = position + 1
-    return special
+    return n_forbidden, first, n_discouraged
+
+
+@njit(cache=True, nogil=True)
+def _forbidden_rows(
+    data: np.ndarray, offsets: np.ndarray, codes: np.ndarray, coded: bool, n_rows: int
+) -> tuple[int, int]:
+    """Count the rows whose value holds a tab, a newline or a carriage return.
+
+    Returns:
+        Their number, and the first of them or -1.
+    """
+    count = 0
+    first = -1
+    for row in range(n_rows):
+        code = codes[row] if coded else row
+        if code < 0:
+            continue
+        for index in range(offsets[code], offsets[code + 1]):
+            if _BYTE_CLASSES[data[index]] & 1:
+                count += 1
+                if first < 0:
+                    first = row
+                break
+    return count, first
+
+
+@njit(cache=True, nogil=True)
+def _count_forbidden_values(data: np.ndarray, offsets: np.ndarray) -> int:
+    """Count the values of packed text that hold a tab, a newline or a carriage return."""
+    count = 0
+    for value in range(offsets.shape[0] - 1):
+        for index in range(offsets[value], offsets[value + 1]):
+            if _BYTE_CLASSES[data[index]] & 1:
+                count += 1
+                break
+    return count
+
+
+@njit(cache=True, nogil=True)
+def _forbidden_values(data: np.ndarray, offsets: np.ndarray, count: int) -> np.ndarray:
+    """Return the positions of the ``count`` values that ``_count_forbidden_values`` counts.
+
+    The positions are ascending, as int64.
+    """
+    found = np.empty(count, dtype=np.int64)
+    taken = 0
+    for value in range(offsets.shape[0] - 1):
+        if taken == count:
+            break
+        for index in range(offsets[value], offsets[value + 1]):
+            if _BYTE_CLASSES[data[index]] & 1:
+                found[taken] = value
+                taken += 1
+                break
+    return found
+
+
+@njit(cache=True, nogil=True)
+def _mark_forbidden_rows(
+    piece: np.ndarray, start: int, bounds: np.ndarray, marks: np.ndarray
+) -> None:
+    """Mark each row whose bytes in ``piece`` hold a tab, a newline or a carriage return.
+
+    Row ``i`` holds the bytes ``bounds[i]:bounds[i + 1]`` of a ragged field,
+    empty where ``bounds[i + 1]`` equals ``bounds[i]``, and ``piece`` holds
+    its bytes from ``start`` on, within those of the rows.
+    """
+    index = 0
+    while index < piece.shape[0]:
+        if _BYTE_CLASSES[piece[index]] & 1:
+            row = np.searchsorted(bounds, start + index, side="right") - 1
+            marks[row] = True
+            # The rest of the row's bytes need not be read; the loop moves on
+            # by at least a byte whatever the bounds hold.
+            index = max(index + 1, bounds[row + 1] - start)
+        else:
+            index += 1
+
+
+@njit(cache=True, nogil=True)
+def _mark_coded_rows(
+    values: np.ndarray,
+    marked: np.ndarray,
+    through: np.ndarray,
+    indirect: bool,
+    marks: np.ndarray,
+) -> None:
+    """Mark each row whose code is among ``marked``, which is sorted.
+
+    Row ``i``'s code is ``values[i]``, or with ``indirect`` ``through[values[i]]``;
+    a code of -1 is a missing value.
+    """
+    for row in range(values.shape[0]):
+        code = values[row]
+        if indirect and code >= 0:
+            code = through[code]
+        if code < 0:
+            continue
+        at = np.searchsorted(marked, code)
+        if at < marked.shape[0] and marked[at] == code:
+            marks[row] = True
+
+
+def _forbidden_message(found: Sequence[tuple[str, int, str]], subject: str) -> str:
+    """Name each field whose values hold a tab, a newline or a carriage return.
+
+    Args:
+        found: Each field, the number of its values that hold one, and the
+            ``sequence_id`` of the first.
+        subject: What holds the values, such as "the contigs".
+    """
+    parts = [
+        f"{count} value{'s' if count > 1 else ''} of {field}, "
+        f"{'the first ' if count > 1 else ''}in contig {contig!r}"
+        for field, count, contig in found
+    ]
+    return (
+        "AIRR values must not hold a tab, a newline or a carriage return, which "
+        f"these values of {subject} do: " + "; ".join(parts)
+    )
 
 
 @njit(cache=True, nogil=True)
@@ -281,104 +426,28 @@ def _lengths(column: _Bytes) -> np.ndarray:
     return lengths
 
 
-@njit(cache=True, nogil=True)
-def _add_quoted_widths(
-    widths: np.ndarray,
-    data: np.ndarray,
-    offsets: np.ndarray,
-    codes: np.ndarray,
-    coded: bool,
-    first: int,
-) -> int:
-    """Add the bytes of each row's value, quoted where it must be, to its width.
-
-    Rows ``first`` on are the rows of ``widths``. A quoted value gains its two
-    quotes and a second copy of each double quote that it holds.
-
-    Returns:
-        The number of rows whose value is quoted.
-    """
-    n_quoted = 0
-    for row in range(widths.shape[0]):
-        code = codes[first + row] if coded else first + row
-        if code < 0:
-            continue
-        quotes = 0
-        special = False
-        for index in range(offsets[code], offsets[code + 1]):
-            byte = data[index]
-            if byte == 34:
-                quotes += 1
-                special = True
-            elif byte == 9 or byte == 10 or byte == 13:
-                special = True
-        widths[row] += offsets[code + 1] - offsets[code]
-        if special:
-            widths[row] += 2 + quotes
-            n_quoted += 1
-    return n_quoted
-
-
-@njit(cache=True, nogil=True)
-def _scatter_quoted(
-    out: np.ndarray,
-    cursor: np.ndarray,
-    data: np.ndarray,
-    offsets: np.ndarray,
-    codes: np.ndarray,
-    coded: bool,
-    first: int,
-    separator: int,
-) -> None:
-    """Copy each row's value, quoted where it must be, and then ``separator``.
-
-    Rows ``first`` on are the rows of ``cursor``. A value that holds a tab, a
-    newline, a carriage return or a double quote is quoted, with its double
-    quotes doubled.
-    """
-    for row in range(cursor.shape[0]):
-        code = codes[first + row] if coded else first + row
-        position = cursor[row]
-        if code >= 0:
-            start, end = offsets[code], offsets[code + 1]
-            special = False
-            for index in range(start, end):
-                byte = data[index]
-                if byte == 9 or byte == 10 or byte == 13 or byte == 34:
-                    special = True
-                    break
-            if special:
-                out[position] = 34
-                position += 1
-            for index in range(start, end):
-                byte = data[index]
-                out[position] = byte
-                position += 1
-                if special and byte == 34:
-                    out[position] = 34
-                    position += 1
-            if special:
-                out[position] = 34
-                position += 1
-        out[position] = separator
-        cursor[row] = position + 1
-
-
 def _rows(
-    columns: list[_Bytes | None], n_rows: int, quoted: list[int]
-) -> Iterator[np.ndarray]:
+    columns: list[_Bytes | None], n_rows: int, counted: list[bool]
+) -> tuple[np.ndarray, list[tuple[int, int, int]]]:
     """Join the columns of rows with tabs, each row ending with a newline.
 
-    A value that holds a tab, a newline, a carriage return or a double quote
-    is quoted, with its double quotes doubled, as Python's csv module and
-    pandas' ``to_csv`` quote it; ``None`` is an empty column. The rows come as
-    one array of bytes, unless a value is quoted: then they are rendered
-    again, in slices of rows that each hold at most the bytes of the first
-    rendering, or one row, and ``quoted`` receives the number of quoted
-    values.
+    Values are copied as they are; ``None`` is an empty column.
+
+    Args:
+        columns: The columns, in order.
+        n_rows: The rows of each column.
+        counted: Whether to count each column's values that hold a double
+            quote, #, ' or @.
+
+    Returns:
+        The rows as one array of bytes, and for each column the number of
+        rows whose value holds a tab, a newline or a carriage return, the
+        first of them or -1, and the number of counted values that hold a
+        double quote, #, ' or @.
     """
+    marks = [(0, -1, 0)] * len(columns)
     if not n_rows:
-        return
+        return np.empty(0, dtype=np.uint8), marks
     widths = np.full(n_rows, len(columns), dtype=np.int64)
     for column in columns:
         if column is not None:
@@ -386,14 +455,14 @@ def _rows(
     cursor = np.zeros(n_rows, dtype=np.int64)
     np.cumsum(widths[:-1], out=cursor[1:])
     out = np.empty(int(cursor[-1] + widths[-1]), dtype=np.uint8)
-    special = False
+    del widths
     for position, column in enumerate(columns):
         separator = _NEWLINE if position == len(columns) - 1 else _TAB
         if column is None:
             _separate(cursor, out, separator)
             continue
         codes = column.codes
-        special |= _scatter(
+        marks[position] = _scatter(
             out,
             cursor,
             column.data,
@@ -401,55 +470,18 @@ def _rows(
             _NO_CODES if codes is None else codes,
             codes is not None,
             separator,
+            counted[position],
         )
-    if not special:
-        yield out
-        return
-    limit = len(out)
-    del out
-    widths[:] = len(columns)
-    n_quoted = 0
-    for column in columns:
-        if column is not None:
-            codes = column.codes
-            n_quoted += _add_quoted_widths(
-                widths,
-                column.data,
-                column.offsets,
-                _NO_CODES if codes is None else codes,
-                codes is not None,
-                0,
-            )
-    quoted.append(n_quoted)
-    # Each row's end among the quoted rows, in place of its start.
-    np.cumsum(widths, out=cursor)
-    start = 0
-    while start < n_rows:
-        before = int(cursor[start - 1]) if start else 0
-        stop = int(np.searchsorted(cursor, before + limit, side="right"))
-        stop = min(max(stop, start + 1), n_rows)
-        positions = cursor[start:stop] - widths[start:stop]
-        out = np.empty(int(cursor[stop - 1]) - before, dtype=np.uint8)
-        positions -= before
-        for position, column in enumerate(columns):
-            separator = _NEWLINE if position == len(columns) - 1 else _TAB
-            if column is None:
-                _separate(positions, out, separator)
-                continue
-            codes = column.codes
-            _scatter_quoted(
-                out,
-                positions,
-                column.data,
-                column.offsets,
-                _NO_CODES if codes is None else codes,
-                codes is not None,
-                start,
-                separator,
-            )
-        yield out
-        del out
-        start = stop
+    return out, marks
+
+
+def _value_text(column: _Bytes, row: int) -> str:
+    """Decode one row's value of a column of UTF-8 bytes."""
+    code = row if column.codes is None else int(column.codes[row])
+    if code < 0:
+        return ""
+    start, end = int(column.offsets[code]), int(column.offsets[code + 1])
+    return bytes(column.data[start:end]).decode("utf-8")
 
 
 def _real_text(numbers: np.ndarray, whole: bool) -> np.ndarray:
@@ -558,12 +590,20 @@ class AirrRearrangementWriter:
     schema's order, then ``columns`` without them. Each block is a table of
     contigs, a DataFrame or a mapping of column names to equal-length values,
     rendered as ``write_airr_rearrangements`` renders a table: logical fields
-    as ``T`` and ``F``, missing values empty, and the real-number columns of
-    ``whole`` as integers. A column may also be ``EncodedText``, whose code
-    for each row names one of its packed values, -1 for a missing value; the
-    values' bytes are copied without being decoded, and need not be sorted or
-    distinct. A block may lack required fields, which are written empty. A path
-    ending in ``.gz`` is gzip-compressed at level 6.
+    as ``T`` and ``F``, missing values empty, the real-number columns of
+    ``whole`` as integers, and other values as they are, unquoted. A column
+    may also be ``EncodedText``, whose code for each row names one of its
+    packed values, -1 for a missing value; the values' bytes are copied
+    without being decoded, and need not be sorted or distinct. A block may
+    lack required fields, which are written empty. A path ending in ``.gz`` is
+    gzip-compressed at level 6.
+
+    A block that holds a value with a tab, a newline or a carriage return,
+    which the AIRR format forbids, is refused before any of its rows is
+    written. Values that hold ``@``, ``#``, ``"`` or ``'``, which the format
+    advises against, are written as they are and counted, outside ``quality``
+    and ``quality_alignment``, and closing the writer warns with their number
+    and fields.
 
     The schema requires unique ``sequence_id`` values, and the writer writes
     each block as given, so a caller whose contigs' IDs may repeat gives the
@@ -602,7 +642,8 @@ class AirrRearrangementWriter:
         )
         self._whole = frozenset(whole)
         self._n_rows = 0
-        self._n_quoted = 0
+        # The values of each field that hold a double quote, #, ' or @.
+        self._discouraged: dict[str, int] = {}
         target = os.fspath(path)
         self._file: Any = open(target, "wb")
         # A compressed file's header names no file and no time, so the same
@@ -627,9 +668,13 @@ class AirrRearrangementWriter:
         return self._n_rows
 
     @property
-    def n_quoted(self) -> int:
-        """The number of values written quoted."""
-        return self._n_quoted
+    def n_discouraged(self) -> int:
+        """The number of values written that hold ``@``, ``#``, ``"`` or ``'``.
+
+        The AIRR format advises against these characters; values of
+        ``quality`` and ``quality_alignment`` are not counted.
+        """
+        return sum(self._discouraged.values())
 
     @property
     def closed(self) -> bool:
@@ -648,8 +693,9 @@ class AirrRearrangementWriter:
         Raises:
             ValueError: If the writer is closed, ``block`` holds no
                 ``sequence_id``, lacks a column after the required fields or
-                holds columns of different lengths, or a logical field holds
-                a value that is not logical.
+                holds columns of different lengths, a logical field holds a
+                value that is not logical, or a value holds a tab, a newline
+                or a carriage return; the block is then not written.
         """
         if self._handle is None:
             raise ValueError("The writer is closed")
@@ -675,31 +721,58 @@ class AirrRearrangementWriter:
             else None
             for column in self.columns
         ]
-        quoted: list[int] = []
-        for rendered in _rows(columns, n_rows, quoted):
-            for start in range(0, len(rendered), _WRITE_BYTES):
-                self._handle.write(rendered[start : start + _WRITE_BYTES])
-            # A slice is let go before the next is rendered.
-            del rendered
+        rendered, marks = _rows(
+            columns, n_rows, [column not in _PHRED_FIELDS for column in self.columns]
+        )
+        forbidden = sorted(
+            (first, position, count)
+            for position, (count, first, _) in enumerate(marks)
+            if count
+        )
+        if forbidden:
+            # The block's sequence_id, the first column, names the contigs.
+            ids = columns[0]
+            assert ids is not None
+            raise ValueError(
+                _forbidden_message(
+                    [
+                        (self.columns[position], count, _value_text(ids, first))
+                        for first, position, count in forbidden
+                    ],
+                    "the block",
+                )
+            )
+        for start in range(0, len(rendered), _WRITE_BYTES):
+            self._handle.write(rendered[start : start + _WRITE_BYTES])
         self._n_rows += n_rows
-        self._n_quoted += sum(quoted)
+        for name, (_, _, count) in zip(self.columns, marks, strict=True):
+            if count:
+                self._discouraged[name] = self._discouraged.get(name, 0) + count
         return n_rows
 
     def close(self) -> None:
         """Close the file; closing again does nothing.
 
-        A file that holds quoted values warns with their number, since the
-        AIRR TSV dialect leaves such values out.
+        A file whose values hold ``@``, ``#``, ``"`` or ``'``, which the AIRR
+        format advises against, warns with their number and fields.
         """
         if self._handle is not None:
             handle, self._handle = self._handle, None
             handle.close()
             self._file.close()
-            if self._n_quoted:
+            if self._discouraged:
+                fields = [name for name in self.columns if name in self._discouraged]
+                named = (
+                    fields[0]
+                    if len(fields) == 1
+                    else ", ".join(fields[:-1]) + " and " + fields[-1]
+                )
+                count = self.n_discouraged
                 logger.warning(
-                    f"{self._n_quoted} values hold a tab, a newline, a carriage "
-                    "return or a double quote, which the AIRR TSV dialect leaves "
-                    "out; they are written quoted, as pandas' to_csv quotes them"
+                    f"{count} value{'s' if count > 1 else ''} of {named} "
+                    f"hold{'' if count > 1 else 's'} @, #, a double quote or ', "
+                    "which the AIRR format advises against since readers may take "
+                    "them differently; they are written as they are"
                 )
 
     def __enter__(self) -> Self:
@@ -724,7 +797,10 @@ def write_airr_rearrangements(
 
     The required fields come first, in the schema's order, empty when the
     table lacks them, then the table's other columns in their order, or
-    ``columns`` when given. A path ending in ``.gz`` is gzip-compressed.
+    ``columns`` when given. Values are written as they are, unquoted, and a
+    value that holds a tab, a newline or a carriage return, which the AIRR
+    format forbids, is refused before the file is opened. A path ending in
+    ``.gz`` is gzip-compressed.
 
     Args:
         table: One row per contig, its columns AIRR field names.
@@ -739,8 +815,9 @@ def write_airr_rearrangements(
         TypeError: If ``table`` is not a DataFrame, ``path`` is not a path, or
             ``columns`` is not a sequence of column names.
         ValueError: If ``table`` holds no ``sequence_id`` or a ``sequence_id``
-            more than once, which the schema forbids, or ``columns`` names a
-            column more than once or one that the table lacks.
+            more than once, which the schema forbids, a value that holds a
+            tab, a newline or a carriage return, or ``columns`` names a column
+            more than once or one that the table lacks.
     """
     if not isinstance(table, pd.DataFrame):
         raise TypeError("table must be a pandas DataFrame")
@@ -770,10 +847,63 @@ def write_airr_rearrangements(
         and pd.api.types.is_float_dtype(table[column].dtype)
         and _whole(table[column])
     }
+    forbidden = _forbidden_columns(table, order, whole)
+    if forbidden:
+        raise ValueError(_forbidden_message(forbidden, "the table"))
     with AirrRearrangementWriter(path, rest, whole=whole) as writer:
         for start in range(0, len(table), _CHUNK_ROWS):
             writer.write(table.iloc[start : start + _CHUNK_ROWS])
     return len(table)
+
+
+def _forbidden_columns(
+    table: pd.DataFrame, order: Sequence[str], whole: Collection[str]
+) -> list[tuple[str, int, str]]:
+    """Find the columns whose values hold a tab, a newline or a carriage return.
+
+    Each column of ``order`` that the table holds is rendered as the writer
+    renders it, a chunk of rows at a time, except logical fields and columns of
+    numbers or booleans, which render as digits, ``T`` and ``F``.
+
+    Returns:
+        Each such column, the number of its values that hold one, and the
+        ``sequence_id`` of the first, ordered by that row.
+    """
+    found = []
+    for column in order:
+        if column not in table.columns:
+            continue
+        dtype = table[column].dtype
+        if (
+            column in AIRR_LOGICAL_FIELDS
+            or pd.api.types.is_bool_dtype(dtype)
+            or pd.api.types.is_numeric_dtype(dtype)
+        ):
+            continue
+        count, first = 0, -1
+        for start in range(0, len(table), _CHUNK_ROWS):
+            values = _bytes_column(
+                table[column].iloc[start : start + _CHUNK_ROWS], column, column in whole
+            )
+            codes = values.codes
+            n_rows = len(values.offsets) - 1 if codes is None else len(codes)
+            n_found, row = _forbidden_rows(
+                values.data,
+                values.offsets,
+                _NO_CODES if codes is None else codes,
+                codes is not None,
+                n_rows,
+            )
+            if n_found and first < 0:
+                first = start + row
+            count += n_found
+        if count:
+            found.append((first, column, count))
+    ids = table["sequence_id"]
+    return [
+        (column, count, str(ids.iloc[first]))
+        for first, column, count in sorted(found, key=lambda item: item[0])
+    ]
 
 
 def sequence_id_hashes(ids: Any) -> np.ndarray:
