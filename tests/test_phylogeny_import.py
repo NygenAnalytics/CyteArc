@@ -519,6 +519,71 @@ def test_loaded_phylogenies_list_every_node_and_tree(
     ]
 
 
+def test_writing_the_names_counts_what_the_join_holds(tmp_path) -> None:
+    # Long node names make their writing the import's largest check, which
+    # must count what the join holds beside the trees: its lookup and each
+    # selected cell's ID as text, whether or not a leaf names the cell.
+    import re
+    import sys
+    import warnings
+
+    from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
+    from cytearc.datastore.datastore import DataStore
+
+    n_cells, n_leaves = 25_000, 20_000
+    ids = [f"cell{cell:06d}-1" for cell in range(n_cells)]
+    write_count_store(
+        str(tmp_path / "names.zarr"),
+        {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
+        "uint16",
+        cell_ids=ids,
+    )
+    store = DataStore(
+        str(tmp_path / "names.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        nthreads=1,
+    )
+    store.cells.insert("in_tree", np.arange(n_cells) < n_leaves)
+    pairs = ",".join(
+        f"({ids[cell]}:1,{ids[cell + 1]}:1){'n' * 190}{cell:09d}:1"
+        for cell in range(0, n_leaves, 2)
+    )
+    path = tmp_path / "names.nwk"
+    path.write_text(f"({pairs})root;")
+
+    def names_estimate(selection) -> int:
+        """The bytes that writing the names holds, from its refusal."""
+        budget = 1
+        for _attempt in range(20):
+            store.memoryBytes = budget
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    store.clones.import_phylogeny(
+                        path,
+                        cell_selection=selection,
+                        time_unit="days",
+                        invalidate_cache=True,
+                    )
+            except MemoryError as error:
+                found = re.search(r"about (\d+) bytes", str(error))
+                assert found is not None, str(error)
+                if str(error).startswith("Writing the names"):
+                    return int(found.group(1))
+                budget = int(found.group(1))
+                continue
+            raise AssertionError("writing the names was never refused")
+        raise AssertionError("the budget did not settle")
+
+    in_tree = names_estimate(store.snapshot_cell_selection("in_tree"))
+    every_cell_of_the_store = names_estimate(store.snapshot_cell_selection())
+    beyond = ids[n_leaves:]
+    assert every_cell_of_the_store - in_tree == LOOKUP_BYTES_PER_CELL * len(
+        beyond
+    ) + sum(map(sys.getsizeof, beyond))
+
+
 def test_missing_and_incomplete_phylogenies_are_refused(store, tmp_path) -> None:
     from cytearc.storage.artifacts import artifact_group
     from cytearc.storage.refs import ArtifactRef

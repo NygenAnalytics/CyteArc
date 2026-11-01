@@ -32,7 +32,11 @@ from ...clones.phylogeny import (
     phylogeny_frames,
 )
 from ...metadata.arguments import PhylogenyCloneArguments, PhylogenyImportArguments
-from ...metadata.rows import read_array_rows_chunkwise, read_metadata_rows_chunkwise
+from ...metadata.rows import (
+    read_array_rows_chunkwise,
+    read_metadata_rows_chunkwise,
+    text_width,
+)
 from ...metadata.selection import cell_selection_indices
 from ...storage.artifact_writer import ArrayRequirement, artifact_transaction
 from ...storage.arrays import (
@@ -689,7 +693,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         group = self._phylogeny_group(phylogeny)
         names_array = as_zarr_array(group["names"], name="names")
         n_nodes = int(names_array.shape[0])
-        width = int(names_array.dtype.itemsize) // 4
+        width = text_width(names_array)
         selection = self._phylogeny_cells(phylogeny)
         cell_index = cell_selection_indices(self.zw, selection)
         n_named = _count(group, "n_cells_in_trees")
@@ -823,7 +827,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             return planned.ref
         names_array = as_zarr_array(group["names"], name="names")
         n_nodes = int(names_array.shape[0])
-        width = int(names_array.dtype.itemsize) // 4
+        width = text_width(names_array)
         held = _FIXED_BYTES + _CUT_BYTES_PER_NODE * n_nodes
         self._check_phylogeny_budget(f"Cutting the phylogeny of {n_nodes} nodes", held)
         self._require_writable(arguments.operation)
