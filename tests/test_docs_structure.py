@@ -255,3 +255,17 @@ def test_every_linked_doi_has_a_local_citation() -> None:
         "from `curl -L -H 'Accept: application/x-bibtex' https://doi.org/<doi>`: "
         f"{missing}"
     )
+
+
+def test_the_notices_open_and_close_each_code_fence_on_a_line_of_its_own() -> None:
+    # A licence whose last line lacks a line break once swallowed the fence
+    # that closes it, and the notices after it rendered as its code.
+    notices = (_REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md").read_text()
+    lines = notices.splitlines()
+    inline = [
+        number for number, line in enumerate(lines, 1) if "```" in line.strip()[3:]
+    ]
+    fences = [line for line in lines if line.startswith("```")]
+    assert not inline, f"Fences that share a line with text, on lines {inline}"
+    assert len(fences) % 2 == 0
+    assert all(fence == "```" for fence in fences[1::2])

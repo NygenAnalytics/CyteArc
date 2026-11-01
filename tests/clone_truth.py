@@ -2121,13 +2121,8 @@ def expected_petracer_characters(
     rows: list[dict[str, object]] = []
     for row in recorders.independent.itertuples():
         state = row.state if row.read else "missing"
-        allele = (
-            str(row.mark)
-            if state == "mark"
-            else "!"
-            if state == "unknown_mark"
-            else None
-        )
+        # "!" is a placeholder of an unknown mark, which names no allele.
+        allele = str(row.mark) if state == "mark" else None
         if (
             layout == "zenodo"
             and row.integration == PETRACER_INTEGRATIONS[-1]
@@ -2357,7 +2352,8 @@ def expected_darlin(
                 "integration": row.integration,
                 "site": "",
                 "state": state,
-                "allele": None if state == "unedited" else row.allele,
+                # CARLIN's "X" is a placeholder, which names no allele.
+                "allele": row.allele if state == "mark" else None,
                 "umis": -1,
                 "reads": -1,
             }

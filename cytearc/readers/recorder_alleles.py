@@ -154,13 +154,37 @@ _CARLIN_EVENT = (
     r"(?:\d+_\d+del|\d+_\d+ins[ACGTN]+|\d+_\d+delins[ACGTN]+|\d+[ACGTN]>[ACGTN])"
 )
 _CARLIN_ALLELE = rf"{_CARLIN_EVENT}(?:,{_CARLIN_EVENT})*"
-# PEtracer's and DNA Typewriter's insertions are bases, never N, so text such
-# as NA is no insertion.
+# PEtracer's and DNA Typewriter's insertions are bases. An insertion that
+# holds N, an ambiguous base, names no allele, so it is read as missing, as is
+# NA; other text is no insertion.
 _INSERTION = r"[ACGT]+"
-# A state of a character matrix: text that other formats read as missing or
-# unedited, and a negative number that the matrix does not name missing, are
-# none.
-_MATRIX_STATE = r"(?!(?:None|none|nan|NaN|-\d+)$)\S(?:.*\S)?"
+_AMBIGUOUS_INSERTION = r"[ACGTN]*N[ACGTN]*"
+# What Cassiopeia 3.0 writes at a site of known insertions for an edit that its
+# lookup does not name: the inserted sequence, or a deletion's length after D,
+# with the inserted sequence after I where there is one.
+_LOOKUP_EDIT = r"[ACGT]+|D\d+(?:I[ACGTN]+)?"
+# PEtracer's character matrices of 2026: "*" unedited, "-" missing, a mark
+# from 1 to 8, "!" an insertion outside the lookup and nothing for an
+# integration that the cell's embryo lacks.
+_PETRACER_CHARACTER_RULES = SiteRules(
+    kind="independent",
+    not_applicable=frozenset({""}),
+    missing=frozenset({"-"}),
+    unedited=frozenset({"*"}),
+    unknown=frozenset({"!"}),
+    marks=frozenset(str(mark) for mark in range(1, 9)),
+)
+# A state of a character matrix: text that pandas or other formats read as
+# missing, None among it, and a negative number that the matrix does not name
+# missing, are none; the format's own tokens are read before this applies.
+_MATRIX_STATE = (
+    r"(?!(?:"
+    + "|".join(re.escape(token) for token in sorted(MISSING_TEXT | {"none"}) if token)
+    + r"|-\d+)$)\S(?:.*\S)?"
+)
+# A whole number written with a fraction of zeros, as pandas writes the
+# integers of a column that holds a missing value.
+_WHOLE_FLOAT = re.compile(r"(-?\d+)\.0+")
 _NUCLEOTIDE_NAME = re.compile(r"^[ACGTN]+$")
 # PEtracer's eight lineage marks at each site, the 5-mers that Koblan, Yost
 # et al. (Science 2025) insert, as Cassiopeia's PEtracer preset lists them.
@@ -188,6 +212,8 @@ _TYPEWRITER_QC_COLUMNS = frozenset(
 _TYPEWRITER_CELL_COLUMNS = ("cell", "cell_id")
 # Cassiopeia's columns besides its sites, before 3.0 and in 3.0.
 _CASSIOPEIA_SITE = re.compile(r"^r\d+$")
+# The schema key under which pandas saves a table's attrs in parquet.
+_PANDAS_ATTRS = "PANDAS_ATTRS"
 _PARQUET_RESERVED = frozenset(
     {
         "sample",
@@ -360,7 +386,8 @@ class AlleleLayout:
             **{
                 key: value
                 for key, value in self._read.items()
-                if key in ("states_from", "encoding", "reads_from", "sites_from")
+                if key
+                in ("states_from", "names_from", "encoding", "reads_from", "sites_from")
             },
         }
 
@@ -616,7 +643,11 @@ def _text_lines(path: Path) -> list[str]:
 
 def _carlin_layout(path: str, integration: str) -> AlleleLayout:
     pair = _carlin_pair(Path(path))
-    assert pair is not None
+    if pair is None:
+        raise ValueError(
+            f"{path} is no CARLIN pair: format='carlin' reads AlleleAnnotations.txt "
+            "and AlleleColonies.txt, named by either file or by their folder"
+        )
     annotations, colonies = pair
     run = _results_type(annotations)
     if run is not None and not run.startswith("sc"):
@@ -762,9 +793,83 @@ def _polars() -> Any:
     return polars
 
 
-def _parquet_layout(path: str) -> AlleleLayout:
+def _parquet_attributes(path: str, metadata: Mapping[str, str]) -> dict[str, Any]:
+    """The ``attrs`` that pandas saves with a table, as Cassiopeia 3.0 writes them.
+
+    Raises:
+        ValueError: If the table's attributes are not a JSON object.
+    """
     import json
 
+    saved = metadata.get(_PANDAS_ATTRS)
+    if saved is None:
+        return {}
+    try:
+        attributes = json.loads(saved)
+    except ValueError as error:
+        raise ValueError(
+            f"The {_PANDAS_ATTRS} of {path} are not JSON: {error}"
+        ) from None
+    if not isinstance(attributes, dict):
+        raise ValueError(f"The {_PANDAS_ATTRS} of {path} are not a JSON object")
+    return attributes
+
+
+def _parquet_rules(
+    path: str, sites: Sequence[str], attributes: Mapping[str, Any]
+) -> SiteRules:
+    """The rules of a table's sites, by the edit model that Cassiopeia 3.0 records."""
+    models = attributes.get("edit_models") or {}
+    if not isinstance(models, dict):
+        raise ValueError(f"The edit_models of {path} are not a mapping of sites")
+    found = {str(models.get(site, "indel")) for site in sites}
+    if len(found) > 1:
+        raise ValueError(
+            f"The sites of {path} follow several edit models, "
+            + ", ".join(sorted(found))
+            + "; CyteArc reads the sites of one table by one model"
+        )
+    (model,) = found
+    if model == "indel":
+        # Text that holds None is an uncut site, as Cassiopeia reads it.
+        return SiteRules(kind="indel", missing=frozenset({""}), unedited_within="None")
+    if model == "insertion_lookup":
+        states = attributes.get("site_states") or {}
+        if not isinstance(states, dict) or any(
+            not isinstance(states.get(site), list) for site in sites
+        ):
+            raise ValueError(
+                f"{path} records sites of insertions of known sequences without "
+                "the site_states that name their labels"
+            )
+        # Insertions in the lookup are written by their label, others by their
+        # sequence, deletions as D and their length, with I and the sequence
+        # inserted beside them, and the unedited site as None.
+        return SiteRules(
+            kind="independent",
+            missing=frozenset({""}),
+            unedited=frozenset({"None"}),
+            marks_at=MappingProxyType(
+                {site: frozenset(map(str, states[site])) for site in sites}
+            ),
+            pattern=_LOOKUP_EDIT,
+            ambiguous=_AMBIGUOUS_INSERTION,
+        )
+    if model == "sequential_insertion":
+        return SiteRules(
+            kind="ordered",
+            missing=frozenset({""}),
+            unedited=frozenset({"None"}),
+            pattern=_INSERTION,
+            ambiguous=_AMBIGUOUS_INSERTION,
+        )
+    raise ValueError(
+        f"The sites of {path} follow Cassiopeia's {model!r} edit model, which "
+        "CyteArc does not read"
+    )
+
+
+def _parquet_layout(path: str) -> AlleleLayout:
     pl = _polars()
     schema = pl.read_parquet_schema(path)
     names = list(schema)
@@ -774,32 +879,33 @@ def _parquet_layout(path: str) -> AlleleLayout:
             f"{path} has no column " + ", ".join(map(repr, missing)) + " of "
             "Cassiopeia's allele tables"
         )
-    attributes: dict[str, Any] = {}
-    metadata = pl.read_parquet_metadata(path)
-    if "pandas" in metadata:
-        try:
-            attributes = dict(json.loads(metadata["pandas"]).get("attrs") or {})
-        except (ValueError, AttributeError):
-            attributes = {}
+    if "UMI" in names:
+        raise ValueError(
+            f"{path} holds one row per UMI, as Cassiopeia 3.0 writes a table before "
+            "it collapses molecules; import the collapsed table, whose n_umis "
+            "count molecules"
+        )
+    attributes = _parquet_attributes(path, pl.read_parquet_metadata(path))
     listed = attributes.get("sites")
-    if isinstance(listed, list) and listed and all(isinstance(s, str) for s in listed):
+    if listed is not None:
+        if not isinstance(listed, list) or not all(isinstance(s, str) for s in listed):
+            raise ValueError(f"The sites of {path} are not a list of column names")
         sites = [site for site in listed if site in names]
         sites_from = "attrs"
     else:
-        # Cassiopeia's own rule: the text columns that no other role names.
+        # Cassiopeia's own rule: the categorical columns that no other role
+        # names.
         sites = [
             name
             for name in names
             if name not in _PARQUET_RESERVED
             and not name.startswith(("pass_", "doublet"))
-            and (
-                schema[name] == pl.String
-                or isinstance(schema[name], pl.Categorical | pl.Enum)
-            )
+            and isinstance(schema[name], pl.Categorical | pl.Enum)
         ]
         sites_from = "columns"
     if not sites:
         raise ValueError(f"{path} names no site columns")
+    rules = _parquet_rules(path, sites, attributes)
     sample_values = []
     if "sample" in names:
         sample_values = (
@@ -818,7 +924,8 @@ def _parquet_layout(path: str) -> AlleleLayout:
         path=path,
         tool="Cassiopeia",
         pipeline="Cassiopeia 3",
-        rules=SiteRules(kind="indel", unedited_within="None"),
+        rules=rules,
+        n_slots=len(sites) if rules.kind == "ordered" else None,
         columns=MappingProxyType({"sites": sites}),
         n_columns=len(sites) + 5,
         n_sites=len(sites),
@@ -850,6 +957,7 @@ def _petracer_layout(path: str) -> AlleleLayout:
             unedited_at=MappingProxyType({"EMX1": frozenset({"CTTGGG"})}),
             marks_at=_PETRACER_MARKS,
             pattern=_INSERTION,
+            ambiguous=_AMBIGUOUS_INSERTION,
         ),
         n_columns=len(text.names),
         n_sites=len(_PETRACER_SITES),
@@ -884,14 +992,14 @@ def _matrix_layout(path: str, format: str) -> AlleleLayout:
     names = list(text.names[1:])
     columns = _matrix_columns(names, path)
     if format == "petracer_characters":
-        rules = SiteRules(
-            kind="independent",
-            not_applicable=frozenset({""}),
-            missing=frozenset({"-"}),
-            unedited=frozenset({"*"}),
-            unknown=frozenset({"!"}),
-            marks=frozenset(str(mark) for mark in range(1, 9)),
-        )
+        other = sorted({site for _integration, site in columns} - set(_PETRACER_SITES))
+        if other:
+            raise ValueError(
+                f"{path} names sites {', '.join(map(repr, other))}, which are none "
+                "of PEtracer's " + ", ".join(_PETRACER_SITES) + "; PEtracer's "
+                "characters are named intID<N>-<site>"
+            )
+        rules = _PETRACER_CHARACTER_RULES
         tool, pipeline = "PEtracer", "PEtracer 2026"
     else:
         rules = SiteRules(
@@ -946,7 +1054,12 @@ def _typewriter_layout(path: str, lengths: Mapping[str, int]) -> AlleleLayout:
         path=path,
         tool="DNA Typewriter",
         pipeline="DNA Typewriter 2022",
-        rules=SiteRules(kind="ordered", unedited=frozenset({""}), pattern=_INSERTION),
+        rules=SiteRules(
+            kind="ordered",
+            unedited=frozenset({""}),
+            pattern=_INSERTION,
+            ambiguous=_AMBIGUOUS_INSERTION,
+        ),
         lengths=MappingProxyType(dict(lengths)),
         n_slots=len(slots),
         n_columns=len(names) + 1,
@@ -981,6 +1094,12 @@ def _chains_layout(path: str, lengths: Mapping[str, int]) -> AlleleLayout:
         raise ValueError(f"{path} names no integration barcode")
     if len(set(integrations)) != len(integrations):
         raise ValueError(f"{path} names an integration twice")
+    lacking = sorted(set(lengths) - set(integrations))
+    if lacking:
+        raise ValueError(
+            f"integrations gives the slots of {', '.join(map(repr, lacking))}, which "
+            f"{path} holds no column of; check the names of the contracted tapes"
+        )
     return AlleleLayout(
         format="typewriter_chains",
         path=path,
@@ -990,6 +1109,7 @@ def _chains_layout(path: str, lengths: Mapping[str, int]) -> AlleleLayout:
             kind="ordered",
             unedited=frozenset({""}),
             pattern=_INSERTION,
+            ambiguous=_AMBIGUOUS_INSERTION,
             absent=MISSING,
         ),
         lengths=MappingProxyType(dict(lengths)),
@@ -1005,6 +1125,27 @@ def _chains_layout(path: str, lengths: Mapping[str, int]) -> AlleleLayout:
 def _treedata_layout(path: str) -> AlleleLayout:
     table = character_table(path)
     columns = _matrix_columns(table.characters, path)
+    if table.names_from != "columns":
+        # PEtracer's published files hold its character matrices of 2026 as
+        # an array, with the matrices' tokens and no states in uns.
+        return AlleleLayout(
+            format="treedata",
+            path=path,
+            tool="PEtracer",
+            pipeline="PEtracer 2026",
+            rules=_PETRACER_CHARACTER_RULES,
+            n_columns=len(columns),
+            n_sites=len(columns),
+            _table=table,
+            _read=MappingProxyType(
+                {
+                    "columns": columns,
+                    "states_from": "PEtracer's characters",
+                    "names_from": table.names_from,
+                    "encoding": table.encoding,
+                }
+            ),
+        )
     if table.missing_state is not None or table.unmodified_state is not None:
         if table.missing_state is None or table.unmodified_state is None:
             raise ValueError(
@@ -1027,6 +1168,9 @@ def _treedata_layout(path: str) -> AlleleLayout:
             kind="independent",
             missing=missing,
             unedited=unedited,
+            # PEtracer writes an insertion outside its lookup as "!", which
+            # no other tool writes as a state.
+            unknown=frozenset({"!"}) - missing - unedited,
             pattern=_MATRIX_STATE,
         ),
         n_columns=len(columns),
@@ -1154,6 +1298,18 @@ def _table_layout(
         n_slots = len(sites)
     if lengths and rules.kind != "ordered":
         raise ValueError("integrations gives slots of ordered sites only")
+    split_sites = None
+    if "separator" in roles:
+        if rules.kind == "ordered":
+            if n_slots is None:
+                raise ValueError(
+                    "columns['slots'] must count the slots of ordered sites that "
+                    "'separator' splits from each row's allele"
+                )
+        else:
+            # The sites of every row are those of the file's first row, so a
+            # chunk of any size reads them alike.
+            split_sites = _first_split_sites(text, roles, rules.missing)
     return AlleleLayout(
         format="table",
         path=path,
@@ -1166,12 +1322,27 @@ def _table_layout(
         rows_hold_sites="site" in roles,
         columns=MappingProxyType(roles),
         n_columns=len(text.names),
-        # A split allele's sites are counted as GESTALT's ten until it is read.
-        n_sites=len(sites) if sites else (n_slots or 10),
+        n_sites=len(sites) if sites else (n_slots or split_sites or 1),
         line_bytes=_line_bytes(path, text.compression),
         _text=text,
-        _read=MappingProxyType({"sites": tuple(sites)}),
+        _read=MappingProxyType({"sites": tuple(sites), "split_sites": split_sites}),
     )
+
+
+def _first_split_sites(
+    text: TextLayout, roles: Mapping[str, Any], missing: frozenset[str]
+) -> int:
+    """The sites that the first allele of a table splits into, or 1 for none.
+
+    The file is read only until its first row with an allele, most often its
+    first row.
+    """
+    position = text.names.index(roles["allele"])
+    for _line, chunk in text_chunks(text, _SAMPLED_LINES):
+        for value in _stripped(chunk[position]).tolist():
+            if value is not None and value not in missing:
+                return len(str(value).split(roles["separator"]))
+    return 1
 
 
 def allele_layout(
@@ -1227,6 +1398,10 @@ def allele_layout(
     if found == "cassiopeia":
         return _cassiopeia_layout(text)
     if found == "cassiopeia_parquet":
+        if not signature(text).startswith(_PARQUET_SIGNATURE):
+            raise ValueError(
+                f"{text} is no parquet file, which format='cassiopeia_parquet' reads"
+            )
         return _parquet_layout(text)
     if found == "petracer":
         return _petracer_layout(text)
@@ -1626,12 +1801,28 @@ def _iter_matrix(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
             [_stripped(chunk[position]) for position in range(1, len(text.names))],
             axis=1,
         )
+        if layout.format == "characters":
+            tokens = _whole_numbers(tokens)
         yield AlleleRows(
             barcodes=_cells(chunk[0].to_numpy(dtype=object), lines, text.path),
             rows=lines,
             columns=columns,
             tokens=tokens,
         )
+
+
+def _whole_numbers(tokens: np.ndarray) -> np.ndarray:
+    """Tokens of whole numbers written with zero fractions, such as 1.0, as integers."""
+    values = np.asarray(tokens, dtype=object)
+    codes, distinct = pd.factorize(values.reshape(-1), use_na_sentinel=True)
+    written = []
+    for token in np.asarray(distinct, dtype=object).tolist():
+        found = _WHOLE_FLOAT.fullmatch(str(token))
+        written.append(str(int(found.group(1))) if found else token)
+    result = np.full(values.size, None, dtype=object)
+    present = codes >= 0
+    result[present] = np.asarray(written, dtype=object)[codes[present]]
+    return result.reshape(values.shape)
 
 
 def _iter_typewriter(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
@@ -1778,7 +1969,7 @@ def _iter_treedata(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows
             barcodes=np.asarray(cells, dtype=object),
             rows=rows,
             columns=columns,
-            tokens=_stripped(states).reshape(states.shape),
+            tokens=_whole_numbers(_stripped(states).reshape(states.shape)),
         )
 
 
@@ -1802,19 +1993,38 @@ def _iter_table(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
             columns = tuple((layout.integration, site) for site in sites)
         elif separator is not None:
             alleles = _stripped(chunk[positions[roles["allele"]]])
-            split = [str(value).split(separator) for value in alleles.tolist()]
-            n_sites = int(
-                layout.n_slots or max((len(parts) for parts in split), default=1)
-            )
-            longer = [row for row, parts in enumerate(split) if len(parts) > n_sites]
-            if longer:
+            # A row without an allele reads none of its sites.
+            split = [
+                None
+                if value is None or value in layout.rules.missing
+                else str(value).split(separator)
+                for value in alleles.tolist()
+            ]
+            if layout.n_slots is not None:
+                n_sites = int(layout.n_slots)
+                other = [
+                    row
+                    for row, parts in enumerate(split)
+                    if parts is not None and len(parts) > n_sites
+                ]
+                what = f"more than {n_sites} sites"
+            else:
+                n_sites = int(layout._read["split_sites"])
+                other = [
+                    row
+                    for row, parts in enumerate(split)
+                    if parts is not None and len(parts) != n_sites
+                ]
+                what = f"another number of sites than the {n_sites} of its first allele"
+            if other:
                 raise ValueError(
-                    f"{text.path} splits alleles into more than {n_sites} sites on "
-                    + file_lines(np.asarray(longer), line)
+                    f"{text.path} splits alleles into {what} on "
+                    + file_lines(np.asarray(other), line)
                 )
             tokens = np.full((len(split), n_sites), None, dtype=object)
             for row, parts in enumerate(split):
-                tokens[row, : len(parts)] = [part.strip() for part in parts]
+                if parts is not None:
+                    tokens[row, : len(parts)] = [part.strip() for part in parts]
             columns = tuple(
                 (layout.integration, str(site)) for site in range(1, n_sites + 1)
             )
@@ -1971,7 +2181,7 @@ def classified_rows(layout: AlleleLayout, rows: AlleleRows) -> ChunkStates:
         shown = ", ".join(
             f"{token!r} at {site or 'its allele'}" for site, token in refused.tokens
         )
-        lines = ", ".join(str(int(row)) for row in rows.rows[refused.rows][:5])
+        lines = ", ".join(str(int(row)) for row in rows.rows[list(refused.rows)][:5])
         raise ValueError(
             f"{layout.path} holds tokens that {layout.format!r} does not read, "
             f"{shown}, on rows {lines}"

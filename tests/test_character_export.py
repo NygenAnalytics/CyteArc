@@ -68,8 +68,8 @@ def read_treedata(path: Path) -> dict:
 def expected_characters(recorders, truth) -> pd.DataFrame:
     """The states that PEtracer's characters of the truth export as, cells by characters.
 
-    A mark is its own state; an unknown mark follows the largest mark of its
-    character; unedited is 0 and missing -1. Cells that read no site are
+    A mark is its own state; an unknown mark, written ``!``, names no allele
+    and is missing; unedited is 0 and missing -1. Cells that read no site are
     left out.
     """
     table = recorders.independent.copy()
@@ -80,13 +80,7 @@ def expected_characters(recorders, truth) -> pd.DataFrame:
         -1,
         np.where(table["state"] == "mark", table["mark"], 0),
     )
-    largest = (
-        table[read & (table["state"] == "mark")].groupby("character")["mark"].max()
-    )
-    unknown = read & (table["state"] == "unknown_mark")
-    table.loc[unknown, "code"] = (
-        table.loc[unknown, "character"].map(largest).fillna(0).astype(int) + 1
-    )
+    table.loc[table["state"] == "unknown_mark", "code"] = -1
     matrix = table.pivot(index="cell", columns="character", values="code")
     matrix = matrix.loc[(matrix >= 0).any(axis=1)]
     # Characters that no exported cell reads are left out.
@@ -124,16 +118,13 @@ def test_cassiopeia_stores_hold_the_truths_states(store, truth, recorders, tmp_p
     assert elements["allow_overlap"] is False or elements["allow_overlap"] == np.False_
     assert elements["alignment"] == "leaves"
     assert elements["obst"] == []
-    # The state table names each exported edit's allele: a mark's label, or
-    # '!' for an unknown mark.
+    # The state table names each exported edit's allele, a mark's label.
     states = elements["uns"]["character_states"]
+    assert len(states)
     for row in states.itertuples():
         found = set(characters[row.character][characters[row.character] == row.state])
         assert found == {row.state}
-        if row.allele == "!":
-            assert row.state > 8 or row.state == characters[row.character].max()
-        else:
-            assert row.state == int(row.allele)
+        assert row.state == int(row.allele)
 
 
 def test_laml_files_hold_the_matrix_its_priors_and_states(

@@ -609,3 +609,193 @@ def test_rows_without_an_integration_are_left_out_counted_and_warned(tmp_path):
     records = store.clones.load_alleles(ref).records
     assert len(records) == 3 * (len(raw) - lacking)
     assert store.artifacts.load(ref).attrs["n_rows_without_integration"] == lacking
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "options"),
+    [
+        ("petracer.csv", "intID,cellBC,RNF2,HEK3,EMX1,UMI,readCount\n", {}),
+        ("characters.csv", "cell_barcode,intID1-EMX1,intID1-HEK3,intID1-RNF2\n", {}),
+        ("typewriter.csv", "Cell,TargetBC,Site1,Site2,Site3,Site4,Site5,nUMI\n", {}),
+        ("chains.tsv", "cell\tCGGGGAATTGTA\tn_loci\n", {}),
+        (
+            "table.csv",
+            "cell,integration,allele\n",
+            {
+                "columns": {
+                    "cell": "cell",
+                    "integration": "integration",
+                    "allele": "allele",
+                }
+            },
+        ),
+    ],
+)
+def test_files_of_a_header_alone_import_no_records(
+    store, truth, tmp_path, name, text, options
+):
+    path = tmp_path / name
+    path.write_text(text)
+    ref = store.clones.import_alleles(path, cell_selection=every_cell(store), **options)
+    loaded = store.clones.load_alleles(ref)
+    assert len(loaded.records) == 0 and loaded.records.columns.tolist()[:3] == [
+        "cell",
+        "file",
+        "integration",
+    ]
+    assert (loaded.cells["n_records"] == 0).all()
+    assert loaded.files["rows"].tolist() == [0]
+    assert loaded.site_states().empty
+    with pytest.raises(ValueError, match="No cell reads a character"):
+        store.clones.export_characters(ref, tmp_path / "out.zarr")
+
+
+def test_an_empty_carlin_pair_imports_no_records(store, tmp_path):
+    folder = tmp_path / "pair"
+    folder.mkdir()
+    (folder / "AlleleAnnotations.txt").write_text("")
+    (folder / "AlleleColonies.txt").write_text("")
+    ref = store.clones.import_alleles(
+        folder, cell_selection=every_cell(store), integrations="CA"
+    )
+    assert len(store.clones.load_alleles(ref).records) == 0
+
+
+def test_a_pair_listed_twice_keeps_each_listings_integration(tmp_path):
+    """Canonical order sorts files by prefix, but options follow their listing."""
+    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import write_count_store
+
+    pair = Path(__file__).parent / "data" / "recorders" / "darlin_ll837_skull_CA"
+    barcodes = sorted(
+        {
+            barcode
+            for line in (pair / "AlleleColonies.txt").read_text().splitlines()
+            for barcode in line.split(",")
+            if barcode
+        }
+    )
+    cells = [f"z_{barcode}" for barcode in barcodes] + [
+        f"a_{barcode}" for barcode in barcodes
+    ]
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((len(cells), 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=cells,
+    )
+    store = open_clone_store(tmp_path / "store.zarr")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ref = store.clones.import_alleles(
+            [pair, pair],
+            cell_selection=store.snapshot_cell_selection(),
+            barcode_prefix=["z_", "a_"],
+            integrations=["ZZ", "AA"],
+        )
+    records = store.clones.load_alleles(ref).records
+    prefixes = records["cell"].astype(str).str[:2]
+    assert set(zip(prefixes, records["integration"].astype(str), strict=True)) == {
+        ("z_", "ZZ"),
+        ("a_", "AA"),
+    }
+
+
+def test_records_do_not_depend_on_the_chunks_a_file_is_read_in(
+    store, truth, recorders, tmp_path, monkeypatch
+):
+    """Rows of one site each are read site by site within a chunk, and split
+    alleles give each row the sites of the file's first allele, whatever the
+    budget's chunks."""
+    from cytearc.datastore._operations import recorder_alleles as operations
+    from tests.clone_truth import write_gestalt_table
+
+    long = write_gestalt_table(recorders, truth, tmp_path / "long.tsv", long=True)
+    columns = {
+        "cell": "cellID",
+        "integration": "intID",
+        "site": "target",
+        "allele": "target_edit",
+        "unedited": "NONE",
+        "missing": "UNKNOWN",
+    }
+    split = tmp_path / "split.tsv"
+    split.write_text(
+        "cell\tallele\n"
+        + "".join(
+            f"{cell}\t{'NONE-3D+1-UNKNOWN' if index % 3 else ''}\n"
+            for index, cell in enumerate(truth.cell_ids)
+        )
+    )
+    split_columns = {"cell": "cell", "allele": "allele", "separator": "-"}
+    cells = every_cell(store)
+
+    def records(path, **options):
+        ref = store.clones.import_alleles(
+            path, cell_selection=cells, invalidate_cache=True, **options
+        )
+        return store.clones.load_alleles(ref).records
+
+    expected = [
+        records(long, columns=columns),
+        records(split, columns=split_columns, integrations="HMID"),
+    ]
+    # One row per chunk.
+    monkeypatch.setattr(operations, "_CHUNK_SHARE", 10**15)
+    found = [
+        records(long, columns=columns),
+        records(split, columns=split_columns, integrations="HMID"),
+    ]
+    for one, other in zip(expected, found, strict=True):
+        pd.testing.assert_frame_equal(one, other)
+        rows = one.groupby("cell", observed=True)["row"]
+        assert rows.apply(lambda values: values.is_monotonic_increasing).all()
+    # A row without an allele reads each of the first allele's three sites.
+    assert expected[1].groupby("row").size().unique().tolist() == [3]
+
+
+def test_split_alleles_of_another_number_of_sites_are_refused(store, tmp_path):
+    path = tmp_path / "split.tsv"
+    path.write_text("cell\tallele\nc1\tA-B-C\nc2\tA-B\n")
+    with pytest.raises(ValueError, match="another number of sites than the 3"):
+        store.clones.import_alleles(
+            path,
+            cell_selection=every_cell(store),
+            columns={"cell": "cell", "allele": "allele", "separator": "-"},
+            integrations="HMID",
+        )
+    with pytest.raises(ValueError, match=r"columns\['slots'\] must count the slots"):
+        store.clones.import_alleles(
+            path,
+            cell_selection=every_cell(store),
+            columns={
+                "cell": "cell",
+                "allele": "allele",
+                "separator": "-",
+                "kind": "ordered",
+            },
+            integrations="HMID",
+        )
+
+
+def test_slots_of_tapes_that_no_row_names_are_refused(
+    store, truth, recorders, tmp_path
+):
+    """A misspelt tape would otherwise keep the recorder's full length."""
+    from tests.clone_truth import write_typewriter, write_typewriter_chains
+
+    cells = every_cell(store)
+    before = set(store.artifacts.list(kind="lineage_alleles", scope="datastore"))
+    tapes = write_typewriter(recorders, truth, tmp_path / "d2.csv", sample="d2")
+    with pytest.raises(ValueError, match=r"slots of 'TGGACGAX', which no row of"):
+        store.clones.import_alleles(
+            tapes, cell_selection=cells, integrations={"TGGACGAX": 4}
+        )
+    chains = write_typewriter_chains(recorders, truth, tmp_path / "chains.tsv.gz")
+    with pytest.raises(ValueError, match=r"slots of 'GTGTAAATCGGX', which .* holds"):
+        store.clones.import_alleles(
+            chains, cell_selection=cells, integrations={"GTGTAAATCGGX": 4}
+        )
+    assert (
+        set(store.artifacts.list(kind="lineage_alleles", scope="datastore")) == before
+    )

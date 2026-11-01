@@ -323,9 +323,9 @@ _TOKENS = {
     "carlin": {"None": None, "NA": None},
     "darlin": {"None": None, "NA": None, "": "unedited"},
     "cassiopeia": {"None": "unedited", "NA": "missing", "": "missing"},
-    "petracer": {"None": "unedited", "NA": None, "": "missing"},
+    "petracer": {"None": "unedited", "NA": "missing", "": "missing"},
     "petracer_characters": {"None": None, "NA": None, "": "not_applicable"},
-    "typewriter": {"None": None, "NA": None, "": "unedited"},
+    "typewriter": {"None": None, "NA": "missing", "": "unedited"},
     "typewriter_chains": {"None": None, "NA": "missing", "": "missing"},
     "treedata": {"None": None, "NA": "missing"},
     "characters": {"None": None, "NA": "missing", "": None},
@@ -412,6 +412,34 @@ def test_none_na_and_empty_text_mean_what_each_format_says(
     assert first["allele"] is None
 
 
+@pytest.mark.parametrize(
+    ("format", "token"),
+    [
+        # PEtracer's GEO tables of 2025 hold such reads at EMX1 and HEK3.
+        ("petracer", "GTNAG"),
+        ("petracer", "NTTGGG"),
+        ("petracer", "CTTNGG"),
+        ("typewriter", "ACNTTA"),
+        ("typewriter_chains", "AAG-CNC"),
+    ],
+)
+def test_insertions_that_hold_n_are_missing(tmp_path, format, token):
+    """An N is an ambiguous base, so the insertion names no allele, edited or not."""
+    path, options = _one_site_file(format, token, tmp_path)
+    read = read_all(path, **options)
+    if format == "typewriter_chains":
+        # The chain's first symbol is read; its second, which holds N, is not.
+        assert read["state"].tolist()[:3] == ["mark", "missing", "unedited"]
+        assert read["allele"].tolist()[:2] == ["AAG", None]
+        return
+    first = read.iloc[0]
+    assert first["state"] == "missing" and first["allele"] is None
+    # Other text that holds N is still no insertion.
+    path, options = _one_site_file(format, token.replace("N", "Q"), tmp_path)
+    with pytest.raises(ValueError, match="tokens that"):
+        read_all(path, **options)
+
+
 _CELLS = ("AAACCCAAGTGAACAT", "CCCGCCAAGTGAACAT", "GGGTCCAAGTGAACAT")
 
 
@@ -478,10 +506,10 @@ def test_treedata_reads_integer_states_and_a_plain_array(tmp_path):
     read = read_all(tmp_path / "integers.h5td")
     assert read["state"].tolist() == ["unedited", "missing", "mark", "mark"]
     assert read["allele"].tolist() == [None, None, "4", "1"]
+    # An array without names gives no integrations to read.
     _treedata(tmp_path / "array.h5td", np.array([[0, 2], [-1, 0]]))
-    read = read_all(tmp_path / "array.h5td")
-    assert read["integration"].tolist() == ["0", "1", "0", "1"]
-    assert read["barcode"].tolist() == ["c1", "c1", "c2", "c2"]
+    with pytest.raises(ValueError, match="an array whose columns have no names"):
+        read_all(tmp_path / "array.h5td")
     _treedata(
         tmp_path / "fractions.h5td", pd.DataFrame({"i1-a": [0.5, 1.0]}, index=cells)
     )
@@ -493,13 +521,63 @@ def test_treedata_reads_integer_states_and_a_plain_array(tmp_path):
         allele_layout(tmp_path / "none.h5td")
 
 
-def _parquet(path: Path, frame, sites=None) -> Path:
-    polars = pytest.importorskip("polars")
-    metadata = (
-        None if sites is None else {"pandas": json.dumps({"attrs": {"sites": sites}})}
+def test_petracers_published_treedata_reads_its_names_and_tokens(tmp_path):
+    """PEtracer's Zenodo files hold the characters of 2026 as an array of text.
+
+    The columns' names are listed in uns['embryo_characters'], and there are
+    no states in uns, so the tokens are those of the character matrices.
+    """
+    names = ["intID4-EMX1", "intID4-HEK3", "intID101-EMX1"]
+    tokens = np.array([["*", "3", "!"], ["-", "", "8"]], dtype=object)
+    _treedata(tmp_path / "embryo.h5td", tokens, embryo_characters=np.array(names))
+    read = read_all(tmp_path / "embryo.h5td")
+    assert read["integration"].tolist() == ["intID4", "intID4", "intID101"] * 2
+    assert read["site"].tolist() == ["EMX1", "HEK3", "EMX1"] * 2
+    assert read["state"].tolist() == [
+        "unedited",
+        "mark",
+        "unknown_mark",
+        "missing",
+        "not_applicable",
+        "mark",
+    ]
+    # "!" is a placeholder, which names no allele.
+    assert read["allele"].tolist() == [None, "3", None, None, None, "8"]
+    layout = allele_layout(tmp_path / "embryo.h5td")
+    assert (layout.tool, layout.pipeline) == ("PEtracer", "PEtracer 2026")
+    assert layout.source()["names_from"] == "uns['embryo_characters']"
+    # The listing must name each column once.
+    _treedata(tmp_path / "short.h5td", tokens, embryo_characters=np.array(names[:2]))
+    with pytest.raises(ValueError, match="names 2 characters for the 3 columns"):
+        read_all(tmp_path / "short.h5td")
+    _treedata(
+        tmp_path / "twice.h5td", tokens, embryo_characters=np.array(names[:2] * 2)[:3]
     )
+    with pytest.raises(ValueError, match="names a character twice"):
+        read_all(tmp_path / "twice.h5td")
+
+
+def _parquet(path: Path, frame, sites=None, **attrs) -> Path:
+    """A table as Cassiopeia 3.0 saves it with pandas' to_parquet.
+
+    pandas saves a table's attrs as JSON under the schema key PANDAS_ATTRS
+    and its own layout under "pandas", which holds no attrs; Cassiopeia's
+    sites and the cells and intBCs are categorical.
+    """
+    polars = pytest.importorskip("polars")
+    if sites is not None:
+        attrs["sites"] = sites
+    metadata = {
+        "pandas": json.dumps({"index_columns": [], "columns": []}),
+        **({"PANDAS_ATTRS": json.dumps(attrs)} if attrs else {}),
+    }
+    categorical = [*(sites or ["r1", "r2"]), "cellBC", "intBC"]
     polars.DataFrame(frame).with_columns(
-        [polars.col(name).cast(polars.Categorical) for name in (sites or ["r1", "r2"])]
+        [
+            polars.col(name).cast(polars.Categorical)
+            for name in categorical
+            if name in frame
+        ]
     ).write_parquet(path, metadata=metadata)
     return path
 
@@ -536,12 +614,22 @@ def test_cassiopeia_parquet_reads_passing_rows_and_null_as_missing(tmp_path):
     ]
     assert read["row"].tolist() == [1, 1, 2, 2, 3, 3]
     assert read["reads"].tolist() == [50, 50, 40, 40, 30, 30]
-    # Without its attributes, the text columns that no role names are sites.
+    # Without its attributes, the categorical columns that no role names are
+    # sites, as Cassiopeia's own rule takes them, and text columns are not.
     unnamed = _parquet(
         tmp_path / "y.alleles.parquet",
-        {"cellBC": ["c1"], "intBC": ["i1"], "r1": ["None"], "r2": ["A"], "n_umis": [1]},
+        {
+            "cellBC": ["c1"],
+            "intBC": ["i1"],
+            "r1": ["None"],
+            "r2": ["A"],
+            "note": ["x"],
+            "n_umis": [1],
+        },
     )
-    assert allele_layout(unnamed).source()["sites_from"] == "columns"
+    layout = allele_layout(unnamed)
+    assert layout.source()["sites_from"] == "columns"
+    assert layout.columns["sites"] == ["r1", "r2"]
     samples = _parquet(
         tmp_path / "z.alleles.parquet",
         {
@@ -554,6 +642,155 @@ def test_cassiopeia_parquet_reads_passing_rows_and_null_as_missing(tmp_path):
     )
     with pytest.raises(ValueError, match="holds 2 samples"):
         allele_layout(samples)
+
+
+def test_cassiopeia_parquet_reads_known_insertions_by_their_lookup(tmp_path):
+    """PEtracer's sites in Cassiopeia 3.0 are insertions of known sequences.
+
+    A label of the lookup is a mark, None unedited, an insertion outside the
+    lookup its sequence and a deletion D and its length, both unknown marks
+    of their own text, and an insertion that holds N or an empty site
+    missing.
+    """
+    labels = [str(label) for label in range(1, 9)]
+    path = _parquet(
+        tmp_path / "p.alleles.parquet",
+        {
+            "cellBC": ["c1", "c2", "c3", "c4", "c5", "c6"],
+            "intBC": ["i1"] * 6,
+            "RNF2": ["1", "None", "ACGTA", "D6", "D6IAC", "GTNAG"],
+            "HEK3": ["8", "None", "None", "", None, "None"],
+            "n_umis": [5, 4, 3, 2, 2, 1],
+            "n_reads": [50, 40, 30, 20, 20, 10],
+        },
+        sites=["RNF2", "HEK3"],
+        edit_models={"RNF2": "insertion_lookup", "HEK3": "insertion_lookup"},
+        site_states={"RNF2": labels, "HEK3": labels},
+    )
+    layout = allele_layout(path)
+    assert layout.rules.kind == "independent"
+    read = read_all(path)
+    assert read["state"].tolist() == [
+        "mark",
+        "mark",
+        "unedited",
+        "unedited",
+        "unknown_mark",
+        "unedited",
+        "unknown_mark",
+        "missing",
+        "unknown_mark",
+        "missing",
+        "missing",
+        "unedited",
+    ]
+    assert read["allele"].tolist()[::2] == ["1", None, "ACGTA", "D6", "D6IAC", None]
+    # A label that the lookup does not list is refused.
+    other = _parquet(
+        tmp_path / "q.alleles.parquet",
+        {"cellBC": ["c1"], "intBC": ["i1"], "RNF2": ["9"], "n_umis": [1]},
+        sites=["RNF2"],
+        edit_models={"RNF2": "insertion_lookup"},
+        site_states={"RNF2": labels},
+    )
+    with pytest.raises(ValueError, match="'9' at RNF2"):
+        read_all(other)
+
+
+def test_cassiopeia_parquet_reads_tape_slots_in_order(tmp_path):
+    path = _parquet(
+        tmp_path / "t.alleles.parquet",
+        {
+            "cellBC": ["c1", "c2"],
+            "intBC": ["i1", "i1"],
+            "slot1": ["AAGTCA", "None"],
+            "slot2": [None, "None"],
+            "slot3": ["CCTAGA", None],
+            "n_umis": [3, 2],
+        },
+        sites=["slot1", "slot2", "slot3"],
+        edit_models={
+            site: "sequential_insertion" for site in ("slot1", "slot2", "slot3")
+        },
+    )
+    layout = allele_layout(path)
+    assert (layout.rules.kind, layout.n_slots) == ("ordered", 3)
+    # A slot not read before an edit is missing, as the prefix rule reads it.
+    assert read_all(path)["state"].tolist() == [
+        "mark",
+        "missing",
+        "mark",
+        "unedited",
+        "unedited",
+        "missing",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("attrs", "columns", "message"),
+    [
+        ({"PANDAS_ATTRS": "not json"}, {}, "are not JSON"),
+        ({"PANDAS_ATTRS": "[1, 2]"}, {}, "are not a JSON object"),
+        (
+            {"PANDAS_ATTRS": json.dumps({"sites": "r1"})},
+            {},
+            "not a list of column names",
+        ),
+        (
+            {"PANDAS_ATTRS": json.dumps({"sites": ["r1"], "edit_models": ["indel"]})},
+            {},
+            "edit_models of .* are not a mapping",
+        ),
+        (
+            {
+                "PANDAS_ATTRS": json.dumps(
+                    {
+                        "sites": ["r1", "r2"],
+                        "edit_models": {"r1": "indel", "r2": "substitution"},
+                    }
+                )
+            },
+            {},
+            "follow several edit models, indel, substitution",
+        ),
+        (
+            {
+                "PANDAS_ATTRS": json.dumps(
+                    {"sites": ["r1"], "edit_models": {"r1": "substitution"}}
+                )
+            },
+            {},
+            "'substitution' edit model, which CyteArc does not read",
+        ),
+        (
+            {
+                "PANDAS_ATTRS": json.dumps(
+                    {"sites": ["r1"], "edit_models": {"r1": "insertion_lookup"}}
+                )
+            },
+            {},
+            "without the site_states that name their labels",
+        ),
+        ({}, {"UMI": ["AAAA"]}, "holds one row per UMI"),
+    ],
+)
+def test_cassiopeia_parquet_refuses_attributes_it_cannot_read(
+    tmp_path, attrs, columns, message
+):
+    polars = pytest.importorskip("polars")
+    frame = {
+        "cellBC": ["c1"],
+        "intBC": ["i1"],
+        "r1": ["None"],
+        "r2": ["None"],
+        **columns,
+    }
+    path = tmp_path / "x.alleles.parquet"
+    polars.DataFrame(frame).with_columns(
+        [polars.col(name).cast(polars.Categorical) for name in ("r1", "r2")]
+    ).write_parquet(path, metadata=attrs or None)
+    with pytest.raises(ValueError, match=message):
+        allele_layout(path, format="cassiopeia_parquet")
 
 
 @pytest.mark.parametrize(

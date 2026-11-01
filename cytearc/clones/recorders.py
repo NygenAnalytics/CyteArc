@@ -54,7 +54,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from ..metadata.records import INTEGER, TEXT, FieldKind, RecordTable
+from ..metadata.records import INTEGER, TEXT, EncodedText, FieldKind, RecordTable
 from ..utils.arrays import sort_categories, sorted_unique
 
 __all__ = [
@@ -134,6 +134,9 @@ class SiteRules:
             appears in it, as Cassiopeia writes ``[None]`` with the
             sequence around an uncut site; None for no such text.
         unknown: Tokens of an unknown mark.
+        ambiguous: A regular expression of tokens that are missing because
+            they cannot be read, such as an insertion that holds ``N``, or
+            None.
         marks: Tokens of the known marks at every site, or None.
         marks_at: Tokens of the known marks at each site, by site.
         pattern: A regular expression that every other token must match in
@@ -154,6 +157,7 @@ class SiteRules:
     )
     unedited_within: str | None = None
     unknown: frozenset[str] = frozenset()
+    ambiguous: str | None = None
     marks: frozenset[str] | None = None
     marks_at: Mapping[str, frozenset[str]] = field(
         default_factory=lambda: MappingProxyType({})
@@ -182,12 +186,15 @@ class SiteRules:
                         f"{state}"
                     )
                 seen[token] = state
-        if self.pattern is not None:
+        for name in ("pattern", "ambiguous"):
+            expression = getattr(self, name)
+            if expression is None:
+                continue
             try:
-                re.compile(self.pattern)
+                re.compile(expression)
             except re.error as error:
                 raise ValueError(
-                    f"pattern {self.pattern!r} is not a regular expression: {error}"
+                    f"{name} {expression!r} is not a regular expression: {error}"
                 ) from None
         if self.absent not in range(len(STATES)):
             raise ValueError("absent must be the code of a state")
@@ -209,6 +216,8 @@ class SiteRules:
             return UNEDITED
         if token in self.unknown:
             return UNKNOWN_MARK
+        if self.ambiguous is not None and re.fullmatch(self.ambiguous, token):
+            return MISSING
         matches = self.pattern is None or re.fullmatch(self.pattern, token) is not None
         if self.has_lookup:
             known = (self.marks or frozenset()) | self.marks_at.get(site, frozenset())
@@ -247,7 +256,9 @@ class SiteRules:
                 states[position] = MISSING
                 continue
             states[position] = state
-            if state in (MARK, UNKNOWN_MARK):
+            # A placeholder of an unknown mark, such as PEtracer's "!", names
+            # no allele, so cells that hold it share none.
+            if state == MARK or (state == UNKNOWN_MARK and token not in self.unknown):
                 alleles[position] = str(token)
         present = codes >= 0
         row_states = np.full(len(values), self.absent, dtype=np.int8)
@@ -377,13 +388,19 @@ class RefusedTokens(ValueError):
 
     Attributes:
         rows: The positions in the chunk of the rows that hold them.
-        tokens: Up to five of the refused tokens, with their sites.
+        tokens: Up to five of the refused tokens, as their sites and texts.
     """
 
-    def __init__(self, rows: np.ndarray, tokens: list[tuple[str, str]]) -> None:
-        super().__init__("tokens that the format does not read")
-        self.rows = rows
-        self.tokens = tokens
+    def __init__(
+        self, rows: Sequence[int], tokens: Sequence[tuple[str | None, str]]
+    ) -> None:
+        self.rows = tuple(int(row) for row in rows)
+        self.tokens = tuple((site, token) for site, token in tokens)
+        # The arguments rebuild the error when a pickle of it is loaded.
+        super().__init__(self.rows, self.tokens)
+
+    def __str__(self) -> str:
+        return "tokens that the format does not read"
 
 
 def chunk_states(
@@ -424,7 +441,7 @@ def chunk_states(
                 if len(examples) < 5:
                     examples.append((site, str(token)))
     if refused.any():
-        raise RefusedTokens(np.flatnonzero(refused), examples)
+        raise RefusedTokens(np.flatnonzero(refused).tolist(), examples)
     n_beyond = 0
     if rules.kind == "ordered":
         if n_slots is None:
@@ -506,6 +523,54 @@ def allele_chunk(
     return records, np.repeat(np.asarray(cells, dtype=np.int64)[keep], n_columns)
 
 
+def records_in_line_order(table: RecordTable) -> RecordTable:
+    """The records ordered by cell, then file, then file row.
+
+    The encoder keeps the order in which each file's records arrive, and a
+    table whose rows each hold one site gives them site by site within each
+    chunk, so they are ordered again by their rows, whatever the chunks.
+    """
+    order = np.lexsort(
+        (
+            np.asarray(table.values["row"]),
+            np.asarray(table.sources),
+            np.asarray(table.cells),
+        )
+    )
+    return RecordTable(
+        cells=np.asarray(table.cells)[order],
+        sources=np.asarray(table.sources)[order],
+        kinds=table.kinds,
+        text={
+            name: EncodedText(
+                codes=np.asarray(encoded.codes)[order],
+                data=encoded.data,
+                offsets=encoded.offsets,
+            )
+            for name, encoded in table.text.items()
+        },
+        ragged={},
+        values={
+            name: np.asarray(values)[order] for name, values in table.values.items()
+        },
+    )
+
+
+def empty_allele_chunk() -> tuple[pd.DataFrame, np.ndarray]:
+    """A chunk of no records that names every field, as ``allele_chunk`` returns one.
+
+    An encoder that is given it returns a table of every field even when no
+    file holds a row, as a file of a header alone does.
+    """
+    text = {
+        name: np.empty(0, dtype=object) for name in ("integration", "site", "allele")
+    }
+    numbers = {
+        name: np.empty(0, dtype=np.int64) for name in ("state", "umis", "reads", "row")
+    }
+    return pd.DataFrame({**text, **numbers}), np.empty(0, dtype=np.int64)
+
+
 def cell_summaries(table: RecordTable, n_cells: int) -> dict[str, np.ndarray]:
     """Count each selected cell's edits, integrations read and records.
 
@@ -559,7 +624,8 @@ class LineageAlleles:
             cell, file and file row: ``cell``, ``file``, ``integration``,
             ``site``, ``state`` (one of ``STATES``) and ``allele`` as
             categoricals, ``allele`` missing for states other than marks
-            and unknown marks, ``umis`` and ``reads`` as ``Int64``, missing
+            and unknown marks and for placeholders of unknown marks, such as
+            PEtracer's ``!``, ``umis`` and ``reads`` as ``Int64``, missing
             where unknown, and ``row``, the allele row's line or position in
             its file.
         files: One row per file, in canonical order: ``file`` (its
@@ -680,9 +746,14 @@ def _allele_ranks(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     are their own state; other text ranks after them by code point.
     """
     texts = np.asarray(values, dtype=object)
+    # Only a number written as such, without leading zeros, is its own state,
+    # so that 1 and 01 stay two alleles.
     numeric = np.asarray(
         [
-            text.isdigit() and text.isascii() and len(text) <= _MAX_NUMBER_DIGITS
+            text.isdigit()
+            and text.isascii()
+            and not text.startswith("0")
+            and len(text) <= _MAX_NUMBER_DIGITS
             for text in texts.tolist()
         ],
         dtype=bool,
@@ -993,7 +1064,9 @@ def character_matrix(
 
     edited = states == MARK
     if unknown == "state":
-        edited |= states == UNKNOWN_MARK
+        # An unknown mark that names its allele, such as an insertion outside
+        # a lookup, is a state; a placeholder names none and is missing.
+        edited |= (states == UNKNOWN_MARK) & (alleles >= 0)
     exported = kept & (edited | (states == UNEDITED))
     # The characters that an exported record reads, in natural order.
     integration_names = table.text["integration"].categories
@@ -1055,6 +1128,13 @@ def character_matrix(
         distinct[:, 1] == 0, allele_numbers[edit_alleles[first_edit]], 0
     )
     state_codes = _state_codes(distinct[:, 0], distinct_numbers)
+    if len(state_codes) and int(state_codes.max()) > _MAX_STATE + 1:
+        position = int(np.argmax(state_codes))
+        raise ValueError(
+            f"The states of the character {character_name(*ranked_names[int(distinct[position, 0])])!r} "
+            f"pass {_MAX_STATE + 1}, the largest that an int32 matrix holds; its "
+            "edits follow marks numbered up to it"
+        )
     record_codes = np.full(len(states), -1, dtype=np.int64)
     record_codes[exported & (states == UNEDITED)] = 0
     record_codes[edits] = state_codes[inverse]
@@ -1078,6 +1158,16 @@ def character_matrix(
     ] = record_codes[with_state]
 
     characters = [character_name(*pair) for pair in ranked_names]
+    if len(set(characters)) != len(characters):
+        seen: dict[str, tuple[str, str]] = {}
+        for name, pair in zip(characters, ranked_names, strict=True):
+            if name in seen:
+                raise ValueError(
+                    f"The integration {seen[name][0]!r} at site {seen[name][1]!r} and "
+                    f"{pair[0]!r} at {pair[1]!r} are both the character {name!r}; "
+                    "rename an integration so that each character has its own name"
+                )
+            seen[name] = pair
     allele_of_rank = np.empty(len(allele_names), dtype=object)
     allele_of_rank[allele_ranks] = allele_names
     state_table = pd.DataFrame(

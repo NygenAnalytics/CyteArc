@@ -3,6 +3,8 @@
 Every expectation is derived by hand from the rows each test builds.
 """
 
+from types import MappingProxyType
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -178,8 +180,8 @@ def test_chunk_states_refuse_tokens_and_apply_lengths_by_integration():
             rules,
             n_slots=2,
         )
-    assert refused.value.rows.tolist() == [0]
-    assert refused.value.tokens == [("1", "x")]
+    assert refused.value.rows == (0,)
+    assert refused.value.tokens == (("1", "x"),)
     with pytest.raises(ValueError, match="number of slots"):
         chunk_states(_rows(), rules)
     # A wide matrix's columns name integrations, whose lengths apply per run.
@@ -354,6 +356,44 @@ def test_whole_number_marks_keep_their_numbers_and_others_follow():
         character_matrix(table, unknown="drop")
 
 
+def test_placeholders_of_unknown_marks_name_no_allele_and_export_missing():
+    """PEtracer's "!" and CARLIN's "X" say an edit is unknown, not which one.
+
+    Cells that hold a placeholder share no edit, so the export writes it as
+    missing; an unknown mark whose text is its allele keeps a state of its
+    own.
+    """
+    rules = SiteRules(
+        kind="independent",
+        unknown=frozenset({"!"}),
+        marks_at=MappingProxyType({"s": frozenset({"ACAGT"})}),
+        pattern=r"[ACGT]+",
+    )
+    states, alleles, refused = rules.classify(["!", "GTCAG", "ACAGT", "!"], "s")
+    assert states.tolist() == [UNKNOWN_MARK, UNKNOWN_MARK, MARK, UNKNOWN_MARK]
+    assert alleles.tolist() == [None, "GTCAG", "ACAGT", None]
+    assert not refused.any()
+    table = _table(
+        [
+            (0, 0, "A", "s", None, UNKNOWN_MARK, -1, -1, 2),
+            (1, 0, "A", "s", "GTCAG", UNKNOWN_MARK, -1, -1, 3),
+            (2, 0, "A", "s", "ACAGT", MARK, -1, -1, 4),
+            (3, 0, "A", "s", None, UNKNOWN_MARK, -1, -1, 5),
+            (3, 0, "A", "t", None, UNEDITED, -1, -1, 5),
+        ]
+    )
+    matrix = character_matrix(table)
+    codes = {
+        cell: row.tolist()
+        for cell, row in zip(matrix.cells.tolist(), matrix.codes, strict=True)
+    }
+    # Cell 0 reads only a placeholder, so it is left out; cell 3 keeps its
+    # unedited site.
+    assert codes == {1: [2, -1], 2: [1, -1], 3: [-1, 0]}
+    assert matrix.states["allele"].tolist() == ["ACAGT", "GTCAG"]
+    assert matrix.n_without_states == 1
+
+
 def test_cells_and_characters_without_a_read_site_are_left_out():
     table = _table(
         [
@@ -414,3 +454,44 @@ def test_integer_keys_sort_as_their_columns_and_refuse_the_int64_range():
     # 2**40 integrations by 2**23 cells would wrap past the int64 range.
     with pytest.raises(ValueError, match="too many to number as one integer key"):
         _integer_keys((np.zeros(1), 2**40), (np.zeros(1), 2**23))
+
+
+def test_numbers_with_leading_zeros_are_text_and_states_fit_int32():
+    table = _table(
+        [
+            (0, 0, "A", "s", "1", MARK, -1, -1, 2),
+            (1, 0, "A", "s", "01", MARK, -1, -1, 3),
+            (2, 0, "A", "s", "001", MARK, -1, -1, 4),
+        ]
+    )
+    matrix = character_matrix(table)
+    # 1 keeps its number; 01 and 001 are two other alleles that follow it.
+    assert matrix.codes[:, 0].tolist() == [1, 3, 2]
+    assert dict(zip(matrix.states["state"], matrix.states["allele"], strict=True)) == {
+        1: "1",
+        2: "001",
+        3: "01",
+    }
+    # The largest number an int32 holds leaves no state for two more alleles.
+    largest = str(2**31 - 2)
+    table = _table(
+        [
+            (0, 0, "A", "s", largest, MARK, -1, -1, 2),
+            (1, 0, "A", "s", "ACGT", MARK, -1, -1, 3),
+            (2, 0, "A", "s", "GTCA", MARK, -1, -1, 4),
+        ]
+    )
+    with pytest.raises(ValueError, match="pass 2147483647, the largest that an int32"):
+        character_matrix(table)
+
+
+def test_characters_that_two_integrations_name_alike_are_refused():
+    # "a-b" at site "c" and "a" at site "b-c" both name the character a-b-c.
+    table = _table(
+        [
+            (0, 0, "a-b", "c", "1", MARK, -1, -1, 2),
+            (1, 0, "a", "b-c", "2", MARK, -1, -1, 3),
+        ]
+    )
+    with pytest.raises(ValueError, match="are both the character 'a-b-c'"):
+        character_matrix(table)

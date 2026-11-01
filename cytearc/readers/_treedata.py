@@ -174,6 +174,9 @@ class CharacterTable:
             records in ``uns``, as text, or None.
         encoding: The ``encoding-type`` and ``encoding-version`` of the
             file's root, such as ``"treedata 0.1.0"``.
+        names_from: Where the characters' names are read: ``"columns"`` of
+            a dataframe, or ``"uns['embryo_characters']"`` for a plain array,
+            as PEtracer's published files store them.
     """
 
     path: str
@@ -183,6 +186,7 @@ class CharacterTable:
     missing_state: str | None
     unmodified_state: str | None
     encoding: str | None
+    names_from: str = "columns"
 
     def held_bytes(self) -> int:
         """The bytes that reading holds beside its blocks: the column names."""
@@ -201,7 +205,7 @@ class CharacterTable:
         """
         step = max(1, int(n_rows))
         with _open(self.path, self.container) as root:
-            index, columns = _dataframe(root, self.path)
+            index, columns, _names_from = _dataframe(root, self.path)
             what = f"The character matrix of {self.path}"
             for start in range(0, self.n_cells, step):
                 stop = min(start + step, self.n_cells)
@@ -241,8 +245,13 @@ class _open:
             self._handle.close()
 
 
-def _dataframe(root: Any, path: str) -> tuple[_Column, list[_Column]]:
-    """The index and the columns of a file's ``obsm['characters']``."""
+# Where PEtracer's published TreeData files name the columns of their plain
+# array of characters.
+_EMBRYO_CHARACTERS = "embryo_characters"
+
+
+def _dataframe(root: Any, path: str) -> tuple[_Column, list[_Column], str]:
+    """The index, the columns and where the names come from of ``obsm['characters']``."""
     obsm = root.get("obsm")
     node = None if obsm is None or not _is_group(obsm) else obsm.get("characters")
     if node is None:
@@ -251,8 +260,8 @@ def _dataframe(root: Any, path: str) -> tuple[_Column, list[_Column]]:
         )
     what = f"The character matrix of {path}"
     if not _is_group(node):
-        # A plain array names its characters by position and its cells by
-        # the file's obs names.
+        # A plain array names its cells by the file's obs names, and its
+        # characters only where PEtracer's files list them in uns.
         if len(node.shape) != 2:
             raise ValueError(f"{what} must be a table of cells by characters")
         obs = root.get("obs")
@@ -260,11 +269,33 @@ def _dataframe(root: Any, path: str) -> tuple[_Column, list[_Column]]:
         if obs is None or index_name is None:
             raise ValueError(f"{path} names no cells in obs")
         index = _column("_index", obs[as_text(index_name)], what)
-        matrix = node
-        return index, [
-            _Column(str(position), _ColumnOf(matrix, position), "array")
-            for position in range(int(node.shape[1]))
-        ]
+        uns = root.get("uns")
+        listed = (
+            None if uns is None or not _is_group(uns) else uns.get(_EMBRYO_CHARACTERS)
+        )
+        if listed is None or _is_group(listed) or len(listed.shape) != 1:
+            raise ValueError(
+                f"{what} is an array whose columns have no names, so its "
+                "characters and their integrations are unknown; CyteArc reads "
+                "a dataframe of named columns, or the names that PEtracer's "
+                f"files list in uns[{_EMBRYO_CHARACTERS!r}]"
+            )
+        names = _names(listed[:])
+        if len(names) != int(node.shape[1]):
+            raise ValueError(
+                f"uns[{_EMBRYO_CHARACTERS!r}] of {path} names {len(names)} "
+                f"characters for the {int(node.shape[1])} columns of {what}"
+            )
+        if len(set(names)) != len(names):
+            raise ValueError(f"{what} names a character twice")
+        return (
+            index,
+            [
+                _Column(name, _ColumnOf(node, position), "array")
+                for position, name in enumerate(names)
+            ],
+            f"uns[{_EMBRYO_CHARACTERS!r}]",
+        )
     if _encoding(node) != "dataframe":
         raise ValueError(f"{what} is no dataframe that CyteArc can read")
     index_name = node.attrs.get("_index")
@@ -279,7 +310,7 @@ def _dataframe(root: Any, path: str) -> tuple[_Column, list[_Column]]:
         if name not in node:
             raise ValueError(f"{what} lists a character {name!r} that it does not hold")
         columns.append(_column(name, node[name], what))
-    return index, columns
+    return index, columns, "columns"
 
 
 class _ColumnOf:
@@ -317,7 +348,7 @@ def character_table(path: str | os.PathLike[str]) -> CharacterTable:
             if not handle.read(len(HDF5_SIGNATURE)).startswith(HDF5_SIGNATURE):
                 raise ValueError(f"{text} is neither an HDF5 file nor a Zarr store")
     with _open(text, container) as root:
-        index, columns = _dataframe(root, text)
+        index, columns, names_from = _dataframe(root, text)
         n_cells = (
             int(index.node["values"].shape[0])
             if index.encoding == "nullable"
@@ -353,6 +384,7 @@ def character_table(path: str | os.PathLike[str]) -> CharacterTable:
             encoding=None
             if encoding is None
             else f"{as_text(encoding)} {as_text(version or '')}".strip(),
+            names_from=names_from,
         )
 
 
@@ -473,6 +505,7 @@ def write_character_store(
         target,
         mode="w-",
         zarr_format=3,
+        use_consolidated=False,
         attributes=_encoded(("treedata", "0.1.0")),
     )
     # obs and var hold no columns beside their index.

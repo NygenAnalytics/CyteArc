@@ -72,6 +72,21 @@ def test_matrices_and_chains_refuse_malformed_headers_and_rows(
         _rows(path, format=format)
 
 
+def test_character_matrices_read_whole_floats_as_numbers_and_refuse_na_text(
+    tmp_path,
+):
+    """pandas writes the integers of a column with a missing value as floats."""
+    path = tmp_path / "matrix.csv"
+    path.write_text("cell,i1-a,i1-b,i1-c\nc1,0.0,-1.0,3.0\nc2,3,0,12.00\n")
+    (chunk,) = _rows(path, format="characters")
+    assert chunk.states.tolist() == [[0, 3, 1], [1, 0, 1]]
+    assert chunk.alleles.tolist() == [[None, None, "3"], ["3", None, "12"]]
+    for token in ("null", "NULL", "#N/A", "N/A", "<NA>", "none"):
+        path.write_text(f"cell,i1-a\nc1,{token}\n")
+        with pytest.raises(ValueError, match="tokens that 'characters' does not read"):
+            _rows(path, format="characters")
+
+
 def test_a_table_refuses_rows_of_another_width(tmp_path):
     path = tmp_path / "alleles.csv"
     path.write_text("cell,allele,umis\nc1,x\n")
@@ -278,7 +293,11 @@ def polars():
 
 
 def _parquet(polars, path: Path, **columns) -> Path:
-    polars.DataFrame(columns).write_parquet(path)
+    """A table whose site r1 is categorical, as Cassiopeia's sites are."""
+    frame = polars.DataFrame(columns)
+    if "r1" in columns:
+        frame = frame.with_columns(polars.col("r1").cast(polars.Categorical))
+    frame.write_parquet(path)
     return path
 
 
@@ -307,10 +326,11 @@ def test_parquet_tables_refuse_what_cassiopeia_does_not_write(
 
 
 def test_parquet_tables_read_sites_without_pandas_attributes(tmp_path, polars):
+    # pandas' own layout under "pandas" holds no attrs and is not read.
     path = tmp_path / "a.alleles.parquet"
-    polars.DataFrame({"cellBC": ["c1"], "intBC": ["i1"], "r1": ["None"]}).write_parquet(
-        path, metadata={"pandas": "not json"}
-    )
+    polars.DataFrame({"cellBC": ["c1"], "intBC": ["i1"], "r1": ["None"]}).with_columns(
+        polars.col("r1").cast(polars.Categorical)
+    ).write_parquet(path, metadata={"pandas": "not json"})
     layout = allele_layout(path, format="cassiopeia_parquet")
     assert layout._read["sites_from"] == "columns"
     (chunk,) = _rows(path, format="cassiopeia_parquet")
@@ -530,4 +550,21 @@ def test_the_store_writer_refuses_what_its_layout_cannot_hold(tmp_path):
     with pytest.raises(ValueError, match="Each character must be named once"):
         write_character_store(
             tmp_path / "b.zarr", ["c1", "c2"], ["a", "a"], codes, states
+        )
+
+
+@pytest.mark.parametrize(
+    ("format", "message"),
+    [
+        ("carlin", "is no CARLIN pair"),
+        ("cassiopeia_parquet", "is no parquet file"),
+        ("petracer_characters", r"names sites 'a', 'b', which are none of PEtracer's"),
+    ],
+)
+def test_a_format_that_does_not_fit_the_file_is_refused(tmp_path, format, message):
+    path = tmp_path / "matrix.csv"
+    path.write_text("cell,i1-a,i1-b\nc1,1,2\n")
+    with pytest.raises(ValueError, match=message):
+        allele_layout(
+            path, format=format, integrations="CA" if format == "carlin" else None
         )

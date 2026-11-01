@@ -14,7 +14,9 @@ from ...clones.recorders import (
     allele_chunk,
     cell_summaries,
     character_matrix,
+    empty_allele_chunk,
     lineage_allele_frames,
+    records_in_line_order,
 )
 from ...metadata.arguments import RecorderAlleleImportArguments
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
@@ -87,11 +89,11 @@ _MERGE_FACTOR = 2
 _MERGE_BYTES_PER_TEXT = 150
 # Bytes that writing takes per record beside the table: the int32 copies of
 # its cells and files, the int8 copy of its states, and the keys that count
-# each cell's integrations. The chunks that the merge freed stay resident
-# beside them, since the allocator keeps them for reuse: at 30 million
-# records the resident peak of writing was twice the table's bytes and about
-# 40 bytes per record.
-_WRITE_BYTES_PER_RECORD = 40
+# each cell's integrations, 43 as traced over 6 million records. The chunks
+# that the merge freed stay resident beside them, since the allocator keeps
+# them for reuse: at 30 million records the resident peak of writing was
+# twice the table's bytes and about as many bytes per record.
+_WRITE_BYTES_PER_RECORD = 44
 # Bytes that an import, a load and an export hold whatever their size: a
 # block of a file as it is hashed, pandas' parser buffers, and a Zarr chunk of
 # 2 MiB as it is filled and encoded.
@@ -223,10 +225,12 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         of a cell is unedited, a mark, an unknown mark, missing or not
         applicable, and each format writes these states with tokens of its
         own: Cassiopeia's ``None`` is an uncut site, PEtracer's ``None`` an
-        unedited one, and a blank DNA Typewriter slot unedited after the
-        last edit. Text that pandas reads as missing is missing only in
-        tables read through ``columns``. The clones API reference lists the
-        formats and their tokens.
+        unedited one, a blank DNA Typewriter slot unedited after the last
+        edit, and an insertion that holds ``N`` missing. A placeholder of an
+        unknown mark, such as PEtracer's ``!``, names no allele. Text that
+        pandas reads as missing is missing only in tables read through
+        ``columns``. The clones API reference lists the formats and their
+        tokens.
 
         Each file's format is recognised from its contents unless ``format``
         names it. A file that holds one array, as a CARLIN pair does, has
@@ -259,8 +263,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             integrations: For a file that holds one array, its name, such as
                 ``"CA"``; for DNA Typewriter's ordered slots, a mapping of
                 each integration shorter than the recorder's arrays to its
-                number of slots, such as ``{"TTCACGTA": 2}``. One for every
-                file, or a sequence with one per file.
+                number of slots, such as ``{"TTCACGTA": 2}``, each named by
+                a row or column of the import. One for every file, or a
+                sequence with one per file.
             barcode_prefix: Text before each cell barcode in the cell IDs:
                 one for every file, or one per file.
             barcode_suffix: Text after each cell barcode in the cell IDs, such
@@ -272,11 +277,13 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 ``"cell"``, ``"integration"`` (or ``integrations`` names the
                 one integration), ``"sites"`` (a column per site), or
                 ``"allele"`` with ``"site"`` (one site per row) or
-                ``"separator"`` (sites joined in one column), ``"umis"``,
-                ``"reads"``, ``"kind"`` (``"indel"``, ``"independent"`` or
-                ``"ordered"``) and ``"slots"``, and the tokens
-                ``"unedited"``, ``"missing"``, ``"not_applicable"`` and
-                ``"unknown"``.
+                ``"separator"`` (sites joined in one column, as many in each
+                row as in the file's first allele, or at most ``"slots"``
+                ordered slots), ``"umis"``, ``"reads"``, ``"kind"``
+                (``"indel"``, ``"independent"`` or ``"ordered"``) and
+                ``"slots"``, and the tokens ``"unedited"``, ``"missing"``,
+                ``"not_applicable"`` and ``"unknown"``, the last placeholders
+                that name no allele.
             invalidate_cache: Import again instead of reusing saved alleles.
 
         Returns:
@@ -381,27 +388,18 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             what="allele file",
             identify=_path_sha256,
         )
-        # Integrations follow the order of the paths, as given.
+        # Integrations follow the order of the paths, as given, and each file
+        # takes those of its own listing, also when a file is listed twice.
         items = _per_file(integrations, len(resolved))
-        positions: dict[str, list[int]] = {}
-        for position, path in enumerate(resolved):
-            positions.setdefault(os.fspath(path), []).append(position)
-        taken: dict[str, int] = {}
-        layouts = []
-        for file in files:
-            key = os.fspath(file.path)
-            # A file listed twice with other prefixes takes its listings'
-            # options in order.
-            position = positions[key][taken.get(key, 0)]
-            taken[key] = taken.get(key, 0) + 1
-            layouts.append(
-                allele_layout(
-                    file.path,
-                    format=format,
-                    columns=columns,
-                    integrations=items[position],
-                )
+        layouts = [
+            allele_layout(
+                file.path,
+                format=format,
+                columns=columns,
+                integrations=items[file.position],
             )
+            for file in files
+        ]
         return files, layouts
 
     def _allele_selection_indices(self, cell_selection: ArtifactRef) -> np.ndarray:
@@ -501,6 +499,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         # array's cells, which find arrays that share no cell.
         held = (LOOKUP_BYTES_PER_CELL + _CELL_BYTES + single) * n_cells + ids_bytes
         encoder = RecordEncoder(FIELDS)
+        # Files that hold no row, such as a header alone, give no records.
+        encoder.add(*empty_allele_chunk(), 0)
         # The selected cells' share is checked before a cell ID is read.
         self._check_allele_budget(encoder, cells=held)
         cell_ids = np.asarray(
@@ -515,6 +515,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         named: list[np.ndarray | None] = []
         counted: list[dict[str, int]] = []
         merge_text = 0
+        # The integrations of contracted tapes that some file's rows name.
+        tapes: set[str] = set()
         for position, (file, layout) in enumerate(zip(files, layouts, strict=True)):
             mask = (
                 np.zeros(n_cells, dtype=bool)
@@ -530,13 +532,17 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 mask=mask,
                 held=held,
                 merge_text=merge_text,
+                tapes=tapes,
             )
             named.append(mask)
             counted.append(counts)
         _check_shared_cells(files, layouts, named)
+        _check_named_tapes(files, layouts, tapes)
         del named
         self._check_allele_budget(encoder, cells=held, merge_text=merge_text)
         table = encoder.finish()
+        if any(layout.rows_hold_sites for layout in layouts):
+            table = records_in_line_order(table)
         attributes = {
             "files": [
                 {
@@ -568,8 +574,12 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         mask: np.ndarray | None,
         held: int,
         merge_text: int,
+        tapes: set[str],
     ) -> tuple[dict[str, int], int]:
         """Read one file into the encoder.
+
+        ``tapes`` gains the integrations of contracted tapes that the file's
+        rows name.
 
         Returns:
             The file's ``rows``, its ``records``, its edits ``beyond`` their
@@ -605,6 +615,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 counts["without_integration"] += int(
                     np.count_nonzero(pd.isna(rows.integrations))
                 )
+                if layout.lengths:
+                    tapes.update(
+                        set(pd.unique(rows.integrations).tolist()) & set(layout.lengths)
+                    )
             self._check_allele_budget(
                 encoder,
                 cells=held,
@@ -737,13 +751,16 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         ``{integration}-{site}``, or after its integration when the site has
         no name, as a DARLIN array's allele does. Its states are integers:
         0 unedited, missing where a site is missing or not applicable, and
-        its edits from 1: a mark written as a whole number, such as
-        PEtracer's marks ``1`` to ``8``, is its own state, and the
-        character's other marks, by their text, then its unknown marks, take
-        the states after the largest such number. So each state names one
-        allele of its character in every cell, a character matrix keeps its
-        states through an import and an export, and a table names each
-        state's allele. Where a cell holds several allele rows of one
+        its edits from 1: a mark written as a whole number without leading
+        zeros, such as PEtracer's marks ``1`` to ``8``, is its own state, and
+        the character's other marks, by their text, then its unknown marks
+        that name their allele, take the states after the largest such
+        number. So each state names one allele of its character in every
+        cell, a character matrix keeps its states through an import and an
+        export, and a table names each state's allele. An unknown mark that a
+        placeholder writes, such as PEtracer's ``!`` or CARLIN's ``X``, names
+        no allele, so cells that hold it share no state: it is missing.
+        Where a cell holds several allele rows of one
         integration, the row of most UMIs, then most reads, then most sites
         read is exported, as Cassiopeia keeps each integration's most
         abundant allele, and a warning counts them. Ordered slots export one
@@ -769,9 +786,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 must not exist; for ``"laml"``, the CSV to write, replacing a
                 file of that name, as the files beside it are.
             format: ``"cassiopeia"`` or ``"laml"``.
-            unknown: ``"state"`` gives each distinct unknown mark of a
-                character a state of its own, after the marks; ``"missing"``
-                writes unknown marks as missing.
+            unknown: ``"state"`` gives each distinct unknown mark that names
+                its allele, such as an insertion outside PEtracer's lookup, a
+                state of its own after the marks; ``"missing"`` writes every
+                unknown mark as missing.
 
         Returns:
             The number of cells written.
@@ -780,8 +798,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``alleles`` is not a complete ``lineage_alleles``
                 artifact, ``format`` or ``unknown`` is unknown, no cell
-                reads a character, or, for LAML, a cell or character name
-                holds a character that its files cannot hold.
+                reads a character, two integrations give one character name,
+                a character's states pass the int32 range, or, for LAML, a
+                cell or character name holds a character that its files
+                cannot hold.
             FileExistsError: For ``"cassiopeia"``, if ``path`` exists.
             MemoryError: If the export does not fit the memory budget.
         """
@@ -962,6 +982,33 @@ def _check_shared_cells(
                     "barcode_prefix and barcode_suffix, so they are no arrays of one "
                     "library; give each library its own barcode_prefix"
                 )
+
+
+def _check_named_tapes(
+    files: Sequence[BarcodeFile], layouts: Sequence["AlleleLayout"], tapes: set[str]
+) -> None:
+    """Refuse slots of contracted tapes that no row of the import names.
+
+    A misspelt integration would otherwise leave its tape at the recorder's
+    full length without a word.
+    """
+    given = {
+        name
+        for layout in layouts
+        if layout.lengths and layout.format != "typewriter_chains"
+        for name in layout.lengths
+    }
+    lacking = sorted(given - tapes)
+    if lacking:
+        paths = ", ".join(
+            os.fspath(file.path)
+            for file, layout in zip(files, layouts, strict=True)
+            if layout.lengths
+        )
+        raise ValueError(
+            f"integrations gives the slots of {', '.join(map(repr, lacking))}, which "
+            f"no row of {paths} names; check the names of the contracted tapes"
+        )
 
 
 def _stored_files(group: zarr.Group) -> list[dict[str, Any]]:

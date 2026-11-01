@@ -563,3 +563,40 @@ def test_an_encoder_counts_the_bytes_of_every_array_it_holds() -> None:
     molecule = 7 + 5 * 8 + 4 * 8
     reads = 4 * 8
     assert encoder.nbytes == cells + barcode + molecule + reads == 189
+
+
+def test_parsers_read_only_the_missing_tokens_they_are_given():
+    """A recorder writes None for an uncut site, so its None must stay text."""
+    raw = np.array([" None ", "NA", "", "x"], dtype=object)
+    assert parse_text(raw).tolist() == [None, None, None, "x"]
+    assert parse_text(raw, missing=frozenset()).tolist() == ["None", "NA", "", "x"]
+    assert parse_text(raw, missing=frozenset({"NA"})).tolist() == [
+        "None",
+        None,
+        "",
+        "x",
+    ]
+    counts = np.array(["3", "-", "NA"], dtype=object)
+    assert parse_integers(
+        counts, name="n", missing=frozenset({"-", "NA"})
+    ).tolist() == [
+        3,
+        -1,
+        -1,
+    ]
+    # NA is a number of no kind once it is not missing.
+    with pytest.raises(ValueError, match="'NA'"):
+        parse_integers(counts, name="n", missing=frozenset({"-"}))
+    values = np.array(["1.5", "-", "nan"], dtype=object)
+    parsed = parse_numbers(values, name="q", missing=frozenset({"-", "nan"}))
+    assert parsed[0] == 1.5 and np.isnan(parsed[1:]).all()
+    flags = np.array(["true", "None", "false"], dtype=object)
+    assert parse_flags(flags, name="pass").tolist() == [1, -1, 0]
+    with pytest.raises(ValueError, match="'None'"):
+        parse_flags(flags, name="pass", missing=frozenset())
+    frame = pd.DataFrame({"site": ["None", "AC"], "umis": ["-", "4"]})
+    parsed = parse_columns(
+        frame, {"site": TEXT, "umis": INTEGER}, first_line=2, missing=frozenset({"-"})
+    )
+    assert parsed["site"].tolist() == ["None", "AC"]
+    assert parsed["umis"].tolist() == [-1, 4]
