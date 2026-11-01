@@ -218,9 +218,36 @@ def test_grouping_is_checked_against_the_memory_budget(store) -> None:
     per_cell += GROUPING_BYTES_PER_LABEL_BYTE * (12 + 4)
     assert N_CELLS * per_cell == 2_304
     chunk = max(_chunk(store.cells._get_array(name)) for name in ("sample", "batch"))
+    # The second column is read while the read of the first can still hold
+    # its chunk, with Zarr's objects.
+    before = chunk + READ_OBJECT_BYTES
     # Each column holds two distinct labels, and they make four groups.
     named = (2 + 2) * GROUPING_BYTES_PER_DISTINCT_LABEL + 4 * GROUPING_BYTES_PER_GROUP
-    _assert_needs(store, 2_304 + chunk + named, group_by=["sample", "batch"])
+    _assert_needs(store, 2_304 + chunk + before + named, group_by=["sample", "batch"])
+
+
+def test_a_column_of_several_chunks_counts_the_chunk_read_before(tmp_path) -> None:
+    path = tmp_path / "store.zarr"
+    write_count_store(str(path), {"RNA": np.ones((N_CELLS, 3), dtype=int)}, "uint16")
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
+    store.zw["cellData"].create_array("halves", data=SAMPLES, chunks=(4,))
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    halves = store.cells._get_array("halves")
+    assert halves.chunks == (4,)
+    # One column of labels stored 3 characters wide is read a chunk of four
+    # cells at a time, and each read can still hold the chunk read before it.
+    per_cell = GROUPING_BYTES_PER_CELL + GROUPING_BYTES_PER_COLUMN
+    per_cell += GROUPING_BYTES_PER_LABEL_BYTE * 12
+    before = _chunk(halves) + READ_OBJECT_BYTES
+    named = 2 * GROUPING_BYTES_PER_DISTINCT_LABEL + 2 * GROUPING_BYTES_PER_GROUP
+    _assert_needs(
+        store, N_CELLS * per_cell + _chunk(halves) + before + named, group_by="halves"
+    )
 
 
 def test_a_selection_and_a_label_artifact_count_all_their_cells(store) -> None:

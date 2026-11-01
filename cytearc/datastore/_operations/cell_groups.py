@@ -175,6 +175,12 @@ def _column_chunk_bytes(cells: MetaData, column: str) -> int:
     return chunk
 
 
+def _stored_in_chunks(cells: MetaData, column: str) -> bool:
+    """Whether a column holds more than one stored chunk, which its rows can span."""
+    array = cells._get_array(column)
+    return int(array.shape[0]) > int(array.chunks[0])
+
+
 def _label_extent(zw: zarr.Group, groups: ArtifactRef) -> tuple[int, int, int]:
     """The cells of a label artifact, the stored width of its labels, and a chunk's bytes.
 
@@ -276,7 +282,7 @@ def cell_groups(
     # Reading a column, or the label artifact, also holds the rest of its
     # last chunk; they are read one at a time, a column a stored chunk at a
     # time.
-    chunk = max((_column_chunk_bytes(cells, column) for column in columns), default=0)
+    chunks = [_column_chunk_bytes(cells, column) for column in columns]
     # A cell selection and a label artifact are read whole, whatever cells
     # the artifact holds.
     if cell_selection is not None:
@@ -293,8 +299,13 @@ def cell_groups(
         resident += n_labelled * (
             GROUPING_BYTES_PER_LABELLED_CELL + GROUPING_BYTES_PER_LABEL_BYTE * width
         )
-        chunk = max(chunk, label_chunk)
-    resident += chunk
+        chunks.append(label_chunk)
+    resident += max(chunks, default=0)
+    # The read of a chunk can still hold the chunk read before it, of the same
+    # column or of the column or labels before, so a column stored in several
+    # chunks, or several columns and labels, count the largest chunk again.
+    if len(chunks) > 1 or any(_stored_in_chunks(cells, column) for column in columns):
+        resident += previous_read_bytes(*chunks)
 
     def held(total: int) -> int:
         """Return the bytes that grouping holds, refused beyond the budget."""
