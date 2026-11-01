@@ -54,3 +54,73 @@ def test_the_context_manager_restores_after_an_exception(two_blas_threads):
             assert _blas_threads() == {1}
             raise RuntimeError("stage failed")
     assert _blas_threads() == {2}
+
+
+def _built_controllers(monkeypatch: pytest.MonkeyPatch) -> list[None]:
+    """Note each ThreadpoolController built from now on."""
+    built: list[None] = []
+    build = ThreadpoolController.__init__
+
+    def noted(self: ThreadpoolController) -> None:
+        built.append(None)
+        build(self)
+
+    monkeypatch.setattr(ThreadpoolController, "__init__", noted)
+    return built
+
+
+def test_scopes_reuse_one_controller_while_nothing_is_imported(monkeypatch):
+    built = _built_controllers(monkeypatch)
+    exit_thread_limit(enter_thread_limit(None))
+    before = len(built)
+
+    for _ in range(50):
+        exit_thread_limit(enter_thread_limit(1))
+        with process_thread_limit(None):
+            pass
+
+    # Each scope built two controllers, one at each end, which only the cycle
+    # collector frees.
+    assert len(built) == before
+
+
+def test_a_scope_after_an_import_builds_the_controller_again(monkeypatch):
+    import sys
+    import types
+
+    built = _built_controllers(monkeypatch)
+    exit_thread_limit(enter_thread_limit(None))
+    before = len(built)
+    # An extension module that loads a BLAS or OpenMP runtime is imported.
+    stand_in = types.ModuleType("cytearc_native_library_stand_in")
+    monkeypatch.setitem(sys.modules, stand_in.__name__, stand_in)
+
+    exit_thread_limit(enter_thread_limit(None))
+    exit_thread_limit(enter_thread_limit(None))
+
+    assert len(built) == before + 1
+
+
+def test_many_scopes_leave_no_controller_to_the_cycle_collector():
+    import gc
+
+    exit_thread_limit(enter_thread_limit(None))
+    enabled = gc.isenabled()
+    gc.collect()
+    gc.disable()
+    gc.set_debug(gc.DEBUG_SAVEALL)
+    try:
+        # As many scopes as the blocks of a stream that limits each block's
+        # BLAS threads.
+        for _ in range(40):
+            with process_thread_limit(1):
+                pass
+        gc.collect()
+        left = [obj for obj in gc.garbage if isinstance(obj, ThreadpoolController)]
+    finally:
+        gc.set_debug(0)
+        gc.garbage.clear()
+        if enabled:
+            gc.enable()
+
+    assert left == []

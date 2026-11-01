@@ -70,6 +70,10 @@ _ASSOCIATION_HELD_SHARE = 0.5
 # counts and results, and the copies that the tests, the adjustment and the
 # write make of them.
 _ASSOCIATION_PAIR_BYTES = 320
+# The objects that Zarr makes to read a stored chunk, its tasks, futures,
+# specs and selections, whatever the chunk's size: about 25 KB, and 35 KB
+# beside those of the previous read, on Python 3.13 to 3.15.
+_READ_OBJECT_BYTES = 64 * 1024
 # The integer and floating-point columns of a perturbation association table,
 # one row per pair; each pair's group of treatment cells names its target and
 # guides once per group.
@@ -114,11 +118,15 @@ def _code_blocks(codes: zarr.Array) -> Iterator[np.ndarray]:
 def _chunk_read_bytes(codes: zarr.Array) -> int:
     """Return what reading one stored chunk of rows of an array of codes holds.
 
-    The read holds the chunk as stored and decoded, and the rows it returns.
+    The read holds the chunk as stored and decoded, the rows it returns, and
+    the objects Zarr makes to run it. The previous chunk, as stored and
+    decoded, can still be held beside them: the thread of Zarr's pool that
+    decoded it lets go of it only when that thread next runs, which on a busy
+    machine can come after the next read has begun.
     """
     stored, _ = array_row_selection_parts(codes)
     row_bytes = int(np.prod(codes.shape[1:], dtype=np.int64)) * codes.dtype.itemsize
-    return stored + _chunk_rows(codes) * row_bytes
+    return 2 * stored + _chunk_rows(codes) * row_bytes + _READ_OBJECT_BYTES
 
 
 def _association_warnings(
@@ -1194,6 +1202,23 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         n_cells = len(cells)
         n_rows = len(rows.names)
         n_discovery = len(discovery[0])
+        # Counting each guide's cells, and by target each target's, holds the
+        # counts and one stored chunk of codes read at a time. The counts size
+        # the rest of the budget, so this part is checked before they are read.
+        code_read_bytes = max(
+            _chunk_read_bytes(guide_codes), _chunk_read_bytes(row_codes)
+        )
+        code_count_bytes = 8 * (len(guide_names) + len(rows.target_names))
+        counting_bytes = code_read_bytes + code_count_bytes
+        counted_codes = "guide and target" if by == "target" else "guide"
+        _require_budget(
+            counting_bytes,
+            self.memoryBytes,
+            f"Counting the cells of each {counted_codes} over {n_cells} labelled "
+            "cells holds about",
+            beside=" with the cells' guides read a stored chunk at a time",
+            remedy=f"Raise mem_budget to at least {counting_bytes} bytes.",
+        )
         guide_cells = code_counts(_code_blocks(guide_codes), len(guide_names))
         # The control guides that some labelled cell carries make up the
         # calibration groups, which hold the median target's guides, or every
@@ -1277,7 +1302,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         # the QC counts.
         threads = self.nthreads
         resident = n_cells * (144 + 8 * (n_covariates + len(covariate_names)))
-        resident += 8 * (len(guide_names) + len(rows.target_names))
+        resident += code_count_bytes
         resident += 32 * int(row_sizes.sum() + nt_most.sum())
         resident += _ASSOCIATION_PAIR_BYTES * n_pairs_most
         resident += 4 * len(used) * len(target_features)
@@ -1308,7 +1333,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         # Before the tests, placing the groups' cells reads one stored chunk
         # of codes at a time, and the calibration groups hold the control
         # guides' cells and merge the cells of one group's guides.
-        building = max(_chunk_read_bytes(guide_codes), _chunk_read_bytes(row_codes))
+        building = code_read_bytes
         if n_groups_nt:
             building += 8 * int(guide_sizes.sum()) + 32 * int(nt_most.max())
         needed = resident + max(testing, building)
