@@ -399,6 +399,39 @@ def test_saved_clones_are_reused_by_their_rules_and_banks(store, tmp_path) -> No
     )
 
 
+def test_saved_clones_are_reused_only_with_each_cells_rare_alleles(
+    store, tmp_path
+) -> None:
+    from cytearc.storage.artifacts import artifact_group
+
+    calling, alleles = _imported(store, tmp_path)
+    clones = store.clones.allele_clones(
+        alleles, method="graph", frequencies=calling.banks, **DARLIN_RULES
+    )
+    group = artifact_group(store.zw, clones)
+    assert group["n_alleles"].dtype == np.dtype(np.int32)
+    n_alleles = np.asarray(group["n_alleles"][:])
+    assert n_alleles.max() > 0
+    assert (
+        store.clones.allele_clones(
+            alleles, method="graph", frequencies=calling.banks, **DARLIN_RULES
+        )
+        == clones
+    )
+    # Clones that lost each cell's rare alleles are called again, as a new
+    # artifact, rather than reused without them.
+    del group["n_alleles"]
+    again = store.clones.allele_clones(
+        alleles, method="graph", frequencies=calling.banks, **DARLIN_RULES
+    )
+    assert again != clones
+    np.testing.assert_array_equal(
+        store.artifacts.load(again)["n_alleles"][:], n_alleles
+    )
+    loaded = store.clones.load_clones(again)
+    np.testing.assert_array_equal(loaded.cells["n_alleles"], n_alleles)
+
+
 def test_other_labels_of_one_within_column_call_other_clones(store, tmp_path) -> None:
     calling, alleles = _imported(store, tmp_path)
     options = {"method": "graph", "frequencies": calling.banks, **DARLIN_RULES}

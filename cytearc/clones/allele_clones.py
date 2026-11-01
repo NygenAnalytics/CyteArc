@@ -751,9 +751,9 @@ def allele_clone_calls(
     room.held += 8 * (n_cells + 1 + len(sets.items)) - 16 * n_linked
     calls = set_clones(sets, groups=group_codes, method="shared", max_bytes=room.left())
     n_alleles = sets.sizes
-    # The calls hold each cell's clone and doublet flag and each clone's size,
-    # beside each cell's rare alleles.
-    room.held += 17 * n_cells + 8 * calls.n_clones + 8 * n_cells
+    # The calls hold each cell's clone and its doublet and ambiguous flags and
+    # each clone's size, beside each cell's rare alleles.
+    room.held += 18 * n_cells + 8 * calls.n_clones + 8 * n_cells
     counts["cells_with_rare_alleles"] = int(np.count_nonzero(n_alleles > 0))
 
     # A clone's alleles are the distinct rare alleles of its cells.
