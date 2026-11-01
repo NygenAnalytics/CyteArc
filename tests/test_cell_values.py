@@ -662,9 +662,10 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
     )
     alleles = store.clones.import_alleles(characters, cell_selection=cells)
     # Without a bank, each mark's frequency is its share of the cells with an
-    # edit at its site, a third or a half, so below 0.6 every mark is rare;
-    # no two cells share one, so cell0 and cell5 are clones of one, with two
-    # and three rare marks, and cell1's placeholder links nothing.
+    # edit at its site: a third or a half below 0.6, so rare, but 1 for
+    # cell5's 6, the only edit at its site. No two cells share a mark, so
+    # cell0 and cell5 are clones of one, with two rare marks each, and
+    # cell1's placeholder links nothing.
     allele_clones = store.clones.allele_clones(
         alleles, method="graph", max_frequency=0.6
     )
