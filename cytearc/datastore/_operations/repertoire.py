@@ -2206,13 +2206,13 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 raise TypeError("fields must be a sequence of field names or None")
             # Every row needs its contig ID, and every file its cells' IDs and,
             # with clonotypes, their labels, which no stored field holds.
-            written = {"cell_id", "clone_id"} if clonotypes else {"cell_id"}
+            always = {"cell_id", "clone_id"} if clonotypes else {"cell_id"}
             fields = [
                 "sequence_id",
                 *[
                     name
                     for name in fields
-                    if name != "sequence_id" and name not in written
+                    if name != "sequence_id" and name not in always
                 ],
             ]
         group, stored = self._receptor_group(receptors)
