@@ -29,7 +29,7 @@ _VMR_FLOOR = 1e-6
 _UNCOVERED_COLOR = "#d9d9d9"
 # The height of the bar of clone colours above the heatmap.
 _CLONE_BAR_INCHES = 0.25
-# The colour of each genotype call, in the vocabulary's order.
+# The colour of each genotype call.
 _CALL_COLORS = {
     "wild_type": "#4c78a8",
     "heterozygous": "#f58518",
@@ -580,7 +580,8 @@ def genotypes(
 
     loaded = _load_genotypes(store, genotypes, sites=sites)
     site_names = [str(name) for name in loaded.sites.index]
-    calls = list(_CALL_COLORS)
+    # The calls in the vocabulary's order, which their codes follow.
+    calls = [str(call) for call in loaded.calls["call"].cat.categories]
     n_cells = len(loaded.cells)
     group_labels, names, group_name = cell_groups(
         store, genotypes, group_by=group_by, groups=groups
@@ -598,17 +599,22 @@ def genotypes(
     row_cells = table["cell"].cat.codes.to_numpy(dtype=np.int64)
     row_sites = table["site"].cat.codes.to_numpy(dtype=np.int64)
     row_calls = table["call"].cat.codes.to_numpy(dtype=np.int64)
-    # Each cell's call at each drawn site, missing where the calls list none.
-    matrix = np.full((n_cells, len(site_names)), calls.index("missing"), dtype=np.int64)
-    matrix[row_cells, row_sites] = row_calls
+    missing = calls.index("missing")
+    # The calls of each site and group; a group's cells that the calls do not
+    # list at a site are missing there.
+    row_groups = cell_group[row_cells]
+    grouped = row_groups >= 0
+    counted = np.zeros((len(site_names), len(names), len(calls)), dtype=np.int64)
+    np.add.at(counted, (row_sites[grouped], row_groups[grouped], row_calls[grouped]), 1)
+    totals = np.bincount(cell_group[cell_group >= 0], minlength=len(names))
+    counted[:, :, missing] += totals[None, :] - counted.sum(axis=2)
     records = []
     for site_rank, name in enumerate(site_names):
         for group_rank, group in enumerate(names):
-            members = cell_group == group_rank
-            total = int(members.sum())
+            total = int(totals[group_rank])
             if not total:
                 continue
-            found = np.bincount(matrix[members, site_rank], minlength=len(calls))
+            found = counted[site_rank, group_rank]
             for code, call in enumerate(calls):
                 records.append(
                     {
@@ -644,7 +650,9 @@ def genotypes(
         y = np.asarray(
             _fetch_cell_column(store, f"{layout_key}2", cell_idx=rows), dtype=np.float64
         )
-        chosen = matrix[:, site_names.index(site)]
+        at_site = row_sites == site_names.index(site)
+        chosen = np.full(n_cells, missing, dtype=np.int64)
+        chosen[row_cells[at_site]] = row_calls[at_site]
         cells_table = pd.DataFrame(
             {
                 "cell": loaded.cells.index.to_numpy(dtype=object),
