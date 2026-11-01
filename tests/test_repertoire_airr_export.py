@@ -1,6 +1,7 @@
 import gzip
 import io
 import re
+import weakref
 import zlib
 
 import numpy as np
@@ -1220,3 +1221,62 @@ def test_renamed_ids_stay_held_while_the_blocks_are_written(
     store.repertoire.export_airr(receptors, tmp_path / "renamed.tsv")
     # X_3, X_4 and Z_3 stay held with their new names, 1,000 bytes more each.
     assert held[1] - held[0] == 3 * 1_000
+
+
+class _StoredRows:
+    """An array of six rows in chunks of two, which notes what it held at each read."""
+
+    chunks = (2,)
+    shape = (6,)
+
+    def __init__(self) -> None:
+        self.values = np.arange(6)
+        self.previous: weakref.ref | None = None
+        self.held_at_read: list[bool] = []
+
+    def __getitem__(self, selection):
+        out = self.values[selection].copy()
+        if len(out):
+            self.held_at_read.append(
+                self.previous is not None and self.previous() is not None
+            )
+            self.previous = weakref.ref(out)
+        return out
+
+
+def test_a_window_lets_go_of_its_chunk_before_reading_the_next() -> None:
+    stored = _StoredRows()
+    window = repertoire_operations._Window(stored)
+    assert [window.read(start, start + 2).tolist() for start in (0, 2, 4)] == [
+        [0, 1],
+        [2, 3],
+        [4, 5],
+    ]
+    # Each chunk is read once, and the one before is gone by then.
+    assert stored.held_at_read == [False, False, False]
+
+
+def test_a_block_is_let_go_before_the_next_is_read(tmp_path, monkeypatch) -> None:
+    # Contigs of small chunks, one per block, so every block reads its windows.
+    monkeypatch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", 16)
+    monkeypatch.setattr(repertoire_operations, "_EXPORT_BLOCK_BYTES", 1)
+    store, receptors = _edge_receptors(tmp_path)
+    written: list[weakref.ref] = []
+    alive: list[bool] = []
+    write = airr_writer.AirrRearrangementWriter.write
+    read = repertoire_operations._Window.read
+
+    def recorded_write(writer, block):
+        written.append(weakref.ref(block["sequence_id"].data))
+        return write(writer, block)
+
+    def recorded_read(window, start, stop):
+        if written:
+            alive.append(written[-1]() is not None)
+        return read(window, start, stop)
+
+    monkeypatch.setattr(airr_writer.AirrRearrangementWriter, "write", recorded_write)
+    monkeypatch.setattr(repertoire_operations._Window, "read", recorded_read)
+    assert store.repertoire.export_airr(receptors, tmp_path / "blocks.tsv") == 10
+    # Ten blocks were written, and no block was held while the next was read.
+    assert len(written) == 10 and len(alive) > 10 and not any(alive)
