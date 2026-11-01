@@ -69,7 +69,7 @@ from ..metadata.records import take_text
 from ..utils.arguments import integer_argument
 from ..utils.arrays import sorted_unique
 from .calling import SetClones, cell_sets, set_clones
-from .sequences import MAX_CHANCE_EDITS, neighbor_pairs
+from .sequences import MAX_CHANCE_EDITS, expected_chance_pairs, neighbor_pairs
 
 __all__ = [
     "BARCODE_DIAGNOSTICS",
@@ -194,8 +194,8 @@ _LOOKUP_RECORD_BYTES = 32
 _CORRECTION_RECORD_BYTES = 96
 _PAIRING_RECORD_BYTES = 136
 # Each distinct barcode of a block while it is corrected: its block, code,
-# abundance, component and representative, beside the text that the search
-# holds; each decoded barcode, its Python string and its place in the list of
+# abundance, component, rank and representative, beside the text that the
+# search holds; each decoded barcode, its Python string and its place in the list of
 # texts, beside four bytes per character; each stored barcode, its flag in a
 # lookup; and each allowlisted barcode, its entry in the index looked up.
 _ENTRY_BYTES = 64
@@ -470,9 +470,11 @@ def barcode_call_settings(
         raise ValueError(f"metric must be one of {', '.join(BARCODE_METRICS)}")
     elif metric_value == "levenshtein" and distance_value > MAX_CHANCE_EDITS:
         raise ValueError(
-            f"metric='levenshtein' corrects barcodes within at most "
-            f"{MAX_CHANCE_EDITS} edits, the most within which the matches "
-            "expected by chance can be counted; pass a smaller distance"
+            f"metric='levenshtein' takes a distance of at most {MAX_CHANCE_EDITS}, "
+            "since the barcode matches expected by chance within more edits take "
+            "too long to count: their cost grows about eightfold with every two "
+            "edits. Pass a smaller distance, or metric='hamming', which counts "
+            "them within any distance but matches only barcodes of one length"
         )
     trex = preset == "trex"
     if trex and metric_value not in (None, "hamming"):
@@ -734,10 +736,11 @@ def _corrected(
     their distance by the metric is within the distance; a connected
     component of linked barcodes merges into the barcode with the most
     UMIs, or reads, in the block, and of those the one that sorts last. The
-    search that links them also gives the pairs it expects within the
-    distance by chance, on the barcodes and positions it compares; the
-    distinct barcodes it compares leave out those that ``uncompared`` flags
-    by stored code, TREX's cloneIDs of fewer bases than it compares.
+    pairs expected within the distance by chance are counted over the
+    barcodes and positions that the search compares, from the bases of each
+    component's barcode of highest rank; the distinct barcodes it compares
+    leave out those that ``uncompared`` flags by stored code, TREX's cloneIDs
+    of fewer bases than it compares.
     """
     from .calling import Edges, connected_components
 
@@ -763,30 +766,46 @@ def _corrected(
     room.check(entries, f"correcting {n_entries} barcodes of their blocks")
     room.held += entries
     texts = records.texts(distinct)[positions.reshape(-1)]
-    first, second, expected = neighbor_pairs(
+    unknown = _TREX_UNKNOWN if settings.trex else ""
+    min_compared = _TREX_MIN_BASES if settings.trex else 0
+    first, second = neighbor_pairs(
         texts,
         str(settings.metric),
         settings.distance,
         entry_blocks,
         max_bytes=room.left(),
-        unknown=_TREX_UNKNOWN if settings.trex else "",
-        min_compared=_TREX_MIN_BASES if settings.trex else 0,
-        return_expected=True,
+        unknown=unknown,
+        min_compared=min_compared,
     )
-    del texts
-    # The texts are freed; the entries and the pairs found are held while the
+    # The entries, their texts and the pairs found are held while the
     # components are found, which get what is left.
-    text_bytes = _TEXT_BYTES * len(distinct) + 4 * int(lengths.sum())
     pair_bytes = 16 * len(first)
-    room.held += pair_bytes - text_bytes
+    room.held += pair_bytes
     components = connected_components(
         n_entries, Edges(first=first, second=second), max_bytes=room.left()
     )
     del first, second
-    room.held -= entries - text_bytes + pair_bytes
+    room.held -= pair_bytes
     # The last entry of each component, ordered by abundance and then code,
     # is its representative: the most abundant barcode, sorting last on ties.
     by_rank = np.lexsort((entry_codes, abundance, components))
+    # Each entry's place in that order, so that each component's
+    # representative holds the highest place of its entries.
+    rank = np.empty(n_entries, dtype=np.int64)
+    rank[by_rank] = np.arange(n_entries)
+    expected = expected_chance_pairs(
+        texts,
+        str(settings.metric),
+        settings.distance,
+        entry_blocks,
+        components=components,
+        priority=rank,
+        max_bytes=room.left(),
+        unknown=unknown,
+        min_compared=min_compared,
+    )
+    del texts, rank
+    room.held -= entries
     last = np.ones(n_entries, dtype=bool)
     if n_entries > 1:
         last[:-1] = components[by_rank][1:] != components[by_rank][:-1]

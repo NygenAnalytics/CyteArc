@@ -15,9 +15,14 @@ from cytearc.clones.barcode_clones import (
     barcode_clone_calls,
     clone_labels,
 )
-from cytearc.clones.sequences import neighbor_pairs
+from cytearc.clones.sequences import expected_chance_pairs, neighbor_pairs
 from cytearc.metadata.records import pack_text
-from tests.clone_helpers import clone_partition, smallest_budget, traced_peak
+from tests.clone_helpers import (
+    clone_partition,
+    link_count_variance,
+    smallest_budget,
+    traced_peak,
+)
 
 A = "ACGTACGTACGTACGTACGTACGTACGT"
 # One substitution from A, and one more.
@@ -239,7 +244,8 @@ def test_given_values_replace_a_presets_and_zero_turns_a_filter_off() -> None:
         (
             {"method": "sets", "distance": 9, "metric": "levenshtein"},
             ValueError,
-            "at most 8 edits",
+            "at most 8, since the barcode matches expected by chance .* "
+            "metric='hamming'",
         ),
     ],
 )
@@ -490,13 +496,29 @@ def _random_cloneids(rng, n_texts: int) -> list[str]:
     return sorted(texts)
 
 
+def _linked(n_texts: int, first: np.ndarray, second: np.ndarray) -> np.ndarray:
+    """Each text's component of linked pairs, by union and find."""
+    parent = list(range(n_texts))
+
+    def root(text: int) -> int:
+        while parent[text] != text:
+            parent[text] = parent[parent[text]]
+            text = parent[text]
+        return text
+
+    for one, other in zip(first.tolist(), second.tolist(), strict=True):
+        parent[root(one)] = root(other)
+    return np.asarray([root(text) for text in range(n_texts)])
+
+
 @pytest.mark.parametrize("preset", ["trex", "celltag_multi"])
-def test_the_expected_matches_are_the_searchs_over_each_library_as_correction_runs(
+def test_the_expected_matches_are_those_of_each_library_as_correction_links_it(
     preset,
 ) -> None:
-    # Each library's barcodes are compared alone: the expectation is that of
-    # the search over each library's distinct barcodes, with TREX's characters
-    # of no base and its 20 compared bases, or within 2 edits.
+    # Each library's barcodes are compared alone, with TREX's characters of
+    # no base and its 20 compared bases, or within 2 edits; the barcodes that
+    # correction links are one component, which its barcode that sorts last
+    # represents, since every barcode holds one molecule.
     rng = np.random.default_rng(12)
     if preset == "trex":
         texts = [_random_cloneids(rng, 300), _random_cloneids(rng, 300)]
@@ -519,20 +541,91 @@ def test_the_expected_matches_are_the_searchs_over_each_library_as_correction_ru
         else {"preset": "celltag_multi", "allowlist": False, "min_reads": 0}
     )
     calls = _call(_records(rows, libraries), 2_000, **options)
-    metric, cutoff = search.pop("metric"), search.pop("cutoff")
-    alone = [
-        neighbor_pairs(barcodes, metric, cutoff, return_expected=True, **search)[2]
-        for barcodes in texts
-    ]
+
+    def expect(barcodes: list[str]) -> float:
+        first, second = neighbor_pairs(barcodes, **search)
+        return expected_chance_pairs(
+            barcodes,
+            **search,
+            components=_linked(len(barcodes), first, second),
+            priority=np.arange(len(barcodes)),
+        )
+
     expected = calls.diagnostics["expectedChanceMatches"]
-    assert expected == pytest.approx(sum(alone), rel=1e-12)
+    assert expected == pytest.approx(sum(map(expect, texts)), rel=1e-9)
     assert expected > 0
     assert calls.diagnostics["distinctBarcodes"] == sum(map(len, texts))
     # Compared together, the two libraries would expect more.
-    together = neighbor_pairs(
-        texts[0] + texts[1], metric, cutoff, return_expected=True, **search
-    )[2]
-    assert together > 1.5 * expected
+    assert expect(sorted(texts[0] + texts[1])) > 1.5 * expected
+
+
+def test_barcodes_without_errors_expect_as_if_each_were_its_own_component() -> None:
+    # Random barcodes of 24 bases never lie within 2 substitutions of each
+    # other, so each is a component of its own, and their frequencies are
+    # those of every barcode compared.
+    rng = np.random.default_rng(15)
+    texts = sorted({"".join(rng.choice(list("ACGT"), size=24)) for _ in range(800)})
+    rows = [(cell, 0, text, f"U{cell}", 1, 20) for cell, text in enumerate(texts)]
+    calls = _call(
+        _records(rows), len(texts), method="sets", distance=2, metric="hamming"
+    )
+    assert calls.diagnostics["mergedBarcodes"] == 0
+    assert calls.diagnostics["expectedChanceMatches"] == pytest.approx(
+        expected_chance_pairs(texts, "hamming", 2), rel=1e-12
+    )
+
+
+def test_error_variants_weigh_no_more_than_their_parents_in_the_expectation() -> None:
+    # 600 random parents of 12 bases, one with the variants of 400 draws of
+    # one or two substitutions and every fifth with one more, each parent in
+    # five molecules and each variant in one, so that correction merges each
+    # family into its parent. The parents are independent random barcodes, so
+    # the pairs of parents within 3 substitutions are chance matches; their
+    # count, scaled from the pairs of parents to every pair compared, is what
+    # the expectation must give, within four standard deviations of the count.
+    rng = np.random.default_rng(17)
+    letters = np.asarray(list("ACGT"))
+    parents = sorted({"".join(rng.choice(letters, size=12)) for _ in range(600)})
+
+    def variant(text: str, changes: int) -> str:
+        bases = list(text)
+        for position in rng.choice(12, size=changes, replace=False):
+            bases[position] = str(rng.choice(letters[letters != bases[position]]))
+        return "".join(bases)
+
+    barcodes = set(parents)
+    for _ in range(400):
+        barcodes.add(variant(parents[0], int(rng.integers(1, 3))))
+    for index in range(1, len(parents), 5):
+        barcodes.add(variant(parents[index], 1))
+    texts = sorted(barcodes)
+    rows = []
+    for cell, text in enumerate(texts):
+        reads = 5 if text in parents else 1
+        rows += [(cell, 0, text, f"U{cell}_{k}", 1, 20) for k in range(reads)]
+    calls = _call(
+        _records(rows), len(texts), method="sets", distance=3, metric="hamming"
+    )
+    expected = calls.diagnostics["expectedChanceMatches"]
+    # The pairs of parents within 3 substitutions, by brute force.
+    codes = np.asarray([list(text) for text in parents])
+    firsts, seconds = [], []
+    for row in range(len(parents) - 1):
+        linked = np.flatnonzero((codes[row + 1 :] != codes[row]).sum(axis=1) <= 3)
+        firsts.append(np.full(len(linked), row))
+        seconds.append(row + 1 + linked)
+    count, variance = link_count_variance(
+        len(parents), np.concatenate(firsts), np.concatenate(seconds)
+    )
+    scale = len(texts) * (len(texts) - 1) / (len(parents) * (len(parents) - 1))
+    reference = count * scale
+    tolerance = 4 * variance**0.5 * scale
+    assert count > 50
+    assert abs(expected - reference) <= tolerance, (expected, reference, tolerance)
+    # The frequencies of every barcode compared lean towards the parent of
+    # many variants, and expect far more.
+    every_barcode = expected_chance_pairs(texts, "hamming", 3)
+    assert every_barcode - reference > tolerance, (every_barcode, reference, tolerance)
 
 
 def test_counting_the_distinct_barcodes_without_correction_checks_the_budget() -> None:

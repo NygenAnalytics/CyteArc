@@ -38,20 +38,22 @@ compare the same positions, and each pair of groups is searched on those
 positions in the same two ways. These functions work on text and never touch
 storage.
 
-The search can also say how many of the pairs it compared would fall within
-the cutoff by chance, if each text's characters were drawn independently,
-position by position, from the characters that the compared texts hold
-there: an expectation that grows with the square of the texts compared,
-which lineage barcode correction records beside the pairs it merges.
+:func:`expected_chance_pairs` says how many of the pairs that the search
+compares would fall within the cutoff by chance, if each text's characters
+were drawn independently, position by position, from those of one text per
+component, such as the barcodes that correction merges into: an expectation
+that grows with the square of the texts compared, which lineage barcode
+correction records beside the barcodes it merges.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from math import comb
-from typing import Any, Literal, overload
+from typing import Any
 
 import numpy as np
 
-from ..utils.arguments import bool_argument, integer_argument
+from ..utils.arguments import integer_argument
 from ..utils.arrays import sorted_unique, unique_inverse
 from ..utils.numba import njit
 
@@ -59,14 +61,15 @@ __all__ = [
     "DISTANCE_METRICS",
     "MAX_CHANCE_EDITS",
     "allowed_mismatches",
+    "expected_chance_pairs",
     "neighbor_pairs",
 ]
 
 #: The metrics of :func:`neighbor_pairs`.
 DISTANCE_METRICS: tuple[str, ...] = ("hamming", "normalized_hamming", "levenshtein")
-#: The most edits within which :func:`neighbor_pairs` gives the pairs expected
-#: by chance under ``levenshtein``, whose cost grows about eightfold with every
-#: two edits more.
+#: The most edits within which :func:`expected_chance_pairs` counts the pairs
+#: expected by chance under ``levenshtein``, whose cost grows about eightfold
+#: with every two edits more.
 MAX_CHANCE_EDITS = 8
 # The bytes that a search of two or more texts holds whatever they are: the
 # buffers of its sorts, its random generator and the objects of its arrays.
@@ -125,6 +128,13 @@ _COUNTED_CODE_BYTES = 9
 # and the small arrays of the cells, up to 25 KiB at 4 edits.
 _CHANCE_STATE_BYTES = 160
 _CHANCE_FIXED_BYTES = 1 << 15
+# Choosing one text per component holds, for each text, its component and
+# priority, their order, the sorted runs and the texts chosen; taking each
+# position's character of one text per component, with characters of no base,
+# also holds each text's run and, for one position, the texts that hold a
+# base there.
+_REPRESENTATIVE_ROW_BYTES = 48
+_LIBRARY_ROW_BYTES = 64
 
 
 def allowed_mismatches(length: int, percent: int) -> int:
@@ -175,13 +185,6 @@ class _Memory:
             "cutoff, compare fewer texts at once or within smaller blocks, or "
             "raise the memory budget."
         )
-
-
-@dataclass(slots=True)
-class _Chance:
-    """The pairs expected within the cutoff by chance, summed over the sets searched."""
-
-    expected: float = 0.0
 
 
 @njit(cache=True)
@@ -1066,24 +1069,27 @@ def _edit_chance(agree: np.ndarray, limit: int, memory: _Memory) -> float:
 def _edit_chance_pairs(
     matrix: np.ndarray,
     groups: list[np.ndarray],
+    chosen: list[np.ndarray],
     lengths: list[int],
     limit: int,
     memory: _Memory,
 ) -> float:
     """The pairs of a block's texts expected within ``limit`` edits by chance.
 
-    ``groups`` holds the rows of each length of the block, ``lengths`` that
-    length, ascending. Each pair of lengths within ``limit`` pairs its texts,
-    and two texts of one length are distinct, so pairs that would be
-    identical are left out as :func:`_chance_pairs` leaves them out.
+    ``groups`` holds the rows of each length of the block, ``chosen`` the rows
+    whose characters give that length's frequencies, and ``lengths`` that
+    length, ascending. Each pair of lengths within ``limit`` pairs every text
+    of one with every text of the other, and two texts of one length are
+    distinct, so pairs that would be identical are left out as
+    :func:`_chance_pairs` leaves them out.
     """
     held = _FREQUENCY_BYTES * sum(lengths) + _AGREEMENT_BYTES * max(lengths) ** 2
     # Counting one position's codes copies them, widened to 8 bytes each.
-    counting = _COUNTED_CODE_BYTES * max(map(len, groups)) + _FREQUENCY_BYTES
+    counting = _COUNTED_CODE_BYTES * max(map(len, chosen)) + _FREQUENCY_BYTES
     memory.check(held + counting, "the frequencies of the texts' characters")
     memory.held += held
     frequencies = []
-    for rows, length in zip(groups, lengths, strict=True):
+    for rows, length in zip(chosen, lengths, strict=True):
         counts = np.zeros((length, 256), dtype=np.float64)
         for position in range(length):
             counts[position] = np.bincount(matrix[rows, position], minlength=256)
@@ -1115,13 +1121,7 @@ def _edit_chance_pairs(
     return expected
 
 
-def _hamming_segments(
-    codes: np.ndarray,
-    limit: int,
-    room: int,
-    split: int = 0,
-    agree: np.ndarray | None = None,
-) -> int:
+def _hamming_segments(codes: np.ndarray, limit: int, room: int, split: int = 0) -> int:
     """The segments whose masked keys find the pairs of texts of one length soonest.
 
     A key masks ``limit`` of ``m`` segments of positions in a row, so a text
@@ -1133,10 +1133,9 @@ def _hamming_segments(
     keys, hashed once for each pass, whose size follows ``room`` as the search
     sizes it, and its candidate pairs, estimated from how often two texts
     agree at each position by the frequencies of its characters, as
-    :func:`_agreement` gives them, or as ``agree`` holds them when given; a
-    choice whose candidates of one pass would not fit ``room`` is left out.
-    With a ``split`` above 0, only the rows below it pair, with those at or
-    above it.
+    :func:`_agreement` gives them; a choice whose candidates of one pass would
+    not fit ``room`` is left out. With a ``split`` above 0, only the rows
+    below it pair, with those at or above it.
 
     Returns:
         The segments of the fastest keyed search, or 0 when comparing every
@@ -1155,8 +1154,7 @@ def _hamming_segments(
     # The logarithms of the chance that two texts agree at each position,
     # summed along the positions; a position where they never agree counts
     # as a tiny chance.
-    if agree is None:
-        agree = _agreement(codes, split)
+    agree = _agreement(codes, split)
     summed = np.concatenate([[0.0], np.cumsum(np.log(np.maximum(agree, 1e-300)))])
     keys_per_pass = min(
         _KEYS_PER_PASS, max(_MIN_KEYS_PER_PASS, room // (_KEY_SHARE * _KEY_BYTES))
@@ -1259,25 +1257,14 @@ def _substitution_pairs(
     memory: _Memory,
     found: _Found,
     split: int = 0,
-    chance: _Chance | None = None,
-    agree: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Every pair of rows within ``limit`` substitutions, by keys or by loops.
 
     The rows are texts of one length; with a ``split`` above 0, only the rows
-    below it pair, with those at or above it. With ``chance``, the pairs of
-    rows expected within ``limit`` by chance are added to it, from the same
-    chances of agreeing at each position that time the search: ``agree``,
-    when the caller has them, or those of :func:`_agreement`.
+    below it pair, with those at or above it.
     """
     limit = min(limit, codes.shape[1])
-    if chance is not None:
-        if agree is None:
-            agree = _agreement(codes, split)
-        chance.expected += _chance_pairs(
-            len(codes), split, _mismatch_chances(1.0 - agree, limit)
-        )
-    if segments := _hamming_segments(codes, limit, memory.room, split, agree):
+    if segments := _hamming_segments(codes, limit, memory.room, split):
         lengths = np.full(len(codes), codes.shape[1], dtype=np.int64)
         return _keyed_pairs(
             codes, lengths, limit, False, table, memory, segments, split
@@ -1285,20 +1272,60 @@ def _substitution_pairs(
     return found.looped(_hamming_pairs(_words(codes), limit, found.most(), split))
 
 
-def _group_agreement(
-    first: np.ndarray,
-    second: np.ndarray,
-    n_first: int,
-    n_second: int,
-    columns: np.ndarray,
-) -> np.ndarray:
-    """The chance that a text of one group agrees with one of another, at some positions.
+def _mask_groups(
+    matrix: np.ndarray,
+    members: np.ndarray,
+    length: int,
+    unknown: np.ndarray,
+    min_compared: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Group the texts of one length by the positions where they hold no base.
 
-    ``first`` and ``second`` hold each group's count of each character at
-    each position, ``columns`` the positions; within one group, both are its
-    counts, as :func:`_agreement` gives them for the group's rows.
+    Only texts that hold at least ``min_compared`` bases are grouped, since
+    the others pair with nothing.
+
+    Returns:
+        The positions among ``members`` of the grouped texts, each group's in
+        a row; each group's start and end in that order; and each group's
+        positions of no base, as bits of 64-bit words.
     """
-    return np.sum(first[columns] / n_first * second[columns] / n_second, axis=1)
+    masks, known = _unknown_masks(matrix, members, length, unknown)
+    linkable = np.flatnonzero(known >= min_compared)
+    del known
+    order = linkable[np.lexsort(masks[linkable].T)]
+    del linkable
+    ordered_masks = masks[order]
+    del masks
+    starts = np.flatnonzero(
+        np.concatenate(
+            [[True], np.any(ordered_masks[1:] != ordered_masks[:-1], axis=1)]
+        )
+    )[: len(order)]
+    ends = np.append(starts[1:], len(order))
+    return order, starts, ends, ordered_masks[starts]
+
+
+def _group_pairs(
+    group_masks: np.ndarray, length: int, min_compared: int
+) -> Iterator[tuple[int, int, np.ndarray]]:
+    """Each pair of groups that compares ``min_compared`` positions or more.
+
+    A group pairs with itself and with each later group, on the positions
+    where neither holds a character of no base.
+
+    Yields:
+        The first group, the second group and the positions compared.
+    """
+    positions = np.arange(length)
+    words = positions >> 6
+    shifts = (positions & 63).astype(np.uint64)
+    for first_group in range(len(group_masks)):
+        unions = group_masks[first_group] | group_masks[first_group:]
+        compared = length - np.bitwise_count(unions).sum(axis=1)
+        for offset in np.flatnonzero(compared >= min_compared).tolist():
+            union = unions[offset]
+            columns = np.flatnonzero(((union[words] >> shifts) & np.uint64(1)) == 0)
+            yield first_group, first_group + offset, columns
 
 
 def _partial_pairs(
@@ -1311,7 +1338,6 @@ def _partial_pairs(
     table: np.ndarray,
     memory: _Memory,
     found: _Found,
-    chance: _Chance | None = None,
 ) -> None:
     """Find the pairs of texts of one length that may hold characters of no base.
 
@@ -1321,143 +1347,101 @@ def _partial_pairs(
     pair of groups that compares at least ``min_compared`` positions is then
     searched on those positions as texts without unknown characters are, by
     keys or by loops, the texts of two groups paired across them; a text
-    that holds fewer bases than that has no pairs. With ``chance``, the pairs
-    expected by chance are added to it for each pair of groups searched, on
-    the positions searched, from each group's count of each character at
-    each position, counted once.
+    that holds fewer bases than that has no pairs.
     """
     n_words = max(-(-length // 64), 1)
     held = len(members) * (_MASK_TEXT_BYTES + 16 * n_words)
     memory.check(held, "the positions where the texts hold no base")
     memory.held += held
-    masks, known = _unknown_masks(matrix, members, length, unknown)
-    linkable = np.flatnonzero(known >= min_compared)
-    del known
-    # The texts of each group in a row, in their order.
-    order = linkable[np.lexsort(masks[linkable].T)]
-    del linkable
-    ordered_masks = masks[order]
-    del masks
-    starts = np.flatnonzero(
-        np.concatenate(
-            [[True], np.any(ordered_masks[1:] != ordered_masks[:-1], axis=1)]
-        )
-    )[: len(order)]
-    ends = np.append(starts[1:], len(order))
-    group_masks = ordered_masks[starts]
-    del ordered_masks
-    group_counts = None
-    if chance is not None:
-        group_counts, counts_held = _group_counts(
-            matrix, members, order, starts, ends, length, memory
-        )
-    positions = np.arange(length)
-    words = positions >> 6
-    shifts = (positions & 63).astype(np.uint64)
-    for first_group in range(len(starts)):
-        unions = group_masks[first_group] | group_masks[first_group:]
-        compared = length - np.bitwise_count(unions).sum(axis=1)
+    order, starts, ends, group_masks = _mask_groups(
+        matrix, members, length, unknown, min_compared
+    )
+    for first_group, second_group, columns in _group_pairs(
+        group_masks, length, min_compared
+    ):
         rows_below = order[starts[first_group] : ends[first_group]]
-        for offset in np.flatnonzero(compared >= min_compared).tolist():
-            second_group = first_group + offset
-            split = 0
-            rows = members[rows_below]
-            if offset:
-                split = len(rows_below)
-                rows_above = order[starts[second_group] : ends[second_group]]
-                rows = np.concatenate([rows, members[rows_above]])
-            elif len(rows) < 2:
-                continue
-            union = unions[offset]
-            columns = np.flatnonzero(((union[words] >> shifts) & np.uint64(1)) == 0)
-            codes = matrix[np.ix_(rows, columns)]
-            agree = None
-            if group_counts is not None:
-                agree = _group_agreement(
-                    group_counts[first_group],
-                    group_counts[second_group],
-                    int(ends[first_group] - starts[first_group]),
-                    int(ends[second_group] - starts[second_group]),
-                    columns,
-                )
-            first, second = _substitution_pairs(
-                codes, limit, table, memory, found, split, chance, agree
-            )
-            del codes
-            first, second = _ordered(rows[first], rows[second])
-            found.add(first, second)
-    if group_counts is not None:
-        memory.held -= counts_held
+        split = 0
+        rows = members[rows_below]
+        if second_group != first_group:
+            split = len(rows_below)
+            rows_above = order[starts[second_group] : ends[second_group]]
+            rows = np.concatenate([rows, members[rows_above]])
+        elif len(rows) < 2:
+            continue
+        codes = matrix[np.ix_(rows, columns)]
+        first, second = _substitution_pairs(codes, limit, table, memory, found, split)
+        del codes
+        first, second = _ordered(rows[first], rows[second])
+        found.add(first, second)
     memory.held -= held
 
 
-def _group_counts(
-    matrix: np.ndarray,
-    members: np.ndarray,
-    order: np.ndarray,
-    starts: np.ndarray,
-    ends: np.ndarray,
-    length: int,
-    memory: _Memory,
-) -> tuple[np.ndarray, int]:
-    """Each group's count of each character at each position, and the bytes it holds.
+def _search_arguments(
+    metric: str,
+    cutoff: Any,
+    max_bytes: Any,
+    unknown: Any,
+    min_compared: Any,
+) -> tuple[int, int | None, int]:
+    """Check the arguments that a search and its expectation share.
 
-    The groups are the slices of ``order`` from ``starts`` to ``ends``, rows
-    of ``members``. Only the characters that the texts hold are counted, so
-    the counts hold a few per position rather than 256, and they are held
-    while the groups are searched.
+    Returns:
+        The cutoff, the most bytes or None, and the fewest positions compared.
     """
-    present = np.zeros(256, dtype=np.bool_)
-    largest = int(np.max(ends - starts)) if len(starts) else 0
-    # Counting one position copies its codes, widened to 8 bytes each.
-    counting = _COUNTED_CODE_BYTES * max(len(members), 1) + _FREQUENCY_BYTES
-    memory.check(counting, "the characters of each group of texts")
-    for position in range(length):
-        present |= np.bincount(matrix[members, position], minlength=256) > 0
-    ranks = np.cumsum(present) - 1
-    n_characters = int(np.count_nonzero(present))
-    held = 8 * len(starts) * length * n_characters
-    memory.check(
-        held + _COUNTED_CODE_BYTES * max(largest, 1),
-        "the characters of each group of texts",
+    if metric not in DISTANCE_METRICS:
+        raise ValueError(f"metric must be one of {', '.join(DISTANCE_METRICS)}")
+    cutoff = integer_argument(cutoff, "cutoff", minimum=0)
+    limit_bytes = (
+        None
+        if max_bytes is None
+        else integer_argument(max_bytes, "max_bytes", minimum=0)
     )
-    counts = np.zeros((len(starts), length, n_characters), dtype=np.float64)
-    for group in range(len(starts)):
-        rows = members[order[starts[group] : ends[group]]]
-        for position in range(length):
-            counts[group, position] = np.bincount(
-                ranks[matrix[rows, position]], minlength=n_characters
-            )
-    memory.held += held
-    return counts, held
+    if not isinstance(unknown, str):
+        raise TypeError("unknown must be text, the characters that hold no base")
+    min_compared = integer_argument(min_compared, "min_compared", minimum=0)
+    if (unknown or min_compared) and metric != "hamming":
+        raise ValueError(
+            "unknown and min_compared apply to metric='hamming' only, which "
+            "compares texts position by position"
+        )
+    return cutoff, limit_bytes, min_compared
 
 
-@overload
-def neighbor_pairs(
-    texts: Any,
-    metric: str,
-    cutoff: int,
-    blocks: Any = ...,
-    *,
-    max_bytes: int | None = ...,
-    unknown: str = ...,
-    min_compared: int = ...,
-    return_expected: Literal[False] = ...,
-) -> tuple[np.ndarray, np.ndarray]: ...
+def _length_groups(
+    block_codes: np.ndarray, lengths: np.ndarray, memory: _Memory
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Order the texts by block and length, so that each group's are a slice.
+
+    Each group of one length and block holds ``_GROUP_BYTES`` of ``memory``.
+
+    Returns:
+        The order of the texts, each group's start, end and length in it, and
+        each text's rank among the blocks.
+    """
+    _distinct, ranks = unique_inverse(block_codes)
+    group_keys = ranks * (int(lengths.max()) + 1) + lengths
+    order = np.argsort(group_keys, kind="stable")
+    ordered = group_keys[order]
+    first_of_group = np.concatenate([[True], ordered[1:] != ordered[:-1]])
+    n_groups = int(np.count_nonzero(first_of_group))
+    memory.check(_GROUP_BYTES * n_groups, "the lengths and blocks of the texts")
+    memory.held += _GROUP_BYTES * n_groups
+    starts = np.flatnonzero(first_of_group)
+    del first_of_group
+    ends = np.append(starts[1:], len(order))
+    return order, starts, ends, lengths[order[starts]], ranks
 
 
-@overload
-def neighbor_pairs(
-    texts: Any,
-    metric: str,
-    cutoff: int,
-    blocks: Any = ...,
-    *,
-    max_bytes: int | None = ...,
-    unknown: str = ...,
-    min_compared: int = ...,
-    return_expected: Literal[True],
-) -> tuple[np.ndarray, np.ndarray, float]: ...
+def _block_spans(
+    ranks: np.ndarray, order: np.ndarray, starts: np.ndarray
+) -> list[tuple[int, int]]:
+    """Each block's first group and the group after its last, in group order."""
+    group_ranks = ranks[order[starts]]
+    block_starts = np.flatnonzero(
+        np.concatenate([[True], group_ranks[1:] != group_ranks[:-1]])
+    )
+    block_ends = np.append(block_starts[1:], len(starts))
+    return list(zip(block_starts.tolist(), block_ends.tolist(), strict=True))
 
 
 def neighbor_pairs(
@@ -1469,8 +1453,7 @@ def neighbor_pairs(
     max_bytes: int | None = None,
     unknown: str = "",
     min_compared: int = 0,
-    return_expected: bool = False,
-) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Find every pair of texts within ``cutoff`` of each other.
 
     Two texts at positions ``i < j`` form a pair when their distance by
@@ -1485,23 +1468,8 @@ def neighbor_pairs(
     when at least ``min_compared`` positions are compared, as TREX links
     partial cloneIDs.
 
-    With ``return_expected``, the search also gives the pairs it would find
-    by chance: the pairs within the cutoff expected among the pairs it
-    compares, if each text's character at each position were drawn
-    independently from the frequencies of the characters that the compared
-    texts hold there. Texts of one length are distinct, so a pair of them
-    that would agree everywhere counts as one that does not. Under
-    ``hamming`` and ``normalized_hamming``, each set of texts that the search
-    compares at once, such as the texts of one length and block or, with
-    ``unknown``, two groups of texts on the positions both hold, gives the
-    chance of each number of mismatches exactly from the chance that two
-    texts agree at each position, which also times the search. Under
-    ``levenshtein``, each pair of lengths of a block follows the edit
-    distance's dynamic programming over the chance that each pair of
-    positions agrees, treating the pairs of positions as independent, an
-    approximation that comes within a tenth of brute-force counts on random
-    texts of near-uniform composition and overstates them where one
-    character dominates; it needs a cutoff of at most ``MAX_CHANCE_EDITS``.
+    :func:`expected_chance_pairs` gives the pairs that the search would find
+    by chance among the pairs it compares.
 
     Args:
         texts: The texts, a sequence of str, such as the distinct junctions
@@ -1528,17 +1496,10 @@ def neighbor_pairs(
         unknown: Characters that hold no base, under ``hamming`` only.
         min_compared: The fewest positions that two texts must compare,
             under ``hamming`` only.
-        return_expected: Also return the pairs expected within the cutoff
-            by chance. Under ``levenshtein`` the search then also holds the
-            frequency of each character code at each position of the texts
-            of a block, 2 KiB per position, 8 bytes for each pair of
-            positions of two lengths, and 160 bytes for each state of the
-            edit distances it follows, with 32 KiB more.
 
     Returns:
         The positions of the pairs as int64, the first below the second,
-        each pair once; with ``return_expected``, also the pairs expected
-        within the cutoff by chance, a float.
+        each pair once.
 
     Raises:
         TypeError: If ``texts`` is not a one-dimensional sequence of str,
@@ -1548,36 +1509,14 @@ def neighbor_pairs(
             ``min_compared`` is negative, ``blocks`` does not hold one block
             per text, the texts hold more than 256 distinct characters, or
             ``unknown`` or ``min_compared`` is given with a metric other than
-            ``hamming``, or ``return_expected`` with ``levenshtein`` and a
-            cutoff above ``MAX_CHANCE_EDITS``.
+            ``hamming``.
         MemoryError: If the search would hold more than ``max_bytes``: the
             encoded texts, the keys or candidate pairs of one pass, or the
             pairs within the cutoff need more.
     """
-    if metric not in DISTANCE_METRICS:
-        raise ValueError(f"metric must be one of {', '.join(DISTANCE_METRICS)}")
-    cutoff = integer_argument(cutoff, "cutoff", minimum=0)
-    limit_bytes = (
-        None
-        if max_bytes is None
-        else integer_argument(max_bytes, "max_bytes", minimum=0)
+    cutoff, limit_bytes, min_compared = _search_arguments(
+        metric, cutoff, max_bytes, unknown, min_compared
     )
-    if not isinstance(unknown, str):
-        raise TypeError("unknown must be text, the characters that hold no base")
-    min_compared = integer_argument(min_compared, "min_compared", minimum=0)
-    if (unknown or min_compared) and metric != "hamming":
-        raise ValueError(
-            "unknown and min_compared apply to metric='hamming' only, which "
-            "compares texts position by position"
-        )
-    bool_argument(return_expected, "return_expected")
-    if return_expected and metric == "levenshtein" and cutoff > MAX_CHANCE_EDITS:
-        raise ValueError(
-            "The pairs expected by chance within more than "
-            f"{MAX_CHANCE_EDITS} edits take too long to follow; pass a cutoff "
-            f"of at most {MAX_CHANCE_EDITS} with metric='levenshtein'"
-        )
-    chance = _Chance() if return_expected else None
     values = _texts(texts)
     n_texts = len(values)
     block_codes = _blocks(blocks, n_texts)
@@ -1587,22 +1526,11 @@ def neighbor_pairs(
     unknown_codes = _unknown_table(unknown, coding)
     empty = np.empty(0, dtype=np.int64)
     if n_texts < 2:
-        return (empty, empty.copy(), 0.0) if return_expected else (empty, empty.copy())
+        return empty, empty.copy()
     table = _zobrist_table(matrix.shape[1])
-    # The texts in order of block and length, so that the texts of a block,
-    # and of each of its lengths, are slices.
-    _distinct, ranks = unique_inverse(block_codes)
-    group_keys = ranks * (int(lengths.max()) + 1) + lengths
-    order = np.argsort(group_keys, kind="stable")
-    ordered = group_keys[order]
-    first_of_group = np.concatenate([[True], ordered[1:] != ordered[:-1]])
-    n_groups = int(np.count_nonzero(first_of_group))
-    memory.check(_GROUP_BYTES * n_groups, "the lengths and blocks of the texts")
-    memory.held += _GROUP_BYTES * n_groups
-    starts = np.flatnonzero(first_of_group)
-    del first_of_group
-    ends = np.append(starts[1:], n_texts)
-    group_lengths = lengths[order[starts]]
+    order, starts, ends, group_lengths, ranks = _length_groups(
+        block_codes, lengths, memory
+    )
     found = _Found(memory, [], [])
     # The positions of the pairs among the members of a length or block are
     # replaced in turn by their positions among all texts, so that no copy of
@@ -1611,25 +1539,10 @@ def neighbor_pairs(
         # Texts are at most as many edits apart as the longer is long, so a
         # larger cutoff links every pair.
         limit = min(cutoff, int(lengths.max()))
-        group_ranks = ranks[order[starts]]
-        block_starts = np.flatnonzero(
-            np.concatenate([[True], group_ranks[1:] != group_ranks[:-1]])
-        )
-        block_ends = np.append(block_starts[1:], len(starts))
-        for block in range(len(block_starts)):
-            low = int(block_starts[block])
-            high = int(block_ends[block])
+        for low, high in _block_spans(ranks, order, starts):
             members = order[starts[low] : ends[high - 1]]
             if len(members) < 2:
                 continue
-            if chance is not None:
-                chance.expected += _edit_chance_pairs(
-                    matrix,
-                    [order[starts[group] : ends[group]] for group in range(low, high)],
-                    group_lengths[low:high].tolist(),
-                    limit,
-                    memory,
-                )
             sizes = ends[low:high] - starts[low:high]
             if _edits_keyed(sizes, group_lengths[low:high], limit):
                 first, second = _keyed_pairs(
@@ -1689,24 +1602,305 @@ def neighbor_pairs(
                         table,
                         memory,
                         found,
-                        chance,
                     )
                 continue
             first, second = _substitution_pairs(
-                matrix[members, :length], limit, table, memory, found, chance=chance
+                matrix[members, :length], limit, table, memory, found
             )
             first = members[first]
             second = members[second]
             found.add(first, second)
     if not found.firsts:
-        first, second = empty, empty.copy()
-    elif len(found.firsts) == 1:
-        first, second = found.firsts[0], found.seconds[0]
-    else:
-        first, second = np.concatenate(found.firsts), np.concatenate(found.seconds)
-    if chance is not None:
-        return first, second, chance.expected
-    return first, second
+        return empty, empty.copy()
+    if len(found.firsts) == 1:
+        return found.firsts[0], found.seconds[0]
+    return np.concatenate(found.firsts), np.concatenate(found.seconds)
+
+
+def _component_arguments(
+    components: Any, priority: Any, n_texts: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Each text's component and priority, every text its own without them."""
+    if components is None:
+        if priority is not None:
+            raise ValueError(
+                "priority ranks the texts of each component; pass components too"
+            )
+        return np.arange(n_texts, dtype=np.int64), np.zeros(n_texts, dtype=np.int64)
+    codes = np.asarray(components)
+    if codes.ndim != 1 or (len(codes) and codes.dtype.kind not in "iu"):
+        raise TypeError("components must hold one integer code per text")
+    if len(codes) != n_texts:
+        raise ValueError("components must hold one component per text")
+    if priority is None:
+        return codes.astype(np.int64), np.zeros(n_texts, dtype=np.int64)
+    ranks = np.asarray(priority)
+    if ranks.ndim != 1 or (len(ranks) and ranks.dtype.kind not in "iuf"):
+        raise TypeError("priority must hold one number per text")
+    if len(ranks) != n_texts:
+        raise ValueError("priority must hold one number per text")
+    return codes.astype(np.int64), ranks
+
+
+def _representatives(
+    rows: np.ndarray, components: np.ndarray, priority: np.ndarray
+) -> np.ndarray:
+    """One row per component among ``rows``: its row of highest priority.
+
+    Of rows of equal priority, the later one represents the component.
+    """
+    order = rows[np.lexsort((priority[rows], components[rows]))]
+    runs = components[order]
+    last = np.ones(len(order), dtype=bool)
+    last[:-1] = runs[1:] != runs[:-1]
+    return order[last]
+
+
+def _library_frequencies(
+    matrix: np.ndarray,
+    rows: np.ndarray,
+    length: int,
+    components: np.ndarray,
+    priority: np.ndarray,
+    unknown: np.ndarray,
+) -> np.ndarray:
+    """Each position's frequency of each character among one text per component.
+
+    At each position, each component of ``rows`` gives the character of its
+    text of highest priority that holds a base there, so a component whose
+    text of highest priority was cut short still counts where others hold
+    bases. A position where no text holds a base has no frequencies.
+    """
+    # Components in a row, the text of highest priority first.
+    order = rows[np.lexsort((priority[rows], components[rows]))][::-1]
+    runs = components[order]
+    first_of_run = np.ones(len(order), dtype=bool)
+    first_of_run[1:] = runs[1:] != runs[:-1]
+    run_of = np.cumsum(first_of_run) - 1
+    del runs, first_of_run
+    counts = np.zeros((length, 256), dtype=np.float64)
+    for position in range(length):
+        codes = matrix[order, position]
+        holding = np.flatnonzero(~unknown[codes])
+        if len(holding):
+            first = np.ones(len(holding), dtype=bool)
+            first[1:] = run_of[holding][1:] != run_of[holding][:-1]
+            counts[position] = np.bincount(codes[holding[first]], minlength=256)
+    totals = counts.sum(axis=1, keepdims=True)
+    np.divide(counts, totals, out=counts, where=totals > 0)
+    return counts
+
+
+def _partial_chance_pairs(
+    matrix: np.ndarray,
+    members: np.ndarray,
+    length: int,
+    limit: int,
+    min_compared: int,
+    unknown: np.ndarray,
+    components: np.ndarray,
+    priority: np.ndarray,
+    memory: _Memory,
+) -> float:
+    """The pairs of texts of one length expected within ``limit`` by chance.
+
+    The texts are grouped as :func:`_partial_pairs` groups them, and each
+    pair of groups that compares ``min_compared`` positions or more adds its
+    pairs times their chance on those positions, from each position's
+    frequencies among one text per component of the grouped texts.
+    """
+    n_words = max(-(-length // 64), 1)
+    held = len(members) * (_MASK_TEXT_BYTES + 16 * n_words)
+    memory.check(held, "the positions where the texts hold no base")
+    memory.held += held
+    order, starts, ends, group_masks = _mask_groups(
+        matrix, members, length, unknown, min_compared
+    )
+    memory.check(
+        _LIBRARY_ROW_BYTES * len(order) + 2 * _FREQUENCY_BYTES * length,
+        "the characters of one text per component",
+    )
+    frequencies = _library_frequencies(
+        matrix, members[order], length, components, priority, unknown
+    )
+    memory.held += _FREQUENCY_BYTES * length
+    expected = 0.0
+    for first_group, second_group, columns in _group_pairs(
+        group_masks, length, min_compared
+    ):
+        n_first = int(ends[first_group] - starts[first_group])
+        if second_group == first_group:
+            if n_first < 2:
+                continue
+            split, n_texts = 0, n_first
+        else:
+            split = n_first
+            n_texts = n_first + int(ends[second_group] - starts[second_group])
+        agree = np.sum(frequencies[columns] ** 2, axis=1)
+        chances = _mismatch_chances(1.0 - agree, min(limit, len(columns)))
+        expected += _chance_pairs(n_texts, split, chances)
+    memory.held -= held + _FREQUENCY_BYTES * length
+    return expected
+
+
+def expected_chance_pairs(
+    texts: Any,
+    metric: str,
+    cutoff: int,
+    blocks: Any = None,
+    *,
+    components: Any = None,
+    priority: Any = None,
+    max_bytes: int | None = None,
+    unknown: str = "",
+    min_compared: int = 0,
+) -> float:
+    """The pairs of texts expected within ``cutoff`` of each other by chance.
+
+    Of the pairs that :func:`neighbor_pairs` compares with the same texts,
+    metric, cutoff, blocks, ``unknown`` and ``min_compared``, these are the
+    pairs expected within the cutoff if each text's character at each
+    position were drawn independently from the characters that one text per
+    component holds there. ``components`` gives each text's component, such
+    as the barcodes that correction linked, and ``priority`` ranks the texts
+    of a component, so that its text of highest priority represents it, such
+    as the barcode that it merges into; without them, every text is its own
+    component. Error variants of one barcode are not independent draws, so
+    one text per component keeps a few abundant barcodes and their errors
+    from weighting the frequencies, while the representatives keep the real
+    biases of each position, such as positions that every barcode fixes.
+
+    The frequencies are those of each length of a block. With ``unknown``,
+    each position takes the character of each component's text of highest
+    priority that holds a base there. Pairs are counted over every text
+    compared: each pair of the texts of one length and block or, with
+    ``unknown``, of two groups of texts on the positions both hold, as the
+    search compares them. Two texts of one length are distinct, so a pair of
+    them that would agree everywhere counts as one that does not.
+
+    Under ``hamming`` and ``normalized_hamming``, the chance of each number of
+    mismatches follows exactly from the chance that two texts agree at each
+    position, the sum of the squared frequencies of its characters. Under
+    ``levenshtein``, each pair of lengths of a block follows the edit
+    distance's dynamic programming over the chance that each pair of
+    positions agrees, treating the pairs of positions as independent, an
+    approximation that comes within a tenth of exact counts on random texts
+    of 6 to 20 characters of about equal frequency and overstates them where
+    one character dominates, more so for longer texts and larger cutoffs.
+
+    Args:
+        texts: The texts, a sequence of str, as :func:`neighbor_pairs` takes
+            them.
+        metric: ``"hamming"``, ``"normalized_hamming"`` or ``"levenshtein"``.
+        cutoff: The largest distance that links two texts.
+        blocks: Each text's block as an integer code, or None.
+        components: Each text's component as an integer code, or None.
+        priority: Each text's rank within its component, a number, higher
+            first, or None for ranks by position, the later first.
+        max_bytes: The most bytes it may hold: the encoded texts, as
+            :func:`neighbor_pairs` counts them; 48 bytes for each length of
+            each block; 48 bytes for each text while one per component is
+            chosen, or with ``unknown``, the positions of no base as the
+            search counts them and 64 bytes for each text while each
+            position's characters are counted; 2 KiB for each position of a
+            length counted; under ``levenshtein``, 8 bytes for each pair of
+            positions of two lengths and 160 bytes for each state of the
+            edit distances followed, with 32 KiB more. None sets no limit.
+        unknown: Characters that hold no base, under ``hamming`` only.
+        min_compared: The fewest positions that two texts must compare,
+            under ``hamming`` only.
+
+    Returns:
+        The expected pairs, a float.
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If an argument is out of range as :func:`neighbor_pairs`
+            refuses it, ``components`` or ``priority`` does not hold one value
+            per text, ``priority`` comes without ``components``, or the cutoff
+            under ``levenshtein`` is above ``MAX_CHANCE_EDITS``.
+        MemoryError: If it would hold more than ``max_bytes``.
+    """
+    cutoff, limit_bytes, min_compared = _search_arguments(
+        metric, cutoff, max_bytes, unknown, min_compared
+    )
+    if metric == "levenshtein" and cutoff > MAX_CHANCE_EDITS:
+        raise ValueError(
+            f"The pairs expected by chance within more than {MAX_CHANCE_EDITS} "
+            "edits take too long to count, since their cost grows about eightfold "
+            f"with every two edits; pass a cutoff of at most {MAX_CHANCE_EDITS} "
+            "with metric='levenshtein', or use metric='hamming', whose chance "
+            "pairs are counted for any cutoff"
+        )
+    values = _texts(texts)
+    n_texts = len(values)
+    block_codes = _blocks(blocks, n_texts)
+    component_codes, ranks_of = _component_arguments(components, priority, n_texts)
+    memory = _Memory(limit_bytes)
+    matrix, lengths, coding = _encoded(values, memory)
+    if n_texts < 2:
+        return 0.0
+    unknown_codes = _unknown_table(unknown, coding)
+    partial = bool(unknown) or min_compared > 0
+    order, starts, ends, group_lengths, block_ranks = _length_groups(
+        block_codes, lengths, memory
+    )
+    expected = 0.0
+    if metric == "levenshtein":
+        limit = min(cutoff, int(lengths.max()))
+        for low, high in _block_spans(block_ranks, order, starts):
+            members = order[starts[low] : ends[high - 1]]
+            if len(members) < 2:
+                continue
+            groups = [order[starts[group] : ends[group]] for group in range(low, high)]
+            memory.check(
+                _REPRESENTATIVE_ROW_BYTES * len(members),
+                "the representatives of the components",
+            )
+            chosen = [
+                _representatives(rows, component_codes, ranks_of) for rows in groups
+            ]
+            expected += _edit_chance_pairs(
+                matrix, groups, chosen, group_lengths[low:high].tolist(), limit, memory
+            )
+        return expected
+    for group in range(len(starts)):
+        if ends[group] - starts[group] < 2:
+            continue
+        members = order[starts[group] : ends[group]]
+        length = int(group_lengths[group])
+        limit = (
+            cutoff
+            if metric == "hamming" or not cutoff
+            else allowed_mismatches(length, cutoff)
+        )
+        limit = min(limit, length)
+        if partial:
+            if length >= min_compared:
+                expected += _partial_chance_pairs(
+                    matrix,
+                    members,
+                    length,
+                    limit,
+                    min_compared,
+                    unknown_codes,
+                    component_codes,
+                    ranks_of,
+                    memory,
+                )
+            continue
+        # The representatives, their characters and the count of one position.
+        memory.check(
+            (_REPRESENTATIVE_ROW_BYTES + length + _COUNTED_CODE_BYTES) * len(members)
+            + _FREQUENCY_BYTES,
+            "the representatives of the components",
+        )
+        representatives = _representatives(members, component_codes, ranks_of)
+        agree = _agreement(matrix[representatives, :length])
+        expected += _chance_pairs(
+            len(members), 0, _mismatch_chances(1.0 - agree, limit)
+        )
+    return expected
 
 
 def _ordered(first: np.ndarray, second: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

@@ -434,6 +434,24 @@ def clone_partition(codes: np.ndarray) -> set[frozenset[int]]:
     }
 
 
+def link_count_variance(
+    n_texts: int, first: np.ndarray, second: np.ndarray
+) -> tuple[int, float]:
+    """The pairs linked, and the variance of that count over draws of the texts.
+
+    Each pair's link varies on its own, and with every pair that shares one of
+    its texts: the cherries, two linked pairs that share a text, estimate how
+    much more often such pairs link together than apart.
+    """
+    count = len(first)
+    pairs = n_texts * (n_texts - 1) / 2
+    rate = count / pairs
+    linked = np.bincount(np.concatenate([first, second]), minlength=n_texts)
+    cherries = float(np.sum(linked * (linked - 1) / 2))
+    together = n_texts * (n_texts - 1) * (n_texts - 2) / 2 * rate**2
+    return count, pairs * rate * (1 - rate) + 2 * max(0.0, cherries - together)
+
+
 def smallest_budget(call: Callable[[int], object], high: int) -> int:
     """The smallest budget below ``high`` at which ``call`` raises no MemoryError.
 
