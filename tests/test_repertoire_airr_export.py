@@ -957,3 +957,25 @@ def test_exports_of_long_values_fit_the_smallest_budget(tmp_path, kind) -> None:
     assert peak <= budget, (peak, budget)
     written = _read(path)
     assert len(written) == 200 and written["sequence_id"].is_unique
+
+
+def test_receptors_without_contigs_export_their_header(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    elsewhere = [
+        "elsewhere,true,e_contig_1,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,true,CAVA,TGTGCTGTGGCC,90,9,ct1,ct1_1"
+    ]
+    with pytest.warns(UserWarning, match="match no selected cell"):
+        receptors = store.repertoire.import_receptors(
+            write_lines(tmp_path, "none.csv", CELLRANGER_HEADER, elsewhere),
+            cell_selection=store.snapshot_cell_selection(),
+        )
+    clonotypes = store.repertoire.clonotypes(receptors)
+    for source, name in ((receptors, "none.tsv.gz"), (clonotypes, "none.tsv")):
+        assert (
+            store.repertoire.export_airr(source, tmp_path / name, chains_only=True) == 0
+        )
+        header = _text(tmp_path / name)
+        assert header.endswith("\n") and header.count("\n") == 1
+        assert header.split("\t")[: len(AIRR_REQUIRED_FIELDS)] == list(
+            AIRR_REQUIRED_FIELDS
+        )

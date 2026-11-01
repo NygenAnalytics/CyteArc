@@ -159,7 +159,7 @@ A domain that persists an artifact may use a narrow, named `storage` adapter.
   name such as `cytearc.cytebase.Catalog` raises an `AttributeError` that names the package.
   CyteArc opens CyteBase datasets by their `hf://` URIs like any other remote store.
 - `readers/` parses supported input formats, including the clone files of lineage tracing tools (`readers/clone_tables.py`) and immune receptor contigs (`readers/cellranger.py` and `readers/airr.py`).
-- `writers/` materializes CyteArc stores and exports supported formats, including clone tables and clone matrices (`writers/clone_tables.py`).
+- `writers/` materializes CyteArc stores and exports supported formats, including clone tables and clone matrices (`writers/clone_tables.py`) and AIRR Rearrangement files of immune receptor contigs (`writers/airr.py`).
 - `merge/` combines assays and datasets without importing `DataStore` during normal module loading.
 - `composite/` presents selected source counts through an ordinary `DataStore` without copying
   them. It is an adapter: only the storage opener imports it, lazily, and core reads reach it

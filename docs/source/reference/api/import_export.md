@@ -366,6 +366,10 @@ writing it, remove it with `discard_interrupted_assay` on a `DataStore` of its w
 ```
 
 ```{eval-rst}
+.. autofunction:: cytearc.writers.write_airr_rearrangements
+```
+
+```{eval-rst}
 .. autofunction:: cytearc.writers.chunked_to_zarr
 ```
 
