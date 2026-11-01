@@ -279,6 +279,27 @@ def test_the_writer_reads_logical_text_and_whole_counts(tmp_path) -> None:
         write_airr_rearrangements(numbers.assign(productive=[2, 0]), path)
 
 
+@pytest.mark.parametrize(
+    "productive",
+    [
+        ["T", "F", "T", "maybe", "F"],
+        [1, 0, 1, 2, 0],
+        pd.Categorical(["T", "F", "T", "X", "F"]),
+    ],
+)
+def test_a_table_of_values_that_are_not_logical_leaves_no_file(
+    tmp_path, monkeypatch, productive
+) -> None:
+    # Written two rows at a time, the value that is not logical comes in the
+    # second chunk, after the first could have been written.
+    monkeypatch.setattr(airr_writer, "_CHUNK_ROWS", 2)
+    table = pd.DataFrame({"sequence_id": list("abcde"), "productive": productive})
+    path = tmp_path / "refused.tsv"
+    with pytest.raises(ValueError, match="productive must hold logical values"):
+        write_airr_rearrangements(table, path)
+    assert not path.exists()
+
+
 def test_export_writes_each_contig_with_its_cell_and_clonotype(tmp_path) -> None:
     store, receptors = clonal_receptors(tmp_path, CLONAL_ROWS)
     clonotypes = store.repertoire.clonotypes(receptors)

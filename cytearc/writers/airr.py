@@ -829,10 +829,11 @@ def write_airr_rearrangements(
 
     The required fields come first, in the schema's order, empty when the
     table lacks them, then the table's other columns in their order, or
-    ``columns`` when given. Values are written as they are, unquoted, and a
-    value that holds a tab, a newline or a carriage return, which the AIRR
-    format forbids, is refused before the file is opened. A path ending in
-    ``.gz`` is gzip-compressed.
+    ``columns`` when given. Values are written as they are, unquoted. A value
+    that holds a tab, a newline or a carriage return, which the AIRR format
+    forbids, is refused before the file is opened, as is a logical field's
+    value that is not logical, so a refused table leaves no file. A path
+    ending in ``.gz`` is gzip-compressed.
 
     Args:
         table: One row per contig, its columns AIRR field names.
@@ -848,8 +849,9 @@ def write_airr_rearrangements(
             ``columns`` is not a sequence of column names.
         ValueError: If ``table`` holds no ``sequence_id`` or a ``sequence_id``
             more than once, which the schema forbids, a value or a column's
-            name holds a tab, a newline or a carriage return, or ``columns``
-            names a column more than once or one that the table lacks.
+            name holds a tab, a newline or a carriage return, a logical field
+            holds a value that is not logical, or ``columns`` names a column
+            more than once or one that the table lacks.
     """
     if not isinstance(table, pd.DataFrame):
         raise TypeError("table must be a pandas DataFrame")
@@ -879,7 +881,9 @@ def write_airr_rearrangements(
         and pd.api.types.is_float_dtype(table[column].dtype)
         and _whole(table[column])
     }
-    forbidden = _forbidden_columns(table, order, whole)
+    # Every value is checked before the file is opened, so a refused table
+    # leaves no file.
+    forbidden = _checked_columns(table, order, whole)
     if forbidden:
         raise ValueError(_forbidden_message(forbidden, "the table"))
     with AirrRearrangementWriter(path, rest, whole=whole) as writer:
@@ -888,29 +892,34 @@ def write_airr_rearrangements(
     return len(table)
 
 
-def _forbidden_columns(
+def _checked_columns(
     table: pd.DataFrame, order: Sequence[str], whole: Collection[str]
 ) -> list[tuple[str, int, str]]:
-    """Find the columns whose values hold a tab, a newline or a carriage return.
+    """Check a table's values as the writer will render them, before any is written.
 
     Each column of ``order`` that the table holds is rendered as the writer
-    renders it, a chunk of rows at a time, except logical fields, rendered as
-    ``T`` and ``F``, and columns of numbers or booleans, rendered as numbers,
-    ``True`` and ``False``, which hold no such character.
+    renders it, a chunk of rows at a time. A logical field raises for a value
+    that is not logical, and other columns are searched for values that hold a
+    tab, a newline or a carriage return. Columns of booleans, and columns of
+    numbers outside logical fields, render as ``T`` and ``F``, numbers,
+    ``True`` and ``False``, which need no check.
 
     Returns:
-        Each such column, the number of its values that hold one, and the
-        ``sequence_id`` of the first, ordered by that row.
+        Each column whose values hold such a character, the number of its
+        values that hold one, and the ``sequence_id`` of the first, ordered by
+        that row.
+
+    Raises:
+        ValueError: If a logical field holds a value that is not logical.
     """
     found = []
     for column in order:
         if column not in table.columns:
             continue
         dtype = table[column].dtype
-        if (
-            column in AIRR_LOGICAL_FIELDS
-            or pd.api.types.is_bool_dtype(dtype)
-            or pd.api.types.is_numeric_dtype(dtype)
+        logical = column in AIRR_LOGICAL_FIELDS
+        if pd.api.types.is_bool_dtype(dtype) or (
+            not logical and pd.api.types.is_numeric_dtype(dtype)
         ):
             continue
         count, first = 0, -1
@@ -918,8 +927,12 @@ def _forbidden_columns(
             values = _bytes_column(
                 table[column].iloc[start : start + _CHUNK_ROWS], column, column in whole
             )
-            # Only logical fields render with codes, and they are not read
-            # here, so each row holds its own value.
+            if logical:
+                # Rendering a logical field checks its values, and T and F
+                # hold no forbidden character.
+                continue
+            # Only logical fields of booleans render with codes, so each row
+            # here holds its own value.
             assert values.codes is None
             n_found = _count_forbidden_values(values.data, values.offsets)
             if n_found and first < 0:
