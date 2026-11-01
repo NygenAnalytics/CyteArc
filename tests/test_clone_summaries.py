@@ -4,9 +4,9 @@ Each source saves the synthetic truth's clones its own way, in a store of the
 truth's cells, and every summary must measure the truth's clones whatever
 saved them. The expected values are counted cell by cell from the truth, so
 they never come from the code under test. A pull request that adds a clone
-source adds a row to ``SOURCES``, to ``KEPT_APART`` when its clones keep
-labels apart, and to ``LABELS`` when its labels follow from the truth; one
-that adds a summary adds a test here.
+source adds a row to ``SOURCES``, and one to ``KEPT_APART`` when its clones
+keep labels apart or to ``LABELS`` when they keep none, which gives the rule
+its labels follow, or None; one that adds a summary adds a test here.
 """
 
 from collections import Counter
@@ -121,13 +121,22 @@ def _ranked_label(clone: int) -> str:
     return f"clone_{ranked.index(clone) + 1}"
 
 
-#: How a source labels each of the truth's clones, where the label follows
-#: from the truth alone: imported clones keep the labels of their file, and
-#: barcode clones are numbered by size.
-LABELS: dict[str, Callable[[int], str]] = {
+#: How each source that keeps no labels apart labels the truth's clones: the
+#: rule its labels follow from the truth, such as the labels of imported
+#: clones' files and barcode clones' numbers by size, or None for a source
+#: whose labels follow from something else.
+LABELS: dict[str, Callable[[int], str] | None] = {
     "imported clones": number_label,
     "barcode clones": _ranked_label,
 }
+
+
+def test_every_source_says_how_it_labels_the_truths_clones() -> None:
+    # The tracking row checks the labels of every source that keeps no labels
+    # apart against its rule, so each source names its labels kept apart or
+    # its rule, and never both.
+    assert set(LABELS).isdisjoint(KEPT_APART)
+    assert set(LABELS) | set(KEPT_APART) == set(SOURCES)
 
 
 @pytest.fixture(scope="module", params=list(SOURCES))

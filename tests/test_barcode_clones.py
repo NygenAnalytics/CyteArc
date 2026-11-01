@@ -406,6 +406,9 @@ def test_barcode_clones_name_missing_and_incomplete_barcodes(store, tmp_path) ->
     )
     with pytest.raises(KeyError, match="Artifact does not exist"):
         store.clones.barcode_clones(missing, preset="larry")
+    # The arguments are checked before the store is read.
+    with pytest.raises(TypeError, match="invalidate_cache must be a boolean"):
+        store.clones.barcode_clones(missing, preset="larry", invalidate_cache=1)
     # An import that stopped before it finished leaves an incomplete artifact.
     artifact_group(store.zw, barcodes).attrs["complete"] = False
     with pytest.raises(RuntimeError, match="Artifact is incomplete"):
