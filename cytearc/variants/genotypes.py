@@ -759,12 +759,12 @@ class VariantGenotypes:
             alternative present) and ``n_called_sites`` (those and the sites
             called wild type).
         calls: One row per cell and site with evidence: ``cell``, ``site``,
-            ``call`` (one of :data:`CALLS`, ordered), ``label`` (the source's
-            own label, empty for the other methods), ``reference_umis`` and
-            ``alternative_umis`` (-1 where the counts hold none), and the
-            posteriors ``posterior_wild_type``, ``posterior_heterozygous``
-            and ``posterior_homozygous_alternative`` (NaN unless
-            ``method="gift"``).
+            ``call`` (one of ``cytearc.variants.CALLS``, ordered), ``label``
+            (the source's own label, empty for the other methods),
+            ``reference_umis`` and ``alternative_umis`` (-1 where the counts
+            hold none), and the posteriors ``posterior_wild_type``,
+            ``posterior_heterozygous`` and ``posterior_homozygous_alternative``
+            (NaN unless ``method="gift"``).
         counts: The ``variant_counts`` artifact the calls came from.
         method: ``"source"``, ``"threshold"`` or ``"gift"``.
         rules: The rules as the method applied them.
