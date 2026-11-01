@@ -93,7 +93,11 @@ JOIN_CELLS = ("s1__AAAC-1", "s1__CCCG-1", "s1__TTTA-1", "s2__AAAC-1", "s2__GGGT-
 
 
 def build_join_store(path: Path) -> tuple["DataStore", "ArtifactRef"]:
-    """Write a store of ``JOIN_CELLS`` with RNA and guide counts, and select them."""
+    """Write a store of ``JOIN_CELLS`` with RNA and guide counts, and select them.
+
+    The columns ``s1`` and ``s2`` hold each sample's cells, since one call
+    file of guides reaches the cells of one sample.
+    """
     from tests.perturbation_helpers import open_store
     from tests.storage_helpers import write_count_store
 
@@ -110,6 +114,10 @@ def build_join_store(path: Path) -> tuple["DataStore", "ArtifactRef"]:
     )
     store = open_store(path)
     store.cells.insert("joined", np.ones(n_cells, dtype=bool))
+    for sample in ("s1", "s2"):
+        store.cells.insert(
+            sample, np.asarray([cell.startswith(f"{sample}__") for cell in JOIN_CELLS])
+        )
     return store, store.snapshot_cell_selection("joined")
 
 

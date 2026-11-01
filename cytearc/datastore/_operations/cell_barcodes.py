@@ -30,7 +30,9 @@ __all__ = [
     "CellBarcodeJoin",
     "barcode_files",
     "barcode_pattern",
+    "derived_id_bytes",
     "file_sha256",
+    "join_bytes",
     "unmatched_barcodes_warning",
     "warn_unmatched_barcodes",
 ]
@@ -44,6 +46,22 @@ LOOKUP_BYTES_PER_CELL = 100
 # Bytes held for each distinct barcode that matches no selected cell: its
 # 64-bit hash and the copy that merging new hashes makes.
 _UNMATCHED_BYTES_PER_BARCODE = 16
+# Bytes of each barcode while its cell ID is derived, whatever the options:
+# the pandas copy of the pointers to the barcodes, and whether it names a cell.
+_COPY_BYTES_PER_BARCODE = 16
+# Bytes of each copy of a barcode that a prefix or a suffix makes, beside its
+# characters: its Python string header and the pointers to it.
+_AFFIXED_BYTES_PER_BARCODE = 80
+# Bytes of each barcode that a pattern's extraction holds, beside the
+# characters of the part it keeps: that part's Python string, the frame and
+# series of the extraction, and the mask of the barcodes it matched.
+_EXTRACTED_BYTES_PER_BARCODE = 176
+# Bytes that matching each barcode holds while ``CellBarcodeJoin.cells`` runs,
+# beside the IDs that its options derive: its position, the masks and the
+# pandas copies of the barcodes, and for a barcode that matches no cell, its
+# hash and the unique arrays that count it. Hashing a barcode also encodes
+# its text, a byte for each character.
+_MATCH_BYTES_PER_BARCODE = 128
 # The named group of a barcode pattern that holds the barcode.
 _BARCODE_GROUP = "barcode"
 # What the options of an import may be, for their errors.
@@ -111,6 +129,84 @@ class BarcodeFile:
             "barcode_suffix": self.barcode_suffix,
             "barcode_pattern": self.barcode_pattern,
         }
+
+    def cell_ids(self, barcodes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return the cell ID that each barcode names, and whether it names one.
+
+        The ID is the prefix, the part of the barcode that the pattern's
+        ``barcode`` group matches, or the whole barcode without a pattern,
+        and the suffix. A barcode that the pattern does not match names no
+        cell; its ID is the whole barcode with the prefix and the suffix, so
+        that such barcodes can still be counted.
+
+        Args:
+            barcodes: Barcodes as the file holds them, one per row.
+
+        Returns:
+            The IDs as an object array of text, and a boolean array that is
+            False where a barcode names no cell.
+        """
+        texts = pd.Series(np.asarray(barcodes, dtype=object), dtype=object)
+        named = np.ones(len(texts), dtype=bool)
+        core = texts
+        if self.barcode_pattern is not None:
+            extracted = texts.str.extract(self.barcode_pattern, expand=True)[
+                _BARCODE_GROUP
+            ]
+            named = extracted.notna().to_numpy()
+            # A barcode that the pattern does not match is counted whole.
+            core = extracted.where(named, texts)
+        identifiers = core
+        if self.barcode_prefix is not None:
+            identifiers = self.barcode_prefix + identifiers
+        if self.barcode_suffix is not None:
+            identifiers = identifiers + self.barcode_suffix
+        return identifiers.to_numpy(dtype=object), named
+
+
+def derived_id_bytes(file: BarcodeFile, n_rows: int, n_chars: int) -> int:
+    """Return the most bytes that :meth:`BarcodeFile.cell_ids` holds for a file's barcodes.
+
+    A prefix, a suffix and a pattern each make a copy of every barcode, so
+    a file with all three holds three copies while its IDs are derived, and
+    a file with none holds a copy of the pointers alone.
+
+    Args:
+        file: The file, whose options derive the IDs.
+        n_rows: The barcodes.
+        n_chars: The characters of the barcodes, or a bound on them.
+    """
+    affixes = [
+        option for option in (file.barcode_prefix, file.barcode_suffix) if option
+    ]
+    per_barcode = _COPY_BYTES_PER_BARCODE + sum(
+        _AFFIXED_BYTES_PER_BARCODE + len(affix) for affix in affixes
+    )
+    n_copies = len(affixes)
+    if file.barcode_pattern is not None:
+        per_barcode += _EXTRACTED_BYTES_PER_BARCODE
+        n_copies += 1
+    return int(n_rows) * per_barcode + n_copies * int(n_chars)
+
+
+def join_bytes(file: BarcodeFile, n_rows: int, n_chars: int) -> int:
+    """Return the most bytes that :meth:`CellBarcodeJoin.cells` holds for a file's barcodes.
+
+    These are the bytes beside the barcodes themselves and the join's
+    lookup, which :attr:`CellBarcodeJoin.held_bytes` counts: the IDs that
+    the file's options derive, as :func:`derived_id_bytes` counts them, and
+    what matching each barcode holds, its encoded text included.
+
+    Args:
+        file: The file, whose options derive the IDs.
+        n_rows: The barcodes.
+        n_chars: The characters of the barcodes, or a bound on them.
+    """
+    return (
+        derived_id_bytes(file, n_rows, n_chars)
+        + _MATCH_BYTES_PER_BARCODE * int(n_rows)
+        + int(n_chars)
+    )
 
 
 def _listed(value: Any, n_files: int, name: str, what: str, expected: str) -> list[Any]:
@@ -311,22 +407,8 @@ class CellBarcodeJoin:
             MemoryError: If the hashes of the barcodes that matched no cell
                 outgrow the memory budget.
         """
-        texts = pd.Series(np.asarray(barcodes, dtype=object), dtype=object)
-        named = np.ones(len(texts), dtype=bool)
-        core = texts
-        if file.barcode_pattern is not None:
-            extracted = texts.str.extract(file.barcode_pattern, expand=True)[
-                _BARCODE_GROUP
-            ]
-            named = extracted.notna().to_numpy()
-            # A barcode that the pattern does not match is counted whole.
-            core = extracted.where(named, texts)
-        identifiers = core
-        if file.barcode_prefix is not None:
-            identifiers = file.barcode_prefix + identifiers
-        if file.barcode_suffix is not None:
-            identifiers = identifiers + file.barcode_suffix
-        identifiers_array = identifiers.to_numpy(dtype=object)
+        texts = np.asarray(barcodes, dtype=object)
+        identifiers_array, named = file.cell_ids(texts)
         positions = np.asarray(
             self._lookup.get_indexer(identifiers_array), dtype=np.int64
         )
@@ -352,7 +434,7 @@ class CellBarcodeJoin:
                 )
             self._unmatched = sorted_unique(np.concatenate([self._unmatched, hashes]))
             if len(self._examples) < UNMATCHED_EXAMPLES:
-                for barcode in pd.unique(texts.to_numpy(dtype=object)[unmatched]):
+                for barcode in pd.unique(texts[unmatched]):
                     if len(self._examples) == UNMATCHED_EXAMPLES:
                         break
                     if str(barcode) not in self._examples:
