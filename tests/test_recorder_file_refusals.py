@@ -568,3 +568,13 @@ def test_a_format_that_does_not_fit_the_file_is_refused(tmp_path, format, messag
         allele_layout(
             path, format=format, integrations="CA" if format == "carlin" else None
         )
+
+
+def test_a_split_table_without_any_allele_reads_one_missing_site_per_row(tmp_path):
+    path = tmp_path / "alleles.tsv"
+    path.write_text("cell\tallele\nc1\t\nc2\tNA\n")
+    columns = {"cell": "cell", "allele": "allele", "separator": "-"}
+    layout = allele_layout(path, format="table", columns=columns, integrations="HMID")
+    assert layout._read["split_sites"] == 1
+    (chunk,) = _rows(path, format="table", columns=columns, integrations="HMID")
+    assert chunk.states.tolist() == [[3], [3]]
