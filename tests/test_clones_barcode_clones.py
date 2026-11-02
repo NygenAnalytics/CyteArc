@@ -7,6 +7,7 @@ merges or refuses is derived by hand from the rule's published statement.
 import numpy as np
 import pytest
 
+from cytearc.clones import barcode_clones
 from cytearc.clones.barcode_clones import (
     PRESETS,
     BarcodeRecords,
@@ -626,6 +627,72 @@ def test_error_variants_weigh_no_more_than_their_parents_in_the_expectation() ->
     # many variants, and expect far more.
     every_barcode = expected_chance_pairs(texts, "hamming", 3)
     assert every_barcode - reference > tolerance, (every_barcode, reference, tolerance)
+
+
+def test_the_most_abundant_barcode_represents_its_component_in_the_expectation() -> (
+    None
+):
+    # Two families of a barcode in five molecules and a variant one
+    # substitution away in one, each variant sorting after its barcode, and
+    # a barcode alone. The abundant barcodes represent their families, as
+    # correction merges into them: the last base of the three agrees with
+    # chance 1/3, where the variants' would agree with chance 5/9.
+    texts = ["AAAAAAAA", "AAAAAAAT", "CCCCCCCC", "CCCCCCCG", "GGGGTTTT"]
+    molecules = [5, 1, 5, 1, 5]
+    rows = [
+        (cell, 0, text, f"U{cell}_{k}", 1, 20)
+        for cell, (text, count) in enumerate(zip(texts, molecules, strict=True))
+        for k in range(count)
+    ]
+    calls = _call(
+        _records(rows), len(texts), method="sets", distance=1, metric="hamming"
+    )
+    components = [0, 0, 1, 1, 2]
+    by_abundance = expected_chance_pairs(
+        texts, "hamming", 1, components=components, priority=molecules
+    )
+    by_code = expected_chance_pairs(texts, "hamming", 1, components=components)
+    assert calls.diagnostics["mergedBarcodes"] == 2
+    assert calls.diagnostics["expectedChanceMatches"] == pytest.approx(
+        by_abundance, rel=1e-12
+    )
+    assert by_code != pytest.approx(by_abundance, rel=1e-3)
+
+
+def test_the_expectation_may_hold_what_the_search_could(monkeypatch) -> None:
+    # Correction holds its barcodes and their texts until the expectation is
+    # counted and lets the pairs go once the components are found, so the
+    # expectation gets the room that the search got.
+    rooms = {}
+
+    def recorded(name, function):
+        def call(*args, max_bytes=None, **kwargs):
+            rooms[name] = max_bytes
+            return function(*args, max_bytes=max_bytes, **kwargs)
+
+        return call
+
+    monkeypatch.setattr(
+        barcode_clones,
+        "neighbor_pairs",
+        recorded("search", barcode_clones.neighbor_pairs),
+    )
+    monkeypatch.setattr(
+        barcode_clones,
+        "expected_chance_pairs",
+        recorded("expectation", barcode_clones.expected_chance_pairs),
+    )
+    rows = _molecules(0, A, 4) + _molecules(1, A1, 2) + _molecules(2, B, 4)
+    budget = 10**7
+    calls = barcode_clone_calls(
+        _records(rows),
+        3,
+        groups=np.zeros(3, dtype=np.int64),
+        settings=barcode_call_settings(method="sets", distance=1, metric="hamming"),
+        max_bytes=budget,
+    )
+    assert calls.diagnostics["mergedBarcodes"] == 1
+    assert rooms["expectation"] == rooms["search"] < budget
 
 
 def test_counting_the_distinct_barcodes_without_correction_checks_the_budget() -> None:

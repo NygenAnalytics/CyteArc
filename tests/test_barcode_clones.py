@@ -172,6 +172,11 @@ def test_the_trex_preset_gives_trexs_own_clones(tmp_path, run, doublets) -> None
         # low-complexity filter.
         counts = dict(store.artifacts.load(clones).attrs)["rule_counts"]
         assert counts["molecules_of_low_complexity"] == 3_800 - 3_639
+        # Most of its cloneIDs are errors of one, which correction merges, and
+        # chance alone explains none of the merges.
+        diagnostics = store.clones.load_clones(clones).diagnostics
+        assert diagnostics["mergedBarcodes"] == 89
+        assert diagnostics["expectedChanceMatches"] < 1
     # TREX's clones.txt lists the cells of cells_filtered.txt, one cloneID or
     # more each, and singletons are clones.
     assert int(loaded.cells["clone"].notna().sum()) == sum(map(len, expected))
