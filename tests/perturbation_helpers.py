@@ -1,11 +1,7 @@
 """Shared helpers for the tests of ``cytearc.perturbation``."""
 
-import re
-import shutil
-import tracemalloc
 import warnings
-from collections.abc import Callable, Mapping, Sequence
-from functools import partial
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -15,24 +11,11 @@ import pytest
 import statsmodels.api as sm
 from scipy import optimize, special, stats
 
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import open_store, write_count_store
 
 if TYPE_CHECKING:
     from cytearc.datastore.datastore import DataStore
     from cytearc.storage.refs import ArtifactRef
-
-
-def open_store(path: str | Path, **options: Any) -> "DataStore":
-    """Open a screen store with RNA as its default assay, on one thread by default."""
-    # Imported here, so that the domain tests do not import the datastore.
-    from cytearc.datastore.datastore import DataStore
-
-    return DataStore(
-        str(path),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        **{"nthreads": 1, **options},
-    )
 
 
 def write_screen(
@@ -64,114 +47,6 @@ def write_screen(
     return store
 
 
-def named_budget(refusal: BaseException) -> int:
-    """Return the memory budget that a refusal names in its closing ``raise mem_budget to at least N bytes``.
-
-    A refusal that says the call holds about M bytes must name M. A refusal
-    that closes with ``Raise mem_budget.`` names no budget, as Mixscape's
-    refusal of a classification batch does, and asks for the M bytes the call
-    holds.
-    """
-    message = str(refusal)
-    held = re.search(r"holds? about (\d+) bytes", message)
-    if message.endswith(" Raise mem_budget."):
-        assert held is not None, f"The refusal names no budget: {message}"
-        return int(held.group(1))
-    named = re.search(
-        r"[Rr]aise mem_budget to at least (\d+) bytes(?:, or [^.]*)?\.$", message
-    )
-    assert named is not None, f"The refusal does not end naming a budget: {message}"
-    assert held is None or held.group(1) == named.group(1), (
-        f"The refusal names a budget other than what it holds: {message}"
-    )
-    return int(named.group(1))
-
-
-def traced_peak(call: Callable[[], Any], budget: int) -> tuple[Any, int]:
-    """Return the result of ``call()`` and the most bytes it held beside what was held before it.
-
-    tracemalloc counts every allocation in the process while the call runs,
-    other threads' included, so a peak above ``budget`` is traced again on a
-    second run, and the smaller peak is returned: a call that holds more than
-    its budget does so in both runs.
-    """
-
-    def trace() -> tuple[Any, int]:
-        tracemalloc.start()
-        try:
-            start = tracemalloc.get_traced_memory()[0]
-            result = call()
-            return result, tracemalloc.get_traced_memory()[1] - start
-        finally:
-            tracemalloc.stop()
-
-    result, peak = trace()
-    if peak > budget:
-        result, again = trace()
-        peak = min(peak, again)
-    return result, peak
-
-
-def budget_that_runs(
-    path: str | Path, call: Callable[["DataStore"], Any], **options: Any
-) -> tuple[int, list[str], Any, int]:
-    """Follow the refusals of ``call`` from a budget of one byte to the budget that runs it.
-
-    ``call`` runs an operation on the store at ``path``, opened with each
-    budget and ``options``. Each refusal must name a budget above the one it
-    refused, which the next attempt opens the store with, and a check that a
-    later step makes may refuse that budget and name more. Each attempt is
-    traced as :func:`traced_peak` traces it, and ten refusals fail the search.
-
-    Returns:
-        The budget that runs the call, the messages of the refusals on the
-        way, and the result and traced peak of the call at that budget.
-    """
-    budget, refusals = 1, []
-    while len(refusals) < 10:
-        store = open_store(path, mem_budget=budget, **options)
-        try:
-            result, peak = traced_peak(partial(call, store), budget)
-        except MemoryError as refusal:
-            named = named_budget(refusal)
-            assert named > budget, f"{refusal} names no budget above {budget}"
-            refusals.append(str(refusal))
-            budget = named
-        else:
-            return budget, refusals, result, peak
-    raise AssertionError(f"Ten refusals named no budget that runs: {refusals}")
-
-
-def check_budget(
-    path: str | Path,
-    call: Callable[["DataStore"], Any],
-    *,
-    check_writes: bool = True,
-    **options: Any,
-) -> tuple[int, list[str], Any]:
-    """Check that ``call`` runs within the budget that its refusals name.
-
-    :func:`budget_that_runs` finds that budget and traces the call at it. The
-    traced peak must be within the budget, and one byte less must be refused
-    naming the same budget. With ``check_writes``, the refused call must leave
-    what the store holds unchanged. ``call`` should compute again rather than
-    reuse.
-
-    Returns:
-        The budget, the messages of the refusals on the way, and the result
-        of the call at that budget.
-    """
-    budget, refusals, result, peak = budget_that_runs(path, call, **options)
-    assert peak <= budget, f"The call held {peak} bytes within a budget of {budget}"
-    saved = written(open_store(path)) if check_writes else None
-    with pytest.raises(MemoryError) as refused:
-        call(open_store(path, mem_budget=budget - 1, **options))
-    assert named_budget(refused.value) == budget
-    if check_writes:
-        assert written(open_store(path)) == saved
-    return budget, refusals, result
-
-
 def fixed_labels(
     store: "DataStore", controls: Sequence[str], *, min_umi: int = 10
 ) -> "ArtifactRef":
@@ -180,22 +55,6 @@ def fixed_labels(
         store.select_measured_cells("CRISPR"), method="fixed", min_umi=min_umi
     )
     return store.perturbation.labels(calls, controls=list(controls))
-
-
-def copy_store(template: Path, folder: Path, **options: Any) -> "DataStore":
-    """Copy a template store into ``folder`` and open the copy."""
-    target = folder / template.name
-    shutil.copytree(template, target)
-    return open_store(target, **options)
-
-
-def written(store: "DataStore") -> tuple[Any, ...]:
-    """Return what a call can write: run records, and every artifact of the store."""
-    return (
-        [run.run_id for run in store.pipeline.list_runs(limit=1000)],
-        store.artifacts.list(scope="datastore"),
-        *(store.artifacts.list(from_assay=assay) for assay in store.assay_names),
-    )
 
 
 class _RecordedRows:

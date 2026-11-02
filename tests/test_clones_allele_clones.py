@@ -23,8 +23,8 @@ from cytearc.clones.allele_clones import (
     benjamini_hochberg,
     clonal_p_values,
 )
-from tests.clone_helpers import smallest_budget, traced_steps
-from tests.perturbation_helpers import traced_peak
+from tests.clone_helpers import traced_steps
+from tests.memory_helpers import smallest_budget, traced_peak
 
 _TEXTS = ("a", "b", "c", "d", "e", "f", "g", "h")
 

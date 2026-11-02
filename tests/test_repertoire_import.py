@@ -24,7 +24,6 @@ from tests.clone_helpers import (
     TCR_ROWS,
     airr_file,
     bcr_file,
-    copy_clone_store,
     every_cell,
     ids_read_bytes,
     receptor_store,
@@ -32,6 +31,8 @@ from tests.clone_helpers import (
     write_lines,
     write_truth_store,
 )
+from tests.memory_helpers import budget_that_runs, stated_bytes
+from tests.storage_helpers import copy_store, open_store
 from tests.clone_truth import (
     N_OUTSIDE,
     RECEPTOR_SLOTS,
@@ -550,47 +551,11 @@ def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
         )
 
 
-def _refused_estimate(run, store, monkeypatch, budget: int) -> int:
-    """Return the bytes that a run names when it refuses ``budget``."""
-    import re
-
-    with monkeypatch.context() as patched:
-        patched.setattr(store, "memoryBytes", budget)
-        with pytest.raises(MemoryError) as refused:
-            run()
-    found = re.search(r"(?:holds?|needs) about (\d+) bytes", str(refused.value))
-    assert found is not None, str(refused.value)
-    return int(found.group(1))
-
-
-def _smallest_budget(run, store, monkeypatch) -> int:
-    """Return the smallest budget that ``run`` accepts.
-
-    The budget starts at one byte and rises to each refusal's own estimate.
-    """
-    budget = 1
-    for _attempt in range(20):
-        with monkeypatch.context() as patched:
-            patched.setattr(store, "memoryBytes", budget)
-            try:
-                run()
-                return budget
-            except MemoryError:
-                pass
-        needed = _refused_estimate(run, store, monkeypatch, budget)
-        assert needed > budget, (needed, budget)
-        budget = needed
-    raise AssertionError("the budget did not settle")
-
-
 @pytest.mark.slow
 @pytest.mark.parametrize("long_ids", [False, True], ids=["ids", "80-character-ids"])
 def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
-    tmp_path, monkeypatch, long_ids
+    tmp_path, long_ids
 ) -> None:
-    import tracemalloc
-
-    from cytearc.datastore.datastore import DataStore
     from tests.storage_helpers import write_count_store
 
     # One cell in 50 has a contig, as when a store of every cell of a sample
@@ -607,12 +572,7 @@ def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
         "uint16",
         cell_ids=ids,
     )
-    store = DataStore(
-        str(tmp_path / "sparse.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-    )
+    store = open_store(tmp_path / "sparse.zarr")
     rows = [
         f"{ids[cell]},true,{ids[cell]}_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,"
         f"true,true,CASS{cell % 50}F,TGTGCC{cell % 50},40,3,ct{cell},ct{cell}_1"
@@ -631,28 +591,20 @@ def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
             path, cell_selection=cells, invalidate_cache=True
         )
 
-    def traced(run, budget):
-        with monkeypatch.context() as patched:
-            patched.setattr(store, "memoryBytes", budget)
-            tracemalloc.start()
-            try:
-                result = run()
-                _current, peak = tracemalloc.get_traced_memory()
-            finally:
-                tracemalloc.stop()
-        return result, peak
-
-    # Each import runs at the smallest budget it accepts.
-    budget = _smallest_budget(run_import, store, monkeypatch)
-    ref, peak = traced(run_import, budget)
+    # Each import runs at the smallest budget it accepts, which the budget
+    # reaches from one byte by the bytes that each refusal states.
+    budget, _refusals, ref, peak = budget_that_runs(
+        store, lambda _store: run_import(), refusal_budget=stated_bytes, max_refusals=20
+    )
     assert peak <= budget, (peak, budget)
 
     def run_load():
         return store.repertoire.load_receptors(ref, fields=[])
 
     run_load()
-    budget = _smallest_budget(run_load, store, monkeypatch)
-    _loaded, peak = traced(run_load, budget)
+    budget, _refusals, _loaded, peak = budget_that_runs(
+        store, lambda _store: run_load(), refusal_budget=stated_bytes, max_refusals=20
+    )
     assert peak <= budget, (peak, budget)
 
 
@@ -960,7 +912,7 @@ def test_tcr_files_alone_leave_a_heavy_chain_unseen(truth_store, tmp_path) -> No
 
 
 def test_a_merged_store_needs_each_samples_prefix(truth_store, tmp_path) -> None:
-    store = copy_clone_store(truth_store.path, tmp_path / "merged")
+    store = copy_store(truth_store.path, tmp_path / "merged")
     paths = _write_truth(tmp_path, "filtered")
     with collect_warnings() as messages:
         ref = store.repertoire.import_receptors(paths, cell_selection=every_cell(store))

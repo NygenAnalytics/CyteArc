@@ -25,22 +25,19 @@ from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
-    copy_clone_store,
     every_cell,
     import_calling_truth,
     loaded_partition,
-    open_clone_store,
-    smallest_budget,
     write_truth_store,
 )
-from tests.perturbation_helpers import traced_peak
+from tests.memory_helpers import smallest_budget, traced_peak
 from tests.clone_truth import (
     N_CELLS,
     SAMPLES,
     calling_truth,
     clone_truth,
 )
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
 DATA = Path(__file__).parent / "data" / "barcodes"
@@ -81,7 +78,7 @@ def template(tmp_path_factory) -> Path:
 
 @pytest.fixture
 def store(template, tmp_path) -> DataStore:
-    return copy_clone_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 def _imported(store: DataStore, folder: Path, preset: str, **options):
@@ -149,7 +146,7 @@ def _trex_store(folder: Path, molecules: Path) -> DataStore:
     write_count_store(
         str(folder / "trex.zarr"), {"RNA": counts}, "uint16", cell_ids=cells
     )
-    store = open_clone_store(folder / "trex.zarr")
+    store = open_store(folder / "trex.zarr")
     store.cells.insert("every_cell", np.ones(len(cells), dtype=bool))
     return store
 
@@ -458,7 +455,7 @@ def test_a_read_only_store_reuses_saved_clones_and_refuses_new_ones(
 ) -> None:
     _calling, barcodes = _imported(store, tmp_path, "larry")
     clones = store.clones.barcode_clones(barcodes, preset="larry")
-    reader = open_clone_store(Path(store.zarr_loc), zarr_mode="r")
+    reader = open_store(Path(store.zarr_loc), zarr_mode="r")
     assert reader.clones.barcode_clones(barcodes, preset="larry") == clones
     with pytest.raises(PermissionError, match="call_barcode_clones"):
         reader.clones.barcode_clones(barcodes, preset="larry", min_umis=4)
@@ -488,7 +485,7 @@ def test_calls_follow_neither_file_order_nor_chunks_nor_threads(
         folder = tmp_path / case.replace(" ", "_")
         folder.mkdir()
         write_truth_store(folder / "store.zarr", TRUTH)
-        store = open_clone_store(
+        store = open_store(
             folder / "store.zarr", nthreads=4 if case == "4 threads" else 1
         )
         with monkeypatch.context() as patched:
@@ -643,7 +640,7 @@ def test_the_write_check_counts_a_buffer_for_each_write_zarr_runs_at_once(
 def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(
     template, tmp_path, monkeypatch, preset
 ) -> None:
-    store = copy_clone_store(template, tmp_path)
+    store = copy_store(template, tmp_path)
     calling, barcodes = _imported(store, tmp_path, preset)
     allowlist = list(calling.allowlist) if preset == "celltag_multi" else None
 

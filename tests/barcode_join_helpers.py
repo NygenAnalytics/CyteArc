@@ -108,8 +108,7 @@ def build_join_store(path: Path) -> tuple["DataStore", "ArtifactRef"]:
     The columns ``s1`` and ``s2`` hold each sample's cells, since one call
     file of guides reaches the cells of one sample.
     """
-    from tests.perturbation_helpers import open_store
-    from tests.storage_helpers import write_count_store
+    from tests.storage_helpers import open_store, write_count_store
 
     n_cells = len(JOIN_CELLS)
     rng = np.random.default_rng(11)

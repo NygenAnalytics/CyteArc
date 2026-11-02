@@ -16,8 +16,8 @@ from cytearc.clones.sequences import (
 )
 from cytearc.repertoire.clonotypes import METRICS
 from tests.clone_helpers import levenshtein_distance as _levenshtein
-from tests.clone_helpers import link_count_variance, smallest_budget
-from tests.perturbation_helpers import traced_peak
+from tests.clone_helpers import link_count_variance
+from tests.memory_helpers import smallest_budget, traced_peak
 from tests.clone_helpers import within_distance as _within
 
 
@@ -421,8 +421,17 @@ def _group_bytes(texts: list[str]) -> int:
 _PAIR_ARRAYS = 2 * 192
 
 
-@pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
-@pytest.mark.parametrize("path", ["keyed", "passes", "pairwise"])
+@pytest.mark.parametrize(
+    ("path", "metric"),
+    [
+        ("keyed", "hamming"),
+        pytest.param("keyed", "levenshtein", marks=pytest.mark.slow),
+        pytest.param("passes", "hamming", marks=pytest.mark.slow),
+        pytest.param("passes", "levenshtein", marks=pytest.mark.slow),
+        pytest.param("pairwise", "hamming", marks=pytest.mark.slow),
+        pytest.param("pairwise", "levenshtein", marks=pytest.mark.slow),
+    ],
+)
 def test_the_search_holds_no_more_than_the_smallest_budget_it_accepts(
     monkeypatch, path, metric
 ) -> None:
@@ -446,6 +455,7 @@ def test_the_search_holds_no_more_than_the_smallest_budget_it_accepts(
     assert peak <= budget
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
 def test_keys_of_distinct_texts_hold_no_more_than_the_smallest_budget(
     monkeypatch, metric
@@ -474,6 +484,7 @@ def test_keys_of_distinct_texts_hold_no_more_than_the_smallest_budget(
     assert peak <= budget
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
 @pytest.mark.parametrize("near", [True, False])
 def test_many_blocks_hold_no_more_than_the_smallest_budget_they_accept(
@@ -1011,6 +1022,7 @@ def test_partial_cloneids_search_their_groups_by_keys(monkeypatch) -> None:
     assert not looped or max(looped) < 2_000
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("path", ["keyed", "pairwise"])
 @pytest.mark.parametrize("near", [True, False])
 def test_partial_texts_hold_no_more_than_the_smallest_budget_they_accept(
@@ -1970,10 +1982,19 @@ def test_the_frequencies_of_edited_texts_count_against_the_budget() -> None:
 @pytest.mark.parametrize(
     ("metric", "cutoff", "lengths", "n_texts", "options"),
     [
-        ("levenshtein", 3, (9, 10, 11, 12), 600, {}),
-        ("levenshtein", 8, (20, 22, 24), 60, {}),
+        pytest.param(
+            "levenshtein", 3, (9, 10, 11, 12), 600, {}, marks=pytest.mark.slow
+        ),
+        pytest.param("levenshtein", 8, (20, 22, 24), 60, {}, marks=pytest.mark.slow),
         ("hamming", 2, (12,), 3_000, {}),
-        ("hamming", 5, (30,), 3_000, {"unknown": "-", "min_compared": 20}),
+        pytest.param(
+            "hamming",
+            5,
+            (30,),
+            3_000,
+            {"unknown": "-", "min_compared": 20},
+            marks=pytest.mark.slow,
+        ),
     ],
 )
 def test_the_expectation_holds_no_more_than_the_smallest_budget_it_accepts(

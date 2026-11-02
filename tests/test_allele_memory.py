@@ -14,7 +14,6 @@ U+FFFF or beyond it, or ASCII but for one allele that starts with an emoji,
 whose text outweighs the rest.
 """
 
-import re
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -22,15 +21,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests.clone_helpers import open_clone_store
-from tests.perturbation_helpers import traced_peak
-from tests.storage_helpers import write_count_store
+from tests.memory_helpers import at_budget, budget_bounds, traced_peak
+from tests.storage_helpers import open_store, write_count_store
 
 pytestmark = pytest.mark.slow
 
 _RNG = np.random.default_rng(19)
-# Each refusal states the bytes that the step would hold.
-_STATED = re.compile(r"holds? about (\d+) bytes")
 
 
 def _store(folder: Path, cell_ids: list[str]):
@@ -41,55 +37,15 @@ def _store(folder: Path, cell_ids: list[str]):
         "uint16",
         cell_ids=cell_ids,
     )
-    store = open_clone_store(folder / "store.zarr")
+    store = open_store(folder / "store.zarr")
     return store, store.snapshot_cell_selection()
 
 
-def _refused(store, run: Callable[[], object], budget: int) -> int | None:
-    """The bytes that the step's refusal states at ``budget``, or None if it fits."""
-    store.memoryBytes = budget
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            run()
-    except MemoryError as error:
-        found = _STATED.search(str(error))
-        assert found, str(error)
-        stated = int(found.group(1))
-        # A refusal states more than the budget it refuses.
-        assert stated > budget, (stated, budget)
-        return stated
-    return None
-
-
-def _bounds(store, run: Callable[[], object]) -> tuple[int, int]:
-    """The largest budget refused and the smallest accepted, within one percent."""
-    low, high = 0, 1 << 20
-    # Chunks grow with the budget, and so do the bytes that a refusal
-    # states, so the climb takes at least a quarter more at each step.
-    while (stated := _refused(store, run, high)) is not None:
-        low, high = high, max(stated, high + high // 4)
-    assert low, "the step fits 1 MiB, too small a shape to measure"
-    while high - low > high // 100:
-        middle = (low + high) // 2
-        if _refused(store, run, middle) is None:
-            high = middle
-        else:
-            low = middle
-    return low, high
-
-
-def _traced(store, run: Callable[[], object], budget: int, bound: int) -> int:
-    """The step's traced peak at ``budget``, traced again if it passes ``bound``.
-
-    Each run recomputes its step: imports invalidate the saved one, and
-    exports write a file of their own.
-    """
-    store.memoryBytes = budget
+def _quietly(run: Callable[[], object]) -> object:
+    """Run a step with its warnings ignored."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        _, peak = traced_peak(run, bound)
-    return peak
+        return run()
 
 
 def _check(store, run: Callable[[], object]) -> None:
@@ -99,8 +55,18 @@ def _check(store, run: Callable[[], object]) -> None:
             warnings.simplefilter("ignore")
             # Compiled kernels and caches are warmed before anything is traced.
             run()
-        low, high = _bounds(store, run)
-        peak = _traced(store, run, high, low + 1)
+        # The largest budget refused and the smallest accepted, within one
+        # percent: chunks grow with the budget, and so do the bytes that a
+        # refusal states, so the climb takes at least a quarter more at each
+        # step. Each run recomputes its step: imports invalidate the saved
+        # one, and exports write a file of their own.
+        low, high = budget_bounds(
+            at_budget(store, lambda: _quietly(run)), 1 << 20, parts=100
+        )
+        store.memoryBytes = high
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            _, peak = traced_peak(run, low + 1)
     finally:
         store.memoryBytes = full
     # Every accepted budget is above the largest refused one.

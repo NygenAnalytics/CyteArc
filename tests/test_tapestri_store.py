@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 import zarr
 
-from tests.clone_helpers import loaded_partition, smallest_budget
-from tests.perturbation_helpers import traced_peak
+from tests.clone_helpers import loaded_partition
+from tests.memory_helpers import smallest_budget, traced_peak
 from tests.variant_truth import (
     PROTEIN_METADATA,
     TAPESTRI_AMPLICONS,

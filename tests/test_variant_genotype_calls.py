@@ -17,15 +17,10 @@ import pytest
 from cytearc.storage.artifacts import artifact_group
 from cytearc.utils.logging import collect_warnings
 from cytearc.variants.genotypes import CALLS
-from tests.clone_helpers import (
-    every_cell,
-    levenshtein_distance,
-    open_clone_store,
-    smallest_budget,
-    write_cells_store,
-)
-from tests.perturbation_helpers import traced_peak
-from tests.variant_helpers import copy_variant_store, write_variant_store
+from tests.clone_helpers import every_cell, levenshtein_distance, write_cells_store
+from tests.storage_helpers import copy_store, open_store
+from tests.memory_helpers import smallest_budget, traced_peak
+from tests.variant_helpers import write_variant_store
 from tests.variant_truth import (
     PROBES,
     TARGETS,
@@ -48,7 +43,7 @@ def template(tmp_path_factory) -> Path:
 
 @pytest.fixture
 def store(template, tmp_path):
-    return copy_variant_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 def _import(store, paths, **options):
@@ -544,7 +539,7 @@ def test_saved_genotypes_are_reused_by_their_rules(store, tmp_path) -> None:
     assert again != first
     assert _calls(store, again) == _calls(store, first)
     # Reuse takes the newest of the saved genotypes with the same rules.
-    reader = open_clone_store(Path(store.zarr_loc), zarr_mode="r")
+    reader = open_store(Path(store.zarr_loc), zarr_mode="r")
     assert (
         reader.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
         == again
@@ -647,7 +642,14 @@ def _recorded_bands(monkeypatch) -> list[tuple[int, int]]:
     return bands
 
 
-@pytest.mark.parametrize("method", ["threshold", "gift", "source"])
+@pytest.mark.parametrize(
+    "method",
+    [
+        pytest.param("threshold", marks=pytest.mark.slow),
+        pytest.param("gift", marks=pytest.mark.slow),
+        "source",
+    ],
+)
 def test_genotypes_read_in_bands_equal_those_read_in_one(
     store, tmp_path, monkeypatch, method
 ) -> None:
@@ -670,6 +672,7 @@ def test_genotypes_read_in_bands_equal_those_read_in_one(
     pd.testing.assert_frame_equal(found, whole)
 
 
+@pytest.mark.slow
 def test_a_band_holds_a_floor_of_rows_and_the_cell_with_the_most(
     store, tmp_path, monkeypatch
 ) -> None:
@@ -833,18 +836,16 @@ def test_genotypes_of_many_cells_hold_no_more_than_a_budget_of_wide_bands(
             counts, method=method, invalidate_cache=True, **options
         )
 
+    def plans(budget: int) -> None:
+        try:
+            call(budget)
+        except _Accepted:
+            pass
+
     # The smallest budget accepted, found without reading, reads bands of
     # the floor of rows.
     monkeypatch.setattr(variants, "_variant_bands", accepted)
-    low, high = 1, 1 << 32
-    while high - low > 1:
-        middle = (low + high) // 2
-        try:
-            call(middle)
-        except MemoryError:
-            low = middle
-        except _Accepted:
-            high = middle
+    high = smallest_budget(plans, 1 << 32)
     monkeypatch.setattr(variants, "_variant_bands", read)
     per_row = variants._GENOTYPE_BYTES_PER_ROW[method]
     bands = _recorded_bands(monkeypatch)

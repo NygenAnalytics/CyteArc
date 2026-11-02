@@ -8,7 +8,6 @@ that check reuse, read-only stores or the memory budget copy the template.
 import gzip
 import math
 import re
-import tracemalloc
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,13 +22,13 @@ from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
-    copy_clone_store,
     every_cell,
     loaded_partition,
-    open_clone_store,
     write_cells_store,
     write_truth_store,
 )
+from tests.memory_helpers import traced_peak
+from tests.storage_helpers import copy_store, open_store
 from tests.clone_truth import (
     CLONE_SIZES,
     N_CELLS,
@@ -65,13 +64,13 @@ def template(tmp_path_factory) -> Path:
 @pytest.fixture(scope="module")
 def shared(template, tmp_path_factory) -> SimpleNamespace:
     """One writable copy for the imports that save artifacts of their own."""
-    store = copy_clone_store(template, tmp_path_factory.mktemp("clone_shared"))
+    store = copy_store(template, tmp_path_factory.mktemp("clone_shared"))
     return SimpleNamespace(store=store, cells=every_cell(store))
 
 
 @pytest.fixture
 def store(template, tmp_path):
-    return copy_clone_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 # Each case: the writer, the import's options, the format it should detect,
@@ -593,7 +592,7 @@ def test_a_reused_import_warns_again_and_a_read_only_store_reads_it(
         + ", ".join(repr(f"d2__{barcode}-1") for barcode in TRUTH.outside)
         + ". Check barcode_prefix and cell_selection."
     ]
-    reader = open_clone_store(Path(store.zarr_loc), zarr_mode="r")
+    reader = open_store(Path(store.zarr_loc), zarr_mode="r")
     with collect_warnings() as reader_messages:
         assert reader.clones.import_clones(path, cell_selection=cells) == saved
     assert list(reader_messages) == list(first_messages)
@@ -1024,18 +1023,20 @@ def test_a_column_without_labels_saves_no_clone(store) -> None:
     assert math.isclose(store.artifacts.load(ref).attrs["n_clones"], 0)
 
 
-def _traced(function: Callable[[], object]) -> tuple[object, int]:
-    """Run ``function`` and return its result, or its MemoryError, and its traced peak."""
-    tracemalloc.start()
-    try:
+def _traced(function: Callable[[], object], budget: int) -> tuple[object, int]:
+    """Run ``function`` and return its result, or its MemoryError, and its traced peak.
+
+    The peak is traced as :func:`tests.memory_helpers.traced_peak` traces it,
+    again where it passes ``budget``.
+    """
+
+    def run() -> object:
         try:
-            result = function()
+            return function()
         except MemoryError as error:
-            result = error
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-    return result, peak
+            return error
+
+    return traced_peak(run, budget)
 
 
 # Cells of the long-label store, each in its own clone. The last label is
@@ -1060,7 +1061,9 @@ def _long_label_store(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(store=store, cells=every_cell(store), table=table, ids=ids)
 
 
-@pytest.mark.parametrize("method", ["from_column", "import_clones"])
+@pytest.mark.parametrize(
+    "method", ["from_column", pytest.param("import_clones", marks=pytest.mark.slow)]
+)
 def test_saving_long_labels_holds_the_budget_or_refuses(tmp_path, method) -> None:
     long = _long_label_store(tmp_path)
     save = {
@@ -1073,7 +1076,7 @@ def test_saving_long_labels_holds_the_budget_or_refuses(tmp_path, method) -> Non
     }[method]
     long.store.memoryBytes = _BUDGET
 
-    result, peak = _traced(save)
+    result, peak = _traced(save, _BUDGET)
 
     if isinstance(result, MemoryError):
         assert f"memory budget of {_BUDGET} bytes" in str(result)
@@ -1103,7 +1106,9 @@ def test_a_table_whose_first_rows_are_long_needs_room_for_a_chunk(tmp_path) -> N
         long.store.clones.import_clones(first, cell_selection=long.cells)
 
 
-@pytest.mark.parametrize("method", ["load_clones", "table", "matrix"])
+@pytest.mark.parametrize(
+    "method", ["load_clones", "table", pytest.param("matrix", marks=pytest.mark.slow)]
+)
 def test_reading_long_saved_labels_holds_the_budget_or_refuses(
     tmp_path, method
 ) -> None:
@@ -1119,7 +1124,7 @@ def test_reading_long_saved_labels_holds_the_budget_or_refuses(
     }[method]
     long.store.memoryBytes = _BUDGET
 
-    result, peak = _traced(read)
+    result, peak = _traced(read, _BUDGET)
 
     if isinstance(result, MemoryError):
         assert f"memory budget of {_BUDGET} bytes" in str(result)
@@ -1143,7 +1148,8 @@ def test_long_cell_ids_count_against_the_budget(tmp_path) -> None:
     store.memoryBytes = budget
 
     result, peak = _traced(
-        lambda: store.clones.import_clones(table, cell_selection=every_cell(store))
+        lambda: store.clones.import_clones(table, cell_selection=every_cell(store)),
+        budget,
     )
 
     if isinstance(result, MemoryError):

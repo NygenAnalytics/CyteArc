@@ -16,10 +16,10 @@ import pytest
 from cytearc.metadata.rows import text_read_bytes
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import every_cell
-from tests.perturbation_helpers import traced_peak
+from tests.memory_helpers import at_budget, smallest_budget, stated_bytes, traced_peak
+from tests.storage_helpers import copy_store
 from tests.variant_helpers import (
     assert_tables,
-    copy_variant_store,
     expected_gift,
     expected_got,
     expected_got_calls,
@@ -62,7 +62,7 @@ def template(tmp_path_factory) -> Path:
 
 @pytest.fixture
 def store(template, tmp_path):
-    return copy_variant_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 def _import(store, path, **options):
@@ -75,9 +75,7 @@ def _import(store, path, **options):
 
 
 def _refused_estimate(store, run, budget: int) -> int:
-    """The bytes that ``run`` names when it refuses ``budget``."""
-    import re
-
+    """The bytes that ``run`` states when it refuses ``budget``."""
     full = store.memoryBytes
     store.memoryBytes = budget
     try:
@@ -85,9 +83,7 @@ def _refused_estimate(store, run, budget: int) -> int:
             run()
     finally:
         store.memoryBytes = full
-    found = re.search(r"holds about (\d+) bytes", str(refused.value))
-    assert found is not None, str(refused.value)
-    return int(found.group(1))
+    return stated_bytes(refused.value)
 
 
 def _large_mgatk(
@@ -276,8 +272,8 @@ def test_cell_order_and_spills_to_disk_do_not_change_the_counts(
     # budget covers the read of the cells' IDs, which decodes a stored chunk
     # of 100,000 of them, and leaves room for the chunks that writing
     # rewrites; the rows outgrow the sort buffer that the rest leaves.
-    roomy = copy_variant_store(template, tmp_path / "roomy")
-    tight = copy_variant_store(template, tmp_path / "tight")
+    roomy = copy_store(template, tmp_path / "roomy")
+    tight = copy_store(template, tmp_path / "tight")
     ids = [str(cell) for cell in roomy.cells.fetch_all("ids")]
     folder = tmp_path / "final"
     drawn = _large_mgatk(folder, ids, seed=4, n_positions=4_000)
@@ -585,7 +581,7 @@ def test_gotcha_counts_are_reads(store, tmp_path, style) -> None:
 
 def test_several_libraries_join_with_their_own_prefixes(template, tmp_path) -> None:
     # Each library's files name cells by bare barcode; the prefix names them.
-    store = copy_variant_store(template, tmp_path)
+    store = copy_store(template, tmp_path)
     ids = TRUTH.row_ids
     samples = [identifier.split("__")[0] for identifier in ids]
     folders = []
@@ -702,11 +698,11 @@ def test_missing_paths_and_files_are_named(store, tmp_path) -> None:
 def test_a_read_only_store_reuses_saved_counts_and_refuses_new_ones(
     store, tmp_path
 ) -> None:
-    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import open_store
 
     folder = write_mgatk(TRUTH, tmp_path / "final")
     ref, messages = _import(store, folder)
-    reader = open_clone_store(Path(store.zarr_loc), zarr_mode="r")
+    reader = open_store(Path(store.zarr_loc), zarr_mode="r")
     again, reused = _import(reader, folder)
     assert again == ref and reused == messages
     with pytest.raises(PermissionError):
@@ -768,20 +764,20 @@ def test_the_parse_shares_what_the_join_leaves(template, tmp_path) -> None:
     from cytearc.datastore._operations import variants as operations
     from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
     from cytearc.storage.arrays import create_metadata_column
-    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import open_store
 
     path = tmp_path / "store" / template.name
     shutil.copytree(template, path)
-    ids = np.asarray(open_clone_store(path).cells.fetch_all("ids"))
+    ids = np.asarray(open_store(path).cells.fetch_all("ids"))
     create_metadata_column(
-        open_clone_store(path).cells._group,
+        open_store(path).cells._group,
         "ids",
         data=ids,
         dtype=ids.dtype,
         chunkSize=len(ids),
         overwrite=True,
     )
-    store = open_clone_store(path)
+    store = open_store(path)
     assert store.cells._get_array("ids").chunks == (len(ids),)
     got = write_got(TRUTH, tmp_path / "CALR.tsv", style="xv")
 
@@ -1101,14 +1097,14 @@ def test_load_counts_refuses_rows_beyond_the_memory_budget(store, tmp_path) -> N
 def test_threads_parse_the_base_files_into_the_same_artifact(
     template, tmp_path
 ) -> None:
-    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import open_store
 
     folder = write_mgatk(TRUTH, tmp_path / "final")
     groups, warned = [], []
     for threads in (1, 4):
         target = tmp_path / f"threads{threads}"
         shutil.copytree(template, target / template.name)
-        store = open_clone_store(target / template.name, nthreads=threads)
+        store = open_store(target / template.name, nthreads=threads)
         ref, messages = _import(store, folder)
         groups.append(store.artifacts.load(ref))
         warned.append(messages)
@@ -1121,7 +1117,7 @@ def test_threads_parse_the_base_files_into_the_same_artifact(
         np.testing.assert_array_equal(groups[0][name][:], groups[1][name][:])
     # A malformed file stops the threads with its error.
     (folder / "sample.G.txt.gz").write_bytes(gzip.compress(b"1,x,1,1\n2,x,y,1\n"))
-    store = open_clone_store(tmp_path / "threads4" / template.name, nthreads=4)
+    store = open_store(tmp_path / "threads4" / template.name, nthreads=4)
     with pytest.raises(ValueError, match="holds a row that is not 4 fields"):
         store.variants.import_counts(folder, cell_selection=every_cell(store))
 
@@ -1427,7 +1423,7 @@ def test_a_small_budget_parses_the_base_files_on_one_thread(
     template, tmp_path, monkeypatch
 ) -> None:
     import cytearc.readers.mgatk as mgatk
-    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import open_store
 
     real = mgatk.mgatk_source
     threads: list[int] = []
@@ -1439,7 +1435,7 @@ def test_a_small_budget_parses_the_base_files_on_one_thread(
     monkeypatch.setattr(mgatk, "mgatk_source", recording)
     folder = write_mgatk(TRUTH, tmp_path / "final")
     shutil.copytree(template, tmp_path / "store" / template.name)
-    store = open_clone_store(tmp_path / "store" / template.name, nthreads=4)
+    store = open_store(tmp_path / "store" / template.name, nthreads=4)
     for budget in (512 << 20, 2 << 30):
         store.memoryBytes = budget
         _import(store, folder, invalidate_cache=True)
@@ -1578,27 +1574,12 @@ def test_a_budget_without_room_for_the_rewritten_chunks_writes_nothing(
     assert store.artifacts.list(kind="variant_counts") == []
 
 
-def _smallest_accepted_budget(store, run) -> int:
-    """The smallest budget at which ``run`` raises no ``MemoryError``."""
-    low, high = 1, 1 << 33
-    while low < high:
-        middle = (low + high) // 2
-        store.memoryBytes = middle
-        try:
-            run()
-            high = middle
-        except MemoryError:
-            low = middle + 1
-    return low
-
-
 @pytest.mark.slow
 def test_the_traced_peaks_of_import_and_load_fit_the_smallest_budget_accepted(
     tmp_path,
 ) -> None:
     """With 80-character IDs, reading them dominates what each step holds."""
-    from cytearc.datastore.datastore import DataStore
-    from tests.storage_helpers import write_count_store
+    from tests.storage_helpers import open_store, write_count_store
 
     n_cells = 20_000
     ids = [f"{'sample_with_a_long_name_' * 3}{cell:08d}-1" for cell in range(n_cells)]
@@ -1608,12 +1589,7 @@ def test_the_traced_peaks_of_import_and_load_fit_the_smallest_budget_accepted(
         "uint16",
         cell_ids=ids,
     )
-    store = DataStore(
-        str(tmp_path / "long.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-    )
+    store = open_store(tmp_path / "long.zarr")
     got = tmp_path / "CALR.tsv"
     got.write_text(
         "BC\twtUMIs\tmutUMIs\n"
@@ -1634,7 +1610,7 @@ def test_the_traced_peaks_of_import_and_load_fit_the_smallest_budget_accepted(
     for name, run in steps.items():
         store.memoryBytes = 1 << 33
         run()
-        budget = _smallest_accepted_budget(store, run)
+        budget = smallest_budget(at_budget(store, run), 1 << 33)
         store.memoryBytes = budget
         _result, peak = traced_peak(run, budget)
         assert peak <= budget, (name, peak, budget)
@@ -1645,8 +1621,7 @@ def test_loading_a_few_cells_of_many_fits_the_smallest_budget_accepted(
     tmp_path,
 ) -> None:
     """Counts of 500,000 cells hold offsets and per-cell arrays for each one."""
-    from cytearc.datastore.datastore import DataStore
-    from tests.storage_helpers import write_count_store
+    from tests.storage_helpers import open_store, write_count_store
 
     n_cells = 500_000
     ids = [f"c{cell}" for cell in range(n_cells)]
@@ -1656,12 +1631,7 @@ def test_loading_a_few_cells_of_many_fits_the_smallest_budget_accepted(
         "uint16",
         cell_ids=ids,
     )
-    store = DataStore(
-        str(tmp_path / "many.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-    )
+    store = open_store(tmp_path / "many.zarr")
     got = tmp_path / "CALR.tsv"
     got.write_text(
         "BC\twtUMIs\tmutUMIs\n"
@@ -1680,7 +1650,7 @@ def test_loading_a_few_cells_of_many_fits_the_smallest_budget_accepted(
     }.items():
         store.memoryBytes = 1 << 33
         run()
-        budget = _smallest_accepted_budget(store, run)
+        budget = smallest_budget(at_budget(store, run), 1 << 33)
         store.memoryBytes = budget
         _result, peak = traced_peak(run, budget)
         assert peak <= budget, (name, peak, budget)

@@ -37,14 +37,14 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.repertoire import SLOTS
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import logger
-from tests.clone_helpers import (
-    CELLRANGER_HEADER,
+from tests.clone_helpers import CELLRANGER_HEADER, write_clone_contigs, write_lines
+from tests.memory_helpers import (
+    budget_that_runs,
     smallest_budget,
-    write_clone_contigs,
-    write_lines,
+    stated_bytes,
+    traced_peak,
 )
-from tests.perturbation_helpers import traced_peak
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import open_store, write_count_store
 
 pytestmark = pytest.mark.slow
 
@@ -72,9 +72,7 @@ def data(tmp_path_factory) -> SimpleNamespace:
     ids = np.asarray([f"cell{i:06d}-1" for i in range(N_CELLS)])
     counts = rng.poisson(2.0, size=(N_CELLS, 4)).astype(np.uint16) + 1
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=ids)
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     draws = rng.integers(0, 8, size=N_CELLS)
     store.cells.insert(
         "donor", np.asarray([f"donor_with_a_long_name_{k:04d}" for k in draws])
@@ -548,41 +546,22 @@ CLUSTER_CASES: dict[str, dict[str, object]] = {
 }
 
 
-def _smallest_budget(store: DataStore, run: Callable[[], object]) -> int:
-    """Raise the budget to each refusal's estimate until ``run`` runs."""
-    budget = 1
-    for _attempt in range(100):
-        store.memoryBytes = budget
-        try:
-            run()
-            return budget
-        except MemoryError as error:
-            found = re.search(r"about (\d+) bytes", str(error))
-            assert found is not None, str(error)
-            estimate = int(found.group(1))
-            # A refusal names a larger estimate than the budget it refused.
-            assert estimate > budget, str(error)
-            budget = estimate
-    raise AssertionError("the budget did not settle")
-
-
 def _traced_at_smallest_budget(
     store: DataStore, run: Callable[[], object]
 ) -> tuple[int, int]:
-    """The peak that tracemalloc records at the smallest budget accepted."""
-    full = store.memoryBytes
-    try:
-        # Compiled kernels and caches are warmed before anything is traced.
-        run()
-        budget = _smallest_budget(store, run)
-        store.memoryBytes = budget
-        # Python grows its table of interned strings in one allocation, 15 MB
-        # when the table passes about 350,000 strings, during whichever run
-        # adds the next one. A peak above the budget is therefore traced
-        # again: a summary that holds too much does so in both runs.
-        _result, peak = traced_peak(run, budget)
-    finally:
-        store.memoryBytes = full
+    """The peak that tracemalloc records at the smallest budget accepted, and that budget.
+
+    The budget climbs from one byte to the bytes that each refusal states.
+    Python grows its table of interned strings in one allocation, 15 MB when
+    the table passes about 350,000 strings, during whichever run adds the next
+    one, so a peak above the budget is traced again: a summary that holds too
+    much does so in both runs.
+    """
+    # Compiled kernels and caches are warmed before anything is traced.
+    run()
+    budget, _refusals, _result, peak = budget_that_runs(
+        store, lambda _store: run(), refusal_budget=stated_bytes, max_refusals=100
+    )
     return peak, budget
 
 
@@ -593,16 +572,16 @@ def test_the_traced_peak_fits_the_smallest_budget_accepted(data, case) -> None:
 
 
 # The two summaries are run, each at the smallest budget it accepts, in a fresh
-# process whose Zarr reads no earlier test left running. Each finished task of
-# Zarr's pool is held until the next finishes, as the thread that ran it holds
-# its chunk, as stored and decoded, on a busy machine until after the next
-# read has begun.
+# process whose Zarr reads no earlier test left running. The work of each read
+# of a stored array is held until the next read ends, as the thread of Zarr's
+# pool that ran it holds its chunk, as stored and decoded, on a busy machine
+# until after the next read has begun.
 _HELD_READ_SCRIPT = """
-import json, re, sys, threading, tracemalloc
-from concurrent.futures import thread
-from cytearc.datastore.datastore import DataStore
+import json, sys, tracemalloc
+from tests.memory_helpers import ZARR_READS, budget_that_runs, hold_finished_reads, stated_bytes
+from tests.storage_helpers import open_store
 
-store = DataStore(sys.argv[1], default_assay="RNA", min_features_per_cell=0, nthreads=1)
+store = open_store(sys.argv[1])
 every = store.snapshot_cell_selection("every_cell")
 first = store.snapshot_cell_selection("first")
 long = store.clones.from_column("long_clone", cell_selection=every)
@@ -615,30 +594,19 @@ cases = {
         store.clones.diversity(few, cell_selection=every)
     ),
 }
-lock, held, run = threading.Lock(), [None], thread._WorkItem.run
-
-def run_and_hold(item, *args):
-    run(item, *args)
-    with lock:
-        held[0] = item
 
 results = {}
 for name, call in cases.items():
     call()
-    budget = 1
-    while True:
-        store.memoryBytes = budget
-        try:
-            call()
-            break
-        except MemoryError as error:
-            budget = int(re.search(r"about (\\d+) bytes", str(error)).group(1))
-    thread._WorkItem.run = run_and_hold
-    tracemalloc.start()
-    call()
-    results[name] = [tracemalloc.get_traced_memory()[1], budget]
-    tracemalloc.stop()
-    thread._WorkItem.run = run
+    budget, _, _, _ = budget_that_runs(
+        store, lambda _: call(), refusal_budget=stated_bytes, max_refusals=100
+    )
+    store.memoryBytes = budget
+    with hold_finished_reads(*ZARR_READS):
+        tracemalloc.start()
+        call()
+        results[name] = [tracemalloc.get_traced_memory()[1], budget]
+        tracemalloc.stop()
 print(json.dumps(results))
 """
 
@@ -669,23 +637,22 @@ def test_the_budgets_count_the_read_that_zarr_still_holds(data) -> None:
 
 
 # Grouping 400 cells, spread over 20,000, by text columns of 24 characters in
-# a fresh process. While the cells are grouped, every task that Zarr's pool
-# ran for a row read is held until the next row read ends, as master's test of
-# the held codes read holds them, so each read has the read before beside it.
+# a fresh process. While the cells are grouped, the work of each row read is
+# held until the next row read ends, as master's test of the held codes read
+# holds it, so each read has the read before beside it.
 _CHUNKED_GROUPS_SCRIPT = """
-import json, re, sys, threading, tracemalloc
-from concurrent.futures import thread
+import json, sys, tracemalloc
 import numpy as np
 import cytearc.metadata.rows as rows
 from cytearc.datastore._operations import clones as operations
-from cytearc.datastore.datastore import DataStore
-from tests.storage_helpers import write_count_store
+from tests.memory_helpers import budget_that_runs, hold_finished_reads, stated_bytes
+from tests.storage_helpers import open_store, write_count_store
 
 n_cells, path = 20_000, sys.argv[1]
 rng = np.random.default_rng(3)
 ids = np.asarray([f"cell{i:06d}-1" for i in range(n_cells)])
 write_count_store(path, {"RNA": np.ones((n_cells, 2), dtype=np.uint16)}, "uint16", cell_ids=ids)
-store = DataStore(path, default_assay="RNA", min_features_per_cell=0, nthreads=1)
+store = open_store(path)
 alphabet = np.asarray(list("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"))
 chunk_rows = {"in_10_chunks": 2_000, "whole_a": n_cells, "whole_b": n_cells}
 for name, rows_per_chunk in chunk_rows.items():
@@ -693,7 +660,7 @@ for name, rows_per_chunk in chunk_rows.items():
     store.zw["cellData"].create_array(name, data=labels, chunks=(rows_per_chunk,))
 store.cells.insert("few", np.arange(n_cells) % 50 == 0)
 store.cells.insert("clone", np.asarray([f"clone{i % 7}" for i in range(n_cells)]))
-store = DataStore(path, default_assay="RNA", min_features_per_cell=0, nthreads=1)
+store = open_store(path)
 for name, rows_per_chunk in chunk_rows.items():
     assert store.cells._get_array(name).chunks == (rows_per_chunk,)
 clones = store.clones.from_column("clone", cell_selection=store.snapshot_cell_selection("few"))
@@ -701,33 +668,11 @@ cases = {
     "a column in 10 chunks": ["in_10_chunks"],
     "two columns of one chunk each": ["whole_a", "whole_b"],
 }
-lock, reading, held = threading.Lock(), [0], {}
-run, read_rows, cell_groups = thread._WorkItem.run, rows._read_array_rows, operations.cell_groups
-
-def run_and_hold(item, *args):
-    with lock:
-        read = reading[0]
-    run(item, *args)
-    with lock:
-        if read >= reading[0] - 1:
-            held.setdefault(read, []).append(item)
-
-def read_and_count(array, indices):
-    values = read_rows(array, indices)
-    with lock:
-        held.pop(reading[0] - 1, None)
-        reading[0] += 1
-    return values
+cell_groups = operations.cell_groups
 
 def grouped_with_reads_held(*args, **kwargs):
-    thread._WorkItem.run, rows._read_array_rows = run_and_hold, read_and_count
-    try:
+    with hold_finished_reads((rows, "_read_array_rows")):
         return cell_groups(*args, **kwargs)
-    finally:
-        thread._WorkItem.run, rows._read_array_rows = run, read_rows
-        with lock:
-            held.clear()
-            reading[0] = 0
 
 results, full = {}, store.memoryBytes
 for case, columns in cases.items():
@@ -735,14 +680,10 @@ for case, columns in cases.items():
         return store.clones.diversity(clones, group_by=columns)
     store.memoryBytes = full
     call()
-    budget = 1
-    while True:
-        store.memoryBytes = budget
-        try:
-            call()
-            break
-        except MemoryError as error:
-            budget = int(re.search(r"about (\\d+) bytes", str(error)).group(1))
+    budget, _, _, _ = budget_that_runs(
+        store, lambda _: call(), refusal_budget=stated_bytes, max_refusals=100
+    )
+    store.memoryBytes = budget
     peaks = []
     for hold in (False, True):
         operations.cell_groups = grouped_with_reads_held if hold else cell_groups
@@ -836,9 +777,7 @@ def long_ids(tmp_path_factory) -> SimpleNamespace:
     assert ids.dtype == np.dtype("<U82")
     counts = np.ones((N_LONG_IDS, 2), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=ids)
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     contigs = write_clone_contigs(
         path.parent, "contigs.csv", ids, np.arange(N_LONG_IDS) // 4
     )
@@ -866,9 +805,7 @@ def singletons(tmp_path_factory) -> SimpleNamespace:
     ids = np.asarray([f"c{i}" for i in range(N_SINGLETONS)])
     counts = np.ones((N_SINGLETONS, 2), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=ids)
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     contigs = write_clone_contigs(
         path.parent,
         "contigs.csv",
@@ -955,9 +892,7 @@ def extra_contigs(tmp_path_factory) -> SimpleNamespace:
     ids = [f"cell{i:06d}-1" for i in range(N_EXTRA_CELLS)]
     counts = np.ones((N_EXTRA_CELLS, 2), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=np.asarray(ids))
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     residues = np.asarray(list("ACDEFGHIKLMNPQRSTVWY"))
     bases = np.asarray(list("ACGT"))
     rows = []
@@ -1019,9 +954,7 @@ def wide_junctions(tmp_path_factory) -> SimpleNamespace:
     ids = [f"cell{i:06d}-1" for i in range(N_LABELLED)]
     counts = np.ones((N_LABELLED, 2), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=np.asarray(ids))
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     wide = np.asarray([chr(0x1F600 + k) for k in range(20)])
     residues = np.asarray(list("ACDEFGHIKLMNPQRSTVWY"))
     rows = []
@@ -1084,9 +1017,7 @@ def own_clonotypes(tmp_path_factory) -> SimpleNamespace:
     ids = np.asarray([f"c{i}" for i in range(N_OWN_CLONOTYPES)])
     counts = np.ones((N_OWN_CLONOTYPES, 2), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=ids)
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     contigs = write_clone_contigs(
         path.parent, "contigs.csv", ids, np.arange(N_OWN_CLONOTYPES)
     )
@@ -1121,9 +1052,7 @@ def long_junctions(tmp_path_factory) -> SimpleNamespace:
     ids = [f"cell{i:06d}-1" for i in range(N_LONG_JUNCTIONS)]
     counts = np.ones((N_LONG_JUNCTIONS, 2), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=np.asarray(ids))
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     residues = np.asarray(list("ACDEFGHIKLMNPQRSTVWY"))
     bases = np.asarray(list("ACGT"))
     rows = []
@@ -1176,9 +1105,7 @@ def _export_store(folder: Path, ids: list[str]) -> DataStore:
     path = folder / "store.zarr"
     counts = np.ones((len(ids), 2), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=np.asarray(ids))
-    return DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    return open_store(path)
 
 
 def _import_in_small_chunks(store: DataStore, files: list[Path]) -> ArtifactRef:

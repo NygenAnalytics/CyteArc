@@ -2,24 +2,18 @@
 
 The expected tables come from the truth's arrays alone, so a test that
 compares an import with them checks the importer against values it never
-computed. ``download_or_skip`` fetches the files of tests marked
-integration.
+computed.
 """
 
-import gzip
-import http.client
-import shutil
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from cytearc.datastore._operations.clone_artifacts import zarr_write_buffer_bytes
-from tests.clone_helpers import open_clone_store, write_truth_store
+from tests.clone_helpers import write_truth_store
+from tests.storage_helpers import open_store
 from tests.variant_truth import (
     BASES,
     CONTIG,
@@ -37,12 +31,6 @@ if TYPE_CHECKING:
 def write_variant_store(path: Path, truth: VariantTruth) -> "DataStore":
     """Write a store of the truth's cells, every cell in ``every_cell``."""
     return write_truth_store(path, truth.clones)
-
-
-def copy_variant_store(template: Path, folder: Path) -> "DataStore":
-    target = folder / template.name
-    shutil.copytree(template, target)
-    return open_clone_store(target)
 
 
 def mito_label(position: int, contig: str = CONTIG) -> str:
@@ -238,63 +226,6 @@ def mito_reference_digest() -> str:
     return hashlib.sha256(REFERENCE.encode()).hexdigest()
 
 
-# What a download raises when its host is unreachable, slow or cuts the file
-# short: IncompleteRead is an HTTPException rather than an OSError, and a gzip
-# stream that ends early raises EOFError.
-_UNREACHABLE = (
-    urllib.error.URLError,
-    TimeoutError,
-    OSError,
-    http.client.HTTPException,
-    EOFError,
-)
-# HTTP statuses of a host that refuses or fails for the moment, as GEO does
-# under load; any other error status, such as 404 for a file that moved,
-# fails the test.
-_TRANSIENT_STATUSES = frozenset({403, 408, 429, 500, 502, 503, 504})
-
-
-def _fetched(url: str) -> bytes:
-    """The bytes at ``url``, refusing a body shorter than its stated length
-    and a gzip file that ends early."""
-    with urllib.request.urlopen(url, timeout=120) as response:
-        data = response.read()
-        length = response.headers.get("Content-Length")
-    if length is not None and len(data) != int(length):
-        raise http.client.IncompleteRead(data, int(length) - len(data))
-    if url.endswith(".gz"):
-        gzip.decompress(data)
-    return data
-
-
-def download_or_skip(url: str, path: Path) -> Path:
-    """Download a file for a test marked integration, or skip the test when
-    its host cannot serve the file whole.
-
-    A failed download is tried once more, and the file is written only once
-    whole, under a name of its own and then renamed. A status that names a
-    missing file, such as 404, fails the test, since skipping would hide a
-    file that moved.
-    """
-    failure: Exception | None = None
-    for _attempt in range(2):
-        try:
-            data = _fetched(url)
-        except urllib.error.HTTPError as error:
-            if error.code not in _TRANSIENT_STATUSES:
-                raise
-            failure = error
-            continue
-        except _UNREACHABLE as error:
-            failure = error
-            continue
-        partial = path.with_name(f"{path.name}.partial")
-        partial.write_bytes(data)
-        partial.replace(path)
-        return path
-    pytest.skip(f"{url} could not be downloaded whole: {failure}")
-
-
 def expected_mito_statistics(truth: VariantTruth, rows: list[int]) -> pd.DataFrame:
     """mgatk's per-variant statistics of the chosen rows, from the truth's reads.
 
@@ -415,7 +346,6 @@ def write_rcrs_mgatk(
 
 def rcrs_store(path: Path) -> "DataStore":
     """Write a store of ``RCRS_CELLS``, every cell in ``every_cell``."""
-    from cytearc.datastore.datastore import DataStore
     from tests.storage_helpers import write_count_store
 
     write_count_store(
@@ -424,9 +354,7 @@ def rcrs_store(path: Path) -> "DataStore":
         "uint16",
         cell_ids=list(RCRS_CELLS),
     )
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     store.cells.insert("every_cell", np.ones(len(RCRS_CELLS), dtype=bool))
     return store
 

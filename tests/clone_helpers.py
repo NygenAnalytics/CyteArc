@@ -1,8 +1,6 @@
 """Stores and checks shared by the tests of clones."""
 
 import math
-import re
-import shutil
 from collections.abc import Callable, Mapping, Sequence
 from fractions import Fraction
 from math import sqrt
@@ -27,23 +25,11 @@ from tests.clone_truth import (
     write_pycashier,
     write_trex_molecules,
 )
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import open_store, write_count_store
 
 if TYPE_CHECKING:
     from cytearc.datastore.datastore import DataStore
     from cytearc.storage.refs import ArtifactRef
-
-
-def open_clone_store(path: Path, **options: object) -> "DataStore":
-    """Open a store of the truth's cells on one thread."""
-    from cytearc.datastore.datastore import DataStore
-
-    return DataStore(
-        str(path),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        **{"nthreads": 1, **options},  # type: ignore[arg-type]
-    )
 
 
 def write_truth_store(path: Path, truth: CloneTruth) -> "DataStore":
@@ -51,7 +37,7 @@ def write_truth_store(path: Path, truth: CloneTruth) -> "DataStore":
     n_cells = len(truth.cell_ids)
     counts = np.random.default_rng(5).poisson(3.0, size=(n_cells, 6)) + 1
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=truth.cell_ids)
-    store = open_clone_store(path)
+    store = open_store(path)
     store.cells.insert("sample", truth.samples.astype(object))
     store.cells.insert("time_point", truth.time_points)
     store.cells.insert("cell_type", truth.cell_types.astype(object))
@@ -66,16 +52,9 @@ def write_cells_store(path: Path, cell_ids: Sequence[str]) -> "DataStore":
     """
     counts = np.ones((len(cell_ids), 3), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=list(cell_ids))
-    store = open_clone_store(path)
+    store = open_store(path)
     store.cells.insert("every_cell", np.ones(len(cell_ids), dtype=bool))
     return store
-
-
-def copy_clone_store(template: Path, folder: Path) -> "DataStore":
-    """Copy a template store into ``folder`` and open the copy."""
-    target = folder / template.name
-    shutil.copytree(template, target)
-    return open_clone_store(target)
 
 
 def every_cell(store: "DataStore") -> "ArtifactRef":
@@ -336,18 +315,11 @@ def write_clone_contigs(
 
 def receptor_store(folder: Path, **options: object) -> "DataStore":
     """Open the store of cells cell0 to cell7 in ``folder``, writing it once."""
-    from cytearc.datastore.datastore import DataStore
-
     path = folder / "store.zarr"
     if not path.exists():
         counts = np.random.default_rng(5).poisson(2.0, size=(N_RECEPTOR_CELLS, 6)) + 1
         write_count_store(str(path), {"RNA": counts}, "uint16")
-    return DataStore(
-        str(path),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        **{"nthreads": 1, **options},  # type: ignore[arg-type]
-    )
+    return open_store(path, **options)
 
 
 def write_lines(folder: Path, name: str, header: str, rows: list[str]) -> Path:
@@ -401,34 +373,6 @@ def levenshtein_distance(first: str, second: str) -> int:
     return previous[-1]
 
 
-def budget_refusals(
-    store: "DataStore", run: Callable[[], object]
-) -> list[tuple[str, int]]:
-    """Each refusal on the way from a budget of one byte to one that runs.
-
-    The budget rises to each refusal's own estimate, so each later step's
-    check shows once the earlier ones pass.
-    """
-    found: list[tuple[str, int]] = []
-    budget, full = 1, store.memoryBytes
-    try:
-        for _attempt in range(100):
-            store.memoryBytes = budget
-            try:
-                run()
-                return found
-            except MemoryError as error:
-                matched = re.search(r"^(.*) holds about (\d+) bytes", str(error))
-                assert matched is not None, str(error)
-                estimate = int(matched.group(2))
-                assert estimate > budget, str(error)
-                found.append((matched.group(1), estimate))
-                budget = estimate
-    finally:
-        store.memoryBytes = full
-    raise AssertionError("the budget did not settle")
-
-
 def clone_partition(codes: np.ndarray) -> set[frozenset[int]]:
     """The positions of the cells of each clone, from each cell's clone code, -1 for none."""
     return {
@@ -453,23 +397,6 @@ def link_count_variance(
     cherries = float(np.sum(linked * (linked - 1) / 2))
     together = n_texts * (n_texts - 1) * (n_texts - 2) / 2 * rate**2
     return count, pairs * rate * (1 - rate) + 2 * max(0.0, cherries - together)
-
-
-def smallest_budget(call: Callable[[int], object], high: int) -> int:
-    """The smallest budget below ``high`` at which ``call`` raises no MemoryError.
-
-    Found by bisection, so ``call`` must succeed at every larger budget.
-    """
-    low = 0
-    while low < high:
-        middle = (low + high) // 2
-        try:
-            call(middle)
-        except MemoryError:
-            low = middle + 1
-        else:
-            high = middle
-    return low
 
 
 def within_distance(first: str, second: str, metric: str, cutoff: int) -> bool:
@@ -660,7 +587,7 @@ def traced_steps(
     from each check to the next, the bytes by which that check falls short
     of the largest, allocated but never written, so its peak passes the
     largest check exactly when a step holds more than its own check states.
-    The peak is traced as :func:`tests.perturbation_helpers.traced_peak`
+    The peak is traced as :func:`tests.memory_helpers.traced_peak`
     traces it, again where it passes the largest check, so ``call`` must
     compute afresh each time.
 
@@ -673,7 +600,7 @@ def traced_steps(
     import cytearc.clones.allele_clones as domain
     import cytearc.clones.calling as calling
     import cytearc.datastore._operations.recorder_alleles as operations
-    from tests.perturbation_helpers import traced_peak
+    from tests.memory_helpers import traced_peak
 
     checks: list[tuple[str, int]] = []
     allowance: list[np.ndarray] = []

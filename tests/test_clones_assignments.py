@@ -1,7 +1,6 @@
 """Clone labels, assignment and ranking, checked against hand-derived values."""
 
 import sys
-import tracemalloc
 
 import numpy as np
 import pandas as pd
@@ -16,6 +15,7 @@ from cytearc.clones.assignments import (
     ranked_clones,
 )
 from cytearc.utils.arrays import sort_categories
+from tests.memory_helpers import traced_peak
 
 CELLS = np.asarray([f"c{index}" for index in range(6)])
 
@@ -123,12 +123,9 @@ def test_ranking_holds_each_label_as_its_own_text() -> None:
     # as fixed-width text would take 240 MB.
     labels = [str(index) for index in range(30_000)]
     labels[0] = "X" * 2_000
-    tracemalloc.start()
-    try:
-        _ranked, ids, _sizes = ranked_clones(np.arange(len(labels)), labels)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    (_ranked, ids, _sizes), peak = traced_peak(
+        lambda: ranked_clones(np.arange(len(labels)), labels), 24_000_000 - 1
+    )
     # Numbers come first, then other text.
     assert ids.tolist()[:2] == ["1", "2"]
     assert ids.tolist()[-1] == "X" * 2_000

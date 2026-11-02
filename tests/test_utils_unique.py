@@ -19,7 +19,7 @@ from cytearc.utils.arrays import (
     unique_inverse,
     unique_rows,
 )
-from tests.perturbation_helpers import traced_peak
+from tests.memory_helpers import traced_peak
 
 _CYTEARC_ROOT = Path(__file__).resolve().parents[1] / "cytearc"
 # The clone stack's modules: its three packages, and its modules in shared

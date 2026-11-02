@@ -8,18 +8,14 @@ from the raw file by the format's documented rules.
 """
 
 import gzip
-import hashlib
-import http.client
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from tests.clone_helpers import open_clone_store
-from tests.storage_helpers import write_count_store
+from tests.network_helpers import download_or_skip
+from tests.storage_helpers import open_store, write_count_store
 
 _COMMIT = "a491be02509d5ae862181a076f9e9006600dc096"
 _SUBSAMPLE = (
@@ -28,26 +24,13 @@ _SUBSAMPLE = (
 )
 # The file's git blob at that commit.
 _BLOB = "081bcbadf3997edd1402faaf3fbe5b1199ff0313"
-_DOWNLOAD_ERRORS = (
-    urllib.error.URLError,
-    TimeoutError,
-    OSError,
-    http.client.HTTPException,
-)
 
 
 def _download(folder: Path) -> Path:
-    try:
-        with urllib.request.urlopen(_SUBSAMPLE, timeout=60) as response:
-            data = response.read()
-    except _DOWNLOAD_ERRORS as error:
-        pytest.skip(f"GitHub could not serve DNA Typewriter's subsample whole: {error}")
-    blob = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()  # noqa: S324
-    if blob != _BLOB:
-        pytest.skip("GitHub served DNA Typewriter's subsample short or changed")
-    path = folder / "e3v8_subsample.cell_consensus.tsv.gz"
-    path.write_bytes(data)
-    return path
+    """Download the subsample, or skip when GitHub cannot serve it whole."""
+    return download_or_skip(
+        _SUBSAMPLE, folder / "e3v8_subsample.cell_consensus.tsv.gz", git_blob=_BLOB
+    )
 
 
 @pytest.mark.integration
@@ -77,7 +60,7 @@ def test_dna_typewriters_mouse_chains_read_as_their_slots(tmp_path) -> None:
         "uint16",
         cell_ids=cells,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     alleles = store.clones.import_alleles(
         path, cell_selection=store.snapshot_cell_selection()
     )

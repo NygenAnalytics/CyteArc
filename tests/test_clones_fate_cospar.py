@@ -18,8 +18,7 @@ import numpy as np
 import pytest
 
 from cytearc.clones import COUPLING_METHODS
-from tests.clone_helpers import open_clone_store
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import open_store, write_count_store
 
 GOLDEN = json.loads(
     (Path(__file__).parent / "cospar_0_5_0_golden.json").read_text(encoding="utf-8")
@@ -37,7 +36,7 @@ def experiment(tmp_path_factory) -> SimpleNamespace:
     n_cells = len(CELLS["ids"])
     counts = np.random.default_rng(0).poisson(2.0, size=(n_cells, 4)) + 1
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=CELLS["ids"])
-    store = open_clone_store(path)
+    store = open_store(path)
     store.cells.insert("cell_type", CELLS["cell_type"].astype(object))
     store.cells.insert("clone", CELLS["clone"].astype(object))
     store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))

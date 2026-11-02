@@ -19,7 +19,7 @@ from sklearn.metrics import adjusted_rand_score
 
 from cytearc.datastore.datastore import DataStore
 from tests.storage_helpers import write_count_store
-from tests.variant_helpers import download_or_skip
+from tests.network_helpers import download_or_skip
 from tests.variant_truth import mito_clone_truth, variant_truth, write_mgatk
 
 TESTS = Path(__file__).parent

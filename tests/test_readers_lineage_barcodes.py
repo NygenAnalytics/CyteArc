@@ -24,7 +24,7 @@ from cytearc.readers.cellranger import (
     molecule_info_library,
 )
 from cytearc.readers.lineage_barcodes import barcode_layout, iter_barcode_rows
-from tests.perturbation_helpers import traced_peak
+from tests.memory_helpers import traced_peak
 from tests.clone_truth import (
     barcode_truth,
     clone_truth,

@@ -23,7 +23,8 @@ from cytearc.perturbation.clusters import (
     profile_distances,
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
-from tests.perturbation_helpers import fixed_labels, open_store, write_screen
+from tests.perturbation_helpers import fixed_labels, write_screen
+from tests.storage_helpers import open_store
 
 
 def _planted(seed: int = 0) -> tuple[np.ndarray, np.ndarray]:

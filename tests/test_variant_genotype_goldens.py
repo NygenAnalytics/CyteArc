@@ -20,7 +20,7 @@ import pandas as pd
 import pytest
 
 from tests.storage_helpers import write_count_store
-from tests.variant_helpers import download_or_skip
+from tests.network_helpers import download_or_skip
 
 GOLDEN = json.loads((Path(__file__).parent / "giftwrap_0_6_2_golden.json").read_text())
 DATA = Path(__file__).parent / "data" / "variants"

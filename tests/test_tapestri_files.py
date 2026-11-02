@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from tests.clone_helpers import every_cell, write_cells_store
-from tests.variant_helpers import download_or_skip
+from tests.network_helpers import download_or_skip
 
 _ZENODO = (
     "https://zenodo.org/records/20818440/files/"

@@ -12,11 +12,11 @@ import pandas as pd
 import pytest
 
 from cytearc.variants import VariantSelection
-from tests.clone_helpers import every_cell, open_clone_store
-from tests.perturbation_helpers import traced_peak
+from tests.clone_helpers import every_cell
+from tests.storage_helpers import copy_store, open_store
+from tests.memory_helpers import smallest_budget, traced_peak
 from tests.variant_helpers import (
     band_budget,
-    copy_variant_store,
     expected_mito_statistics,
     mito_variant_labels,
     rcrs_store,
@@ -70,7 +70,7 @@ def template(tmp_path_factory) -> Path:
 
 @pytest.fixture
 def store(template, tmp_path):
-    return copy_variant_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 def _counts(store, *, qualities: bool = False):
@@ -428,7 +428,7 @@ def test_saved_statistics_are_reused_and_identified_by_their_thresholds(store) -
     assert other != first
     again = store.variants.informative(counts, preset="atac", invalidate_cache=True)
     assert again != first
-    reader = open_clone_store(Path(store.zarr_loc), zarr_mode="r")
+    reader = open_store(Path(store.zarr_loc), zarr_mode="r")
     assert reader.variants.informative(counts, preset="atac") in {first, again}
     with pytest.raises(PermissionError):
         reader.variants.informative(counts, preset="atac", min_vmr=0.2)
@@ -525,17 +525,15 @@ def test_scoring_holds_no_more_than_a_budget_near_the_smallest_it_accepts(
                 counts, cells=cells, min_vmr=0.0, invalidate_cache=True
             )
 
+        def scores(budget: int, call=call) -> None:
+            try:
+                call(budget)
+            except _Accepted:
+                pass
+
         # The smallest budget that scoring accepts, found without reading.
         monkeypatch.setattr(variant_operations, "_variant_bands", accepted)
-        low, high = 1, 1 << 32
-        while high - low > 1:
-            middle = (low + high) // 2
-            try:
-                call(middle)
-            except MemoryError:
-                low = middle
-            except _Accepted:
-                high = middle
+        high = smallest_budget(scores, 1 << 32)
         monkeypatch.setattr(variant_operations, "_variant_bands", bands)
         # Bands of 2,000 rows beyond it, a few cells each.
         budget = high + 200 * 2_000

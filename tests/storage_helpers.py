@@ -1,7 +1,9 @@
 """Storage helpers for tests that build CyteArc stores directly."""
 
+import shutil
 from collections.abc import Mapping, Sequence
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import zarr
@@ -9,6 +11,42 @@ from numpy.typing import DTypeLike
 
 from cytearc.storage import async_execution
 from cytearc.storage.identity import CountSummary, finalize_counts
+
+if TYPE_CHECKING:
+    from cytearc.datastore.datastore import DataStore
+
+
+def open_store(path: str | Path, **options: Any) -> "DataStore":
+    """Open a store with RNA as its default assay, on one thread by default.
+
+    No floor of features per cell applies, so every cell of a small test
+    store is measured.
+    """
+    # Imported here, so that the domain tests do not import the datastore.
+    from cytearc.datastore.datastore import DataStore
+
+    return DataStore(
+        str(path),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        **{"nthreads": 1, **options},
+    )
+
+
+def copy_store(template: Path, folder: Path, **options: Any) -> "DataStore":
+    """Copy a template store into ``folder`` and open the copy."""
+    target = folder / template.name
+    shutil.copytree(template, target)
+    return open_store(target, **options)
+
+
+def written(store: "DataStore") -> tuple[Any, ...]:
+    """Return what a call can write: run records, and every artifact of the store."""
+    return (
+        [run.run_id for run in store.pipeline.list_runs(limit=1000)],
+        store.artifacts.list(scope="datastore"),
+        *(store.artifacts.list(from_assay=assay) for assay in store.assay_names),
+    )
 
 
 def finalize_test_counts(counts: zarr.Array) -> str:

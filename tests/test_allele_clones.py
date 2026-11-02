@@ -19,11 +19,8 @@ import pytest
 
 from cytearc.datastore.datastore import DataStore
 from tests.clone_helpers import (
-    copy_clone_store,
     import_allele_truth,
     loaded_partition,
-    open_clone_store,
-    smallest_budget,
     traced_steps,
     write_truth_store,
 )
@@ -35,8 +32,8 @@ from tests.clone_truth import (
     allele_calling_truth,
     clone_truth,
 )
-from tests.perturbation_helpers import traced_peak
-from tests.storage_helpers import write_count_store
+from tests.memory_helpers import smallest_budget, traced_peak
+from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
 DATA = Path(__file__).parent / "data" / "recorders"
@@ -53,7 +50,7 @@ def template(tmp_path_factory) -> Path:
 
 @pytest.fixture
 def store(template, tmp_path) -> DataStore:
-    return copy_clone_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 def _imported(store: DataStore, folder: Path, noise=ALLELE_NOISE, **options):
@@ -67,7 +64,7 @@ def _imported(store: DataStore, folder: Path, noise=ALLELE_NOISE, **options):
 def test_each_method_recovers_the_clones_of_the_truths_rare_alleles(
     template, tmp_path, method, max_samples, max_alleles
 ) -> None:
-    store = copy_clone_store(template, tmp_path)
+    store = copy_store(template, tmp_path)
     calling, alleles = _imported(store, tmp_path)
     rules = {"max_frequency": 2e-5} if method == "graph" else {}
     clones = store.clones.allele_clones(
@@ -229,7 +226,7 @@ def _clones_of_their_own_alleles(
         "uint16",
         cell_ids=barcodes,
     )
-    store = open_clone_store(folder / "store.zarr")
+    store = open_store(folder / "store.zarr")
     paths = []
     for index, array in enumerate(arrays):
         drawn = rng.permutation(n_cells)[: n_clones * clone_size]
@@ -261,7 +258,7 @@ def test_unedited_arrays_placeholders_and_missing_sites_never_link_cells(
         "uint16",
         cell_ids=barcodes,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     # Six cells are unedited, three hold the placeholder X and three share an
     # allele; the third array is read in none of them.
     pair = _pair(
@@ -451,7 +448,7 @@ def test_a_read_only_store_reuses_saved_clones_and_refuses_new_ones(
     calling, alleles = _imported(store, tmp_path)
     options = {"method": "graph", "frequencies": calling.banks, "max_frequency": 2e-5}
     clones = store.clones.allele_clones(alleles, **options)
-    reader = open_clone_store(Path(store.zarr_loc), zarr_mode="r")
+    reader = open_store(Path(store.zarr_loc), zarr_mode="r")
     assert reader.clones.allele_clones(alleles, **options) == clones
     with pytest.raises(PermissionError, match="call_allele_clones"):
         reader.clones.allele_clones(alleles, max_alleles=3, **options)
@@ -468,7 +465,7 @@ def test_calls_follow_neither_file_order_nor_chunks_nor_threads(
         folder = tmp_path / case.replace(" ", "_")
         folder.mkdir()
         write_truth_store(folder / "store.zarr", TRUTH)
-        store = open_clone_store(
+        store = open_store(
             folder / "store.zarr", nthreads=4 if case == "4 threads" else 1
         )
         with monkeypatch.context() as patched:
@@ -684,7 +681,7 @@ def test_real_darlin_alleles_join_the_cells_that_share_a_rare_one(tmp_path) -> N
         "uint16",
         cell_ids=barcodes,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         alleles = store.clones.import_alleles(
@@ -746,7 +743,7 @@ def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(
         "uint16",
         cell_ids=barcodes,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     store.cells.insert(
         "mouse", np.asarray([f"m{index % 3}" for index in range(n_cells)], dtype=object)
     )
@@ -839,7 +836,7 @@ def test_calling_on_wide_characters_holds_no_more_than_the_smallest_budget_it_ac
         "uint16",
         cell_ids=cells,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     alleles = store.clones.import_alleles(
         path, cell_selection=store.snapshot_cell_selection()
     )
@@ -869,7 +866,7 @@ def _characters_store(tmp_path: Path, rows: list[str], header: str):
         "uint16",
         cell_ids=cells,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     alleles = store.clones.import_alleles(
         path, cell_selection=store.snapshot_cell_selection()
     )
@@ -1096,7 +1093,7 @@ def test_each_step_on_millions_of_records_holds_no_more_than_its_check_states(
         "uint16",
         cell_ids=cells,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     alleles = store.clones.import_alleles(
         path, cell_selection=store.snapshot_cell_selection()
     )
@@ -1146,7 +1143,7 @@ def test_each_step_on_wide_alleles_holds_no_more_than_its_check_states(
         "uint16",
         cell_ids=cells,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     alleles = store.clones.import_alleles(
         path,
         cell_selection=store.snapshot_cell_selection(),
@@ -1198,7 +1195,7 @@ def test_each_step_on_few_long_alleles_holds_no_more_than_its_check_states(
         "uint16",
         cell_ids=cells,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     alleles = store.clones.import_alleles(
         path,
         cell_selection=store.snapshot_cell_selection(),
@@ -1231,7 +1228,7 @@ def test_each_step_with_banks_and_groups_holds_no_more_than_its_check_states(
         "uint16",
         cell_ids=barcodes,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     store.cells.insert(
         "mouse", np.asarray([f"m{index % 7}" for index in range(n_cells)], dtype=object)
     )

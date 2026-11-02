@@ -11,8 +11,7 @@ from cytearc.repertoire.clonotypes import (
     assign_clonotype_clusters,
     assign_clonotypes,
 )
-from tests.clone_helpers import smallest_budget
-from tests.perturbation_helpers import traced_peak
+from tests.memory_helpers import smallest_budget, traced_peak
 from tests.clone_helpers import within_distance as _within
 
 
@@ -284,10 +283,10 @@ def test_clusters_do_not_depend_on_the_chunks_of_pairs(monkeypatch) -> None:
     ("receptor_arms", "dual_ir", "second_chains"),
     [
         ("VDJ", "any", False),
-        ("any", "primary_only", True),
-        ("all", "any", False),
-        ("all", "all", True),
-        ("VJ", "all", True),
+        pytest.param("any", "primary_only", True, marks=pytest.mark.slow),
+        pytest.param("all", "any", False, marks=pytest.mark.slow),
+        pytest.param("all", "all", True, marks=pytest.mark.slow),
+        pytest.param("VJ", "all", True, marks=pytest.mark.slow),
     ],
 )
 def test_linking_holds_no_more_than_the_smallest_budget_it_accepts(

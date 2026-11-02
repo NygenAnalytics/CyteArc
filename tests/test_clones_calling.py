@@ -25,8 +25,8 @@ from cytearc.clones.calling import (
     pruned_edges,
     set_clones,
 )
-from tests.clone_helpers import clone_partition, smallest_budget
-from tests.perturbation_helpers import traced_peak
+from tests.clone_helpers import clone_partition
+from tests.memory_helpers import smallest_budget, traced_peak
 
 
 def _sets(rows: list[list[int]]) -> CellSets:
@@ -933,14 +933,20 @@ def _random_sets(n_cells: int, seed: int = 0) -> CellSets:
     "options",
     [
         {"method": "sets"},
-        {"method": "jaccard", "similarity": 0.3, "inclusive": False},
-        {
-            "method": "jaccard",
-            "similarity": 0.3,
-            "inclusive": False,
-            "prune": True,
-            "doublets": True,
-        },
+        pytest.param(
+            {"method": "jaccard", "similarity": 0.3, "inclusive": False},
+            marks=pytest.mark.slow,
+        ),
+        pytest.param(
+            {
+                "method": "jaccard",
+                "similarity": 0.3,
+                "inclusive": False,
+                "prune": True,
+                "doublets": True,
+            },
+            marks=pytest.mark.slow,
+        ),
     ],
 )
 def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(options) -> None:
@@ -955,6 +961,7 @@ def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(options) -> N
     assert peak <= budget
 
 
+@pytest.mark.slow
 def test_components_of_many_edges_hold_no_more_than_the_budget_they_accept() -> None:
     # Every pair of 1,000 nodes, 499,500 edges: the components hold memory
     # for the nodes alone.
@@ -970,6 +977,7 @@ def test_components_of_many_edges_hold_no_more_than_the_budget_they_accept() -> 
     assert peak <= budget
 
 
+@pytest.mark.slow
 def test_unknown_items_and_shared_links_hold_no_more_than_their_budget() -> None:
     sets = _random_sets(20_000)
     rng = np.random.default_rng(4)
@@ -992,6 +1000,7 @@ def test_unknown_items_and_shared_links_hold_no_more_than_their_budget() -> None
         assert peak <= budget
 
 
+@pytest.mark.slow
 def test_sets_of_narrower_integers_count_their_int64_copies() -> None:
     sets = _sets([[1, 2], [1, 2], [3]] * 1_000)
     narrow = CellSets(
