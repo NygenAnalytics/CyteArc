@@ -520,7 +520,7 @@ def test_summaries_refuse_a_grouping_that_leaves_out_every_clone(source) -> None
             summary(source.clones, group_by="unlabelled")
 
 
-def test_summaries_name_missing_and_incomplete_clones(source) -> None:
+def test_summaries_name_missing_and_incomplete_clones(source, tmp_path) -> None:
     store = source.store
     early = store.snapshot_cell_selection("is_d2")
     late = store.snapshot_cell_selection("is_d4")
@@ -541,12 +541,22 @@ def test_summaries_name_missing_and_incomplete_clones(source) -> None:
         ),
         fate_bias,
     )
+
+    def export_airr(clones):
+        return store.repertoire.export_airr(clones, tmp_path / "contigs.tsv")
+
     if source.clones.kind == "clonotypes":
-        # Gene usage and junction lengths read clonotypes, and their
-        # receptors, as the summaries read them; other clones hold no chains.
+        # Gene usage, junction lengths and the AIRR export read clonotypes,
+        # and their receptors, as the summaries read them; other clones hold
+        # no chains.
         summaries += (store.repertoire.gene_usage, store.repertoire.spectratype)
+        summaries += (export_airr,)
     else:
-        for measure in (store.repertoire.gene_usage, store.repertoire.spectratype):
+        for measure in (
+            store.repertoire.gene_usage,
+            store.repertoire.spectratype,
+            export_airr,
+        ):
             with pytest.raises(ValueError, match="immune_receptors or clonotypes"):
                 measure(source.clones)
     # Each saved result, with the loader that reads it.
@@ -590,6 +600,8 @@ def test_summaries_name_missing_and_incomplete_clones(source) -> None:
             attributes["complete"] = True
     for result, load in saved.items():
         assert len(load(result).cells) > 0
+    # No refused export wrote its file.
+    assert not (tmp_path / "contigs.tsv").exists()
 
 
 def _unsaved(ref: ArtifactRef) -> ArtifactRef:

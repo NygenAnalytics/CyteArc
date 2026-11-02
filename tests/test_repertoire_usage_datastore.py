@@ -28,6 +28,7 @@ from cytearc.repertoire import SLOTS, GeneUsage, Spectratype
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
+    budget_refusals,
     CELLRANGER_HEADER,
     CLONAL_ROWS,
     airr_file,
@@ -480,32 +481,6 @@ def test_missing_incomplete_and_other_sources_are_named(tmp_path, measure) -> No
             run(clonotypes)
 
 
-def _refusals(store, run) -> list[tuple[str, int]]:
-    """Each refusal on the way from a budget of one byte to one that runs.
-
-    The budget rises to each refusal's own estimate, so each later step's
-    check shows once the earlier ones pass.
-    """
-    found: list[tuple[str, int]] = []
-    budget, full = 1, store.memoryBytes
-    try:
-        for _attempt in range(100):
-            store.memoryBytes = budget
-            try:
-                run()
-                return found
-            except MemoryError as error:
-                matched = re.search(r"^(.*) holds about (\d+) bytes", str(error))
-                assert matched is not None, str(error)
-                estimate = int(matched.group(2))
-                assert estimate > budget, str(error)
-                found.append((matched.group(1), estimate))
-                budget = estimate
-    finally:
-        store.memoryBytes = full
-    raise AssertionError("the budget did not settle")
-
-
 def _chunk(array) -> int:
     """The bytes of one chunk that reading an array holds, by the store's model."""
     return array_row_selection_parts(array)[0]
@@ -550,11 +525,11 @@ def test_each_step_is_checked_before_it_reads_or_allocates(tmp_path, source) -> 
         (store.repertoire.spectratype, "junction lengths"),
     ):
         counting = f"Counting the {what} of the chains of 8 cells"
-        assert _refusals(store, lambda measure=measure: measure(ref))[:2] == [
+        assert budget_refusals(store, lambda measure=measure: measure(ref))[:2] == [
             (counting, reading),
             (counting, chains),
         ]
-        assert _refusals(
+        assert budget_refusals(
             store, lambda measure=measure: measure(ref, group_by="sample")
         )[:2] == [(counting, reading), ("Grouping 8 cells by 1 columns", grouping)]
 
@@ -771,7 +746,7 @@ def test_the_groups_keys_are_checked_before_their_frame_is_built(tmp_path) -> No
         contigs, cell_selection=every_cell(store)
     )
     columns = [f"bit{column}" for column in range(n_columns)]
-    refusals = _refusals(
+    refusals = budget_refusals(
         store, lambda: store.repertoire.spectratype(receptors, group_by=columns)
     )
     last_grouping = max(

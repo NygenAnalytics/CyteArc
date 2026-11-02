@@ -304,11 +304,11 @@ The clone sizes that `ds.clones.import_clones` saves were checked against counts
 
 ## Data that validated the immune repertoire methods
 
-The receptor import, the clonotypes, and the gene usage and junction lengths in the [repertoire API page](https://docs.nygen.io/CyteArc/api/repertoire.html) were compared with scirpy, scRepertoire and Cell Ranger on these datasets. The repository holds none of them, and neither the tests nor the documentation download them.
+The receptor import, the clonotypes, the gene usage and junction lengths, and the AIRR export in the [repertoire API page](https://docs.nygen.io/CyteArc/api/repertoire.html) were compared with scirpy, scRepertoire and Cell Ranger, and the export checked with the AIRR Community's airr library, on these datasets. The repository holds none of them, and neither the tests nor the documentation download them.
 
 | Validation | Source | License or terms |
 | --- | --- | --- |
-| Receptor import, clonotypes, gene usage and junction lengths | "Human PBMC from a Healthy Donor, 10k cells (v2)", Single Cell Immune Profiling, the TCR and BCR contig annotations of Cell Ranger 5.0.0, and for the import also those of Cell Ranger 4.0.0, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
+| Receptor import, clonotypes, gene usage and junction lengths, AIRR export | "Human PBMC from a Healthy Donor, 10k cells (v2)", Single Cell Immune Profiling, the TCR and BCR contig annotations of Cell Ranger 5.0.0, and for the import also those of Cell Ranger 4.0.0, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
 | Receptor import and clonotypes | "CD8+ T cells of Healthy Donor 1", Single Cell Immune Profiling, the contig annotations of Cell Ranger 3.0.2, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
 
 ## Optional packages that CyteArc does not install

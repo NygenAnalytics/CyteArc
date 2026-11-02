@@ -208,8 +208,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # clones.coupling, clones.fate_bias and clones.load_fate_bias, then
     # repertoire.import_receptors and repertoire.load_receptors, then
     # repertoire.clonotypes and repertoire.load_clonotypes, then
-    # repertoire.gene_usage and repertoire.spectratype.
-    assert len(_NAMESPACE_METHODS) == 133
+    # repertoire.gene_usage and repertoire.spectratype, then
+    # repertoire.export_airr.
+    assert len(_NAMESPACE_METHODS) == 134
     assert {
         "import_receptors",
         "load_receptors",
@@ -217,6 +218,7 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         "load_clonotypes",
         "gene_usage",
         "spectratype",
+        "export_airr",
     } == {
         name
         for namespace, _, name, _ in _NAMESPACE_METHODS

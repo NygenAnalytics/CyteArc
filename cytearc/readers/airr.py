@@ -3,12 +3,15 @@
 The AIRR Community's Rearrangement schema (Vander Heiden et al. 2018) holds one
 row per rearrangement, here one contig of a cell's receptor chain, in a
 tab-separated file with a header of field names. True and false are written
-``T`` and ``F`` and a missing value is empty. A single-cell file joins each row
-to its cell through ``cell_id``. Cell Ranger writes such a file,
-``airr_rearrangement.tsv``, and other pipelines that follow the schema read the
-same when they hold the fields that an import needs.
+``T`` and ``F`` and a missing value is empty. Values are not quoted, so a
+quote is read as part of its value, also where a file's writer quoted it, as
+the airr library's writer quotes a value that holds a double quote. A
+single-cell file joins each row to its cell through ``cell_id``. Cell Ranger writes such a file,
+``airr_rearrangement.tsv``, and other pipelines that follow the schema read
+the same when they hold the fields that an import needs.
 """
 
+import csv
 import os
 from collections.abc import Iterator
 
@@ -77,10 +80,11 @@ def iter_airr_rearrangements(
 ) -> Iterator[tuple[int, pd.DataFrame]]:
     """Parse an AIRR Rearrangement file in chunks of rows.
 
-    A plain or gzip-compressed file is read. Fields outside ``FIELDS`` are not
-    kept, and blank lines hold no rearrangement. A file without ``locus`` has
-    each contig's locus inferred from its gene calls
-    (:func:`cytearc.repertoire.chains.infer_loci`).
+    A plain or gzip-compressed file is read, without quoting: the AIRR file
+    format quotes no value, so quotes are read as part of their values. Fields
+    outside ``FIELDS`` are not kept, and blank lines hold no rearrangement. A
+    file without ``locus`` has each contig's locus inferred from its gene
+    calls (:func:`cytearc.repertoire.chains.infer_loci`).
 
     Args:
         path: The AIRR Rearrangement file.
@@ -124,11 +128,14 @@ def iter_airr_rearrangements(
         )
     kept = frozenset({"cell_id", *FIELDS})
     line = 2
+    # The AIRR file format quotes no value, so a quote is part of its value,
+    # also at the start of one.
     reader = pd.read_csv(
         path,
         sep="\t",
         usecols=lambda name: str(name).strip() in kept,
         chunksize=max(1, int(chunk_rows)),
+        quoting=csv.QUOTE_NONE,
         **read_options(path),
     )
     with reader:

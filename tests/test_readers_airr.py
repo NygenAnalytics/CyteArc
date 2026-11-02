@@ -98,6 +98,37 @@ def test_airr_rows_are_parsed_by_field_kind(tmp_path) -> None:
     assert chunk["sequence"].tolist() == ["ACGTAC", None, "GGG"]
 
 
+@pytest.mark.parametrize("compress", [False, True])
+def test_airr_values_are_read_without_quoting(tmp_path, compress) -> None:
+    # The AIRR file format quotes no value, so a double quote at the start of a
+    # value, within it or around it, and ', @ and #, are part of the value; a
+    # quote that opened a quoted field would run on into the next rows.
+    rows = [
+        'c1\tc1_1\tTRB\tTRBV1\tTRBJ1\t"TRBC1\tTGTGCC\tCASS\tT\t4\t100\t0.98\tACGT\tx',
+        "c1\tc1_2\tTRA\tTRAV1'x\tTRAJ1\t\tTGTGCT\tCAVF\tF\t\t12\t\t\ty",
+        'c2\tc2_1\tIGH\tIGHV3"30\tIGHJ4\t"IGHM"\tTGTGCG\tCARW\tT\t7\t70\t0.91\tGGG\tz',
+        'c3\t@c3#\tIGK\t""\tIGKJ1\tIGKC\tTGTCAG\tCQQY\tT\t2\t20\t1\tTT\t"',
+    ]
+    path = _write(tmp_path / "quotes.tsv", [AIRR_HEADER, *rows], compress)
+    ((_first_line, chunk),) = iter_airr_rearrangements(path)
+    assert chunk["sequence_id"].tolist() == ["c1_1", "c1_2", "c2_1", "@c3#"]
+    assert chunk["c_call"].tolist() == ['"TRBC1', None, '"IGHM"', "IGKC"]
+    assert chunk["v_call"].tolist() == ["TRBV1", "TRAV1'x", 'IGHV3"30', '""']
+    assert chunk["umi_count"].tolist() == [4, -1, 7, 2]
+
+
+def test_cellranger_values_keep_their_csv_quoting(tmp_path) -> None:
+    # Cell Ranger writes CSV, whose quoted fields may hold commas and doubled
+    # quotes, so its files keep their quoting.
+    row = CELLRANGER_ROWS[0].replace("TRAV23/DV6", '"TRAV23,DV6"')
+    row = row.replace("clonotype1_consensus_2", '"clonotype ""1"""')
+    path = _write(tmp_path / "contigs.csv", [CELLRANGER_HEADER, row])
+    ((_first_line, chunk),) = iter_vdj_contigs(path)
+    assert chunk["v_call"].tolist() == ["TRAV23,DV6"]
+    assert chunk["raw_consensus_id"].tolist() == ['clonotype "1"']
+    assert chunk["umi_count"].tolist() == [11]
+
+
 def test_airr_files_are_read_in_chunks_with_their_lines(tmp_path) -> None:
     path = _write(tmp_path / "rearrangements.tsv.gz", [AIRR_HEADER, *AIRR_ROWS], True)
     chunks = list(iter_airr_rearrangements(path, chunk_rows=2))

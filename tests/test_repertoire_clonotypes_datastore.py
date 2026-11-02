@@ -32,6 +32,7 @@ from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import logger
 from tests.clone_helpers import (
+    clonal_receptors,
     CELLRANGER_HEADER,
     CLONAL_ROWS,
     N_RECEPTOR_CELLS,
@@ -73,15 +74,6 @@ def _clonal_store_copy(clonal_template, tmp_path) -> None:
     shutil.copytree(clonal_template, tmp_path / "store.zarr")
 
 
-def _receptors(tmp_path: Path, rows: list[str] = CLONAL_ROWS):
-    store = receptor_store(tmp_path)
-    path = write_lines(tmp_path, "clonal.csv", CELLRANGER_HEADER, rows)
-    receptors = store.repertoire.import_receptors(
-        path, cell_selection=store.snapshot_cell_selection()
-    )
-    return store, receptors
-
-
 def _members(table: Clonotypes) -> dict[str, list[str]]:
     cells = table.cells.dropna(subset=["clonotype"])
     return {
@@ -91,7 +83,7 @@ def _members(table: Clonotypes) -> dict[str, list[str]]:
 
 
 def test_clonotypes_follow_identical_chains(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
 
     assert ref.kind == "clonotypes" and ref.scope == "datastore"
@@ -186,14 +178,14 @@ def test_clonotypes_follow_identical_chains(tmp_path) -> None:
     ],
 )
 def test_clonotype_options_change_the_links(tmp_path, options, expected) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors, **options)
     partition = sorted(_members(store.repertoire.load_clonotypes(ref)).values())
     assert partition == sorted(expected)
 
 
 def test_within_columns_keep_donors_apart(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     store.cells.insert(
         "donor", np.asarray(["d1", "d2", "d1", "d1", "d1", "d1", "d1", "d1"])
     )
@@ -212,7 +204,7 @@ def test_within_columns_keep_donors_apart(tmp_path) -> None:
 
 
 def test_within_columns_need_a_label_for_every_cell_with_a_receptor(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     missing = np.zeros(N_CELLS, dtype=bool)
     missing[7] = True  # cell7 has no receptor, so it needs no label
     insert_nullable_cell_column(store, "donor", np.asarray(["d1"] * N_CELLS), missing)
@@ -229,7 +221,7 @@ def test_receptor_types_need_not_keep_clonotypes_apart(tmp_path) -> None:
         "cell7,true,cell7_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,30,3,ct9,ct9_1",
         "cell7,true,cell7_contig_2,true,500,IGH,IGHV1,,IGHJ1,IGHM,true,true,CARW,TGTGCGAGATGG,20,2,ct9,ct9_2",
     ]
-    store, receptors = _receptors(tmp_path, rows)
+    store, receptors = clonal_receptors(tmp_path, rows)
     apart = store.repertoire.load_clonotypes(
         store.repertoire.clonotypes(receptors, receptor_arms="VDJ")
     )
@@ -246,7 +238,7 @@ def test_receptor_types_need_not_keep_clonotypes_apart(tmp_path) -> None:
 
 
 def test_clonotypes_are_reused_and_selected_like_labels(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     first = store.repertoire.clonotypes(receptors)
     assert store.repertoire.clonotypes(receptors) == first
     assert store.repertoire.clonotypes(receptors, invalidate_cache=True) != first
@@ -296,14 +288,14 @@ def test_nucleotide_clonotypes_need_nucleotide_junctions(tmp_path) -> None:
     ],
 )
 def test_clonotype_arguments_are_checked(tmp_path, kwargs, error, message) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     store.cells.insert("donor", np.asarray(["d1"] * N_CELLS))
     with pytest.raises(error, match=message):
         store.repertoire.clonotypes(receptors, **kwargs)
 
 
 def test_clonotypes_refuse_other_artifacts(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     with pytest.raises(ValueError, match="immune_receptors artifact"):
         store.repertoire.clonotypes(store.snapshot_cell_selection())
     with pytest.raises(TypeError, match="receptors must be an ArtifactRef"):
@@ -315,7 +307,7 @@ def test_clonotypes_refuse_other_artifacts(tmp_path) -> None:
 
 
 def test_a_read_only_store_refuses_new_clonotypes(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     saved = store.repertoire.clonotypes(receptors)
     reader = receptor_store(tmp_path, zarr_mode="r")
     assert reader.repertoire.clonotypes(receptors) == saved
@@ -326,7 +318,7 @@ def test_a_read_only_store_refuses_new_clonotypes(tmp_path) -> None:
 def test_clone_abundance_counts_the_clonotypes_of_each_receptor_type(
     tmp_path,
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     result = store.plots.clone_abundance(ref, top=3, show=False)
     try:
@@ -371,7 +363,7 @@ def test_clone_abundance_counts_the_clonotypes_of_each_receptor_type(
 def test_clone_abundance_splits_clonotypes_by_group_and_receptor_type(
     tmp_path,
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     store.cells.insert(
         "sample", np.asarray(["s1", "s2", "s1", "s2", "s1", "s1", "s2", "s1"])
@@ -413,7 +405,7 @@ def test_clonotypes_without_a_beta_chain_are_named_by_their_alpha_chain(
     rows = CLONAL_ROWS + [
         "cell7,true,cell7_contig_1,true,500,TRA,TRAV9,,TRAJ9,TRAC,true,true,CAVZ,TGTGCTGTGTAA,10,1,ct9,ct9_1",
     ]
-    store, receptors = _receptors(tmp_path, rows)
+    store, receptors = clonal_receptors(tmp_path, rows)
     ref = store.repertoire.clonotypes(receptors)
     result = plotting.clone_abundance(store, ref, show=False)
     try:
@@ -436,7 +428,7 @@ def test_clonotypes_without_a_beta_chain_are_named_by_their_alpha_chain(
 def test_figure_labels_name_clonotypes_by_their_representatives_junction(
     tmp_path,
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     # In any order and repeated; clonotype_4 is cell2's, of alpha CAVA and
     # beta CASSA. An ID given twice is one clonotype, so CASSA names one.
@@ -475,7 +467,7 @@ def test_figure_labels_name_clonotypes_by_their_representatives_junction(
 
 
 def test_clonotypes_of_one_arm_are_named_by_the_chains_they_share(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ids = ["clonotype_1", "clonotype_2", "clonotype_3"]
     # By alpha and light chains: cell0, cell1 and cell4 share CAVA, the B
     # cells CQQY, and cell2 has CAVA from other nucleotides; their beta and
@@ -501,7 +493,7 @@ def test_clonotypes_of_one_arm_are_named_by_the_chains_they_share(tmp_path) -> N
 def test_figure_labels_read_the_clonotype_ids_within_the_budget(
     tmp_path, monkeypatch
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     # Four IDs of 11 characters, read as fixed-width text of 4 bytes per
     # character: 176 bytes, three times with the buffers of the read, 2 bytes
@@ -531,7 +523,7 @@ def test_figure_labels_read_the_clonotype_ids_within_the_budget(
 def test_a_representative_without_a_junction_is_refused(tmp_path) -> None:
     from cytearc.storage.artifacts import artifact_group
 
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     # Point clonotype_1's representative at cell7, which has no receptor.
     representatives = artifact_group(store.zw, ref)["representatives"]
@@ -541,7 +533,7 @@ def test_a_representative_without_a_junction_is_refused(tmp_path) -> None:
 
 
 def test_figure_labels_name_missing_and_incomplete_clonotypes(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     missing = ArtifactRef(
         scope="datastore", kind="clonotypes", artifact_id="0" * 64, assay=None
@@ -572,7 +564,7 @@ def test_figure_labels_name_missing_and_incomplete_clonotypes(tmp_path) -> None:
 
 
 def test_clone_abundance_needs_a_store_that_labels_clones(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     loader = SimpleNamespace(
         clones=SimpleNamespace(load_clones=store.clones.load_clones)
@@ -611,7 +603,7 @@ def _legend(result) -> list[str]:
 
 
 def test_the_tracking_plot_labels_clonotypes_by_their_junctions(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     store.cells.insert("sample", TRACKED_SAMPLES)
     ref = store.repertoire.clonotypes(receptors)
     # The largest clonotype of each sample's T cells is clonotype_1, which in
@@ -638,7 +630,7 @@ def test_the_tracking_plot_labels_clonotypes_by_their_junctions(tmp_path) -> Non
 def test_the_tracking_plot_numbers_clonotypes_that_share_a_junction(
     tmp_path,
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     store.cells.insert("sample", TRACKED_SAMPLES)
     ref = store.repertoire.clonotypes(receptors)
     # The two largest of each group add cell2's clonotype_4 in s1's T cells
@@ -695,7 +687,7 @@ def test_the_tracking_plot_numbers_clonotypes_that_share_a_junction(
 
 
 def test_figures_name_clonotype_clusters_as_their_definition_does(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     store.cells.insert("sample", TRACKED_SAMPLES)
     identical = store.repertoire.clonotypes(receptors)
     # Within three substitutions cell2's alpha chain joins it to clonotype_1,
@@ -749,7 +741,7 @@ def test_figures_name_clonotype_clusters_as_their_definition_does(tmp_path) -> N
 
 
 def test_clonotypes_load_and_export_as_clones(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     loaded = store.clones.load_clones(ref)
     assert loaded.source == "define_clonotypes"
@@ -799,7 +791,7 @@ def test_clonotypes_load_and_export_as_clones(tmp_path) -> None:
 
 
 def test_clone_summaries_measure_each_receptor_type_apart(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     indices = store.clones.diversity(ref).indices
     assert indices[
@@ -835,7 +827,7 @@ def test_summaries_keep_receptor_types_apart_within_one_clonotype(tmp_path) -> N
         "cell7,true,cell7_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,30,3,ct9,ct9_1",
         "cell7,true,cell7_contig_2,true,500,IGH,IGHV1,,IGHJ1,IGHM,true,true,CARW,TGTGCGAGATGG,20,2,ct9,ct9_2",
     ]
-    store, receptors = _receptors(tmp_path, rows)
+    store, receptors = clonal_receptors(tmp_path, rows)
     together = store.repertoire.clonotypes(
         receptors, receptor_arms="VDJ", within_receptor_type=False
     )
@@ -907,7 +899,7 @@ def test_summaries_keep_receptor_types_apart_within_one_clonotype(tmp_path) -> N
 
 
 def test_summaries_of_clonotypes_follow_a_cell_selection(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     # cell0, cell3, cell5 and cell7.
     store.cells.insert("chosen", np.isin(np.arange(N_CELLS), [0, 3, 5, 7]))
@@ -927,7 +919,7 @@ def test_summaries_of_clonotypes_follow_a_cell_selection(tmp_path) -> None:
 
 
 def test_group_by_may_not_name_the_receptor_type_again(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     store.cells.insert("receptor_type", np.asarray(["x"] * N_CELLS))
     with pytest.raises(ValueError, match="'receptor_type', whose labels the artifact"):
@@ -960,7 +952,7 @@ def _assert_stored_widths(store, receptors, ref) -> None:
 def test_defining_clonotypes_is_checked_against_the_memory_budget(
     tmp_path, monkeypatch
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     # Reading the receptor types takes each cell's 20 stored bytes and 100
     # more while they are coded.
     monkeypatch.setattr(store, "memoryBytes", 8 * 120 - 1)
@@ -982,7 +974,7 @@ def test_defining_clonotypes_is_checked_against_the_memory_budget(
 def test_grouping_by_within_columns_is_checked_against_the_memory_budget(
     tmp_path, monkeypatch
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     store.cells.insert("donor", np.asarray(["d1", "d2"] * 4))
     # The definition alone fits, but grouping the cells by donor reads a chunk
     # of 100,000 rows of the column, which does not.
@@ -996,7 +988,7 @@ def test_grouping_by_within_columns_is_checked_against_the_memory_budget(
 def test_reading_clonotypes_as_clones_counts_their_receptor_types(
     tmp_path, monkeypatch
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     _assert_stored_widths(store, receptors, ref)
     for with_ids, needed in (
@@ -1018,7 +1010,7 @@ def test_reading_clonotypes_as_clones_counts_their_receptor_types(
 def test_clonotypes_load_and_export_as_clones_within_the_memory_budget(
     tmp_path, monkeypatch
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     # Beside 250 bytes per cell for the tables, or 200 for the file, both read
     # the clonotypes and count their labels and the cells' IDs as text, the
@@ -1044,7 +1036,7 @@ def test_clonotypes_load_and_export_as_clones_within_the_memory_budget(
 def test_expansion_of_clonotypes_counts_each_cells_receptor_type(
     tmp_path, monkeypatch
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     # Measuring takes 300 bytes per cell and 8 for its receptor type, and
     # 2,000 for each group, the T cells and the B cells.
@@ -1059,7 +1051,7 @@ def test_expansion_of_clonotypes_counts_each_cells_receptor_type(
 def test_loaded_expansion_of_other_cells_matches_their_receptor_types(
     tmp_path, monkeypatch
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     store.cells.insert("first_half", np.arange(N_CELLS) < 4)
     measured = store.snapshot_cell_selection("first_half")
@@ -1099,7 +1091,7 @@ def test_loaded_expansion_of_other_cells_matches_their_receptor_types(
 def test_loaded_clonotypes_are_checked_against_the_memory_budget(
     tmp_path, monkeypatch
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     store.cells.insert("donor", np.asarray(["d1", "d2"] * 4))
     receptor_group = artifact_group(store.zw, receptors)
     # The four representative fields store these values and packed bytes.
@@ -1140,7 +1132,7 @@ def test_loaded_clonotypes_are_checked_against_the_memory_budget(
 def test_loaded_chains_do_not_depend_on_the_decoding_batch(
     tmp_path, monkeypatch
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     whole = store.repertoire.load_clonotypes(ref).clonotypes
     assert whole.set_index("clonotype").loc["clonotype_1", "VDJ_1_junction_aa"] == (
@@ -1154,7 +1146,7 @@ def test_loaded_chains_do_not_depend_on_the_decoding_batch(
 
 
 def test_every_chain_column_holds_text(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     table = store.repertoire.load_clonotypes(
         store.repertoire.clonotypes(receptors)
     ).clonotypes
@@ -1219,7 +1211,7 @@ def test_receptor_types_and_within_labels_never_share_a_group(tmp_path) -> None:
         "cell1,true,cell1_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,80,8,ct2,ct2_1",
         "cell1,true,cell1_contig_2,true,500,IGK,IGKV1,,IGKJ1,IGKC,true,true,CQQY,TGTCAGCAGTAT,400,15,ct2,ct2_2",
     ]
-    store, receptors = _receptors(tmp_path, rows)
+    store, receptors = clonal_receptors(tmp_path, rows)
     store.cells.insert("donor", np.asarray(["d2"] + ["d1"] * (N_CELLS - 1)))
     types = store.artifacts.load_values(receptors).values
     assert list(types[:2]) == ["TCR", "ambiguous"]
@@ -1248,7 +1240,7 @@ def test_receptor_types_and_within_labels_never_share_a_group(tmp_path) -> None:
 def test_within_labels_are_an_array_that_opening_the_artifact_never_reads(
     tmp_path,
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     store.cells.insert(
         "donor", np.asarray(["d1", "d2", "d1", "d1", "d1", "d1", "d1", "d1"])
     )
@@ -1275,7 +1267,7 @@ def test_within_labels_are_an_array_that_opening_the_artifact_never_reads(
 
 
 def test_renamed_within_labels_give_other_clonotypes(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     donors = np.asarray(["d1", "d2", "d1", "d1", "d1", "d1", "d1", "d1"])
     store.cells.insert("donor", donors)
     first = store.repertoire.clonotypes(receptors, within="donor")
@@ -1293,7 +1285,7 @@ def test_renamed_within_labels_give_other_clonotypes(tmp_path) -> None:
 
 
 def test_within_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     for column in ("clone_size", "VDJ_1_junction_aa", "VJ_2_j_call"):
         store.cells.insert(column, np.arange(N_CELLS).astype(str))
         with pytest.raises(ValueError, match=f"'{column}', which is also a column"):
@@ -1301,7 +1293,7 @@ def test_within_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:
 
 
 def test_regrouped_expansion_plot_keeps_receptor_types_apart(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     store.cells.insert(
         "sample", np.asarray(["s1", "s2", "s1", "s2", "s1", "s1", "s2", "s1"])
     )
@@ -1327,7 +1319,7 @@ def test_regrouped_expansion_plot_keeps_receptor_types_apart(tmp_path) -> None:
 
 
 def test_clonotype_clusters_need_room_for_their_search(tmp_path, monkeypatch) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     monkeypatch.setattr(store, "memoryBytes", 1_000_000)
     assert store.repertoire.clonotypes(receptors).kind == "clonotypes"
     with pytest.raises(MemoryError, match="Raise mem_budget"):
@@ -1337,7 +1329,7 @@ def test_clonotype_clusters_need_room_for_their_search(tmp_path, monkeypatch) ->
 def test_clonotype_clusters_get_what_the_budget_leaves_for_their_pairs(
     tmp_path, monkeypatch
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     # Within three substitutions, cell0's alpha junction pairs with cell2's
     # (3 substitutions) and with cell4's second one (2): two pairs of chains
     # of 32 bytes each beyond the 1,000 bytes per cell, the stored junction
@@ -1364,7 +1356,7 @@ def test_clonotype_clusters_get_what_the_budget_leaves_for_their_pairs(
 
 
 def test_clonotype_clusters_link_similar_junctions(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     # cell2's alpha junction differs from cell0's in 3 of 12 nucleotides.
     identical = store.repertoire.clonotypes(receptors)
     near = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
@@ -1403,7 +1395,7 @@ def test_clonotype_clusters_link_similar_junctions(tmp_path) -> None:
 def test_clusters_ignore_the_junctions_of_contigs_that_are_not_chains(
     tmp_path,
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     clusters = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
     expected = _members(store.repertoire.load_clonotypes(clusters))
     # Non-productive alpha contigs of cell3 and of cell7, which has no chain,
@@ -1416,14 +1408,14 @@ def test_clusters_ignore_the_junctions_of_contigs_that_are_not_chains(
     other = tmp_path / "other"
     other.mkdir()
     shutil.copytree(tmp_path / "store.zarr", other / "store.zarr")
-    store, receptors = _receptors(other, rows)
+    store, receptors = clonal_receptors(other, rows)
     assert len(store.repertoire.load_receptors(receptors).chains) == 16
     near = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
     assert _members(store.repertoire.load_clonotypes(near)) == expected
 
 
 def test_decoded_values_read_only_the_codes_given(tmp_path, monkeypatch) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     group = artifact_group(store.zw, receptors)
     every = repertoire_operations._stored_text(group, "junction").categories
     chunked: list[str] = []
@@ -1468,7 +1460,7 @@ def test_decoded_values_read_only_the_codes_given(tmp_path, monkeypatch) -> None
 
 
 def test_the_log_names_clonotype_clusters_as_such(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     messages: list[str] = []
     sink = logger.add(
         lambda message: messages.append(message.record["message"]), level="INFO"
@@ -1510,13 +1502,13 @@ def test_the_log_names_clonotype_clusters_as_such(tmp_path) -> None:
 def test_clonotype_cluster_options_are_checked(
     tmp_path, kwargs, error, message
 ) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     with pytest.raises(error, match=message):
         store.repertoire.clonotypes(receptors, **kwargs)
 
 
 def test_the_bounds_of_the_cutoff_are_accepted(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path)
+    store, receptors = clonal_receptors(tmp_path)
     # Identity records a cutoff of 0, so a cutoff of 0 is the same request.
     identity = store.repertoire.clonotypes(receptors)
     assert store.repertoire.clonotypes(receptors, cutoff=0) == identity

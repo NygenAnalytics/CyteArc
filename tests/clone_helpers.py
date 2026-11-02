@@ -1,6 +1,7 @@
 """Stores and checks shared by the tests of clones."""
 
 import math
+import re
 import shutil
 from collections.abc import Callable, Mapping, Sequence
 from fractions import Fraction
@@ -349,6 +350,18 @@ def write_lines(folder: Path, name: str, header: str, rows: list[str]) -> Path:
     return path
 
 
+def clonal_receptors(
+    folder: Path, rows: list[str] = CLONAL_ROWS
+) -> tuple["DataStore", "ArtifactRef"]:
+    """The store of cells cell0 to cell7 and the receptors of Cell Ranger rows."""
+    store = receptor_store(folder)
+    path = write_lines(folder, "clonal.csv", CELLRANGER_HEADER, rows)
+    receptors = store.repertoire.import_receptors(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    return store, receptors
+
+
 def tcr_file(folder: Path, rows: list[str] = TCR_ROWS, name: str = "tcr.csv") -> Path:
     """Cell Ranger's contig annotations of the T cell rows."""
     return write_lines(folder, name, CELLRANGER_HEADER, rows)
@@ -379,6 +392,34 @@ def levenshtein_distance(first: str, second: str) -> int:
             )
         previous = current
     return previous[-1]
+
+
+def budget_refusals(
+    store: "DataStore", run: Callable[[], object]
+) -> list[tuple[str, int]]:
+    """Each refusal on the way from a budget of one byte to one that runs.
+
+    The budget rises to each refusal's own estimate, so each later step's
+    check shows once the earlier ones pass.
+    """
+    found: list[tuple[str, int]] = []
+    budget, full = 1, store.memoryBytes
+    try:
+        for _attempt in range(100):
+            store.memoryBytes = budget
+            try:
+                run()
+                return found
+            except MemoryError as error:
+                matched = re.search(r"^(.*) holds about (\d+) bytes", str(error))
+                assert matched is not None, str(error)
+                estimate = int(matched.group(2))
+                assert estimate > budget, str(error)
+                found.append((matched.group(1), estimate))
+                budget = estimate
+    finally:
+        store.memoryBytes = full
+    raise AssertionError("the budget did not settle")
 
 
 def smallest_budget(call: Callable[[int], object], high: int) -> int:
