@@ -620,6 +620,48 @@ def test_a_budget_that_only_writing_the_clones_exceeds_is_refused_before_calling
     assert entered == []
 
 
+def test_writing_the_clones_counts_a_buffer_for_each_write_zarr_runs_at_once(
+    tmp_path, monkeypatch
+) -> None:
+    # Zarr writes each chunk and each array's metadata through a buffered
+    # file, as many at once as its async concurrency allows, and Python 3.14
+    # made each buffer 128 KiB, where it was the file system's block. Both
+    # checks of writing the clones count them, and no other check does.
+    import io
+
+    import zarr
+
+    import cytearc.datastore._operations.recorder_alleles as operations
+
+    store, alleles = _clones_of_their_own_alleles(tmp_path, 2_000, 100, 2, ("CA",))
+    monkeypatch.setattr(store, "memoryBytes", 1 << 34)
+    check = operations._check_calling
+
+    def stated(concurrency: int) -> list[tuple[str, int]]:
+        found: list[tuple[str, int]] = []
+
+        def recorded(needed: int, budget: int, what: str) -> None:
+            found.append((what, needed))
+            check(needed, budget, what)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(operations, "_check_calling", recorded)
+            with zarr.config.set({"async.concurrency": concurrency}):
+                store.clones.allele_clones(
+                    alleles, method="graph", max_frequency=0.5, invalidate_cache=True
+                )
+        return found
+
+    ten, twenty = stated(10), stated(20)
+    assert [what for what, _ in ten] == [what for what, _ in twenty]
+    grown = {what: more - fewer for (what, fewer), (_, more) in zip(ten, twenty)}
+    assert grown == {
+        what: 10 * io.DEFAULT_BUFFER_SIZE if what.endswith("as they are written") else 0
+        for what in grown
+    }
+    assert sum(what.endswith("as they are written") for what in grown) == 2
+
+
 def test_real_darlin_alleles_join_the_cells_that_share_a_rare_one(tmp_path) -> None:
     """DARLIN's skull library on three arrays, its frequencies from its cells."""
     lines = {}

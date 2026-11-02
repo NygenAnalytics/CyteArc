@@ -196,7 +196,7 @@ _KEY_BLOCK = 1 << 16
 # for a cell of a clone, its clone's code and label or size as they are
 # gathered, 24 as traced; for each clone, its label as a Python string and
 # its size; each label is also written as fixed-width text of four bytes per
-# character.
+# character; and Zarr's writes hold their file buffers.
 _WRITE_CELL_BYTES = 64
 _WRITE_CLONE_BYTES = 120
 
@@ -1189,7 +1189,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         # Writing the clones is checked first, as if every cell were a clone
         # of its own, the most clones there can be.
         width = len(f"clone_{n_cells}")
-        writing = n_cells * (_WRITE_CELL_BYTES + _WRITE_CLONE_BYTES + 8 * width)
+        writing = (
+            n_cells * (_WRITE_CELL_BYTES + _WRITE_CLONE_BYTES + 8 * width)
+            + zarr_write_buffer_bytes()
+        )
         held = bank_bytes + _CALL_CELL_BYTES * n_cells
         _check_calling(
             held + writing + _FIXED_BYTES,
@@ -1252,6 +1255,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             _CALL_CELL_BYTES * n_cells
             + n_cells * (_WRITE_CELL_BYTES + 8 * width)
             + _WRITE_CLONE_BYTES * called.n_clones
+            + zarr_write_buffer_bytes()
             + _FIXED_BYTES,
             self.memoryBytes,
             f"the {called.n_clones} clones of {n_cells} cells as they are written",
