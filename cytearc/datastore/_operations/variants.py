@@ -245,6 +245,9 @@ _GENOTYPE_CLONE_ATTRIBUTES = (
 
 # The formats whose files hold a chosen subset of variants.
 _VARIANT_CHOICE_FORMATS = ("tapestri", "dabseq")
+# The formats whose calls carry a quality, the genotype quality GQ, which
+# min_quality tests; the other formats' calls carry none.
+_CALL_QUALITY_FORMATS = ("tapestri", "dabseq")
 
 
 def _variant_names(variants: Any) -> tuple[str, ...]:
@@ -2381,7 +2384,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
           their quality and depth: a call whose quality, such as Tapestri's
           ``GQ``, is below ``min_quality`` or missing, or whose cell's depth
           at the site, or at the deepest of its channels, is below
-          ``min_depth``, is ``filtered``.
+          ``min_depth``, is ``filtered``. Only Tapestri's and DAb-seq's calls
+          carry a quality, so counts of other formats refuse ``min_quality``,
+          and a genotyped site at which no cell holds depth, as in a GoT
+          table of calls alone, refuses ``min_depth``.
         - ``"threshold"`` calls each cell from its UMIs of the site's wild type
           and alternative by the rules given, since GoT studies apply
           different ones: ``min_mutant_umis=1`` calls a cell
@@ -2428,9 +2434,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 read up; a UMI takes the value of the most reads given that
                 it reaches, and its reads are its entry's reads per UMI.
             min_quality: For ``"source"``, the quality that an adopted call
-                needs, or None to adopt calls whatever their quality.
+                needs, such as Tapestri's ``GQ``, or None to adopt calls
+                whatever their quality.
             min_depth: For ``"source"``, the depth at the site that an adopted
                 call needs, or None to adopt calls whatever their depth.
+                Every genotyped site needs depth in some cell.
             invalidate_cache: Call the genotypes again instead of reusing them.
 
         Returns:
@@ -2443,7 +2451,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``counts`` is not a ``variant_counts`` artifact,
                 the method is unknown, a rule is given to a method that does
-                not use it or is out of range, a named site is unknown or
+                not use it or is out of range, ``min_quality`` is given for
+                counts whose calls carry no quality or ``min_depth`` for a site
+                at which no cell holds depth, a named site is unknown or
                 cannot be called by the method, ``alleles`` names an unknown
                 site, a source's call label is unknown, or no site can be
                 genotyped.
@@ -2478,6 +2488,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "method='threshold' compares the reads of the wild type and the "
                 "alternative, and Tapestri's files hold no reads of the reference; "
                 "use method='source' to adopt its NGT calls"
+            )
+        if (
+            rules.min_quality is not None
+            and str(group.attrs["format"]) not in _CALL_QUALITY_FORMATS
+        ):
+            raise ValueError(
+                "min_quality tests call_quality, which these counts cannot give: "
+                f"their {str(group.attrs['format'])!r} calls carry no quality, "
+                "while Tapestri's and DAb-seq's carry their GQ; leave min_quality out"
             )
         table = _stored_sites(group)
         explicit = sites is not None
@@ -2516,6 +2535,17 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     "with alleles"
                 )
             )
+        if rules.min_depth is not None:
+            unread = _sites_without_depth(group, table, genotyped)
+            if unread:
+                raise ValueError(
+                    "min_depth tests each cell's depth at the site, which these counts "
+                    f"cannot give at {len(unread)} genotyped "
+                    f"{'site' if len(unread) == 1 else 'sites'}, such as "
+                    f"{unread[0]!r}: no cell holds depth there or at the site's "
+                    "channels, as when a source wrote calls alone; leave min_depth "
+                    "out or name other sites"
+                )
         cell_selection = inspect_artifact(self.zw, counts).input_ref("cell_selection")
         arguments = VariantGenotypeArguments(
             cell_selection=cell_selection,
@@ -3371,6 +3401,30 @@ def _unit_ranks(
         order = np.lexsort((ranks[~single], genotyped[~single]))
         site_units = (offsets, ranks[~single][order])
     return site_rank, allele_rank, site_units, int(per_site.max(initial=1))
+
+
+def _sites_without_depth(
+    group: zarr.Group, table: SiteTable, sites: np.ndarray
+) -> list[str]:
+    """The labels of the sites among ``sites`` at which no cell holds depth.
+
+    A named target's channels, such as GoT-Multi's ``BCOR (geneseq)``, read
+    its evidence, so depth at a channel covers its target.
+    """
+    read = _read(group, "site_cells").astype(np.int64) > 0
+    names = [str(name) for name in table.site_name]
+    channels = [str(channel) for channel in table.site_channel]
+    read_targets = {
+        name
+        for name, channel, covered in zip(names, channels, read.tolist(), strict=True)
+        if channel and covered
+    }
+    labels = table.labels()
+    return [
+        str(labels[site])
+        for site in np.unique(np.asarray(sites, dtype=np.int64)).tolist()
+        if not read[site] and not (names[site] in read_targets and not channels[site])
+    ]
 
 
 def _cover_ranks(table: SiteTable, site_rank: np.ndarray) -> np.ndarray:
