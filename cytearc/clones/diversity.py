@@ -23,9 +23,9 @@ cells.
 Many groups are measured at once, from one long table of each group's clone
 sizes and how many clones have each size: the indices are sums over its
 rows, and compiled loops rarefy every group to its sample sizes in one call.
-Groups with equal tables get equal measures, so a summary of groups measures
-each distinct table once. These functions work on clone sizes and never touch
-storage.
+Groups with equal tables get equal measures, so the diversity of many groups
+measures each distinct table once. These functions work on clone sizes and
+never touch storage.
 """
 
 import math
