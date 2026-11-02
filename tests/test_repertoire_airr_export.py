@@ -1580,10 +1580,16 @@ def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
     def recorded(reads, needed):
         reserve(reads, needed)
         # The bytes that the check counted, from its refusal of a copy of
-        # the reads with no budget.
-        with pytest.raises(MemoryError) as refused:
+        # the reads with no budget. The refusal goes with its traceback when
+        # the handler ends: kept, it would hold this frame in a cycle, which
+        # Python 3.14's incremental collector frees only steps later.
+        try:
             reserve(dataclasses.replace(reads, limit=-1), needed)
-        found = re.search(r"holds about (-?\d+) bytes", str(refused.value))
+        except MemoryError as error:
+            message = str(error)
+        else:
+            raise AssertionError("a check with no budget refused nothing")
+        found = re.search(r"holds about (-?\d+) bytes", message)
         assert found is not None
         checks.append(int(found.group(1)))
         # Until the next check, the step also holds the bytes by which its
