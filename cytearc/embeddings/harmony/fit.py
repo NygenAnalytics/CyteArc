@@ -10,11 +10,11 @@ from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
-from threadpoolctl import threadpool_limits
 
 from ...utils.arguments import integer_argument
+from ...utils.compute import process_thread_limit
 from ...utils.logging import logger
-from ...utils.numba import restore_numba_threads
+from ...utils.numba import numba_threads
 from ...utils.progress import tqdmbar
 from ...utils.warnings import warn
 from .clustering import (
@@ -36,7 +36,6 @@ from .parameters import (
 from .seeding import kmeans_plus_plus_seeds
 
 
-@restore_numba_threads
 def fit_harmony(
     values: np.ndarray,
     metadata: pd.DataFrame,
@@ -190,10 +189,7 @@ def fit_harmony(
         {**options, "n_clusters": n_clusters}, design
     )
     del options
-    import numba
-
-    numba.set_num_threads(min(threads, int(numba.config.NUMBA_NUM_THREADS)))
-    with threadpool_limits(limits=threads):
+    with numba_threads(threads), process_thread_limit(threads):
         return _fit(values, design, parameters)
 
 

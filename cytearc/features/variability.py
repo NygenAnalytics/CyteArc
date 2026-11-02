@@ -32,6 +32,7 @@ import pandas as pd
 
 from ..utils.arguments import float_argument, integer_argument
 from ..utils.arrays import regex_match_mask, within_bounds
+from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
 from ..utils.numba import njit
 from .gene_families import GENE_FAMILY_PATTERNS
@@ -345,11 +346,9 @@ def fit_lowess(
     n_bins = integer_argument(n_bins, "n_bins", minimum=1)
     lowess_frac = _lowess_frac(lowess_frac)
     if _bin_strategy(bin_strategy) == "adaptive":
-        from threadpoolctl import threadpool_limits
-
         # The adaptive fit solves many tiny least-squares problems, where extra
         # BLAS threads cost far more in synchronization than they save.
-        with threadpool_limits(limits=1, user_api="blas"):
+        with process_thread_limit(1, user_api="blas"):
             return _fit_lowess_adaptive(a, b, n_bins, lowess_frac)
 
     from statsmodels.nonparametric.smoothers_lowess import lowess

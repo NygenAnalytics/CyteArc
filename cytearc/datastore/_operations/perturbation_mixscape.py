@@ -20,6 +20,7 @@ from ...storage.geometry import array_geometry
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
+from ...utils.compute import process_thread_limit
 from ...utils.logging import logger
 from ...utils.numba import numba_threads
 from .perturbation_store import (
@@ -183,7 +184,6 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 do not fit the memory budget.
         """
         from ...graph.feature_projection import resolve_coordinate_inputs
-        from threadpoolctl import threadpool_limits
 
         from ...perturbation.signature import (
             nearest_control_bytes,
@@ -374,7 +374,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         values = np.asarray(data[:, :resolved_dims], dtype=np.float64)
         neighbors = np.empty((n_cells, neighbors_k), dtype=np.int64)
         # The distances' matrix products use as many BLAS threads as the store.
-        with threadpool_limits(limits=self.nthreads, user_api="blas"):
+        with process_thread_limit(self.nthreads, user_api="blas"):
             for code in range(len(sample_names)):
                 members = np.flatnonzero(codes == code)
                 pool = members[is_control[members]]

@@ -20,6 +20,7 @@ from cytearc.embeddings.reduction import (
 )
 from cytearc.matrix import ChunkedArray
 from cytearc.storage.budget import ResourceBudget
+from tests.thread_helpers import blas_threads, raised_threads
 
 
 class _ReadTrackingArray(ChunkedArray):
@@ -512,6 +513,48 @@ def test_pca_agrees_across_thread_counts(
         np.testing.assert_allclose(
             other_model.explained_variance_, model.explained_variance_, rtol=1e-12
         )
+
+
+class _ProductThreads(np.ndarray):
+    """A block that notes the BLAS threads each of its matrix products starts with."""
+
+    seen: list[set[int]] = []
+
+    def __matmul__(self, other):
+        _ProductThreads.seen.append(blas_threads())
+        return np.asarray(self) @ other
+
+
+@pytest.mark.parametrize("n_features", [60, _WIDE_FEATURES])
+def test_pca_products_between_blocks_run_on_its_threads(
+    wide_values: np.ndarray, n_features: int, monkeypatch
+) -> None:
+    from scipy.linalg import blas
+
+    values = (
+        wide_values if n_features == _WIDE_FEATURES else _spectrum_values(240, 60, 5)
+    )
+    blocks = reduction_module._FittedRows.blocks
+    rank_update = blas.dsyrk
+
+    def watched_blocks(self, message):
+        for block in blocks(self, message):
+            yield block.view(_ProductThreads)
+
+    def watched_rank_update(*args, **kwargs):
+        _ProductThreads.seen.append(blas_threads())
+        return rank_update(*args, **kwargs)
+
+    monkeypatch.setattr(reduction_module._FittedRows, "blocks", watched_blocks)
+    monkeypatch.setattr(blas, "dsyrk", watched_rank_update)
+    monkeypatch.setattr(_ProductThreads, "seen", [])
+    # Three threads outside the fit, so neither a clamp to the block stream's
+    # one thread per reader nor a product outside the fit's limit passes.
+    with raised_threads(blas=3):
+        _fit(values, block_size=64, dims=4, nthreads=2)
+        assert blas_threads() == {3}
+    assert _ProductThreads.seen
+    assert all(threads == {2} for threads in _ProductThreads.seen)
 
 
 # Fits PCA with four BLAS threads in a process whose BLAS started with one, as

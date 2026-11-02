@@ -25,7 +25,7 @@ from numba import prange
 
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import sorted_unique
-from ..utils.numba import njit, restore_numba_threads
+from ..utils.numba import njit, numba_threads
 from .overlap import group_clone_matrix
 
 __all__ = [
@@ -439,7 +439,6 @@ def coupling_linkage(
     return np.asarray(linkage(squareform(distances, checks=False), method="average"))
 
 
-@restore_numba_threads
 def clone_coupling(
     pair_groups: np.ndarray,
     pair_clones: np.ndarray,
@@ -593,11 +592,6 @@ def clone_coupling(
     mean = np.full(n_pairs, np.nan)
     spread = np.full(n_pairs, np.nan)
     if permutations:
-        import numba
-
-        numba.set_num_threads(
-            min(scratch_workers, int(getattr(numba.config, "NUMBA_NUM_THREADS")))
-        )
         rows = 16 * scratch_workers if batch is None else int(batch)
         rows = max(min(rows, int(permutations)), 1)
         shuffled = np.empty((scratch_workers, len(labels)), dtype=np.int32)
@@ -606,29 +600,30 @@ def clone_coupling(
         m2 = np.zeros(n_pairs, dtype=np.float64)
         key = _seed_key(seed)
         count = 0
-        for start in range(0, int(permutations), rows):
-            n_rows = min(rows, int(permutations) - start)
-            _permuted_couplings(
-                labels,
-                stratum_bounds,
-                clone_bounds,
-                method_code,
-                group_cells,
-                group_strata,
-                stratum_clones,
-                first,
-                second,
-                key,
-                np.int64(start),
-                shuffled,
-                counts,
-                touched,
-                values,
-                dot,
-                squares,
-                out[:n_rows],
-            )
-            count = _accumulate(out, n_rows, count, mean, m2)
+        with numba_threads(scratch_workers):
+            for start in range(0, int(permutations), rows):
+                n_rows = min(rows, int(permutations) - start)
+                _permuted_couplings(
+                    labels,
+                    stratum_bounds,
+                    clone_bounds,
+                    method_code,
+                    group_cells,
+                    group_strata,
+                    stratum_clones,
+                    first,
+                    second,
+                    key,
+                    np.int64(start),
+                    shuffled,
+                    counts,
+                    touched,
+                    values,
+                    dot,
+                    squares,
+                    out[:n_rows],
+                )
+                count = _accumulate(out, n_rows, count, mean, m2)
         del shuffled, out
         spread = np.sqrt(m2 / (count - 1)) if count > 1 else spread
     del counts, touched, values, dot, squares, labels

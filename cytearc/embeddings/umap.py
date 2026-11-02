@@ -7,11 +7,7 @@ from scipy.sparse import csr_matrix, issparse
 from ..utils.arguments import integer_argument
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
-from ..utils.numba import (
-    enable_dispatcher_cache,
-    import_umap,
-    restore_numba_threads,
-)
+from ..utils.numba import enable_dispatcher_cache, import_umap, numba_threads
 from ..utils.progress import tqdm_params as default_tqdm_params
 
 locale.setlocale(locale.LC_NUMERIC, "C")
@@ -166,7 +162,6 @@ def layout_threads(parallel: bool, nthreads: int) -> int:
     return max(1, min(int(nthreads), int(numba.config.NUMBA_NUM_THREADS)))
 
 
-@restore_numba_threads
 def simplicial_set_embedding(
     g: Any,
     embedding: np.ndarray,
@@ -183,7 +178,6 @@ def simplicial_set_embedding(
     verbose: bool,
 ) -> np.ndarray:
     """Run UMAP simplicial-set embedding with optional densMAP."""
-    import numba
     from sklearn.utils import check_random_state
 
     import_umap()
@@ -208,49 +202,48 @@ def simplicial_set_embedding(
         .astype(np.int64)
     )
     # The calling thread's count may be below the request, so always set it.
-    numba.set_num_threads(layout_threads(parallel, nthreads))
+    with numba_threads(layout_threads(parallel, nthreads)):
+        if densmap_kwds != {}:
+            with process_thread_limit(nthreads):
+                mu_sum, standardized_ro = calc_dens_map_params(
+                    g,
+                    densmap_kwds["knn_dists"],
+                )
+            densmap_kwds["mu_sum"] = mu_sum
+            densmap_kwds["R"] = standardized_ro
+            densmap_kwds["mu"] = g.data
+            densmap = True
+            logger.trace("calculated densmap params")
+        else:
+            densmap = False
 
-    if densmap_kwds != {}:
-        with process_thread_limit(nthreads):
-            mu_sum, standardized_ro = calc_dens_map_params(
-                g,
-                densmap_kwds["knn_dists"],
-            )
-        densmap_kwds["mu_sum"] = mu_sum
-        densmap_kwds["R"] = standardized_ro
-        densmap_kwds["mu"] = g.data
-        densmap = True
-        logger.trace("calculated densmap params")
-    else:
-        densmap = False
+        tqdm_params = dict(default_tqdm_params)
+        tqdm_params["desc"] = "Training UMAP"
+        tqdm_params["disable"] = not verbose
 
-    tqdm_params = dict(default_tqdm_params)
-    tqdm_params["desc"] = "Training UMAP"
-    tqdm_params["disable"] = not verbose
-
-    # Numba's thread count is per thread, so the layout needs no process-wide
-    # BLAS limit.
-    embedding = optimize_layout_euclidean(
-        head_embedding=embedding,
-        tail_embedding=embedding,
-        head=g.row,
-        tail=g.col,
-        n_epochs=n_epochs,
-        n_vertices=g.shape[1],
-        epochs_per_sample=epochs_per_sample,
-        a=a,
-        b=b,
-        rng_state=rng_state,
-        gamma=gamma,
-        initial_alpha=initial_alpha,
-        negative_sample_rate=negative_sample_rate,
-        parallel=parallel,
-        verbose=False,
-        densmap=densmap,
-        densmap_kwds=densmap_kwds,
-        tqdm_kwds=tqdm_params,
-        move_other=True,
-    )
+        # Numba's thread count is per thread, so the layout needs no process-wide
+        # BLAS limit.
+        embedding = optimize_layout_euclidean(
+            head_embedding=embedding,
+            tail_embedding=embedding,
+            head=g.row,
+            tail=g.col,
+            n_epochs=n_epochs,
+            n_vertices=g.shape[1],
+            epochs_per_sample=epochs_per_sample,
+            a=a,
+            b=b,
+            rng_state=rng_state,
+            gamma=gamma,
+            initial_alpha=initial_alpha,
+            negative_sample_rate=negative_sample_rate,
+            parallel=parallel,
+            verbose=False,
+            densmap=densmap,
+            densmap_kwds=densmap_kwds,
+            tqdm_kwds=tqdm_params,
+            move_other=True,
+        )
     return np.asarray(embedding)
 
 

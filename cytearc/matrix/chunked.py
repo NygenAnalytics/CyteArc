@@ -439,6 +439,9 @@ class ChunkedArray:
 
         With ``allow_transposed`` and no ``row_mask``, the blocks may be read
         from the backing's stored transpose; see ``_transposed_row_blocks``.
+        The reads run no BLAS or OpenMP work, so the stream sets no native
+        thread limit: the consumer's own work on each block runs under the
+        limits it holds.
         """
         from ..storage.execution import WorkShape, plan_operation
         from ..storage.parallel import stream_shards, in_shard_context
@@ -507,7 +510,6 @@ class ChunkedArray:
             depth = min(planned.readWorkers, planned.computeWorkers)
             if prefetch is not None:
                 depth = min(depth, max(1, int(prefetch)))
-            within = planned.threadsPerComputeWorker
             io_concurrency = planned.ioConcurrency
         else:
             requested = (
@@ -516,7 +518,6 @@ class ChunkedArray:
                 else DEFAULT_READ_AHEAD_BLOCKS
             )
             depth = min(threads, requested, max(1, len(ranges)))
-            within = 1
 
         def materialize(interval: tuple[int, int]) -> list[np.ndarray]:
             start, end = interval
@@ -532,7 +533,6 @@ class ChunkedArray:
             ranges,
             materialize,
             workers=depth,
-            within_block_threads=within,
             io_concurrency=io_concurrency,
             msg=msg,
             total=len(ranges),

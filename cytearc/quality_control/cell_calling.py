@@ -50,7 +50,7 @@ from scipy.special import gammaln
 
 from ..utils.arguments import float_argument, integer_argument
 from ..utils.logging import logger
-from ..utils.numba import njit
+from ..utils.numba import njit, numba_threads
 
 __all__ = [
     "BarcodeRanks",
@@ -1063,9 +1063,7 @@ def _monte_carlo_p_values(
     # log_counts[k] = log(k) for the molecules of one feature; 0 is unused.
     log_counts = np.zeros(largest + 1)
     log_counts[1:] = np.log(np.arange(1, largest + 1))
-    previous_threads = numba.get_num_threads()
-    numba.set_num_threads(workers)
-    try:
+    with numba_threads(workers):
         _simulate(
             n_iter,
             np.uint64(random_seed % 2**64),
@@ -1083,8 +1081,6 @@ def _monte_carlo_p_values(
             drawn,
             feature_counts,
         )
-    finally:
-        numba.set_num_threads(previous_threads)
     summed = hits.sum(axis=0)
     group_of = np.repeat(np.arange(n_groups), group_sizes)
     # The slot of sorted barcode q is q plus its group; a draw that reaches

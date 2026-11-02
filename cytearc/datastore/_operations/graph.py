@@ -123,6 +123,7 @@ from ...utils.arrays import clean_array
 from ...utils.arguments import integer_argument
 from ...utils.logging import logger
 from ...utils.moments import ColumnMoments
+from ...utils.numba import numba_threads
 from ...utils.shutdown import shutdown_checkpoint
 from ...utils.warnings import warn
 
@@ -3219,20 +3220,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 ).tocsr()
                 for source in captured_sources
             ]
-            import numba
-
             # The merge kernels run on the store's threads.
-            previous_threads = numba.get_num_threads()
-            numba.set_num_threads(
-                min(
-                    max(1, int(self.nthreads)),
-                    int(getattr(numba.config, "NUMBA_NUM_THREADS")),
-                )
-            )
-            try:
+            with numba_threads(self.nthreads):
                 merged_graph = merge_graphs(graphs)
-            finally:
-                numba.set_num_threads(previous_threads)
             # The sources are released before the integrated graph is written.
             del graphs
         else:

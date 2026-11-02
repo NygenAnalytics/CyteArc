@@ -15,7 +15,6 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 from scipy.sparse import csr_matrix, vstack
-from threadpoolctl import threadpool_limits
 
 from ..assay import RNAassay
 from ..assay.persistence import _read_block
@@ -45,6 +44,7 @@ from ..storage.partition import (
 from ..storage.types import as_zarr_array
 from ..utils.arguments import float_argument, integer_argument
 from ..utils.arrays import sparse_matrix_bytes
+from ..utils.compute import process_thread_limit
 
 __all__ = [
     "DoubletIndexSettings",
@@ -762,7 +762,7 @@ def _simulate_sample(
         resources, min(preferred, plan.simulated), row_bytes, resident
     )
     parameters = reference.normalization_parameters
-    with threadpool_limits(limits=resources.workers):
+    with process_thread_limit(resources.workers):
         for start in range(0, plan.simulated, batch_rows):
             stop = min(start + batch_rows, plan.simulated)
             first, second = left[start:stop], right[start:stop]

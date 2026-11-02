@@ -6,6 +6,7 @@ import numpy as np
 
 from ..matrix import ChunkedArray
 from ..utils.arguments import integer_argument
+from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
 from ..utils.warnings import warn
 
@@ -204,31 +205,27 @@ def _pca_model(
     )
 
 
-def _fit_gram_pca(rows: _FittedRows, *, dims: int, nthreads: int) -> _PcaModel:
+def _fit_gram_pca(rows: _FittedRows, *, dims: int) -> _PcaModel:
     """Fit exact PCA from the covariance that one pass accumulates."""
     from scipy.linalg import blas, eigh
-    from threadpoolctl import ThreadpoolController
 
     n_features = rows.n_features
-    controller = ThreadpoolController()
     gram = np.zeros(
         (n_features, n_features),
         dtype=np.float64,
         order="F",
     )
+    # The rank update runs between blocks, under the caller's thread limit.
     for values in rows.blocks("Fitting PCA"):
-        # The block stream clamps BLAS to one thread per reader for its
-        # whole lifetime; the rank update runs here, between blocks.
-        with controller.limit(limits=nthreads, user_api="blas"):
-            gram = blas.dsyrk(
-                1.0,
-                values,
-                beta=1.0,
-                c=gram,
-                trans=1,
-                lower=0,
-                overwrite_c=1,
-            )
+        gram = blas.dsyrk(
+            1.0,
+            values,
+            beta=1.0,
+            c=gram,
+            trans=1,
+            lower=0,
+            overwrite_c=1,
+        )
         del values
 
     gram = blas.dsyr(
@@ -262,7 +259,6 @@ def _fit_randomized_pca(
     *,
     dims: int,
     random_state: int,
-    nthreads: int,
 ) -> _PcaModel:
     """Fit PCA with a streamed randomized block Krylov solver.
 
@@ -281,10 +277,8 @@ def _fit_randomized_pca(
     the projection is exact, and warns when the last pass comes first.
     """
     from scipy.linalg import eigh, qr, subspace_angles
-    from threadpoolctl import ThreadpoolController
 
     n_features = rows.n_features
-    controller = ThreadpoolController()
     width = _randomized_pca_width(n_features, dims)
     capacity = min(n_features, width * _RANDOMIZED_PCA_MAX_PASSES)
     tolerance = np.radians(_RANDOMIZED_PCA_TOLERANCE_DEGREES)
@@ -306,14 +300,12 @@ def _fit_randomized_pca(
         newest = basis[:, start:stop]
         product = np.zeros((n_features, stop - start), dtype=np.float64)
         squares = 0.0
+        # The products run between blocks, under the caller's thread limit.
         for values in rows.blocks(f"Fitting PCA (pass {pass_number})"):
-            # The block stream clamps BLAS to one thread per reader for its
-            # whole lifetime; the products run here, between blocks.
-            with controller.limit(limits=nthreads, user_api="blas"):
-                product += values.T @ (values @ newest)
-                if pass_number == 1:
-                    flat = values.ravel(order="K")
-                    squares += float(flat @ flat)
+            product += values.T @ (values @ newest)
+            if pass_number == 1:
+                flat = values.ravel(order="K")
+                squares += float(flat @ flat)
             del values
         n_rows = rows.n_rows
         offset = rows.offset
@@ -408,8 +400,6 @@ def fit_pca(
     beyond rounding. Constant values give components of zero variance, and
     values that are not finite raise ValueError.
     """
-    from threadpoolctl import threadpool_limits
-
     selected_samples = int(np.count_nonzero(use_for_pca))
     row_mask = use_for_pca if selected_samples != data.shape[0] else None
     n_features = int(data.shape[1])
@@ -425,7 +415,7 @@ def fit_pca(
         # solver's products read scaled blocks as they come.
         order="F" if solver == "gram" else "C",
     )
-    with threadpool_limits(limits=nthreads):
+    with process_thread_limit(nthreads):
         if solver == "gram":
             accumulator_mib = n_features * n_features * 8 / (1024**2)
             logger.debug(
@@ -433,19 +423,14 @@ def fit_pca(
                 f"({n_features} features, {block_rows} rows per block, "
                 f"{accumulator_mib:.0f} MiB accumulator)"
             )
-            model = _fit_gram_pca(rows, dims=dims, nthreads=nthreads)
+            model = _fit_gram_pca(rows, dims=dims)
         else:
             logger.debug(
                 "Fitting PCA with the randomized solver "
                 f"({n_features} features, {block_rows} rows per block, "
                 f"blocks of {_randomized_pca_width(n_features, dims)} vectors)"
             )
-            model = _fit_randomized_pca(
-                rows,
-                dims=dims,
-                random_state=random_state,
-                nthreads=nthreads,
-            )
+            model = _fit_randomized_pca(rows, dims=dims, random_state=random_state)
             logger.info(
                 f"Fitted PCA of {n_features} features with the randomized solver "
                 f"in {model.n_passes_} passes over the data. At most "

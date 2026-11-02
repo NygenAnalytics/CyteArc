@@ -7,7 +7,7 @@ import threading
 import weakref
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from functools import cache, wraps
+from functools import cache
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, NamedTuple, overload
 
@@ -20,20 +20,7 @@ if TYPE_CHECKING:
 _CYTEARC_DIR = Path(__file__).resolve().parent.parent
 
 
-def restore_numba_threads[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
-    """Restore Numba's process thread count after a call."""
-
-    @wraps(fn)
-    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
-        import numba
-
-        previous = numba.get_num_threads()
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            numba.set_num_threads(previous)
-
-    return wrapped
+_NUMBA_THREADS_LOCK = threading.Lock()
 
 
 @contextmanager
@@ -41,15 +28,22 @@ def numba_threads(nthreads: int) -> Iterator[None]:
     """Run Numba's parallel kernels on ``nthreads`` threads, then restore the count.
 
     The count is at least 1 and at most the threads that Numba started with.
+    Numba keeps a count for each thread, so this sets the calling thread's.
+    Changes are serialized, since concurrent calls of Numba's setter can
+    deadlock.
     """
     import numba
 
-    previous = numba.get_num_threads()
-    numba.set_num_threads(min(max(1, int(nthreads)), numba.config.NUMBA_NUM_THREADS))
+    with _NUMBA_THREADS_LOCK:
+        previous = numba.get_num_threads()
+        numba.set_num_threads(
+            min(max(1, int(nthreads)), numba.config.NUMBA_NUM_THREADS)
+        )
     try:
         yield
     finally:
-        numba.set_num_threads(previous)
+        with _NUMBA_THREADS_LOCK:
+            numba.set_num_threads(previous)
 
 
 # Typed as numba.njit is, so each kernel keeps its function's signature.

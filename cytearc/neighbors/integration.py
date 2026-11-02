@@ -2,12 +2,13 @@ from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
-from numba import config, prange, set_num_threads
+from numba import prange
 from scipy.sparse import coo_matrix
 
 from ..utils.arguments import integer_argument
+from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
-from ..utils.numba import njit, restore_numba_threads
+from ..utils.numba import njit, numba_threads
 from ..utils.progress import iter_progress
 
 # Rows that the input checks of WNN integration scan at once.
@@ -872,7 +873,6 @@ def _integrate_cells(
         )
 
 
-@restore_numba_threads
 def _wnn_integration_many(
     modalities: list[tuple[str, np.ndarray, np.ndarray]],
     nthreads: int,
@@ -925,8 +925,6 @@ def _wnn_integration_many(
             "neighbors per cell."
         )
 
-    from threadpoolctl import threadpool_limits
-
     inverse_norms: list[np.ndarray | None] = (
         [_inverse_row_norms(embedding) for embedding in validated_embeddings]
         if l2_normalize
@@ -938,10 +936,7 @@ def _wnn_integration_many(
     merged_data = np.empty(output_size, dtype=np.float32)
     modality_weights = np.empty((n_cells, len(modalities)), dtype=np.float32)
 
-    # Numba sets its thread cap at import, an attribute no stub declares.
-    cap = int(getattr(config, "NUMBA_NUM_THREADS"))
-    set_num_threads(min(max(1, int(nthreads)), cap))
-    with threadpool_limits(limits=nthreads):
+    with numba_threads(nthreads), process_thread_limit(nthreads):
         if all(embedding.dtype in _KERNEL_DTYPES for embedding in validated_embeddings):
             _integrate_blocks(
                 validated_indices,

@@ -220,17 +220,17 @@ def test_runner_reports_every_cleanup_failure(monkeypatch: pytest.MonkeyPatch) -
         close(loops)
         raise RuntimeError("I/O loop close failed")
 
-    io_limit = async_execution.zarr_io_concurrency
+    numba_threads = async_execution.numba_threads
 
     @contextmanager
-    def failing_io_limit(limit: int) -> Any:
-        with io_limit(limit):
+    def failing_numba_restore(threads: int) -> Any:
+        with numba_threads(threads):
             yield
-        raise RuntimeError("I/O limit restore failed")
+        raise RuntimeError("Numba thread restore failed")
 
     monkeypatch.setattr(async_execution, "ThreadPoolExecutor", FailingShutdownPool)
     monkeypatch.setattr(async_execution._IoLoops, "close", failing_close)
-    monkeypatch.setattr(async_execution, "zarr_io_concurrency", failing_io_limit)
+    monkeypatch.setattr(async_execution, "numba_threads", failing_numba_restore)
 
     async def operation(_active: AsyncStorageRunner) -> int:
         return 1
@@ -241,7 +241,7 @@ def test_runner_reports_every_cleanup_failure(monkeypatch: pytest.MonkeyPatch) -
         "cytearc-compute shutdown failed",
         "cytearc-zarr-codec shutdown failed",
         "I/O loop close failed",
-        "I/O limit restore failed",
+        "Numba thread restore failed",
     ]
     assert zarr.config.get("async.concurrency") == 10
 
@@ -570,6 +570,32 @@ def test_dense_row_batches_are_checked_against_their_destination() -> None:
             write_dense_from_row_batches(
                 destination(f"failure_{index}"), iter(stream), resources=resources
             )
+
+
+def test_the_source_of_dense_row_batches_computes_under_its_callers_threads() -> None:
+    from tests.thread_helpers import blas_threads, raised_threads
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    target = root.create_array(
+        "values", shape=(64, 4), chunks=(4, 4), shards=(8, 4), dtype=np.float64
+    )
+    seen: list[set[int]] = []
+
+    def batches():
+        # As a projection between blocks, while earlier bands are written.
+        for start in range(0, 64, 4):
+            seen.append(blas_threads())
+            yield np.full((4, 4), float(start))
+
+    with raised_threads(blas=2):
+        written = write_dense_from_row_batches(
+            target, batches(), resources=ResourceBudget(1 << 24, 4)
+        )
+        assert blas_threads() == {2}
+    assert written == 64
+    # The writes hold no thread limit, so every batch sees the caller's count,
+    # whichever writes are running.
+    assert seen == [{2}] * 16
 
 
 def test_chunked_to_zarr_writes_every_band_to_its_mirror() -> None:

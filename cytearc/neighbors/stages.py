@@ -7,10 +7,10 @@ from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
-from threadpoolctl import threadpool_info, threadpool_limits
 
 from ..embeddings.harmony import HarmonyResult, fit_harmony
 from ..matrix import ChunkedArray
+from ..utils.compute import process_thread_limit, thread_pool_info
 from ..utils.logging import logger
 from ..utils.process import rss_text
 from ..utils.shutdown import shutdown_checkpoint
@@ -56,7 +56,7 @@ class ReductionTransform:
                         "ERROR: `use_for_pca` does not have sample length as nCells"
                     )
                 if not disable_reduction:
-                    with threadpool_limits(limits=self.nthreads):
+                    with process_thread_limit(self.nthreads):
                         self._fit_pca(disable_scaling, use_for_pca)
             else:
                 self.dims = self.loadings.shape[1]
@@ -67,7 +67,7 @@ class ReductionTransform:
         elif self.method == "lsi":
             if self.loadings is None:
                 if not disable_reduction:
-                    with threadpool_limits(limits=self.nthreads):
+                    with process_thread_limit(self.nthreads):
                         self._fit_lsi(lsi_skip_first, lsi_params)
             else:
                 self.dims = self.loadings.shape[1]
@@ -211,7 +211,7 @@ class BatchCorrectionStage:
                 f"Coordinate source contains {start} rows, expected {self.n_cells}"
             )
         shutdown_checkpoint()
-        with threadpool_limits(limits=self.nthreads):
+        with process_thread_limit(self.nthreads):
             self.result = fit_harmony(
                 uncorrected,
                 self.batches,
@@ -650,14 +650,14 @@ class KMeansInitializationStage:
                 )
                 del block
 
-        with threadpool_limits(limits=nthreads):
+        with process_thread_limit(nthreads):
             pools = sorted(
                 (
                     str(pool.get("user_api")),
                     str(pool.get("internal_api")),
                     int(pool.get("num_threads", 0)),
                 )
-                for pool in threadpool_info()
+                for pool in thread_pool_info()
             )
             logger.debug(
                 f"KMeans initialization plan: rows={n_rows} "
