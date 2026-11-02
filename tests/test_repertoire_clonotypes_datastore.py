@@ -467,7 +467,7 @@ def test_figure_labels_name_clonotypes_by_their_representatives_junction(
         shown.close()
 
 
-def test_figure_labels_refuse_ids_that_only_resemble_a_clonotypes(tmp_path) -> None:
+def test_figure_labels_refuse_ids_that_only_resemble_a_clonotype_id(tmp_path) -> None:
     store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     # The IDs are clonotype_1 to clonotype_4, stored 11 characters wide: an ID

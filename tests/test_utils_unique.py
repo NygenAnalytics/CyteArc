@@ -181,6 +181,32 @@ def test_sorted_unique_refuses_other_arrays(values) -> None:
 
 
 @pytest.mark.parametrize("seed", range(5))
+@pytest.mark.parametrize("high", [1, 50, 2**40])
+def test_has_duplicates_tells_whether_np_unique_drops_a_value(
+    seed: int, high: int
+) -> None:
+    rng = np.random.default_rng(seed)
+    drawn = rng.integers(-high, high + 1, size=int(rng.integers(0, 60)))
+    # Drawn values, the same made distinct, ascending and descending, and as
+    # finite floats, which is what the stack's callers pass.
+    distinct = np.unique(drawn)
+    for values in (drawn, distinct, distinct[::-1], drawn / 4, distinct / 4):
+        expected = len(np.unique(values)) != len(values)
+        assert arrays.has_duplicates(values) is expected
+
+
+def test_has_duplicates_at_the_ends_and_of_signed_zeros() -> None:
+    assert arrays.has_duplicates(np.asarray([], dtype=np.int64)) is False
+    assert arrays.has_duplicates(np.asarray([3])) is False
+    # A repeat among ascending values ends the shortcut for ascending arrays.
+    assert arrays.has_duplicates(np.asarray([1, 2, 3, 3])) is True
+    assert arrays.has_duplicates(np.asarray([4, 1, 2, 4])) is True
+    assert arrays.has_duplicates(np.asarray([2**64 - 1, 0, 2**64 - 1], np.uint64))
+    # np.unique counts -0.0 and 0.0 as one value.
+    assert arrays.has_duplicates(np.asarray([0.0, 1.5, -0.0])) is True
+
+
+@pytest.mark.parametrize("seed", range(5))
 @pytest.mark.parametrize("columns", [1, 2, 3])
 def test_unique_rows_equals_numpy(seed: int, columns: int) -> None:
     rng = np.random.default_rng(seed)
