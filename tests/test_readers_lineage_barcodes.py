@@ -622,11 +622,14 @@ def test_tool_formats_refuse_a_missing_value_where_the_tool_writes_one(
     import pandas as pd
 
     named = tmp_path / "named.h5ad"
-    anndata.AnnData(
-        X=np.asarray([[2.0, 0.0], [0.0, 3.0]]),
-        obs=pd.DataFrame(index=["NA", "AAAG"]),
-        var=pd.DataFrame(index=["NA", "ACGT"]),
-    ).write_h5ad(named)
+    # Releases of anndata before pandas 3 write nullable strings, as current
+    # releases always do, only once that is allowed.
+    with anndata.settings.override(allow_write_nullable_strings=True):
+        anndata.AnnData(
+            X=np.asarray([[2.0, 0.0], [0.0, 3.0]]),
+            obs=pd.DataFrame(index=pd.Index(["NA", "AAAG"], dtype="string")),
+            var=pd.DataFrame(index=pd.Index(["NA", "ACGT"], dtype="string")),
+        ).write_h5ad(named)
     chunks = _rows(barcode_layout(named), 100)
     assert sorted(
         (cell, barcode)

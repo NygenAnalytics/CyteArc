@@ -1392,11 +1392,16 @@ def write_quicat_h5ad(
             "csr": sparse.csr_matrix(dense),
             "csc": sparse.csc_matrix(dense),
         }
-        anndata.AnnData(
-            X=matrices[layout],
-            obs=pd.DataFrame({"sample": samples}, index=pd.Index(cells)),
-            var=pd.DataFrame(index=pd.Index(names)),
-        ).write_h5ad(path)
+        # Releases of anndata before pandas 3 write nullable strings, as current
+        # releases always do, only once that is allowed.
+        with anndata.settings.override(allow_write_nullable_strings=True):
+            anndata.AnnData(
+                X=matrices[layout],
+                obs=pd.DataFrame(
+                    {"sample": samples}, index=pd.Index(cells, dtype="string")
+                ),
+                var=pd.DataFrame(index=pd.Index(names, dtype="string")),
+            ).write_h5ad(path)
         return path
     with h5py.File(path, "w") as handle:
         obs = _obs_frame(handle, cells)
