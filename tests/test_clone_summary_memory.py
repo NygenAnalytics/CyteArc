@@ -575,13 +575,16 @@ def test_the_traced_peak_fits_the_smallest_budget_accepted(data, case) -> None:
 
 
 # The two summaries are run, each at the smallest budget it accepts, in a fresh
-# process whose Zarr reads no earlier test left running. The work of each read
-# of a stored array is held until the next read ends, as the thread of Zarr's
-# pool that ran it holds its chunk, as stored and decoded, on a busy machine
-# until after the next read has begun. The work between reads, such as the
-# writes of the expansion's results, is not held.
+# process whose Zarr reads no earlier test left running. While they match the
+# clones' cells to the measured cells and group the cells, the steps whose
+# estimates count the read before, the work of each read of a stored array is
+# held until the next read ends, as the thread of Zarr's pool that ran it
+# holds its chunk, as stored and decoded, on a busy machine until after the
+# next read has begun. The hold ends with each step, so the summaries' writes
+# run as they would.
 _HELD_READ_SCRIPT = """
 import json, sys, tracemalloc
+from cytearc.datastore._operations import clones as operations
 from tests.memory_helpers import ZARR_READS, budget_that_runs, hold_finished_reads, stated_bytes
 from tests.storage_helpers import open_store
 
@@ -599,6 +602,15 @@ cases = {
     ),
 }
 
+steps = operations._CloneOperationsMixin
+measured_cells, cell_groups = steps._measured_clone_cells, operations.cell_groups
+
+def with_reads_held(step):
+    def held_step(*args, **kwargs):
+        with hold_finished_reads(*ZARR_READS):
+            return step(*args, **kwargs)
+    return held_step
+
 results = {}
 for name, call in cases.items():
     call()
@@ -606,11 +618,13 @@ for name, call in cases.items():
         store, lambda _: call(), refusal_budget=stated_bytes, max_refusals=100
     )
     store.memoryBytes = budget
-    with hold_finished_reads(*ZARR_READS):
-        tracemalloc.start()
-        call()
-        results[name] = [tracemalloc.get_traced_memory()[1], budget]
-        tracemalloc.stop()
+    steps._measured_clone_cells = with_reads_held(measured_cells)
+    operations.cell_groups = with_reads_held(cell_groups)
+    tracemalloc.start()
+    call()
+    results[name] = [tracemalloc.get_traced_memory()[1], budget]
+    tracemalloc.stop()
+    steps._measured_clone_cells, operations.cell_groups = measured_cells, cell_groups
 print(json.dumps(results))
 """
 

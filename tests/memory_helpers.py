@@ -386,7 +386,10 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
     no such call runs, such as the writes after an operation's last read,
     belongs to no read and is let go as it would be without the hold. With no
     function named, the caller ends each read by calling the function that
-    this context gives, and all work belongs to the read under way.
+    this context gives, and all work belongs to the read under way. The last
+    read stays held until the context closes, so a test holds the reads of the
+    step whose estimate counts the read before, not of a whole operation with
+    the writes after its last read.
 
     The hold applies to every thread pool of the process, so a test that must
     see only its own reads traces them in a fresh process, which imports this
