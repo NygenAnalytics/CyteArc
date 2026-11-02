@@ -5,6 +5,7 @@ template. A test that writes copies the template, and the tests of refused
 imports share one copy, which they check is left as it was.
 """
 
+import gc
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -557,8 +558,13 @@ def test_refusals_mid_stream_leave_zarr_concurrency_as_it_was(tmp_path) -> None:
         )
     with pytest.raises(ValueError, match=_BEYOND_UINT32) as called:
         store.perturbation.call_guides(selection, method="fixed", min_umi=5)
-    assert zarr.config.get("async.concurrency") == before
-    del imported, called
+    try:
+        assert zarr.config.get("async.concurrency") == before
+    finally:
+        # The collector frees the stopped streams, so a failure here leaves no
+        # limit entered for later tests.
+        del imported, called
+        gc.collect()
 
 
 @pytest.mark.parametrize(

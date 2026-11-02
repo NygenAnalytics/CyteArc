@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
+import zarr
 from scipy.stats import norm
 from scipy.stats import t as student_t
 from statsmodels.stats.multitest import multipletests
@@ -648,6 +649,31 @@ def test_curves_accept_explicit_coordinates_and_lineage_subsets(
     full = datastore.trajectory.load_curves(lineage_curves)
     np.testing.assert_allclose(subset.points[0], full.points[1], atol=1e-9)
     assert datastore.trajectory.curves(lineage_fate, n_points=40) == lineage_curves
+
+
+def test_curve_placements_are_written_one_chunk_at_a_time(
+    datastore, lineage_fate, monkeypatch
+):
+    # A block of placements across a chunk boundary rewrites two chunks of up
+    # to 100,000 rows, which Zarr's default concurrency would rewrite at once.
+    before = zarr.config.get("async.concurrency")
+    setitem = zarr.Array.__setitem__
+    limits = []
+
+    def recorded(array, selection, value):
+        limits.append(
+            (array.path.rsplit("/", 1)[-1], zarr.config.get("async.concurrency"))
+        )
+        return setitem(array, selection, value)
+
+    monkeypatch.setattr(zarr.Array, "__setitem__", recorded)
+    datastore.trajectory.curves(lineage_fate, lineages=[2], n_points=24, batch_size=97)
+    monkeypatch.undo()
+    placements = [limit for name, limit in limits if name in ("progress", "distance")]
+    # Batches of 97 cells write several blocks of each array.
+    assert len(placements) > 2
+    assert set(placements) == {1}
+    assert zarr.config.get("async.concurrency") == before
 
 
 def test_curve_arguments_are_checked(datastore, lineage_fate, umap, monkeypatch):

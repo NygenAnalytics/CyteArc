@@ -146,11 +146,13 @@ def stream_shards(
 ) -> Generator[Any, None, None]:
     """Yield transformed items in order with bounded read-ahead.
 
-    ``io_concurrency`` limits Zarr's process-wide async concurrency while a
-    call of ``fn`` runs, and not while the stream waits for its consumer. A
+    Zarr's process-wide async concurrency is set to ``io_concurrency``, or to
+    a lower limit already in force, only while a call of ``fn`` runs. Between
+    items, the consumer runs under the setting outside the stream, or, in a
+    threaded stream, under the stream's while a read-ahead call runs. A
     stream that its consumer stops without closing, as an error in the
-    consumer does, then leaves the setting as it was, even before the stream
-    is collected.
+    consumer does, leaves the setting as it was once its read-ahead calls
+    end, even before the stream is collected.
     """
     workers = max(1, int(workers))
     work = _io_limited(fn, io_concurrency)
