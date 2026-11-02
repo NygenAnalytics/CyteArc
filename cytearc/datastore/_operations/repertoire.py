@@ -1,3 +1,4 @@
+import io
 import math
 import os
 from collections.abc import Iterator, Sequence
@@ -2388,12 +2389,15 @@ _EXPORT_ROW_BYTES = 96
 _EXPORT_CLONE_BYTES = 12
 # The Python objects of the stored arrays that an export opens, their
 # metadata, codecs and reads, and of the file and a block's columns while it
-# is written: 106 KB with two fields and 247 KB with 22, as traced.
-_EXPORT_OBJECT_BYTES = 128 * 2**10
+# is written: 106 KB with two fields and 247 KB with 22, as traced on Python
+# 3.13. The file's buffer takes one of io's default buffers on common file
+# systems, which Python 3.14 raised from 8 KiB to 128 KiB.
+_EXPORT_OBJECT_BYTES = 120 * 2**10 + io.DEFAULT_BUFFER_SIZE
 _EXPORT_OBJECT_BYTES_PER_FIELD = 8 * 2**10
-# Writing a compressed file holds zlib's deflate state at level 6 and the
-# file's buffer, about 300 KB as traced.
-_GZIP_BYTES = 384 * 2**10
+# Writing a compressed file holds zlib's deflate state at level 6, about
+# 270 KB as traced, and gzip's buffer of four of io's default buffers, 32 KiB
+# before Python 3.14 and 512 KiB since.
+_GZIP_BYTES = 352 * 2**10 + 4 * io.DEFAULT_BUFFER_SIZE
 # Reading a cell selection's positions holds 25 bytes per cell at its peak,
 # as traced on 200,000 cells, and keeps 8.
 _SELECTION_BYTES_PER_CELL = 32

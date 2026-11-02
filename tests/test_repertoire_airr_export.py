@@ -1513,19 +1513,21 @@ def test_clonotypes_hold_their_codes_and_labels_while_blocks_are_written(
 
 
 @pytest.mark.parametrize(
-    ("source", "suffix", "large"),
+    ("source", "suffix", "large", "fields"),
     [
-        ("receptors", ".tsv", "every"),
-        ("clonotypes", ".tsv", "every"),
-        ("receptors", ".tsv.gz", "every"),
-        ("clonotypes", ".tsv", "contig_"),
-        ("receptors", ".tsv", "contig_j_identity"),
-        ("receptors", ".tsv", "values"),
-        ("clonotypes", ".tsv", "values"),
+        ("receptors", ".tsv", "every", None),
+        ("clonotypes", ".tsv", "every", None),
+        ("receptors", ".tsv.gz", "every", None),
+        ("clonotypes", ".tsv", "contig_", None),
+        ("receptors", ".tsv", "contig_j_identity", None),
+        ("receptors", ".tsv", "values", None),
+        ("clonotypes", ".tsv", "values", None),
+        ("receptors", ".tsv", "every", ["umi_count"]),
+        ("receptors", ".tsv.gz", "every", ["umi_count"]),
     ],
 )
 def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
-    tmp_path, monkeypatch, source, suffix, large
+    tmp_path, monkeypatch, source, suffix, large, fields
 ) -> None:
     # Zarr's decoding thread may hold a read's decoded chunk a moment after
     # the read returns. Each read here holds a chunk of 50 MiB, as the
@@ -1537,7 +1539,9 @@ def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
     # reads chunks larger than the one left behind before it, or, with the J
     # identities, the last field that measuring reads and the blocks next,
     # smaller ones; with "values", the cell selection's mask holds one, and
-    # the cells' IDs read after it hold smaller chunks.
+    # the cells' IDs read after it hold smaller chunks. An export of one
+    # field holds little beside the opened arrays' objects and the file,
+    # whose buffer, and gzip's, Python 3.14 made 16 times larger.
     # Zarr decodes inline here, so the chunks that this test holds are the
     # only ones left behind.
     async def inline(function, /, *args, **kwargs):
@@ -1606,7 +1610,7 @@ def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
     def export() -> None:
         checks.clear()
         try:
-            store.repertoire.export_airr(ref, path)
+            store.repertoire.export_airr(ref, path, fields=fields)
         finally:
             allowance.clear()
             held.clear()
@@ -1618,7 +1622,7 @@ def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
     ceiling = max(checks)
     gc.collect()
     _result, peak = traced_peak(export, ceiling)
-    assert len(checks) > 10 and peak <= ceiling, (peak - ceiling, checks)
+    assert len(checks) >= 10 and peak <= ceiling, (peak - ceiling, checks)
 
 
 def test_the_export_warns_of_discouraged_characters_and_repeated_ids(
