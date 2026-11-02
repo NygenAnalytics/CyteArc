@@ -255,15 +255,20 @@ class GroupedCloneSizes:
             first group that holds each, and each group's position in it.
         """
         n_groups = len(self.n)
+        if n_groups < 2:
+            return self, np.arange(n_groups)
         lengths = np.diff(self.starts)
         # Groups fall into classes by their number of rows, and then by the
         # size and count of their rows one position at a time, so two groups
         # share a class only when their tables are equal. The classes made at
         # a position are numbered above every class so far, so they stay apart
-        # from those of shorter groups.
+        # from those of shorter groups. The groups that reach a position are
+        # the first of the groups ordered from the longest.
         classes = lengths.copy()
+        longest = np.argsort(-lengths, kind="stable")
+        reaching = n_groups - np.cumsum(np.bincount(lengths))
         for position in range(int(lengths.max(initial=0))):
-            active = np.flatnonzero(lengths > position)
+            active = longest[: reaching[position]]
             rows = self.starts[active] + position
             keys = (self.counts[rows], self.values[rows], classes[active])
             order = np.lexsort(keys)
@@ -768,11 +773,12 @@ def _terms(
     reached = np.full(len(table), np.nan)
     rate = np.zeros(len(table))
     if len(shannon):
-        reached[shannon] = (
-            np.exp(_chao_entropy(table.take(shannon)))
-            if asymptote is None
-            else asymptote[shannon]
-        )
+        if asymptote is not None:
+            reached[shannon] = asymptote[shannon]
+        elif len(shannon) == len(table):
+            reached[shannon] = np.exp(_chao_entropy(table))[shannon]
+        else:
+            reached[shannon] = np.exp(_chao_entropy(table.take(shannon)))
         rising = shannon[
             (table.n[shannon] >= 2) & (reached[shannon] > observed[1][shannon])
         ]
