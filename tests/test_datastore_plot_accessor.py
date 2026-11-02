@@ -36,6 +36,8 @@ _STORE_PLOT_METHODS = (
     "efficiency",
     "embedding",
     "embedding_raster",
+    "gene_pairing",
+    "gene_usage",
     "guide_calls",
     "guide_thresholds",
     "lineage_curves",
@@ -54,6 +56,7 @@ _STORE_PLOT_METHODS = (
     "pseudotime_heatmap",
     "receptor_qc",
     "run_recipe",
+    "spectratype",
 )
 
 _GRAPH_REF = ArtifactRef(
@@ -171,6 +174,11 @@ _RECEPTORS_REF = ArtifactRef(
     scope="datastore",
     kind="immune_receptors",
     artifact_id="a" * 64,
+)
+_CLONOTYPES_REF = ArtifactRef(
+    scope="datastore",
+    kind="clonotypes",
+    artifact_id="c" * 64,
 )
 
 
@@ -413,6 +421,9 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             (_RECEPTORS_REF,),
             {"group_by": "sample", "normalize": False},
         ),
+        ("gene_usage", (_RECEPTORS_REF,), {"gene": "j_call", "level": "family"}),
+        ("gene_pairing", (_CLONOTYPES_REF,), {"count": "clonotypes", "top": 5}),
+        ("spectratype", (_RECEPTORS_REF,), {"sequence": "nt", "group_by": "sample"}),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -473,6 +484,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("bias"))
     elif name == "receptor_qc":
         expected_args.append(expected_kwargs.pop("receptors"))
+    elif name in ("gene_usage", "gene_pairing", "spectratype"):
+        expected_args.append(expected_kwargs.pop("source"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

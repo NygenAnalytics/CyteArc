@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from tests.clone_truth import (
@@ -244,6 +245,26 @@ BCR_ROWS = [
     "cell4,true,cell4_contig_2,true,500,IGK,IGKV1,,IGKJ1,IGKC,true,true,CQQY,TGTCAGCAGTAT,400,15,cb1,cb1_2",
     "cell0,true,cell0_contig_1,true,500,IGH,IGHV2,,IGHJ2,IGHG1,true,true,CARX,TGTGCGAGATAA,50,2,cb2,cb2_1",
 ]
+# cell0 and cell1 share an alpha and a beta chain. cell2 has the same alpha
+# residues from other nucleotides, cell3 the beta chain alone, and cell4 a
+# second alpha chain beside the pair. cell5 and cell6 are B cells of one
+# clone, and cell7 has no contig.
+CLONAL_ROWS = [
+    "cell0,true,cell0_contig_1,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,true,CAVA,TGTGCTGTGGCC,90,9,ct1,ct1_1",
+    "cell0,true,cell0_contig_2,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,80,8,ct1,ct1_2",
+    "cell1,true,cell1_contig_1,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,true,CAVA,TGTGCTGTGGCC,70,7,ct1,ct1_1",
+    "cell1,true,cell1_contig_2,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,60,6,ct1,ct1_2",
+    "cell2,true,cell2_contig_1,true,500,TRA,TRAV2,,TRAJ1,TRAC,true,true,CAVA,TGTGCAGTAGCA,50,5,ct2,ct2_1",
+    "cell2,true,cell2_contig_2,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,40,4,ct2,ct2_2",
+    "cell3,true,cell3_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,30,3,ct3,ct3_1",
+    "cell4,true,cell4_contig_1,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,true,CAVA,TGTGCTGTGGCC,90,9,ct4,ct4_1",
+    "cell4,true,cell4_contig_2,true,500,TRA,TRAV3,,TRAJ2,TRAC,true,true,CAVB,TGTGCTGTGTAC,20,2,ct4,ct4_2",
+    "cell4,true,cell4_contig_3,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,80,8,ct4,ct4_3",
+    "cell5,true,cell5_contig_1,true,500,IGH,IGHV1,,IGHJ1,IGHM,true,true,CARW,TGTGCGAGATGG,500,20,cb1,cb1_1",
+    "cell5,true,cell5_contig_2,true,500,IGK,IGKV1,,IGKJ1,IGKC,true,true,CQQY,TGTCAGCAGTAT,400,15,cb1,cb1_2",
+    "cell6,true,cell6_contig_1,true,500,IGH,IGHV1,,IGHJ1,IGHG1,true,true,CARW,TGTGCGAGATGG,300,12,cb1,cb1_1",
+    "cell6,true,cell6_contig_2,true,500,IGK,IGKV1,,IGKJ1,IGKC,true,true,CQQY,TGTCAGCAGTAT,200,10,cb1,cb1_2",
+]
 AIRR_HEADER = (
     "cell_id\tsequence_id\tv_call\td_call\tj_call\tc_call\tjunction\tjunction_aa"
     "\tproductive\tduplicate_count\tconsensus_count\tv_identity\tsequence"
@@ -397,3 +418,43 @@ def within_distance(first: str, second: str, metric: str, cutoff: int) -> bool:
         return True
     percent = Fraction(100 * mismatches, len(first))
     return math.floor(percent + Fraction(1, 2)) <= cutoff
+
+
+def count_units(
+    units: pd.DataFrame, keys: list[str], values: list[str], count: str
+) -> pd.DataFrame:
+    """Count units by keys and values, with each count's share of its keys.
+
+    The pandas reference that the counts of chains are checked against, as
+    #55 counted gene usage before its counts moved to integer codes.
+
+    Args:
+        units: One row per unit, such as a cell's chain, with the ``keys``
+            and ``values`` columns; rows with a missing value are left out.
+        keys: The columns whose combinations share one total, such as the
+            group and locus.
+        values: The counted columns, such as the V gene.
+        count: The name of the count column.
+
+    Returns:
+        One row per combination of keys and values with a unit, in the
+        natural order of the keys and by count, most first: the keys, the
+        values, ``count`` and ``fraction``.
+    """
+    kept = units.dropna(subset=values)
+    if kept.empty:
+        return pd.DataFrame(columns=[*keys, *values, count, "fraction"])
+    table = (
+        kept.groupby([*keys, *values], sort=False, dropna=False)
+        .size()
+        .rename(count)
+        .reset_index()
+    )
+    totals = table.groupby(keys, sort=False, dropna=False)[count].transform("sum")
+    table["fraction"] = table[count] / totals
+    table[count] = table[count].astype(np.int64)
+    return table.sort_values(
+        [*keys, count, *values],
+        ascending=[*([True] * len(keys)), False, *([True] * len(values))],
+        kind="stable",
+    ).reset_index(drop=True)

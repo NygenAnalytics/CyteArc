@@ -210,6 +210,7 @@ def cell_groups(
     memory_bytes: int,
     kept_apart: Sequence[tuple[str, np.ndarray]] = (),
     reserved: frozenset[str] = frozenset(),
+    held_bytes: int = 0,
 ) -> CellGroups:
     """Group the cells of a cell-aligned artifact by their labels.
 
@@ -232,6 +233,8 @@ def cell_groups(
         kept_apart: Key columns whose labels the artifact keeps apart, each
             with every artifact cell's label, such as a receptor type.
         reserved: The columns of the result, which no key column may name.
+        held_bytes: What the caller holds beside the grouping, which counts
+            against the budget with it.
 
     Returns:
         The groups' key columns and labels, and each cell's group.
@@ -281,7 +284,7 @@ def cell_groups(
     n_cells = len(has)
     n_columns = len(key_columns)
     label_bytes = sum(cells.get_dtype(column).itemsize for column in columns)
-    resident = n_cells * (
+    resident = int(held_bytes) + n_cells * (
         GROUPING_BYTES_PER_CELL
         + GROUPING_BYTES_PER_COLUMN * n_columns
         + GROUPING_BYTES_PER_LABEL_BYTE * label_bytes

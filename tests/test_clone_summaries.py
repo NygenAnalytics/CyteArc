@@ -541,6 +541,14 @@ def test_summaries_name_missing_and_incomplete_clones(source) -> None:
         ),
         fate_bias,
     )
+    if source.clones.kind == "clonotypes":
+        # Gene usage and junction lengths read clonotypes, and their
+        # receptors, as the summaries read them; other clones hold no chains.
+        summaries += (store.repertoire.gene_usage, store.repertoire.spectratype)
+    else:
+        for measure in (store.repertoire.gene_usage, store.repertoire.spectratype):
+            with pytest.raises(ValueError, match="immune_receptors or clonotypes"):
+                measure(source.clones)
     # Each saved result, with the loader that reads it.
     saved = {
         store.clones.expansion(source.clones): store.clones.load_expansion,

@@ -254,6 +254,25 @@ def test_a_column_of_several_chunks_counts_the_chunk_read_before(tmp_path) -> No
     )
 
 
+def test_what_the_caller_holds_counts_beside_the_grouping(store) -> None:
+    # The grouping by two columns of the first budget test, beside 1,000
+    # bytes that the caller holds, such as the chain slots that gene usage
+    # reads before it groups.
+    per_cell = GROUPING_BYTES_PER_CELL + 2 * GROUPING_BYTES_PER_COLUMN
+    per_cell += GROUPING_BYTES_PER_LABEL_BYTE * (12 + 4)
+    chunk = max(_chunk(store.cells._get_array(name)) for name in ("sample", "batch"))
+    before = chunk + READ_OBJECT_BYTES
+    named = (2 + 2) * GROUPING_BYTES_PER_DISTINCT_LABEL + 4 * GROUPING_BYTES_PER_GROUP
+    _assert_needs(
+        store,
+        1_000 + N_CELLS * per_cell + chunk + before + named,
+        group_by=["sample", "batch"],
+        held_bytes=1_000,
+    )
+    # Without a grouping, the rows form one group beside what is held.
+    _assert_needs(store, 1_000 + N_CELLS * GROUPING_BYTES_PER_CELL, held_bytes=1_000)
+
+
 def test_a_selection_and_a_label_artifact_count_all_their_cells(store) -> None:
     # The four odd cells of a selection are read whatever the artifact holds.
     batch = _chunk(store.cells._get_array("batch"))

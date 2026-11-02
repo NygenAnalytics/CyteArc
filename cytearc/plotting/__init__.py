@@ -80,7 +80,12 @@ if TYPE_CHECKING:
         mixscape as mixscape,
         perturbation_clusters as perturbation_clusters,
     )
-    from .repertoire import receptor_qc as receptor_qc
+    from .repertoire import (
+        gene_pairing as gene_pairing,
+        gene_usage as gene_usage,
+        receptor_qc as receptor_qc,
+        spectratype as spectratype,
+    )
     from .summary import dotplot as dotplot
     from .summary import matrixplot as matrixplot
 
@@ -124,6 +129,8 @@ __all__ = [
     "elbow",
     "embedding",
     "embedding_raster",
+    "gene_pairing",
+    "gene_usage",
     "graph_qc",
     "guide_calls",
     "guide_thresholds",
@@ -146,6 +153,7 @@ __all__ = [
     "qc",
     "receptor_qc",
     "run_recipe",
+    "spectratype",
     "theme_context",
 ]
 
@@ -191,6 +199,8 @@ __getattr__, __dir__ = _lazy_facade(
         "elbow": ".diagnostics",
         "embedding": ".embedding",
         "embedding_raster": ".embedding_raster",
+        "gene_pairing": ".repertoire",
+        "gene_usage": ".repertoire",
         "graph_qc": ".diagnostics",
         "guide_calls": ".perturbation",
         "guide_thresholds": ".perturbation",
@@ -213,6 +223,7 @@ __getattr__, __dir__ = _lazy_facade(
         "qc": ".diagnostics",
         "receptor_qc": ".repertoire",
         "run_recipe": ".recipes",
+        "spectratype": ".repertoire",
         "theme_context": "._style",
     },
 )
