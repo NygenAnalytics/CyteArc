@@ -28,9 +28,9 @@ from tests.clone_helpers import (
     loaded_partition,
     open_clone_store,
     smallest_budget,
-    traced_peak,
     write_truth_store,
 )
+from tests.perturbation_helpers import traced_peak
 from tests.clone_truth import (
     N_CELLS,
     SAMPLES,
@@ -569,7 +569,8 @@ def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(
         )
 
     budget = smallest_budget(call, 1 << 30)
-    assert traced_peak(lambda: call(budget)) <= budget
+    _, peak = traced_peak(lambda: call(budget), budget)
+    assert peak <= budget
 
 
 # TREX 0.4.dev412 (commit c1ade47) ran its own run10x steps on a synthetic

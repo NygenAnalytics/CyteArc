@@ -22,8 +22,8 @@ from tests.clone_helpers import (
     clone_partition,
     link_count_variance,
     smallest_budget,
-    traced_peak,
 )
+from tests.perturbation_helpers import traced_peak
 
 A = "ACGTACGTACGTACGTACGTACGTACGT"
 # One substitution from A, and one more.
@@ -1174,7 +1174,8 @@ def test_calls_hold_no_more_than_the_smallest_budget_they_accept(
         )
 
     budget = smallest_budget(call, 1 << 30)
-    assert traced_peak(lambda: call(budget)) <= budget
+    _, peak = traced_peak(lambda: call(budget), budget)
+    assert peak <= budget
     with pytest.raises(MemoryError, match="(?i)raise"):
         call(budget - 1)
 

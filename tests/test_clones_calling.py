@@ -24,7 +24,8 @@ from cytearc.clones.calling import (
     pruned_edges,
     set_clones,
 )
-from tests.clone_helpers import clone_partition, smallest_budget, traced_peak
+from tests.clone_helpers import clone_partition, smallest_budget
+from tests.perturbation_helpers import traced_peak
 
 
 def _sets(rows: list[list[int]]) -> CellSets:
@@ -853,7 +854,8 @@ def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(options) -> N
         return set_clones(sets, groups=groups, max_bytes=budget, **options)
 
     budget = smallest_budget(call, 1 << 30)
-    assert traced_peak(lambda: call(budget)) <= budget
+    _, peak = traced_peak(lambda: call(budget), budget)
+    assert peak <= budget
 
 
 def test_components_of_many_edges_hold_no_more_than_the_budget_they_accept() -> None:
@@ -867,7 +869,8 @@ def test_components_of_many_edges_hold_no_more_than_the_budget_they_accept() -> 
 
     budget = smallest_budget(call, 1 << 30)
     assert budget < 200_000
-    assert traced_peak(lambda: call(budget)) <= budget
+    _, peak = traced_peak(lambda: call(budget), budget)
+    assert peak <= budget
 
 
 def test_unknown_items_and_shared_links_hold_no_more_than_their_budget() -> None:
@@ -888,7 +891,8 @@ def test_unknown_items_and_shared_links_hold_no_more_than_their_budget() -> None
             return set_clones(sets, groups=groups, max_bytes=budget, **options)
 
         budget = smallest_budget(call, 1 << 30)
-        assert traced_peak(lambda: call(budget)) <= budget
+        _, peak = traced_peak(lambda: call(budget), budget)
+        assert peak <= budget
 
 
 def test_sets_of_narrower_integers_count_their_int64_copies() -> None:
@@ -913,7 +917,8 @@ def test_sets_of_narrower_integers_count_their_int64_copies() -> None:
         return identical_sets(narrow, max_bytes=budget)
 
     budget = smallest_budget(call, 1 << 30)
-    assert traced_peak(lambda: call(budget)) <= budget
+    _, peak = traced_peak(lambda: call(budget), budget)
+    assert peak <= budget
 
 
 def test_a_budget_too_small_refuses_before_allocating() -> None:

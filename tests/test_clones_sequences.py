@@ -1036,7 +1036,8 @@ def test_partial_texts_hold_no_more_than_the_smallest_budget_they_accept(
     if near:
         assert len(search(None)[0]) == 360 * 359 // 2
     budget = smallest_budget(search, 1 << 24)
-    assert traced_peak(lambda: search(budget)) <= budget
+    _, peak = traced_peak(lambda: search(budget), budget)
+    assert peak <= budget
 
 
 def test_the_positions_of_partial_texts_count_against_the_budget() -> None:
@@ -2004,4 +2005,5 @@ def test_the_expectation_holds_no_more_than_the_smallest_budget_it_accepts(
         )
 
     budget = smallest_budget(expect, 1 << 26)
-    assert traced_peak(lambda: expect(budget)) <= budget
+    _, peak = traced_peak(lambda: expect(budget), budget)
+    assert peak <= budget
