@@ -16,6 +16,7 @@ import pytest
 from cytearc.metadata.rows import text_read_bytes
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import every_cell
+from tests.perturbation_helpers import traced_peak
 from tests.variant_helpers import (
     assert_tables,
     copy_variant_store,
@@ -1561,8 +1562,6 @@ def test_the_traced_peaks_of_import_and_load_fit_the_smallest_budget_accepted(
     tmp_path,
 ) -> None:
     """With 80-character IDs, reading them dominates what each step holds."""
-    import tracemalloc
-
     from cytearc.datastore.datastore import DataStore
     from tests.storage_helpers import write_count_store
 
@@ -1602,12 +1601,7 @@ def test_the_traced_peaks_of_import_and_load_fit_the_smallest_budget_accepted(
         run()
         budget = _smallest_accepted_budget(store, run)
         store.memoryBytes = budget
-        tracemalloc.start()
-        try:
-            run()
-            _current, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+        _result, peak = traced_peak(run, budget)
         assert peak <= budget, (name, peak, budget)
 
 
@@ -1616,8 +1610,6 @@ def test_loading_a_few_cells_of_many_fits_the_smallest_budget_accepted(
     tmp_path,
 ) -> None:
     """Counts of 500,000 cells hold offsets and per-cell arrays for each one."""
-    import tracemalloc
-
     from cytearc.datastore.datastore import DataStore
     from tests.storage_helpers import write_count_store
 
@@ -1655,10 +1647,5 @@ def test_loading_a_few_cells_of_many_fits_the_smallest_budget_accepted(
         run()
         budget = _smallest_accepted_budget(store, run)
         store.memoryBytes = budget
-        tracemalloc.start()
-        try:
-            run()
-            _current, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+        _result, peak = traced_peak(run, budget)
         assert peak <= budget, (name, peak, budget)
