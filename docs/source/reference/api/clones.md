@@ -301,7 +301,7 @@ Calling checks the memory budget before each step that reads or allocates, and r
 | Step | Bytes |
 |---|---|
 | Reading the records | 48 per record, 8 more while one is converted, the stored barcodes with 8 per distinct barcode, 16 per cell, and 300 per allowlisted barcode, with 4 per character of a fixed-width array |
-| Writing the clones | 160 per cell, and 8 per character of the longest label, checked before reading as if every cell were a clone |
+| Writing the clones | 160 per cell, and 8 per character of the longest label, checked before reading as if every cell were a clone, and one of io's default buffers for each write that Zarr runs at once, up to its async concurrency: 8 KiB each before Python 3.14 and 128 KiB since |
 | Every rule | 40 per cell, and 18 per record until the records collapse into pairs |
 | Looking up barcodes, for TREX's rules and the allowlist | 32 per record, 120 and 4 per character for each stored barcode decoded, and 1 per stored barcode |
 | Correction | 96 per molecule or pair kept, 64 per distinct barcode of a block with its text, and what the search holds, within what is left; the expected chance matches then encode the barcodes as the search does and hold, while one barcode per component is chosen, 57 bytes and its length for each barcode of a length, or under TREX's rules what the search holds for the positions of no base, 64 bytes for each cloneID and 4 KiB for each position; under `"levenshtein"`, 48 bytes for each barcode of a group and library, 2 KiB for each position of each length, 8 bytes for each pair of positions of two lengths, 3 bytes for each position for each barcode chosen of a length, and 160 bytes for each state of the edit distances they follow |

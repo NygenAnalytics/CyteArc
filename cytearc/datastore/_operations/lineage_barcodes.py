@@ -1,3 +1,4 @@
+import io
 import os
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
@@ -948,9 +949,17 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             + int(barcode_values.shape[0])
         )
         # Writing them is checked first, as if every cell were a clone of its
-        # own, the most clones there can be.
+        # own, the most clones there can be. Zarr writes each chunk and each
+        # array's metadata through a buffered file, up to its async
+        # concurrency of them at once, and each buffer is counted as one of
+        # io's default buffers: Python 3.13 buffers the file system's block,
+        # 4 KiB on common file systems, and Python 3.14 one default buffer,
+        # which it raised from 8 KiB to 128 KiB.
         width = len(f"clone_{n_cells}")
-        writing = n_cells * (_WRITE_CELL_BYTES + _WRITE_CLONE_BYTES + 8 * width)
+        writing = (
+            n_cells * (_WRITE_CELL_BYTES + _WRITE_CLONE_BYTES + 8 * width)
+            + int(zarr.config.get("async.concurrency")) * io.DEFAULT_BUFFER_SIZE
+        )
         for needed, what in (
             (held + _CONVERTED_RECORD_BYTES * n_records, "as they are read"),
             (writing, "as they are written"),

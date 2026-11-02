@@ -9,13 +9,16 @@ of their ``clones.txt``.
 
 import copy
 import gzip
+import io
 import json
+import re
 import pickle
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+import zarr
 
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.artifacts import artifact_group
@@ -551,6 +554,37 @@ def test_calling_refuses_a_budget_too_small_before_writing(
     with pytest.raises(MemoryError, match="Raise mem_budget"):
         store.clones.barcode_clones(barcodes, preset="trex")
     assert len(store.artifacts.list(kind="clones", scope="datastore")) == before
+
+
+def test_the_write_check_counts_a_buffer_for_each_write_zarr_runs_at_once(
+    store, tmp_path, monkeypatch
+) -> None:
+    # Zarr writes each chunk and each array's metadata through a buffered
+    # file, as many at once as its async concurrency allows, and Python 3.14
+    # made each buffer 128 KiB, where it was the file system's block.
+    _calling, barcodes = _imported(store, tmp_path, "larry")
+
+    def bytes_as_written(concurrency: int) -> int:
+        """The bytes of the check of writing, which refuses right after reading's."""
+        with zarr.config.set({"async.concurrency": concurrency}):
+            budget = 1
+            for _attempt in range(3):
+                monkeypatch.setattr(store, "memoryBytes", budget)
+                try:
+                    store.clones.barcode_clones(
+                        barcodes, preset="larry", invalidate_cache=True
+                    )
+                except MemoryError as error:
+                    found = re.search(
+                        r"about (\d+) bytes as they are (\w+)", str(error)
+                    )
+                    assert found is not None, str(error)
+                    if found.group(2) == "written":
+                        return int(found.group(1))
+                    budget = int(found.group(1))
+        raise AssertionError("writing was not refused right after reading")
+
+    assert bytes_as_written(20) - bytes_as_written(10) == 10 * io.DEFAULT_BUFFER_SIZE
 
 
 @pytest.mark.slow
