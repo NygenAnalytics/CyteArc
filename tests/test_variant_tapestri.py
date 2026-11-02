@@ -1341,7 +1341,7 @@ def _wide_dabseq(
         ("tapestri", 1, False),
         pytest.param("tapestri", 1_000, False, marks=pytest.mark.slow),
         pytest.param("tapestri", 1_000, True, marks=pytest.mark.slow),
-        pytest.param("dabseq", 1, False, marks=pytest.mark.slow),
+        ("dabseq", 1, False),
         pytest.param("dabseq", 1_000, False, marks=pytest.mark.slow),
         pytest.param("dabseq", 1_000, True, marks=pytest.mark.slow),
     ],

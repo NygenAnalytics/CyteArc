@@ -961,7 +961,6 @@ def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(options) -> N
     assert peak <= budget
 
 
-@pytest.mark.slow
 def test_components_of_many_edges_hold_no_more_than_the_budget_they_accept() -> None:
     # Every pair of 1,000 nodes, 499,500 edges: the components hold memory
     # for the nodes alone.

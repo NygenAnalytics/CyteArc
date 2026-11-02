@@ -575,7 +575,6 @@ def test_writing_the_names_counts_what_the_join_holds(tmp_path) -> None:
     import warnings
 
     from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
-    from cytearc.datastore.datastore import DataStore
 
     n_cells, n_leaves = 25_000, 20_000
     ids = [f"cell{cell:06d}-1" for cell in range(n_cells)]
@@ -585,12 +584,7 @@ def test_writing_the_names_counts_what_the_join_holds(tmp_path) -> None:
         "uint16",
         cell_ids=ids,
     )
-    store = DataStore(
-        str(tmp_path / "names.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-    )
+    store = open_store(tmp_path / "names.zarr")
     store.cells.insert("in_tree", np.arange(n_cells) < n_leaves)
     pairs = ",".join(
         f"({ids[cell]}:1,{ids[cell + 1]}:1){'n' * 190}{cell:09d}:1"
@@ -862,8 +856,6 @@ def test_the_join_counts_the_cells_ids_once(tmp_path) -> None:
     import re
     import warnings
 
-    from cytearc.datastore.datastore import DataStore
-
     n_cells = 3_000
     ids = [f"{'sample_with_a_long_name_' * 3}{cell:08d}-1" for cell in range(n_cells)]
     write_count_store(
@@ -872,12 +864,7 @@ def test_the_join_counts_the_cells_ids_once(tmp_path) -> None:
         "uint16",
         cell_ids=ids,
     )
-    store = DataStore(
-        str(tmp_path / "long.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-    )
+    store = open_store(tmp_path / "long.zarr")
     pairs = ",".join(
         f"({ids[cell]}:1,{ids[cell + 1]}:1)g{cell}:1" for cell in range(0, 2_000, 2)
     )

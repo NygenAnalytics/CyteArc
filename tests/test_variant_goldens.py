@@ -18,7 +18,7 @@ import pytest
 from sklearn.metrics import adjusted_rand_score
 
 from cytearc.datastore.datastore import DataStore
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import open_store, write_count_store
 from tests.network_helpers import download_or_skip
 from tests.variant_truth import mito_clone_truth, variant_truth, write_mgatk
 
@@ -55,12 +55,7 @@ def _store(folder: Path, cells: list[str]) -> DataStore:
         "uint16",
         cell_ids=every,
     )
-    store = DataStore(
-        str(folder / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-    )
+    store = open_store(folder / "store.zarr")
     store.cells.insert("every_cell", np.ones(len(every), dtype=bool))
     return store
 

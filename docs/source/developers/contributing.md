@@ -61,7 +61,7 @@ Update uv with `UV_SYSTEM_CERTS=true uv self update`, which checks the download 
 
 Two markers select the expensive parts of the suite: `slow` for tests that build neighbourhood graphs or run iterative numerical workflows, and for the memory cases of an operation beyond the one smallest-budget case that the quick suite keeps, and `integration` for tests that need live network access.
 Memory tests trace a call's peak and find the smallest budget it accepts through `tests/memory_helpers.py`.
-An integration test downloads its files through `tests/network_helpers.download_or_skip`, which skips the test when a host cannot serve a file whole and fails it when a file is missing, and a run ends naming each test that skipped for the network.
+An integration test downloads its files through `download_or_skip` of `tests/network_helpers.py`, which skips the test when a host cannot serve a file whole and fails it when a file is missing, and a run ends naming each test that skipped for the network.
 While iterating, skip both:
 
     uv run pytest -m "not slow and not integration"

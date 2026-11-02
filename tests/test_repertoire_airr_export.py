@@ -1522,21 +1522,24 @@ def test_clonotypes_hold_their_codes_and_labels_while_blocks_are_written(
     assert held[1] - held[0] == 4 * 8 + 8 * (len(labels) + 1) + packed
 
 
+def _slow(*values: object) -> object:
+    return pytest.param(*values, marks=pytest.mark.slow)
+
+
 @pytest.mark.parametrize(
     ("source", "suffix", "large", "fields"),
     [
         ("receptors", ".tsv", "every", None),
-        ("clonotypes", ".tsv", "every", None),
-        ("receptors", ".tsv.gz", "every", None),
-        ("clonotypes", ".tsv", "contig_", None),
-        ("receptors", ".tsv", "contig_j_identity", None),
-        ("receptors", ".tsv", "values", None),
-        ("clonotypes", ".tsv", "values", None),
-        ("receptors", ".tsv", "every", ["umi_count"]),
-        ("receptors", ".tsv.gz", "every", ["umi_count"]),
+        _slow("clonotypes", ".tsv", "every", None),
+        _slow("receptors", ".tsv.gz", "every", None),
+        _slow("clonotypes", ".tsv", "contig_", None),
+        _slow("receptors", ".tsv", "contig_j_identity", None),
+        _slow("receptors", ".tsv", "values", None),
+        _slow("clonotypes", ".tsv", "values", None),
+        _slow("receptors", ".tsv", "every", ["umi_count"]),
+        _slow("receptors", ".tsv.gz", "every", ["umi_count"]),
     ],
 )
-@pytest.mark.slow
 def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
     tmp_path, monkeypatch, source, suffix, large, fields
 ) -> None:

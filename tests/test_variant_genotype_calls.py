@@ -642,14 +642,7 @@ def _recorded_bands(monkeypatch) -> list[tuple[int, int]]:
     return bands
 
 
-@pytest.mark.parametrize(
-    "method",
-    [
-        pytest.param("threshold", marks=pytest.mark.slow),
-        pytest.param("gift", marks=pytest.mark.slow),
-        "source",
-    ],
-)
+@pytest.mark.parametrize("method", ["threshold", "gift", "source"])
 def test_genotypes_read_in_bands_equal_those_read_in_one(
     store, tmp_path, monkeypatch, method
 ) -> None:

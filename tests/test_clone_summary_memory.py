@@ -48,6 +48,9 @@ from tests.storage_helpers import open_store, write_count_store
 
 pytestmark = pytest.mark.slow
 
+# The scripts that run in a fresh process import the tests' helpers from here.
+_REPOSITORY = Path(__file__).resolve().parents[1]
+
 N_CELLS = 10_000
 N_MEASURED = 500
 N_LONG_IDS = 2_000
@@ -625,6 +628,7 @@ def test_the_budgets_count_the_read_that_zarr_still_holds(data) -> None:
         capture_output=True,
         text=True,
         check=True,
+        cwd=_REPOSITORY,
     )
     results = json.loads(traced.stdout.strip().splitlines()[-1])
 
@@ -710,6 +714,7 @@ def test_grouping_by_columns_of_several_chunks_holds_its_budget(tmp_path) -> Non
         capture_output=True,
         text=True,
         check=True,
+        cwd=_REPOSITORY,
     )
     results = json.loads(traced.stdout.strip().splitlines()[-1])
 

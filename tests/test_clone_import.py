@@ -1027,7 +1027,8 @@ def _traced(function: Callable[[], object], budget: int) -> tuple[object, int]:
     """Run ``function`` and return its result, or its MemoryError, and its traced peak.
 
     The peak is traced as :func:`tests.memory_helpers.traced_peak` traces it,
-    again where it passes ``budget``.
+    again where it passes ``budget``, so ``function`` must compute afresh
+    each time rather than reuse what the first run saved.
     """
 
     def run() -> object:
@@ -1066,12 +1067,13 @@ def _long_label_store(tmp_path: Path) -> SimpleNamespace:
 )
 def test_saving_long_labels_holds_the_budget_or_refuses(tmp_path, method) -> None:
     long = _long_label_store(tmp_path)
+    # Each save computes afresh, so a trace that runs it again traces it again.
     save = {
         "from_column": lambda: long.store.clones.from_column(
-            "lineage", cell_selection=long.cells
+            "lineage", cell_selection=long.cells, invalidate_cache=True
         ),
         "import_clones": lambda: long.store.clones.import_clones(
-            long.table, cell_selection=long.cells
+            long.table, cell_selection=long.cells, invalidate_cache=True
         ),
     }[method]
     long.store.memoryBytes = _BUDGET
@@ -1148,7 +1150,9 @@ def test_long_cell_ids_count_against_the_budget(tmp_path) -> None:
     store.memoryBytes = budget
 
     result, peak = _traced(
-        lambda: store.clones.import_clones(table, cell_selection=every_cell(store)),
+        lambda: store.clones.import_clones(
+            table, cell_selection=every_cell(store), invalidate_cache=True
+        ),
         budget,
     )
 

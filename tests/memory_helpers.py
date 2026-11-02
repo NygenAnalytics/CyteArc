@@ -49,16 +49,19 @@ def named_budget(refusal: BaseException) -> int:
     return int(named.group(1))
 
 
-def stated_bytes(refusal: BaseException) -> int:
+def stated_bytes(refusal: BaseException, pattern: str = r"about (\d+) bytes") -> int:
     """Return the bytes that a refusal states, as in ``holds about N bytes``.
 
     The refusals of the clone, repertoire and variant operations state what
     the call would hold, or need, without naming a budget to raise to, so the
-    first ``about N bytes`` of the message is the budget to try next.
+    bytes they state are the budget to try next. ``pattern``, a regular
+    expression whose last group is the number, finds them: by default the
+    first ``about N bytes`` of the message. A test that requires the words
+    before the number, such as ``holds about``, passes a pattern of its own.
     """
-    found = re.search(r"about (\d+) bytes", str(refusal))
-    assert found is not None, f"The refusal states no bytes: {refusal}"
-    return int(found.group(1))
+    found = re.search(pattern, str(refusal))
+    assert found is not None, f"The refusal states no bytes as {pattern!r}: {refusal}"
+    return int(found.group(found.lastindex or 0))
 
 
 def traced_peak(call: Callable[[], Any], budget: int) -> tuple[Any, int]:
@@ -113,8 +116,9 @@ def budget_that_runs(
     *,
     refusal_budget: Callable[[BaseException], int] = named_budget,
     max_refusals: int = 10,
+    traced: bool = True,
     **options: Any,
-) -> tuple[int, list[str], Any, int]:
+) -> tuple[int, list[str], Any, int | None]:
     """Follow the refusals of ``call`` from a budget of one byte to the budget that runs it.
 
     ``call`` runs an operation on what ``store`` gives at each budget. That is
@@ -126,13 +130,15 @@ def budget_that_runs(
     a budget above the one it refused, as ``refusal_budget`` reads it, which
     the next attempt takes, and a check that a later step makes may refuse
     that budget and name more. Each attempt is traced as :func:`traced_peak`
-    traces it, and ``max_refusals`` refusals fail the search: ten, unless a
-    step's estimate grows with the budget, as those of the clone, repertoire
-    and variant steps that size their chunks from it do.
+    traces it, or runs untraced without ``traced``, and ``max_refusals``
+    refusals fail the search: ten, unless a step's estimate grows with the
+    budget, as those of the clone, repertoire and variant steps that size
+    their chunks from it do.
 
     Returns:
         The budget that runs the call, the messages of the refusals on the
-        way, and the result and traced peak of the call at that budget.
+        way, and the result and traced peak of the call at that budget, the
+        peak None when untraced.
     """
     at_budget = _store_at_budget(store, options)
     restored = store.memoryBytes if _is_open_store(store) else None
@@ -141,7 +147,10 @@ def budget_that_runs(
         while len(refusals) < max_refusals:
             opened = at_budget(budget)
             try:
-                result, peak = traced_peak(partial(call, opened), budget)
+                if traced:
+                    result, peak = traced_peak(partial(call, opened), budget)
+                else:
+                    result, peak = call(opened), None
             except MemoryError as refusal:
                 named = refusal_budget(refusal)
                 assert named > budget, f"{refusal} names no budget above {budget}"
@@ -157,21 +166,31 @@ def budget_that_runs(
     )
 
 
+#: A refusal's step and the bytes it states: what comes before its last
+#: ``holds about N bytes``, and N.
+_REFUSAL_STEP = r"^(.*) holds about (\d+) bytes"
+
+
 def budget_refusals(
     store: "DataStore", run: Callable[[], object]
 ) -> list[tuple[str, int]]:
     """Each refusal of ``run`` on the way from a budget of one byte to one that runs, as the step it names and the bytes it states.
 
-    :func:`budget_that_runs` follows the refusals on the open ``store`` by the
-    bytes that each states, so each later step's check shows once the earlier
-    ones pass, for up to 100 refusals.
+    :func:`budget_that_runs` follows the refusals on the open ``store``,
+    untraced, by the bytes of each refusal's last ``holds about N bytes``, so
+    each later step's check shows once the earlier ones pass, for up to 100
+    refusals.
     """
     _budget, refusals, _result, _peak = budget_that_runs(
-        store, lambda _store: run(), refusal_budget=stated_bytes, max_refusals=100
+        store,
+        lambda _store: run(),
+        refusal_budget=partial(stated_bytes, pattern=_REFUSAL_STEP),
+        max_refusals=100,
+        traced=False,
     )
     found: list[tuple[str, int]] = []
     for refusal in refusals:
-        matched = re.search(r"^(.*) holds about (\d+) bytes", refusal)
+        matched = re.search(_REFUSAL_STEP, refusal)
         assert matched is not None, refusal
         found.append((matched.group(1), int(matched.group(2))))
     return found
@@ -204,7 +223,9 @@ def check_budget(
     budget, refusals, result, peak = budget_that_runs(
         store, call, refusal_budget=refusal_budget, **options
     )
-    assert peak <= budget, f"The call held {peak} bytes within a budget of {budget}"
+    assert peak is not None and peak <= budget, (
+        f"The call held {peak} bytes within a budget of {budget}"
+    )
     if at_most is not None:
         assert budget <= at_most * peak + allowance, (
             f"The call accepted a budget of {budget} bytes, more than {at_most} "
@@ -266,7 +287,11 @@ def at_budget(store: "DataStore", run: Callable[[], Any]) -> Callable[[int], Any
 
 
 def budget_bounds(
-    call: Callable[[int], object], start: int, *, parts: int
+    call: Callable[[int], object],
+    start: int,
+    *,
+    parts: int,
+    refusal_bytes: Callable[[BaseException], int] = stated_bytes,
 ) -> tuple[int, int]:
     """The largest budget that ``call`` refuses and the smallest it accepts, at most one part in ``parts`` of the larger apart.
 
@@ -274,23 +299,31 @@ def budget_bounds(
     it would hold, and runs at every budget above it. The search climbs from
     a refused ``start`` to the bytes that each refusal states, or a quarter
     more where that is more, since a call whose chunks grow with its budget
-    states more at a larger one, and then bisects. A call that holds no more
-    than the largest budget refused, plus one byte, at the budget accepted
-    holds no more than any budget it accepts.
+    states more at a larger one, and then bisects; ``refusal_bytes`` reads the
+    bytes a refusal states, and 100 refusals in the climb fail the search. A
+    call that holds no more than the largest budget refused, plus one byte, at
+    the budget accepted holds no more than any budget it accepts.
     """
 
     def refused(budget: int) -> int | None:
         try:
             call(budget)
         except MemoryError as refusal:
-            stated = stated_bytes(refusal)
+            stated = refusal_bytes(refusal)
             assert stated > budget, f"{refusal} states no more than {budget} bytes"
             return stated
         return None
 
     low, high = 0, start
-    while (stated := refused(high)) is not None:
+    for _climb in range(100):
+        stated = refused(high)
+        if stated is None:
+            break
         low, high = high, max(stated, high + high // 4)
+    else:
+        raise AssertionError(
+            f"100 refusals from {start} bytes named no budget that runs"
+        )
     assert low, f"The call fits {start} bytes, too small a budget to measure"
     while high - low > high // parts:
         middle = (low + high) // 2

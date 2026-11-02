@@ -16,17 +16,20 @@ whose text outweighs the rest.
 
 import warnings
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from tests.memory_helpers import at_budget, budget_bounds, traced_peak
+from tests.memory_helpers import at_budget, budget_bounds, stated_bytes, traced_peak
 from tests.storage_helpers import open_store, write_count_store
 
 pytestmark = pytest.mark.slow
 
 _RNG = np.random.default_rng(19)
+# Each refusal states the bytes that the step would hold.
+_stated = partial(stated_bytes, pattern=r"holds? about (\d+) bytes")
 
 
 def _store(folder: Path, cell_ids: list[str]):
@@ -61,7 +64,10 @@ def _check(store, run: Callable[[], object]) -> None:
         # step. Each run recomputes its step: imports invalidate the saved
         # one, and exports write a file of their own.
         low, high = budget_bounds(
-            at_budget(store, lambda: _quietly(run)), 1 << 20, parts=100
+            at_budget(store, lambda: _quietly(run)),
+            1 << 20,
+            parts=100,
+            refusal_bytes=_stated,
         )
         store.memoryBytes = high
         with warnings.catch_warnings():

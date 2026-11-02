@@ -9,6 +9,7 @@ encoding recovers each cell's chains. The join of barcodes to cells runs in
 
 import gzip
 import shutil
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -551,6 +552,10 @@ def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
         )
 
 
+# The bytes that a refusal of the import or the load states.
+_stated = partial(stated_bytes, pattern=r"(?:holds?|needs) about (\d+) bytes")
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("long_ids", [False, True], ids=["ids", "80-character-ids"])
 def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
@@ -594,7 +599,7 @@ def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
     # Each import runs at the smallest budget it accepts, which the budget
     # reaches from one byte by the bytes that each refusal states.
     budget, _refusals, ref, peak = budget_that_runs(
-        store, lambda _store: run_import(), refusal_budget=stated_bytes, max_refusals=20
+        store, lambda _store: run_import(), refusal_budget=_stated, max_refusals=20
     )
     assert peak <= budget, (peak, budget)
 
@@ -603,7 +608,7 @@ def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
 
     run_load()
     budget, _refusals, _loaded, peak = budget_that_runs(
-        store, lambda _store: run_load(), refusal_budget=stated_bytes, max_refusals=20
+        store, lambda _store: run_load(), refusal_budget=_stated, max_refusals=20
     )
     assert peak <= budget, (peak, budget)
 

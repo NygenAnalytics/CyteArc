@@ -28,7 +28,11 @@ from tests.clone_helpers import (
     write_truth_store,
 )
 from tests.clone_truth import CELL_TYPES, N_CELLS, clone_truth
-from tests.storage_helpers import insert_nullable_cell_column, write_count_store
+from tests.storage_helpers import (
+    insert_nullable_cell_column,
+    open_store,
+    write_count_store,
+)
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -42,9 +46,7 @@ GROUPS = ["x", "x", "y", "x", "y", None]
 def plotted(tmp_path_factory):
     path = tmp_path_factory.mktemp("clone_plot") / "store.zarr"
     write_count_store(str(path), {"RNA": np.ones((6, 3), dtype=int)}, "uint16")
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     store.cells.insert("lineage", np.asarray(CLONES, dtype=object))
     store.cells.insert("group", np.asarray(GROUPS, dtype=object))
     store.cells.insert("every_cell", np.ones(6, dtype=bool))
@@ -751,9 +753,7 @@ def many_groups(tmp_path_factory) -> SimpleNamespace:
     """200 cells, cell i in clone i // 2, each with a label of its own."""
     path = tmp_path_factory.mktemp("many_groups") / "store.zarr"
     write_count_store(str(path), {"RNA": np.ones((N_MANY, 3), dtype=int)}, "uint16")
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     store.cells.insert(
         "clone", np.asarray([f"k{i // 2:03d}" for i in range(N_MANY)], dtype=object)
     )

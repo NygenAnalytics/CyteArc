@@ -7,6 +7,7 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import thread as pool_thread
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,6 +86,18 @@ def test_stated_bytes_reads_the_bytes_that_a_refusal_states() -> None:
     )
     with pytest.raises(AssertionError, match="states no bytes"):
         stated_bytes(MemoryError("Grouping does not fit the memory budget"))
+    # A pattern of the test's own requires the words before the bytes, and
+    # its last group is the number.
+    held = r"holds? about (\d+) bytes"
+    assert stated_bytes(MemoryError("The tables hold about 9 bytes"), held) == 9
+    with pytest.raises(AssertionError, match="states no bytes"):
+        stated_bytes(MemoryError("The tables take about 9 bytes"), held)
+    assert (
+        stated_bytes(
+            MemoryError("A, B holds about 7 bytes"), r"^(.*) holds about (\d+)"
+        )
+        == 7
+    )
 
 
 def test_traced_peak_counts_what_the_call_holds_beside_what_was_held() -> None:
@@ -229,17 +242,51 @@ def test_budget_that_runs_gives_up_after_ten_refusals_or_the_number_given() -> N
     assert (budget, len(refusals)) == (16, 15)
 
 
+def test_an_untraced_search_runs_each_attempt_once_and_traces_nothing() -> None:
+    import tracemalloc
+
+    runs: list[bool] = []
+
+    def run(store: _ScriptedStore) -> int:
+        runs.append(tracemalloc.is_tracing())
+        return store.run(store)
+
+    # A call that holds more than its budget: traced, it would run twice.
+    store = _ScriptedStore(lambda budget: [MIB], holds=2 * MIB)
+    budget, refusals, result, peak = budget_that_runs(store, run, traced=False)
+    assert (budget, len(refusals), result, peak) == (MIB, 1, 2 * MIB, None)
+    assert runs == [False, False]
+    runs.clear()
+    budget_that_runs(store, run)
+    assert runs == [True, True, True]
+
+
 def test_budget_refusals_name_each_step_and_its_bytes() -> None:
     def needed(budget: int) -> list[int]:
         # The second step's estimate grows with the budget until 3,000 bytes.
         return [500, budget + 100 if budget < 3000 else 0]
 
-    store = _ScriptedStore(needed, holds=1000)
+    # The call that runs holds more than its budget, which a traced search
+    # would trace again.
+    store = _ScriptedStore(needed, holds=8000)
     refusals = budget_refusals(store, lambda: store.run(store))
     assert refusals == [("Step 0", 500)] + [
         ("Step 1", stated) for stated in range(600, 3100, 100)
     ]
     assert store.memoryBytes == 1 << 40
+    # Each budget runs once, untraced, the last one too.
+    assert store.budgets == [1, 500, *range(600, 3100, 100)]
+    # A refusal that does not say what its step holds fails the search.
+    store = _ScriptedStore(lambda budget: [500], holds=1000)
+
+    def needs(store: _ScriptedStore) -> int:
+        try:
+            return store.run(store)
+        except MemoryError as refusal:
+            raise MemoryError(str(refusal).replace("holds", "needs")) from None
+
+    with pytest.raises(AssertionError, match="states no bytes"):
+        budget_refusals(store, lambda: needs(store))
 
 
 def test_a_path_is_opened_at_each_budget_with_the_options_given(tmp_path) -> None:
@@ -327,6 +374,35 @@ def test_check_budget_fails_a_refusal_that_writes() -> None:
     check_budget(store, store.run, check_writes=False)
 
 
+def test_check_budget_fails_a_refusal_that_writes_to_a_store_at_a_path(
+    tmp_path,
+) -> None:
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((3, 2), dtype=np.uint16)},
+        "uint16",
+    )
+    calls = [0]
+
+    def call(store, writes: bool) -> int:
+        calls[0] += 1
+        if store.memoryBytes < 5000:
+            if writes:
+                # A selection that leaves out another cell at each call, so
+                # each refusal saves an artifact of its own.
+                store.cells.insert(f"refused{calls[0]}", np.arange(3) != calls[0] % 3)
+                store.snapshot_cell_selection(f"refused{calls[0]}")
+            raise MemoryError(
+                "Reading holds about 5000 bytes. Raise mem_budget to at least 5000 "
+                "bytes."
+            )
+        return 1
+
+    check_budget(tmp_path / "store.zarr", lambda store: call(store, writes=False))
+    with pytest.raises(AssertionError, match="changed what the store holds"):
+        check_budget(tmp_path / "store.zarr", lambda store: call(store, writes=True))
+
+
 def test_at_most_fails_an_estimate_inflated_beyond_the_traced_peak() -> None:
     # The refusal asks for 8 MiB to hold 1 MiB.
     store = _ScriptedStore(lambda budget: [8 * MIB], holds=MIB)
@@ -366,6 +442,23 @@ def test_budget_bounds_bracket_the_smallest_budget_within_the_share_given() -> N
     # A start that fits measures nothing.
     with pytest.raises(AssertionError, match="too small a budget to measure"):
         budget_bounds(call, 4_000_000, parts=100)
+
+
+def test_budget_bounds_read_refusals_by_the_pattern_given_and_stop_climbing() -> None:
+    def call(budget: int) -> None:
+        if budget < 3_000_000:
+            raise MemoryError(f"Importing takes about {budget + 1000} bytes, more")
+
+    held = partial(stated_bytes, pattern=r"holds? about (\d+) bytes")
+    with pytest.raises(AssertionError, match="states no bytes"):
+        budget_bounds(call, 1 << 20, parts=100, refusal_bytes=held)
+    assert budget_bounds(call, 1 << 20, parts=100)[1] >= 3_000_000
+
+    def always(budget: int) -> None:
+        raise MemoryError(f"Importing holds about {budget + 1} bytes, more")
+
+    with pytest.raises(AssertionError, match="100 refusals from 16 bytes"):
+        budget_bounds(always, 16, parts=100)
 
 
 def test_budget_bounds_fail_a_refusal_that_states_no_more_than_its_budget() -> None:
@@ -437,6 +530,36 @@ def test_each_read_is_held_until_the_next_read_ends() -> None:
         assert _gone(_finished(pool))
 
 
+def test_work_that_finishes_after_its_read_ended_is_held_until_the_next_one_ends() -> (
+    None
+):
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def decode() -> np.ndarray:
+        started.set()
+        assert release.wait(10)
+        return np.ones(1000)
+
+    with ThreadPoolExecutor(1) as pool:
+        with hold_finished_reads() as end_read:
+            future = pool.submit(decode)
+            assert started.wait(10)
+            # The read ends while its pool thread still decodes, as a read
+            # whose thread was descheduled does.
+            end_read()
+            release.set()
+            decoded = weakref.ref(future.result())
+            del future
+            # Once the thread has run the next work item, only the hold keeps
+            # the finished one.
+            pool.submit(int).result()
+            assert decoded() is not None
+            end_read()
+            assert _gone(decoded)
+
+
 def test_a_function_named_as_a_read_ends_a_read_each_time_it_returns() -> None:
     owner = SimpleNamespace(read=lambda value: value + 1)
     read = owner.read
@@ -452,8 +575,8 @@ def test_a_function_named_as_a_read_ends_a_read_each_time_it_returns() -> None:
 
 # Chunks of 12,000 rows of 40 int32 values, 1.92 MB decoded, read one after
 # another in a fresh process whose pool runs no earlier test's reads. The
-# reads are traced alone, then with the work of the read before held, ending
-# each read by hand and then at each read of a Zarr array.
+# reads are traced alone three times, then with the work of the read before
+# held, ending each read by hand and then at each read of a Zarr array.
 _HELD_READ_SCRIPT = """
 import contextlib, json, sys, tracemalloc
 import zarr
@@ -468,20 +591,21 @@ def read_each_chunk(end_read):
         del block
         end_read()
 
-def held(name):
-    if name == "free":
-        return contextlib.nullcontext(lambda: None)
-    return hold_finished_reads(*(ZARR_READS if name == "at each Zarr read" else ()))
-
-read_each_chunk(lambda: None)
-peaks = {}
-for name in ("free", "by hand", "at each Zarr read"):
-    with held(name) as end_read:
+def traced(hold, end_reads):
+    with hold as end_read:
         tracemalloc.start()
         start = tracemalloc.get_traced_memory()[0]
-        read_each_chunk(end_read if name == "by hand" else lambda: None)
-        peaks[name] = tracemalloc.get_traced_memory()[1] - start
+        read_each_chunk(end_read if end_reads else lambda: None)
+        peak = tracemalloc.get_traced_memory()[1] - start
         tracemalloc.stop()
+    return peak
+
+read_each_chunk(lambda: None)
+peaks = {
+    "free": [traced(contextlib.nullcontext(lambda: None), False) for _ in range(3)],
+    "by hand": traced(hold_finished_reads(), True),
+    "at each Zarr read": traced(hold_finished_reads(*ZARR_READS), False),
+}
 print(json.dumps(peaks))
 """
 
@@ -509,14 +633,17 @@ def test_a_read_that_a_pool_thread_still_holds_is_missed_unless_reads_are_held(
     )
     peaks = json.loads(traced.stdout.strip().splitlines()[-1])
 
+    # A read holds its chunk as stored and decoded and the rows it returns,
+    # under three decoded chunks. Without the hold a pool thread lets go of
+    # the read before it, unless it was descheduled, which at least one of
+    # three traces escapes.
     chunk = 12_000 * 40 * 4
-    free = peaks.pop("free")
+    free = min(peaks.pop("free"))
+    assert free < 3 * chunk, peaks
     for name, held in peaks.items():
-        # Without the hold the trace sees one read at a time; with it, the
-        # decoded chunk of the read before beside each read.
-        assert held - free > chunk // 2, (name, free, held)
-        # A read holds its chunk as stored and decoded and the rows it
-        # returns, and the read before it adds no more than that again.
+        # With the hold every read has the read before beside it, its decoded
+        # chunk among it, and no more than that read again.
+        assert held > 3 * chunk, (name, free, held)
         assert held <= 2 * free + chunk, (name, free, held)
 
 
