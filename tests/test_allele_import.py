@@ -6,6 +6,7 @@ quirks. Each import must give exactly the records that the truth fixes for
 the file, state by state.
 """
 
+import re
 import shutil
 import sys
 import warnings
@@ -643,9 +644,11 @@ def test_the_check_before_the_ids_are_read_counts_the_cells_and_their_read(
 
     The share is what the import and the join's lookup hold for each selected
     cell and the read of the cells' IDs, which decodes a stored chunk of
-    them, beside the bytes that the import holds whatever its size.
+    them, beside the bytes that the import holds whatever its size and the
+    file buffers that writing its records through Zarr will hold.
     """
     from cytearc.datastore._operations import recorder_alleles as operations
+    from cytearc.datastore._operations.clone_artifacts import zarr_write_buffer_bytes
     from tests.clone_helpers import ids_read_bytes, open_clone_store
     from tests.storage_helpers import write_count_store
 
@@ -673,6 +676,7 @@ def test_the_check_before_the_ids_are_read_counts_the_cells_and_their_read(
         _FIXED_BYTES
         + (_CELL_BYTES + LOOKUP_BYTES_PER_CELL) * len(ids)
         + ids_read_bytes(store, len(ids))
+        + zarr_write_buffer_bytes()
     )
     store.memoryBytes = share - 1
     with pytest.raises(MemoryError, match="Importing alleles holds about"):
@@ -691,6 +695,47 @@ def test_the_check_before_the_ids_are_read_counts_the_cells_and_their_read(
     except MemoryError:
         pass
     assert reads
+
+
+def test_imports_count_a_buffer_for_each_write_zarr_runs_at_once(tmp_path):
+    # Zarr writes each chunk and each array's metadata through a buffered
+    # file, as many at once as its async concurrency allows, and Python 3.14
+    # made each buffer 128 KiB, where it was the file system's block. The
+    # check counts them for writing the records, before an ID is read.
+    import io
+
+    import zarr
+
+    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import write_count_store
+
+    ids = [f"cell{index:04d}" for index in range(20)]
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((len(ids), 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=ids,
+    )
+    store = open_clone_store(tmp_path / "store.zarr")
+    path = tmp_path / "characters.csv"
+    path.write_text(
+        "cell_barcode,intID1-RNF2\n" + "".join(f"{cell},1\n" for cell in ids)
+    )
+
+    def stated(concurrency: int) -> int:
+        store.memoryBytes = 1
+        try:
+            with zarr.config.set({"async.concurrency": concurrency}):
+                store.clones.import_alleles(
+                    path, cell_selection=store.snapshot_cell_selection()
+                )
+        except MemoryError as error:
+            found = re.search(r"holds about (\d+) bytes at its peak", str(error))
+            assert found is not None, str(error)
+            return int(found.group(1))
+        raise AssertionError("a budget of one byte imported the alleles")
+
+    assert stated(20) - stated(10) == 10 * io.DEFAULT_BUFFER_SIZE
 
 
 def test_saved_records_keep_each_rows_line_as_its_table_numbers_it(tmp_path):

@@ -393,6 +393,39 @@ def test_an_export_beyond_the_budget_writes_nothing(store, truth, recorders, tmp
     assert not (tmp_path / "out.zarr").exists() and not (tmp_path / "out.csv").exists()
 
 
+def test_store_exports_count_a_buffer_for_each_write_zarr_runs_at_once(
+    store, truth, recorders, tmp_path
+):
+    # Zarr writes each chunk and each array's metadata through a buffered
+    # file, as many at once as its async concurrency allows, and Python 3.14
+    # made each buffer 128 KiB, where it was the file system's block. An
+    # export to Cassiopeia writes a Zarr store and counts them; LAML's text
+    # does not.
+    import io
+    import re
+
+    import zarr
+
+    alleles = _petracer_alleles(store, truth, recorders, tmp_path)
+
+    def stated(format: str, concurrency: int) -> int:
+        store.memoryBytes = 1
+        target = tmp_path / ("out.zarr" if format == "cassiopeia" else "out.csv")
+        try:
+            with zarr.config.set({"async.concurrency": concurrency}):
+                store.clones.export_characters(alleles, target, format=format)
+        except MemoryError as error:
+            found = re.search(r"holds about (\d+) bytes", str(error))
+            assert found is not None, str(error)
+            return int(found.group(1))
+        raise AssertionError("a budget of one byte exported the characters")
+
+    assert stated("cassiopeia", 20) - stated("cassiopeia", 10) == (
+        10 * io.DEFAULT_BUFFER_SIZE
+    )
+    assert stated("laml", 20) == stated("laml", 10)
+
+
 def _matrix_of(codes: np.ndarray, largest: int):
     """A character matrix whose every character lists the states 1 to ``largest``."""
     from cytearc.clones.recorders import CharacterMatrix

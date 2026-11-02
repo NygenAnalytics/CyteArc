@@ -45,6 +45,7 @@ from .cell_barcodes import (
     store_sha256,
     warn_unmatched_barcodes,
 )
+from .clone_artifacts import zarr_write_buffer_bytes
 from .record_tables import (
     read_array,
     record_arrays,
@@ -475,8 +476,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         """Refuse an import whose peak would pass the memory budget.
 
         The peak is the largest of reading a chunk beside the records held,
-        merging the records into one table and writing the table, beside
-        what the import holds whatever its size.
+        merging the records into one table and writing the table beside the
+        file buffers of Zarr's writes, beside what the import holds whatever
+        its size.
 
         Args:
             encoder: The records held so far.
@@ -488,7 +490,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         """
         held = encoder.nbytes
         merging = _MERGE_FACTOR * held + max(
-            merge_text, _WRITE_BYTES_PER_RECORD * encoder.n_records
+            merge_text,
+            _WRITE_BYTES_PER_RECORD * encoder.n_records + zarr_write_buffer_bytes(),
         )
         peak = cells + _FIXED_BYTES + max(held + reading, merging)
         if peak > self.memoryBytes:
@@ -860,8 +863,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         # allele as it is ranked, the texts as they are decoded, each
         # character as it is named and ordered (at most every integration at
         # every site), the exported cells' IDs, and a store's column and its
-        # alleles as they are written; the matrix's codes are counted once
-        # their size is known.
+        # alleles as they are written, beside the file buffers of Zarr's
+        # writes; the matrix's codes are counted once their size is known.
         resident = (
             _FIXED_BYTES
             + _EXPORT_BYTES_PER_RECORD * n_records
@@ -873,6 +876,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             + _STORE_BYTES_PER_CELL * n_cells
             + (
                 _STORE_BYTES_PER_ALLELE_BYTE * counts["allele_bytes"]
+                + zarr_write_buffer_bytes()
                 if format == "cassiopeia"
                 else 0
             )
