@@ -932,6 +932,23 @@ def _agreement(codes: np.ndarray, split: int = 0) -> np.ndarray:
     return agree
 
 
+def _component_agreement(codes: np.ndarray) -> np.ndarray:
+    """The chance that the rows of two components agree, at each position.
+
+    Each row stands for one component, so the chance is the share of pairs
+    of two rows that hold one character there: the sum over the characters
+    of each one's count times one less, over the rows times one less. A row
+    never pairs with itself, which would raise the chance by about its
+    complement over the rows, and the rows must be two or more.
+    """
+    n_rows, length = codes.shape
+    agree = np.empty(length, dtype=np.float64)
+    for position in range(length):
+        counts = np.bincount(codes[:, position], minlength=256)
+        agree[position] = int(counts @ (counts - 1)) / (n_rows * (n_rows - 1))
+    return agree
+
+
 @njit(cache=True)
 def _mismatch_chances(disagree: np.ndarray, limit: int) -> np.ndarray:
     """The chances of 0 to ``limit`` mismatches between two texts.
@@ -1073,35 +1090,65 @@ def _edit_chance_pairs(
     chosen: list[np.ndarray],
     lengths: list[int],
     limit: int,
+    components: np.ndarray,
     memory: _Memory,
 ) -> float:
     """The pairs of a block's texts expected within ``limit`` edits by chance.
 
     ``groups`` holds the rows of each length of the block, ``chosen`` the rows
-    whose characters give that length's frequencies, and ``lengths`` that
-    length, ascending. Each pair of lengths within ``limit`` pairs every text
-    of one with every text of the other, and two texts of one length are
-    distinct, so pairs that would be identical are left out as
-    :func:`_chance_pairs` leaves them out.
+    of one text per component of that length, and ``lengths`` that length,
+    ascending. Each pair of positions agrees with the share of pairs of chosen
+    texts of two components that hold one character there; a pair of lengths
+    whose chosen texts are of one component alone expects nothing. Each pair
+    of lengths within ``limit`` pairs every text of one with every text of
+    the other, and two texts of one length are distinct, so pairs that would
+    be identical are left out as :func:`_chance_pairs` leaves them out.
     """
-    held = _FREQUENCY_BYTES * sum(lengths) + _AGREEMENT_BYTES * max(lengths) ** 2
-    # Counting one position's codes copies them, widened to 8 bytes each.
-    counting = _COUNTED_CODE_BYTES * max(map(len, chosen)) + _FREQUENCY_BYTES
+    longest, most = max(lengths), max(map(len, chosen))
+    held = _FREQUENCY_BYTES * sum(lengths) + _AGREEMENT_BYTES * longest**2
+    # Counting one position's codes copies them, widened to 8 bytes each;
+    # the chosen texts of one component in two lengths are copied, and one
+    # position of one compared with every position of the other.
+    counting = _COUNTED_CODE_BYTES * most + _FREQUENCY_BYTES + 3 * most * longest
     memory.check(held + counting, "the frequencies of the texts' characters")
     memory.held += held
-    frequencies = []
+    counts = []
     for rows, length in zip(chosen, lengths, strict=True):
-        counts = np.zeros((length, 256), dtype=np.float64)
+        tally = np.zeros((length, 256), dtype=np.float64)
         for position in range(length):
-            counts[position] = np.bincount(matrix[rows, position], minlength=256)
-        counts /= len(rows)
-        frequencies.append(counts)
+            tally[position] = np.bincount(matrix[rows, position], minlength=256)
+        counts.append(tally)
     expected = 0.0
     for first in range(len(groups)):
         for second in range(first, len(groups)):
             if lengths[second] - lengths[first] > limit:
                 break
-            agree = frequencies[first] @ frequencies[second].T
+            # The chosen texts of one component in both lengths, which never
+            # pair by chance.
+            rows_first, rows_second = chosen[first], chosen[second]
+            if first == second:
+                shared_first = shared_second = rows_first
+            else:
+                _, at_first, at_second = np.intersect1d(
+                    components[rows_first],
+                    components[rows_second],
+                    assume_unique=True,
+                    return_indices=True,
+                )
+                shared_first = rows_first[at_first]
+                shared_second = rows_second[at_second]
+            apart = len(rows_first) * len(rows_second) - len(shared_first)
+            if apart < 1:
+                continue
+            agree = counts[first] @ counts[second].T
+            codes_first = matrix[shared_first, : lengths[first]]
+            codes_second = matrix[shared_second, : lengths[second]]
+            for position in range(lengths[first]):
+                agree[position] -= np.sum(
+                    codes_first[:, position, None] == codes_second, axis=0
+                )
+            del codes_first, codes_second
+            agree /= apart
             chance = _edit_chance(agree, limit, memory)
             n_first, n_second = len(groups[first]), len(groups[second])
             if first != second:
@@ -1659,7 +1706,7 @@ def _representatives(
     return order[last]
 
 
-def _library_frequencies(
+def _library_counts(
     matrix: np.ndarray,
     rows: np.ndarray,
     length: int,
@@ -1667,12 +1714,12 @@ def _library_frequencies(
     priority: np.ndarray,
     unknown: np.ndarray,
 ) -> np.ndarray:
-    """Each position's frequency of each character among one text per component.
+    """Each position's count of each character among one text per component.
 
     At each position, each component of ``rows`` gives the character of its
     text of highest priority that holds a base there, so a component whose
     text of highest priority was cut short still counts where others hold
-    bases. A position where no text holds a base has no frequencies.
+    bases.
     """
     # Components in a row, the text of highest priority first and of equal
     # priorities the later.
@@ -1690,8 +1737,6 @@ def _library_frequencies(
             first = np.ones(len(holding), dtype=bool)
             first[1:] = run_of[holding][1:] != run_of[holding][:-1]
             counts[position] = np.bincount(codes[holding[first]], minlength=256)
-    totals = counts.sum(axis=1, keepdims=True)
-    np.divide(counts, totals, out=counts, where=totals > 0)
     return counts
 
 
@@ -1710,8 +1755,11 @@ def _partial_chance_pairs(
 
     The texts are grouped as :func:`_partial_pairs` groups them, and each
     pair of groups that compares ``min_compared`` positions or more adds its
-    pairs times their chance on those positions, from each position's
-    frequencies among one text per component of the grouped texts.
+    pairs times their chance on those positions. Each position agrees with
+    the share of pairs of components that hold one character there, of one
+    text per component of the grouped texts; where fewer than two
+    components hold a base, every text that holds one is of one component,
+    so a pair of groups that compares that position expects nothing.
     """
     n_words = max(-(-length // 64), 1)
     held = len(members) * (_MASK_TEXT_BYTES + 16 * n_words)
@@ -1724,18 +1772,28 @@ def _partial_chance_pairs(
         _LIBRARY_ROW_BYTES * len(order) + 2 * _FREQUENCY_BYTES * length,
         "the characters of one text per component",
     )
-    frequencies = _library_frequencies(
+    counts = _library_counts(
         matrix, members[order], length, components, priority, unknown
     )
-    # Each position's chance that two texts agree there, held for every pair
-    # of groups once the frequencies are let go.
-    agreement = np.sum(frequencies**2, axis=1)
-    del frequencies
-    memory.held += _AGREEMENT_BYTES * length
+    # Each position's chance that the texts of two components agree there,
+    # held for every pair of groups with the positions that two or more
+    # components hold, once the counts are let go.
+    holding = counts.sum(axis=1)
+    held_apart = holding >= 2
+    agreement = np.zeros(length, dtype=np.float64)
+    for position in np.flatnonzero(held_apart).tolist():
+        tally = counts[position]
+        agreement[position] = float(tally @ (tally - 1.0)) / (
+            holding[position] * (holding[position] - 1.0)
+        )
+    del counts, holding
+    memory.held += (_AGREEMENT_BYTES + 1) * length
     expected = 0.0
     for first_group, second_group, columns in _group_pairs(
         group_masks, length, min_compared
     ):
+        if not held_apart[columns].all():
+            continue
         n_first = int(ends[first_group] - starts[first_group])
         if second_group == first_group:
             if n_first < 2:
@@ -1746,7 +1804,7 @@ def _partial_chance_pairs(
             n_texts = n_first + int(ends[second_group] - starts[second_group])
         chances = _mismatch_chances(1.0 - agreement[columns], min(limit, len(columns)))
         expected += _chance_pairs(n_texts, split, chances)
-    memory.held -= held + _AGREEMENT_BYTES * length
+    memory.held -= held + (_AGREEMENT_BYTES + 1) * length
     return expected
 
 
@@ -1777,18 +1835,27 @@ def expected_chance_pairs(
     from weighting the frequencies, while the representatives keep the real
     biases of each position, such as positions that every barcode fixes.
 
-    The frequencies are those of each length of a block. With ``unknown``,
-    each position takes the character of each component's text of highest
-    priority that holds a base there. Pairs are counted over every text
-    compared: each pair of the texts of one length and block or, with
-    ``unknown``, of two groups of texts on the positions both hold, as the
-    search compares them. Two texts of one length are distinct, so a pair of
-    them that would agree everywhere counts as one that does not.
+    Two texts agree at a position with the chance that the representatives
+    of two components do: the share of pairs of them, among the texts of
+    each length of a block, that hold one character there. A text never
+    pairs with itself here, which would raise the chance by about its
+    complement over the components. With ``unknown``, each position takes
+    the character of each component's text of highest priority that holds a
+    base there. Where fewer than two components give a set of texts its
+    characters, no two of its texts are of two components, and the set
+    expects nothing: the texts of one length and block, a pair of groups of
+    texts that compares a position that fewer than two components hold, or
+    under ``levenshtein`` a pair of lengths whose representatives are of one
+    component. Pairs are counted over every text compared: each pair of the
+    texts of one length and block or, with ``unknown``, of two groups of
+    texts on the positions both hold, as the search compares them. Two
+    texts of one length are distinct, so a pair of them that would agree
+    everywhere counts as one that does not.
 
     Under ``hamming`` and ``normalized_hamming``, the chance of each number of
     mismatches follows exactly from the chance that two texts agree at each
-    position, the sum of the squared frequencies of its characters. Under
-    ``levenshtein``, each pair of lengths of a block follows the edit
+    position. Under ``levenshtein``, each pair of lengths of a block follows
+    the edit
     distance's dynamic programming over the chance that each pair of
     positions agrees, treating the pairs of positions as independent, an
     approximation that comes within a tenth of exact counts on random texts
@@ -1808,17 +1875,17 @@ def expected_chance_pairs(
         max_bytes: The most bytes it may hold: the encoded texts, as
             :func:`neighbor_pairs` counts them, and 48 bytes for each length
             of each block; while one text per component of a length is
-            chosen, 57 bytes and its length for each text, with 2 KiB; with
+            chosen, 57 bytes and its length for each text, with 4 KiB; with
             ``unknown``, the positions of no base as the search counts them,
             64 bytes for each text that holds enough bases and 4 KiB for
-            each position while the characters are counted, and 8 bytes for
+            each position while the characters are counted, and 9 bytes for
             each position after; under ``levenshtein``, 48 bytes for each
             text of a block while one per component is chosen, 2 KiB for
             each position of each length of the block, 8 bytes for each pair
-            of positions of its longest length, 9 bytes for each text chosen
-            of its most numerous length with 2 KiB, and 160 bytes for each
-            state of the edit distances followed, with 32 KiB more. None sets
-            no limit.
+            of positions of its longest length, for each text chosen of its
+            most numerous length 9 bytes and 3 for each position of its
+            longest, with 2 KiB, and 160 bytes for each state of the edit
+            distances followed, with 32 KiB more. None sets no limit.
         unknown: Characters that hold no base, under ``hamming`` only.
         min_compared: The fewest positions that two texts must compare,
             under ``hamming`` only.
@@ -1875,7 +1942,13 @@ def expected_chance_pairs(
                 _representatives(rows, component_codes, ranks_of) for rows in groups
             ]
             expected += _edit_chance_pairs(
-                matrix, groups, chosen, group_lengths[low:high].tolist(), limit, memory
+                matrix,
+                groups,
+                chosen,
+                group_lengths[low:high].tolist(),
+                limit,
+                component_codes,
+                memory,
             )
         return expected
     for group in range(len(starts)):
@@ -1903,14 +1976,17 @@ def expected_chance_pairs(
                     memory,
                 )
             continue
-        # The representatives, their characters and the count of one position.
+        # The representatives, their characters and the count of one position
+        # with its copy less one.
         memory.check(
             (_REPRESENTATIVE_ROW_BYTES + length + _COUNTED_CODE_BYTES) * len(members)
-            + _FREQUENCY_BYTES,
+            + 2 * _FREQUENCY_BYTES,
             "the representatives of the components",
         )
         representatives = _representatives(members, component_codes, ranks_of)
-        agree = _agreement(matrix[representatives, :length])
+        if len(representatives) < 2:
+            continue
+        agree = _component_agreement(matrix[representatives, :length])
         expected += _chance_pairs(
             len(members), 0, _mismatch_chances(1.0 - agree, limit)
         )
