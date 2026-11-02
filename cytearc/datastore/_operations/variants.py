@@ -2398,8 +2398,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             }
         # Every cell of the counts holds its offsets while bands are read, and
         # its call counts and offsets as they are written; each allele its
-        # site, rank and gapfill probability; each call label its text; and
-        # appending a band rewrites the chunks it ends in.
+        # site, rank and gapfill probability; each call label its text;
+        # appending a band rewrites the chunks it ends in; and Zarr's writes
+        # hold their file buffers.
         n_alleles = table.n_alleles
         # Each call row's label refers to one of these texts rather than a copy.
         call_value_names = np.asarray(
@@ -2416,6 +2417,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             + sum(map(sys.getsizeof, call_value_names.tolist()))
             + _band_chunk_bytes(group, tables)
             + _REWRITTEN_CHUNKS * min(_ROW_BAND, max(1, most_rows)) * _STORED_BYTES
+            + zarr_write_buffer_bytes()
         )
         per_row = _GENOTYPE_BYTES_PER_ROW[method]
         max_rows = (self.memoryBytes - held) // per_row

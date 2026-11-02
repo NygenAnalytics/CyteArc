@@ -523,6 +523,34 @@ def test_genotypes_refuse_a_budget_too_small_before_writing(
     )
 
 
+def test_bands_count_a_buffer_for_each_write_zarr_runs_at_once(store, tmp_path) -> None:
+    # Appending a band's calls writes stored chunks, each through a buffered
+    # file, as many at once as Zarr's async concurrency allows, and Python
+    # 3.14 made each buffer 128 KiB, where it was the file system's block.
+    import io
+    import re
+
+    import zarr
+
+    counts, options = _method_counts(store, tmp_path, "threshold")
+
+    def bytes_named(concurrency: int) -> int:
+        """The bytes that the check of the first band names."""
+        with zarr.config.set({"async.concurrency": concurrency}):
+            store.memoryBytes = 1
+            try:
+                store.variants.genotypes(counts, method="threshold", **options)
+            except MemoryError as error:
+                found = re.search(r"holds about (\d+) bytes for a band", str(error))
+                assert found is not None, str(error)
+                return int(found.group(1))
+            finally:
+                store.memoryBytes = 1 << 30
+        raise AssertionError("a budget of one byte called the genotypes")
+
+    assert bytes_named(20) - bytes_named(10) == 10 * io.DEFAULT_BUFFER_SIZE
+
+
 def _method_counts(store, tmp_path, method):
     if method == "gift":
         return _gift_store(store, tmp_path), {}
