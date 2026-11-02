@@ -893,7 +893,7 @@ requires-dist = [
     { name = "packaging" },
     { name = "pandas", specifier = ">=2.2.3" },
     { name = "polars", marker = "extra == 'regulons'", specifier = ">=1.20" },
-    { name = "polars", marker = "extra == 'test'", specifier = ">=1.20" },
+    { name = "polars", marker = "extra == 'test'", specifier = ">=1.30" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4" },
     { name = "pytest-xdist", marker = "extra == 'test'", specifier = ">=3.6" },

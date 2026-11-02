@@ -86,7 +86,9 @@ test = [
     # The Hugging Face store tests build HTTP errors with httpx, which
     # huggingface-hub 2.0 no longer installs.
     "httpx>=0.28.1",
-    "polars>=1.20",
+    # Cassiopeia's parquet allele tables keep their attributes in the file's
+    # metadata, which polars reads, and the tests write, from 1.30 on.
+    "polars>=1.30",
     # CI runs t-SNE on Linux x86_64, where sgtsnepi has wheels.
     "sgtsnepi>=0.7; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]

@@ -798,8 +798,17 @@ def _polars() -> Any:
         import polars
     except ImportError as error:
         raise ImportError(
-            "Reading Cassiopeia's parquet allele tables needs polars; install polars"
+            "Reading Cassiopeia's parquet allele tables needs polars 1.30 or later; "
+            "install polars"
         ) from error
+    # Cassiopeia keeps its attributes in the file's metadata, which polars
+    # reads from 1.30 on.
+    if not hasattr(polars, "read_parquet_metadata"):
+        raise ImportError(
+            "Reading Cassiopeia's parquet allele tables needs polars 1.30 or later, "
+            f"which reads a parquet file's metadata, not polars {polars.__version__}; "
+            "install a later polars"
+        )
     return polars
 
 

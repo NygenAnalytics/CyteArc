@@ -9,6 +9,7 @@ element with zarr, as anndata lays them out, and HDF5 files with h5py.
 import gzip
 import shutil
 import sys
+import types
 from pathlib import Path
 
 import h5py
@@ -306,7 +307,17 @@ def test_parquet_tables_need_polars(tmp_path, polars, monkeypatch):
         polars, tmp_path / "a.alleles.parquet", cellBC=["c1"], intBC=["i1"], r1=["None"]
     )
     monkeypatch.setitem(sys.modules, "polars", None)
-    with pytest.raises(ImportError, match="parquet allele tables needs polars"):
+    with pytest.raises(ImportError, match="parquet allele tables needs polars 1.30"):
+        allele_layout(path, format="cassiopeia_parquet")
+    # A polars that cannot read a parquet file's metadata, as before 1.30, is
+    # refused by name rather than failing at the read.
+    earlier = types.SimpleNamespace(
+        __version__="1.29.0", read_parquet_schema=polars.read_parquet_schema
+    )
+    monkeypatch.setitem(sys.modules, "polars", earlier)
+    with pytest.raises(
+        ImportError, match="reads a parquet file's metadata, not polars 1.29.0"
+    ):
         allele_layout(path, format="cassiopeia_parquet")
 
 
