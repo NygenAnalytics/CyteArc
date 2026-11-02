@@ -816,6 +816,39 @@ def test_got_tables_refuse_malformed_text(tmp_path, text, message) -> None:
         got_source(path, format="got")
 
 
+def test_got_tables_read_r_row_names_as_clone_tables_do(tmp_path) -> None:
+    """A delimiter after each row's last field gives one field more than the
+    header, as R's row names do, so a table whose rows of one field more all
+    end in a delimiter is refused, while one row holding a value after its
+    named columns makes them row names."""
+    cells = ["AAAC-1", "AAAG-1"]
+    store, selection = _store(tmp_path / "store.zarr", cells)
+    path = tmp_path / "CALR.tsv"
+    path.write_text("BC\tWT.calls\tMUT.calls\nAAAC-1\t1\t2\t\nAAAG-1\t0\t3\t\n")
+    with pytest.raises(ValueError, match="end the header with the delimiter too"):
+        got_source(path, format="got")
+    counts = pd.DataFrame(
+        {
+            "cell": ["AAAC-1", "AAAC-1", "AAAG-1"],
+            "site": "CALR",
+            "allele": ["WT", "MUT", "MUT"],
+            "count": [1, 2, 3],
+        }
+    )
+    # A header that ends in the delimiter too names an empty last column.
+    path.write_text("BC\tWT.calls\tMUT.calls\t\nAAAC-1\t1\t2\t\nAAAG-1\t0\t3\t\n")
+    loaded, _group = _import(store, selection, path)
+    assert_tables(loaded.counts, counts)
+    # R leaves a missing last value empty with na=""; the second row's value
+    # shows that the first field of each row is a row name.
+    path.write_text(
+        "BC\tWT.calls\tMUT.calls\tGenotype\n1\tAAAC-1\t1\t2\t\n2\tAAAG-1\t0\t3\tMUT\n"
+    )
+    loaded, _group = _import(store, selection, path, invalidate_cache=True)
+    assert_tables(loaded.counts, counts)
+    assert loaded.calls[["cell", "call"]].to_numpy().tolist() == [["AAAG-1", "MUT"]]
+
+
 def test_got_formats_and_their_columns(tmp_path) -> None:
     path = tmp_path / "t.tsv"
     path.write_text("BC\tnum.WT.call\nA\t1\n")

@@ -1148,7 +1148,7 @@ def test_reader_implementations_are_runtime_isolated():
         },
         "csv.py": {"readers._text"},
         "giftwrap.py": {"readers._variant_files"},
-        "got.py": {"readers._variant_files"},
+        "got.py": {"readers._delimited", "readers._variant_files"},
         "lineage_barcodes.py": {
             "readers._delimited",
             "readers._h5ad_columns",

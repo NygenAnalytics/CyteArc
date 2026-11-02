@@ -47,6 +47,7 @@ import numpy as np
 import pandas as pd
 
 from ..variants.counts import EntryBatch, SiteTable
+from ._delimited import text_layout
 from ._variant_files import first_line, open_text
 
 __all__ = ["GOT_FORMATS", "GotSource", "got_source", "got_table_format"]
@@ -81,9 +82,16 @@ def _delimiter(line: str) -> str:
 def _read_table(path: str) -> _Table:
     """Read a GoT table as text, with its cells from a column or R's row names.
 
+    A first row of one field more than the header holds R's row names, as
+    :func:`~cytearc.readers._delimited.text_layout` reads them: a table whose
+    rows of one field more all end in a delimiter with nothing after it reads
+    alike with a delimiter after each row's last field, and is refused.
+
     Raises:
         ValueError: If the file is empty, its rows hold another number of
-            fields than its header, or no column names the cells.
+            fields than its header, its rows of one field more than the header
+            all end in a delimiter with nothing after it, or no column names
+            the cells.
     """
     header = first_line(path)
     if not header.strip():
@@ -95,6 +103,8 @@ def _read_table(path: str) -> _Table:
     body = [row for row in rows[1:] if any(field.strip() for field in row)]
     row_names = bool(body) and len(body[0]) == len(names) + 1
     if row_names:
+        # Refuses the rows that a delimiter after each last field gives.
+        text_layout(path, what="a GoT table")
         names = ["", *names]
     for line, row in enumerate(body, start=2):
         if len(row) != len(names):
