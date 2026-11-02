@@ -149,6 +149,16 @@ uv pip install "cytearc[extra,regulons]"
 
 Without `polars`, opening a ranking database raises an `ImportError` that names the extra.
 
+## Optional parquet allele tables
+
+`ds.clones.import_alleles` reads Cassiopeia 3.0's parquet allele tables with [polars] 1.30 or later, which reads the attributes that Cassiopeia keeps in a parquet file's metadata. CyteArc does not install it by default, and the `regulons` extra accepts earlier versions, so install it directly:
+
+```bash
+uv pip install "polars>=1.30"
+```
+
+Without it, or with an earlier version, reading such a table raises an `ImportError` that names the version.
+
 ## JupyterLab
 
 Install and launch JupyterLab from the same activated environment as CyteArc.

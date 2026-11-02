@@ -76,6 +76,7 @@ Granular workflows pass exact refs to the same datastore-owned plotting surface:
 | fate coupling of every pair of groups with the tree of their order | `clone_coupling(ds.clones.coupling(clones_ref, group_by="cell_type"))`, or `value="coupling"` for the couplings |
 | each clone's late cells by fate, by dominant fate | `clone_fates(bias_ref)`, or `normalize=True` for shares |
 | barcodes per cell, UMIs per barcode and reads per molecule of imported lineage barcodes | `barcode_calls(barcodes_ref)`, or `barcode_calls(barcodes_ref, max_barcodes=5)` to gather cells of five barcodes or more in the last bar |
+| the share of cells that each site of a lineage recorder reads as unedited, marked, unknown or missing | `recorder_states(alleles_ref)`, or `recorder_states(alleles_ref, max_sites=20)` to draw the 20 sites read in the most cells |
 | receptor types, chain pairings and chains per cell of imported immune receptors | `receptor_qc(receptors_ref)`, or `receptor_qc(receptors_ref, group_by="sample")` for one bar per group |
 | V, D, J or constant gene usage of each locus | `gene_usage(receptors_ref, group_by="sample")`, or `gene="j_call"`, `level="family"` |
 | V-J gene pairing of each locus | `gene_pairing(receptors_ref, cell_selection=t_cells)` |
@@ -175,7 +176,7 @@ Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, a
 
 ```{eval-rst}
 .. automodule:: cytearc.plotting
-    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, mixscape, association_volcano, association_calibration, perturbation_clusters, clone_abundance, clonal_expansion, clonal_rarefaction, clonal_overlap, clone_tracking, clone_coupling, clone_fates, barcode_calls, receptor_qc, gene_usage, gene_pairing, spectratype, variant_depth, variant_statistics, allele_frequencies, genotypes, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
+    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, mixscape, association_volcano, association_calibration, perturbation_clusters, clone_abundance, clonal_expansion, clonal_rarefaction, clonal_overlap, clone_tracking, clone_coupling, clone_fates, barcode_calls, recorder_states, receptor_qc, gene_usage, gene_pairing, spectratype, variant_depth, variant_statistics, allele_frequencies, genotypes, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
     :imported-members:
     :undoc-members:
     :show-inheritance:

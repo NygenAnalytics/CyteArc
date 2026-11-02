@@ -727,6 +727,20 @@ class GenotypeCloneArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class RecorderAlleleImportArguments(OperationArguments):
+    operation: ClassVar[str] = "import_recorder_alleles"
+    artifact_kind: ClassVar[str] = "lineage_alleles"
+
+    cell_selection: ArtifactRef = artifact_input()
+    # Each allele file's format, its one integration or the slots of its
+    # shorter integrations, the columns it reads, the SHA-256 of its bytes
+    # and of the files read beside it, and how its barcodes name cells, in
+    # canonical order. Paths are not part of the identity.
+    sources: tuple[dict[str, Any], ...] = artifact_input()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class GuideThresholdArguments(OperationArguments):
     operation: ClassVar[str] = "fit_guide_thresholds"
     artifact_kind: ClassVar[str] = "guide_thresholds"

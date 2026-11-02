@@ -1106,6 +1106,7 @@ def test_reader_implementations_are_runtime_isolated():
         "mgatk.py",
         "mito_afm.py",
         "mtx.py",
+        "recorder_alleles.py",
         "seurat.py",
         "tapestri.py",
         "vartrix.py",
@@ -1130,6 +1131,7 @@ def test_reader_implementations_are_runtime_isolated():
         "readers.mgatk",
         "readers.mito_afm",
         "readers.mtx",
+        "readers.recorder_alleles",
         "readers.tapestri",
         "readers.vartrix",
         "readers.seurat",
@@ -1167,6 +1169,7 @@ def test_reader_implementations_are_runtime_isolated():
             "readers._text",
         },
         "mtx.py": {"readers._sparse", "readers._text"},
+        "recorder_alleles.py": {"readers._delimited", "readers._treedata"},
         "tapestri.py": {"readers._assay_names", "readers._text"},
     }
     reader_edges = {
@@ -1234,6 +1237,7 @@ def test_writer_implementations_are_runtime_isolated():
         "_store.py",
         "airr.py",
         "cellranger.py",
+        "characters.py",
         "clone_tables.py",
         "counts_t.py",
         "csv.py",
@@ -1256,6 +1260,7 @@ def test_writer_implementations_are_runtime_isolated():
     format_modules = {
         "writers.airr",
         "writers.cellranger",
+        "writers.characters",
         "writers.clone_tables",
         "writers.csv",
         "writers.h5ad",
@@ -1273,6 +1278,9 @@ def test_writer_implementations_are_runtime_isolated():
         "writers.create_zarr_obj_array",
     }
     shared_edges = {"writers._materialize", "writers._store", "writers.counts_t"}
+    # TreeData's reading and writing share one module, so a store that
+    # character export writes is the layout that import reads.
+    shared_reader_codecs = {"characters.py": {"readers._treedata"}}
     matching_reader_exports = {
         "cellranger.py": {"CrReader"},
         "csv.py": {"CSVReader"},
@@ -1324,6 +1332,7 @@ def test_writer_implementations_are_runtime_isolated():
             for module_name in runtime_imports
             if module_name.startswith("readers.")
             and module_name != f"readers.{path.stem}"
+            and module_name not in shared_reader_codecs.get(path.name, set())
         }
 
 
@@ -1418,6 +1427,9 @@ def test_datastore_operation_mixins_are_runtime_isolated():
     from cytearc.datastore._operations.lineage_barcodes import (
         _LineageBarcodeOperationsMixin,
     )
+    from cytearc.datastore._operations.recorder_alleles import (
+        _RecorderAlleleOperationsMixin,
+    )
     from cytearc.datastore._operations.repertoire import _RepertoireOperationsMixin
     from cytearc.datastore._operations.trajectory import (
         _TrajectoryFeatureOperationsMixin,
@@ -1476,6 +1488,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         _PerturbationProfileOperationsMixin,
         _CloneOperationsMixin,
         _LineageBarcodeOperationsMixin,
+        _RecorderAlleleOperationsMixin,
         _RepertoireOperationsMixin,
         _VariantOperationsMixin,
     )

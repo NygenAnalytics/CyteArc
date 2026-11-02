@@ -177,3 +177,12 @@ def write_variant_file(path: Path, barcodes: list[str]) -> Path:
         "BC\twtUMIs\tmutUMIs\n" + "".join(f"{barcode}\t1\t0\n" for barcode in barcodes)
     )
     return path
+
+
+def write_allele_file(path: Path, barcodes: list[str]) -> Path:
+    """PEtracer's long allele table, which gives each cell a mark and two unedited sites."""
+    path.write_text(
+        "intID,cellBC,RNF2,HEK3,EMX1,UMI,readCount\n"
+        + "".join(f"intID1,{barcode},ACAGT,None,None,3,30\n" for barcode in barcodes)
+    )
+    return path

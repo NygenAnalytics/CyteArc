@@ -108,6 +108,23 @@ def test_integers_refuse_values_that_are_not_counts(value) -> None:
         parse_integers(["1", value], name="umi_count", first_line=10)
 
 
+def test_integers_name_lines_by_the_callers_rule_where_one_is_given() -> None:
+    # Rows 1 and 3 hold no count; the caller places them on file lines 7 and
+    # 12, as rows after blank lines sit.
+    file_lines_of_rows = np.array([5, 7, 9, 12])
+    named: list[list[int]] = []
+
+    def lines(rows: np.ndarray) -> str:
+        named.append(rows.tolist())
+        return "lines " + ", ".join(str(file_lines_of_rows[row]) for row in rows)
+
+    with pytest.raises(ValueError, match=r"holds 'x' on lines 7, 12$"):
+        parse_integers(["1", "x", "2", "y"], name="umis", first_line=5, lines=lines)
+    assert named == [[1, 3]]
+    with pytest.raises(ValueError, match=r"holds 'x' on lines 6, 8$"):
+        parse_integers(["1", "x", "2", "y"], name="umis", first_line=5)
+
+
 def test_integers_refuse_values_beyond_int64() -> None:
     with pytest.raises(ValueError, match="too large"):
         parse_integers(["1", str(2**64)], name="umi_count")
@@ -563,3 +580,40 @@ def test_an_encoder_counts_the_bytes_of_every_array_it_holds() -> None:
     molecule = 7 + 5 * 8 + 4 * 8
     reads = 4 * 8
     assert encoder.nbytes == cells + barcode + molecule + reads == 189
+
+
+def test_parsers_read_only_the_missing_tokens_they_are_given():
+    """A recorder writes None for an uncut site, so its None must stay text."""
+    raw = np.array([" None ", "NA", "", "x"], dtype=object)
+    assert parse_text(raw).tolist() == [None, None, None, "x"]
+    assert parse_text(raw, missing=frozenset()).tolist() == ["None", "NA", "", "x"]
+    assert parse_text(raw, missing=frozenset({"NA"})).tolist() == [
+        "None",
+        None,
+        "",
+        "x",
+    ]
+    counts = np.array(["3", "-", "NA"], dtype=object)
+    assert parse_integers(
+        counts, name="n", missing=frozenset({"-", "NA"})
+    ).tolist() == [
+        3,
+        -1,
+        -1,
+    ]
+    # NA is a number of no kind once it is not missing.
+    with pytest.raises(ValueError, match="'NA'"):
+        parse_integers(counts, name="n", missing=frozenset({"-"}))
+    values = np.array(["1.5", "-", "nan"], dtype=object)
+    parsed = parse_numbers(values, name="q", missing=frozenset({"-", "nan"}))
+    assert parsed[0] == 1.5 and np.isnan(parsed[1:]).all()
+    flags = np.array(["true", "None", "false"], dtype=object)
+    assert parse_flags(flags, name="pass").tolist() == [1, -1, 0]
+    with pytest.raises(ValueError, match="'None'"):
+        parse_flags(flags, name="pass", missing=frozenset())
+    frame = pd.DataFrame({"site": ["None", "AC"], "umis": ["-", "4"]})
+    parsed = parse_columns(
+        frame, {"site": TEXT, "umis": INTEGER}, first_line=2, missing=frozenset({"-"})
+    )
+    assert parsed["site"].tolist() == ["None", "AC"]
+    assert parsed["umis"].tolist() == [-1, 4]

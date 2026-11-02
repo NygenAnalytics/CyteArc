@@ -1,0 +1,81 @@
+INPUT
+
+CfgType:                                                sc10xV2
+Input FastQ File(s):                                    Processed/EB/FO864/SC/LF/Amplicon/FO864LF_S1_L001_R1_001.fastq.gz
+                                                        Processed/EB/FO864/SC/LF/Amplicon/FO864LF_S1_L001_R2_001.fastq.gz
+Reference barcode file:                                 Analyzed/EB/FO864/SC/LF/Transcriptome/filtered_barcodes_umi_mt.txt
+Output directory:                                       Analyzed/EB/FO864/SC/LF/Amplicon
+
+READ BREAKDOWN                                               Reads      %
+
+in_fastq:                                                   194704    100
+QC_length_match:                                            194704    100
+CB_correct_length:                                          194704    100
+UMI_correct_length:                                         194704    100
+CB_no_N:                                                    194704    100
+UMI_no_N:                                                   194704    100
+good_CB_UMI_QC:                                             155655     80
+valid_provenance_structure:                                 155655     80
+CARLIN_match:                                               179383     92
+valid_5_primer:                                             171817     88
+valid_3_primer:                                             194704    100
+valid_2_seq:                                                173400     89
+valid_read_structure:                                       158531     81
+trimmed_SEQ_long_enough:                                    153556     79
+SEQ_no_N:                                                   158531     81
+valid_SEQ_structure:                                        153556     79
+valid_lines:                                                126903     65
+matched_CBs:                                                106637     55
+common_CBs:                                                 105244     54
+called_CBs_total:                                           101731     52
+called_CBs_allele:                                           80330     41
+eventful_CBs_total:                                          68900     35
+eventful_CBs_allele:                                         60377     31
+
+THRESHOLDS
+
+CB_one_tenth_99_pctl:                                           54
+CB_max_cells:                                                    2
+CB_equal_partition:                                             26
+CB_err_floor:                                                    1
+CB_read_floor:                                                  10
+CB_override:                                                    10
+CB_chosen:                                                      10
+
+UMI_one_tenth_99_pctl:                                          26
+UMI_max_molecules:                                               2
+UMI_equal_partition:                                             0
+UMI_err_floor:                                                   1
+UMI_read_floor:                                                 10
+UMI_override:                                                   10
+UMI_chosen:                                                     10
+
+CELL BARCODE BREAKDOWN
+
+reference:                                                    4938
+uncleaned:                                                    2399
+matched:                                                      1891
+cleaned:                                                      1380
+common:                                                        951
+called:                                                        864
+eventful:                                                      347
+
+PREFERENTIAL AMPLIFICATION
+
+Mean reads per edited CB:                                      199
+Mean reads per unedited CB:                                     64
+
+SEQUENCE HETEROGENEITY
+
+Mean % reads in edited CB folded into consensus:                88
+Mean % reads in unedited CB folded into consensus:              61
+
+ALLELES
+
+Total (including template):                                     39
+Singletons (including template):                                14
+% CBs edited:                                                   40
+Effective Alleles:                                              13
+Diversity Index (normalized by all):                          0.02
+Diversity Index (normalized by edited):                       0.04
+Mean CARLIN potential (by allele):                            1.95

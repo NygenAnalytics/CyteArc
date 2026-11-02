@@ -81,6 +81,7 @@ if TYPE_CHECKING:
         mixscape as mixscape,
         perturbation_clusters as perturbation_clusters,
     )
+    from .recorder_alleles import recorder_states as recorder_states
     from .repertoire import (
         gene_pairing as gene_pairing,
         gene_usage as gene_usage,
@@ -162,6 +163,7 @@ __all__ = [
     "pseudotime_heatmap",
     "qc",
     "receptor_qc",
+    "recorder_states",
     "run_recipe",
     "spectratype",
     "theme_context",
@@ -237,6 +239,7 @@ __getattr__, __dir__ = _lazy_facade(
         "pseudotime_heatmap": ".heatmaps",
         "qc": ".diagnostics",
         "receptor_qc": ".repertoire",
+        "recorder_states": ".recorder_alleles",
         "run_recipe": ".recipes",
         "spectratype": ".repertoire",
         "theme_context": "._style",

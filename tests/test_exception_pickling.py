@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 import cytearc
+from cytearc.clones.recorders import RefusedTokens
 from cytearc.datastore.pipeline_run import PipelineCancelled, PipelineExecutionError
 from cytearc.merge.metadata import _SourceConflict
 from cytearc.metadata.membership import UnmeasuredCellsError
@@ -48,6 +49,7 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
     ),
     PipelineCancelled: lambda: PipelineCancelled(RUN_ID, "pca", "stopped"),
     _SourceConflict: lambda: _SourceConflict("The sources disagree on 'batch'"),
+    RefusedTokens: lambda: RefusedTokens([3, 5], [("EMX1", "GTNAG"), (None, "Q")]),
     UnmeasuredCellsError: lambda: UnmeasuredCellsError(
         "run_pca", "ADT", "ADT_I", 2, 9, "graph"
     ),

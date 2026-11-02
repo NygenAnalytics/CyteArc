@@ -58,6 +58,7 @@ _STORE_PLOT_METHODS = (
     "perturbation_clusters",
     "pseudotime_heatmap",
     "receptor_qc",
+    "recorder_states",
     "run_recipe",
     "spectratype",
     "variant_depth",
@@ -204,6 +205,11 @@ _VARIANT_GENOTYPES_REF = ArtifactRef(
     scope="datastore",
     kind="variant_genotypes",
     artifact_id="d" * 64,
+)
+_ALLELES_REF = ArtifactRef(
+    scope="datastore",
+    kind="lineage_alleles",
+    artifact_id="a" * 64,
 )
 
 
@@ -462,6 +468,7 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             (_VARIANT_GENOTYPES_REF,),
             {"group_by": "cell_type", "layout_key": "UMAP", "site": "CALR"},
         ),
+        ("recorder_states", (_ALLELES_REF,), {"max_sites": 12}),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -532,6 +539,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("variants"))
     elif name == "genotypes":
         expected_args.append(expected_kwargs.pop("genotypes"))
+    elif name == "recorder_states":
+        expected_args.append(expected_kwargs.pop("alleles"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]
