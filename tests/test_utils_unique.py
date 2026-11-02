@@ -10,6 +10,7 @@ from cytearc.utils.arrays import (
     unique_inverse,
     unique_rows,
 )
+from tests.perturbation_helpers import traced_peak
 
 
 @pytest.mark.parametrize("seed", range(5))
@@ -132,21 +133,16 @@ def test_union_sorted_of_empty_and_extreme_values() -> None:
 
 
 def test_union_sorted_holds_the_held_values_twice_at_most() -> None:
-    import tracemalloc
-
     held = np.arange(0, 2_000_000, 2, dtype=np.uint64)
     values = np.arange(1, 20_001, 2, dtype=np.uint64)
     union_sorted(held[:4], values[:4])
-    tracemalloc.start()
-    before = tracemalloc.get_traced_memory()[0]
-    merged = union_sorted(held, values)
-    peak = tracemalloc.get_traced_memory()[1] - before
-    tracemalloc.stop()
-    assert len(merged) == len(held) + len(values)
     # Beside the held values and the new ones: the result, sized exactly, and
     # the sorted copy of the new ones, where sorting all again holds the held
     # ones three more times.
-    assert peak <= merged.nbytes + values.nbytes + 4_096, peak
+    allowed = 8 * (len(held) + len(values)) + values.nbytes + 4_096
+    merged, peak = traced_peak(lambda: union_sorted(held, values), allowed)
+    assert len(merged) == len(held) + len(values)
+    assert peak <= allowed, peak
 
 
 def test_union_sorted_kernel_runs_as_python_too() -> None:

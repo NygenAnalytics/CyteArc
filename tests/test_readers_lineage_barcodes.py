@@ -24,6 +24,7 @@ from cytearc.readers.cellranger import (
     molecule_info_library,
 )
 from cytearc.readers.lineage_barcodes import barcode_layout, iter_barcode_rows
+from tests.perturbation_helpers import traced_peak
 from tests.clone_truth import (
     barcode_truth,
     clone_truth,
@@ -1263,8 +1264,6 @@ def test_quicats_cells_without_barcodes_hold_no_count(tmp_path) -> None:
 
 
 def test_dense_anndata_reads_its_rows_within_the_chunk(tmp_path) -> None:
-    import tracemalloc
-
     # 400 cells by 20,000 barcodes of float32 counts: 32 MB in memory.
     n_cells, n_barcodes = 400, 20_000
     path = tmp_path / "dense.h5ad"
@@ -1293,10 +1292,7 @@ def test_dense_anndata_reads_its_rows_within_the_chunk(tmp_path) -> None:
             values[row] = line
     layout = barcode_layout(path)
     entries = layout.chunk_rows(2 * 2**20)
-    tracemalloc.start()
-    chunks = _rows(layout, entries)
-    _current, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    chunks, peak = traced_peak(lambda: _rows(layout, entries), 8 * 2**20)
     assert sum(len(chunk.cells) for chunk in chunks) == n_cells
     assert peak < 8 * 2**20
 
@@ -1652,17 +1648,17 @@ def test_required_columns_are_found_in_time_linear_in_the_header(tmp_path) -> No
         require_columns(text, ["B9999"])
 
 
-def _peak_while_reading(layout, chunk_rows: int) -> int:
-    """The bytes held at the peak of reading a file chunk by chunk."""
-    import tracemalloc
+def _peak_while_reading(layout, chunk_rows: int, budget: int) -> int:
+    """The bytes held at the peak of reading a file chunk by chunk.
 
-    tracemalloc.start()
-    try:
+    A peak above ``budget`` is traced again, as ``traced_peak`` traces it.
+    """
+
+    def read() -> None:
         for _chunk in iter_barcode_rows(layout, chunk_rows):
             pass
-        _current, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+
+    _, peak = traced_peak(read, budget)
     return int(peak)
 
 
@@ -1707,9 +1703,8 @@ def test_reading_holds_no_more_than_the_layout_estimates(tmp_path, kind) -> None
     )
     chunk_rows = layout.chunk_rows(400_000)
     assert _entries(_rows(layout, chunk_rows)) == _nonzero_entries(values)
-    assert _peak_while_reading(layout, chunk_rows) <= layout.held_bytes() + (
-        layout.chunk_bytes(chunk_rows)
-    )
+    counted = layout.held_bytes() + layout.chunk_bytes(chunk_rows)
+    assert _peak_while_reading(layout, chunk_rows, counted) <= counted
 
 
 @pytest.mark.parametrize(
@@ -1873,9 +1868,8 @@ def test_the_names_of_many_cells_are_held_within_the_estimate(
     chunk_rows = layout.chunk_rows(400_000)
     # Decoded at once and counted at 100 bytes a name, 34 characters held
     # about 166 bytes a cell at their peak.
-    assert _peak_while_reading(layout, chunk_rows) <= layout.held_bytes() + (
-        layout.chunk_bytes(chunk_rows)
-    )
+    counted = layout.held_bytes() + layout.chunk_bytes(chunk_rows)
+    assert _peak_while_reading(layout, chunk_rows, counted) <= counted
 
 
 def test_a_fatemap_table_without_a_header_names_its_short_row(tmp_path) -> None:

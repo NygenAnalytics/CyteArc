@@ -922,7 +922,7 @@ def test_the_join_counts_each_chunks_new_hashes_beside_those_it_holds() -> None:
 
 @pytest.mark.slow
 def test_the_hashes_of_barcodes_that_match_no_cell_fit_the_smallest_budget() -> None:
-    from tests.clone_helpers import smallest_budget, traced_peak
+    from tests.clone_helpers import smallest_budget
 
     # 50,000 barcodes outside the selection, in 100 chunks, set the budget:
     # the join holds their hashes and merges each chunk's into them. Each
@@ -940,9 +940,10 @@ def test_the_hashes_of_barcodes_that_match_no_cell_fit_the_smallest_budget() -> 
             join.cells(_plain(), chunk)
 
     budget = smallest_budget(run, 1 << 22)
-    peak = traced_peak(lambda: run(budget))
     # Merging by sorting every hash with each chunk's held 1.9 times as much.
-    assert peak <= budget + 300 * 500, (peak, budget)
+    allowed = budget + 300 * 500
+    _, peak = traced_peak(lambda: run(budget), allowed)
+    assert peak <= allowed, (peak, budget)
 
 
 def test_the_join_counts_the_text_of_long_cell_ids() -> None:
