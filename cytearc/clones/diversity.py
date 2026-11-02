@@ -22,7 +22,7 @@ cells.
 
 Many groups are measured at once, from one long table of each group's clone
 sizes and how many clones have each size: the indices are sums over its
-rows, and compiled loops rarefy every group to its sample sizes in one call.
+rows, and compiled loops rarefy the samples of many groups in one call.
 Groups with equal tables get equal measures, so the diversity of many groups
 measures each distinct table once. These functions work on clone sizes and
 never touch storage.
@@ -225,7 +225,16 @@ class GroupedCloneSizes:
         return len(self.n)
 
     def group(self, index: int) -> CloneSizes:
-        """The clone sizes of one group."""
+        """The clone sizes of one group.
+
+        Raises:
+            ValueError: If ``index`` is not between 0 and the number of groups
+                less one.
+        """
+        if not 0 <= index < len(self):
+            raise ValueError(
+                f"index must be between 0 and {len(self) - 1}, not {index!r}"
+            )
         rows = slice(int(self.starts[index]), int(self.starts[index + 1]))
         return CloneSizes(
             values=self.values[rows],
@@ -237,8 +246,15 @@ class GroupedCloneSizes:
         )
 
     def take(self, positions: Any) -> "GroupedCloneSizes":
-        """The table of the groups at ``positions``, numbered from 0 in that order."""
+        """The table of the groups at ``positions``, numbered from 0 in that order.
+
+        Raises:
+            ValueError: If a position is not between 0 and the number of
+                groups less one.
+        """
         chosen = np.asarray(positions, dtype=np.int64).reshape(-1)
+        if len(chosen) and (chosen.min() < 0 or chosen.max() >= len(self)):
+            raise ValueError(f"positions must be between 0 and {len(self) - 1}")
         lengths = np.diff(self.starts)[chosen]
         starts = np.zeros(len(chosen) + 1, dtype=np.int64)
         np.cumsum(lengths, out=starts[1:])
@@ -265,6 +281,7 @@ class GroupedCloneSizes:
         # from those of shorter groups. The groups that reach a position are
         # the first of the groups ordered from the longest.
         classes = lengths.copy()
+        top = int(classes.max())
         longest = np.argsort(-lengths, kind="stable")
         reaching = n_groups - np.cumsum(np.bincount(lengths))
         for position in range(int(lengths.max(initial=0))):
@@ -277,7 +294,8 @@ class GroupedCloneSizes:
             for key in keys:
                 ordered = key[order]
                 new[1:] |= ordered[1:] != ordered[:-1]
-            classes[active[order]] = classes.max() + np.cumsum(new)
+            classes[active[order]] = top + np.cumsum(new)
+            top += int(new.sum())
         # Each class's first group gives its table its place.
         order = np.argsort(classes, kind="stable")
         ordered = classes[order]
@@ -860,12 +878,17 @@ def _extrapolated_coverage(
 ) -> np.ndarray:
     """The expected coverage of samples of more than their groups' cells (Chao and Jost 2012).
 
-    ``ratio`` holds each group's :func:`_undetected_ratio`.
+    ``ratio`` holds each group's :func:`_undetected_ratio`. A group without
+    singletons keeps its complete coverage, and its ratio, which can exceed 1,
+    is not raised to a power.
     """
     f1, n = table.f1[owners], table.n[owners]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        grown = 1 - f1 / n * ratio[owners] ** (sizes - n + 1)
-    return np.where(f1 == 0, 1.0, grown)
+    covered = np.ones(len(owners))
+    some = f1 > 0
+    covered[some] = 1 - f1[some] / n[some] * ratio[owners[some]] ** (
+        sizes[some] - n[some] + 1
+    )
+    return covered
 
 
 def _sample_sizes(sizes: Any) -> np.ndarray:
@@ -1440,7 +1463,8 @@ def diversity_tables(
 
     Raises:
         ValueError: If a group holds no cell, ``keys`` does not hold one row
-            per group, or ``coverage`` is not above 0.
+            per group, ``coverage`` is not above 0, or there is no group and
+            ``size`` or ``coverage`` is None.
     """
     if len(keys) != len(groups):
         raise ValueError(

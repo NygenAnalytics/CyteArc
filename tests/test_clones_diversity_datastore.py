@@ -247,7 +247,9 @@ def _clone_counts(shape: str) -> tuple[int, int, np.ndarray]:
     if shape == "groups of one cell":
         return 40_000, 1, np.ones(40_000, dtype=np.int64)
     if shape == "groups of clones of distinct sizes":
-        return 2_000, 30, np.tile(np.arange(1, 31), 2_000)
+        # Group g holds clones of g + 1 to g + 30 cells, a table of its own.
+        sizes = np.arange(1, 31)[None, :] + np.arange(2_000)[:, None]
+        return 2_000, 30, sizes.reshape(-1)
     return 1, 4_000, np.arange(1, 4_001)
 
 
@@ -288,6 +290,49 @@ def test_summarizing_clone_sizes_holds_what_its_check_counts(shape) -> None:
     )
     _result, peak = traced_peak(summarize, counted)
     assert peak <= counted, (peak, counted)
+
+
+def test_summarizing_counts_each_row_of_a_group_beyond_its_first(
+    copied, monkeypatch
+) -> None:
+    store, clones = copied.store, copied.clones
+    # Two groups: clones of 1, 2, 2 and 5 cells, and two of 3 cells, so six
+    # counts and four distinct sizes, two of them beyond their group's first;
+    # the table is counted once it is built.
+    keys = pd.DataFrame({"group": ["a", "b"]})
+    counts = (
+        keys,
+        np.array([0, 0, 0, 0, 1, 1]),
+        np.arange(6),
+        np.array([1, 2, 2, 5, 3, 3]),
+    )
+    monkeypatch.setattr(store, "_clone_pair_counts", lambda *args, **kwargs: counts)
+    needed = 2 * 2_000 + 6 * 56 + 2 * 128
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(MemoryError, match=f"2 groups holds about {needed} bytes"):
+        store.clones.diversity(clones)
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    assert store.clones.diversity(clones).indices["cells"].tolist() == [10, 6]
+
+
+def test_rarefaction_counts_the_key_columns_of_each_row(copied, monkeypatch) -> None:
+    store, clones = copied.store, copied.clones
+    # Two samples at 10,000 sizes, more than grouping the cells holds: each
+    # size reached in 192 bytes, and 20,000 rows of 128 bytes and 8 more for
+    # the sample's key column.
+    needed = 10_000 * 192 + 20_000 * (128 + 8)
+    sizes = np.arange(1, 10_001)
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(
+        MemoryError,
+        match=f"Rarefying 2 groups to 10000 sizes holds about {needed} bytes",
+    ):
+        store.clones.rarefaction(clones, group_by="sample", orders=(0,), sizes=sizes)
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    curves = store.clones.rarefaction(
+        clones, group_by="sample", orders=(0,), sizes=sizes
+    ).curves
+    assert len(curves) == 20_000
 
 
 def test_rarefaction_counts_the_sizes_it_reaches(copied, monkeypatch) -> None:

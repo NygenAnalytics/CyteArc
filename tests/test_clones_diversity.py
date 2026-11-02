@@ -1,5 +1,6 @@
 """Diversity indices and Hill numbers, against iNEXT, vegan and exact sums."""
 
+import warnings
 from fractions import Fraction
 from itertools import combinations
 from math import comb, fsum, log, ulp
@@ -898,6 +899,8 @@ def test_diversity_tables_refuse_groups_without_cells_and_misaligned_keys() -> N
         dv.diversity_tables(_grouped(A, []), keys)
     with pytest.raises(ValueError, match="one row for each of the 2 groups, not 1"):
         dv.diversity_tables(_grouped(A, B), keys.iloc[:1])
+    with pytest.raises(ValueError, match="one row for each of the 2 groups, not 3"):
+        dv.diversity_tables(_grouped(A, B), pd.DataFrame({"group": ["a", "b", "c"]}))
     for level in (0.0, -0.5, float("nan")):
         with pytest.raises(ValueError, match="coverage must be between 0 and 1"):
             dv.diversity_tables(_grouped(A, B), keys, coverage=level)
@@ -934,3 +937,119 @@ def test_shannon_entropy_is_its_terms_summed_exactly() -> None:
     table = dv.diversity_tables(dv.GroupedCloneSizes.from_groups(groups), keys)[0]
     for got, exact in zip(table["shannon"], expected, strict=True):
         assert abs(got - exact) <= ulp(exact)
+
+
+def _rows_alone(groups, keys, size, coverage) -> list[np.ndarray]:
+    """Each group's numbers in the Hill table when it is measured alone."""
+    rows = []
+    for at in range(len(groups)):
+        hill = dv.diversity_tables(
+            groups.take([at]),
+            keys.iloc[[at]].reset_index(drop=True),
+            size=size,
+            coverage=coverage,
+        )[1]
+        numbers = hill.drop(columns=["group", "method_at_size", "method_at_coverage"])
+        rows.append(numbers.to_numpy(dtype=np.float64))
+    return rows
+
+
+def test_groups_interpolate_and_search_their_own_coverage() -> None:
+    # B and a group of 52 cells both reach coverage 0.9 between two whole
+    # sizes, and each interpolates toward its own next size: B at iNEXT's
+    # 23.96 cells, within the 1e-7 that iNEXT's root finding leaves.
+    keys = pd.DataFrame({"group": ["b", "other"]})
+    groups = _grouped(B, [3, 1, 1, 2, 9, 1, 1, 30, 2, 2])
+    hill = dv.diversity_tables(groups, keys, size=10, coverage=0.9)[1]
+    b = hill[hill["group"] == "b"]
+    np.testing.assert_allclose(
+        b["at_coverage"],
+        [4.92842811594038, 2.87982535549222, 2.21073264251641],
+        rtol=1e-7,
+    )
+    assert b["size_at_coverage"].iloc[0] == pytest.approx(23.9610607098077, rel=1e-6)
+    assert hill["method_at_coverage"].tolist() == ["rarefaction"] * 6
+    numbers = hill.drop(columns=["group", "method_at_size", "method_at_coverage"])
+    for at, alone in enumerate(_rows_alone(groups, keys, 10, 0.9)):
+        np.testing.assert_array_equal(
+            numbers.to_numpy(dtype=np.float64)[3 * at : 3 * at + 3], alone
+        )
+    # Groups of 9 and 6 cells search from their own coverage at one cell, 11/36
+    # and 4/15, and reach 0.35 before two cells, where theirs are 31/63 and
+    # 29/60: at 1 + (7/20 - 11/36) / (31/63 - 11/36) = 291/235 and
+    # 1 + (7/20 - 4/15) / (29/60 - 4/15) = 18/13 cells.
+    keys = pd.DataFrame({"group": ["nine", "six"]})
+    groups = _grouped([1, 1, 2, 5], [3, 1, 2])
+    hill = dv.diversity_tables(groups, keys, size=3, coverage=0.35)[1]
+    reached = hill.groupby("group", sort=False)["size_at_coverage"].first()
+    assert reached["nine"] == pytest.approx(291 / 235, rel=1e-14, abs=0)
+    assert reached["six"] == pytest.approx(18 / 13, rel=1e-14, abs=0)
+    assert hill["method_at_coverage"].tolist() == ["rarefaction"] * 6
+
+
+def test_a_group_without_singletons_extrapolates_without_warnings() -> None:
+    # One clone of 4 cells has neither singleton nor doubleton, so its
+    # coverage stays complete at every size; the ratio by which a deficit
+    # would shrink exceeds 1 there, and a power of it would overflow.
+    clones = _clones([4])
+    groups = dv.GroupedCloneSizes.from_groups([clones])
+    keys = pd.DataFrame({"group": ["a"]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert dv.coverage_at(clones, 5_000) == 1.0
+        hill = dv.diversity_tables(groups, keys, size=5_000)[1]
+        assert hill["coverage_at_size"].tolist() == [1.0] * 3
+        assert hill["at_size"].tolist() == [1.0] * 3
+        curves = dv.rarefaction_curves(groups, keys, sizes=[10, 5_000])
+        assert curves["coverage"].tolist() == [1.0] * 6
+
+
+def test_grouped_clone_sizes_refuse_positions_outside_the_groups() -> None:
+    grouped = _grouped([1, 1], [3, 2, 2])
+    for index in (-1, -2, 2):
+        with pytest.raises(ValueError, match="index must be between 0 and 1"):
+            grouped.group(index)
+    for positions in ([-1], [0, 2]):
+        with pytest.raises(ValueError, match="positions must be between 0 and 1"):
+            grouped.take(positions)
+
+
+@pytest.mark.parametrize(
+    ("n", "a"), [(100, 0.3), (60, 0.5), (16, 0.44), (100_000, 1e-4)]
+)
+def test_entropy_tail_series_is_summed_exactly(n, a) -> None:
+    # Where the factor (1 - a) ** (1 - n) is large the tail is summed as its
+    # series, sum((1 - a) ** j / (j + n - 1), j >= 1), here exactly over its
+    # terms until they fall below e**-50 of the first; a series that shrinks
+    # slowly needs the terms that each stopping point leaves out.
+    decay = -np.log1p(-a)
+    assert (n - 1) * decay > 5
+    j = np.arange(1, int(np.ceil(50 / decay)) + 1, dtype=np.float64)
+    expected = fsum((np.exp(-j * decay) / (j + n - 1)).tolist())
+    assert dv._entropy_tail(n, a) == pytest.approx(expected, rel=1e-15, abs=0)
+
+
+def test_two_singletons_extrapolate_their_shannon_diversity() -> None:
+    # Two singletons hold D(1) = 1 and D(2) = 2, and their asymptote is
+    # exp(1 + 3 log 1.5 - 1) = 1.5**3; the rate (2 - 1) / (3.375 - 1) = 8/19
+    # leaves 11/19 per cell, so 4 cells reach 2 + 1.375 (1 - (11/19)**2) =
+    # 1052/361.
+    clones = _clones([1, 1])
+    assert dv.estimated_hill(clones, 1) == pytest.approx(3.375, rel=1e-14, abs=0)
+    assert dv.diversity_at(clones, 4, 1) == (
+        pytest.approx(1052 / 361, rel=1e-13, abs=0),
+        "extrapolation",
+    )
+
+
+def test_curves_extrapolate_shannon_diversity_where_they_pass_a_groups_cells() -> None:
+    # B's 82 cells rarefy to 66, and A's 33 extrapolate to them, iNEXT's
+    # 10.0309, so only A's Shannon extrapolation is measured.
+    groups = dv.GroupedCloneSizes.from_groups([_clones(B), _clones(A)])
+    keys = pd.DataFrame({"group": ["b", "a"]})
+    curves = dv.rarefaction_curves(groups, keys, (1,), sizes=[66])
+    assert curves["method"].tolist() == ["rarefaction", "extrapolation"]
+    assert curves["diversity"].iloc[0] == pytest.approx(
+        dv.diversity_at(_clones(B), 66, 1)[0], rel=1e-15, abs=0
+    )
+    assert curves["diversity"].iloc[1] == pytest.approx(10.030943287946, rel=1e-11)
