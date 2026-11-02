@@ -540,20 +540,30 @@ def _require_harmony_fit_budget(
     return reading
 
 
+# What one save or load of an ANN index holds whatever its payload, such as
+# Zarr's metadata: up to 160 KB on Python 3.14 and 3.15, and 35 KB on 3.13.
+_ANN_INDEX_TRANSFER_FIXED_BYTES = 256 * 1024
+
+
 def _ann_index_transfer_bytes(payload_bytes: int) -> int:
     """Bytes that copying an ANN index payload through its temporary file holds.
 
     ``save_ann_index`` and ``load_ann_index`` move the saved index between
-    Zarr and a temporary file in windows of ``ANN_INDEX_IO_BYTES``. A save
-    holds the window it read from the file, Zarr's copies of its chunks, and
-    their encoded bytes; a load holds the window it fills beside the one
-    before it and the chunks Zarr decodes into it. Four windows and four
-    chunks bound both, since Zarr 3.2 holds two more copies of a chunk while
-    saving it than later releases do.
+    Zarr and a temporary file in windows of ``ANN_INDEX_IO_BYTES``. A load
+    holds the window it fills, the encoded chunks Zarr reads for it and the
+    chunks it decodes, about three windows. A save holds the window it read
+    from the file, Zarr's copy of it and the encoded bytes of the chunks in
+    flight, about two windows and two chunks. Before that, the save hashes
+    its file in reads of ``ANN_INDEX_CHUNK_BYTES``, and each read holds that
+    much beside the block before it, however small the file. Three windows
+    and two chunks, or one hashing read and its block, bound both, beside
+    what every save or load holds.
     """
     window = min(int(payload_bytes), ANN_INDEX_IO_BYTES)
     chunk = min(int(payload_bytes), ANN_INDEX_CHUNK_BYTES)
-    return 4 * window + 4 * chunk
+    copies = 3 * window + 2 * chunk
+    hashing = ANN_INDEX_CHUNK_BYTES + chunk
+    return max(copies, hashing) + _ANN_INDEX_TRANSFER_FIXED_BYTES
 
 
 def _float32_copy_bytes(data: ChunkedArray, dims: int) -> int:
