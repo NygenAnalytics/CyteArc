@@ -649,28 +649,43 @@ def import_allele_truth(
 
 def traced_steps(
     monkeypatch: pytest.MonkeyPatch, call: Callable[[], object], budget: int
-) -> list[tuple[str, int, int]]:
-    """Each memory check of allele clone calling, with the bytes it states and its step's peak.
+) -> tuple[list[tuple[str, int]], int]:
+    """Each memory check of allele clone calling with the bytes it states, and the call's traced peak.
 
-    A step runs from its check to the next check, and the last one to the end
-    of ``call``; its peak is the most bytes that tracemalloc traced in it. The
-    bytes that a check states are the call's total under ``budget``: those of
-    the operation's checks as they state them, those of the domain's beside
-    what the operation holds, and those of ``clones/calling.py`` beside what
-    the domain holds.
+    The bytes that a check states are the call's total under ``budget``:
+    those of the operation's checks as they state them, those of the
+    domain's beside what the operation holds, and those of
+    ``clones/calling.py`` beside what the domain holds. A first call finds
+    the checks and warms the compiled kernels. The traced call then holds,
+    from each check to the next, the bytes by which that check falls short
+    of the largest, allocated but never written, so its peak passes the
+    largest check exactly when a step holds more than its own check states.
+    The peak is traced as :func:`tests.perturbation_helpers.traced_peak`
+    traces it, again where it passes the largest check, so ``call`` must
+    compute afresh each time.
+
+    Returns:
+        Each check's step and the bytes it states, from the first call, and
+        the traced call's peak.
     """
+    import gc
+
     import cytearc.clones.allele_clones as domain
     import cytearc.clones.calling as calling
     import cytearc.datastore._operations.recorder_alleles as operations
+    from tests.perturbation_helpers import traced_peak
 
-    steps: list[list] = []
+    checks: list[tuple[str, int]] = []
+    allowance: list[np.ndarray] = []
+    ceiling = [0]
 
     def note(what: str, stated: int) -> None:
-        _current, peak = tracemalloc.get_traced_memory()
-        if steps:
-            steps[-1][2] = peak
-        steps.append([what, int(stated), 0])
-        tracemalloc.reset_peak()
+        checks.append((str(what), int(stated)))
+        allowance.clear()
+        if ceiling[0]:
+            # A check of the traced call that states more than the first
+            # call's largest is held to its own bytes, and fails below.
+            allowance.append(np.empty(max(0, ceiling[0] - int(stated)), dtype=np.uint8))
 
     room_check = domain._Room.check
     calling_check = calling._check
@@ -689,14 +704,22 @@ def traced_steps(
         note(what, needed)
         operation_check(needed, limit, what)
 
-    monkeypatch.setattr(domain._Room, "check", checked_room)
-    monkeypatch.setattr(calling, "_check", checked_calling)
-    monkeypatch.setattr(operations, "_check_calling", checked_operation)
-    gc.collect()
-    tracemalloc.start()
-    try:
-        call()
-        steps[-1][2] = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-    return [(str(what), int(stated), int(peak)) for what, stated, peak in steps]
+    def run() -> None:
+        checks.clear()
+        try:
+            call()
+        finally:
+            allowance.clear()
+
+    with monkeypatch.context() as patched:
+        patched.setattr(domain._Room, "check", checked_room)
+        patched.setattr(calling, "_check", checked_calling)
+        patched.setattr(operations, "_check_calling", checked_operation)
+        run()
+        found = list(checks)
+        ceiling[0] = max((stated for _what, stated in found), default=0)
+        gc.collect()
+        _result, peak = traced_peak(run, ceiling[0])
+        # The traced call makes the checks that the first call made.
+        assert checks == found, (checks, found)
+    return found, peak

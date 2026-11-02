@@ -24,7 +24,6 @@ from tests.clone_helpers import (
     loaded_partition,
     open_clone_store,
     smallest_budget,
-    traced_peak,
     traced_steps,
     write_truth_store,
 )
@@ -36,6 +35,7 @@ from tests.clone_truth import (
     allele_calling_truth,
     clone_truth,
 )
+from tests.perturbation_helpers import traced_peak
 from tests.storage_helpers import write_count_store
 
 TRUTH = clone_truth()
@@ -604,10 +604,9 @@ def test_a_budget_that_only_writing_the_clones_exceeds_is_refused_before_calling
     budget = 1 << 34
     monkeypatch.setattr(store, "memoryBytes", budget)
     # Every step but writing fits the most bytes that any of them states.
+    checks, _peak = traced_steps(monkeypatch, call, budget)
     fitting = max(
-        stated
-        for what, stated, _peak in traced_steps(monkeypatch, call, budget)
-        if not what.endswith("as they are written")
+        stated for what, stated in checks if not what.endswith("as they are written")
     )
     entered: list[object] = []
     monkeypatch.setattr(
@@ -760,7 +759,8 @@ def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(
 
     call(1 << 32)
     budget = smallest_budget(call, 1 << 30)
-    assert traced_peak(lambda: call(budget)) <= budget
+    _, peak = traced_peak(lambda: call(budget), budget)
+    assert peak <= budget
 
 
 @pytest.mark.slow
@@ -810,7 +810,7 @@ def test_calling_on_wide_characters_holds_no_more_than_the_smallest_budget_it_ac
 
     call(1 << 32)
     budget = smallest_budget(call, 1 << 30)
-    peak = traced_peak(lambda: call(budget))
+    _, peak = traced_peak(lambda: call(budget), budget)
     assert peak <= budget
     # The records, not the fixed bytes, set the budget.
     assert budget > 4 * (8 << 20)
@@ -1005,10 +1005,13 @@ def test_a_bank_may_name_a_character_whose_cells_are_all_unedited(tmp_path) -> N
         )
 
 
-def _assert_steps_within(steps: list[tuple[str, int, int]]) -> None:
-    over = [(what, stated, peak) for what, stated, peak in steps if peak > stated]
-    assert not over, over
-    assert len(steps) > 10
+def _assert_steps_within(traced: tuple[list[tuple[str, int]], int]) -> None:
+    """No step holds more than its check states: the traced peak, which holds each
+    step's shortfall from the largest check beside it, stays within the largest."""
+    checks, peak = traced
+    ceiling = max(stated for _what, stated in checks)
+    assert peak <= ceiling, (peak - ceiling, checks)
+    assert len(checks) > 10
 
 
 @pytest.mark.slow
@@ -1063,8 +1066,6 @@ def test_each_step_on_millions_of_records_holds_no_more_than_its_check_states(
             alleles, method="graph", max_frequency=0.5, invalidate_cache=True
         )
 
-    # Compiled kernels are warmed before anything is traced.
-    call()
     _assert_steps_within(traced_steps(monkeypatch, call, budget))
 
 
@@ -1118,7 +1119,6 @@ def test_each_step_on_wide_alleles_holds_no_more_than_its_check_states(
             alleles, method="graph", max_frequency=0.5, invalidate_cache=True
         )
 
-    call()
     assert store.clones.load_clones(call()).clones["n_cells"].tolist() == [2] * (
         n_cells // 2
     )
@@ -1171,7 +1171,6 @@ def test_each_step_on_few_long_alleles_holds_no_more_than_its_check_states(
             alleles, method="graph", max_frequency=0.5, invalidate_cache=True
         )
 
-    call()
     _assert_steps_within(traced_steps(monkeypatch, call, budget))
 
 
@@ -1239,7 +1238,6 @@ def test_each_step_with_banks_and_groups_holds_no_more_than_its_check_states(
                 **rules,
             )
 
-        call()
         _assert_steps_within(traced_steps(monkeypatch, call, budget))
 
 
@@ -1269,8 +1267,7 @@ def test_each_step_on_many_alleles_and_clones_holds_no_more_than_its_check_state
             alleles, method="graph", max_frequency=0.5, invalidate_cache=True
         )
 
-    call()
-    steps = traced_steps(monkeypatch, call, budget)
+    traced = traced_steps(monkeypatch, call, budget)
     written = f"the {n_clones} clones of {n_cells} cells as they are written"
-    assert steps[-1][0] == written
-    _assert_steps_within(steps)
+    assert traced[0][-1][0] == written
+    _assert_steps_within(traced)

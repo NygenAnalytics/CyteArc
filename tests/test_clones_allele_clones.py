@@ -23,7 +23,8 @@ from cytearc.clones.allele_clones import (
     benjamini_hochberg,
     clonal_p_values,
 )
-from tests.clone_helpers import smallest_budget, traced_peak, traced_steps
+from tests.clone_helpers import smallest_budget, traced_steps
+from tests.perturbation_helpers import traced_peak
 
 _TEXTS = ("a", "b", "c", "d", "e", "f", "g", "h")
 
@@ -910,7 +911,8 @@ def test_calls_hold_no_more_than_the_smallest_budget_they_accept(
     # Compiled kernels are warmed before anything is traced.
     call(1 << 40)
     budget = smallest_budget(call, 1 << 30)
-    assert traced_peak(lambda: call(budget)) <= budget
+    _, peak = traced_peak(lambda: call(budget), budget)
+    assert peak <= budget
     with pytest.raises(MemoryError, match="Raise mem_budget"):
         call(budget - 1)
 
@@ -942,8 +944,8 @@ def test_each_step_on_two_million_edits_holds_no_more_than_its_check_states(
             max_bytes=budget,
         )
 
-    call()
-    steps = traced_steps(monkeypatch, call, budget)
-    over = [(what, stated, peak) for what, stated, peak in steps if peak > stated]
-    assert not over, over
-    assert len(steps) > 10
+    checks, peak = traced_steps(monkeypatch, call, budget)
+    # Each step holds its shortfall from the largest check beside it.
+    ceiling = max(stated for _what, stated in checks)
+    assert peak <= ceiling, (peak - ceiling, checks)
+    assert len(checks) > 10
