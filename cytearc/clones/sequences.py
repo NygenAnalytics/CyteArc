@@ -1802,8 +1802,9 @@ def expected_chance_pairs(
         cutoff: The largest distance that links two texts.
         blocks: Each text's block as an integer code, or None.
         components: Each text's component as an integer code, or None.
-        priority: Each text's rank within its component, a number, higher
-            first, or None for ranks by position, the later first.
+        priority: Each text's rank within its component, a finite number,
+            higher first, of equal ranks the later text first, or None for
+            ranks by position.
         max_bytes: The most bytes it may hold: the encoded texts, as
             :func:`neighbor_pairs` counts them, and 48 bytes for each length
             of each block; while one text per component of a length is
@@ -1829,8 +1830,9 @@ def expected_chance_pairs(
         TypeError: If an argument has the wrong type.
         ValueError: If an argument is out of range as :func:`neighbor_pairs`
             refuses it, ``components`` or ``priority`` does not hold one value
-            per text, ``priority`` comes without ``components``, or the cutoff
-            under ``levenshtein`` is above ``MAX_CHANCE_EDITS``.
+            per text, ``priority`` holds a number that is not finite or comes
+            without ``components``, or the cutoff under ``levenshtein`` is
+            above ``MAX_CHANCE_EDITS``.
         MemoryError: If it would hold more than ``max_bytes``.
     """
     cutoff, limit_bytes, min_compared = _search_arguments(
