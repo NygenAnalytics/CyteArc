@@ -70,10 +70,10 @@ def test_hill_numbers_match_inext(sizes, observed, estimated) -> None:
     clones = _clones(sizes)
     for order in dv.ORDERS:
         assert dv.observed_hill(clones, order) == pytest.approx(
-            observed[order], rel=1e-12
+            observed[order], rel=1e-12, abs=0
         )
         assert dv.estimated_hill(clones, order) == pytest.approx(
-            estimated[order], rel=1e-10
+            estimated[order], rel=1e-10, abs=0
         )
 
 
@@ -140,31 +140,33 @@ def test_rarefaction_and_extrapolation_match_inext(
     for order in dv.ORDERS:
         value, got = dv.diversity_at(clones, m, order)
         assert got == method
-        assert value == pytest.approx(values[order], rel=1e-11)
-    assert dv.coverage_at(clones, m) == pytest.approx(coverage, rel=1e-11)
+        assert value == pytest.approx(values[order], rel=1e-11, abs=0)
+    assert dv.coverage_at(clones, m) == pytest.approx(coverage, rel=1e-11, abs=0)
 
 
 def test_standardizing_by_coverage_matches_inext() -> None:
     a, b = _clones(A), _clones(B)
     # Above the observed coverage the extrapolated coverage is inverted.
-    assert dv.size_for_coverage(a, 0.9) == pytest.approx(60.9940672961916, rel=1e-9)
+    assert dv.size_for_coverage(a, 0.9) == pytest.approx(
+        60.9940672961916, rel=1e-9, abs=0
+    )
     for order, value in zip(
         dv.ORDERS, (15.8272727272727, 9.85088615975206, 6.81211855586043), strict=True
     ):
         assert dv.diversity_at(a, 60.9940672961916, order)[0] == pytest.approx(
-            value, rel=1e-10
+            value, rel=1e-10, abs=0
         )
     # Below it, rarefied sizes are interpolated linearly, as iNEXT does.
     # iNEXT's root finding stops at a coverage of 0.89999999; the size here
     # reaches 0.9 itself.
     m = dv.size_for_coverage(b, 0.9)
-    assert m == pytest.approx(23.9610607098077, rel=1e-6)
-    assert dv.coverage_at(b, m) == pytest.approx(0.9, rel=1e-14)
+    assert m == pytest.approx(23.9610607098077, rel=1e-6, abs=0)
+    assert dv.coverage_at(b, m) == pytest.approx(0.9, rel=1e-14, abs=0)
     for order, value in zip(
         dv.ORDERS, (4.92842811594038, 2.87982535549222, 2.21073264251641), strict=True
     ):
         assert dv.diversity_at(b, 23.9610607098077, order)[0] == pytest.approx(
-            value, rel=1e-10
+            value, rel=1e-10, abs=0
         )
     assert dv.size_for_coverage(a, dv.coverage(a)) == 33
     # A level below the coverage of one cell needs one cell.
@@ -197,11 +199,15 @@ def test_rarefaction_equals_every_subsample(sizes) -> None:
         squares = sum(
             sum((c / m) ** 2 for c in counts.values()) for _, _, counts in draws
         ) / len(draws)
-        assert dv.diversity_at(clones, m, 0)[0] == pytest.approx(richness, rel=1e-12)
-        assert dv.diversity_at(clones, m, 1)[0] == pytest.approx(
-            np.exp(entropy), rel=1e-12
+        assert dv.diversity_at(clones, m, 0)[0] == pytest.approx(
+            richness, rel=1e-12, abs=0
         )
-        assert dv.diversity_at(clones, m, 2)[0] == pytest.approx(1 / squares, rel=1e-12)
+        assert dv.diversity_at(clones, m, 1)[0] == pytest.approx(
+            np.exp(entropy), rel=1e-12, abs=0
+        )
+        assert dv.diversity_at(clones, m, 2)[0] == pytest.approx(
+            1 / squares, rel=1e-12, abs=0
+        )
         # The coverage of m cells: the chance that one more cell, drawn from
         # the rest, belongs to a clone the m cells hold.
         seen = Fraction(0)
@@ -209,7 +215,7 @@ def test_rarefaction_equals_every_subsample(sizes) -> None:
             rest = [cell for cell in range(n) if cell not in chosen]
             seen += Fraction(sum(cells[cell] in counts for cell in rest), len(rest))
         assert dv.coverage_at(clones, m) == pytest.approx(
-            float(seen / len(draws)), rel=1e-12
+            float(seen / len(draws)), rel=1e-12, abs=0
         )
 
 
@@ -226,13 +232,15 @@ def test_coverage_is_exact_for_large_samples() -> None:
             for value, count in zip(clones.values, clones.counts, strict=True)
             if n - value >= m
         )
-        assert dv.coverage_at(clones, m) == pytest.approx(float(1 - missed), rel=1e-13)
+        assert dv.coverage_at(clones, m) == pytest.approx(
+            float(1 - missed), rel=1e-13, abs=0
+        )
         richness = sum(
             int(count) * (1 - Fraction(comb(n - int(value), m), comb(n, m)))
             for value, count in zip(clones.values, clones.counts, strict=True)
         )
         assert dv.diversity_at(clones, m, 0)[0] == pytest.approx(
-            float(richness), rel=1e-13
+            float(richness), rel=1e-13, abs=0
         )
 
 
@@ -262,7 +270,9 @@ def test_curves_share_the_shannon_terms() -> None:
     for order in dv.ORDERS:
         values, methods = dv.hill_curve(clones, sizes.tolist(), order)
         expected = [dv.diversity_at(clones, float(m), order) for m in sizes]
-        assert values == pytest.approx([value for value, _ in expected], rel=1e-15)
+        assert values == pytest.approx(
+            [value for value, _ in expected], rel=1e-15, abs=0
+        )
         assert methods == [method for _, method in expected]
 
 
@@ -273,10 +283,10 @@ def test_extrapolation_without_singletons() -> None:
     assert dv.diversity_at(clones, 30, 0)[0] == 4
     assert dv.coverage_at(clones, 30) == 1.0
     assert dv.diversity_at(clones, 21, 1)[0] == pytest.approx(
-        4.20839264819087, rel=1e-11
+        4.20839264819087, rel=1e-11, abs=0
     )
     assert dv.diversity_at(clones, 22, 1)[0] == pytest.approx(
-        4.22969311355331, rel=1e-11
+        4.22969311355331, rel=1e-11, abs=0
     )
     single = _clones([7])
     assert dv.diversity_at(single, 14, 1)[0] == 1.0
@@ -365,7 +375,7 @@ def test_entropy_tail_is_stable_in_both_regimes() -> None:
         direct = float(np.sum((1 - a) ** j / (j + n - 1)))
         if (1 - a) ** j[-1] > 1e-12:
             continue
-        assert dv._entropy_tail(n, a) == pytest.approx(direct, rel=1e-11)
+        assert dv._entropy_tail(n, a) == pytest.approx(direct, rel=1e-11, abs=0)
     # Tails summed as written over more than one chunk, and as a series that
     # needs more than one chunk of terms.
     for n, a in ((2_000_000, 2e-6), (1_000_000, 1e-5)):
@@ -374,7 +384,7 @@ def test_entropy_tail_is_stable_in_both_regimes() -> None:
         for start in range(1, int(60 / a), 4_000_000):
             j = np.arange(start, min(start + 4_000_000, int(60 / a)), dtype=np.float64)
             direct += float(np.sum(np.exp(j * np.log1p(-a)) / (j + n - 1)))
-        assert dv._entropy_tail(n, a) == pytest.approx(direct, rel=1e-10)
+        assert dv._entropy_tail(n, a) == pytest.approx(direct, rel=1e-10, abs=0)
 
 
 def test_indices_of_a_few_clones() -> None:
@@ -419,9 +429,9 @@ def test_indices_of_one_clone_and_richness_estimators() -> None:
     # vegan 2.7.6 estimateR.
     assert dv.chao1_bias_corrected(_clones([10, 5, 3, 1, 1, 1, 1])) == 13
     assert dv.ace(_clones([10, 5, 3, 1, 1, 1, 1])) == pytest.approx(
-        14.1687242798354, rel=1e-12
+        14.1687242798354, rel=1e-12, abs=0
     )
-    assert dv.ace(_clones([5, 3, 1])) == pytest.approx(3.62109375, rel=1e-12)
+    assert dv.ace(_clones([5, 3, 1])) == pytest.approx(3.62109375, rel=1e-12, abs=0)
     assert dv.chao1_bias_corrected(_clones([1] * 20)) == 210
     # Every rare clone a singleton leaves ACE undefined, as vegan's NA.
     assert np.isnan(dv.ace(_clones([1] * 20)))
@@ -469,9 +479,9 @@ def test_rarefied_entropy_equals_exact_hypergeometric_sums(sizes, m) -> None:
     # Large clones and samples need windows of more than 64 terms each.
     clones = _clones(sizes)
     expected = np.exp(_exact_entropy(sizes, m))
-    assert dv.diversity_at(clones, m, 1)[0] == pytest.approx(expected, rel=1e-13)
+    assert dv.diversity_at(clones, m, 1)[0] == pytest.approx(expected, rel=1e-13, abs=0)
     values, methods = dv.hill_curve(clones, [m, m, 1, clones.n], 1)
-    assert values[:2] == pytest.approx([expected, expected], rel=1e-13)
+    assert values[:2] == pytest.approx([expected, expected], rel=1e-13, abs=0)
     assert methods == ["rarefaction", "rarefaction", "rarefaction", "observed"]
 
 
@@ -485,7 +495,9 @@ def test_size_for_coverage_finds_the_last_whole_size_below_the_level(seed) -> No
     for level in rng.uniform(whole[0], whole[-1], size=6):
         low = max(m for m in range(1, n) if whole[m - 1] < level)
         expected = low + (level - whole[low - 1]) / (whole[low] - whole[low - 1])
-        assert dv.size_for_coverage(clones, level) == pytest.approx(expected, rel=1e-13)
+        assert dv.size_for_coverage(clones, level) == pytest.approx(
+            expected, rel=1e-13, abs=0
+        )
 
 
 def test_diversity_tables_match_inext_for_every_group() -> None:
@@ -495,7 +507,7 @@ def test_diversity_tables_match_inext_for_every_group() -> None:
     # iNEXT's defaults: the smallest doubled size and the lowest coverage at
     # doubled sizes.
     assert size == 66
-    assert level == pytest.approx(0.909807035796235, rel=1e-11)
+    assert level == pytest.approx(0.909807035796235, rel=1e-11, abs=0)
     assert table.columns.tolist() == ["group", "sample", *dv.INDEX_COLUMNS]
     assert table["group"].tolist() == ["a, s1", "b, s2"]
     assert table[["cells", "clones", "singletons", "doubletons"]].values.tolist() == [
@@ -535,7 +547,7 @@ def test_diversity_tables_match_inext_for_every_group() -> None:
     assert a["method_at_size"].tolist() == ["extrapolation"] * 3
     assert b["method_at_size"].tolist() == ["rarefaction"] * 3
     # The common coverage is A's own at 66 cells.
-    assert a["size_at_coverage"].tolist() == pytest.approx([66.0] * 3, rel=1e-12)
+    assert a["size_at_coverage"].tolist() == pytest.approx([66.0] * 3, rel=1e-12, abs=0)
     np.testing.assert_allclose(a["at_coverage"], a["at_size"], rtol=1e-11)
     at_coverage = dv.diversity_tables(groups, keys, size=23, coverage=0.9)[1]
     a, b = at_coverage.iloc[:3], at_coverage.iloc[3:]
@@ -544,11 +556,15 @@ def test_diversity_tables_match_inext_for_every_group() -> None:
         [15.8272727272727, 9.85088615975206, 6.81211855586043],
         rtol=1e-10,
     )
-    assert b["size_at_coverage"].iloc[0] == pytest.approx(23.9610607098077, rel=1e-6)
+    assert b["size_at_coverage"].iloc[0] == pytest.approx(
+        23.9610607098077, rel=1e-6, abs=0
+    )
     np.testing.assert_allclose(
         b["at_size"], [4.83087682300689, 2.86343404471686, 2.20587980477662], rtol=1e-11
     )
-    assert b["coverage_at_size"].iloc[0] == pytest.approx(0.898496221999323, rel=1e-11)
+    assert b["coverage_at_size"].iloc[0] == pytest.approx(
+        0.898496221999323, rel=1e-11, abs=0
+    )
     assert a["method_at_coverage"].tolist() == ["extrapolation"] * 3
     assert b["method_at_coverage"].tolist() == ["rarefaction"] * 3
 
@@ -609,8 +625,8 @@ def test_rarefaction_curves_hold_each_group_order_and_size() -> None:
     ):
         for order, value in zip(dv.ORDERS, values, strict=True):
             row = by_row.loc[(group, order, m)]
-            assert row["diversity"] == pytest.approx(value, rel=1e-11)
-            assert row["coverage"] == pytest.approx(sample_coverage, rel=1e-11)
+            assert row["diversity"] == pytest.approx(value, rel=1e-11, abs=0)
+            assert row["coverage"] == pytest.approx(sample_coverage, rel=1e-11, abs=0)
     defaults = dv.rarefaction_curves(groups, keys, (0,), endpoint=40, knots=4)
     # A's 33 cells extrapolate to the endpoint; B's 82 rarefy to it.
     assert defaults["size"].tolist() == [1, 33, 34, 40, 1, 14, 27, 40]
@@ -737,7 +753,7 @@ def test_groups_with_equal_tables_get_equal_rows() -> None:
     # The groups of one cell set the common size; A's coverage at twice its
     # cells, iNEXT's 0.9098, is the lowest at doubled sizes.
     assert size == 2
-    assert level == pytest.approx(0.909807035796235, rel=1e-11)
+    assert level == pytest.approx(0.909807035796235, rel=1e-11, abs=0)
     indices = table.drop(columns="group").to_numpy(dtype=np.float64)
     numbers = hill.drop(columns=["group", "method_at_size", "method_at_coverage"])
     measures = numbers.to_numpy(dtype=np.float64).reshape(len(sizes), -1)
@@ -809,7 +825,7 @@ def test_a_group_of_one_cell_and_a_group_of_every_cell() -> None:
     # One cell doubled is the common size; A's coverage at 66 cells is the
     # lowest coverage at doubled sizes.
     assert size == 2
-    assert level == pytest.approx(0.909807035796235, rel=1e-11)
+    assert level == pytest.approx(0.909807035796235, rel=1e-11, abs=0)
     by_group = table.set_index("group")
     rows = hill.set_index(["group", "order"])
     # One cell is one clone of one cell: complete, with no entropy, and no
@@ -967,7 +983,9 @@ def test_groups_interpolate_and_search_their_own_coverage() -> None:
         [4.92842811594038, 2.87982535549222, 2.21073264251641],
         rtol=1e-7,
     )
-    assert b["size_at_coverage"].iloc[0] == pytest.approx(23.9610607098077, rel=1e-6)
+    assert b["size_at_coverage"].iloc[0] == pytest.approx(
+        23.9610607098077, rel=1e-6, abs=0
+    )
     assert hill["method_at_coverage"].tolist() == ["rarefaction"] * 6
     numbers = hill.drop(columns=["group", "method_at_size", "method_at_coverage"])
     for at, alone in enumerate(_rows_alone(groups, keys, 10, 0.9)):
@@ -1052,4 +1070,6 @@ def test_curves_extrapolate_shannon_diversity_where_they_pass_a_groups_cells() -
     assert curves["diversity"].iloc[0] == pytest.approx(
         dv.diversity_at(_clones(B), 66, 1)[0], rel=1e-15, abs=0
     )
-    assert curves["diversity"].iloc[1] == pytest.approx(10.030943287946, rel=1e-11)
+    assert curves["diversity"].iloc[1] == pytest.approx(
+        10.030943287946, rel=1e-11, abs=0
+    )
