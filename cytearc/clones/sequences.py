@@ -114,9 +114,10 @@ _KEY_SHARE = 4
 _MIN_KEYS_PER_PASS = 1 << 20
 # The room of a search without a limit: more bytes than any machine holds.
 _UNLIMITED = 2**62
-# The pairs expected by chance under levenshtein hold, for each position of
-# the texts of one length in a block, the frequency of each of 256 codes, and
-# for each pair of positions of two lengths their chance of agreeing.
+# The pairs expected by chance hold, for each position of the texts of one
+# length in a block, the frequency of each of 256 codes, and their chance of
+# agreeing: under levenshtein for each pair of positions of two lengths, and
+# with characters of no base for each position.
 _FREQUENCY_BYTES = 8 * 256
 _AGREEMENT_BYTES = 8
 # Counting the codes at one position holds each text's code and its copy
@@ -1639,6 +1640,8 @@ def _component_arguments(
         raise TypeError("priority must hold one number per text")
     if len(ranks) != n_texts:
         raise ValueError("priority must hold one number per text")
+    if ranks.dtype.kind == "f" and not np.isfinite(ranks).all():
+        raise ValueError("priority must hold finite numbers, not NaN or infinity")
     return codes.astype(np.int64), ranks
 
 
@@ -1649,7 +1652,7 @@ def _representatives(
 
     Of rows of equal priority, the later one represents the component.
     """
-    order = rows[np.lexsort((priority[rows], components[rows]))]
+    order = rows[np.lexsort((rows, priority[rows], components[rows]))]
     runs = components[order]
     last = np.ones(len(order), dtype=bool)
     last[:-1] = runs[1:] != runs[:-1]
@@ -1671,8 +1674,9 @@ def _library_frequencies(
     text of highest priority was cut short still counts where others hold
     bases. A position where no text holds a base has no frequencies.
     """
-    # Components in a row, the text of highest priority first.
-    order = rows[np.lexsort((priority[rows], components[rows]))][::-1]
+    # Components in a row, the text of highest priority first and of equal
+    # priorities the later.
+    order = rows[np.lexsort((rows, priority[rows], components[rows]))][::-1]
     runs = components[order]
     first_of_run = np.ones(len(order), dtype=bool)
     first_of_run[1:] = runs[1:] != runs[:-1]
@@ -1723,7 +1727,11 @@ def _partial_chance_pairs(
     frequencies = _library_frequencies(
         matrix, members[order], length, components, priority, unknown
     )
-    memory.held += _FREQUENCY_BYTES * length
+    # Each position's chance that two texts agree there, held for every pair
+    # of groups once the frequencies are let go.
+    agreement = np.sum(frequencies**2, axis=1)
+    del frequencies
+    memory.held += _AGREEMENT_BYTES * length
     expected = 0.0
     for first_group, second_group, columns in _group_pairs(
         group_masks, length, min_compared
@@ -1736,10 +1744,9 @@ def _partial_chance_pairs(
         else:
             split = n_first
             n_texts = n_first + int(ends[second_group] - starts[second_group])
-        agree = np.sum(frequencies[columns] ** 2, axis=1)
-        chances = _mismatch_chances(1.0 - agree, min(limit, len(columns)))
+        chances = _mismatch_chances(1.0 - agreement[columns], min(limit, len(columns)))
         expected += _chance_pairs(n_texts, split, chances)
-    memory.held -= held + _FREQUENCY_BYTES * length
+    memory.held -= held + _AGREEMENT_BYTES * length
     return expected
 
 
@@ -1798,14 +1805,19 @@ def expected_chance_pairs(
         priority: Each text's rank within its component, a number, higher
             first, or None for ranks by position, the later first.
         max_bytes: The most bytes it may hold: the encoded texts, as
-            :func:`neighbor_pairs` counts them; 48 bytes for each length of
-            each block; 48 bytes for each text while one per component is
-            chosen, or with ``unknown``, the positions of no base as the
-            search counts them and 64 bytes for each text while each
-            position's characters are counted; 2 KiB for each position of a
-            length counted; under ``levenshtein``, 8 bytes for each pair of
-            positions of two lengths and 160 bytes for each state of the
-            edit distances followed, with 32 KiB more. None sets no limit.
+            :func:`neighbor_pairs` counts them, and 48 bytes for each length
+            of each block; while one text per component of a length is
+            chosen, 57 bytes and its length for each text, with 2 KiB; with
+            ``unknown``, the positions of no base as the search counts them,
+            64 bytes for each text that holds enough bases and 4 KiB for
+            each position while the characters are counted, and 8 bytes for
+            each position after; under ``levenshtein``, 48 bytes for each
+            text of a block while one per component is chosen, 2 KiB for
+            each position of each length of the block, 8 bytes for each pair
+            of positions of its longest length, 9 bytes for each text chosen
+            of its most numerous length with 2 KiB, and 160 bytes for each
+            state of the edit distances followed, with 32 KiB more. None sets
+            no limit.
         unknown: Characters that hold no base, under ``hamming`` only.
         min_compared: The fewest positions that two texts must compare,
             under ``hamming`` only.
