@@ -1155,6 +1155,8 @@ def test_quicats_wide_table_names_the_lines_of_blank_lines_and_quotes(
         ("s1,,0,1", "rows without a cell barcode on lines 3"),
         ("s1,B_s1,inf,1", "holds 'inf' as the count of barcode 'TTT' on line 3"),
         ("s1,B_s1,1,nan", "holds 'nan' as the count of barcode 'GGG' on line 3"),
+        # A line of two wrong counts is named once.
+        ("s1,B_s1,inf,nan", "holds 'inf' as the count of barcode 'TTT' on line 3;"),
     ],
 )
 def test_quicats_wide_table_refuses_rows_of_another_width_or_without_counts(

@@ -514,6 +514,11 @@ def test_one_site_is_genotyped_alone_and_named_sites_follow_the_counts(
     assert store.variants.load_genotypes(both).sites.index.tolist() == list(TARGETS)
     shown = store.variants.load_genotypes(both, sites=["SF3B1"])
     assert set(shown.calls["site"].astype(str)) == {"SF3B1"}
+    # Sites named out of order, or twice, are loaded once each in the
+    # counts' order.
+    every = store.variants.load_genotypes(both)
+    named = store.variants.load_genotypes(both, sites=["SF3B1", "CALR", "SF3B1"])
+    pd.testing.assert_frame_equal(named.calls, every.calls)
     with pytest.raises(ValueError, match="no site 'KRAS'"):
         store.variants.load_genotypes(both, sites=["KRAS"])
     with pytest.raises(TypeError, match="a sequence of site labels"):

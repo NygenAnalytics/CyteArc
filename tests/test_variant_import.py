@@ -899,6 +899,14 @@ def test_load_counts_keeps_the_sites_and_cells_it_is_given(store, tmp_path) -> N
             ]
             assert_tables(getattr(loaded, name), expected)
         assert set(loaded.alleles["site"].astype(str)) == set(labels)
+    # A site or a cell named twice is loaded once.
+    twice = store.variants.load_counts(
+        ref, sites=[*positions, positions[0]], cells=[*chosen_ids, chosen_ids[1]]
+    )
+    assert twice.sites.index.tolist() == labels
+    assert twice.cells.index.tolist() == by_position.cells.index.tolist()
+    for name in ("sites", "cells", "depth", "counts"):
+        assert_tables(getattr(twice, name), getattr(by_position, name))
     # A cell selection within the counts' cells selects the same way.
     selection = store.select_cells(ref, low=0.0)
     selected = store.variants.load_counts(ref, cells=selection, sites=positions)

@@ -65,32 +65,66 @@ _STACK_MODULES = (
     "writers/clone_tables.py",
     "writers/tapestri.py",
 )
-# A call that asks for any of these sorts; NumPy hashes the values of others.
-_SORTING_ARGUMENTS = {"return_index", "return_inverse", "return_counts", "axis"}
+# np.unique sorts when a call asks for the indices, the inverse or the counts
+# of the values, and hashes them otherwise, whatever axis it names, as
+# np.unique_values always does.
+_SORTING_FLAGS = ("return_index", "return_inverse", "return_counts")
+
+
+def _numpy_names(tree: ast.Module) -> tuple[set[str], dict[str, str]]:
+    """The names that a module binds to NumPy, and to functions imported from it."""
+    modules = {"np", "numpy"}
+    functions: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == "numpy"
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module == "numpy":
+            functions.update(
+                (alias.asname or alias.name, alias.name) for alias in node.names
+            )
+    return modules, functions
 
 
 def _hashed_unique_lines(source: str) -> list[int]:
-    """The lines of the ``np.unique`` calls of ``source`` that NumPy hashes."""
+    """The lines of the calls of ``source`` whose distinct values NumPy hashes.
+
+    A call of ``np.unique`` sorts only when it passes ``return_index``,
+    ``return_inverse`` or ``return_counts`` as the literal True, by keyword
+    or by position, so a flag held in a name or unpacked counts as hashing.
+    """
+    tree = ast.parse(source)
+    modules, functions = _numpy_names(tree)
     lines = []
-    for node in ast.walk(ast.parse(source)):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "unique"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in {"np", "numpy"}
-        ):
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
             continue
-        # A second positional argument is return_index, and unpacked
-        # arguments may name any of them.
-        sorts = len(node.args) > 1 or any(
-            isinstance(argument, ast.Starred) for argument in node.args
-        )
-        if not sorts and not any(
-            keyword.arg is None or keyword.arg in _SORTING_ARGUMENTS
-            for keyword in node.keywords
-        ):
-            lines.append(node.lineno)
+        called = node.func
+        if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+            name = called.attr if called.value.id in modules else ""
+        elif isinstance(called, ast.Name):
+            name = functions.get(called.id, "")
+        else:
+            continue
+        if name == "unique":
+            flags = [
+                *node.args[1:4],
+                *(
+                    keyword.value
+                    for keyword in node.keywords
+                    if keyword.arg in _SORTING_FLAGS
+                ),
+            ]
+            if any(
+                isinstance(flag, ast.Constant) and flag.value is True for flag in flags
+            ):
+                continue
+        elif name != "unique_values":
+            continue
+        lines.append(node.lineno)
     return sorted(lines)
 
 
@@ -114,34 +148,45 @@ def test_stack_modules_find_distinct_values_by_sorting() -> None:
         for line in _hashed_unique_lines(path.read_text())
     ]
     assert not hashed, (
-        "Plain np.unique calls hash their values; use sorted_unique, or "
-        f"has_duplicates to test whether values repeat: {hashed}"
+        "NumPy hashes the values of these calls, which takes many times as long "
+        "as sorting them: use sorted_unique for integers, has_duplicates to test "
+        "whether values repeat, and for other values a call that asks for the "
+        f"inverse or the counts, which NumPy finds by sorting: {hashed}"
     )
 
 
-def test_the_guard_finds_each_plain_call_and_passes_sorting_calls() -> None:
+def test_the_guard_finds_each_call_that_hashes_and_passes_sorting_calls() -> None:
     source = "\n".join(
         [
             "import numpy",
             "import numpy as np",
+            "import numpy as onp",
+            "from numpy import unique as distinct, unique_values",
             "a = np.unique(values)",
             "b = len(numpy.unique(values[keep]))",
-            "c = np.unique(values, equal_nan=False)",
-            "d = np.unique(values, sorted=True)",
-            "e = np.unique(values, return_counts=True)",
-            "f = np.unique(values, return_inverse=True)",
-            "g = np.unique(values, return_index=True)",
-            "h = np.unique(rows, axis=0)",
-            "i = np.unique(values, True)",
+            "c = np.unique(values, equal_nan=False, sorted=True)",
+            "d = np.unique(values, return_counts=False)",
+            "e = np.unique(values, return_inverse=wanted)",
+            "f = np.unique(values, axis=0)",
+            "g = onp.unique(values)",
+            "h = distinct(values)",
+            "i = unique_values(values) + np.unique_values(values)",
             "j = np.unique(values, **options)",
             "k = np.unique(*arguments)",
-            "m = pd.unique(values)",
-            "n = sorted_unique(values)",
+            "m = np.unique(values, return_counts=True)",
+            "n = np.unique(rows, return_inverse=True, axis=0)",
+            "o = np.unique(values, return_index=True)",
+            "p = np.unique(values, True)",
+            "q = np.unique(values, False, True)",
+            "r = distinct(values, return_counts=True)",
+            "s = np.unique_counts(values)",
+            "t = pd.unique(values) + sorted_unique(values) + unique(values)",
             "def inner():",
             "    return [value for value in np.unique(found).tolist()]",
         ]
     )
-    assert _hashed_unique_lines(source) == [3, 4, 5, 6, 17]
+    expected = [5, 6, 7, 8, 9, 10, 11, 12, 13, 13, 14, 15, 25]
+    assert _hashed_unique_lines(source) == expected
     assert _hashed_unique_lines("x = 1\n") == []
 
 
@@ -197,6 +242,9 @@ def test_has_duplicates_tells_whether_np_unique_drops_a_value(
 def test_has_duplicates_at_the_ends_and_of_signed_zeros() -> None:
     assert arrays.has_duplicates(np.asarray([], dtype=np.int64)) is False
     assert arrays.has_duplicates(np.asarray([3])) is False
+    assert arrays.has_duplicates(np.asarray([3, 3])) is True
+    assert arrays.has_duplicates(np.asarray([3, 4])) is False
+    assert arrays.has_duplicates(np.asarray([4, 3])) is False
     # A repeat among ascending values ends the shortcut for ascending arrays.
     assert arrays.has_duplicates(np.asarray([1, 2, 3, 3])) is True
     assert arrays.has_duplicates(np.asarray([4, 1, 2, 4])) is True

@@ -488,6 +488,48 @@ def test_figure_labels_refuse_ids_that_only_resemble_a_clonotype_id(tmp_path) ->
     # IDs given as numbers are their text, which names no clonotype either.
     with pytest.raises(ValueError, match=r"No clonotype is labelled \['1'\]"):
         store._clone_figure_labels(ref, [1])  # type: ignore[list-item]
+    # Nor does an ID that ends in a NUL character, which a comparison of
+    # fixed-width NumPy text ignores.
+    with pytest.raises(ValueError, match=r"labelled \['clonotype_1\\x00'\]"):
+        store._clone_figure_labels(ref, ["clonotype_1\x00"])
+
+
+def test_figure_labels_hold_each_clone_given_while_its_junction_is_read(
+    tmp_path, monkeypatch
+) -> None:
+    # cell7's beta chain of 20,000 residues names its own clonotype, so reading
+    # that junction holds more than reading the IDs of the five clonotypes.
+    junction = "C" + "A" * 20_000 + "F"
+    rows = CLONAL_ROWS + [
+        "cell7,true,cell7_contig_1,true,500,TRB,TRBV9,,TRBJ9,TRBC1,true,true,"
+        f"{junction},TGT{'GCT' * 20_000}TTT,10,1,ct9,ct9_1",
+    ]
+    store, receptors = clonal_receptors(tmp_path, rows)
+    ref = store.repertoire.clonotypes(receptors)
+    clonotype = str(store.repertoire.load_clonotypes(ref).cells["clonotype"]["cell7"])
+
+    def smallest_budget(ids: list[str]) -> tuple[int, str]:
+        budget, refused = 1, ""
+        for _attempt in range(10):
+            monkeypatch.setattr(store, "memoryBytes", budget)
+            try:
+                assert store._clone_figure_labels(ref, ids).tolist() == [
+                    junction
+                ] * len(ids)
+                return budget, refused
+            except MemoryError as error:
+                refused = str(error)
+                found = re.search(r"about (\d+) bytes", refused)
+                assert found is not None and int(found.group(1)) > budget, refused
+                budget = int(found.group(1))
+        raise AssertionError("the budget did not settle")
+
+    one, refused = smallest_budget([clonotype])
+    assert refused.startswith("Labelling clonotypes by their junctions holds about")
+    # Each clone given, the same one here, is held while the junction is read.
+    twenty, refused = smallest_budget([clonotype] * 20)
+    assert refused.startswith("Labelling clonotypes by their junctions holds about")
+    assert twenty == one + 19 * 400
 
 
 def test_clonotypes_of_one_arm_are_named_by_the_chains_they_share(tmp_path) -> None:
