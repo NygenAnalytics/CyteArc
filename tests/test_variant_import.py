@@ -16,7 +16,7 @@ import pytest
 from cytearc.metadata.rows import text_read_bytes
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import every_cell
-from tests.memory_helpers import at_budget, smallest_budget, stated_bytes, traced_peak
+from tests.memory_helpers import at_budget, smallest_budget, traced_peak
 from tests.storage_helpers import copy_store
 from tests.variant_helpers import (
     assert_tables,
@@ -75,7 +75,9 @@ def _import(store, path, **options):
 
 
 def _refused_estimate(store, run, budget: int) -> int:
-    """The bytes that ``run`` states when it refuses ``budget``."""
+    """The bytes that ``run`` names when it refuses ``budget``."""
+    import re
+
     full = store.memoryBytes
     store.memoryBytes = budget
     try:
@@ -83,7 +85,9 @@ def _refused_estimate(store, run, budget: int) -> int:
             run()
     finally:
         store.memoryBytes = full
-    return stated_bytes(refused.value)
+    found = re.search(r"holds about (\d+) bytes", str(refused.value))
+    assert found is not None, str(refused.value)
+    return int(found.group(1))
 
 
 def _large_mgatk(
