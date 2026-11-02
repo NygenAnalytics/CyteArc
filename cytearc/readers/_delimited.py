@@ -10,9 +10,9 @@ delimiter after each row's last field also gives one field more than the
 header, an empty one, so when every row ends in its delimiter with nothing
 after it the table is refused, since the two layouts read alike there, unless
 its reader prefers R's row names because its own checks refuse the other
-layout, as a character matrix's do. Blank lines hold no rows. These functions find a table's layout from its
-first lines and yield its rows as text, chunk by chunk, naming the file in
-their errors.
+layout, as a character matrix's do. Blank lines hold no rows. These functions
+find a table's layout from its first lines and yield its rows as text, chunk
+by chunk, naming the file in their errors.
 """
 
 import csv
