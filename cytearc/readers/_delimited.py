@@ -43,6 +43,7 @@ __all__ = [
     "open_text",
     "parsed_chunks",
     "require_columns",
+    "rows_end_in_delimiter",
     "signature",
     "split_fields",
     "text_chunks",
@@ -71,10 +72,6 @@ class TextLayout:
         header: Whether the first line is a header; a table without one
             names its columns by their position.
         row_chars: The characters of the longest of the first rows.
-        rows_end_in_delimiter: Whether the row names come from rows of one
-            field more than the header that all end in a delimiter with
-            nothing after it, which ``text_layout`` reads only for a reader
-            that prefers R's row names.
     """
 
     path: str
@@ -84,7 +81,6 @@ class TextLayout:
     row_names: bool
     header: bool = True
     row_chars: int = 0
-    rows_end_in_delimiter: bool = False
 
 
 def signature(path: str) -> bytes:
@@ -269,12 +265,14 @@ def text_layout(
         path: The table.
         what: What the table is, such as ``"a clone table"``, for the error
             about an empty file.
-        prefer_row_names: Read rows of one field more than the header that
-            all end in a delimiter with nothing after it as R's row names
-            with an empty last column, rather than refuse them. Only for a
-            table whose reader refuses the other layout by its own checks, as
-            a character matrix refuses the cells' column among its characters
-            and the empty last state that a delimiter after each row gives.
+        prefer_row_names: Read rows of one field more than the header as
+            R's row names even where they all end in a delimiter with nothing
+            after it, without reading the rest of the file to tell, rather
+            than refuse them. Only for a table whose reader refuses the other
+            layout by its own checks, as a character matrix refuses the
+            cells' column read among PEtracer's characters, or an empty last
+            state where its format writes none, which a delimiter after each
+            row's last field gives.
 
     Raises:
         ValueError: If the file is empty, is not UTF-8 text, a gzip file is
@@ -292,7 +290,7 @@ def text_layout(
     # TREX starts its headers with "#", which marks no comment.
     if header and header[0].startswith("#"):
         header[0] = header[0][1:]
-    row_names = rows_end_in_delimiter = False
+    row_names = False
     if rows:
         fields = split_fields(rows[0], separator)
         if len(fields) == len(header) + 1:
@@ -300,12 +298,13 @@ def text_layout(
             # delimiter after each row's last field gives one field more too,
             # an empty one. The two differ only where a row holds something
             # after its last named column.
-            rows_end_in_delimiter = _ends_in_delimiter(
-                rows[0], separator
-            ) and not _rows_hold_values_after_their_names(
-                path, found, separator, len(header)
-            )
-            if rows_end_in_delimiter and not prefer_row_names:
+            if (
+                not prefer_row_names
+                and _ends_in_delimiter(rows[0], separator)
+                and not _rows_hold_values_after_their_names(
+                    path, found, separator, len(header)
+                )
+            ):
                 raise ValueError(
                     f"The header of {path} names {len(header)} columns, and its "
                     f"rows of {len(header) + 1} fields all end in a delimiter with "
@@ -332,7 +331,33 @@ def text_layout(
         compression=found,
         row_names=row_names,
         row_chars=max((len(row) for row in rows), default=0),
-        rows_end_in_delimiter=rows_end_in_delimiter,
+    )
+
+
+def rows_end_in_delimiter(text: TextLayout) -> bool:
+    """Return whether a table's R row names come from rows that all end in a delimiter.
+
+    Such rows hold one field more than the header and nothing after their
+    last delimiter, which a delimiter after each row's last field writes
+    alike, so ``text_layout`` reads them as row names only for a reader that
+    prefers them. The file is read again, so a reader asks only to explain
+    an error.
+
+    Raises:
+        ValueError: If the file is not UTF-8 text, a gzip file is cut short or
+            corrupt, or a quote never closes.
+    """
+    if not text.row_names or not text.header:
+        return False
+    first, rows = _header_and_rows(text.path, text.compression)
+    n_names = len(split_fields(first.lstrip("\ufeff"), text.delimiter))
+    return (
+        bool(rows)
+        and n_names == len(text.names) - 1
+        and _ends_in_delimiter(rows[0], text.delimiter)
+        and not _rows_hold_values_after_their_names(
+            text.path, text.compression, text.delimiter, n_names
+        )
     )
 
 

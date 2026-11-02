@@ -107,6 +107,7 @@ from ._delimited import (
     line_list,
     open_text,
     require_columns,
+    rows_end_in_delimiter,
     signature,
     split_fields,
     text_chunks,
@@ -1014,6 +1015,23 @@ def _matrix_layout(path: str, format: str) -> AlleleLayout:
     # after a named cell column then gives an empty last state, or a cell
     # column among the characters, which the states and names refuse.
     text = text_layout(path, what="a character matrix", prefer_row_names=True)
+    if (
+        format == "petracer_characters"
+        and not text.row_names
+        and _PETRACER_COLUMN.match(text.names[0])
+    ):
+        # A space-separated file loses an empty field at the end of a row
+        # unless it is quoted, so a matrix whose rows end in an empty state
+        # holds no more fields than its header, and its first character would
+        # read as the cells' column.
+        raise ValueError(
+            f"{path} names its first column {text.names[0]!r}, as PEtracer names "
+            "a character, but its rows hold no more fields than its header, so "
+            "that column would read as the cells': a space-separated matrix "
+            "loses an empty state at the end of a row unless its fields are "
+            "quoted. Quote the fields, as R's write.table does by default, or "
+            "separate them by commas or tabs"
+        )
     names = list(text.names[1:])
     columns = _matrix_columns(names, path)
     if format == "petracer_characters":
@@ -1026,7 +1044,7 @@ def _matrix_layout(path: str, format: str) -> AlleleLayout:
                 f"column, {text.names[1]!r}, reads as a character, as R's "
                 "write.table leaves the cells' column unnamed: write the matrix "
                 "without a delimiter at the end of each row"
-                if text.rows_end_in_delimiter
+                if rows_end_in_delimiter(text)
                 else ""
             )
             raise ValueError(

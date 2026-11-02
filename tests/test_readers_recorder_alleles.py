@@ -24,7 +24,7 @@ import pandas as pd
 import pytest
 
 from cytearc.clones.recorders import STATES
-from cytearc.readers._delimited import text_layout
+from cytearc.readers._delimited import rows_end_in_delimiter, text_layout
 from cytearc.readers.recorder_alleles import (
     ALLELE_FORMATS,
     allele_file,
@@ -1313,7 +1313,7 @@ def test_character_matrices_without_a_cell_column_name_read_as_r_writes_them(
 
 
 def test_a_table_whose_rows_all_end_in_a_delimiter_takes_row_names_on_request(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
     # Rows of one field more than the header that all end in a delimiter
     # read alike as R's row names with an empty last column and as rows that
@@ -1325,9 +1325,20 @@ def test_a_table_whose_rows_all_end_in_a_delimiter_takes_row_names_on_request(
         ValueError, match="names 2 columns, and its rows of 3 fields all end in"
     ):
         text_layout(str(path))
-    layout = text_layout(str(path), prefer_row_names=True)
+    # A reader that prefers the row names reads no further than the first rows.
+    import cytearc.readers._delimited as delimited
+
+    scan = delimited._rows_hold_values_after_their_names
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            delimited,
+            "_rows_hold_values_after_their_names",
+            lambda *args: pytest.fail("the whole file was read"),
+        )
+        layout = text_layout(str(path), prefer_row_names=True)
+    assert delimited._rows_hold_values_after_their_names is scan
     assert layout.names == ("", "a", "b")
-    assert layout.row_names and layout.rows_end_in_delimiter
+    assert layout.row_names and rows_end_in_delimiter(layout)
     # A row that holds a value after the header's names, or quoted empty
     # text as R writes it, gives R's row names under either rule.
     for rows in ("r1,1,\nr2,2,3\n", 'r1,1,\nr2,2,""\n'):
@@ -1335,7 +1346,45 @@ def test_a_table_whose_rows_all_end_in_a_delimiter_takes_row_names_on_request(
         for prefer in (False, True):
             layout = text_layout(str(path), prefer_row_names=prefer)
             assert layout.names == ("", "a", "b") and layout.row_names
-            assert not layout.rows_end_in_delimiter
+            assert not rows_end_in_delimiter(layout)
+    # Row names that the header names, as write.csv writes them, come from no
+    # row of one field more, even where every row ends in its delimiter.
+    path.write_text(",a,b\nr1,1,\nr2,2,\n")
+    layout = text_layout(str(path))
+    assert layout.row_names and not rows_end_in_delimiter(layout)
+    path.write_text("a,b\n1,2\n")
+    assert not rows_end_in_delimiter(text_layout(str(path)))
+
+
+def test_space_separated_matrices_keep_an_empty_last_state_only_when_quoted(
+    tmp_path,
+):
+    # Splitting a space-separated row drops the spaces at its ends, so an
+    # unquoted empty state at the end of every row is lost and the rows hold
+    # as many fields as the header. Read as written, the first character
+    # would become the cells' column and each state would move one site over.
+    read_as_r_writes = [
+        ["cell1", "RNF2", "mark", "1"],
+        ["cell1", "HEK3", "not_applicable", None],
+        ["cell2", "RNF2", "mark", "2"],
+        ["cell2", "HEK3", "not_applicable", None],
+    ]
+    path = tmp_path / "characters.txt"
+    for text in (
+        "intID1-RNF2,intID1-HEK3\ncell1,1,\ncell2,2,\n",
+        'intID1-RNF2 intID1-HEK3\n"cell1" "1" ""\n"cell2" "2" ""\n',
+    ):
+        path.write_text(text)
+        read = read_all(path, format="petracer_characters")
+        assert read[["barcode", "site", "state", "allele"]].values.tolist() == (
+            read_as_r_writes
+        )
+    path.write_text("intID1-RNF2 intID1-HEK3\ncell1 1 \ncell2 2 \n")
+    with pytest.raises(
+        ValueError,
+        match="names its first column 'intID1-RNF2', as PEtracer names a character",
+    ):
+        read_all(path, format="petracer_characters")
 
 
 def _rows_ending_in_delimiters(format: str, folder: Path) -> tuple[Path, dict]:
