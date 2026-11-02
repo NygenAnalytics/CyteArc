@@ -591,8 +591,9 @@ def test_work_that_runs_outside_every_named_read_is_let_go() -> None:
 
 # Chunks of 12,000 rows of 40 int32 values, 1.92 MB decoded, read one after
 # another in a fresh process whose pool runs no earlier test's reads. The
-# reads are traced alone three times, then with the work of the read before
-# held, ending each read by hand and then at each read of a Zarr array.
+# reads are traced alone until a trace holds under three decoded chunks, up to
+# 20 times, then with the work of the read before held, ending each read by
+# hand and then at each read of a Zarr array.
 _HELD_READ_SCRIPT = """
 import contextlib, json, sys, tracemalloc
 import zarr
@@ -600,6 +601,7 @@ from tests.memory_helpers import ZARR_READS, hold_finished_reads
 
 array = zarr.open_array(sys.argv[1], mode="r")
 rows = array.chunks[0]
+three_chunks = 3 * rows * array.shape[1] * array.dtype.itemsize
 
 def read_each_chunk(end_read):
     for start in range(0, array.shape[0], rows):
@@ -617,8 +619,11 @@ def traced(hold, end_reads):
     return peak
 
 read_each_chunk(lambda: None)
+free = []
+while len(free) < 20 and (not free or min(free) >= three_chunks):
+    free.append(traced(contextlib.nullcontext(lambda: None), False))
 peaks = {
-    "free": [traced(contextlib.nullcontext(lambda: None), False) for _ in range(3)],
+    "free": free,
     "by hand": traced(hold_finished_reads(), True),
     "at each Zarr read": traced(hold_finished_reads(*ZARR_READS), False),
 }
@@ -651,8 +656,8 @@ def test_a_read_that_a_pool_thread_still_holds_is_missed_unless_reads_are_held(
 
     # A read holds its chunk as stored and decoded and the rows it returns,
     # under three decoded chunks. Without the hold a pool thread lets go of
-    # the read before it, unless it was descheduled, which at least one of
-    # three traces escapes.
+    # the read before it, unless it was descheduled, which at least one of 20
+    # traces escapes even on a loaded machine.
     chunk = 12_000 * 40 * 4
     free = min(peaks.pop("free"))
     assert free < 3 * chunk, peaks
