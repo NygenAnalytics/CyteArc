@@ -579,8 +579,8 @@ class _MappingOperationsMixin(_MappingOperationsBase):
                 writer.abort()
             raise
         finally:
-            # A failed query leaves the block stream suspended while it holds
-            # Zarr's process-wide I/O limit; release it now, not at collection.
+            # A failed query leaves the block stream suspended; release it now,
+            # not at collection.
             coordinate_blocks.close()
             if coordinates_file is not None:
                 coordinates_file.close()

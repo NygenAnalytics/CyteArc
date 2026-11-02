@@ -369,8 +369,8 @@ def test_mapping_failure_discards_the_projection(
         "_load_reference_neighbor_query",
         lambda *_args, **_kwargs: FailingNeighborQuery(),
     )
-    # Without a collection to rescue it, a stream left suspended by the failure
-    # would keep Zarr's process-wide I/O limit lowered for later work.
+    # With the collector off, a stream that the failure left suspended would
+    # stay alive, and it must not keep Zarr's process-wide I/O limit lowered.
     gc_enabled = gc.isenabled()
     gc.disable()
     try:

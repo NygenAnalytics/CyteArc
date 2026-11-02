@@ -68,6 +68,7 @@ from ...storage.selections import (
     validate_stored_selection_integrity,
 )
 from ...storage.arrays import create_zarr_dataset
+from ...storage.async_execution import zarr_io_concurrency
 from ...trajectory.feature_dynamics import (
     scatter_feature_clusters as _scatter_feature_clusters_impl,
     validate_pseudotime_regressor,
@@ -1874,8 +1875,12 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                         )
                         block_progress[scored, lineage] = position
                         block_distance[scored, lineage] = distance
-                positions[start:stop] = block_progress
-                distances[start:stop] = block_distance
+                # A block across a chunk boundary rewrites two chunks of up to
+                # 100,000 rows, which Zarr would rewrite at once; one at a time,
+                # the writes hold the buffers of one chunk.
+                with zarr_io_concurrency(1):
+                    positions[start:stop] = block_progress
+                    distances[start:stop] = block_distance
             valid_array = create_zarr_dataset(
                 group, "valid", (chunk_rows,), np.bool_, (n_cells,)
             )
