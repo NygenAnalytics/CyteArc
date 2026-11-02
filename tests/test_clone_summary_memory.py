@@ -317,6 +317,9 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
     "rarefaction at 5,000 sizes": lambda data: data.store.clones.rarefaction(
         data.clones, orders=(0, 1), sizes=range(1, 5_001)
     ),
+    "rarefaction of one-cell clones at 5,000 sizes": lambda data: (
+        data.store.clones.rarefaction(data.long, orders=(0,), sizes=range(1, 5_001))
+    ),
     "overlap by two columns of long labels": lambda data: data.store.clones.overlap(
         data.clones, group_by=["donor", "condition"]
     ),

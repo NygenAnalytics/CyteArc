@@ -8,8 +8,10 @@ that change cell metadata or the memory budget copy the template.
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 
+import cytearc.datastore._operations.clones as operations
 from cytearc.clones import ClonalDiversity, Rarefaction
 from cytearc.clones import diversity as dv
 from tests.clone_helpers import (
@@ -19,6 +21,7 @@ from tests.clone_helpers import (
     write_truth_store,
 )
 from tests.clone_truth import CLONE_SIZES, N_CELLS, clone_truth
+from tests.perturbation_helpers import traced_peak
 from tests.storage_helpers import insert_nullable_cell_column
 
 TRUTH = clone_truth()
@@ -216,14 +219,16 @@ def test_diversity_refuses_other_artifacts_and_large_stores(
 def test_each_group_counts_beside_its_cells(copied, monkeypatch) -> None:
     store, clones = copied.store, copied.clones
     # A label of its own for each of the 32 cells with a clone makes 32
-    # groups, whose clone sizes and rows take 2,000 bytes each.
+    # groups, whose clone sizes and rows take 2,000 bytes each, and 32 counts
+    # of a clone's cells in a group, which the table of clone sizes sorts in
+    # 56 bytes each.
     has = TRUTH.clones >= 0
     store.cells.insert("own", np.asarray([f"c{i:02d}" for i in range(N_CELLS)]))
     store.cells.insert("has_clone", has)
     own = store.snapshot_cluster_labels(
         "own", cell_selection=store.snapshot_cell_selection("has_clone")
     )
-    needed = 32 * 2_000
+    needed = 32 * 2_000 + 32 * 56
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
     with pytest.raises(MemoryError, match=f"32 groups holds about {needed} bytes"):
         store.clones.diversity(clones, groups=own)
@@ -234,13 +239,62 @@ def test_each_group_counts_beside_its_cells(copied, monkeypatch) -> None:
     assert result.indices["cells"].tolist() == [1] * 32
 
 
+def _clone_counts(shape: str) -> tuple[int, int, np.ndarray]:
+    """The groups, clones per group and each clone's cells of a shape of counts."""
+    if shape == "four groups of many clones":
+        sizes = np.random.default_rng(6).zipf(1.8, size=400_000)
+        return 4, 100_000, np.minimum(sizes, 1_000)
+    if shape == "groups of one cell":
+        return 40_000, 1, np.ones(40_000, dtype=np.int64)
+    if shape == "groups of clones of distinct sizes":
+        return 2_000, 30, np.tile(np.arange(1, 31), 2_000)
+    return 1, 4_000, np.arange(1, 4_001)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "four groups of many clones",
+        "groups of one cell",
+        "groups of clones of distinct sizes",
+        "one group of every size up to 4,000",
+    ],
+)
+def test_summarizing_clone_sizes_holds_what_its_check_counts(shape) -> None:
+    # The counts of each clone's cells in each group, as grouping the cells
+    # leaves them, then the table built from them and its diversity: every
+    # group, every count and every row of the table beyond its group's first,
+    # by the operation's own check.
+    n_groups, per_group, cells = _clone_counts(shape)
+    keys = pd.DataFrame({"group": [f"g{at}" for at in range(n_groups)]})
+
+    def summarize() -> object:
+        pair_groups = np.repeat(np.arange(n_groups), per_group)
+        pair_codes = np.arange(n_groups * per_group)
+        pair_cells = cells.copy()
+        grouped = dv.GroupedCloneSizes.from_clones(pair_groups, pair_cells, n_groups)
+        return dv.diversity_tables(grouped, keys), pair_codes
+
+    summarize()
+    rows = len(
+        dv.GroupedCloneSizes.from_clones(
+            np.repeat(np.arange(n_groups), per_group), cells, n_groups
+        ).values
+    )
+    counted = (
+        operations._SUMMARY_BYTES_PER_GROUP * n_groups
+        + operations._SIZE_TABLE_BYTES_PER_COUNT * n_groups * per_group
+        + operations._SIZE_TABLE_BYTES_PER_ROW * (rows - n_groups)
+    )
+    _result, peak = traced_peak(summarize, counted)
+    assert peak <= counted, (peak, counted)
+
+
 def test_rarefaction_counts_the_sizes_it_reaches(copied, monkeypatch) -> None:
     store, clones = copied.store, copied.clones
-    # 1,000 sizes for the one group: its 32 cells reach 32 whole sizes below
-    # them, each with its 7 distinct clone sizes at 40 bytes, and 1,000 rows
-    # of 100 bytes.
-    needed = 32 * 7 * 40 + 1_000 * 100
-    assert len(ALL.values) == 7 and needed == 108_960
+    # 1,000 sizes for the one group, each reached in 192 bytes, and 1,000
+    # rows of 128 bytes, with no key column beside the group's name.
+    needed = 1_000 * 192 + 1_000 * 128
     sizes = np.arange(1, 1_001)
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
     with pytest.raises(MemoryError, match=f"to 1000 sizes holds about {needed} bytes"):

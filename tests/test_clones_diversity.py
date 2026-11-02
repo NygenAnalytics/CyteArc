@@ -431,14 +431,15 @@ def test_indices_of_one_clone_and_richness_estimators() -> None:
     assert np.isnan(dv.estimated_hill(_clones([]), 1))
     assert np.isnan(dv.observed_hill(_clones([]), 0))
     assert np.isnan(dv.chao_entropy(_clones([])))
-    assert np.isnan(dv._gini(_clones([])))
+    assert np.isnan(dv._gini(dv.GroupedCloneSizes.from_groups([_clones([])]))[0])
 
 
 def test_common_levels_follow_inext_defaults() -> None:
-    groups = [_clones(A), _clones(B)]
+    clones = [_clones(A), _clones(B)]
+    groups = dv.GroupedCloneSizes.from_groups(clones)
     assert dv.common_size(groups) == 66
     assert dv.common_coverage(groups) == pytest.approx(
-        min(dv.coverage_at(groups[0], 66), dv.coverage_at(groups[1], 164))
+        min(dv.coverage_at(clones[0], 66), dv.coverage_at(clones[1], 164))
     )
 
 
@@ -487,7 +488,7 @@ def test_size_for_coverage_finds_the_last_whole_size_below_the_level(seed) -> No
 
 
 def test_diversity_tables_match_inext_for_every_group() -> None:
-    groups = [_clones(A), _clones(B)]
+    groups = dv.GroupedCloneSizes.from_groups([_clones(A), _clones(B)])
     keys = pd.DataFrame({"group": ["a, s1", "b, s2"], "sample": ["s1", "s2"]})
     table, hill, size, level = dv.diversity_tables(groups, keys)
     # iNEXT's defaults: the smallest doubled size and the lowest coverage at
@@ -552,7 +553,7 @@ def test_diversity_tables_match_inext_for_every_group() -> None:
 
 
 def test_rarefaction_curves_hold_each_group_order_and_size() -> None:
-    groups = [_clones(A), _clones(B)]
+    groups = dv.GroupedCloneSizes.from_groups([_clones(A), _clones(B)])
     keys = pd.DataFrame({"group": ["a", "b"]})
     curves = dv.rarefaction_curves(
         groups, keys, (2, 0, 1), sizes=[164, 16, 23, 50, 66, 16]
@@ -613,8 +614,304 @@ def test_rarefaction_curves_hold_each_group_order_and_size() -> None:
     # A's 33 cells extrapolate to the endpoint; B's 82 rarefy to it.
     assert defaults["size"].tolist() == [1, 33, 34, 40, 1, 14, 27, 40]
     assert (
-        dv.rarefaction_curves([], keys.iloc[:0]).columns.tolist()
+        dv.rarefaction_curves(
+            dv.GroupedCloneSizes.from_groups([]), keys.iloc[:0]
+        ).columns.tolist()
         == curves.columns.tolist()
     )
     with pytest.raises(ValueError, match="order must be"):
         dv.rarefaction_curves(groups, keys, (3,))
+
+
+def _grouped(*sizes) -> dv.GroupedCloneSizes:
+    return dv.GroupedCloneSizes.from_groups([_clones(each) for each in sizes])
+
+
+def test_grouped_clone_sizes_hold_each_groups_frequency_table() -> None:
+    # Clones of groups 2, 0, 2, 2, 0, 3, 1 and 3 of four, one of no cells: group
+    # 0 holds two singletons, group 1 nothing, group 2 clones of 3, 1 and 3
+    # cells and group 3 clones of 5 and 2 cells.
+    grouped = dv.GroupedCloneSizes.from_clones(
+        [2, 0, 2, 2, 0, 3, 1, 3], [3, 1, 1, 3, 1, 5, 0, 2], 4
+    )
+    assert len(grouped) == 4
+    assert grouped.starts.tolist() == [0, 1, 1, 3, 5]
+    assert grouped.groups.tolist() == [0, 2, 2, 3, 3]
+    assert grouped.values.tolist() == [1, 1, 3, 2, 5]
+    assert grouped.counts.tolist() == [2, 1, 2, 1, 1]
+    assert grouped.n.tolist() == [2, 0, 7, 7]
+    assert grouped.richness.tolist() == [2, 0, 3, 2]
+    assert grouped.f1.tolist() == [2, 0, 1, 0]
+    assert grouped.f2.tolist() == [0, 0, 0, 1]
+    tables = ([1, 1], [], [3, 1, 3], [5, 2])
+    joined = _grouped(*tables)
+    for name in ("starts", "groups", "values", "counts", "n", "richness", "f1", "f2"):
+        assert getattr(joined, name).tolist() == getattr(grouped, name).tolist()
+    for at, sizes in enumerate(tables):
+        one, expected = grouped.group(at), _clones(sizes)
+        assert one.values.tolist() == expected.values.tolist()
+        assert one.counts.tolist() == expected.counts.tolist()
+        assert (one.n, one.richness, one.f1, one.f2) == (
+            expected.n,
+            expected.richness,
+            expected.f1,
+            expected.f2,
+        )
+    taken = grouped.take([3, 1, 0, 3])
+    assert taken.starts.tolist() == [0, 2, 2, 3, 5]
+    assert taken.values.tolist() == [2, 5, 1, 2, 5]
+    assert taken.counts.tolist() == [1, 1, 2, 1, 1]
+    assert taken.n.tolist() == [7, 0, 2, 7]
+    assert len(_grouped()) == 0 and _grouped().starts.tolist() == [0]
+
+
+@pytest.mark.parametrize(
+    ("groups", "sizes", "message"),
+    [
+        ([0, 1], [1], "one value per clone"),
+        ([0, 4], [1, 1], "between 0 and 3"),
+        ([-1], [1], "between 0 and 3"),
+        ([0, 1], [2, -1], "must not be negative"),
+    ],
+)
+def test_grouped_clone_sizes_refuse_clones_outside_the_groups(
+    groups, sizes, message
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        dv.GroupedCloneSizes.from_clones(groups, sizes, 4)
+
+
+def test_distinct_tables_keep_the_order_of_their_first_groups() -> None:
+    grouped = _grouped(
+        # Table a: two singletons and a clone of 3 cells.
+        [3, 1, 1],
+        [1, 3, 1],
+        # b: the sizes of a, with one singleton fewer.
+        [3, 1],
+        # c: the counts of a, with a clone of 4 cells for its 3.
+        [1, 1, 4],
+        # d: no cells.
+        [],
+        # e: the rows of a and a clone of 5 cells after them.
+        [3, 1, 1, 5],
+        [5, 1, 3, 1],
+        [],
+        [1, 3],
+    )
+    tables, held = grouped.distinct()
+    assert held.tolist() == [0, 0, 1, 2, 3, 4, 4, 3, 1]
+    assert tables.starts.tolist() == [0, 2, 4, 6, 6, 9]
+    assert tables.values.tolist() == [1, 3, 1, 3, 1, 4, 1, 3, 5]
+    assert tables.counts.tolist() == [2, 1, 1, 1, 2, 1, 2, 1, 1]
+    assert tables.n.tolist() == [5, 4, 6, 0, 10]
+    # Groups that all differ are their own distinct tables.
+    alone, places = _grouped([2, 1], [1], [2, 2]).distinct()
+    assert places.tolist() == [0, 1, 2]
+    assert alone.values.tolist() == [1, 2, 1, 2] and alone.counts.tolist() == [
+        1,
+        1,
+        1,
+        2,
+    ]
+    empty, none = _grouped().distinct()
+    assert len(empty) == 0 and none.tolist() == []
+
+
+def test_groups_with_equal_tables_get_equal_rows() -> None:
+    sizes = [
+        A,
+        [1],
+        B,
+        [1, 1, 3, 1, 10, 2, 1, 5, 1, 2, 5, 1],
+        [6, 3, 1, 1, 2],
+        [5, 4, 1, 1, 2],
+        [1],
+        [1, 2, 50, 1, 4, 1, 20, 1, 2],
+        [2, 1, 3, 6, 1],
+    ]
+    groups = _grouped(*sizes)
+    assert groups.distinct()[1].tolist() == [0, 1, 2, 0, 3, 4, 1, 2, 3]
+    keys = pd.DataFrame({"group": [f"g{at}" for at in range(len(sizes))]})
+    table, hill, size, level = dv.diversity_tables(groups, keys)
+    # The groups of one cell set the common size; A's coverage at twice its
+    # cells, iNEXT's 0.9098, is the lowest at doubled sizes.
+    assert size == 2
+    assert level == pytest.approx(0.909807035796235, rel=1e-11)
+    indices = table.drop(columns="group").to_numpy(dtype=np.float64)
+    numbers = hill.drop(columns=["group", "method_at_size", "method_at_coverage"])
+    measures = numbers.to_numpy(dtype=np.float64).reshape(len(sizes), -1)
+    methods = hill[["method_at_size", "method_at_coverage"]].to_numpy()
+    methods = methods.reshape(len(sizes), -1)
+    for first, again in ((0, 3), (1, 6), (2, 7), (4, 8)):
+        np.testing.assert_array_equal(indices[again], indices[first])
+        np.testing.assert_array_equal(measures[again], measures[first])
+        assert methods[again].tolist() == methods[first].tolist()
+    # Groups 4 and 5 hold 13 cells in five clones, two singletons and a
+    # doubleton each, and D50 of 2, but sizes 6 and 3 against 5 and 4.
+    counted = ["cells", "clones", "singletons", "doubletons", "d50"]
+    assert table.loc[4, counted].tolist() == table.loc[5, counted].tolist()
+    assert table.loc[4, counted].tolist() == [13, 5, 2, 1, 2]
+    assert table.loc[4, "gini"] == pytest.approx(2 * 51 / (5 * 13) - 6 / 5)
+    assert table.loc[5, "gini"] == pytest.approx(2 * 50 / (5 * 13) - 6 / 5)
+    # A's and B's rows hold iNEXT's numbers in each place.
+    by_group = hill.set_index("group")
+    for at in (0, 3):
+        rows = by_group.loc[f"g{at}"]
+        np.testing.assert_allclose(
+            rows["observed"], [12, 8.39095516943926, 6.29479768786127], rtol=1e-12
+        )
+        np.testing.assert_allclose(
+            rows["estimated"],
+            [20.7272727272727, 11.6060325357083, 7.54285714285715],
+            rtol=1e-10,
+        )
+        np.testing.assert_allclose(
+            rows["at_coverage"],
+            [16.3078174812882, 10.030943287946, 6.86254430878299],
+            rtol=1e-11,
+        )
+        np.testing.assert_allclose(rows["size_at_coverage"], 66, rtol=1e-12)
+    for at in (2, 7):
+        rows = by_group.loc[f"g{at}"]
+        np.testing.assert_allclose(
+            rows["observed"], [9, 3.2845734146719, 2.29644808743169], rtol=1e-12
+        )
+        np.testing.assert_allclose(
+            rows["estimated"],
+            [12.9512195121951, 3.56798065100181, 2.33380182712578],
+            rtol=1e-10,
+        )
+    # Each group's rows are those it gets alone at the same size and coverage.
+    for at in range(len(sizes)):
+        alone, alone_hill, _, _ = dv.diversity_tables(
+            groups.take([at]),
+            keys.iloc[[at]].reset_index(drop=True),
+            size=size,
+            coverage=level,
+        )
+        np.testing.assert_array_equal(
+            alone.drop(columns="group").to_numpy(dtype=np.float64)[0], indices[at]
+        )
+        alone_numbers = alone_hill.drop(
+            columns=["group", "method_at_size", "method_at_coverage"]
+        )
+        np.testing.assert_array_equal(
+            alone_numbers.to_numpy(dtype=np.float64).reshape(-1), measures[at]
+        )
+
+
+def test_a_group_of_one_cell_and_a_group_of_every_cell() -> None:
+    # Each of A's 33 cells as a group of its own, and a group of all of them.
+    groups = _grouped(*[[1]] * 33, A)
+    keys = pd.DataFrame({"group": [f"cell {at}" for at in range(33)] + ["every"]})
+    table, hill, size, level = dv.diversity_tables(groups, keys)
+    # One cell doubled is the common size; A's coverage at 66 cells is the
+    # lowest coverage at doubled sizes.
+    assert size == 2
+    assert level == pytest.approx(0.909807035796235, rel=1e-11)
+    by_group = table.set_index("group")
+    rows = hill.set_index(["group", "order"])
+    # One cell is one clone of one cell: complete, with no entropy, and no
+    # rare clone of more than one cell for ACE.
+    for at in range(33):
+        cell = by_group.loc[f"cell {at}"]
+        assert cell[
+            ["cells", "clones", "singletons", "doubletons", "d50"]
+        ].tolist() == [
+            1,
+            1,
+            1,
+            0,
+            1,
+        ]
+        assert (cell["coverage"], cell["shannon"], cell["gini"]) == (1, 0, 0)
+        assert (cell["simpson"], cell["inverse_simpson"], cell["gini_simpson"]) == (
+            1,
+            1,
+            0,
+        )
+        assert (cell["chao1"], cell["chao1_bias_corrected"]) == (1, 1)
+        assert np.isnan(cell["pielou"]) and np.isnan(cell["ace"])
+        for order, estimated, doubled in zip(
+            dv.ORDERS, (1, 1, np.inf), (1, 1, 2), strict=True
+        ):
+            row = rows.loc[(f"cell {at}", order)]
+            assert (row["observed"], row["estimated"]) == (1, estimated)
+            # Two cells extrapolated from one keep its clone and its entropy,
+            # and count two dominant clones, since no pair shares a clone.
+            assert (row["at_size"], row["coverage_at_size"]) == (doubled, 1)
+            assert row["method_at_size"] == "extrapolation"
+            # The coverage of one cell is 1, so it reaches the common one.
+            assert (row["at_coverage"], row["size_at_coverage"]) == (1, 1)
+            assert row["method_at_coverage"] == "observed"
+    # The group of every cell holds A's indices and iNEXT's numbers, its
+    # coverage at 66 cells for the common coverage, and its rarefaction to two
+    # cells, counted over every pair of its cells.
+    every = by_group.loc["every"]
+    assert every[["cells", "clones", "singletons", "doubletons"]].tolist() == [
+        33,
+        12,
+        6,
+        2,
+    ]
+    assert every["coverage"] == pytest.approx(1 - 6 / 33 * (32 * 6 / (32 * 6 + 4)))
+    draws = list(_subsamples(A, 2))
+    richness = sum(len(counts) for _, _, counts in draws) / len(draws)
+    entropy = sum(
+        -sum(c / 2 * log(c / 2) for c in counts.values()) for _, _, counts in draws
+    ) / len(draws)
+    squares = sum(sum((c / 2) ** 2 for c in counts.values()) for _, _, counts in draws)
+    seen = Fraction(0)
+    for chosen, cells, counts in draws:
+        rest = [cell for cell in range(33) if cell not in chosen]
+        seen += Fraction(sum(cells[cell] in counts for cell in rest), len(rest))
+    whole = hill[hill["group"] == "every"]
+    np.testing.assert_allclose(
+        whole["at_size"],
+        [richness, np.exp(entropy), len(draws) / squares],
+        rtol=1e-12,
+    )
+    np.testing.assert_allclose(
+        whole["coverage_at_size"], float(seen / len(draws)), rtol=1e-12
+    )
+    assert whole["method_at_size"].tolist() == ["rarefaction"] * 3
+    np.testing.assert_allclose(
+        whole["observed"], [12, 8.39095516943926, 6.29479768786127], rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        whole["estimated"],
+        [20.7272727272727, 11.6060325357083, 7.54285714285715],
+        rtol=1e-10,
+    )
+    np.testing.assert_allclose(
+        whole["at_coverage"],
+        [16.3078174812882, 10.030943287946, 6.86254430878299],
+        rtol=1e-11,
+    )
+    np.testing.assert_allclose(whole["size_at_coverage"], 66, rtol=1e-12)
+    assert whole["method_at_coverage"].tolist() == ["extrapolation"] * 3
+
+
+def test_diversity_tables_refuse_groups_without_cells_and_misaligned_keys() -> None:
+    keys = pd.DataFrame({"group": ["a", "b"]})
+    with pytest.raises(ValueError, match="Every group must hold a cell"):
+        dv.diversity_tables(_grouped(A, []), keys)
+    with pytest.raises(ValueError, match="one row for each of the 2 groups, not 1"):
+        dv.diversity_tables(_grouped(A, B), keys.iloc[:1])
+    for level in (0.0, -0.5, float("nan")):
+        with pytest.raises(ValueError, match="coverage must be between 0 and 1"):
+            dv.diversity_tables(_grouped(A, B), keys, coverage=level)
+    with pytest.raises(ValueError, match="common size of no group"):
+        dv.diversity_tables(_grouped(), keys.iloc[:0])
+    with pytest.raises(ValueError, match="common coverage of no group"):
+        dv.diversity_tables(_grouped(), keys.iloc[:0], size=5)
+    table, hill, size, level = dv.diversity_tables(
+        _grouped(), keys.iloc[:0], size=5, coverage=0.5
+    )
+    assert (len(table), len(hill), size, level) == (0, 0, 5, 0.5)
+    assert table.columns.tolist() == ["group", *dv.INDEX_COLUMNS]
+    # The measures of one group need a cell.
+    with pytest.raises(ValueError, match="no diversity indices"):
+        dv.indices(_clones([]))
+    with pytest.raises(ValueError, match="reaches no coverage"):
+        dv.size_for_coverage(_clones([]), 0.5)

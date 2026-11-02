@@ -224,14 +224,10 @@ def _group_pairs(n_groups: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 @lru_cache(maxsize=1)
 def _group_clone_sizes(n_groups: int):
-    from cytearc.clones.diversity import CloneSizes
+    from cytearc.clones.diversity import GroupedCloneSizes
 
     pair_groups, _codes, pair_cells = _group_pairs(n_groups)
-    bounds = np.searchsorted(pair_groups, np.arange(n_groups + 1))
-    groups = [
-        CloneSizes.from_sizes(pair_cells[bounds[at] : bounds[at + 1]])
-        for at in range(n_groups)
-    ]
+    groups = GroupedCloneSizes.from_clones(pair_groups, pair_cells, n_groups)
     keys = pd.DataFrame(
         {
             "group": [f"g{at:05d}" for at in range(n_groups)],
@@ -258,13 +254,13 @@ def test_diversity_tables(bench) -> None:
         groups, keys = _group_clone_sizes(n_groups)
         table, hill, size, level = result
         assert table["group"].tolist() == keys["group"].tolist()
-        assert table["cells"].tolist() == [clones.n for clones in groups]
-        assert size == min(2 * clones.n for clones in groups)
+        assert table["cells"].tolist() == groups.n.tolist()
+        assert size == 2 * int(groups.n.min())
         assert 0 < level < 1
         assert len(hill) == len(ORDERS) * n_groups
         # Spot-check groups against the scalar functions.
         for at in (0, n_groups - 1):
-            clones = groups[at]
+            clones = groups.group(at)
             expected = indices(clones)
             for column in ("clones", "singletons", "d50"):
                 assert table[column].iat[at] == expected[column]
@@ -295,7 +291,7 @@ def test_rarefaction_curves(bench) -> None:
 
     def check(n_groups: int, curves) -> None:
         groups, keys = _group_clone_sizes(n_groups)
-        lengths = [3 * len(default_sizes(clones.n)) for clones in groups]
+        lengths = [3 * len(default_sizes(n)) for n in groups.n.tolist()]
         assert len(curves) == sum(lengths)
         observed = curves[curves["method"] == "observed"]
         assert len(observed) == 3 * n_groups
@@ -303,7 +299,7 @@ def test_rarefaction_curves(bench) -> None:
             rows = observed[observed["group"] == keys["group"].iat[at]]
             for order, value in zip(rows["order"], rows["diversity"], strict=True):
                 assert value == pytest.approx(
-                    observed_hill(groups[at], int(order)), rel=1e-12
+                    observed_hill(groups.group(at), int(order)), rel=1e-12
                 )
         # Rarefied curves rise to the observed value, and coverage with them.
         rarefied = curves[curves["method"] != "extrapolation"]
