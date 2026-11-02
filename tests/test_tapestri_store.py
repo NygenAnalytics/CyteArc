@@ -13,7 +13,8 @@ import numpy as np
 import pytest
 import zarr
 
-from tests.clone_helpers import loaded_partition, smallest_budget, traced_peak
+from tests.clone_helpers import loaded_partition, smallest_budget
+from tests.perturbation_helpers import traced_peak
 from tests.variant_truth import (
     PROTEIN_METADATA,
     TAPESTRI_AMPLICONS,
@@ -343,7 +344,6 @@ def test_a_batch_of_reads_holds_what_the_reader_reports(tmp_path, read_dtype) ->
     """The writer plans each batch with the reader's staging bytes beside
     the sparse batch it keeps, so the batch's peak must fit both."""
     import gc
-    import tracemalloc
 
     from cytearc.readers import TapestriReader
     from cytearc.utils.arrays import sparse_matrix_bytes
@@ -358,21 +358,18 @@ def test_a_batch_of_reads_holds_what_the_reader_reports(tmp_path, read_dtype) ->
     reader = TapestriReader(str(file))
     try:
         for rows in (100, 1_000, 3_000):
-            batches = reader.consume(rows)
-            gc.collect()
-            tracemalloc.start()
-            try:
-                before = tracemalloc.get_traced_memory()[0]
-                matrix = next(batches)
-                peak = tracemalloc.get_traced_memory()[1] - before
-            finally:
-                tracemalloc.stop()
+            # Each batch starts at the first cell, so every read is alike.
             staging = reader.producer_staging_bytes(rows, 0)
+            budget = staging + sparse_matrix_bytes(next(reader.consume(rows)))
+            gc.collect()
+            matrix, peak = traced_peak(
+                lambda rows=rows: next(reader.consume(rows)), budget
+            )
             assert matrix.shape == (rows, reader.nFeatures)
-            assert peak <= staging + sparse_matrix_bytes(matrix), (rows, peak)
+            assert peak <= budget, (rows, peak)
             # The staging is the batch's own: the peak reaches most of it.
             assert peak >= staging * 0.75, (rows, peak, staging)
-            del matrix, batches
+            del matrix
     finally:
         reader.close()
 
@@ -408,5 +405,5 @@ def test_the_traced_peak_of_a_store_fits_the_smallest_budget_accepted(
             reader.close()
 
     budget = smallest_budget(write, 1 << 30)
-    peak = traced_peak(lambda: write(budget))
+    _result, peak = traced_peak(lambda: write(budget), budget)
     assert peak <= budget, (peak, budget)

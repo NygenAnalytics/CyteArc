@@ -1030,7 +1030,8 @@ def _large_store(tmp_path, file: Path):
 
 
 def _smallest_and_peak(store, run) -> tuple[int, int]:
-    from tests.clone_helpers import smallest_budget, traced_peak
+    from tests.clone_helpers import smallest_budget
+    from tests.perturbation_helpers import traced_peak
 
     store.memoryBytes = 1 << 33
     run()
@@ -1041,7 +1042,7 @@ def _smallest_and_peak(store, run) -> tuple[int, int]:
 
     budget = smallest_budget(at, 1 << 30)
     store.memoryBytes = budget
-    return budget, traced_peak(run)
+    return budget, traced_peak(run, budget)[1]
 
 
 @pytest.mark.slow
@@ -1358,7 +1359,7 @@ def test_describing_a_file_holds_no_more_than_the_smallest_budget_accepted(
     tmp_path, file_format, alternative_length, variable_length
 ) -> None:
     from cytearc.readers.tapestri import dabseq_source, tapestri_source
-    from tests.clone_helpers import traced_peak
+    from tests.perturbation_helpers import traced_peak
 
     # SNVs make what the description holds for each variant most of it, and
     # insertions of 1,000 bases the variants' texts, however the file stores
@@ -1383,7 +1384,7 @@ def test_describing_a_file_holds_no_more_than_the_smallest_budget_accepted(
     budget = int(found.group(1))
     with pytest.raises(MemoryError):
         describe(path, memory_bytes=budget - 1)
-    peak = traced_peak(lambda: describe(path, memory_bytes=budget))
+    _source, peak = traced_peak(lambda: describe(path, memory_bytes=budget), budget)
     assert peak <= budget, (peak, budget)
 
 
