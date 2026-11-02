@@ -39,11 +39,11 @@ positions in the same two ways. These functions work on text and never touch
 storage.
 
 :func:`expected_chance_pairs` says how many of the pairs that the search
-compares would fall within the cutoff by chance, if each text's characters
-were drawn independently, position by position, from those of one text per
-component, such as the barcodes that correction merges into: an expectation
-that grows with the square of the texts compared, which lineage barcode
-correction records beside the barcodes it merges.
+compares would fall within the cutoff by chance, if texts of different
+components, such as the barcodes that correction links, agreed at each
+position independently, as often as one text per component of each does: an
+expectation that grows with the square of the texts compared, which lineage
+barcode correction records beside the barcodes it merges.
 """
 
 from collections.abc import Iterator
