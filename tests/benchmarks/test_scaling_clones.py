@@ -267,13 +267,17 @@ def test_diversity_tables(bench) -> None:
             rows = hill.iloc[len(ORDERS) * at : len(ORDERS) * (at + 1)]
             for order, value in zip(ORDERS, rows["at_size"], strict=True):
                 assert value == pytest.approx(
-                    diversity_at(clones, size, order)[0], rel=1e-12
+                    diversity_at(clones, size, order)[0], rel=1e-12, abs=0
                 )
             assert rows["coverage_at_size"].iat[0] == pytest.approx(
-                coverage_at(clones, size), rel=1e-12
+                coverage_at(clones, size), rel=1e-12, abs=0
             )
+            # A group whose coverage at one cell exceeds the level stays at
+            # one cell.
             reached = coverage_at(clones, rows["size_at_coverage"].iat[0])
-            assert reached == pytest.approx(level, rel=1e-9)
+            assert reached == pytest.approx(
+                max(level, coverage_at(clones, 1)), rel=1e-9, abs=0
+            )
 
     bench("clones.diversity_tables", make, GROUPS, check=check)
 
@@ -299,7 +303,7 @@ def test_rarefaction_curves(bench) -> None:
             rows = observed[observed["group"] == keys["group"].iat[at]]
             for order, value in zip(rows["order"], rows["diversity"], strict=True):
                 assert value == pytest.approx(
-                    observed_hill(groups.group(at), int(order)), rel=1e-12
+                    observed_hill(groups.group(at), int(order)), rel=1e-12, abs=0
                 )
         # Rarefied curves rise to the observed value, and coverage with them.
         rarefied = curves[curves["method"] != "extrapolation"]
