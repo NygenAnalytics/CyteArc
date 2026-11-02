@@ -72,6 +72,7 @@ A coordinate stream's reads reserve what its consumer holds while it reads, and 
 Cluster selection reads its sampled cells in blocks of the stored coordinates, so it decodes every stored chunk that holds one of them, which for a sample spread over a large normalized matrix is most of it.
 
 `graph.ann_index` saves the index through a temporary file of about `4 * dims + 8 * ann_m + 20` bytes per cell, and `graph.neighbors` loads it through another one of the same size, in the system's temporary directory (`TMPDIR` on Linux and macOS); leave that much free space there.
+`variants.import_counts` sorts the rows that outgrow its budget in runs in the same directory, about 4 bytes per count row of mgatk's files, and removes them when the import ends.
 A composite with remote sources keeps downloaded source objects in the same temporary directory, up to `CYTEARC_SOURCE_CACHE_BYTES` per open composite (2 GiB unless set; `0` reads the sources directly). That disk space is outside `mem_budget`, and where the temporary directory is memory-backed, such as a `tmpfs` `/tmp`, it uses memory.
 
 An RNA run with `pca={"dims": 0}` builds its graph on the normalized values of the selected features, one coordinate per highly variable gene, so the memory and time of the ANN index, the neighbour queries, the embedding initialization, and cluster selection scale with the HVG count instead of the PCA dimensions.

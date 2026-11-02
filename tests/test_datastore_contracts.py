@@ -26,6 +26,7 @@ from cytearc.datastore.namespaces import (
     RepertoireAccessor,
     ScoresAccessor,
     TrajectoryAccessor,
+    VariantsAccessor,
 )
 from tests.signature_contracts import signature_digest
 
@@ -177,6 +178,7 @@ _ACCESSORS = {
     "repertoire": RepertoireAccessor,
     "scores": ScoresAccessor,
     "trajectory": TrajectoryAccessor,
+    "variants": VariantsAccessor,
 }
 _NAMESPACE_METHODS = [
     (namespace, accessor, name, method)
@@ -210,8 +212,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # repertoire.clonotypes and repertoire.load_clonotypes, then
     # repertoire.gene_usage and repertoire.spectratype, then
     # repertoire.export_airr, then clones.import_barcodes and
-    # clones.load_barcodes, then clones.barcode_clones.
-    assert len(_NAMESPACE_METHODS) == 137
+    # clones.load_barcodes, then clones.barcode_clones, then
+    # variants.import_counts and variants.load_counts.
+    assert len(_NAMESPACE_METHODS) == 139
     assert {
         "import_receptors",
         "load_receptors",
@@ -224,6 +227,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         name
         for namespace, _, name, _ in _NAMESPACE_METHODS
         if namespace == "repertoire"
+    }
+    assert {"import_counts", "load_counts"} == {
+        name for namespace, _, name, _ in _NAMESPACE_METHODS if namespace == "variants"
     }
     assert {
         "import_clones",
@@ -419,6 +425,7 @@ def test_datastore_accessor_namespace_contract_is_stable():
         "perturbation",
         "clones",
         "repertoire",
+        "variants",
     ):
         descriptor = inspect.getattr_static(DataStore, name)
         assert isinstance(descriptor, property)
@@ -527,6 +534,7 @@ def test_datastore_private_mixin_order_is_stable():
     from cytearc.datastore._operations.trajectory import (
         _TrajectoryFeatureOperationsMixin,
     )
+    from cytearc.datastore._operations.variants import _VariantOperationsMixin
 
     assert DataStore.__bases__ == (
         _CellCallingOperationsMixin,
@@ -545,9 +553,10 @@ def test_datastore_private_mixin_order_is_stable():
         _CloneOperationsMixin,
         _LineageBarcodeOperationsMixin,
         _RepertoireOperationsMixin,
+        _VariantOperationsMixin,
         MappingDatastore,
     )
-    assert DataStore.mro()[:18] == [
+    assert DataStore.mro()[:19] == [
         DataStore,
         _CellCallingOperationsMixin,
         _QualityControlOperationsMixin,
@@ -565,6 +574,7 @@ def test_datastore_private_mixin_order_is_stable():
         _CloneOperationsMixin,
         _LineageBarcodeOperationsMixin,
         _RepertoireOperationsMixin,
+        _VariantOperationsMixin,
         MappingDatastore,
     ]
 
@@ -629,6 +639,7 @@ def test_datastore_operation_mixins_have_unique_method_owners():
         _TrajectoryFeatureOperationsMixin,
         _TrajectoryOperationsMixin,
     )
+    from cytearc.datastore._operations.variants import _VariantOperationsMixin
 
     mixins = (
         _EmbeddingOperationsMixin,
@@ -652,6 +663,7 @@ def test_datastore_operation_mixins_have_unique_method_owners():
         _CloneOperationsMixin,
         _LineageBarcodeOperationsMixin,
         _RepertoireOperationsMixin,
+        _VariantOperationsMixin,
     )
     owners: dict[str, list[str]] = {}
     for mixin in mixins:

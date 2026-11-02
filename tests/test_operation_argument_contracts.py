@@ -25,6 +25,7 @@ from cytearc.datastore.namespaces import (
     RepertoireAccessor,
     ScoresAccessor,
     TrajectoryAccessor,
+    VariantsAccessor,
 )
 from cytearc.datastore import _operations as operations_package
 from cytearc.datastore._operations.clustering import _ClusteringOperationsMixin
@@ -359,6 +360,23 @@ _CONTRACTS = (
             "format",
             "columns",
             "library",
+        ),
+        model_only=_classified("resolved_input", "sources"),
+    ),
+    OperationContract(
+        VariantsAccessor.import_counts,
+        metadata_arguments.VariantCountImportArguments,
+        # Each source is identified by its format, the SHA-256 of each file it
+        # reads by role and how its barcodes name cells, in canonical order;
+        # its path is not recorded. The count unit is recorded as the format's
+        # own when the files state it.
+        signature_only=_classified(
+            "transformed",
+            "paths",
+            "barcode_prefix",
+            "barcode_suffix",
+            "barcode_pattern",
+            "format",
         ),
         model_only=_classified("resolved_input", "sources"),
     ),

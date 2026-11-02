@@ -27,6 +27,7 @@ from ._operations.quality_control import _QualityControlOperationsMixin
 from ._operations.regulons import _RegulonOperationsMixin
 from ._operations.repertoire import _RepertoireOperationsMixin
 from ._operations.trajectory import _TrajectoryFeatureOperationsMixin
+from ._operations.variants import _VariantOperationsMixin
 from .mapping_datastore import MappingDatastore
 
 if TYPE_CHECKING:
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
         RepertoireAccessor,
         ScoresAccessor,
         TrajectoryAccessor,
+        VariantsAccessor,
     )
     from .pipeline_accessor import PipelineAccessor
     from .plot_accessor import DataStorePlotAccessor
@@ -217,6 +219,7 @@ class DataStore(
     _CloneOperationsMixin,
     _LineageBarcodeOperationsMixin,
     _RepertoireOperationsMixin,
+    _VariantOperationsMixin,
     MappingDatastore,
 ):
     """This class extends MappingDatastore and consequently inherits methods of
@@ -415,6 +418,12 @@ class DataStore(
         from .namespaces import TrajectoryAccessor
 
         return TrajectoryAccessor(self)
+
+    @property
+    def variants(self) -> "VariantsAccessor":
+        from .namespaces import VariantsAccessor
+
+        return VariantsAccessor(self)
 
     @property
     def artifacts(self) -> "ArtifactAccessor":

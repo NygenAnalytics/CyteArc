@@ -80,6 +80,7 @@ Granular workflows pass exact refs to the same datastore-owned plotting surface:
 | V, D, J or constant gene usage of each locus | `gene_usage(receptors_ref, group_by="sample")`, or `gene="j_call"`, `level="family"` |
 | V-J gene pairing of each locus | `gene_pairing(receptors_ref, cell_selection=t_cells)` |
 | junction lengths of each locus | `spectratype(receptors_ref, group_by="sample")`, or `sequence="nt"` |
+| depth of variant counts at each site and in each cell | `variant_depth(counts_ref)`, or `variant_depth(counts_ref, group_by="sample")` for one histogram per group |
 
 `layout_key` and string forms on plotters that still accept them refer to deliberate live metadata
 inputs. Distribution grouping instead requires either an exact categorical artifact or an explicit
@@ -171,7 +172,7 @@ Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, a
 
 ```{eval-rst}
 .. automodule:: cytearc.plotting
-    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, mixscape, association_volcano, association_calibration, perturbation_clusters, clone_abundance, clonal_expansion, clonal_rarefaction, clonal_overlap, clone_tracking, clone_coupling, clone_fates, barcode_calls, receptor_qc, gene_usage, gene_pairing, spectratype, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
+    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, mixscape, association_volcano, association_calibration, perturbation_clusters, clone_abundance, clonal_expansion, clonal_rarefaction, clonal_overlap, clone_tracking, clone_coupling, clone_fates, barcode_calls, receptor_qc, gene_usage, gene_pairing, spectratype, variant_depth, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
     :imported-members:
     :undoc-members:
     :show-inheritance:

@@ -169,3 +169,11 @@ def write_barcode_file(path: Path, barcodes: list[str]) -> Path:
         "gene\tcell\tcount\n" + "".join(f"LB1\t{barcode}\t3\n" for barcode in barcodes)
     )
     return path
+
+
+def write_variant_file(path: Path, barcodes: list[str]) -> Path:
+    """A per-cell GoT table that counts one wild-type UMI in each barcode."""
+    path.write_text(
+        "BC\twtUMIs\tmutUMIs\n" + "".join(f"{barcode}\t1\t0\n" for barcode in barcodes)
+    )
+    return path

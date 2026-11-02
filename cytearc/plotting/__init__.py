@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     )
     from .summary import dotplot as dotplot
     from .summary import matrixplot as matrixplot
+    from .variants import variant_depth as variant_depth
 
 __all__ = [
     "CategoricalScale",
@@ -157,6 +158,7 @@ __all__ = [
     "run_recipe",
     "spectratype",
     "theme_context",
+    "variant_depth",
 ]
 
 __getattr__, __dir__ = _lazy_facade(
@@ -228,5 +230,6 @@ __getattr__, __dir__ = _lazy_facade(
         "run_recipe": ".recipes",
         "spectratype": ".repertoire",
         "theme_context": "._style",
+        "variant_depth": ".variants",
     },
 )

@@ -27,6 +27,7 @@ from ._operations.regulons import _RegulonOperationsMixin
 from ._operations.repertoire import _RepertoireOperationsMixin
 from ._operations.trajectory import _TrajectoryFeatureOperationsMixin
 from ._operations.trajectory import _TrajectoryOperationsMixin
+from ._operations.variants import _VariantOperationsMixin
 from .datastore import DataStore
 
 __all__ = [
@@ -47,6 +48,7 @@ __all__ = [
     "RepertoireAccessor",
     "ScoresAccessor",
     "TrajectoryAccessor",
+    "VariantsAccessor",
 ]
 
 
@@ -339,3 +341,10 @@ class TrajectoryAccessor(_Accessor):
     load_curves = _bind(_TrajectoryOperationsMixin._trajectory_load_curves)
     lineage_tree = _bind(_TrajectoryOperationsMixin._trajectory_lineage_tree)
     load_lineage_tree = _bind(_TrajectoryOperationsMixin._trajectory_load_lineage_tree)
+
+
+class VariantsAccessor(_Accessor):
+    __slots__ = ()
+
+    import_counts = _bind(_VariantOperationsMixin._variants_import_counts)
+    load_counts = _bind(_VariantOperationsMixin._variants_load_counts)

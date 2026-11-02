@@ -613,6 +613,23 @@ class BarcodeCloneArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class VariantCountImportArguments(OperationArguments):
+    operation: ClassVar[str] = "import_variant_counts"
+    artifact_kind: ClassVar[str] = "variant_counts"
+
+    cell_selection: ArtifactRef = artifact_input()
+    # Each source's format, the SHA-256 of each file it reads by role, and
+    # how its barcodes name cells, in canonical order; paths are not part of
+    # the identity.
+    sources: tuple[dict[str, Any], ...] = artifact_input()
+    # The unit of the counts: declared for formats whose files do not state
+    # it, and the format's own unit otherwise.
+    count_unit: Literal["reads", "umis", "molecules"] = parameter()
+    swap_strands: bool = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class GuideThresholdArguments(OperationArguments):
     operation: ClassVar[str] = "fit_guide_thresholds"
     artifact_kind: ClassVar[str] = "guide_thresholds"

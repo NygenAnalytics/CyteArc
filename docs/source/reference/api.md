@@ -15,6 +15,7 @@ Public CyteArc surfaces for analysts:
 - `cytearc.perturbation` for pooled CRISPR screens: guide calls made from the guide counts or imported from Cell Ranger, the thresholds fitted to each guide, perturbation labels that name the genes each cell's guides target, the efficiency of each perturbation on its target gene, the E-distance of each perturbation's cells from the control cells, Mixscape's signatures and calls of knocked-out cells and escapers, calibrated tests of whether each perturbation changes each gene, and each perturbation's mean expression against the control cells with clusters of the perturbations whose profiles agree
 - `cytearc.clones` for lineage tracing: clones imported from the files that lineage tracing tools write or from a cell metadata column, read as tables of cells and clones, measured within groups of cells as clonal expansion, diversity indices and Hill numbers, compared between groups by the clones they share, and measured as the fate coupling of groups and the fate bias of early cells
 - `cytearc.repertoire` for single-cell T cell and B cell receptors: contigs imported from Cell Ranger and AIRR Rearrangement files, the ranked chains, receptor type, subtype and chain pairing of each cell, and clonotypes of cells that share their receptor or clonotype clusters of cells with similar junctions, which the clone summaries measure
+- `cytearc.variants` for mitochondrial lineage tracing and targeted genotyping: per-cell allele counts of variant sites imported from the files of mgatk, maegatk, cellsnp-lite, MQuad, VarTrix, MiTo, giftwrap and the GoT tools, read as tables of sites, alleles, depth, counts and calls
 - Readers that ingest source formats; writers that create or export Zarr stores (and other exports)
 - `cytearc.plotting`
 - `cytearc.datasets` for the public example datasets that the tutorials download
@@ -40,6 +41,7 @@ Prefer calling methods on `DataStore`.
 | CRISPR screens | [Perturbation API reference](/api/perturbation.html) |
 | Clones and lineage tracing | [Clones API reference](/api/clones.html) |
 | Immune receptor repertoires | [Repertoire API reference](/api/repertoire.html) |
+| Mitochondrial and targeted variants | [Variants API reference](/api/variants.html) |
 | Plotting | [Plotting API reference](/api/plotting.html) |
 | Example datasets | [Example datasets API reference](/api/datasets.html) |
 | Utilities | [Utilities API reference](/api/utilities.html) |
