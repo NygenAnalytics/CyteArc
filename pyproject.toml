@@ -51,7 +51,9 @@ dependencies = [
     "threadpoolctl>=3.5.0",
     "tqdm>=4.60",
     "umap-learn>=0.5.12",
-    "zarr>=3.4.0",
+    # zarr 3.4.0 reads a 0-d string, as TreeData stores keep their text
+    # scalars, at about 520 bytes per character.
+    "zarr>=3.4.2",
     "obstore>=0.5.1",
     "huggingface-hub>=2.0.0",
     "zstandard>=0.25.0",
