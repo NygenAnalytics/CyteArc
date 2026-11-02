@@ -1,17 +1,22 @@
 import os
 import sys
+import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import pandas as pd
 import zarr
 
 from ...clones.assignments import CloneAssignment, ranked_clones
+from ...clones.barcode_clones import clone_labels
+from ...clones.calling import cell_sets, set_clones
 from ...metadata.arguments import (
+    GenotypeCloneArguments,
     VariantCloneArguments,
     VariantCountImportArguments,
+    VariantGenotypeArguments,
     VariantSelectionArguments,
 )
 from ...metadata.artifacts import plan_cell_data_artifact
@@ -58,6 +63,24 @@ from ...variants.frequencies import (
     clone_status_counts,
     frequency_clones,
 )
+from ...variants.genotypes import (
+    CALLS,
+    FILTERED,
+    MUTANT_CALLS,
+    SOURCE_CALLS,
+    SOURCE_PRECEDENCE,
+    WILD_TYPE,
+    GenotypeRules,
+    VariantGenotypes,
+    gapfill_wild_type_probabilities,
+    genotype_frames,
+    genotype_rules,
+    gift_calls,
+    gift_posteriors,
+    source_call_codes,
+    threshold_calls,
+    unit_swap_probabilities,
+)
 from ...variants.masks import VARIANT_MASKS, masked_variants
 from ...variants.sorting import CellRowSorter, sort_rows
 from ...variants.statistics import (
@@ -75,7 +98,7 @@ from .cell_barcodes import (
     barcode_files,
     warn_unmatched_barcodes,
 )
-from .cell_groups import cell_groups
+from .cell_groups import cell_groups, group_columns, within_groups
 from .clone_artifacts import (
     check_clone_write_budget,
     log_clones,
@@ -169,6 +192,52 @@ _CLONE_ATTRIBUTES = (
     "n_cells_without_alternative",
     "n_cells_without_neighbors",
     "n_cells_without_group",
+    "n_edges",
+)
+# Bytes that calling genotypes, or the clones they define, holds whatever the
+# counts: zarr's objects for the arrays that planning, writing and validating
+# the artifact open, the chunk of the cell selection that planning validates,
+# and the garbage that appending bands leaves until Python collects it.
+_GENOTYPE_FIXED_BYTES = 1 << 20
+# A band of genotypes holds at least this many rows, or every row, so that a
+# small budget does not append the calls a few rows at a time.
+_MIN_GENOTYPE_BAND_ROWS = 1_000
+# Bytes per call row read while the sites of a source's calls are found: its
+# allele, site and source, as read and stacked, and their distinct pairs.
+_SOURCE_SITE_BYTES_PER_ROW = 64
+# Calling genotypes holds, for each cell of the counts, its mutant and called
+# sites and its offset as they are written.
+_GENOTYPE_BYTES_PER_CELL = 24
+# And for each of the counts' alleles, its site's rank and its gapfill's
+# probability of the wild type.
+_GENOTYPE_BYTES_PER_ALLELE = 24
+# Bytes per stored row of a band that genotypes read, by method: the rows of
+# the depth, counts or calls with their cells, the keys of their cells and
+# sites and their order, and what the method derives per key, the UMIs and
+# calls, the source's labels and the order of its columns, or GIFT's scores
+# and posteriors; at most 110, 129 and 277 bytes as traced between bands of
+# 20,000 and 80,000 rows on two shapes of counts.
+_GENOTYPE_BYTES_PER_ROW = {"threshold": 144, "source": 168, "gift": 360}
+# Bytes per call row of loaded genotypes: its row of the table of calls and
+# the stored arrays read beside it, 174 as traced on 128,000 rows.
+_LOADED_GENOTYPE_BYTES_PER_ROW = 220
+# Genotype clones hold, for each cell of the genotypes, its offsets, group,
+# membership and the arrays that number its clone; and for each call row its
+# cell, site, rank and call as read, and its membership masks.
+_GENOTYPE_CLONE_BYTES_PER_CELL = 80
+_GENOTYPE_CLONE_BYTES_PER_ROW = 48
+# Bytes held for each cell while genotype clones are written: its clone code,
+# ambiguous flag and size as called and as written.
+_GENOTYPE_CLONE_WRITE_BYTES_PER_CELL = 40
+# The columns of loaded genotype clones, which within columns may not name.
+_GENOTYPE_CLONE_COLUMNS = frozenset({"clone", "clone_size", "ambiguous"})
+# The attributes that saved genotype clones need to be reused.
+_GENOTYPE_CLONE_ATTRIBUTES = (
+    "n_clones",
+    "n_sites",
+    "n_cells_mutant",
+    "n_ambiguous",
+    "n_nodes",
     "n_edges",
 )
 
@@ -2126,6 +2195,796 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         log_clones(assignment, n_cells)
         return planned.ref
 
+    def _genotype_group(self, genotypes: ArtifactRef) -> zarr.Group:
+        """Return a complete ``variant_genotypes`` artifact's group."""
+        if not isinstance(genotypes, ArtifactRef):
+            raise TypeError("genotypes must be an ArtifactRef")
+        if genotypes.kind != VariantGenotypeArguments.artifact_kind:
+            raise ValueError(
+                f"genotypes must be a variant_genotypes artifact, not "
+                f"{genotypes.kind!r}"
+            )
+        require_complete_artifact(self.zw, genotypes)
+        return artifact_group(self.zw, genotypes)
+
+    @validation_scoped
+    def _variants_genotypes(
+        self,
+        counts: ArtifactRef,
+        *,
+        method: str,
+        sites: Sequence[str | int] | np.ndarray | pd.Index | None = None,
+        alleles: Mapping[str, Sequence[str]] | None = None,
+        min_umis: int | None = None,
+        min_mutant_umis: int | None = None,
+        min_fraction: float | None = None,
+        min_posterior: float = 0.6,
+        swap_probabilities: Mapping[int, float] | None = None,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Call each cell's genotype at targeted sites, in one vocabulary of calls.
+
+        A call says what a cell carries at a site: ``wild_type``,
+        ``heterozygous``, ``homozygous_alternative``, ``alternative_present``
+        (the alternative, without a claim of how many copies carry it),
+        ``missing`` (no evidence) or ``filtered`` (evidence that the rule did
+        not call). Three methods call them:
+
+        - ``"source"`` adopts the calls that the tool wrote into the imported
+          files, such as GoT's ``Genotype``, GoT-Multi's ``genotype_merged``
+          or ``genotype_final`` and Gotcha's ``genotype_pred``, keeping each
+          call's own label. Where the files wrote several call columns for a
+          site, each cell takes its call from the first that holds one for
+          it: GoT-Multi's refined call, then its merged call, then a single
+          call column, and its channels' calls last. A label of no call where
+          the cell holds evidence at the site or at its channels, such as
+          ``Unprofiled`` beside ambiguous UMIs, is ``filtered``, and a cell
+          with evidence but no call is ``filtered`` too.
+        - ``"threshold"`` calls each cell from its UMIs of the site's wild type
+          and alternative by the rules given, since GoT studies apply
+          different ones: ``min_mutant_umis=1`` calls a cell
+          ``alternative_present`` with one mutant UMI and ``wild_type``
+          with none, as for patients' cells, and ``min_fraction=0.9`` calls
+          a cell mutant or wild type when that allele's share of its UMIs
+          exceeds 90%, as for cell lines. ``min_umis`` UMIs of the two, 1 by
+          default, are needed for any call.
+        - ``"gift"`` applies GIFT's model to giftwrap's counts: each UMI's
+          gapfill goes to the probe's wild type or mutant by its edit
+          distance to them, each UMI may come from template switching with
+          the probability that ``swap_probabilities`` gives for its reads,
+          and the UMIs of a cell give the posterior of the wild type, the
+          heterozygote and the homozygous mutant under a uniform prior. The
+          most probable genotype is called when its posterior exceeds
+          ``min_posterior`` and the cell holds at least ``min_umis`` UMIs, 1
+          by default, whose swap probability lies below 0.1. Without
+          ``swap_probabilities`` every UMI counts, as GIFT treats cell lines
+          once their UMIs of few reads are dropped.
+
+        ``"threshold"`` and ``"gift"`` compare each site's wild type, the
+        allele of role ``"reference"``, with its one alternative; ``alleles``
+        names them for a site whose files do not, such as a GIFT probe whose
+        manifest lacks its gapfills, as ``{"JAK2 c.1849G>T": ("CAC",
+        "AAC")}``. Without ``sites``, every site that the method can call is
+        genotyped: those with calls for ``"source"``, those with one wild
+        type and one alternative otherwise.
+
+        Args:
+            counts: A ``variant_counts`` artifact from
+                :meth:`~cytearc.datastore.namespaces.VariantsAccessor.import_counts`.
+            method: ``"source"``, ``"threshold"`` or ``"gift"``.
+            sites: Site labels, such as ``["CALR"]``, to genotype, or None.
+            alleles: Each site's wild-type and alternative allele, by label.
+            min_umis: The fewest UMIs that a call needs, for ``"threshold"``
+                and ``"gift"``.
+            min_mutant_umis: The fewest mutant UMIs of a mutant call, for
+                ``"threshold"``.
+            min_fraction: The share, from 0.5 to below 1, that the called
+                allele's UMIs must exceed, for ``"threshold"``.
+            min_posterior: The posterior that a ``"gift"`` call must exceed.
+            swap_probabilities: For ``"gift"``, the probability that a UMI of
+                each number of reads came from template switching, from 1
+                read up; a UMI takes the value of the most reads given that
+                it reaches, and its reads are its entry's reads per UMI.
+            invalidate_cache: Call the genotypes again instead of reusing them.
+
+        Returns:
+            A complete datastore-scoped, cell-aligned ``variant_genotypes``
+            artifact over the counts' cells. Its canonical ``n_mutant_sites``
+            counts each cell's mutant sites. Read it with
+            :meth:`~cytearc.datastore.namespaces.VariantsAccessor.load_genotypes`.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``counts`` is not a ``variant_counts`` artifact,
+                the method is unknown, a rule is given to a method that does
+                not use it or is out of range, a named site is unknown or
+                cannot be called by the method, ``alleles`` names an unknown
+                site, a source's call label is unknown, or no site can be
+                genotyped.
+            KeyError: If the store holds no such ``counts`` artifact.
+            RuntimeError: If the ``counts`` artifact is incomplete.
+            PermissionError: If the store is read-only and the genotypes are
+                not saved yet.
+            MemoryError: If the counts' rows, the calls or the cells' arrays
+                do not fit the memory budget.
+        """
+        group = self._variant_group(counts)
+        bool_argument(invalidate_cache, "invalidate_cache")
+        rules = genotype_rules(
+            method,
+            min_umis=min_umis,
+            min_mutant_umis=min_mutant_umis,
+            min_fraction=min_fraction,
+            min_posterior=min_posterior,
+            swap_probabilities=swap_probabilities,
+            alleles=alleles,
+        )
+        if method == "gift" and str(group.attrs["format"]) != "giftwrap":
+            raise ValueError(
+                "method='gift' weighs the gapfills of giftwrap's probes, and these "
+                f"counts come from {str(group.attrs['format'])!r} files; use "
+                "method='threshold' for the UMIs of wild type and mutant"
+            )
+        table = _stored_sites(group)
+        explicit = sites is not None
+        chosen = _site_positions(table, sites)
+        if explicit and not len(chosen):
+            raise ValueError("sites names no site")
+        labels = table.labels()
+        if rules.alleles:
+            unknown = sorted(set(rules.alleles) - set(labels.tolist()))
+            if unknown:
+                raise ValueError(f"alleles names {unknown[0]!r}, which no site is")
+        n_cells = _n_counts_cells(group)
+        if method == "source":
+            genotyped, site_columns = self._source_call_sites(
+                group, table, chosen, explicit, n_cells
+            )
+            site_sources = [", ".join(columns) for columns in site_columns]
+            site_alleles: list[tuple[str, str]] = [("", "") for _ in genotyped]
+            reference_alleles = alternative_alleles = np.empty(0, dtype=np.int64)
+        else:
+            genotyped, site_alleles, reference_alleles, alternative_alleles = (
+                _compared_alleles(table, chosen, explicit, rules)
+            )
+            site_columns = [() for _ in genotyped]
+            site_sources = ["" for _ in genotyped]
+        if not len(genotyped):
+            raise ValueError(
+                f"No site of the counts can be genotyped with method={method!r}: "
+                + (
+                    "no site holds calls of the source"
+                    if method == "source"
+                    else "no site has one wild type and one alternative; name them "
+                    "with alleles"
+                )
+            )
+        cell_selection = inspect_artifact(self.zw, counts).input_ref("cell_selection")
+        arguments = VariantGenotypeArguments(
+            cell_selection=cell_selection,
+            counts=counts,
+            method=cast(Literal["source", "threshold", "gift"], rules.method),
+            sites=tuple(str(labels[site]) for site in genotyped),
+            alleles=tuple(site_alleles) if method != "source" else (),
+            min_umis=rules.min_umis,
+            min_mutant_umis=rules.min_mutant_umis,
+            min_fraction=rules.min_fraction,
+            min_posterior=rules.min_posterior,
+            swap_probabilities=rules.swap_record,
+            invalidate_cache=invalidate_cache,
+        )
+        planned = self._plan_variant_genotypes(arguments, cell_selection, n_cells)
+        if planned.reused:
+            return planned.ref
+        self._require_writable(arguments.operation)
+        tables: dict[str, tuple[str, ...]]
+        if method == "source":
+            tables = {
+                "call": ("call_alleles", "call_sources", "call_values"),
+                "depth": ("depth_sites", "depth"),
+            }
+        elif method == "threshold":
+            tables = {
+                "count": ("count_alleles", "counts"),
+                "depth": ("depth_sites", "depth"),
+            }
+        else:
+            tables = {
+                "count": (
+                    "count_alleles",
+                    "counts",
+                    *(("counts_reads",) if rules.swap is not None else ()),
+                )
+            }
+        # Every cell of the counts holds its offsets while bands are read, and
+        # its call counts and offsets as they are written; each allele its
+        # site, rank and gapfill probability; each call label its text;
+        # appending a band rewrites the chunks it ends in; and Zarr's writes
+        # hold their file buffers.
+        n_alleles = table.n_alleles
+        # Each call row's label refers to one of these texts rather than a copy.
+        call_value_names = np.asarray(
+            _read(group, "call_value_names").astype(str), dtype=object
+        )
+        most_rows = sum(
+            int(as_zarr_array(group[names[0]], name=names[0]).shape[0])
+            for names in tables.values()
+        )
+        held = (
+            _GENOTYPE_FIXED_BYTES
+            + (_BAND_BYTES_PER_COUNTS_CELL + _GENOTYPE_BYTES_PER_CELL) * n_cells
+            + _GENOTYPE_BYTES_PER_ALLELE * n_alleles
+            + sum(map(sys.getsizeof, call_value_names.tolist()))
+            + _band_chunk_bytes(group, tables)
+            + _REWRITTEN_CHUNKS * min(_ROW_BAND, max(1, most_rows)) * _STORED_BYTES
+            + zarr_write_buffer_bytes()
+        )
+        per_row = _GENOTYPE_BYTES_PER_ROW[method]
+        max_rows = (self.memoryBytes - held) // per_row
+        # A band holds at least _MIN_GENOTYPE_BAND_ROWS rows, or every row,
+        # and every row of the cell that holds the most.
+        fewest = max(1, min(most_rows, _MIN_GENOTYPE_BAND_ROWS))
+        if max_rows >= fewest:
+            fewest = max(fewest, _most_cell_rows(group, tables))
+        if max_rows < fewest:
+            raise MemoryError(
+                f"Calling the genotypes of {n_cells} cells holds about "
+                f"{held + fewest * per_row} bytes for a band of "
+                f"{fewest} rows, more than the memory budget of {self.memoryBytes} "
+                "bytes. Raise mem_budget."
+            )
+        site_rank = np.full(table.n_sites, -1, dtype=np.int64)
+        site_rank[genotyped] = np.arange(len(genotyped))
+        allele_rank = site_rank[np.asarray(table.allele_site, dtype=np.int64)]
+        cover_rank = _cover_ranks(table, site_rank)
+        wild_type_probabilities = np.zeros(0)
+        if method == "gift":
+            # Each stored gapfill of a genotyped probe, against its probe's
+            # wild type and mutant.
+            of_probe = np.flatnonzero(allele_rank >= 0)
+            wild_type_probabilities = np.zeros(n_alleles, dtype=np.float64)
+            wild_type_probabilities[of_probe] = gapfill_wild_type_probabilities(
+                [str(table.allele[allele]) for allele in of_probe],
+                [site_alleles[allele_rank[allele]][0] for allele in of_probe],
+                [site_alleles[allele_rank[allele]][1] for allele in of_probe],
+            )
+        # Each source column's place among a site's adopted columns, -1 where
+        # the site does not adopt it.
+        source_codes = _read(group, "call_source_names").astype(str)
+        column_place = np.full((len(genotyped), len(source_codes)), -1, dtype=np.int64)
+        for rank, columns in enumerate(site_columns):
+            for place, column in enumerate(columns):
+                column_place[rank, int(np.flatnonzero(source_codes == column)[0])] = (
+                    place
+                )
+        # The labels the calls can take, coded in an order that the bands do
+        # not change: the source's labels, or none.
+        label_names = sorted(
+            {""} | (set(call_value_names.tolist()) if method == "source" else set())
+        )
+        label_index = {text: code for code, text in enumerate(label_names)}
+        n_mutant = np.zeros(n_cells, dtype=np.int32)
+        n_called = np.zeros(n_cells, dtype=np.int32)
+        offsets = np.zeros(n_cells + 1, dtype=np.int64)
+        call_counts = np.zeros(len(CALLS), dtype=np.int64)
+        positions = np.arange(n_cells, dtype=np.int64)
+        with artifact_transaction(self.zw, planned) as out:
+            appender = _Appender(
+                out,
+                {
+                    "call_sites": (np.int32, most_rows),
+                    "calls": (np.int8, most_rows),
+                    "call_labels": (np.int32, most_rows),
+                    "call_reference": (np.int32, most_rows),
+                    "call_alternative": (np.int32, most_rows),
+                    "posterior_wild_type": (np.float32, most_rows),
+                    "posterior_heterozygous": (np.float32, most_rows),
+                    "posterior_homozygous_alternative": (np.float32, most_rows),
+                },
+            )
+            for band, rows in _variant_bands(group, tables, positions, int(max_rows)):
+                first = int(band[0])
+                width = int(band[-1]) - first + 1
+                result = _band_genotypes(
+                    rows,
+                    method=method,
+                    rules=rules,
+                    first=first,
+                    n_genotyped=len(genotyped),
+                    cover_rank=cover_rank,
+                    allele_rank=allele_rank,
+                    reference_alleles=reference_alleles,
+                    alternative_alleles=alternative_alleles,
+                    wild_type_probabilities=wild_type_probabilities,
+                    column_place=column_place,
+                    source_columns=source_codes,
+                    call_value_names=call_value_names,
+                )
+                cells_of_rows = result.cells
+                per_cell = np.bincount(cells_of_rows - first, minlength=width)
+                offsets[first + 1 : first + width + 1] = offsets[first] + np.cumsum(
+                    per_cell
+                )
+                mutant = np.isin(result.calls, list(MUTANT_CALLS))
+                called = mutant | (result.calls == WILD_TYPE)
+                n_mutant[first : first + width] += np.bincount(
+                    cells_of_rows[mutant] - first, minlength=width
+                ).astype(np.int32)
+                n_called[first : first + width] += np.bincount(
+                    cells_of_rows[called] - first, minlength=width
+                ).astype(np.int32)
+                call_counts += np.bincount(result.calls, minlength=len(CALLS))
+                appender.append("call_sites", result.sites.astype(np.int32))
+                appender.append("calls", result.calls.astype(np.int8))
+                appender.append("call_labels", _label_codes(label_index, result.labels))
+                appender.append("call_reference", result.reference.astype(np.int32))
+                appender.append("call_alternative", result.alternative.astype(np.int32))
+                for index, name in enumerate(
+                    (
+                        "posterior_wild_type",
+                        "posterior_heterozygous",
+                        "posterior_homozygous_alternative",
+                    )
+                ):
+                    appender.append(
+                        name, result.posteriors[:, index].astype(np.float32)
+                    )
+            _write_array(out, "n_mutant_sites", n_mutant)
+            _write_array(out, "n_called_sites", n_called)
+            _write_array(out, "call_offsets", offsets)
+            _write_array(out, "genotype_sites", np.asarray(genotyped, dtype=np.int32))
+            _write_array(out, "site_labels", np.asarray(arguments.sites, dtype=object))
+            _write_array(
+                out,
+                "site_reference",
+                np.asarray([pair[0] for pair in site_alleles], dtype=object),
+            )
+            _write_array(
+                out,
+                "site_alternative",
+                np.asarray([pair[1] for pair in site_alleles], dtype=object),
+            )
+            _write_array(out, "site_sources", np.asarray(site_sources, dtype=object))
+            _write_array(out, "call_label_names", np.asarray(label_names, dtype=object))
+            out.attrs.update(
+                {
+                    "method": method,
+                    "rules": rules.record(),
+                    "n_sites": len(genotyped),
+                    "call_counts": {
+                        name: int(call_counts[code]) for code, name in enumerate(CALLS)
+                    },
+                    "count_unit": str(group.attrs["count_unit"]),
+                }
+            )
+        logger.info(
+            f"Called the genotypes of {int(np.count_nonzero(n_called))} of {n_cells} "
+            f"cells at {len(genotyped)} sites by method={method!r}; "
+            f"{int(np.count_nonzero(n_mutant))} cells carry a mutant call"
+        )
+        return planned.ref
+
+    def _source_call_sites(
+        self,
+        group: zarr.Group,
+        table: SiteTable,
+        chosen: np.ndarray,
+        explicit: bool,
+        n_cells: int,
+    ) -> tuple[np.ndarray, list[tuple[str, ...]]]:
+        """The chosen sites that hold source calls, and each one's call columns.
+
+        A site's columns come in the order of ``SOURCE_PRECEDENCE``, which a
+        cell's call follows: the first column that holds one for the cell.
+        """
+        alleles = as_zarr_array(group["call_alleles"], name="call_alleles")
+        sources = as_zarr_array(group["call_sources"], name="call_sources")
+        names = _read(group, "call_source_names").astype(str)
+        n_rows = int(alleles.shape[0])
+        # The call rows are read in steps of at least _MIN_GENOTYPE_BAND_ROWS
+        # rows, or all of them, beside the chunks that a step decompresses.
+        held = _GENOTYPE_FIXED_BYTES + _band_chunk_bytes(
+            group, {"call": ("call_alleles", "call_sources")}
+        )
+        step = (self.memoryBytes - held) // _SOURCE_SITE_BYTES_PER_ROW
+        fewest = max(1, min(n_rows, _MIN_GENOTYPE_BAND_ROWS))
+        if step < fewest:
+            raise MemoryError(
+                f"Finding the sites of the source calls of {n_cells} cells holds "
+                f"about {held + fewest * _SOURCE_SITE_BYTES_PER_ROW} bytes, more "
+                f"than the memory budget of {self.memoryBytes} bytes. Raise "
+                "mem_budget."
+            )
+        allele_site = np.asarray(table.allele_site, dtype=np.int64)
+        pairs: set[tuple[int, int]] = set()
+        for start in range(0, n_rows, int(step)):
+            stop = min(n_rows, start + int(step))
+            sites_of_rows = allele_site[np.asarray(alleles[start:stop], dtype=np.int64)]
+            codes = np.asarray(sources[start:stop], dtype=np.int64)
+            distinct = np.unique(np.stack([sites_of_rows, codes], axis=1), axis=0)
+            pairs.update((int(site), int(code)) for site, code in distinct.tolist())
+        columns: dict[int, list[str]] = {}
+        for site, code in pairs:
+            columns.setdefault(site, []).append(str(names[code]))
+        labels = table.labels()
+        kept: list[int] = []
+        chosen_columns: list[tuple[str, ...]] = []
+        for site in chosen.tolist():
+            present = columns.get(site, [])
+            if not present:
+                if explicit:
+                    raise ValueError(
+                        f"The site {labels[site]!r} holds no call of the source, so "
+                        "method='source' cannot genotype it; use method='threshold'"
+                    )
+                continue
+            ranked = sorted(
+                present,
+                key=lambda column: (
+                    SOURCE_PRECEDENCE.index(column)
+                    if column in SOURCE_PRECEDENCE
+                    else len(SOURCE_PRECEDENCE),
+                    column,
+                ),
+            )
+            unknown = [column for column in ranked if column not in SOURCE_CALLS]
+            if unknown:
+                raise ValueError(
+                    f"The calls of the column {unknown[0]!r} at the site "
+                    f"{labels[site]!r} have no vocabulary; the known call columns "
+                    f"are {', '.join(SOURCE_CALLS)}"
+                )
+            kept.append(site)
+            chosen_columns.append(tuple(ranked))
+        return np.asarray(kept, dtype=np.int64), chosen_columns
+
+    def _plan_variant_genotypes(
+        self,
+        arguments: VariantGenotypeArguments,
+        cell_selection: ArtifactRef,
+        n_cells: int,
+    ) -> PlannedArtifact:
+        record = arguments.to_record()
+        n_sites = len(arguments.sites)
+
+        def has_calls(_ref: ArtifactRef, group: zarr.Group) -> bool:
+            names = set(group.array_keys())
+            long_arrays = {
+                "call_sites",
+                "calls",
+                "call_labels",
+                "call_reference",
+                "call_alternative",
+                "posterior_wild_type",
+                "posterior_heterozygous",
+                "posterior_homozygous_alternative",
+            }
+            site_arrays = {
+                "genotype_sites",
+                "site_labels",
+                "site_reference",
+                "site_alternative",
+                "site_sources",
+            }
+            if (
+                not (long_arrays | site_arrays | {"call_offsets", "call_label_names"})
+                <= names
+            ):
+                return False
+            if as_zarr_array(group["call_offsets"], name="call_offsets").shape != (
+                n_cells + 1,
+            ):
+                return False
+            lengths = {
+                as_zarr_array(group[name], name=name).shape for name in long_arrays
+            }
+            sites = {
+                as_zarr_array(group[name], name=name).shape for name in site_arrays
+            }
+            return len(lengths) == 1 and sites == {(n_sites,)}
+
+        return plan_cell_data_artifact(
+            self.zw,
+            scope="datastore",
+            kind=arguments.artifact_kind,
+            operation=arguments.operation,
+            parameters=record.parameters,
+            inputs=record.inputs,
+            execution_options=record.execution_options,
+            cell_selection=cell_selection,
+            arrays={
+                "n_mutant_sites": ((n_cells,), "i"),
+                "n_called_sites": ((n_cells,), "i"),
+            },
+            invalidate_cache=arguments.invalidate_cache,
+            required_attributes=("method", "rules", "n_sites", "call_counts"),
+            reuse_validator=has_calls,
+        )
+
+    @validation_scoped
+    def _variants_load_genotypes(
+        self,
+        genotypes: ArtifactRef,
+        *,
+        sites: Sequence[str] | np.ndarray | pd.Index | None = None,
+    ) -> VariantGenotypes:
+        """Read saved genotype calls as tables of sites, cells and calls.
+
+        A cell that the calls table does not list at a site holds no evidence
+        there, the call ``missing``.
+
+        Args:
+            genotypes: A ``variant_genotypes`` artifact from
+                :meth:`~cytearc.datastore.namespaces.VariantsAccessor.genotypes`.
+            sites: The site labels to read the calls of, or None for every
+                genotyped site.
+
+        Returns:
+            A :class:`~cytearc.variants.VariantGenotypes` record.
+
+        Raises:
+            TypeError: If ``genotypes`` is not an ArtifactRef or ``sites`` not
+                a sequence of labels.
+            ValueError: If ``genotypes`` is not a ``variant_genotypes``
+                artifact or ``sites`` names a site it did not genotype.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
+            MemoryError: If the tables do not fit the memory budget.
+        """
+        group = self._genotype_group(genotypes)
+        site_labels = _read(group, "site_labels").astype(str)
+        chosen = _chosen_genotype_sites(site_labels, sites)
+        cell_index = cell_selection_indices(
+            self.zw, inspect_artifact(self.zw, genotypes).input_ref("cell_selection")
+        )
+        n_cells = len(cell_index)
+        n_rows = int(as_zarr_array(group["calls"], name="calls").shape[0])
+        needed = (
+            _LOADED_BYTES_PER_CELL * n_cells
+            + text_read_bytes(self.cells._get_array("ids"), n_cells)
+            + _LOADED_GENOTYPE_BYTES_PER_ROW * n_rows
+        )
+        if needed > self.memoryBytes:
+            raise MemoryError(
+                f"Loading the genotype calls of {n_cells} cells, {n_rows} rows, "
+                f"holds about {needed} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Raise mem_budget."
+            )
+        offsets = _read(group, "call_offsets").astype(np.int64)
+        cells_of_rows = np.repeat(np.arange(n_cells, dtype=np.int64), np.diff(offsets))
+        call_sites = _read(group, "call_sites").astype(np.int64)
+        keep = np.isin(call_sites, chosen)
+        ids = np.asarray(
+            read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
+        )
+        # Each row's label refers to one of a few texts rather than a copy.
+        label_names = np.asarray(
+            _read(group, "call_label_names").astype(str), dtype=object
+        )
+        frames = genotype_frames(
+            cell_ids=ids,
+            site_labels=site_labels,
+            site_reference=_read(group, "site_reference").astype(str),
+            site_alternative=_read(group, "site_alternative").astype(str),
+            site_sources=_read(group, "site_sources").astype(str),
+            chosen=chosen,
+            cells=cells_of_rows[keep],
+            sites=call_sites[keep],
+            calls=_read(group, "calls")[keep],
+            labels=label_names[_read(group, "call_labels")[keep].astype(np.int64)]
+            if len(label_names)
+            else np.empty(0, dtype=object),
+            reference=_read(group, "call_reference")[keep],
+            alternative=_read(group, "call_alternative")[keep],
+            posteriors=np.stack(
+                [
+                    _read(group, name)[keep]
+                    for name in (
+                        "posterior_wild_type",
+                        "posterior_heterozygous",
+                        "posterior_homozygous_alternative",
+                    )
+                ],
+                axis=1,
+            ),
+        )
+        status = inspect_artifact(self.zw, genotypes)
+        return VariantGenotypes(
+            sites=frames["sites"],
+            cells=frames["cells"],
+            calls=frames["calls"],
+            counts=status.input_ref("counts"),
+            method=str(group.attrs["method"]),
+            rules=dict(cast(Mapping[str, Any], group.attrs["rules"])),
+        )
+
+    @validation_scoped
+    def _variants_genotype_clones(
+        self,
+        genotypes: ArtifactRef,
+        *,
+        sites: Sequence[str] | np.ndarray | pd.Index | None = None,
+        within: str | Sequence[str] | None = None,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Call clones from the combinations of mutant calls that cells carry.
+
+        Cells that descend from one mutated ancestor share its mutations. Each
+        cell's mutant sites, those called heterozygous, homozygous alternative
+        or alternative present, form a set, and the sites it was not called at,
+        missing or filtered, are unknown rather than wild type. Cells are
+        linked when they agree at every site that both were called at, a
+        Jaccard index of 1 over the sites both know. Cells whose calls agree
+        with two cells that disagree at a site they were not called at, such
+        as cells that carry a founder mutation and were not read where a
+        subclone differs, cannot be placed and join neither: they are left
+        out as ambiguous, however many there are. The linked groups are the
+        clones, numbered by size as ``clone_1`` and on, and a cell without a
+        mutant call gets no clone. ``within`` names cell metadata columns,
+        such as the donor: clones never join cells of two groups.
+
+        Args:
+            genotypes: A ``variant_genotypes`` artifact from
+                :meth:`~cytearc.datastore.namespaces.VariantsAccessor.genotypes`.
+            sites: The site labels whose calls define the clones, or None for
+                every genotyped site.
+            within: Cell metadata columns to call clones within, or None.
+            invalidate_cache: Call the clones again instead of reusing them.
+
+        Returns:
+            A complete datastore-scoped ``clones`` artifact over the
+            genotypes' cells, which every clone summary reads. Its
+            ``ambiguous`` array marks the cells left out as ambiguous. Read it
+            with
+            :meth:`~cytearc.datastore.namespaces.ClonesAccessor.load_clones`.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``genotypes`` is not a ``variant_genotypes``
+                artifact, ``sites`` names a site it did not genotype,
+                ``within`` names a column twice, a column of the clones or
+                no cell metadata column, or a mutant cell has no label in it.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
+            PermissionError: If the store is read-only and the clones are not
+                saved yet.
+            MemoryError: If the cells' sets, the graph or the clone labels as
+                the store saves them do not fit the memory budget.
+        """
+        group = self._genotype_group(genotypes)
+        bool_argument(invalidate_cache, "invalidate_cache")
+        columns = group_columns(within, "within", _GENOTYPE_CLONE_COLUMNS)
+        site_labels = _read(group, "site_labels").astype(str)
+        chosen = _chosen_genotype_sites(site_labels, sites)
+        cell_selection = inspect_artifact(self.zw, genotypes).input_ref(
+            "cell_selection"
+        )
+        offsets = _read(group, "call_offsets").astype(np.int64)
+        n_cells = len(offsets) - 1
+        n_rows = int(offsets[-1])
+        # The calls are read whole: each row's cell, site and call.
+        held = _GENOTYPE_FIXED_BYTES + _GENOTYPE_CLONE_BYTES_PER_CELL * n_cells
+        reading = held + _GENOTYPE_CLONE_BYTES_PER_ROW * n_rows
+        if reading > self.memoryBytes:
+            raise MemoryError(
+                f"Reading the {n_rows} genotype calls of {n_cells} cells holds about "
+                f"{reading} bytes, more than the memory budget of {self.memoryBytes} "
+                "bytes. Raise mem_budget."
+            )
+        cells_of_rows = np.repeat(np.arange(n_cells, dtype=np.int64), np.diff(offsets))
+        call_sites = _read(group, "call_sites").astype(np.int64)
+        calls = _read(group, "calls").astype(np.int64)
+        rank = np.full(len(site_labels), -1, dtype=np.int64)
+        rank[chosen] = np.arange(len(chosen))
+        site_ranks = rank[call_sites]
+        on_chosen = site_ranks >= 0
+        mutant_rows = on_chosen & np.isin(calls, list(MUTANT_CALLS))
+        known_rows = mutant_rows | (on_chosen & (calls == WILD_TYPE))
+        members = np.zeros(n_cells, dtype=bool)
+        members[cells_of_rows[mutant_rows]] = True
+        group_codes, _keys, within_fingerprint = within_groups(
+            self.zw,
+            self.cells,
+            cell_selection,
+            columns,
+            members,
+            memory_bytes=self.memoryBytes - reading,
+            reserved=_GENOTYPE_CLONE_COLUMNS,
+            what="a mutant call",
+        )
+        arguments = GenotypeCloneArguments(
+            cell_selection=cell_selection,
+            genotypes=genotypes,
+            within_fingerprint=within_fingerprint,
+            sites=tuple(str(site_labels[site]) for site in chosen),
+            within=columns,
+            method="jaccard",
+            similarity=1.0,
+            inclusive=True,
+            ambiguous=True,
+            invalidate_cache=invalidate_cache,
+        )
+        planned = plan_clones(
+            self.zw,
+            arguments,
+            cell_selection,
+            n_cells,
+            with_probability=False,
+            required_attributes=_GENOTYPE_CLONE_ATTRIBUTES,
+            source_arrays={"ambiguous": "b"},
+        )
+        if planned.reused:
+            return planned.ref
+        self._require_writable(arguments.operation)
+        # A mutant cell's unknown sites are the chosen sites it was not
+        # called at, which a dense mask of its sites finds.
+        member_cells = np.flatnonzero(members)
+        mask_bytes = len(member_cells) * len(chosen) + 16 * len(member_cells)
+        unknown_bytes = 8 * len(member_cells) * len(chosen)
+        sets_bytes = held + mask_bytes + 2 * unknown_bytes + 64 * n_rows
+        if sets_bytes > self.memoryBytes:
+            raise MemoryError(
+                f"Building the sites of {len(member_cells)} mutant cells at "
+                f"{len(chosen)} sites holds about {sets_bytes} bytes, more than the "
+                f"memory budget of {self.memoryBytes} bytes. Raise mem_budget, or "
+                "pass fewer sites."
+            )
+        mutant_sets = cell_sets(
+            cells_of_rows[mutant_rows], site_ranks[mutant_rows], n_cells
+        )
+        member_row = np.full(n_cells, -1, dtype=np.int64)
+        member_row[member_cells] = np.arange(len(member_cells))
+        known = np.zeros((len(member_cells), len(chosen)), dtype=bool)
+        kept = known_rows & members[cells_of_rows]
+        known[member_row[cells_of_rows[kept]], site_ranks[kept]] = True
+        unknown_rows, unknown_sites = np.nonzero(~known)
+        del known
+        unknown = cell_sets(member_cells[unknown_rows], unknown_sites, n_cells)
+        del unknown_rows, unknown_sites, cells_of_rows, call_sites, calls
+        called = set_clones(
+            mutant_sets,
+            unknown=unknown,
+            groups=group_codes,
+            method="jaccard",
+            similarity=1.0,
+            inclusive=True,
+            ambiguous=True,
+            max_bytes=self.memoryBytes - held - 64 * n_rows,
+        )
+        labels = clone_labels(len(called.sizes))
+        assignment = CloneAssignment(
+            codes=called.codes,
+            clone_ids=labels,
+            clone_sizes=called.sizes,
+            probabilities=None,
+            n_cells_in_several_clones=0,
+        )
+        attributes = {
+            "n_clones": len(labels),
+            "n_sites": len(chosen),
+            "n_cells_mutant": int(len(member_cells)),
+            "n_ambiguous": int(np.count_nonzero(called.ambiguous)),
+            "n_nodes": called.n_nodes,
+            "n_edges": called.n_edges,
+        }
+        check_clone_write_budget(
+            self.memoryBytes,
+            _GENOTYPE_FIXED_BYTES
+            + _GENOTYPE_CLONE_WRITE_BYTES_PER_CELL * n_cells
+            + sum(map(sys.getsizeof, labels.tolist())),
+            assignment.clone_ids,
+            n_cells,
+        )
+        write_clones(
+            self.zw,
+            planned,
+            assignment,
+            attributes,
+            source_arrays={"ambiguous": called.ambiguous.astype(bool)},
+        )
+        log_clones(assignment, n_cells)
+        return planned.ref
+
 
 def _mask_names(mask: str | Sequence[str] | None) -> tuple[str, ...]:
     """The masks that ``mask`` names, sorted and once each."""
@@ -2173,4 +3032,266 @@ def _clone_assignment(
         clone_sizes=clone_sizes,
         probabilities=None,
         n_cells_in_several_clones=0,
+    )
+
+
+def _compared_alleles(
+    table: SiteTable, chosen: np.ndarray, explicit: bool, rules: GenotypeRules
+) -> tuple[np.ndarray, list[tuple[str, str]], np.ndarray, np.ndarray]:
+    """The chosen sites that a counting method can genotype, with their alleles.
+
+    A site is compared at its wild type and its one alternative: those that
+    ``rules.alleles`` names for it, or its alleles of roles ``"reference"``
+    and ``"alternative"``. Each allele's position among the counts' alleles
+    is -1 where the counts hold no such allele at the site: an alternative
+    that no cell shows, of which a warning tells.
+
+    Raises:
+        ValueError: If a site that ``explicit`` sites name has no wild type
+            or not one alternative, or ``rules.alleles`` names a wild type
+            that no cell shows at its site.
+    """
+    labels = table.labels()
+    allele_site = np.asarray(table.allele_site, dtype=np.int64)
+    roles = np.asarray(table.allele_role, dtype=object)
+    texts = np.asarray(table.allele, dtype=object)
+    kept: list[int] = []
+    pairs: list[tuple[str, str]] = []
+    reference: list[int] = []
+    alternative: list[int] = []
+    for site in chosen.tolist():
+        own = np.flatnonzero(allele_site == site)
+        label = str(labels[site])
+        if label in rules.alleles:
+            wild_type, mutant = rules.alleles[label]
+        else:
+            wild = own[roles[own] == "reference"]
+            mutants = own[roles[own] == "alternative"]
+            if len(wild) != 1 or len(mutants) != 1:
+                if explicit:
+                    raise ValueError(
+                        f"The site {label!r} has {len(wild)} wild types and "
+                        f"{len(mutants)} alternatives in the counts; name its "
+                        "wild type and alternative with alleles"
+                    )
+                continue
+            wild_type, mutant = str(texts[wild[0]]), str(texts[mutants[0]])
+        positions = {str(texts[allele]): int(allele) for allele in own}
+        if label in rules.alleles:
+            if wild_type not in positions:
+                raise ValueError(
+                    f"alleles gives the site {label!r} the wild type {wild_type!r}, "
+                    "which no cell shows there; its alleles are "
+                    f"{', '.join(map(repr, positions)) or 'none'}, in the "
+                    "orientation that the files give, such as a GIFT probe's"
+                )
+            if mutant not in positions:
+                warnings.warn(
+                    f"No cell shows the alternative {mutant!r} that alleles gives "
+                    f"the site {label!r}; its alleles are "
+                    f"{', '.join(map(repr, positions))}",
+                    UserWarning,
+                    stacklevel=4,
+                )
+        kept.append(site)
+        pairs.append((wild_type, mutant))
+        reference.append(positions.get(wild_type, -1))
+        alternative.append(positions.get(mutant, -1))
+    return (
+        np.asarray(kept, dtype=np.int64),
+        pairs,
+        np.asarray(reference, dtype=np.int64),
+        np.asarray(alternative, dtype=np.int64),
+    )
+
+
+def _cover_ranks(table: SiteTable, site_rank: np.ndarray) -> np.ndarray:
+    """Each site's genotyped site whose evidence its reads are, or -1.
+
+    A genotyped site's reads are its own; a channel of a named target, such
+    as GoT-Multi's ``BCOR (geneseq)``, that is not genotyped itself reads
+    the evidence of its target, which holds the calls.
+    """
+    cover = np.asarray(site_rank, dtype=np.int64).copy()
+    names = [str(name) for name in table.site_name]
+    channels = [str(channel) for channel in table.site_channel]
+    targets = {
+        name: site
+        for site, (name, channel) in enumerate(zip(names, channels, strict=True))
+        if name and not channel
+    }
+    for site, (name, channel) in enumerate(zip(names, channels, strict=True)):
+        if channel and cover[site] < 0 and name in targets:
+            cover[site] = site_rank[targets[name]]
+    return cover
+
+
+def _label_codes(index: Mapping[str, int], labels: np.ndarray) -> np.ndarray:
+    """Each label's position in the vocabulary that ``index`` numbers."""
+    distinct, inverse = np.unique(np.asarray(labels, dtype=object), return_inverse=True)
+    lookup = np.asarray(
+        [index[str(text)] for text in distinct.tolist()], dtype=np.int32
+    )
+    return lookup[np.asarray(inverse).reshape(-1)]
+
+
+def _most_cell_rows(group: zarr.Group, tables: Mapping[str, Sequence[str]]) -> int:
+    """The most rows that one cell holds in ``tables`` together."""
+    combined = np.sum([_read(group, f"{name}_offsets") for name in tables], axis=0)
+    return int(np.diff(combined).max(initial=0))
+
+
+def _chosen_genotype_sites(site_labels: np.ndarray, sites: Any) -> np.ndarray:
+    """The genotyped sites that ``sites`` names, as ascending positions."""
+    if sites is None:
+        return np.arange(len(site_labels), dtype=np.int64)
+    sites = _listed(sites)
+    if isinstance(sites, str | bytes) or not isinstance(sites, Sequence):
+        raise TypeError("sites must be a sequence of site labels or None")
+    position = {str(label): index for index, label in enumerate(site_labels.tolist())}
+    chosen: list[int] = []
+    for item in sites:
+        if not isinstance(item, str):
+            raise TypeError(f"sites must hold site labels, not {type(item).__name__}")
+        if item not in position:
+            raise ValueError(f"The genotypes have no site {item!r}")
+        chosen.append(position[item])
+    if not chosen:
+        raise ValueError("sites names no site")
+    return np.unique(np.asarray(chosen, dtype=np.int64))
+
+
+@dataclass(frozen=True, slots=True)
+class _BandCalls:
+    """The calls of one band of cells, sorted by cell and then site."""
+
+    cells: np.ndarray
+    sites: np.ndarray
+    calls: np.ndarray
+    labels: np.ndarray
+    reference: np.ndarray
+    alternative: np.ndarray
+    posteriors: np.ndarray
+
+
+def _band_keys(
+    cells: np.ndarray, ranks: np.ndarray, first: int, n_genotyped: int
+) -> np.ndarray:
+    """Each row's cell and genotyped site as one sortable key."""
+    return np.asarray(
+        (cells.astype(np.int64) - first) * n_genotyped + ranks, dtype=np.int64
+    )
+
+
+def _band_genotypes(
+    rows: Mapping[str, tuple[np.ndarray, dict[str, np.ndarray]]],
+    *,
+    method: str,
+    rules: GenotypeRules,
+    first: int,
+    n_genotyped: int,
+    cover_rank: np.ndarray,
+    allele_rank: np.ndarray,
+    reference_alleles: np.ndarray,
+    alternative_alleles: np.ndarray,
+    wild_type_probabilities: np.ndarray,
+    column_place: np.ndarray,
+    source_columns: np.ndarray,
+    call_value_names: np.ndarray,
+) -> _BandCalls:
+    """Call the genotypes of a band's cells at the genotyped sites."""
+    covered = np.empty(0, dtype=np.int64)
+    if "depth" in rows:
+        depth_cells, depth = rows["depth"]
+        ranks = cover_rank[depth["depth_sites"].astype(np.int64)]
+        on = (ranks >= 0) & (depth["depth"] > 0)
+        covered = np.unique(_band_keys(depth_cells[on], ranks[on], first, n_genotyped))
+    labels: np.ndarray
+    if method == "source":
+        call_cells, values = rows["call"]
+        ranks = allele_rank[values["call_alleles"].astype(np.int64)]
+        columns = values["call_sources"].astype(np.int64)
+        place = np.full(len(ranks), -1, dtype=np.int64)
+        on = ranks >= 0
+        place[on] = column_place[ranks[on], columns[on]]
+        adopted = np.flatnonzero(place >= 0)
+        # Each cell's call at a site comes from the first of the site's
+        # columns that holds one.
+        all_keys = _band_keys(call_cells[adopted], ranks[adopted], first, n_genotyped)
+        order = np.lexsort((place[adopted], all_keys))
+        leading = np.ones(len(order), dtype=bool)
+        leading[1:] = all_keys[order[1:]] != all_keys[order[:-1]]
+        picked = adopted[order[leading]]
+        call_keys = all_keys[order[leading]]
+        del all_keys, order, leading, adopted
+        call_labels = call_value_names[values["call_values"][picked].astype(np.int64)]
+        call_columns = columns[picked]
+        keys = np.union1d(covered, call_keys)
+        calls = np.full(len(keys), FILTERED, dtype=np.int8)
+        labels = np.full(len(keys), "", dtype=object)
+        at = np.searchsorted(keys, call_keys)
+        is_covered = np.isin(call_keys, covered)
+        for code in np.unique(call_columns).tolist():
+            of_column = call_columns == code
+            calls[at[of_column]] = source_call_codes(
+                str(source_columns[code]), call_labels[of_column], is_covered[of_column]
+            )
+        labels[at] = call_labels
+        reference = alternative = np.full(len(keys), -1, dtype=np.int64)
+        posteriors = np.full((len(keys), 3), np.nan)
+    else:
+        count_cells, values = rows["count"]
+        alleles = values["count_alleles"].astype(np.int64)
+        ranks = allele_rank[alleles]
+        on = ranks >= 0
+        alleles, ranks = alleles[on], ranks[on]
+        umis = values["counts"][on].astype(np.int64)
+        count_keys = _band_keys(count_cells[on], ranks, first, n_genotyped)
+        keys = np.union1d(covered, count_keys)
+        at = np.searchsorted(keys, count_keys)
+        is_reference = alleles == reference_alleles[ranks]
+        is_alternative = alleles == alternative_alleles[ranks]
+        reference = np.bincount(
+            at[is_reference], weights=umis[is_reference], minlength=len(keys)
+        ).astype(np.int64)
+        alternative = np.bincount(
+            at[is_alternative], weights=umis[is_alternative], minlength=len(keys)
+        ).astype(np.int64)
+        labels = np.full(len(keys), "", dtype=object)
+        if method == "threshold":
+            assert rules.min_umis is not None
+            calls = threshold_calls(
+                reference,
+                alternative,
+                min_umis=rules.min_umis,
+                min_mutant_umis=rules.min_mutant_umis,
+                min_fraction=rules.min_fraction,
+            )
+            posteriors = np.full((len(keys), 3), np.nan)
+        else:
+            assert rules.min_umis is not None and rules.min_posterior is not None
+            swap = (
+                np.zeros(len(umis))
+                if rules.swap is None
+                else unit_swap_probabilities(
+                    umis, values["counts_reads"][on].astype(np.int64), rules.swap
+                )
+            )
+            posteriors, confident = gift_posteriors(
+                at, len(keys), umis, wild_type_probabilities[alleles], swap
+            )
+            calls = gift_calls(
+                posteriors,
+                confident,
+                min_posterior=rules.min_posterior,
+                min_umis=rules.min_umis,
+            )
+    return _BandCalls(
+        cells=first + keys // n_genotyped,
+        sites=keys % n_genotyped,
+        calls=calls,
+        labels=labels,
+        reference=reference,
+        alternative=alternative,
+        posteriors=posteriors,
     )

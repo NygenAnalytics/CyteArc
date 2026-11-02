@@ -1,11 +1,11 @@
-"""The variant depth plot, on counts whose depths are known by hand."""
+"""The variant plots, on counts whose depths and calls are known by hand."""
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
 from cytearc.datastore.datastore import DataStore
-from cytearc.plotting import variant_depth
+from cytearc.plotting import genotypes, variant_depth
 from tests.storage_helpers import write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
@@ -405,3 +405,160 @@ def test_allele_frequencies_show_and_need_a_store_with_clones(scored) -> None:
             clones=clones,
             show=False,
         )
+
+
+def _shares(result) -> dict[tuple[str, str], dict[str, float]]:
+    """Each bar's share of each call that is not zero."""
+    shares: dict[tuple[str, str], dict[str, float]] = {}
+    for row in result.tables["calls"].itertuples(index=False):
+        if row.share:
+            shares.setdefault((row.site, row.group), {})[row.call] = row.share
+    return shares
+
+
+def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
+    store, targets, _positions = plotted
+    called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
+    # At CALR, c0 and c2 read a mutant UMI and c1 none; c3 reads no UMI and c4
+    # is not named, so both are missing. At SF3B1 only c0 is read.
+    result = genotypes(store, called, show=False)
+    assert _shares(result) == {
+        ("CALR", "all cells"): {
+            "wild_type": 0.2,
+            "alternative_present": 0.4,
+            "missing": 0.4,
+        },
+        ("SF3B1", "all cells"): {"alternative_present": 0.2, "missing": 0.8},
+    }
+    calls = result.tables["calls"]
+    assert calls.groupby(["site", "group"])["cells"].sum().tolist() == [5, 5]
+    ax = result.axes["calls"]
+    assert [label.get_text() for label in ax.get_yticklabels()] == ["CALR", "SF3B1"]
+    # One segment per bar and call, in the vocabulary's order.
+    assert len(ax.patches) == 2 * 6
+    assert [text.get_text() for text in ax.get_legend().get_texts()] == [
+        "wild_type",
+        "heterozygous",
+        "homozygous_alternative",
+        "alternative_present",
+        "missing",
+        "filtered",
+    ]
+    # c4 has no group and is left out.
+    grouped = genotypes(store, called, group_by="group", show=False)
+    assert _shares(grouped) == {
+        ("CALR", "x"): {"wild_type": 0.5, "alternative_present": 0.5},
+        ("CALR", "y"): {"alternative_present": 0.5, "missing": 0.5},
+        ("SF3B1", "x"): {"alternative_present": 0.5, "missing": 0.5},
+        ("SF3B1", "y"): {"missing": 1.0},
+    }
+    assert grouped.provenance.n_cells == 4
+    labels = [label.get_text() for label in grouped.axes["calls"].get_yticklabels()]
+    assert labels == ["CALR, x", "CALR, y", "SF3B1, x", "SF3B1, y"]
+    plt.close(result.figure)
+    plt.close(grouped.figure)
+
+
+def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
+    store, targets, _positions = plotted
+    called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
+    store.cells.insert("UMAP1", np.arange(5, dtype=np.float64))
+    store.cells.insert("UMAP2", np.arange(5, 10, dtype=np.float64))
+    result = genotypes(store, called, layout_key="UMAP", site="CALR", show=False)
+    cells = result.tables["cells"]
+    assert cells["cell"].tolist() == CELLS
+    assert cells["x"].tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert cells["y"].tolist() == [5.0, 6.0, 7.0, 8.0, 9.0]
+    assert cells["call"].tolist() == [
+        "alternative_present",
+        "wild_type",
+        "alternative_present",
+        "missing",
+        "missing",
+    ]
+    layout = result.axes["layout"]
+    assert layout.get_title() == "CALR"
+    # One point set per call that a cell holds.
+    offsets = sorted(
+        tuple(map(tuple, collection.get_offsets())) for collection in layout.collections
+    )
+    assert offsets == [
+        ((0.0, 5.0), (2.0, 7.0)),
+        ((1.0, 6.0),),
+        ((3.0, 8.0), (4.0, 9.0)),
+    ]
+    # With one site drawn, the layout takes its calls.
+    alone = genotypes(store, called, sites=["SF3B1"], layout_key="UMAP", show=False)
+    assert alone.tables["cells"]["call"].tolist() == [
+        "alternative_present",
+        *["missing"] * 4,
+    ]
+    shown = store.plots.genotypes(
+        called, sites=["SF3B1"], layout_key="UMAP", show=False
+    )
+    assert shown.tables["cells"].equals(alone.tables["cells"])
+    assert shown.tables["calls"].equals(alone.tables["calls"])
+    for figure in (result.figure, alone.figure, shown.figure):
+        plt.close(figure)
+
+
+def test_genotypes_show_and_close_the_figure_they_own(plotted) -> None:
+    store, targets, _positions = plotted
+    called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
+    result = genotypes(store, called, show=True)
+    assert result.owns_figure
+    assert result.figure.number not in plt.get_fignums()
+
+
+def test_genotypes_refuse_what_they_cannot_draw(plotted) -> None:
+    store, targets, _positions = plotted
+    called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
+    store.cells.insert("nobody", np.asarray([None] * 5, dtype=object))
+    with pytest.raises(ValueError, match="No cell of the genotypes has a group"):
+        genotypes(store, called, group_by="nobody", show=False)
+    store.cells.insert("XY1", np.zeros(5))
+    store.cells.insert("XY2", np.zeros(5))
+    with pytest.raises(ValueError, match="draws 2 sites; name the one"):
+        genotypes(store, called, layout_key="XY", show=False)
+    with pytest.raises(ValueError, match="site 'SF3B1' is not among the drawn"):
+        genotypes(
+            store, called, sites=["CALR"], layout_key="XY", site="SF3B1", show=False
+        )
+    with pytest.raises(ValueError, match="variant_genotypes artifact"):
+        genotypes(store, targets, show=False)
+    with pytest.raises(TypeError, match="does not provide variants.load_genotypes"):
+        genotypes(object(), called, show=False)
+
+
+def test_genotypes_of_many_sites_and_groups_keep_a_drawable_height(tmp_path) -> None:
+    import warnings
+
+    from tests.clone_helpers import every_cell, write_cells_store
+
+    # 120 sites of 400 cells in 8 groups draw 960 bars.
+    rng = np.random.default_rng(3)
+    ids = [f"cell{cell:03d}-1" for cell in range(400)]
+    store = write_cells_store(tmp_path / "store.zarr", ids)
+    store.cells.insert(
+        "group", np.asarray([f"g{cell % 8}" for cell in range(400)], dtype=object)
+    )
+    paths = []
+    for site in range(120):
+        lines = ["BC\twtUMIs\tmutUMIs"] + [
+            f"{ids[cell]}\t{int(rng.integers(0, 3))}\t{int(rng.integers(0, 2))}"
+            for cell in range(400)
+        ]
+        path = tmp_path / f"S{site:03d}.tsv"
+        path.write_text("\n".join(lines) + "\n")
+        paths.append(path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        counts = store.variants.import_counts(paths, cell_selection=every_cell(store))
+    called = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
+    result = genotypes(store, called, group_by="group", show=False)
+    shares = result.tables["calls"].groupby(["site", "group"])["share"].sum()
+    assert len(shares) == 960
+    np.testing.assert_allclose(shares.to_numpy(), 1.0)
+    assert len(result.axes["calls"].get_yticks()) == 960
+    assert result.figure.get_size_inches()[1] == 40.0
+    plt.close(result.figure)

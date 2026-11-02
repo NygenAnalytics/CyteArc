@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     from .summary import matrixplot as matrixplot
     from .variants import (
         allele_frequencies as allele_frequencies,
+        genotypes as genotypes,
         variant_depth as variant_depth,
         variant_statistics as variant_statistics,
     )
@@ -139,6 +140,7 @@ __all__ = [
     "embedding_raster",
     "gene_pairing",
     "gene_usage",
+    "genotypes",
     "graph_qc",
     "guide_calls",
     "guide_thresholds",
@@ -213,6 +215,7 @@ __getattr__, __dir__ = _lazy_facade(
         "embedding_raster": ".embedding_raster",
         "gene_pairing": ".repertoire",
         "gene_usage": ".repertoire",
+        "genotypes": ".variants",
         "graph_qc": ".diagnostics",
         "guide_calls": ".perturbation",
         "guide_thresholds": ".perturbation",

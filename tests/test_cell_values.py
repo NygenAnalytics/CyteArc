@@ -642,6 +642,13 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         )
     )
     variant_counts = store.variants.import_counts(got, cell_selection=cells)
+    # One mutant UMI calls a cell mutant: cells 0, 1, 2 and 4; cell 3 is wild
+    # type and the sixth has no evidence.
+    variant_genotypes = store.variants.genotypes(
+        variant_counts, method="threshold", min_mutant_umis=1
+    )
+    # The four mutant cells carry one combination of calls, one clone.
+    genotype_clones = store.variants.genotype_clones(variant_genotypes)
     stored: dict[str, set[str]] = {}
 
     for ref, expected in (
@@ -674,6 +681,8 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
             np.array(["clone_1", "clone_2", "", "clone_3", "", "clone_4"]),
         ),
         (variant_counts, np.array([4.0, 2.0, 4.0, 1.0, 5.0, np.nan])),
+        (variant_genotypes, np.array([1, 1, 1, 0, 1, 0])),
+        (genotype_clones, np.array(["clone_1"] * 3 + [""] + ["clone_1", ""])),
     ):
         loaded = store.artifacts.load_values(ref)
         np.testing.assert_array_equal(loaded.values, expected)
@@ -700,7 +709,7 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         stored.setdefault(ref.kind, set()).update(per_cell - {"cell_index"})
     # Each kind's producers store every array it declares between them:
     # Numbat's clones their posteriors, barcode clones each cell's barcodes
-    # and doublet flag.
+    # and doublet flag, and genotype clones each cell's ambiguous flag.
     assert {kind: stored[kind] for kind in stored} == {
         kind: _declared(kind) for kind in stored
     }

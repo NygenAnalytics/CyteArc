@@ -226,6 +226,13 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - License: MIT
 - Used in: `cytearc/clones/calling.py` (the clone graph of `trex/clone.py` and `trex/graph.py` at commit `c1ade47`: cells of identical cloneID sets as one node, as `CellGraph._precluster_cells` makes them, edges above a Jaccard threshold, as `_make_graph` and `_is_similar` draw them, the bridges of `CellGraph.bridges`, the local cut vertices of `Graph.local_cut_vertices` that `CellGraph.doublets` removes when they hold one cell, and the order of `run10x`'s rounds of bridges and doublets), reimplemented on arrays; `cytearc/clones/barcode_clones.py` (the rules of `trex/cli/run10x.py`, `trex/filters.py` and `trex/cell.py`: the low-complexity filter of `is_low_complexity`, the correction of `correct_clone_ids` into each cluster's most frequent cloneID, ties to the larger, the minimum length of `compute_cells`, and the two filters of `filter_cells`), reimplemented on records; and `cytearc/clones/sequences.py` (the comparison of `is_similar` at the positions where both cloneIDs hold a base, with a minimum of compared positions).
 
+### GIFT reproducibility code
+
+- Source: <https://github.com/clareaulab/gift_figures_reproducibility>
+- Copyright (c) 2026 Lareau Lab
+- License: MIT
+- Used in: `cytearc/variants/genotypes.py` (the genotype model of `get_p`, `get_cell_genotypes` and `assign_genotypes` in `1_figure_CL_proof_of_concept/code/utils_00.py` at commit `35564bc`: each gapfill's probability of a probe's two alleles, normalized over them; each UMI's score of a genotype, the larger of its swap probability and its probability under the genotype, of which the heterozygote takes the larger half; a cell's likelihood as the product of its UMIs' scores; the posterior under a uniform prior; and a call when the largest posterior exceeds `min_p` and enough UMIs have a swap probability below 0.1), reimplemented on arrays as sums of logarithms.
+
 ## Data in this repository
 
 - **JASPAR** (<https://jaspar.elixir.no>), CC BY 4.0: the motif matrices MA0004.1 (Arnt) and
@@ -285,11 +292,8 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
   `tests/data/variants/giftwrap_counts.1.filtered.h5` holds the first 60 cells of
   `sample_data/counts.1.filtered.h5` at v0.6.2 and the 494 probe and gapfill columns they hold,
   in the file's layout.
-- **Single-cell_BPDCN** (<https://github.com/petervangalen/Single-cell_BPDCN>), MIT, Copyright (c)
-  2022 Peter van Galen: `tests/data/variants/got/` holds the XV-seq tables
-  `04_XV-seq/Pt1Dx/TET2.2847/Patient1_TET2.2847_summTable.txt` and
-  `04_XV-seq/Pt5Dx/ZRSR2.500/Patient5_ZRSR2.500_summTable.txt` at commit
-  5c5f361aafcc6fa6a7d6f8b33556bb0bfd76a03b, unchanged.
+- **Single-cell_BPDCN** (<https://github.com/petervangalen/Single-cell_BPDCN>), MIT, Copyright (c) 2022 Peter van Galen: `tests/data/variants/got/` holds the XV-seq tables `04_XV-seq/Pt1Dx/TET2.2847/Patient1_TET2.2847_summTable.txt` and `04_XV-seq/Pt5Dx/ZRSR2.500/Patient5_ZRSR2.500_summTable.txt` at commit 5c5f361aafcc6fa6a7d6f8b33556bb0bfd76a03b, unchanged, and in `Pt1Dx_CellBarcode_Allowlist_in_TET2.2847.txt` and `Pt5Dx_CellBarcode_Allowlist_in_ZRSR2.500.txt` the barcodes of `05_Stats/5.1_CB-AllowLists/Pt1Dx_CellBarcode_Allowlist.txt` and `Pt5Dx_CellBarcode_Allowlist.txt` at the same commit that each table names, in the allowlist's order. `tests/test_variant_genotype_studies.py` compares the calls with `04_XV-seq/4.2_Genotyping_stats.txt`.
+- **GIFT goldens**: `tests/giftwrap_0_6_2_golden.json` holds what giftwrap 0.6.2 (MIT) read from its 60-cell sample and from the BC8 plex of GEO GSM9714721 (GSE319999; Blattman et al. (2026), bioRxiv, doi:10.64898/2026.04.11.717967), each probe's UMI and read totals and a digest of the sample's entries, and the calls and posteriors that the GIFT reproducibility code (MIT, credited above) made from them. GEO states no license, and the NCBI places no restrictions on the use of its data.
 - **Color palettes** in `cytearc/plotting/_style.py`: the 10- and 20-color sets are Tableau 10 and
   20 as distributed with matplotlib (the 10-color set with Scanpy's colorblind substitutions), the
   28-color set is from Zeileis, Hornik, and Murrell (2009), Computational Statistics & Data
@@ -340,17 +344,7 @@ states no license, and the NCBI places no restrictions on the use of its data.
 
 `tests/test_barcode_files.py` downloads `GSM9076301_SG05-Capture-1-Rep1_S1.counts.tsv.gz` and `GSM9076301_SG05-Capture-1-Rep1_S1_cell_barcode_annotation.tsv.gz`, BARtab's outputs for one sample of GEO GSE301145 (Gordon et al. (2025), Cancer Discovery 15:2117-2138, doi:10.1158/2159-8290.CD-24-1517), for a test marked `integration`; GEO states no license, and the NCBI places no restrictions on the use of its data. BARtab itself is licensed under the GPL-3.0, so CyteArc reads its outputs from its documentation and these files, and none of its code was read.
 
-`tests/test_readers_variants.py` downloads these for tests marked `integration`, which skip
-when the host is unreachable: `chrM_refAllele.txt` and `pL1000_mgatk.variant_stats.tsv.gz` of
-Figshare doi:10.6084/m9.figshare.31323481 (CC BY 4.0); GIFT's per-UMI tables of the BC8 plex of
-GEO GSM9714721 (GSE319999); the GoT tables `GSM3309839_ET02.CALR.txt.gz` of GEO GSE117825
-(Nam et al. (2019), Nature 571:355-360, doi:10.1038/s41586-019-1367-0) and
-`GSM6198716_MDS04.SF3B1.tsv.gz` of GEO GSE204845 (Cell Stem Cell (2023) 30:1262-1281.e8,
-doi:10.1016/j.stem.2023.07.012); and GoT-Multi-ML's example outputs
-`example_run/got_multi_ml_run/ironthrone_out_pp.csv` and
-`ml_denoise/got_multi_out_refined.csv` at commit c4a6721d64c0710e6fc2fa3356f9ad4f55e796e8 of
-<https://github.com/AnnaNamLab/GoT-Multi-ML>, which carries no license, so they are read and never
-checked in. GEO states no license, and the NCBI places no restrictions on the use of its data.
+`tests/test_readers_variants.py`, `tests/test_variant_genotype_goldens.py` and `tests/test_variant_genotype_studies.py` download these for tests marked `integration`, which skip when the host is unreachable: `chrM_refAllele.txt` and `pL1000_mgatk.variant_stats.tsv.gz` of Figshare doi:10.6084/m9.figshare.31323481 (CC BY 4.0); GIFT's per-UMI tables of the BC8 plex of GEO GSM9714721 (GSE319999); the GoT tables `GSM3309839_ET02.CALR.txt.gz` of GEO GSE117825 (Nam et al. (2019), Nature 571:355-360, doi:10.1038/s41586-019-1367-0) and `GSM6198713_MDS01.SF3B1.tsv.gz` and `GSM6198716_MDS04.SF3B1.tsv.gz` of GEO GSE204845 (Cell Stem Cell (2023) 30:1262-1281.e8, doi:10.1016/j.stem.2023.07.012); and GoT-Multi-ML's example outputs `example_run/got_multi_ml_run/ironthrone_out_pp.csv` and `ml_denoise/got_multi_out_refined.csv` at commit c4a6721d64c0710e6fc2fa3356f9ad4f55e796e8 of <https://github.com/AnnaNamLab/GoT-Multi-ML>, which carries no license, so they are read and never checked in. GEO states no license, and the NCBI places no restrictions on the use of its data.
 
 The Seurat import tutorial also uses `seurat_v4_1_3_pbmc_mye.rds` and embeds a 581-byte
 compressed synthetic RDS with three cells and two genes. The synthetic object was authored
@@ -1157,6 +1151,32 @@ THE SOFTWARE.
 ### giftwrap (MIT License)
 
 ```text
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### GIFT reproducibility code (MIT License)
+
+```text
+MIT License
+
+Copyright (c) 2026 Lareau Lab
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights

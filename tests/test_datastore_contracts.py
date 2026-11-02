@@ -214,8 +214,10 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # repertoire.export_airr, then clones.import_barcodes and
     # clones.load_barcodes, then clones.barcode_clones, then
     # variants.import_counts and variants.load_counts, then
-    # variants.informative, variants.load_informative and variants.clones.
-    assert len(_NAMESPACE_METHODS) == 142
+    # variants.informative, variants.load_informative and variants.clones,
+    # then variants.genotypes, variants.load_genotypes and
+    # variants.genotype_clones.
+    assert len(_NAMESPACE_METHODS) == 145
     assert {
         "import_receptors",
         "load_receptors",
@@ -235,6 +237,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         "informative",
         "load_informative",
         "clones",
+        "genotypes",
+        "load_genotypes",
+        "genotype_clones",
     } == {
         name for namespace, _, name, _ in _NAMESPACE_METHODS if namespace == "variants"
     }

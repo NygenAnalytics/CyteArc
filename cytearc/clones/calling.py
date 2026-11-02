@@ -52,6 +52,7 @@ __all__ = [
     "connected_components",
     "identical_sets",
     "jaccard_edges",
+    "ambiguous_nodes",
     "local_cut_vertices",
     "pruned_edges",
     "set_clones",
@@ -946,6 +947,92 @@ def local_cut_vertices(
 
 
 @njit(cache=True)
+def _holds(indptr: np.ndarray, items: np.ndarray, node: int, item: int) -> bool:
+    """Whether a node's ascending items hold ``item``."""
+    low = indptr[node]
+    high = indptr[node + 1]
+    while low < high:
+        middle = (low + high) // 2
+        if items[middle] < item:
+            low = middle + 1
+        else:
+            high = middle
+    return bool(low < indptr[node + 1] and items[low] == item)
+
+
+@njit(cache=True)
+def _ambiguous(
+    indptr: np.ndarray,
+    neighbours: np.ndarray,
+    set_indptr: np.ndarray,
+    set_items: np.ndarray,
+    unknown_indptr: np.ndarray,
+    unknown_items: np.ndarray,
+) -> np.ndarray:
+    """Whether two of each node's neighbours disagree at one of its unknown items."""
+    n_nodes = len(indptr) - 1
+    flags = np.zeros(n_nodes, dtype=np.bool_)
+    for node in range(n_nodes):
+        if indptr[node + 1] - indptr[node] < 2:
+            continue
+        for position in range(unknown_indptr[node], unknown_indptr[node + 1]):
+            item = unknown_items[position]
+            held = False
+            absent = False
+            for at in range(indptr[node], indptr[node + 1]):
+                other = neighbours[at]
+                if _holds(set_indptr, set_items, other, item):
+                    held = True
+                elif not _holds(unknown_indptr, unknown_items, other, item):
+                    absent = True
+                if held and absent:
+                    break
+            if held and absent:
+                flags[node] = True
+                break
+    return flags
+
+
+def ambiguous_nodes(
+    nodes: SetNodes, edges: Edges, *, max_bytes: int | None = None
+) -> np.ndarray:
+    """Find the nodes whose sets agree with two nodes that disagree.
+
+    With unknown items, a node is linked to the nodes it agrees with wherever
+    both know. When two of its neighbours disagree at an item that the node
+    holds unknown, one holding the item and the other knowing it absent, the
+    node cannot tell which of them its cells belong with: they are ambiguous,
+    however many there are. Neighbours that share no known item do not
+    disagree, so a node whose cells were read where its partly read
+    neighbours were not stays. A node without unknown items is never
+    ambiguous.
+
+    Returns:
+        Whether each node is ambiguous.
+
+    Raises:
+        MemoryError: If the lists of neighbours do not fit ``max_bytes``.
+    """
+    limit = _max_bytes(max_bytes)
+    n_nodes = nodes.n_nodes
+    if nodes.unknown is None or not len(edges):
+        return np.zeros(n_nodes, dtype=bool)
+    _check(_adjacency_bytes(n_nodes, len(edges)), limit, "the lists of neighbours")
+    indptr, neighbours = _neighbours(n_nodes, edges)
+    return np.asarray(
+        _ambiguous(
+            indptr,
+            neighbours,
+            np.asarray(nodes.sets.indptr, dtype=np.int64),
+            np.asarray(nodes.sets.items, dtype=np.int64),
+            np.asarray(nodes.unknown.indptr, dtype=np.int64),
+            np.asarray(nodes.unknown.items, dtype=np.int64),
+        ),
+        dtype=bool,
+    )
+
+
+@njit(cache=True)
 def _roots(n_nodes: int, first: np.ndarray, second: np.ndarray) -> np.ndarray:
     """Each node's component as its lowest node, by union-find."""
     parent = np.arange(n_nodes, dtype=np.int64)
@@ -1028,22 +1115,27 @@ class SetClones:
             first cell; -1 for a cell without one.
         sizes: The cells of each clone.
         doublets: Whether each cell was removed as a doublet.
+        ambiguous: Whether each cell was removed as ambiguous, its set
+            agreeing with two clones that disagree.
         n_nodes: The distinct sets.
         n_edges: The edges of the Jaccard graph, before pruning.
         n_pruned: The edges that pruning removed, over both rounds.
         n_doublet_nodes: The doublets that each round removed.
         n_small_cells: The cells left without a clone because theirs held
             fewer cells than the smallest size.
+        n_ambiguous_nodes: The nodes removed as ambiguous.
     """
 
     codes: np.ndarray
     sizes: np.ndarray
     doublets: np.ndarray
+    ambiguous: np.ndarray
     n_nodes: int
     n_edges: int
     n_pruned: int
     n_doublet_nodes: tuple[int, ...]
     n_small_cells: int
+    n_ambiguous_nodes: int
 
     @property
     def n_clones(self) -> int:
@@ -1062,6 +1154,7 @@ def set_clones(
     modalities: np.ndarray | None = None,
     prune: bool = False,
     doublets: bool = False,
+    ambiguous: bool = False,
     min_size: int = 1,
     max_bytes: int | None = None,
 ) -> SetClones:
@@ -1072,7 +1165,10 @@ def set_clones(
     TREX does, ``prune`` removes the edges of :func:`pruned_edges` and
     ``doublets`` the single-cell nodes of :func:`local_cut_vertices` with
     their cells, in TREX's order: pruning, doublets, pruning again and
-    doublets again. ``method="shared"`` links the nodes that share any item,
+    doublets again. Before them, ``ambiguous`` removes the nodes of
+    :func:`ambiguous_nodes`, whatever their cells, which sets with unknown
+    items need, such as genotypes: a node of cells that agree with two
+    clones that disagree joins neither. ``method="shared"`` links the nodes that share any item,
     as DARLIN links cells that share a rare allele, joining the nodes of
     each item without listing every pair of them. The connected components
     of what remains are the clones, and a clone of fewer than ``min_size``
@@ -1092,6 +1188,7 @@ def set_clones(
         modalities: Each cell's modality as an integer code, with ``across``.
         prune: For ``"jaccard"``, remove TREX's bridges.
         doublets: For ``"jaccard"``, remove TREX's doublets.
+        ambiguous: For ``"jaccard"``, remove the ambiguous nodes.
         min_size: The fewest cells of a clone.
         max_bytes: The most bytes the calling may hold, or None.
 
@@ -1104,7 +1201,8 @@ def set_clones(
     limit = _max_bytes(max_bytes)
     if method not in CALLING_METHODS:
         raise ValueError(f"method must be one of {', '.join(CALLING_METHODS)}")
-    for name, flag in (("prune", prune), ("doublets", doublets)):
+    flags = (("prune", prune), ("doublets", doublets), ("ambiguous", ambiguous))
+    for name, flag in flags:
         if not isinstance(flag, bool | np.bool_):
             raise TypeError(f"{name} must be a boolean")
     if isinstance(min_size, bool | np.bool_) or not isinstance(
@@ -1123,7 +1221,7 @@ def set_clones(
                 ("modalities", modalities),
             )
             if value is not None
-        ] + [name for name, flag in (("prune", prune), ("doublets", doublets)) if flag]
+        ] + [name for name, flag in flags if flag]
         if method == "shared" and unknown is not None:
             given.append("unknown")
         if given:
@@ -1150,6 +1248,7 @@ def set_clones(
         + (0 if nodes.unknown is None else _HELD_ITEM_BYTES * len(nodes.unknown.items))
     )
     present = np.ones(n_nodes, dtype=bool)
+    unclear = np.zeros(n_nodes, dtype=bool)
     edges = Edges(np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64))
     n_edges = n_pruned = 0
     removed_rounds: list[int] = []
@@ -1175,6 +1274,10 @@ def set_clones(
         n_edges = len(edges)
         held += _EDGE_BYTES * n_edges
         room = None if limit is None else limit - held
+        if ambiguous:
+            unclear = ambiguous_nodes(nodes, edges, max_bytes=room)
+            present &= ~unclear
+            edges = edges.kept(present[edges.first] & present[edges.second])
         rounds = 2 if doublets else 1
         for _round in range(rounds):
             if prune:
@@ -1202,8 +1305,11 @@ def set_clones(
         "the cells' clones",
     )
     doublet = np.zeros(n_cells, dtype=bool)
+    removed_unclear = np.zeros(n_cells, dtype=bool)
     has_node = nodes.cell_nodes >= 0
     doublet[has_node] = ~present[nodes.cell_nodes[has_node]]
+    removed_unclear[has_node] = unclear[nodes.cell_nodes[has_node]]
+    doublet &= ~removed_unclear
     cell_components = np.full(n_cells, -1, dtype=np.int64)
     cell_components[has_node] = components[nodes.cell_nodes[has_node]]
     in_component = cell_components >= 0
@@ -1222,11 +1328,13 @@ def set_clones(
         codes=codes,
         sizes=component_sizes[order].astype(np.int64),
         doublets=doublet,
+        ambiguous=removed_unclear,
         n_nodes=n_nodes,
         n_edges=n_edges,
         n_pruned=n_pruned,
         n_doublet_nodes=tuple(removed_rounds),
         n_small_cells=n_small,
+        n_ambiguous_nodes=int(np.count_nonzero(unclear)),
     )
 
 

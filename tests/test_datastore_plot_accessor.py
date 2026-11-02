@@ -40,6 +40,7 @@ _STORE_PLOT_METHODS = (
     "embedding_raster",
     "gene_pairing",
     "gene_usage",
+    "genotypes",
     "guide_calls",
     "guide_thresholds",
     "lineage_curves",
@@ -198,6 +199,11 @@ _VARIANT_SELECTION_REF = ArtifactRef(
     scope="datastore",
     kind="variant_selection",
     artifact_id="c" * 64,
+)
+_VARIANT_GENOTYPES_REF = ArtifactRef(
+    scope="datastore",
+    kind="variant_genotypes",
+    artifact_id="d" * 64,
 )
 
 
@@ -451,6 +457,11 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             (_VARIANT_SELECTION_REF,),
             {"clones": _CLONES_REF, "max_cells": 50},
         ),
+        (
+            "genotypes",
+            (_VARIANT_GENOTYPES_REF,),
+            {"group_by": "cell_type", "layout_key": "UMAP", "site": "CALR"},
+        ),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -519,6 +530,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("counts"))
     elif name in {"variant_statistics", "allele_frequencies"}:
         expected_args.append(expected_kwargs.pop("variants"))
+    elif name == "genotypes":
+        expected_args.append(expected_kwargs.pop("genotypes"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

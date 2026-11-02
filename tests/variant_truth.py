@@ -270,6 +270,56 @@ def clone_variant_truth(clones: CloneTruth, seed: int = 0) -> VariantTruth:
     )
 
 
+def genotype_clone_truth(clones: CloneTruth, seed: int = 0) -> np.ndarray:
+    """GoT UMIs of ``clones``' cells at one target per clone, from which the clones follow.
+
+    Each clone carries a mutation at a target of its own, which every cell of
+    the clone is read at, with one mutant UMI or more beside a few wild-type
+    ones, as one mutant copy of two gives. Every other target reads wild type
+    in a cell, or is not read at all in about a fifth of the cells, which
+    leaves it unknown rather than wild type. Cells without a clone read wild
+    type wherever they are read, so genotype clones of the mutant calls are
+    exactly the truth's clones, its clone of one cell among them.
+
+    Returns:
+        The wild-type and mutant UMIs of each cell at each target, shaped
+        ``(cells, clones, 2)``, -1 where the cell was not read.
+    """
+    rng = np.random.default_rng(seed + 500)
+    n_cells = len(clones.cell_ids)
+    umis = np.full((n_cells, clones.n_clones, 2), -1, dtype=np.int64)
+    for cell in range(n_cells):
+        own = int(clones.clones[cell])
+        for target in range(clones.n_clones):
+            if target != own and rng.random() < 0.2:
+                continue
+            if target == own:
+                umis[cell, target] = (int(rng.poisson(1)), 1 + int(rng.poisson(1)))
+            else:
+                umis[cell, target] = (1 + int(rng.poisson(2)), 0)
+    return umis
+
+
+def write_genotype_tables(
+    umis: np.ndarray, cell_ids: Sequence[str], folder: Path
+) -> list[Path]:
+    """One GoT table (``BC wtUMIs mutUMIs``) per target of :func:`genotype_clone_truth`.
+
+    The tables are named ``T1.tsv`` and on, so their targets are ``T1`` and on,
+    and list only the cells read at the target.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for target in range(umis.shape[1]):
+        lines = ["BC\twtUMIs\tmutUMIs"] + [
+            f"{cell}\t{umis[row, target, 0]}\t{umis[row, target, 1]}"
+            for row, cell in enumerate(cell_ids)
+            if umis[row, target, 0] >= 0
+        ]
+        paths.append(_write(folder / f"T{target + 1}.tsv", lines))
+    return paths
+
+
 #: The clones of :func:`mito_clone_truth`, largest first.
 MITO_CLONE_SIZES = (60, 45, 35, 30, 20, 15)
 

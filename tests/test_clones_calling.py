@@ -16,6 +16,7 @@ from cytearc.clones import calling
 from cytearc.clones.calling import (
     CellSets,
     Edges,
+    ambiguous_nodes,
     cell_sets,
     connected_components,
     identical_sets,
@@ -460,6 +461,102 @@ def test_a_cell_that_agrees_with_two_clones_where_it_knows_is_a_doublet() -> Non
         frozenset({2, 3}),
         frozenset({4}),
     }
+
+
+def _ambiguous_nodes_by_hand(rows, unknown_rows, pairs) -> set[int]:
+    """The nodes, here one per cell, that agree with two neighbours that
+    disagree at an item the node holds unknown, checked pair by pair."""
+    held = [set(row) for row in rows]
+    lost = [set(row) for row in unknown_rows]
+    neighbours: dict[int, set[int]] = {node: set() for node in range(len(rows))}
+    for a, b in pairs:
+        neighbours[a].add(b)
+        neighbours[b].add(a)
+    found = set()
+    for node, others in neighbours.items():
+        for item in lost[node]:
+            holders = [other for other in others if item in held[other]]
+            knowers = [
+                other
+                for other in others
+                if item not in held[other] and item not in lost[other]
+            ]
+            if holders and knowers:
+                found.add(node)
+    return found
+
+
+def test_a_node_is_ambiguous_when_two_neighbours_disagree_where_it_does_not_know() -> (
+    None
+):
+    # Cells 0 and 1 are a founder (0) and its subclone (0 and 1); cell 2 holds
+    # 0 with 1 unknown and agrees with both; cell 3 holds 1 with 0 unknown and
+    # agrees with the subclone alone; cell 4 holds 2 and 3 known where its
+    # partial neighbours 5 (3 unknown) and 6 (2 unknown) share nothing.
+    rows = [[0], [0, 1], [0], [1], [2, 3], [2], [3]]
+    unknown_rows = [[], [], [1], [0], [], [3], [2]]
+    pairs = [(0, 2), (1, 2), (1, 3), (4, 5), (4, 6)]
+    sets, unknown = _unknown_sets(rows, unknown_rows)
+    nodes = identical_sets(sets, unknown=unknown)
+    order = nodes.cell_nodes
+    edges = _edges([(int(order[a]), int(order[b])) for a, b in pairs])
+    flags = ambiguous_nodes(nodes, edges)
+    found = {int(cell) for cell in range(len(rows)) if flags[order[cell]]}
+    assert found == _ambiguous_nodes_by_hand(rows, unknown_rows, pairs) == {2}
+    # Without unknown items, or without edges, no node is ambiguous.
+    plain = identical_sets(sets)
+    assert not ambiguous_nodes(plain, _edges([(0, 1)])).any()
+    assert not ambiguous_nodes(nodes, _edges([])).any()
+    with pytest.raises(MemoryError, match="lists of neighbours"):
+        ambiguous_nodes(nodes, edges, max_bytes=100)
+
+
+def test_random_sets_flag_the_ambiguous_nodes_found_pair_by_pair() -> None:
+    rng = np.random.default_rng(31)
+    n_cells = 60
+    rows, unknown_rows = [], []
+    for _ in range(n_cells):
+        states = rng.integers(0, 3, size=5)
+        rows.append(np.flatnonzero(states == 1).tolist() or [int(rng.integers(5))])
+        unknown_rows.append(
+            [
+                site
+                for site in np.flatnonzero(states == 2).tolist()
+                if site not in rows[-1]
+            ]
+        )
+    sets, unknown = _unknown_sets(rows, unknown_rows)
+    nodes = identical_sets(sets, unknown=unknown)
+    edges = jaccard_edges(nodes, 1.0, inclusive=True)
+    flags = ambiguous_nodes(nodes, edges)
+    # One representative cell per node, with the edges between nodes.
+    first = nodes.first_cells.tolist()
+    pairs = list(zip(edges.first.tolist(), edges.second.tolist(), strict=True))
+    by_hand = _ambiguous_nodes_by_hand(
+        [rows[cell] for cell in first], [unknown_rows[cell] for cell in first], pairs
+    )
+    assert set(np.flatnonzero(flags).tolist()) == by_hand and by_hand
+
+
+def test_ambiguous_cells_join_no_clone_however_many_they_are() -> None:
+    # A founder (item 0, item 1 known absent) and its subclone (0 and 1), two
+    # cells each; three cells hold 0 with 1 unknown, one node of three cells
+    # that TREX's rule keeps and that joins the two clones.
+    rows = [[0], [0], [0, 1], [0, 1], [0], [0], [0]]
+    unknown_rows = [[], [], [], [], [1], [1], [1]]
+    sets, unknown = _unknown_sets(rows, unknown_rows)
+    options = {"method": "jaccard", "similarity": 1.0, "inclusive": True}
+    calls = set_clones(sets, unknown=unknown, ambiguous=True, **options)
+    assert clone_partition(calls.codes) == {frozenset({0, 1}), frozenset({2, 3})}
+    assert calls.ambiguous.tolist() == [False] * 4 + [True] * 3
+    assert not calls.doublets.any() and calls.n_ambiguous_nodes == 1
+    trex = set_clones(sets, unknown=unknown, doublets=True, **options)
+    assert clone_partition(trex.codes) == {frozenset(range(7))}
+    assert not trex.ambiguous.any() and trex.n_ambiguous_nodes == 0
+    with pytest.raises(ValueError, match="ambiguous would change nothing"):
+        set_clones(sets, method="sets", ambiguous=True)
+    with pytest.raises(TypeError, match="ambiguous must be a boolean"):
+        set_clones(sets, unknown=unknown, ambiguous=1, **options)
 
 
 # Links through any shared item.

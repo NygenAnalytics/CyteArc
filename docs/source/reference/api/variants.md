@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    description: CyteArc variants API for mitochondrial lineage tracing and targeted genotyping, with per-cell allele counts imported from mgatk, maegatk, cellsnp-lite, MQuad, VarTrix, MiTo, giftwrap and the GoT tools, joined to cells by barcode, scored with mgatk's per-variant statistics, filtered to informative variants by Signac's or MAESTER's rules, and clustered into clones as Signac's FindClonotypes does.
+    description: CyteArc variants API for mitochondrial lineage tracing and targeted genotyping, with per-cell allele counts imported from mgatk, maegatk, cellsnp-lite, MQuad, VarTrix, MiTo, giftwrap and the GoT tools, joined to cells by barcode, scored with mgatk's per-variant statistics, filtered to informative variants by Signac's or MAESTER's rules, clustered into clones as Signac's FindClonotypes does, and genotyped at targeted sites by GoT's rules, GIFT's model or the tools' own calls.
 ---
 
 # Variants API reference
 
 Mitochondrial lineage tracing (mtscATAC-seq, MAESTER) and targeted genotyping (GoT, GIFT) count, for each cell, the reads or UMIs of each allele at a set of sites: every position of the mitochondrial genome, or targets and probes without coordinates. Each tool writes those counts in its own files. `ds.variants` reads them into one `variant_counts` artifact that holds the sites and their alleles, and each cell's depth at each site, its count of each allele and the calls the tool made itself.
 
-{meth}`ds.variants.import_counts <cytearc.datastore.namespaces.VariantsAccessor.import_counts>` imports the counts of one file or folder, or several of one format, {meth}`ds.variants.load_counts <cytearc.datastore.namespaces.VariantsAccessor.load_counts>` reads them as a {class}`~cytearc.variants.VariantCounts` record, and {meth}`ds.plots.variant_depth <cytearc.datastore.plot_accessor.DataStorePlotAccessor.variant_depth>` draws the depth at each site and in each cell. {meth}`ds.variants.informative <cytearc.datastore.namespaces.VariantsAccessor.informative>` scores every variant across cells and selects the informative ones, and {meth}`ds.variants.clones <cytearc.datastore.namespaces.VariantsAccessor.clones>` calls the clones that those variants mark.
+{meth}`ds.variants.import_counts <cytearc.datastore.namespaces.VariantsAccessor.import_counts>` imports the counts of one file or folder, or several of one format, {meth}`ds.variants.load_counts <cytearc.datastore.namespaces.VariantsAccessor.load_counts>` reads them as a {class}`~cytearc.variants.VariantCounts` record, and {meth}`ds.plots.variant_depth <cytearc.datastore.plot_accessor.DataStorePlotAccessor.variant_depth>` draws the depth at each site and in each cell. {meth}`ds.variants.informative <cytearc.datastore.namespaces.VariantsAccessor.informative>` scores every variant across cells and selects the informative ones, and {meth}`ds.variants.clones <cytearc.datastore.namespaces.VariantsAccessor.clones>` calls the clones that those variants mark. For targeted sites, {meth}`ds.variants.genotypes <cytearc.datastore.namespaces.VariantsAccessor.genotypes>` calls each cell's genotype and {meth}`ds.variants.genotype_clones <cytearc.datastore.namespaces.VariantsAccessor.genotype_clones>` the clones that the mutant calls define.
 
 ```python
 cells = ds.snapshot_cell_selection("I")
@@ -152,6 +152,70 @@ Signac turns an uncovered cell's allele frequency into 0, which makes a cell tha
 
 `ds.plots.allele_frequencies(informative, clones=clones)` draws each cell's allele frequency of each informative variant, cells ordered by clone under a bar of clone colours, with uncovered entries grey and apart from a frequency of 0. Without `clones`, it draws the scored cells in their order; `max_cells` caps the cells drawn, chosen evenly along the order.
 
+## Call genotypes
+
+Targeted genotyping asks what each cell carries at a few known mutation sites. `genotypes` calls each cell's genotype at the sites of a `variant_counts` artifact in one vocabulary and saves a `variant_genotypes` artifact, {meth}`ds.variants.load_genotypes <cytearc.datastore.namespaces.VariantsAccessor.load_genotypes>` reads it as a {class}`~cytearc.variants.VariantGenotypes` record, `genotype_clones` calls clones from the combinations of mutant calls that cells carry, and {meth}`ds.plots.genotypes <cytearc.datastore.plot_accessor.DataStorePlotAccessor.genotypes>` draws the calls.
+
+```python
+counts = ds.variants.import_counts(
+    ["Patient1_CALR_summTable.txt", "Patient1_SF3B1_summTable.txt"],
+    cell_selection=cells,
+)
+calls = ds.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
+ds.variants.load_genotypes(calls).calls.head()  # each cell's call at each site
+clones = ds.variants.genotype_clones(calls, within="donor")
+ds.plots.genotypes(calls, group_by="cell_type", layout_key="UMAP", site="Patient1_CALR")
+```
+
+### Calls
+
+A call says what a cell carries at a site, and keeps the source's own label, such as GoT's `MUT`:
+
+| Call | What the cell carries |
+|---|---|
+| `wild_type` | the wild type only |
+| `heterozygous` | the alternative allele on one copy |
+| `homozygous_alternative` | the alternative allele on every copy |
+| `alternative_present` | the alternative allele, without a claim of how many copies carry it, as GoT's UMIs of one transcript give |
+| `missing` | no evidence at the site |
+| `filtered` | evidence that the rule did not call, such as ambiguous UMIs alone |
+
+A cell that the calls do not list at a site is `missing` there. `cytearc.variants.CALLS` lists the calls in the order of their stored codes, and `cytearc.variants.SOURCE_CALLS` maps the labels of each tool's call column to them.
+
+### Methods
+
+`method` chooses how the calls are made:
+
+- `"source"` adopts the calls that the tool wrote into the imported files: GoT's `Genotype` on GEO, GoT-Multi's `genotype_merged` and its refined `genotype_final`, whose `FalsePositive`, a mutant call that its model rejected, is `filtered`, and Gotcha's `genotype_pred`, whose `HET` is `heterozygous`. GoT's `MUT` is `alternative_present`. Where the files wrote several call columns for a site, each cell takes its call from the first that holds one for it: the refined call, then the merged call, then a single call column, then the channels' calls, so the cells that GoT-Multi's model did not refine keep their merged call. A label of no call, such as GoT-Multi's `Unprofiled`, is `filtered` where the cell holds UMIs at the site or at its channels and `missing` where it holds none, and a cell with UMIs but no call is `filtered`.
+- `"threshold"` calls each cell from its UMIs of the site's wild type and alternative, by the rule given, since GoT studies apply different ones. `min_mutant_umis=1` calls a cell `alternative_present` with one mutant UMI or more and `wild_type` with none, the rule that GEO GSE204845 states for its patient samples and that Single-cell_BPDCN's XV-seq analysis applies. `min_fraction=0.9` calls a cell mutant or wild type when that allele holds more than 90% of its UMIs, the rule that [Nam et al. (2019)](https://doi.org/10.1038/s41586-019-1367-0) applied to cell lines, whose many transcripts make PCR recombination more likely; the two may be combined. `min_umis`, 1 by default, is the fewest UMIs of the two alleles that a call needs, and a cell that no rule calls is `filtered`. On GoT-Multi's counts each channel of a target is a site of its own, so a cell's `n_mutant_sites` counts a target once per channel.
+- `"gift"` applies the model of GIFT ([Blattman et al. 2026](https://doi.org/10.64898/2026.04.11.717967)) to giftwrap's counts, as the next section describes.
+
+`"threshold"` and `"gift"` genotype the sites that have one wild type and one alternative, and `"source"` those with calls, unless `sites` names them. `alleles` names the wild type and alternative of a site whose files do not, such as a GIFT probe whose manifest lacks its gapfills: `alleles={"JAK2 c.1849G>T": ("CAC", "AAC")}`, in the probe's orientation, as the files give the gapfills. A wild type that no cell shows at the site raises `ValueError`, and an alternative that none shows gives a warning. `"gift"` reads the gapfills of giftwrap's counts and refuses counts of other tools. Saved genotypes are reused when the counts, the method and its rules are the same.
+
+### GIFT's model
+
+GIFT reads a mutation from the gapfill that a probe pair captures, and a UMI may come from template switching during PCR, a swap, which carries no genotype information. Each UMI scores each genotype with the larger of its swap probability and its gapfill's probability under the genotype. A gapfill's probability of the wild type is its likelihood under the wild type over the sum of its likelihoods under the wild type and the mutant, where each edit between the gapfill and an allele multiplies the likelihood by 0.01. GIFT gives any gapfill that does not match an allele a likelihood of 0.01 in cell lines, which equals this for a gapfill one edit away; the heterozygote scores the larger of half of each allele's probability. A cell's likelihood of a genotype is the product of its UMIs' scores, summed as logarithms so that many UMIs do not underflow, and the posterior divides it by the sum over the three genotypes, a uniform prior. The most probable genotype is called when its posterior exceeds `min_posterior`, 0.6 by default, and the cell holds at least `min_umis` UMIs, 1 by default, whose swap probability lies below 0.1; otherwise the cell is `filtered`. Each call keeps the three posteriors.
+
+`swap_probabilities` gives the probability of a swap by a UMI's reads, starting at 1 read, such as `{1: 0.5, 2: 0.2, 4: 0.05}`, and a UMI takes the value of the most reads given that it reaches. GIFT's reproducibility code stores each library's likelihood that a UMI of so many reads is no swap, so give one minus it, and a probability of 1 for UMIs of few reads drops them, as GIFT drops them in cell lines. giftwrap stores each cell's UMIs and reads per probe and gapfill rather than per UMI, so each UMI takes its entry's reads per UMI, rounded down. Without `swap_probabilities` every UMI counts, as GIFT treats cell lines once their UMIs of few reads are dropped. GIFT learns the swap probabilities and the gapfill error rates of patient samples from controls; here the swap probabilities are given, and a gapfill that matches neither allele is weighed by its edits.
+
+### The variant_genotypes artifact
+
+The artifact holds a row per cell of the counts in its canonical `n_mutant_sites`, the sites called `heterozygous`, `homozygous_alternative` or `alternative_present`, and `n_called_sites`, those and the sites called `wild_type`, so `ds.select_cells(calls, low=0)` keeps the cells with a mutant call. {doc}`artifacts` describes its arrays.
+
+`load_genotypes` returns a {class}`~cytearc.variants.VariantGenotypes` record. Its `sites` table holds each genotyped site's `reference` and `alternative`, `source`, the call columns that `"source"` adopted in the order a cell's call is taken from them, and the cells of each call, those that the calls do not list counted `missing`; `cells` holds each cell's `n_mutant_sites` and `n_called_sites` at the sites shown; and `calls` holds one row per cell and site with evidence: `cell`, `site`, `call`, `label`, `reference_umis` and `alternative_umis`, -1 for adopted calls, and GIFT's `posterior_wild_type`, `posterior_heterozygous` and `posterior_homozygous_alternative`, NaN for the other methods. `sites` reads the calls of some sites, which the `cells` table then counts.
+
+Calling reads the counts in bands of cells within the memory budget, which counts each band's rows, about 144 bytes per row for `"threshold"`, 168 for `"source"` and 360 for `"gift"`, whose scores and posteriors hold the most; 72 bytes for each cell of the counts; the chunks that a band's reads decompress and that appending its calls rewrites; and 1 MiB that the store's objects hold whatever the counts. A band holds at least 1,000 rows, or every row, and every row of the cell that holds the most. Loading checks about 220 bytes per call row, 200 per cell and the read of the cells' IDs.
+
+### Clones from genotypes
+
+Cells that descend from one mutated ancestor share its mutations. `genotype_clones(calls)` takes each cell's mutant sites as a set and the sites at which it is `missing` or `filtered` as unknown rather than wild type. Two cells are linked when they agree at every site that both were called at, a Jaccard index of 1 over the sites that both know. Cells whose calls agree with two cells that disagree at a site they were not called at cannot be placed: cells that carry a founder mutation and were not read where a subclone differs from the rest of the founder's cells could belong to either. Such cells are left out as ambiguous, however many there are, so they never join the founder and its subclone into one clone. A cell read where its clone's partly read cells were not stays with them, since cells that share no read site do not disagree. The linked cells are the clones, numbered by size as `clone_1` and on, and a cell without a mutant call gets no clone. A doublet of two clones read at the sites where they differ carries a combination of its own and forms a clone of one cell. `sites` chooses the sites whose calls define the clones, and `within` names cell metadata columns, such as the donor, whose groups clones never cross.
+
+The clones are saved as a `clones` artifact, which `ds.clones.load_clones`, every clone summary and `ds.plots.clone_abundance` read; its `ambiguous` array marks the cells left out as ambiguous, and its attributes count the clones, the sites, the mutant cells and the ambiguous cells. The calls are read whole, at about 48 bytes per call row and 80 per cell, beside a mask of each mutant cell's known sites and the 1 MiB that the store's objects hold.
+
+### Plot genotypes
+
+`ds.plots.genotypes(calls)` draws, for each site, one bar per group whose segments are the shares of the group's cells with each call; cells that the calls do not list at a site count as `missing`. `group_by` names a cell metadata column, such as the cell type, and `groups` a cell-label artifact; without either, each site has one bar of all cells, and cells without a group are left out. With `layout_key`, such as `"UMAP"`, a second panel draws the cells at the cell metadata columns `UMAP1` and `UMAP2`, coloured by their call at `site`, which may be left out when one site is drawn. Its tables are `calls` (`site`, `group`, `call`, `cells`, `share`) and, with a layout, `cells` (`cell`, `x`, `y`, `call`).
+
 ## VariantCounts
 
 ```{eval-rst}
@@ -162,4 +226,10 @@ Signac turns an uncovered cell's allele frequency into 0, which makes a cell tha
 
 ```{eval-rst}
 .. autoclass:: cytearc.variants.VariantSelection
+```
+
+## VariantGenotypes
+
+```{eval-rst}
+.. autoclass:: cytearc.variants.VariantGenotypes
 ```

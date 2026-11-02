@@ -9,16 +9,26 @@ if TYPE_CHECKING:
         DEPTH_DEFINITIONS as DEPTH_DEFINITIONS,
         VariantCounts as VariantCounts,
     )
+    from .genotypes import (
+        CALLS as CALLS,
+        GENOTYPE_METHODS as GENOTYPE_METHODS,
+        SOURCE_CALLS as SOURCE_CALLS,
+        VariantGenotypes as VariantGenotypes,
+    )
     from .masks import VARIANT_MASKS as VARIANT_MASKS
     from .statistics import PRESETS as PRESETS, VariantSelection as VariantSelection
 
 __all__ = [
     "ALLELE_ROLES",
+    "CALLS",
     "COUNT_UNITS",
     "DEPTH_DEFINITIONS",
+    "GENOTYPE_METHODS",
     "PRESETS",
+    "SOURCE_CALLS",
     "VARIANT_MASKS",
     "VariantCounts",
+    "VariantGenotypes",
     "VariantSelection",
 ]
 
@@ -26,11 +36,15 @@ __getattr__, __dir__ = _lazy_facade(
     __name__,
     {
         "ALLELE_ROLES": ".counts",
+        "CALLS": ".genotypes",
         "COUNT_UNITS": ".counts",
         "DEPTH_DEFINITIONS": ".counts",
+        "GENOTYPE_METHODS": ".genotypes",
         "PRESETS": ".statistics",
+        "SOURCE_CALLS": ".genotypes",
         "VARIANT_MASKS": ".masks",
         "VariantCounts": ".counts",
+        "VariantGenotypes": ".genotypes",
         "VariantSelection": ".statistics",
     },
 )

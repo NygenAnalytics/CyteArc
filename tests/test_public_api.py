@@ -154,6 +154,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "embedding_raster",
     "gene_pairing",
     "gene_usage",
+    "genotypes",
     "graph_qc",
     "guide_calls",
     "guide_thresholds",
