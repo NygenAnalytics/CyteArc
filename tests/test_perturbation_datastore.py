@@ -519,22 +519,46 @@ def test_import_refuses_counts_that_are_not_unsigned_integers(tmp_path) -> None:
         )
 
 
-def test_import_refuses_counts_beyond_uint32_as_guide_calling_does(tmp_path) -> None:
-    # The top UMIs are saved as uint32, so a larger count would wrap.
+_BEYOND_UINT32 = "^Guide UMI counts must be at most 4294967295$"
+
+
+def _store_beyond_uint32(path: Path) -> DataStore:
+    """The screen, with cell0 holding a count beyond the uint32 range."""
     counts = GUIDE_COUNTS.astype(np.uint64)
     counts[0, 0] = 2**33 + 7
     rna = np.random.default_rng(7).poisson(2.0, size=(len(counts), 10))
-    store = write_screen(tmp_path / "store.zarr", rna, counts, dtype="uint64")
+    return write_screen(path, rna, counts, dtype="uint64")
+
+
+def test_import_refuses_counts_beyond_uint32_as_guide_calling_does(tmp_path) -> None:
+    # The top UMIs are saved as uint32, so a larger count would wrap.
+    store = _store_beyond_uint32(tmp_path / "store.zarr")
     selection = _selection(store)
     saved = written(store)
-    message = "^Guide UMI counts must be at most 4294967295$"
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match=_BEYOND_UINT32):
         store.perturbation.import_guide_calls(
             _call_file(tmp_path), cell_selection=selection
         )
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match=_BEYOND_UINT32):
         store.perturbation.call_guides(selection, method="fixed", min_umi=5)
     assert written(store) == saved
+
+
+def test_refusals_mid_stream_leave_zarr_concurrency_as_it_was(tmp_path) -> None:
+    # Each refusal stops the stream of counts at its first block. The errors
+    # are kept, as a notebook keeps its last error, and so are the frames that
+    # hold the stopped streams.
+    store = _store_beyond_uint32(tmp_path / "store.zarr")
+    selection = _selection(store)
+    before = zarr.config.get("async.concurrency")
+    with pytest.raises(ValueError, match=_BEYOND_UINT32) as imported:
+        store.perturbation.import_guide_calls(
+            _call_file(tmp_path), cell_selection=selection
+        )
+    with pytest.raises(ValueError, match=_BEYOND_UINT32) as called:
+        store.perturbation.call_guides(selection, method="fixed", min_umi=5)
+    assert zarr.config.get("async.concurrency") == before
+    del imported, called
 
 
 @pytest.mark.parametrize(

@@ -1,3 +1,4 @@
+import gc
 import threading
 import weakref
 
@@ -186,6 +187,85 @@ def test_stream_shards_config_neutral_without_io():
         # Every item runs under the caller's setting, which stays in place.
         assert seen == [5] * 4
         assert zarr.config.get("async.concurrency") == 5
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_paused_stream_holds_no_io_limit(workers):
+    from cytearc.storage import async_execution
+
+    before = zarr.config.get("async.concurrency")
+    seen = []
+
+    def fn(value):
+        seen.append(zarr.config.get("async.concurrency"))
+        return value
+
+    stream = stream_shards(range(2), fn, workers=workers, io_concurrency=1)
+    try:
+        # Taking both items waits for the read-ahead, so no item is running.
+        assert [next(stream), next(stream)] == [0, 1]
+        # The stream waits for its consumer and holds no limit meanwhile.
+        assert zarr.config.get("async.concurrency") == before
+        assert async_execution._ACTIVE_IO_LIMITS == {}
+    finally:
+        stream.close()
+    assert seen == [1, 1]
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_stream_abandoned_in_a_reference_cycle_leaves_the_io_limit(workers):
+    from cytearc.storage import async_execution
+
+    before = zarr.config.get("async.concurrency")
+
+    def refuse_the_last_item() -> weakref.ref:
+        stream = stream_shards(
+            range(2), lambda value: value, workers=workers, io_concurrency=1
+        )
+        kept: list[BaseException] = []
+        try:
+            for value in stream:
+                if value == 1:
+                    raise ValueError("the last item is refused")
+        except ValueError as error:
+            # The error's traceback holds this frame, which holds the error and
+            # the stream, so the stream outlives the call in a reference cycle.
+            kept.append(error)
+        return weakref.ref(stream)
+
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        stream = refuse_the_last_item()
+        # Only the cycle collector can close the stream, and it has not run.
+        assert stream() is not None
+        assert zarr.config.get("async.concurrency") == before
+        assert async_execution._ACTIVE_IO_LIMITS == {}
+    finally:
+        if enabled:
+            gc.enable()
+        # The collector frees the stream, so a failure here leaves no limit
+        # entered for later tests.
+        gc.collect()
+    assert stream() is None
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_failed_item_releases_its_io_limit(workers):
+    from cytearc.storage import async_execution
+
+    before = zarr.config.get("async.concurrency")
+
+    def fail(value):
+        raise RuntimeError(f"item {value} failed")
+
+    # The kept error keeps the frames of the failed call alive, so only the
+    # limit's own exit can restore the setting.
+    with pytest.raises(RuntimeError, match="^item 0 failed$") as failed:
+        list(stream_shards(range(1), fail, workers=workers, io_concurrency=1))
+    assert zarr.config.get("async.concurrency") == before
+    assert async_execution._ACTIVE_IO_LIMITS == {}
+    del failed
 
 
 def test_stream_shards_cancels_unconsumed_work():

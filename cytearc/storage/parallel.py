@@ -32,15 +32,17 @@ def _shard_context() -> Iterator[None]:
         _shard_ctx.active = previous
 
 
-@contextmanager
-def _io_concurrency(io: int | None) -> Iterator[None]:
+def _io_limited(fn: Callable[[Any], Any], io: int | None) -> Callable[[Any], Any]:
+    """Return ``fn`` holding Zarr's process-wide I/O limit ``io`` while it runs."""
     if io is None:
-        yield
-        return
+        return fn
     from .async_execution import zarr_io_concurrency
 
-    with zarr_io_concurrency(io):
-        yield
+    def limited(item: Any) -> Any:
+        with zarr_io_concurrency(io):
+            return fn(item)
+
+    return limited
 
 
 def _blas_limit(within: int | None) -> Any:
@@ -142,18 +144,26 @@ def stream_shards(
     total: int | None = None,
     backend: Backend = "thread",
 ) -> Generator[Any, None, None]:
-    """Yield transformed items in order with bounded read-ahead."""
+    """Yield transformed items in order with bounded read-ahead.
+
+    ``io_concurrency`` limits Zarr's process-wide async concurrency while a
+    call of ``fn`` runs, and not while the stream waits for its consumer. A
+    stream that its consumer stops without closing, as an error in the
+    consumer does, then leaves the setting as it was, even before the stream
+    is collected.
+    """
     workers = max(1, int(workers))
+    work = _io_limited(fn, io_concurrency)
     if backend == "serial" or workers <= 1 or in_shard_context():
         iterator = iter(items)
-        with _io_concurrency(io_concurrency), _blas_limit(within_block_threads):
+        with _blas_limit(within_block_threads):
             try:
 
                 def checked() -> Iterator[Any]:
                     for item in iterator:
                         shutdown_checkpoint()
                         with _shard_context():
-                            result = fn(item)
+                            result = work(item)
                         shutdown_checkpoint()
                         yield result
 
@@ -161,11 +171,10 @@ def stream_shards(
             finally:
                 _close_iterator(iterator)
         return
-    with _io_concurrency(io_concurrency):
-        base = _imap_ordered(
-            items,
-            fn,
-            workers=workers,
-            within_block_threads=within_block_threads,
-        )
-        yield from _progress(base, msg, total)
+    base = _imap_ordered(
+        items,
+        work,
+        workers=workers,
+        within_block_threads=within_block_threads,
+    )
+    yield from _progress(base, msg, total)

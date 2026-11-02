@@ -437,8 +437,8 @@ class AlignedFeatureStream:
                 self._query_index_map,
             )
 
-        # The block reader holds Zarr's process-wide I/O limit while suspended,
-        # so close it when this iterator closes rather than at collection.
+        # Close the block reader when this iterator closes, so a stopped reader
+        # releases its last block then rather than at collection.
         with closing(
             stream_shards(
                 self._row_geometry.boundaries,
