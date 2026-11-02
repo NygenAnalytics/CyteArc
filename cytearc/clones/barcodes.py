@@ -59,6 +59,7 @@ __all__ = [
     "LineageBarcodes",
     "barcode_pairs",
     "cell_summaries",
+    "known_sums",
     "library_summaries",
     "lineage_barcode_frames",
     "pair_keys",
@@ -119,7 +120,7 @@ class _Rows:
         )
 
 
-def _known_sums(values: np.ndarray, starts: np.ndarray) -> np.ndarray:
+def known_sums(values: np.ndarray, starts: np.ndarray) -> np.ndarray:
     """Sum runs of counts; a run that holds an unknown count, -1, sums to -1."""
     sums = np.add.reduceat(np.maximum(values, 0), starts)
     sums[np.minimum.reduceat(values, starts) < 0] = -1
@@ -145,7 +146,7 @@ def _collapsed(rows: _Rows) -> _Rows:
     starts = np.flatnonzero(new)
     molecule = umis_text[starts] >= 0
     # A molecule is one UMI however many rows name it; a pair sums its UMIs.
-    umis = np.where(molecule, 1, _known_sums(rows.umis[order], starts))
+    umis = np.where(molecule, 1, known_sums(rows.umis[order], starts))
     return _Rows(
         cells=cells[starts],
         libraries=libraries[starts],
@@ -154,7 +155,7 @@ def _collapsed(rows: _Rows) -> _Rows:
         umis_text=umis_text[starts],
         umi_values=rows.umi_values,
         umis=np.asarray(umis, dtype=np.int64),
-        reads=_known_sums(rows.reads[order], starts),
+        reads=known_sums(rows.reads[order], starts),
     )
 
 
@@ -611,8 +612,8 @@ def _pair_runs(
         cells=cells[starts],
         sources=sources[starts],
         barcodes=barcodes[starts],
-        umis=_known_sums(np.asarray(umis, dtype=np.int64), starts),
-        reads=_known_sums(np.asarray(reads, dtype=np.int64), starts),
+        umis=known_sums(np.asarray(umis, dtype=np.int64), starts),
+        reads=known_sums(np.asarray(reads, dtype=np.int64), starts),
         molecules=np.add.reduceat(np.asarray(is_molecule, dtype=np.int64), starts),
     )
 

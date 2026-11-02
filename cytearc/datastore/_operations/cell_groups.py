@@ -52,6 +52,7 @@ __all__ = [
     "CellGroups",
     "cell_groups",
     "group_columns",
+    "within_groups",
 ]
 
 #: Grouping cells holds, at its peak, about ``GROUPING_BYTES_PER_CELL`` for
@@ -402,3 +403,71 @@ def cell_groups(
     # each.
     group_names(keys)
     return CellGroups(key_columns, keys, cell_codes)
+
+
+def within_groups(
+    zw: zarr.Group,
+    cells: MetaData,
+    cell_selection: ArtifactRef,
+    columns: tuple[str, ...],
+    members: np.ndarray,
+    *,
+    memory_bytes: int,
+    reserved: frozenset[str],
+    what: str,
+) -> tuple[np.ndarray, list[dict[str, str]], str | None]:
+    """Group an artifact's member cells by their labels in the ``within`` columns.
+
+    Clone-defining methods define clones within groups, such as each mouse:
+    the groups are those of :func:`cell_groups`, in the natural order of
+    their labels, identified by its fingerprint of each cell's group.
+
+    Args:
+        zw: The store's root group.
+        cells: The store's cell metadata.
+        cell_selection: The selection of the artifact's cells.
+        columns: The within columns.
+        members: The cells that need a group, as a mask aligned to the
+            artifact's cells, such as the cells with a receptor.
+        memory_bytes: The memory budget.
+        reserved: The columns of the result, which no within column may name.
+        what: What the member cells hold, such as ``"a receptor"``, which
+            the error names.
+
+    Returns:
+        Each cell's group, 0 for a cell that is not a member; each group's
+        labels by column; and the fingerprint of the cells' groups. Without
+        columns, every cell is in one group without labels, and the
+        fingerprint is None.
+
+    Raises:
+        ValueError: If a column is not a cell metadata column, or a member
+            cell has no label in one.
+        MemoryError: If grouping the cells does not fit the memory budget.
+    """
+    n_cells = len(members)
+    if not columns:
+        return np.zeros(n_cells, dtype=np.int64), [{}], None
+    for column in columns:
+        if column not in cells.columns:
+            raise ValueError(
+                f"within names {column!r}, which is not a cell metadata column"
+            )
+    grouped = cell_groups(
+        zw,
+        cells,
+        cell_selection,
+        members,
+        group_by=columns,
+        groups=None,
+        cell_selection=None,
+        memory_bytes=memory_bytes,
+        reserved=reserved,
+    )
+    unlabelled = int(np.count_nonzero(members & (grouped.codes < 0)))
+    if unlabelled:
+        raise ValueError(
+            f"The within columns have no label for {unlabelled} cells with {what}. "
+            f"Every cell with {what} needs a label in the within columns."
+        )
+    return np.maximum(grouped.codes, 0), grouped.keys, grouped.fingerprint()

@@ -4,8 +4,9 @@ Each source saves the synthetic truth's clones its own way, in a store of the
 truth's cells, and every summary must measure the truth's clones whatever
 saved them. The expected values are counted cell by cell from the truth, so
 they never come from the code under test. A pull request that adds a clone
-source adds a row to ``SOURCES``, and to ``KEPT_APART`` when its clones keep
-labels apart; one that adds a summary adds a test here.
+source adds a row to ``SOURCES``, and one to ``KEPT_APART`` when its clones
+keep labels apart or to ``LABELS`` when they keep none, which gives the rule
+its labels follow, or None; one that adds a summary adds a test here.
 """
 
 from collections import Counter
@@ -22,14 +23,22 @@ from scipy.stats import fisher_exact
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.storage.refs import ArtifactRef
+from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
     coupling_reference,
+    import_calling_truth,
     import_truth_clones,
     import_truth_receptors,
     overlap_reference,
     write_truth_store,
 )
-from tests.clone_truth import N_CELLS, clone_truth, number_label, receptor_truth
+from tests.clone_truth import (
+    N_CELLS,
+    calling_truth,
+    clone_truth,
+    number_label,
+    receptor_truth,
+)
 from tests.storage_helpers import insert_nullable_cell_column
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
@@ -63,12 +72,23 @@ def _clonotype_clusters(store: DataStore, folder: Path) -> ArtifactRef:
     )
 
 
+def _barcode_clones(store: DataStore, folder: Path) -> ArtifactRef:
+    # TREX's rules remove the errors, ambient molecules and partial cloneIDs
+    # of the truth's barcodes and join the cells that lost one, keeping the
+    # truth's clones, its singleton among them.
+    calling = calling_truth(TRUTH, noise=("amplified", "ambient", "dropout", "partial"))
+    with collect_warnings():
+        barcodes = import_calling_truth(store, calling, folder, "trex")
+    return store.clones.barcode_clones(barcodes, preset="trex")
+
+
 #: How each clone source saves the truth's clones, in the order the stack adds
 #: them.
 SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
     "imported clones": _imported_clones,
     "clonotypes": _clonotypes,
     "clonotype clusters": _clonotype_clusters,
+    "barcode clones": _barcode_clones,
 }
 #: The labels that a source's clones keep apart, by key column, for each of the
 #: truth's cells: every summary measures the cells of each label apart, so T
@@ -85,6 +105,40 @@ KEPT_APART: dict[str, dict[str, np.ndarray]] = {
 }
 
 
+def _ranked_label(clone: int) -> str:
+    """A clone's label as barcode clones number them, counted from the truth.
+
+    ``clone_1`` is the largest clone, and clones of one size follow their
+    first cell.
+    """
+    sizes = np.bincount(TRUTH.clones[TRUTH.clones >= 0], minlength=TRUTH.n_clones)
+    first = [
+        int(np.flatnonzero(TRUTH.clones == other)[0]) for other in range(TRUTH.n_clones)
+    ]
+    ranked = sorted(
+        range(TRUTH.n_clones), key=lambda other: (-sizes[other], first[other])
+    )
+    return f"clone_{ranked.index(clone) + 1}"
+
+
+#: How each source that keeps no labels apart labels the truth's clones: the
+#: rule its labels follow from the truth, such as the labels of imported
+#: clones' files and barcode clones' numbers by size, or None for a source
+#: whose labels follow from something else.
+LABELS: dict[str, Callable[[int], str] | None] = {
+    "imported clones": number_label,
+    "barcode clones": _ranked_label,
+}
+
+
+def test_every_source_says_how_it_labels_the_truths_clones() -> None:
+    # The tracking row checks the labels of every source that keeps no labels
+    # apart against its rule, so each source names its labels kept apart or
+    # its rule, and never both.
+    assert set(LABELS).isdisjoint(KEPT_APART)
+    assert set(LABELS) | set(KEPT_APART) == set(SOURCES)
+
+
 @pytest.fixture(scope="module", params=list(SOURCES))
 def source(request, tmp_path_factory) -> SimpleNamespace:
     folder = tmp_path_factory.mktemp(request.param.replace(" ", "_"))
@@ -98,6 +152,7 @@ def source(request, tmp_path_factory) -> SimpleNamespace:
         store=store,
         clones=SOURCES[request.param](store, folder),
         kept_apart=KEPT_APART.get(request.param, {}),
+        labels=LABELS.get(request.param),
     )
 
 
@@ -189,6 +244,23 @@ def _source_clones(source) -> tuple[dict[tuple, str], dict[tuple, int]]:
         assert labels.setdefault(key, str(label)) == str(label)
     assert len(set(labels.values())) == len(labels)
     return labels, {key: ranks[label] for key, label in labels.items()}
+
+
+def test_only_barcode_clones_record_diagnostics(source) -> None:
+    # The record of every source holds the field, which only the clones
+    # called from barcodes fill.
+    loaded = source.store.clones.load_clones(source.clones)
+    if inspect_artifact(source.store.zw, source.clones).operation == (
+        "call_barcode_clones"
+    ):
+        assert list(loaded.diagnostics) == [
+            "distinctBarcodes",
+            "expectedChanceMatches",
+            "mergedBarcodes",
+            "largestCloneShare",
+        ]
+    else:
+        assert dict(loaded.diagnostics) == {}
 
 
 def test_clone_abundance_counts_the_clones_of_each_size(source) -> None:
@@ -284,8 +356,8 @@ def test_overlap_compares_the_clones_that_samples_share(source) -> None:
 def test_track_follows_each_samples_largest_clones(source) -> None:
     tracked = source.store.clones.track(source.clones, group_by="sample", top=2)
     labels, ranks = _source_clones(source)
-    if not source.kept_apart:
-        assert labels == {(clone,): number_label(clone) for (clone,) in labels}
+    if source.labels is not None:
+        assert labels == {(clone,): source.labels(clone) for (clone,) in labels}
     by_group = _group_cells(source, TRUTH.samples)
     kept = _kept_labels(source, TRUTH.samples)
     # Each group's two largest clones, ties to the larger clone overall.

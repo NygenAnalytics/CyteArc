@@ -16,10 +16,14 @@ import pytest
 from tests.clone_truth import (
     N_CELLS,
     SAMPLES,
+    CallingTruth,
     CloneTruth,
     ReceptorTruth,
     write_cellranger_contigs,
+    write_celltag_reads,
     write_cospar,
+    write_pycashier,
+    write_trex_molecules,
 )
 from tests.storage_helpers import write_count_store
 
@@ -422,6 +426,32 @@ def budget_refusals(
     raise AssertionError("the budget did not settle")
 
 
+def clone_partition(codes: np.ndarray) -> set[frozenset[int]]:
+    """The positions of the cells of each clone, from each cell's clone code, -1 for none."""
+    return {
+        frozenset(np.flatnonzero(codes == clone).tolist())
+        for clone in range(int(codes.max()) + 1 if len(codes) else 0)
+    }
+
+
+def link_count_variance(
+    n_texts: int, first: np.ndarray, second: np.ndarray
+) -> tuple[int, float]:
+    """The pairs linked, and the variance of that count over draws of the texts.
+
+    Each pair's link varies on its own, and with every pair that shares one of
+    its texts: the cherries, two linked pairs that share a text, estimate how
+    much more often such pairs link together than apart.
+    """
+    count = len(first)
+    pairs = n_texts * (n_texts - 1) / 2
+    rate = count / pairs
+    linked = np.bincount(np.concatenate([first, second]), minlength=n_texts)
+    cherries = float(np.sum(linked * (linked - 1) / 2))
+    together = n_texts * (n_texts - 1) * (n_texts - 2) / 2 * rate**2
+    return count, pairs * rate * (1 - rate) + 2 * max(0.0, cherries - together)
+
+
 def smallest_budget(call: Callable[[int], object], high: int) -> int:
     """The smallest budget below ``high`` at which ``call`` raises no MemoryError.
 
@@ -499,3 +529,75 @@ def count_units(
         ascending=[*([True] * len(keys)), False, *([True] * len(values))],
         kind="stable",
     ).reset_index(drop=True)
+
+
+#: The file layout in which each barcode-calling preset reads the truth.
+CALLING_LAYOUTS = ("trex", "pycashier", "celltag", "celltag_multi")
+
+
+def import_calling_truth(
+    store: "DataStore",
+    calling: CallingTruth,
+    folder: Path,
+    layout: str,
+    *,
+    cell_selection: "ArtifactRef | None" = None,
+    samples: Sequence[str] = SAMPLES,
+) -> "ArtifactRef":
+    """Import the calling truth's molecules as one tool writes them, one file per sample.
+
+    ``"trex"`` writes TREX's ``molecules.txt`` of one library, ``"pycashier"``
+    pycashier's reads, ``"celltag"`` the Biddy et al. workflow's reads of
+    one library, and ``"celltag_multi"`` CellTag-multi's scRNA-seq reads of
+    d2 and its scATAC-seq reads, without UMIs, of d4, as two libraries. The
+    files are listed in the order of ``samples``.
+    """
+    barcodes = calling.barcodes
+    prefixes = [f"{sample}__" for sample in samples]
+    assays = {"d2": "RNA", "d4": "ATAC"}
+    if layout == "trex":
+        paths = [
+            write_trex_molecules(
+                barcodes, folder / f"{sample}_molecules.txt", sample=sample
+            )
+            for sample in samples
+        ]
+        options: dict[str, object] = {"barcode_suffix": "-1", "library": "trex"}
+    elif layout == "pycashier":
+        paths = [
+            write_pycashier(
+                barcodes,
+                folder / f"{sample}.umi_cell_labeled.barcode.tsv",
+                sample=sample,
+            )
+            for sample in samples
+        ]
+        options = {"barcode_suffix": "-1", "library": "larry"}
+    elif layout == "celltag":
+        paths = [
+            write_celltag_reads(
+                barcodes,
+                folder / f"{sample}.celltag.parsed.tsv.gz",
+                sample=sample,
+                biddy=True,
+            )
+            for sample in samples
+        ]
+        options = {"library": "rna"}
+    elif layout == "celltag_multi":
+        paths = [
+            write_celltag_reads(
+                barcodes,
+                folder / f"{sample}_parse.txt.gz",
+                sample=sample,
+                assay=assays[sample],
+            )
+            for sample in samples
+        ]
+        options = {"library": [assays[sample] for sample in samples]}
+    else:
+        raise ValueError(f"layout must be one of {', '.join(CALLING_LAYOUTS)}")
+    selection = every_cell(store) if cell_selection is None else cell_selection
+    return store.clones.import_barcodes(
+        paths, cell_selection=selection, barcode_prefix=prefixes, **options
+    )

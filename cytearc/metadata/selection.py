@@ -157,11 +157,18 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
             },
         ),
         # clone_probability is stored when the clone source gives each cell's
-        # posterior, such as Numbat's p_opt.
+        # posterior, such as Numbat's p_opt; n_barcodes and doublet when the
+        # clones were called from lineage barcodes.
         "clones": CellValueSpec(
             "values",
             True,
-            {"codes": True, "clone_size": False, "clone_probability": False},
+            {
+                "codes": True,
+                "clone_size": False,
+                "clone_probability": False,
+                "n_barcodes": False,
+                "doublet": True,
+            },
         ),
         # codes holds each cell's clonotype, a position in the artifact's
         # clonotype_ids, -1 for none.

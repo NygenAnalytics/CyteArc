@@ -423,20 +423,30 @@ class Clones:
             label, as a categorical of the labels in rank order, NA without
             one), ``clone_size`` (the cells of its clone, 0 without one),
             when the source gave them, ``clone_probability`` (the probability
-            of its clone, NaN without one), and each column of
+            of its clone, NaN without one), for clones called from lineage
+            barcodes ``n_barcodes`` (its barcodes after the pair filters) and
+            ``doublet`` (whether TREX's rule removed it), and each column of
             ``kept_apart``, a categorical of the cell's labels.
         clones: One row per clone, largest first: ``clone`` and ``n_cells``.
         source: The operation that saved the clones, such as
-            ``"import_clones"`` or ``"define_clonotypes"``.
+            ``"import_clones"``, ``"call_barcode_clones"`` or
+            ``"define_clonotypes"``.
         kept_apart: The columns of ``cells`` whose labels the clones keep
             apart, such as ``("receptor_type",)`` for clonotypes: every clone
             summary measures the cells of each label apart. Clones keep none.
+        diagnostics: Numbers that the operation recorded about how it
+            defined the clones, by name, which callers can turn into
+            warnings. Clones called from lineage barcodes record
+            ``distinctBarcodes``, ``expectedChanceMatches``,
+            ``mergedBarcodes`` and ``largestCloneShare``; other sources
+            record none.
     """
 
     cells: pd.DataFrame = field(repr=False)
     clones: pd.DataFrame = field(repr=False)
     source: str
     kept_apart: tuple[str, ...] = ()
+    diagnostics: dict[str, int | float] = field(default_factory=dict)
 
 
 def clone_frames(

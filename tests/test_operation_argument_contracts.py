@@ -329,6 +329,20 @@ _CONTRACTS = (
         model_only=_classified("resolved_input", "within_fingerprint"),
     ),
     OperationContract(
+        ClonesAccessor.barcode_clones,
+        metadata_arguments.BarcodeCloneArguments,
+        # The allowlist is recorded by the fingerprint of its distinct
+        # barcodes, the labels of the within columns by theirs; the preset
+        # resolves into the rules recorded, TREX's own among them.
+        signature_only=_classified("transformed", "allowlist"),
+        model_only={
+            **_classified(
+                "resolved_input", "within_fingerprint", "allowlist_fingerprint"
+            ),
+            **_classified("algorithm_policy", "trex_rules"),
+        },
+    ),
+    OperationContract(
         ClonesAccessor.import_barcodes,
         metadata_arguments.LineageBarcodeImportArguments,
         # Each file is identified by its format, columns and library, the

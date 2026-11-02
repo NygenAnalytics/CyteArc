@@ -92,7 +92,7 @@ from .cell_barcodes import (
     barcode_files,
     warn_unmatched_barcodes,
 )
-from .cell_groups import cell_groups, group_columns
+from .cell_groups import cell_groups, group_columns, within_groups
 from .record_tables import (
     read_array,
     record_arrays,
@@ -1047,50 +1047,17 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         columns: tuple[str, ...],
         with_receptor: np.ndarray,
     ) -> tuple[np.ndarray, list[dict[str, str]], str | None]:
-        """Group the cells with a receptor by their labels in the within columns.
-
-        The groups are those of :func:`cell_groups`, in the natural order of
-        their labels, and are identified by its fingerprint of each cell's
-        group.
-
-        Returns:
-            Each cell's group, 0 for a cell without a receptor; each group's
-            labels by column; and the fingerprint of the cells' groups.
-            Without columns, every cell is in one group without labels, and
-            the fingerprint is None.
-
-        Raises:
-            ValueError: If a column is not a cell metadata column, or a cell
-                with a receptor has no label in one.
-            MemoryError: If grouping the cells does not fit the memory budget.
-        """
-        n_cells = len(with_receptor)
-        if not columns:
-            return np.zeros(n_cells, dtype=np.int64), [{}], None
-        for column in columns:
-            if column not in self.cells.columns:
-                raise ValueError(
-                    f"within names {column!r}, which is not a cell metadata column"
-                )
-        grouped = cell_groups(
+        """Group the cells with a receptor by their labels in the within columns."""
+        return within_groups(
             self.zw,
             self.cells,
             cell_selection,
+            columns,
             with_receptor,
-            group_by=columns,
-            groups=None,
-            cell_selection=None,
             memory_bytes=self.memoryBytes,
             reserved=_CLONOTYPE_COLUMNS,
+            what="a receptor",
         )
-        unlabelled = int(np.count_nonzero(with_receptor & (grouped.codes < 0)))
-        if unlabelled:
-            raise ValueError(
-                f"The within columns have no label for {unlabelled} cells with a "
-                "receptor. Every cell with a receptor needs a label in the within "
-                "columns."
-            )
-        return np.maximum(grouped.codes, 0), grouped.keys, grouped.fingerprint()
 
     def _artifact_cell_ids(self, artifact: ArtifactRef) -> np.ndarray:
         """The IDs of a cell-aligned artifact's cells, in the order of its arrays."""
