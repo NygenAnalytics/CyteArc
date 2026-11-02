@@ -28,6 +28,7 @@ from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
     coupling_reference,
     every_cell,
+    import_allele_truth,
     import_calling_truth,
     import_truth_clones,
     import_truth_receptors,
@@ -37,6 +38,7 @@ from tests.clone_helpers import (
 from tests.clone_truth import (
     N_CELLS,
     CloneTruth,
+    allele_calling_truth,
     calling_truth,
     clone_truth,
     number_label,
@@ -115,6 +117,24 @@ def _genotype_clones(store: DataStore, folder: Path) -> ArtifactRef:
     return store.variants.genotype_clones(genotypes)
 
 
+def _allele_clones(store: DataStore, folder: Path) -> ArtifactRef:
+    # DARLIN's rules: alleles of frequency below 2e-5 in at most one of the
+    # bank's mice link cells, so neither the common alleles, the unedited
+    # arrays and placeholders nor the homoplasic allele of three mice join
+    # two clones; the truth's clones, its singleton among them, hold two
+    # rare alleles each, below DARLIN's three.
+    calling = allele_calling_truth(TRUTH, noise=("homoplasy",))
+    alleles = import_allele_truth(store, calling, TRUTH, folder)
+    return store.clones.allele_clones(
+        alleles,
+        method="graph",
+        frequencies=calling.banks,
+        max_frequency=2e-5,
+        max_samples=1,
+        max_alleles=3,
+    )
+
+
 #: How each clone source saves the truth's clones, in the order the stack adds
 #: them.
 SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
@@ -124,6 +144,7 @@ SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
     "barcode clones": _barcode_clones,
     "variant clones": _variant_clones,
     "genotype clones": _genotype_clones,
+    "allele clones": _allele_clones,
 }
 #: The truth's clones as a source saves them, where it cannot save every one:
 #: variant clones join each cell to the cells that share its variants, so the
@@ -147,7 +168,7 @@ KEPT_APART: dict[str, dict[str, np.ndarray]] = {
 
 
 def _ranked_label(clone: int) -> str:
-    """A clone's label as barcode and genotype clones number them, counted from the truth.
+    """A clone's label as barcode, genotype and allele clones number them, from the truth.
 
     ``clone_1`` is the largest clone, and clones of one size follow their
     first cell.
@@ -164,14 +185,15 @@ def _ranked_label(clone: int) -> str:
 
 #: How each source that keeps no labels apart labels the truth's clones: the
 #: rule its labels follow from the truth, such as the labels of imported
-#: clones' files and the numbers by size of barcode and genotype clones, or
-#: None for a source whose labels follow from something else, such as variant
-#: clones, which number their clones by cluster.
+#: clones' files and the numbers by size of barcode, genotype and allele
+#: clones, or None for a source whose labels follow from something else,
+#: such as variant clones, which number their clones by cluster.
 LABELS: dict[str, Callable[[int], str] | None] = {
     "imported clones": number_label,
     "barcode clones": _ranked_label,
     "variant clones": None,
     "genotype clones": _ranked_label,
+    "allele clones": _ranked_label,
 }
 
 

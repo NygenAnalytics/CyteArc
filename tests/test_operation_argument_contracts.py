@@ -439,6 +439,17 @@ _CONTRACTS = (
         model_only=_classified("resolved_input", "sources"),
     ),
     OperationContract(
+        ClonesAccessor.allele_clones,
+        metadata_arguments.AlleleCloneArguments,
+        # Each character's bank is recorded by the fingerprint of its sorted
+        # alleles, frequencies and samples, the labels of the within columns
+        # by theirs.
+        signature_only=_classified("transformed", "frequencies"),
+        model_only=_classified(
+            "resolved_input", "within_fingerprint", "frequencies_fingerprint"
+        ),
+    ),
+    OperationContract(
         PerturbationAccessor.import_guide_calls,
         metadata_arguments.GuideCallImportArguments,
         # The file is identified by the SHA-256 of its bytes, not its path.

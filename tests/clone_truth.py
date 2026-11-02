@@ -2585,3 +2585,235 @@ def expected_gestalt_table(
             }
         )
     return _records(rows)
+
+
+# Allele clone calling ----------------------------------------------------------
+
+#: The noise that the rules of allele clone calling must remove: a homoplasic
+#: allele, rare in the bank but found in three of its mice, in one cell of
+#: each of two clones ("homoplasy"), and an allele that the bank lacks in one
+#: cell of each of two other clones ("merged").
+ALLELE_NOISE = ("homoplasy", "merged")
+#: The bank frequency of the alleles that independently edited cells often
+#: hold, and of the rare alleles that the bank lists.
+COMMON_FREQUENCY = 0.05
+RARE_FREQUENCY = 1e-6
+#: The clones that each kind of noise joins: both rare alleles of each clone
+#: and the allele that joins them make five, more than three.
+HOMOPLASIC_CLONES = (0, 3)
+MERGED_CLONES = (2, 5)
+
+
+@dataclass(frozen=True, slots=True)
+class AlleleCallingTruth:
+    """DARLIN arrays of the truth's cells for calling clones from rare alleles.
+
+    Clone ``k`` holds two rare alleles: one on its own array,
+    ``DARLIN_ARRAYS[k % 3]``, in every cell but its second, and one on the
+    next array in its first two cells and every other cell after, so its
+    second cell joins the others only through its first, which holds both.
+    The bank lists the first rare allele of even clones and the second of
+    odd ones, at ``RARE_FREQUENCY`` in one mouse, and lacks the others. The
+    third array holds one of two common alleles in even clones, at
+    ``COMMON_FREQUENCY`` in three mice, and is unedited in odd ones, read in
+    every third cell. Cells without a clone hold common alleles, unedited
+    arrays, CARLIN's placeholder ``X`` or nothing, so that only rare alleles
+    could give them a clone.
+
+    Attributes:
+        recorders: The arrays, in ``RecorderTruth.arrays``, so that
+            ``write_carlin_pair`` writes them; the other tables are empty.
+        banks: Each array's bank, as DARLIN's banks hold them: ``allele``,
+            ``observed_count``, ``sample_count``, ``sample_id`` and
+            ``normalized_count``.
+        noise: The kinds of noise, of ``ALLELE_NOISE``.
+        rare: Each array's alleles that the design makes rare, the
+            homoplasic one among them.
+        homoplasic: The homoplasic allele of RA, or None without it.
+    """
+
+    recorders: RecorderTruth
+    banks: dict[str, pd.DataFrame]
+    noise: tuple[str, ...]
+    rare: dict[str, frozenset[str]]
+    homoplasic: str | None
+
+    def expected_partition(
+        self,
+        truth: CloneTruth,
+        *,
+        max_samples: int | None = None,
+        max_alleles: int | None = None,
+        groups: np.ndarray | None = None,
+    ) -> set[frozenset[str]]:
+        """The clones that the design's rare alleles give, as sets of cell IDs.
+
+        Cells of a group that hold one of the design's rare alleles of an
+        array are joined, one cell at a time; the homoplasic allele is rare
+        unless ``max_samples`` is below 3, the bank's mice that hold it. A
+        joined set of more than ``max_alleles`` distinct rare alleles leaves
+        its cells without a clone. ``groups`` keeps the cells of each group
+        apart, as ``within`` does. Without noise, the clones are the truth's.
+        """
+        rare = {array: set(alleles) for array, alleles in self.rare.items()}
+        if max_samples is not None and max_samples < 3:
+            rare["RA"] -= {self.homoplasic} if self.homoplasic else set()
+        keys = np.zeros(N_CELLS, dtype=object) if groups is None else groups
+        parent = list(range(N_CELLS))
+
+        def root(cell: int) -> int:
+            while parent[cell] != cell:
+                cell = parent[cell]
+            return cell
+
+        holders: dict[tuple[object, str, str], int] = {}
+        held: dict[int, set[tuple[str, str]]] = {}
+        for row in self.recorders.arrays.itertuples():
+            if not row.read or row.allele not in rare[row.integration]:
+                continue
+            cell = int(row.cell)
+            held.setdefault(cell, set()).add((row.integration, row.allele))
+            key = (keys[cell], row.integration, row.allele)
+            if key in holders:
+                parent[root(cell)] = root(holders[key])
+            else:
+                holders[key] = cell
+        members: dict[int, set[int]] = {}
+        for cell in held:
+            members.setdefault(root(cell), set()).add(cell)
+        ids = truth.cell_ids
+        found = set()
+        for cells in members.values():
+            alleles = set().union(*(held[cell] for cell in cells))
+            if max_alleles is None or len(alleles) <= max_alleles:
+                found.add(frozenset(str(ids[cell]) for cell in cells))
+        return found
+
+
+def _allele_text(rng: np.random.Generator, seen: set[str]) -> str:
+    """A DARLIN allele of two events, as Custom_CARLIN writes them, not seen before."""
+    while True:
+        start = int(rng.integers(20, 120))
+        end = start + int(rng.integers(5, 140))
+        insertion = "".join(rng.choice(list("ACGT"), size=int(rng.integers(1, 4))))
+        allele = f"{start}_{end}del,{end + 20}_{end + 21}ins{insertion}"
+        if allele not in seen:
+            seen.add(allele)
+            return allele
+
+
+def allele_calling_truth(
+    truth: CloneTruth, *, noise: Sequence[str] = (), seed: int = 0
+) -> AlleleCallingTruth:
+    """Give the truth's clones rare alleles on DARLIN's arrays, with a bank.
+
+    ``"homoplasy"`` gives the third cells of clones 0 and 3, on their third
+    array, RA for both, an allele that the bank lists as rare but in three
+    mice; ``"merged"`` gives the third cell of clone 2 and the first of clone
+    5, on their third array, TA for both, an allele that the bank lacks.
+    """
+    unknown = sorted(set(noise) - set(ALLELE_NOISE))
+    if unknown:
+        raise ValueError(f"unknown noise {unknown}")
+    rng = np.random.default_rng([seed, 20])
+    seen: set[str] = set()
+    common = {
+        array: (_allele_text(rng, seen), _allele_text(rng, seen))
+        for array in DARLIN_ARRAYS
+    }
+    first_rare = [_allele_text(rng, seen) for _clone in range(truth.n_clones)]
+    second_rare = [_allele_text(rng, seen) for _clone in range(truth.n_clones)]
+    homoplasic = _allele_text(rng, seen)
+    lacking = _allele_text(rng, seen)
+    rows: list[dict[str, object]] = []
+    rare: dict[str, set[str]] = {array: set() for array in DARLIN_ARRAYS}
+    listed: dict[str, list[tuple[str, float, int]]] = {
+        array: [
+            ("[]", 1.0, 3),
+            *((allele, COMMON_FREQUENCY, 3) for allele in common[array]),
+        ]
+        for array in DARLIN_ARRAYS
+    }
+
+    def add(cell: int, array: str, allele: str | None) -> None:
+        rows.append(
+            {
+                "cell": cell,
+                "integration": array,
+                "read": allele is not None,
+                "allele": "[]" if allele is None else allele,
+            }
+        )
+
+    for clone in range(truth.n_clones):
+        own, following, third = (DARLIN_ARRAYS[(clone + step) % 3] for step in range(3))
+        rare[own].add(first_rare[clone])
+        rare[following].add(second_rare[clone])
+        if clone % 2 == 0:
+            listed[own].append((first_rare[clone], RARE_FREQUENCY, 1))
+        else:
+            listed[following].append((second_rare[clone], RARE_FREQUENCY, 1))
+        members = np.flatnonzero(truth.clones == clone).tolist()
+        for position, cell in enumerate(members):
+            add(cell, own, None if position == 1 else first_rare[clone])
+            add(
+                cell,
+                following,
+                second_rare[clone] if position < 2 or position % 2 == 0 else None,
+            )
+            allele = None
+            if position % 3 == 0:
+                allele = common[third][position % 2] if clone % 2 == 0 else "[]"
+            if "homoplasy" in noise and clone in HOMOPLASIC_CLONES and position == 2:
+                allele = homoplasic
+            if "merged" in noise and (
+                (clone == MERGED_CLONES[0] and position == 2)
+                or (clone == MERGED_CLONES[1] and position == 0)
+            ):
+                allele = lacking
+            add(cell, third, allele)
+    if "homoplasy" in noise:
+        listed["RA"].append((homoplasic, RARE_FREQUENCY, 3))
+        rare["RA"].add(homoplasic)
+    if "merged" in noise:
+        rare["TA"].add(lacking)
+    # Cells without a clone read common alleles, unedited arrays, CARLIN's
+    # placeholder or nothing, in turn.
+    choices = ("[]", "common0", "X", None, "common1")
+    for order, cell in enumerate(np.flatnonzero(truth.clones < 0).tolist()):
+        for step, array in enumerate(DARLIN_ARRAYS):
+            choice = choices[(order + step) % len(choices)]
+            if choice is not None and choice.startswith("common"):
+                choice = common[array][int(choice[-1])]
+            add(cell, array, choice)
+    banks = {
+        array: pd.DataFrame(
+            {
+                "allele": [allele for allele, _rate, _mice in entries],
+                "observed_count": [
+                    max(1, round(rate * 1_000_000)) for _allele, rate, _mice in entries
+                ],
+                "sample_count": [mice for _allele, _rate, mice in entries],
+                "sample_id": [
+                    ",".join(f"LL{583 + mouse}" for mouse in range(mice))
+                    for _allele, _rate, mice in entries
+                ],
+                "normalized_count": [rate for _allele, rate, _mice in entries],
+            }
+        )
+        for array, entries in listed.items()
+    }
+    empty = pd.DataFrame()
+    return AlleleCallingTruth(
+        recorders=RecorderTruth(
+            independent=empty,
+            second=empty,
+            tapes=empty,
+            chains=empty,
+            arrays=pd.DataFrame(rows),
+        ),
+        banks=banks,
+        noise=tuple(noise),
+        rare={array: frozenset(alleles) for array, alleles in rare.items()},
+        homoplasic=homoplasic if "homoplasy" in noise else None,
+    )

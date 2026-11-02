@@ -247,6 +247,13 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - License: BSD-3-Clause
 - Used in: `cytearc/readers/_treedata.py` (the on-disk layout of `docs/fileformat.md` and of what treedata writes: a TreeData file is an AnnData file whose root's `encoding-type` is `treedata` and which holds `label`, `allow_overlap`, `alignment`, `obst` and `vart` beside AnnData's elements, with one group per tree in a `.zarr` store). Written from that layout; no code was copied.
 
+### CARLIN
+
+- Source: <https://gitlab.com/hormozlab/carlin>
+- Copyright (c) 2021 Duluxan Sritharan
+- License: MIT
+- Used in: `cytearc/clones/allele_clones.py` (the clonal p-value of `@Bank/Bank.m` at commit 7b10f94611473de8c70dd78c2f911507f52c626b: `clonal_pvalue_eqn`, the chance that an allele of Poisson rate λ seen among M observations arose more than once, and its use in `compute_clonal_pvalue`, which tests each allele of a sample against its bank rate with M the sample's observations of edited alleles and gives the unedited template a p-value of 1), reimplemented on arrays from the Poisson tails. Alleles that the bank lacks take a rate of 0, where `compute_clonal_pvalue` takes its model's mean rate of unobserved alleles.
+
 ## Data in this repository
 
 - **JASPAR** (<https://jaspar.elixir.no>), CC BY 4.0: the motif matrices MA0004.1 (Arnt) and
@@ -423,6 +430,16 @@ The receptor import, the clonotypes, the gene usage and junction lengths, and th
 | --- | --- | --- |
 | Receptor import, clonotypes, gene usage and junction lengths, AIRR export | "Human PBMC from a Healthy Donor, 10k cells (v2)", Single Cell Immune Profiling, the TCR and BCR contig annotations of Cell Ranger 5.0.0, and for the import also those of Cell Ranger 4.0.0, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
 | Receptor import and clonotypes | "CD8+ T cells of Healthy Donor 1", Single Cell Immune Profiling, the contig annotations of Cell Ranger 3.0.2, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
+
+## Data that validated allele clones
+
+The clones called from recorder alleles in the [clones API page](https://docs.nygen.io/CyteArc/api/clones.html) were compared with DARLIN's published clones on these data, read at run time in a Modal container. The repository holds none of them, and neither the tests nor the documentation download them.
+
+| Validation | Source | License or terms |
+| --- | --- | --- |
+| Allele import and clones | DARLIN's experiment LL837, `DARLIN_public/DATA/20220815_LL837_10X_3A/` of `DARLIN_public.zip`: the CARLIN pairs of its five tissues on three arrays, and MosaicLineage's `df_sc_data_10.csv`, `df_sc_data_10_HQ.csv`, `df_sc_data_10_assigned_clones.csv` and `df_sc_data_10_cells_with_assigned_clones.csv` (Zenodo, doi:10.5281/zenodo.11929508). Li et al. (2023), Cell 186:5183-5199, doi:10.1016/j.cell.2023.09.019 | CC BY 4.0 |
+| Allele banks | `reference/reference_merged_alleles_{CA,TA,RA}.csv` and `reference_merged_alleles_{CA,TA,RA}_Gr.csv` of MosaicLineage (<https://github.com/ShouWenWang-Lab/MosaicLineage>) at commit 7660afbd10c4cb31cbe973c918f3b7dac35a9b75 | No license file; read, not redistributed |
+| Allele banks | `reference/allele_bank/allele_bank_Gr_{CA,TA,RA}.csv.gz` of the `darlin` CLI (<https://github.com/JarningGau/darlin>) at commit 82ae9db957ce752c26c7536c46a2f3daca97cfa8 | "Proprietary", no license file; read, not redistributed |
 
 ## Optional packages that CyteArc does not install
 
@@ -1022,6 +1039,32 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### CARLIN (MIT License)
+
+```text
+MIT License
+
+Copyright (c) 2021 Duluxan Sritharan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### pycashier (MIT License)
