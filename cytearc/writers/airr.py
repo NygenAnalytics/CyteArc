@@ -40,6 +40,7 @@ import numpy as np
 import pandas as pd
 
 from ..metadata.records import EncodedText, decode_text
+from ..utils.arrays import sorted_unique
 from ..utils.logging import logger
 from ..utils.numba import njit
 
@@ -1037,7 +1038,9 @@ def suffix_repeated_ids(
     held: dict[int, set[str]] = {}
 
     def hold(values: np.ndarray) -> None:
-        wanted = [value for value in np.unique(values).tolist() if value not in held]
+        wanted = [
+            value for value in sorted_unique(values).tolist() if value not in held
+        ]
         if not wanted:
             return
         found = np.flatnonzero(_found(np.asarray(wanted, dtype=np.uint64), hashes))

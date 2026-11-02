@@ -24,6 +24,7 @@ import pandas as pd
 from numba import prange
 
 from ..storage.refs import ArtifactRef
+from ..utils.arrays import sorted_unique
 from ..utils.numba import njit, restore_numba_threads
 from .overlap import group_clone_matrix
 
@@ -543,7 +544,7 @@ def clone_coupling(
     stratum_clones = np.bincount(clone_strata, minlength=n_strata).astype(np.float64)
     if (
         method_code == _NORMALIZED_COVARIANCE
-        and (stratum_clones[np.unique(group_strata[first])] < 2).any()
+        and (stratum_clones[sorted_unique(group_strata[first])] < 2).any()
     ):
         raise ValueError(
             "normalized_covariance needs at least two clones in each stratum of "

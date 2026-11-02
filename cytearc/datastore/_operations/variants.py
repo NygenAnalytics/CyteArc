@@ -39,6 +39,7 @@ from ...storage.profiles import resolve_storage_profile
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
+from ...utils.arrays import sorted_unique
 from ...utils.logging import logger
 from ...variants.counts import (
     CALL_DTYPE,
@@ -413,21 +414,6 @@ def _distinct_calls(rows: np.ndarray) -> tuple[np.ndarray, int | None, int]:
     return rows[kept], None, int(np.count_nonzero(same))
 
 
-def _sorted_unique(values: np.ndarray) -> np.ndarray:
-    """The distinct values, ascending.
-
-    NumPy 2.5's ``unique`` hashes arrays of many distinct integers, which
-    takes several times as long as sorting them, as each band's keys are.
-    """
-    ordered = np.sort(np.asarray(values).reshape(-1))
-    if len(ordered) < 2:
-        return ordered
-    keep = np.empty(len(ordered), dtype=bool)
-    keep[0] = True
-    np.not_equal(ordered[1:], ordered[:-1], out=keep[1:])
-    return ordered[keep]
-
-
 def _factorized(texts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Each text's position among the distinct texts, and the distinct texts.
 
@@ -614,7 +600,7 @@ def _site_positions(table: SiteTable, sites: Any) -> np.ndarray:
         raise ValueError(
             f"The artifact has no site {', '.join(repr(item) for item in unknown[:5])}"
         )
-    return np.unique(np.asarray(chosen, dtype=np.int64))
+    return sorted_unique(np.asarray(chosen, dtype=np.int64))
 
 
 def _band_chunk_bytes(group: zarr.Group, tables: Mapping[str, Sequence[str]]) -> int:
@@ -1527,7 +1513,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "The counts hold no cell "
                 + ", ".join(repr(str(cell)) for cell in missing)
             )
-        return np.unique(positions)
+        return sorted_unique(positions)
 
     def _variant_rows(
         self,
@@ -2805,7 +2791,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             allele_codes = np.asarray(alleles[start:stop], dtype=np.int64)
             codes = np.asarray(sources[start:stop], dtype=np.int64)
             # One integer per pair sorts fast, where unique rows sort slowly.
-            keys = _sorted_unique(allele_codes * len(names) + codes)
+            keys = sorted_unique(allele_codes * len(names) + codes)
             pairs.update(
                 (int(key) // len(names), int(key) % len(names)) for key in keys.tolist()
             )
@@ -3422,7 +3408,7 @@ def _sites_without_depth(
     labels = table.labels()
     return [
         str(labels[site])
-        for site in np.unique(np.asarray(sites, dtype=np.int64)).tolist()
+        for site in sorted_unique(np.asarray(sites, dtype=np.int64)).tolist()
         if not read[site] and not (names[site] in read_targets and not channels[site])
     ]
 
@@ -3480,7 +3466,7 @@ def _chosen_genotype_sites(site_labels: np.ndarray, sites: Any) -> np.ndarray:
         chosen.append(position[item])
     if not chosen:
         raise ValueError("sites names no site")
-    return np.unique(np.asarray(chosen, dtype=np.int64))
+    return sorted_unique(np.asarray(chosen, dtype=np.int64))
 
 
 @dataclass(frozen=True, slots=True)
@@ -3545,7 +3531,7 @@ def _covered_keys(
                     ),
                 ]
             )
-    return _sorted_unique(keys)
+    return sorted_unique(keys)
 
 
 def _band_genotypes(
@@ -3616,12 +3602,12 @@ def _band_genotypes(
         del all_keys, order, leading, adopted
         call_labels = call_value_names[values["call_values"][picked].astype(np.int64)]
         call_columns = columns[picked]
-        keys = _sorted_unique(np.concatenate([covered, call_keys]))
+        keys = sorted_unique(np.concatenate([covered, call_keys]))
         calls = np.full(len(keys), FILTERED, dtype=np.int8)
         labels = np.full(len(keys), "", dtype=object)
         at = np.searchsorted(keys, call_keys)
         is_covered = np.isin(call_keys, covered)
-        for code in np.unique(call_columns).tolist():
+        for code in sorted_unique(call_columns).tolist():
             of_column = call_columns == code
             calls[at[of_column]] = source_call_codes(
                 str(source_columns[code]), call_labels[of_column], is_covered[of_column]
@@ -3646,7 +3632,7 @@ def _band_genotypes(
         alleles, ranks = alleles[on], ranks[on]
         umis = values["counts"][on].astype(np.int64)
         count_keys = _band_keys(count_cells[on], ranks, first, n_genotyped)
-        keys = _sorted_unique(np.concatenate([covered, count_keys]))
+        keys = sorted_unique(np.concatenate([covered, count_keys]))
         at = np.searchsorted(keys, count_keys)
         is_reference = alleles == reference_alleles[ranks]
         is_alternative = alleles == alternative_alleles[ranks]

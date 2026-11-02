@@ -450,12 +450,21 @@ def test_a_tree_key_with_a_slash_is_refused(store, tmp_path) -> None:
 
 
 def test_two_leaves_that_name_one_cell_are_refused(store, tmp_path) -> None:
-    a, b = _cell_ids(2)
+    a, b, c = _cell_ids(3)
     # Two trees over the same cells, as bootstrap replicates are.
     path = tmp_path / "replicates.nwk"
     path.write_text(f"({a},{b});\n({b},{a});\n")
     with pytest.raises(ValueError, match="2 cells are named by several leaves"):
         _import(store, path)
+    # A cell that three leaves name counts once, and is shown once.
+    three = tmp_path / "three.nwk"
+    three.write_text(f"({a},{b});\n({b},{a});\n({a},{c});\n")
+    with pytest.raises(ValueError) as refused:
+        _import(store, three)
+    assert str(refused.value).startswith(
+        f"2 cells are named by several leaves, for example '{a}' by '{a}' and "
+        f"'{a}' and '{a}'; '{b}' by '{b}' and '{b}'. "
+    )
     # A pattern can make two leaves name one cell too.
     patterned = tmp_path / "patterned.nwk"
     patterned.write_text(f"('x:{a}','y:{a}');")

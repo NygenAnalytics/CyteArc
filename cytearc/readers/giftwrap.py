@@ -40,6 +40,7 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from ..utils.arrays import has_duplicates
 from ..variants.counts import EntryBatch, SiteTable
 from ._variant_files import find_file, is_gzip, open_text
 
@@ -380,7 +381,7 @@ def _table_source(folder: str) -> GiftwrapSource:
     index = pd.to_numeric(probe_table["index"], errors="coerce").to_numpy(
         dtype=np.float64
     )
-    if np.any(~np.isfinite(index)) or len(np.unique(index)) != len(index):
+    if np.any(~np.isfinite(index)) or has_duplicates(index):
         raise ValueError(
             f"The index column of {manifest_path} must hold distinct numbers"
         )

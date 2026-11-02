@@ -7,6 +7,7 @@ import pandas as pd
 
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import integer_argument
+from ..utils.arrays import sorted_unique
 from ._contracts import PlotProvenance
 from ._deps import require_matplotlib
 from ._figure import (
@@ -421,9 +422,11 @@ def allele_frequencies(
         cell_ids = listed.index.to_numpy(dtype=object)
         cell_clones = np.full(len(cell_ids), None, dtype=object)
     if len(cell_ids) > max_cells:
-        picked = np.unique(np.linspace(0, len(cell_ids) - 1, max_cells).round())
-        cell_ids = cell_ids[picked.astype(np.int64)]
-        cell_clones = cell_clones[picked.astype(np.int64)]
+        picked = sorted_unique(
+            np.linspace(0, len(cell_ids) - 1, max_cells).round().astype(np.int64)
+        )
+        cell_ids = cell_ids[picked]
+        cell_clones = cell_clones[picked]
     site_labels = list(dict.fromkeys(chosen["site"].tolist()))
     loaded = _load_counts(
         store, selection.counts, sites=site_labels, cells=list(cell_ids)

@@ -1364,7 +1364,7 @@ def _refuse_wide_lines(
         raise ValueError(
             f"{layout.path} holds {str(block[row, column]).strip()!r} as the count "
             f"of barcode {text.names[positions[column]]!r} on "
-            + file_lines(numbers[np.unique(wrong // len(positions))], 0)
+            + file_lines(numbers[sorted_unique(wrong // len(positions))], 0)
             + "; every field of QuiCAT's merged table holds a count of UMIs, a "
             "whole number of at least 0 and below 2**63"
         )

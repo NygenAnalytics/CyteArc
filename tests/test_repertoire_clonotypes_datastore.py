@@ -467,6 +467,71 @@ def test_figure_labels_name_clonotypes_by_their_representatives_junction(
         shown.close()
 
 
+def test_figure_labels_refuse_ids_that_only_resemble_a_clonotype_id(tmp_path) -> None:
+    store, receptors = clonal_receptors(tmp_path)
+    ref = store.repertoire.clonotypes(receptors)
+    # The IDs are clonotype_1 to clonotype_4, stored 11 characters wide: an ID
+    # that extends one past that width, a prefix of one, another case, a
+    # space or a leading zero names no clonotype, and the first five missing
+    # are named in the order given.
+    near = [
+        "clonotype_12",
+        "clonotype_",
+        "Clonotype_1",
+        "clonotype_1 ",
+        " clonotype_2",
+        "clonotype_04",
+    ]
+    with pytest.raises(ValueError) as refused:
+        store._clone_figure_labels(ref, ["clonotype_2", *near, "clonotype_2"])
+    assert str(refused.value) == f"No clonotype is labelled {near[:5]}"
+    # IDs given as numbers are their text, which names no clonotype either.
+    with pytest.raises(ValueError, match=r"No clonotype is labelled \['1'\]"):
+        store._clone_figure_labels(ref, [1])  # type: ignore[list-item]
+    # Nor does an ID that ends in a NUL character, which a comparison of
+    # fixed-width NumPy text ignores.
+    with pytest.raises(ValueError, match=r"labelled \['clonotype_1\\x00'\]"):
+        store._clone_figure_labels(ref, ["clonotype_1\x00"])
+
+
+def test_figure_labels_hold_each_clone_given_while_its_junction_is_read(
+    tmp_path, monkeypatch
+) -> None:
+    # cell7's beta chain of 20,000 residues names its own clonotype, so reading
+    # that junction holds more than reading the IDs of the five clonotypes.
+    junction = "C" + "A" * 20_000 + "F"
+    rows = CLONAL_ROWS + [
+        "cell7,true,cell7_contig_1,true,500,TRB,TRBV9,,TRBJ9,TRBC1,true,true,"
+        f"{junction},TGT{'GCT' * 20_000}TTT,10,1,ct9,ct9_1",
+    ]
+    store, receptors = clonal_receptors(tmp_path, rows)
+    ref = store.repertoire.clonotypes(receptors)
+    clonotype = str(store.repertoire.load_clonotypes(ref).cells["clonotype"]["cell7"])
+
+    def smallest_budget(ids: list[str]) -> tuple[int, str]:
+        budget, refused = 1, ""
+        for _attempt in range(10):
+            monkeypatch.setattr(store, "memoryBytes", budget)
+            try:
+                assert store._clone_figure_labels(ref, ids).tolist() == [
+                    junction
+                ] * len(ids)
+                return budget, refused
+            except MemoryError as error:
+                refused = str(error)
+                found = re.search(r"about (\d+) bytes", refused)
+                assert found is not None and int(found.group(1)) > budget, refused
+                budget = int(found.group(1))
+        raise AssertionError("the budget did not settle")
+
+    one, refused = smallest_budget([clonotype])
+    assert refused.startswith("Labelling clonotypes by their junctions holds about")
+    # Each clone given, the same one here, is held while the junction is read.
+    twenty, refused = smallest_budget([clonotype] * 20)
+    assert refused.startswith("Labelling clonotypes by their junctions holds about")
+    assert twenty == one + 19 * 400
+
+
 def test_clonotypes_of_one_arm_are_named_by_the_chains_they_share(tmp_path) -> None:
     store, receptors = clonal_receptors(tmp_path)
     ids = ["clonotype_1", "clonotype_2", "clonotype_3"]
@@ -496,17 +561,21 @@ def test_figure_labels_read_the_clonotype_ids_within_the_budget(
 ) -> None:
     store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
-    # Four IDs of 11 characters, read as fixed-width text of 4 bytes per
-    # character: 176 bytes, three times with the buffers of the read, 2 bytes
-    # each for a comparison, and 400 bytes for the clonotype labelled.
-    ids_bytes = 400 + 3 * 176 + 2 * 4
+    # Four IDs of 11 characters, stored in one chunk as fixed-width text of 4
+    # bytes per character, read as Python strings and then indexed: the chunk
+    # decoded, 176 bytes, and its compressed bound, 176 + 1 + 1,024 bytes;
+    # each ID three times with the buffers of the read, 44 bytes each, 16
+    # index arrays of 8 bytes, a Python string of 64 bytes and 4 per
+    # character, and 100 bytes in the index; and 400 bytes for the clonotype
+    # labelled.
+    per_id = 3 * 44 + 16 * 8 + (64 + 4 * 11) + 100
+    ids_bytes = 176 + (176 + 1 + 1_024) + 4 * per_id + 400
     monkeypatch.setattr(store, "memoryBytes", ids_bytes - 1)
     with pytest.raises(MemoryError, match="Labelling clonotypes reads the IDs of 4"):
         store._clone_figure_labels(ref, ["clonotype_1"])
     # Reading the junction that names it then decodes a chunk of each array
-    # of the receptors that it reads, which the IDs' budget does not hold.
+    # of the receptors that it reads, which may refuse a budget of its own.
     budget = ids_bytes
-    refusals = []
     for _attempt in range(10):
         monkeypatch.setattr(store, "memoryBytes", budget)
         try:
@@ -515,10 +584,28 @@ def test_figure_labels_read_the_clonotype_ids_within_the_budget(
         except MemoryError as error:
             found = re.search(r"by their junctions holds about (\d+) bytes", str(error))
             assert found is not None, str(error)
+            assert int(found.group(1)) > budget
+            budget = int(found.group(1))
+    assert labels.tolist() == ["CASSA"]
+    # Here that read holds less than the IDs, so it is checked alone: before
+    # each read, beside what the caller holds.
+    budget = 1
+    refusals = []
+    for _attempt in range(10):
+        monkeypatch.setattr(store, "memoryBytes", budget)
+        try:
+            junctions = store._representative_junctions(
+                ref, np.asarray([0]), held_bytes=400
+            )
+            break
+        except MemoryError as error:
+            found = re.search(r"by their junctions holds about (\d+) bytes", str(error))
+            assert found is not None, str(error)
             refusals.append(int(found.group(1)))
             assert refusals[-1] > budget
             budget = refusals[-1]
-    assert refusals and labels.tolist() == ["CASSA"]
+    assert len(refusals) > 1 and junctions.tolist() == ["CASSA"]
+    assert ids_bytes > budget > 400
 
 
 def test_a_representative_without_a_junction_is_refused(tmp_path) -> None:

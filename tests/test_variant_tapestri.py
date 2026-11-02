@@ -1149,7 +1149,6 @@ def test_calls_and_labels_are_coded_whatever_their_number() -> None:
     from cytearc.datastore._operations.variants import (
         _factorized,
         _label_codes,
-        _sorted_unique,
         _Vocabulary,
     )
 
@@ -1173,10 +1172,6 @@ def test_calls_and_labels_are_coded_whatever_their_number() -> None:
     ]
     with pytest.raises(ValueError, match="missing where text was expected"):
         _factorized(np.asarray(["0", None], dtype=object))
-    values = np.asarray([5, 3, 5, 9, 3, 3], dtype=np.int64)
-    assert _sorted_unique(values).tolist() == [3, 5, 9]
-    assert _sorted_unique(values[:1]).tolist() == [5]
-    assert _sorted_unique(values[:0]).tolist() == []
 
 
 def test_a_source_must_give_each_call_one_quality() -> None:

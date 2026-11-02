@@ -53,7 +53,7 @@ from ...storage.artifacts import (
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
-from ...utils.arrays import sort_categories
+from ...utils.arrays import sort_categories, sorted_unique
 from ...utils.logging import logger
 from ...utils.warnings import warn
 from .cell_barcodes import (
@@ -443,7 +443,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         repeated = order[1:][cells[order[1:]] == cells[order[:-1]]]
         if not len(repeated):
             return
-        repeated_cells = np.unique(cells[repeated])
+        repeated_cells = sorted_unique(cells[repeated])
         examples = []
         for cell in repeated_cells[:3].tolist():
             leaves = names[cells == cell].tolist()
