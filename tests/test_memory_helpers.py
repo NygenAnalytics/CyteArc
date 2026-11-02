@@ -561,16 +561,32 @@ def test_work_that_finishes_after_its_read_ended_is_held_until_the_next_one_ends
 
 
 def test_a_function_named_as_a_read_ends_a_read_each_time_it_returns() -> None:
-    owner = SimpleNamespace(read=lambda value: value + 1)
-    read = owner.read
     with ThreadPoolExecutor(1) as pool:
+        owner = SimpleNamespace(read=lambda: _finished(pool))
+        read = owner.read
         with hold_finished_reads((owner, "read")):
-            first = _finished(pool)
-            assert owner.read(1) == 2
+            first = owner.read()
+            # The read after it has not begun, so the first read is held.
             assert first() is not None
-            assert owner.read(2) == 3
+            second = owner.read()
             assert _gone(first)
+            assert second() is not None
+        assert _gone(second)
         assert owner.read is read
+
+
+def test_work_that_runs_outside_every_named_read_is_let_go() -> None:
+    with ThreadPoolExecutor(1) as pool:
+        owner = SimpleNamespace(read=lambda: _finished(pool))
+        with hold_finished_reads((owner, "read")):
+            before = _finished(pool)
+            read = owner.read()
+            # Work between reads, such as the writes after an operation's
+            # last read, belongs to no read, so nothing keeps it.
+            written = _finished(pool)
+            assert _gone(before)
+            assert _gone(written)
+            assert read() is not None
 
 
 # Chunks of 12,000 rows of 40 int32 values, 1.92 MB decoded, read one after

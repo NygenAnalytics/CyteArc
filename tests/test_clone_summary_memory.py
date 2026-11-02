@@ -578,7 +578,8 @@ def test_the_traced_peak_fits_the_smallest_budget_accepted(data, case) -> None:
 # process whose Zarr reads no earlier test left running. The work of each read
 # of a stored array is held until the next read ends, as the thread of Zarr's
 # pool that ran it holds its chunk, as stored and decoded, on a busy machine
-# until after the next read has begun.
+# until after the next read has begun. The work between reads, such as the
+# writes of the expansion's results, is not held.
 _HELD_READ_SCRIPT = """
 import json, sys, tracemalloc
 from tests.memory_helpers import ZARR_READS, budget_that_runs, hold_finished_reads, stated_bytes
@@ -641,9 +642,10 @@ def test_the_budgets_count_the_read_that_zarr_still_holds(data) -> None:
 
 
 # Grouping 400 cells, spread over 20,000, by text columns of 24 characters in
-# a fresh process. While the cells are grouped, the work of each row read is
-# held until the next row read ends, as master's test of the held codes read
-# holds it, so each read has the read before beside it.
+# a fresh process. While the cells are grouped, all of the grouping's work in
+# Zarr's pool is held, and each row read ends a read, so each row read has the
+# work before it beside it, the reads of the selection and the clone codes
+# before the first.
 _CHUNKED_GROUPS_SCRIPT = """
 import json, sys, tracemalloc
 import numpy as np
@@ -672,11 +674,19 @@ cases = {
     "a column in 10 chunks": ["in_10_chunks"],
     "two columns of one chunk each": ["whole_a", "whole_b"],
 }
-cell_groups = operations.cell_groups
+cell_groups, read_rows = operations.cell_groups, rows._read_array_rows
 
 def grouped_with_reads_held(*args, **kwargs):
-    with hold_finished_reads((rows, "_read_array_rows")):
-        return cell_groups(*args, **kwargs)
+    with hold_finished_reads() as end_read:
+        def read_and_end(array, indices):
+            values = read_rows(array, indices)
+            end_read()
+            return values
+        rows._read_array_rows = read_and_end
+        try:
+            return cell_groups(*args, **kwargs)
+        finally:
+            rows._read_array_rows = read_rows
 
 results, full = {}, store.memoryBytes
 for case, columns in cases.items():

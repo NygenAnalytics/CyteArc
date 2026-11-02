@@ -376,12 +376,17 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
     The thread of Zarr's pool that decoded a chunk holds the chunk as stored,
     the work it was given, and as decoded, its result, until that thread next
     runs, which on a busy machine came after the next read had begun. Within
-    this context every work item that a pool thread finishes is kept with the
-    read that it ran for, and let go when the read after that one ends, so a
-    trace sees each read beside the one before it, without timing. A read ends
-    when a call of a function named in ``reads``, as (owner, attribute)
-    pairs, returns, or when the caller calls the function that this context
-    gives. Work items of earlier reads are let go at once.
+    this context every work item that a pool thread runs for a read is kept
+    with that read, and let go when the read after it ends, so a trace sees
+    each read beside the one before it, without timing. Work items of earlier
+    reads are let go at once.
+
+    A read is a call of a function named in ``reads``, as (owner, attribute)
+    pairs, and ends when the call returns. Work that a pool thread starts while
+    no such call runs, such as the writes after an operation's last read,
+    belongs to no read and is let go as it would be without the hold. With no
+    function named, the caller ends each read by calling the function that
+    this context gives, and all work belongs to the read under way.
 
     The hold applies to every thread pool of the process, so a test that must
     see only its own reads traces them in a fresh process, which imports this
@@ -389,15 +394,18 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
     """
     lock = threading.Lock()
     reading = [0]
+    # The calls of named reads under way, in any thread.
+    running = [0]
     held: dict[int, list[object]] = {}
     run = pool_thread._WorkItem.run
 
     def run_and_hold(item: object, *args: Any) -> None:
         with lock:
             read = reading[0]
+            for_a_read = running[0] > 0 or not reads
         run(item, *args)  # type: ignore[arg-type]
         with lock:
-            if read >= reading[0] - 1:
+            if for_a_read and read >= reading[0] - 1:
                 held.setdefault(read, []).append(item)
 
     def end_read() -> None:
@@ -407,7 +415,13 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
 
     def ending(function: Callable[..., Any]) -> Callable[..., Any]:
         def read(*args: Any, **kwargs: Any) -> Any:
-            value = function(*args, **kwargs)
+            with lock:
+                running[0] += 1
+            try:
+                value = function(*args, **kwargs)
+            finally:
+                with lock:
+                    running[0] -= 1
             end_read()
             return value
 
