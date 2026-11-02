@@ -24,6 +24,7 @@ from cytearc.writers import (
     SeuratToZarr,
     SparseToZarr,
     SubsetZarr,
+    TapestriToZarr,
 )
 from tests.signature_contracts import signature_digest
 
@@ -53,6 +54,8 @@ _PUBLIC_CLASS_METHODS = {
         "__init__",
         "dump",
     ),
+    # TapestriToZarr writes with CrToZarr's dump, which it inherits.
+    TapestriToZarr: ("__init__",),
 }
 # Every importer takes the keyword ``overwrite``.
 _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
@@ -62,6 +65,7 @@ _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
     CSVtoZarr: "b005b7bd9fccc8d0c1ad987954f7f7d6de909987b42d577f4f416ccd9b5835de",
     SubsetZarr: "76fd6326d68a545065ce07fed9411ec7f02d3f080041db627c3623bda5fe4ed8",
     SeuratToZarr: "41388ff31e4a94002511aee322870ab234b3fc74d184a48538dbb921ae2f28af",
+    TapestriToZarr: "1ad6b6cb239bad23596e3a4a6b5696d554148cf5f763d4a00e67b5c502fe63df",
 }
 _MODULE_FUNCTIONS = (
     "create_zarr_count_assay",
@@ -100,6 +104,7 @@ def test_writers_facade_surface_is_stable():
         "to_mtx",
         "CSVtoZarr",
         "write_airr_rearrangements",
+        "TapestriToZarr",
     ]
     expected = set(writers_module.__all__)
     assert expected.issubset(dir(writers_module))

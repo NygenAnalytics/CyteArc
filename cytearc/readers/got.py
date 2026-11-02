@@ -228,6 +228,7 @@ class GotSource:
     count_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
+    alleles_overlap: bool
     open_alleles: bool
     notes: dict[str, Any]
     _cells: np.ndarray = field(repr=False)
@@ -561,6 +562,7 @@ def got_source(path: str | os.PathLike[str], *, format: str) -> GotSource:
         count_fields=("reads",) if reads else (),
         depth_roles=None,
         reference_from_depth=False,
+        alleles_overlap=False,
         open_alleles=False,
         notes={},
         _cells=table.cells,

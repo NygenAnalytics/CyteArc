@@ -83,13 +83,15 @@ MAX_COUNT = int(np.iinfo(np.uint32).max)
 DEPTH_DTYPE = np.dtype([("cell", np.int32), ("key", np.int32), ("depth", np.uint32)])
 #: A call row: the cell, the allele the call is about, the source of the call
 #: (a column of the file, such as GoT-Multi's ``genotype_final``) and the
-#: call, both as codes of text.
+#: call, both as codes of text, and the call's quality, such as Tapestri's
+#: genotype quality, NaN where the source gives none.
 CALL_DTYPE = np.dtype(
     [
         ("cell", np.int32),
         ("key", np.int32),
         ("source", np.int32),
         ("value", np.int32),
+        ("quality", np.float32),
     ]
 )
 _ROLE_ORDER = {role: position for position, role in enumerate(ALLELE_ROLES)}
@@ -553,7 +555,8 @@ class EntryBatch:
     counts; ``"counts"`` rows give an allele's count with ``fields`` such as
     the strand counts; ``"depth"`` rows give a site's depth, for sources that
     state depth apart from their counts; ``"calls"`` rows give the call that
-    the source made about an allele, as text.
+    the source made about an allele, as text, with its quality where the
+    source gives one.
 
     Attributes:
         kind: The kind of row.
@@ -566,6 +569,9 @@ class EntryBatch:
         call_source: The source of the calls of a calls batch, such as the
             column that holds them.
         calls: Each row's call, as text, for a calls batch.
+        call_quality: Each call's quality, such as Tapestri's genotype
+            quality, NaN where the source gives none for the call; empty when
+            the source gives no quality at all.
     """
 
     kind: BatchKind
@@ -576,6 +582,9 @@ class EntryBatch:
     fields: Mapping[str, np.ndarray] = field(default_factory=dict)
     call_source: str = ""
     calls: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=object))
+    call_quality: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64)
+    )
 
     @property
     def n_rows(self) -> int:
@@ -599,6 +608,10 @@ class VariantSource(Protocol):
             None when its depth is the sum of its counts at the site.
         reference_from_depth: Whether its reference count is the stated depth
             less the other counts it covers, as for cellsnp-lite.
+        alleles_overlap: Whether reads may count toward several alleles of a
+            site, as Tapestri's allele frequencies of the variants at one
+            position may add up to more than 100%, so that the stated depth
+            bounds each count rather than their sum.
         open_alleles: Whether its alleles are the ones it saw, as GIFT's
             gapfills are, so files may differ in them.
         notes: What the import should record about the source, such as
@@ -628,6 +641,9 @@ class VariantSource(Protocol):
 
     @property
     def reference_from_depth(self) -> bool: ...
+
+    @property
+    def alleles_overlap(self) -> bool: ...
 
     @property
     def open_alleles(self) -> bool: ...
@@ -662,6 +678,7 @@ def finish_band(
     depth_roles: frozenset[str] | None,
     reference_from_depth: bool,
     name_cell: Callable[[int], str],
+    alleles_overlap: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Turn a band of sorted rows into the depth and counts that are stored.
 
@@ -672,7 +689,10 @@ def finish_band(
     site must not exceed it, ``reference_from_depth`` derives the reference
     count as the depth less the other counts it covers, and the counts of
     the other roles, such as cellsnp-lite's other bases, add to the stored
-    depth, so a stored depth counts every stored allele.
+    depth, so a stored depth counts every stored allele. With
+    ``alleles_overlap``, as for Tapestri, whose variants at one position each
+    give their allele frequency over the position's depth, each count must
+    not exceed the stated depth, while their sum may.
 
     Args:
         counts: Count rows sorted by cell and allele, of :func:`count_dtype`.
@@ -681,6 +701,8 @@ def finish_band(
         depth_roles: The roles that the stated depth counts, or None.
         reference_from_depth: Whether to derive the reference count.
         name_cell: Names a cell in errors.
+        alleles_overlap: Whether the stated depth bounds each count of the
+            roles it counts rather than their sum.
 
     Returns:
         Depth rows sorted by cell and site, and count rows sorted by cell and
@@ -689,8 +711,15 @@ def finish_band(
     Raises:
         ValueError: If counts are given at a site where the stated depth is
             0, exceed the stated depth, or add up to more than ``MAX_COUNT``,
-            or a site without a reference allele needs one.
+            a site without a reference allele needs one, or overlapping
+            alleles are asked to derive the reference count or to count
+            without a stated depth.
     """
+    if alleles_overlap and (depth_roles is None or reference_from_depth):
+        raise ValueError(
+            "Overlapping alleles need a stated depth and cannot derive the "
+            "reference count from it"
+        )
     counts = counts[counts["count"] > 0]
     stride = sites.n_sites + 1
     count_sites = sites.allele_site[counts["key"]].astype(np.int64)
@@ -735,19 +764,24 @@ def finish_band(
             )
         )
     totals = np.zeros(len(stated), dtype=np.uint64)
-    np.add.at(totals, at[covered], counts["count"][covered].astype(np.uint64))
+    if alleles_overlap:
+        # Each count is checked alone: the largest of a site's counts.
+        np.maximum.at(totals, at[covered], counts["count"][covered].astype(np.uint64))
+    else:
+        np.add.at(totals, at[covered], counts["count"][covered].astype(np.uint64))
     excess = totals > stated["depth"].astype(np.uint64)
     if excess.any():
         position = int(np.flatnonzero(excess)[0])
         raise ValueError(
-            "The counts of "
+            ("A count of " if alleles_overlap else "The counts of ")
             + _row_label(
                 int(stated["cell"][position]),
                 int(stated["key"][position]),
                 name_cell,
                 sites,
             )
-            + f" add up to {int(totals[position])}, more than its depth "
+            + (" is " if alleles_overlap else " add up to ")
+            + f"{int(totals[position])}, more than its depth "
             f"{int(stated['depth'][position])}"
         )
     rows = [counts]
@@ -835,7 +869,9 @@ class VariantCounts:
             ``quality_forward`` and ``quality_reverse`` (mean base quality,
             NaN where the strand count is 0), ``reads`` and ``support``.
         calls: ``cell``, ``site``, ``allele``, ``source`` (the column that
-            held the call) and ``call``, as the source wrote it.
+            held the call), ``call``, as the source wrote it, and
+            ``quality``, the call's quality where the source gives one, such
+            as Tapestri's genotype quality ``GQ``, and NaN elsewhere.
         contigs: One row per contig: ``name``, ``length`` and
             ``sequence_sha256``.
         format: The format of the imported files, such as ``"mgatk"``.
@@ -867,7 +903,7 @@ def variant_count_frames(
     covered_sites: np.ndarray,
     depth: tuple[np.ndarray, np.ndarray, np.ndarray],
     counts: tuple[np.ndarray, np.ndarray, Mapping[str, np.ndarray]],
-    calls: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    calls: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     call_sources: Sequence[str],
     call_values: Sequence[str],
 ) -> dict[str, pd.DataFrame]:
@@ -884,7 +920,8 @@ def variant_count_frames(
         covered_sites: Each cell's covered sites.
         depth: Depth rows: cells (positions in ``cell_ids``), sites, depths.
         counts: Count rows: cells, alleles and the count and its fields.
-        calls: Call rows: cells, alleles, sources and values as codes.
+        calls: Call rows: cells, alleles, sources and values as codes, and
+            each call's quality.
         call_sources: The text of the source codes.
         call_values: The text of the value codes.
     """
@@ -966,7 +1003,7 @@ def variant_count_frames(
             else array.astype(np.int64)
         )
     counts_frame = pd.DataFrame(count_columns)
-    call_cells, call_alleles, call_source_codes, call_value_codes = calls
+    call_cells, call_alleles, call_source_codes, call_value_codes, call_quality = calls
     calls_frame = pd.DataFrame(
         {
             "cell": cell_column(call_cells),
@@ -982,6 +1019,7 @@ def variant_count_frames(
             ]
             if len(call_value_codes)
             else np.empty(0, dtype=object),
+            "quality": np.asarray(call_quality, dtype=np.float64),
         }
     )
     contigs_frame = pd.DataFrame(

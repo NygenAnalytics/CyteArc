@@ -105,6 +105,74 @@ def test_source_calls_are_the_tools_own_with_their_labels(store, tmp_path) -> No
     np.testing.assert_array_equal(values.values, list(mutant.values()))
 
 
+def _source_counts(store, folder: Path, source: str):
+    """Counts of each GoT tool whose calls method="source" adopts."""
+    if source == "got":
+        return _got(store, folder, "geo_total")
+    if source == "got_multi":
+        return _import(store, write_got_multi(TRUTH, folder / "ironthrone_out_pp.csv"))
+    return _import(store, write_gotcha(TRUTH, folder / "gotcha.csv"))
+
+
+@pytest.mark.parametrize(
+    ("source", "min_quality"),
+    [("got", 30), ("got", 0), ("got_multi", 30), ("gotcha", 30)],
+)
+def test_calls_without_a_quality_refuse_min_quality(
+    store, tmp_path, source, min_quality
+) -> None:
+    # The GoT tools' calls carry no quality, so no call could pass any
+    # min_quality: the rule is refused before anything is saved, as
+    # informative refuses a test that the counts cannot make, rather than
+    # filtering every call.
+    counts = _source_counts(store, tmp_path, source)
+    with pytest.raises(
+        ValueError,
+        match="min_quality tests call_quality, which these counts cannot give: "
+        f"their '{source}' calls carry no quality",
+    ):
+        store.variants.genotypes(counts, method="source", min_quality=min_quality)
+    assert store.artifacts.list(kind="variant_genotypes", scope="datastore") == []
+    # Their tables count UMIs or reads, so min_depth filters their calls.
+    loaded = store.variants.load_genotypes(
+        store.variants.genotypes(counts, method="source", min_depth=1)
+    )
+    assert "wild_type" in set(loaded.calls["call"].astype(str))
+
+
+@pytest.mark.parametrize("source", ["calls_alone", "refined_alone"])
+def test_calls_without_depth_refuse_min_depth(store, tmp_path, source) -> None:
+    # A GoT table of calls alone, and GoT-Multi's refined table imported
+    # without the stage table, give no cell a depth at their sites, so every
+    # call would fail any min_depth.
+    if source == "calls_alone":
+        counts = _import(
+            store, write_got(TRUTH, tmp_path / "CALR.tsv", style="geo_call_only")
+        )
+        site = "CALR"
+    else:
+        counts = _import(
+            store,
+            write_got_multi(
+                TRUTH, tmp_path / "got_multi_out_refined.csv", refined=True
+            ),
+        )
+        site = TARGETS[0]
+    adopted = store.variants.load_genotypes(
+        store.variants.genotypes(counts, method="source")
+    )
+    assert len(adopted.calls) and set(adopted.calls["call"].astype(str)) != {"filtered"}
+    with pytest.raises(
+        ValueError,
+        match="min_depth tests each cell's depth at the site, which these counts "
+        f"cannot give at .* such as '{site}': no cell holds depth there",
+    ):
+        store.variants.genotypes(
+            counts, method="source", min_depth=1, invalidate_cache=True
+        )
+    assert len(store.artifacts.list(kind="variant_genotypes", scope="datastore")) == 1
+
+
 def test_got_multi_adopts_its_merged_call_and_its_refined_one(store, tmp_path) -> None:
     stage = _import(store, write_got_multi(TRUTH, tmp_path / "ironthrone_out_pp.csv"))
     loaded = store.variants.load_genotypes(

@@ -974,3 +974,591 @@ def write_gotcha(truth: VariantTruth, path: Path, *, style: str = "labeling") ->
     else:
         raise ValueError(f"Unknown Gotcha style {style!r}")
     return _write(path, lines)
+
+
+@dataclass(frozen=True, slots=True)
+class TapestriVariant:
+    """A candidate variant of the synthetic Tapestri panel.
+
+    ``chrom`` is written as Tapestri's ``CHROM`` column writes it, without
+    ``chr``, which its variant IDs add.
+    """
+
+    gene: str
+    chrom: str
+    position: int
+    reference: str
+    alternative: str
+    passing: bool
+
+    @property
+    def name(self) -> str:
+        """The variant's ``id`` in a Tapestri file."""
+        return f"chr{self.chrom}:{self.position}:{self.reference}/{self.alternative}"
+
+    @property
+    def dabseq_name(self) -> str:
+        """The variant's name in a DAb-seq file: its gene, then its ``id``."""
+        return f"{self.gene}:{self.name}"
+
+
+#: The panel's candidate variants, as a Tapestri file lists them: two
+#: alternatives of one position that both pass; a deletion and a SNV of one
+#: position, whose references differ; an alternative that fails beside one
+#: that passes; empty ALTs, one of them passing; and alleles that are not
+#: bases.
+TAPESTRI_VARIANTS = (
+    TapestriVariant("NRAS", "1", 1000, "G", "A", True),
+    TapestriVariant("NRAS", "1", 1000, "G", "T", True),
+    TapestriVariant("NRAS", "1", 1500, "C", "", False),
+    TapestriVariant("DNMT3A", "1", 2000, "TC", "T", True),
+    TapestriVariant("DNMT3A", "1", 2000, "T", "G", True),
+    TapestriVariant("IDH1", "2", 500, "A", "G", True),
+    TapestriVariant("IDH1", "2", 500, "A", "C", False),
+    TapestriVariant("IDH1", "2", 800, "*", "C+T", False),
+    TapestriVariant("EZH2", "7", 300, "A", "", True),
+    TapestriVariant("EZH2", "7", 400, "G", "A", True),
+)
+#: Each clone's mutated variants, by position in ``TAPESTRI_VARIANTS``, so
+#: every clone carries a combination of its own; the deletion is homozygous
+#: and every other mutation heterozygous.
+TAPESTRI_CLONE_VARIANTS = {
+    0: (0,),
+    1: (1,),
+    2: (3,),
+    3: (4,),
+    4: (5,),
+    5: (9,),
+    6: (0, 9),
+    7: (5, 9),
+}
+HOMOZYGOUS_VARIANTS = frozenset({3})
+#: The amplicons: ID, CHROM, start and end.
+TAPESTRI_AMPLICONS = (
+    ("AML_NRAS_1", "1", 950, 1600),
+    ("AML_DNMT3A_2", "1", 1950, 2150),
+    ("AML_IDH1_3", "2", 450, 900),
+    ("AML_EZH2_4", "7", 250, 450),
+)
+#: The antibodies: ID and tag sequence.
+TAPESTRI_ANTIBODIES = (
+    ("CD34", "CCTGGAATC"),
+    ("CD3", "CCTCTATGC"),
+    ("IgG1", "GCGGAACAT"),
+)
+TAPESTRI_METADATA = {
+    "panel_name": "AML",
+    "genome_version": "hg19",
+    "pipeline_version": "2.0.2",
+    "chemistry_version": "V2",
+}
+PROTEIN_METADATA = {"panel_name": "ab_barcodes_test", "pipeline_version": "2.0.1"}
+#: DAb-seq's FLT3-ITD variant, which it adds from ITDseek with RD holding the
+#: depth.
+DABSEQ_ITD = "FLT3-ITD:chr13:28608251:T/TCTC"
+
+
+@dataclass(frozen=True, slots=True)
+class TapestriTruth:
+    """Targeted DNA genotypes and protein reads of the synthetic experiment.
+
+    Rows are the truth's cells, a twin cell of sample ``d4`` with the
+    barcode of the first cell of sample ``d2``, and the droplets outside the
+    store, of sample ``d2``. Columns of the variant arrays follow
+    ``TAPESTRI_VARIANTS``; the variants of one position share their depth.
+
+    Attributes:
+        clones: The experiment's cells and clones.
+        samples: Each row's sample.
+        barcodes: Each row's barcode.
+        depth: Each row's depth at each variant.
+        alternative: Each row's alternative reads of each variant.
+        genotypes: Each row's ``NGT`` of each variant, 0 to 3.
+        quality: Each row's ``GQ`` of each variant.
+        filtered: Whether the pipeline's filters removed each row.
+        amplicon_reads: Each row's reads of each amplicon.
+        protein_reads: Each row's reads of each antibody.
+        overlap_row: The row whose two alternatives of ``chr2:500`` each
+            show its one read, so their reads add up to more than its depth.
+        no_call_row: The row with reads but no call at ``chr7:400``.
+        uncovered_row: The row without reads at ``chr7:400``.
+        wild_type_row: The row called wild type at ``chr1:1000`` without
+            reads there, as Tapestri's files hold such calls.
+    """
+
+    clones: CloneTruth
+    samples: np.ndarray
+    barcodes: np.ndarray
+    depth: np.ndarray
+    alternative: np.ndarray
+    genotypes: np.ndarray
+    quality: np.ndarray
+    filtered: np.ndarray
+    amplicon_reads: np.ndarray
+    protein_reads: np.ndarray
+    overlap_row: int
+    no_call_row: int
+    uncovered_row: int
+    wild_type_row: int
+
+    @property
+    def row_ids(self) -> list[str]:
+        """Each row's cell ID, ``<sample>__<barcode>``."""
+        return [
+            f"{sample}__{barcode}"
+            for sample, barcode in zip(self.samples, self.barcodes, strict=True)
+        ]
+
+    @property
+    def n_rows(self) -> int:
+        return len(self.samples)
+
+    @property
+    def twin_row(self) -> int:
+        return len(self.clones.cell_ids)
+
+    def frequency(self) -> np.ndarray:
+        """Tapestri's ``AF``: the alternative reads over the depth, in percent."""
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.where(
+                self.depth > 0, self.alternative / np.maximum(self.depth, 1) * 100, 0.0
+            )
+
+
+def tapestri_truth(seed: int = 0) -> TapestriTruth:
+    """Draw the targeted genotypes and protein reads of ``clone_truth(seed)``.
+
+    Every cell of a clone carries its clone's mutations, and every truth
+    cell is read and called at every variant that passes, so the genotype
+    clones of the mutant calls are the truth's clones. The cases that test
+    the import fall on cells without a clone.
+    """
+    clones = clone_truth(seed)
+    rng = np.random.default_rng(seed + 700)
+    first_d2 = int(np.flatnonzero(clones.samples == "d2")[0])
+    samples = np.concatenate(
+        [clones.samples, ["d4"], np.full(len(clones.outside), "d2")]
+    ).astype(object)
+    barcodes = np.concatenate(
+        [clones.barcodes, [clones.barcodes[first_d2]], clones.outside]
+    ).astype(object)
+    n_rows = len(samples)
+    n_variants = len(TAPESTRI_VARIANTS)
+    clone_of = np.concatenate([clones.clones, np.full(n_rows - len(clones.clones), -1)])
+    positions = [(variant.chrom, variant.position) for variant in TAPESTRI_VARIANTS]
+    distinct = list(dict.fromkeys(positions))
+    depth = np.zeros((n_rows, n_variants), dtype=np.int64)
+    alternative = np.zeros((n_rows, n_variants), dtype=np.int64)
+    genotypes = np.zeros((n_rows, n_variants), dtype=np.int64)
+    quality = np.zeros((n_rows, n_variants), dtype=np.int64)
+    for row in range(n_rows):
+        for key in distinct:
+            columns = [index for index, at in enumerate(positions) if at == key]
+            depth[row, columns] = int(rng.poisson(30)) + 8
+        mutated = TAPESTRI_CLONE_VARIANTS.get(int(clone_of[row]), ())
+        mutated_positions = {positions[column] for column in mutated}
+        for column, variant in enumerate(TAPESTRI_VARIANTS):
+            reads = int(depth[row, column])
+            if column in mutated:
+                if column in HOMOZYGOUS_VARIANTS:
+                    alternative[row, column] = reads
+                    genotypes[row, column] = 2
+                else:
+                    alternative[row, column] = int(
+                        np.clip(rng.binomial(reads, 0.5), 2, reads - 2)
+                    )
+                    genotypes[row, column] = 1
+            elif (
+                variant.alternative
+                and positions[column] not in mutated_positions
+                and rng.random() < 0.1
+            ):
+                # A read error that the caller still calls wild type.
+                alternative[row, column] = 1
+            quality[row, column] = int(rng.integers(30, 100))
+    unclonal = [row for row in range(len(clones.clones)) if int(clone_of[row]) < 0]
+    overlap_row, no_call_row, uncovered_row, wild_type_row = unclonal[:4]
+    # One read, which each alternative of chr2:500 claims.
+    depth[overlap_row, [5, 6]] = 1
+    alternative[overlap_row, [5, 6]] = 1
+    genotypes[overlap_row, [5, 6]] = 3
+    quality[overlap_row, [5, 6]] = 0
+    genotypes[no_call_row, 9] = 3
+    quality[no_call_row, 9] = 0
+    depth[uncovered_row, 9] = 0
+    alternative[uncovered_row, 9] = 0
+    genotypes[uncovered_row, 9] = 3
+    quality[uncovered_row, 9] = 0
+    depth[wild_type_row, [0, 1]] = 0
+    alternative[wild_type_row, [0, 1]] = 0
+    quality[wild_type_row, [0, 1]] = 0
+    filtered = np.zeros(n_rows, dtype=bool)
+    filtered[len(clones.clones) + 1 :] = True
+    filtered[unclonal[4]] = True
+    amplicon_reads = rng.poisson(40, size=(n_rows, len(TAPESTRI_AMPLICONS)))
+    amplicon_reads[unclonal[5], 1] = 0
+    protein_reads = rng.poisson(15, size=(n_rows, len(TAPESTRI_ANTIBODIES)))
+    protein_reads[:, 2] = rng.poisson(0.5, size=n_rows)
+    return TapestriTruth(
+        clones=clones,
+        samples=samples,
+        barcodes=barcodes,
+        depth=depth,
+        alternative=alternative,
+        genotypes=genotypes,
+        quality=quality,
+        filtered=filtered,
+        amplicon_reads=amplicon_reads.astype(np.int64),
+        protein_reads=protein_reads.astype(np.int64),
+        overlap_row=overlap_row,
+        no_call_row=no_call_row,
+        uncovered_row=uncovered_row,
+        wild_type_row=wild_type_row,
+    )
+
+
+def _texts_dataset(group: h5py.Group, name: str, values: Sequence[str]) -> None:
+    encoded = [str(value).encode("utf-8") for value in values]
+    width = max([1, *(len(value) for value in encoded)])
+    group.create_dataset(
+        name, data=np.asarray(encoded, dtype=f"S{width}"), compression="gzip"
+    )
+
+
+def _metadata_group(group: h5py.Group, values: dict[str, object], samples) -> None:
+    for name, value in values.items():
+        if isinstance(value, str):
+            group.create_dataset(name, data=np.bytes_(value.encode("utf-8")))
+        else:
+            group.create_dataset(name, data=value)
+    group.create_dataset(
+        "sample_name",
+        data=np.asarray([[sample.encode()] for sample in samples], dtype="S8"),
+    )
+
+
+def _cell_rows(group: h5py.Group, truth: TapestriTruth, rows: np.ndarray) -> None:
+    _texts_dataset(group, "barcode", truth.barcodes[rows].tolist())
+    _texts_dataset(group, "sample_name", truth.samples[rows].tolist())
+
+
+def write_tapestri(
+    truth: TapestriTruth,
+    path: Path,
+    *,
+    protein: bool = True,
+    rows: Sequence[int] | None = None,
+    chunks: tuple[int, int] = (8, 4),
+) -> Path:
+    """Write a Tapestri Pipeline 2.0 ``.dna+protein.h5`` file of the truth.
+
+    The layout and dtypes follow Mission Bio's documented structure and the
+    files it publishes: ``assays/dna_variants`` with the ``AF`` (float64),
+    ``DP`` (int16), ``NGT`` and ``GQ`` (int8), ``RGQ`` and ``FILTER_MASK``
+    layers, ``assays/dna_read_counts`` and, with ``protein``,
+    ``assays/protein_read_counts``, each with ``ra``, ``ca`` and
+    ``metadata``, ``all_barcodes`` of background barcodes, and the file's
+    ``metadata``. Layers are chunked in ``chunks`` of cells by features.
+    """
+    chosen = np.arange(truth.n_rows) if rows is None else np.asarray(rows)
+    samples = list(dict.fromkeys(truth.samples[chosen].tolist()))
+    with h5py.File(path, "w") as handle:
+        top = handle.create_group("metadata")
+        top.create_dataset("date_created", data=np.bytes_(b"2026-01-01"))
+        top.create_dataset("sdk_version", data=np.bytes_(b"3.1.2"))
+        assays = handle.create_group("assays")
+        variants = assays.create_group("dna_variants")
+        columns = variants.create_group("ca")
+        _texts_dataset(columns, "id", [variant.name for variant in TAPESTRI_VARIANTS])
+        _texts_dataset(
+            columns, "CHROM", [variant.chrom for variant in TAPESTRI_VARIANTS]
+        )
+        columns.create_dataset(
+            "POS",
+            data=np.asarray(
+                [variant.position for variant in TAPESTRI_VARIANTS], np.int32
+            ),
+        )
+        _texts_dataset(
+            columns, "REF", [variant.reference for variant in TAPESTRI_VARIANTS]
+        )
+        _texts_dataset(
+            columns, "ALT", [variant.alternative for variant in TAPESTRI_VARIANTS]
+        )
+        _texts_dataset(
+            columns,
+            "amplicon",
+            [f"AML_{variant.gene}" for variant in TAPESTRI_VARIANTS],
+        )
+        columns.create_dataset(
+            "filtered",
+            data=np.asarray(
+                [0 if variant.passing else 1 for variant in TAPESTRI_VARIANTS], np.uint8
+            ),
+        )
+        columns.create_dataset(
+            "QUAL", data=np.full(len(TAPESTRI_VARIANTS), 100.0, dtype=np.float32)
+        )
+        layers = variants.create_group("layers")
+        layer_chunks = (min(chunks[0], len(chosen)), chunks[1])
+        for name, values, dtype in (
+            ("AF", truth.frequency()[chosen], np.float64),
+            ("DP", truth.depth[chosen], np.int16),
+            ("NGT", truth.genotypes[chosen], np.int8),
+            ("GQ", truth.quality[chosen], np.int8),
+            ("RGQ", np.zeros_like(truth.depth[chosen]), np.int32),
+            (
+                "FILTER_MASK",
+                (truth.quality[chosen] < 30).astype(np.uint8),
+                np.uint8,
+            ),
+        ):
+            layers.create_dataset(
+                name,
+                data=np.asarray(values, dtype=dtype),
+                chunks=layer_chunks,
+                compression="gzip",
+            )
+        cell_rows = variants.create_group("ra")
+        _cell_rows(cell_rows, truth, chosen)
+        cell_rows.create_dataset(
+            "filtered", data=truth.filtered[chosen].astype(np.uint8)
+        )
+        _metadata_group(
+            variants.create_group("metadata"),
+            {
+                **TAPESTRI_METADATA,
+                "n_passing_variants": 7,
+                "gq_cutoff": 30,
+                "dp_cutoff": 10,
+                "af_cutoff": 20,
+            },
+            samples,
+        )
+        assay_layouts = [
+            (
+                "dna_read_counts",
+                truth.amplicon_reads[chosen],
+                {
+                    "id": [amplicon[0] for amplicon in TAPESTRI_AMPLICONS],
+                    "CHROM": [amplicon[1] for amplicon in TAPESTRI_AMPLICONS],
+                    "start_pos": [amplicon[2] for amplicon in TAPESTRI_AMPLICONS],
+                    "end_pos": [amplicon[3] for amplicon in TAPESTRI_AMPLICONS],
+                },
+                TAPESTRI_METADATA,
+            )
+        ]
+        if protein:
+            assay_layouts.append(
+                (
+                    "protein_read_counts",
+                    truth.protein_reads[chosen],
+                    {
+                        "id": [antibody[0] for antibody in TAPESTRI_ANTIBODIES],
+                        "antibody_sequence": [
+                            antibody[1] for antibody in TAPESTRI_ANTIBODIES
+                        ],
+                        "antibody_id": ["" for _ in TAPESTRI_ANTIBODIES],
+                    },
+                    PROTEIN_METADATA,
+                )
+            )
+        background = handle.create_group("all_barcodes")
+        for name, reads, feature_columns, metadata in assay_layouts:
+            assay = assays.create_group(name)
+            feature_group = assay.create_group("ca")
+            for key, values in feature_columns.items():
+                if isinstance(values[0], str):
+                    _texts_dataset(feature_group, key, values)
+                else:
+                    feature_group.create_dataset(key, data=np.asarray(values, np.int64))
+            assay.create_group("layers").create_dataset(
+                "read_counts",
+                data=np.asarray(reads, dtype=np.int64),
+                chunks=(min(chunks[0], len(chosen)), reads.shape[1]),
+                compression="gzip",
+            )
+            _cell_rows(assay.create_group("ra"), truth, chosen)
+            _metadata_group(assay.create_group("metadata"), dict(metadata), samples)
+            # Background barcodes, with Mission Bio's -1 suffix.
+            extra = background.create_group(name)
+            _texts_dataset(extra.create_group("ca"), "id", feature_columns["id"])
+            extra_rows = extra.create_group("ra")
+            _texts_dataset(extra_rows, "barcode", ["ACGTACGTACGTACGTAA-1"])
+            _texts_dataset(extra_rows, "sample_name", [samples[0]])
+            extra.create_group("layers").create_dataset(
+                "read_counts", data=np.ones((1, reads.shape[1]), dtype=np.int64)
+            )
+    return path
+
+
+def write_dabseq(truth: TapestriTruth, path: Path) -> Path:
+    """Write a DAb-seq ``.hdf5`` file of the truth's genotypes.
+
+    The arrays follow the DAb-seq pipeline's layout: ``AD``, ``RD``, ``DP``
+    (int16), ``GQ`` and ``GT`` (int8), cells by variants named
+    ``<gene>:<chrom>:<pos>:<ref>/<alt>``, cells named
+    ``<barcode>-1-<sample>``, and missing values as -1, as for the empty
+    ALTs' reads and quality and one cell's depth. The variants of one
+    position count the same reference reads, the reads of the position that
+    no alternative claims; the reads that two alternatives of the overlap
+    cell claim become one alternative's. FLT3-ITD is added with RD holding
+    its depth and GT 0 without reads, as the pipeline adds it.
+    """
+    variants = list(TAPESTRI_VARIANTS)
+    alternative = truth.alternative.copy()
+    alternative[truth.overlap_row, 6] = 0
+    depth = truth.depth.copy()
+    genotypes = truth.genotypes.copy()
+    quality = np.where(genotypes == 3, -1, truth.quality)
+    reference = np.zeros_like(depth)
+    positions = [(variant.chrom, variant.position) for variant in variants]
+    for key in dict.fromkeys(positions):
+        columns = [index for index, at in enumerate(positions) if at == key]
+        claimed = alternative[:, columns].sum(axis=1)
+        reference[:, columns] = (depth[:, columns[0]] - claimed)[:, None]
+    empty = np.asarray([not variant.alternative for variant in variants])
+    alternative[:, empty] = -1
+    reference[:, empty] = -1
+    # A missing depth, which a no-call without reads may hold.
+    depth[truth.uncovered_row, 9] = -1
+    n_rows = truth.n_rows
+    itd_depth = np.zeros(n_rows, dtype=np.int64)
+    itd_alternative = np.zeros(n_rows, dtype=np.int64)
+    itd_genotype = np.zeros(n_rows, dtype=np.int64)
+    itd_quality = np.zeros(n_rows, dtype=np.int64)
+    itd_rows = np.flatnonzero(truth.clones.clones == 4)
+    itd_depth[itd_rows] = 60
+    itd_alternative[itd_rows] = 25
+    itd_genotype[itd_rows] = 1
+    itd_quality[itd_rows] = 100
+    names = [variant.dabseq_name for variant in variants]
+    # DAb-seq names a variant without a gene annotation with an empty gene.
+    names = [
+        name if variant.alternative else f":{variant.name}"
+        for name, variant in zip(names, variants, strict=True)
+    ]
+    with h5py.File(path, "w") as handle:
+        for name, values, own, dtype in (
+            ("AD", alternative, itd_alternative, np.int16),
+            ("RD", reference, itd_depth, np.int16),
+            ("DP", depth, itd_depth, np.int16),
+            ("GQ", quality, itd_quality, np.int8),
+            ("GT", genotypes, itd_genotype, np.int8),
+        ):
+            handle.create_dataset(
+                name,
+                data=np.column_stack([values, own]).astype(dtype),
+                chunks=(5, 4),
+                compression="gzip",
+            )
+        _texts_dataset(handle, "VARIANTS", [*names, DABSEQ_ITD])
+        _texts_dataset(
+            handle,
+            "CELL_BARCODES",
+            [
+                f"{barcode}-1-{sample}"
+                for barcode, sample in zip(truth.barcodes, truth.samples, strict=True)
+            ],
+        )
+        amplicons = handle.create_group("AMPLICONS")
+        _texts_dataset(
+            amplicons, "NAMES", [amplicon[0] for amplicon in TAPESTRI_AMPLICONS]
+        )
+        amplicons.create_dataset(
+            "COUNTS", data=truth.amplicon_reads.astype(np.int32), compression="gzip"
+        )
+    return path
+
+
+def write_large_tapestri(
+    path: Path,
+    *,
+    n_cells: int,
+    n_variants: int,
+    n_amplicons: int = 120,
+    n_antibodies: int = 20,
+    seed: int = 0,
+    read_dtype: type = np.int64,
+    alternatives: int = 1,
+) -> Path:
+    """A Tapestri file of many cells with random reads, for memory tests.
+
+    Every variant passes; ``alternatives`` variants share each position and
+    its depth. A cell's alternative reads are a binomial share of its depth,
+    its NGT follows their frequency, and about 2% of entries are not
+    covered.
+    """
+    rng = np.random.default_rng(seed)
+    n_positions = -(-n_variants // alternatives)
+    depth = np.repeat(
+        rng.poisson(30, size=(n_cells, n_positions))
+        * (rng.random((n_cells, n_positions)) > 0.02),
+        alternatives,
+        axis=1,
+    )[:, :n_variants]
+    alternative = rng.binomial(depth, rng.choice([0.0, 0.5, 1.0], size=n_variants))
+    frequency = np.where(depth > 0, alternative / np.maximum(depth, 1) * 100, 0.0)
+    genotypes = np.where(
+        depth == 0, 3, np.where(frequency > 90, 2, np.where(frequency > 20, 1, 0))
+    )
+    # Each cell's number in base 4, one base per digit.
+    barcodes = [
+        "".join("ACGT"[(cell >> (2 * digit)) & 3] for digit in range(18))
+        for cell in range(n_cells)
+    ]
+    with h5py.File(path, "w") as handle:
+        variants = handle.create_group("assays/dna_variants")
+        columns = variants.create_group("ca")
+        positions = 1000 + 10 * (np.arange(n_variants) // alternatives)
+        alts = [("G", "T", "C")[column % alternatives] for column in range(n_variants)]
+        _texts_dataset(
+            columns,
+            "id",
+            [
+                f"chr1:{position}:A/{alt}"
+                for position, alt in zip(positions, alts, strict=True)
+            ],
+        )
+        _texts_dataset(columns, "CHROM", ["1"] * n_variants)
+        columns.create_dataset("POS", data=positions.astype(np.int32))
+        _texts_dataset(columns, "REF", ["A"] * n_variants)
+        _texts_dataset(columns, "ALT", alts)
+        columns.create_dataset("filtered", data=np.zeros(n_variants, dtype=np.uint8))
+        layers = variants.create_group("layers")
+        for name, values, dtype in (
+            ("AF", frequency, np.float64),
+            ("DP", depth, np.int16),
+            ("NGT", genotypes, np.int8),
+            ("GQ", np.full(depth.shape, 99), np.int8),
+        ):
+            layers.create_dataset(
+                name,
+                data=values.astype(dtype),
+                chunks=(min(64, n_cells), min(64, n_variants)),
+                compression="gzip",
+            )
+        for name, width in (
+            ("dna_variants", 0),
+            ("dna_read_counts", n_amplicons),
+            ("protein_read_counts", n_antibodies),
+        ):
+            assay = handle.require_group(f"assays/{name}")
+            rows = assay.create_group("ra")
+            _texts_dataset(rows, "barcode", barcodes)
+            _texts_dataset(rows, "sample_name", ["sample1"] * n_cells)
+            if name == "dna_variants":
+                rows.create_dataset("filtered", data=np.zeros(n_cells, dtype=np.uint8))
+                continue
+            _texts_dataset(
+                assay.create_group("ca"),
+                "id",
+                [f"{name}_{index}" for index in range(width)],
+            )
+            assay.create_group("layers").create_dataset(
+                "read_counts",
+                data=rng.poisson(20, size=(n_cells, width)).astype(read_dtype),
+                chunks=(min(64, n_cells), width),
+                compression="gzip",
+            )
+    return path

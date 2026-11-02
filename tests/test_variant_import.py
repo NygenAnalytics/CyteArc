@@ -1053,7 +1053,31 @@ def test_an_artifact_that_lost_a_table_is_not_reused(store, tmp_path) -> None:
     third, _ = _import(store, folder)
     assert third not in (first, second)
     del writable(third)["counts_forward"]
-    assert _import(store, folder)[0] not in (first, second, third)
+    fourth, _ = _import(store, folder)
+    assert fourth not in (first, second, third)
+    # Counts saved without call qualities, which every source's calls now
+    # carry, are imported again.
+    del writable(fourth)["call_quality"]
+    assert _import(store, folder)[0] not in (first, second, third, fourth)
+
+
+def test_repeated_calls_must_agree_in_their_quality() -> None:
+    from cytearc.datastore._operations.variants import _distinct_calls
+    from cytearc.variants.counts import CALL_DTYPE
+
+    rows = np.zeros(3, dtype=CALL_DTYPE)
+    rows["value"] = 1
+    rows["quality"] = [np.nan, np.nan, 30.0]
+    rows["key"] = [0, 0, 1]
+    # Two repeats without a quality are one call; NaN never equals NaN.
+    kept, conflict, dropped = _distinct_calls(rows)
+    assert conflict is None and dropped == 1 and len(kept) == 2
+    rows["key"] = 0
+    kept, conflict, dropped = _distinct_calls(rows)
+    assert conflict == 2 and dropped == 0
+    rows["quality"] = [20.0, 20.0, 99.0]
+    rows["key"] = [0, 0, 0]
+    assert _distinct_calls(rows)[1] == 2
 
 
 def test_load_counts_refuses_rows_beyond_the_memory_budget(store, tmp_path) -> None:
@@ -1248,6 +1272,7 @@ def test_every_source_is_checked_against_the_unit_and_the_others() -> None:
                 depth_definition="all",
                 depth_roles=None,
                 reference_from_depth=False,
+                alleles_overlap=False,
                 open_alleles=False,
                 count_fields=(),
             )
@@ -1332,8 +1357,10 @@ def test_short_tables_are_one_chunk_no_longer_than_their_rows(store, tmp_path) -
     )
     calls = store.artifacts.load(calls_ref)
     n_calls = len(expected_got_calls(TRUTH, site="CALR", source="Genotype"))
-    for name in ("call_alleles", "call_sources", "call_values"):
+    for name in ("call_alleles", "call_sources", "call_values", "call_quality"):
         assert calls[name].shape[0] == calls[name].chunks[0] == n_calls
+    # GoT tables give no quality of their calls.
+    assert np.isnan(calls["call_quality"][:]).all()
 
 
 def test_long_tables_are_chunked_in_bands_of_a_million_rows(tmp_path) -> None:

@@ -58,6 +58,9 @@ class CrToZarr:
         z: The Zarr hierarchy (array or group).
     """
 
+    #: The tool whose files the writer reads, as its log names it.
+    source_name = "Cell Ranger"
+
     def __init__(
         self,
         cr: CrReader,
@@ -473,7 +476,7 @@ class CrToZarr:
             logger.info(
                 f"Wrote {self.cr.nCells} cells and "
                 f"{sum(buffer.nColumns for buffer in buffers.values())} features "
-                f"from Cell Ranger to {len(stores)} assay(s)"
+                f"from {self.source_name} to {len(stores)} assay(s)"
             )
             for assay, summary in summaries.items():
                 finalize_counts(stores[assay], summary=summary)

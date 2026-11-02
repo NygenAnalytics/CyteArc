@@ -127,6 +127,7 @@ class CellsnpSource:
     count_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
+    alleles_overlap: bool
     open_alleles: bool
     notes: dict[str, Any]
     _records: _Records = field(repr=False)
@@ -332,6 +333,7 @@ def cellsnp_source(path: str | os.PathLike[str], *, format: str) -> CellsnpSourc
         count_fields=(),
         depth_roles=frozenset({"reference", "alternative"}),
         reference_from_depth=True,
+        alleles_overlap=False,
         open_alleles=False,
         notes={},
         _records=records,

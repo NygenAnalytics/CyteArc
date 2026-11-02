@@ -49,6 +49,7 @@ class VartrixSource:
     count_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
+    alleles_overlap: bool
     open_alleles: bool
     notes: dict[str, Any]
     _sites: SiteTable = field(repr=False)
@@ -213,6 +214,7 @@ def vartrix_source(path: str | os.PathLike[str]) -> VartrixSource:
         count_fields=(),
         depth_roles=None,
         reference_from_depth=False,
+        alleles_overlap=False,
         open_alleles=False,
         notes={"n_skipped_records": int((~single).sum())},
         _sites=sites,

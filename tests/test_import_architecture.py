@@ -1107,6 +1107,7 @@ def test_reader_implementations_are_runtime_isolated():
         "mito_afm.py",
         "mtx.py",
         "seurat.py",
+        "tapestri.py",
         "vartrix.py",
     }
     assert required_files.issubset(path.name for path in readers_root.glob("*.py"))
@@ -1129,6 +1130,7 @@ def test_reader_implementations_are_runtime_isolated():
         "readers.mgatk",
         "readers.mito_afm",
         "readers.mtx",
+        "readers.tapestri",
         "readers.vartrix",
         "readers.seurat",
     }
@@ -1165,10 +1167,13 @@ def test_reader_implementations_are_runtime_isolated():
             "readers._text",
         },
         "mtx.py": {"readers._sparse", "readers._text"},
+        "tapestri.py": {"readers._assay_names", "readers._text"},
     }
     reader_edges = {
         "readers.lineage_barcodes": {"readers.cellranger"},
         "readers.mtx": {"readers.cellranger"},
+        # TapestriReader is a CrReader, which CrToZarr writes.
+        "readers.tapestri": {"readers.cellranger"},
         "readers.seurat": {
             "readers._rds",
             "readers._seurat",
@@ -1237,6 +1242,7 @@ def test_writer_implementations_are_runtime_isolated():
         "sparse.py",
         "subset.py",
         "seurat.py",
+        "tapestri.py",
     }
     assert {path.name for path in writers_root.glob("*.py")} == required_files
     assert _runtime_import_modules(
@@ -1256,8 +1262,12 @@ def test_writer_implementations_are_runtime_isolated():
         "writers.sparse",
         "writers.subset",
         "writers.seurat",
+        "writers.tapestri",
     }
     format_names = {name.rsplit(".", 1)[-1] for name in format_modules}
+    # TapestriToZarr writes its reader's counts as CrToZarr does, as a
+    # subclass.
+    sibling_edges = {"tapestri.py": {"cellranger"}}
     facade_edges = {
         "writers.create_zarr_count_assay",
         "writers.create_zarr_obj_array",
@@ -1280,7 +1290,8 @@ def test_writer_implementations_are_runtime_isolated():
             and node.level == 1
             and node.module in format_names
         }
-        assert relative_sibling_imports == set()
+        allowed_siblings = sibling_edges.get(path.name, set())
+        assert relative_sibling_imports <= allowed_siblings
 
         runtime_imports = _runtime_import_modules(path)
         assert not {
@@ -1294,7 +1305,9 @@ def test_writer_implementations_are_runtime_isolated():
             for module_name in runtime_imports
             if module_name == "writers" or module_name.startswith("writers.")
         }
-        assert writer_edges <= shared_edges | facade_edges
+        assert writer_edges <= shared_edges | facade_edges | {
+            f"writers.{name}" for name in allowed_siblings
+        }
 
         reader_imports = {
             node

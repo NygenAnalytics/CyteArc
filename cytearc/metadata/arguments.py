@@ -620,7 +620,8 @@ class VariantCountImportArguments(OperationArguments):
     cell_selection: ArtifactRef = artifact_input()
     # Each source's format, the SHA-256 of each file it reads by role, and
     # how its barcodes name cells, in canonical order; paths are not part of
-    # the identity.
+    # the identity. A Tapestri or DAb-seq source also records the variants
+    # that it imports beside its passing ones.
     sources: tuple[dict[str, Any], ...] = artifact_input()
     # The unit of the counts: declared for formats whose files do not state
     # it, and the format's own unit otherwise.
@@ -695,6 +696,9 @@ class VariantGenotypeArguments(OperationArguments):
     # GIFT's swap probabilities by reads per UMI, as (reads, probability),
     # or empty for none.
     swap_probabilities: tuple[tuple[int, float], ...] = parameter()
+    # The quality and depth that an adopted source call needs, or None.
+    min_quality: float | None = parameter()
+    min_depth: int | None = parameter()
     invalidate_cache: bool = execution()
 
 

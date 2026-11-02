@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from .seurat import SeuratImportResult, SeuratToZarr
     from .sparse import SparseToZarr
     from .subset import SubsetZarr, subset_assay_zarr
+    from .tapestri import TapestriToZarr
 
 __all__ = [
     "create_zarr_dataset",
@@ -39,6 +40,7 @@ __all__ = [
     "to_mtx",
     "CSVtoZarr",
     "write_airr_rearrangements",
+    "TapestriToZarr",
 ]
 
 __getattr__, __dir__ = _lazy_facade(
@@ -62,6 +64,7 @@ __getattr__, __dir__ = _lazy_facade(
         "SparseToZarr": ".sparse",
         "SubsetZarr": ".subset",
         "subset_assay_zarr": ".subset",
+        "TapestriToZarr": ".tapestri",
     },
     set_module=True,
 )

@@ -210,6 +210,7 @@ class MgatkSource:
     count_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
+    alleles_overlap: bool
     open_alleles: bool
     notes: dict[str, Any]
     _reference: _Reference = field(repr=False)
@@ -465,6 +466,7 @@ def mgatk_source(
         + (("quality_forward", "quality_reverse") if six else ()),
         depth_roles=None,
         reference_from_depth=False,
+        alleles_overlap=False,
         open_alleles=False,
         notes={"columns": len(layout), "strands_swapped": swap},
         _reference=_read_reference(str(reference), prefix),
