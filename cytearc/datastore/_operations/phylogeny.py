@@ -65,7 +65,7 @@ from .cell_barcodes import (
     store_sha256,
     warn_unmatched_barcodes,
 )
-from .clone_artifacts import plan_clones, write_clones
+from .clone_artifacts import plan_clones, write_clones, zarr_write_buffer_bytes
 
 if TYPE_CHECKING:
     from ...readers.phylogeny import FileTrees, TreeFileLayout
@@ -634,9 +634,11 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             ),
         }
         width = _names_width(forest.names)
+        # The arrays are written beside what Zarr's writes hold in file
+        # buffers.
         self._check_phylogeny_budget(
             f"Writing the names of {len(forest.names)} nodes",
-            held + _write_bytes(width, len(forest.names)),
+            held + _write_bytes(width, len(forest.names)) + zarr_write_buffer_bytes(),
         )
         with artifact_transaction(self.zw, planned) as group:
             group.attrs.update(attributes)
@@ -870,10 +872,13 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         label_width = max(width, len(f"node{n_nodes}"))
         if len(tree_names) > 1:
             label_width += 1 + max(map(len, tree_names.tolist()))
+        # The clones are labelled and then written beside what Zarr's writes
+        # hold in file buffers.
         held += (
             n_clones * (_CUT_BYTES_PER_CLONE + 8 * (1 + label_width))
             + n_cells * (_CUT_BYTES_PER_CELL + 4 * label_width)
             + max(1, int(names_array.chunks[0])) * _NAME_READ_COPIES * 4 * width
+            + zarr_write_buffer_bytes()
         )
         self._check_phylogeny_budget(
             f"Labelling {n_clones} clones of {n_cells} cells", held

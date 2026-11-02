@@ -328,6 +328,50 @@ def test_trees_without_lengths_are_cut_at_depths_only(store, tmp_path) -> None:
     assert nodes["time"].isna().all()
 
 
+def test_writes_count_a_buffer_for_each_write_zarr_runs_at_once(
+    store, tmp_path, monkeypatch
+) -> None:
+    # Zarr writes each chunk and each array's metadata through a buffered
+    # file, as many at once as its async concurrency allows, and Python 3.14
+    # made each buffer 128 KiB, where it was the file system's block. The
+    # import's write of its arrays and the cut's of its clones count them,
+    # and no other check does.
+    import io
+
+    import zarr
+
+    from cytearc.datastore._operations.phylogeny import _PhylogenyOperationsMixin
+
+    check = _PhylogenyOperationsMixin._check_phylogeny_budget
+    path = _write_newick(tmp_path / "truth_tree.nwk")
+
+    def stated(concurrency: int) -> list[tuple[str, int]]:
+        found: list[tuple[str, int]] = []
+
+        def recorded(self, what: str, held: int) -> None:
+            found.append((what, held))
+            check(self, what, held)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(
+                _PhylogenyOperationsMixin, "_check_phylogeny_budget", recorded
+            )
+            with zarr.config.set({"async.concurrency": concurrency}):
+                phylogeny, _ = _import(store, path, invalidate_cache=True)
+                _cut(store, phylogeny, time=1.0, invalidate_cache=True)
+        return found
+
+    ten, twenty = stated(10), stated(20)
+    assert [what for what, _ in ten] == [what for what, _ in twenty]
+    writes = ("Writing the names of", "Labelling")
+    grown = {what: more - fewer for (what, fewer), (_, more) in zip(ten, twenty)}
+    assert grown == {
+        what: 10 * io.DEFAULT_BUFFER_SIZE if what.startswith(writes) else 0
+        for what in grown
+    }
+    assert sum(what.startswith(writes) for what in grown) == 2
+
+
 def test_the_time_unit_is_declared_never_inferred(store, tmp_path) -> None:
     path = _write_newick(tmp_path / "t.nwk")
     cells = every_cell(store)
