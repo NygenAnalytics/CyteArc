@@ -23,6 +23,7 @@ from tests.clone_truth import (
     write_petracer_characters,
     write_petracer_long,
 )
+from tests.perturbation_helpers import traced_peak
 from tests.storage_helpers import write_count_store
 
 DATA = Path(__file__).parent / "data" / "recorders"
@@ -422,8 +423,6 @@ def test_laml_text_holds_what_its_rows_count(tmp_path):
     States of two digits each become a string of their own when every value
     is converted, which held about 85 bytes per state beside the 64 counted.
     """
-    import tracemalloc
-
     from cytearc.writers.characters import laml_row_bytes, write_laml_characters
 
     rng = np.random.default_rng(5)
@@ -431,16 +430,15 @@ def test_laml_text_holds_what_its_rows_count(tmp_path):
     codes = rng.integers(-1, 41, size=(n_cells, n_characters)).astype(np.int32)
     matrix = _matrix_of(codes, 40)
     cells = np.asarray([f"cell{index:05d}" for index in range(n_cells)], dtype=object)
-    tracemalloc.start()
-    try:
-        before = tracemalloc.get_traced_memory()[0]
-        write_laml_characters(
+    counted = n_cells * laml_row_bytes(n_characters)
+    # The writer replaces the files, so a trace again writes them afresh.
+    _, peak = traced_peak(
+        lambda: write_laml_characters(
             tmp_path / "matrix.csv", cells, matrix, block_cells=n_cells
-        )
-        peak = tracemalloc.get_traced_memory()[1] - before
-    finally:
-        tracemalloc.stop()
-    assert peak <= n_cells * laml_row_bytes(n_characters), peak
+        ),
+        counted,
+    )
+    assert peak <= counted, peak
     written = pd.read_csv(
         tmp_path / "matrix.csv", dtype=str, keep_default_na=False, index_col=0
     )

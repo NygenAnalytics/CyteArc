@@ -452,15 +452,23 @@ def test_carlins_empty_line_leaves_its_cells_allele_unknown(tmp_path):
 
 
 def _treedata(path: Path, characters, **uns) -> Path:
-    """An AnnData file holding ``characters`` in obsm, as treedata writes .h5td."""
+    """An AnnData file holding ``characters`` in obsm, as treedata writes .h5td.
+
+    Current releases of anndata store each index as a nullable string array,
+    and releases before pandas 3 do so only once that is allowed.
+    """
     anndata = pytest.importorskip("anndata")
-    cells = characters.index if hasattr(characters, "index") else None
-    data = anndata.AnnData(
-        obs=pd.DataFrame(index=cells if cells is not None else ["c1", "c2"])
+    cells = pd.Index(
+        characters.index if hasattr(characters, "index") else ["c1", "c2"],
+        dtype="string",
     )
+    if hasattr(characters, "index"):
+        characters = characters.set_axis(cells)
+    data = anndata.AnnData(obs=pd.DataFrame(index=cells))
     data.obsm["characters"] = characters
     data.uns.update(uns)
-    data.write_h5ad(path)
+    with anndata.settings.override(allow_write_nullable_strings=True):
+        data.write_h5ad(path)
     return path
 
 
@@ -517,7 +525,10 @@ def test_treedata_reads_integer_states_and_a_plain_array(tmp_path):
     with pytest.raises(ValueError, match="not whole numbers"):
         read_all(tmp_path / "fractions.h5td")
     anndata = pytest.importorskip("anndata")
-    anndata.AnnData(obs=pd.DataFrame(index=cells)).write_h5ad(tmp_path / "none.h5td")
+    with anndata.settings.override(allow_write_nullable_strings=True):
+        anndata.AnnData(
+            obs=pd.DataFrame(index=pd.Index(cells, dtype="string"))
+        ).write_h5ad(tmp_path / "none.h5td")
     with pytest.raises(ValueError, match=r"holds no obsm\['characters'\]"):
         allele_layout(tmp_path / "none.h5td")
 

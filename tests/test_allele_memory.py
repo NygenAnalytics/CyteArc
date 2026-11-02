@@ -15,7 +15,6 @@ whose text outweighs the rest.
 """
 
 import re
-import tracemalloc
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -24,6 +23,7 @@ import numpy as np
 import pytest
 
 from tests.clone_helpers import open_clone_store
+from tests.perturbation_helpers import traced_peak
 from tests.storage_helpers import write_count_store
 
 pytestmark = pytest.mark.slow
@@ -79,16 +79,17 @@ def _bounds(store, run: Callable[[], object]) -> tuple[int, int]:
     return low, high
 
 
-def _traced(store, run: Callable[[], object], budget: int) -> int:
+def _traced(store, run: Callable[[], object], budget: int, bound: int) -> int:
+    """The step's traced peak at ``budget``, traced again if it passes ``bound``.
+
+    Each run recomputes its step: imports invalidate the saved one, and
+    exports write a file of their own.
+    """
     store.memoryBytes = budget
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        tracemalloc.start()
-        try:
-            run()
-            return tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
+        _, peak = traced_peak(run, bound)
+    return peak
 
 
 def _check(store, run: Callable[[], object]) -> None:
@@ -99,7 +100,7 @@ def _check(store, run: Callable[[], object]) -> None:
             # Compiled kernels and caches are warmed before anything is traced.
             run()
         low, high = _bounds(store, run)
-        peak = _traced(store, run, high)
+        peak = _traced(store, run, high, low + 1)
     finally:
         store.memoryBytes = full
     # Every accepted budget is above the largest refused one.
