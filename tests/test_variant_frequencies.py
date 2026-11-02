@@ -1,8 +1,6 @@
 """Allele frequencies, masked cosine neighbourhoods, the shared-neighbour graph and
 the clones they give, against values derived by hand."""
 
-import tracemalloc
-
 import numpy as np
 import pytest
 from scipy.sparse import coo_matrix
@@ -16,6 +14,7 @@ from cytearc.variants.frequencies import (
     cosine_neighborhoods,
     frequency_clones,
 )
+from tests.perturbation_helpers import traced_peak
 
 
 def _sites() -> SiteTable:
@@ -437,18 +436,6 @@ def test_frequency_clones_check_inputs_and_memory() -> None:
         )
 
 
-def _peak_bytes(call) -> int:
-    """The traced bytes that ``call`` holds at its peak beyond what was held
-    before it."""
-    tracemalloc.start()
-    try:
-        before = tracemalloc.get_traced_memory()[0]
-        call()
-        return tracemalloc.get_traced_memory()[1] - before
-    finally:
-        tracemalloc.stop()
-
-
 def _smallest_accepted_budget(call, *, high: int) -> int:
     """The smallest memory budget that ``call(budget)`` accepts, within 2%,
     by bisection on its MemoryError."""
@@ -498,7 +485,7 @@ def test_frequency_clones_hold_no_more_than_the_smallest_budget_they_accept(
         )
 
     budget = _smallest_accepted_budget(call, high=1 << 30)
-    assert _peak_bytes(lambda: call(budget)) <= budget
+    assert traced_peak(lambda: call(budget), budget)[1] <= budget
 
 
 def test_frequency_clones_refuse_a_budget_below_the_coverage_masks() -> None:

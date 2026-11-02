@@ -13,6 +13,7 @@ import pytest
 
 from cytearc.variants import VariantSelection
 from tests.clone_helpers import every_cell, open_clone_store
+from tests.perturbation_helpers import traced_peak
 from tests.variant_helpers import (
     band_budget,
     copy_variant_store,
@@ -504,8 +505,6 @@ class _Accepted(Exception):
 def test_scoring_holds_no_more_than_a_budget_near_the_smallest_it_accepts(
     store, monkeypatch
 ) -> None:
-    import tracemalloc
-
     from cytearc.datastore._operations import variants as variant_operations
 
     # Counts with strands and qualities, read whole and for scattered cells:
@@ -540,13 +539,7 @@ def test_scoring_holds_no_more_than_a_budget_near_the_smallest_it_accepts(
         monkeypatch.setattr(variant_operations, "_variant_bands", bands)
         # Bands of 2,000 rows beyond it, a few cells each.
         budget = high + 200 * 2_000
-        tracemalloc.start()
-        try:
-            before = tracemalloc.get_traced_memory()[0]
-            call(budget)
-            peak = tracemalloc.get_traced_memory()[1] - before
-        finally:
-            tracemalloc.stop()
+        _result, peak = traced_peak(lambda: call(budget), budget)
         assert peak <= budget
 
 

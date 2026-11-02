@@ -12,6 +12,7 @@ import pytest
 from sklearn.metrics import adjusted_rand_score
 
 from tests.clone_helpers import every_cell, open_clone_store
+from tests.perturbation_helpers import traced_peak
 from tests.variant_helpers import (
     clone_band_budget,
     copy_variant_store,
@@ -355,15 +356,8 @@ def _smallest_accepted_budget(store, run) -> int:
 
 
 def _traced_peak(store, run, budget: int) -> int:
-    import tracemalloc
-
     store.memoryBytes = budget
-    tracemalloc.start()
-    try:
-        run()
-        return tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    return traced_peak(run, budget)[1]
 
 
 @pytest.mark.slow
