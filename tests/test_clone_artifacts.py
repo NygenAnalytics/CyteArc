@@ -1,14 +1,18 @@
 """The ``clones`` artifact as every clone source plans, writes and loads it."""
 
 import dataclasses
+import io
+import re
 from pathlib import Path
 
 import numpy as np
 import pytest
+import zarr
 
 from cytearc.clones.assignments import CloneAssignment, ranked_clones
 from cytearc.datastore._operations.clone_artifacts import (
     SOURCE_ARRAYS,
+    check_clone_write_budget,
     plan_clones,
     write_clones,
 )
@@ -120,3 +124,22 @@ def test_writing_refuses_arrays_that_no_source_adds(store) -> None:
             {"n_clones": len(assignment.clone_ids)},
             source_arrays={"clone_probability": np.ones(N_CELLS)},
         )
+
+
+def test_the_write_check_counts_a_buffer_for_each_write_zarr_runs_at_once() -> None:
+    # Zarr writes each chunk and each array's metadata through a buffered
+    # file, as many at once as its async concurrency allows, and Python 3.14
+    # made each buffer 128 KiB, where it was the file system's block. Three
+    # cells of labels five characters long hold 3 * (8 + 4 * 5) bytes.
+    labels = np.asarray(["clone", "clone", "other"], dtype=object)
+
+    def bytes_named(concurrency: int) -> int:
+        with zarr.config.set({"async.concurrency": concurrency}):
+            with pytest.raises(MemoryError, match="width of the longest, 5") as refused:
+                check_clone_write_budget(1, 1_000, labels, 3)
+        found = re.search(r"holds about (\d+) bytes", str(refused.value))
+        assert found is not None
+        return int(found.group(1))
+
+    assert bytes_named(1) == 1_000 + 3 * (8 + 4 * 5) + io.DEFAULT_BUFFER_SIZE
+    assert bytes_named(20) - bytes_named(10) == 10 * io.DEFAULT_BUFFER_SIZE

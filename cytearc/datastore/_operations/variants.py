@@ -81,6 +81,7 @@ from .clone_artifacts import (
     log_clones,
     plan_clones,
     write_clones,
+    zarr_write_buffer_bytes,
 )
 
 if TYPE_CHECKING:
@@ -1706,11 +1707,14 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         if qualities:
             count_arrays += ["counts_quality_forward", "counts_quality_reverse"]
         tables = {"depth": ("depth_sites", "depth"), "count": tuple(count_arrays)}
+        # The statistics are written beside what Zarr's writes hold in file
+        # buffers.
         held = (
             _STATISTIC_BYTES_PER_VARIANT * sites.n_alleles
             + 16 * sites.n_sites
             + _band_chunk_bytes(group, tables)
             + _BAND_BYTES_PER_COUNTS_CELL * _n_counts_cells(group)
+            + zarr_write_buffer_bytes()
         )
         max_rows = (self.memoryBytes - held) // _STATISTIC_BYTES_PER_ROW
         if max_rows < 1:

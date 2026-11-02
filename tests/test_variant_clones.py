@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import zarr
 from sklearn.metrics import adjusted_rand_score
 
 from tests.clone_helpers import every_cell, open_clone_store
@@ -186,14 +187,16 @@ def test_clones_do_not_depend_on_threads_or_budget(store, tmp_path) -> None:
     counts, selection = _inputs(store)
     first = _called(store, store.variants.clones(counts, variants=selection))
     other = open_clone_store(Path(store.zarr_loc), nthreads=4)
-    # Bands of 2,000 rows, a few cells each.
+    # Bands of 2,000 rows, a few cells each. Zarr writes the clones one file
+    # at a time, so the buffer of that write fits beside them.
     other.memoryBytes = clone_band_budget(
         other, counts, 2_000, n_cells=TRUTH.n_cells, n_variants=12
     )
-    second = _called(
-        other,
-        other.variants.clones(counts, variants=selection, invalidate_cache=True),
-    )
+    with zarr.config.set({"async.concurrency": 1}):
+        second = _called(
+            other,
+            other.variants.clones(counts, variants=selection, invalidate_cache=True),
+        )
     np.testing.assert_array_equal(first, second)
 
 

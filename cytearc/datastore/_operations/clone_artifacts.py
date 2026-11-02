@@ -9,6 +9,7 @@ it, check that its labels fit the memory budget as the store saves them,
 write it and log it, once for every operation mixin that saves clones.
 """
 
+import io
 from collections.abc import Mapping
 from typing import Any, ClassVar, Protocol
 
@@ -30,6 +31,7 @@ __all__ = [
     "log_clones",
     "plan_clones",
     "write_clones",
+    "zarr_write_buffer_bytes",
 ]
 
 #: The per-cell array of each cell's probability of its clone.
@@ -109,6 +111,18 @@ def plan_clones(
     )
 
 
+def zarr_write_buffer_bytes() -> int:
+    """The bytes that Zarr's writes hold in file buffers at once.
+
+    Zarr writes each chunk and each array's metadata through a buffered file,
+    up to its async concurrency of them at once. Each buffer is counted as
+    one of io's default buffers, 8 KiB before Python 3.14 and 128 KiB from it,
+    which covers the buffer that Python gives a file on a file system whose
+    blocks are no larger.
+    """
+    return int(zarr.config.get("async.concurrency")) * io.DEFAULT_BUFFER_SIZE
+
+
 def check_clone_write_budget(
     memory_bytes: int, held: int, clone_ids: np.ndarray, n_cells: int
 ) -> None:
@@ -116,13 +130,14 @@ def check_clone_write_budget(
 
     The store saves text at the width of the longest value, so each cell's
     label takes four bytes per character of the longest as it is written,
-    beside its code; ``held`` is what the caller holds beside them.
+    beside its code and Zarr's file buffers (``zarr_write_buffer_bytes``);
+    ``held`` is what the caller holds beside them.
 
     Raises:
         MemoryError: If the clones would not fit ``memory_bytes``.
     """
     width = max((len(str(label)) for label in clone_ids.tolist()), default=0)
-    peak = held + n_cells * (8 + 4 * width)
+    peak = held + n_cells * (8 + 4 * width) + zarr_write_buffer_bytes()
     if peak > memory_bytes:
         raise MemoryError(
             f"Saving the clones of {n_cells} cells holds about {peak} bytes, "

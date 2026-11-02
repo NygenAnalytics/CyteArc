@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc.datastore._operations.clone_artifacts import zarr_write_buffer_bytes
 from tests.clone_helpers import open_clone_store, write_truth_store
 from tests.variant_truth import (
     BASES,
@@ -440,7 +441,8 @@ def band_budget(store: "DataStore", counts, rows: int) -> int:
     """The memory budget at which ``ds.variants.informative`` reads bands of
     ``rows`` stored rows of ``counts``: its per-variant sums (240 bytes per
     allele and 16 per site), the two chunks of the widest array that a band's
-    reads decompress beyond its rows, and 200 bytes per row."""
+    reads decompress beyond its rows, the file buffers of Zarr's writes and
+    200 bytes per row."""
     group = store.artifacts.load(counts)
     fields = group.attrs["count_fields"]
     names = ["depth_sites", "depth", "count_alleles", "counts"]
@@ -454,6 +456,7 @@ def band_budget(store: "DataStore", counts, rows: int) -> int:
         240 * n_alleles
         + 16 * n_sites
         + 2 * _widest_chunk_bytes(group, names)
+        + zarr_write_buffer_bytes()
         + 200 * rows
     )
 
@@ -465,7 +468,8 @@ def clone_band_budget(
     ``rows`` stored rows of ``counts``: the frequencies of ``n_cells`` cells
     at ``n_variants`` informative variants, the two chunks that a band's
     reads decompress beyond its rows, and per row 200 bytes and 32 per
-    variant."""
+    variant. It leaves out what writing the clones holds after the bands, the
+    file buffers of Zarr's writes among them, which the budget must fit too."""
     group = store.artifacts.load(counts)
     names = ["depth_sites", "depth", "count_alleles", "counts"]
     return (

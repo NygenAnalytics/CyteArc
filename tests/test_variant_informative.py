@@ -543,6 +543,34 @@ def test_scoring_holds_no_more_than_a_budget_near_the_smallest_it_accepts(
         assert peak <= budget
 
 
+def test_scoring_counts_a_buffer_for_each_write_zarr_runs_at_once(store) -> None:
+    # Zarr writes each chunk and each array's metadata through a buffered
+    # file, as many at once as its async concurrency allows, and Python 3.14
+    # made each buffer 128 KiB, where it was the file system's block.
+    import io
+    import re
+
+    import zarr
+
+    counts = _counts(store, qualities=True)
+
+    def bytes_held(concurrency: int) -> int:
+        """The bytes that the check before the first band names."""
+        with zarr.config.set({"async.concurrency": concurrency}):
+            store.memoryBytes = 1
+            try:
+                store.variants.informative(counts, min_vmr=0.0, invalidate_cache=True)
+            except MemoryError as error:
+                found = re.search(r"holds about (\d+) bytes", str(error))
+                assert found is not None and "Scoring the variants" in str(error)
+                return int(found.group(1))
+            finally:
+                store.memoryBytes = 1 << 30
+        raise AssertionError("a budget of one byte scored the variants")
+
+    assert bytes_held(20) - bytes_held(10) == 10 * io.DEFAULT_BUFFER_SIZE
+
+
 def test_statistics_do_not_depend_on_the_band_size(store) -> None:
     counts = _counts(store, qualities=True)
     whole = store.variants.load_informative(
