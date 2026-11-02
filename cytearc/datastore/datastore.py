@@ -23,6 +23,7 @@ from ._operations.perturbation_effects import _PerturbationEffectOperationsMixin
 from ._operations.perturbation_guides import _PerturbationGuideOperationsMixin
 from ._operations.perturbation_mixscape import _PerturbationMixscapeOperationsMixin
 from ._operations.perturbation_profiles import _PerturbationProfileOperationsMixin
+from ._operations.phylogeny import _PhylogenyOperationsMixin
 from ._operations.presentation import _PresentationOperationsMixin
 from ._operations.quality_control import _QualityControlOperationsMixin
 from ._operations.regulons import _RegulonOperationsMixin
@@ -217,6 +218,7 @@ class DataStore(
     _PerturbationMixscapeOperationsMixin,
     _PerturbationAssociationOperationsMixin,
     _PerturbationProfileOperationsMixin,
+    _PhylogenyOperationsMixin,
     _CloneOperationsMixin,
     _LineageBarcodeOperationsMixin,
     _RecorderAlleleOperationsMixin,

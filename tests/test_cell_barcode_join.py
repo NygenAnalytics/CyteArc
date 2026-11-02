@@ -41,6 +41,7 @@ from tests.barcode_join_helpers import (
     write_clone_file,
     write_contig_file,
     write_guide_call_file,
+    write_tree_file,
     write_variant_file,
 )
 from tests.perturbation_helpers import traced_peak
@@ -209,6 +210,15 @@ def _cells_with_alleles(store, ref) -> set[str]:
     return set(cells.index[cells["n_records"] > 0])
 
 
+def _phylogeny(store, paths, **options):
+    return store.clones.import_phylogeny(paths, time_unit="days", **options)
+
+
+def _leaf_cells(store, ref) -> set[str]:
+    nodes = store.clones.load_phylogeny(ref).nodes
+    return set(nodes["cell"].dropna())
+
+
 IMPORTERS = {
     "import_guide_calls": Importer(
         name="import_guide_calls",
@@ -258,6 +268,14 @@ IMPORTERS = {
         run=_alleles,
         joined=_cells_with_alleles,
         files=("the allele file", "the allele files"),
+    ),
+    "import_phylogeny": Importer(
+        name="import_phylogeny",
+        several_files=True,
+        write=write_tree_file,
+        run=_phylogeny,
+        joined=_leaf_cells,
+        files=("the tree file", "the tree files"),
     ),
 }
 MULTI_FILE = [name for name, importer in IMPORTERS.items() if importer.several_files]

@@ -11,6 +11,7 @@ Import the clones that a lineage tracing tool or a study assigned to cells, the 
 - Clones from imported lineage barcodes: `ds.clones.barcode_clones` with the preset of the method that made them (LARRY, TREX, CellTagR, CellTag-multi) or rules chosen one by one.
 - The edits of a lineage recorder per cell and array: DARLIN's or CARLIN's `AlleleAnnotations.txt` and `AlleleColonies.txt`, the `darlin` CLI's `step4_final.tsv`, Cassiopeia's allele tables (before 3.0, or 3.0's parquet), PEtracer's allele tables and character matrices, DNA Typewriter's tables, a TreeData file's `obsm['characters']`, another tool's character matrix, or any table of alleles: `ds.clones.import_alleles`, then `ds.clones.export_characters` for Cassiopeia or LAML, which build the trees. CyteArc builds no trees.
 - Clones from imported recorder alleles, cells that share a rare allele: `ds.clones.allele_clones` by DARLIN's frequency graph or CARLIN's p_clonal test, with each array's allele bank.
+- A lineage recorder's trees whose leaves are cells (PEtracer, DNA Typewriter, Cassiopeia, LAML, ConvexML): Newick text or TreeData `.h5td`/`.zarr`, imported with `ds.clones.import_phylogeny` and cut into clones with `ds.clones.phylogeny_clones`. CyteArc never reconstructs trees.
 
 ## Key concepts
 
@@ -64,6 +65,12 @@ Import the clones that a lineage tracing tool or a study assigned to cells, the 
 - `ds.clones.fate_bias(clones, *, group_by=None, groups=None, early, late, invalidate_cache=False)` saves a datastore-scoped `clone_fate_bias` artifact (operation `measure_clone_fate_bias`) labelling the `early` cells (a cell selection) with their dominant fate; fates are the groups of the `late` cells (a cell selection sharing no cell with `early`). Per early cell: `values` (dominant fate, empty for none or a tie), `codes` (clone), `fate_codes`, `late_cells` (its clone's late cells), `fractions` (cells by fates, NaN without late cells; CoSpar's `fate_map(method="sum")` on its clonal transition map). Per clone with late cells: counts per fate and a one-sided Fisher test per fate against all late cells with a fate (CoSpar's `clonal_fate_bias(alternative="less")`, which is the upper tail), Benjamini-Hochberg within each fate (CoSpar adjusts within clone sizes). A fate named `clone`, `late_cells` or `fate` is refused.
 - `ds.clones.load_fate_bias(bias)` returns a `CloneFateBias` record: `.cells` (indexed by early cell ID: `clone`, `late_cells`, `fate`, then one column per fate of its share), `.clone_fates` (one row per clone with late cells and fate: `clone`, `fate`, key columns, `early_cells`, `late_cells`, `cells`, `fraction`, `p_value`, `q_value`), `.fates` (`fate`, key columns, `late_cells`), `.clones`, `.early`, `.late`, `.group_by`, `.groups`. `ds.select_cells(bias, include=["Neutrophil"])` keeps early cells whose clones went mostly to neutrophils.
 - `ds.plots.clone_coupling(coupling, value="z_score")` draws the record as a heatmap in its linkage order with the tree above (z-scores centred on 0; `value="coupling"` for the values; tables `matrix`, `pairs`); `ds.plots.clone_fates(bias, top=40, normalize=False)` stacks the late cells of the `top` clones with the most late cells by fate, grouped by dominant fate, under their early cells (table `clones`).
+- `ds.clones.import_phylogeny(paths, *, cell_selection, time_unit, format=None, barcode_prefix=None, barcode_suffix=None, barcode_pattern=None, invalidate_cache=False)` saves a datastore-scoped `cell_phylogeny` artifact. `time_unit` is required, never inferred: `"days"` for PEtracer and DNA Typewriter, or None for lengths that are not times (then cut by depth only). `format` is `"newick"` or `"treedata"`; a Zarr store or HDF5 file is TreeData. Newick: plain or gzip, several trees per file, comments, quoted labels, polytomies, single-child nodes, negative lengths and a root length are read; an unquoted number on an internal node is a support value, not a name (quote it, as `'95'`, to keep it); NEXUS is refused. TreeData: node `time` is preferred over edge `length`; other attributes are dropped; `.zarr` stores written before treedata 0.3.0 are refused.
+- Leaves join to cells as clone files do (`barcode_prefix + leaf + barcode_suffix`, `barcode_pattern`). Attributes: `n_unmatched_barcodes` (leaves naming no selected cell, warned again on reuse), `n_cells_in_no_tree`, `n_cells_in_trees`, `n_trees`, `n_leaves`, `leaf_time_spread` (largest gap between a tree's earliest and latest leaf; 0 when ultrametric). Two leaves naming one cell, such as bootstrap replicates in one file, raise `ValueError`.
+- Tree names: the file's prefix and name without `.gz` and extension (`E7.5-R1-C1.nwk.gz` gives `E7.5-R1-C1`), plus `_<k>` or `_<key>` for files of several trees; names must differ. The file's bytes and its trees' name identify the import.
+- `ds.clones.phylogeny_clones(phylogeny, *, time=None, depth=None, invalidate_cache=False)` saves a `clones` artifact (source `"phylogeny_clones"`) of the phylogeny's cells; pass exactly one cut. A clone is the clade of the first node at or past the cut below each root (as pycea's `tl.clades`); depth counts branchings with single-child nodes merged, so a root with one child is at depth 0; each child of a polytomy is its own clone; `depth=0`, or a time at or before every root's time (`time=0` unless a negative length lies above a root), gives one clone per tree. Cells whose leaves end before the cut have no clone (`n_cells_before_cut`, warned); a cut that leaves every cell out raises `ValueError`.
+- Clone labels: the clade root's name when every node of its tree has a unique name (PEtracer, Cassiopeia), else `node<position>` (the `node` column of `load_phylogeny(...).nodes`); with several trees, `<tree>/` comes first.
+- `ds.clones.load_phylogeny(phylogeny)` returns a `CellPhylogeny` record: `.nodes` (`tree`, `node`, `name`, `parent`, `time`, `depth`, `is_leaf`, `cell`), `.trees` (`tree`, `n_nodes`, `n_leaves`, `n_cells`, `root_time`, `earliest_leaf_time`, `latest_leaf_time`) and `.time_unit`.
 - Validated on immune receptor clonotypes: every cell's category equals scirpy 0.25.1's `clonal_expansion`, frequency fractions equal scRepertoire 2.8.0's `clonalHomeostasis` and rank windows its `clonalProportion`; Hill-number curves within 1.4e-12 of iNEXT 3.0.2, `estimateD` within 1e-7, every index within 6e-14 of scRepertoire 2.8.0 `clonalDiversity`, immunarch 0.10.3 `repDiversity` and vegan 2.7.6 `estimateR`; every overlap index within 5e-14 of immunarch 0.10.3 `repOverlap` and scRepertoire 2.8.0 `clonalOverlap`.
 
 ## Recipe
@@ -165,6 +172,18 @@ clones = ds.clones.allele_clones(
 ds.artifacts.load(clones).attrs["bank_coverage"]  # each array's alleles and observations, and how many the bank lists
 ```
 
+```python
+# PEtracer's clone trees of one embryo, in days; cut them at several times.
+phylogeny = ds.clones.import_phylogeny(
+    ["E7.5-R1-C1.nwk.gz", "E7.5-R1-C2.nwk.gz"], cell_selection=cells, time_unit="days"
+)
+attributes = ds.artifacts.load(phylogeny).attrs
+print(attributes["n_cells_in_trees"], "cells in trees;", attributes["n_cells_in_no_tree"], "in none")
+for time in (4.0, 5.5, 6.5):
+    clones = ds.clones.phylogeny_clones(phylogeny, time=time)
+    print(time, ds.clones.overlap(clones, group_by="cell_type").pairs[["group_1", "group_2", "morisita_horn"]])
+```
+
 ## Checks
 
 - Compare `n_unmatched_barcodes` with what the file should hold outside the selection before suspecting the prefix, suffix or pattern. pycashier, BARtab from BAM input and Cell Ranger's molecule info list droplets that are not cells, so their unmatched barcodes are expected.
@@ -182,3 +201,4 @@ ds.artifacts.load(clones).attrs["bank_coverage"]  # each array's alleles and obs
 - Measure coupling on the cells of one time point (`cell_selection`) and read `z_score` as a ranking: shuffled labels spread each clone over every group, so when clones commit to few fates most pairs fall below the null. Keep `share_cosine` unless a few large clones should dominate. Coupling treats cells as exchangeable: it is exploratory within one sample.
 - For fate bias, `early` and `late` must share no cell. Every early cell of a clone gets its clone's fractions, so summarise by clone; report how many early cells have late clone-mates. Small clones cannot reach small p-values. When barcode detection differs between cell types, pass only late cells with a clone as `late`.
 - Compare conditions with one value per sample (such as the fraction of cells in clones of more than two cells), never with cells as replicates; test such values with a method that treats samples as replicates, such as CytePool's (https://docs.nygen.io/CytePool/).
+- After importing a phylogeny, check `n_unmatched_barcodes` (leaves naming no selected cell) and `n_cells_in_no_tree`; cut at several times, not one, and check `leaf_time_spread` and `n_cells_before_cut` for cuts near the leaves.

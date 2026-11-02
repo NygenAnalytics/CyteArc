@@ -450,6 +450,28 @@ _CONTRACTS = (
         ),
     ),
     OperationContract(
+        ClonesAccessor.import_phylogeny,
+        metadata_arguments.PhylogenyImportArguments,
+        # Each file is identified by its format, the SHA-256 of its bytes, how
+        # its leaves name cells and the name its trees take, in canonical
+        # order; its path is not recorded.
+        signature_only=_classified(
+            "transformed",
+            "paths",
+            "format",
+            "barcode_prefix",
+            "barcode_suffix",
+            "barcode_pattern",
+        ),
+        model_only=_classified("resolved_input", "sources"),
+    ),
+    OperationContract(
+        ClonesAccessor.phylogeny_clones,
+        metadata_arguments.PhylogenyCloneArguments,
+        # The clones label the phylogeny's cells.
+        model_only=_classified("resolved_input", "cell_selection"),
+    ),
+    OperationContract(
         PerturbationAccessor.import_guide_calls,
         metadata_arguments.GuideCallImportArguments,
         # The file is identified by the SHA-256 of its bytes, not its path.

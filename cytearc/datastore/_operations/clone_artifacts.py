@@ -1,13 +1,13 @@
 """The ``clones`` artifact that every clone source saves.
 
 Clone import, clones from a cell column, barcode clones, clones called from
-variants and allele clones all save the same artifact: per cell the clone
-label in ``values``, the clone's rank in ``codes`` and its size in
-``clone_size``, and per clone ``clone_ids`` and ``clone_sizes``, beside the
-per-cell arrays that a source adds, such as each cell's probability of its
-clone. These helpers plan it, check that its labels fit the memory budget as
-the store saves them, write it and log it, once for every operation mixin that
-saves clones.
+variants, allele clones and the clones of a phylogeny's cut all save the same
+artifact: per cell the clone label in ``values``, the clone's rank in
+``codes`` and its size in ``clone_size``, and per clone ``clone_ids`` and
+``clone_sizes``, beside the per-cell arrays that a source adds, such as each
+cell's probability of its clone. These helpers plan it, check that its labels
+fit the memory budget as the store saves them, write it and log it, once for
+every operation mixin that saves clones.
 """
 
 import io

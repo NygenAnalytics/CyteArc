@@ -186,3 +186,13 @@ def write_allele_file(path: Path, barcodes: list[str]) -> Path:
         + "".join(f"intID1,{barcode},ACAGT,None,None,3,30\n" for barcode in barcodes)
     )
     return path
+
+
+def write_tree_file(path: Path, barcodes: list[str]) -> Path:
+    """A Newick tree whose leaves are the barcodes, quoted where they hold marks."""
+    from tests.clone_truth import newick_label
+
+    path.write_text(
+        "(" + ",".join(newick_label(barcode) for barcode in barcodes) + ");"
+    )
+    return path

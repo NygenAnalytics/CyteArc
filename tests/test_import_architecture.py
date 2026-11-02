@@ -1106,6 +1106,7 @@ def test_reader_implementations_are_runtime_isolated():
         "mgatk.py",
         "mito_afm.py",
         "mtx.py",
+        "phylogeny.py",
         "recorder_alleles.py",
         "seurat.py",
         "tapestri.py",
@@ -1131,6 +1132,7 @@ def test_reader_implementations_are_runtime_isolated():
         "readers.mgatk",
         "readers.mito_afm",
         "readers.mtx",
+        "readers.phylogeny",
         "readers.recorder_alleles",
         "readers.tapestri",
         "readers.vartrix",
@@ -1419,6 +1421,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
     from cytearc.datastore._operations.perturbation_profiles import (
         _PerturbationProfileOperationsMixin,
     )
+    from cytearc.datastore._operations.phylogeny import _PhylogenyOperationsMixin
     from cytearc.datastore._operations.presentation import _PresentationOperationsMixin
     from cytearc.datastore._operations.quality_control import (
         _QualityControlOperationsMixin,
@@ -1491,6 +1494,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         _RecorderAlleleOperationsMixin,
         _RepertoireOperationsMixin,
         _VariantOperationsMixin,
+        _PhylogenyOperationsMixin,
     )
     assert all("__init__" not in mixin.__dict__ for mixin in mixins)
     assert all(mixin.__bases__ == (object,) for mixin in mixins)
