@@ -22,7 +22,6 @@ from ...metadata.records import (
     RecordTable,
     chunk_rows_for,
     decode_ragged,
-    decode_text,
     pack_text,
     take_text,
     unpack_text,
@@ -94,6 +93,12 @@ from .cell_barcodes import (
     warn_unmatched_barcodes,
 )
 from .cell_groups import cell_groups, group_columns
+from .record_tables import (
+    read_array,
+    record_arrays,
+    record_chunk_lengths,
+    stored_column,
+)
 
 if TYPE_CHECKING:
     from ..mapping_datastore import MappingDatastore as _RepertoireOperationsBase
@@ -142,9 +147,8 @@ _TABLE_BYTES_PER_FIELD = 64
 # the labels and chain counts as read and as table columns, and the slots.
 # Up to 560 bytes per cell were resident at the peak, on 1,000,000 cells.
 _CELL_TABLE_BYTES_PER_CELL = 700
-# The bytes of each chunk of a contig array. Packed text and per-contig codes
-# are read and written whole, which chunks of megabytes make fast.
-_CONTIG_CHUNK_BYTES = 2 * 2**20
+# The prefix of the stored contig arrays, such as contig_cells.
+_CONTIGS = "contig"
 # Reading the receptor types holds each cell's stored text and, while it is
 # coded, a Python string and a code for each cell, 92 bytes beside the text as
 # traced on 200,000 cells.
@@ -360,68 +364,6 @@ def _encode_contigs(
     return encoder.finish()
 
 
-def _contig_arrays(table: RecordTable) -> dict[str, np.ndarray]:
-    """Return the stored arrays of encoded contigs, keyed by array name.
-
-    A text field ``f`` is stored as ``contig_f``, each contig's code, with the
-    UTF-8 bytes of its distinct values in ``contig_f_values`` and their
-    offsets in ``contig_f_offsets``. A ragged field is stored as
-    ``contig_f``, the bytes of each contig's value, with ``contig_f_offsets``.
-    Other fields are stored as ``contig_f``.
-    """
-    arrays: dict[str, np.ndarray] = {
-        "contig_cells": np.asarray(table.cells, dtype=np.int32),
-        "contig_sources": np.asarray(table.sources, dtype=np.int32),
-    }
-    # contig_cells, contig_sources and contig_chain are not fields.
-    for name, kind in table.kinds.items():
-        if kind == TEXT:
-            encoded = table.text[name]
-            arrays[f"contig_{name}"] = np.asarray(encoded.codes, dtype=np.int32)
-            arrays[f"contig_{name}_values"] = encoded.data
-            arrays[f"contig_{name}_offsets"] = encoded.offsets
-        elif kind == RAGGED:
-            data, offsets = table.ragged[name]
-            arrays[f"contig_{name}"] = data
-            arrays[f"contig_{name}_offsets"] = offsets
-        else:
-            arrays[f"contig_{name}"] = np.asarray(table.values[name])
-    return arrays
-
-
-def _contig_chunk_lengths(arrays: dict[str, np.ndarray]) -> dict[str, int]:
-    """Chunk each contig array in about 2 MiB, for whole-array reads and writes."""
-    return {
-        name: max(1, _CONTIG_CHUNK_BYTES // max(1, values.dtype.itemsize))
-        for name, values in arrays.items()
-    }
-
-
-def _read(group: zarr.Group, name: str) -> np.ndarray:
-    return np.asarray(as_zarr_array(group[name], name=name)[:])
-
-
-def _stored_text(group: zarr.Group, name: str) -> EncodedText:
-    return EncodedText(
-        codes=_read(group, f"contig_{name}"),
-        data=_read(group, f"contig_{name}_values"),
-        offsets=_read(group, f"contig_{name}_offsets"),
-    )
-
-
-def _stored_column(group: zarr.Group, name: str) -> np.ndarray:
-    """Decode one stored contig field: text, None where missing."""
-    kind = FIELDS[name]
-    if kind == TEXT:
-        encoded = _stored_text(group, name)
-        return decode_text(encoded.codes, encoded.categories)
-    if kind == RAGGED:
-        return decode_ragged(
-            _read(group, f"contig_{name}"), _read(group, f"contig_{name}_offsets")
-        )
-    return _read(group, f"contig_{name}")
-
-
 def _stored_fields(group: zarr.Group) -> tuple[str, ...]:
     fields = group.attrs["fields"]
     if not isinstance(fields, list) or not all(name in FIELDS for name in fields):
@@ -452,8 +394,8 @@ def _stored_text_at(group: zarr.Group, name: str, positions: np.ndarray) -> np.n
         # The packed bytes are read once; only the needed values become text,
         # a batch at a time, so the objects that decoding makes for each value
         # are held for one batch.
-        data = _read(group, f"contig_{name}_values")
-        offsets = _read(group, f"contig_{name}_offsets")
+        data = read_array(group, f"contig_{name}_values")
+        offsets = read_array(group, f"contig_{name}_offsets")
         text = np.empty(len(needed), dtype=object)
         for start in range(0, len(needed), _DECODE_BATCH_VALUES):
             batch = needed[start : start + _DECODE_BATCH_VALUES]
@@ -464,7 +406,7 @@ def _stored_text_at(group: zarr.Group, name: str, positions: np.ndarray) -> np.n
 
 def _slot_codes(group: zarr.Group, name: str, slots: np.ndarray) -> np.ndarray:
     """Return a text field's code in each cell's slots, -1 for an empty slot."""
-    codes = _read(group, f"contig_{name}").astype(np.int64)
+    codes = read_array(group, f"contig_{name}").astype(np.int64)
     taken = np.full(slots.shape, -1, dtype=np.int64)
     filled = slots >= 0
     taken[filled] = codes[slots[filled]]
@@ -948,7 +890,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         quality = receptor_quality(index, locus)
         n_contigs = np.bincount(table.cells, minlength=n_cells).astype(np.int32)
-        contig_arrays = {"contig_chain": index.eligible, **_contig_arrays(table)}
+        contig_arrays = {
+            "contig_chain": index.eligible,
+            **record_arrays(table, _CONTIGS),
+        }
         attributes = {
             "fields": list(table.fields),
             "n_file_contigs": join.n_rows,
@@ -969,7 +914,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 "chain_slots": index.slots,
                 **contig_arrays,
             },
-            chunk_lengths=_contig_chunk_lengths(contig_arrays),
+            chunk_lengths=record_chunk_lengths(contig_arrays),
             attributes=attributes,
         )
         warn_unmatched_barcodes(attributes, files_text)
@@ -1023,7 +968,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                     + ", ".join(stored)
                 )
             chosen = tuple(name for name in stored if name in set(fields))
-        contig_cells = _read(group, "contig_cells")
+        contig_cells = read_array(group, "contig_cells")
         n_contigs = len(contig_cells)
         n_cells = int(as_zarr_array(group["values"], name="values").shape[0])
         sequence_bytes = sum(
@@ -1049,14 +994,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         # arrays are aligned to the same cells.
         loaded = self._artifacts_load_values(receptors)
         cell_ids = loaded.cell_ids
-        arrays = {name: _read(group, name) for name in _CELL_ARRAYS[1:]}
-        slots = _read(group, "chain_slots")
-        columns = {name: _stored_column(group, name) for name in chosen}
+        arrays = {name: read_array(group, name) for name in _CELL_ARRAYS[1:]}
+        slots = read_array(group, "chain_slots")
+        columns = {
+            name: stored_column(group, _CONTIGS, name, FIELDS[name]) for name in chosen
+        }
         chains = contig_frame(
             cell_ids,
             contig_cells=contig_cells,
             slots=slots,
-            eligible=_read(group, "contig_chain").astype(bool),
+            eligible=read_array(group, "contig_chain").astype(bool),
             columns={name: columns[name] for name in chosen},
         )
         cells = receptor_cell_frame(
@@ -1375,7 +1322,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
                 "Raise mem_budget."
             )
-        slots = _read(group, "chain_slots")
+        slots = read_array(group, "chain_slots")
         compared = _slot_codes(group, field_name, slots)
         v_genes = _slot_codes(group, "v_call", slots) if same_v_gene else None
         j_genes = _slot_codes(group, "j_call", slots) if same_j_gene else None
@@ -1619,8 +1566,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
                 "Raise mem_budget."
             )
-        representatives = _read(group, "representatives").astype(np.int64)
-        slots = _read(receptor_group, "chain_slots")[representatives]
+        representatives = read_array(group, "representatives").astype(np.int64)
+        slots = read_array(receptor_group, "chain_slots")[representatives]
         # Only the representatives' contigs are decoded.
         contigs = slots.reshape(-1)
         local = np.where(contigs >= 0, np.arange(len(contigs)), -1)
@@ -1629,20 +1576,20 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             for name in REPRESENTATIVE_FIELDS
             if name in fields
         }
-        within_codes = _read(group, "clonotype_within").astype(np.int64)
+        within_codes = read_array(group, "clonotype_within").astype(np.int64)
         within_labels = (
-            _read(group, "within_labels").reshape(-1, len(within))
+            read_array(group, "within_labels").reshape(-1, len(within))
             if within
             else np.empty((0, 0), dtype=object)
         )
         cells, table = clonotype_frames(
             self._artifact_cell_ids(clonotypes),
-            codes=_read(group, "codes"),
-            clone_size=_read(group, "clone_size"),
-            clonotype_ids=_read(group, "clonotype_ids"),
-            clonotype_sizes=_read(group, "clonotype_sizes"),
-            n_configurations=_read(group, "n_configurations"),
-            receptor_type=_read(receptor_group, "values")[representatives],
+            codes=read_array(group, "codes"),
+            clone_size=read_array(group, "clone_size"),
+            clonotype_ids=read_array(group, "clonotype_ids"),
+            clonotype_sizes=read_array(group, "clonotype_sizes"),
+            n_configurations=read_array(group, "n_configurations"),
+            receptor_type=read_array(receptor_group, "values")[representatives],
             within={
                 column: _labels_at(within_labels[:, position], within_codes)
                 for position, column in enumerate(within)
@@ -1752,13 +1699,13 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 + n_cells * (_CODE_BYTES + 1)
             )
         reads.reserve(reading)
-        slot_contigs = _read(group, "chain_slots")[
+        slot_contigs = read_array(group, "chain_slots")[
             :, [SLOTS.index(slot) for slot in chosen]
         ]
         rows = (slot_contigs >= 0).any(axis=1)
         codes = None
         if clonotype_group is not None:
-            codes = _read(clonotype_group, "codes").astype(np.int64)
+            codes = read_array(clonotype_group, "codes").astype(np.int64)
             rows &= codes >= 0
         reads.held = int(slot_contigs.nbytes + rows.nbytes) + (
             0 if codes is None else int(codes.nbytes)

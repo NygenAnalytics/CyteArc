@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    description: CyteArc clones API for lineage tracing, with clones imported from CoSpar, TREX, CellTag-multi, CellTagR, STICR, Cassiopeia, Numbat, MiTo and LARRY's clone matrices or from a cell metadata column, joined to cells by barcode prefix, suffix or pattern, saved as a clones artifact, read as tables of cells and clones, exported as CoSpar's clone table or a Matrix Market file, drawn as clone sizes, measured within groups of cells, immune receptor clonotypes among them, as clonal expansion, diversity indices and Hill numbers with rarefaction and extrapolation, compared between groups by the clones they share, with chosen clones followed across groups, and measured as fate coupling between groups against shuffled labels and as the fate bias of early cells, with CoSpar's definitions.
+    description: CyteArc clones API for lineage tracing, with clones imported from CoSpar, TREX, CellTag-multi, CellTagR, STICR, Cassiopeia, Numbat, MiTo and LARRY's clone matrices or from a cell metadata column, lineage barcode reads, molecules and counts imported from TREX, pycashier, CellTag-multi, FateMap, QuiCAT, BARtab and Cell Ranger, joined to cells by barcode prefix, suffix or pattern, saved as a clones artifact, read as tables of cells and clones, exported as CoSpar's clone table or a Matrix Market file, drawn as clone sizes, measured within groups of cells, immune receptor clonotypes among them, as clonal expansion, diversity indices and Hill numbers with rarefaction and extrapolation, compared between groups by the clones they share, with chosen clones followed across groups, and measured as fate coupling between groups against shuffled labels and as the fate bias of early cells, with CoSpar's definitions.
 ---
 
 # Clones API reference
 
 A clone is the set of cells that descend from one ancestor cell. Lineage tracing methods mark the ancestor with a heritable barcode, such as LARRY's, CellTag's or TREX's expressed barcodes, and other methods infer clones from the cells' own mutations, such as copy-number changes or mitochondrial variants. Each tool writes which clone each cell belongs to in its own format. `ds.clones` reads those files, joins their cells to a store's cells, and saves the clones as a `clones` artifact that CyteArc's clone analyses read whatever defined the clones. The T cell and B cell clonotypes of {meth}`ds.repertoire.clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.clonotypes>` are clones too: every function on this page reads a `clonotypes` artifact as it reads `clones`, and measures each receptor type apart, as the {doc}`repertoire` describes.
 
-{meth}`ds.clones.import_clones <cytearc.datastore.namespaces.ClonesAccessor.import_clones>` imports the clones of one file or several, and {meth}`ds.clones.from_column <cytearc.datastore.namespaces.ClonesAccessor.from_column>` takes them from a cell metadata column. {meth}`ds.clones.load_clones <cytearc.datastore.namespaces.ClonesAccessor.load_clones>` reads the artifact as a {class}`~cytearc.clones.Clones` record, {meth}`ds.clones.export_clones <cytearc.datastore.namespaces.ClonesAccessor.export_clones>` writes it as a file that other tools read, and {meth}`ds.plots.clone_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clone_abundance>` draws how many clones have each size. {meth}`ds.clones.expansion <cytearc.datastore.namespaces.ClonesAccessor.expansion>` places each cell in an expansion category by its clone's size within its sample or other group, {meth}`ds.clones.diversity <cytearc.datastore.namespaces.ClonesAccessor.diversity>` and {meth}`ds.clones.rarefaction <cytearc.datastore.namespaces.ClonesAccessor.rarefaction>` measure how many clones each group holds and how evenly its cells spread over them, {meth}`ds.clones.overlap <cytearc.datastore.namespaces.ClonesAccessor.overlap>` and {meth}`ds.clones.track <cytearc.datastore.namespaces.ClonesAccessor.track>` compare groups by the clones they share and follow chosen clones across them, {meth}`ds.clones.coupling <cytearc.datastore.namespaces.ClonesAccessor.coupling>` measures how strongly groups share clones against shuffled labels, and {meth}`ds.clones.fate_bias <cytearc.datastore.namespaces.ClonesAccessor.fate_bias>` follows each early cell's clone to its later cells and tests which fates each clone took.
+{meth}`ds.clones.import_clones <cytearc.datastore.namespaces.ClonesAccessor.import_clones>` imports the clones of one file or several, and {meth}`ds.clones.from_column <cytearc.datastore.namespaces.ClonesAccessor.from_column>` takes them from a cell metadata column. {meth}`ds.clones.load_clones <cytearc.datastore.namespaces.ClonesAccessor.load_clones>` reads the artifact as a {class}`~cytearc.clones.Clones` record, {meth}`ds.clones.export_clones <cytearc.datastore.namespaces.ClonesAccessor.export_clones>` writes it as a file that other tools read, and {meth}`ds.plots.clone_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clone_abundance>` draws how many clones have each size. {meth}`ds.clones.expansion <cytearc.datastore.namespaces.ClonesAccessor.expansion>` places each cell in an expansion category by its clone's size within its sample or other group, {meth}`ds.clones.diversity <cytearc.datastore.namespaces.ClonesAccessor.diversity>` and {meth}`ds.clones.rarefaction <cytearc.datastore.namespaces.ClonesAccessor.rarefaction>` measure how many clones each group holds and how evenly its cells spread over them, {meth}`ds.clones.overlap <cytearc.datastore.namespaces.ClonesAccessor.overlap>` and {meth}`ds.clones.track <cytearc.datastore.namespaces.ClonesAccessor.track>` compare groups by the clones they share and follow chosen clones across them, {meth}`ds.clones.coupling <cytearc.datastore.namespaces.ClonesAccessor.coupling>` measures how strongly groups share clones against shuffled labels, and {meth}`ds.clones.fate_bias <cytearc.datastore.namespaces.ClonesAccessor.fate_bias>` follows each early cell's clone to its later cells and tests which fates each clone took. {meth}`ds.clones.import_barcodes <cytearc.datastore.namespaces.ClonesAccessor.import_barcodes>` reads the lineage barcodes of each cell, from which clones are called.
 
 ```python
 cells = ds.snapshot_cell_selection("I")
@@ -95,6 +95,110 @@ A cell listed in two different clones, in one file or in two, raises `ValueError
 ```python
 clones = ds.clones.from_column("clone_id", cell_selection=cells)
 ```
+
+## Import lineage barcodes
+
+Expressed lineage barcodes, such as LARRY's, CellTag's and TREX's, are random sequences written into each founding cell's genome; the cell and its descendants transcribe them, so the barcodes that cells share mark their common ancestor. Tools that extract the barcodes from sequencing reads write them at one of three levels. {meth}`ds.clones.import_barcodes <cytearc.datastore.namespaces.ClonesAccessor.import_barcodes>` reads any of them, joins each row to a selected cell by its cell barcode and saves a `lineage_barcodes` artifact. {meth}`ds.clones.load_barcodes <cytearc.datastore.namespaces.ClonesAccessor.load_barcodes>` reads it as a {class}`~cytearc.clones.LineageBarcodes` record, and {meth}`ds.plots.barcode_calls <cytearc.datastore.plot_accessor.DataStorePlotAccessor.barcode_calls>` draws the counts that clone calling filters.
+
+```python
+barcodes = ds.clones.import_barcodes("trex_run/molecules.txt", cell_selection=cells, barcode_suffix="-1")
+table = ds.clones.load_barcodes(barcodes)
+table.records.head()  # one row per molecule: cell, library, barcode, UMI, UMIs and reads
+ds.plots.barcode_calls(barcodes)
+```
+
+| Level | One row per | Counts | Saved as |
+|---|---|---|---|
+| reads | read, naming its cell, UMI and barcode | each row is one read | molecules whose reads are their rows, or, without UMIs, pairs of a cell and a barcode |
+| molecules | cell, UMI and barcode | the molecule's reads, or none | molecules |
+| pairs | cell and barcode | its UMIs or reads, or none | pairs |
+
+Nothing is filtered at import: one-read molecules, barcodes with sequencing errors and ambient barcodes are kept, so that clone calling applies the rules of the method that made the data.
+
+### Formats
+
+`import_barcodes` recognises each file's format from its header, and pycashier's and FateMap's tables without a header from the fields of their first row. `format=` names the format, and `"reads"`, `"molecules"` or `"pairs"` reads any other table by the columns that `columns` names. A file of clone IDs, such as TREX's `clones.txt`, is refused with a pointer to `import_clones`.
+
+| `format` | File | Level | Columns read |
+|---|---|---|---|
+| `"trex"` | [TREX](https://github.com/frisen-lab/TREX)'s `molecules.txt` and `molecules_corrected.txt` of every release | molecules; reads for Smart-seq2 runs, which write no `umi` | `cell_id`, `umi`, `clone_id`, and `read_count` since September 2024; `-` and `0` in a cloneID are kept |
+| `"pycashier"` | [pycashier](https://github.com/brocklab/pycashier)'s `<sample>.umi_cell_labeled.barcode.tsv`, or, before release 2024.1001, its `cell_record_labeled` table without a header | reads | `cell`, `umi`, `barcode` |
+| `"celltag"` | [CellTag-multi](https://github.com/morris-lab/CellTag-multi-2023)'s per-read tables, and the parsed reads of the Biddy et al. workflow | reads; scATAC-seq tables have no `UMI` | `Cell.BC`, `UMI`, `Cell.Tag` |
+| `"fatemap"` | [FateMap](https://github.com/arjunrajlaboratory/FateMap_Goyal2023)'s `stepThreeStarcodeShavedReads.txt`, with a header or without | molecules | `cellID`, `UMI`, `BC50StarcodeD8` |
+| `"quicat"` | [QuiCAT](https://github.com/theislab/quicat)'s per-sample `<sample>_output.csv` | pairs | `cell`, `barcode`, `counts` as UMIs |
+| `"quicat_wide"` | QuiCAT's merged `barcodes_output.csv` | pairs | `cell`, and one column of UMIs per barcode |
+| `"h5ad"` | an AnnData file of cells by barcodes, such as QuiCAT's `barcodes_output.h5ad` | pairs | the `obs` and `var` names, and `X` as UMIs |
+| `"bartab"` | [BARtab](https://github.com/DaneVass/BARtab)'s `<sample>.counts.tsv` | pairs | `gene`, `cell`, `count` as UMIs |
+| `"bartab_annotation"` | BARtab's `<sample>_cell_barcode_annotation.tsv` | pairs | each row's name, and its lists `barcode` and `bc.umi.count`, joined by `;`, or by `,` in early files |
+| `"molecule_info"` | Cell Ranger's `molecule_info.h5`, the molecules of one feature barcode library | molecules | each molecule's cell barcode, UMI, feature ID and reads |
+
+A file in TREX's format must list each cell and UMI once, as its molecule tables do. TREX's `reads.txt` has the header of its early `molecules.txt` but one row per read, so a TREX table that lists a cell and UMI twice is refused. FateMap's table of several samples is refused, since their cells share bare barcodes; read it with `format="molecules"` and `columns={"cell": ["SampleNum", "cellID"], "umi": "UMI", "barcode": "BC50StarcodeD8"}`, which joins each cell's sample to its barcode.
+
+A tool's table must hold every value that the tool writes in each row, so a row cut short, such as a TREX molecule without its `read_count` or a BARtab count without its UMIs, is refused, as is a gzip file cut short. Every field of QuiCAT's merged table must hold a whole number, and a merged table saved again with an index column is refused.
+
+QuiCAT counts distinct UMIs for 10x Genomics data and reads for a technology without UMIs. Its formats read the counts as UMIs, so read a table of reads with `format="pairs"` and `columns={"cell": "cell", "barcode": "barcode", "reads": "counts"}`, and an AnnData file with `format="h5ad"` and `columns={"reads": "X"}`.
+
+Cell Ranger counts a lineage library only when its barcodes are listed in the feature reference, as `Custom` or `CRISPR Guide Capture` features. The import reads the molecules of the file's only library that is not gene expression, or of the type that `library` names, decodes each 2-bit UMI with the length that the file's `metrics_json` records, as Cell Ranger does from release 6, names each barcode by its feature ID, and appends each molecule's GEM well to its cell barcode, as Cell Ranger's matrices name cells. Barcodes that Cell Ranger did not call cells are counted as unmatched.
+
+BARtab is licensed under the GPL, so its formats follow its documentation and published files only.
+
+### Tables of other tools
+
+`format="reads"`, `"molecules"` or `"pairs"` names what each row of a table is, and `columns` maps roles to its columns: `"cell"` and `"barcode"`, each a column or a list of columns whose values are joined by `"__"`; `"umi"`, which molecules need and reads may have; `"umis"` and `"reads"`, a pair's counts or a molecule's reads; `"library"`, each row's library; and `"separator"`, one of `";"`, `","`, `":"` and `"|"`, which splits the barcode and count fields of pairs into lists whose items stay aligned. Without `"cell"`, a table in R's row-name layout takes each cell from its row names. Counts are whole numbers. In such a table, a barcode, UMI, count or library that is empty or holds text that pandas reads as missing, such as `NA`, `N/A`, `#N/A`, `NaN` or `null`, has no value: a row without a barcode holds none, a count is unknown, and a molecule without its UMI or a row without its library is refused. A tool's own format must hold the fields that the tool fills in every row, so there such a value marks a row cut short, which is refused. Cell barcodes, the barcodes that head the columns of QuiCAT's merged table and the names in an AnnData file are read as written.
+
+```python
+# CloneTracker XP's barcode has two parts, 14 and 30 bases; each pair counts UMIs.
+barcodes = ds.clones.import_barcodes(
+    "clonetracker.tsv",
+    cell_selection=cells,
+    format="pairs",
+    columns={"cell": "cell", "barcode": ["bc14", "bc30"], "umis": "n"},
+)
+# Watermelon's metadata lists each cell's barcodes in its row, without counts.
+barcodes = ds.clones.import_barcodes(
+    "GSE150949_metaData_with_lineage.txt.gz",
+    cell_selection=cells,
+    format="pairs",
+    columns={"barcode": "lineage_barcode", "separator": ","},
+)
+```
+
+### Libraries
+
+Each file's rows belong to a library, which `library` names, one for every file or one per file; without it, a file's library is its name before the first `.`. A library holds molecules or pairs, never both, and its records keep apart from those of other libraries, even in one cell. Rows of one library that name one molecule or pair merge, summing their reads, so a library sequenced in two runs gives each molecule the reads of both.
+
+```python
+# CellTag-multi's RNA reads have UMIs and its ATAC reads none: two libraries.
+barcodes = ds.clones.import_barcodes(
+    ["parse_rna.txt.gz", "parse_atac.txt.gz"],
+    cell_selection=cells,
+    library=["RNA", "ATAC"],
+)
+```
+
+### Barcodes counted by an assay
+
+A lineage library counted as features of an assay, such as a Cell Ranger feature barcode matrix, is imported with `from_assay` instead of files: each nonzero count of a selected cell is a pair of the cell and the feature's ID, and the count its UMIs. The library is named after the assay unless `library` names it, and file options such as `barcode_prefix` or `format` are refused.
+
+```python
+barcodes = ds.clones.import_barcodes(cell_selection=cells, from_assay="LINEAGE")
+```
+
+### Join, reuse and memory
+
+Cell barcodes join cells as clone files do: a cell's ID is its file's `barcode_prefix`, the cell barcode and `barcode_suffix`, and `barcode_pattern` keeps the part that its `barcode` group matches. Cell barcodes that match no selected cell, such as the droplets that pycashier, BARtab and Cell Ranger list, are counted in the artifact's `n_file_barcodes`, `n_unmatched_barcodes` and `unmatched_barcode_examples` attributes, and a warning names them, which a reused import gives again. `n_file_rows` and `n_unmatched_rows` count the rows read, one for each item of a list field and for each nonzero count of a merged table or a matrix. A row without a barcode and a pair counted 0 hold none and are counted in `n_empty_rows`. A file is identified by the SHA-256 of its bytes and by its library, the file's name unless `library` names it, so a file moved to another folder reuses the saved barcodes, as does a renamed file whose library is named.
+
+A file is read in chunks of about a twentieth of the memory budget: at most 50,000 rows of a text table, rows of a merged table, whose fields are parsed in one pass, and stored entries of an AnnData matrix, read in tiles of whole HDF5 chunks when it is dense. Each chunk's reads collapse into molecules at once, and the chunks merge into the records once they outnumber them, so an import holds at most about twice as many rows as it saves records, however many reads a file lists. Before it reads the selected cells' IDs, the import checks their lookup and the read of their IDs as text, which decodes a stored chunk of them. It then checks its peak against the memory budget before it reads a file and as it reads: the lookup of the selected cells with their IDs as text; an AnnData file's names of cells and barcodes and its column of libraries, at the size they take decoded, which it reads once to count; one chunk, with HDF5's buffer for the chunk it inflates; the cell barcodes that match no selected cell; the keys that find a TREX table's repeated molecules; about 1,300 bytes for each chunk that waits to merge, of which at most 256 wait; and, at the peak of a merge, about 150 bytes per row held and 140 per distinct barcode and UMI. It refuses with `MemoryError` before it writes, and suggests a smaller `cell_selection` only when the selected cells take most of the peak.
+
+On one thread, CellTag-multi's per-read table of 100,000 cells, 9.6 million reads in 198 MiB of gzip, imports into 1.2 million molecules in 35 s, holding at most 2.3 million rows and 583 MiB above its start; TREX's 2 million molecules of 100,000 cells import in 13 s and 544 MiB; and BARtab's counts of 1,000,000 cells with five barcodes each, 5 million pairs, import in 21 s and 1,203 MiB, which the check estimates as 1,337 MiB. QuiCAT's merged table of 50,000 cells by 5,000 barcodes, 478 MiB of text, imports in 14 s within a budget of 512 MiB, holding 39 MiB above its start, and a dense AnnData matrix of 20,000 cells by 50,000 barcodes, 3.7 GiB once read, imports in 15 s within 1 GiB, holding 74 MiB. `load_barcodes` reads the first three in 0.6, 1.0 and 1.7 s.
+
+### Read and plot lineage barcodes
+
+A `lineage_barcodes` artifact holds one record per molecule or pair, ordered by cell, library, barcode and UMI, with each distinct barcode and UMI stored once. A molecule's `umis` is 1, and a pair's UMIs and either's reads are -1 where its library counts none. The canonical `n_barcodes` holds each cell's distinct barcodes over its libraries, and `n_umis`, `n_reads` and `n_records` hold its UMIs, reads and records, -1 where a library of the cell counts none. `select_cells` keeps the values above `low`, so `ds.select_cells(barcodes, low=0)` keeps the cells with a barcode and `low=1` those with two or more.
+
+`load_barcodes` returns a {class}`~cytearc.clones.LineageBarcodes` record. Its `cells` table holds one row per selected cell, indexed by cell ID, with the per-cell counts. Its `records` table holds one row per record: `cell`, `library`, `barcode` and `umi` as categoricals, `umi` missing for a pair, and `umis` and `reads` as nullable integers. Its `libraries` table names each library's `level`, `"molecules"` or `"pairs"`, its `records`, and whether they count UMIs and reads. `pairs()` collapses the records into one row per cell, library and barcode, with the pair's distinct UMIs, reads and molecules.
+
+`ds.plots.barcode_calls(barcodes)` draws three panels: the cells by their distinct barcodes, cells without a barcode included and `max_barcodes` or more (default 10) in the last bar; each library's pairs by their UMIs; and each library's molecules by their reads, on log scales, so molecules of 0 reads appear in the table only. Barcodes of one or two UMIs and molecules of one read are mostly sequencing errors and ambient molecules, which clone calling filters out. Its tables are `barcodes_per_cell` (`barcodes`, `cells`), `umis_per_barcode` (`library`, `umis`, `pairs`) and `reads_per_molecule` (`library`, `reads`, `molecules`).
 
 ## Read, export and plot clones
 
@@ -295,6 +399,13 @@ On the synthetic experiment above, every early cell's fractions equal CoSpar 0.5
 
 ```{eval-rst}
 .. autoclass:: cytearc.clones.Clones
+```
+
+## Lineage barcodes
+
+```{eval-rst}
+.. autoclass:: cytearc.clones.LineageBarcodes
+    :members: pairs
 ```
 
 ## Clonal expansion

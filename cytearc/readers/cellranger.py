@@ -1049,3 +1049,317 @@ def iter_vdj_contigs(
             chunk.columns = [_VDJ_COLUMNS[str(name).strip()] for name in chunk.columns]
             yield line, parse_contig_columns(chunk, first_line=line, infer_locus=False)
             line += len(chunk)
+
+
+# The per-molecule datasets of Cell Ranger's molecule_info.h5 that a lineage
+# barcode import reads, and the lookups they index.
+_MOLECULE_COLUMNS = ("barcode_idx", "umi", "feature_idx", "count", "gem_group")
+_MOLECULE_LOOKUPS = ("barcodes", "features/id", "library_info", "library_idx")
+# The library type of Cell Ranger's gene expression libraries, which hold no
+# feature barcodes.
+_GENE_EXPRESSION = "Gene Expression"
+# The bases of a 2-bit packed UMI: A=0, C=1, G=2, T=3.
+_UMI_BASES = np.frombuffer(b"ACGT", dtype=np.uint8)
+#: Rows of the per-molecule datasets read at once, at least.
+MIN_MOLECULE_ROWS = 1 << 16
+
+
+@dataclass(frozen=True, slots=True)
+class MoleculeInfoLibrary:
+    """One feature barcode library of a Cell Ranger ``molecule_info.h5``.
+
+    Attributes:
+        path: The file.
+        library_type: The library's type, such as ``"Custom"`` or ``"CRISPR
+            Guide Capture"``.
+        library_indices: The positions in ``library_info`` of the libraries
+            of that type.
+        umi_length: The length of the library's UMIs, from ``metrics_json``.
+        n_molecules: The molecules of the file, of every library.
+        barcode_block_rows: The cell barcodes read at once: the rows of the
+            dataset's chunks, or 65,536 if more.
+        barcode_block_bytes: The bytes of such a block of cell barcodes.
+    """
+
+    path: str
+    library_type: str
+    library_indices: tuple[int, ...]
+    umi_length: int
+    n_molecules: int
+    barcode_block_rows: int
+    barcode_block_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class MoleculeRows:
+    """A chunk of the molecules of one library of a ``molecule_info.h5``.
+
+    Attributes:
+        first_row: The position of the chunk's first row in the file.
+        barcodes: Each molecule's cell barcode with ``-`` and its GEM well.
+        umis: Each molecule's UMI, decoded.
+        features: The ID of each molecule's feature, its barcode.
+        reads: Each molecule's reads.
+    """
+
+    first_row: int
+    barcodes: np.ndarray
+    umis: np.ndarray
+    features: np.ndarray
+    reads: np.ndarray
+
+
+def is_molecule_info(path: str | os.PathLike[str]) -> bool:
+    """Return whether an HDF5 file holds Cell Ranger's per-molecule datasets."""
+    with h5py.File(path, "r") as handle:
+        return all(
+            isinstance(handle.get(name), h5py.Dataset)
+            for name in (*_MOLECULE_COLUMNS, "library_idx", "barcodes", "library_info")
+        )
+
+
+def _json_dataset(handle: h5py.File, name: str) -> Any:
+    """Decode a dataset that holds one JSON text, as a scalar or one entry."""
+    import json
+
+    value = np.asarray(handle[name][()]).reshape(-1)[0]
+    return json.loads(as_text(value))
+
+
+def _umi_length(handle: h5py.File, library_type: str, path: str) -> int:
+    """Read the UMI length of a library type from the file's metrics."""
+    metrics = _json_dataset(handle, "metrics_json") if "metrics_json" in handle else {}
+    candidates: list[Any] = []
+    definitions = metrics.get("chemistry_defs") if isinstance(metrics, dict) else None
+    if isinstance(definitions, dict) and isinstance(
+        definitions.get(library_type), dict
+    ):
+        candidates.append(definitions[library_type].get("umi"))
+    if isinstance(metrics, dict):
+        candidates.append(metrics.get("chemistry_umi"))
+    for candidate in candidates:
+        found = candidate[0] if isinstance(candidate, list) and candidate else candidate
+        if isinstance(found, dict) and isinstance(found.get("length"), int):
+            return int(found["length"])
+    raise ValueError(
+        f"{path} records no UMI length in its metrics_json, so its 2-bit packed "
+        "UMIs cannot be decoded; Cell Ranger records it from release 6"
+    )
+
+
+def molecule_info_library(
+    path: str | os.PathLike[str], library_type: str | None = None
+) -> MoleculeInfoLibrary:
+    """Find the feature barcode library to read from a ``molecule_info.h5``.
+
+    Cell Ranger's ``molecule_info.h5`` lists every molecule of every library
+    of a run. A lineage barcode library is a feature barcode library, of type
+    ``"Custom"`` or another, whose features are the barcodes.
+
+    Args:
+        path: The file.
+        library_type: The type of the library to read, such as ``"Custom"``,
+            or None for the file's only library that is not gene expression.
+
+    Raises:
+        ValueError: If the file lacks a per-molecule dataset, holds no library
+            of the type, or, without a type, holds no library or several
+            besides gene expression, or records no UMI length.
+    """
+    name = os.fspath(path)
+    with h5py.File(name, "r") as handle:
+        missing = [
+            dataset
+            for dataset in (*_MOLECULE_COLUMNS, *_MOLECULE_LOOKUPS)
+            if not isinstance(handle.get(dataset), h5py.Dataset)
+        ]
+        if missing:
+            raise ValueError(
+                f"{name} is not a Cell Ranger molecule_info.h5: it lacks "
+                + ", ".join(missing)
+            )
+        libraries = _json_dataset(handle, "library_info")
+        if not isinstance(libraries, list) or not all(
+            isinstance(entry, dict) and "library_type" in entry for entry in libraries
+        ):
+            raise ValueError(f"The library_info of {name} lists no library types")
+        types = [str(entry["library_type"]) for entry in libraries]
+        features = sorted({kind for kind in types if kind != _GENE_EXPRESSION})
+        if library_type is None:
+            if len(features) != 1:
+                raise ValueError(
+                    f"{name} holds "
+                    + (
+                        "no feature barcode library"
+                        if not features
+                        else "the feature barcode libraries "
+                        + ", ".join(map(repr, features))
+                    )
+                    + "; name the library type to read with library=..."
+                )
+            library_type = features[0]
+        elif library_type not in types:
+            raise ValueError(
+                f"{name} holds no library of type {library_type!r}; its libraries "
+                "are " + ", ".join(map(repr, types))
+            )
+        indices = tuple(
+            position for position, kind in enumerate(types) if kind == library_type
+        )
+        umi_length = _umi_length(handle, library_type, name)
+        n_molecules = int(handle["library_idx"].shape[0])
+        barcodes = handle["barcodes"]
+        chunk_rows = barcodes.chunks[0] if barcodes.chunks else 0
+        block_rows = max(int(chunk_rows), MIN_MOLECULE_ROWS)
+        block_bytes = block_rows * int(barcodes.dtype.itemsize)
+        lengths = {int(handle[column].shape[0]) for column in _MOLECULE_COLUMNS}
+        if lengths != {n_molecules}:
+            raise ValueError(
+                f"The per-molecule datasets of {name} differ in length, so its "
+                "molecules cannot be read"
+            )
+    if not 1 <= umi_length <= 16:
+        raise ValueError(
+            f"{name} records a UMI length of {umi_length}; a 32-bit packed UMI "
+            "holds 1 to 16 bases"
+        )
+    return MoleculeInfoLibrary(
+        path=name,
+        library_type=library_type,
+        library_indices=indices,
+        umi_length=umi_length,
+        n_molecules=n_molecules,
+        barcode_block_rows=block_rows,
+        barcode_block_bytes=block_bytes,
+    )
+
+
+class BarcodeBlocks:
+    """Cell barcodes of a ``molecule_info.h5``, read one block at a time.
+
+    Molecules are sorted by their barcode, so the chunks of molecules name
+    blocks of barcodes in order; the block read last is kept, and each block
+    is read once even when its dataset is stored as one compressed chunk.
+
+    Args:
+        barcodes: The ``barcodes`` dataset, or anything sliced like it.
+        block_rows: The barcodes of each block.
+    """
+
+    def __init__(self, barcodes: Any, *, block_rows: int) -> None:
+        self._barcodes = barcodes
+        self._rows = max(1, int(block_rows))
+        self._n = int(barcodes.shape[0])
+        self._block = -1
+        self._values: np.ndarray = np.empty(0, dtype=object)
+
+    def texts(self, indices: np.ndarray) -> np.ndarray:
+        """Return the barcodes at ``indices``, as text."""
+        positions = np.asarray(indices, dtype=np.int64)
+        texts = np.empty(len(positions), dtype=object)
+        blocks = positions // self._rows
+        for block in np.unique(blocks).tolist():
+            if block != self._block:
+                start = block * self._rows
+                self._values = np.asarray(
+                    self._barcodes[slice(start, min(start + self._rows, self._n))]
+                )
+                self._block = block
+            chosen = blocks == block
+            texts[chosen] = [
+                as_text(value)
+                for value in self._values[positions[chosen] - block * self._rows]
+            ]
+        return texts
+
+
+def decode_umis(packed: Any, length: int) -> np.ndarray:
+    """Decode 2-bit packed UMIs, whose last base holds the lowest bits.
+
+    Args:
+        packed: The packed UMIs, as unsigned integers.
+        length: The bases of each UMI.
+
+    Returns:
+        Each UMI as text.
+    """
+    values = np.asarray(packed, dtype=np.uint64).reshape(-1)
+    shifts = np.arange(2 * (length - 1), -1, -2, dtype=np.uint64)
+    digits = (values[:, None] >> shifts[None, :]) & np.uint64(3)
+    letters = np.ascontiguousarray(_UMI_BASES[digits.astype(np.intp)])
+    if not len(values):
+        return np.empty(0, dtype=object)
+    return letters.view(f"S{length}").reshape(-1).astype(str).astype(object)
+
+
+def iter_molecule_info(
+    library: MoleculeInfoLibrary, *, chunk_rows: int = MIN_MOLECULE_ROWS
+) -> Iterator[MoleculeRows]:
+    """Yield the molecules of one library of a ``molecule_info.h5`` in chunks.
+
+    Each molecule is a cell barcode, a UMI and a feature, with the reads that
+    Cell Ranger assigned to it. Cell barcodes are stored without their GEM
+    well, which each molecule records, so each gets ``-`` and its GEM well,
+    as Cell Ranger's matrices name cells. UMIs are decoded with the length
+    that the file's metrics record, and features named by their IDs.
+    Barcodes that Cell Ranger did not call cells are included.
+
+    Args:
+        library: The library, from :func:`molecule_info_library`.
+        chunk_rows: The rows of the file to read at once, at least 65,536.
+
+    Raises:
+        ValueError: If a molecule names a barcode or feature that the file
+            does not list.
+    """
+    rows = max(MIN_MOLECULE_ROWS, int(chunk_rows))
+    wanted = np.asarray(library.library_indices, dtype=np.int64)
+    with h5py.File(library.path, "r") as handle:
+        feature_ids = np.asarray(
+            [as_text(value) for value in handle["features/id"][:].tolist()],
+            dtype=object,
+        )
+        barcode_table = handle["barcodes"]
+        n_barcodes = int(barcode_table.shape[0])
+        blocks = BarcodeBlocks(barcode_table, block_rows=library.barcode_block_rows)
+        for start in range(0, library.n_molecules, rows):
+            stop = min(start + rows, library.n_molecules)
+            kept = np.flatnonzero(
+                np.isin(np.asarray(handle["library_idx"][start:stop]), wanted)
+            )
+            if not len(kept):
+                continue
+            columns = {
+                name: np.asarray(handle[name][start:stop])[kept]
+                for name in _MOLECULE_COLUMNS
+            }
+            barcode_index = columns["barcode_idx"].astype(np.int64)
+            feature_index = columns["feature_idx"].astype(np.int64)
+            if barcode_index.max() >= n_barcodes or feature_index.max() >= len(
+                feature_ids
+            ):
+                raise ValueError(
+                    f"{library.path} lists molecules of barcodes or features that "
+                    "it does not hold"
+                )
+            keys, positions = np.unique(
+                np.stack([barcode_index, columns["gem_group"].astype(np.int64)]),
+                axis=1,
+                return_inverse=True,
+            )
+            texts = np.asarray(
+                [
+                    f"{barcode}-{gem_group}"
+                    for barcode, gem_group in zip(
+                        blocks.texts(keys[0]).tolist(), keys[1].tolist(), strict=True
+                    )
+                ],
+                dtype=object,
+            )
+            yield MoleculeRows(
+                first_row=start,
+                barcodes=texts[np.asarray(positions).reshape(-1)],
+                umis=decode_umis(columns["umi"], library.umi_length),
+                features=feature_ids[feature_index],
+                reads=columns["count"].astype(np.int64),
+            )

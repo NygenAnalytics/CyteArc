@@ -161,3 +161,11 @@ def write_contig_file(path: Path, barcodes: list[str]) -> Path:
         )
     )
     return path
+
+
+def write_barcode_file(path: Path, barcodes: list[str]) -> Path:
+    """BARtab's counts.tsv, which counts three UMIs of one lineage barcode per cell."""
+    path.write_text(
+        "gene\tcell\tcount\n" + "".join(f"LB1\t{barcode}\t3\n" for barcode in barcodes)
+    )
+    return path

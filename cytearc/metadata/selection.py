@@ -224,6 +224,13 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
                 "reference_distance_percentile": False,
             },
         ),
+        # The record_ arrays hold one row per molecule or barcode pair, or per
+        # distinct barcode or UMI, which are not cell-aligned.
+        "lineage_barcodes": CellValueSpec(
+            "n_barcodes",
+            False,
+            {"n_umis": False, "n_reads": False, "n_records": False},
+        ),
         "lineage_curves": CellValueSpec(
             "progress", False, {"distance": False, "valid": True}
         ),

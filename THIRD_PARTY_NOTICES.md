@@ -190,22 +190,15 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
   MA0006.1 (Ahr::Arnt), and an excerpt of the MEME export of MA0004.1, in
   `tests/test_genomic_motifs.py`. Rauluseviciute et al. (2024), Nucleic Acids Research,
   doi:10.1093/nar/gkad1059.
-- **10x Genomics**, CC BY 4.0: `tests/seurat_wnn_5_5_1_golden.json` holds Seurat 5.5.1 outputs on
-  principal components of 300 cells of the `tenx_8K_pbmc_citeseq` dataset,
-  `tests/scanpy_hvg_1_12_4_golden.json` holds scanpy 1.12.4 highly variable gene selections and
-  scores computed from the RNA counts of the 1k PBMC CITE-seq test fixture by
-  `scripts/export_scanpy_hvg_golden.py`, and the reference images in `tests/visual/showcase/` are
-  rendered from the same fixture. Both datasets are credited below.
+- **10x Genomics**, CC BY 4.0: `tests/seurat_wnn_5_5_1_golden.json` holds Seurat 5.5.1 outputs on principal components of 300 cells of the `tenx_8K_pbmc_citeseq` dataset, `tests/scanpy_hvg_1_12_4_golden.json` holds scanpy 1.12.4 highly variable gene selections and scores computed from the RNA counts of the 1k PBMC CITE-seq test fixture by `scripts/export_scanpy_hvg_golden.py`, and the reference images in `tests/visual/showcase/` are rendered from the same fixture. Both datasets are credited below. `tests/test_readers_lineage_barcodes.py` checks three UMIs against the 2-bit values that `pbmc_1k_protein_v3_molecule_info.h5` (Cell Ranger 3.0.0) and the `SC3_v3_NextGem_DI_CRISPR_A549_5K` sample's `molecule_info.h5` (Cell Ranger 6.0.0) store for them.
 - **GEO GSE245108**: hashtag counts in `tests/seurat_hto_5_5_1_golden.json`, from Zhang et al.
   (2024), Nature Immunology, doi:10.1038/s41590-024-01782-4.
 - **HGNC** (<https://www.genenames.org>), CC0 1.0: the previous symbols of the default cell-cycle
   genes in `cytearc/quality_control/cell_cycle_genes.py` (`cell_cycle_previous_symbols`), from the
   HGNC REST service in October 2026. Seal et al. (2023), Nucleic Acids Research,
   doi:10.1093/nar/gkac888.
-- **TREX** (<https://github.com/frisen-lab/TREX>), MIT, Copyright 2018 Leonie von Berlin:
-  `tests/data/clones/trex_clones.txt` holds 41 rows of `tests/expected/clones.txt` at commit
-  c1ade47971bfcb5242ebf213f7160215567647b4, every cell of three clones and 30 cells of the fourth.
-  The license text is at the end of this file.
+- **TREX** (<https://github.com/frisen-lab/TREX>), MIT, Copyright 2018 Leonie von Berlin: `tests/data/clones/trex_clones.txt` holds 41 rows of `tests/expected/clones.txt` at commit c1ade47971bfcb5242ebf213f7160215567647b4, every cell of three clones and 30 cells of the fourth. `tests/data/barcodes/trex_molecules.txt` and `tests/data/barcodes/trex_molecules_corrected.txt` hold every row of 31 cells of `tests/expected/molecules.txt` and `tests/expected/molecules_corrected.txt` at the same commit, and `tests/data/barcodes/trex_molecules_2022.txt` the same cells' rows of `tests/expected/molecules.txt` at commit dff02eea348ad870c148b8d590e6b973b25dc17a, each with its header. The license text is at the end of this file.
+- **pycashier** (<https://github.com/brocklab/pycashier>), MIT, Copyright (c) 2024 brocklab, and Copyright (c) 2021 brocklab at tag v23.1.2: `tests/data/barcodes/pycashier_test.umi_cell_labeled.barcode.tsv` is `tests/data/reference/outs-scrna/test.umi_cell_labeled.barcode.tsv` at commit 1ced13ff46deb88d731386c578ed5ead628b9228, and `tests/data/barcodes/pycashier_test.cell_record_labeled.barcode.tsv` is `tests/data/reference/outs-scrna/test.cell_record_labeled.barcode.tsv` at tag v23.1.2, unchanged. The license text is at the end of this file.
 - **CellTag-multi**, CC BY 4.0: `tests/data/clones/celltag_multi_iep_clones.csv` holds the 24
   rows of six clones of `b4.rna&atac.r1&2_master_rev1_annotated.csv`, the iEP clone table of
   "Processed single-cell RNA and ATAC data for the CellTag-multi iEP reprogramming time course"
@@ -258,6 +251,8 @@ package.
 and `GSM4185644_stateFate_cytokinePerturbation_metadata.txt.gz` from GEO GSE140802 (Weinreb et al.
 (2020), Science 367:eaaw3381, doi:10.1126/science.aaw3381) for a test marked `integration`; GEO
 states no license, and the NCBI places no restrictions on the use of its data.
+
+`tests/test_barcode_files.py` downloads `GSM9076301_SG05-Capture-1-Rep1_S1.counts.tsv.gz` and `GSM9076301_SG05-Capture-1-Rep1_S1_cell_barcode_annotation.tsv.gz`, BARtab's outputs for one sample of GEO GSE301145 (Gordon et al. (2025), Cancer Discovery 15:2117-2138, doi:10.1158/2159-8290.CD-24-1517), for a test marked `integration`; GEO states no license, and the NCBI places no restrictions on the use of its data. BARtab itself is licensed under the GPL-3.0, so CyteArc reads its outputs from its documentation and these files, and none of its code was read.
 
 The Seurat import tutorial also uses `seurat_v4_1_3_pbmc_mye.rds` and embeds a 581-byte
 compressed synthetic RDS with three cells and two genes. The synthetic object was authored
@@ -909,4 +904,30 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### pycashier (MIT License)
+
+```text
+MIT License
+
+Copyright (c) 2024 brocklab
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```

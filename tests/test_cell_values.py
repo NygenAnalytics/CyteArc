@@ -610,6 +610,18 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
     # The file has no nucleotide junctions, so clonotypes compare residues:
     # cell0 and cell4 share both chains, and ties follow the receptor types.
     clonotypes = store.repertoire.clonotypes(receptors, sequence="aa")
+    # BARtab's UMIs of two barcodes of cell0, one of cell1, three of cell3 and
+    # one of cell5.
+    counts = tmp_path / "counts.tsv"
+    counts.write_text(
+        "gene\tcell\tcount\n"
+        + "".join(
+            f"bc{barcode}\tcell{cell}\t{barcode + 1}\n"
+            for cell, barcodes in ((0, (1, 2)), (1, (1,)), (3, (1, 2, 3)), (5, (4,)))
+            for barcode in barcodes
+        )
+    )
+    barcodes = store.clones.import_barcodes(counts, cell_selection=cells)
 
     for ref, expected in (
         (clusters, np.array(list("aabbcc"))),
@@ -635,6 +647,7 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
                 ]
             ),
         ),
+        (barcodes, np.array([2, 1, 0, 3, 0, 1])),
     ):
         loaded = store.artifacts.load_values(ref)
         np.testing.assert_array_equal(loaded.values, expected)
@@ -651,6 +664,9 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
                 ref.kind == "immune_receptors"
                 and (name == "chain_slots" or name.startswith("contig_"))
             )
+            # Lineage barcodes' record_ arrays hold one row per molecule or
+            # pair, or per distinct barcode or UMI.
+            and not (ref.kind == "lineage_barcodes" and name.startswith("record_"))
         }
         # An enrichment also stores the cell row of each score row, which
         # CellValues.cell_idx gives.

@@ -6,9 +6,12 @@ its files, with the quirks an importer must handle: headers that start with
 ``#``, R row names, unnamed index columns, gzip, a missing final newline,
 ``NA`` and barcodes of droplets that are not cells. ``receptor_truth`` gives
 the clones T cell and B cell receptor chains and fixes, for each cell, the
-chains and labels that an import of its contigs must give. Tests check that an
-import recovers the truth, which this module fixes and the code under test
-never computes.
+chains and labels that an import of its contigs must give. ``barcode_truth``
+gives the clones lineage barcodes and each cell its molecules and their reads,
+with sequencing errors, ambient reads and droplets outside the store, which
+writers emit as reads, molecules or barcode counts in each tool's format.
+Tests check that an import recovers the truth, which this module fixes and the
+code under test never computes.
 """
 
 import gzip
@@ -991,3 +994,570 @@ def write_airr_contigs(
         }
         lines.append("\t".join(str(values[name]) for name in columns))
     return _write(path, lines, compress=compress)
+
+
+# Lineage barcodes of the truth's clones: clone k carries 1 + k % 3 barcodes
+# of 20 bases, the longest that pycashier keeps, and each UMI 12 bases.
+BARCODE_LENGTH = 20
+UMI_LENGTH = 12
+# The kinds of molecule: a clone's barcode in its cell ("signal"), a read of
+# one with a sequencing error in its barcode ("error"), a clone's barcode in a
+# cell without a clone ("ambient"), and a clone's barcode in a droplet that is
+# not a cell of the store ("outside").
+MOLECULE_KINDS = ("signal", "error", "ambient", "outside")
+
+
+def _sequence(rng: np.random.Generator, length: int) -> str:
+    return "".join(rng.choice(list("ACGT"), size=length))
+
+
+@dataclass(frozen=True, slots=True)
+class BarcodeTruth:
+    """The lineage barcode molecules of the truth's cells, with read-level noise.
+
+    Attributes:
+        clone_barcodes: Each clone's barcodes, by its rank.
+        molecules: One row per molecule: ``cell`` (the cell's position among
+            the truth's cells, -1 for a droplet outside the store),
+            ``sample``, ``cell_barcode`` (its 16 bases, without ``-1``),
+            ``umi``, ``barcode`` as sequenced, ``true_barcode`` as an error
+            correction gives it, ``reads`` and ``kind``.
+        unlabelled: The ``sample`` and ``cell_barcode`` of each cell without a
+            molecule.
+    """
+
+    clone_barcodes: tuple[tuple[str, ...], ...]
+    molecules: pd.DataFrame
+    unlabelled: pd.DataFrame
+
+    def sample_molecules(self, sample: str) -> pd.DataFrame:
+        """The molecules of one sample's cells, and for ``d2`` of the droplets outside."""
+        return self.molecules[self.molecules["sample"] == sample]
+
+    def expected_molecules(
+        self, truth: CloneTruth, *, corrected: bool = False
+    ) -> pd.DataFrame:
+        """The molecules of the store's cells that an import gives, sorted.
+
+        Columns ``cell`` (the cell's ID), ``barcode``, ``umi`` and ``reads``;
+        ``corrected`` gives each molecule its true barcode.
+        """
+        cells = self.molecules[self.molecules["cell"] >= 0]
+        return (
+            pd.DataFrame(
+                {
+                    "cell": truth.cell_ids[cells["cell"].to_numpy()],
+                    "barcode": cells["true_barcode" if corrected else "barcode"],
+                    "umi": cells["umi"],
+                    "reads": cells["reads"].astype(np.int64),
+                }
+            )
+            .sort_values(["cell", "barcode", "umi"])
+            .reset_index(drop=True)
+        )
+
+    def expected_pairs(
+        self, truth: CloneTruth, *, corrected: bool = False
+    ) -> pd.DataFrame:
+        """Each store cell's barcodes with their UMIs and reads, sorted."""
+        molecules = self.expected_molecules(truth, corrected=corrected)
+        return (
+            molecules.groupby(["cell", "barcode"], sort=True)
+            .agg(umis=("umi", "size"), reads=("reads", "sum"))
+            .reset_index()
+            .astype({"umis": np.int64, "reads": np.int64})
+        )
+
+    def reads(self, sample: str, seed: int = 0) -> pd.DataFrame:
+        """One row per read of a sample's molecules, in a shuffled order."""
+        molecules = self.sample_molecules(sample)
+        rows = molecules.loc[molecules.index.repeat(molecules["reads"])]
+        order = np.random.default_rng([seed, 13]).permutation(len(rows))
+        return rows.iloc[order].reset_index(drop=True)
+
+
+def barcode_truth(truth: CloneTruth, seed: int = 0) -> BarcodeTruth:
+    """Give the truth's clones lineage barcodes and each cell its molecules.
+
+    A cell of a clone has two to five UMIs of each of its clone's barcodes,
+    each read 3 to 12 times; every other such cell also has a one-read
+    molecule whose barcode carries a sequencing error. Every other cell
+    without a clone has one ambient read of clone 0's barcode, and each
+    droplet outside the store two molecules of it.
+    """
+    rng = np.random.default_rng([seed, 11])
+    seen: set[str] = set()
+    clone_barcodes = []
+    for clone in range(truth.n_clones):
+        drawn = []
+        while len(drawn) < 1 + clone % 3:
+            barcode = _sequence(rng, BARCODE_LENGTH)
+            if barcode not in seen:
+                seen.add(barcode)
+                drawn.append(barcode)
+        clone_barcodes.append(tuple(drawn))
+    rows: list[dict[str, object]] = []
+    used: dict[str, set[str]] = {}
+
+    def add(cell: int, sample: str, cell_barcode: str, barcode: str, **values):
+        taken = used.setdefault(cell_barcode, set())
+        while True:
+            umi = _sequence(rng, UMI_LENGTH)
+            if umi not in taken:
+                taken.add(umi)
+                break
+        rows.append(
+            {
+                "cell": cell,
+                "sample": sample,
+                "cell_barcode": cell_barcode,
+                "umi": umi,
+                "barcode": values.get("sequenced", barcode),
+                "true_barcode": barcode,
+                "reads": values["reads"],
+                "kind": values["kind"],
+            }
+        )
+
+    for cell in range(N_CELLS):
+        sample = str(truth.samples[cell])
+        cell_barcode = str(truth.barcodes[cell])
+        clone = int(truth.clones[cell])
+        if clone < 0:
+            if cell % 2 == 0:
+                add(
+                    cell,
+                    sample,
+                    cell_barcode,
+                    clone_barcodes[0][0],
+                    reads=1,
+                    kind="ambient",
+                )
+            continue
+        for barcode in clone_barcodes[clone]:
+            for _ in range(int(rng.integers(2, 6))):
+                add(
+                    cell,
+                    sample,
+                    cell_barcode,
+                    barcode,
+                    reads=int(rng.integers(3, 13)),
+                    kind="signal",
+                )
+        if cell % 2:
+            barcode = clone_barcodes[clone][0]
+            position = int(rng.integers(0, BARCODE_LENGTH))
+            base = "ACGT"[("ACGT".index(barcode[position]) + 1) % 4]
+            add(
+                cell,
+                sample,
+                cell_barcode,
+                barcode,
+                sequenced=barcode[:position] + base + barcode[position + 1 :],
+                reads=1,
+                kind="error",
+            )
+    for barcode in truth.outside:
+        for _ in range(2):
+            add(
+                -1,
+                SAMPLES[0],
+                str(barcode),
+                clone_barcodes[0][0],
+                reads=4,
+                kind="outside",
+            )
+    molecules = pd.DataFrame(rows)
+    labelled = set(molecules["cell"])
+    quiet = [cell for cell in range(N_CELLS) if cell not in labelled]
+    return BarcodeTruth(
+        clone_barcodes=tuple(clone_barcodes),
+        molecules=molecules,
+        unlabelled=pd.DataFrame(
+            {"sample": truth.samples[quiet], "cell_barcode": truth.barcodes[quiet]}
+        ),
+    )
+
+
+def write_trex_molecules(
+    barcodes: BarcodeTruth, path: Path, *, sample: str, generation: str = "current"
+) -> Path:
+    """TREX's molecule tables of one sample's cells, named by bare barcodes.
+
+    ``generation`` is ``"current"`` (``molecules.txt`` with ``read_count``),
+    ``"corrected"`` (``molecules_corrected.txt``, whose ``clone_id`` is the
+    corrected barcode), ``"2022"`` (without ``read_count``) or ``"reads"``
+    (``reads.txt``, one row per read, under the header of 2022's molecules).
+    """
+    molecules = barcodes.sample_molecules(sample)
+    if generation == "reads":
+        rows = barcodes.reads(sample)
+        lines = ["#cell_id\tumi\tclone_id"] + [
+            f"{row.cell_barcode}\t{row.umi}\t{row.barcode}"
+            for row in rows.itertuples(index=False)
+        ]
+        return _write(path, lines)
+    if generation == "corrected":
+        header = "#cell_id\tumi\toriginal_clone_id\tclone_id\tread_count"
+        lines = [header] + [
+            f"{row.cell_barcode}\t{row.umi}\t{row.barcode}\t{row.true_barcode}\t"
+            f"{row.reads}"
+            for row in molecules.itertuples(index=False)
+        ]
+        return _write(path, lines)
+    with_reads = generation == "current"
+    if generation not in ("current", "2022"):
+        raise ValueError("generation is current, corrected, 2022 or reads")
+    header = "#cell_id\tumi\tclone_id" + ("\tread_count" if with_reads else "")
+    lines = [header] + [
+        f"{row.cell_barcode}\t{row.umi}\t{row.barcode}"
+        + (f"\t{row.reads}" if with_reads else "")
+        for row in molecules.sort_values(["cell_barcode", "barcode", "umi"]).itertuples(
+            index=False
+        )
+    ]
+    return _write(path, lines)
+
+
+def write_pycashier(
+    barcodes: BarcodeTruth, path: Path, *, sample: str, header: bool = True
+) -> Path:
+    """pycashier's per-read table of one sample, ``-1`` stripped from each cell.
+
+    Releases since 2024.1001 write a header; earlier ones wrote none.
+    """
+    rows = barcodes.reads(sample)
+    lines = (["info\tumi\tcell\tbarcode"] if header else []) + [
+        f"@A00842:201:H3JGCDSX3:3:{index}:{1000 + index}:{2000 + index}\t{row.umi}\t"
+        f"{row.cell_barcode}\t{row.barcode}"
+        for index, row in enumerate(rows.itertuples(index=False))
+    ]
+    return _write(path, lines)
+
+
+def write_celltag_reads(
+    barcodes: BarcodeTruth,
+    path: Path,
+    *,
+    sample: str,
+    assay: str = "RNA",
+    biddy: bool = False,
+) -> Path:
+    """CellTag-multi's per-read table of one sample, gzip-compressed, ``-1`` kept.
+
+    ``assay="ATAC"`` writes no UMIs, as scATAC-seq has none; ``biddy`` writes
+    the Biddy et al. workflow's columns.
+    """
+    rows = barcodes.reads(sample, seed=1)
+    if biddy:
+        lines = ["Read.ID\tRead.Seq\tCell.BC\tUMI\tCell.Tag\tGene"] + [
+            f"read{index}\tACGT{row.barcode}\t{row.cell_barcode}-1\t{row.umi}\t"
+            f"{row.barcode}\tGFP"
+            for index, row in enumerate(rows.itertuples(index=False))
+        ]
+    elif assay == "ATAC":
+        lines = ["Cell.BC\tCell.Tag"] + [
+            f"{row.cell_barcode}-1\t{row.barcode}"
+            for row in rows.itertuples(index=False)
+        ]
+    else:
+        lines = ["Cell.BC\tUMI\tCell.Tag"] + [
+            f"{row.cell_barcode}-1\t{row.umi}\t{row.barcode}"
+            for row in rows.itertuples(index=False)
+        ]
+    return _write(path, lines, compress=True)
+
+
+def write_fatemap(
+    barcodes: BarcodeTruth, path: Path, *, sample: str, header: bool = True
+) -> Path:
+    """FateMap's ``stepThreeStarcodeShavedReads.txt`` of one sample.
+
+    One row per molecule and original barcode, read by its corrected 50-base
+    column; the first molecule is listed twice, with two original barcodes,
+    as starcode leaves molecules that differed in their raw barcode.
+    """
+    molecules = barcodes.sample_molecules(sample)
+    lines = ["\t".join(_FATEMAP_COLUMNS)] if header else []
+    for index, row in enumerate(molecules.itertuples(index=False)):
+        copies = 2 if index == 0 else 1
+        for copy in range(copies):
+            original = row.barcode if copy == 0 else row.barcode[::-1]
+            lines.append(
+                "\t".join(
+                    [
+                        row.cell_barcode,
+                        row.umi,
+                        original,
+                        row.true_barcode,
+                        row.true_barcode[:16],
+                        row.true_barcode[:12],
+                        row.true_barcode[:10],
+                        "1",
+                    ]
+                )
+            )
+    return _write(path, lines)
+
+
+_FATEMAP_COLUMNS = (
+    "cellID",
+    "UMI",
+    "OriginalBarcode",
+    "BC50StarcodeD8",
+    "BC40StarcodeD8",
+    "BC30StarcodeD8",
+    "BC30StarcodeD6",
+    "SampleNum",
+)
+
+
+def _sample_pairs(barcodes: BarcodeTruth, sample: str) -> pd.DataFrame:
+    """UMIs and reads of each cell and sequenced barcode of one sample."""
+    molecules = barcodes.sample_molecules(sample)
+    return (
+        molecules.groupby(["cell_barcode", "barcode"], sort=True)
+        .agg(umis=("umi", "size"), reads=("reads", "sum"))
+        .reset_index()
+    )
+
+
+def write_quicat(barcodes: BarcodeTruth, path: Path, *, sample: str) -> Path:
+    """QuiCAT's per-sample ``<sample>_output.csv``: UMIs per cell and barcode.
+
+    Cells keep 10x's ``-1``, and the sample's cells without barcodes have a
+    row with an empty barcode and count, as QuiCAT's exploded lists write.
+    """
+    pairs = _sample_pairs(barcodes, sample)
+    lines = ["sample,cell,barcode,counts"] + [
+        f"{sample},{row.cell_barcode}-1,{row.barcode},{row.umis}"
+        for row in pairs.itertuples(index=False)
+    ]
+    quiet = barcodes.unlabelled[barcodes.unlabelled["sample"] == sample]
+    lines += [f"{sample},{cell}-1,," for cell in quiet["cell_barcode"]]
+    return _write(path, lines)
+
+
+def _merged_pairs(barcodes: BarcodeTruth) -> tuple[pd.DataFrame, list[str]]:
+    """Every sample's pairs with QuiCAT's merged cell names, and the barcodes."""
+    frames = []
+    for sample in SAMPLES:
+        pairs = _sample_pairs(barcodes, sample)
+        pairs["cell"] = pairs["cell_barcode"] + f"-1_{sample}"
+        pairs["sample"] = sample
+        frames.append(pairs)
+    merged = pd.concat(frames, ignore_index=True)
+    return merged, sorted(merged["barcode"].unique())
+
+
+def write_quicat_wide(barcodes: BarcodeTruth, path: Path) -> Path:
+    """QuiCAT's merged ``barcodes_output.csv``: one column per barcode, zeros filled."""
+    merged, names = _merged_pairs(barcodes)
+    wide = merged.pivot_table(
+        index=["sample", "cell"], columns="barcode", values="umis", fill_value=0
+    ).reindex(columns=names, fill_value=0)
+    lines = ["sample,cell," + ",".join(names)] + [
+        f"{sample},{cell}," + ",".join(str(int(value)) for value in values)
+        for (sample, cell), values in zip(wide.index, wide.to_numpy(), strict=True)
+    ]
+    return _write(path, lines)
+
+
+def write_quicat_h5ad(
+    barcodes: BarcodeTruth,
+    path: Path,
+    *,
+    layout: str = "csr",
+    with_anndata: bool = False,
+) -> Path:
+    """QuiCAT's ``barcodes_output.h5ad``: cells by barcodes, float UMI counts.
+
+    With ``with_anndata``, anndata itself writes the file; current releases
+    store each index as a nullable string array, a group of values and a
+    mask, where the file written here holds a dataset.
+    """
+    merged, names = _merged_pairs(barcodes)
+    cells = sorted(merged["cell"].unique())
+    dense = np.zeros((len(cells), len(names)), dtype=np.float64)
+    rows = pd.Index(cells).get_indexer(merged["cell"])
+    columns = pd.Index(names).get_indexer(merged["barcode"])
+    dense[rows, columns] = merged["umis"].to_numpy(dtype=np.float64)
+    if with_anndata:
+        import anndata
+        from scipy import sparse
+
+        samples = pd.Categorical([cell.rsplit("_", 1)[1] for cell in cells])
+        matrices = {
+            "dense": dense,
+            "csr": sparse.csr_matrix(dense),
+            "csc": sparse.csc_matrix(dense),
+        }
+        # Releases of anndata before pandas 3 write nullable strings, as current
+        # releases always do, only once that is allowed.
+        with anndata.settings.override(allow_write_nullable_strings=True):
+            anndata.AnnData(
+                X=matrices[layout],
+                obs=pd.DataFrame(
+                    {"sample": samples}, index=pd.Index(cells, dtype="string")
+                ),
+                var=pd.DataFrame(index=pd.Index(names, dtype="string")),
+            ).write_h5ad(path)
+        return path
+    with h5py.File(path, "w") as handle:
+        obs = _obs_frame(handle, cells)
+        write_categorical(obs, "sample", [cell.rsplit("_", 1)[1] for cell in cells])
+        var = handle.create_group("var")
+        var.attrs["_index"] = "_index"
+        var.attrs["encoding-type"] = "dataframe"
+        var.attrs["encoding-version"] = "0.2.0"
+        var.attrs["column-order"] = np.asarray([], dtype=h5py.string_dtype())
+        var.create_dataset("_index", data=np.asarray(names, dtype=h5py.string_dtype()))
+        if layout == "dense":
+            handle.create_dataset("X", data=dense)
+            return path
+        major = dense if layout == "csr" else dense.T
+        group = handle.create_group("X")
+        group.attrs["encoding-type"] = f"{layout}_matrix"
+        group.attrs["encoding-version"] = "0.1.0"
+        group.attrs["shape"] = np.asarray(dense.shape)
+        indptr = np.concatenate([[0], np.cumsum((major != 0).sum(axis=1))])
+        indices = np.concatenate([np.flatnonzero(line) for line in major])
+        group.create_dataset("data", data=major[major != 0])
+        group.create_dataset("indices", data=indices.astype(np.int32))
+        group.create_dataset("indptr", data=indptr.astype(np.int64))
+    return path
+
+
+def write_bartab_counts(barcodes: BarcodeTruth, path: Path, *, sample: str) -> Path:
+    """BARtab's ``counts.tsv`` of one sample: UMIs per corrected barcode and cell."""
+    molecules = barcodes.sample_molecules(sample)
+    pairs = (
+        molecules.groupby(["true_barcode", "cell_barcode"], sort=True)["umi"]
+        .size()
+        .reset_index()
+    )
+    lines = ["gene\tcell\tcount"] + [
+        f"{row.true_barcode}\t{row.cell_barcode}\t{row.umi}"
+        for row in pairs.itertuples(index=False)
+    ]
+    return _write(path, lines, compress=True)
+
+
+def write_bartab_annotation(
+    barcodes: BarcodeTruth, path: Path, *, sample: str, legacy: bool = False
+) -> Path:
+    """BARtab's cell barcode annotation of one sample: one row per cell.
+
+    The header names two of the three fields, R's row-name layout; barcodes
+    and their UMIs are joined by ``;``, or, as in early files, by ``,`` in a
+    table separated by spaces, whose cells keep ``-1``.
+    """
+    molecules = barcodes.sample_molecules(sample)
+    pairs = (
+        molecules.groupby(["cell_barcode", "true_barcode"], sort=True)["umi"]
+        .size()
+        .reset_index()
+    )
+    separator, joiner = (" ", ",") if legacy else ("\t", ";")
+    suffix = "-1" if legacy else ""
+    lines = [separator.join(["barcode", "bc.umi.count"])]
+    for cell, rows in pairs.groupby("cell_barcode", sort=True):
+        lines.append(
+            separator.join(
+                [
+                    f"{cell}{suffix}",
+                    joiner.join(rows["true_barcode"]),
+                    joiner.join(str(count) for count in rows["umi"]),
+                ]
+            )
+        )
+    return _write(path, lines)
+
+
+def pack_umis(umis: Sequence[str]) -> np.ndarray:
+    """Pack UMIs two bits per base, the last base lowest, as Cell Ranger does."""
+    values = np.zeros(len(umis), dtype=np.uint32)
+    for index, umi in enumerate(umis):
+        value = 0
+        for base in umi:
+            value = value * 4 + "ACGT".index(base)
+        values[index] = value
+    return values
+
+
+def write_molecule_info(
+    barcodes: BarcodeTruth,
+    path: Path,
+    *,
+    sample: str,
+    library_type: str = "Custom",
+    umi_length: int | None = UMI_LENGTH,
+) -> Path:
+    """A Cell Ranger ``molecule_info.h5`` of one sample in its documented layout.
+
+    Gene expression molecules come first in each cell, then the lineage
+    library's, whose features are the corrected barcodes, named ``LB<k>``
+    with their sequence. Barcodes are stored without ``-1``; each molecule
+    records GEM well 1. ``umi_length`` is recorded in ``metrics_json``, or
+    left out with None.
+    """
+    import json
+
+    molecules = barcodes.sample_molecules(sample)
+    lineage = sorted(molecules["true_barcode"].unique())
+    feature_ids = ["ENSG0001", "ENSG0002"] + [
+        f"LB{index}" for index in range(len(lineage))
+    ]
+    feature_types = ["Gene Expression"] * 2 + [library_type] * len(lineage)
+    sequences = ["", ""] + lineage
+    cell_barcodes = sorted(molecules["cell_barcode"].unique())
+    barcode_index = {barcode: index for index, barcode in enumerate(cell_barcodes)}
+    rows = []
+    for cell_barcode, cell_molecules in molecules.groupby("cell_barcode", sort=True):
+        # One gene expression molecule of each cell, in library 0.
+        rows.append((barcode_index[cell_barcode], "A" * UMI_LENGTH, 0, 7, 0))
+        for row in cell_molecules.itertuples(index=False):
+            rows.append(
+                (
+                    barcode_index[cell_barcode],
+                    row.umi,
+                    2 + lineage.index(row.true_barcode),
+                    int(row.reads),
+                    1,
+                )
+            )
+    table = pd.DataFrame(
+        rows, columns=["barcode", "umi", "feature", "count", "library"]
+    )
+    with h5py.File(path, "w") as handle:
+        handle.attrs["file_version"] = 5
+        handle.attrs["filetype"] = "molecule"
+        handle.create_dataset("barcode_idx", data=table["barcode"].to_numpy(np.uint64))
+        handle.create_dataset("umi", data=pack_umis(table["umi"].tolist()))
+        handle.create_dataset("feature_idx", data=table["feature"].to_numpy(np.uint32))
+        handle.create_dataset("count", data=table["count"].to_numpy(np.uint32))
+        handle.create_dataset("gem_group", data=np.ones(len(table), dtype=np.uint16))
+        handle.create_dataset("library_idx", data=table["library"].to_numpy(np.uint16))
+        handle.create_dataset("umi_type", data=np.zeros(len(table), dtype=np.uint32))
+        handle.create_dataset("barcodes", data=np.asarray(cell_barcodes, dtype="S16"))
+        features = handle.create_group("features")
+        features.create_dataset("id", data=np.asarray(feature_ids, dtype="S16"))
+        features.create_dataset("name", data=np.asarray(feature_ids, dtype="S16"))
+        features.create_dataset(
+            "feature_type", data=np.asarray(feature_types, dtype="S32")
+        )
+        features.create_dataset("sequence", data=np.asarray(sequences, dtype="S32"))
+        libraries = [
+            {"library_id": 0, "library_type": "Gene Expression", "gem_group": 1},
+            {"library_id": 1, "library_type": library_type, "gem_group": 1},
+        ]
+        handle.create_dataset(
+            "library_info", data=np.asarray([json.dumps(libraries)], dtype="S4096")
+        )
+        metrics: dict[str, object] = {"cellranger_version": "cellranger-8.0.0"}
+        if umi_length is not None:
+            metrics["chemistry_umi"] = [{"length": umi_length, "read_type": "R1"}]
+        handle.create_dataset(
+            "metrics_json", data=json.dumps(metrics), dtype=h5py.string_dtype()
+        )
+    return path

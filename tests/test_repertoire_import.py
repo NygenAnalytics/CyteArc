@@ -704,10 +704,10 @@ def test_a_saved_import_with_incomplete_contigs_is_imported_again(
 
 
 def test_contig_arrays_are_chunked_by_bytes(tmp_path, monkeypatch) -> None:
-    from cytearc.datastore._operations import repertoire as operations
+    from cytearc.datastore._operations import record_tables
     from cytearc.storage.artifacts import artifact_group
 
-    monkeypatch.setattr(operations, "_CONTIG_CHUNK_BYTES", 16)
+    monkeypatch.setattr(record_tables, "_RECORD_CHUNK_BYTES", 16)
     store = receptor_store(tmp_path)
     cells = store.snapshot_cell_selection()
     ref = store.repertoire.import_receptors(tcr_file(tmp_path), cell_selection=cells)

@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ...utils.arrays import sorted_unique
+from ...utils.arrays import union_sorted
 from ...utils.warnings import warn
 
 __all__ = [
@@ -33,6 +33,7 @@ __all__ = [
     "derived_id_bytes",
     "file_sha256",
     "join_bytes",
+    "texts_per_file",
     "unmatched_barcodes_warning",
     "warn_unmatched_barcodes",
 ]
@@ -44,7 +45,7 @@ UNMATCHED_EXAMPLES = 5
 #: the ID's slot and hash in the lookup, and whether a file named it.
 LOOKUP_BYTES_PER_CELL = 100
 # Bytes held for each distinct barcode that matches no selected cell: its
-# 64-bit hash and the copy that merging new hashes makes.
+# 64-bit hash and its copy in the hashes that a merge of new ones makes.
 _UNMATCHED_BYTES_PER_BARCODE = 16
 # Bytes of each barcode while its cell ID is derived, whatever the options:
 # the pandas copy of the pointers to the barcodes, and whether it names a cell.
@@ -62,6 +63,9 @@ _EXTRACTED_BYTES_PER_BARCODE = 176
 # hash and the unique arrays that count it. Hashing a barcode also encodes
 # its text, a byte for each character.
 _MATCH_BYTES_PER_BARCODE = 128
+# Bytes of each new hash of a chunk while it is merged: the hash, its sorted
+# copy and its place in the merged hashes.
+_NEW_HASH_BYTES = 24
 # The named group of a barcode pattern that holds the barcode.
 _BARCODE_GROUP = "barcode"
 # What the options of an import may be, for their errors.
@@ -113,6 +117,8 @@ class BarcodeFile:
         barcode_pattern: A regular expression whose ``barcode`` group is the
             part of each barcode that names the cell, or None for the whole
             barcode.
+        position: The file's position in the listing of the import's paths,
+            which options given per file follow; not part of its identity.
     """
 
     path: str | os.PathLike[str]
@@ -120,6 +126,7 @@ class BarcodeFile:
     barcode_prefix: str | None
     barcode_suffix: str | None
     barcode_pattern: str | None
+    position: int = 0
 
     def record(self) -> dict[str, Any]:
         """Return the file's identity: its bytes and how its barcodes name cells."""
@@ -227,7 +234,22 @@ def _listed(value: Any, n_files: int, name: str, what: str, expected: str) -> li
     raise TypeError(f"{name} must be {expected}")
 
 
-def _text_options(value: Any, n_files: int, name: str, what: str) -> list[str | None]:
+def texts_per_file(value: Any, n_files: int, name: str, what: str) -> list[str | None]:
+    """Return one text or None per file: ``value`` for every file, or its items.
+
+    An empty text is None, as it adds nothing.
+
+    Args:
+        value: Text, a sequence of text and None with one item per file, or
+            None.
+        n_files: The files listed.
+        name: The option, named in errors.
+        what: What a file is, such as ``"clone file"``, for the errors.
+
+    Raises:
+        TypeError: If ``value`` or an item is neither text nor None.
+        ValueError: If ``value`` lists a value for another number of files.
+    """
     options = _listed(value, n_files, name, what, _TEXT_OPTIONS)
     for option in options:
         if option is not None and not isinstance(option, str):
@@ -278,8 +300,8 @@ def barcode_files(
         if not isinstance(path, str | os.PathLike):
             raise TypeError("paths must be a path or a sequence of paths")
     n_files = len(listed)
-    prefixes = _text_options(barcode_prefix, n_files, "barcode_prefix", what)
-    suffixes = _text_options(barcode_suffix, n_files, "barcode_suffix", what)
+    prefixes = texts_per_file(barcode_prefix, n_files, "barcode_prefix", what)
+    suffixes = texts_per_file(barcode_suffix, n_files, "barcode_suffix", what)
     patterns = [
         _checked_pattern(option)
         for option in _listed(
@@ -293,9 +315,10 @@ def barcode_files(
             barcode_prefix=prefix,
             barcode_suffix=suffix,
             barcode_pattern=pattern,
+            position=position,
         )
-        for path, prefix, suffix, pattern in zip(
-            listed, prefixes, suffixes, patterns, strict=True
+        for position, (path, prefix, suffix, pattern) in enumerate(
+            zip(listed, prefixes, suffixes, patterns, strict=True)
         )
     ]
     keys = [
@@ -391,6 +414,11 @@ class CellBarcodeJoin:
         return len(self._unmatched)
 
     @property
+    def unmatched_bytes(self) -> int:
+        """The bytes of the hashes of the barcodes that matched no selected cell."""
+        return _UNMATCHED_BYTES_PER_BARCODE * len(self._unmatched)
+
+    @property
     def examples(self) -> list[str]:
         """Up to five barcodes that matched no selected cell, as the files hold them."""
         return list(self._examples)
@@ -427,8 +455,10 @@ class CellBarcodeJoin:
             hashes = np.asarray(
                 pd.util.hash_array(missing, categorize=False), dtype=np.uint64
             )
-            held = self._held_bytes + _UNMATCHED_BYTES_PER_BARCODE * (
-                len(self._unmatched) + len(hashes)
+            held = (
+                self._held_bytes
+                + _UNMATCHED_BYTES_PER_BARCODE * len(self._unmatched)
+                + _NEW_HASH_BYTES * len(hashes)
             )
             if held > self._memory_bytes:
                 raise MemoryError(
@@ -438,7 +468,7 @@ class CellBarcodeJoin:
                     "barcode_suffix, barcode_pattern and cell_selection, or raise "
                     "mem_budget."
                 )
-            self._unmatched = sorted_unique(np.concatenate([self._unmatched, hashes]))
+            self._unmatched = union_sorted(self._unmatched, hashes)
             if len(self._examples) < UNMATCHED_EXAMPLES:
                 for barcode in pd.unique(texts[unmatched]):
                     if len(self._examples) == UNMATCHED_EXAMPLES:

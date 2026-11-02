@@ -758,6 +758,20 @@ class DataStorePlotAccessor:
         """Plot the junction lengths of groups of cells, one panel per locus."""
         return self._forward(PlotResult, "spectratype", locals())
 
+    def barcode_calls(
+        self,
+        barcodes: ArtifactRef,
+        *,
+        max_barcodes: int = 10,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the barcodes per cell, UMIs per barcode and reads per molecule of lineage barcodes."""
+        return self._forward(PlotResult, "barcode_calls", locals())
+
     def guide_calls(
         self,
         calls: ArtifactRef,

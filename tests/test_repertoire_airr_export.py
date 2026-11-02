@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 import zarr
 
+import cytearc.datastore._operations.record_tables as record_tables
 import cytearc.datastore._operations.repertoire as repertoire_operations
 import cytearc.metadata.rows as metadata_rows
 import cytearc.writers.airr as airr_writer
@@ -743,7 +744,7 @@ def test_streamed_exports_match_the_exports_of_one_table(
     if chunk_bytes is not None:
         # Cell positions stored four to a chunk and offsets two, so blocks of
         # four contigs read their windows across stored chunks.
-        monkeypatch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", chunk_bytes)
+        monkeypatch.setattr(record_tables, "_RECORD_CHUNK_BYTES", chunk_bytes)
     store, receptors = _edge_receptors(tmp_path)
     clonotypes = store.repertoire.clonotypes(receptors)
     if block_bytes is not None:
@@ -1361,7 +1362,7 @@ def test_writing_a_block_counts_each_row_at_its_widest(
     tmp_path, monkeypatch, chunk_bytes
 ) -> None:
     if chunk_bytes is not None:
-        monkeypatch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", chunk_bytes)
+        monkeypatch.setattr(record_tables, "_RECORD_CHUNK_BYTES", chunk_bytes)
     store, receptors = _edge_receptors(tmp_path)
     group = artifact_group(store.zw, receptors)
     fields = ("sequence_id", "v_call", "v_identity")
@@ -1466,7 +1467,7 @@ def test_a_window_lets_go_of_its_chunk_before_reading_the_next() -> None:
 
 def test_a_block_is_let_go_before_the_next_is_read(tmp_path, monkeypatch) -> None:
     # Contigs of small chunks, one per block, so every block reads its windows.
-    monkeypatch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", 16)
+    monkeypatch.setattr(record_tables, "_RECORD_CHUNK_BYTES", 16)
     monkeypatch.setattr(repertoire_operations, "_EXPORT_BLOCK_BYTES", 1)
     store, receptors = _edge_receptors(tmp_path)
     written: list[weakref.ref] = []
@@ -1691,7 +1692,7 @@ def test_export_refuses_values_the_format_forbids_before_the_file(
     if chunk_bytes is not None:
         # Contigs stored four to a chunk of cells and IDs 16 bytes to a chunk,
         # so measuring reads spans of four contigs and IDs in pieces.
-        monkeypatch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", chunk_bytes)
+        monkeypatch.setattr(record_tables, "_RECORD_CHUNK_BYTES", chunk_bytes)
     store, receptors = _forbidden_receptors(tmp_path)
     ref = (
         store.repertoire.clonotypes(receptors) if source == "clonotypes" else receptors

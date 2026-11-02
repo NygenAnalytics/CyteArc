@@ -20,6 +20,7 @@ from cytearc.storage import ArtifactRef
 _STORE_PLOT_METHODS = (
     "association_calibration",
     "association_volcano",
+    "barcode_calls",
     "clonal_expansion",
     "clonal_overlap",
     "clonal_rarefaction",
@@ -179,6 +180,11 @@ _CLONOTYPES_REF = ArtifactRef(
     scope="datastore",
     kind="clonotypes",
     artifact_id="c" * 64,
+)
+_BARCODES_REF = ArtifactRef(
+    scope="datastore",
+    kind="lineage_barcodes",
+    artifact_id="a" * 64,
 )
 
 
@@ -424,6 +430,7 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
         ("gene_usage", (_RECEPTORS_REF,), {"gene": "j_call", "level": "family"}),
         ("gene_pairing", (_CLONOTYPES_REF,), {"count": "clonotypes", "top": 5}),
         ("spectratype", (_RECEPTORS_REF,), {"sequence": "nt", "group_by": "sample"}),
+        ("barcode_calls", (_BARCODES_REF,), {"max_barcodes": 6}),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -486,6 +493,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("receptors"))
     elif name in ("gene_usage", "gene_pairing", "spectratype"):
         expected_args.append(expected_kwargs.pop("source"))
+    elif name == "barcode_calls":
+        expected_args.append(expected_kwargs.pop("barcodes"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

@@ -47,15 +47,9 @@ after it the table is refused, since the two layouts read alike there.
 Blank lines hold no rows.
 """
 
-import csv
-import gzip
-import io
-import itertools
 import os
 import re
-import zlib
-from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -65,6 +59,22 @@ import numpy as np
 import pandas as pd
 
 from ..clones.assignments import clone_label_texts
+from ._delimited import (
+    HDF5_SIGNATURE,
+    TextLayout,
+    compression,
+    count_rows,
+    first_lines,
+    joined_columns,
+    line_list,
+    open_text,
+    parsed_chunks,
+    require_columns,
+    signature,
+    text_chunks,
+    text_errors,
+    text_layout,
+)
 from ._h5ad_columns import (
     column_length,
     index_key,
@@ -123,16 +133,10 @@ _TEXT_FORMATS = frozenset(
 )
 _H5AD_FORMATS = frozenset({"cospar_h5ad", "mito", "h5ad"})
 _COLUMN_ROLES = frozenset({"cell", "clone", "probability"})
-_HDF5_SIGNATURE = b"\x89HDF\r\n\x1a\n"
-_GZIP_SIGNATURE = b"\x1f\x8b"
 #: Text that R and pandas write for a missing value, which a table's clone
 #: column reads as no clone.
 MISSING_TEXT = frozenset({"", "NA", "NaN", "nan"})
 _MITO_UNASSIGNED = "unassigned"
-# Rows after the header that the layout samples for their fields and width.
-_SAMPLE_ROWS = 100
-# What reading a gzip file that is cut short or corrupt raises.
-_CORRUPT = (EOFError, zlib.error, gzip.BadGzipFile)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,8 +186,8 @@ class CloneLayout:
     probability: str | None = None
     cells_path: str | None = None
     clones_path: str | None = None
-    _text: "_TextLayout | None" = field(default=None, repr=False)
-    _cells_text: "_TextLayout | None" = field(default=None, repr=False)
+    _text: "TextLayout | None" = field(default=None, repr=False)
+    _cells_text: "TextLayout | None" = field(default=None, repr=False)
     _matrix: "_MatrixHeader | None" = field(default=None, repr=False)
 
     @property
@@ -216,24 +220,6 @@ class CloneLayout:
             "clone": self.clone,
             "probability": self.probability,
         }
-
-
-@dataclass(frozen=True, slots=True)
-class _TextLayout:
-    """A delimited text file's header, delimiter and compression.
-
-    Attributes:
-        row_names: Whether the first field of each row names its cell, under
-            an empty name or one that the header leaves out, as R writes it.
-        row_chars: The characters of the longest of the first rows.
-    """
-
-    path: str
-    names: tuple[str, ...]
-    delimiter: str
-    compression: str | None
-    row_names: bool
-    row_chars: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,206 +272,6 @@ class MatrixEntries:
     clones: np.ndarray
 
 
-def _signature(path: str) -> bytes:
-    with open(path, "rb") as handle:
-        return handle.read(8)
-
-
-def _compression(path: str) -> str | None:
-    return "gzip" if _signature(path).startswith(_GZIP_SIGNATURE) else None
-
-
-def _open_text(path: str, compression: str | None) -> io.TextIOBase:
-    if compression == "gzip":
-        return io.TextIOWrapper(gzip.open(path, "rb"), encoding="utf-8", newline="")
-    return open(path, encoding="utf-8", newline="")
-
-
-def _corrupt_error(path: str, error: BaseException) -> ValueError:
-    return ValueError(f"{path} is cut short or corrupt: {error}")
-
-
-@contextmanager
-def _text_errors(path: str) -> Iterator[None]:
-    """Name the file in the errors of reading it as UTF-8 text, plain or gzip."""
-    try:
-        yield
-    except UnicodeDecodeError:
-        raise ValueError(f"{path} is not a text file that CyteArc can read") from None
-    except _CORRUPT as error:
-        raise _corrupt_error(path, error) from None
-
-
-@contextmanager
-def _parse_errors(path: str) -> Iterator[None]:
-    """Name the file in the errors of parsing it with pandas, a header alone aside."""
-    try:
-        yield
-    except pd.errors.EmptyDataError:
-        raise
-    except _CORRUPT as error:
-        raise _corrupt_error(path, error) from None
-    except (pd.errors.ParserError, ValueError) as error:
-        raise ValueError(f"{path} is malformed: {error}") from None
-
-
-def _first_lines(path: str, compression: str | None, n_lines: int) -> list[str]:
-    lines: list[str] = []
-    with _text_errors(path), _open_text(path, compression) as handle:
-        for line in handle:
-            lines.append(line.rstrip("\r\n"))
-            if len(lines) == n_lines:
-                break
-    return lines
-
-
-def _records(lines: Iterable[str], path: str) -> Iterator[str]:
-    """Yield the rows of a table's text after its header, each without its line ending.
-
-    Blank lines are skipped, and a row whose quotes are open goes on to the
-    next line; each line's quotes are counted once.
-
-    Raises:
-        ValueError: If a quote is still open where the file ends.
-    """
-    parts: list[str] = []
-    # The line on which the quote that is still open opened, 0 for none.
-    opened = 0
-    for number, line in enumerate(lines, start=2):
-        text = line.rstrip("\r\n")
-        if not parts and not text.strip():
-            continue
-        parts.append(text)
-        if text.count('"') % 2:
-            opened = 0 if opened else number
-        if not opened:
-            yield "\n".join(parts)
-            parts = []
-    if opened:
-        raise ValueError(
-            f"{path} is malformed: the quote opened on line {opened} is never closed"
-        )
-
-
-def _header_and_rows(path: str, compression: str | None) -> tuple[str, list[str]]:
-    """Return a table's first line and up to ``_SAMPLE_ROWS`` rows after it.
-
-    Blank lines after the first are skipped.
-    """
-    with _text_errors(path), _open_text(path, compression) as handle:
-        header = next(handle, "").rstrip("\r\n")
-        rows = list(itertools.islice(_records(handle, path), _SAMPLE_ROWS))
-    return header, rows
-
-
-def _ends_in_delimiter(row: str, delimiter: str) -> bool:
-    """Return whether a row ends in its delimiter, with nothing but spaces after it.
-
-    Space-separated rows lose the spaces at their ends when they are split,
-    so none ends in its delimiter.
-    """
-    if delimiter == " ":
-        return False
-    return row.rstrip(" \t".replace(delimiter, "")).endswith(delimiter)
-
-
-def _rows_hold_values_after_their_names(
-    path: str, compression: str | None, delimiter: str, n_names: int
-) -> bool:
-    """Return whether a row of a table holds anything after its named columns.
-
-    Each row is read until one holds a field after the header's ``n_names``
-    columns that is not empty: a value, or quoted empty text as R writes it.
-    """
-    with _text_errors(path), _open_text(path, compression) as handle:
-        next(handle, "")
-        for row in _records(handle, path):
-            if len(_fields(row, delimiter)) == n_names + 1 and not _ends_in_delimiter(
-                row, delimiter
-            ):
-                return True
-    return False
-
-
-def _delimiter(lines: list[str]) -> str:
-    """Return the delimiter of a table: tab, comma or space.
-
-    The header decides; a header of one name leaves it to the first row, so
-    a quoted barcode that holds a comma or a space stays one field.
-    """
-    header = lines[0]
-    for delimiter in ("\t", ","):
-        if delimiter in header:
-            return delimiter
-    if " " in header.strip():
-        return " "
-    row = lines[1] if len(lines) > 1 else ""
-    for delimiter in ("\t", ","):
-        if delimiter in row:
-            return delimiter
-    return " "
-
-
-def _fields(line: str, delimiter: str) -> list[str]:
-    if delimiter == " ":
-        reader = csv.reader([line.strip()], delimiter=" ", skipinitialspace=True)
-    else:
-        reader = csv.reader([line], delimiter=delimiter)
-    return next(reader, [])
-
-
-def _text_layout(path: str) -> _TextLayout:
-    compression = _compression(path)
-    first, rows = _header_and_rows(path, compression)
-    if not first.strip():
-        raise ValueError(f"{path} is empty; a clone table needs a header line")
-    delimiter = _delimiter([first, *rows[:1]])
-    header = [name.strip() for name in _fields(first.lstrip("﻿"), delimiter)]
-    # TREX starts its headers with "#", which marks no comment.
-    if header and header[0].startswith("#"):
-        header[0] = header[0][1:]
-    row_names = False
-    if rows:
-        fields = _fields(rows[0], delimiter)
-        if len(fields) == len(header) + 1:
-            # R's write.table leaves its row names out of the header, and a
-            # delimiter after each row's last field gives one field more too,
-            # an empty one. The two differ only where a row holds something
-            # after its last named column.
-            if _ends_in_delimiter(
-                rows[0], delimiter
-            ) and not _rows_hold_values_after_their_names(
-                path, compression, delimiter, len(header)
-            ):
-                raise ValueError(
-                    f"The header of {path} names {len(header)} columns, and its "
-                    f"rows of {len(header) + 1} fields all end in a delimiter with "
-                    "nothing after it: R's row names under a header that leaves "
-                    "them out, with an empty last column, or a delimiter after "
-                    "each row's last field. Name the row names in the header, as "
-                    "R's write.table(..., col.names=NA) writes them, or end the "
-                    "header with the delimiter too"
-                )
-            row_names = True
-            header = ["", *header]
-        elif len(fields) != len(header):
-            raise ValueError(
-                f"The header of {path} names {len(header)} columns, but its first "
-                f"row holds {len(fields)} fields"
-            )
-        elif header[0] == "":
-            # R's write.csv writes its row names under an empty name.
-            row_names = True
-    return _TextLayout(
-        path=path,
-        names=tuple(header),
-        delimiter=delimiter,
-        compression=compression,
-        row_names=row_names,
-        row_chars=max((len(row) for row in rows), default=0),
-    )
-
-
 def _columns_mapping(columns: Any) -> dict[str, tuple[str, ...]]:
     if columns is None:
         return {}
@@ -525,26 +311,7 @@ def _columns_mapping(columns: Any) -> dict[str, tuple[str, ...]]:
     return resolved
 
 
-def _require_columns(layout: _TextLayout, names: Sequence[str]) -> None:
-    """Refuse a table that lacks a column to read, or names it twice."""
-    missing = [name for name in names if name not in layout.names]
-    if missing:
-        shown = ", ".join(repr(name) for name in layout.names if name)
-        raise ValueError(
-            f"{layout.path} has no column "
-            + ", ".join(repr(name) for name in missing)
-            + f"; its columns are {shown}"
-        )
-    repeated = sorted({name for name in names if layout.names.count(name) > 1})
-    if repeated:
-        raise ValueError(
-            f"{layout.path} names the column "
-            + ", ".join(repr(name) for name in repeated)
-            + " more than once, so which one to read is unclear"
-        )
-
-
-def _detected_preset(layout: _TextLayout) -> str | None:
+def _detected_preset(layout: TextLayout) -> str | None:
     names = set(layout.names)
     matches = [
         name
@@ -563,7 +330,7 @@ def _detected_preset(layout: _TextLayout) -> str | None:
 def _table_layout(
     path: str, format: str | None, columns: dict[str, tuple[str, ...]]
 ) -> CloneLayout:
-    text = _text_layout(path)
+    text = text_layout(path)
     if format is None:
         format = "table" if columns else _detected_preset(text)
         if format is None:
@@ -586,7 +353,7 @@ def _table_layout(
         needed = [preset.cell, clone] + (
             [preset.probability] if preset.probability else []
         )
-        _require_columns(text, needed)
+        require_columns(text, needed)
         return CloneLayout(
             format=format,
             path=path,
@@ -610,7 +377,7 @@ def _table_layout(
             "columns={'cell': ..., 'clone': ...}"
         )
     probability = columns["probability"][0] if "probability" in columns else None
-    _require_columns(text, [*cell, clone_name, *([probability] if probability else [])])
+    require_columns(text, [*cell, clone_name, *([probability] if probability else [])])
     return CloneLayout(
         format="table",
         path=path,
@@ -622,7 +389,7 @@ def _table_layout(
 
 
 def _matrix_header(path: str, compression: str | None) -> _MatrixHeader:
-    with _text_errors(path), _open_text(path, compression) as handle:
+    with text_errors(path), open_text(path, compression) as handle:
         banner = handle.readline().strip().split()
         if len(banner) < 5 or banner[0].lower() != "%%matrixmarket":
             raise ValueError(f"{path} is not a Matrix Market file")
@@ -703,22 +470,11 @@ def _beside(path: str) -> tuple[str, str | None]:
     return os.fspath(cells), clones
 
 
-def _count_rows(text: _TextLayout) -> int:
-    """Count a table's lines that hold text, its header aside."""
-    count = 0
-    with _text_errors(text.path), _open_text(text.path, text.compression) as handle:
-        handle.readline()
-        for line in handle:
-            if line.strip():
-                count += 1
-    return count
-
-
 def _list_cell_columns(
-    text: _TextLayout, cell: tuple[str, ...] | None
+    text: TextLayout, cell: tuple[str, ...] | None
 ) -> tuple[str, ...]:
     if cell is not None:
-        _require_columns(text, cell)
+        require_columns(text, cell)
         return cell
     named = [name for name in text.names if name]
     if text.row_names:
@@ -745,12 +501,12 @@ def _matrix_layout(
         )
     header = _matrix_header(path, compression)
     cells_path, clones_path = _beside(path)
-    cells_text = _text_layout(cells_path)
+    cells_text = text_layout(cells_path)
     cell = _list_cell_columns(cells_text, columns.get("cell"))
-    n_cells = _count_rows(cells_text)
+    n_cells = count_rows(cells_text)
     n_clones = None
     if clones_path is not None:
-        n_clones = _count_rows(_text_layout(clones_path))
+        n_clones = count_rows(text_layout(clones_path))
     axes = [
         axis
         for axis, (cells, clones) in enumerate(
@@ -876,141 +632,29 @@ def clone_layout(
         )
     resolved = _columns_mapping(columns)
     name = os.fspath(path)
-    signature = _signature(name)
-    if not signature:
+    head = signature(name)
+    if not head:
         raise ValueError(f"{name} is empty")
-    if signature.startswith(_HDF5_SIGNATURE):
+    if head.startswith(HDF5_SIGNATURE):
         if format is not None and format not in _H5AD_FORMATS:
             raise ValueError(f"{name} is an AnnData file, not format={format!r}")
         return _h5ad_layout(name, format, resolved)
-    compression = _compression(name)
-    first = _first_lines(name, compression, 1)
+    found = compression(name)
+    first = first_lines(name, found, 1)
     if first and first[0].lower().startswith("%%matrixmarket"):
         if format not in (None, "matrix"):
             raise ValueError(f"{name} is a Matrix Market file, not format={format!r}")
-        return _matrix_layout(name, compression, resolved)
+        return _matrix_layout(name, found, resolved)
     if format is not None and format not in _TEXT_FORMATS:
         raise ValueError(f"{name} is a text table, not format={format!r}")
     return _table_layout(name, format, resolved)
-
-
-def _joined_barcodes(frame: pd.DataFrame, positions: Sequence[int]) -> np.ndarray:
-    parts = [frame[position].str.strip() for position in positions]
-    joined = parts[0]
-    for part in parts[1:]:
-        joined = joined + CELL_ID_SEPARATOR + part
-    return np.asarray(joined.to_numpy(dtype=object))
-
-
-def _line_list(
-    rows: np.ndarray, first_line: int, text: "_TextLayout | None" = None
-) -> str:
-    """Name up to five lines of rows of a chunk that starts at ``first_line``.
-
-    ``first_line`` counts rows, as ``_text_chunks`` yields it; with ``text``,
-    the rows' lines in the file are found by reading it again, past blank
-    lines and quoted fields that hold line breaks.
-    """
-    lines = [int(row) + first_line for row in rows[:5]]
-    if text is not None:
-        lines = _file_lines(text, lines)
-    more = f" and {len(rows) - 5} more" if len(rows) > 5 else ""
-    return ", ".join(str(line) for line in lines) + more
-
-
-def _blank_record(fields: list[str], delimiter: str) -> bool:
-    """Whether a record is a line that pandas skips as blank.
-
-    A line of whitespace alone is blank, but a tab-separated line of tabs
-    holds empty fields.
-    """
-    if not all(not field.strip() for field in fields):
-        return False
-    return delimiter == " " or len(fields) <= 1
-
-
-def _file_lines(text: _TextLayout, row_lines: list[int]) -> list[int]:
-    """Return the file lines of rows that ``_text_chunks`` numbers from line 2.
-
-    Only errors need them, so the file is read again from its start.
-    """
-    wanted = {line - 2 for line in row_lines}
-    found: dict[int, int] = {}
-    with _open_text(text.path, text.compression) as handle:
-        handle.readline()
-        if text.delimiter == " ":
-            reader = csv.reader(handle, delimiter=" ", skipinitialspace=True)
-        else:
-            reader = csv.reader(handle, delimiter=text.delimiter)
-        row, consumed = -1, 0
-        for fields in reader:
-            start = consumed + 2
-            consumed = reader.line_num
-            if _blank_record(fields, text.delimiter):
-                continue
-            row += 1
-            if row in wanted:
-                found[row] = start
-                if len(found) == len(wanted):
-                    break
-    # A row the second reading misses keeps the line that counts rows.
-    return [found.get(line - 2, line) for line in row_lines]
-
-
-def _text_chunks(
-    text: _TextLayout, chunk_rows: int
-) -> Iterator[tuple[int, pd.DataFrame]]:
-    """Yield chunks of a table's rows as text, with each chunk's first line.
-
-    Every field is read, so a row with more fields than the first raises.
-    Blank lines hold no rows. The lines count rows, the first after the
-    header being line 2, so a row's line is its chunk's first line plus its
-    position; ``_line_list`` with ``text`` finds the line in the file, past
-    blank lines and quoted fields that hold line breaks.
-    """
-    separator = r"\s+" if text.delimiter == " " else text.delimiter
-    chunks = _parsed_chunks(
-        text.path,
-        sep=separator,
-        header=None,
-        skiprows=1,
-        dtype=str,
-        keep_default_na=False,
-        na_filter=False,
-        compression=text.compression,
-        quotechar='"',
-        chunksize=chunk_rows,
-        skip_blank_lines=True,
-        encoding="utf-8",
-    )
-    line = 2
-    for chunk in chunks:
-        yield line, chunk
-        line += len(chunk)
-
-
-def _parsed_chunks(path: str, **options: Any) -> Iterator[pd.DataFrame]:
-    """Yield the chunks that pandas parses, naming the file in its errors."""
-    try:
-        with _parse_errors(path):
-            reader = pd.read_csv(path, **options)
-    except pd.errors.EmptyDataError:
-        # A header without rows holds no rows.
-        return
-    with reader:
-        while True:
-            with _parse_errors(path):
-                chunk = next(reader, None)
-            if chunk is None:
-                return
-            yield chunk
 
 
 def _probabilities(
     values: pd.Series,
     first_line: int,
     path: str,
-    table: "_TextLayout | None" = None,
+    table: "TextLayout | None" = None,
 ) -> np.ndarray:
     text = values.str.strip()
     missing = text.isin(MISSING_TEXT).to_numpy()
@@ -1023,7 +667,7 @@ def _probabilities(
     if len(invalid):
         raise ValueError(
             f"Clone probabilities of {path} must be numbers from 0 to 1, or NA, on "
-            f"lines {_line_list(invalid, first_line, table)}"
+            f"lines {line_list(invalid, first_line, table)}"
         )
     return np.asarray(numbers, dtype=np.float64)
 
@@ -1054,13 +698,13 @@ def _iter_table_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows
     probability_position = (
         index[layout.probability] if layout.probability is not None else None
     )
-    for first_line, chunk in _text_chunks(text, chunk_rows):
-        barcodes = _joined_barcodes(chunk, cell_positions)
+    for first_line, chunk in text_chunks(text, chunk_rows):
+        barcodes = joined_columns(chunk, cell_positions, CELL_ID_SEPARATOR)
         empty = np.flatnonzero(barcodes == "")
         if len(empty):
             raise ValueError(
                 f"{layout.path} has rows without a cell barcode on lines "
-                f"{_line_list(empty, first_line, text)}"
+                f"{line_list(empty, first_line, text)}"
             )
         probabilities = None
         if probability_position is not None:
@@ -1195,13 +839,13 @@ def matrix_cells(layout: CloneLayout, chunk_rows: int) -> Iterator[np.ndarray]:
     assert text is not None
     index = {name: position for position, name in enumerate(text.names)}
     positions = [index[name] for name in layout.cell] if layout.cell else [0]
-    for first_line, chunk in _text_chunks(text, chunk_rows):
-        barcodes = _joined_barcodes(chunk, positions)
+    for first_line, chunk in text_chunks(text, chunk_rows):
+        barcodes = joined_columns(chunk, positions, CELL_ID_SEPARATOR)
         empty = np.flatnonzero(barcodes == "")
         if len(empty):
             raise ValueError(
                 f"The cell list {text.path} has cells without a barcode on lines "
-                f"{_line_list(empty, first_line, text)}"
+                f"{line_list(empty, first_line, text)}"
             )
         yield barcodes
 
@@ -1226,11 +870,11 @@ def matrix_clone_ids(layout: CloneLayout) -> np.ndarray:
     assert header is not None
     if layout.clones_path is None:
         return np.arange(header.n_clones).astype(str).astype(object)
-    text = _text_layout(layout.clones_path)
+    text = text_layout(layout.clones_path)
     labels = np.concatenate(
         [
             chunk[0].str.strip().to_numpy(dtype=object)
-            for _line, chunk in _text_chunks(text, 1 << 20)
+            for _line, chunk in text_chunks(text, 1 << 20)
         ]
         or [np.empty(0, dtype=object)]
     )
@@ -1294,7 +938,7 @@ def _mtx_entries(layout: CloneLayout, chunk_rows: int) -> Iterator[MatrixEntries
     header = layout._matrix
     assert header is not None
     columns = [0, 1] if header.pattern else [0, 1, 2]
-    chunks = _parsed_chunks(
+    chunks = parsed_chunks(
         layout.path,
         sep=r"\s+",
         header=None,

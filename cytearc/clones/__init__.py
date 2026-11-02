@@ -7,6 +7,7 @@ if TYPE_CHECKING:
         MULTIPLE_POLICIES as MULTIPLE_POLICIES,
         Clones as Clones,
     )
+    from .barcodes import LineageBarcodes as LineageBarcodes
     from .diversity import (
         ORDERS as ORDERS,
         ClonalDiversity as ClonalDiversity,
@@ -36,6 +37,7 @@ __all__ = [
     "CloneOverlap",
     "CloneTracking",
     "Clones",
+    "LineageBarcodes",
     "Rarefaction",
 ]
 
@@ -53,6 +55,7 @@ __getattr__, __dir__ = _lazy_facade(
         "CloneOverlap": ".overlap",
         "CloneTracking": ".overlap",
         "Clones": ".assignments",
+        "LineageBarcodes": ".barcodes",
         "Rarefaction": ".diversity",
     },
 )

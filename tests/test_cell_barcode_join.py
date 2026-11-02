@@ -34,6 +34,7 @@ from tests.barcode_join_helpers import (
     build_guide_store,
     build_join_store,
     import_case,
+    write_barcode_file,
     write_clone_file,
     write_contig_file,
     write_guide_call_file,
@@ -177,6 +178,15 @@ def _cells_with_contigs(store, ref) -> set[str]:
     return set(cells.index[cells["n_contigs"] > 0])
 
 
+def _barcodes(store, paths, **options):
+    return store.clones.import_barcodes(paths, **options)
+
+
+def _cells_with_barcodes(store, ref) -> set[str]:
+    cells = store.clones.load_barcodes(ref).cells
+    return set(cells.index[cells["n_barcodes"] > 0])
+
+
 IMPORTERS = {
     "import_guide_calls": Importer(
         name="import_guide_calls",
@@ -202,6 +212,14 @@ IMPORTERS = {
         run=_receptors,
         joined=_cells_with_contigs,
         files=("the contig file", "the contig files"),
+    ),
+    "import_barcodes": Importer(
+        name="import_barcodes",
+        several_files=True,
+        write=write_barcode_file,
+        run=_barcodes,
+        joined=_cells_with_barcodes,
+        files=("the barcode file", "the barcode files"),
     ),
 }
 MULTI_FILE = [name for name, importer in IMPORTERS.items() if importer.several_files]
@@ -880,6 +898,52 @@ def test_the_join_refuses_repeated_cell_ids_and_budgets_too_small() -> None:
         join.cells(
             _plain(), np.asarray([f"x{index}" for index in range(20)], dtype=object)
         )
+
+
+def test_the_join_counts_each_chunks_new_hashes_beside_those_it_holds() -> None:
+    # Five barcodes that name no cell, then a chunk of six others and one of
+    # the five: the join holds five hashes, 16 bytes each with their copy in
+    # the merged hashes, and each of the chunk's seven distinct hashes takes
+    # 24 bytes while it is merged.
+    first = np.asarray([f"x{k}" for k in range(5)], dtype=object)
+    second = np.asarray([f"y{k}" for k in range(6)] + ["x0"], dtype=object)
+    held = CellBarcodeJoin(np.asarray(["a"]), memory_bytes=10**6).held_bytes
+    needed = held + 16 * 5 + 24 * 7
+    short = CellBarcodeJoin(np.asarray(["a"]), memory_bytes=needed - 1)
+    short.cells(_plain(), first)
+    with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
+        short.cells(_plain(), second)
+    join = CellBarcodeJoin(np.asarray(["a"]), memory_bytes=needed)
+    join.cells(_plain(), first)
+    join.cells(_plain(), second)
+    assert join.n_unmatched_barcodes == 11
+    assert join.unmatched_bytes == 16 * 11
+
+
+@pytest.mark.slow
+def test_the_hashes_of_barcodes_that_match_no_cell_fit_the_smallest_budget() -> None:
+    from tests.clone_helpers import smallest_budget
+
+    # 50,000 barcodes outside the selection, in 100 chunks, set the budget:
+    # the join holds their hashes and merges each chunk's into them. Each
+    # chunk's rows take about 300 bytes each while they are joined, which the
+    # importer counts with its chunk.
+    cell_ids = np.asarray([f"c{index}" for index in range(10)])
+    chunks = [
+        np.asarray([f"out{chunk}_{row}" for row in range(500)], dtype=object)
+        for chunk in range(100)
+    ]
+
+    def run(budget: int) -> None:
+        join = CellBarcodeJoin(cell_ids, memory_bytes=budget)
+        for chunk in chunks:
+            join.cells(_plain(), chunk)
+
+    budget = smallest_budget(run, 1 << 22)
+    # Merging by sorting every hash with each chunk's held 1.9 times as much.
+    allowed = budget + 300 * 500
+    _, peak = traced_peak(lambda: run(budget), allowed)
+    assert peak <= allowed, (peak, budget)
 
 
 def test_the_join_counts_the_text_of_long_cell_ids() -> None:

@@ -11,6 +11,7 @@ from ._operations.embeddings import _EmbeddingOperationsMixin
 from ._operations.features import _FeatureOperationsMixin
 from ._operations.graph import _GraphOperationsMixin
 from ._operations.integration_metrics import _IntegrationMetricsOperationsMixin
+from ._operations.lineage_barcodes import _LineageBarcodeOperationsMixin
 from ._operations.mapping import _MappingOperationsMixin
 from ._operations.mapping_reference import _MappingReferenceOperationsMixin
 from ._operations.perturbation_associations import (
@@ -91,6 +92,8 @@ class ClonesAccessor(_Accessor):
     coupling = _bind(_CloneOperationsMixin._clones_coupling)
     fate_bias = _bind(_CloneOperationsMixin._clones_fate_bias)
     load_fate_bias = _bind(_CloneOperationsMixin._clones_load_fate_bias)
+    import_barcodes = _bind(_LineageBarcodeOperationsMixin._clones_import_barcodes)
+    load_barcodes = _bind(_LineageBarcodeOperationsMixin._clones_load_barcodes)
 
 
 class ClustersAccessor(_Accessor):
