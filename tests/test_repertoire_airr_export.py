@@ -5,7 +5,6 @@ import gc
 import gzip
 import io
 import re
-import tracemalloc
 import weakref
 import zlib
 
@@ -36,10 +35,10 @@ from tests.clone_helpers import (
     TCR_ROWS,
     budget_refusals,
     receptor_store,
-    traced_peak,
     write_cells_store,
     write_lines,
 )
+from tests.perturbation_helpers import traced_peak
 
 # Contig IDs repeat across the three files: X takes _3 and then _4, since the
 # TCR file names a contig X_2, and Z takes _3, or _2 when only chains are
@@ -1131,7 +1130,8 @@ def test_exports_of_long_values_fit_the_smallest_budget(tmp_path, kind) -> None:
     refusals = budget_refusals(store, export)
     budget = refusals[-1][1]
     store.memoryBytes = budget
-    peak = traced_peak(export)
+    gc.collect()
+    _result, peak = traced_peak(export, budget)
     assert peak <= budget, (peak, budget)
     written = _read(path)
     assert len(written) == 200 and written["sequence_id"].is_unique
@@ -1520,6 +1520,8 @@ def test_clonotypes_hold_their_codes_and_labels_while_blocks_are_written(
         ("receptors", ".tsv.gz", "every"),
         ("clonotypes", ".tsv", "contig_"),
         ("receptors", ".tsv", "contig_j_identity"),
+        ("receptors", ".tsv", "values"),
+        ("clonotypes", ".tsv", "values"),
     ],
 )
 def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
@@ -1534,7 +1536,8 @@ def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
     # the others keep the store's own model, a few MiB at most: a step then
     # reads chunks larger than the one left behind before it, or, with the J
     # identities, the last field that measuring reads and the blocks next,
-    # smaller ones.
+    # smaller ones; with "values", the cell selection's mask holds one, and
+    # the cells' IDs read after it hold smaller chunks.
     # Zarr decodes inline here, so the chunks that this test holds are the
     # only ones left behind.
     async def inline(function, /, *args, **kwargs):
@@ -1570,38 +1573,46 @@ def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
 
     monkeypatch.setattr(zarr.Array, "__getitem__", read)
     reserve = repertoire_operations._Reads.reserve
-    steps: list[tuple[int, int]] = []
-    estimate = 0
+    checks: list[int] = []
+    allowance: list[np.ndarray] = []
+    ceiling = 0
 
     def recorded(reads, needed):
-        nonlocal estimate
         reserve(reads, needed)
-        steps.append((estimate, tracemalloc.get_traced_memory()[1]))
-        tracemalloc.reset_peak()
         # The bytes that the check counted, from its refusal of a copy of
         # the reads with no budget.
         with pytest.raises(MemoryError) as refused:
             reserve(dataclasses.replace(reads, limit=-1), needed)
         found = re.search(r"holds about (-?\d+) bytes", str(refused.value))
         assert found is not None
-        estimate = int(found.group(1))
+        checks.append(int(found.group(1)))
+        # Until the next check, the step also holds the bytes by which its
+        # check falls short of the largest check, allocated but never
+        # written, so the traced peak passes the largest check exactly when
+        # a step holds more than the check made before it.
+        allowance.clear()
+        if ceiling:
+            allowance.append(np.empty(ceiling - checks[-1], dtype=np.uint8))
 
     monkeypatch.setattr(repertoire_operations._Reads, "reserve", recorded)
+    path = tmp_path / f"lingering{suffix}"
+
+    def export() -> None:
+        checks.clear()
+        try:
+            store.repertoire.export_airr(ref, path)
+        finally:
+            allowance.clear()
+            held.clear()
+
+    # A first export compiles the kernels and finds the checks; each step of
+    # the traced export is then held to the check made before it, and a peak
+    # above the largest check is traced again.
+    export()
+    ceiling = max(checks)
     gc.collect()
-    tracemalloc.start()
-    try:
-        store.repertoire.export_airr(ref, tmp_path / f"lingering{suffix}")
-        steps.append((estimate, tracemalloc.get_traced_memory()[1]))
-    finally:
-        tracemalloc.stop()
-        held.clear()
-    # The first record closes what ran before the first check.
-    over = [
-        (index, peak - bound)
-        for index, (bound, peak) in enumerate(steps[1:], start=1)
-        if peak > bound
-    ]
-    assert len(steps) > 10 and not over, over
+    _result, peak = traced_peak(export, ceiling)
+    assert len(checks) > 10 and peak <= ceiling, (peak - ceiling, checks)
 
 
 def test_the_export_warns_of_discouraged_characters_and_repeated_ids(
