@@ -967,6 +967,37 @@ def test_a_table_in_rs_row_name_layout_takes_its_cells_from_the_row_names(
     assert chunk.umi_counts is None
 
 
+def test_r_row_names_hold_when_only_the_first_row_ends_in_its_delimiter(
+    tmp_path,
+) -> None:
+    # R's write.table(..., na="") leaves the first cell's unknown count empty,
+    # so its row ends in the delimiter; the count of the next row shows that
+    # the first field of each row names its cell.
+    path = _file(
+        tmp_path, "pairs.tsv", "barcode\tumis\nAAAC-1\tLB1\t\nCCCG-1\tLB2\t3\n"
+    )
+    layout = barcode_layout(
+        path, format="pairs", columns={"barcode": "barcode", "umis": "umis"}
+    )
+    assert layout.cell == ()
+    (chunk,) = _rows(layout, 10)
+    assert chunk.cells.tolist() == ["AAAC-1", "CCCG-1"]
+    assert chunk.barcodes.tolist() == ["LB1", "LB2"]
+    assert chunk.umi_counts.tolist() == [-1, 3]
+
+
+def test_a_barcode_table_whose_rows_all_end_in_its_delimiter_is_refused(
+    tmp_path,
+) -> None:
+    # R's row names with an empty last column, and a delimiter after each
+    # row's last field, read alike here.
+    path = _file(tmp_path, "pairs.tsv", "barcode\tumis\nAAAC-1\tLB1\t\nCCCG-1\tLB2\t\n")
+    with pytest.raises(ValueError, match="all end in a delimiter with nothing after"):
+        barcode_layout(
+            path, format="pairs", columns={"barcode": "barcode", "umis": "umis"}
+        )
+
+
 def test_anndata_counts_skip_blocks_without_counts_and_refuse_odd_matrices(
     tmp_path,
 ) -> None:
