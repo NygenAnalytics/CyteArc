@@ -1,6 +1,7 @@
 """Pairs of texts within a distance, checked against every pair compared directly."""
 
 import itertools
+import math
 import warnings
 
 import numpy as np
@@ -1295,18 +1296,27 @@ def test_the_edit_distances_of_chance_pairs_keep_only_the_states_that_can_end_wi
 @pytest.mark.parametrize(
     ("cutoff", "neighbours"), [(1, 12), (2, 12 + 54), (3, 12 + 54 + 108), (4, 255)]
 )
-def test_every_text_of_a_length_expects_exactly_the_pairs_it_holds(
+def test_every_text_of_a_length_expects_its_pairs_from_the_share_that_agree(
     cutoff, neighbours
 ) -> None:
-    # The 256 texts of four bases hold each base at each position as often,
-    # so they are the independent draws of the expectation, without repeats:
-    # each text has 4 * 3 others one substitution away, 6 * 3 * 3 two away,
-    # 4 * 3 * 3 * 3 three away, and every other within four.
+    # Of the 255 others of each of the 256 texts of four bases, 63 share its
+    # base at a position, so two of them agree there with chance 63/255, and
+    # a pair of distinct texts falls within the cutoff with the binomial
+    # chance of 1 to ``cutoff`` mismatches over the chance of any. Each text
+    # has 4 * 3 others one substitution away, 6 * 3 * 3 two away, 4 * 3 * 3 *
+    # 3 three away, and every other within four, which the search finds; the
+    # whole space holds a few more than independent draws from it would.
     texts = ["".join(bases) for bases in itertools.product("ACGT", repeat=4)]
     found, _second = neighbor_pairs(texts, "hamming", cutoff)
     expected = expected_chance_pairs(texts, "hamming", cutoff)
+    agree = 63 / 255
+    chance = sum(
+        math.comb(4, mismatches) * (1 - agree) ** mismatches * agree ** (4 - mismatches)
+        for mismatches in range(1, cutoff + 1)
+    ) / (1 - agree**4)
     assert len(found) == 256 * neighbours // 2
-    assert expected == pytest.approx(256 * neighbours / 2, rel=1e-12)
+    assert expected == pytest.approx(256 * 255 / 2 * chance, rel=1e-12)
+    assert expected <= len(found)
 
 
 def test_texts_that_cannot_pair_by_chance_expect_nothing() -> None:
@@ -1366,7 +1376,9 @@ def test_the_frequencies_of_one_block_are_let_go_before_the_next() -> None:
     lengths = [7, 8, 9]
     groups = [np.arange(0, 30), np.arange(30, 60), np.arange(60, 90)]
     memory = sequences._Memory(None, held=12_345)
-    expected = sequences._edit_chance_pairs(codes, groups, groups, lengths, 2, memory)
+    expected = sequences._edit_chance_pairs(
+        codes, groups, groups, lengths, 2, np.arange(90), memory
+    )
     assert expected > 0 and memory.held == 12_345
 
 
@@ -1392,7 +1404,7 @@ def test_each_position_counts_the_best_text_of_each_component_that_holds_a_base(
     texts = ["AC-", "GTA", "C-G"]
     matrix, _lengths, coding = sequences._encoded(texts, sequences._Memory(None))
     unknown = sequences._unknown_table("-", coding)
-    frequencies = sequences._library_frequencies(
+    counts = sequences._library_counts(
         matrix,
         np.arange(3),
         3,
@@ -1401,12 +1413,12 @@ def test_each_position_counts_the_best_text_of_each_component_that_holds_a_base(
         unknown,
     )
 
-    def share(position: int, letter: str) -> float:
-        return float(frequencies[position, ord(letter)])
+    def count(position: int, letter: str) -> float:
+        return float(counts[position, ord(letter)])
 
-    assert share(0, "A") == 0.5 and share(0, "C") == 0.5
-    assert share(1, "C") == 1.0
-    assert share(2, "A") == 0.5 and share(2, "G") == 0.5
+    assert count(0, "A") == 1 and count(0, "C") == 1
+    assert count(1, "C") == 1 and counts[1].sum() == 1
+    assert count(2, "A") == 1 and count(2, "G") == 1
 
 
 def test_texts_that_are_their_own_components_expect_as_without_components() -> None:
@@ -1442,68 +1454,124 @@ def test_a_block_of_one_text_expects_no_pairs() -> None:
 
 
 def test_the_representatives_alone_give_the_frequencies() -> None:
-    # "AAAA" and "CCCC" represent their components, so each position agrees
-    # with chance 1/2: within one substitution, a pair of distinct texts
-    # falls with chance (1/16 + 4/16 - 1/16) / (1 - 1/16) = 4/15, and the
-    # four texts pair six times. Texts linked into one component would all
-    # be its representative, never distinct, so they expect no pairs.
-    texts = ["AAAT", "AAAA", "CCCG", "CCCC"]
+    # "AAAA", "CCCC" and "ACCA" represent their components, and at each
+    # position two of the three agree, so two components agree with chance
+    # 1/3: within one substitution, a pair of distinct texts falls with
+    # chance (1/81 + 8/81 - 1/81) / (1 - 1/81) = 1/10, and the four texts
+    # pair six times. Texts linked into one component are of no two
+    # components, so they expect no pairs.
+    texts = ["AAAT", "AAAA", "CCCC", "ACCA"]
     expected = expected_chance_pairs(
-        texts, "hamming", 1, components=[0, 0, 1, 1], priority=[0, 1, 0, 1]
+        texts, "hamming", 1, components=[0, 0, 1, 2], priority=[0, 1, 0, 0]
     )
-    assert expected == pytest.approx(6 * 4 / 15, rel=1e-12)
+    assert expected == pytest.approx(6 / 10, rel=1e-12)
     assert expected_chance_pairs(texts, "hamming", 1, components=[0, 0, 0, 0]) == 0.0
 
 
 def test_the_priority_chooses_the_text_that_represents_a_component() -> None:
-    # "AAAC" and "AAAA" share a component and "CCCC" is alone. With "AAAC"
-    # first, the last position agrees surely and the others with chance 1/2,
-    # so a pair of distinct texts falls within one substitution with chance
-    # (1/8 + 3/8 - 1/8) / (1 - 1/8) = 3/7; with "AAAA", the later text of
-    # equal priority, every position agrees with chance 1/2 and the chance
-    # is 4/15. The three texts pair three times.
-    texts = ["AAAC", "AAAA", "CCCC"]
-    components = [0, 0, 1]
+    # "CAAG" and "TATA" share a component, beside "TAAA" and "AAAA". With
+    # "CAAG" first, the first position never agrees, the middle two surely
+    # and the last with chance 1/3, so a pair of distinct texts falls within
+    # one substitution with chance 1/3; with "TATA", the later text of equal
+    # priority, the first and third agree with chance 1/3 and the others
+    # surely, and the chance is (1/9 + 4/9 - 1/9) / (1 - 1/9) = 1/2. The four
+    # texts pair six times.
+    texts = ["CAAG", "TATA", "TAAA", "AAAA"]
+    components = [0, 0, 1, 2]
     assert expected_chance_pairs(
-        texts, "hamming", 1, components=components, priority=[1, 0, 0]
-    ) == pytest.approx(3 * 3 / 7, rel=1e-12)
+        texts, "hamming", 1, components=components, priority=[1, 0, 0, 0]
+    ) == pytest.approx(6 / 3, rel=1e-12)
     assert expected_chance_pairs(
         texts, "hamming", 1, components=components
-    ) == pytest.approx(3 * 4 / 15, rel=1e-12)
+    ) == pytest.approx(6 / 2, rel=1e-12)
 
 
 def test_equal_priorities_go_to_the_later_text_with_characters_of_no_base() -> None:
     # "-CGTAA" and "ACGTAC" share a component and "TTGTAC" is alone. Of
-    # equal priorities the later "ACGTAC" represents its component: the first
-    # two positions agree with chance 1/2 and the others surely, so the two
-    # full texts fall within one substitution with chance (1/4 + 1/2 - 1/4)
-    # / (1 - 1/4) = 2/3, and the cut text, against either full one on the
-    # last five positions, surely. With "-CGTAA" first, its last position
-    # agrees with chance 1/2 too: 3/7 for the full texts, and 3/4 for each
-    # pair with the cut one.
+    # equal priorities the later "ACGTAC" represents its component: the two
+    # components differ at the first two positions and agree at the others,
+    # so the two full texts, two mismatches apart, never fall within one
+    # substitution, and the cut text, against either full one on the last
+    # five positions, surely does. With "-CGTAA" first, the components
+    # differ at the last position too, and no pair falls within one.
     texts = ["-CGTAA", "ACGTAC", "TTGTAC"]
     search = {"components": [0, 0, 1], "unknown": "-", "min_compared": 4}
     assert expected_chance_pairs(texts, "hamming", 1, **search) == pytest.approx(
-        2 / 3 + 2, rel=1e-12
+        2, rel=1e-12
     )
-    assert expected_chance_pairs(
-        texts, "hamming", 1, priority=[1, 0, 0], **search
-    ) == pytest.approx(3 / 7 + 2 * 3 / 4, rel=1e-12)
+    assert expected_chance_pairs(texts, "hamming", 1, priority=[1, 0, 0], **search) == 0
+
+
+def test_a_position_that_one_component_holds_pairs_nothing_by_chance() -> None:
+    # "ACGTAC" and "ACGTAA" are of one component, the only one that holds the
+    # first position, and "-CGTAC" and "-AGTCC" are alone. The two full texts
+    # compare that position, so their pair is of one component and expects
+    # nothing. The last five positions agree with chances 1/3, 1, 1, 1/3 and
+    # 1/3: the two cut texts, distinct, fall within one substitution with
+    # chance (1/27 + 6/27 - 1/27) / (1 - 1/27) = 3/13, and each of the four
+    # pairs of a full and a cut text with chance 7/27.
+    texts = ["ACGTAC", "ACGTAA", "-CGTAC", "-AGTCC"]
+    expected = expected_chance_pairs(
+        texts, "hamming", 1, components=[0, 0, 1, 2], unknown="-", min_compared=4
+    )
+    assert expected == pytest.approx(3 / 13 + 4 * 7 / 27, rel=1e-12)
+
+
+def test_edits_agree_as_the_pairs_of_two_components_do(monkeypatch) -> None:
+    # "ACGT" and "ACGTA" are of one component, beside "AAGT" and "TCGTA".
+    # Each pair of positions, of one length or two, agrees with the share of
+    # pairs of texts of two components that hold one character there, and
+    # the texts of one component never pair with each other.
+    seen = []
+    follow = sequences._edit_chance
+
+    def recorded(agree, limit, memory):
+        seen.append(agree.copy())
+        return follow(agree, limit, memory)
+
+    monkeypatch.setattr(sequences, "_edit_chance", recorded)
+    four, five = ["ACGT", "AAGT"], ["ACGTA", "TCGTA"]
+    expected_chance_pairs([*four, *five], "levenshtein", 1, components=[0, 1, 0, 2])
+
+    def shares(first, second, pairs) -> np.ndarray:
+        return np.asarray(
+            [
+                [
+                    np.mean([first[a][j] == second[b][k] for a, b in pairs])
+                    for k in range(len(second[0]))
+                ]
+                for j in range(len(first[0]))
+            ]
+        )
+
+    wanted = [
+        shares(four, four, [(0, 1), (1, 0)]),
+        shares(four, five, [(0, 1), (1, 0), (1, 1)]),
+        shares(five, five, [(0, 1), (1, 0)]),
+    ]
+    assert len(seen) == 3
+    for agree, share in zip(seen, wanted, strict=True):
+        np.testing.assert_allclose(agree, share, rtol=0, atol=1e-12)
 
 
 def test_a_component_of_two_lengths_gives_a_text_of_each() -> None:
-    # "ACGTA" leads its component, which also holds "ACGT", and "TTTA" is
-    # alone. Each length takes one text per component, so the texts of
-    # length 4 are "ACGT" and "TTTA": every text represents itself, and the
-    # expectation is that of the texts without components.
-    texts = ["ACGTA", "ACGT", "TTTA"]
+    # "ACGTACG" leads its component, which also holds "ACGT", and four texts
+    # of lengths 4 and 7 are alone. Lengths 3 apart never pair within one
+    # edit, and each length takes one text per component, so the expectation
+    # is the sum of each length's alone, "ACGT" representing its component
+    # among the texts of length 4.
+    texts = ["ACGTACG", "ACGT", "ACGA", "ACTA", "ACGTTCG", "ACCTACG"]
     expected = expected_chance_pairs(
-        texts, "levenshtein", 1, components=[0, 0, 1], priority=[2, 1, 0]
+        texts,
+        "levenshtein",
+        1,
+        components=[0, 0, 1, 2, 3, 4],
+        priority=[1, 0, 0, 0, 0, 0],
     )
-    assert expected > 0
-    assert expected == pytest.approx(
-        expected_chance_pairs(texts, "levenshtein", 1), rel=1e-12
-    )
+    four = expected_chance_pairs(texts[1:4], "levenshtein", 1)
+    seven = expected_chance_pairs([texts[0], *texts[4:]], "levenshtein", 1)
+    assert four > 0 and seven > 0
+    assert expected == pytest.approx(four + seven, rel=1e-12)
 
 
 def test_texts_of_too_few_bases_leave_the_frequencies_alone() -> None:
@@ -1547,11 +1615,11 @@ def test_the_frequencies_of_cut_texts_are_let_go() -> None:
 def test_choosing_one_text_per_component_counts_against_the_budget() -> None:
     # 200 texts of 10 characters hold 48 bytes each while one per component
     # is chosen, beside their characters and their copy of 9 bytes, with
-    # 2 KiB for one position's count.
+    # 4 KiB for one position's count and its copy less one.
     rng = np.random.default_rng(6)
     texts = _random_texts(rng, 200, [10], (0.25, 0.25, 0.25, 0.25))
     held = _encoding_bytes(texts) + _group_bytes(texts)
-    choosing = (48 + 10 + 9) * len(texts) + 2048
+    choosing = (48 + 10 + 9) * len(texts) + 2 * 2048
     with pytest.raises(MemoryError, match="the representatives of the components"):
         expected_chance_pairs(texts, "hamming", 2, max_bytes=held + choosing - 1)
     assert expected_chance_pairs(
@@ -1676,6 +1744,157 @@ def test_error_variants_weigh_no_more_than_their_parents_under_edits() -> None:
     assert every_text - count * scale > tolerance, (every_text, count * scale)
 
 
+def test_random_texts_expect_their_count_which_self_pairs_would_overstate() -> None:
+    # 400 random texts of 100 bases, about half of whose pairs fall within
+    # 75 substitutions, give a count precise enough to show a bias, and the
+    # expectation lies within four standard deviations of it. Frequencies
+    # that count each text against itself, as the sum of their squares
+    # does, raise each position's agreement by about 3/1600 and expect ten
+    # standard deviations too many.
+    rng = np.random.default_rng(1)
+    texts = ["".join(rng.choice(list("ACGT"), size=100)) for _ in range(400)]
+    first, second = _substitution_links(texts, 75)
+    count, variance = link_count_variance(len(texts), first, second)
+    expected = expected_chance_pairs(texts, "hamming", 75)
+    tolerance = 4 * variance**0.5
+    assert abs(expected - count) <= tolerance, (expected, count, tolerance)
+    # The sum of the squared frequencies at each position, and the chance of
+    # 1 to 75 mismatches between distinct texts that it gives.
+    codes = np.asarray([list(text) for text in texts])
+    agree = np.asarray(
+        [
+            sum(np.mean(codes[:, position] == letter) ** 2 for letter in "ACGT")
+            for position in range(100)
+        ]
+    )
+    chances = np.zeros(76)
+    chances[0] = 1.0
+    for disagree in 1.0 - agree:
+        chances[1:] = chances[1:] * (1 - disagree) + chances[:-1] * disagree
+        chances[0] *= 1 - disagree
+    with_self = 400 * 399 / 2 * (chances.sum() - chances[0]) / (1 - chances[0])
+    assert with_self - count > tolerance, (with_self, count, tolerance)
+
+
+def _parent_families(
+    rng, n_parents: int, length: int, cut: bool
+) -> tuple[list[str], list[int], list[int]]:
+    """Random parents with the variants of 20 draws of one or two substitutions each.
+
+    Returns the distinct texts, each one's family, and 1 for a parent and 0
+    for a variant; with ``cut``, each text loses one or two bases at either
+    end three times in ten.
+    """
+    letters = np.asarray(list("ACGT"))
+    texts: list[str] = []
+    families: list[int] = []
+    lead: list[int] = []
+    for family in range(n_parents):
+        parent = "".join(rng.choice(letters, size=length))
+        members = {parent}
+        for _ in range(20):
+            bases = list(parent)
+            changes = int(rng.integers(1, 3))
+            for position in rng.choice(length, size=changes, replace=False):
+                bases[position] = str(rng.choice(letters[letters != bases[position]]))
+            members.add("".join(bases))
+        for text in sorted(members):
+            shown = text
+            if cut and rng.random() < 0.3:
+                lost = int(rng.integers(1, 3))
+                if rng.random() < 0.5:
+                    shown = "-" * lost + text[lost:]
+                else:
+                    shown = text[:-lost] + "-" * lost
+            if shown in texts:
+                continue
+            texts.append(shown)
+            families.append(family)
+            lead.append(int(text == parent))
+    return texts, families, lead
+
+
+def _equal_base_pairs(texts: list[str], metric: str, cutoff: int, min_compared: int):
+    """The pairs expected within the cutoff if every base were as frequent everywhere.
+
+    Every text has one length. Two texts that compare ``c`` positions agree
+    at each with chance 1/4, so their mismatches are binomial, and two of one
+    group of cut texts are distinct; under edits, the edit chain follows
+    agreements of 1/4.
+    """
+    length = len(texts[0])
+
+    def within(compared: int, limit: int, distinct: bool) -> float:
+        chance = sum(
+            math.comb(compared, k) * 0.75**k * 0.25 ** (compared - k)
+            for k in range(min(limit, compared) + 1)
+        )
+        if not distinct:
+            return chance
+        return (chance - 0.25**compared) / (1 - 0.25**compared)
+
+    n_texts = len(texts)
+    if metric == "levenshtein":
+        chance = sequences._edit_chance(
+            np.full((length, length), 0.25), cutoff, sequences._Memory(None)
+        )
+        identical = 0.25**length
+        return n_texts * (n_texts - 1) / 2 * (chance - identical) / (1 - identical)
+    limit = cutoff if metric == "hamming" else allowed_mismatches(length, cutoff)
+    groups: dict[tuple[bool, ...], int] = {}
+    for text in texts:
+        mask = tuple(letter != "-" for letter in text)
+        groups[mask] = groups.get(mask, 0) + 1
+    masks = list(groups)
+    total = 0.0
+    for first in range(len(masks)):
+        for second in range(first, len(masks)):
+            both = sum(a and b for a, b in zip(masks[first], masks[second]))
+            if both < min_compared:
+                continue
+            if first == second:
+                pairs = groups[masks[first]] * (groups[masks[first]] - 1) / 2
+            else:
+                pairs = groups[masks[first]] * groups[masks[second]]
+            total += pairs * within(both, limit, first == second)
+    return total
+
+
+@pytest.mark.parametrize(
+    ("metric", "cutoff", "length", "cut"),
+    [
+        ("hamming", 2, 12, False),
+        ("normalized_hamming", 20, 12, False),
+        ("levenshtein", 2, 10, False),
+        ("hamming", 2, 12, True),
+    ],
+)
+def test_few_families_expect_almost_nothing_and_many_what_equal_bases_give(
+    metric, cutoff, length, cut
+) -> None:
+    # Random parents, each with the variants of 20 draws of one or two
+    # substitutions, are the components that correction would link. One
+    # family is of no two components and expects nothing; two or three
+    # expect less than a tenth of the variants that correction would merge;
+    # thirty expect within a factor of 2 of what bases of equal frequency,
+    # the parents' own, give on the same pairs.
+    rng = np.random.default_rng(21)
+    search = {"unknown": "-", "min_compared": 8} if cut else {}
+    for parents in (1, 2, 3, 30):
+        texts, families, lead = _parent_families(rng, parents, length, cut)
+        expected = expected_chance_pairs(
+            texts, metric, cutoff, components=families, priority=lead, **search
+        )
+        merged = len(texts) - parents
+        if parents == 1:
+            assert expected == 0
+        elif parents < 30:
+            assert expected < 0.1 * merged, (parents, expected, merged)
+        else:
+            equal = _equal_base_pairs(texts, metric, cutoff, 8 if cut else 0)
+            assert 0.5 < expected / equal < 2, (expected, equal)
+
+
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
 def test_a_cutoff_beyond_every_length_expects_every_pair(metric) -> None:
     rng = np.random.default_rng(3)
@@ -1717,16 +1936,17 @@ def test_the_expectation_checks_its_arguments_and_needs_few_edits() -> None:
 
 
 def test_the_frequencies_of_edited_texts_count_against_the_budget() -> None:
-    # Texts of lengths 7 and 8 in one block hold the frequency of each of 256
+    # Texts of lengths 7 and 8 in one block hold the count of each of 256
     # codes at each of their 15 positions, and the 64 chances of agreeing of
     # two lengths, while their expectation is found; counting one position
     # copies the codes of the larger length's texts, widened to 8 bytes, and
-    # counts them in 256 bins.
+    # counts them in 256 bins, and comparing the texts of one component in
+    # two lengths holds 3 bytes for each of them at each of 8 positions.
     rng = np.random.default_rng(5)
     texts = _random_texts(rng, 200, [7, 8], (0.25, 0.25, 0.25, 0.25))
     held = _encoding_bytes(texts) + _group_bytes(texts)
     most = max(sum(len(text) == length for text in texts) for length in (7, 8))
-    frequencies = 8 * 256 * 15 + 8 * 8**2 + 9 * most + 8 * 256
+    frequencies = 8 * 256 * 15 + 8 * 8**2 + 9 * most + 8 * 256 + 3 * most * 8
     with pytest.raises(MemoryError, match="frequencies of the texts' characters"):
         expected_chance_pairs(texts, "levenshtein", 1, max_bytes=held + frequencies - 1)
     with pytest.raises(MemoryError) as refused:

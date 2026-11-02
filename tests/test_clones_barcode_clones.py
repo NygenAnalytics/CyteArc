@@ -632,13 +632,16 @@ def test_error_variants_weigh_no_more_than_their_parents_in_the_expectation() ->
 def test_the_most_abundant_barcode_represents_its_component_in_the_expectation() -> (
     None
 ):
-    # Two families of a barcode in five molecules and a variant one
-    # substitution away in one, each variant sorting after its barcode, and
-    # a barcode alone. The abundant barcodes represent their families, as
-    # correction merges into them: the last base of the three agrees with
-    # chance 1/3, where the variants' would agree with chance 5/9.
-    texts = ["AAAAAAAA", "AAAAAAAT", "CCCCCCCC", "CCCCCCCG", "GGGGTTTT"]
-    molecules = [5, 1, 5, 1, 5]
+    # "AATAG" in five molecules and its variant "TATAG" in one, which sorts
+    # after it, beside "TATGC" and "TGTGA" in five each. The abundant barcode
+    # represents its family, as correction merges into it: two components
+    # agree at the first, second and fourth positions with chance 1/3, at
+    # the third surely and at the last never, so a pair of distinct barcodes
+    # falls within one substitution with chance 1/27, and the four pair six
+    # times. "TATAG" would make the first position agree surely, and the
+    # chance 1/9.
+    texts = ["AATAG", "TATAG", "TATGC", "TGTGA"]
+    molecules = [5, 1, 5, 5]
     rows = [
         (cell, 0, text, f"U{cell}_{k}", 1, 20)
         for cell, (text, count) in enumerate(zip(texts, molecules, strict=True))
@@ -647,16 +650,13 @@ def test_the_most_abundant_barcode_represents_its_component_in_the_expectation()
     calls = _call(
         _records(rows), len(texts), method="sets", distance=1, metric="hamming"
     )
-    components = [0, 0, 1, 1, 2]
-    by_abundance = expected_chance_pairs(
-        texts, "hamming", 1, components=components, priority=molecules
-    )
-    by_code = expected_chance_pairs(texts, "hamming", 1, components=components)
-    assert calls.diagnostics["mergedBarcodes"] == 2
+    assert calls.diagnostics["mergedBarcodes"] == 1
     assert calls.diagnostics["expectedChanceMatches"] == pytest.approx(
-        by_abundance, rel=1e-12
+        6 / 27, rel=1e-12
     )
-    assert by_code != pytest.approx(by_abundance, rel=1e-3)
+    assert expected_chance_pairs(
+        texts, "hamming", 1, components=[0, 0, 1, 2]
+    ) == pytest.approx(6 / 9, rel=1e-12)
 
 
 def test_the_expectation_may_hold_what_the_search_could(monkeypatch) -> None:
@@ -693,6 +693,79 @@ def test_the_expectation_may_hold_what_the_search_could(monkeypatch) -> None:
     )
     assert calls.diagnostics["mergedBarcodes"] == 1
     assert rooms["expectation"] == rooms["search"] < budget
+
+
+def _family_rows(rng, parent: str, clone: int, first_cell: int) -> list[tuple]:
+    """A cloneID in three molecules in each of 5 cells, and its variants once in them.
+
+    The variants are those of 30 draws of one or two substitutions and of 30
+    cuts of 1 to 8 bases at either end with at most one substitution.
+    """
+    letters = np.asarray(list("ACGT"))
+
+    def substituted(text: str, changes: int) -> str:
+        bases = list(text)
+        for position in rng.choice(len(text), size=changes, replace=False):
+            bases[position] = str(rng.choice(letters[letters != bases[position]]))
+        return "".join(bases)
+
+    cells = list(range(first_cell, first_cell + 5))
+    rows = [
+        (cell, 0, parent, f"P{clone}_{cell}_{k}", 1, 20)
+        for cell in cells
+        for k in range(3)
+    ]
+    variants = {substituted(parent, int(rng.integers(1, 3))) for _ in range(30)}
+    for draw in range(30):
+        cut = int(rng.integers(1, 9))
+        text = substituted(parent, int(rng.integers(0, 2)))
+        variants.add("-" * cut + text[cut:] if draw % 2 else text[:-cut] + "-" * cut)
+    variants.discard(parent)
+    for k, text in enumerate(sorted(variants)):
+        rows.append((cells[k % 5], 0, text, f"V{clone}_{k}", 1, 2))
+    return rows
+
+
+def test_a_group_of_one_clone_adds_nothing_to_the_expectation() -> None:
+    # Under TREX's rules, 30 clones of a cloneID of 30 bases and its variants
+    # fill one group of `within`, and one more such clone a second group.
+    # The second group is one component, whose cloneIDs are of no two
+    # components, so the call expects what the 30 clones expect alone.
+    rng = np.random.default_rng(11)
+    letters = np.asarray(list("ACGT"))
+    rows = []
+    for clone in range(30):
+        parent = "".join(rng.choice(letters, size=30))
+        rows += _family_rows(rng, parent, clone, 5 * clone)
+    alone = _call(_records(rows), 150, preset="trex")
+    parent = "".join(rng.choice(letters, size=30))
+    rows += _family_rows(rng, parent, 30, 150)
+    both = _call(_records(rows), 155, groups=np.repeat([0, 1], [150, 5]), preset="trex")
+    assert both.diagnostics["mergedBarcodes"] > alone.diagnostics["mergedBarcodes"]
+    assert alone.diagnostics["expectedChanceMatches"] > 0
+    assert both.diagnostics["expectedChanceMatches"] == pytest.approx(
+        alone.diagnostics["expectedChanceMatches"], rel=1e-12
+    )
+
+
+def test_barcodes_that_correction_chains_into_one_component_expect_nothing() -> None:
+    # 766 random barcodes of 6 or 7 bases lie within 2 edits of so many
+    # others that correction chains them all into one component, and every
+    # cell into one clone. The expectation measures chance merging among
+    # many components and expects nothing of one; the largest clone's share
+    # shows the chaining.
+    rng = np.random.default_rng(23)
+    letters = np.asarray(list("ACGT"))
+    texts = sorted(
+        {"".join(rng.choice(letters, size=int(rng.integers(6, 8)))) for _ in range(800)}
+    )
+    rows = [(cell, 0, text, f"U{cell}", 1, 20) for cell, text in enumerate(texts)]
+    calls = _call(
+        _records(rows), len(texts), method="sets", distance=2, metric="levenshtein"
+    )
+    assert calls.diagnostics["mergedBarcodes"] == len(texts) - 1
+    assert calls.diagnostics["expectedChanceMatches"] == 0
+    assert calls.diagnostics["largestCloneShare"] == 1.0
 
 
 def test_counting_the_distinct_barcodes_without_correction_checks_the_budget() -> None:
