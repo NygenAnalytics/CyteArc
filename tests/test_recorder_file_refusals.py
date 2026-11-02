@@ -6,8 +6,12 @@ can write is read as it says. TreeData stores are written element by
 element with zarr, as anndata lays them out, and HDF5 files with h5py.
 """
 
+import functools
 import gzip
+import json
+import random
 import shutil
+import string
 import sys
 import types
 from pathlib import Path
@@ -25,8 +29,13 @@ from cytearc.readers.recorder_alleles import (
     classified_rows,
     iter_allele_rows,
 )
+from tests.perturbation_helpers import traced_peak
 
 DATA = Path(__file__).parent / "data" / "recorders"
+# treedata 0.4.0 wrote this store; its 'alignment' is a text scalar.
+TREEDATA_STORE = (
+    Path(__file__).parent / "data" / "phylogenies" / "truth_tree_treedata_0_4_0.zarr"
+)
 
 
 def _rows(path, **options) -> list:
@@ -438,6 +447,53 @@ def test_treedata_reads_categorical_and_nullable_columns(tmp_path):
     table = character_table(path)
     assert (table.missing_state, table.unmodified_state) == ("-", "0")
     assert _states(path) == [[["3", "2", "1"], [None, None, None]]]
+
+
+def test_treedata_reads_a_long_text_state_at_a_few_bytes_per_character(tmp_path):
+    # TreeData keeps a text scalar, such as a state in uns, as a 0-d array of
+    # variable-length UTF-8. Reading one holds a few copies of its text, the
+    # stored chunk among them, under four bytes per ASCII character, so one
+    # more copy of the text passes 4.5 bytes per character. Opening the store
+    # holds under 128 KiB. zarr 3.4.0 held about 520 bytes per character.
+    def write(name: str, text: str) -> Path:
+        path = tmp_path / f"{name}.zarr"
+        root = _store(path, characters={"i1-a": [1, 2]})
+        uns = root.create_group("uns", attributes={"encoding-type": "dict"})
+        for key, value in (("missing_state", text), ("unmodified_state", "0")):
+            state = uns.create_array(
+                key,
+                shape=(),
+                dtype=str,
+                attributes={"encoding-type": "string", "encoding-version": "0.2.0"},
+            )
+            state[()] = value
+        return path
+
+    letters = random.Random(19).choices(string.ascii_letters, k=200_000)
+    texts = {n: "".join(letters[:n]) for n in (100_000, 200_000)}
+    paths = {n: write(f"state{n}", text) for n, text in texts.items()}
+    written = paths[100_000] / "uns" / "missing_state" / "zarr.json"
+    assert json.loads(written.read_text()) == json.loads(
+        (TREEDATA_STORE / "alignment" / "zarr.json").read_text()
+    )
+    # A process's first read holds more than the reads after it.
+    character_table(write("first", "-"))
+    peaks = {}
+    for n, text in texts.items():
+        bound = 5 * n + 128 * 1024
+        table, peaks[n] = traced_peak(
+            functools.partial(character_table, paths[n]), bound
+        )
+        assert (table.missing_state, table.unmodified_state) == (text, "0")
+        # The read holds at least the text it returns.
+        assert n <= peaks[n] <= bound, (
+            f"Reading a state of {n:,} characters held {peaks[n]:,} bytes, not "
+            f"between one byte per character and {bound:,} bytes"
+        )
+    per_character = (peaks[200_000] - peaks[100_000]) / 100_000
+    assert per_character <= 4.5, (
+        f"Each added character of a state held {per_character:.2f} bytes, more than 4.5"
+    )
 
 
 @pytest.mark.parametrize(
