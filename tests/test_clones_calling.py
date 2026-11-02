@@ -547,11 +547,11 @@ def test_ambiguous_cells_join_no_clone_however_many_they_are() -> None:
     sets, unknown = _unknown_sets(rows, unknown_rows)
     options = {"method": "jaccard", "similarity": 1.0, "inclusive": True}
     calls = set_clones(sets, unknown=unknown, ambiguous=True, **options)
-    assert _partition(calls.codes) == {frozenset({0, 1}), frozenset({2, 3})}
+    assert clone_partition(calls.codes) == {frozenset({0, 1}), frozenset({2, 3})}
     assert calls.ambiguous.tolist() == [False] * 4 + [True] * 3
     assert not calls.doublets.any() and calls.n_ambiguous_nodes == 1
     trex = set_clones(sets, unknown=unknown, doublets=True, **options)
-    assert _partition(trex.codes) == {frozenset(range(7))}
+    assert clone_partition(trex.codes) == {frozenset(range(7))}
     assert not trex.ambiguous.any() and trex.n_ambiguous_nodes == 0
     with pytest.raises(ValueError, match="ambiguous would change nothing"):
         set_clones(sets, method="sets", ambiguous=True)

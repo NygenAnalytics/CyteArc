@@ -16,9 +16,9 @@ from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import (
     every_cell,
     smallest_budget,
-    traced_peak,
     write_cells_store,
 )
+from tests.perturbation_helpers import traced_peak
 from tests.variant_helpers import copy_variant_store, write_variant_store
 from tests.variant_truth import variant_truth
 
@@ -294,8 +294,9 @@ def test_genotype_clones_hold_no_more_than_the_smallest_budget_they_accept(
 
     budget = smallest_budget(call, 1 << 28)
     store.memoryBytes = budget
-    peak = traced_peak(
-        lambda: store.variants.genotype_clones(genotypes, invalidate_cache=True)
+    _clones, peak = traced_peak(
+        lambda: store.variants.genotype_clones(genotypes, invalidate_cache=True),
+        budget,
     )
     assert peak <= budget
 
@@ -321,4 +322,4 @@ def test_genotype_clones_of_many_cells_hold_no_more_than_the_smallest_budget(
             store.memoryBytes = 1 << 30
 
     budget = smallest_budget(call, 1 << 30)
-    assert traced_peak(lambda: call(budget)) <= budget
+    assert traced_peak(lambda: call(budget), budget)[1] <= budget

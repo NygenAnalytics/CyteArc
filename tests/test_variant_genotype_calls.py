@@ -22,9 +22,9 @@ from tests.clone_helpers import (
     levenshtein_distance,
     open_clone_store,
     smallest_budget,
-    traced_peak,
     write_cells_store,
 )
+from tests.perturbation_helpers import traced_peak
 from tests.variant_helpers import copy_variant_store, write_variant_store
 from tests.variant_truth import (
     PROBES,
@@ -639,10 +639,11 @@ def test_genotypes_hold_no_more_than_the_smallest_budget_they_accept(
         lambda limit: _at_budget(store, limit, counts, method, options), 1 << 28
     )
     store.memoryBytes = budget
-    peak = traced_peak(
+    _genotypes, peak = traced_peak(
         lambda: store.variants.genotypes(
             counts, method=method, invalidate_cache=True, **options
-        )
+        ),
+        budget,
     )
     assert peak <= budget
 
@@ -750,7 +751,7 @@ def test_genotypes_of_many_cells_hold_no_more_than_a_budget_of_wide_bands(
     for rows in (20_000, 60_000):
         budget = high + (rows - variants._MIN_GENOTYPE_BAND_ROWS) * per_row
         bands.clear()
-        peaks[rows] = traced_peak(lambda budget=budget: call(budget))
+        peaks[rows] = traced_peak(lambda budget=budget: call(budget), budget)[1]
         assert {allowed for allowed, _held in bands} == {rows}
         assert max(held for _allowed, held in bands) > rows // 2
         assert peaks[rows] <= budget
@@ -787,7 +788,7 @@ def test_loaded_genotypes_of_many_cells_hold_no_more_than_the_smallest_budget(
         budget = smallest_budget(load, 1 << 30)
         peaks[n_sites] = (
             n_rows,
-            traced_peak(lambda load=load, budget=budget: load(budget)),
+            traced_peak(lambda load=load, budget=budget: load(budget), budget)[1],
         )
         assert peaks[n_sites][1] <= budget
     # The bytes of each call row stay within what the check counts for it.
