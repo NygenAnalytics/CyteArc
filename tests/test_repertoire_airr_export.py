@@ -1692,7 +1692,7 @@ def test_export_refuses_values_the_format_forbids_before_the_file(
     if chunk_bytes is not None:
         # Contigs stored four to a chunk of cells and IDs 16 bytes to a chunk,
         # so measuring reads spans of four contigs and IDs in pieces.
-        monkeypatch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", chunk_bytes)
+        monkeypatch.setattr(record_tables, "_RECORD_CHUNK_BYTES", chunk_bytes)
     store, receptors = _forbidden_receptors(tmp_path)
     ref = (
         store.repertoire.clonotypes(receptors) if source == "clonotypes" else receptors
