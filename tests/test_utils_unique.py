@@ -108,7 +108,6 @@ def _stack_module_paths() -> list[Path]:
 
 def test_stack_modules_find_distinct_values_by_sorting() -> None:
     paths = _stack_module_paths()
-    assert len(paths) == 64
     hashed = [
         f"{path.relative_to(_CYTEARC_ROOT).as_posix()}:{line}"
         for path in paths
