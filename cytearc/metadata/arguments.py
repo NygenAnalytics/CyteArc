@@ -630,6 +630,50 @@ class VariantCountImportArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class VariantSelectionArguments(OperationArguments):
+    operation: ClassVar[str] = "informative_variants"
+    artifact_kind: ClassVar[str] = "variant_selection"
+
+    counts: ArtifactRef = artifact_input()
+    # The cells whose evidence the statistics use, or None for every cell
+    # that the counts' files name.
+    cells: ArtifactRef | None = artifact_input()
+    preset: Literal["atac", "rna"] | None = parameter()
+    # Each threshold as resolved from the preset and the arguments, None for
+    # a test not made.
+    min_cells: float | None = parameter()
+    min_strand_correlation: float | None = parameter()
+    min_vmr: float | None = parameter()
+    min_depth: float | None = parameter()
+    min_quality: float | None = parameter()
+    # The names of the masks, sorted.
+    mask: tuple[str, ...] = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class VariantCloneArguments(OperationArguments):
+    operation: ClassVar[str] = "variant_clones"
+    artifact_kind: ClassVar[str] = "clones"
+
+    # The counts' cells, which the clones label.
+    cell_selection: ArtifactRef = artifact_input()
+    counts: ArtifactRef = artifact_input()
+    variants: ArtifactRef = artifact_input()
+    # The fingerprint of each cell's group in the within column, or None
+    # without groups.
+    within_fingerprint: str | None = artifact_input()
+    n_neighbors: int = parameter()
+    resolution: float = parameter()
+    within: str | None = parameter()
+    # Fixed choices of the method: the Leiden seed and the smallest Jaccard
+    # index of the shared-neighbour graph that Seurat keeps.
+    random_seed: int = parameter()
+    shared_neighbor_prune: float = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class GuideThresholdArguments(OperationArguments):
     operation: ClassVar[str] = "fit_guide_thresholds"
     artifact_kind: ClassVar[str] = "guide_thresholds"

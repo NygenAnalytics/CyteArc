@@ -13,7 +13,6 @@ import zarr
 from ...clones.assignments import (
     MULTIPLE_POLICIES,
     CloneAssigner,
-    CloneAssignment,
     Clones,
     clone_frames,
     MultiplePolicy,
@@ -82,7 +81,6 @@ from ...metadata.rows import (
 )
 from ...metadata.selection import category_codes, cell_selection_indices
 from ...repertoire.clonotypes import clonotype_noun
-from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
@@ -104,6 +102,13 @@ from .cell_barcodes import (
     warn_unmatched_barcodes,
 )
 from .cell_groups import cell_groups, group_columns, selection_chunk_bytes
+from .clone_artifacts import (
+    SOURCE_ARRAYS,
+    check_clone_write_budget,
+    log_clones,
+    plan_clones,
+    write_clones,
+)
 
 if TYPE_CHECKING:
     from ...readers.clone_tables import CloneLayout
@@ -113,11 +118,6 @@ else:
 
 #: The values of ``export_clones``'s ``format``.
 EXPORT_FORMATS = ("table", "matrix")
-_PROBABILITY = "clone_probability"
-# The per-cell arrays that a clone source may add, with the dtype that the
-# table of loaded cells holds: each cell's probability of its clone, its
-# barcodes and whether calling removed it as a doublet.
-_SOURCE_ARRAYS = {_PROBABILITY: np.float64, "n_barcodes": np.int64, "doublet": bool}
 
 
 def _stored_diagnostics(group: zarr.Group, operation: str) -> dict[str, int | float]:
@@ -405,24 +405,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "mem_budget."
             )
 
-    def _check_clone_write_budget(
-        self, held: int, clone_ids: np.ndarray, n_cells: int
-    ) -> None:
-        """Refuse clones whose labels would not fit the memory budget as stored.
-
-        The store saves text at the width of the longest value, so each cell's
-        label takes four bytes per character of the longest as it is written.
-        """
-        width = max((len(str(label)) for label in clone_ids.tolist()), default=0)
-        peak = held + n_cells * (8 + 4 * width)
-        if peak > self.memoryBytes:
-            raise MemoryError(
-                f"Saving the clones of {n_cells} cells holds about {peak} bytes, "
-                f"more than the memory budget of {self.memoryBytes} bytes, since the "
-                "store saves each cell's clone label at the width of the longest, "
-                f"{width} characters. Raise mem_budget."
-            )
-
     @validation_scoped
     def _clones_import_clones(
         self,
@@ -569,7 +551,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             invalidate_cache=invalidate_cache,
         )
         with_probability = any(layout.probability is not None for layout in layouts)
-        planned = self._plan_clones(
+        planned = plan_clones(
+            self.zw,
             arguments,
             cell_selection,
             n_cells,
@@ -635,7 +618,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 chunk_bytes=chunk_rows * row_bytes,
             )
         assignment = assigner.finish()
-        self._check_clone_write_budget(
+        check_clone_write_budget(
+            self.memoryBytes,
             held + _BYTES_PER_LABEL * assigner.n_labels + assigner.label_bytes,
             assignment.clone_ids,
             n_cells,
@@ -645,9 +629,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             "n_clones": len(assignment.clone_ids),
             "n_cells_in_several_clones": assignment.n_cells_in_several_clones,
         }
-        self._write_clones(planned, assignment, attributes)
+        write_clones(self.zw, planned, assignment, attributes)
         warn_unmatched_barcodes(attributes, files_text)
-        self._log_clones(assignment, n_cells)
+        log_clones(assignment, n_cells)
         return planned.ref
 
     def _assign_clone_file(
@@ -710,87 +694,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         )
         for entries in matrix_entries(layout, chunk_rows):
             assigner.add(cells[entries.cells], labels[entries.clones], source=source)
-
-    def _plan_clones(
-        self,
-        arguments: CloneImportArguments | CloneColumnArguments | BarcodeCloneArguments,
-        cell_selection: ArtifactRef,
-        n_cells: int,
-        *,
-        with_probability: bool,
-        required_attributes: tuple[str, ...],
-        source_arrays: Mapping[str, str] | None = None,
-    ) -> PlannedArtifact:
-        """Plan a ``clones`` artifact of ``n_cells`` cells.
-
-        ``source_arrays`` names further per-cell arrays that the source
-        saves, with their dtype kinds, such as barcode clones' ``n_barcodes``
-        and ``doublet``.
-        """
-        record = arguments.to_record()
-        arrays: dict[str, tuple[tuple[int | None, ...], str | None]] = {
-            "values": ((n_cells,), None),
-            "codes": ((n_cells,), "i"),
-            "clone_size": ((n_cells,), "i"),
-        }
-        if with_probability:
-            arrays[_PROBABILITY] = ((n_cells,), "f")
-        for name, kind in (source_arrays or {}).items():
-            arrays[name] = ((n_cells,), kind)
-
-        def has_clones(_ref: ArtifactRef, group: zarr.Group) -> bool:
-            ids = group.get("clone_ids")
-            sizes = group.get("clone_sizes")
-            return (
-                isinstance(ids, zarr.Array)
-                and isinstance(sizes, zarr.Array)
-                and ids.shape == sizes.shape
-            )
-
-        return plan_cell_data_artifact(
-            self.zw,
-            scope="datastore",
-            kind=arguments.artifact_kind,
-            operation=arguments.operation,
-            parameters=record.parameters,
-            inputs=record.inputs,
-            execution_options=record.execution_options,
-            cell_selection=cell_selection,
-            arrays=arrays,
-            invalidate_cache=arguments.invalidate_cache,
-            required_attributes=required_attributes,
-            reuse_validator=has_clones,
-        )
-
-    def _write_clones(
-        self,
-        planned: PlannedArtifact,
-        assignment: CloneAssignment,
-        attributes: Mapping[str, Any],
-        source_arrays: Mapping[str, np.ndarray] | None = None,
-    ) -> None:
-        arrays: dict[str, np.ndarray] = {
-            "values": assignment.values,
-            "codes": assignment.codes.astype(np.int32),
-            "clone_size": assignment.clone_size,
-            "clone_ids": assignment.clone_ids,
-            "clone_sizes": assignment.clone_sizes.astype(np.int64),
-        }
-        if assignment.probabilities is not None:
-            arrays[_PROBABILITY] = assignment.probabilities.astype(np.float64)
-        for name, values in (source_arrays or {}).items():
-            # The callers in this package name only the arrays of a source.
-            assert name in _SOURCE_ARRAYS and name not in arrays, name
-            arrays[name] = values
-        write_cell_data_artifact(self.zw, planned, arrays, attributes=dict(attributes))
-
-    def _log_clones(self, assignment: CloneAssignment, n_cells: int) -> None:
-        n_assigned = int(np.count_nonzero(assignment.codes >= 0))
-        largest = int(assignment.clone_sizes[0]) if len(assignment.clone_sizes) else 0
-        logger.info(
-            f"Saved {len(assignment.clone_ids)} clones of {n_assigned} of {n_cells} "
-            f"cells; the largest holds {largest} cells"
-        )
 
     @validation_scoped
     def _clones_from_column(
@@ -859,7 +762,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             column=column,
             invalidate_cache=invalidate_cache,
         )
-        planned = self._plan_clones(
+        planned = plan_clones(
+            self.zw,
             arguments,
             cell_selection,
             n_cells,
@@ -884,15 +788,18 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 held, assigner.n_labels, assigner.label_bytes, block_rows * row_bytes
             )
         assignment = assigner.finish()
-        self._check_clone_write_budget(
+        check_clone_write_budget(
+            self.memoryBytes,
             _ASSIGNER_BYTES_PER_CELL * n_cells
             + _BYTES_PER_LABEL * assigner.n_labels
             + assigner.label_bytes,
             assignment.clone_ids,
             n_cells,
         )
-        self._write_clones(planned, assignment, {"n_clones": len(assignment.clone_ids)})
-        self._log_clones(assignment, n_cells)
+        write_clones(
+            self.zw, planned, assignment, {"n_clones": len(assignment.clone_ids)}
+        )
+        log_clones(assignment, n_cells)
         return planned.ref
 
     def _clone_group(self, clones: ArtifactRef) -> zarr.Group:
@@ -966,7 +873,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         assert source.clone_ids is not None
         extra = {
             name: _read(group, name).astype(dtype)
-            for name, dtype in _SOURCE_ARRAYS.items()
+            for name, dtype in SOURCE_ARRAYS.items()
             if name in group
         }
         # Every saved clone holds a cell, so the codes give the clone sizes.

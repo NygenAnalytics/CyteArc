@@ -4,9 +4,10 @@ Each source saves the synthetic truth's clones its own way, in a store of the
 truth's cells, and every summary must measure the truth's clones whatever
 saved them. The expected values are counted cell by cell from the truth, so
 they never come from the code under test. A pull request that adds a clone
-source adds a row to ``SOURCES``, and one to ``KEPT_APART`` when its clones
-keep labels apart or to ``LABELS`` when they keep none, which gives the rule
-its labels follow, or None; one that adds a summary adds a test here.
+source adds a row to ``SOURCES``, one to ``KEPT_APART`` when its clones keep
+labels apart or to ``LABELS`` when they keep none, which gives the rule its
+labels follow, or None, and one to ``TRUTHS`` when it cannot save every clone
+of the truth; one that adds a summary adds a test here.
 """
 
 from collections import Counter
@@ -26,6 +27,7 @@ from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
     coupling_reference,
+    every_cell,
     import_calling_truth,
     import_truth_clones,
     import_truth_receptors,
@@ -34,12 +36,15 @@ from tests.clone_helpers import (
 )
 from tests.clone_truth import (
     N_CELLS,
+    CloneTruth,
     calling_truth,
     clone_truth,
     number_label,
     receptor_truth,
+    without_single_cell_clones,
 )
 from tests.storage_helpers import insert_nullable_cell_column
+from tests.variant_truth import clone_variant_truth, write_mgatk
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -82,6 +87,17 @@ def _barcode_clones(store: DataStore, folder: Path) -> ArtifactRef:
     return store.clones.barcode_clones(barcodes, preset="trex")
 
 
+def _variant_clones(store: DataStore, folder: Path) -> ArtifactRef:
+    # Each clone carries two variants of its own, which every cell of it shows
+    # and no other cell does, so the variants that two cells or more show join
+    # exactly the cells of each clone of two cells or more.
+    path = write_mgatk(clone_variant_truth(TRUTH), folder / "mgatk")
+    with pytest.warns(UserWarning, match="match no selected cell"):
+        counts = store.variants.import_counts(path, cell_selection=every_cell(store))
+    variants = store.variants.informative(counts, min_cells=2, min_vmr=0.01)
+    return store.variants.clones(counts, variants=variants)
+
+
 #: How each clone source saves the truth's clones, in the order the stack adds
 #: them.
 SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
@@ -89,6 +105,13 @@ SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
     "clonotypes": _clonotypes,
     "clonotype clusters": _clonotype_clusters,
     "barcode clones": _barcode_clones,
+    "variant clones": _variant_clones,
+}
+#: The truth's clones as a source saves them, where it cannot save every one:
+#: variant clones join each cell to the cells that share its variants, so the
+#: truth's clone of one cell is no clone of theirs.
+TRUTHS: dict[str, CloneTruth] = {
+    "variant clones": without_single_cell_clones(TRUTH),
 }
 #: The labels that a source's clones keep apart, by key column, for each of the
 #: truth's cells: every summary measures the cells of each label apart, so T
@@ -124,10 +147,12 @@ def _ranked_label(clone: int) -> str:
 #: How each source that keeps no labels apart labels the truth's clones: the
 #: rule its labels follow from the truth, such as the labels of imported
 #: clones' files and barcode clones' numbers by size, or None for a source
-#: whose labels follow from something else.
+#: whose labels follow from something else, such as variant clones, which
+#: number their clones by cluster.
 LABELS: dict[str, Callable[[int], str] | None] = {
     "imported clones": number_label,
     "barcode clones": _ranked_label,
+    "variant clones": None,
 }
 
 
@@ -153,6 +178,7 @@ def source(request, tmp_path_factory) -> SimpleNamespace:
         clones=SOURCES[request.param](store, folder),
         kept_apart=KEPT_APART.get(request.param, {}),
         labels=LABELS.get(request.param),
+        truth=TRUTHS.get(request.param, TRUTH),
     )
 
 
@@ -178,7 +204,7 @@ def _groups(source, labels: np.ndarray | None = None) -> np.ndarray:
 def _by_group(
     source, labels: np.ndarray | None = None, cells: np.ndarray | None = None
 ) -> dict[object, list[int]]:
-    return TRUTH.group_clone_sizes(_groups(source, labels), cells=cells)
+    return source.truth.group_clone_sizes(_groups(source, labels), cells=cells)
 
 
 def _group_cells(
@@ -190,7 +216,7 @@ def _group_cells(
     apart, so within a group each of the truth's clones is one of the
     source's clones.
     """
-    return TRUTH.group_clone_cells(_groups(source, labels), cells=cells)
+    return source.truth.group_clone_cells(_groups(source, labels), cells=cells)
 
 
 def _kept_labels(source, labels: np.ndarray) -> dict[object, tuple[str, ...]]:
@@ -222,7 +248,7 @@ def _keys(source) -> list[tuple | None]:
     kept = [np.asarray(values, dtype=object) for values in source.kept_apart.values()]
     return [
         None if clone < 0 else (int(clone), *(str(values[cell]) for values in kept))
-        for cell, clone in enumerate(TRUTH.clones.tolist())
+        for cell, clone in enumerate(source.truth.clones.tolist())
     ]
 
 
@@ -234,6 +260,9 @@ def _source_clones(source) -> tuple[dict[tuple, str], dict[tuple, int]]:
     the clone's place in the source's table of clones, largest first.
     """
     loaded = source.store.clones.load_clones(source.clones)
+    # Every source numbers its clones by size, largest first, which the ranks
+    # and the tracking's ties follow, whatever rule its labels follow.
+    assert loaded.clones["n_cells"].is_monotonic_decreasing
     ranks = {str(label): rank for rank, label in enumerate(loaded.clones["clone"])}
     of_cell = loaded.cells["clone"].reindex(TRUTH.cell_ids)
     labels: dict[tuple, str] = {}
@@ -286,7 +315,7 @@ def test_expansion_counts_each_clone_within_each_sample(source) -> None:
     cells = loaded.cells.loc[TRUTH.cell_ids]
     np.testing.assert_array_equal(
         cells["group_clone_size"],
-        TRUTH.cell_clone_sizes(_groups(source, TRUTH.samples)),
+        source.truth.cell_clone_sizes(_groups(source, TRUTH.samples)),
     )
     expected = _by_group(source, TRUTH.samples)
     totals = loaded.categories.groupby("group")["cells"].sum().to_dict()
@@ -472,7 +501,7 @@ def test_fate_bias_follows_early_cells_to_their_clones_late_cells(source) -> Non
 def test_summaries_report_each_label_their_clones_keep_apart(source) -> None:
     store = source.store
     columns = ["sample", *source.kept_apart]
-    clonal = TRUTH.clones >= 0
+    clonal = source.truth.clones >= 0
     labels = [TRUTH.samples, *source.kept_apart.values()]
     # Each group's labels in the key columns, from the truth's cells with a
     # clone.
@@ -545,7 +574,7 @@ def test_summaries_keep_to_a_cell_selection(source) -> None:
     assert expansion.cells.index.tolist() == TRUTH.cell_ids[d2].tolist()
     np.testing.assert_array_equal(
         expansion.cells["group_clone_size"],
-        TRUTH.cell_clone_sizes(_groups(source), cells=d2)[d2],
+        source.truth.cell_clone_sizes(_groups(source), cells=d2)[d2],
     )
     by_type = _group_cells(source, TRUTH.cell_types, cells=d2)
     cells_of = {group: sum(found.values()) for group, found in by_type.items()}

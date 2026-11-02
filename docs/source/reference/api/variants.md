@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    description: CyteArc variants API for mitochondrial lineage tracing and targeted genotyping, with per-cell allele counts imported from mgatk, maegatk, cellsnp-lite, MQuad, VarTrix, MiTo, giftwrap and the GoT tools, joined to cells by barcode, saved as a variant_counts artifact, read as tables of sites, alleles, depth, counts and calls, and drawn as depth per site and per cell.
+    description: CyteArc variants API for mitochondrial lineage tracing and targeted genotyping, with per-cell allele counts imported from mgatk, maegatk, cellsnp-lite, MQuad, VarTrix, MiTo, giftwrap and the GoT tools, joined to cells by barcode, scored with mgatk's per-variant statistics, filtered to informative variants by Signac's or MAESTER's rules, and clustered into clones as Signac's FindClonotypes does.
 ---
 
 # Variants API reference
 
 Mitochondrial lineage tracing (mtscATAC-seq, MAESTER) and targeted genotyping (GoT, GIFT) count, for each cell, the reads or UMIs of each allele at a set of sites: every position of the mitochondrial genome, or targets and probes without coordinates. Each tool writes those counts in its own files. `ds.variants` reads them into one `variant_counts` artifact that holds the sites and their alleles, and each cell's depth at each site, its count of each allele and the calls the tool made itself.
 
-{meth}`ds.variants.import_counts <cytearc.datastore.namespaces.VariantsAccessor.import_counts>` imports the counts of one file or folder, or several of one format, {meth}`ds.variants.load_counts <cytearc.datastore.namespaces.VariantsAccessor.load_counts>` reads them as a {class}`~cytearc.variants.VariantCounts` record, and {meth}`ds.plots.variant_depth <cytearc.datastore.plot_accessor.DataStorePlotAccessor.variant_depth>` draws the depth at each site and in each cell.
+{meth}`ds.variants.import_counts <cytearc.datastore.namespaces.VariantsAccessor.import_counts>` imports the counts of one file or folder, or several of one format, {meth}`ds.variants.load_counts <cytearc.datastore.namespaces.VariantsAccessor.load_counts>` reads them as a {class}`~cytearc.variants.VariantCounts` record, and {meth}`ds.plots.variant_depth <cytearc.datastore.plot_accessor.DataStorePlotAccessor.variant_depth>` draws the depth at each site and in each cell. {meth}`ds.variants.informative <cytearc.datastore.namespaces.VariantsAccessor.informative>` scores every variant across cells and selects the informative ones, and {meth}`ds.variants.clones <cytearc.datastore.namespaces.VariantsAccessor.clones>` calls the clones that those variants mark.
 
 ```python
 cells = ds.snapshot_cell_selection("I")
@@ -16,6 +16,12 @@ counts = ds.variants.import_counts("mgatk/final", cell_selection=cells)
 loaded = ds.variants.load_counts(counts, sites=[310, 3244])
 loaded.counts.head()  # each cell's reads of each base at the two positions
 ds.plots.variant_depth(counts, group_by="sample")
+
+deep = ds.select_cells(counts, low=10)
+informative = ds.variants.informative(counts, cells=deep, preset="atac")
+ds.plots.variant_statistics(informative)
+clones = ds.variants.clones(counts, variants=informative)
+ds.plots.allele_frequencies(informative, clones=clones)
 ```
 
 ## Import counts
@@ -92,8 +98,68 @@ The artifact holds a row per selected cell in its canonical `mean_depth`, the ce
 
 `ds.plots.variant_depth(counts)` draws two panels: each site's mean depth over the cells that the files name, on a log scale, along the contig for positions and as bars for named sites; and how many cells have each mean depth over the sites. `group_by` names a cell metadata column, such as the sample, and `groups` a cell-label artifact; with either, the second panel draws one histogram per group. Its tables are `sites` (`site`, `contig`, `position`, `mean_depth`, `covered_fraction`) and `cells` (`cell`, `group`, `mean_depth`, `covered_sites`).
 
+## Find informative variants
+
+Most bases that differ from the reference in a few reads are sequencing errors, and a variant marks clones only when some cells carry it and others do not. `informative` scores every variant that a chosen cell shows, an alternative allele at a site such as `310T>C`, with the statistics of mgatk's `variant_stats` table, computed as [mgatk](https://github.com/caleblareau/mgatk) 0.9.0 computes them. A cell's allele frequency is its count of the allele over its depth at the site, and is undefined in a cell without depth there.
+
+| Column | What it holds |
+|---|---|
+| `mean` | the allele's reads over the depth at its site, both summed over the cells |
+| `variance` | the sample variance of the covered cells' allele frequencies |
+| `vmr` | `variance / (mean + 1e-11)`, the variance-mean ratio |
+| `n_cells_conf_detected` | cells with at least 2 reads of the allele on each strand |
+| `strand_correlation` | the Pearson correlation of the forward and reverse reads of the cells that show the allele |
+| `n_cells_over_5`, `n_cells_over_10`, `n_cells_over_20`, `n_cells_over_95` | cells whose allele frequency reaches 5, 10, 20 and 95% |
+| `max_heteroplasmy` | the highest allele frequency of a cell |
+| `mean_coverage` | the depth at the site summed over the cells, over their number |
+| `n_cells_covered` | cells with depth at the site, which the variance covers |
+| `mean_quality` | the mean base quality of the allele, as MAESTER computes it: the mean over the cells and strands with reads of the allele of their mean quality |
+
+A variant is informative when it passes every threshold that is set and no mask lists it. `preset` names a published rule, and a threshold given by name replaces the preset's:
+
+| `preset` | Thresholds | Source |
+|---|---|---|
+| `"atac"` | `min_cells=5`, `min_strand_correlation=0.65`, `min_vmr=0.01` | the thresholds that [Lareau et al. (2020)](https://doi.org/10.1038/s41587-020-0645-6) set for mtscATAC-seq, as [Signac](https://doi.org/10.1038/s41592-021-01282-5)'s vignette applies them |
+| `"rna"` | `min_depth=20`, `min_quality=30`, `min_vmr=0.01` | the depth and quality that [Miller et al. (2022)](https://doi.org/10.1038/s41587-022-01210-8) required of MAESTER variants, with Signac's VMR |
+
+VMR, depth and quality must exceed their thresholds, and the confidently detected cells and the strand correlation must reach theirs, as the published rules compare them; a statistic that is undefined, such as the strand correlation of a variant that one cell shows, fails. Errors appear on one strand, so the strand tests separate them from variants in DNA libraries such as mtscATAC-seq. In RNA libraries, strand follows the transcript, so `"rna"` tests no strand. MAESTER then chose variants by percentiles of their allele frequencies, which mgatk's columns do not hold; the VMR stands in for that test of variability and keeps many more variants: on 50 cells of MiTo's MAESTER data, `"rna"` keeps 470 of the 5,664 variants they show, where MiTo's own filter keeps 3, and a larger `min_vmr` keeps fewer. A threshold that the counts cannot test, such as a strand correlation of cellsnp-lite counts or a base quality of four-column mgatk files, raises `ValueError` before any row is read.
+
+`cells` restricts the statistics to a cell selection within the counts' cells. mgatk scores cells whose mean depth exceeds 10, and `ds.select_cells(counts, low=10)` selects nearly the same cells, for the reason that the variant_counts artifact above gives. Signac scores the cells of its object, often filtered the same way. Cells that no file names are left out either way. The statistics read the stored rows in bands of cells within the memory budget, which counts each band's rows, the two stored chunks that a band's reads decompress beyond its rows, and 48 bytes for each cell of the counts, chosen or not, whose offsets are read whole.
+
+### Masks
+
+`mask` names lists of variants that artifacts mimic, in the coordinates of the revised Cambridge Reference Sequence, which hg38's `chrM` and GRCh38's `MT` share. A masked variant is scored but never informative. A listed variant matches by position and alternative allele, and the masks refuse counts whose contig is not 16,569 bases long, such as hg19's `chrM`.
+
+| `mask` | Variants | Source |
+|---|---|---|
+| `"numt"` | the 25 false positives that two common polymorphic NUMTs, nuclear copies of mitochondrial DNA, cause when their reads align to the mitochondrial genome, such as `16293A>C` | Supplemental Table S1 of [Laricchia et al. (2022)](https://doi.org/10.1101/gr.276013.121) |
+| `"rna_editing"` | the RNA-DNA differences of human mitochondrial transcripts, `295C>T`, `2617A>G`, `2617A>T`, `13710A>G` and `13710A>T`, which RNA libraries read as variants | [Bar-Yaacov et al. (2013)](https://doi.org/10.1101/gr.161265.113) |
+| `"artifact_prone"` | every variant at 301, 302, 310, 316, 3107 and 16182, homopolymers that sequencers misread and the reference's `N`, which gnomAD filters | [Laricchia et al. (2022)](https://doi.org/10.1101/gr.276013.121) |
+
+### How the statistics differ from Signac's
+
+Signac's `IdentifyVariants` computes the same columns but gives a cell without depth an allele frequency of 0, and by default replaces the frequency of a cell with depth below 10 by the pooled mean before taking the variance. CyteArc keeps the frequency of an uncovered cell undefined, as mgatk does: the variance and the cell counts cover the covered cells. Where every cell is covered, the statistics equal Signac's without its variance stabilisation; where coverage is sparse, a variant that covered cells rarely carry has a larger variance and VMR in CyteArc than in Signac, whose zeros for uncovered cells lower both. Signac also scores every alternative base at every position, while `informative` lists those that some chosen cell shows, and mgatk those seen on both strands.
+
+`load_informative` returns a {class}`~cytearc.variants.VariantSelection` record: its `variants` table holds one row per scored variant, indexed by a label such as `chrM:310T>C`, with `site`, `position`, `reference`, `alternative`, the statistics, `masked` and `informative`, and the record names the counts, the cells, the preset, the thresholds as applied, the masks and the number of cells, and says whether the counts give strands and base qualities. `ds.plots.variant_statistics(informative)` draws each variant's VMR against its strand correlation, as mgatk draws it, with the informative and masked variants marked and the thresholds drawn as lines; for counts without strands, the x axis is the mean depth instead.
+
+## Call clones
+
+`clones(counts, variants=informative)` calls clones from the allele frequencies of the informative variants, as Signac's `FindClonotypes` does. Each cell's neighbourhood holds the cell itself and the `n_neighbors - 1` cells most similar to it by the cosine similarity of the square roots of their allele frequencies; two cells that share a neighbour are joined with the Jaccard index of their neighbourhoods, their shared cells over the cells in either, and joins below 1/15 are dropped, as Seurat's `FindNeighbors` builds its shared-neighbour graph; CyteArc's Leiden algorithm then partitions the graph at `resolution`, where Signac uses Seurat's `FindClusters`. `n_neighbors=10` and `resolution=1` are Signac's defaults. Every cell is compared with every other cell, so the time grows with the square of the cells, and `within` compares the cells of each group apart. Cells with collinear profiles, such as cells that each show one informative variant, tie at similarity 1 and take the same few cells as neighbours, so every pair of them shares those and the graph grows with the square of their number too; a graph that does not fit the memory budget raises `MemoryError` before anything is saved.
+
+Signac turns an uncovered cell's allele frequency into 0, which makes a cell that was not read at a variant look like one that lacks it. CyteArc compares two cells over the variants that both cover, and a pair that shares no covered variant, or no alternative allele at the variants it shares, has similarity 0 and is never joined. Cells covered at no informative variant, cells that show none of them and cells similar to no other cell carry no evidence of a clone and get none, where Signac assigns every cell to a cluster; the artifact counts them in `n_cells_without_coverage`, `n_cells_without_alternative` and `n_cells_without_neighbors`. The cosine similarity ignores how frequent an allele is, so a cell that shows a clone's variant in one read is joined to that clone, as in Signac.
+
+`within` names a cell metadata column, such as the donor: clones never join cells of two groups, each clone's label starts with its group, as in `donor1:3`, and cells without a group get no clone. The groups are those that the clone summaries group cells into by a column, read and coded within the memory budget, and the artifact records them by each cell's group and the groups' labels. The clones cover the cells that `variants` scored, over the counts' cells, and are saved as a `clones` artifact, which `ds.clones.load_clones`, every clone summary and `ds.plots.clone_abundance` read. The bands of frequencies count what the statistics' bands count and 24 bytes more for each cell of the counts, its rows and group, and writing the clones is checked at about 50 bytes for each of the counts' cells beside its label, which the store saves at the width of the longest, so counts over many cells of which the files name few need room for every cell.
+
+`ds.plots.allele_frequencies(informative, clones=clones)` draws each cell's allele frequency of each informative variant, cells ordered by clone under a bar of clone colours, with uncovered entries grey and apart from a frequency of 0. Without `clones`, it draws the scored cells in their order; `max_cells` caps the cells drawn, chosen evenly along the order.
+
 ## VariantCounts
 
 ```{eval-rst}
 .. autoclass:: cytearc.variants.VariantCounts
+```
+
+## VariantSelection
+
+```{eval-rst}
+.. autoclass:: cytearc.variants.VariantSelection
 ```

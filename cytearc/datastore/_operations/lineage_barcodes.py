@@ -1,7 +1,6 @@
-import io
 import os
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -53,6 +52,7 @@ from .cell_barcodes import (
     texts_per_file,
     warn_unmatched_barcodes,
 )
+from .clone_artifacts import plan_clones, write_clones, zarr_write_buffer_bytes
 from .record_tables import (
     read_array,
     record_arrays,
@@ -63,7 +63,6 @@ from .record_tables import (
 if TYPE_CHECKING:
     from ...readers.lineage_barcodes import BarcodeLayout, BarcodeRows
     from ..mapping_datastore import MappingDatastore as _BarcodeOperationsBase
-    from .clones import _CloneOperationsMixin
 else:
     _BarcodeOperationsBase = object
 
@@ -911,10 +910,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             trex_rules=record["trex_rules"],
             invalidate_cache=invalidate_cache,
         )
-        # The DataStore holds the clone operations, which plan and write the
-        # clones artifact that every clone source saves.
-        clone_operations = cast("_CloneOperationsMixin", self)
-        planned = clone_operations._plan_clones(
+        planned = plan_clones(
+            self.zw,
             arguments,
             cell_selection,
             n_cells,
@@ -949,16 +946,12 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             + int(barcode_values.shape[0])
         )
         # Writing them is checked first, as if every cell were a clone of its
-        # own, the most clones there can be. Zarr writes each chunk and each
-        # array's metadata through a buffered file, up to its async
-        # concurrency of them at once, and each buffer is counted as one of
-        # io's default buffers: Python 3.13 buffers the file system's block,
-        # 4 KiB on common file systems, and Python 3.14 one default buffer,
-        # which it raised from 8 KiB to 128 KiB.
+        # own, the most clones there can be, beside the file buffers of
+        # Zarr's writes.
         width = len(f"clone_{n_cells}")
         writing = (
             n_cells * (_WRITE_CELL_BYTES + _WRITE_CLONE_BYTES + 8 * width)
-            + int(zarr.config.get("async.concurrency")) * io.DEFAULT_BUFFER_SIZE
+            + zarr_write_buffer_bytes()
         )
         for needed, what in (
             (held + _CONVERTED_RECORD_BYTES * n_records, "as they are read"),
@@ -1011,7 +1004,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             "doublets": int(sum(calls.n_doublet_nodes)),
             "cells_in_small_clones": calls.n_small_cells,
         }
-        clone_operations._write_clones(
+        write_clones(
+            self.zw,
             planned,
             assignment,
             {

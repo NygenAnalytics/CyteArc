@@ -239,6 +239,57 @@ def test_the_artifact_holds_barcodes_doublets_and_what_each_rule_removed(
     )
 
 
+def test_saved_clones_are_reused_only_with_their_barcodes_and_doublets(
+    store, tmp_path
+) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "trex")
+    clones = store.clones.barcode_clones(barcodes, preset="trex")
+    group = artifact_group(store.zw, clones)
+    # Each cell's barcodes and doublet flag are stored as the clones artifact
+    # declares them.
+    assert group["n_barcodes"].dtype == np.dtype(np.int32)
+    assert group["doublet"].dtype == np.dtype(bool)
+    doublet = np.asarray(group["doublet"][:])
+    assert store.clones.barcode_clones(barcodes, preset="trex") == clones
+    # Clones that lost one of the arrays that their source adds are called
+    # again, as a new artifact, rather than reused without it.
+    del group["doublet"]
+    again = store.clones.barcode_clones(barcodes, preset="trex")
+    assert again != clones
+    np.testing.assert_array_equal(store.artifacts.load(again)["doublet"][:], doublet)
+    loaded = store.clones.load_clones(again)
+    np.testing.assert_array_equal(loaded.cells["doublet"], doublet)
+
+
+def test_barcode_clones_store_each_array_at_its_dtype_chunks_and_codecs(
+    store, tmp_path
+) -> None:
+    # The shared clone writer stores the arrays as the clone operations'
+    # writer did: labels as fixed-width text at the width of the longest,
+    # one chunk for these 48 cells, compressed by blosc.
+    _calling, barcodes = _imported(store, tmp_path, "trex")
+    group = artifact_group(
+        store.zw, store.clones.barcode_clones(barcodes, preset="trex")
+    )
+    n_clones = int(group["clone_sizes"].shape[0])
+    width = len(f"clone_{n_clones}")
+    expected = {
+        "values": (np.dtype(f"<U{width}"), N_CELLS),
+        "codes": (np.dtype(np.int32), N_CELLS),
+        "clone_size": (np.dtype(np.int64), N_CELLS),
+        "n_barcodes": (np.dtype(np.int32), N_CELLS),
+        "doublet": (np.dtype(bool), N_CELLS),
+        "clone_ids": (np.dtype(f"<U{width}"), n_clones),
+        "clone_sizes": (np.dtype(np.int64), n_clones),
+    }
+    assert set(group.array_keys()) == set(expected)
+    for name, (dtype, rows) in expected.items():
+        array = group[name]
+        assert (array.dtype, array.shape, array.chunks) == (dtype, (rows,), (rows,))
+        codecs = [codec["name"] for codec in array.metadata.to_dict()["codecs"]]
+        assert codecs == ["bytes", "blosc"], (name, codecs)
+
+
 def test_clones_within_groups_are_those_of_each_group_alone(store, tmp_path) -> None:
     calling, barcodes = _imported(store, tmp_path, "larry")
     within = store.clones.barcode_clones(barcodes, preset="larry", within="sample")

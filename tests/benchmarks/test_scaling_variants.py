@@ -1,11 +1,13 @@
-"""Benchmarks of importing per-cell variant counts.
+"""Benchmarks of importing per-cell variant counts and scoring their variants.
 
 mgatk writes, for every cell, the reads of each base at each position of the
 mitochondrial genome: about 1.2 rows per position at 100x. Importing them
 parses the four base files and sorts their rows by cell, then turns each band
-of cells into depth and counts. Each benchmark runs one step on synthetic
-cells of 2,000 positions and checks its result against sums taken from the
-drawn reads, so it doubles as a test at the smoke size.
+of cells into depth and counts. Scoring the variants streams the stored rows
+again, and calling clones compares every cell with every other over the
+informative variants. Each benchmark runs one step on synthetic cells of
+2,000 positions and checks its result against values taken from the drawn
+reads, so it doubles as a test at the smoke size.
 """
 
 import gzip
@@ -22,6 +24,9 @@ pytestmark = pytest.mark.benchmark
 
 N_POSITIONS = 2_000
 LADDER = Ladder(sizes=(250, 500, 1_000, 2_000), smoke=12)
+# Clones compare every cell with every other, whose cost overtakes the fixed
+# costs only past a thousand cells, so their fit starts there.
+CLONE_LADDER = Ladder(sizes=(1_000, 2_000, 4_000, 8_000), smoke=12)
 
 
 @lru_cache(maxsize=2)
@@ -154,3 +159,122 @@ def test_rows_sort_by_cell_and_finish_their_bands(bench) -> None:
         np.testing.assert_array_equal(depth_total, _reads(n_cells).sum(axis=(1, 2, 3)))
 
     bench("variants.sort_and_finish", make, LADDER, check=check)
+
+
+def test_variant_statistics_accumulate_over_bands_of_cells(bench) -> None:
+    from cytearc.variants.counts import SiteTable
+    from cytearc.variants.statistics import VariantStatisticsAccumulator
+
+    sites = SiteTable(
+        contigs=(),
+        site_contig=np.full(N_POSITIONS, -1),
+        site_position=np.full(N_POSITIONS, -1),
+        site_name=np.asarray(
+            [f"p{index}" for index in range(N_POSITIONS)], dtype=object
+        ),
+        site_channel=np.full(N_POSITIONS, "", dtype=object),
+        allele_site=np.repeat(np.arange(N_POSITIONS), 4),
+        allele=np.tile(np.asarray(list("ACGT"), dtype=object), N_POSITIONS),
+        allele_role=np.tile(
+            np.asarray(
+                ["reference", "alternative", "alternative", "alternative"], dtype=object
+            ),
+            N_POSITIONS,
+        ),
+    )
+
+    def rows(n_cells: int) -> list[dict[str, np.ndarray]]:
+        """The stored rows of bands of 200 cells: depth by cell and site, and
+        counts by cell and allele, each site's reference base its allele 0."""
+        reads = _reads(n_cells)
+        counts = reads.sum(axis=3)
+        depth = counts.sum(axis=2)
+        reference = counts.sum(axis=0).argmax(axis=1)
+        depth_cells, depth_sites = np.nonzero(depth)
+        cells, positions, bases = np.nonzero(counts)
+        alleles = positions * 4 + (bases - reference[positions]) % 4
+        order = np.lexsort((alleles, cells))
+        cells, positions, bases, alleles = (
+            cells[order],
+            positions[order],
+            bases[order],
+            alleles[order],
+        )
+        bands = []
+        for first in range(0, n_cells, 200):
+            in_depth = (depth_cells >= first) & (depth_cells < first + 200)
+            in_counts = (cells >= first) & (cells < first + 200)
+            bands.append(
+                {
+                    "depth_cells": depth_cells[in_depth],
+                    "depth_sites": depth_sites[in_depth],
+                    "depth": depth[depth_cells[in_depth], depth_sites[in_depth]],
+                    "count_cells": cells[in_counts],
+                    "count_alleles": alleles[in_counts],
+                    "counts": counts[cells, positions, bases][in_counts],
+                    "forward": reads[cells, positions, bases, 0][in_counts],
+                    "reverse": reads[cells, positions, bases, 1][in_counts],
+                }
+            )
+        return bands
+
+    def make(n_cells: int):
+        bands = rows(n_cells)
+
+        def run():
+            accumulator = VariantStatisticsAccumulator(
+                sites, stranded=True, qualities=False
+            )
+            for band in bands:
+                accumulator.add(**band)
+            return accumulator.finish(n_cells)
+
+        return run
+
+    def check(n_cells: int, statistics) -> None:
+        counts = _reads(n_cells).sum(axis=3)
+        reference = counts.sum(axis=0).argmax(axis=1)
+        site = statistics.alleles // 4
+        base = (statistics.alleles % 4 + reference[site]) % 4
+        expected = counts[:, site, base].sum(axis=0) / counts[:, site].sum(axis=(0, 2))
+        np.testing.assert_allclose(statistics.mean, expected)
+
+    bench("variants.statistics", make, LADDER, check=check)
+
+
+def test_clones_call_from_allele_frequencies(bench) -> None:
+    from cytearc.variants.frequencies import frequency_clones
+
+    n_variants = 24
+
+    def frequencies(n_cells: int) -> tuple[np.ndarray, np.ndarray]:
+        """Twelve clones, each marked by two variants of its own, 10% of
+        entries uncovered."""
+        rng = np.random.default_rng([inputs.SEED, n_cells, 1])
+        clones = rng.integers(0, n_variants // 2, size=n_cells)
+        values = np.zeros((n_cells, n_variants))
+        rows = np.arange(n_cells)
+        values[rows, 2 * clones] = rng.uniform(0.3, 0.9, size=n_cells)
+        values[rows, 2 * clones + 1] = rng.uniform(0.3, 0.9, size=n_cells)
+        uncovered = rng.random(values.shape) < 0.1
+        uncovered[rows, 2 * clones] = False
+        values[uncovered] = np.nan
+        return values, clones
+
+    def make(n_cells: int):
+        values, _clones = frequencies(n_cells)
+        return lambda: frequency_clones(
+            values,
+            n_neighbors=10,
+            resolution=1.0,
+            random_seed=4444,
+            memory_bytes=1 << 31,
+        )
+
+    def check(n_cells: int, called) -> None:
+        _values, clones = frequencies(n_cells)
+        # Every called clone holds cells of one true clone.
+        for label in np.unique(called.clusters[called.clusters > 0]).tolist():
+            assert len(np.unique(clones[called.clusters == label])) == 1
+
+    bench("variants.clones", make, CLONE_LADDER, check=check)

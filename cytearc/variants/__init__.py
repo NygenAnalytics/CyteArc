@@ -9,12 +9,17 @@ if TYPE_CHECKING:
         DEPTH_DEFINITIONS as DEPTH_DEFINITIONS,
         VariantCounts as VariantCounts,
     )
+    from .masks import VARIANT_MASKS as VARIANT_MASKS
+    from .statistics import PRESETS as PRESETS, VariantSelection as VariantSelection
 
 __all__ = [
     "ALLELE_ROLES",
     "COUNT_UNITS",
     "DEPTH_DEFINITIONS",
+    "PRESETS",
+    "VARIANT_MASKS",
     "VariantCounts",
+    "VariantSelection",
 ]
 
 __getattr__, __dir__ = _lazy_facade(
@@ -23,6 +28,9 @@ __getattr__, __dir__ = _lazy_facade(
         "ALLELE_ROLES": ".counts",
         "COUNT_UNITS": ".counts",
         "DEPTH_DEFINITIONS": ".counts",
+        "PRESETS": ".statistics",
+        "VARIANT_MASKS": ".masks",
         "VariantCounts": ".counts",
+        "VariantSelection": ".statistics",
     },
 )

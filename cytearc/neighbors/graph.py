@@ -425,6 +425,139 @@ def snn_merge_peak_bytes(
     return held + max(merging, graph) + _SNN_OBJECT_BYTES
 
 
+def _checked_neighborhoods(neighborhoods: np.ndarray) -> np.ndarray:
+    """Return neighbourhoods as int64, after checking their entries."""
+    array = np.asarray(neighborhoods)
+    if array.ndim != 2 or not np.issubdtype(array.dtype, np.integer):
+        raise ValueError("neighborhoods must be an integer matrix of cells by slots")
+    array = array.astype(np.int64, copy=False)
+    n_cells = array.shape[0]
+    if np.any(array < -1) or np.any(array >= n_cells):
+        raise ValueError("Neighbourhoods name cells outside 0 to the cells - 1")
+    ordered = np.sort(array, axis=1)
+    if np.any((ordered[:, 1:] == ordered[:, :-1]) & (ordered[:, 1:] >= 0)):
+        raise ValueError("A neighbourhood lists a cell twice")
+    return array
+
+
+def shared_neighbor_bounds(neighborhoods: np.ndarray) -> np.ndarray:
+    """Bound each cell's joins in :func:`shared_neighbor_graph`.
+
+    A cell shares a neighbour ``j`` with the cells whose neighbourhoods hold
+    ``j``, so the sum over its neighbours of how many neighbourhoods hold
+    each bounds the cells it shares one with.
+    """
+    array = _checked_neighborhoods(neighborhoods)
+    held = np.bincount(array[array >= 0], minlength=array.shape[0]).astype(np.int64)
+    return np.where(array >= 0, held[np.maximum(array, 0)], 0).sum(axis=1)
+
+
+def shared_neighbor_graph(
+    neighborhoods: np.ndarray,
+    *,
+    prune: float = 1 / 15,
+    max_joins: int | None = None,
+    max_entries: int = 1 << 24,
+) -> coo_matrix:
+    """Join cells by the overlap of their neighbourhoods, as Seurat's SNN does.
+
+    Each row of ``neighborhoods`` holds a cell's neighbourhood, the cell
+    itself included as Seurat's ``FindNeighbors`` includes it, padded with
+    -1. Two cells that share a neighbour are joined with the Jaccard index of
+    their neighbourhoods: the cells they share over the cells in either,
+    which for full rows of ``k`` cells is Seurat's
+    ``shared / (k + (k - shared))``. Joins below ``prune`` are dropped, as
+    Seurat's ``ComputeSNN`` drops them, and a cell is not joined to itself.
+
+    Cells that tie, such as cells with one profile, take the same few cells
+    as neighbours, and every pair of them shares those, so the graph grows
+    with the square of their number. The joins are computed for blocks of
+    cells whose bounded joins number at most ``max_entries``, which leaves
+    them unchanged, and a graph that would hold more than ``max_joins``
+    joins is refused.
+
+    Args:
+        neighborhoods: Cells by neighbourhood slots, entries from -1 to the
+            cells - 1, each cell at most once per row.
+        prune: The smallest Jaccard index kept, in [0, 1].
+        max_joins: The most joins the graph may hold, or None for no limit.
+        max_entries: The most candidate joins held at once.
+
+    Returns:
+        The joins, each pair once with its lower cell as the row, sorted by
+        row and then column, so that ``W + W^T`` is the symmetric graph.
+
+    Raises:
+        ValueError: If the neighbourhoods are malformed, ``prune`` lies
+            outside [0, 1], or ``max_joins`` or ``max_entries`` is below 1.
+        MemoryError: If one cell's candidate joins exceed ``max_entries``, or
+            the graph holds more than ``max_joins`` joins.
+    """
+    array = _checked_neighborhoods(neighborhoods)
+    if not isinstance(prune, Real) or not 0 <= float(prune) <= 1:
+        raise ValueError("prune must be a number in [0, 1]")
+    if max_joins is not None:
+        max_joins = integer_argument(max_joins, "max_joins", minimum=1)
+    max_entries = integer_argument(max_entries, "max_entries", minimum=1)
+    n_cells, slots = array.shape
+    valid = array >= 0
+    rows = np.repeat(np.arange(n_cells, dtype=np.int64), slots)[valid.ravel()]
+    membership = csr_matrix(
+        (np.ones(len(rows), dtype=np.float64), (rows, array[valid])),
+        shape=(n_cells, n_cells),
+    )
+    del rows
+    held_by = membership.T.tocsr()
+    sizes = valid.sum(axis=1).astype(np.float64)
+    bounds = shared_neighbor_bounds(array)
+    if n_cells and int(bounds.max()) > max_entries:
+        cell = int(np.argmax(bounds))
+        raise MemoryError(
+            f"Cell {cell} may share neighbours with {int(bounds[cell])} cells, more "
+            f"than the {max_entries} joins that fit at once"
+        )
+    firsts: list[np.ndarray] = []
+    seconds: list[np.ndarray] = []
+    weights: list[np.ndarray] = []
+    n_joins = 0
+    start = 0
+    ends = np.cumsum(bounds)
+    while start < n_cells:
+        # The block's bounded joins fit max_entries.
+        base = ends[start - 1] if start else 0
+        stop = int(np.searchsorted(ends, base + max_entries, side="right"))
+        stop = max(stop, start + 1)
+        shared = (membership[start:stop] @ held_by).tocoo()
+        row = shared.row.astype(np.int64) + start
+        column = shared.col.astype(np.int64)
+        # The shared count is symmetric, so each pair is taken once, from the
+        # block of its lower cell.
+        lower = row < column
+        row, column, count = row[lower], column[lower], shared.data[lower]
+        del shared, lower
+        jaccard = count / (sizes[row] + sizes[column] - count)
+        kept = jaccard >= float(prune)
+        n_joins += int(np.count_nonzero(kept))
+        if max_joins is not None and n_joins > max_joins:
+            raise MemoryError(
+                f"The shared-neighbour graph of {n_cells} cells holds more than "
+                f"the {max_joins} joins that fit"
+            )
+        row, column, jaccard = row[kept], column[kept], jaccard[kept]
+        order = np.lexsort((column, row))
+        firsts.append(row[order])
+        seconds.append(column[order])
+        weights.append(jaccard[order])
+        start = stop
+    first = np.concatenate(firsts) if firsts else np.empty(0, dtype=np.int64)
+    del firsts
+    second = np.concatenate(seconds) if seconds else np.empty(0, dtype=np.int64)
+    del seconds
+    weight = np.concatenate(weights) if weights else np.empty(0, dtype=np.float64)
+    del weights
+    return coo_matrix((weight, (first, second)), shape=(n_cells, n_cells))
+
+
 def weight_sort_indices(
     i: np.ndarray,
     w: np.ndarray,

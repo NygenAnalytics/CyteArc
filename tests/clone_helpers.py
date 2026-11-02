@@ -14,7 +14,6 @@ import pandas as pd
 import pytest
 
 from tests.clone_truth import (
-    N_CELLS,
     SAMPLES,
     CallingTruth,
     CloneTruth,
@@ -46,13 +45,14 @@ def open_clone_store(path: Path, **options: object) -> "DataStore":
 
 def write_truth_store(path: Path, truth: CloneTruth) -> "DataStore":
     """Write a store whose cells are the truth's, with their sample, time and type."""
-    counts = np.random.default_rng(5).poisson(3.0, size=(N_CELLS, 6)) + 1
+    n_cells = len(truth.cell_ids)
+    counts = np.random.default_rng(5).poisson(3.0, size=(n_cells, 6)) + 1
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=truth.cell_ids)
     store = open_clone_store(path)
     store.cells.insert("sample", truth.samples.astype(object))
     store.cells.insert("time_point", truth.time_points)
     store.cells.insert("cell_type", truth.cell_types.astype(object))
-    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
+    store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))
     return store
 
 

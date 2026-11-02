@@ -130,6 +130,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "SizeScale",
     "StudyDesign",
     "THEMES",
+    "allele_frequencies",
     "association_calibration",
     "association_volcano",
     "barcode_calls",
@@ -178,6 +179,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "spectratype",
     "theme_context",
     "variant_depth",
+    "variant_statistics",
 )
 
 

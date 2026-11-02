@@ -381,6 +381,22 @@ _CONTRACTS = (
         model_only=_classified("resolved_input", "sources"),
     ),
     OperationContract(
+        VariantsAccessor.informative,
+        metadata_arguments.VariantSelectionArguments,
+    ),
+    OperationContract(
+        VariantsAccessor.clones,
+        metadata_arguments.VariantCloneArguments,
+        model_only={
+            # The clones label the counts' cells; the within column's labels
+            # are recorded by their fingerprint.
+            **_classified("resolved_input", "cell_selection", "within_fingerprint"),
+            # The Leiden seed and Seurat's pruning of the shared-neighbour
+            # graph are fixed choices of the method.
+            **_classified("algorithm_policy", "random_seed", "shared_neighbor_prune"),
+        },
+    ),
+    OperationContract(
         PerturbationAccessor.import_guide_calls,
         metadata_arguments.GuideCallImportArguments,
         # The file is identified by the SHA-256 of its bytes, not its path.

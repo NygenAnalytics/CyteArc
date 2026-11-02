@@ -348,3 +348,6 @@ class VariantsAccessor(_Accessor):
 
     import_counts = _bind(_VariantOperationsMixin._variants_import_counts)
     load_counts = _bind(_VariantOperationsMixin._variants_load_counts)
+    informative = _bind(_VariantOperationsMixin._variants_informative)
+    load_informative = _bind(_VariantOperationsMixin._variants_load_informative)
+    clones = _bind(_VariantOperationsMixin._variants_clones)

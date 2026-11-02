@@ -89,7 +89,11 @@ if TYPE_CHECKING:
     )
     from .summary import dotplot as dotplot
     from .summary import matrixplot as matrixplot
-    from .variants import variant_depth as variant_depth
+    from .variants import (
+        allele_frequencies as allele_frequencies,
+        variant_depth as variant_depth,
+        variant_statistics as variant_statistics,
+    )
 
 __all__ = [
     "CategoricalScale",
@@ -111,6 +115,7 @@ __all__ = [
     "SizeScale",
     "StudyDesign",
     "THEMES",
+    "allele_frequencies",
     "association_calibration",
     "association_volcano",
     "barcode_calls",
@@ -159,6 +164,7 @@ __all__ = [
     "spectratype",
     "theme_context",
     "variant_depth",
+    "variant_statistics",
 ]
 
 __getattr__, __dir__ = _lazy_facade(
@@ -183,6 +189,7 @@ __getattr__, __dir__ = _lazy_facade(
         "SizeScale": "._contracts",
         "StudyDesign": "._contracts",
         "THEMES": "._style",
+        "allele_frequencies": ".variants",
         "association_calibration": ".perturbation",
         "association_volcano": ".perturbation",
         "barcode_calls": ".lineage_barcodes",
@@ -231,5 +238,6 @@ __getattr__, __dir__ = _lazy_facade(
         "spectratype": ".repertoire",
         "theme_context": "._style",
         "variant_depth": ".variants",
+        "variant_statistics": ".variants",
     },
 )

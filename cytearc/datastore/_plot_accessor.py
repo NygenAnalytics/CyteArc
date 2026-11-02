@@ -787,6 +787,34 @@ class DataStorePlotAccessor:
         """Plot the depth of variant counts at each site and in each cell."""
         return self._forward(PlotResult, "variant_depth", locals())
 
+    def variant_statistics(
+        self,
+        variants: ArtifactRef,
+        *,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot each variant's VMR against its strand correlation."""
+        return self._forward(PlotResult, "variant_statistics", locals())
+
+    def allele_frequencies(
+        self,
+        variants: ArtifactRef,
+        *,
+        clones: ArtifactRef | None = None,
+        max_cells: int = 2000,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot each cell's allele frequency of each informative variant."""
+        return self._forward(PlotResult, "allele_frequencies", locals())
+
     def guide_calls(
         self,
         calls: ArtifactRef,

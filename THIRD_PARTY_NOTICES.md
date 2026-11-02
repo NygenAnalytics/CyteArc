@@ -58,7 +58,42 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
   `cytearc/datastore/_operations/perturbation_mixscape.py` (the iterations of `RunMixscape` and
   `TopDEGenesMixscape` in the same file, the filters, fold change and Bonferroni adjustment of
   `FindMarkers` and `FoldChange` in `R/differential_expression.R`, and the scaling of
-  `FastDenseRowScale` in `src/data_manipulation.cpp`).
+  `FastDenseRowScale` in `src/data_manipulation.cpp`), and `cytearc/neighbors/graph.py`
+  (`shared_neighbor_graph`: the Jaccard index of two neighbourhoods and the pruning below 1/15 of
+  `ComputeSNN` in `src/snn.cpp`, with each cell counted among its own neighbours as
+  `FindNeighbors` in `R/clustering.R` counts it, read at the main branch in October 2026).
+
+### mgatk
+
+- Source: <https://github.com/caleblareau/mgatk>
+- Copyright (c) 2020 Caleb Lareau
+- License: MIT
+- Used in: `cytearc/variants/statistics.py`, the per-variant statistics of `call_variants` in
+  `mgatk/processing/variant_calling.py` at 0.9.0 (commit
+  7ca7d74bf6104101e94f53f1a6a0f4f7d263e8ab): the pooled mean, the variance of the covered cells'
+  allele frequencies and its ratio to the mean with the `1e-11` offset, the cells with 2 reads of
+  the allele on each strand, the strand correlation over the cells that show the allele, the cells
+  over 5, 10, 20 and 95%, the largest frequency and the mean coverage.
+
+### Signac
+
+- Source: <https://github.com/stuart-lab/signac>
+- Copyright (c) 2021 Tim Stuart
+- License: MIT
+- Used in: `cytearc/variants/statistics.py` (the thresholds of the `"atac"` preset, as
+  `vignettes/mito.Rmd` applies them) and `cytearc/variants/frequencies.py` (the method of
+  `FindClonotypes` in `R/mito.R`: square-root allele frequencies, cosine neighbours with `k = 10`
+  and clustering of the shared-neighbour graph), at commit 12d1ff82774890b08e55b3101f36fab83e674b88.
+
+### MAESTER-2021
+
+- Source: <https://github.com/petervangalen/MAESTER-2021>
+- Copyright (c) 2021 vangalenlab
+- License: MIT
+- Used in: `cytearc/variants/statistics.py`, the mean base quality of a variant, the mean of the
+  cells' and strands' mean qualities where they read the allele, as
+  `3_Cell_line_mixes_variants/3.1_SW_CellLineMix_variants.R` computes it at commit
+  6853e8c1f2342f7ec4ef28d8466b285a2b5ec0f3.
 
 ### chromVAR
 
@@ -224,6 +259,16 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
   the same commit, from "nf-MiTo data (AFM MDA_clones and metadata)" by Andrea Cossa (Zenodo,
   doi:10.5281/zenodo.17225334), with the hg38 mitochondrial reference of the pL1000 folder as
   `chrM_refAllele.txt.gz`, which maegatk writes beside its tables.
+- **Variant goldens**: `tests/mgatk_0_9_0_golden.json`, `tests/signac_1_17_1_golden.json` and
+  `tests/mito_2_0_0_golden.json` hold what mgatk 0.9.0, Signac 1.17.1 with Seurat 5.6.0, and MiTo
+  2.0.0 (all MIT) computed on Signac's `test_mgatk` fixture, the synthetic truths of
+  `tests/variant_truth.py`, and MiTo's 50-cell `mtscATAC_pL1000` and `maester_MDA_clones` folders
+  at commit 05725c3e69ad2294bff03bb9dcbfcb8499600e10 (CC BY 4.0, from the sources named above).
+  `tests/test_variant_goldens.py` downloads MiTo's folders for its tests marked `integration`.
+- **Variant masks** in `cytearc/variants/masks.py`: the 25 NUMT-derived false positives of
+  Supplemental Table S1 and the artifact-prone positions of Laricchia et al. (2022), Genome Research
+  32:569-582, doi:10.1101/gr.276013.121, and the RNA-DNA differences of Bar-Yaacov et al. (2013),
+  Genome Research 23:1789-1796, doi:10.1101/gr.161265.113, as lists of positions and alleles.
 - **cellsnp-lite** (<https://github.com/single-cell-genetics/cellsnp-lite>), Apache-2.0:
   `tests/data/variants/cellsnp_lite/` holds the first 60 records and the first 40 cells of
   `data/csp_mode1` at commit 8e8ba00c2adfe6fc758385f99c61ab5545387838.
@@ -989,6 +1034,58 @@ SOFTWARE.
 
 ```text
 Copyright (c) 2021 Tim Stuart
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### mgatk (MIT License)
+
+```text
+MIT License
+
+Copyright (c) 2020 Caleb Lareau
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### MAESTER-2021 (MIT License)
+
+```text
+MIT License
+
+Copyright (c) 2021 vangalenlab
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
