@@ -316,9 +316,13 @@ def _single(clones: CloneSizes) -> GroupedCloneSizes:
 
 
 def _sums(table: GroupedCloneSizes, values: np.ndarray) -> np.ndarray:
-    """Each group's sum of a value of its rows, as floats even without rows."""
-    sums = np.bincount(table.groups, weights=values, minlength=len(table.n))
-    return sums.astype(np.float64, copy=False)
+    """Each group's sum of a value of its rows, 0 without rows.
+
+    The sums carry their rounding errors apart, since the extrapolated Shannon
+    diversity divides by the small difference of two diversities near the
+    group's size, which magnifies an error in the last place many times.
+    """
+    return _segment_sums(table.starts, np.ascontiguousarray(values, dtype=np.float64))
 
 
 def _running(table: GroupedCloneSizes, values: np.ndarray) -> np.ndarray:
@@ -498,6 +502,18 @@ def _add(total: float, error: float, term: float) -> tuple[float, float]:
     else:
         error += (term - added) + total
     return added, error
+
+
+@njit(cache=True)
+def _segment_sums(starts: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """Each group's sum of the values of its rows, which start at ``starts``."""
+    sums = np.empty(len(starts) - 1)
+    for group in range(len(starts) - 1):
+        total, error = 0.0, 0.0
+        for row in range(starts[group], starts[group + 1]):
+            total, error = _add(total, error, values[row])
+        sums[group] = total + error
+    return sums
 
 
 @njit(cache=True)

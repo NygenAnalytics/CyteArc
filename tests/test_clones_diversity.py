@@ -2,7 +2,7 @@
 
 from fractions import Fraction
 from itertools import combinations
-from math import comb, log
+from math import comb, fsum, log, ulp
 
 import numpy as np
 import pandas as pd
@@ -915,3 +915,22 @@ def test_diversity_tables_refuse_groups_without_cells_and_misaligned_keys() -> N
         dv.indices(_clones([]))
     with pytest.raises(ValueError, match="reaches no coverage"):
         dv.size_for_coverage(_clones([]), 0.5)
+
+
+def test_shannon_entropy_is_its_terms_summed_exactly() -> None:
+    # The extrapolated Shannon diversity divides by the small difference of
+    # two diversities near a group's size, so an error in the last place of the
+    # observed entropy grows many times; each group's terms are summed within
+    # a unit in the last place of their exactly rounded sum.
+    rng = np.random.default_rng(7)
+    groups = [_clones(np.minimum(rng.zipf(2.2, size=n), 500)) for n in (23_263, 80_000)]
+    expected = []
+    for clones in groups:
+        p = clones.values / clones.n
+        expected.append(-fsum((clones.counts * p * np.log(p)).tolist()))
+    for clones, exact in zip(groups, expected, strict=True):
+        assert abs(dv.indices(clones)["shannon"] - exact) <= ulp(exact)
+    keys = pd.DataFrame({"group": ["a", "b"]})
+    table = dv.diversity_tables(dv.GroupedCloneSizes.from_groups(groups), keys)[0]
+    for got, exact in zip(table["shannon"], expected, strict=True):
+        assert abs(got - exact) <= ulp(exact)
