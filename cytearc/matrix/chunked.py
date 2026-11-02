@@ -255,8 +255,27 @@ class ChunkedArray:
         )
 
     def _max_decode_bytes(self) -> int:
-        """Bytes a row block's read holds for its inner chunks, whatever its rows."""
-        return self._read_bytes(0)
+        """Bytes a row block's read holds for its inner chunks, whatever its rows.
+
+        They include the chunk that the reader's previous read can still hold,
+        so a plan that charges them for each block in flight charges one such
+        chunk for each read worker.
+        """
+        return self._read_bytes(0) + self._held_read_bytes()
+
+    def _held_read_bytes(self) -> int:
+        """Bytes that the previous read of the backing can still hold beside the next.
+
+        ``ArrayGeometry.heldReadBytes`` counts them for a Zarr backing. A
+        NumPy backing holds none, and the reads of a virtual array are charged
+        only what its reader's ``read_scratch_bytes`` names.
+        """
+        if self._is_numpy:
+            return 0
+        if virtual_array_reader(cast(zarr.Array, self._backing)) is not None:
+            return 0
+        geometry = self._geometry()
+        return 0 if geometry is None else geometry.heldReadBytes()
 
     def _block_owned_bytes(self) -> int:
         """Bytes of one row block that grow with its rows.
@@ -269,7 +288,7 @@ class ChunkedArray:
         elements = rows * max(1, self._n_cols)
         input_bytes = elements * max(1, int(self._backing.dtype.itemsize))
         return self._op_peak_bytes(
-            rows, self._read_bytes(input_bytes) - self._max_decode_bytes()
+            rows, self._read_bytes(input_bytes) - self._read_bytes(0)
         )
 
     def _op_peak_bytes(self, rows: int, held: int) -> int:
@@ -286,20 +305,23 @@ class ChunkedArray:
         return peak
 
     def _block_task_bytes(self) -> int:
-        """Bytes one row block holds while it is read and transformed."""
+        """Bytes one row block holds while it is read and transformed.
+
+        They include the chunk that the reader's previous read can still hold.
+        """
         return self._block_owned_bytes() + self._max_decode_bytes()
 
     def stream_bytes(self, scratch_bytes_per_row: int = 0) -> int:
         """Return the bytes that a stream of this matrix holds with whole blocks.
 
         That is this matrix's own index arrays and one block of the rows of
-        a stored shard, with its decode and the ``scratch_bytes_per_row``
-        that the caller makes of each row, beside the bytes that the caller
-        keeps. A budget of at least the caller's bytes and these runs the
-        stream in whole blocks. A stream given ``memory_bytes`` shrinks its
-        blocks only when the budget leaves less room than this; a smaller
-        block decodes the same chunks again, so it saves little memory for
-        much time.
+        a stored shard, with its decode, the chunk that the previous read can
+        still hold, and the ``scratch_bytes_per_row`` that the caller makes of
+        each row, beside the bytes that the caller keeps. A budget of at least
+        the caller's bytes and these runs the stream in whole blocks. A stream
+        given ``memory_bytes`` shrinks its blocks only when the budget leaves
+        less room than this; a smaller block decodes the same chunks again, so
+        it saves little memory for much time.
 
         Args:
             scratch_bytes_per_row: Bytes that the caller makes of each row of

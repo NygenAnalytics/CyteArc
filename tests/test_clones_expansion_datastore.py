@@ -14,8 +14,9 @@ import pytest
 
 from cytearc.clones import ClonalExpansion
 from cytearc.clones.expansion import DEFAULT_RANK_SPLITS
-from cytearc.metadata.rows import READ_OBJECT_BYTES, array_row_selection_parts
+from cytearc.metadata.rows import array_row_selection_parts
 from cytearc.storage.artifacts import artifact_group
+from cytearc.storage.geometry import READ_OBJECT_BYTES
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
     every_cell,

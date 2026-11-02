@@ -8,7 +8,12 @@ import numpy as np
 
 from .types import array_metadata_shards
 
-__all__ = ["ArrayGeometry", "array_geometry"]
+__all__ = ["READ_OBJECT_BYTES", "ArrayGeometry", "array_geometry"]
+
+#: The objects that Zarr makes to read a stored chunk, its tasks, futures,
+#: specs and selections, whatever the chunk's size: about 25 KB, and 35 KB
+#: beside those of the previous read, on Python 3.13 to 3.15.
+READ_OBJECT_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +46,28 @@ class ArrayGeometry:
         for extent in self.chunks:
             elements *= max(1, extent)
         return elements * self.itemsize
+
+    def storedChunkBytes(self) -> int:
+        """Return the bytes of one whole chunk as stored and decoded.
+
+        That is the decoded chunk beside the bound of its encoded bytes for
+        the supported compressors.
+        """
+        from .layout import _encoded_chunk_bound
+
+        decoded = self.nominalChunkBytes()
+        return decoded + _encoded_chunk_bound(decoded)
+
+    def heldReadBytes(self) -> int:
+        """Return what a finished read can still hold beside the next read.
+
+        The thread of Zarr's pool that decoded a chunk lets go of it only when
+        that thread next runs, which on a busy machine can come after the next
+        read has begun. Until then it holds the chunk as stored and decoded,
+        and :data:`READ_OBJECT_BYTES` covers Zarr's objects for the finished
+        read and the next.
+        """
+        return self.storedChunkBytes() + READ_OBJECT_BYTES
 
     def readBytes(
         self, resultBytes: int, chunks: int = 1, decodes: int | None = None

@@ -11,7 +11,6 @@ from ...metadata.arguments import (
 )
 from ...metadata.artifacts import write_cell_data_artifact
 from ...metadata.rows import (
-    READ_OBJECT_BYTES,
     apply_missing_mask,
     array_row_selection_parts,
     read_array_rows_chunkwise,
@@ -33,7 +32,7 @@ from ...storage.artifact_writer import (
     PlannedArtifact,
 )
 from ...storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
-from ...storage.geometry import array_geometry
+from ...storage.geometry import READ_OBJECT_BYTES, array_geometry
 from ...storage.partition import row_band
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped

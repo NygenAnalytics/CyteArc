@@ -30,7 +30,12 @@ from tests.perturbation_helpers import (
     use_python_kernels,
     write_screen,
 )
-from tests.memory_helpers import check_budget, named_budget
+from tests.memory_helpers import (
+    ZARR_READS,
+    budget_that_runs,
+    hold_finished_reads,
+    named_budget,
+)
 from tests.storage_helpers import insert_nullable_cell_column, open_store
 
 # Tests that check the warning about thin perturbations catch it themselves.
@@ -772,7 +777,13 @@ def test_profiles_read_bands_of_features_that_fit_the_budget(
     with pytest.raises(MemoryError, match="2 targets in 30 features") as low:
         run(open_store(shared.path, nthreads=2, mem_budget=1000))
     needed = named_budget(low.value)
-    banded = run(open_store(shared.path, nthreads=2, mem_budget=3 * needed // 2))
+    # The least budget counts the chunk that a read of the counts can still
+    # hold after it ends, whatever a band's width, and half again the rest of
+    # it gives bands of several features.
+    held = store._get_assay("RNA").rawData._held_read_bytes()
+    banded = run(
+        open_store(shared.path, nthreads=2, mem_budget=needed + (needed - held) // 2)
+    )
 
     # Each band reads the control cells, then the profiled cells, and holds
     # several features but not all of them.
@@ -935,8 +946,20 @@ def test_profiles_run_within_the_budget_they_name(tmp_path) -> None:
         run(open_store(screen.path, nthreads=2))
     )
     # Each band of features streams its counts within the budget that the
-    # refusal names, which once failed in the stream planner.
-    _, _, profiles = check_budget(screen.path, run, check_writes=False, nthreads=2)
+    # refusal names, which once failed in the stream planner. Each read's work
+    # in Zarr's pool is held until the next read ends, as a pool thread that
+    # runs late holds it, so every read of the counts runs beside the chunk of
+    # the read before it, which CI's runs met now and then.
+    with hold_finished_reads(*ZARR_READS):
+        budget, _, profiles, peak = budget_that_runs(screen.path, run, nthreads=2)
+    with pytest.raises(MemoryError) as short:
+        run(open_store(screen.path, nthreads=2, mem_budget=budget - 1))
+    assert named_budget(short.value) == budget
+    # The budget counts the chunk that the read before can still hold, and
+    # the call held more than the budget less that chunk, so the hold took
+    # effect.
+    held = open_store(screen.path)._get_assay("RNA").rawData._held_read_bytes()
+    assert budget - held < peak <= budget
     result = open_store(screen.path).perturbation.load_profiles(profiles)
     pd.testing.assert_frame_equal(result.values, whole.values)
     pd.testing.assert_frame_equal(result.control_mean, whole.control_mean)

@@ -226,10 +226,11 @@ def _stream_bytes(counts: Any, scratch_bytes_per_row: int = 0) -> tuple[int, int
     """Return what a budgeted row stream of ``counts`` holds: its least, and with full blocks.
 
     ``ChunkedArray._stream_blocks`` with a memory budget holds the matrix's
-    own arrays, the decode of one stored chunk, and the rows of each block
-    with ``scratch_bytes_per_row`` for each, beside the caller's resident
-    bytes. It shrinks its blocks to fit, down to one row, and refuses a
-    budget without room for that row; this follows its arithmetic.
+    own arrays, the decode of one stored chunk beside the chunk that the
+    previous read can still hold, and the rows of each block with
+    ``scratch_bytes_per_row`` for each, beside the caller's resident bytes.
+    It shrinks its blocks to fit, down to one row, and refuses a budget
+    without room for that row; this follows its arithmetic.
 
     Args:
         counts: A chunked matrix of counts, such as ``assay.rawData[cells, :]``.
@@ -294,8 +295,9 @@ def _count_stream_bytes(
     """Return the bytes that :func:`_count_blocks` holds beside its caller's.
 
     That is the stream's index arrays and one block of the counts of
-    ``features`` over the ``cells`` of a stored chunk, with its decode and
-    the ``scratch_bytes_per_row`` that the caller makes of each row.
+    ``features`` over the ``cells`` of a stored chunk, with its decode, the
+    chunk that the previous read can still hold, and the
+    ``scratch_bytes_per_row`` that the caller makes of each row.
     """
     held: int = _count_matrix(assay, features, cells).stream_bytes(
         scratch_bytes_per_row

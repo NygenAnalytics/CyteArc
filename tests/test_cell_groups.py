@@ -16,10 +16,11 @@ from cytearc.datastore._operations.cell_groups import (
 )
 from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.artifacts import plan_cell_data_artifact
-from cytearc.metadata.rows import READ_OBJECT_BYTES, array_row_selection_parts
+from cytearc.metadata.rows import array_row_selection_parts
 from cytearc.storage.arrays import MISSING_MASK_PREFIX
 from cytearc.storage.artifact_writer import artifact_transaction
 from cytearc.storage.artifacts import artifact_group
+from cytearc.storage.geometry import READ_OBJECT_BYTES
 from cytearc.storage.refs import ArtifactRef
 from tests.storage_helpers import (
     insert_nullable_cell_column,
