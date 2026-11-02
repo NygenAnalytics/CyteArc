@@ -8,12 +8,11 @@ import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
 from typing import Any, TypeVar, cast
 
 import zarr
 
-from ..utils.compute import process_thread_limit
 from ..utils.numba import numba_threads
 from ..utils.shutdown import ShutdownRequested, shutdown_checkpoint
 
@@ -301,9 +300,9 @@ class AsyncStorageRunner:
     """Own one event loop, codec executor, compute pool, and byte ledger.
 
     The runner holds Zarr's process-wide I/O limit only while its own reads
-    and writes run, and each compute call holds the native thread-pool
-    limit, so a runner that waits on its caller, as a stream whose consumer
-    has stopped does, holds no process-wide limit.
+    and writes run, and sets no BLAS or OpenMP limit, since its compute calls
+    run no such work. A runner that waits on its caller, as a stream whose
+    consumer has stopped does, holds no process-wide limit.
     """
 
     def __init__(
@@ -321,6 +320,7 @@ class AsyncStorageRunner:
         self._read_slots: asyncio.Semaphore | None = None
         self._commit_slots: asyncio.Semaphore | None = None
         self._io_loops: _IoLoops | None = None
+        self._worker_numba: list[AbstractContextManager[None]] = []
 
     def run(self, operation: Callable[["AsyncStorageRunner"], Awaitable[T]]) -> T:
         """Run ``operation`` to completion and return its result.
@@ -398,6 +398,7 @@ class AsyncStorageRunner:
             self._compute_pool = ThreadPoolExecutor(
                 max_workers=self.plan.computeWorkers,
                 thread_name_prefix="cytearc-compute",
+                initializer=self._start_compute_worker,
             )
             self._read_slots = asyncio.Semaphore(
                 self.plan.readWorkers * self.plan.innerReads
@@ -433,6 +434,13 @@ class AsyncStorageRunner:
                         pool.shutdown(wait=True, cancel_futures=True)
                     except BaseException as exc:
                         errors.append(exc)
+            # The workers have finished, so their settings end without a change.
+            for context in self._worker_numba:
+                try:
+                    context.__exit__(None, None, None)
+                except BaseException as exc:
+                    errors.append(exc)
+            self._worker_numba.clear()
             if self._io_loops is not None:
                 try:
                     self._io_loops.close()
@@ -477,24 +485,28 @@ class AsyncStorageRunner:
             )
         return results.pop()
 
-    async def compute(self, fn: Callable[[], T]) -> T:
-        """Run ``fn`` on the compute pool with the plan's threads per worker.
+    def _start_compute_worker(self) -> None:
+        """Run a compute worker's Numba kernels on the plan's threads for its life."""
+        context = numba_threads(max(1, int(self.plan.threadsPerComputeWorker)))
+        context.__enter__()
+        self._worker_numba.append(context)
 
-        The call holds that many Numba threads on its worker and that many
-        BLAS and OpenMP threads, a process-wide limit for BLAS, while it runs.
+    async def compute(self, fn: Callable[[], T]) -> T:
+        """Run ``fn`` on the compute pool, whose workers run Numba's kernels on
+        the plan's threads per worker.
+
+        A call sets no BLAS or OpenMP limit: such a limit applies to the whole
+        process, beside the caller's own work, and the runner's calls assemble,
+        count and copy without BLAS or OpenMP work. A function that runs such
+        work holds its own through ``process_thread_limit``.
         """
         if self._compute_pool is None:
             raise RuntimeError("compute pool is not installed")
-        threads = max(1, int(self.plan.threadsPerComputeWorker))
 
         def _limited() -> T:
             from .parallel import _shard_context
 
-            with (
-                _shard_context(),
-                numba_threads(threads),
-                process_thread_limit(threads),
-            ):
+            with _shard_context():
                 return fn()
 
         shutdown_checkpoint()

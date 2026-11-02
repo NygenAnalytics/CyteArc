@@ -338,7 +338,6 @@ class ChunkedArray:
 
         ranges = self._ranges()
         workers = self._nthreads if nthreads is None else max(1, int(nthreads))
-        within = 1
         io_concurrency: int | None = None
         planned = None
         if self._resources is not None:
@@ -355,7 +354,6 @@ class ChunkedArray:
                 policy=self._io,
             )
             workers = planned.computeWorkers
-            within = planned.threadsPerComputeWorker
             io_concurrency = planned.ioConcurrency
         if in_shard_context():
             workers = 1
@@ -370,7 +368,6 @@ class ChunkedArray:
             list(enumerate(ranges)),
             produce,
             workers=workers,
-            within_block_threads=within,
             io_concurrency=workers if io_concurrency is None else io_concurrency,
             msg=msg,
             total=len(ranges),
@@ -439,9 +436,8 @@ class ChunkedArray:
 
         With ``allow_transposed`` and no ``row_mask``, the blocks may be read
         from the backing's stored transpose; see ``_transposed_row_blocks``.
-        The reads run no BLAS or OpenMP work, so the stream sets no native
-        thread limit: the consumer's own work on each block runs under the
-        limits it holds.
+        The stream sets no BLAS or OpenMP limit, so the consumer's own work on
+        each block runs under the limits it holds.
         """
         from ..storage.execution import WorkShape, plan_operation
         from ..storage.parallel import stream_shards, in_shard_context

@@ -7,7 +7,6 @@ from contextlib import contextmanager
 from typing import Any, Literal
 
 
-from ..utils.compute import process_thread_limit
 from ..utils.shutdown import shutdown_checkpoint
 
 __all__ = ["stream_shards", "in_shard_context"]
@@ -32,30 +31,15 @@ def _shard_context() -> Iterator[None]:
         _shard_ctx.active = previous
 
 
-def _limited(
-    fn: Callable[[Any], Any], io: int | None, threads: int | None
-) -> Callable[[Any], Any]:
-    """Return ``fn`` holding the stream's process-wide limits while it runs.
-
-    ``io`` is Zarr's I/O limit and ``threads`` the native thread-pool limit;
-    None leaves one as it is.
-    """
-    if io is None and threads is None:
+def _io_limited(fn: Callable[[Any], Any], io: int | None) -> Callable[[Any], Any]:
+    """Return ``fn`` holding Zarr's process-wide I/O limit ``io`` while it runs."""
+    if io is None:
         return fn
     from .async_execution import zarr_io_concurrency
 
-    def io_limited(item: Any) -> Any:
-        if io is None:
-            return fn(item)
+    def limited(item: Any) -> Any:
         with zarr_io_concurrency(io):
             return fn(item)
-
-    if threads is None:
-        return io_limited
-
-    def limited(item: Any) -> Any:
-        with process_thread_limit(threads):
-            return io_limited(item)
 
     return limited
 
@@ -145,7 +129,6 @@ def stream_shards(
     fn: Callable[[Any], Any],
     *,
     workers: int,
-    within_block_threads: int | None = None,
     io_concurrency: int | None = None,
     msg: str | None = None,
     total: int | None = None,
@@ -153,26 +136,19 @@ def stream_shards(
 ) -> Generator[Any, None, None]:
     """Yield transformed items in order with bounded read-ahead.
 
-    Each call of ``fn`` holds two process-wide limits, in the thread that runs
-    it: Zarr's async concurrency at ``io_concurrency``, or a lower limit
-    already in force, and the native thread pools at ``within_block_threads``
-    threads. A stream inside a shard worker sets no thread limit, so the
-    worker's own applies. No limit is held across a yield: between items, the
-    consumer runs under the settings outside the stream, or, in a threaded
-    stream, under the stream's while a read-ahead call runs. A stream that its
-    consumer stops without closing, as an error in the consumer does, leaves
-    the settings as they were once its read-ahead calls end, even before the
-    stream is collected.
+    Zarr's process-wide async concurrency is set to ``io_concurrency``, or to
+    a lower limit already in force, only while a call of ``fn`` runs, in the
+    thread that runs it. Between items, the consumer runs under the setting
+    outside the stream, or, in a threaded stream, under the stream's while a
+    read-ahead call runs. A stream that its consumer stops without closing, as
+    an error in the consumer does, leaves the setting as it was once its
+    read-ahead calls end, even before the stream is collected. A stream sets
+    no BLAS or OpenMP limit, which would apply to the whole process beside its
+    consumer; an ``fn`` that runs such work holds its own through
+    ``process_thread_limit``.
     """
     workers = max(1, int(workers))
-    threads = (
-        within_block_threads
-        if within_block_threads is not None
-        and within_block_threads >= 1
-        and not in_shard_context()
-        else None
-    )
-    work = _limited(fn, io_concurrency, threads)
+    work = _io_limited(fn, io_concurrency)
     if backend == "serial" or workers <= 1 or in_shard_context():
         iterator = iter(items)
         try:

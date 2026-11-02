@@ -797,8 +797,6 @@ def write_sparse_bands(
             admitted = min(operation.computeWorkers, operation.writeWorkers)
             inner = operation.ioConcurrency
             batch = [pending.popleft() for _ in range(admitted)]
-            # The writes run no BLAS or OpenMP work, so they hold no thread
-            # limit, and the bands' producer runs under its caller's.
             for _ in stream_shards(
                 batch,
                 write_one,
@@ -1001,8 +999,6 @@ def write_dense_from_row_batches(
 
     total_rows = int(
         sum(
-            # The writes run no BLAS or OpenMP work, so they hold no thread
-            # limit, and the source of the batches runs under its caller's.
             stream_shards(
                 aligned(),
                 write_band,
@@ -1126,7 +1122,6 @@ def write_dense_in_shard_rows(
         slices,
         produce_and_write,
         workers=workers,
-        within_block_threads=plan.threadsPerComputeWorker,
         io_concurrency=inner,
         msg=msg or "Writing Zarr array",
         total=len(slices),

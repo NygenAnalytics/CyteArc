@@ -3,7 +3,7 @@ import threading
 import types
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import pytest
@@ -24,20 +24,9 @@ from tests.thread_helpers import (
 )
 
 
-def _blas_threads() -> set[int]:
-    return {
-        lib.num_threads
-        for lib in ThreadpoolController().lib_controllers
-        if lib.user_api == "blas"
-    }
-
-
 @pytest.fixture
 def two_blas_threads():
-    # The test session pins BLAS to one thread; raise it so a change shows.
-    with threadpool_limits(limits=2, user_api="blas"):
-        if not _blas_threads() or max(_blas_threads()) < 2:
-            pytest.skip("needs a multi-threaded BLAS")
+    with raised_threads(blas=2):
         yield
 
 
@@ -46,30 +35,30 @@ def test_the_latest_remaining_limit_applies_after_a_middle_exit(two_blas_threads
     second = enter_thread_limit(2)
     third = enter_thread_limit(1)
     exit_thread_limit(third)
-    assert _blas_threads() == {2}
+    assert blas_threads() == {2}
     exit_thread_limit(second)
-    assert _blas_threads() == {1}
+    assert blas_threads() == {1}
     exit_thread_limit(first)
-    assert _blas_threads() == {2}
+    assert blas_threads() == {2}
 
 
 def test_a_scope_without_a_limit_still_restores_the_original(two_blas_threads):
     unchanged = enter_thread_limit(None)
-    assert _blas_threads() == {2}
+    assert blas_threads() == {2}
     limited = enter_thread_limit(1)
     exit_thread_limit(limited)
     # Only the unchanged scope remains, so the original limits apply.
-    assert _blas_threads() == {2}
+    assert blas_threads() == {2}
     exit_thread_limit(unchanged)
-    assert _blas_threads() == {2}
+    assert blas_threads() == {2}
 
 
 def test_the_context_manager_restores_after_an_exception(two_blas_threads):
     with pytest.raises(RuntimeError, match="stage failed"):
         with process_thread_limit(1):
-            assert _blas_threads() == {1}
+            assert blas_threads() == {1}
             raise RuntimeError("stage failed")
-    assert _blas_threads() == {2}
+    assert blas_threads() == {2}
 
 
 def _built_controllers(monkeypatch: pytest.MonkeyPatch) -> list[None]:
@@ -224,6 +213,32 @@ def test_overlapping_limits_on_two_threads_restore_what_the_first_recorded(
         assert worker["inside"] == ({1}, {1})
         assert worker["after"] == worker["before"]
         assert compute._active_thread_limits == {}
+
+
+def test_a_limit_without_a_count_leaves_the_limits_before_it(two_blas_threads):
+    limited = enter_thread_limit(1)
+    unchanged = enter_thread_limit(None)
+    # The most recent limit sets no count, so the one before it applies.
+    assert blas_threads() == {1}
+    exit_thread_limit(unchanged)
+    assert blas_threads() == {1}
+    exit_thread_limit(limited)
+    assert blas_threads() == {2}
+
+
+def test_a_thread_forgets_its_openmp_counts_once_its_limits_end():
+    load_openmp_runtime()
+    with raised_threads(blas=2, openmp=3):
+        with process_thread_limit(1):
+            assert openmp_threads() == {1}
+        assert openmp_threads() == {3}
+        # The count changes between limits, as a caller may set it, and the
+        # next limit restores the new count, not the one before.
+        with threadpool_limits(limits={"openmp": 5}):
+            with process_thread_limit(1):
+                assert openmp_threads() == {1}
+            assert openmp_threads() == {5}
+        assert compute._original_openmp_threads == {}
 
 
 class _FakeLibrary:
@@ -519,43 +534,78 @@ def _pca_call(_tmp_path: Path) -> Callable[[], object]:
     )
 
 
-def _stage_call(_tmp_path: Path) -> Callable[[], object]:
+def _stage_values() -> Any:
     from cytearc.matrix import ChunkedArray
+
+    values = np.abs(np.random.default_rng(3).normal(size=(120, 6)))
+    return values, ChunkedArray.from_numpy(values, block_size=40, nthreads=2)
+
+
+def _reduction_stage(method: str) -> Callable[[Path], Callable[[], object]]:
+    def build(_tmp_path: Path) -> Callable[[], object]:
+        from cytearc.neighbors.stages import ReductionTransform
+
+        values, data = _stage_values()
+
+        def run() -> object:
+            return ReductionTransform(
+                data=data,
+                method=method,
+                dims=2,
+                loadings=None,
+                use_for_pca=np.ones(len(values), dtype=bool),
+                mu=values.mean(axis=0),
+                sigma=values.std(axis=0),
+                batch_size=40,
+                nthreads=2,
+                rand_state=4466,
+                disable_scaling=False,
+                lsi_skip_first=False,
+                lsi_params={},
+            )
+
+        return run
+
+    return build
+
+
+def _kmeans_stage_call(_tmp_path: Path) -> Callable[[], object]:
     from cytearc.neighbors.stages import (
         ChunkedCoordinateStream,
         KMeansInitializationStage,
-        ReductionTransform,
     )
 
-    values = np.random.default_rng(3).normal(size=(120, 6))
-    data = ChunkedArray.from_numpy(values, block_size=40, nthreads=2)
+    values, data = _stage_values()
+    # One batch of every row fits the model in memory, with its ``fit``.
+    return lambda: KMeansInitializationStage.fit(
+        stream=ChunkedCoordinateStream(data, 2),
+        n_rows=len(values),
+        batch_size=len(values),
+        n_clusters=3,
+        rand_state=4466,
+        nthreads=2,
+    )
 
-    def run() -> object:
-        reduction = ReductionTransform(
-            data=data,
-            method="pca",
-            dims=2,
-            loadings=None,
-            use_for_pca=np.ones(len(values), dtype=bool),
-            mu=values.mean(axis=0),
-            sigma=values.std(axis=0),
-            batch_size=40,
-            nthreads=2,
-            rand_state=4466,
-            disable_scaling=False,
-            lsi_skip_first=False,
-            lsi_params={},
-        )
-        return reduction, KMeansInitializationStage.fit(
-            stream=ChunkedCoordinateStream(data, 2),
-            n_rows=len(values),
-            batch_size=40,
-            n_clusters=3,
-            rand_state=4466,
-            nthreads=2,
-        )
 
-    return run
+def _harmony_stage_call(_tmp_path: Path) -> Callable[[], object]:
+    import pandas as pd
+
+    from cytearc.matrix import ChunkedArray
+    from cytearc.neighbors.stages import BatchCorrectionStage, ChunkedCoordinateStream
+
+    values = np.random.default_rng(9).normal(size=(200, 4))
+    data = ChunkedArray.from_numpy(values, block_size=50, nthreads=2)
+    batches = pd.DataFrame({"batch": np.repeat(["a", "b"], 100)})
+    return lambda: BatchCorrectionStage(
+        stream=ChunkedCoordinateStream(data, 2),
+        n_cells=len(values),
+        dims=values.shape[1],
+        batch_size=50,
+        batches=batches,
+        parameters={"n_clusters": 3, "max_iter_harmony": 1},
+        corrected_data=None,
+        nthreads=2,
+    ).ensure_corrected()
 
 
 def _integration_call(_tmp_path: Path) -> Callable[[], object]:
@@ -717,36 +767,92 @@ def _load_clusters_call(tmp_path: Path) -> Callable[[], object]:
     return lambda: store.perturbation.load_clusters(clusters)
 
 
+class _Family(NamedTuple):
+    """One call of a family, the work inside its limit, and the counts it runs with.
+
+    ``blas`` is the BLAS count the work runs with; ``openmp`` says whether the
+    limit reaches OpenMP too, at the same count, or leaves it as it was.
+    """
+
+    build: Callable[[Path], Callable[[], object]]
+    work: tuple[str, str] | None = None
+    blas: int | None = None
+    openmp: bool = True
+
+
 _FAMILIES = {
-    "feature variability": _variability_call,
-    "Harmony": _harmony_call,
-    "PCA": _pca_call,
-    "neighbor stages": _stage_call,
-    "WNN integration": _integration_call,
-    "doublets": _doublet_call,
-    "storage runner": _runner_call,
-    "block stream items": _stream_items_call,
-    "Mixscape signature": _signature_call,
-    "profile clusters": _cluster_call,
-    "loaded profile clusters": _load_clusters_call,
+    "feature variability": _Family(
+        _variability_call,
+        ("cytearc.features.variability", "_fit_lowess_adaptive"),
+        blas=1,
+        openmp=False,
+    ),
+    "Harmony": _Family(_harmony_call, ("cytearc.embeddings.harmony.fit", "_fit"), 2),
+    "PCA": _Family(_pca_call, ("cytearc.embeddings.reduction", "_fit_gram_pca"), 2),
+    "PCA stage": _Family(
+        _reduction_stage("pca"),
+        ("cytearc.neighbors.stages:ReductionTransform", "_fit_pca"),
+        2,
+    ),
+    "LSI stage": _Family(
+        _reduction_stage("lsi"),
+        ("cytearc.neighbors.stages:ReductionTransform", "_fit_lsi"),
+        2,
+    ),
+    "k-means stage": _Family(
+        _kmeans_stage_call, ("sklearn.cluster:MiniBatchKMeans", "fit"), 2
+    ),
+    "Harmony stage": _Family(
+        _harmony_stage_call, ("cytearc.neighbors.stages", "fit_harmony"), 2
+    ),
+    "WNN integration": _Family(
+        _integration_call, ("cytearc.neighbors.integration", "_integrate_blocks"), 2
+    ),
+    "doublets": _Family(
+        _doublet_call, ("cytearc.quality_control.doublets", "sum_doublet_pairs"), 2
+    ),
+    "storage runner": _Family(_runner_call),
+    "block stream items": _Family(_stream_items_call),
+    "Mixscape signature": _Family(
+        _signature_call,
+        ("cytearc.perturbation.signature", "nearest_controls"),
+        blas=2,
+        openmp=False,
+    ),
+    "profile clusters": _Family(
+        _cluster_call,
+        ("cytearc.perturbation.clusters", "cluster_profiles"),
+        blas=2,
+        openmp=False,
+    ),
+    "loaded profile clusters": _Family(
+        _load_clusters_call,
+        ("cytearc.perturbation.clusters", "profile_distances"),
+        blas=2,
+        openmp=False,
+    ),
 }
 _SCREEN_FAMILIES = {"Mixscape signature", "profile clusters", "loaded profile clusters"}
 
 
-@pytest.mark.parametrize(
-    "family",
-    [
+def _family_params(names) -> list[Any]:
+    return [
         pytest.param(name, marks=pytest.mark.slow) if name in _SCREEN_FAMILIES else name
-        for name in _FAMILIES
-    ],
-)
+        for name in names
+    ]
+
+
+@pytest.mark.parametrize("family", _family_params(_FAMILIES))
 def test_each_family_limits_threads_without_a_controller_of_its_own(
     family, tmp_path, monkeypatch
 ):
     import gc
 
-    run = _FAMILIES[family](tmp_path)
+    run = _FAMILIES[family].build(tmp_path)
     run()
+    # The first call may import modules after its last limit; a limit now
+    # builds the shared controller that sees them, as the next call would.
+    exit_thread_limit(enter_thread_limit(None))
     built = _built_controllers(monkeypatch)
     enabled = gc.isenabled()
     gc.collect()
@@ -764,3 +870,38 @@ def test_each_family_limits_threads_without_a_controller_of_its_own(
     assert built == []
     assert left == []
     assert compute._active_thread_limits == {}
+
+
+@pytest.mark.parametrize(
+    "family",
+    _family_params(name for name, family in _FAMILIES.items() if family.work),
+)
+def test_each_family_limits_the_runtimes_it_limits(family, tmp_path, monkeypatch):
+    import importlib
+
+    load_openmp_runtime()
+    chosen = _FAMILIES[family]
+    assert chosen.work is not None
+    run = chosen.build(tmp_path)
+    # The first call loads every runtime the family uses, such as Numba's
+    # OpenMP layer, so that the counts below reach them all.
+    run()
+    module_name, attribute = chosen.work
+    module_name, _, class_name = module_name.partition(":")
+    owner = importlib.import_module(module_name)
+    if class_name:
+        owner = getattr(owner, class_name)
+    original = getattr(owner, attribute)
+    seen: list[tuple[set[int], set[int]]] = []
+
+    def watched(*args: Any, **kwargs: Any) -> Any:
+        seen.append((blas_threads(), openmp_threads()))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, attribute, watched)
+    # Three threads outside, apart from each family's count and from one.
+    with raised_threads(blas=3, openmp=3):
+        run()
+        assert (blas_threads(), openmp_threads()) == ({3}, {3})
+    expected = ({chosen.blas}, {chosen.blas} if chosen.openmp else {3})
+    assert seen and all(counts == expected for counts in seen)

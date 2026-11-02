@@ -1,5 +1,6 @@
 import gc
 import threading
+import time
 import weakref
 
 import numpy as np
@@ -270,51 +271,58 @@ def test_a_failed_item_releases_its_io_limit(workers):
 
 
 @pytest.mark.parametrize("workers", [1, 2])
-def test_each_item_holds_the_thread_limit_and_a_paused_stream_holds_none(workers):
+def test_a_stream_sets_no_thread_limit_for_its_items_or_its_consumer(workers):
     from cytearc.utils import compute
+
+    items: list[set[int]] = []
+    consumer: list[set[int]] = []
+
+    def fn(value):
+        items.append(blas_threads())
+        # A slow item, so that read-ahead runs while the consumer works.
+        time.sleep(0.005)
+        return value
 
     with raised_threads(blas=2):
-        seen = []
-
-        def fn(value):
-            seen.append(blas_threads())
-            return value
-
-        stream = stream_shards(range(2), fn, workers=workers, within_block_threads=1)
-        try:
-            # Taking both items waits for the read-ahead, so no item is running.
-            assert [next(stream), next(stream)] == [0, 1]
-            # The consumer's own work runs under the count outside the stream.
-            assert blas_threads() == {2}
+        for _ in stream_shards(range(6), fn, workers=workers, io_concurrency=2):
+            consumer.append(blas_threads())
             assert compute._active_thread_limits == {}
-        finally:
-            stream.close()
-        assert seen == [{1}, {1}]
+    assert items == [{2}] * 6
+    assert consumer == [{2}] * 6
 
 
-@pytest.mark.parametrize("workers", [1, 2])
-def test_a_stream_stopped_by_an_error_that_is_kept_leaves_no_thread_limit(workers):
+@pytest.mark.parametrize("prefetch", [1, None])
+def test_a_block_stream_stopped_by_an_error_that_is_kept_leaves_blas_as_it_was(
+    prefetch,
+):
+    from cytearc.storage.budget import ResourceBudget
     from cytearc.utils import compute
 
-    def refuse_the_first_item() -> tuple[weakref.ref, list[BaseException]]:
-        stream = stream_shards(
-            range(3), lambda value: value, workers=workers, within_block_threads=1
+    # Two workers plan one BLAS thread each, which the stream once held from
+    # its first block until it closed; one block of read-ahead is serial.
+    matrix = ChunkedArray.from_numpy(
+        np.ones((40, 4)), block_size=4, nthreads=2, resources=ResourceBudget(1 << 20, 2)
+    )
+
+    def refuse_the_first_block() -> tuple[weakref.ref, list[BaseException]]:
+        blocks = matrix._stream_blocks(
+            nthreads=2, msg=None, prefetch=prefetch, row_mask=None
         )
         kept: list[BaseException] = []
         try:
-            for _ in stream:
-                raise ValueError("the first item is refused")
+            for _ in blocks:
+                raise ValueError("the first block is refused")
         except ValueError as error:
             # As a notebook keeps the last error: its traceback holds this
             # frame, which holds the stream, so the stream stays alive.
             kept.append(error)
-        return weakref.ref(stream), kept
+        return weakref.ref(blocks), kept
 
     with raised_threads(blas=2):
         enabled = gc.isenabled()
         gc.disable()
         try:
-            stream, kept = refuse_the_first_item()
+            stream, kept = refuse_the_first_block()
             assert stream() is not None
             assert blas_threads() == {2}
             assert compute._active_thread_limits == {}
@@ -323,37 +331,6 @@ def test_a_stream_stopped_by_an_error_that_is_kept_leaves_no_thread_limit(worker
                 gc.enable()
             del kept
             gc.collect()
-
-
-@pytest.mark.parametrize("workers", [1, 2])
-def test_a_failed_item_releases_its_thread_limit(workers):
-    from cytearc.utils import compute
-
-    def fail(value):
-        raise RuntimeError(f"item {value} failed")
-
-    with raised_threads(blas=2):
-        with pytest.raises(RuntimeError, match="^item 0 failed$") as failed:
-            list(stream_shards(range(1), fail, workers=workers, within_block_threads=1))
-        assert blas_threads() == {2}
-        assert compute._active_thread_limits == {}
-        del failed
-
-
-def test_a_stream_inside_an_item_keeps_the_limit_of_the_outer_item():
-    def inner(value):
-        return blas_threads()
-
-    def outer(value):
-        # The nested stream asks for three threads, and its items still run
-        # under the one thread of the outer item.
-        return list(stream_shards(range(2), inner, workers=4, within_block_threads=3))
-
-    with raised_threads(blas=2):
-        assert list(
-            stream_shards(range(2), outer, workers=2, within_block_threads=1)
-        ) == [[{1}, {1}], [{1}, {1}]]
-        assert blas_threads() == {2}
 
 
 def test_stream_shards_cancels_unconsumed_work():

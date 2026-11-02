@@ -1236,22 +1236,15 @@ def test_task_factory_forwards_keywords_that_newer_asyncio_passes():
 def test_operation_restores_blas_limits_left_by_concurrent_compute_tasks():
     import time
 
-    from threadpoolctl import ThreadpoolController, threadpool_limits
+    from threadpoolctl import threadpool_limits
 
-    controller = ThreadpoolController()
-
-    def blas_threads() -> list[int]:
-        return [
-            lib.num_threads
-            for lib in controller.lib_controllers
-            if lib.user_api == "blas"
-        ]
+    from tests.thread_helpers import blas_threads
 
     async def operation(runner):
         async def task() -> None:
             await runner.compute(lambda: time.sleep(0.001))
 
-        # Per-task limit scopes on several workers restore each other's values.
+        # Many compute calls on several workers leave BLAS as they found it.
         await asyncio.gather(*(task() for _ in range(64)))
 
     runner = _runner(ResourceBudget(1024**2, 8))
@@ -1266,16 +1259,10 @@ def test_operation_restores_blas_limits_left_by_concurrent_compute_tasks():
 
 
 def test_overlapping_thread_limits_restore_the_original_in_any_order():
-    from threadpoolctl import ThreadpoolController, threadpool_limits
+    from threadpoolctl import threadpool_limits
 
     from cytearc.utils.compute import enter_thread_limit, exit_thread_limit
-
-    def blas_threads() -> set[int]:
-        return {
-            lib.num_threads
-            for lib in ThreadpoolController().lib_controllers
-            if lib.user_api == "blas"
-        }
+    from tests.thread_helpers import blas_threads
 
     # The test session pins BLAS to one thread; raise it so a change shows.
     with threadpool_limits(limits=2, user_api="blas"):
@@ -1342,32 +1329,38 @@ def test_runner_keeps_groups_of_distinct_failures() -> None:
     assert {str(error) for error in raised.value.exceptions} == {"first", "second"}
 
 
-def test_blas_restore_failure_does_not_skip_later_cleanup(monkeypatch) -> None:
+def test_compute_calls_set_no_thread_limit_and_workers_keep_their_numba_count() -> None:
     import numba
 
     from cytearc.utils import compute
+    from tests.thread_helpers import blas_threads, raised_threads
 
-    restore = compute.exit_thread_limit
+    runner = _runner(ResourceBudget(1024 * 1024, 4))
+    assert runner.plan.threadsPerComputeWorker == 1
+    seen: list[tuple[set[int], int, dict]] = []
 
-    def failing_restore(token: int) -> None:
-        restore(token)
-        raise RuntimeError("blas restore failed")
+    async def operation(active: AsyncStorageRunner) -> None:
+        def probe() -> int:
+            seen.append(
+                (
+                    blas_threads(),
+                    numba.get_num_threads(),
+                    dict(compute._active_thread_limits),
+                )
+            )
+            return 0
 
-    # A compute call holds the thread limit, so its restore fails in the call.
-    monkeypatch.setattr(compute, "exit_thread_limit", failing_restore)
-    runner = _runner(ResourceBudget(1024, 2), chunksPerShard=2)
+        await asyncio.gather(*[active.compute(probe) for _ in range(8)])
+
     caller_threads = numba.get_num_threads()
-
-    async def operation(active: AsyncStorageRunner) -> int:
-        return await active.compute(lambda: 1)
-
-    with pytest.raises(RuntimeError, match="blas restore failed"):
+    assert caller_threads >= 2
+    with raised_threads(blas=2):
         runner.run(operation)
+        assert blas_threads() == {2}
+    # A BLAS limit would apply to the whole process, beside the caller's own
+    # work, so the calls hold none; each worker runs Numba on its share.
+    assert seen == [({2}, 1, {})] * 8
     assert numba.get_num_threads() == caller_threads
-    assert runner._compute_pool is not None and runner._compute_pool._shutdown
-    assert runner._codec_pool is not None and runner._codec_pool._shutdown
-    assert compute._active_thread_limits == {}
-    assert zarr.config.get("async.concurrency") == 10
 
 
 def test_a_read_whose_io_limit_fails_to_restore_reports_it(monkeypatch) -> None:

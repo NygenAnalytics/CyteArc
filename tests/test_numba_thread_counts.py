@@ -162,6 +162,63 @@ def _integration() -> tuple[str, str, Callable[[], object]]:
     )
 
 
+class _FeatureBatches:
+    """A stand-in assay that yields one batch of normalized features."""
+
+    nthreads = _REQUESTED
+
+    def __init__(self, cells_by_features: np.ndarray) -> None:
+        self.values = cells_by_features
+
+    def iter_normed_feature_wise(self, **_options: Any) -> Any:
+        yield self.values.T.copy(), np.arange(self.values.shape[1])
+
+
+def _marker_ranks() -> tuple[str, str, Callable[[], object]]:
+    from cytearc.features.markers.search import _rank_normed_batches
+
+    rng = np.random.default_rng(6)
+    values = rng.poisson(2.0, size=(40, 5)).astype(np.float64)
+    codes = np.repeat(np.arange(2), 20).astype(np.int64)
+    group_sizes = np.bincount(codes)
+    statistics = np.zeros((5, 2, 8))
+    return (
+        "cytearc.features.markers.search",
+        "_batch_stats",
+        lambda: _rank_normed_batches(
+            _FeatureBatches(values),
+            codes,
+            group_sizes,
+            np.arange(40),
+            np.arange(5),
+            statistics,
+            nthreads=_REQUESTED,
+            held_bytes=0,
+            norm_params={},
+            exact=None,
+        ),
+    )
+
+
+def _marker_regression() -> tuple[str, str, Callable[[], object]]:
+    from cytearc.features.markers.search import find_markers_by_regression
+
+    rng = np.random.default_rng(7)
+    values = rng.poisson(2.0, size=(30, 4)).astype(np.float64)
+    return (
+        "cytearc.features.markers.search",
+        "_regression_batch_results",
+        lambda: find_markers_by_regression(
+            _FeatureBatches(values),
+            np.arange(30),
+            np.arange(4),
+            np.arange(30.0),
+            2,
+            log_transform=None,
+        ),
+    )
+
+
 _CASES = {
     "Harmony": _harmony,
     "Paris": _paris,
@@ -172,6 +229,8 @@ _CASES = {
     "clone coupling": _coupling,
     "cell calling": _cell_calling,
     "WNN integration": _integration,
+    "marker ranks": _marker_ranks,
+    "marker regression": _marker_regression,
 }
 
 
@@ -201,4 +260,35 @@ def test_each_kernel_runs_on_the_requested_threads_and_the_count_comes_back(
     finally:
         numba.set_num_threads(previous)
     assert seen and set(seen) == {_REQUESTED}
+    assert after == 1
+
+
+def test_a_setting_that_ends_on_another_thread_changes_nothing_there():
+    import threading
+
+    from cytearc.utils.numba import numba_threads
+
+    if numba.config.NUMBA_NUM_THREADS < 2:
+        pytest.skip("needs Numba to start 2 threads")
+    entered: list[tuple[Any, int]] = []
+
+    def enter_on_a_worker() -> None:
+        context = numba_threads(2)
+        context.__enter__()
+        entered.append((context, numba.get_num_threads()))
+
+    previous = numba.get_num_threads()
+    numba.set_num_threads(1)
+    try:
+        worker = threading.Thread(target=enter_on_a_worker)
+        worker.start()
+        worker.join(10)
+        ((context, inside),) = entered
+        # As a pool's worker holds its count for its life and the runner ends
+        # the setting once the worker has finished.
+        context.__exit__(None, None, None)
+        after = numba.get_num_threads()
+    finally:
+        numba.set_num_threads(previous)
+    assert inside == 2
     assert after == 1

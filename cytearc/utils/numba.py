@@ -20,29 +20,24 @@ if TYPE_CHECKING:
 _CYTEARC_DIR = Path(__file__).resolve().parent.parent
 
 
-_NUMBA_THREADS_LOCK = threading.Lock()
-
-
 @contextmanager
 def numba_threads(nthreads: int) -> Iterator[None]:
     """Run Numba's parallel kernels on ``nthreads`` threads, then restore the count.
 
     The count is at least 1 and at most the threads that Numba started with.
-    Numba keeps a count for each thread, so this sets the calling thread's.
-    Changes are serialized, since concurrent calls of Numba's setter can
-    deadlock.
+    Numba keeps a count for each thread, so this sets the calling thread's,
+    and a setting that ends on another thread, as one held for the life of a
+    pool's worker does once the worker has finished, changes nothing.
     """
     import numba
 
-    with _NUMBA_THREADS_LOCK:
-        previous = numba.get_num_threads()
-        numba.set_num_threads(
-            min(max(1, int(nthreads)), numba.config.NUMBA_NUM_THREADS)
-        )
+    thread = threading.get_ident()
+    previous = numba.get_num_threads()
+    numba.set_num_threads(min(max(1, int(nthreads)), numba.config.NUMBA_NUM_THREADS))
     try:
         yield
     finally:
-        with _NUMBA_THREADS_LOCK:
+        if threading.get_ident() == thread:
             numba.set_num_threads(previous)
 
 
