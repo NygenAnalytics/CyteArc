@@ -713,7 +713,7 @@ def _record_counts(
     rule: str,
 ) -> np.ndarray:
     """Each record's count in its library's unit; refused where a library has none."""
-    for position in np.unique(sources[~is_molecule]).tolist():
+    for position in sorted_unique(sources[~is_molecule]).tolist():
         if units[position] is None:
             raise _unknown_unit(details[position], rule)
     unit_reads = np.asarray([unit == "reads" for unit in units], dtype=bool)

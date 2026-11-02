@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ..utils.arrays import sorted_unique
 from .counts import SiteTable
 
 if TYPE_CHECKING:
@@ -384,7 +385,7 @@ def frequency_clones(
     del covered, shown
     clusters = np.zeros(n_cells, dtype=np.int64)
     n_edges = 0
-    for group in np.unique(group_codes[status == 0]).tolist():
+    for group in sorted_unique(group_codes[status == 0]).tolist():
         members = np.flatnonzero((group_codes == group) & (status == 0))
         n_members = len(members)
         per_row = neighborhood_bytes_per_cell(n_members, n_variants)

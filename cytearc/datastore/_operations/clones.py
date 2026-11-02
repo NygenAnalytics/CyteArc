@@ -1164,8 +1164,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 clonotype, or a representative has no junction to show.
             KeyError: If the store holds no such artifact.
             RuntimeError: If the artifact is incomplete.
-            MemoryError: If reading the clonotypes' IDs, three times their
-                size as read, and 400 bytes for each clone given, or reading
+            MemoryError: If reading the clonotypes' IDs as text and a hash
+                index of them, and 400 bytes for each clone given, or reading
                 their representatives' junctions, a chunk of each array at a
                 time, does not fit the memory budget.
         """
@@ -1175,25 +1175,24 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             return names
         stored_ids = as_zarr_array(group["clonotype_ids"], name="clonotype_ids")
         n_clonotypes = int(stored_ids.shape[0])
-        # The IDs as read, the buffer they are decoded from and their
-        # compressed bytes, each at most their size, and a comparison of them
-        # with an ID given: 56 MiB traced for 410,365 IDs of up to 16
-        # characters, 26 MB as read. Each clone given is held throughout.
+        # The IDs read as Python strings, as every read of IDs as text is
+        # counted, and each ID's slot and hash in the index that finds those
+        # given. Each clone given is held throughout.
         held = _FIGURE_LABEL_BYTES * len(names)
-        resident = held + 3 * int(stored_ids.nbytes) + 2 * n_clonotypes
+        resident = (
+            held
+            + text_read_bytes(stored_ids, n_clonotypes)
+            + LOOKUP_BYTES_PER_CELL * n_clonotypes
+        )
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Labelling clonotypes reads the IDs of {n_clonotypes} clonotypes, "
                 f"about {resident} bytes, more than the memory budget of "
                 f"{self.memoryBytes} bytes. Raise mem_budget."
             )
-        stored = np.asarray(stored_ids[:])
-        codes = np.full(len(names), -1, dtype=np.int64)
-        for at, name in enumerate(names.tolist()):
-            hits = np.flatnonzero(stored == name)
-            if len(hits):
-                codes[at] = hits[0]
-        del stored
+        index = pd.Index(np.asarray(stored_ids[:]), dtype=object)
+        codes = np.asarray(index.get_indexer(names), dtype=np.int64)
+        del index
         if (codes < 0).any():
             unknown = names[codes < 0].tolist()
             raise ValueError(f"No clonotype is labelled {unknown[:5]}")

@@ -16,6 +16,33 @@ pytestmark = pytest.mark.benchmark
 
 CELLS = Ladder(sizes=(4_000, 8_000, 16_000, 32_000), smoke=600)
 GRAPH_CELLS = Ladder(sizes=(2_000, 4_000, 8_000, 16_000), smoke=600)
+# Distinct integers, such as the cell and barcode pairs of a million cells'
+# molecules, up to five million.
+DISTINCT_VALUES = Ladder(
+    sizes=(625_000, 1_250_000, 2_500_000, 5_000_000), smoke=1_000, unit="values"
+)
+
+
+def test_sorted_unique_of_distinct_integers(bench) -> None:
+    from cytearc.utils.arrays import sorted_unique
+
+    def make(n_values: int):
+        # Every value is distinct, spread out and shuffled.
+        rng = np.random.default_rng(inputs.SEED)
+        values = rng.permutation(n_values).astype(np.int64) * 7_919 - 3
+        return lambda: sorted_unique(values)
+
+    def check(n_values: int, distinct) -> None:
+        expected = np.arange(n_values, dtype=np.int64) * 7_919 - 3
+        np.testing.assert_array_equal(distinct, expected)
+        assert distinct.dtype == np.int64
+
+    bench(
+        "arrays.sorted_unique_of_distinct_integers",
+        make,
+        DISTINCT_VALUES,
+        check=check,
+    )
 
 
 def test_aucell_sparse_ranking(bench) -> None:

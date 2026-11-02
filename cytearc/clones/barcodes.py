@@ -48,6 +48,7 @@ from ..metadata.records import (
     RecordTable,
     pack_text,
 )
+from ..utils.arrays import sorted_unique
 
 __all__ = [
     "FIELDS",
@@ -524,7 +525,7 @@ def cell_summaries(table: RecordTable, n_cells: int) -> dict[str, np.ndarray]:
     cells = np.asarray(table.cells, dtype=np.int64)
     barcode = table.text["barcode"]
     n_values = max(1, len(barcode.offsets) - 1)
-    pairs = np.unique(cells * n_values + np.asarray(barcode.codes, dtype=np.int64))
+    pairs = sorted_unique(cells * n_values + np.asarray(barcode.codes, dtype=np.int64))
     return {
         "n_barcodes": np.bincount(pairs // n_values, minlength=n_cells).astype(
             np.int32
@@ -826,7 +827,7 @@ def repeated_keys(keys: Sequence[np.ndarray]) -> int:
         [np.empty(0, dtype=np.uint64), *(part[:, 0] for part in parts)]
     )
     halves.sort()
-    shared = np.unique(halves[1:][halves[1:] == halves[:-1]])
+    shared = sorted_unique(halves[1:][halves[1:] == halves[:-1]])
     del halves
     if not len(shared):
         return 0

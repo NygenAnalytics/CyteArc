@@ -1,4 +1,13 @@
-"""The sort-based replacements of ``np.unique`` equal it on integers."""
+"""The sort-based replacements of ``np.unique`` equal it on integers.
+
+NumPy 2.3 and later answer an ``np.unique`` call that asks for no indices,
+inverse or counts by hashing the values, which on millions of distinct
+integers takes tens of times as long as sorting them, so the clone stack's
+modules find distinct values with ``sorted_unique`` and ``has_duplicates``.
+"""
+
+import ast
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -11,6 +20,130 @@ from cytearc.utils.arrays import (
     unique_rows,
 )
 from tests.perturbation_helpers import traced_peak
+
+_CYTEARC_ROOT = Path(__file__).resolve().parents[1] / "cytearc"
+# The clone stack's modules: its three packages, and its modules in shared
+# packages. Master's other modules keep their plain calls, on feature, chunk,
+# group and float arrays where sorting saves nothing measurable.
+_STACK_PACKAGES = ("clones", "repertoire", "variants")
+_STACK_MODULES = (
+    "datastore/_operations/cell_barcodes.py",
+    "datastore/_operations/cell_groups.py",
+    "datastore/_operations/clone_artifacts.py",
+    "datastore/_operations/clones.py",
+    "datastore/_operations/lineage_barcodes.py",
+    "datastore/_operations/phylogeny.py",
+    "datastore/_operations/record_tables.py",
+    "datastore/_operations/recorder_alleles.py",
+    "datastore/_operations/repertoire.py",
+    "datastore/_operations/variants.py",
+    "metadata/records.py",
+    "plotting/_groups.py",
+    "plotting/clones.py",
+    "plotting/lineage_barcodes.py",
+    "plotting/recorder_alleles.py",
+    "plotting/repertoire.py",
+    "plotting/variants.py",
+    "readers/_contigs.py",
+    "readers/_delimited.py",
+    "readers/_treedata.py",
+    "readers/_variant_files.py",
+    "readers/airr.py",
+    "readers/cellsnp.py",
+    "readers/clone_tables.py",
+    "readers/giftwrap.py",
+    "readers/got.py",
+    "readers/lineage_barcodes.py",
+    "readers/mgatk.py",
+    "readers/mito_afm.py",
+    "readers/phylogeny.py",
+    "readers/recorder_alleles.py",
+    "readers/tapestri.py",
+    "readers/vartrix.py",
+    "writers/airr.py",
+    "writers/characters.py",
+    "writers/clone_tables.py",
+    "writers/tapestri.py",
+)
+# A call that asks for any of these sorts; NumPy hashes the values of others.
+_SORTING_ARGUMENTS = {"return_index", "return_inverse", "return_counts", "axis"}
+
+
+def _hashed_unique_lines(source: str) -> list[int]:
+    """The lines of the ``np.unique`` calls of ``source`` that NumPy hashes."""
+    lines = []
+    for node in ast.walk(ast.parse(source)):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "unique"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in {"np", "numpy"}
+        ):
+            continue
+        # A second positional argument is return_index, and unpacked
+        # arguments may name any of them.
+        sorts = len(node.args) > 1 or any(
+            isinstance(argument, ast.Starred) for argument in node.args
+        )
+        if not sorts and not any(
+            keyword.arg is None or keyword.arg in _SORTING_ARGUMENTS
+            for keyword in node.keywords
+        ):
+            lines.append(node.lineno)
+    return sorted(lines)
+
+
+def _stack_module_paths() -> list[Path]:
+    paths = []
+    for package in _STACK_PACKAGES:
+        # A renamed or removed package must fail here instead of passing.
+        assert (_CYTEARC_ROOT / package / "__init__.py").is_file(), package
+        paths.extend(sorted((_CYTEARC_ROOT / package).rglob("*.py")))
+    for module in _STACK_MODULES:
+        assert (_CYTEARC_ROOT / module).is_file(), module
+        paths.append(_CYTEARC_ROOT / module)
+    return paths
+
+
+def test_stack_modules_find_distinct_values_by_sorting() -> None:
+    paths = _stack_module_paths()
+    assert len(paths) == 64
+    hashed = [
+        f"{path.relative_to(_CYTEARC_ROOT).as_posix()}:{line}"
+        for path in paths
+        for line in _hashed_unique_lines(path.read_text())
+    ]
+    assert not hashed, (
+        "Plain np.unique calls hash their values; use sorted_unique, or "
+        f"has_duplicates to test whether values repeat: {hashed}"
+    )
+
+
+def test_the_guard_finds_each_plain_call_and_passes_sorting_calls() -> None:
+    source = "\n".join(
+        [
+            "import numpy",
+            "import numpy as np",
+            "a = np.unique(values)",
+            "b = len(numpy.unique(values[keep]))",
+            "c = np.unique(values, equal_nan=False)",
+            "d = np.unique(values, sorted=True)",
+            "e = np.unique(values, return_counts=True)",
+            "f = np.unique(values, return_inverse=True)",
+            "g = np.unique(values, return_index=True)",
+            "h = np.unique(rows, axis=0)",
+            "i = np.unique(values, True)",
+            "j = np.unique(values, **options)",
+            "k = np.unique(*arguments)",
+            "m = pd.unique(values)",
+            "n = sorted_unique(values)",
+            "def inner():",
+            "    return [value for value in np.unique(found).tolist()]",
+        ]
+    )
+    assert _hashed_unique_lines(source) == [3, 4, 5, 6, 17]
+    assert _hashed_unique_lines("x = 1\n") == []
 
 
 @pytest.mark.parametrize("seed", range(5))
@@ -36,6 +169,9 @@ def test_sorted_unique_keeps_the_dtype_of_small_and_unsigned_integers() -> None:
     assert sorted_unique(np.asarray([True, False, True])).tolist() == [False, True]
     assert sorted_unique(np.asarray([7])).tolist() == [7]
     assert sorted_unique(np.asarray([], dtype=np.int64)).tolist() == []
+    values = np.asarray([5, 3, 5, 9, 3, 3], dtype=np.int64)
+    assert sorted_unique(values).tolist() == [3, 5, 9]
+    assert sorted_unique(values[:1]).tolist() == [5]
 
 
 @pytest.mark.parametrize("values", [np.zeros((2, 2), dtype=int), np.asarray([1.5])])

@@ -15,6 +15,7 @@ import numpy as np
 
 from ..clones.recorders import CharacterMatrix
 from ..readers._treedata import write_character_store
+from ..utils.arrays import sorted_unique
 
 __all__ = [
     "laml_paths",
@@ -121,7 +122,7 @@ def write_laml_characters(
     codes = np.asarray(matrix.codes)
     # Each state's text is made once and shared by every cell that holds it:
     # missing, unedited and each edited state of the state table.
-    values = np.unique(
+    values = sorted_unique(
         np.concatenate(
             [[-1, 0], np.asarray(matrix.states["state"], dtype=np.int64)]
         ).astype(np.int64)

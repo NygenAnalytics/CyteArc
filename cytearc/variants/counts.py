@@ -29,7 +29,7 @@ from typing import Any, Literal, Protocol
 import numpy as np
 import pandas as pd
 
-from ..utils.arrays import sort_categories
+from ..utils.arrays import has_duplicates, sort_categories
 
 __all__ = [
     "ALLELE_ROLES",
@@ -324,7 +324,7 @@ class SiteTable:
         references = np.full(self.n_sites, -1, dtype=np.int64)
         positions = np.flatnonzero(self.allele_role == "reference")
         sites = self.allele_site[positions]
-        if len(sites) != len(np.unique(sites)):
+        if has_duplicates(sites):
             repeated = int(sites[np.flatnonzero(np.diff(np.sort(sites)) == 0)[0]])
             raise ValueError(
                 f"The site {self.label(repeated)} has two reference alleles"

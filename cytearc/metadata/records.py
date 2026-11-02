@@ -39,6 +39,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from ..utils.arrays import sorted_unique
 from ..utils.numba import njit
 
 __all__ = [
@@ -901,7 +902,7 @@ class RecordEncoder:
         )
         if not same.any():
             return []
-        candidates = np.unique(np.concatenate([order[1:][same], order[:-1][same]]))
+        candidates = sorted_unique(np.concatenate([order[1:][same], order[:-1][same]]))
         starts = np.cumsum([0] + [chunk.n_rows for chunk in chunks])
         found: set[tuple[int, str]] = set()
         seen: set[tuple[int, str]] = set()
