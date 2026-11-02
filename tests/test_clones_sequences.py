@@ -1554,6 +1554,18 @@ def test_edits_agree_as_the_pairs_of_two_components_do(monkeypatch) -> None:
         np.testing.assert_allclose(agree, share, rtol=0, atol=1e-12)
 
 
+def test_texts_of_one_component_in_two_lengths_expect_nothing() -> None:
+    # "ACGT" and "ACGTA" are of one component, so no pair of texts of their
+    # lengths is of two components, and they expect nothing, found without
+    # dividing by the pairs of two components, of which there are none.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        expected = expected_chance_pairs(
+            ["ACGT", "ACGTA"], "levenshtein", 1, components=[0, 0]
+        )
+    assert expected == 0
+
+
 def test_a_component_of_two_lengths_gives_a_text_of_each() -> None:
     # "ACGTACG" leads its component, which also holds "ACGT", and four texts
     # of lengths 4 and 7 are alone. Lengths 3 apart never pair within one
