@@ -24,6 +24,7 @@ import pandas as pd
 import pytest
 
 from cytearc.clones.recorders import STATES
+from cytearc.readers._delimited import text_layout
 from cytearc.readers.recorder_alleles import (
     ALLELE_FORMATS,
     allele_file,
@@ -1293,6 +1294,87 @@ def test_character_matrices_without_a_cell_column_name_read_as_r_writes_them(
     path.write_text("cell_barcode,intID1-SITE\ncell1,1\n")
     with pytest.raises(ValueError, match="characters are named intID<N>-<site>$"):
         read_all(path, format="petracer_characters")
+    # Nor does a matrix one of whose rows holds a state after the header's
+    # names, since a delimiter after each row's last field leaves none.
+    path.write_text("cell_barcode,intID1-RNF2\ncell1,1,\ncell2,2,3\n")
+    with pytest.raises(ValueError, match="characters are named intID<N>-<site>$"):
+        read_all(path, format="petracer_characters")
+
+
+def test_a_table_whose_rows_all_end_in_a_delimiter_takes_row_names_on_request(
+    tmp_path,
+):
+    # Rows of one field more than the header that all end in a delimiter
+    # read alike as R's row names with an empty last column and as rows that
+    # each end in a delimiter, so the shared reader refuses them unless its
+    # caller prefers the row names.
+    path = tmp_path / "table.csv"
+    path.write_text("a,b\nr1,1,\nr2,2,\n")
+    with pytest.raises(
+        ValueError, match="names 2 columns, and its rows of 3 fields all end in"
+    ):
+        text_layout(str(path))
+    layout = text_layout(str(path), prefer_row_names=True)
+    assert layout.names == ("", "a", "b")
+    assert layout.row_names and layout.rows_end_in_delimiter
+    # A row that holds a value after the header's names, or quoted empty
+    # text as R writes it, gives R's row names under either rule.
+    for rows in ("r1,1,\nr2,2,3\n", 'r1,1,\nr2,2,""\n'):
+        path.write_text("a,b\n" + rows)
+        for prefer in (False, True):
+            layout = text_layout(str(path), prefer_row_names=prefer)
+            assert layout.names == ("", "a", "b") and layout.row_names
+            assert not layout.rows_end_in_delimiter
+
+
+def _rows_ending_in_delimiters(format: str, folder: Path) -> tuple[Path, dict]:
+    """A file of the format whose rows each hold one empty field more than its header."""
+    if format == "darlin":
+        path = _darlin_pair(
+            folder,
+            _FINAL_HEADER + "2\tAAAC1\t23_268del\tLB1\tREF\t\n",
+            _MOLECULE_HEADER + "AAAC1\tx\tu1\t3\tm\tLB1\tREF\n",
+        )
+        return path, {"integrations": "CA"}
+    contents = {
+        "cassiopeia": (
+            "alleles.txt",
+            "cellBC\tintBC\tr1\tr2\tUMI\treadCount\nc1\ti1\tAC\tGT\t3\t30\t\n",
+            {},
+        ),
+        "petracer": (
+            "alleles.csv",
+            "intID,cellBC,RNF2,HEK3,EMX1,UMI,readCount\ni1,c1,None,None,None,3,30,\n",
+            {},
+        ),
+        "typewriter_chains": (
+            "consensus.tsv",
+            "cell\tACGTACGTACGT\tn_loci\nc1\tAC\t1\t\n",
+            {},
+        ),
+        "table": (
+            "table.tsv",
+            "cell\tallele\nc1\tAC\t\nc2\tGT\t\n",
+            {"columns": {"cell": "cell", "allele": "allele"}, "integrations": "X"},
+        ),
+    }
+    name, text, options = contents[format]
+    path = folder / name
+    path.write_text(text)
+    return path, options
+
+
+@pytest.mark.parametrize(
+    "format", ["darlin", "cassiopeia", "petracer", "typewriter_chains", "table"]
+)
+def test_tables_whose_rows_all_end_in_a_delimiter_are_refused(tmp_path, format):
+    # Only a character matrix's own checks refuse the reading of rows that
+    # each end in a delimiter, so every other table keeps the shared rule.
+    path, options = _rows_ending_in_delimiters(format, tmp_path)
+    with pytest.raises(
+        ValueError, match="all end in a delimiter with nothing after it: R's row names"
+    ):
+        allele_layout(allele_file(path), format=format, **options)
 
 
 def test_counts_must_be_whole_numbers_in_tool_tables(tmp_path):

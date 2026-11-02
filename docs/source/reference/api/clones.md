@@ -338,7 +338,7 @@ Each site of a cell is in one of five states: unedited; a mark, an edit that the
 
 ### Formats
 
-`import_alleles` recognises each file's format from its contents unless `format` names it. A character matrix of another tool needs `format="characters"`, and any other table `format="table"` with `columns`.
+`import_alleles` recognises each file's format from its contents unless `format` names it. A character matrix of another tool needs `format="characters"`, and any other table `format="table"` with `columns`. Text tables follow the layout rules of [clone tables](#import-clones-from-a-file), with one exception: a character matrix whose header leaves out the cells' column, as R's `write.table` writes it, takes its cells from its rows even where every row ends in an empty state, as PEtracer leaves a site of an integration that the cell's embryo lacks. A matrix whose rows do end in a delimiter after a named cells' column is refused, by its empty last states or, in PEtracer's matrices, by the cells' column read among the characters.
 
 | `format` | File | Integration | Tokens |
 |---|---|---|---|

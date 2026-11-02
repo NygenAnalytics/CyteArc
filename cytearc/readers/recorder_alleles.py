@@ -79,7 +79,7 @@ import csv
 import os
 import re
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -998,23 +998,13 @@ def _matrix_columns(names: Sequence[str], path: str) -> tuple[tuple[str, str], .
 
 
 def _matrix_layout(path: str, format: str) -> AlleleLayout:
-    text = text_layout(path, what="a character matrix")
-    rows_without_names = text.trailing_delimiter
-    if text.trailing_delimiter:
-        # A first row one field longer than the header, whose last field is
-        # empty, reads in a table as a delimiter that ends each row. A
-        # matrix's first column holds its cells, so the header lacks the row
-        # names' column, as R's write.table leaves it, and the row's last
-        # state is empty, as PEtracer writes a site that the cell's embryo
-        # lacks. A matrix whose rows do end in a delimiter then gives an empty
-        # last state, or a cell column among the characters, which the
-        # states and names refuse.
-        text = replace(
-            text,
-            names=("", *text.names),
-            row_names=True,
-            trailing_delimiter=False,
-        )
+    # A matrix's first column holds its cells, so a header one field shorter
+    # than its rows lacks the cells' column, as R's write.table leaves it,
+    # even where every row ends in an empty state, as PEtracer writes a site
+    # that the cell's embryo lacks. A matrix whose rows do end in a delimiter
+    # after a named cell column then gives an empty last state, or a cell
+    # column among the characters, which the states and names refuse.
+    text = text_layout(path, what="a character matrix", prefer_row_names=True)
     names = list(text.names[1:])
     columns = _matrix_columns(names, path)
     if format == "petracer_characters":
@@ -1027,7 +1017,7 @@ def _matrix_layout(path: str, format: str) -> AlleleLayout:
                 f"column, {text.names[1]!r}, reads as a character, as R's "
                 "write.table leaves the cells' column unnamed: write the matrix "
                 "without a delimiter at the end of each row"
-                if rows_without_names
+                if text.rows_end_in_delimiter
                 else ""
             )
             raise ValueError(

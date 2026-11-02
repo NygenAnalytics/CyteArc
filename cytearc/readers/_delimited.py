@@ -8,8 +8,9 @@ row-name layout, whose header holds one field fewer than its rows; R's
 ``write.csv`` writes the row names under an empty first name instead. A
 delimiter after each row's last field also gives one field more than the
 header, an empty one, so when every row ends in its delimiter with nothing
-after it the table is refused, since the two layouts read alike there.
-Blank lines hold no rows. These functions find a table's layout from its
+after it the table is refused, since the two layouts read alike there, unless
+its reader prefers R's row names because its own checks refuse the other
+layout, as a character matrix's do. Blank lines hold no rows. These functions find a table's layout from its
 first lines and yield its rows as text, chunk by chunk, naming the file in
 their errors.
 """
@@ -70,6 +71,10 @@ class TextLayout:
         header: Whether the first line is a header; a table without one
             names its columns by their position.
         row_chars: The characters of the longest of the first rows.
+        rows_end_in_delimiter: Whether the row names come from rows of one
+            field more than the header that all end in a delimiter with
+            nothing after it, which ``text_layout`` reads only for a reader
+            that prefers R's row names.
     """
 
     path: str
@@ -79,6 +84,7 @@ class TextLayout:
     row_names: bool
     header: bool = True
     row_chars: int = 0
+    rows_end_in_delimiter: bool = False
 
 
 def signature(path: str) -> bytes:
@@ -244,7 +250,9 @@ def split_fields(line: str, delimiter: str) -> list[str]:
     return next(reader, [])
 
 
-def text_layout(path: str, *, what: str = "a clone table") -> TextLayout:
+def text_layout(
+    path: str, *, what: str = "a clone table", prefer_row_names: bool = False
+) -> TextLayout:
     """Read a table's header and delimiter from its first line and rows.
 
     A header that starts with ``#`` is a header whose first name loses the
@@ -253,20 +261,27 @@ def text_layout(path: str, *, what: str = "a clone table") -> TextLayout:
     first column is named ``""``; a delimiter after each row's last field
     gives one field more than the header too, an empty one, so a table whose
     every row ends in its delimiter with nothing after it fits both layouts
-    and is refused. A header whose first name is empty, as R's ``write.csv``
-    writes it, holds row names too.
+    and is refused, unless ``prefer_row_names`` reads its row names. A header
+    whose first name is empty, as R's ``write.csv`` writes it, holds row names
+    too.
 
     Args:
         path: The table.
         what: What the table is, such as ``"a clone table"``, for the error
             about an empty file.
+        prefer_row_names: Read rows of one field more than the header that
+            all end in a delimiter with nothing after it as R's row names
+            with an empty last column, rather than refuse them. Only for a
+            table whose reader refuses the other layout by its own checks, as
+            a character matrix refuses the cells' column among its characters
+            and the empty last state that a delimiter after each row gives.
 
     Raises:
         ValueError: If the file is empty, is not UTF-8 text, a gzip file is
             cut short or corrupt, a quote never closes, its first row holds
-            another number of fields than its header names, or its rows of one
-            field more than the header all end in a delimiter with nothing
-            after it.
+            another number of fields than its header names, or, without
+            ``prefer_row_names``, its rows of one field more than the header
+            all end in a delimiter with nothing after it.
     """
     found = compression(path)
     first, rows = _header_and_rows(path, found)
@@ -277,7 +292,7 @@ def text_layout(path: str, *, what: str = "a clone table") -> TextLayout:
     # TREX starts its headers with "#", which marks no comment.
     if header and header[0].startswith("#"):
         header[0] = header[0][1:]
-    row_names = False
+    row_names = rows_end_in_delimiter = False
     if rows:
         fields = split_fields(rows[0], separator)
         if len(fields) == len(header) + 1:
@@ -285,11 +300,12 @@ def text_layout(path: str, *, what: str = "a clone table") -> TextLayout:
             # delimiter after each row's last field gives one field more too,
             # an empty one. The two differ only where a row holds something
             # after its last named column.
-            if _ends_in_delimiter(
+            rows_end_in_delimiter = _ends_in_delimiter(
                 rows[0], separator
             ) and not _rows_hold_values_after_their_names(
                 path, found, separator, len(header)
-            ):
+            )
+            if rows_end_in_delimiter and not prefer_row_names:
                 raise ValueError(
                     f"The header of {path} names {len(header)} columns, and its "
                     f"rows of {len(header) + 1} fields all end in a delimiter with "
@@ -316,6 +332,7 @@ def text_layout(path: str, *, what: str = "a clone table") -> TextLayout:
         compression=found,
         row_names=row_names,
         row_chars=max((len(row) for row in rows), default=0),
+        rows_end_in_delimiter=rows_end_in_delimiter,
     )
 
 
