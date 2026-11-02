@@ -10,7 +10,6 @@ clones or one clone per cell.
 
 import json
 import re
-import tracemalloc
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +20,7 @@ import pytest
 
 from cytearc.datastore.datastore import DataStore
 from cytearc.readers.phylogeny import read_trees, tree_file_layout
+from tests.perturbation_helpers import traced_peak
 from tests.storage_helpers import write_count_store
 
 pytestmark = pytest.mark.slow
@@ -286,12 +286,8 @@ def test_the_traced_peak_fits_the_smallest_budget_accepted(data, case) -> None:
         run(data)
         budget = _smallest_budget(store, lambda: run(data))
         store.memoryBytes = budget
-        tracemalloc.start()
-        try:
-            run(data)
-            _current, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+        # Imports and cuts are made afresh, and loads read, on each run.
+        _, peak = traced_peak(lambda: run(data), budget)
     finally:
         store.memoryBytes = full
     print(f"{case}: peak {peak} budget {budget} ratio {peak / budget:.2f}")
@@ -346,12 +342,7 @@ def test_a_59_megabyte_tree_on_one_line_parses_within_its_budget(tmp_path) -> No
             break
         except MemoryError as error:
             budget = int(re.search(r"about (\d+) bytes", str(error)).group(1))
-    tracemalloc.start()
-    try:
-        trees = read_trees(layout, memory_bytes=budget)
-        _current, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    trees, peak = traced_peak(lambda: read_trees(layout, memory_bytes=budget), budget)
     print(f"59 MB tree: peak {peak} budget {budget} ratio {peak / budget:.2f}")
     assert peak <= budget
     assert trees.names[2].startswith("exp1_P")
