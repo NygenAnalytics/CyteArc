@@ -19,7 +19,6 @@ from cytearc.quality_control import cell_calling
 from cytearc.quality_control.ambient import (
     _round_up,
     _row_uniforms,
-    _splitmix64,
     estimate_contamination,
     estimation_cells,
     expressing_cells,
@@ -27,6 +26,7 @@ from cytearc.quality_control.ambient import (
     remove_ambient_counts,
     soup_fractions,
 )
+from cytearc.utils.digest import mix64_array
 
 _MASK = 2**64 - 1
 
@@ -458,10 +458,10 @@ def test_rounding_draws_are_splitmix64_streams_of_the_seed_and_row_key():
     values = np.array([0, 1, 2**63 + 5, 2**64 - 1], dtype=np.uint64)
     with np.errstate(over="ignore"):
         compiled = [
-            int(cell_calling._mix64.py_func(np.uint64(value))) for value in values
+            int(cell_calling.mix64.py_func(np.uint64(value))) for value in values
         ]
     assert (
-        _splitmix64(values).tolist()
+        mix64_array(values).tolist()
         == compiled
         == [_mix(int(value)) for value in values]
     )

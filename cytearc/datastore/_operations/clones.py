@@ -92,13 +92,13 @@ from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.arrays import sorted_unique
+from ...utils.digest import file_sha256
 from ...utils.logging import logger
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
-    file_sha256,
     warn_unmatched_barcodes,
 )
 from .cell_groups import cell_groups, group_columns, selection_chunk_bytes

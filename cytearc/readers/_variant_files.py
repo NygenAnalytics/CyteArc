@@ -22,6 +22,8 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from ..utils.digest import file_sha256
+
 __all__ = [
     "VARIANT_FORMATS",
     "MatrixHeader",
@@ -126,14 +128,6 @@ def find_file(
     return os.path.join(folder, matches[0])
 
 
-def _file_sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def source_sha256(files: Sequence[tuple[str, str]]) -> tuple[str, dict[str, str]]:
     """Identify a source by the SHA-256 of the files it reads.
 
@@ -144,7 +138,7 @@ def source_sha256(files: Sequence[tuple[str, str]]) -> tuple[str, dict[str, str]
     Returns:
         The source's SHA-256, and each role's digest.
     """
-    digests = {role: _file_sha256(path) for role, path in files}
+    digests = {role: file_sha256(path) for role, path in files}
     if len(digests) == 1:
         return next(iter(digests.values())), digests
     payload = json.dumps(sorted(digests.items()), separators=(",", ":"))

@@ -4,8 +4,9 @@ The native backend implements the Leiden algorithm of Traag, Waltman and van
 Eck (2019). This module holds the pieces that all of its phases share:
 
 - a counter-based random number generator, in which every draw is a pure
-  function of a 64-bit key and a counter (the splitmix64 finaliser used as a
-  mixing function), so no generator state is shared between threads;
+  function of a 64-bit key and a counter (SplitMix64's finaliser,
+  ``utils.digest.mix64``, used as a mixing function), so no generator state
+  is shared between threads;
 - a small open-addressing hash accumulator that one worker uses to collect
   edge weights per neighbouring community;
 - parallel primitives (prefix sums, stable bucket sorts, conflict-free
@@ -28,8 +29,9 @@ Determinism rules followed here and in the other ``_leiden_*`` modules:
   the switch only affects speed.
 
 The constants below are part of the backend's definition. Changing the random
-number constants or ``FLOAT_SUM_BLOCK`` changes the labels of every native
-Leiden run, so they are frozen. The other block sizes only affect speed.
+number constants below or those of ``mix64``, or ``FLOAT_SUM_BLOCK``, changes
+the labels of every native Leiden run, so they are frozen. The other block
+sizes only affect speed.
 
 Reference:
     Traag VA, Waltman L, van Eck NJ. From Louvain to Leiden: guaranteeing
@@ -40,17 +42,13 @@ Reference:
 import numpy as np
 from numba import prange
 
+from ..utils.digest import mix64
 from ..utils.numba import njit
 
 # Counter-based random numbers. Fixed forever (see the module docstring).
 GOLDEN = np.uint64(0x9E3779B97F4A7C15)
-MIX_MULTIPLIER_1 = np.uint64(0xBF58476D1CE4E5B9)
-MIX_MULTIPLIER_2 = np.uint64(0x94D049BB133111EB)
 SEED_SALT = np.uint64(0x6C656964656E3031)
 _SHIFT_11 = np.uint64(11)
-_SHIFT_27 = np.uint64(27)
-_SHIFT_30 = np.uint64(30)
-_SHIFT_31 = np.uint64(31)
 _UNIT_INTERVAL_SCALE = 1.0 / 9007199254740992.0  # 2**-53
 
 # Stream identifiers of the random phases.
@@ -80,14 +78,6 @@ EMPTY_SLOT = -1
 
 # Id lists up to this length are sorted by insertion.
 INSERTION_SORT_LIMIT = 32
-
-
-@njit(cache=True, nogil=True)
-def mix64(value: np.uint64) -> np.uint64:
-    """Return the splitmix64 finaliser of a 64-bit unsigned integer."""
-    mixed = (value ^ (value >> _SHIFT_30)) * MIX_MULTIPLIER_1
-    mixed = (mixed ^ (mixed >> _SHIFT_27)) * MIX_MULTIPLIER_2
-    return mixed ^ (mixed >> _SHIFT_31)
 
 
 @njit(cache=True, nogil=True)

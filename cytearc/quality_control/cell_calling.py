@@ -49,6 +49,7 @@ from scipy.optimize import brentq
 from scipy.special import gammaln
 
 from ..utils.arguments import float_argument, integer_argument
+from ..utils.digest import mix64
 from ..utils.logging import logger
 from ..utils.numba import njit, numba_threads
 
@@ -87,17 +88,13 @@ _BLOCK_BYTES = 64 * 1024**2
 
 # Counter-based random numbers: every draw is a pure function of the seed,
 # the iteration, and the draw's position in it, so no state is shared between
-# threads. These are the constants of the SplitMix64 generator (Steele, Lea
-# and Flood 2014, doi:10.1145/2714064.2660195). Changing them changes every
-# p-value, so they are fixed.
+# threads. They follow the SplitMix64 generator (Steele, Lea and Flood 2014,
+# doi:10.1145/2714064.2660195): its golden-ratio increment, and its finaliser,
+# mix64. Changing these constants or mix64's changes every p-value, so they
+# are fixed.
 _GOLDEN = np.uint64(0x9E3779B97F4A7C15)
-_MIX_1 = np.uint64(0xBF58476D1CE4E5B9)
-_MIX_2 = np.uint64(0x94D049BB133111EB)
 _SEED_SALT = np.uint64(0x456D707479447270)
 _SHIFT_11 = np.uint64(11)
-_SHIFT_27 = np.uint64(27)
-_SHIFT_30 = np.uint64(30)
-_SHIFT_31 = np.uint64(31)
 _UNIT_INTERVAL = 1.0 / 9007199254740992.0  # 2**-53
 
 
@@ -810,23 +807,15 @@ def _total_parts(totals: np.ndarray, alpha: float) -> np.ndarray:
 
 
 @njit(cache=True, nogil=True)
-def _mix64(value: np.uint64) -> np.uint64:
-    """Return the SplitMix64 finaliser of a 64-bit unsigned integer."""
-    mixed = (value ^ (value >> _SHIFT_30)) * _MIX_1
-    mixed = (mixed ^ (mixed >> _SHIFT_27)) * _MIX_2
-    return mixed ^ (mixed >> _SHIFT_31)
-
-
-@njit(cache=True, nogil=True)
 def _iteration_key(seed: np.uint64, iteration: int) -> np.uint64:
     """Return the key of the random stream of one iteration."""
-    return _mix64(_mix64(seed ^ _SEED_SALT) ^ _mix64(np.uint64(iteration) + _GOLDEN))
+    return mix64(mix64(seed ^ _SEED_SALT) ^ mix64(np.uint64(iteration) + _GOLDEN))
 
 
 @njit(cache=True, nogil=True)
 def _uniform(key: np.uint64, counter: int) -> float:
     """Return draw ``counter`` of stream ``key``, uniform on [0, 1)."""
-    mixed = _mix64(key + np.uint64(counter) * _GOLDEN)
+    mixed = mix64(key + np.uint64(counter) * _GOLDEN)
     return np.float64(mixed >> _SHIFT_11) * _UNIT_INTERVAL
 
 

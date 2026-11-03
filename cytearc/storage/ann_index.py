@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import zarr
 
+from ..utils.digest import file_sha256
 from .types import as_zarr_array
 from .layout import _group_zarr_format, get_compressors
 from .profiles import StorageProfile
@@ -61,12 +62,9 @@ def save_ann_index(
     try:
         ann_idx.save_index(path)
         byte_length = os.path.getsize(path)
-        digest = hashlib.sha256()
-        with open(path, "rb") as source:
-            for block in iter(lambda: source.read(ANN_INDEX_CHUNK_BYTES), b""):
-                digest.update(block)
         # The local file is hashed first so the array and its record are
         # created with one metadata write; overwrite replaces an older index.
+        payload_sha256 = file_sha256(path)
         array = group.create_array(
             name,
             shape=(byte_length,),
@@ -83,7 +81,7 @@ def save_ann_index(
                 "metric": str(metric),
                 "dimensions": int(dimensions),
                 "element_count": int(element_count),
-                "payload_sha256": digest.hexdigest(),
+                "payload_sha256": payload_sha256,
             },
         )
         with open(path, "rb") as source:

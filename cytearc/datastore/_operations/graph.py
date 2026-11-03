@@ -563,17 +563,14 @@ def _ann_index_transfer_bytes(payload_bytes: int) -> int:
     holds the window it fills, the encoded chunks Zarr reads for it and the
     chunks it decodes, about three windows. A save holds the window it read
     from the file, Zarr's copy of it and the encoded bytes of the chunks in
-    flight, about two windows and two chunks. Before that, the save hashes
-    its file in reads of ``ANN_INDEX_CHUNK_BYTES``, and each read holds that
-    much beside the block before it, however small the file. Three windows
-    and two chunks, or one hashing read and its block, bound both, beside
-    what every save or load holds.
+    flight, about two windows and at most two chunks. Before that, the save
+    hashes its file through one buffer of at most 256 KiB and at most the
+    payload, less than a window. Three windows and two chunks bound both,
+    beside what every save or load holds.
     """
     window = min(int(payload_bytes), ANN_INDEX_IO_BYTES)
     chunk = min(int(payload_bytes), ANN_INDEX_CHUNK_BYTES)
-    copies = 3 * window + 2 * chunk
-    hashing = ANN_INDEX_CHUNK_BYTES + chunk
-    return max(copies, hashing) + _ANN_INDEX_TRANSFER_FIXED_BYTES
+    return 3 * window + 2 * chunk + _ANN_INDEX_TRANSFER_FIXED_BYTES
 
 
 def _float32_copy_bytes(data: ChunkedArray, dims: int) -> int:

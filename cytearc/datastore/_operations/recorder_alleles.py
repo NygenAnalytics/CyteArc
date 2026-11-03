@@ -48,6 +48,7 @@ from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.arrays import sorted_unique, unique_inverse
+from ...utils.digest import file_sha256, path_sha256
 from ...utils.logging import logger
 from ...utils.warnings import warn
 from .cell_groups import group_columns, within_groups
@@ -56,8 +57,6 @@ from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
-    file_sha256,
-    store_sha256,
     warn_unmatched_barcodes,
 )
 from .clone_artifacts import plan_clones, write_clones, zarr_write_buffer_bytes
@@ -203,10 +202,6 @@ _WRITE_CLONE_BYTES = 120
 
 def _files_text(n_files: int) -> str:
     return "the allele file" if n_files == 1 else "the allele files"
-
-
-def _path_sha256(path: Any) -> str:
-    return store_sha256(path) if os.path.isdir(path) else file_sha256(path)
 
 
 def _per_file(integrations: Any, n_files: int) -> list[Any]:
@@ -469,7 +464,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             barcode_suffix=barcode_suffix,
             barcode_pattern=barcode_pattern,
             what="allele file",
-            identify=_path_sha256,
+            digest=path_sha256,
         )
         # Integrations follow the order of the paths, as given, and each file
         # takes those of its own listing, also when a file is listed twice.

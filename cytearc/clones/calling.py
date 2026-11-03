@@ -40,6 +40,7 @@ from typing import Literal
 import numpy as np
 
 from ..utils.arrays import unique_inverse
+from ..utils.digest import mix64
 from ..utils.numba import njit
 
 __all__ = [
@@ -242,14 +243,6 @@ class SetNodes:
 
 
 @njit(cache=True)
-def _mixed(value: np.uint64) -> np.uint64:
-    """SplitMix64's finaliser, which spreads every input bit over the output."""
-    value = (value ^ (value >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
-    value = (value ^ (value >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
-    return value ^ (value >> np.uint64(31))
-
-
-@njit(cache=True)
 def _set_hashes(indptr: np.ndarray, items: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Two 64-bit hashes of each set, folded over its items in order."""
     n_sets = len(indptr) - 1
@@ -260,8 +253,8 @@ def _set_hashes(indptr: np.ndarray, items: np.ndarray) -> tuple[np.ndarray, np.n
         high = np.uint64(0x13198A2E03707344)
         for at in range(indptr[row], indptr[row + 1]):
             item = np.uint64(items[at])
-            low = _mixed(low ^ (item + np.uint64(0x9E3779B97F4A7C15)))
-            high = _mixed((high + item) * np.uint64(0xD6E8FEB86659FD93))
+            low = mix64(low ^ (item + np.uint64(0x9E3779B97F4A7C15)))
+            high = mix64((high + item) * np.uint64(0xD6E8FEB86659FD93))
         first[row] = low
         second[row] = high
     return first, second

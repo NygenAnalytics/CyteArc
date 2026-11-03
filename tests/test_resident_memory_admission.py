@@ -508,9 +508,8 @@ def test_ann_index_transfer_bytes_bound_the_traced_copies(tmp_path) -> None:
     payload = int(group["ann_idx_bytes"].shape[0])
     loading = _traced_peak(lambda: load_ann_index(group, "l2", dims))
 
-    # The payload fits one Zarr chunk, so a save holds a copy of it beside
-    # the 8 MiB that each read of its hashing asks for, and a load about
-    # three copies.
+    # The payload fits one Zarr chunk, so a save holds about two copies of
+    # it and a load about three.
     bound = _ann_index_transfer_bytes(payload)
     assert max(saving, loading) <= bound <= 2 * max(saving, loading)
 

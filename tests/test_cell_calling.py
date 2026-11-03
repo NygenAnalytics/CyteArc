@@ -982,7 +982,7 @@ def test_likelihood_kernels_match_their_python_versions() -> None:
 def test_random_number_kernels_match_their_python_versions() -> None:
     with np.errstate(over="ignore"):
         for value in (0, 1, 2**63 + 5, 2**64 - 1):
-            assert cc._mix64.py_func(np.uint64(value)) == cc._mix64(np.uint64(value))
+            assert cc.mix64.py_func(np.uint64(value)) == cc.mix64(np.uint64(value))
         for seed, iteration in ((0, 0), (7, 3), (2**64 - 1, 10_000)):
             key = cc._iteration_key.py_func(np.uint64(seed), iteration)
             assert key == cc._iteration_key(np.uint64(seed), iteration)
