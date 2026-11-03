@@ -96,7 +96,12 @@ def test_diversity_groups_by_columns_labels_and_selections(shared) -> None:
     by_sample = store.clones.diversity(clones, group_by="sample", size=3, coverage=0.5)
     assert by_sample.group_by == ("sample",) and by_sample.size == 3
     assert by_sample.coverage == 0.5
-    table = by_sample.indices.set_index("sample")
+    assert by_sample.indices.columns.tolist() == ["group", *dv.INDEX_COLUMNS]
+    assert by_sample.group_keys.to_dict("index") == {
+        "d2": {"sample": "d2"},
+        "d4": {"sample": "d4"},
+    }
+    table = by_sample.indices.join(by_sample.group_keys, on="group").set_index("sample")
     for sample, found in TRUTH.group_clone_sizes(TRUTH.samples).items():
         assert table.loc[sample, ["n_cells", "n_clones", "n_singletons"]].tolist() == [
             sum(found),
@@ -110,10 +115,12 @@ def test_diversity_groups_by_columns_labels_and_selections(shared) -> None:
     labels = store.snapshot_cluster_labels("cell_type", cell_selection=shared.cells)
     crossed = store.clones.diversity(clones, group_by=["sample"], groups=labels)
     assert crossed.groups == labels
-    assert crossed.indices.columns[:3].tolist() == ["group", "sample", "cluster_labels"]
+    assert crossed.indices.columns.tolist() == ["group", *dv.INDEX_COLUMNS]
+    assert crossed.group_keys.columns.tolist() == ["sample", "cluster_labels"]
     assert crossed.indices["n_cells"].sum() == 32
     # Each group is named by its labels joined by commas, in their order.
-    names = crossed.indices[["sample", "cluster_labels"]].agg(", ".join, axis=1)
+    names = crossed.group_keys[["sample", "cluster_labels"]].agg(", ".join, axis=1)
+    assert crossed.group_keys.index.tolist() == names.tolist()
     assert crossed.indices["group"].tolist() == names.tolist()
     assert crossed.hill["group"].tolist() == [
         name for name in names.tolist() for _ in dv.ORDERS
@@ -139,23 +146,31 @@ def test_diversity_at_full_coverage_is_the_observed_diversity(shared) -> None:
     assert hill["size_at_coverage"].tolist() == [31.0] * 3
 
 
-def test_group_columns_may_not_share_a_name_with_the_result(copied) -> None:
+def test_group_columns_may_take_the_names_of_the_results_columns(copied) -> None:
     store, clones = copied.store, copied.clones
-    store.cells.insert("coverage", TRUTH.samples.astype(object))
-    with pytest.raises(ValueError, match="'coverage', which is also a column"):
-        store.clones.diversity(clones, group_by="coverage")
-    with pytest.raises(ValueError, match="'coverage', which is also a column"):
-        store.clones.rarefaction(clones, group_by="coverage")
-    store.cells.insert("n_clones", TRUTH.samples.astype(object))
-    with pytest.raises(ValueError, match="'n_clones', which is also a column"):
-        store.clones.diversity(clones, group_by="n_clones")
-    # The count columns are n_cells and n_clones, so a clones artifact as
-    # labels, whose key column is "clones", groups the cells.
-    assert len(store.clones.diversity(clones, groups=clones).indices) > 0
-    # A name that only other results hold is free.
-    store.cells.insert("window", TRUTH.samples.astype(object))
-    assert len(store.clones.diversity(clones, group_by="window").indices) == 2
-    assert len(store.clones.rarefaction(clones, group_by="n_clones").curves)
+    neutral = store.clones.diversity(clones, group_by="sample")
+    neutral_curves = store.clones.rarefaction(clones, group_by="sample").curves
+    # Columns named like the results' own columns hold the samples' labels and
+    # measure what the samples do; their labels stay in the keys.
+    for name in ("group", "coverage", "n_clones", "shannon", "order", "diversity"):
+        store.cells.insert(name, TRUTH.samples.astype(object), overwrite=True)
+        found = store.clones.diversity(clones, group_by=name)
+        pd.testing.assert_frame_equal(found.indices, neutral.indices)
+        pd.testing.assert_frame_equal(found.hill, neutral.hill)
+        curves = store.clones.rarefaction(clones, group_by=name)
+        pd.testing.assert_frame_equal(curves.curves, neutral_curves)
+        for keys in (found.group_keys, curves.group_keys):
+            assert keys.columns.tolist() == [name]
+            assert keys.to_dict("index") == {
+                "d2": {name: "d2"},
+                "d4": {name: "d4"},
+            }
+        joined = found.indices.join(found.group_keys, on="group", rsuffix="_key")
+        label = f"{name}_key" if name in found.indices.columns else name
+        assert joined[label].tolist() == ["d2", "d4"]
+    # A clones artifact as labels has the key column "clones".
+    labelled = store.clones.diversity(clones, groups=clones)
+    assert labelled.group_keys.columns.tolist() == ["clones"]
 
 
 def test_cells_without_a_label_are_left_out(copied) -> None:
@@ -264,14 +279,14 @@ def test_summarizing_clone_sizes_holds_what_its_check_counts(shape) -> None:
     # group, every count and every row of the table beyond its group's first,
     # by the operation's own check.
     n_groups, per_group, cells = _clone_counts(shape)
-    keys = pd.DataFrame({"group": [f"g{at}" for at in range(n_groups)]})
+    names = [f"g{at}" for at in range(n_groups)]
 
     def summarize() -> object:
         pair_groups = np.repeat(np.arange(n_groups), per_group)
         pair_codes = np.arange(n_groups * per_group)
         pair_cells = cells.copy()
         grouped = dv.GroupedCloneSizes.from_clones(pair_groups, pair_cells, n_groups)
-        return dv.diversity_tables(grouped, keys), pair_codes
+        return dv.diversity_tables(grouped, names), pair_codes
 
     summarize()
     rows = len(
@@ -295,7 +310,7 @@ def test_summarizing_counts_each_row_of_a_group_beyond_its_first(
     # Two groups: clones of 1, 2, 2 and 5 cells, and two of 3 cells, so six
     # counts and four distinct sizes, two of them beyond their group's first;
     # the table is counted once it is built.
-    keys = pd.DataFrame({"group": ["a", "b"]})
+    keys = pd.DataFrame(index=pd.Index(["a", "b"], name="group"))
     counts = (
         keys,
         np.array([0, 0, 0, 0, 1, 1]),
@@ -308,15 +323,16 @@ def test_summarizing_counts_each_row_of_a_group_beyond_its_first(
     with pytest.raises(MemoryError, match=f"2 groups holds about {needed} bytes"):
         store.clones.diversity(clones)
     monkeypatch.setattr(store, "memoryBytes", needed)
-    assert store.clones.diversity(clones).indices["n_cells"].tolist() == [10, 6]
+    indices = store.clones.diversity(clones).indices
+    assert indices[["group", "n_cells"]].values.tolist() == [["a", 10], ["b", 6]]
 
 
-def test_rarefaction_counts_the_key_columns_of_each_row(copied, monkeypatch) -> None:
+def test_rarefaction_counts_the_rows_of_each_group(copied, monkeypatch) -> None:
     store, clones = copied.store, copied.clones
     # Two samples at 10,000 sizes, more than grouping the cells holds: each
-    # size reached in 192 bytes, and 20,000 rows of 128 bytes and 8 more for
-    # the sample's key column.
-    needed = 10_000 * 192 + 20_000 * (128 + 8)
+    # size reached in 192 bytes, and 20,000 rows of 128 bytes, which hold the
+    # group's name and leave the sample's label to the keys.
+    needed = 10_000 * 192 + 20_000 * 128
     sizes = np.arange(1, 10_001)
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
     with pytest.raises(
@@ -374,16 +390,16 @@ def test_rarefaction_follows_each_groups_default_sizes(shared) -> None:
     result = store.clones.rarefaction(clones, group_by="sample")
     assert isinstance(result, Rarefaction) and result.orders == (0, 1, 2)
     assert result.group_by == ("sample",) and result.clones == clones
-    curves = result.curves
-    assert curves.columns.tolist() == [
+    assert result.curves.columns.tolist() == [
         "group",
-        "sample",
         "order",
         "size",
         "method",
         "diversity",
         "coverage",
     ]
+    assert result.group_keys.columns.tolist() == ["sample"]
+    curves = result.curves.join(result.group_keys, on="group")
     d4 = dv.CloneSizes.from_sizes(TRUTH.group_clone_sizes(TRUTH.samples)["d4"])
     rows = curves[(curves["sample"] == "d4") & (curves["order"] == 1)]
     assert rows["size"].tolist() == dv.default_sizes(d4.n).tolist()

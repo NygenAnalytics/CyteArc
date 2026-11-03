@@ -1,10 +1,12 @@
 """The groups of cells that clone summaries count within, and their clones.
 
 A group is a combination of labels, one in each key column, such as a sample
-and a cell type. Tables and figures name it by its labels joined by commas.
-The summaries count each clone's cells within each group, from each cell's
-group and clone codes. These functions work on labels and codes and never
-touch storage.
+and a cell type. Tables and figures name it by its labels joined by commas,
+and a summary's record holds each group's labels apart, in a table of one row
+per group indexed by that name, so a key column may take any name, even one
+of a table's own columns. The summaries count each clone's cells within each
+group, from each cell's group and clone codes. These functions work on labels
+and codes and never touch storage.
 """
 
 from collections.abc import Sequence
@@ -13,7 +15,7 @@ import numpy as np
 import pandas as pd
 from ..utils.arguments import quoted_value
 
-__all__ = ["group_frame", "group_names", "pair_counts"]
+__all__ = ["group_key_table", "group_names", "pair_counts"]
 
 
 def group_names(group_keys: Sequence[dict[str, str]]) -> list[str]:
@@ -35,22 +37,29 @@ def group_names(group_keys: Sequence[dict[str, str]]) -> list[str]:
     return names
 
 
-def group_frame(
-    key_columns: Sequence[str], group_keys: Sequence[dict[str, str]]
+def group_key_table(
+    key_columns: Sequence[str],
+    group_keys: Sequence[dict[str, str]],
+    *,
+    index: str = "group",
 ) -> pd.DataFrame:
-    """One row per group: ``group``, its name, and its label in each key column.
+    """One row per group, indexed by its name, with its label in each key column.
 
-    The tables of grouped results take their first columns from these rows.
+    The index, named ``index``, holds each group's name as
+    :func:`group_names` gives it, the name that the tables of grouped
+    results hold in their own column of that name, and the columns are the
+    key columns under their own names, whatever those are, so
+    ``table.join(keys, on="group")`` gives each row of such a table its
+    group's labels; pandas asks for an ``rsuffix`` when a key column shares
+    a name with a column of the table.
 
     Raises:
         ValueError: If two groups get one name, as :func:`group_names` names
             them.
     """
     return pd.DataFrame(
-        {
-            "group": group_names(group_keys),
-            **{column: [key[column] for key in group_keys] for column in key_columns},
-        }
+        {column: [key[column] for key in group_keys] for column in key_columns},
+        index=pd.Index(group_names(group_keys), name=index),
     )
 
 

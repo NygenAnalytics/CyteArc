@@ -143,7 +143,7 @@ def test_fate_fractions_equal_cospars_clonal_fate_map(experiment) -> None:
     mapped = GOLDEN["fate_map"]
     assert mapped["fates"] == FATES
     cells = bias.cells.loc[mapped["early_cells"]]
-    found = cells[FATES].to_numpy(dtype=np.float64)
+    found = bias.fractions.loc[mapped["early_cells"], FATES].to_numpy(dtype=np.float64)
     expected = np.asarray(mapped["fractions"])
     # CoSpar gives an early cell whose clone has no late cell 0 in every
     # fate, where CyteArc gives it no fractions.

@@ -12,6 +12,7 @@ from itertools import combinations
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from cytearc.clones import OVERLAP_INDICES, CloneOverlap, CloneTracking
@@ -81,11 +82,15 @@ def test_overlap_compares_the_clones_of_two_samples(shared) -> None:
     assert result.groups is None and result.cell_selection is None
     by_sample = TRUTH.group_clone_cells(TRUTH.samples)
     sizes = result.group_sizes
-    assert sizes.columns.tolist() == ["group", "sample", "n_cells", "n_clones"]
+    assert sizes.columns.tolist() == ["group", "n_cells", "n_clones"]
     assert sizes.values.tolist() == [
-        [sample, sample, sum(by_sample[sample].values()), len(by_sample[sample])]
+        [sample, sum(by_sample[sample].values()), len(by_sample[sample])]
         for sample in SAMPLES
     ]
+    assert result.group_keys.index.name == "group"
+    assert result.group_keys.to_dict("index") == {
+        sample: {"sample": sample} for sample in SAMPLES
+    }
     _check_pairs(result.pairs, {sample: by_sample[sample] for sample in SAMPLES})
     # By hand: d2 holds 13 cells of clones 1 to 7, with 3, 2, 2, 3, 1, 1 and 1
     # cells, and d4 19 cells of clones 1 to 8, with 6, 4, 3, 1, 2, 1, 1 and 1.
@@ -118,12 +123,11 @@ def test_overlap_groups_by_labels_columns_and_selections(shared) -> None:
     labels = store.snapshot_cluster_labels("cell_type", cell_selection=shared.cells)
     by_type = store.clones.overlap(clones, groups=labels)
     assert by_type.groups == labels and by_type.group_by == ()
-    assert by_type.group_sizes.columns.tolist() == [
-        "group",
-        "cluster_labels",
-        "n_cells",
-        "n_clones",
-    ]
+    assert by_type.group_sizes.columns.tolist() == ["group", "n_cells", "n_clones"]
+    assert by_type.group_keys.columns.tolist() == ["cluster_labels"]
+    assert by_type.group_keys["cluster_labels"].tolist() == (
+        by_type.group_sizes["group"].tolist()
+    )
     found = TRUTH.group_clone_cells(TRUTH.cell_types)
     _check_pairs(by_type.pairs, {name: found[name] for name in sorted(found)})
     # Samples by cell types: each group is named by both labels.
@@ -134,6 +138,8 @@ def test_overlap_groups_by_labels_columns_and_selections(shared) -> None:
     )
     found = TRUTH.group_clone_cells(keys)
     assert crossed.group_sizes["group"].tolist() == sorted(found)
+    labelled = crossed.group_sizes.join(crossed.group_keys, on="group")
+    assert (labelled["sample"] + ", " + labelled["cell_type"]).tolist() == sorted(found)
     assert len(crossed.pairs) == 15
     _check_pairs(crossed.pairs, {name: found[name] for name in sorted(found)})
     # Only the cells of d2, compared between cell types.
@@ -193,25 +199,32 @@ def test_groups_whose_labels_join_to_one_name_are_refused(copied) -> None:
         store.clones.track(clones, group_by=["first", "second"])
 
 
-def test_group_columns_may_not_share_a_name_with_the_result(copied) -> None:
+def test_group_columns_may_take_the_names_of_the_results_columns(copied) -> None:
     store, clones = copied.store, copied.clones
-    for column in ("n_cells", "n_clones", "fraction", "clone", "cells", "clones"):
-        store.cells.insert(column, TRUTH.samples.astype(object))
-    for column in ("n_cells", "n_clones"):
-        with pytest.raises(ValueError, match=f"'{column}', which is also a column"):
-            store.clones.overlap(clones, group_by=column)
-    for column in ("n_cells", "fraction", "clone"):
-        with pytest.raises(ValueError, match=f"'{column}', which is also a column"):
-            store.clones.track(clones, group_by=column)
-    # The count columns are named n_cells and n_clones, so the names cells
-    # and clones, and a clones artifact as labels, whose key column is
-    # "clones", are free in both results.
-    for column in ("cells", "clones"):
-        assert len(store.clones.overlap(clones, group_by=column).pairs) == 1
-        assert len(store.clones.track(clones, group_by=column, top_n=1).table) == 2
-    assert store.clones.overlap(clones, groups=clones).group_sizes.columns.tolist()[
-        :2
-    ] == ["group", "clones"]
+    overlap = store.clones.overlap(clones, group_by="sample")
+    tracked = store.clones.track(clones, group_by="sample", top_n=2)
+    # Columns named like the results' own columns hold the samples' labels
+    # and compare and follow what the samples do; their labels stay in the
+    # keys.
+    for column in ("group", "n_cells", "n_clones", "fraction", "clone", "shared"):
+        store.cells.insert(column, TRUTH.samples.astype(object), overwrite=True)
+        found = store.clones.overlap(clones, group_by=column)
+        pd.testing.assert_frame_equal(found.group_sizes, overlap.group_sizes)
+        pd.testing.assert_frame_equal(found.pairs, overlap.pairs)
+        followed = store.clones.track(clones, group_by=column, top_n=2)
+        assert followed.tracked == tracked.tracked
+        pd.testing.assert_frame_equal(followed.table, tracked.table)
+        for keys in (found.group_keys, followed.group_keys):
+            assert keys.to_dict("index") == {
+                sample: {column: sample} for sample in SAMPLES
+            }
+        joined = followed.table.join(followed.group_keys, on="group", rsuffix="_key")
+        label = f"{column}_key" if column in followed.table.columns else column
+        assert joined[label].tolist() == joined["group"].tolist()
+    # A clones artifact as labels has the key column "clones" in both results.
+    assert store.clones.overlap(clones, groups=clones).group_keys.columns.tolist() == [
+        "clones"
+    ]
     assert store.clones.track(clones, groups=clones, top_n=1).tracked
     # Names that only the other result holds are free.
     assert len(store.clones.overlap(clones, group_by="fraction").pairs) == 1
@@ -267,8 +280,9 @@ def test_track_follows_the_largest_clones_of_each_group(shared, top) -> None:
     chosen = _largest(by_sample, top)
     assert tracked.tracked == tuple(number_label(clone) for clone in chosen)
     cells = tracked.table
-    assert cells.columns.tolist() == ["clone", "group", "sample", "n_cells", "fraction"]
-    assert (cells["group"] == cells["sample"]).all()
+    assert cells.columns.tolist() == ["clone", "group", "n_cells", "fraction"]
+    labelled = cells.join(tracked.group_keys, on="group")
+    assert (labelled["group"] == labelled["sample"]).all()
     expected = _expected_rows(by_sample, chosen)
     assert cells[["clone", "group", "n_cells"]].values.tolist() == [
         row[:3] for row in expected
@@ -306,14 +320,8 @@ def test_track_follows_labelled_clones_through_every_group(shared) -> None:
     by_group = TRUTH.group_clone_cells(keys)
     by_group = {name: by_group[name] for name in sorted(by_group)}
     expected = _expected_rows(by_group, [2, 7])
-    assert tracked.table.columns.tolist() == [
-        "clone",
-        "group",
-        "sample",
-        "cluster_labels",
-        "n_cells",
-        "fraction",
-    ]
+    assert tracked.table.columns.tolist() == ["clone", "group", "n_cells", "fraction"]
+    assert tracked.group_keys.columns.tolist() == ["sample", "cluster_labels"]
     assert tracked.table[["clone", "group", "n_cells"]].values.tolist() == [
         row[:3] for row in expected
     ]
@@ -398,11 +406,11 @@ def test_overlap_and_track_refuse_tables_beyond_the_budget(copied, monkeypatch) 
     monkeypatch.setattr(store, "memoryBytes", pairs)
     assert len(store.clones.overlap(clones, groups=own).pairs) == 496
     # The 8 clones that are each group's largest, followed through the 32
-    # groups, give 256 rows of 100 bytes and 16 for their one key column, a
-    # byte for each clone and group, and the counts, groups and clones read
-    # as for overlap, with the clones' labels.
-    rows = 256 * (100 + 16) + 8 * 32 + 40 * 32 + 32 * 2_000 + READ_WITH_LABELS
-    assert rows == 96_704
+    # groups, give 256 rows of 100 bytes, which leave the groups' labels to
+    # the keys, a byte for each clone and group, and the counts, groups and
+    # clones read as for overlap, with the clones' labels.
+    rows = 256 * 100 + 8 * 32 + 40 * 32 + 32 * 2_000 + READ_WITH_LABELS
+    assert rows == 92_608
     monkeypatch.setattr(store, "memoryBytes", rows - 1)
     with pytest.raises(
         MemoryError, match=f"gives 256 rows and holds about {rows} bytes.*smaller"
@@ -442,12 +450,14 @@ def kept_apart(copied, monkeypatch) -> SimpleNamespace:
 def test_overlap_compares_only_groups_of_the_labels_kept_apart(kept_apart) -> None:
     store, clones = kept_apart.store, kept_apart.clones
     result = store.clones.overlap(clones, group_by="sample")
-    assert result.group_sizes.columns.tolist() == [
-        "group",
-        "sample",
-        "lineage",
-        "n_cells",
-        "n_clones",
+    assert result.group_sizes.columns.tolist() == ["group", "n_cells", "n_clones"]
+    # The labels kept apart are the last key column.
+    assert result.group_keys.columns.tolist() == ["sample", "lineage"]
+    assert result.group_keys.values.tolist() == [
+        ["d2", "A"],
+        ["d2", "B"],
+        ["d4", "A"],
+        ["d4", "B"],
     ]
     assert result.group_sizes["group"].tolist() == [
         "d2, A",
@@ -511,14 +521,8 @@ def test_track_follows_clones_through_the_groups_of_their_labels(kept_apart) -> 
         clones, group_by="sample", labels=["8"], cell_selection=lineage_a
     )
     assert none.tracked == ("8",) and none.table.empty
-    assert none.table.columns.tolist() == [
-        "clone",
-        "group",
-        "sample",
-        "lineage",
-        "n_cells",
-        "fraction",
-    ]
+    assert none.table.columns.tolist() == ["clone", "group", "n_cells", "fraction"]
+    assert none.group_keys.columns.tolist() == ["sample", "lineage"]
     # The empty table keeps the types of a full one.
     full = store.clones.track(clones, group_by="sample", labels=["8"])
     assert none.table.dtypes.tolist() == full.table.dtypes.tolist()
@@ -552,10 +556,11 @@ def test_the_budget_counts_only_the_pairs_and_rows_of_one_lineage(
     monkeypatch.setattr(store, "memoryBytes", pairs)
     assert len(store.clones.overlap(clones, groups=own).pairs) == 304
     # Clones 1 to 4 are followed through the 24 groups of A and clones 5 to
-    # 8 through the 8 of B, in rows with two key columns.
-    rows = (4 * 24 + 4 * 8) * (100 + 2 * 16) + 8 * 32 + 40 * 32 + 32 * 2_000
+    # 8 through the 8 of B, in rows that leave the two key columns to the
+    # keys.
+    rows = (4 * 24 + 4 * 8) * 100 + 8 * 32 + 40 * 32 + 32 * 2_000
     rows += READ_WITH_LABELS
-    assert rows == 83_904
+    assert rows == 79_808
     monkeypatch.setattr(store, "memoryBytes", rows - 1)
     with pytest.raises(
         MemoryError, match=f"gives 128 rows and holds about {rows} bytes"

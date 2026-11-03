@@ -3,9 +3,10 @@
 from collections import Counter
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from cytearc.clones.groups import group_frame, group_names, pair_counts
+from cytearc.clones.groups import group_key_table, group_names, pair_counts
 
 
 def _pairs(groups: np.ndarray, clones: np.ndarray):
@@ -53,20 +54,43 @@ def test_pairs_of_one_group_and_one_clone() -> None:
     )
 
 
-def test_group_frame_names_each_group() -> None:
-    frame = group_frame(
+def test_group_key_table_holds_each_groups_labels_under_their_columns() -> None:
+    keys = group_key_table(
         ("sample", "cell_type"),
         [
             {"sample": "s1", "cell_type": "B"},
             {"sample": "s2", "cell_type": "T"},
         ],
     )
-    assert frame.to_dict("list") == {
-        "group": ["s1, B", "s2, T"],
-        "sample": ["s1", "s2"],
-        "cell_type": ["B", "T"],
-    }
-    assert group_frame((), [{}]).to_dict("list") == {"group": ["all cells"]}
-    assert group_frame(("sample",), []).columns.tolist() == ["group", "sample"]
+    assert keys.index.name == "group"
+    assert keys.index.tolist() == ["s1, B", "s2, T"]
+    assert keys.to_dict("list") == {"sample": ["s1", "s2"], "cell_type": ["B", "T"]}
+    # Without key columns, the one group of every cell has no labels.
+    alone = group_key_table((), [{}])
+    assert (alone.index.tolist(), alone.columns.tolist()) == (["all cells"], [])
+    assert group_key_table(("sample",), []).columns.tolist() == ["sample"]
+    assert group_key_table(
+        ("cell_type",), [{"cell_type": "B"}], index="fate"
+    ).index.name == ("fate")
     with pytest.raises(ValueError, match="both named"):
-        group_frame(("a", "b"), [{"a": "x, y", "b": "z"}, {"a": "x", "b": "y, z"}])
+        group_key_table(("a", "b"), [{"a": "x, y", "b": "z"}, {"a": "x", "b": "y, z"}])
+
+
+def test_key_columns_may_take_the_names_of_the_index_and_of_a_tables_columns() -> None:
+    # A key column named "group" sits beside the index of that name, and the
+    # labels of columns named like a summary's own columns stay the user's.
+    keys = group_key_table(
+        ("group", "n_cells"),
+        [{"group": "g1", "n_cells": "x"}, {"group": "g2", "n_cells": "y"}],
+    )
+    assert keys.index.tolist() == ["g1, x", "g2, y"]
+    assert keys.columns.tolist() == ["group", "n_cells"]
+    assert keys["group"].tolist() == ["g1", "g2"]
+    table = pd.DataFrame({"group": ["g2, y", "g1, x", "g2, y"], "n_cells": [3, 1, 2]})
+    joined = table.join(keys, on="group", rsuffix="_label")
+    assert joined.to_dict("list") == {
+        "group": ["g2, y", "g1, x", "g2, y"],
+        "n_cells": [3, 1, 2],
+        "group_label": ["g2", "g1", "g2"],
+        "n_cells_label": ["y", "x", "y"],
+    }

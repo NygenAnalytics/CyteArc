@@ -169,6 +169,7 @@ _COUPLING = CloneCoupling(
     pairs=None,  # type: ignore[arg-type]
     order=(),
     linkage=np.zeros((0, 4)),
+    group_keys=None,  # type: ignore[arg-type]
     method="share_cosine",
     n_permutations=0,
     random_seed=0,
@@ -179,6 +180,7 @@ _COUPLING = CloneCoupling(
 )
 _RAREFACTION = Rarefaction(
     curves=None,  # type: ignore[arg-type]
+    group_keys=None,  # type: ignore[arg-type]
     clones=_CLONES_REF,
     group_by=("sample",),
     groups=None,
@@ -188,6 +190,7 @@ _RAREFACTION = Rarefaction(
 _OVERLAP = CloneOverlap(
     group_sizes=None,  # type: ignore[arg-type]
     pairs=None,  # type: ignore[arg-type]
+    group_keys=None,  # type: ignore[arg-type]
     clones=_CLONES_REF,
     group_by=("sample", "tissue"),
     groups=None,
@@ -195,6 +198,7 @@ _OVERLAP = CloneOverlap(
 )
 _TRACKING = CloneTracking(
     table=None,  # type: ignore[arg-type]
+    group_keys=None,  # type: ignore[arg-type]
     clones=_CLONES_REF,
     tracked=("3",),
     group_by=("timepoint",),
@@ -213,6 +217,7 @@ _CLONOTYPES_REF = ArtifactRef(
 )
 _GENE_USAGE = GeneUsage(
     table=None,  # type: ignore[arg-type]
+    group_keys=None,  # type: ignore[arg-type]
     source=_RECEPTORS_REF,
     genes=("j_call",),
     level="family",
@@ -225,6 +230,7 @@ _GENE_USAGE = GeneUsage(
 )
 _GENE_PAIRS = GeneUsage(
     table=None,  # type: ignore[arg-type]
+    group_keys=None,  # type: ignore[arg-type]
     source=_CLONOTYPES_REF,
     genes=("v_call", "j_call"),
     level="gene",
@@ -237,6 +243,7 @@ _GENE_PAIRS = GeneUsage(
 )
 _SPECTRATYPE = Spectratype(
     table=None,  # type: ignore[arg-type]
+    group_keys=None,  # type: ignore[arg-type]
     source=_RECEPTORS_REF,
     sequence="nt",
     slots=("VJ_1", "VDJ_1"),

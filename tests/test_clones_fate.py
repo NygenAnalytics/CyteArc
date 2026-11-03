@@ -662,8 +662,7 @@ def test_fate_bias_refuses_inconsistent_counts() -> None:
 
 def test_the_tables_name_cells_clones_and_fates() -> None:
     result = fate_bias(np.array([0, -1, 1]), *_late_pairs())
-    fates = pd.DataFrame({"group": ["Neu", "Mono"], "cell_type": ["Neu", "Mono"]})
-    cells, table = fate_bias_tables(
+    cells, shares, table = fate_bias_tables(
         np.array(["e0", "e1", "e2"]),
         codes=np.array([0, -1, 1]),
         dominant=result.dominant,
@@ -675,10 +674,16 @@ def test_the_tables_name_cells_clones_and_fates() -> None:
         clone_early_cells=result.clone_early_cells,
         p_values=result.p_values,
         q_values=result.q_values,
-        fates=fates,
+        fates=["Neu", "Mono"],
     )
     assert cells.index.tolist() == ["e0", "e1", "e2"]
-    assert cells.columns.tolist() == ["clone", "n_late_cells", "fate", "Neu", "Mono"]
+    assert cells.columns.tolist() == ["clone", "n_late_cells", "fate"]
+    # The shares sit in a table of their own, one column per fate and nothing
+    # else, beside the cells.
+    assert shares.index.name == "ids"
+    assert shares.index.tolist() == ["e0", "e1", "e2"]
+    assert shares.columns.tolist() == ["Neu", "Mono"]
+    np.testing.assert_array_equal(shares.to_numpy(), result.fractions)
     assert cells["clone"].tolist()[0] == "c0" and pd.isna(cells["clone"].iloc[1])
     assert [
         name if isinstance(name, str) else None for name in cells["fate"].tolist()
@@ -686,7 +691,6 @@ def test_the_tables_name_cells_clones_and_fates() -> None:
     assert table.columns.tolist() == [
         "clone",
         "fate",
-        "cell_type",
         "n_early_cells",
         "n_late_cells",
         "n_cells",

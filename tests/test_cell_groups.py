@@ -74,12 +74,21 @@ def _group(store: DataStore, rows=None, *, selection: str = "every_cell", **opti
         ([3], TypeError, "group_by must be a column name"),
         ([""], TypeError, "group_by must be a column name"),
         (["a", "a"], ValueError, "group_by names a column twice"),
-        ("clones", ValueError, "'clones', which is also a column of the result"),
+        (["group", "group"], ValueError, "group_by names a column twice"),
     ],
 )
 def test_group_columns_are_checked(value, error, message) -> None:
     with pytest.raises(error, match=message):
-        group_columns(value, reserved=frozenset({"clones"}))
+        group_columns(value)
+
+
+def test_group_columns_may_take_the_names_of_any_tables_columns() -> None:
+    # Results hold the groups' labels in a table of their own, so no name is
+    # reserved for the columns of a result.
+    names = ["group", "clone", "n_cells", "fraction", "locus", "fate", "label"]
+    assert group_columns(names) == tuple(names)
+    for name in names:
+        assert group_columns(name) == (name,)
 
 
 def test_group_columns_take_one_name_or_several() -> None:
@@ -164,6 +173,30 @@ def test_without_a_grouping_the_rows_form_one_group(store) -> None:
     assert keyed.keys == [] and (keyed.codes == -1).all()
 
 
+def test_key_columns_named_like_a_results_columns_group_as_any_other(store) -> None:
+    # Columns named like the columns of the summaries' tables hold the same
+    # labels as the sample and batch, and group the cells as those do.
+    store.cells.insert("group", SAMPLES.astype(object), overwrite=True)
+    store.cells.insert("n_cells", BATCHES.astype(object), overwrite=True)
+    neutral = _group(store, group_by=["sample", "batch"])
+    named = _group(store, group_by=["group", "n_cells"])
+    assert named.key_columns == ("group", "n_cells")
+    assert [list(key.values()) for key in named.keys] == [
+        list(key.values()) for key in neutral.keys
+    ]
+    assert named.codes.tolist() == neutral.codes.tolist()
+    # A label artifact's kind and the labels kept apart sit beside them.
+    labels = store.snapshot_cluster_labels(
+        "cluster", cell_selection=store.snapshot_cell_selection("every_cell")
+    )
+    kinds = np.asarray(["T", "B"] * 4, dtype=object)
+    beside = _group(
+        store, group_by="group", groups=labels, kept_apart=(("fraction", kinds),)
+    )
+    assert beside.key_columns == ("group", "cluster_labels", "fraction")
+    assert beside.keys[0] == {"group": "s2", "cluster_labels": "x", "fraction": "T"}
+
+
 def test_groups_that_labels_with_commas_name_alike_are_refused(store) -> None:
     store.cells.insert("first", np.asarray(["x, y"] * 4 + ["x"] * 4), overwrite=True)
     store.cells.insert("second", np.asarray(["z"] * 4 + ["y, z"] * 4), overwrite=True)
@@ -184,8 +217,6 @@ def test_key_columns_are_checked(store) -> None:
         _group(store, group_by="batch", kept_apart=(("batch", BATCHES),))
     with pytest.raises(ValueError, match="name 'cluster_labels' twice"):
         _group(store, groups=labels, kept_apart=(("cluster_labels", BATCHES),))
-    with pytest.raises(ValueError, match="key column 'cluster_labels' is also a"):
-        _group(store, groups=labels, reserved=frozenset({"cluster_labels"}))
     with pytest.raises(ValueError, match="'absent', which is not a cell metadata"):
         _group(store, group_by=["sample", "absent"])
     with pytest.raises(TypeError, match="groups must be an ArtifactRef or None"):

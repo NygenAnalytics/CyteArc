@@ -127,8 +127,11 @@ def test_gene_usage_counts_each_cells_primary_chains(tmp_path) -> None:
 
 def test_gene_usage_by_group_and_by_clonotype(tmp_path) -> None:
     store, receptors, clonotypes = _sources(tmp_path)
-    by_sample = store.repertoire.gene_usage(receptors, group_by="sample").table
-    assert by_sample.columns[:3].tolist() == ["group", "sample", "locus"]
+    usage = store.repertoire.gene_usage(receptors, group_by="sample")
+    assert usage.table.columns[:3].tolist() == ["group", "locus", "v_call"]
+    assert usage.group_keys.index.name == "group"
+    assert usage.group_keys.columns.tolist() == ["sample"]
+    by_sample = usage.table.join(usage.group_keys, on="group")
     assert (by_sample["group"] == by_sample["sample"]).all()
     s1 = by_sample[(by_sample["sample"] == "s1") & (by_sample["locus"] == "TRA")]
     assert s1[["v_call", "n_cells", "fraction"]].values.tolist() == [
@@ -182,15 +185,15 @@ def test_spectratype_counts_junction_lengths(tmp_path) -> None:
     nucleotides = store.repertoire.spectratype(
         clonotypes, sequence="nt", group_by="sample", count="clonotypes"
     )
-    table = nucleotides.table
-    assert table.columns.tolist() == [
+    assert nucleotides.table.columns.tolist() == [
         "group",
-        "sample",
         "locus",
         "length",
         "n_clonotypes",
         "fraction",
     ]
+    assert nucleotides.group_keys.columns.tolist() == ["sample"]
+    table = nucleotides.table.join(nucleotides.group_keys, on="group")
     tra = table[(table["sample"] == "s1") & (table["locus"] == "TRA")]
     # s1 holds clonotype_1 (cell0 and cell4) and clonotype_4 (cell2), both
     # with 12 alpha nucleotides.
@@ -201,7 +204,9 @@ def test_tables_follow_the_natural_order_of_the_groups(tmp_path) -> None:
     store, receptors, clonotypes = _sources(tmp_path)
     # "g10" sorts before "g2" as text, but after it as a label.
     store.cells.insert("batch", np.asarray(["g10", "g2"] * 4))
-    lengths = store.repertoire.spectratype(receptors, group_by="batch").table
+    spectratype = store.repertoire.spectratype(receptors, group_by="batch")
+    assert spectratype.group_keys.index.tolist() == ["g2", "g10"]
+    lengths = spectratype.table.join(spectratype.group_keys, on="group")
     assert list(dict.fromkeys(lengths["batch"])) == ["g2", "g10"]
     assert lengths["group"].tolist() == lengths["batch"].tolist()
     # Within a group, by locus and then by length.
@@ -210,7 +215,7 @@ def test_tables_follow_the_natural_order_of_the_groups(tmp_path) -> None:
             rows[["locus", "length"]].values.tolist()
         )
     usage = store.repertoire.gene_usage(clonotypes, group_by="batch").table
-    assert list(dict.fromkeys(usage["batch"])) == ["g2", "g10"]
+    assert list(dict.fromkeys(usage["group"])) == ["g2", "g10"]
 
 
 @pytest.mark.parametrize(
@@ -443,6 +448,15 @@ def _counts(table, *columns: str) -> dict[tuple, int]:
     }
 
 
+def _labelled(result) -> pd.DataFrame:
+    """A record's table with its groups' labels after each row's group name."""
+    table = result.table.copy()
+    labels = result.group_keys.loc[table["group"]]
+    for at, column in enumerate(labels.columns, start=1):
+        table.insert(at, column, labels[column].to_numpy())
+    return table
+
+
 def test_a_clonotypes_source_counts_only_cells_with_a_clonotype(tmp_path) -> None:
     store, receptors, _clonotypes = _sources(tmp_path)
     # Under receptor_arms="VJ", cell3, with a beta chain alone, has no
@@ -475,8 +489,13 @@ def test_cells_outside_a_selection_or_without_a_label_are_left_out(tmp_path) -> 
     assert usage.n_cells == 4 and usage.cell_selection == first
     # A label artifact of the first four cells leaves the others ungrouped.
     labels = store.snapshot_cluster_labels("sample", cell_selection=first)
-    grouped = store.repertoire.spectratype(receptors, groups=labels).table
-    assert grouped.columns[:3].tolist() == ["group", labels.kind, "locus"]
+    spectratype = store.repertoire.spectratype(receptors, groups=labels)
+    grouped = spectratype.table
+    assert grouped.columns[:3].tolist() == ["group", "locus", "length"]
+    assert spectratype.group_keys.to_dict("index") == {
+        "s1": {labels.kind: "s1"},
+        "s2": {labels.kind: "s2"},
+    }
     assert _counts(grouped, "group", "locus", "length") == {
         ("s1", "TRA", 4): 2,
         ("s1", "TRB", 5): 2,
@@ -490,12 +509,18 @@ def test_groups_of_two_columns_follow_the_natural_order_of_each(tmp_path) -> Non
     store.cells.insert("batch", np.asarray(["b10", "b2"] * 4))
     usage = store.repertoire.gene_usage(receptors, group_by=["batch", "sample"])
     table = usage.table
-    assert table.columns[:4].tolist() == ["group", "batch", "sample", "locus"]
+    assert table.columns[:3].tolist() == ["group", "locus", "v_call"]
     assert list(dict.fromkeys(table["group"])) == [
         "b2, s1",
         "b2, s2",
         "b10, s1",
         "b10, s2",
+    ]
+    assert usage.group_keys.values.tolist() == [
+        ["b2", "s1"],
+        ["b2", "s2"],
+        ["b10", "s1"],
+        ["b10", "s2"],
     ]
     assert usage.group_by == ("batch", "sample")
     # Each group's shares of a locus sum to one.
@@ -503,31 +528,26 @@ def test_groups_of_two_columns_follow_the_natural_order_of_each(tmp_path) -> Non
     np.testing.assert_allclose(totals.to_numpy(), 1.0)
 
 
-def test_group_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:
+def test_group_columns_may_take_the_names_of_the_results_columns(tmp_path) -> None:
     store, receptors, clonotypes = _sources(tmp_path)
-    for column in ("locus", "v_call", "length", "group"):
-        store.cells.insert(column, SAMPLES)
-    for measure, column in (
-        (store.repertoire.gene_usage, "locus"),
-        (store.repertoire.gene_usage, "v_call"),
-        (store.repertoire.spectratype, "length"),
-        (store.repertoire.spectratype, "group"),
-    ):
-        with pytest.raises(ValueError, match=f"'{column}', which is also a column"):
-            measure(receptors, group_by=column)
-    # Gene usage has no length column, nor junction lengths a gene column.
-    assert len(store.repertoire.gene_usage(receptors, group_by="length").table)
-    assert len(store.repertoire.spectratype(receptors, group_by="v_call").table)
-    # The count columns are n_cells and n_clonotypes, which a group column may
-    # not name; clonotypes as labels, whose key column is "clonotypes", may
-    # group the cells.
-    for column in ("n_cells", "n_clonotypes"):
-        store.cells.insert(column, SAMPLES)
-        for measure in (store.repertoire.gene_usage, store.repertoire.spectratype):
-            with pytest.raises(ValueError, match=f"'{column}', which is also a column"):
-                measure(receptors, group_by=column)
-    by_clonotype = store.repertoire.gene_usage(receptors, groups=clonotypes).table
-    assert by_clonotype.columns[:2].tolist() == ["group", "clonotypes"]
+    measures = (store.repertoire.gene_usage, store.repertoire.spectratype)
+    neutral = [measure(receptors, group_by="sample") for measure in measures]
+    # Columns named like the results' own columns hold the samples' labels
+    # and count what the samples do; their labels stay in the keys.
+    for column in ("group", "locus", "v_call", "length", "n_cells", "fraction"):
+        store.cells.insert(column, SAMPLES, overwrite=True)
+        for measure, expected in zip(measures, neutral, strict=True):
+            found = measure(receptors, group_by=column)
+            pd.testing.assert_frame_equal(found.table, expected.table)
+            assert found.group_keys.to_dict("index") == {
+                sample: {column: sample} for sample in ("s1", "s2")
+            }
+            joined = found.table.join(found.group_keys, on="group", rsuffix="_key")
+            label = f"{column}_key" if column in found.table.columns else column
+            assert joined[label].tolist() == joined["group"].tolist()
+    # Clonotypes as labels have the key column "clonotypes".
+    by_clonotype = store.repertoire.gene_usage(receptors, groups=clonotypes)
+    assert by_clonotype.group_keys.columns.tolist() == ["clonotypes"]
 
 
 @pytest.mark.parametrize("measure", ["gene_usage", "spectratype"])
@@ -746,17 +766,21 @@ def test_gene_usage_recovers_the_truths_genes_in_each_sample(tmp_path) -> None:
             # clonotype.
             clone = (int(truth.clones[cell]), row.receptor_type)
             clones_of.setdefault(key, set()).add(clone)
-    usage = store.repertoire.gene_usage(
-        receptors, genes=("v_call", "j_call"), level="allele", group_by="sample"
-    ).table
+    usage = _labelled(
+        store.repertoire.gene_usage(
+            receptors, genes=("v_call", "j_call"), level="allele", group_by="sample"
+        )
+    )
     assert _counts(usage, "sample", "locus", "v_call", "j_call") == dict(by_cells)
-    once = store.repertoire.gene_usage(
-        clonotypes,
-        genes=("v_call", "j_call"),
-        level="allele",
-        group_by="sample",
-        count="clonotypes",
-    ).table
+    once = _labelled(
+        store.repertoire.gene_usage(
+            clonotypes,
+            genes=("v_call", "j_call"),
+            level="allele",
+            group_by="sample",
+            count="clonotypes",
+        )
+    )
     assert _counts(once, "sample", "locus", "v_call", "j_call") == {
         key: len(found) for key, found in clones_of.items()
     }
@@ -771,7 +795,7 @@ def test_gene_usage_recovers_the_truths_genes_in_each_sample(tmp_path) -> None:
     # At the gene level the alleles of the truth's calls fall away.
     genes_only = store.repertoire.gene_usage(receptors, group_by="sample").table
     assert not genes_only["v_call"].str.contains("*", regex=False).any()
-    lengths = store.repertoire.spectratype(receptors, group_by="sample").table
+    lengths = _labelled(store.repertoire.spectratype(receptors, group_by="sample"))
     expected_lengths: Counter = Counter()
     for cell, row in enumerate(expected.itertuples()):
         for slot in ("VJ_1", "VDJ_1"):
@@ -876,7 +900,9 @@ def test_the_groups_keys_are_checked_before_their_frame_is_built(tmp_path) -> No
 
 def test_counting_is_checked_with_its_table_before_it_runs(tmp_path) -> None:
     store, _receptors, _clonotypes = _sources(tmp_path)
-    keys = pd.DataFrame({"group": ["s1", "s2"], "sample": ["s1", "s2"]})
+    keys = pd.DataFrame(
+        {"sample": ["s1", "s2"]}, index=pd.Index(["s1", "s2"], name="group")
+    )
 
     def needs(n_chains: int, widths: list[int], once: bool) -> int:
         reads = repertoire_operations._Reads(
@@ -889,14 +915,22 @@ def test_counting_is_checked_with_its_table_before_it_runs(tmp_path) -> None:
         return int(found.group(1))
 
     # The table holds a row for each group, locus and value that the chains
-    # hold, at most 2 * 3 * 5 = 30 for 1,000 chains, each with its group,
-    # sample, locus, value, count and fraction: 120 + 6 * 16 bytes.
-    assert needs(1_000, [3, 5], once=False) == 30 * (120 + 6 * 16)
+    # hold, at most 2 * 3 * 5 = 30 for 1,000 chains, each with its group's
+    # name, locus, value, count and fraction, 120 + 5 * 16 bytes; the sample's
+    # label stays in the keys.
+    assert needs(1_000, [3, 5], once=False) == 30 * (120 + 5 * 16)
     # At most one row per chain for 20 chains.
-    assert needs(20, [3, 5], once=False) == 20 * (120 + 6 * 16)
+    assert needs(20, [3, 5], once=False) == 20 * (120 + 5 * 16)
     # Counting each clonotype, or each cell, once also holds each chain's row
     # of group, locus, value and clonotype or cell: 32 + 4 * 16 bytes.
-    assert needs(1_000, [3, 5], once=True) == 30 * 216 + 1_000 * (32 + 4 * 16)
+    assert needs(1_000, [3, 5], once=True) == 30 * 200 + 1_000 * (32 + 4 * 16)
+    # More key columns add nothing per row.
+    wide = pd.DataFrame(
+        {"sample": ["s1", "s2"], "batch": ["b1", "b1"], "site": ["x", "y"]},
+        index=keys.index,
+    )
+    keys = wide
+    assert needs(1_000, [3, 5], once=False) == 30 * (120 + 5 * 16)
 
 
 def test_two_slots_of_one_arm_count_a_cell_once_per_value(tmp_path) -> None:

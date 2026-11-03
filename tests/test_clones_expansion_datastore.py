@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from cytearc.clones import ClonalExpansion
@@ -163,10 +164,14 @@ def test_expansion_counts_cells_within_samples(shared) -> None:
         "clone",
         "category",
         "group",
-        "sample",
         "group_clone_size",
         "group_clone_frequency",
     ]
+    # The groups' labels stay in a table of their own, indexed by the name
+    # that the tables hold.
+    keys = loaded.group_keys
+    assert keys.index.name == "group"
+    assert keys.to_dict("index") == {"d2": {"sample": "d2"}, "d4": {"sample": "d4"}}
     expected = TRUTH.cell_clone_sizes(TRUTH.samples)
     np.testing.assert_array_equal(cells["group_clone_size"], expected)
     in_sample = {
@@ -180,27 +185,36 @@ def test_expansion_counts_cells_within_samples(shared) -> None:
             for size, sample in zip(expected.tolist(), TRUTH.samples, strict=True)
         ],
     )
-    assert cells["sample"].tolist() == [
-        sample if clone >= 0 else np.nan
+    labelled = cells.join(keys, on="group")
+    assert [
+        None if pd.isna(sample) else sample for sample in labelled["sample"].tolist()
+    ] == [
+        sample if clone >= 0 else None
         for sample, clone in zip(TRUTH.samples, TRUTH.clones, strict=True)
     ]
     by_hand = _table_by_hand(TRUTH.group_clone_sizes(TRUTH.samples))
     table = loaded.categories
     assert table.columns.tolist() == [
         "group",
-        "sample",
         "category",
         "n_cells",
         "n_clones",
         "fraction",
     ]
+    table = table.join(keys, on="group")
     for sample in ("d2", "d4"):
         rows = table[table["sample"] == sample]
         assert rows["group"].tolist() == [sample] * len(CATEGORIES)
         assert rows["n_cells"].tolist() == by_hand[sample]["n_cells"]
         assert rows["n_clones"].tolist() == by_hand[sample]["n_clones"]
     # The largest clone of each sample holds the window "1"; the rest follow.
-    ranks = loaded.rank_windows.set_index(["sample", "window"])
+    assert loaded.rank_windows.columns.tolist() == [
+        "group",
+        "window",
+        "n_cells",
+        "fraction",
+    ]
+    ranks = loaded.rank_windows.join(keys, on="group").set_index(["sample", "window"])
     for sample, found in TRUTH.group_clone_sizes(TRUTH.samples).items():
         assert ranks.loc[(sample, "1"), "n_cells"] == found[0]
         assert ranks.loc[(sample, "after 1"), "n_cells"] == sum(found[1:])
@@ -213,11 +227,11 @@ def test_expansion_crosses_columns_with_a_label_artifact(shared) -> None:
     ref = store.clones.expansion(shared.clones, group_by="sample", groups=labels)
     loaded = store.clones.load_expansion(ref)
     assert loaded.groups == labels
-    assert loaded.categories.columns[:4].tolist() == [
-        "group",
-        "sample",
-        "cluster_labels",
-        "category",
+    assert loaded.categories.columns[:2].tolist() == ["group", "category"]
+    # The key columns: the group_by column, then the label artifact's kind.
+    assert loaded.group_keys.columns.tolist() == ["sample", "cluster_labels"]
+    assert loaded.group_keys.index.tolist() == [
+        f"{sample}, {cell_type}" for sample, cell_type in loaded.group_keys.values
     ]
     keys = np.asarray(
         [
@@ -363,20 +377,41 @@ def test_expansion_refuses_groups_that_labels_with_commas_name_alike(copied) -> 
         store.clones.expansion(copied.clones, group_by=["first", "second"])
 
 
-def test_group_columns_may_not_share_a_name_with_the_result(copied) -> None:
+def test_group_columns_may_take_the_names_of_the_results_columns(copied) -> None:
     store = copied.store
-    store.cells.insert("category", TRUTH.samples.astype(object))
-    with pytest.raises(ValueError, match="'category', which is also a column"):
-        store.clones.expansion(copied.clones, group_by="category")
-    store.cells.insert("n_clones", TRUTH.samples.astype(object))
-    with pytest.raises(ValueError, match="'n_clones', which is also a column"):
-        store.clones.expansion(copied.clones, group_by="n_clones")
-    # The count columns are n_cells and n_clones, so a clones artifact as
-    # labels, whose key column is "clones", groups the cells.
-    assert store.clones.expansion(copied.clones, groups=copied.clones)
-    # A column that only other summaries hold is free.
-    store.cells.insert("coverage", TRUTH.samples.astype(object))
-    assert store.clones.expansion(copied.clones, group_by="coverage")
+    neutral = store.clones.load_expansion(
+        store.clones.expansion(copied.clones, group_by="sample")
+    )
+    # Columns named like the expansion's own columns hold the samples' labels,
+    # and measure what the samples do; their labels stay in the keys.
+    for name in (
+        "group",
+        "clone",
+        "category",
+        "n_cells",
+        "n_clones",
+        "fraction",
+        "window",
+        "group_clone_size",
+    ):
+        store.cells.insert(name, TRUTH.samples.astype(object), overwrite=True)
+        loaded = store.clones.load_expansion(
+            store.clones.expansion(copied.clones, group_by=name)
+        )
+        for table in ("cells", "categories", "rank_windows"):
+            found, expected = getattr(loaded, table), getattr(neutral, table)
+            assert found.columns.tolist() == expected.columns.tolist(), (name, table)
+            pd.testing.assert_frame_equal(found, expected)
+        assert loaded.group_keys.columns.tolist() == [name]
+        assert loaded.group_keys[name].tolist() == ["d2", "d4"]
+        joined = loaded.categories.join(loaded.group_keys, on="group", rsuffix="_key")
+        label = name if name not in loaded.categories.columns else f"{name}_key"
+        assert joined[label].tolist() == joined["group"].tolist()
+    # A clones artifact as labels has the key column "clones".
+    labelled = store.clones.load_expansion(
+        store.clones.expansion(copied.clones, groups=copied.clones)
+    )
+    assert labelled.group_keys.columns.tolist() == ["clones"]
 
 
 @pytest.mark.parametrize(
@@ -451,17 +486,20 @@ def test_frequency_bounds_that_print_alike_get_names_of_their_own(shared) -> Non
     }
 
 
-def test_the_cells_table_orders_the_labels_of_key_columns_naturally(copied) -> None:
+def test_the_group_keys_order_the_groups_naturally(copied) -> None:
     store = copied.store
     sites = np.where(TRUTH.samples == "d2", "s2", "s10").astype(object)
     store.cells.insert("site", sites)
     loaded = store.clones.load_expansion(
         store.clones.expansion(copied.clones, group_by="site")
     )
-    assert loaded.cells["site"].cat.categories.tolist() == ["s2", "s10"]
-    assert loaded.categories["site"].drop_duplicates().tolist() == ["s2", "s10"]
-    assert loaded.cells["site"].astype(object).tolist() == [
-        site if clone >= 0 else np.nan
+    assert loaded.group_keys.index.tolist() == ["s2", "s10"]
+    assert loaded.group_keys["site"].tolist() == ["s2", "s10"]
+    assert loaded.cells["group"].cat.categories.tolist() == ["s2", "s10"]
+    assert loaded.categories["group"].drop_duplicates().tolist() == ["s2", "s10"]
+    labelled = loaded.cells.join(loaded.group_keys, on="group")
+    assert [None if pd.isna(site) else site for site in labelled["site"].tolist()] == [
+        site if clone >= 0 else None
         for site, clone in zip(sites, TRUTH.clones, strict=True)
     ]
 

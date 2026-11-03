@@ -25,8 +25,6 @@ import numpy as np
 import pandas as pd
 
 from ..storage.refs import ArtifactRef
-from ..utils.arrays import sort_categories
-from .groups import group_names
 
 __all__ = [
     "DEFAULT_BREAKPOINTS",
@@ -290,25 +288,31 @@ class ClonalExpansion:
     """The clonal expansion of a set of cells, from a ``clonal_expansion`` artifact.
 
     The groups are the combinations of the labels of the ``group_by``
-    columns and of the ``groups`` artifact; these key columns are each
-    group's key in the tables.
+    columns, of the ``groups`` artifact and of the labels that the clones
+    keep apart, such as receptor types. Each table names a group in
+    ``group``, its labels joined by commas, and ``group_keys`` holds its
+    labels, so ``categories.join(group_keys, on="group")`` gives each row its
+    group's labels.
 
     Attributes:
         cells: One row per cell, indexed by cell ``ids``: ``clone``,
             ``category`` (its expansion category, NA without a clone or a
-            group), ``group`` (the group's labels joined by commas), the
-            group's key, ``group_clone_size`` (the cells of its clone in its
-            group, 0 without one) and ``group_clone_frequency`` (their share
-            of the group's cells with a clone, NaN without one). The labels
-            are categoricals, and ``category`` is ordered, smallest first.
+            group), ``group`` (the group's name, NA without one),
+            ``group_clone_size`` (the cells of its clone in its group, 0
+            without one) and ``group_clone_frequency`` (their share of the
+            group's cells with a clone, NaN without one). The labels are
+            categoricals, and ``category`` is ordered, smallest first.
         categories: One row per group and category, every category of every
-            group: ``group``, the group's key, ``category``, ``n_cells``,
-            ``n_clones``, and ``fraction``, the share of the group's cells with
-            a clone that the category holds.
-        rank_windows: One row per group and rank window: ``group``, the
-            group's key, ``window``, ``n_cells``, the cells that the group's
-            clones ranked in the window hold, and their ``fraction`` of the
-            group's cells.
+            group: ``group``, ``category``, ``n_cells``, ``n_clones``, and
+            ``fraction``, the share of the group's cells with a clone that
+            the category holds.
+        rank_windows: One row per group and rank window: ``group``,
+            ``window``, ``n_cells``, the cells that the group's clones ranked
+            in the window hold, and their ``fraction`` of the group's cells.
+        group_keys: One row per group, indexed by its name, ``group``, with
+            its label in each key column: the ``group_by`` columns, the kind
+            of the ``groups`` artifact, then the columns that the clones keep
+            apart, under their own names.
         clones: The clone artifact, such as a ``clones`` artifact.
         labels: The categories, smallest clones first.
         breakpoints: The bounds in cells, or None with frequency bounds.
@@ -324,6 +328,7 @@ class ClonalExpansion:
     cells: pd.DataFrame = field(repr=False)
     categories: pd.DataFrame = field(repr=False)
     rank_windows: pd.DataFrame = field(repr=False)
+    group_keys: pd.DataFrame = field(repr=False)
     clones: ArtifactRef
     labels: tuple[str, ...]
     breakpoints: tuple[int, ...] | None
@@ -350,13 +355,15 @@ def expansion_tables(
     clones: np.ndarray,
     clone_ids: np.ndarray,
     groups: np.ndarray,
-    group_keys: Sequence[dict[str, str]],
-    key_columns: Sequence[str],
+    group_names: Sequence[str],
     sizes: np.ndarray,
     frequencies: np.ndarray,
     splits: Sequence[int],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Return the tables of cells, categories and rank windows.
+
+    The tables name each group in ``group``; its labels stay out of them,
+    so a key column may take any name.
 
     Args:
         cell_ids: The ``ids`` of the cells.
@@ -365,10 +372,9 @@ def expansion_tables(
         labels: The names of the categories.
         clones: Each cell's clone code, -1 without one.
         clone_ids: The label of each clone code.
-        groups: Each cell's group, a position in ``group_keys``, -1 without
+        groups: Each cell's group, a position in ``group_names``, -1 without
             one.
-        group_keys: Each group's label in each key column.
-        key_columns: The columns of the groups' keys.
+        group_names: Each group's name, its labels joined by commas.
         sizes: Each cell's clone size in its group.
         frequencies: Each cell's clone frequency in its group.
         splits: The last rank of each window but the last.
@@ -377,13 +383,9 @@ def expansion_tables(
     groups = np.asarray(groups, dtype=np.int64)
     clones = np.asarray(clones, dtype=np.int64)
     names = np.asarray(list(labels), dtype=object)
-    n_groups, n_categories = len(group_keys), len(names)
+    group_labels = np.asarray(list(group_names), dtype=object)
+    n_groups, n_categories = len(group_labels), len(names)
     counted = categories >= 0
-    group_labels = np.asarray(group_names(group_keys), dtype=object)
-    keys = {
-        column: np.asarray([key[column] for key in group_keys], dtype=object)
-        for column in key_columns
-    }
     # Each cell's labels are categories coded by the stored codes, so the
     # table holds no text per cell.
     cell_columns: dict[str, Any] = {
@@ -396,16 +398,6 @@ def expansion_tables(
         ),
         "group": pd.Categorical.from_codes(groups, categories=pd.Index(group_labels)),
     }
-    for column, column_keys in keys.items():
-        # Each key column's labels in their natural order, as the groups are.
-        distinct = sort_categories(dict.fromkeys(column_keys.tolist()))
-        group_codes = pd.Index(distinct, dtype=object).get_indexer(column_keys)
-        cell_columns[column] = pd.Categorical.from_codes(
-            np.where(groups >= 0, group_codes[np.maximum(groups, 0)], -1)
-            if n_groups
-            else np.full(len(groups), -1),
-            categories=pd.Index(distinct, dtype=object),
-        )
     cell_columns["group_clone_size"] = np.asarray(sizes, dtype=np.int64)
     cell_columns["group_clone_frequency"] = np.asarray(frequencies, dtype=np.float64)
     cells = pd.DataFrame(cell_columns, index=pd.Index(np.asarray(cell_ids), name="ids"))
@@ -422,10 +414,6 @@ def expansion_tables(
     table = pd.DataFrame(
         {
             "group": pd.array(np.repeat(group_labels, n_categories), dtype="string"),
-            **{
-                column: pd.array(np.repeat(column_keys, n_categories), dtype="string")
-                for column, column_keys in keys.items()
-            },
             "category": pd.array(np.tile(names, n_groups), dtype="string"),
             "n_cells": cell_counts.reshape(-1),
             "n_clones": clone_counts.reshape(-1),
@@ -439,12 +427,6 @@ def expansion_tables(
             "group": pd.array(
                 np.repeat(group_labels, len(window_names)), dtype="string"
             ),
-            **{
-                column: pd.array(
-                    np.repeat(column_keys, len(window_names)), dtype="string"
-                )
-                for column, column_keys in keys.items()
-            },
             "window": pd.array(np.tile(window_names, n_groups), dtype="string"),
             "n_cells": windows.reshape(-1),
             "fraction": _shares(windows).reshape(-1),

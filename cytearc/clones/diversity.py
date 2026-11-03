@@ -1342,19 +1342,25 @@ def indices(clones: CloneSizes) -> dict[str, float]:
 class ClonalDiversity:
     """The diversity of the clones of groups of cells.
 
-    The groups are the combinations of the ``group_by`` columns' labels and
-    the ``groups`` artifact's labels; each table names a group in ``group``,
-    its labels joined by commas, and holds its labels in the key columns.
+    The groups are the combinations of the ``group_by`` columns' labels, the
+    ``groups`` artifact's labels and the labels that the clones keep apart;
+    each table names a group in ``group``, its labels joined by commas, and
+    ``group_keys`` holds its labels, so ``indices.join(group_keys,
+    on="group")`` gives each row its group's labels.
 
     Attributes:
-        indices: One row per group: ``group``, the key columns and the
-            columns of :func:`indices`.
-        hill: One row per group and order 0, 1 and 2: ``group``, the key
-            columns, ``order``, ``observed`` and ``estimated`` (asymptotic)
-            Hill numbers, the Hill number ``at_size`` of the common size, with
-            its ``coverage_at_size`` and ``method_at_size``, and the Hill
-            number ``at_coverage`` of the common coverage, with its
+        indices: One row per group: ``group`` and the columns of
+            :func:`indices`.
+        hill: One row per group and order 0, 1 and 2: ``group``, ``order``,
+            ``observed`` and ``estimated`` (asymptotic) Hill numbers, the Hill
+            number ``at_size`` of the common size, with its
+            ``coverage_at_size`` and ``method_at_size``, and the Hill number
+            ``at_coverage`` of the common coverage, with its
             ``size_at_coverage`` and ``method_at_coverage``.
+        group_keys: One row per group, indexed by its name, ``group``, with
+            its label in each key column: the ``group_by`` columns, the kind
+            of the ``groups`` artifact, then the columns that the clones keep
+            apart, under their own names.
         clones: The clone artifact, such as a ``clones`` artifact.
         group_by: The cell metadata columns of the groups.
         groups: The label artifact of the groups, or None.
@@ -1365,6 +1371,7 @@ class ClonalDiversity:
 
     indices: pd.DataFrame = field(repr=False)
     hill: pd.DataFrame = field(repr=False)
+    group_keys: pd.DataFrame = field(repr=False)
     clones: ArtifactRef
     group_by: tuple[str, ...]
     groups: ArtifactRef | None
@@ -1377,12 +1384,17 @@ class ClonalDiversity:
 class Rarefaction:
     """The rarefaction and extrapolation curves of groups of cells.
 
+    The groups are those of :class:`ClonalDiversity`, and ``group_keys``
+    holds their labels.
+
     Attributes:
         curves: One row per group, order and size: ``group`` (its labels
-            joined by commas), the key columns, ``order``, ``size`` (cells),
-            ``method`` (``"rarefaction"``, ``"observed"`` or
-            ``"extrapolation"``), ``diversity`` (the Hill number) and
-            ``coverage``.
+            joined by commas), ``order``, ``size`` (cells), ``method``
+            (``"rarefaction"``, ``"observed"`` or ``"extrapolation"``),
+            ``diversity`` (the Hill number) and ``coverage``.
+        group_keys: One row per group, indexed by its name, ``group``, with
+            its label in each key column, as :class:`ClonalDiversity` holds
+            them.
         clones: The clone artifact, such as a ``clones`` artifact.
         group_by: The cell metadata columns of the groups.
         groups: The label artifact of the groups, or None.
@@ -1391,6 +1403,7 @@ class Rarefaction:
     """
 
     curves: pd.DataFrame = field(repr=False)
+    group_keys: pd.DataFrame = field(repr=False)
     clones: ArtifactRef
     group_by: tuple[str, ...]
     groups: ArtifactRef | None
@@ -1433,14 +1446,14 @@ def _method_names(codes: np.ndarray) -> np.ndarray:
     return np.asarray(np.asarray(_METHODS, dtype=object)[codes])
 
 
-def _keyed(keys: pd.DataFrame, positions: np.ndarray) -> pd.DataFrame:
-    """The rows of ``keys`` at ``positions``, numbered from 0."""
-    return keys.take(positions).reset_index(drop=True)
+def _named(names: pd.Index, positions: np.ndarray) -> pd.DataFrame:
+    """A table of the groups' names at ``positions``, in ``group``."""
+    return pd.DataFrame({"group": names.take(positions)})
 
 
 def diversity_tables(
     groups: GroupedCloneSizes,
-    keys: pd.DataFrame,
+    names: Sequence[str],
     *,
     size: int | None = None,
     coverage: float | None = None,
@@ -1455,8 +1468,7 @@ def diversity_tables(
 
     Args:
         groups: The groups' clone sizes; every group holds a cell.
-        keys: One row per group, in the order of ``groups``: ``group``, its
-            name, and its label in each key column.
+        names: Each group's name, in the order of ``groups``.
         size: The common size in cells, or None for :func:`common_size`.
         coverage: The common coverage, between 0 and 1, or None for
             :func:`common_coverage`.
@@ -1466,14 +1478,14 @@ def diversity_tables(
         the common coverage.
 
     Raises:
-        ValueError: If a group holds no cell, ``keys`` does not hold one row
-            per group, ``coverage`` is not above 0, or there is no group and
+        ValueError: If a group holds no cell, ``names`` does not name each
+            group once, ``coverage`` is not above 0, or there is no group and
             ``size`` or ``coverage`` is None.
     """
-    if len(keys) != len(groups):
+    named = pd.Index(names)
+    if len(named) != len(groups):
         raise ValueError(
-            f"keys must hold one row for each of the {len(groups)} groups, "
-            f"not {len(keys)}"
+            f"names must name each of the {len(groups)} groups, not {len(named)}"
         )
     if (groups.n == 0).any():
         raise ValueError("Every group must hold a cell")
@@ -1509,13 +1521,13 @@ def diversity_tables(
     coverage_at_size = samples.coverage(terms)[::2]
     methods = samples.methods.reshape(n_tables, 2)
     # Each group takes the rows of its table.
-    table = _keyed(keys, np.arange(len(groups)))
+    table = _named(named, np.arange(len(groups)))
     for column in INDEX_COLUMNS:
         table[column] = np.asarray(
             columns[column][held],
             dtype=np.int64 if column in _COUNT_INDICES else np.float64,
         )
-    hill = _keyed(keys, np.repeat(np.arange(len(groups)), n_orders))
+    hill = _named(named, np.repeat(np.arange(len(groups)), n_orders))
     hill["order"] = np.tile(np.asarray(ORDERS, dtype=np.int64), len(groups))
     hill["observed"] = np.column_stack(terms.observed)[held].reshape(-1)
     hill["estimated"] = estimated[held].reshape(-1)
@@ -1530,7 +1542,7 @@ def diversity_tables(
 
 def rarefaction_curves(
     groups: GroupedCloneSizes,
-    keys: pd.DataFrame,
+    names: Sequence[str],
     orders: Sequence[int] = ORDERS,
     *,
     sizes: Sequence[int] | None = None,
@@ -1541,8 +1553,7 @@ def rarefaction_curves(
 
     Args:
         groups: The groups' clone sizes; every group holds a cell.
-        keys: One row per group, in the order of ``groups``: ``group``, its
-            name, and its label in each key column.
+        names: Each group's name, in the order of ``groups``.
         orders: The orders of the Hill numbers, from 0, 1 and 2.
         sizes: Positive sizes in cells for every group, or None for each
             group's :func:`default_sizes`.
@@ -1551,9 +1562,18 @@ def rarefaction_curves(
         knots: The number of default sizes.
 
     Returns:
-        One row per group, order and size: ``group``, the key columns,
-        ``order``, ``size``, ``method``, ``diversity`` and ``coverage``.
+        One row per group, order and size: ``group``, ``order``, ``size``,
+        ``method``, ``diversity`` and ``coverage``.
+
+    Raises:
+        ValueError: If ``names`` does not name each group once, or an order
+            is not 0, 1 or 2.
     """
+    named = pd.Index(names)
+    if len(named) != len(groups):
+        raise ValueError(
+            f"names must name each of the {len(groups)} groups, not {len(named)}"
+        )
     chosen = tuple(orders)
     for order in chosen:
         _check_order(order)
@@ -1591,7 +1611,7 @@ def rarefaction_curves(
             diversity[start:stop] = samples.hill(order, terms)
             covered[start:stop] = sample_coverage
             start = stop
-    table = _keyed(keys, np.repeat(np.arange(len(groups)), lengths * len(chosen)))
+    table = _named(named, np.repeat(np.arange(len(groups)), lengths * len(chosen)))
     table["order"] = order_column
     table["size"] = size_column
     table["method"] = _method_names(methods)

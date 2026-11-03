@@ -1083,13 +1083,19 @@ class Clonotypes:
         clonotypes: One row per clonotype, largest first: ``clonotype``,
             ``n_cells``, ``fraction`` (its share of the cells with a
             clonotype), ``n_configurations`` (its distinct combinations of
-            compared chains), ``receptor_type`` and the label of each
-            ``within`` column of its cells, and the chains of its
+            compared chains), ``receptor_type``, ``group`` (the name of its
+            cells' ``within`` group, their labels joined by commas, or
+            ``"all cells"`` without ``within``), and the chains of its
             representative cell, the first cell of its most frequent
             configuration: for each slot, ``VJ_1`` to ``VDJ_2``, the slot's
             ``junction_aa``, ``junction``, ``v_call`` and ``j_call`` that the
             receptors store, such as ``VDJ_1_junction_aa``, as pandas text,
             missing where the slot is empty.
+        group_keys: One row per ``within`` group, indexed by its name,
+            ``group``, with its label in each ``within`` column under the
+            column's own name, so ``clonotypes.join(group_keys, on="group")``
+            gives each clonotype its labels; one group without labels,
+            ``"all cells"``, without ``within``.
         receptors: The ``immune_receptors`` artifact that the clonotypes group.
         sequence: ``"nt"`` or ``"aa"``.
         receptor_arms: The arms that had to agree.
@@ -1104,6 +1110,7 @@ class Clonotypes:
 
     cells: pd.DataFrame = field(repr=False)
     clonotypes: pd.DataFrame = field(repr=False)
+    group_keys: pd.DataFrame = field(repr=False)
     receptors: ArtifactRef
     sequence: str
     receptor_arms: str
@@ -1125,11 +1132,15 @@ def clonotype_frames(
     clonotype_sizes: np.ndarray,
     n_configurations: np.ndarray,
     receptor_type: np.ndarray,
-    within: Mapping[str, np.ndarray],
+    groups: np.ndarray,
     slots: np.ndarray,
     chains: Mapping[str, np.ndarray],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return the tables of cells and clonotypes of stored clonotypes.
+
+    The table of clonotypes names each one's ``within`` group in ``group``;
+    the group's labels stay out of it, so a ``within`` column may take any
+    name.
 
     Args:
         cell_ids: The ``ids`` of the cells.
@@ -1140,7 +1151,7 @@ def clonotype_frames(
         clonotype_sizes: The cells of each clonotype.
         n_configurations: The configurations of each clonotype.
         receptor_type: The receptor type of each clonotype's representative.
-        within: The label of each ``within`` column of each clonotype.
+        groups: The name of each clonotype's ``within`` group.
         slots: The contigs in the four slots of each clonotype's
             representative, -1 for an empty slot.
         chains: Each representative field's decoded values per contig.
@@ -1167,9 +1178,8 @@ def clonotype_frames(
         "fraction": sizes / total if total else np.zeros(len(sizes)),
         "n_configurations": np.asarray(n_configurations, dtype=np.int64),
         "receptor_type": shared_text(receptor_type),
+        "group": shared_text(groups),
     }
-    for column, column_labels in within.items():
-        table[column] = shared_text(column_labels)
     slots = np.asarray(slots, dtype=np.int64).reshape(len(sizes), 4)
     for position, slot in enumerate(SLOTS):
         contigs = slots[:, position]
