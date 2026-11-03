@@ -28,6 +28,7 @@ from cytearc.clones.fate import (
 from cytearc.clones.groups import pair_counts
 from cytearc.clones.overlap import overlap_pairs
 from tests.clone_helpers import benjamini_hochberg, coupling_reference
+from tests.random_stream_helpers import child_key, splitmix64, uniform
 
 
 def _pairs(groups, clones):
@@ -160,6 +161,35 @@ def test_the_shuffles_keep_each_strata_labels_and_vary_with_the_permutation() ->
     assert not np.array_equal(
         permuted_labels(labels, bounds, 7, 0), permuted_labels(labels, bounds, 8, 0)
     )
+
+
+def _shuffled_by_hand(labels, bounds, seed: int, permutation: int) -> list[int]:
+    """Fisher and Yates's shuffle of each stratum from one permutation's SplitMix64 stream.
+
+    The permutation's key mixes the seed's key, the seed with fate's salt,
+    and the permutation. The draw for position ``i`` is the stream's uniform
+    ``i``, whose product with the positions to choose from is cut to a whole
+    position.
+    """
+    key = child_key(splitmix64((seed % 2**64) ^ 0x2545F4914F6CDD1D), permutation)
+    shuffled = [int(label) for label in labels]
+    for start, end in zip(bounds[:-1], bounds[1:], strict=True):
+        for position in range(int(end) - 1, int(start), -1):
+            chosen = int(start) + int(uniform(key, position) * (position - start + 1))
+            shuffled[position], shuffled[chosen] = shuffled[chosen], shuffled[position]
+    return shuffled
+
+
+def test_each_permutation_shuffles_by_its_own_splitmix64_stream() -> None:
+    # The null's shuffles follow SplitMix64 to the bit, so a seed gives the
+    # same null in every release and on every number of threads.
+    labels = np.array([0, 0, 1, 2, 2, 2, 3, 4, 4, 5, 5, 5, 5, 6], dtype=np.int32)
+    bounds = np.array([0, 3, 6, 13, 14])
+    for seed in (0, 7, 2**63 + 1, 2**64 + 3):
+        for permutation in (0, 1, 2, 1000):
+            assert permuted_labels(
+                labels, bounds, seed, permutation
+            ).tolist() == _shuffled_by_hand(labels, bounds, seed, permutation)
 
 
 def test_the_shuffles_draw_every_arrangement_equally_often() -> None:

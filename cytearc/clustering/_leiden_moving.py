@@ -46,6 +46,7 @@ References:
 import numpy as np
 from numba import prange
 
+from ..utils.digest import mix64
 from ..utils.numba import njit
 from ._leiden_primitives import (
     BUCKET_CHUNK,
@@ -58,7 +59,6 @@ from ._leiden_primitives import (
     acc_reset,
     check_worker_rows,
     derive_key,
-    mix64,
     scatter_add,
     stream_key,
     uniform01,

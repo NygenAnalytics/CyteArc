@@ -60,6 +60,22 @@ def executed_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     provenance._lockfile_digest.cache_clear()
 
 
+def test_the_lockfile_and_a_config_file_are_named_by_the_sha256_of_their_bytes(
+    executed_tree,
+):
+    lock = executed_tree / "uv.lock"
+    assert (
+        provenance._lockfile_digest() == hashlib.sha256(lock.read_bytes()).hexdigest()
+    )
+    config = executed_tree / "profiling" / "config.toml"
+    expected = hashlib.sha256(config.read_bytes()).hexdigest()
+    assert provenance.config_digest(config) == provenance.config_digest(str(config))
+    assert provenance.config_digest(config) == expected
+    # A path that holds no file has no digest.
+    assert provenance.config_digest(executed_tree / "absent.toml") is None
+    assert provenance.config_digest(executed_tree / "profiling") is None
+
+
 def test_has_client_code_identity_requires_source_tree_digest(executed_tree):
     git_only = collect_run_provenance(clientProvenance={"gitSha": "abc123"})
     assert git_only["hasClientCodeIdentity"] is False

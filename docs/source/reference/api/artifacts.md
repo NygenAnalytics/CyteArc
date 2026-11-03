@@ -191,6 +191,11 @@ it keep their own current revision, but once it is computed again it has a new r
 results built on it are computed again too. Passing a superseded artifact explicitly as an input
 is allowed and records it in lineage as usual.
 
+(import_reuse)=
+### Reuse of imports
+
+Beside its inputs and arguments, an import such as `clones.import_clones` or `variants.import_counts` is identified by the files it reads and the names it takes from them, never by the folders that hold them. Each file counts by the SHA-256 of its bytes: the file that a path names, the files read beside it, such as a CARLIN pair's annotations or a clone matrix's lists of cells and clones, the files that a reader takes from a tool's folder, by their roles, and every file of a Zarr store, with its path below the store. The names are the options that turn barcodes into cell IDs, `barcode_prefix`, `barcode_suffix` and `barcode_pattern`, and those that an import takes from a file, such as the namespace of a clone file's labels, a lineage barcode file's library or the name a tree takes from its file. A file moved or copied to another folder therefore reuses the saved import, the same files listed in another order give the same import, and an edited file gives a new one. A file listed twice with the same prefix and suffix raises `ValueError`.
+
 ### Find one saved result
 
 `ds.artifacts.find` locates a graph, embedding, or clustering without requiring its storage kind

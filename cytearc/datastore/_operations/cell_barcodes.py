@@ -9,7 +9,6 @@ them through ``barcode_files``, so they share the rules, the counts of
 barcodes that match no selected cell, and the warning about them.
 """
 
-import hashlib
 import os
 import re
 import sys
@@ -21,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from ...utils.arrays import union_sorted
+from ...utils.digest import file_sha256
 from ...utils.warnings import warn
 
 __all__ = [
@@ -31,9 +31,7 @@ __all__ = [
     "barcode_files",
     "barcode_pattern",
     "derived_id_bytes",
-    "file_sha256",
     "join_bytes",
-    "store_sha256",
     "texts_per_file",
     "unmatched_barcodes_warning",
     "warn_unmatched_barcodes",
@@ -72,45 +70,6 @@ _BARCODE_GROUP = "barcode"
 # What the options of an import may be, for their errors.
 _TEXT_OPTIONS = "text, a sequence of text, or None"
 _PATTERN_OPTIONS = "a regular expression, a sequence of regular expressions, or None"
-
-
-def file_sha256(path: str | os.PathLike[str]) -> str:
-    """Return the SHA-256 digest of a file's bytes, as hexadecimal text."""
-    with open(path, "rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
-
-
-def store_sha256(path: str | os.PathLike[str]) -> str:
-    """Return the SHA-256 of a directory's files, such as a Zarr store's.
-
-    Each file adds its path below the directory, in POSIX form, and its bytes,
-    each after its length and in the order of the paths, so no two directories
-    of other files or paths hash alike. Empty directories add nothing.
-
-    Raises:
-        OSError: If the directory or a folder below it cannot be listed, which
-            would otherwise hash as if it held no file.
-    """
-    root = os.fspath(path)
-
-    def refuse(error: OSError) -> None:
-        raise error
-
-    files = sorted(
-        os.path.relpath(os.path.join(folder, name), root).replace(os.sep, "/")
-        for folder, _folders, names in os.walk(root, onerror=refuse)
-        for name in names
-    )
-    digest = hashlib.sha256()
-    for relative in files:
-        encoded = relative.encode("utf-8")
-        digest.update(len(encoded).to_bytes(8, "little") + encoded)
-        location = os.path.join(root, *relative.split("/"))
-        digest.update(os.path.getsize(location).to_bytes(8, "little"))
-        with open(location, "rb") as handle:
-            for block in iter(lambda: handle.read(1 << 20), b""):
-                digest.update(block)
-    return digest.hexdigest()
 
 
 def barcode_pattern(value: Any, name: str = "barcode_pattern") -> str | None:
@@ -301,14 +260,14 @@ def barcode_files(
     barcode_suffix: Any = None,
     barcode_pattern: Any = None,
     what: str = "file",
-    identify: Callable[[str | os.PathLike[str]], str] = file_sha256,
+    digest: Callable[[str | os.PathLike[str]], str] = file_sha256,
 ) -> tuple[BarcodeFile, ...]:
     """Check the files of an import and their options, in canonical order.
 
     ``barcode_prefix``, ``barcode_suffix`` and ``barcode_pattern`` each take
     one value for every file or one per file. Files are ordered by the
-    SHA-256 of their bytes, then by prefix, suffix and pattern, so the same
-    files listed in another order give the same import.
+    SHA-256 that identifies them, then by prefix, suffix and pattern, so the
+    same files listed in another order give the same import.
 
     Args:
         paths: A path, or a sequence of paths.
@@ -316,9 +275,11 @@ def barcode_files(
         barcode_suffix: Text after each barcode in the cell IDs.
         barcode_pattern: A regular expression with a named group ``barcode``.
         what: What a file is, such as ``"clone file"``, for the errors.
-        identify: Returns the SHA-256 that identifies a path: by default the
-            digest of a file's bytes; an importer whose sources are folders
-            of files passes one that digests the files a folder holds.
+        digest: Returns the SHA-256 that identifies a path: by default
+            :func:`~cytearc.utils.digest.file_sha256` of a file's bytes; an
+            importer whose sources may be folders, such as Zarr stores,
+            passes :func:`~cytearc.utils.digest.path_sha256` or one that
+            digests every file that a source reads.
 
     Raises:
         TypeError: If an argument has the wrong type.
@@ -350,7 +311,7 @@ def barcode_files(
     files = [
         BarcodeFile(
             path=path,
-            sha256=identify(path),
+            sha256=digest(path),
             barcode_prefix=prefix,
             barcode_suffix=suffix,
             barcode_pattern=pattern,

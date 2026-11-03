@@ -17,10 +17,13 @@ from profiling.datasets import (
     load_csr_source_into_memory,
     ordered_source_row_digest,
     prepare_local_datasets,
+    row_priorities,
+    sampling_salt,
     select_nested_rows,
     write_fixture_h5ad,
     write_h5ad_sample_from_memory,
 )
+from tests.random_stream_helpers import GOLDEN, MASK, splitmix64
 
 
 def _fixture_spec(path: Path, *, nRows: int, nColumns: int, nnz: int) -> SourceSpec:
@@ -49,6 +52,18 @@ def test_load_csr_downcasts_indices_to_int32(tmp_path: Path) -> None:
     assert memory.indicesDtype == np.dtype(np.int64)
     assert memory.data.dtype == np.dtype(np.float32)
     assert int(memory.indptr[-1]) == artifact.nnz
+
+
+def test_row_priorities_are_splitmix64_of_each_row_and_the_salt() -> None:
+    # A row's priority is SplitMix64's output at the row plus the salt of the
+    # seed and source version, so samples stay the same across releases.
+    for seed, version in ((0, "fixture-v1"), (7, "2025-01-30")):
+        salt = sampling_salt(seed, version)
+        priorities = row_priorities(1_000, seed=seed, sourceVersion=version)
+        assert priorities.dtype == np.uint64
+        assert priorities.tolist() == [
+            splitmix64((row + salt + GOLDEN) & MASK) for row in range(1_000)
+        ]
 
 
 def test_write_from_memory_selects_exact_source_rows(tmp_path: Path) -> None:

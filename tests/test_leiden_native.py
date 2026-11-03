@@ -68,6 +68,7 @@ from cytearc.clustering.leiden import leiden_membership
 from cytearc.neighbors.graph import build_connectivity_arrays
 from cytearc.utils.logging import logger
 from cytearc.utils.shutdown import ShutdownRequested, ShutdownToken, shutdown_scope
+from tests.random_stream_helpers import child_key, draw, splitmix64, uniform
 
 # Forces the random-group scheme on every level and the multi-worker loop of
 # every kernel, even on small graphs.
@@ -722,6 +723,29 @@ def test_counter_based_random_numbers():
     np.testing.assert_array_equal(counts[1], counts[4])
     sigma = math.sqrt(n * (1 / 64) * (63 / 64))
     assert np.all(np.abs(counts[1] - n / 64) <= 5 * sigma)
+
+
+def test_random_numbers_are_splitmix64_streams_of_the_seed_and_phase():
+    # A stream's key mixes the seed, the salt "leiden01" in ASCII, the
+    # iteration, the level and the phase; draws are the stream's uniforms,
+    # and a node's group in a sweep is the top bits of its draw. The labels
+    # of a seed are the same in every release.
+    for seed in (0, 7, 2**63 + 11, 2**64 - 1):
+        for iteration, level, phase in (
+            (0, 0, PHASE_MOVE_ORDER),
+            (1, 5, PHASE_GROUPS),
+            (3, 2, PHASE_REFINE),
+        ):
+            key = splitmix64(seed ^ 0x6C656964656E3031)
+            for value in (iteration, level, phase):
+                key = child_key(key, value)
+            assert int(stream_key(np.uint64(seed), iteration, level, phase)) == key
+            assert int(derive_key(np.uint64(key), 12_345)) == child_key(key, 12_345)
+            for counter in (0, 1, 2**40 + 1):
+                assert uniform01(np.uint64(key), counter) == uniform(key, counter)
+            for node in (0, 1, 2**30 - 1):
+                group = moving_module._group_of(np.uint64(key), node, np.uint64(58))
+                assert group == draw(key, node) >> 58
 
 
 @pytest.mark.parametrize("min_items", [1, 1024])

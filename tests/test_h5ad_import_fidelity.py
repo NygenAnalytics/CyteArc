@@ -1,5 +1,6 @@
 """H5AD import fidelity: categoricals, colors, indexes, IDs, and matrix choice."""
 
+import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -256,6 +257,16 @@ def test_cluster_labels_keep_categories_and_export_with_them(tmp_path) -> None:
     )
     _assert_categorical(exported.obs["stage_labels"], source.obs["stage"])
     assert exported.uns["stage_labels_colors"].tolist() == _STAGE_COLORS
+
+
+def test_imported_analyses_name_the_sha256_of_the_source_file(tmp_path) -> None:
+    # The source's digest identifies every analysis that an import saves, so
+    # a saved import is reused only for the same bytes.
+    path = _write(tmp_path / "clusters.h5ad", _categorical_adata())
+    store, result = _import(path, tmp_path / "store.zarr", cluster_keys=("stage",))
+    inputs = store.artifacts.inspect(result.clusterArtifacts["stage"]).inputs
+    expected = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    assert inputs["source_digest"] == {"bytes_hex": expected}
 
 
 def test_categoricals_with_many_categories_keep_no_levels(tmp_path, monkeypatch):

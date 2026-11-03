@@ -1,4 +1,3 @@
-import hashlib
 import math
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -22,11 +21,11 @@ from ..storage.profiles import (
     ZarrLocation,
     resolve_storage_profile,
 )
+from ..utils.digest import file_sha256
 from ..utils.logging import logger
 from ..utils.progress import iter_progress
 
 
-_SOURCE_DIGEST_BLOCK_BYTES = 1024 * 1024
 # Categories longer than this list are not stored with their column: AnnData
 # makes a categorical of any text that repeats a value, so a column of nearly
 # unique text can hold about one category per row.
@@ -634,7 +633,9 @@ class H5adToZarr:
         check_destination(
             zarr_loc, overwrite=overwrite, storage_options=storage_options
         )
-        self._sourceDigest = self._hash_source() if has_analysis else None
+        self._sourceDigest = (
+            bytes.fromhex(file_sha256(self.h5ad.h5adFn)) if has_analysis else None
+        )
         self._projection = (
             None
             if self.assayFeatures is None
@@ -884,13 +885,6 @@ class H5adToZarr:
             embeddingArtifacts=embedding_artifacts,
             clusterArtifacts=cluster_artifacts,
         )
-
-    def _hash_source(self) -> bytes:
-        digest = hashlib.sha256()
-        with open(self.h5ad.h5adFn, "rb") as source:
-            while block := source.read(_SOURCE_DIGEST_BLOCK_BYTES):
-                digest.update(block)
-        return digest.digest()
 
     def _analysis_block_rows(
         self,

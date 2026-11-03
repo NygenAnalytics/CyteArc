@@ -54,6 +54,7 @@ from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.arrays import sort_categories, sorted_unique
+from ...utils.digest import path_sha256
 from ...utils.logging import logger
 from ...utils.warnings import warn
 from .cell_barcodes import (
@@ -61,8 +62,6 @@ from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
-    file_sha256,
-    store_sha256,
     warn_unmatched_barcodes,
 )
 from .clone_artifacts import plan_clones, write_clones, zarr_write_buffer_bytes
@@ -145,16 +144,17 @@ class _ImportedForest:
     n_unnamed_leaves: int
 
 
-def _tree_file_sha256(path: str | os.PathLike[str]) -> str:
+def _tree_path_sha256(path: str | os.PathLike[str]) -> str:
     """Identify a tree file by its bytes, or a Zarr store by its files.
 
     A directory that is not a Zarr store is refused before it is walked.
     """
     from ...readers.phylogeny import tree_container
 
-    if os.path.isdir(path) and tree_container(Path(os.fspath(path))) == "zarr":
-        return store_sha256(path)
-    return file_sha256(path)
+    if os.path.isdir(path):
+        # Refuses a directory that is not a Zarr store.
+        tree_container(Path(os.fspath(path)))
+    return path_sha256(path)
 
 
 def _tree_stem(file: BarcodeFile) -> str:
@@ -552,7 +552,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             barcode_suffix=barcode_suffix,
             barcode_pattern=barcode_pattern,
             what="tree file",
-            identify=_tree_file_sha256,
+            digest=_tree_path_sha256,
         )
         layouts = [tree_file_layout(file.path, format) for file in files]
         stems = [_tree_stem(file) for file in files]

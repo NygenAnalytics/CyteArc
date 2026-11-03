@@ -25,6 +25,7 @@ from numba import prange
 
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import sorted_unique
+from ..utils.digest import mix64
 from ..utils.numba import njit, numba_threads
 from .overlap import group_clone_matrix
 
@@ -60,13 +61,8 @@ _SHARE_COSINE, _ABUNDANCE_COSINE, _NORMALIZED_COVARIANCE, _JACCARD = range(4)
 # SplitMix64 (Steele, Lea and Flood 2014): the finaliser of a key plus a
 # counter gives each draw, so a draw depends only on its stream and counter.
 _GOLDEN = np.uint64(0x9E3779B97F4A7C15)
-_MIX_1 = np.uint64(0xBF58476D1CE4E5B9)
-_MIX_2 = np.uint64(0x94D049BB133111EB)
 _SALT = np.uint64(0x2545F4914F6CDD1D)
 _SHIFT_11 = np.uint64(11)
-_SHIFT_27 = np.uint64(27)
-_SHIFT_30 = np.uint64(30)
-_SHIFT_31 = np.uint64(31)
 _UNIT_INTERVAL = 2.0**-53
 
 # Bytes that measuring coupling holds, besides the clones read and their
@@ -104,23 +100,15 @@ def _checked_method(method: Any) -> int:
     return COUPLING_METHODS.index(method)
 
 
-@njit(cache=True, nogil=True)
-def _mix64(value: np.uint64) -> np.uint64:
-    """Return the SplitMix64 finaliser of a 64-bit unsigned integer."""
-    mixed = (value ^ (value >> _SHIFT_30)) * _MIX_1
-    mixed = (mixed ^ (mixed >> _SHIFT_27)) * _MIX_2
-    return mixed ^ (mixed >> _SHIFT_31)
-
-
 def _seed_key(seed: int) -> np.uint64:
     """The key of a seed's streams."""
-    return np.uint64(int(_mix64(np.uint64(int(seed) % 2**64) ^ _SALT)))
+    return np.uint64(int(mix64(np.uint64(int(seed) % 2**64) ^ _SALT)))
 
 
 @njit(cache=True, nogil=True)
 def _permutation_key(seed_key: np.uint64, permutation: np.int64) -> np.uint64:
     """The key of one permutation's stream."""
-    return _mix64(seed_key ^ _mix64(np.uint64(permutation) + _GOLDEN))
+    return mix64(seed_key ^ mix64(np.uint64(permutation) + _GOLDEN))
 
 
 @njit(cache=True, nogil=True)
@@ -136,7 +124,7 @@ def _shuffle_within(labels: np.ndarray, bounds: np.ndarray, key: np.uint64) -> N
     for stratum in range(len(bounds) - 1):
         start = bounds[stratum]
         for position in range(bounds[stratum + 1] - 1, start, -1):
-            mixed = _mix64(key + np.uint64(position) * _GOLDEN)
+            mixed = mix64(key + np.uint64(position) * _GOLDEN)
             chosen = start + np.int64(
                 np.float64(mixed >> _SHIFT_11)
                 * _UNIT_INTERVAL

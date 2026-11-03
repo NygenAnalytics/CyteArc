@@ -48,17 +48,9 @@ from scipy.stats import false_discovery_control, poisson
 
 from ..utils.arguments import float_argument, integer_argument
 from ..utils.arrays import sort_categories
+from ..utils.digest import mix64_array
 from ..utils.warnings import warn
-from .cell_calling import (
-    _GOLDEN,
-    _MIX_1,
-    _MIX_2,
-    _SHIFT_11,
-    _SHIFT_27,
-    _SHIFT_30,
-    _SHIFT_31,
-    _UNIT_INTERVAL,
-)
+from .cell_calling import _GOLDEN, _SHIFT_11, _UNIT_INTERVAL
 
 __all__ = [
     "AmbientContamination",
@@ -608,18 +600,6 @@ def _row_keys(row_keys: Any | None, n_rows: int) -> np.ndarray:
     return keys.astype(np.uint64)
 
 
-def _splitmix64(values: np.ndarray) -> np.ndarray:
-    """Return the SplitMix64 finaliser of each unsigned 64-bit integer.
-
-    Cell calling compiles the same finaliser for one integer at a time; this
-    form applies it to whole arrays, whose products wrap around as intended.
-    """
-    mixed = (values ^ (values >> _SHIFT_30)) * _MIX_1
-    mixed = (mixed ^ (mixed >> _SHIFT_27)) * _MIX_2
-    finalised: np.ndarray = mixed ^ (mixed >> _SHIFT_31)
-    return finalised
-
-
 def _row_uniforms(random_seed: int, keys: np.ndarray) -> np.ndarray:
     """Return each row's rounding draw, uniform on [0, 1).
 
@@ -627,11 +607,11 @@ def _row_uniforms(random_seed: int, keys: np.ndarray) -> np.ndarray:
     module's salt, and the row key, as cell calling's ``_iteration_key`` mixes
     a seed and an iteration and its ``_uniform`` draws, for every row at once.
     """
-    seed = _splitmix64(
+    seed = mix64_array(
         np.array([random_seed % 2**64], dtype=np.uint64) ^ _ROUNDING_SALT
     )
-    streams = _splitmix64(seed ^ _splitmix64(keys + _GOLDEN))
-    uniforms: np.ndarray = (_splitmix64(streams) >> _SHIFT_11) * _UNIT_INTERVAL
+    streams = mix64_array(seed ^ mix64_array(keys + _GOLDEN))
+    uniforms: np.ndarray = (mix64_array(streams) >> _SHIFT_11) * _UNIT_INTERVAL
     return uniforms
 
 

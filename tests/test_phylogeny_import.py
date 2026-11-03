@@ -821,22 +821,25 @@ def test_cut_clones_read_as_cell_values_and_phylogenies_do_not(
 
 
 def test_a_zarr_store_is_identified_by_every_file_and_path(tmp_path) -> None:
-    # What identifies a store, its files' paths and bytes, is the shared
-    # join's store_sha256, which the join's tests pin; the tree import passes
-    # it for Zarr stores and the SHA-256 of a file's bytes otherwise.
-    from cytearc.datastore._operations.cell_barcodes import barcode_files, store_sha256
-    from cytearc.datastore._operations.phylogeny import _tree_file_sha256
+    # What identifies a store, its files' paths and bytes, is utils.digest's
+    # directory_sha256, which its tests pin; the tree import takes it for a
+    # Zarr store and the SHA-256 of a file's bytes otherwise.
+    from cytearc.datastore._operations.cell_barcodes import barcode_files
+    from cytearc.datastore._operations.phylogeny import _tree_path_sha256
+    from cytearc.utils.digest import directory_sha256
 
     first = write_tree_zarr([TREE], tmp_path / "first.zarr")
     second = tmp_path / "second.zarr"
     shutil.copytree(first, second)
     (second / "zarr.json").write_text((second / "zarr.json").read_text() + " ")
-    assert _tree_file_sha256(first) == store_sha256(first)
-    assert _tree_file_sha256(second) == store_sha256(second) != store_sha256(first)
-    (file,) = barcode_files(first, what="tree file", identify=_tree_file_sha256)
-    assert file.sha256 == store_sha256(first)
+    assert _tree_path_sha256(first) == directory_sha256(first)
+    assert (
+        _tree_path_sha256(second) == directory_sha256(second) != directory_sha256(first)
+    )
+    (file,) = barcode_files(first, what="tree file", digest=_tree_path_sha256)
+    assert file.sha256 == directory_sha256(first)
     newick = _write_newick(tmp_path / "truth_tree.nwk")
-    assert _tree_file_sha256(newick) == hashlib.sha256(newick.read_bytes()).hexdigest()
+    assert _tree_path_sha256(newick) == hashlib.sha256(newick.read_bytes()).hexdigest()
 
 
 def test_a_file_without_a_tree_extension_names_its_tree_whole(store, tmp_path) -> None:
@@ -1072,8 +1075,7 @@ def test_time_cuts_say_why_nodes_have_no_time(store, tmp_path) -> None:
 def test_directories_are_hashed_only_as_zarr_stores(
     store, tmp_path, monkeypatch
 ) -> None:
-    from cytearc.datastore._operations import cell_barcodes
-    from cytearc.datastore._operations import phylogeny as phylogeny_operations
+    from cytearc.utils import digest
 
     folder = tmp_path / "outs"
     folder.mkdir()
@@ -1082,8 +1084,8 @@ def test_directories_are_hashed_only_as_zarr_stores(
     def refuse(*_args, **_kwargs):
         raise AssertionError("a directory was hashed before its format was known")
 
-    monkeypatch.setattr(cell_barcodes, "store_sha256", refuse)
-    monkeypatch.setattr(phylogeny_operations, "store_sha256", refuse)
+    # Every digest of a directory goes through directory_sha256.
+    monkeypatch.setattr(digest, "directory_sha256", refuse)
     # Clone files and call files are files, as before.
     with pytest.raises(IsADirectoryError):
         store.clones.import_clones(folder, cell_selection=every_cell(store))

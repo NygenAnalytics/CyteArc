@@ -862,7 +862,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         readers: dict[str, tuple[VariantSource, str, dict[str, str]]] = {}
         threads = self.nthreads if self.memoryBytes >= _THREADED_PARSE_BYTES else 1
 
-        def identify(path: str | os.PathLike[str]) -> str:
+        def source_digest(path: str | os.PathLike[str]) -> str:
+            """Read a path's source once, and return the SHA-256 of its files."""
             key = os.fspath(path)
             if key not in readers:
                 reader = _read_source(
@@ -883,7 +884,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             barcode_suffix=barcode_suffix,
             barcode_pattern=barcode_pattern,
             what="variant file",
-            identify=identify,
+            digest=source_digest,
         )
         sources = [
             _Source(

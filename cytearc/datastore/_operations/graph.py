@@ -1,3 +1,4 @@
+import io
 import math
 import os
 import tempfile
@@ -550,9 +551,13 @@ def _require_harmony_fit_budget(
     return reading
 
 
-# What one save or load of an ANN index holds whatever its payload, such as
-# Zarr's metadata: up to 160 KB on Python 3.14 and 3.15, and 35 KB on 3.13.
-_ANN_INDEX_TRANSFER_FIXED_BYTES = 256 * 1024
+# What one save or load of an ANN index holds whatever its payload: Zarr's
+# metadata, and the buffers of the temporary file and of the files that Zarr
+# reads or writes, two or three of io's default buffers from run to run, which
+# are 8 KiB before Python 3.14 and 128 KiB since. 44 KiB and three and a half
+# buffers bound it: a save of a small payload held up to 112 KB on Python 3.13
+# and 431 KB on 3.14 and 3.15.
+_ANN_INDEX_TRANSFER_FIXED_BYTES = 44 * 1024 + 7 * io.DEFAULT_BUFFER_SIZE // 2
 
 
 def _ann_index_transfer_bytes(payload_bytes: int) -> int:
@@ -560,20 +565,20 @@ def _ann_index_transfer_bytes(payload_bytes: int) -> int:
 
     ``save_ann_index`` and ``load_ann_index`` move the saved index between
     Zarr and a temporary file in windows of ``ANN_INDEX_IO_BYTES``. A load
-    holds the window it fills, the encoded chunks Zarr reads for it and the
-    chunks it decodes, about three windows. A save holds the window it read
-    from the file, Zarr's copy of it and the encoded bytes of the chunks in
-    flight, about two windows and two chunks. Before that, the save hashes
-    its file in reads of ``ANN_INDEX_CHUNK_BYTES``, and each read holds that
-    much beside the block before it, however small the file. Three windows
-    and two chunks, or one hashing read and its block, bound both, beside
-    what every save or load holds.
+    holds the window it fills, the encoded chunks Zarr reads for it, at most
+    a window, and the chunks it decodes, which are whole even at the
+    payload's end: two windows and the window's whole chunks. A save holds
+    the window it read from the file, Zarr's copy of it and the encoded
+    chunks in flight, never more than a load, after hashing its file through
+    one buffer of at most 256 KiB and at most the payload. The estimate
+    counts one window more than a load holds, a quarter to a third more than
+    the load of a payload of whole chunks or of several, beside what every
+    save or load holds.
     """
     window = min(int(payload_bytes), ANN_INDEX_IO_BYTES)
     chunk = min(int(payload_bytes), ANN_INDEX_CHUNK_BYTES)
-    copies = 3 * window + 2 * chunk
-    hashing = ANN_INDEX_CHUNK_BYTES + chunk
-    return max(copies, hashing) + _ANN_INDEX_TRANSFER_FIXED_BYTES
+    decoded = -(-window // chunk) * chunk if window else 0
+    return 3 * window + decoded + _ANN_INDEX_TRANSFER_FIXED_BYTES
 
 
 def _float32_copy_bytes(data: ChunkedArray, dims: int) -> int:
