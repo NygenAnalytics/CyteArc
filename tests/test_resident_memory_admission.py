@@ -514,7 +514,7 @@ def test_ann_index_transfer_bytes_bound_the_traced_copies(tmp_path) -> None:
     assert max(saving, loading) <= bound <= 2 * max(saving, loading)
 
 
-@pytest.mark.parametrize("n_cells", [50, 1_000, 4_000])
+@pytest.mark.parametrize("n_cells", [2, 50, 1_000, 4_000])
 def test_ann_index_transfer_bytes_bound_the_copies_of_small_indexes(
     tmp_path, n_cells
 ) -> None:
@@ -538,9 +538,11 @@ def test_ann_index_transfer_bytes_bound_the_copies_of_small_indexes(
     payload = int(group["ann_idx_bytes"].shape[0])
     loading = _traced_peak(lambda: load_ann_index(group, "l2", dims))
 
-    # Payloads of about 14 KB, one 256 KiB read of the save's hashing and
-    # four such reads: the hashing holds one buffer of at most the payload,
-    # so the copies that the estimate counts bound a small index too.
+    # Payloads of about 600 bytes, 14 KB, one 256 KiB read of the save's
+    # hashing and four such reads. The hashing holds one buffer of at most
+    # the payload. A save holds two copies and the buffers of its files,
+    # which io makes of 128 KiB since Python 3.14, so on Python 3.14 and
+    # 3.15 the save of a tiny payload holds more than its load.
     assert max(saving, loading) <= _ann_index_transfer_bytes(payload)
 
 

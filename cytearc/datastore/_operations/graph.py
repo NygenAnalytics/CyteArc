@@ -550,9 +550,14 @@ def _require_harmony_fit_budget(
     return reading
 
 
-# What one save or load of an ANN index holds whatever its payload, such as
-# Zarr's metadata: up to 160 KB on Python 3.14 and 3.15, and 35 KB on 3.13.
-_ANN_INDEX_TRANSFER_FIXED_BYTES = 256 * 1024
+# What one load of an ANN index holds whatever its payload, such as Zarr's
+# metadata: up to 160 KB on Python 3.14 and 3.15, and 36 KB on 3.13.
+_ANN_INDEX_LOAD_FIXED_BYTES = 256 * 1024
+# What one save holds whatever its payload: Zarr's metadata, and the buffers
+# of the temporary file it reads and of the files Zarr writes, which io makes
+# of 128 KiB since Python 3.14: up to 430 KB on Python 3.14 and 3.15, and
+# 50 KB on 3.13.
+_ANN_INDEX_SAVE_FIXED_BYTES = 512 * 1024
 
 
 def _ann_index_transfer_bytes(payload_bytes: int) -> int:
@@ -561,16 +566,18 @@ def _ann_index_transfer_bytes(payload_bytes: int) -> int:
     ``save_ann_index`` and ``load_ann_index`` move the saved index between
     Zarr and a temporary file in windows of ``ANN_INDEX_IO_BYTES``. A load
     holds the window it fills, the encoded chunks Zarr reads for it and the
-    chunks it decodes, about three windows. A save holds the window it read
-    from the file, Zarr's copy of it and the encoded bytes of the chunks in
-    flight, about two windows and at most two chunks. Before that, the save
-    hashes its file through one buffer of at most 256 KiB and at most the
-    payload, less than a window. Three windows and two chunks bound both,
-    beside what every save or load holds.
+    chunks it decodes, about three windows, which three windows and two
+    chunks bound beside what every load holds. A save holds the window it
+    read from the file, Zarr's copy of it and the encoded bytes of the
+    chunks in flight, which two windows and two chunks bound beside what
+    every save holds. Before that, the save hashes its file through one
+    buffer of at most 256 KiB and at most the payload, less than either.
     """
     window = min(int(payload_bytes), ANN_INDEX_IO_BYTES)
     chunk = min(int(payload_bytes), ANN_INDEX_CHUNK_BYTES)
-    return 3 * window + 2 * chunk + _ANN_INDEX_TRANSFER_FIXED_BYTES
+    loading = 3 * window + 2 * chunk + _ANN_INDEX_LOAD_FIXED_BYTES
+    saving = 2 * window + 2 * chunk + _ANN_INDEX_SAVE_FIXED_BYTES
+    return max(loading, saving)
 
 
 def _float32_copy_bytes(data: ChunkedArray, dims: int) -> int:
