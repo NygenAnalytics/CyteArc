@@ -60,9 +60,10 @@ Formats, with what each token means:
   ``obsm['characters']``, with the states that ``uns['missing_state']`` and
   ``uns['unmodified_state']`` name, or, where the file names none,
   Cassiopeia's: ``-1``, ``-`` and ``NA`` missing, ``0`` and ``*`` unedited.
-- ``"characters"``: a delimited character matrix, as Cassiopeia's
-  ``to_csv``, LAML and ConvexML write them: a cell column, then one column
-  per character: ``0`` and ``*`` unedited, ``-1``, ``-``, ``?`` and ``NA``
+- ``"laml"``: a delimited character matrix, as LAML reads it and
+  ``export_characters(format="laml")`` writes it, and as Cassiopeia's
+  ``to_csv`` and ConvexML write it: a cell column, then one column per
+  character: ``0`` and ``*`` unedited, ``-1``, ``-``, ``?`` and ``NA``
   missing, other text a state.
 - ``"table"``: any table, read by the columns that ``columns`` names.
 
@@ -141,7 +142,7 @@ ALLELE_FORMATS: tuple[str, ...] = (
     "typewriter",
     "typewriter_chains",
     "treedata",
-    "characters",
+    "laml",
     "table",
 )
 # The formats whose files hold one integration, which the caller names.
@@ -160,7 +161,7 @@ _COUNTED_LINES = frozenset(
         "cassiopeia",
         "petracer",
         "petracer_characters",
-        "characters",
+        "laml",
         "typewriter",
         "typewriter_chains",
         "table",
@@ -546,7 +547,7 @@ def _detected_format(path: str) -> str:
         + ", ".join(repr(name) for name in names if name)
         + ". Pass format, one of "
         + ", ".join(map(repr, ALLELE_FORMATS))
-        + "; 'characters' reads a character matrix and 'table' any table by the "
+        + "; 'laml' reads a character matrix and 'table' any table by the "
         "columns that columns names"
     )
 
@@ -1458,7 +1459,7 @@ def allele_layout(
         return _parquet_layout(text)
     if found == "petracer":
         return _petracer_layout(text)
-    if found in ("petracer_characters", "characters"):
+    if found in ("petracer_characters", "laml"):
         return _matrix_layout(text, found)
     if found == "typewriter":
         layout = _typewriter_layout(text, lengths)
@@ -1892,7 +1893,7 @@ def _iter_matrix(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
             [_stripped(chunk[position]) for position in range(1, len(text.names))],
             axis=1,
         )
-        if layout.format == "characters":
+        if layout.format == "laml":
             tokens = _whole_numbers(tokens)
         yield AlleleRows(
             barcodes=_cells(chunk[0].to_numpy(dtype=object), lines, text.path, text),
@@ -2260,7 +2261,7 @@ def iter_allele_rows(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRo
         "cassiopeia_parquet": _iter_parquet,
         "petracer": _iter_petracer,
         "petracer_characters": _iter_matrix,
-        "characters": _iter_matrix,
+        "laml": _iter_matrix,
         "typewriter": _iter_typewriter,
         "typewriter_chains": _iter_chains,
         "treedata": _iter_treedata,

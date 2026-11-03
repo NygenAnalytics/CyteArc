@@ -116,7 +116,7 @@ def _coupling() -> tuple[str, str, Callable[[], object]]:
         "cytearc.clones.fate",
         "_permuted_couplings",
         lambda: clone_coupling(
-            groups, clones, cells, 2, permutations=20, workers=_REQUESTED
+            groups, clones, cells, 2, n_permutations=20, workers=_REQUESTED
         ),
     )
 

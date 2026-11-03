@@ -275,7 +275,7 @@ def test_loads_fit_the_smallest_budget_they_accept(request, name) -> None:
 
 
 @pytest.mark.parametrize("name", _SHAPES)
-@pytest.mark.parametrize("format", ["cassiopeia", "laml"])
+@pytest.mark.parametrize("format", ["treedata", "laml"])
 def test_exports_fit_the_smallest_budget_they_accept(request, name, format) -> None:
     store, cells, path, folder = request.getfixturevalue(name)
     options = _OPTIONS.get(name, {})
@@ -285,7 +285,7 @@ def test_exports_fit_the_smallest_budget_they_accept(request, name, format) -> N
     targets = iter(range(1_000))
 
     def export() -> object:
-        suffix = ".zarr" if format == "cassiopeia" else ".csv"
+        suffix = ".zarr" if format == "treedata" else ".csv"
         target = folder / f"export_{format}_{next(targets)}{suffix}"
         return store.clones.export_characters(alleles, target, format=format)
 

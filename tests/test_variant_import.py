@@ -178,16 +178,16 @@ def test_mean_depth_covered_sites_and_listed_cells_come_from_the_truth(
         cells["mean_depth"].to_numpy(), reads.sum(axis=1) / len(SITE_POSITIONS)
     )
     np.testing.assert_array_equal(
-        cells["covered_sites"].to_numpy(), (reads > 0).sum(axis=1)
+        cells["n_covered_sites"].to_numpy(), (reads > 0).sum(axis=1)
     )
     assert cells["listed"].all()
     # The cell without reads is in the depth table: listed, at depth 0.
     assert cells["mean_depth"].iloc[UNCOVERED_CELL] == 0.0
-    assert cells["covered_sites"].iloc[UNCOVERED_CELL] == 0
+    assert cells["n_covered_sites"].iloc[UNCOVERED_CELL] == 0
     # Site sums cover every cell.
-    sites = store.variants.load_counts(ref, cells=[]).sites
+    sites = store.variants.load_counts(ref, cell_selection=[]).sites
     np.testing.assert_array_equal(sites["depth"].to_numpy(), reads.sum(axis=0))
-    np.testing.assert_array_equal(sites["cells"].to_numpy(), (reads > 0).sum(axis=0))
+    np.testing.assert_array_equal(sites["n_cells"].to_numpy(), (reads > 0).sum(axis=0))
 
 
 def test_without_a_depth_table_cells_with_reads_are_the_listed_ones(
@@ -209,7 +209,7 @@ def test_six_column_files_keep_qualities_and_need_a_format(store, tmp_path) -> N
     _depth, counts = expected_mito(TRUTH)
     assert_tables(loaded.counts, counts)
     # Each strand's mean quality, missing where the strand has no reads.
-    merged = loaded.counts.assign(cell=loaded.counts["cell"].astype(str))
+    merged = loaded.counts.assign(cell=loaded.counts["ids"].astype(str))
     for row in merged.sample(40, random_state=0).itertuples():
         truth_row = TRUTH.row_ids.index(row.cell)
         position = int(row.site.split(":")[1])
@@ -235,7 +235,7 @@ def test_maegatk_strands_are_swapped_back(store, tmp_path) -> None:
     record = store.artifacts.inspect(ref).inputs["sources"][0]
     assert (record["format"], record["strands_swapped"]) == ("maegatk", True)
     # Each strand's mean quality swaps back with its count, in every row.
-    rows = loaded.counts.assign(cell=loaded.counts["cell"].astype(str))
+    rows = loaded.counts.assign(cell=loaded.counts["ids"].astype(str))
     truth_rows = np.asarray([TRUTH.row_ids.index(cell) for cell in rows["cell"]])
     positions = rows["site"].astype(str).str.split(":").str[1].astype(int).to_numpy()
     bases = np.asarray([BASES.index(allele) for allele in rows["allele"]])
@@ -512,7 +512,7 @@ def test_got_multi_keeps_each_channel_and_the_target_calls(store, tmp_path) -> N
             assert_tables(loaded.depth[loaded.depth["site"] == label], depth)
             assert_tables(
                 loaded.counts[loaded.counts["site"] == label][
-                    ["cell", "site", "allele", "count"]
+                    ["ids", "site", "allele", "count"]
                 ],
                 counts,
             )
@@ -539,7 +539,7 @@ def test_got_multi_keeps_each_channel_and_the_target_calls(store, tmp_path) -> N
     np.testing.assert_array_equal(np.lexsort(rows[::-1]), np.arange(rows.shape[1]))
     # Reads come with the counts: each call's reads, the probe barcode
     # channel's WT reads one more.
-    reads = loaded.counts.assign(cell=loaded.counts["cell"].astype(str))
+    reads = loaded.counts.assign(cell=loaded.counts["ids"].astype(str))
     row = reads[(reads["site"] == "CALR (probebc)") & (reads["allele"] == "WT")].iloc[0]
     truth_row = TRUTH.row_ids.index(row["cell"])
     assert row["reads"] == TRUTH.got_reads[truth_row, 0, 0] + 1
@@ -816,7 +816,7 @@ def test_load_counts_counts_the_ids_it_reads_and_finds_cells_among(
     # finding cells by ID reads the IDs of every cell of the counts.
     loads = {
         "every cell": lambda: store.variants.load_counts(ref),
-        "cells by ID": lambda: store.variants.load_counts(ref, cells=named),
+        "cells by ID": lambda: store.variants.load_counts(ref, cell_selection=named),
     }
 
     def unread(*_arguments, **_options):
@@ -833,7 +833,7 @@ def test_load_counts_counts_the_ids_it_reads_and_finds_cells_among(
     # Without a cell, no ID is read, so a budget far below a chunk of IDs
     # loads the sites.
     store.memoryBytes = chunk // 10
-    assert store.variants.load_counts(ref, cells=[]).cells.empty
+    assert store.variants.load_counts(ref, cell_selection=[]).cells.empty
 
 
 def test_load_counts_names_counts_of_another_kind_missing_or_incomplete(
@@ -877,9 +877,13 @@ def test_load_counts_keeps_the_sites_and_cells_it_is_given(store, tmp_path) -> N
     full = store.variants.load_counts(ref)
     chosen_ids = [str(cell) for cell in TRUTH.clones.cell_ids[[3, 1, 40]]]
     positions = [SITE_POSITIONS[4], SITE_POSITIONS[0]]
-    by_position = store.variants.load_counts(ref, sites=positions, cells=chosen_ids)
+    by_position = store.variants.load_counts(
+        ref, sites=positions, cell_selection=chosen_ids
+    )
     by_label = store.variants.load_counts(
-        ref, sites=[mito_label(position) for position in positions], cells=chosen_ids
+        ref,
+        sites=[mito_label(position) for position in positions],
+        cell_selection=chosen_ids,
     )
     labels = sorted(
         {mito_label(position) for position in positions},
@@ -895,13 +899,15 @@ def test_load_counts_keeps_the_sites_and_cells_it_is_given(store, tmp_path) -> N
             frame = getattr(full, name)
             expected = frame[
                 frame["site"].astype(str).isin(labels)
-                & frame["cell"].astype(str).isin(chosen_ids)
+                & frame["ids"].astype(str).isin(chosen_ids)
             ]
             assert_tables(getattr(loaded, name), expected)
         assert set(loaded.alleles["site"].astype(str)) == set(labels)
     # A site or a cell named twice is loaded once.
     twice = store.variants.load_counts(
-        ref, sites=[*positions, positions[0]], cells=[*chosen_ids, chosen_ids[1]]
+        ref,
+        sites=[*positions, positions[0]],
+        cell_selection=[*chosen_ids, chosen_ids[1]],
     )
     assert twice.sites.index.tolist() == labels
     assert twice.cells.index.tolist() == by_position.cells.index.tolist()
@@ -909,12 +915,14 @@ def test_load_counts_keeps_the_sites_and_cells_it_is_given(store, tmp_path) -> N
         assert_tables(getattr(twice, name), getattr(by_position, name))
     # A cell selection within the counts' cells selects the same way.
     selection = store.select_cells(ref, low=0.0)
-    selected = store.variants.load_counts(ref, cells=selection, sites=positions)
+    selected = store.variants.load_counts(
+        ref, cell_selection=selection, sites=positions
+    )
     # A bound leaves out values equal to it: the cell without reads.
     covered = full.cells.index[full.cells["mean_depth"] > 0].tolist()
     assert selected.cells.index.tolist() == covered
     # Without cells, only the sites and their sums; without sites, only cells.
-    sites_only = store.variants.load_counts(ref, cells=[])
+    sites_only = store.variants.load_counts(ref, cell_selection=[])
     assert sites_only.depth.empty and sites_only.counts.empty and sites_only.cells.empty
     assert sites_only.sites["depth"].tolist() == full.sites["depth"].tolist()
     cells_only = store.variants.load_counts(ref, sites=[])
@@ -932,9 +940,11 @@ def test_load_counts_refuses_sites_and_cells_it_does_not_hold(store, tmp_path) -
         with pytest.raises(error, match=message):
             store.variants.load_counts(ref, sites=sites)
     with pytest.raises(ValueError, match="The counts hold no cell 'nobody'"):
-        store.variants.load_counts(ref, cells=["nobody"])
-    with pytest.raises(TypeError, match="cells must be a cell selection ArtifactRef"):
-        store.variants.load_counts(ref, cells="d2__AAAC-1")
+        store.variants.load_counts(ref, cell_selection=["nobody"])
+    with pytest.raises(
+        TypeError, match="^cell_selection must be a cell selection ArtifactRef"
+    ):
+        store.variants.load_counts(ref, cell_selection="d2__AAAC-1")
     store.cells.insert("first_half", np.arange(TRUTH.n_cells) < TRUTH.n_cells // 2)
     half = store.snapshot_cell_selection("first_half")
     with collect_warnings(), warnings.catch_warnings():
@@ -942,8 +952,10 @@ def test_load_counts_refuses_sites_and_cells_it_does_not_hold(store, tmp_path) -
         half_counts = store.variants.import_counts(
             write_got(TRUTH, tmp_path / "CALR.tsv", style="xv"), cell_selection=half
         )
-    with pytest.raises(ValueError, match="cells that the counts do not hold"):
-        store.variants.load_counts(half_counts, cells=every_cell(store))
+    with pytest.raises(
+        ValueError, match="^cell_selection selects .* cells that the counts do not hold"
+    ):
+        store.variants.load_counts(half_counts, cell_selection=every_cell(store))
     with pytest.raises(TypeError, match="counts must be an ArtifactRef"):
         store.variants.load_counts("counts")
     with pytest.raises(
@@ -1182,8 +1194,8 @@ def _expected_got_multi(truth) -> tuple[pd.DataFrame, pd.DataFrame]:
             ):
                 calls.append((ids[row], name, "MUT", source, value))
     return (
-        pd.DataFrame(counts, columns=["cell", "site", "allele", "count", "reads"]),
-        pd.DataFrame(calls, columns=["cell", "site", "allele", "source", "call"]),
+        pd.DataFrame(counts, columns=["ids", "site", "allele", "count", "reads"]),
+        pd.DataFrame(calls, columns=["ids", "site", "allele", "source", "call"]),
     )
 
 
@@ -1335,14 +1347,14 @@ def test_a_mito_matrix_states_its_unit_or_needs_count_unit(
         with pytest.raises(ValueError, match="does not say whether mito counted"):
             store.variants.import_counts(path, cell_selection=every_cell(store))
         ref, _ = _import(store, path, count_unit="reads")
-        assert store.variants.load_counts(ref, cells=[]).count_unit == "reads"
+        assert store.variants.load_counts(ref, cell_selection=[]).count_unit == "reads"
         return
     with pytest.raises(ValueError, match="mito counts molecules, not reads"):
         store.variants.import_counts(
             path, cell_selection=every_cell(store), count_unit="reads"
         )
     ref, _ = _import(store, path)
-    assert store.variants.load_counts(ref, cells=[]).count_unit == unit
+    assert store.variants.load_counts(ref, cell_selection=[]).count_unit == unit
 
 
 def test_short_tables_are_one_chunk_no_longer_than_their_rows(store, tmp_path) -> None:
@@ -1414,13 +1426,13 @@ def test_load_counts_counts_the_chunks_a_read_decompresses(store, tmp_path) -> N
     ids_bytes = text_read_bytes(store.cells._get_array("ids"), 1)
     store.memoryBytes = ids_bytes + 2 * chunk_bytes
     with pytest.raises(MemoryError, match="before it keeps a row"):
-        store.variants.load_counts(ref, sites=one_site, cells=first)
+        store.variants.load_counts(ref, sites=one_site, cell_selection=first)
     store.memoryBytes = ids_bytes + 2 * chunk_bytes + 10_000
-    loaded = store.variants.load_counts(ref, sites=one_site, cells=first)
+    loaded = store.variants.load_counts(ref, sites=one_site, cell_selection=first)
     assert loaded.cells.index.tolist() == one_cell
     # Without rows to read, no chunk is decompressed.
     store.memoryBytes = 2 * chunk_bytes
-    assert store.variants.load_counts(ref, cells=[]).cells.empty
+    assert store.variants.load_counts(ref, cell_selection=[]).cells.empty
 
 
 def test_a_small_budget_parses_the_base_files_on_one_thread(
@@ -1452,13 +1464,13 @@ def test_load_counts_takes_arrays_and_indexes_of_sites_and_cells(
     ref, _ = _import(store, write_mgatk(TRUTH, tmp_path / "final"))
     ids = [str(cell) for cell in TRUTH.clones.cell_ids[[3, 1]]]
     positions = [SITE_POSITIONS[4], SITE_POSITIONS[0]]
-    listed = store.variants.load_counts(ref, sites=positions, cells=ids)
+    listed = store.variants.load_counts(ref, sites=positions, cell_selection=ids)
     for sites, cells in (
         (np.asarray(positions), np.asarray(ids, dtype=object)),
         (pd.Index(positions), pd.Index(ids)),
         (np.asarray([mito_label(p) for p in positions]), np.asarray(ids, dtype=str)),
     ):
-        loaded = store.variants.load_counts(ref, sites=sites, cells=cells)
+        loaded = store.variants.load_counts(ref, sites=sites, cell_selection=cells)
         assert_tables(loaded.counts, listed.counts)
         assert loaded.cells.index.tolist() == listed.cells.index.tolist()
     with pytest.raises(TypeError, match="sites must hold site labels or positions"):
@@ -1609,7 +1621,9 @@ def test_the_traced_peaks_of_import_and_load_fit_the_smallest_budget_accepted(
             got, cell_selection=cells, invalidate_cache=True
         ),
         "load": lambda: store.variants.load_counts(counts),
-        "load by ID": lambda: store.variants.load_counts(counts, cells=ids[:50:10]),
+        "load by ID": lambda: store.variants.load_counts(
+            counts, cell_selection=ids[:50:10]
+        ),
     }
     for name, run in steps.items():
         store.memoryBytes = 1 << 33
@@ -1649,8 +1663,8 @@ def test_loading_a_few_cells_of_many_fits_the_smallest_budget_accepted(
     store.cells.insert("first", np.arange(n_cells) == 0)
     first = store.snapshot_cell_selection("first")
     for name, run in {
-        "one cell": lambda: store.variants.load_counts(counts, cells=first),
-        "no cell": lambda: store.variants.load_counts(counts, cells=[]),
+        "one cell": lambda: store.variants.load_counts(counts, cell_selection=first),
+        "no cell": lambda: store.variants.load_counts(counts, cell_selection=[]),
     }.items():
         store.memoryBytes = 1 << 33
         run()

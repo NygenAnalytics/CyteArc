@@ -79,7 +79,7 @@ def records_of(store, ref) -> pd.DataFrame:
     allele = records["allele"].astype(object)
     frame = pd.DataFrame(
         {
-            "cell": records["cell"].astype(str),
+            "cell": records["ids"].astype(str),
             "integration": records["integration"].astype(str),
             "site": records["site"].astype(str),
             "state": records["state"].astype(str),
@@ -758,7 +758,7 @@ def test_saved_records_keep_each_rows_line_as_its_table_numbers_it(tmp_path):
         path, cell_selection=store.snapshot_cell_selection()
     )
     records = store.clones.load_alleles(ref).records
-    assert dict(records.groupby("cell", observed=True)["row"].first()) == {
+    assert dict(records.groupby("ids", observed=True)["row"].first()) == {
         "c1": 2,
         "c2": 3,
         "c3": 4,
@@ -871,12 +871,12 @@ def test_files_of_a_header_alone_import_no_records(
     ref = store.clones.import_alleles(path, cell_selection=every_cell(store), **options)
     loaded = store.clones.load_alleles(ref)
     assert len(loaded.records) == 0 and loaded.records.columns.tolist()[:3] == [
-        "cell",
+        "ids",
         "file",
         "integration",
     ]
     assert (loaded.cells["n_records"] == 0).all()
-    assert loaded.files["rows"].tolist() == [0]
+    assert loaded.files["n_rows"].tolist() == [0]
     assert loaded.site_states().empty
     with pytest.raises(ValueError, match="No cell reads a character"):
         store.clones.export_characters(ref, tmp_path / "out.zarr")
@@ -925,7 +925,7 @@ def test_a_pair_listed_twice_keeps_each_listings_integration(tmp_path):
             integrations=["ZZ", "AA"],
         )
     records = store.clones.load_alleles(ref).records
-    prefixes = records["cell"].astype(str).str[:2]
+    prefixes = records["ids"].astype(str).str[:2]
     assert set(zip(prefixes, records["integration"].astype(str), strict=True)) == {
         ("z_", "ZZ"),
         ("a_", "AA"),
@@ -979,7 +979,7 @@ def test_records_do_not_depend_on_the_chunks_a_file_is_read_in(
     ]
     for one, other in zip(expected, found, strict=True):
         pd.testing.assert_frame_equal(one, other)
-        rows = one.groupby("cell", observed=True)["row"]
+        rows = one.groupby("ids", observed=True)["row"]
         assert rows.apply(lambda values: values.is_monotonic_increasing).all()
     # A row without an allele reads each of the first allele's three sites.
     assert expected[1].groupby("row").size().unique().tolist() == [3]

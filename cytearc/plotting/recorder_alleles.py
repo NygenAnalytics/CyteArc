@@ -52,12 +52,12 @@ def _site_table(counts: pd.DataFrame) -> pd.DataFrame:
     table = counts.copy()
     keys = ["integration", "site"]
     applicable = table["state"] != "not_applicable"
-    totals = table.loc[applicable].groupby(keys, sort=False)["cells"].sum()
+    totals = table.loc[applicable].groupby(keys, sort=False)["n_cells"].sum()
     denominator = table.set_index(keys).index.map(totals).to_numpy(dtype=np.float64)
     with np.errstate(divide="ignore", invalid="ignore"):
         share = np.where(
             applicable & (denominator > 0),
-            table["cells"].to_numpy(dtype=np.float64) / denominator,
+            table["n_cells"].to_numpy(dtype=np.float64) / denominator,
             np.nan,
         )
     table["share"] = share
@@ -92,7 +92,8 @@ def recorder_states(
     lineage.
 
     Tables: ``site_states`` (``integration``, ``site``, ``state``,
-    ``cells``, ``share``), one row per site and state.
+    ``n_cells``, ``share``), one row per site and state, the record's
+    :meth:`~cytearc.clones.LineageAlleles.site_states` with each share.
     """
     max_sites = integer_argument(max_sites, "max_sites", minimum=1)
     loaded = _load_alleles(store, alleles)
@@ -108,7 +109,7 @@ def recorder_states(
     }
     read = table.loc[table["state"].isin(("mark", "unknown_mark", "unedited"))]
     read_cells = (
-        read.groupby(["integration", "site"], sort=False)["cells"]
+        read.groupby(["integration", "site"], sort=False)["n_cells"]
         .sum()
         .reindex(keys)
         .fillna(0)

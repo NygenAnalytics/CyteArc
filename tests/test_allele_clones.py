@@ -340,8 +340,20 @@ def test_within_needs_a_label_for_every_cell_with_an_edit(store, tmp_path) -> No
         store.clones.allele_clones(alleles, within="partly", **options)
     with pytest.raises(ValueError, match="not a cell metadata column"):
         store.clones.allele_clones(alleles, within="mouse", **options)
-    with pytest.raises(ValueError, match="also a column of the result"):
+    # The within labels join no table, so a column named like the loaded
+    # clones' n_alleles keeps clones apart as any column does.
+    store.cells.insert("n_alleles", TRUTH.samples.astype(object))
+    store.cells.insert("sample_copy", TRUTH.samples.astype(object))
+    named = store.clones.load_clones(
         store.clones.allele_clones(alleles, within="n_alleles", **options)
+    )
+    assert named.cells.columns.tolist() == ["clone", "clone_size", "n_alleles"]
+    pd.testing.assert_series_equal(
+        named.cells["clone"],
+        store.clones.load_clones(
+            store.clones.allele_clones(alleles, within="sample_copy", **options)
+        ).cells["clone"],
+    )
 
 
 def test_saved_clones_are_reused_by_their_rules_and_banks(store, tmp_path) -> None:

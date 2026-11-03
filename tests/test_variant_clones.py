@@ -8,6 +8,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
 from sklearn.metrics import adjusted_rand_score
@@ -19,7 +20,7 @@ from tests.variant_helpers import (
     clone_band_budget,
     write_variant_store,
 )
-from tests.variant_truth import mito_clone_truth, variant_truth, write_mgatk
+from tests.variant_truth import mito_clone_truth, write_mgatk
 
 TRUTH = mito_clone_truth()
 
@@ -64,7 +65,7 @@ def _called(store, clones) -> np.ndarray:
 
 def test_clones_recover_the_truths_clones(store) -> None:
     counts, selection = _inputs(store)
-    clones = store.variants.clones(counts, variants=selection)
+    clones = store.variants.frequency_clones(selection)
     called = _called(store, clones)
     labelled = TRUTH.clones.clones >= 0
     assert adjusted_rand_score(TRUTH.clones.clones[labelled], called[labelled]) > 0.9
@@ -78,13 +79,17 @@ def test_clones_recover_the_truths_clones(store) -> None:
         assert sizes.max() >= 0.9 * (TRUTH.clones.clones == clone).sum()
     assert len(set(dominant.values())) == TRUTH.clones.n_clones
     loaded = store.clones.load_clones(clones)
-    assert loaded.source == "variant_clones"
+    assert loaded.source == "call_frequency_clones"
+    # Called clones are numbered by size, as every clone that CyteArc calls.
     assert loaded.clones["n_cells"].is_monotonic_decreasing
+    assert loaded.clones["clone"].tolist() == [
+        f"clone_{rank}" for rank in range(1, len(loaded.clones) + 1)
+    ]
 
 
 def test_cells_without_evidence_get_no_clone_and_are_counted(store) -> None:
     counts, selection = _inputs(store)
-    clones = store.variants.clones(counts, variants=selection)
+    clones = store.variants.frequency_clones(selection)
     attributes = store.artifacts.load(clones).attrs
     called = _called(store, clones)
     assert attributes["n_cells_scored"] == TRUTH.n_cells
@@ -94,9 +99,11 @@ def test_cells_without_evidence_get_no_clone_and_are_counted(store) -> None:
         + attributes["n_cells_without_coverage"]
         + attributes["n_cells_without_alternative"]
         + attributes["n_cells_without_neighbors"]
-        + attributes["n_cells_without_group"]
         == TRUTH.n_cells
     )
+    # Cells without a label in the within columns are refused, so no cell is
+    # left without a group.
+    assert "n_cells_without_group" not in attributes
     assert attributes["n_cells_clustered"] == int((called != "").sum())
     # A cell without a clone of its own reads no variant allele, or reads
     # one by error and joins the clone that carries it.
@@ -108,7 +115,7 @@ def test_cells_without_evidence_get_no_clone_and_are_counted(store) -> None:
     shown = {
         str(cell)
         for cell, site, allele in zip(
-            loaded.counts["cell"],
+            loaded.counts["ids"],
             loaded.counts["site"],
             loaded.counts["allele"],
             strict=True,
@@ -124,15 +131,20 @@ def test_cells_without_evidence_get_no_clone_and_are_counted(store) -> None:
     assert attributes["n_clones"] == len(set(called) - {""})
 
 
-def test_within_keeps_groups_apart_and_names_clones_after_them(store) -> None:
+def test_within_keeps_groups_apart_and_numbers_clones_over_every_group(store) -> None:
     counts, selection = _inputs(store)
-    clones = store.variants.clones(counts, variants=selection, within="sample")
-    cells = store.clones.load_clones(clones).cells
-    labels = cells["clone"].astype(object).dropna()
+    clones = store.variants.frequency_clones(selection, within="sample")
+    loaded = store.clones.load_clones(clones)
+    labels = loaded.cells["clone"].astype(object).dropna()
     samples = dict(zip(TRUTH.clones.cell_ids, TRUTH.clones.samples, strict=True))
-    for cell, label in labels.items():
-        group, _cluster = str(label).split(":")
-        assert group == samples[cell]
+    # Each clone holds the cells of one sample.
+    for label in set(labels):
+        assert len({samples[cell] for cell in labels.index[labels == label]}) == 1
+    # One ranking over both samples, largest first, labelled clone_1 and on.
+    sizes = labels.value_counts()
+    ranked = [f"clone_{rank}" for rank in range(1, len(sizes) + 1)]
+    assert loaded.clones["clone"].tolist() == ranked
+    assert [int(sizes[label]) for label in ranked] == sorted(sizes, reverse=True)
     # The truth's clones span both samples, so each splits in two.
     called = _called(store, clones)
     labelled = TRUTH.clones.clones >= 0
@@ -149,43 +161,120 @@ def test_within_keeps_groups_apart_and_names_clones_after_them(store) -> None:
     assert adjusted_rand_score(split, called[labelled]) > 0.8
 
 
-def test_cells_without_a_group_get_no_clone(store) -> None:
+def test_two_within_columns_keep_every_combination_apart(store) -> None:
+    counts, selection = _inputs(store)
+    # A second column across the samples: each clone holds the cells of one
+    # sample and one half, as a single column of both labels would group them.
+    halves = np.where(np.arange(TRUTH.n_cells) % 3 == 0, "x", "y").astype(object)
+    store.cells.insert("half", halves)
+    store.cells.insert(
+        "sample_half",
+        np.asarray(
+            [
+                f"{sample}-{half}"
+                for sample, half in zip(TRUTH.clones.samples, halves, strict=True)
+            ],
+            dtype=object,
+        ),
+    )
+    clones = store.variants.frequency_clones(selection, within=["sample", "half"])
+    called = _called(store, clones)
+    combined = TRUTH.clones.samples.astype(object) + "-" + halves
+    for label in set(called) - {""}:
+        assert len(set(combined[called == label])) == 1, label
+    # The same groups through one column give the same clones and labels.
+    single = store.variants.frequency_clones(selection, within="sample_half")
+    np.testing.assert_array_equal(_called(store, single), called)
+    assert single != clones
+    assert store.artifacts.inspect(clones).parameters["within"] == ["sample", "half"]
+    # Either column's labels enter the identity.
+    store.cells.insert("half", halves[::-1].copy(), overwrite=True)
+    assert (
+        store.variants.frequency_clones(selection, within=["sample", "half"]) != clones
+    )
+
+
+def test_tied_clones_are_numbered_by_their_first_cell() -> None:
+    from cytearc.datastore._operations.variants import _clone_assignment
+    from cytearc.variants.frequencies import FrequencyClones
+
+    # Ten scored cells among 13, two groups numbering their own clusters. The
+    # clone of group 1 and cluster 2 holds three cells, and three clones tie
+    # at two cells: group 1's cluster 1 starts at cell 0, group 0's cluster 1
+    # at cell 2 and its cluster 2 at cell 3, an order that differs from the
+    # groups' and clusters'. Cell 12 has no clone.
+    positions = np.asarray([0, 2, 3, 5, 6, 8, 9, 10, 11, 12])
+    called = FrequencyClones(
+        clusters=np.asarray([1, 1, 2, 1, 2, 2, 1, 2, 2, 0]),
+        groups=np.asarray([1, 0, 0, 1, 0, 1, 0, 1, 1, 0]),
+        status=np.zeros(10, dtype=np.int8),
+        n_edges=0,
+    )
+    assignment = _clone_assignment(13, positions, called)
+    assert assignment.clone_ids.tolist() == ["clone_1", "clone_2", "clone_3", "clone_4"]
+    assert assignment.clone_sizes.tolist() == [3, 2, 2, 2]
+    assert assignment.codes.tolist() == [1, -1, 2, 3, -1, 1, 3, -1, 0, 2, 0, 0, -1]
+    # No clone is called: no label.
+    empty = _clone_assignment(
+        3,
+        np.asarray([0, 2]),
+        FrequencyClones(
+            clusters=np.zeros(2, dtype=np.int64),
+            groups=np.zeros(2, dtype=np.int64),
+            status=np.zeros(2, dtype=np.int8),
+            n_edges=0,
+        ),
+    )
+    assert empty.clone_ids.tolist() == [] and empty.codes.tolist() == [-1, -1, -1]
+
+
+def test_scored_cells_without_a_label_are_refused(store) -> None:
     counts, selection = _inputs(store)
     groups = TRUTH.clones.samples.astype(object).copy()
     groups[:10] = None
     store.cells.insert("donor", groups)
-    clones = store.variants.clones(counts, variants=selection, within="donor")
-    called = _called(store, clones)
+    with pytest.raises(
+        ValueError,
+        match="no label for 10 cells with counts that the statistics scored",
+    ):
+        store.variants.frequency_clones(selection, within="donor")
+    # A cell outside the selection's statistics needs no label: the
+    # statistics of the labelled cells alone call clones within the donors.
+    store.cells.insert("labelled", ~pd.isna(groups))
+    labelled = store.variants.informative(
+        counts, cell_selection=store.snapshot_cell_selection("labelled"), preset="atac"
+    )
+    called = _called(store, store.variants.frequency_clones(labelled, within="donor"))
     assert (called[:10] == "").all()
-    assert store.artifacts.load(clones).attrs["n_cells_without_group"] == 10
+    assert (called[10:] != "").any()
 
 
 def test_clones_are_reused_and_follow_their_arguments(store) -> None:
     counts, selection = _inputs(store)
-    first = store.variants.clones(counts, variants=selection)
-    assert store.variants.clones(counts, variants=selection) == first
-    finer = store.variants.clones(counts, variants=selection, resolution=3.0)
+    first = store.variants.frequency_clones(selection)
+    assert store.variants.frequency_clones(selection) == first
+    finer = store.variants.frequency_clones(selection, resolution=3.0)
     assert finer != first
     assert len(store.clones.load_clones(finer).clones) >= len(
         store.clones.load_clones(first).clones
     )
-    again = store.variants.clones(counts, variants=selection, invalidate_cache=True)
+    again = store.variants.frequency_clones(selection, invalidate_cache=True)
     assert again != first
     np.testing.assert_array_equal(_called(store, again), _called(store, first))
     # Editing the within column gives new clones.
     store.cells.insert("donor", TRUTH.clones.samples.astype(object))
-    grouped = store.variants.clones(counts, variants=selection, within="donor")
+    grouped = store.variants.frequency_clones(selection, within="donor")
     store.cells.insert(
         "donor",
         np.where(TRUTH.clones.samples == "d2", "a", "b").astype(object),
         overwrite=True,
     )
-    assert store.variants.clones(counts, variants=selection, within="donor") != grouped
+    assert store.variants.frequency_clones(selection, within="donor") != grouped
 
 
 def test_clones_do_not_depend_on_threads_or_budget(store, tmp_path) -> None:
     counts, selection = _inputs(store)
-    first = _called(store, store.variants.clones(counts, variants=selection))
+    first = _called(store, store.variants.frequency_clones(selection))
     other = open_store(Path(store.zarr_loc), nthreads=4)
     # Bands of 2,000 rows, a few cells each. Zarr writes the clones one file
     # at a time, so the buffer of that write fits beside them.
@@ -195,7 +284,7 @@ def test_clones_do_not_depend_on_threads_or_budget(store, tmp_path) -> None:
     with zarr.config.set({"async.concurrency": 1}):
         second = _called(
             other,
-            other.variants.clones(counts, variants=selection, invalidate_cache=True),
+            other.variants.frequency_clones(selection, invalidate_cache=True),
         )
     np.testing.assert_array_equal(first, second)
 
@@ -205,9 +294,9 @@ def test_clones_of_scattered_cells_do_not_depend_on_the_budget(store) -> None:
     in_d2 = TRUTH.clones.samples == "d2"
     store.cells.insert("in_d2", in_d2)
     selection = store.variants.informative(
-        counts, cells=store.snapshot_cell_selection("in_d2"), preset="atac"
+        counts, cell_selection=store.snapshot_cell_selection("in_d2"), preset="atac"
     )
-    whole = _called(store, store.variants.clones(counts, variants=selection))
+    whole = _called(store, store.variants.frequency_clones(selection))
     assert (whole[~in_d2] == "").all()
     labelled = in_d2 & (TRUTH.clones.clones >= 0)
     assert adjusted_rand_score(TRUTH.clones.clones[labelled], whole[labelled]) > 0.9
@@ -220,55 +309,47 @@ def test_clones_of_scattered_cells_do_not_depend_on_the_budget(store) -> None:
     store.memoryBytes = clone_band_budget(
         store, counts, 5_000, n_cells=int(in_d2.sum()), n_variants=12
     )
-    banded = store.variants.clones(counts, variants=selection, invalidate_cache=True)
+    banded = store.variants.frequency_clones(selection, invalidate_cache=True)
     np.testing.assert_array_equal(_called(store, banded), whole)
 
 
 def test_a_read_only_store_reuses_saved_clones_and_refuses_new_ones(store) -> None:
     counts, selection = _inputs(store)
-    clones = store.variants.clones(counts, variants=selection)
+    clones = store.variants.frequency_clones(selection)
     reader = open_store(Path(store.zarr_loc), zarr_mode="r")
-    assert reader.variants.clones(counts, variants=selection) == clones
+    assert reader.variants.frequency_clones(selection) == clones
     with pytest.raises(PermissionError):
-        reader.variants.clones(counts, variants=selection, n_neighbors=5)
+        reader.variants.frequency_clones(selection, n_neighbors=5)
 
 
 def test_clones_check_their_arguments(store, tmp_path) -> None:
     counts, selection = _inputs(store)
     with pytest.raises(ValueError, match="at least 2"):
-        store.variants.clones(counts, variants=selection, n_neighbors=1)
+        store.variants.frequency_clones(selection, n_neighbors=1)
     with pytest.raises(TypeError, match="n_neighbors must be an integer"):
-        store.variants.clones(counts, variants=selection, n_neighbors=2.5)
+        store.variants.frequency_clones(selection, n_neighbors=2.5)
     with pytest.raises(ValueError, match="finite and positive"):
-        store.variants.clones(counts, variants=selection, resolution=0)
+        store.variants.frequency_clones(selection, resolution=0)
     with pytest.raises(ValueError, match="not a cell metadata column"):
-        store.variants.clones(counts, variants=selection, within="mouse")
+        store.variants.frequency_clones(selection, within="mouse")
     with pytest.raises(TypeError, match="within must be"):
-        store.variants.clones(counts, variants=selection, within=3)
+        store.variants.frequency_clones(selection, within=3)
     with pytest.raises(TypeError, match="invalidate_cache"):
-        store.variants.clones(counts, variants=selection, invalidate_cache="yes")
+        store.variants.frequency_clones(selection, invalidate_cache="yes")
     with pytest.raises(ValueError, match="variant_selection artifact"):
-        store.variants.clones(counts, variants=counts)
+        store.variants.frequency_clones(counts)
     nothing = store.variants.informative(counts, min_vmr=1e9)
     with pytest.raises(ValueError, match="selects no informative variant"):
-        store.variants.clones(counts, variants=nothing)
-    # Statistics of other counts.
-    small = variant_truth()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        other = store.variants.import_counts(
-            write_mgatk(small, tmp_path / "other"),
-            cell_selection=every_cell(store),
-        )
-    with pytest.raises(ValueError, match="scored other counts"):
-        store.variants.clones(other, variants=selection)
+        store.variants.frequency_clones(nothing)
+    with pytest.raises(ValueError, match="within names a column twice"):
+        store.variants.frequency_clones(selection, within=["sample", "sample"])
 
 
 def test_frequencies_beyond_the_budget_are_refused(store) -> None:
     counts, selection = _inputs(store)
     store.memoryBytes = 2_000
     with pytest.raises(MemoryError, match="Raise mem_budget"):
-        store.variants.clones(counts, variants=selection)
+        store.variants.frequency_clones(selection)
 
 
 def test_variant_clones_feed_the_clone_plots_and_values(store) -> None:
@@ -276,14 +357,14 @@ def test_variant_clones_feed_the_clone_plots_and_values(store) -> None:
 
     matplotlib.use("Agg")
     counts, selection = _inputs(store)
-    clones = store.variants.clones(counts, variants=selection)
+    clones = store.variants.frequency_clones(selection)
     values = store.artifacts.load_values(clones)
     called = store.clones.load_clones(clones).cells["clone"]
     np.testing.assert_array_equal(
         values.values, called.astype(object).where(called.notna(), "").to_numpy()
     )
     result = store.plots.clone_abundance(clones, show=False)
-    assert result.tables["top"]["cells"].sum() == int(called.notna().sum())
+    assert result.tables["top"]["n_cells"].sum() == int(called.notna().sum())
     result.close()
 
 
@@ -294,13 +375,13 @@ def test_variant_operations_name_inputs_of_another_kind_missing_or_incomplete(
     from cytearc.storage.refs import ArtifactRef
 
     counts, selection = _inputs(store)
-    clones = store.variants.clones(counts, variants=selection)
+    clones = store.variants.frequency_clones(selection)
     with pytest.raises(ValueError, match="counts must be a variant_counts artifact"):
         store.variants.informative(clones, preset="atac")
     with pytest.raises(ValueError, match="must be a variant_selection artifact"):
         store.variants.load_informative(counts)
     with pytest.raises(ValueError, match="must be a variant_selection artifact"):
-        store.variants.clones(counts, variants=counts)
+        store.variants.frequency_clones(counts)
 
     def missing(ref: ArtifactRef) -> ArtifactRef:
         return ArtifactRef(scope=ref.scope, kind=ref.kind, artifact_id="f" * 64)
@@ -308,8 +389,7 @@ def test_variant_operations_name_inputs_of_another_kind_missing_or_incomplete(
     for call in (
         lambda: store.variants.informative(missing(counts), preset="atac"),
         lambda: store.variants.load_informative(missing(selection)),
-        lambda: store.variants.clones(missing(counts), variants=selection),
-        lambda: store.variants.clones(counts, variants=missing(selection)),
+        lambda: store.variants.frequency_clones(missing(selection)),
     ):
         with pytest.raises(KeyError, match="Artifact does not exist"):
             call()
@@ -321,15 +401,11 @@ def test_variant_operations_name_inputs_of_another_kind_missing_or_incomplete(
                 counts, preset="atac", invalidate_cache=True
             ),
             lambda: store.variants.load_informative(selection),
-            lambda: store.variants.clones(
-                counts, variants=selection, invalidate_cache=True
-            ),
+            lambda: store.variants.frequency_clones(selection, invalidate_cache=True),
         ),
         selection: (
             lambda: store.variants.load_informative(selection),
-            lambda: store.variants.clones(
-                counts, variants=selection, invalidate_cache=True
-            ),
+            lambda: store.variants.frequency_clones(selection, invalidate_cache=True),
         ),
     }
     for ref, calls in readers.items():
@@ -356,7 +432,7 @@ def test_clones_within_long_labels_fit_the_smallest_budget_they_accept(
     store,
 ) -> None:
     # A read of a within column decodes a stored chunk of its labels at the
-    # width of the longest, and each clone's label starts with its group's.
+    # width of the longest.
     counts, selection = _inputs(store)
     store.cells.insert(
         "donor",
@@ -370,8 +446,8 @@ def test_clones_within_long_labels_fit_the_smallest_budget_they_accept(
     )
 
     def run() -> object:
-        return store.variants.clones(
-            counts, variants=selection, within="donor", invalidate_cache=True
+        return store.variants.frequency_clones(
+            selection, within="donor", invalidate_cache=True
         )
 
     run()
@@ -409,8 +485,8 @@ def test_scoring_and_clones_of_a_few_listed_cells_among_many_fit_the_budget(
         "informative": lambda: store.variants.informative(
             counts, preset="atac", invalidate_cache=True
         ),
-        "clones": lambda: store.variants.clones(
-            counts, variants=selection, invalidate_cache=True
+        "clones": lambda: store.variants.frequency_clones(
+            selection, invalidate_cache=True
         ),
     }.items():
         store.memoryBytes = 1 << 33

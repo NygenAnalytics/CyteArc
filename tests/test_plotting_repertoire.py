@@ -60,7 +60,7 @@ def test_receptor_qc_counts_cells_by_category(receptors) -> None:
     result = store.plots.receptor_qc(ref, show=False)
     try:
         assert set(result.axes) == {"receptor_type", "chain_pairing", "chains_per_cell"}
-        receptor_type = result.tables["receptor_type"]["cells"].to_dict()
+        receptor_type = result.tables["receptor_type"]["n_cells"].to_dict()
         assert receptor_type == {
             "TCR": 2,
             "BCR": 1,
@@ -68,9 +68,10 @@ def test_receptor_qc_counts_cells_by_category(receptors) -> None:
             "multichain": 1,
             "no IR": 3,
         }
-        assert result.tables["chain_pairing"]["cells"].sum() == N_CELLS
+        assert result.tables["chain_pairing"]["n_cells"].sum() == N_CELLS
         chains = result.tables["chains_per_cell"]
         assert chains.index.tolist() == ["0", "1", "2", "3+"]
+        assert chains.index.name == "n_chains"
         assert chains["VJ"].tolist() == [5, 2, 1, 0]
         assert chains["VDJ"].tolist() == [3, 3, 1, 1]
         # One bar per category with cells.

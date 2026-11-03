@@ -97,11 +97,11 @@ def test_gene_usage_counts_each_cells_primary_chains(tmp_path) -> None:
         "group": ["all cells"] * 5,
         "locus": ["IGH", "IGK", "TRA", "TRA", "TRB"],
         "v_call": ["IGHV1", "IGKV1", "TRAV1", "TRAV2", "TRBV1"],
-        "cells": [2, 2, 3, 1, 5],
+        "n_cells": [2, 2, 3, 1, 5],
         "fraction": [1.0, 1.0, 0.75, 0.25, 1.0],
     }
     second = store.repertoire.gene_usage(receptors, slots="VJ_2")
-    assert second.table[["locus", "v_call", "cells"]].values.tolist() == [
+    assert second.table[["locus", "v_call", "n_cells"]].values.tolist() == [
         ["TRA", "TRAV3", 1]
     ]
     pairs = store.repertoire.gene_usage(
@@ -112,11 +112,11 @@ def test_gene_usage_counts_each_cells_primary_chains(tmp_path) -> None:
         "locus",
         "v_call",
         "j_call",
-        "cells",
+        "n_cells",
         "fraction",
     ]
     tra = pairs.table[pairs.table["locus"] == "TRA"]
-    assert tra[["v_call", "j_call", "cells"]].values.tolist() == [
+    assert tra[["v_call", "j_call", "n_cells"]].values.tolist() == [
         ["TRAV1", "TRAJ1", 3],
         ["TRAV2", "TRAJ1", 1],
         ["TRAV3", "TRAJ2", 1],
@@ -130,7 +130,7 @@ def test_gene_usage_by_group_and_by_clonotype(tmp_path) -> None:
     assert by_sample.columns[:3].tolist() == ["group", "sample", "locus"]
     assert (by_sample["group"] == by_sample["sample"]).all()
     s1 = by_sample[(by_sample["sample"] == "s1") & (by_sample["locus"] == "TRA")]
-    assert s1[["v_call", "cells", "fraction"]].values.tolist() == [
+    assert s1[["v_call", "n_cells", "fraction"]].values.tolist() == [
         ["TRAV1", 2, 2 / 3],
         ["TRAV2", 1, 1 / 3],
     ]
@@ -138,13 +138,13 @@ def test_gene_usage_by_group_and_by_clonotype(tmp_path) -> None:
     # clonotype_4 for TRAV2; clonotype_3 has no alpha chain.
     once = store.repertoire.gene_usage(clonotypes, count="clonotypes").table
     tra = once[once["locus"] == "TRA"]
-    assert tra[["v_call", "clonotypes", "fraction"]].values.tolist() == [
+    assert tra[["v_call", "n_clonotypes", "fraction"]].values.tolist() == [
         ["TRAV1", 1, 0.5],
         ["TRAV2", 1, 0.5],
     ]
-    assert once[once["locus"] == "TRB"]["clonotypes"].tolist() == [3]
+    assert once[once["locus"] == "TRB"]["n_clonotypes"].tolist() == [3]
     cells = store.repertoire.gene_usage(clonotypes).table
-    assert cells[cells["locus"] == "TRB"]["cells"].tolist() == [5]
+    assert cells[cells["locus"] == "TRB"]["n_cells"].tolist() == [5]
     t_cells = store.select_cells(receptors, include=["TCR"])
     selected = store.repertoire.gene_usage(receptors, cell_selection=t_cells)
     assert selected.cell_selection == t_cells
@@ -175,7 +175,7 @@ def test_spectratype_counts_junction_lengths(tmp_path) -> None:
         "group": ["all cells"] * 4,
         "locus": ["IGH", "IGK", "TRA", "TRB"],
         "length": [4, 4, 4, 5],
-        "cells": [2, 2, 4, 5],
+        "n_cells": [2, 2, 4, 5],
         "fraction": [1.0, 1.0, 1.0, 1.0],
     }
     nucleotides = store.repertoire.spectratype(
@@ -187,13 +187,13 @@ def test_spectratype_counts_junction_lengths(tmp_path) -> None:
         "sample",
         "locus",
         "length",
-        "clonotypes",
+        "n_clonotypes",
         "fraction",
     ]
     tra = table[(table["sample"] == "s1") & (table["locus"] == "TRA")]
     # s1 holds clonotype_1 (cell0 and cell4) and clonotype_4 (cell2), both
     # with 12 alpha nucleotides.
-    assert tra[["length", "clonotypes"]].values.tolist() == [[12, 2]]
+    assert tra[["length", "n_clonotypes"]].values.tolist() == [[12, 2]]
 
 
 def test_tables_follow_the_natural_order_of_the_groups(tmp_path) -> None:
@@ -269,11 +269,11 @@ def test_gene_usage_plot_draws_one_panel_per_locus(tmp_path) -> None:
         assert list(result.axes) == ["IGH", "IGK", "TRA", "TRB"]
         # Without groups each locus draws bars.
         assert len(result.axes["TRA"].patches) == 2
-        assert result.tables["usage"]["cells"].sum() == 13
+        assert result.tables["usage"]["n_cells"].sum() == 13
         # Cells, each counted once however many of its chains count.
         usage = store.repertoire.gene_usage(receptors, group_by="sample")
         assert result.provenance.n_cells == usage.n_cells == 7
-        assert usage.table["cells"].sum() == 13
+        assert usage.table["n_cells"].sum() == 13
     finally:
         result.close()
     grouped = plotting.gene_usage(
@@ -434,9 +434,16 @@ def test_group_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:
     # Gene usage has no length column, nor junction lengths a gene column.
     assert len(store.repertoire.gene_usage(receptors, group_by="length").table)
     assert len(store.repertoire.spectratype(receptors, group_by="v_call").table)
-    # Clonotypes as labels would name a key column after a count column.
-    with pytest.raises(ValueError, match="key column 'clonotypes' is also a column"):
-        store.repertoire.gene_usage(receptors, groups=clonotypes)
+    # The count columns are n_cells and n_clonotypes, which a group column may
+    # not name; clonotypes as labels, whose key column is "clonotypes", may
+    # group the cells.
+    for column in ("n_cells", "n_clonotypes"):
+        store.cells.insert(column, SAMPLES)
+        for measure in (store.repertoire.gene_usage, store.repertoire.spectratype):
+            with pytest.raises(ValueError, match=f"'{column}', which is also a column"):
+                measure(receptors, group_by=column)
+    by_clonotype = store.repertoire.gene_usage(receptors, groups=clonotypes).table
+    assert by_clonotype.columns[:2].tolist() == ["group", "clonotypes"]
 
 
 @pytest.mark.parametrize("measure", ["gene_usage", "spectratype"])
@@ -568,7 +575,7 @@ def test_junctions_beyond_ascii_are_measured_in_characters(tmp_path) -> None:
 def test_figures_name_what_they_count(tmp_path) -> None:
     store, receptors, clonotypes = _sources(tmp_path)
     clusters = store.repertoire.clonotypes(
-        receptors, sequence="aa", metric="hamming", cutoff=1
+        receptors, sequence="aa", metric="hamming", max_distance=1
     )
     for source, count, noun in (
         (receptors, "cells", "cells"),
@@ -664,7 +671,7 @@ def test_gene_usage_recovers_the_truths_genes_in_each_sample(tmp_path) -> None:
         totals[(sample, locus)] += cells
     for row in usage.itertuples():
         assert row.fraction == pytest.approx(
-            row.cells / totals[(row.sample, row.locus)]
+            row.n_cells / totals[(row.sample, row.locus)]
         )
     # At the gene level the alleles of the truth's calls fall away.
     genes_only = store.repertoire.gene_usage(receptors, group_by="sample").table
@@ -815,7 +822,7 @@ def test_two_slots_of_one_arm_count_a_cell_once_per_value(tmp_path) -> None:
 
     usage = tra(store.repertoire.gene_usage(receptors, slots=alpha).table)
     # cell0, cell1 and cell4 carry TRAV1, cell2 TRAV2 and cell4 TRAV3.
-    assert usage[["v_call", "cells"]].values.tolist() == [
+    assert usage[["v_call", "n_cells"]].values.tolist() == [
         ["TRAV1", 3],
         ["TRAV2", 1],
         ["TRAV3", 1],
@@ -834,7 +841,7 @@ def test_two_slots_of_one_arm_count_a_cell_once_per_value(tmp_path) -> None:
     # Every alpha chain has 4 residues, so each of the four T cells with one
     # counts once, cell1 and cell4 with two alpha chains among them.
     lengths = tra(store.repertoire.spectratype(receptors, slots=alpha).table)
-    assert lengths[["length", "cells"]].values.tolist() == [[4, 4]]
+    assert lengths[["length", "n_cells"]].values.tolist() == [[4, 4]]
 
 
 def test_grouped_gene_usage_names_the_group_of_a_locus_held_by_one(tmp_path) -> None:

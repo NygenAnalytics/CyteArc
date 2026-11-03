@@ -727,7 +727,7 @@ def test_unicode_and_very_long_labels_survive_the_round_trip(store, tmp_path) ->
         "克隆 one",
         "clone, with comma",
     ]
-    for format, name in (("table", "out.csv"), ("matrix", "out.mtx")):
+    for format, name in (("cospar", "out.csv"), ("matrix", "out.mtx")):
         folder = _folder(tmp_path, format)
         store.clones.export_clones(ref, folder / name, format=format)
         again = store.clones.import_clones(folder / name, cell_selection=cells)
@@ -772,7 +772,7 @@ def test_load_and_export_refuse_other_artifacts(shared, tmp_path) -> None:
     ref = shared.store.clones.import_clones(
         write_numbat(TRUTH, tmp_path / "clone_post_2.tsv"), cell_selection=shared.cells
     )
-    with pytest.raises(ValueError, match="format must be one of table, matrix"):
+    with pytest.raises(ValueError, match="format must be one of cospar, matrix"):
         shared.store.clones.export_clones(ref, tmp_path / "x.csv", format="h5ad")
     with pytest.raises(TypeError, match="path must be a path"):
         shared.store.clones.export_clones(ref, 3)
@@ -968,7 +968,7 @@ def test_clones_come_from_a_cell_metadata_column(store) -> None:
     assert ref.kind == "clones"
     assert loaded_partition(store, ref) == TRUTH.partition()
     loaded = store.clones.load_clones(ref)
-    assert loaded.source == "clones_from_column"
+    assert loaded.source == "import_clones_from_column"
     assert loaded.clones["n_cells"].tolist() == list(CLONE_SIZES)
     assert store.artifacts.inspect(ref).parameters == {"column": "lineage"}
     assert store.clones.from_column("lineage", cell_selection=cells) == ref
@@ -1130,7 +1130,7 @@ def test_a_table_whose_first_rows_are_long_needs_room_for_a_chunk(tmp_path) -> N
 
 
 @pytest.mark.parametrize(
-    "method", ["load_clones", "table", pytest.param("matrix", marks=pytest.mark.slow)]
+    "method", ["load_clones", "cospar", pytest.param("matrix", marks=pytest.mark.slow)]
 )
 def test_reading_long_saved_labels_holds_the_budget_or_refuses(
     tmp_path, method
@@ -1140,7 +1140,7 @@ def test_reading_long_saved_labels_holds_the_budget_or_refuses(
     folder = _folder(tmp_path, "export")
     read = {
         "load_clones": lambda: long.store.clones.load_clones(ref),
-        "table": lambda: long.store.clones.export_clones(ref, folder / "out.csv"),
+        "cospar": lambda: long.store.clones.export_clones(ref, folder / "out.csv"),
         "matrix": lambda: long.store.clones.export_clones(
             ref, folder / "out.mtx", format="matrix"
         ),

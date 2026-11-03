@@ -214,7 +214,8 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # repertoire.export_airr, then clones.import_barcodes and
     # clones.load_barcodes, then clones.barcode_clones, then
     # variants.import_counts and variants.load_counts, then
-    # variants.informative, variants.load_informative and variants.clones,
+    # variants.informative, variants.load_informative and
+    # variants.frequency_clones,
     # then variants.genotypes, variants.load_genotypes and
     # variants.genotype_clones, then clones.import_alleles,
     # clones.load_alleles and clones.export_characters, then
@@ -239,7 +240,7 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         "load_counts",
         "informative",
         "load_informative",
-        "clones",
+        "frequency_clones",
         "genotypes",
         "load_genotypes",
         "genotype_clones",

@@ -75,7 +75,7 @@ def test_the_sample_reads_as_giftwrap_reads_it_and_its_genotypes_follow_gift(
     counts = _counts(store, DATA / "giftwrap_counts.1.filtered.h5")
     loaded = store.variants.load_counts(counts)
     entries = sorted(
-        [str(row.cell), str(row.site), str(row.allele), int(row.count), int(row.reads)]
+        [str(row.ids), str(row.site), str(row.allele), int(row.count), int(row.reads)]
         for row in loaded.counts.itertuples(index=False)
     )
     text = "".join("\t".join(map(str, entry)) + "\n" for entry in entries)
@@ -89,7 +89,7 @@ def test_the_sample_reads_as_giftwrap_reads_it_and_its_genotypes_follow_gift(
         sites=[sample["probe"]],
         alleles={sample["probe"]: tuple(sample["alleles"])},
     )
-    calls = store.variants.load_genotypes(genotypes).calls.set_index("cell")
+    calls = store.variants.load_genotypes(genotypes).calls.set_index("ids")
     for cell, posteriors, call in zip(
         sample["cells"], sample["posteriors"], sample["calls"], strict=True
     ):
@@ -114,7 +114,7 @@ def _compare(store, genotypes, golden_calls, golden_posteriors, barcodes) -> int
     ``golden_posteriors`` holds posteriors that must be repeated, or None.
     """
     calls = store.variants.load_genotypes(genotypes).calls
-    indexed = calls.set_index(["cell", "site"])
+    indexed = calls.set_index(["ids", "site"])
     assert len(calls) == sum(len(entry["cells"]) for entry in golden_calls.values())
     equal = 0
     for site, entry in golden_calls.items():

@@ -19,20 +19,20 @@ from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import every_cell, loaded_partition, write_cells_store
 from tests.storage_helpers import copy_store
 from tests.variant_helpers import (
-    DABSEQ_ITD_SITE,
+    DAB_SEQ_ITD_SITE,
     TAPESTRI_ALLELES,
     TAPESTRI_PASSING,
     TAPESTRI_REFERENCES,
     assert_tables,
-    dabseq_ids,
-    expected_dabseq,
+    dab_seq_ids,
+    expected_dab_seq,
     expected_tapestri,
 )
 from tests.variant_truth import (
     TAPESTRI_CLONE_VARIANTS,
     TAPESTRI_VARIANTS,
     tapestri_truth,
-    write_dabseq,
+    write_dab_seq,
     write_got,
     variant_truth,
     write_tapestri,
@@ -57,15 +57,15 @@ def store(template, tmp_path):
 
 
 @pytest.fixture(scope="module")
-def dabseq_template(tmp_path_factory) -> Path:
-    path = tmp_path_factory.mktemp("dabseq") / "store.zarr"
-    write_cells_store(path, dabseq_ids(TRUTH))
+def dab_seq_template(tmp_path_factory) -> Path:
+    path = tmp_path_factory.mktemp("dab_seq") / "store.zarr"
+    write_cells_store(path, dab_seq_ids(TRUTH))
     return path
 
 
 @pytest.fixture
-def dabseq_store(dabseq_template, tmp_path):
-    return copy_store(dabseq_template, tmp_path)
+def dab_seq_store(dab_seq_template, tmp_path):
+    return copy_store(dab_seq_template, tmp_path)
 
 
 def _import(store, path, **options):
@@ -155,14 +155,14 @@ def test_the_cells_of_two_samples_with_one_barcode_stay_apart(store, tmp_path) -
     first = TRUTH.row_ids[0]
     assert twin.split("__")[1] == first.split("__")[1]
     assert twin != first
-    depth = loaded.depth.set_index(["cell", "site"])["depth"]
+    depth = loaded.depth.set_index(["ids", "site"])["depth"]
     for row, cell in ((0, first), (TRUTH.twin_row, twin)):
         assert int(depth[(cell, "chr7:400")]) == int(TRUTH.depth[row, 9])
 
 
 def test_variants_add_failing_variants_and_positions(store, tmp_path) -> None:
     path = write_tapestri(TRUTH, tmp_path / "run.h5")
-    ref, _ = _import(store, path, variants=["chr2:500"])
+    ref, _ = _import(store, path, include_variants=["chr2:500"])
     loaded = store.variants.load_counts(ref)
     columns = (*TAPESTRI_PASSING, 6)
     depth, counts, calls = expected_tapestri(TRUTH, columns)
@@ -173,7 +173,7 @@ def test_variants_add_failing_variants_and_positions(store, tmp_path) -> None:
     # chr2:500, as their allele frequencies of 100% each say.
     cell = TRUTH.row_ids[TRUTH.overlap_row]
     shown = loaded.counts[
-        (loaded.counts["cell"] == cell) & (loaded.counts["site"] == "chr2:500")
+        (loaded.counts["ids"] == cell) & (loaded.counts["site"] == "chr2:500")
     ]
     assert sorted(zip(shown["allele"], shown["count"], strict=True)) == [
         ("C", 1),
@@ -182,7 +182,7 @@ def test_variants_add_failing_variants_and_positions(store, tmp_path) -> None:
     assert (
         int(
             loaded.depth[
-                (loaded.depth["cell"] == cell) & (loaded.depth["site"] == "chr2:500")
+                (loaded.depth["ids"] == cell) & (loaded.depth["site"] == "chr2:500")
             ]["depth"].iloc[0]
         )
         == 1
@@ -194,10 +194,12 @@ def test_variants_add_failing_variants_and_positions(store, tmp_path) -> None:
     )
     # Naming the variant rather than its position adds the same variant, and
     # naming a passing one adds none, so both reuse their imports.
-    assert _import(store, path, variants=["chr2:500:A/C", "chr1:1000"])[0] == ref
+    assert (
+        _import(store, path, include_variants=["chr2:500:A/C", "chr1:1000"])[0] == ref
+    )
     plain, _ = _import(store, path)
     assert plain != ref
-    assert _import(store, path, variants=["chr7:400:G/A"])[0] == plain
+    assert _import(store, path, include_variants=["chr7:400:G/A"])[0] == plain
     assert _source_record(store, plain)["n_added_variants"] == 0
     # With chr7:400 failing too, adding it or chr2:500:A/C imports as many
     # variants, which their names tell apart.
@@ -205,8 +207,8 @@ def test_variants_add_failing_variants_and_positions(store, tmp_path) -> None:
         write_tapestri(TRUTH, tmp_path / "failing.h5"),
         lambda h: h[f"{_COLUMNS}/filtered"].__setitem__(9, 1),
     )
-    first, _ = _import(store, failing, variants=["chr7:400:G/A"])
-    second, _ = _import(store, failing, variants=["chr2:500:A/C"])
+    first, _ = _import(store, failing, include_variants=["chr7:400:G/A"])
+    second, _ = _import(store, failing, include_variants=["chr2:500:A/C"])
     assert first != second
     assert store.variants.load_counts(first).sites.index.tolist() == [
         "chr1:1000",
@@ -224,7 +226,7 @@ def test_variants_that_cannot_be_read_are_skipped_or_refused(store, tmp_path) ->
         match=re.escape("1 chosen variants with an empty ALT and 1 whose alleles"),
     ):
         ref = store.variants.import_counts(
-            path, cell_selection=every_cell(store), variants=["chr2:800"]
+            path, cell_selection=every_cell(store), include_variants=["chr2:800"]
         )
     record = _source_record(store, ref)
     assert record["n_skipped_other_alleles"] == 1
@@ -238,16 +240,16 @@ def test_variants_that_cannot_be_read_are_skipped_or_refused(store, tmp_path) ->
             ValueError, match=re.escape(f"{name!r} of {path} has {reason}")
         ):
             store.variants.import_counts(
-                path, cell_selection=every_cell(store), variants=[name]
+                path, cell_selection=every_cell(store), include_variants=[name]
             )
     with pytest.raises(ValueError, match="'chr9:1', which is neither a variant"):
         store.variants.import_counts(
-            path, cell_selection=every_cell(store), variants=["chr9:1"]
+            path, cell_selection=every_cell(store), include_variants=["chr9:1"]
         )
     for wrong in ("chr2:500", [1], b"chr2:500"):
         with pytest.raises(TypeError, match="variants must be a sequence"):
             store.variants.import_counts(
-                path, cell_selection=every_cell(store), variants=wrong
+                path, cell_selection=every_cell(store), include_variants=wrong
             )
 
 
@@ -257,7 +259,7 @@ def test_variants_are_refused_for_other_formats(store, tmp_path) -> None:
         ValueError, match="variants chooses the variants of Tapestri and DAb-seq"
     ):
         store.variants.import_counts(
-            got, cell_selection=every_cell(store), variants=["chr1:1"]
+            got, cell_selection=every_cell(store), include_variants=["chr1:1"]
         )
 
 
@@ -273,28 +275,32 @@ def test_a_tapestri_import_is_reused_and_warns_again(store, tmp_path) -> None:
     assert _import(store, path, invalidate_cache=True)[0] != first
 
 
-def test_dabseq_counts_are_its_reads_and_calls(dabseq_store, tmp_path) -> None:
-    path = write_dabseq(TRUTH, tmp_path / "GSM0.hdf5")
+def test_dab_seq_counts_are_its_reads_and_calls(dab_seq_store, tmp_path) -> None:
+    path = write_dab_seq(TRUTH, tmp_path / "GSM0.hdf5")
     with pytest.warns(
         UserWarning,
         match=re.escape("2 chosen variants with an empty ALT and 1 whose alleles"),
     ):
-        ref = dabseq_store.variants.import_counts(
-            path, cell_selection=every_cell(dabseq_store)
+        ref = dab_seq_store.variants.import_counts(
+            path, cell_selection=every_cell(dab_seq_store)
         )
-    loaded = dabseq_store.variants.load_counts(ref)
-    depth, counts, calls = expected_dabseq(TRUTH)
+    loaded = dab_seq_store.variants.load_counts(ref)
+    depth, counts, calls = expected_dab_seq(TRUTH)
     assert_tables(loaded.depth, depth)
     assert_tables(loaded.counts, counts)
     assert_tables(loaded.calls.drop(columns="quality"), calls.drop(columns="quality"))
     # A missing GQ is NaN, and every other quality is the file's.
-    merged = loaded.calls.merge(calls, on=["cell", "site", "allele"])
+    merged = loaded.calls.merge(calls, on=["ids", "site", "allele"])
     np.testing.assert_array_equal(merged["quality_x"], merged["quality_y"])
     assert merged["quality_x"].isna().sum() == (calls["quality"].isna()).sum() > 0
-    assert loaded.sites.index.tolist() == [*TAPESTRI_REFERENCES, DABSEQ_ITD_SITE]
-    attributes = dabseq_store.artifacts.load(ref).attrs
-    assert attributes["format"] == "dabseq"
-    record = _source_record(dabseq_store, ref)
+    assert loaded.sites.index.tolist() == [*TAPESTRI_REFERENCES, DAB_SEQ_ITD_SITE]
+    attributes = dab_seq_store.artifacts.load(ref).attrs
+    assert attributes["format"] == "dab_seq"
+    assert loaded.cells.index.name == "ids"
+    # include_variants names a DAb-seq variant too, here as chrom:pos:ref/alt;
+    # every variant is read already, so it adds none and reuses the import.
+    assert _import(dab_seq_store, path, include_variants=["chr1:1000:G/A"])[0] == ref
+    record = _source_record(dab_seq_store, ref)
     assert (
         record["n_variants"],
         record["n_imported_variants"],
@@ -303,8 +309,8 @@ def test_dabseq_counts_are_its_reads_and_calls(dabseq_store, tmp_path) -> None:
     ) == (11, 8, 2, 1)
 
 
-def test_dabseq_variants_named_without_a_gene_read_alike(
-    dabseq_store, tmp_path
+def test_dab_seq_variants_named_without_a_gene_read_alike(
+    dab_seq_store, tmp_path
 ) -> None:
     # The pipeline's non-human mode names variants <chrom>:<pos>:<ref>/<alt>.
     def strip(handle) -> None:
@@ -320,11 +326,11 @@ def test_dabseq_variants_named_without_a_gene_read_alike(
             ),
         )
 
-    path = _edit(write_dabseq(TRUTH, tmp_path / "GSM0.hdf5"), strip)
+    path = _edit(write_dab_seq(TRUTH, tmp_path / "GSM0.hdf5"), strip)
     with h5py.File(path, "r") as handle:
         assert _texts(handle, "VARIANTS")[0] == "chr1:1000:G/A"
-    loaded = dabseq_store.variants.load_counts(_import(dabseq_store, path)[0])
-    depth, counts, calls = expected_dabseq(TRUTH)
+    loaded = dab_seq_store.variants.load_counts(_import(dab_seq_store, path)[0])
+    depth, counts, calls = expected_dab_seq(TRUTH)
     assert_tables(loaded.depth, depth)
     assert_tables(loaded.counts, counts)
     assert_tables(loaded.calls.drop(columns="quality"), calls.drop(columns="quality"))
@@ -355,16 +361,16 @@ def _add_itds(handle, names: list[str]) -> None:
     ],
 )
 def test_flt3_itd_variants_are_sites_of_their_own(
-    dabseq_store, tmp_path, names
+    dab_seq_store, tmp_path, names
 ) -> None:
     path = _edit(
-        write_dabseq(TRUTH, tmp_path / "GSM0.hdf5"), lambda h: _add_itds(h, names)
+        write_dab_seq(TRUTH, tmp_path / "GSM0.hdf5"), lambda h: _add_itds(h, names)
     )
-    loaded = dabseq_store.variants.load_counts(_import(dabseq_store, path)[0])
+    loaded = dab_seq_store.variants.load_counts(_import(dab_seq_store, path)[0])
     assert loaded.sites.index.tolist() == [*TAPESTRI_REFERENCES, *names]
-    ids = np.asarray(dabseq_ids(TRUTH), dtype=object)
-    expected_depth, _counts, _calls = expected_dabseq(TRUTH)
-    coordinates = expected_depth[expected_depth["site"] != DABSEQ_ITD_SITE]
+    ids = np.asarray(dab_seq_ids(TRUTH), dtype=object)
+    expected_depth, _counts, _calls = expected_dab_seq(TRUTH)
+    coordinates = expected_depth[expected_depth["site"] != DAB_SEQ_ITD_SITE]
     assert_tables(loaded.depth[~loaded.depth["site"].isin(names)], coordinates)
     carriers = np.flatnonzero(TRUTH.clones.clones == 4)
     for name in names:
@@ -380,21 +386,21 @@ def test_flt3_itd_variants_are_sites_of_their_own(
         }
         assert_tables(
             shown["depth"],
-            pd.DataFrame({"cell": rows, "site": name, "depth": 60}),
+            pd.DataFrame({"ids": rows, "site": name, "depth": 60}),
         )
         # 25 reads of the ITD and no reads of the reference, since RD holds
         # ITDseek's depth.
         assert_tables(
             shown["counts"],
             pd.DataFrame(
-                {"cell": rows, "site": name, "allele": alternative, "count": 25}
+                {"ids": rows, "site": name, "allele": alternative, "count": 25}
             ),
         )
         assert_tables(
             shown["calls"],
             pd.DataFrame(
                 {
-                    "cell": rows,
+                    "ids": rows,
                     "site": name,
                     "allele": alternative,
                     "source": "GT",
@@ -447,20 +453,20 @@ def _batch_tables(
             )
     return (
         blocks,
-        pd.DataFrame(depth, columns=["cell", "site", "depth"]),
-        pd.DataFrame(counts, columns=["cell", "site", "allele", "count"]),
+        pd.DataFrame(depth, columns=["ids", "site", "depth"]),
+        pd.DataFrame(counts, columns=["ids", "site", "allele", "count"]),
         pd.DataFrame(
-            calls, columns=["cell", "site", "allele", "source", "call", "quality"]
+            calls, columns=["ids", "site", "allele", "source", "call", "quality"]
         ),
     )
 
 
 @pytest.mark.parametrize(("chunk_rows", "n_blocks"), [(1, 52), (20, 26), (10_000, 1)])
-@pytest.mark.parametrize("file_format", ["tapestri", "dabseq"])
+@pytest.mark.parametrize("file_format", ["tapestri", "dab_seq"])
 def test_a_source_gives_the_truth_in_blocks_of_any_size(
     tmp_path, file_format, chunk_rows, n_blocks
 ) -> None:
-    from cytearc.readers.tapestri import dabseq_source, tapestri_source
+    from cytearc.readers.tapestri import dab_seq_source, tapestri_source
 
     # A block holds chunk_rows // (variants + 2) cells: 6 variants of
     # Tapestri's and 8 of DAb-seq's, so 1 cell at a time, then 2, then all.
@@ -470,8 +476,8 @@ def test_a_source_gives_the_truth_in_blocks_of_any_size(
             source = tapestri_source(write_tapestri(TRUTH, tmp_path / "run.h5"))
             expected = expected_tapestri(TRUTH)
         else:
-            source = dabseq_source(write_dabseq(TRUTH, tmp_path / "GSM0.hdf5"))
-            expected = expected_dabseq(TRUTH)
+            source = dab_seq_source(write_dab_seq(TRUTH, tmp_path / "GSM0.hdf5"))
+            expected = expected_dab_seq(TRUTH)
     blocks, *tables = _batch_tables(source, chunk_rows)
     assert blocks == n_blocks
     for loaded, wanted in zip(tables, expected, strict=True):
@@ -493,11 +499,11 @@ def test_the_store_reader_gives_every_read_in_batches(tmp_path) -> None:
     )
 
 
-def test_tapestri_and_dabseq_files_are_recognised(tmp_path) -> None:
+def test_tapestri_and_dab_seq_files_are_recognised(tmp_path) -> None:
     from cytearc.readers._variant_files import hdf5_format
 
     assert hdf5_format(str(write_tapestri(TRUTH, tmp_path / "a.h5"))) == "tapestri"
-    assert hdf5_format(str(write_dabseq(TRUTH, tmp_path / "b.hdf5"))) == "dabseq"
+    assert hdf5_format(str(write_dab_seq(TRUTH, tmp_path / "b.hdf5"))) == "dab_seq"
     with h5py.File(tmp_path / "c.h5", "w") as handle:
         handle.create_dataset("GT", data=np.zeros((1, 1)))
     with pytest.raises(ValueError, match="none of giftwrap's counts.*DAb-seq"):
@@ -649,7 +655,7 @@ def test_the_alleles_of_one_position_must_read_as_one_site(
     )
     if message is None:
         # T/TC, an insertion after the T, is TCC beside the reference TC.
-        loaded = store.variants.load_counts(_import(store, path)[0], cells=[])
+        loaded = store.variants.load_counts(_import(store, path)[0], cell_selection=[])
         assert set(loaded.alleles[loaded.alleles["site"] == "chr1:2000"]["allele"]) == {
             "TC",
             "T",
@@ -680,9 +686,9 @@ def test_tapestri_layers_and_cells_must_align(store, tmp_path) -> None:
         match="lists the barcode 'GGGTAAAGCAGTTCGT' of the sample 'd2' twice",
     ):
         _import(store, path)
-    dabseq = write_dabseq(TRUTH, tmp_path / "c.hdf5")
-    with pytest.raises(ValueError, match="lacks assays/dna_variants.*format='dabseq'"):
-        _import(store, dabseq, format="tapestri")
+    dab_seq = write_dab_seq(TRUTH, tmp_path / "c.hdf5")
+    with pytest.raises(ValueError, match="lacks assays/dna_variants.*format='dab_seq'"):
+        _import(store, dab_seq, format="tapestri")
 
 
 @pytest.mark.parametrize(
@@ -719,12 +725,12 @@ def test_tapestri_layers_and_cells_must_align(store, tmp_path) -> None:
         ),
     ],
 )
-def test_malformed_dabseq_files_are_refused(
-    dabseq_store, tmp_path, edit, message
+def test_malformed_dab_seq_files_are_refused(
+    dab_seq_store, tmp_path, edit, message
 ) -> None:
-    path = _edit(write_dabseq(TRUTH, tmp_path / "GSM0.hdf5"), edit)
+    path = _edit(write_dab_seq(TRUTH, tmp_path / "GSM0.hdf5"), edit)
     with pytest.raises(ValueError, match=message):
-        _import(dabseq_store, path)
+        _import(dab_seq_store, path)
 
 
 def _call_name(
@@ -785,7 +791,7 @@ def _expected_calls(
             )
             is not None
         ],
-        columns=["cell", "site", "call", "label"],
+        columns=["ids", "site", "call", "label"],
     )
 
 
@@ -804,7 +810,7 @@ def test_source_genotypes_of_tapestri_counts_follow_ngt(store, tmp_path) -> None
         loaded.calls.astype({"call": str, "label": str}),
         _expected_calls(_TAPESTRI_UNITS),
     )
-    calls = loaded.calls.set_index(["cell", "site"])
+    calls = loaded.calls.set_index(["ids", "site"])
     # No call with reads is filtered, and without reads missing, as is the
     # wild-type call that Tapestri writes without reads.
     assert calls.loc[(ids[TRUTH.no_call_row], "chr7:400:G/A"), "call"] == "filtered"
@@ -839,7 +845,14 @@ def test_source_calls_below_a_quality_or_depth_are_filtered(
         assert (expected["call"] == "filtered").sum() > (
             _expected_calls(_TAPESTRI_UNITS)["call"] == "filtered"
         ).sum()
-    rules = store.artifacts.load(ref).attrs["rules"]
+    # The rules have one home, the provenance parameters, which the record
+    # reads.
+    rules = store.variants.load_genotypes(ref).rules
+    assert rules == {
+        name: value
+        for name, value in store.artifacts.inspect(ref).parameters.items()
+        if name in rules
+    }
     assert (rules["min_quality"], rules["min_depth"]) == (
         None if min_quality is None else float(min_quality),
         min_depth,
@@ -853,28 +866,28 @@ def test_source_calls_below_a_quality_or_depth_are_filtered(
 
 
 def test_a_call_without_a_quality_fails_every_min_quality(
-    dabseq_store, tmp_path
+    dab_seq_store, tmp_path
 ) -> None:
     row = int(np.flatnonzero(TRUTH.clones.clones == 4)[0])
     path = _edit(
-        write_dabseq(TRUTH, tmp_path / "GSM0.hdf5"),
+        write_dab_seq(TRUTH, tmp_path / "GSM0.hdf5"),
         lambda h: h["GQ"].__setitem__((row, 5), -1),
     )
-    counts, _ = _import(dabseq_store, path)
-    cell = (dabseq_ids(TRUTH)[row], "chr2:500:A/G")
+    counts, _ = _import(dab_seq_store, path)
+    cell = (dab_seq_ids(TRUTH)[row], "chr2:500:A/G")
     for options, call in (
         ({}, "heterozygous"),
         ({"min_quality": 0}, "filtered"),
     ):
-        loaded = dabseq_store.variants.load_genotypes(
-            dabseq_store.variants.genotypes(counts, method="source", **options)
+        loaded = dab_seq_store.variants.load_genotypes(
+            dab_seq_store.variants.genotypes(counts, method="source", **options)
         )
-        assert loaded.calls.set_index(["cell", "site"]).loc[cell, "call"] == call
+        assert loaded.calls.set_index(["ids", "site"]).loc[cell, "call"] == call
 
 
 def test_the_rules_of_several_alternatives_reach_each_of_them(store, tmp_path) -> None:
     path = write_tapestri(TRUTH, tmp_path / "run.h5")
-    counts, _ = _import(store, path, variants=["chr2:500"])
+    counts, _ = _import(store, path, include_variants=["chr2:500"])
     units = {**_TAPESTRI_UNITS, 6: "chr2:500:A/C"}
     for options in ({}, {"min_depth": 33}, {"min_quality": 50}):
         loaded = store.variants.load_genotypes(
@@ -887,7 +900,7 @@ def test_the_rules_of_several_alternatives_reach_each_of_them(store, tmp_path) -
         )
     # The overlap cell's one read leaves both alternatives of chr2:500
     # filtered, beside a cell that reads them and calls one wild type.
-    calls = loaded.calls.set_index(["cell", "site"])["call"].astype(str)
+    calls = loaded.calls.set_index(["ids", "site"])["call"].astype(str)
     overlap = TRUTH.row_ids[TRUTH.overlap_row]
     assert (
         calls[(overlap, "chr2:500:A/G")]
@@ -944,11 +957,11 @@ def test_genotype_clones_of_tapestri_calls_are_the_truth_clones(
     assert loaded_partition(store, clones) == truth
 
 
-def test_dabseq_genotypes_adopt_gt_and_flt3_itd(dabseq_store, tmp_path) -> None:
-    path = write_dabseq(TRUTH, tmp_path / "GSM0.hdf5")
-    counts, _ = _import(dabseq_store, path)
-    genotypes = dabseq_store.variants.genotypes(counts, method="source")
-    loaded = dabseq_store.variants.load_genotypes(genotypes)
+def test_dab_seq_genotypes_adopt_gt_and_flt3_itd(dab_seq_store, tmp_path) -> None:
+    path = write_dab_seq(TRUTH, tmp_path / "GSM0.hdf5")
+    counts, _ = _import(dab_seq_store, path)
+    genotypes = dab_seq_store.variants.genotypes(counts, method="source")
+    loaded = dab_seq_store.variants.load_genotypes(genotypes)
     assert loaded.sites.index.tolist() == [
         "chr1:1000:G/A",
         "chr1:1000:G/T",
@@ -957,16 +970,16 @@ def test_dabseq_genotypes_adopt_gt_and_flt3_itd(dabseq_store, tmp_path) -> None:
         "chr2:500:A/C",
         "chr2:500:A/G",
         "chr7:400:G/A",
-        DABSEQ_ITD_SITE,
+        DAB_SEQ_ITD_SITE,
     ]
     assert set(loaded.sites["source"]) == {"GT"}
     # FLT3-ITD is called only where ITDseek found it, since the wild-type
     # calls that DAb-seq writes elsewhere have no reads.
-    itd = loaded.calls[loaded.calls["site"] == DABSEQ_ITD_SITE]
+    itd = loaded.calls[loaded.calls["site"] == DAB_SEQ_ITD_SITE]
     clone_4 = {
-        dabseq_ids(TRUTH)[row] for row in np.flatnonzero(TRUTH.clones.clones == 4)
+        dab_seq_ids(TRUTH)[row] for row in np.flatnonzero(TRUTH.clones.clones == 4)
     }
-    assert set(itd["cell"].astype(str)) == clone_4
+    assert set(itd["ids"].astype(str)) == clone_4
     assert set(itd["call"].astype(str)) == {"heterozygous"}
 
 
@@ -1068,7 +1081,7 @@ def test_source_genotypes_of_several_alternatives_fit_the_smallest_budget_accept
     )
     store = _large_store(tmp_path, file)
     counts = store.variants.import_counts(file, cell_selection=every_cell(store))
-    loaded = store.variants.load_counts(counts, cells=[])
+    loaded = store.variants.load_counts(counts, cell_selection=[])
     assert len(loaded.sites) == 10 and len(loaded.alleles) == 40
 
     def run() -> None:
@@ -1102,7 +1115,7 @@ def test_a_spanning_deletion_is_read_as_its_allele(store, tmp_path) -> None:
     assert {
         (str(cell), str(site)): int(count)
         for cell, site, count in zip(
-            shown["cell"], shown["site"], shown["count"], strict=True
+            shown["ids"], shown["site"], shown["count"], strict=True
         )
     } == expected
 
@@ -1295,7 +1308,7 @@ def _wide_tapestri(
     return path
 
 
-def _wide_dabseq(
+def _wide_dab_seq(
     path: Path,
     *,
     n_cells: int,
@@ -1341,15 +1354,15 @@ def _wide_dabseq(
         ("tapestri", 1, False),
         pytest.param("tapestri", 1_000, False, marks=pytest.mark.slow),
         pytest.param("tapestri", 1_000, True, marks=pytest.mark.slow),
-        ("dabseq", 1, False),
-        pytest.param("dabseq", 1_000, False, marks=pytest.mark.slow),
-        pytest.param("dabseq", 1_000, True, marks=pytest.mark.slow),
+        ("dab_seq", 1, False),
+        pytest.param("dab_seq", 1_000, False, marks=pytest.mark.slow),
+        pytest.param("dab_seq", 1_000, True, marks=pytest.mark.slow),
     ],
 )
 def test_describing_a_file_holds_no_more_than_the_smallest_budget_accepted(
     tmp_path, file_format, alternative_length, variable_length
 ) -> None:
-    from cytearc.readers.tapestri import dabseq_source, tapestri_source
+    from cytearc.readers.tapestri import dab_seq_source, tapestri_source
     from tests.memory_helpers import traced_peak
 
     # SNVs make what the description holds for each variant most of it, and
@@ -1365,8 +1378,8 @@ def test_describing_a_file_holds_no_more_than_the_smallest_budget_accepted(
         path = _wide_tapestri(tmp_path / "wide.h5", sample="s", **options)
         describe = tapestri_source
     else:
-        path = _wide_dabseq(tmp_path / "wide.hdf5", **options)
-        describe = dabseq_source
+        path = _wide_dab_seq(tmp_path / "wide.hdf5", **options)
+        describe = dab_seq_source
     with pytest.raises(MemoryError, match=r"holds about \d+ bytes") as refused:
         describe(path, memory_bytes=1)
     found = re.search(r"holds about (\d+) bytes", str(refused.value))

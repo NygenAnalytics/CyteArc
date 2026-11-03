@@ -336,12 +336,9 @@ _CONTRACTS = (
         # barcodes, the labels of the within columns by theirs; the preset
         # resolves into the rules recorded, TREX's own among them.
         signature_only=_classified("transformed", "allowlist"),
-        model_only={
-            **_classified(
-                "resolved_input", "within_fingerprint", "allowlist_fingerprint"
-            ),
-            **_classified("algorithm_policy", "trex_rules"),
-        },
+        model_only=_classified(
+            "resolved_input", "within_fingerprint", "allowlist_fingerprint"
+        ),
     ),
     OperationContract(
         ClonesAccessor.import_barcodes,
@@ -378,7 +375,7 @@ _CONTRACTS = (
             "barcode_suffix",
             "barcode_pattern",
             "format",
-            "variants",
+            "include_variants",
         ),
         model_only=_classified("resolved_input", "sources"),
     ),
@@ -387,11 +384,11 @@ _CONTRACTS = (
         metadata_arguments.VariantSelectionArguments,
     ),
     OperationContract(
-        VariantsAccessor.clones,
-        metadata_arguments.VariantCloneArguments,
+        VariantsAccessor.frequency_clones,
+        metadata_arguments.FrequencyCloneArguments,
         model_only={
-            # The clones label the counts' cells; the within column's labels
-            # are recorded by their fingerprint.
+            # The clones label the cells of the selection's counts; the within
+            # columns' labels are recorded by their fingerprint.
             **_classified("resolved_input", "cell_selection", "within_fingerprint"),
             # The Leiden seed and Seurat's pruning of the shared-neighbour
             # graph are fixed choices of the method.

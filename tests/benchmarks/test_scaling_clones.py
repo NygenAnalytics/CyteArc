@@ -114,7 +114,7 @@ def test_rarefaction_curve(bench) -> None:
         clones, table, curves = result
         codes = _clone_codes(n_cells)
         assert clones.n == int((codes >= 0).sum())
-        assert table["clones"] == len(np.unique(codes[codes >= 0]))
+        assert table["n_clones"] == len(np.unique(codes[codes >= 0]))
         for values, methods in curves:
             observed = methods.index("observed")
             # Rarefied curves rise to the observed value.
@@ -184,7 +184,7 @@ def test_coupling(bench) -> None:
             pair_codes,
             pair_cells,
             n_groups,
-            permutations=COUPLING_PERMUTATIONS,
+            n_permutations=COUPLING_PERMUTATIONS,
         )
 
     def check(n_cells: int, result) -> None:
@@ -254,7 +254,7 @@ def test_diversity_tables(bench) -> None:
         groups, keys = _group_clone_sizes(n_groups)
         table, hill, size, level = result
         assert table["group"].tolist() == keys["group"].tolist()
-        assert table["cells"].tolist() == groups.n.tolist()
+        assert table["n_cells"].tolist() == groups.n.tolist()
         assert size == 2 * int(groups.n.min())
         assert 0 < level < 1
         assert len(hill) == len(ORDERS) * n_groups
@@ -262,7 +262,7 @@ def test_diversity_tables(bench) -> None:
         for at in (0, n_groups - 1):
             clones = groups.group(at)
             expected = indices(clones)
-            for column in ("clones", "singletons", "d50"):
+            for column in ("n_clones", "n_singletons", "d50"):
                 assert table[column].iat[at] == expected[column]
             rows = hill.iloc[len(ORDERS) * at : len(ORDERS) * (at + 1)]
             for order, value in zip(ORDERS, rows["at_size"], strict=True):

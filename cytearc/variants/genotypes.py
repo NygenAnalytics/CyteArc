@@ -47,6 +47,7 @@ __all__ = [
     "FILTERED",
     "GAPFILL_ERROR",
     "GENOTYPE_METHODS",
+    "GENOTYPE_RULES",
     "HETEROZYGOUS",
     "HIGH_CONFIDENCE_SWAP",
     "HOMOZYGOUS_ALTERNATIVE",
@@ -140,6 +141,19 @@ SOURCE_PRECEDENCE: tuple[str, ...] = (
     "genotype_geneseq",
     "genotype_probebc",
 )
+#: The rules of a genotype method, by the argument that sets each, as the
+#: artifact's provenance parameters record them as resolved: None for a rule
+#: that the method does not apply, and the swap probabilities as (reads,
+#: probability) pairs, empty for none.
+GENOTYPE_RULES: tuple[str, ...] = (
+    "min_umis",
+    "min_mutant_umis",
+    "min_fraction",
+    "min_posterior",
+    "swap_probabilities",
+    "min_quality",
+    "min_depth",
+)
 #: The likelihood of a gapfill one edit away from an allele, relative to the
 #: allele itself, which GIFT uses for cell lines; each further edit multiplies
 #: it again.
@@ -191,18 +205,6 @@ class GenotypeRules:
             (int(read), float(value))
             for read, value in zip(reads.tolist(), values.tolist(), strict=True)
         )
-
-    def record(self) -> dict[str, Any]:
-        """The rules as JSON-ready values."""
-        return {
-            "min_umis": self.min_umis,
-            "min_mutant_umis": self.min_mutant_umis,
-            "min_fraction": self.min_fraction,
-            "min_posterior": self.min_posterior,
-            "swap_probabilities": [list(pair) for pair in self.swap_record],
-            "min_quality": self.min_quality,
-            "min_depth": self.min_depth,
-        }
 
 
 def _count_rule(value: Any, name: str) -> int | None:
@@ -732,7 +734,7 @@ def genotype_frames(
     call_codes = np.asarray(calls, dtype=np.int64)
     call_table = pd.DataFrame(
         {
-            "cell": pd.Categorical.from_codes(
+            "ids": pd.Categorical.from_codes(
                 np.asarray(cells, dtype=np.int64), dtype=cell_categories
             ),
             "site": pd.Categorical.from_codes(
@@ -804,7 +806,7 @@ class VariantGenotypes:
             (sites shown called heterozygous, homozygous alternative or
             alternative present) and ``n_called_sites`` (those and the sites
             called wild type).
-        calls: One row per cell and site with evidence: ``cell``, ``site``,
+        calls: One row per cell and site with evidence: ``ids``, ``site``,
             ``call`` (one of ``cytearc.variants.CALLS``, ordered), ``label``
             (the source's own label, empty for the other methods),
             ``reference_umis`` and ``alternative_umis`` (-1 where the counts
@@ -813,7 +815,8 @@ class VariantGenotypes:
             (NaN unless ``method="gift"``).
         counts: The ``variant_counts`` artifact the calls came from.
         method: ``"source"``, ``"threshold"`` or ``"gift"``.
-        rules: The rules as the method applied them.
+        rules: The rules as the method applied them, by the names of
+            ``GENOTYPE_RULES``, from the artifact's provenance parameters.
     """
 
     sites: pd.DataFrame = field(repr=False)

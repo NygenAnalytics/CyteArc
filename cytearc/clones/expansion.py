@@ -302,13 +302,13 @@ class ClonalExpansion:
             of the group's cells with a clone, NaN without one). The labels
             are categoricals, and ``category`` is ordered, smallest first.
         categories: One row per group and category, every category of every
-            group: ``group``, the group's key, ``category``, ``cells``,
-            ``clones``, and ``fraction``, the share of the group's cells with
+            group: ``group``, the group's key, ``category``, ``n_cells``,
+            ``n_clones``, and ``fraction``, the share of the group's cells with
             a clone that the category holds.
         rank_windows: One row per group and rank window: ``group``, the
-            group's key, ``window``, the ``cells`` that the group's clones
-            ranked in the window hold, and their ``fraction`` of the group's
-            cells.
+            group's key, ``window``, ``n_cells``, the cells that the group's
+            clones ranked in the window hold, and their ``fraction`` of the
+            group's cells.
         clones: The clone artifact, such as a ``clones`` artifact.
         labels: The categories, smallest clones first.
         breakpoints: The bounds in cells, or None with frequency bounds.
@@ -427,8 +427,8 @@ def expansion_tables(
                 for column, column_keys in keys.items()
             },
             "category": pd.array(np.tile(names, n_groups), dtype="string"),
-            "cells": cell_counts.reshape(-1),
-            "clones": clone_counts.reshape(-1),
+            "n_cells": cell_counts.reshape(-1),
+            "n_clones": clone_counts.reshape(-1),
             "fraction": _shares(cell_counts).reshape(-1),
         }
     )
@@ -446,7 +446,7 @@ def expansion_tables(
                 for column, column_keys in keys.items()
             },
             "window": pd.array(np.tile(window_names, n_groups), dtype="string"),
-            "cells": windows.reshape(-1),
+            "n_cells": windows.reshape(-1),
             "fraction": _shares(windows).reshape(-1),
         }
     )

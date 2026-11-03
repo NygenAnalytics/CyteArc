@@ -63,7 +63,7 @@ def test_the_plot_draws_each_sites_mean_depth_over_named_cells(plotted) -> None:
     np.testing.assert_allclose(sites["mean_depth"], [24 / 4, 1 / 4, 4 / 4, 2 / 4])
     np.testing.assert_allclose(sites["covered_fraction"], [2 / 4, 1 / 4, 1 / 4, 1 / 4])
     cells = result.tables["cells"]
-    assert cells["cell"].tolist() == ["c0", "c1", "c2", "c3"]
+    assert cells["ids"].tolist() == ["c0", "c1", "c2", "c3"]
     np.testing.assert_allclose(cells["mean_depth"], [9 / 4, 20 / 4, 2 / 4, 0.0])
     assert cells["group"].tolist() == ["all cells"] * 4
     assert result.provenance.n_cells == 4
@@ -82,7 +82,7 @@ def test_named_sites_are_bars_and_groups_split_the_cells(plotted) -> None:
     np.testing.assert_allclose(sites["mean_depth"], [12 / 4, 2 / 4])
     cells = result.tables["cells"]
     # c4 is not named, so it has no mean depth; every named cell has a group.
-    assert cells["cell"].tolist() == ["c0", "c1", "c2", "c3"]
+    assert cells["ids"].tolist() == ["c0", "c1", "c2", "c3"]
     assert cells["group"].tolist() == ["x", "x", "y", "y"]
     np.testing.assert_allclose(cells["mean_depth"], [6 / 2, 2 / 2, 6 / 2, 0.0])
     assert [tick.get_text() for tick in result.axes["sites"].get_xticklabels()] == [
@@ -169,7 +169,7 @@ def scored(tmp_path_factory):
             write_mgatk(truth, folder / "final"), cell_selection=every_cell(store)
         )
     selection = store.variants.informative(counts, preset="atac", mask=None)
-    clones = store.variants.clones(counts, variants=selection)
+    clones = store.variants.frequency_clones(selection)
     return store, truth, counts, selection, clones
 
 
@@ -257,7 +257,7 @@ def test_allele_frequencies_order_cells_by_clone_and_keep_uncovered_apart(
     chosen = informative.index[informative["informative"]].tolist()
     assert set(frequencies["variant"]) == set(chosen)
     for row in frequencies.sample(200, random_state=0).itertuples():
-        expected = _truth_frequency(truth, row.cell, row.variant)
+        expected = _truth_frequency(truth, row.ids, row.variant)
         if np.isnan(expected):
             assert np.isnan(row.frequency)
         else:
@@ -275,7 +275,7 @@ def test_allele_frequencies_without_clones_draw_the_scored_cells(scored) -> None
     cells = result.tables["cells"]
     assert len(cells) == 40 and cells["clone"].isna().all()
     ids = list(truth.clones.cell_ids)
-    positions = [ids.index(cell) for cell in cells["cell"]]
+    positions = [ids.index(cell) for cell in cells["ids"]]
     assert positions == sorted(positions)
     assert positions[0] == 0 and positions[-1] == len(ids) - 1
     assert "clones" not in result.axes
@@ -353,7 +353,9 @@ def test_variant_statistics_of_stranded_counts_never_draw_depth_instead(
     # counts have strands and every variant a mean depth.
     store.cells.insert("only_first_cell", np.arange(truth.n_cells) == 0)
     selection = store.variants.informative(
-        counts, cells=store.snapshot_cell_selection("only_first_cell"), min_vmr=0.0
+        counts,
+        cell_selection=store.snapshot_cell_selection("only_first_cell"),
+        min_vmr=0.0,
     )
     loaded = store.variants.load_informative(selection)
     assert loaded.stranded and not loaded.variants.empty
@@ -420,7 +422,7 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
         ("SF3B1", "all cells"): {"alternative_present": 0.2, "missing": 0.8},
     }
     calls = result.tables["calls"]
-    assert calls.groupby(["site", "group"])["cells"].sum().tolist() == [5, 5]
+    assert calls.groupby(["site", "group"])["n_cells"].sum().tolist() == [5, 5]
     ax = result.axes["calls"]
     assert [label.get_text() for label in ax.get_yticklabels()] == ["CALR", "SF3B1"]
     # One segment per bar and call, in the vocabulary's order.
@@ -455,7 +457,7 @@ def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
     store.cells.insert("UMAP2", np.arange(5, 10, dtype=np.float64))
     result = genotypes(store, called, layout_key="UMAP", site="CALR", show=False)
     cells = result.tables["cells"]
-    assert cells["cell"].tolist() == CELLS
+    assert cells["ids"].tolist() == CELLS
     assert cells["x"].tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]
     assert cells["y"].tolist() == [5.0, 6.0, 7.0, 8.0, 9.0]
     assert cells["call"].tolist() == [

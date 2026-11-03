@@ -57,14 +57,14 @@ def test_an_empty_file_has_no_header_to_recognise(tmp_path):
 @pytest.mark.parametrize(
     ("format", "text", "message"),
     [
-        ("characters", "cell,i1-a,i1-b\nc1,1\n", "names 3 columns, but its first row"),
+        ("laml", "cell,i1-a,i1-b\nc1,1\n", "names 3 columns, but its first row"),
         (
             "typewriter_chains",
             "cell\tCGGGGAATTGTA\tTCCGGAAGACCC\nc1\t-\n",
             "names 3 columns, but its first row",
         ),
-        ("characters", "cell\n", "holds no character column"),
-        ("characters", "cell,i1-a,i1-a\nc1,1,2\n", "names a character twice"),
+        ("laml", "cell\n", "holds no character column"),
+        ("laml", "cell,i1-a,i1-a\nc1,1,2\n", "names a character twice"),
         ("typewriter_chains", "cell\tn_loci\nc1\t0\n", "names no integration barcode"),
         (
             "typewriter_chains",
@@ -88,13 +88,13 @@ def test_character_matrices_read_whole_floats_as_numbers_and_refuse_na_text(
     """pandas writes the integers of a column with a missing value as floats."""
     path = tmp_path / "matrix.csv"
     path.write_text("cell,i1-a,i1-b,i1-c\nc1,0.0,-1.0,3.0\nc2,3,0,12.00\n")
-    (chunk,) = _rows(path, format="characters")
+    (chunk,) = _rows(path, format="laml")
     assert chunk.states.tolist() == [[0, 3, 1], [1, 0, 1]]
     assert chunk.alleles.tolist() == [[None, None, "3"], ["3", None, "12"]]
     for token in ("null", "NULL", "#N/A", "N/A", "<NA>", "none"):
         path.write_text(f"cell,i1-a\nc1,{token}\n")
-        with pytest.raises(ValueError, match="tokens that 'characters' does not read"):
-            _rows(path, format="characters")
+        with pytest.raises(ValueError, match="tokens that 'laml' does not read"):
+            _rows(path, format="laml")
 
 
 def test_a_table_refuses_rows_of_another_width(tmp_path):

@@ -10,6 +10,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from cytearc.storage.artifacts import artifact_group
@@ -17,7 +18,7 @@ from tests.clone_helpers import every_cell, write_cells_store
 from tests.memory_helpers import smallest_budget, traced_peak
 from tests.storage_helpers import copy_store
 from tests.variant_helpers import write_variant_store
-from tests.variant_truth import variant_truth
+from tests.variant_truth import mito_clone_truth, variant_truth, write_mgatk
 
 TRUTH = variant_truth()
 IDS = [str(cell) for cell in TRUTH.clones.cell_ids]
@@ -92,7 +93,7 @@ def test_cells_link_where_they_agree_and_ambiguous_cells_join_none(
     assert attributes["n_cells_mutant"] == 6
     assert attributes["n_sites"] == 2
     record = store.artifacts.inspect(clones)
-    assert record.operation == "genotype_clones"
+    assert record.operation == "call_genotype_clones"
     assert record.parameters["similarity"] == 1.0
     assert record.parameters["inclusive"] is True
 
@@ -222,6 +223,114 @@ def test_clones_of_chosen_sites_and_within_groups(store, tmp_path) -> None:
     assert within != store.variants.genotype_clones(genotypes)
 
 
+def test_every_genotype_method_names_sites_by_label_or_position(tmp_path) -> None:
+    # mgatk's counts lie on one contig, whose positions name its sites: a
+    # position resolves to the label that the genotypes record, so naming
+    # sites either way calls, loads and clones the same.
+    truth = mito_clone_truth()
+    mito = write_variant_store(tmp_path / "store.zarr", truth)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        counts = mito.variants.import_counts(
+            write_mgatk(truth, tmp_path / "final"), cell_selection=every_cell(mito)
+        )
+    (first, first_ref, first_alt), (second, second_ref, second_alt) = (
+        truth.variant_sites()[:2]
+    )
+    labels = [f"chrM:{first}", f"chrM:{second}"]
+    alleles = {labels[0]: (first_ref, first_alt), labels[1]: (second_ref, second_alt)}
+    genotypes = mito.variants.genotypes(
+        counts, method="threshold", sites=labels, alleles=alleles, min_mutant_umis=1
+    )
+    assert (
+        mito.variants.genotypes(
+            counts,
+            method="threshold",
+            sites=[first, second],
+            alleles=alleles,
+            min_mutant_umis=1,
+        )
+        == genotypes
+    )
+    by_position = mito.variants.load_genotypes(genotypes, sites=[np.int64(second)])
+    by_label = mito.variants.load_genotypes(genotypes, sites=[labels[1]])
+    assert by_position.sites.index.tolist() == [labels[1]]
+    pd.testing.assert_frame_equal(by_position.calls, by_label.calls)
+    assert len(by_label.calls) > 0
+    clones = mito.variants.genotype_clones(genotypes, sites=[labels[0]])
+    assert mito.variants.genotype_clones(genotypes, sites=[first]) == clones
+    assert mito.artifacts.inspect(clones).parameters["sites"] == [labels[0]]
+    with pytest.raises(ValueError, match="The genotypes have no site 4"):
+        mito.variants.genotype_clones(genotypes, sites=[4])
+    with pytest.raises(TypeError, match="must hold site labels or positions"):
+        mito.variants.load_genotypes(genotypes, sites=[True])
+
+
+def test_a_position_names_every_variant_genotyped_there_and_no_named_site(
+    tmp_path,
+) -> None:
+    import h5py
+
+    from tests.variant_truth import _texts_dataset
+
+    # A DAb-seq panel of one contig: two variants at chr13:100, which share
+    # its reference reads, and FLT3-ITD, a named site without a position.
+    n_cells = 12
+    barcodes = [f"AAAC{cell:04d}GGTT-1-all" for cell in range(n_cells)]
+    itd = "FLT3-ITD:chr13:28608251:T/TCTC"
+    names = ["FLT3:chr13:100:A/G", "FLT3:chr13:100:A/T", itd]
+    depth = np.full((n_cells, 3), 40, dtype=np.int16)
+    alternative = np.zeros((n_cells, 3), dtype=np.int16)
+    calls = np.zeros((n_cells, 3), dtype=np.int8)
+    alternative[:6, 0], calls[:6, 0] = 20, 1
+    alternative[6:9, 1], calls[6:9, 1] = 10, 1
+    alternative[::2, 2], calls[::2, 2] = 15, 1
+    reference = depth - alternative
+    reference[:, 0] = reference[:, 1] = depth[:, 0] - alternative[:, :2].sum(axis=1)
+    path = tmp_path / "run.hdf5"
+    with h5py.File(path, "w") as handle:
+        for name, values in (
+            ("AD", alternative),
+            ("RD", reference),
+            ("DP", depth),
+            ("GQ", np.full((n_cells, 3), 90, dtype=np.int8)),
+            ("GT", calls),
+        ):
+            handle.create_dataset(name, data=values)
+        _texts_dataset(handle, "VARIANTS", names)
+        _texts_dataset(handle, "CELL_BARCODES", barcodes)
+    store = write_cells_store(tmp_path / "store.zarr", barcodes)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        counts = store.variants.import_counts(path, cell_selection=every_cell(store))
+    genotypes = store.variants.genotypes(counts, method="source")
+    at_100 = ["chr13:100:A/G", "chr13:100:A/T"]
+    assert store.variants.load_genotypes(genotypes).sites.index.tolist() == [
+        *at_100,
+        itd,
+    ]
+    # Position 100 names both of its variants in all three methods.
+    assert (
+        store.variants.load_genotypes(
+            store.variants.genotypes(counts, method="source", sites=[100])
+        ).sites.index.tolist()
+        == at_100
+    )
+    assert store.variants.load_genotypes(
+        genotypes, sites=[100]
+    ).sites.index.tolist() == (at_100)
+    clones = store.variants.genotype_clones(genotypes, sites=[100])
+    assert store.artifacts.inspect(clones).parameters["sites"] == at_100
+    assert store.variants.genotype_clones(genotypes, sites=at_100) == clones
+    # A named site has no position, so no position names it, -1 included.
+    with pytest.raises(ValueError, match="^The artifact has no site -1"):
+        store.variants.genotypes(counts, method="source", sites=[-1])
+    with pytest.raises(ValueError, match="^The genotypes have no site -1"):
+        store.variants.load_genotypes(genotypes, sites=[-1])
+    with pytest.raises(ValueError, match="^The genotypes have no site -1"):
+        store.variants.genotype_clones(genotypes, sites=[-1])
+
+
 def test_saved_genotype_clones_are_reused_and_called_again(store, tmp_path) -> None:
     genotypes = _genotypes(store, tmp_path)
     first = store.variants.genotype_clones(genotypes)
@@ -242,8 +351,6 @@ def test_genotype_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -
         store.variants.genotype_clones(genotypes, sites=["S3"])
     with pytest.raises(ValueError, match="sites names no site"):
         store.variants.genotype_clones(genotypes, sites=[])
-    with pytest.raises(ValueError, match="also a column of the result"):
-        store.variants.genotype_clones(genotypes, within="ambiguous")
     with pytest.raises(ValueError, match="not a cell metadata column"):
         store.variants.genotype_clones(genotypes, within="mouse")
     store.cells.insert(
@@ -251,6 +358,24 @@ def test_genotype_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -
     )
     with pytest.raises(ValueError, match="no label for 1 cells with a mutant call"):
         store.variants.genotype_clones(genotypes, within="half")
+
+
+def test_within_may_name_a_column_of_the_loaded_clones(store, tmp_path) -> None:
+    # The within labels join no table, so a column named like the loaded
+    # clones' ambiguous flag keeps clones apart as any column does.
+    genotypes = _genotypes(store, tmp_path)
+    donors = np.where(np.arange(len(IDS)) == 4, "d2", "d1").astype(object)
+    store.cells.insert("donor", donors)
+    store.cells.insert("ambiguous", donors.copy())
+    named = store.variants.genotype_clones(genotypes, within="ambiguous")
+    assert _clones(store, named) == _clones(
+        store, store.variants.genotype_clones(genotypes, within="donor")
+    )
+    assert list(store.clones.load_clones(named).cells.columns) == [
+        "clone",
+        "clone_size",
+        "ambiguous",
+    ]
 
 
 def test_genotype_clones_refuse_a_budget_too_small_before_writing(

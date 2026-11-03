@@ -100,26 +100,26 @@ def barcode_calls(
     molecules of one read are mostly errors and ambient molecules. A library
     that counts no UMIs or no reads is left out of its panel.
 
-    Tables: ``barcodes_per_cell`` (``barcodes``, ``cells``),
-    ``umis_per_barcode`` (``library``, ``umis``, ``pairs``) and
-    ``reads_per_molecule`` (``library``, ``reads``, ``molecules``).
+    Tables: ``barcodes_per_cell`` (``n_barcodes``, ``n_cells``),
+    ``umis_per_barcode`` (``library``, ``umis``, ``n_pairs``) and
+    ``reads_per_molecule`` (``library``, ``reads``, ``n_molecules``).
     """
     max_barcodes = integer_argument(max_barcodes, "max_barcodes", minimum=1)
     loaded = _load_barcodes(store, barcodes)
     per_cell = loaded.cells["n_barcodes"].to_numpy(dtype=np.int64)
     values, counts = np.unique(per_cell, return_counts=True)
     per_cell_table = pd.DataFrame(
-        {"barcodes": values.astype(np.int64), "cells": counts.astype(np.int64)}
+        {"n_barcodes": values.astype(np.int64), "n_cells": counts.astype(np.int64)}
     )
     pairs = loaded.pairs()
-    umis_table = _distribution(pairs["library"], pairs["umis"], "umis", "pairs")
+    umis_table = _distribution(pairs["library"], pairs["umis"], "umis", "n_pairs")
     records = loaded.records
     is_molecule = records["umi"].notna()
     reads_table = _distribution(
         records["library"][is_molecule],
         records["reads"][is_molecule],
         "reads",
-        "molecules",
+        "n_molecules",
     )
     if figsize is None and target is None:
         figsize = (14.0, 4.0)
@@ -140,14 +140,14 @@ def barcode_calls(
         ax.set_ylabel("Cells")
         ax.set_title("Barcodes per cell")
         ax = axes["umis_per_barcode"]
-        _draw_lines(ax, umis_table, "umis", "pairs", show_legend=show_legend)
+        _draw_lines(ax, umis_table, "umis", "n_pairs", show_legend=show_legend)
         ax.set_xlabel("UMIs of the barcode in the cell")
         ax.set_ylabel("Barcodes of cells")
         ax.set_title("UMIs per barcode")
         if umis_table.empty:
             ax.text(0.5, 0.5, "No library counts UMIs", ha="center", va="center")
         ax = axes["reads_per_molecule"]
-        _draw_lines(ax, reads_table, "reads", "molecules", show_legend=show_legend)
+        _draw_lines(ax, reads_table, "reads", "n_molecules", show_legend=show_legend)
         ax.set_xlabel("Reads of the molecule")
         ax.set_ylabel("Molecules")
         ax.set_title("Reads per molecule")

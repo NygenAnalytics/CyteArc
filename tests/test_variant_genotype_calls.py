@@ -16,7 +16,7 @@ import pytest
 
 from cytearc.storage.artifacts import artifact_group
 from cytearc.utils.logging import collect_warnings
-from cytearc.variants.genotypes import CALLS
+from cytearc.variants.genotypes import CALLS, GENOTYPE_RULES
 from tests.clone_helpers import every_cell, levenshtein_distance, write_cells_store
 from tests.storage_helpers import copy_store, open_store
 from tests.memory_helpers import smallest_budget, traced_peak
@@ -67,7 +67,7 @@ def _got(store, folder: Path, style: str):
 def _calls(store, genotypes) -> dict[tuple[str, str], tuple[str, str]]:
     calls = store.variants.load_genotypes(genotypes).calls
     return {
-        (str(row.cell), str(row.site)): (str(row.call), str(row.label))
+        (str(row.ids), str(row.site)): (str(row.call), str(row.label))
         for row in calls.itertuples(index=False)
     }
 
@@ -323,7 +323,7 @@ def test_threshold_calls_follow_gots_rules(store, tmp_path, rules) -> None:
     genotypes = store.variants.genotypes(counts, method="threshold", **rules)
     assert _calls(store, genotypes) == _expected_threshold(**rules)
     loaded = store.variants.load_genotypes(genotypes)
-    calls = loaded.calls.set_index(["cell", "site"])
+    calls = loaded.calls.set_index(["ids", "site"])
     for row, cell in enumerate(TRUTH.row_ids[: TRUTH.n_cells]):
         for target, site in enumerate(TARGETS):
             wild, mutant, ambiguous = TRUTH.got[row, target].tolist()
@@ -335,6 +335,11 @@ def test_threshold_calls_follow_gots_rules(store, tmp_path, rules) -> None:
                 )
                 assert math.isnan(found["posterior_wild_type"])
     assert loaded.rules["min_umis"] == rules.get("min_umis", 1)
+    # The method and its rules have one home, the provenance parameters.
+    parameters = store.artifacts.inspect(genotypes).parameters
+    assert loaded.method == parameters["method"] == "threshold"
+    assert loaded.rules == {name: parameters[name] for name in GENOTYPE_RULES}
+    assert not {"method", "rules"} & set(store.artifacts.load(genotypes).attrs)
 
 
 def _gift_store(store, tmp_path):
@@ -394,7 +399,7 @@ def _expected_gift(alleles, swap=None, min_posterior=0.6, min_umis=1):
 def _gift_calls(store, genotypes):
     calls = store.variants.load_genotypes(genotypes).calls
     return {
-        (str(row.cell), str(row.site)): (
+        (str(row.ids), str(row.site)): (
             str(row.call),
             [
                 row.posterior_wild_type,
@@ -442,13 +447,28 @@ def test_gift_calls_follow_the_posterior_of_each_cell(
         "JAK2 c.1849G>T": {"reference": "CAC", "alternative": "AAC"},
         "ASXL1 c.1772dup": {"reference": "GTAG", "alternative": "GTAAG"},
     }
+    # The rules as GIFT applied them: one UMI, the posterior given or 0.6,
+    # and the swap probabilities as (reads, probability) pairs by reads.
+    assert loaded.method == "gift"
+    assert loaded.rules == {
+        "min_umis": 1,
+        "min_mutant_umis": None,
+        "min_fraction": None,
+        "min_posterior": options.get("min_posterior", 0.6),
+        "swap_probabilities": [
+            [reads, probability]
+            for reads, probability in options.get("swap_probabilities", {}).items()
+        ],
+        "min_quality": None,
+        "min_depth": None,
+    }
 
 
 def test_gift_counts_the_umis_that_match_each_allele(store, tmp_path) -> None:
     counts = _gift_store(store, tmp_path)
     calls = store.variants.load_genotypes(
         store.variants.genotypes(counts, method="gift")
-    ).calls.set_index(["cell", "site"])
+    ).calls.set_index(["ids", "site"])
     for (row, probe, gapfill), umis in TRUTH.gift.items():
         if row >= TRUTH.n_cells or probe != 0:
             continue
@@ -518,7 +538,10 @@ def test_one_site_is_genotyped_alone_and_named_sites_follow_the_counts(
         store.variants.load_genotypes(both, sites=["KRAS"])
     with pytest.raises(TypeError, match="a sequence of site labels"):
         store.variants.load_genotypes(both, sites="CALR")
-    with pytest.raises(TypeError, match="must hold site labels, not int"):
+    with pytest.raises(TypeError, match="must hold site labels or positions"):
+        store.variants.load_genotypes(both, sites=[1.5])
+    # GoT's targets have no coordinates, so a position names none of them.
+    with pytest.raises(ValueError, match="named by position only on genotypes"):
         store.variants.load_genotypes(both, sites=[1])
     store.memoryBytes = 1_000
     with pytest.raises(MemoryError, match="Loading the genotype calls"):
@@ -714,7 +737,7 @@ def test_loaded_calls_name_every_call_of_the_vocabulary(store, tmp_path) -> None
     assert list(calls["call"].cat.categories) == list(CALLS)
     assert calls["call"].cat.ordered
     assert list(calls.columns) == [
-        "cell",
+        "ids",
         "site",
         "call",
         "label",

@@ -646,12 +646,12 @@ class LineageBarcodes:
             ``n_reads``, -1 where a library of the cell counts none, and
             ``n_records``, its rows of ``records``.
         records: One row per molecule or pair, by cell, library, barcode and
-            UMI: ``cell``, ``library``, ``barcode`` and ``umi`` as
+            UMI: ``ids``, the cell, ``library``, ``barcode`` and ``umi`` as
             categoricals, ``umi`` missing for a pair, and ``umis`` and
             ``reads`` as ``Int64``, missing where unknown. A molecule's
             ``umis`` is 1.
         libraries: One row per library: ``library``, ``level``
-            (``"molecules"`` or ``"pairs"``), ``records``, and ``has_umis``
+            (``"molecules"`` or ``"pairs"``), ``n_records``, and ``has_umis``
             and ``has_reads``, whether its records count UMIs and reads.
     """
 
@@ -662,13 +662,14 @@ class LineageBarcodes:
     def pairs(self) -> pd.DataFrame:
         """Return one row per cell, library and barcode, with its UMIs and reads.
 
-        A pair's ``umis`` are its distinct UMIs, or the UMIs that its library
-        counts per barcode, and ``molecules`` its molecules; ``umis`` and
-        ``reads`` are missing where its library counts none.
+        Each row holds the cell's ``ids``, the ``library`` and the
+        ``barcode``. A pair's ``umis`` are its distinct UMIs, or the UMIs that
+        its library counts per barcode, and ``n_molecules`` its molecules;
+        ``umis`` and ``reads`` are missing where its library counts none.
         """
         records = self.records
         pairs = _pair_runs(
-            records["cell"].cat.codes.to_numpy(),
+            records["ids"].cat.codes.to_numpy(),
             records["library"].cat.codes.to_numpy(),
             records["barcode"].cat.codes.to_numpy(),
             records["umi"].cat.codes.to_numpy() >= 0,
@@ -677,8 +678,8 @@ class LineageBarcodes:
         )
         return pd.DataFrame(
             {
-                "cell": pd.Categorical.from_codes(
-                    pairs.cells, dtype=records["cell"].dtype
+                "ids": pd.Categorical.from_codes(
+                    pairs.cells, dtype=records["ids"].dtype
                 ),
                 "library": pd.Categorical.from_codes(
                     pairs.sources, dtype=records["library"].dtype
@@ -688,7 +689,7 @@ class LineageBarcodes:
                 ),
                 "umis": _nullable_counts(pairs.umis),
                 "reads": _nullable_counts(pairs.reads),
-                "molecules": pairs.molecules,
+                "n_molecules": pairs.molecules,
             }
         )
 
@@ -728,7 +729,7 @@ def lineage_barcode_frames(
     umi = table.text["umi"]
     records = pd.DataFrame(
         {
-            "cell": pd.Categorical.from_codes(
+            "ids": pd.Categorical.from_codes(
                 np.asarray(table.cells, dtype=np.int64), categories=ids
             ),
             "library": pd.Categorical.from_codes(
@@ -752,7 +753,7 @@ def lineage_barcode_frames(
             "level": pd.Series(
                 [str(library["level"]) for library in libraries], dtype=object
             ),
-            "records": pd.Series(
+            "n_records": pd.Series(
                 [int(library["records"]) for library in libraries], dtype=np.int64
             ),
             "has_umis": pd.Series(

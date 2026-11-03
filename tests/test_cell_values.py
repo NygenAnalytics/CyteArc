@@ -780,7 +780,7 @@ def test_fate_bias_stores_the_declared_arrays(store) -> None:
     # Two clones with late cells and two fates hold the other arrays.
     assert per_cell == _declared("clone_fate_bias")
     assert group["clone_fate_cells"].shape == (2, 2)
-    with_late = store.select_cells(bias, value="late_cells", low=1, keep_bounds=True)
+    with_late = store.select_cells(bias, value="n_late_cells", low=1, keep_bounds=True)
     assert store.artifacts.load_values(
         bias, cell_selection=with_late
     ).cell_ids.tolist() == _cell_ids(np.arange(4))

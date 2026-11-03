@@ -997,7 +997,7 @@ class TapestriVariant:
         return f"chr{self.chrom}:{self.position}:{self.reference}/{self.alternative}"
 
     @property
-    def dabseq_name(self) -> str:
+    def dab_seq_name(self) -> str:
         """The variant's name in a DAb-seq file: its gene, then its ``id``."""
         return f"{self.gene}:{self.name}"
 
@@ -1055,7 +1055,7 @@ TAPESTRI_METADATA = {
 PROTEIN_METADATA = {"panel_name": "ab_barcodes_test", "pipeline_version": "2.0.1"}
 #: DAb-seq's FLT3-ITD variant, which it adds from ITDseek with RD holding the
 #: depth.
-DABSEQ_ITD = "FLT3-ITD:chr13:28608251:T/TCTC"
+DAB_SEQ_ITD = "FLT3-ITD:chr13:28608251:T/TCTC"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1392,7 +1392,7 @@ def write_tapestri(
     return path
 
 
-def write_dabseq(truth: TapestriTruth, path: Path) -> Path:
+def write_dab_seq(truth: TapestriTruth, path: Path) -> Path:
     """Write a DAb-seq ``.hdf5`` file of the truth's genotypes.
 
     The arrays follow the DAb-seq pipeline's layout: ``AD``, ``RD``, ``DP``
@@ -1432,7 +1432,7 @@ def write_dabseq(truth: TapestriTruth, path: Path) -> Path:
     itd_alternative[itd_rows] = 25
     itd_genotype[itd_rows] = 1
     itd_quality[itd_rows] = 100
-    names = [variant.dabseq_name for variant in variants]
+    names = [variant.dab_seq_name for variant in variants]
     # DAb-seq names a variant without a gene annotation with an empty gene.
     names = [
         name if variant.alternative else f":{variant.name}"
@@ -1452,7 +1452,7 @@ def write_dabseq(truth: TapestriTruth, path: Path) -> Path:
                 chunks=(5, 4),
                 compression="gzip",
             )
-        _texts_dataset(handle, "VARIANTS", [*names, DABSEQ_ITD])
+        _texts_dataset(handle, "VARIANTS", [*names, DAB_SEQ_ITD])
         _texts_dataset(
             handle,
             "CELL_BARCODES",

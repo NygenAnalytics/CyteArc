@@ -67,7 +67,7 @@ def _records(loaded: LineageBarcodes) -> pd.DataFrame:
     records = loaded.records
     return pd.DataFrame(
         {
-            "cell": records["cell"].astype(str).to_numpy(),
+            "cell": records["ids"].astype(str).to_numpy(),
             "barcode": records["barcode"].astype(str).to_numpy(),
             "umi": records["umi"].astype(object).where(records["umi"].notna(), None),
             "umis": records["umis"].fillna(-1).to_numpy(dtype=np.int64),
@@ -376,7 +376,7 @@ def test_counts_of_cells_and_libraries_follow_the_records(shared, tmp_path) -> N
     assert loaded.libraries.to_dict("list") == {
         "library": ["lineage"],
         "level": ["molecules"],
-        "records": [len(expected)],
+        "n_records": [len(expected)],
         "has_umis": [True],
         "has_reads": [True],
     }
@@ -387,11 +387,11 @@ def test_counts_of_cells_and_libraries_follow_the_records(shared, tmp_path) -> N
     observed = (
         pd.DataFrame(
             {
-                "cell": pairs["cell"].astype(str).to_numpy(dtype=object),
+                "cell": pairs["ids"].astype(str).to_numpy(dtype=object),
                 "barcode": pairs["barcode"].astype(str).to_numpy(dtype=object),
                 "umis": pairs["umis"].to_numpy(dtype=np.int64),
                 "reads": pairs["reads"].to_numpy(dtype=np.int64),
-                "molecules": pairs["molecules"].to_numpy(dtype=np.int64),
+                "molecules": pairs["n_molecules"].to_numpy(dtype=np.int64),
             }
         )
         .sort_values(["cell", "barcode"])
@@ -423,7 +423,7 @@ def test_rna_molecules_and_atac_reads_share_an_import_in_two_libraries(
     assert loaded.libraries.to_dict("list") == {
         "library": ["ATAC", "RNA"],
         "level": ["pairs", "molecules"],
-        "records": [len(_pairs()), len(_molecules())],
+        "n_records": [len(_pairs()), len(_molecules())],
         "has_umis": [False, True],
         "has_reads": [True, True],
     }
@@ -748,7 +748,7 @@ def test_a_file_without_barcodes_of_the_selected_cells_saves_none(
     assert loaded.libraries.to_dict("list") == {
         "library": ["molecules"],
         "level": ["molecules"],
-        "records": [0],
+        "n_records": [0],
         "has_umis": [False],
         "has_reads": [False],
     }
@@ -1648,7 +1648,7 @@ def test_selecting_cells_by_their_barcodes_follows_the_documented_bounds(
         )
     records = shared.store.clones.load_barcodes(barcodes).records
     # Each cell's distinct barcodes, counted from its records.
-    distinct = records.groupby("cell", observed=True)["barcode"].nunique()
+    distinct = records.groupby("ids", observed=True)["barcode"].nunique()
     assert (distinct == 1).any() and (distinct >= 2).any()
     for low, fewest in ((0, 1), (1, 2)):
         selected = shared.store.select_cells(barcodes, low=low)

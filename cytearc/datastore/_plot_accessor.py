@@ -643,7 +643,7 @@ class DataStorePlotAccessor:
         group_by: str | Sequence[str] | None = None,
         groups: ArtifactRef | None = None,
         cell_selection: ArtifactRef | None = None,
-        top: int = 10,
+        top_n: int = 10,
         labels: Sequence[str] | None = None,
         order: Sequence[str] | None = None,
         target: Any | None = None,

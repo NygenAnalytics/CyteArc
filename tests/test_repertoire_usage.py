@@ -166,8 +166,12 @@ def test_chains_are_counted_as_count_units_counts_their_labels(seed, count) -> N
         units = units.drop_duplicates(
             ["group", "clonotype", "locus", "v_call", "j_call"]
         )
+    # The table names its count column n_cells or n_clonotypes.
     expected = count_units(
-        units.drop(columns="clonotype"), ["group", "locus"], ["v_call", "j_call"], count
+        units.drop(columns="clonotype"),
+        ["group", "locus"],
+        ["v_call", "j_call"],
+        f"n_{count}",
     )
     positions = expected.pop("group").to_numpy()
     expected.insert(0, "sample", keys["sample"].to_numpy()[positions])
@@ -189,7 +193,7 @@ def test_chains_are_ordered_by_value_or_by_count() -> None:
         "cells",
         by_count=False,
     )
-    assert table[["length", "cells"]].values.tolist() == [[12, 2], [13, 1], [14, 3]]
+    assert table[["length", "n_cells"]].values.tolist() == [[12, 2], [13, 1], [14, 3]]
     assert table["length"].dtype == np.int64 and n_cells == 6
     by_count = count_chains(
         keys,
@@ -213,7 +217,7 @@ def test_chains_are_ordered_by_value_or_by_count() -> None:
         "group",
         "locus",
         "d_call",
-        "clonotypes",
+        "n_clonotypes",
         "fraction",
     ]
     assert empty.empty and none == 0
@@ -293,9 +297,9 @@ def test_a_cell_counts_once_per_value_on_request() -> None:
         "count": "cells",
     }
     chains, n_cells = count_chains(**options)
-    assert chains[["v_call", "cells"]].values.tolist() == [["A", 3], ["B", 1]]
+    assert chains[["v_call", "n_cells"]].values.tolist() == [["A", 3], ["B", 1]]
     cells, same = count_chains(**options, once_per_cell=True)
-    assert cells[["v_call", "cells"]].values.tolist() == [["A", 2], ["B", 1]]
+    assert cells[["v_call", "n_cells"]].values.tolist() == [["A", 2], ["B", 1]]
     assert cells["fraction"].tolist() == [2 / 3, 1 / 3]
     assert n_cells == same == 2
 
@@ -316,6 +320,6 @@ def test_an_empty_table_keeps_the_types_of_its_columns() -> None:
     empty, n_cells = counted(-1)
     full, _n_cells = counted(2)
     assert empty.empty and n_cells == 0 and len(full) == 1
-    for column in ("group", "sample", "length", "cells", "fraction"):
+    for column in ("group", "sample", "length", "n_cells", "fraction"):
         assert empty[column].dtype == full[column].dtype, column
-    assert empty["cells"].dtype == np.int64 and empty["fraction"].dtype == np.float64
+    assert empty["n_cells"].dtype == np.int64 and empty["fraction"].dtype == np.float64

@@ -97,9 +97,9 @@ def test_the_tapestri_example_reads_into_a_store_and_its_variants(tmp_path) -> N
     assert float(loaded.calls["quality"].sum()) == 3_758_700
     first = "4-cell-lines-AML-multiomics__AACAACCTACTCTAGTAA"
     site = "chr1:115256513"
-    depth = loaded.depth.set_index(["cell", "site"])["depth"]
-    reads = loaded.counts.set_index(["cell", "site", "allele"])["count"]
-    calls = loaded.calls.set_index(["cell", "site", "allele"])
+    depth = loaded.depth.set_index(["ids", "site"])["depth"]
+    reads = loaded.counts.set_index(["ids", "site", "allele"])["count"]
+    calls = loaded.calls.set_index(["ids", "site", "allele"])
     assert int(depth[(first, site)]) == 50
     assert int(reads[(first, site, "A")]) == 1
     assert calls.loc[(first, site, "A"), "call"] == "0"
@@ -145,7 +145,7 @@ def test_the_tapestri_example_reads_into_a_store_and_its_variants(tmp_path) -> N
 
 @pytest.mark.slow
 @pytest.mark.integration
-def test_a_dabseq_file_of_geo_reads_into_variant_counts(tmp_path) -> None:
+def test_a_dab_seq_file_of_geo_reads_into_variant_counts(tmp_path) -> None:
     file = download_or_skip(_GEO, tmp_path / "GSM9567643.hdf5")
     with h5py.File(file, "r") as handle:
         barcodes = [value.decode() for value in handle["CELL_BARCODES"][:]]

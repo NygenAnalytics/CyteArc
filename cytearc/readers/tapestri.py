@@ -64,7 +64,7 @@ __all__ = [
     "PROTEIN_FEATURE_TYPE",
     "TapestriReader",
     "TapestriSource",
-    "dabseq_source",
+    "dab_seq_source",
     "tapestri_cell_ids",
     "tapestri_source",
 ]
@@ -113,7 +113,7 @@ _EXAMPLES = 5
 # traced at 636 to 668 bytes (Tapestri) and 860 to 1,059 bytes (DAb-seq,
 # whose names it splits further), with room.
 _TAPESTRI_VARIANT_BYTES = 700
-_DABSEQ_VARIANT_BYTES = 1_100
+_DAB_SEQ_VARIANT_BYTES = 1_100
 # And for each cell: its barcode, sample and ID as Python text and their
 # entry in the lookup of repeated IDs, 251 bytes as traced with 8-character
 # samples, with room.
@@ -582,8 +582,8 @@ def _chosen_columns(
             chosen[by_position[item]] = True
         else:
             raise ValueError(
-                f"variants names {item!r}, which is neither a variant nor a position "
-                f"of {path}; name variants as {what} does, such as "
+                f"include_variants names {item!r}, which is neither a variant nor a "
+                f"position of {path}; name variants as {what} does, such as "
                 f"{variants.names[0] if n_columns else 'chr1:115256513:G/A'!r}, or "
                 "positions such as 'chr1:115256513'"
             )
@@ -610,7 +610,7 @@ def _chosen_columns(
         )
         raise ValueError(
             f"The variant {name!r} of {path} has {reason}, which no documentation "
-            "explains, so it cannot be imported; leave it out of variants"
+            "explains, so it cannot be imported; leave it out of include_variants"
         )
     n_empty = int(np.count_nonzero(skipped & empty))
     n_other = int(np.count_nonzero(skipped & ~empty))
@@ -625,8 +625,8 @@ def _chosen_columns(
     if not len(columns):
         raise ValueError(
             f"{path} has no variant to import: none passes the pipeline's filters "
-            "and variants names none that can be read; name variants or positions "
-            "with variants"
+            "and include_variants names none that can be read; name variants or "
+            "positions with include_variants"
         )
     added = variants.names[columns[~variants.passing[columns]]].tolist()
     record = {
@@ -823,7 +823,7 @@ class TapestriSource:
                 if self.format == "tapestri":
                     yield from self._tapestri_block(layers, start, stop, ids)
                 else:
-                    yield from self._dabseq_block(layers, start, stop, ids)
+                    yield from self._dab_seq_block(layers, start, stop, ids)
 
     def _block_ids(self, handle: h5py.File, start: int, stop: int) -> np.ndarray:
         """The IDs of cells ``[start, stop)``: Tapestri's ``<sample>__<barcode>``,
@@ -961,7 +961,7 @@ class TapestriSource:
         quality = self._read(layers["GQ"], start, stop).astype(np.float64)
         yield self._calls_batch(calls, depth, quality, ids, "NGT")
 
-    def _dabseq_block(
+    def _dab_seq_block(
         self,
         layers: dict[str, h5py.Dataset],
         start: int,
@@ -1078,13 +1078,13 @@ def _check_description(
 
 def tapestri_source(
     path: str | os.PathLike[str],
-    variants: Sequence[str] = (),
+    include_variants: Sequence[str] = (),
     memory_bytes: int | None = None,
 ) -> TapestriSource:
     """Describe the DNA variants of a Tapestri ``.h5`` file as a source of counts.
 
     The variants that pass the pipeline's default filters (``filtered`` 0)
-    are read, with those that ``variants`` names. Before it reads them, the
+    are read, with those that ``include_variants`` names. Before it reads them, the
     description checks what it holds against ``memory_bytes``. The notes
     keep the variants' panel, genome and pipeline version, and the
     thresholds of the pipeline's genotype filters, ``gq_cutoff``,
@@ -1093,19 +1093,20 @@ def tapestri_source(
     Raises:
         ValueError: If the file lacks the DNA variants or their arrays, a
             variant's ``id`` disagrees with its ``CHROM``, ``POS``, ``REF``
-            and ``ALT``, ``variants`` names an unknown or unreadable variant,
+            and ``ALT``, ``include_variants`` names an unknown or unreadable
+            variant,
             a cell repeats, or no variant is left to import.
         MemoryError: If describing the variants and cells does not fit
             ``memory_bytes``.
     """
     text = os.fspath(path)
-    requested = tuple(variants)
+    requested = tuple(include_variants)
     with h5py.File(text, "r") as handle:
         group = handle.get(_VARIANTS)
         if not isinstance(group, h5py.Group):
             raise ValueError(
                 f"{text} lacks {_VARIANTS}; it is not a Tapestri file of DNA "
-                "variants (a DAb-seq file reads with format='dabseq')"
+                "variants (a DAb-seq file reads with format='dab_seq')"
             )
         columns_group = group.get("ca")
         if not isinstance(columns_group, h5py.Group):
@@ -1205,30 +1206,29 @@ def tapestri_source(
     )
 
 
-def dabseq_source(
+def dab_seq_source(
     path: str | os.PathLike[str],
-    variants: Sequence[str] = (),
+    include_variants: Sequence[str] = (),
     memory_bytes: int | None = None,
 ) -> TapestriSource:
     """Describe a DAb-seq ``.hdf5`` file of genotypes as a source of counts.
 
     DAb-seq flags no variant as failing, so every variant whose alleles are
-    bases is read, and ``variants`` may name others only to check that the
-    file holds them. FLT3-ITD variants are named sites of their own. Before
+    bases is read, and ``include_variants`` may name others only to check
+    that the file holds them. FLT3-ITD variants are named sites of their own. Before
     it reads them, the description checks what it holds against
     ``memory_bytes``.
 
     Raises:
         ValueError: If the file lacks one of its arrays, a variant name is
             neither ``gene:chrom:pos:ref/alt`` nor ``chrom:pos:ref/alt``, a
-            barcode repeats, ``variants``
-            names an unknown or unreadable variant, or no variant is left to
-            import.
+            barcode repeats, ``include_variants`` names an unknown or
+            unreadable variant, or no variant is left to import.
         MemoryError: If describing the variants and cells does not fit
             ``memory_bytes``.
     """
     text = os.fspath(path)
-    requested = tuple(variants)
+    requested = tuple(include_variants)
     with h5py.File(text, "r") as handle:
         names_dataset = _dataset(handle, "VARIANTS", text)
         barcode_dataset = _dataset(handle, "CELL_BARCODES", text)
@@ -1236,7 +1236,7 @@ def dabseq_source(
             text,
             memory_bytes,
             n_variants=int(names_dataset.shape[0]),
-            variant_bytes=_DABSEQ_VARIANT_BYTES
+            variant_bytes=_DAB_SEQ_VARIANT_BYTES
             + 2 * _DESCRIBED_TEXT_COPIES * _text_width(names_dataset),
             n_cells=int(barcode_dataset.shape[0]),
             cell_bytes=_CELL_BYTES
@@ -1290,7 +1290,7 @@ def dabseq_source(
     columns = _sites(parsed, chosen, path=text, itd=itd)
     return TapestriSource(
         path=text,
-        format="dabseq",
+        format="dab_seq",
         files=(("hdf5", text),),
         count_unit="reads",
         depth_definition="all",

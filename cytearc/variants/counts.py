@@ -857,18 +857,18 @@ class VariantCounts:
             ``IDH2_Mut1``): ``contig``, ``position`` (-1 for a named site),
             ``name``, ``channel``, ``reference`` (its reference allele, or
             None), ``depth`` (summed over all of the artifact's cells) and
-            ``cells`` (cells covered there).
+            ``n_cells`` (cells covered there).
         alleles: One row per allele: ``site``, ``allele`` and ``role``.
-        cells: One row per cell, indexed by cell ID: ``listed`` (whether a
-            file names the cell), ``mean_depth`` (over the sites, NaN for a
-            cell no file names) and ``covered_sites``.
-        depth: ``cell``, ``site`` and ``depth``, one row per covered cell and
+        cells: One row per cell, indexed by cell ``ids``: ``listed`` (whether
+            a file names the cell), ``mean_depth`` (over the sites, NaN for a
+            cell no file names) and ``n_covered_sites``.
+        depth: ``ids``, ``site`` and ``depth``, one row per covered cell and
             site.
-        counts: ``cell``, ``site``, ``allele`` and ``count``, then the fields
+        counts: ``ids``, ``site``, ``allele`` and ``count``, then the fields
             the source has: ``forward`` and ``reverse`` (strand counts),
             ``quality_forward`` and ``quality_reverse`` (mean base quality,
             NaN where the strand count is 0), ``reads`` and ``support``.
-        calls: ``cell``, ``site``, ``allele``, ``source`` (the column that
+        calls: ``ids``, ``site``, ``allele``, ``source`` (the column that
             held the call), ``call``, as the source wrote it, and
             ``quality``, the call's quality where the source gives one, such
             as Tapestri's genotype quality ``GQ``, and NaN elsewhere.
@@ -900,7 +900,7 @@ def variant_count_frames(
     cell_ids: np.ndarray,
     listed: np.ndarray,
     mean_depth: np.ndarray,
-    covered_sites: np.ndarray,
+    n_covered_sites: np.ndarray,
     depth: tuple[np.ndarray, np.ndarray, np.ndarray],
     counts: tuple[np.ndarray, np.ndarray, Mapping[str, np.ndarray]],
     calls: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
@@ -917,7 +917,7 @@ def variant_count_frames(
         cell_ids: The IDs of the cells to show.
         listed: Whether a file names each cell.
         mean_depth: Each cell's mean depth.
-        covered_sites: Each cell's covered sites.
+        n_covered_sites: Each cell's covered sites.
         depth: Depth rows: cells (positions in ``cell_ids``), sites, depths.
         counts: Count rows: cells, alleles and the count and its fields.
         calls: Call rows: cells, alleles, sources and values as codes, and
@@ -961,7 +961,7 @@ def variant_count_frames(
                 for allele in references[kept_sites].tolist()
             ],
             "depth": np.asarray(site_depth, dtype=np.int64)[kept_sites],
-            "cells": np.asarray(site_cells, dtype=np.int64)[kept_sites],
+            "n_cells": np.asarray(site_cells, dtype=np.int64)[kept_sites],
         },
         index=pd.Index(shown, name="site", dtype=object),
     )
@@ -977,21 +977,21 @@ def variant_count_frames(
         {
             "listed": np.asarray(listed, dtype=bool),
             "mean_depth": np.asarray(mean_depth, dtype=np.float64),
-            "covered_sites": np.asarray(covered_sites, dtype=np.int64),
+            "n_covered_sites": np.asarray(n_covered_sites, dtype=np.int64),
         },
-        index=pd.Index(np.asarray(cell_ids, dtype=object), name="cell", dtype=object),
+        index=pd.Index(np.asarray(cell_ids, dtype=object), name="ids", dtype=object),
     )
     depth_cells, depth_sites, depth_values = depth
     depth_frame = pd.DataFrame(
         {
-            "cell": cell_column(depth_cells),
+            "ids": cell_column(depth_cells),
             "site": site_column(depth_sites),
             "depth": np.asarray(depth_values, dtype=np.int64),
         }
     )
     count_cells, count_alleles, count_values = counts
     count_columns: dict[str, Any] = {
-        "cell": cell_column(count_cells),
+        "ids": cell_column(count_cells),
         "site": site_column(sites.allele_site[count_alleles]),
         "allele": sites.allele[count_alleles],
     }
@@ -1006,7 +1006,7 @@ def variant_count_frames(
     call_cells, call_alleles, call_source_codes, call_value_codes, call_quality = calls
     calls_frame = pd.DataFrame(
         {
-            "cell": cell_column(call_cells),
+            "ids": cell_column(call_cells),
             "site": site_column(sites.allele_site[call_alleles]),
             "allele": sites.allele[call_alleles],
             "source": np.asarray(list(call_sources), dtype=object)[

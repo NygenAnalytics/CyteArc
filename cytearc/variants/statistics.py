@@ -27,6 +27,7 @@ for the variants, not the cells. These functions never touch storage.
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -37,7 +38,7 @@ from .counts import SiteTable
 
 __all__ = [
     "HETEROPLASMY_LEVELS",
-    "PRESETS",
+    "INFORMATIVE_PRESETS",
     "THRESHOLDS",
     "VMR_OFFSET",
     "VariantSelection",
@@ -446,26 +447,34 @@ THRESHOLDS: Mapping[str, tuple[str, str]] = {
     "min_depth": ("mean_coverage", ">"),
     "min_quality": ("mean_quality", ">"),
 }
-#: Published rules: ``"atac"`` is the rule of Lareau et al. (2020) for
-#: mtscATAC-seq as Signac's vignette applies it: at least 5 cells with 2 reads
-#: on each strand, a strand correlation of at least 0.65 and a VMR above 0.01.
-#: ``"rna"`` is MAESTER's for RNA libraries, whose strands follow the
-#: transcript (Miller et al. 2022): a mean depth above 20 and a mean base
-#: quality above 30, with Signac's VMR above 0.01 for the variability that
-#: MAESTER tests by percentiles of the allele frequencies.
-PRESETS: Mapping[str, Mapping[str, float]] = {
-    "atac": {"min_cells": 5, "min_strand_correlation": 0.65, "min_vmr": 0.01},
-    "rna": {"min_depth": 20.0, "min_quality": 30.0, "min_vmr": 0.01},
-}
+#: The published rules of each preset of ``informative``, by argument, read
+#: only: ``"atac"`` is the rule of Lareau et al. (2020) for mtscATAC-seq as
+#: Signac's vignette applies it: at least 5 cells with 2 reads on each strand,
+#: a strand correlation of at least 0.65 and a VMR above 0.01. ``"rna"`` is
+#: MAESTER's for RNA libraries, whose strands follow the transcript (Miller et
+#: al. 2022): a mean depth above 20 and a mean base quality above 30, with
+#: Signac's VMR above 0.01 for the variability that MAESTER tests by
+#: percentiles of the allele frequencies.
+INFORMATIVE_PRESETS: Mapping[str, Mapping[str, int | float]] = MappingProxyType(
+    {
+        "atac": MappingProxyType(
+            {"min_cells": 5, "min_strand_correlation": 0.65, "min_vmr": 0.01}
+        ),
+        "rna": MappingProxyType(
+            {"min_depth": 20.0, "min_quality": 30.0, "min_vmr": 0.01}
+        ),
+    }
+)
 
 
 def resolve_thresholds(
     preset: str | None, given: Mapping[str, float | int | None]
-) -> dict[str, float | None]:
+) -> dict[str, int | float | None]:
     """Combine a preset's thresholds with the thresholds given by name.
 
     A threshold given as a number replaces the preset's; one left as None
-    keeps the preset's, or no test without a preset.
+    keeps the preset's, or no test without a preset. ``min_cells`` resolves
+    to an integer and the other thresholds to floats.
 
     Raises:
         TypeError: If the preset is not text or None, or a threshold is not a
@@ -476,17 +485,19 @@ def resolve_thresholds(
     """
     if preset is not None and not isinstance(preset, str):
         raise TypeError(
-            f"preset must be one of {', '.join(PRESETS)}, or None, not {preset!r}"
+            f"preset must be one of {', '.join(INFORMATIVE_PRESETS)}, or None, not "
+            f"{preset!r}"
         )
-    if preset is not None and preset not in PRESETS:
+    if preset is not None and preset not in INFORMATIVE_PRESETS:
         raise ValueError(
-            f"preset must be one of {', '.join(PRESETS)}, or None, not {preset!r}"
+            f"preset must be one of {', '.join(INFORMATIVE_PRESETS)}, or None, not "
+            f"{preset!r}"
         )
     unknown = sorted(set(given) - set(THRESHOLDS))
     if unknown:
         raise ValueError(f"Unknown thresholds {unknown}")
-    resolved: dict[str, float | None] = {
-        name: (None if preset is None else PRESETS[preset].get(name))
+    resolved: dict[str, int | float | None] = {
+        name: (None if preset is None else INFORMATIVE_PRESETS[preset].get(name))
         for name in THRESHOLDS
     }
     for name, value in given.items():
@@ -501,7 +512,9 @@ def resolve_thresholds(
             raise ValueError("min_cells must be a whole number of cells, 0 or more")
         resolved[name] = number
     resolved = {
-        name: None if value is None else float(value)
+        name: None
+        if value is None
+        else (int(value) if name == "min_cells" else float(value))
         for name, value in resolved.items()
     }
     if all(value is None for value in resolved.values()):
@@ -514,7 +527,7 @@ def resolve_thresholds(
 
 def informative_variants(
     statistics: Mapping[str, np.ndarray],
-    thresholds: Mapping[str, float | None],
+    thresholds: Mapping[str, int | float | None],
     *,
     n_variants: int,
 ) -> np.ndarray:
@@ -588,12 +601,14 @@ class VariantSelection:
             ``mean_quality`` (NaN without base qualities), ``masked`` and
             ``informative``.
         counts: The ``variant_counts`` artifact that the statistics read.
-        cells: The cell selection that the statistics were restricted to,
-            or None for every cell that the counts' files name.
+        cell_selection: The cell selection that the statistics were
+            restricted to, or None for every cell that the counts' files name.
         preset: The preset that set the thresholds, or None.
         thresholds: Each threshold as the selection applied it, None for a
-            test not made.
-        masks: The masks whose variants are never informative.
+            test not made, from the artifact's provenance parameters:
+            ``min_cells`` an integer and the others floats.
+        mask: The masks whose variants are never informative, as the
+            selection's ``mask`` names them.
         n_cells: The cells that the statistics cover.
         stranded: Whether the counts give forward and reverse reads, and so
             ``n_cells_conf_detected`` and ``strand_correlation``.
@@ -603,10 +618,10 @@ class VariantSelection:
 
     variants: pd.DataFrame = field(repr=False)
     counts: ArtifactRef
-    cells: ArtifactRef | None
+    cell_selection: ArtifactRef | None
     preset: str | None
-    thresholds: Mapping[str, float | None]
-    masks: tuple[str, ...]
+    thresholds: Mapping[str, int | float | None]
+    mask: tuple[str, ...]
     n_cells: int
     stranded: bool
     qualities: bool

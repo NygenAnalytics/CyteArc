@@ -81,7 +81,7 @@ def test_overlap_compares_the_clones_of_two_samples(shared) -> None:
     assert result.groups is None and result.cell_selection is None
     by_sample = TRUTH.group_clone_cells(TRUTH.samples)
     sizes = result.group_sizes
-    assert sizes.columns.tolist() == ["group", "sample", "cells", "clones"]
+    assert sizes.columns.tolist() == ["group", "sample", "n_cells", "n_clones"]
     assert sizes.values.tolist() == [
         [sample, sample, sum(by_sample[sample].values()), len(by_sample[sample])]
         for sample in SAMPLES
@@ -121,8 +121,8 @@ def test_overlap_groups_by_labels_columns_and_selections(shared) -> None:
     assert by_type.group_sizes.columns.tolist() == [
         "group",
         "cluster_labels",
-        "cells",
-        "clones",
+        "n_cells",
+        "n_clones",
     ]
     found = TRUTH.group_clone_cells(TRUTH.cell_types)
     _check_pairs(by_type.pairs, {name: found[name] for name in sorted(found)})
@@ -141,7 +141,7 @@ def test_overlap_groups_by_labels_columns_and_selections(shared) -> None:
     selected = store.clones.overlap(clones, group_by="cell_type", cell_selection=d2)
     assert selected.cell_selection == d2
     found = TRUTH.group_clone_cells(TRUTH.cell_types, cells=TRUTH.samples == "d2")
-    assert selected.group_sizes["cells"].sum() == 13
+    assert selected.group_sizes["n_cells"].sum() == 13
     _check_pairs(selected.pairs, {name: found[name] for name in sorted(found)})
 
 
@@ -195,22 +195,27 @@ def test_groups_whose_labels_join_to_one_name_are_refused(copied) -> None:
 
 def test_group_columns_may_not_share_a_name_with_the_result(copied) -> None:
     store, clones = copied.store, copied.clones
-    for column in ("cells", "clones", "fraction", "clone"):
+    for column in ("n_cells", "n_clones", "fraction", "clone", "cells", "clones"):
         store.cells.insert(column, TRUTH.samples.astype(object))
-    for column in ("cells", "clones"):
+    for column in ("n_cells", "n_clones"):
         with pytest.raises(ValueError, match=f"'{column}', which is also a column"):
             store.clones.overlap(clones, group_by=column)
-    for column in ("cells", "fraction", "clone"):
+    for column in ("n_cells", "fraction", "clone"):
         with pytest.raises(ValueError, match=f"'{column}', which is also a column"):
             store.clones.track(clones, group_by=column)
-    # A clones artifact as labels names the key column "clones", which the
-    # overlap's group sizes hold but a tracking table does not.
-    with pytest.raises(ValueError, match="key column 'clones' is also a column"):
-        store.clones.overlap(clones, groups=clones)
-    assert store.clones.track(clones, groups=clones, top=1).tracked
+    # The count columns are named n_cells and n_clones, so the names cells
+    # and clones, and a clones artifact as labels, whose key column is
+    # "clones", are free in both results.
+    for column in ("cells", "clones"):
+        assert len(store.clones.overlap(clones, group_by=column).pairs) == 1
+        assert len(store.clones.track(clones, group_by=column, top_n=1).table) == 2
+    assert store.clones.overlap(clones, groups=clones).group_sizes.columns.tolist()[
+        :2
+    ] == ["group", "clones"]
+    assert store.clones.track(clones, groups=clones, top_n=1).tracked
     # Names that only the other result holds are free.
     assert len(store.clones.overlap(clones, group_by="fraction").pairs) == 1
-    assert len(store.clones.track(clones, group_by="clones", top=1).cells) == 2
+    assert len(store.clones.track(clones, group_by="n_clones", top_n=1).table) == 2
 
 
 def test_cells_without_a_label_are_left_out(copied) -> None:
@@ -219,7 +224,7 @@ def test_cells_without_a_label_are_left_out(copied) -> None:
     missing[np.flatnonzero(TRUTH.clones >= 0)[:2]] = True
     insert_nullable_cell_column(store, "partial", TRUTH.samples, missing)
     result = store.clones.overlap(clones, group_by="partial")
-    assert result.group_sizes["cells"].sum() == 30
+    assert result.group_sizes["n_cells"].sum() == 30
     found = TRUTH.group_clone_cells(TRUTH.samples, cells=~missing)
     _check_pairs(result.pairs, {sample: found[sample] for sample in SAMPLES})
     insert_nullable_cell_column(
@@ -254,18 +259,18 @@ def _largest(by_group: dict, top: int) -> list[int]:
 def test_track_follows_the_largest_clones_of_each_group(shared, top) -> None:
     store, clones = shared.store, shared.clones
     saved = store.artifacts.list(scope="datastore")
-    tracked = store.clones.track(clones, group_by="sample", top=top)
+    tracked = store.clones.track(clones, group_by="sample", top_n=top)
     assert isinstance(tracked, CloneTracking)
     assert tracked.clones == clones and tracked.group_by == ("sample",)
     assert tracked.groups is None and tracked.cell_selection is None
     by_sample = TRUTH.group_clone_cells(TRUTH.samples)
     chosen = _largest(by_sample, top)
     assert tracked.tracked == tuple(number_label(clone) for clone in chosen)
-    cells = tracked.cells
-    assert cells.columns.tolist() == ["clone", "group", "sample", "cells", "fraction"]
+    cells = tracked.table
+    assert cells.columns.tolist() == ["clone", "group", "sample", "n_cells", "fraction"]
     assert (cells["group"] == cells["sample"]).all()
     expected = _expected_rows(by_sample, chosen)
-    assert cells[["clone", "group", "cells"]].values.tolist() == [
+    assert cells[["clone", "group", "n_cells"]].values.tolist() == [
         row[:3] for row in expected
     ]
     np.testing.assert_allclose(cells["fraction"], [row[3] for row in expected])
@@ -275,11 +280,14 @@ def test_track_follows_the_largest_clones_of_each_group(shared, top) -> None:
 def test_track_breaks_ties_by_the_larger_clone(shared) -> None:
     # d2's largest clones are 1 and 4, of 3 cells each, and d4's is 1, so
     # the top one of each sample is clone 1 alone.
-    tracked = shared.store.clones.track(shared.clones, group_by="sample", top=1)
+    tracked = shared.store.clones.track(shared.clones, group_by="sample", top_n=1)
     assert tracked.tracked == ("1",)
-    assert tracked.cells[["group", "cells"]].values.tolist() == [["d2", 3], ["d4", 6]]
-    assert tracked.cells["fraction"].tolist() == pytest.approx([3 / 13, 6 / 19])
-    two = shared.store.clones.track(shared.clones, group_by="sample", top=2)
+    assert tracked.table[["group", "n_cells"]].values.tolist() == [
+        ["d2", 3],
+        ["d4", 6],
+    ]
+    assert tracked.table["fraction"].tolist() == pytest.approx([3 / 13, 6 / 19])
+    two = shared.store.clones.track(shared.clones, group_by="sample", top_n=2)
     assert two.tracked == ("1", "2", "4")
 
 
@@ -298,15 +306,15 @@ def test_track_follows_labelled_clones_through_every_group(shared) -> None:
     by_group = TRUTH.group_clone_cells(keys)
     by_group = {name: by_group[name] for name in sorted(by_group)}
     expected = _expected_rows(by_group, [2, 7])
-    assert tracked.cells.columns.tolist() == [
+    assert tracked.table.columns.tolist() == [
         "clone",
         "group",
         "sample",
         "cluster_labels",
-        "cells",
+        "n_cells",
         "fraction",
     ]
-    assert tracked.cells[["clone", "group", "cells"]].values.tolist() == [
+    assert tracked.table[["clone", "group", "n_cells"]].values.tolist() == [
         row[:3] for row in expected
     ]
     # A clone without cells among the selected cells is followed with none.
@@ -315,7 +323,7 @@ def test_track_follows_labelled_clones_through_every_group(shared) -> None:
         clones, group_by="sample", labels=["8"], cell_selection=d2
     )
     assert alone.cell_selection == d2
-    assert alone.cells[["clone", "group", "cells", "fraction"]].values.tolist() == [
+    assert alone.table[["clone", "group", "n_cells", "fraction"]].values.tolist() == [
         ["8", "d2", 0, 0.0]
     ]
 
@@ -323,9 +331,9 @@ def test_track_follows_labelled_clones_through_every_group(shared) -> None:
 @pytest.mark.parametrize(
     ("kwargs", "error", "message"),
     [
-        ({"top": 0}, ValueError, "top must be a positive integer"),
-        ({"top": 1.5}, TypeError, "top must be a positive integer"),
-        ({"top": True}, TypeError, "top must be a positive integer"),
+        ({"top_n": 0}, ValueError, "^top_n must be a positive integer"),
+        ({"top_n": 1.5}, TypeError, "^top_n must be a positive integer"),
+        ({"top_n": True}, TypeError, "^top_n must be a positive integer"),
         ({"labels": "1"}, TypeError, "labels must be a sequence"),
         ({"labels": [1]}, TypeError, "labels must be a sequence"),
         ({"labels": np.asarray([["1"]])}, TypeError, "labels must be a sequence"),
@@ -344,7 +352,7 @@ def test_track_takes_labels_as_an_array(shared) -> None:
     listed = store.clones.track(clones, group_by="sample", labels=["8", "3"])
     array = store.clones.track(clones, group_by="sample", labels=np.asarray(["8", "3"]))
     assert array.tracked == listed.tracked == ("3", "8")
-    assert array.cells.values.tolist() == listed.cells.values.tolist()
+    assert array.table.values.tolist() == listed.table.values.tolist()
     with pytest.raises(ValueError, match="labels must name at least one clone"):
         store.clones.track(clones, labels=np.asarray([], dtype=str))
 
@@ -399,9 +407,9 @@ def test_overlap_and_track_refuse_tables_beyond_the_budget(copied, monkeypatch) 
     with pytest.raises(
         MemoryError, match=f"gives 256 rows and holds about {rows} bytes.*smaller"
     ):
-        store.clones.track(clones, groups=own, top=1)
+        store.clones.track(clones, groups=own, top_n=1)
     monkeypatch.setattr(store, "memoryBytes", rows)
-    assert len(store.clones.track(clones, groups=own, top=1).cells) == 256
+    assert len(store.clones.track(clones, groups=own, top_n=1).table) == 256
     # Grouping is checked first.
     monkeypatch.setattr(store, "memoryBytes", grouping - 1)
     for method in (store.clones.overlap, store.clones.track):
@@ -438,8 +446,8 @@ def test_overlap_compares_only_groups_of_the_labels_kept_apart(kept_apart) -> No
         "group",
         "sample",
         "lineage",
-        "cells",
-        "clones",
+        "n_cells",
+        "n_clones",
     ]
     assert result.group_sizes["group"].tolist() == [
         "d2, A",
@@ -478,14 +486,14 @@ def test_track_follows_clones_through_the_groups_of_their_labels(kept_apart) -> 
     tracked = store.clones.track(clones, group_by="sample", labels=["1", "8"])
     # Clone 1 is followed through the groups of lineage A and clone 8 through
     # those of B.
-    assert tracked.cells[["clone", "group", "cells"]].values.tolist() == [
+    assert tracked.table[["clone", "group", "n_cells"]].values.tolist() == [
         ["1", "d2, A", 3],
         ["1", "d4, A", 6],
         ["8", "d2, B", 0],
         ["8", "d4, B", 1],
     ]
     d2_cells = TRUTH.group_clone_cells(LINEAGES, cells=TRUTH.samples == "d2")
-    assert tracked.cells["fraction"].tolist() == pytest.approx(
+    assert tracked.table["fraction"].tolist() == pytest.approx(
         [3 / sum(d2_cells["A"].values()), 6 / 14, 0, 1 / 5]
     )
     # Clone 8 has no cell in d2, where it is followed through lineage B alone.
@@ -493,7 +501,7 @@ def test_track_follows_clones_through_the_groups_of_their_labels(kept_apart) -> 
     alone = store.clones.track(
         clones, group_by="sample", labels=["8"], cell_selection=d2
     )
-    assert alone.cells[["clone", "group", "cells"]].values.tolist() == [
+    assert alone.table[["clone", "group", "n_cells"]].values.tolist() == [
         ["8", "d2, B", 0]
     ]
     # Without a group of its lineage, a clone has no group to follow.
@@ -502,22 +510,22 @@ def test_track_follows_clones_through_the_groups_of_their_labels(kept_apart) -> 
     none = store.clones.track(
         clones, group_by="sample", labels=["8"], cell_selection=lineage_a
     )
-    assert none.tracked == ("8",) and none.cells.empty
-    assert none.cells.columns.tolist() == [
+    assert none.tracked == ("8",) and none.table.empty
+    assert none.table.columns.tolist() == [
         "clone",
         "group",
         "sample",
         "lineage",
-        "cells",
+        "n_cells",
         "fraction",
     ]
     # The empty table keeps the types of a full one.
     full = store.clones.track(clones, group_by="sample", labels=["8"])
-    assert none.cells.dtypes.tolist() == full.cells.dtypes.tolist()
-    assert none.cells["cells"].dtype == np.int64
-    assert none.cells["fraction"].dtype == np.float64
+    assert none.table.dtypes.tolist() == full.table.dtypes.tolist()
+    assert none.table["n_cells"].dtype == np.int64
+    assert none.table["fraction"].dtype == np.float64
     # The plot places a sample's groups of both lineages at one position.
-    plot = store.plots.clone_tracking(clones, group_by="sample", top=1, show=False)
+    plot = store.plots.clone_tracking(clones, group_by="sample", top_n=1, show=False)
     ax = plot.axes["tracking"]
     assert [tick.get_text() for tick in ax.get_xticklabels()] == ["d2", "d4"]
     assert all(len(line.get_xdata()) == 2 for line in ax.get_lines())
@@ -550,9 +558,9 @@ def test_the_budget_counts_only_the_pairs_and_rows_of_one_lineage(
     with pytest.raises(
         MemoryError, match=f"gives 128 rows and holds about {rows} bytes"
     ):
-        store.clones.track(clones, groups=own, top=1)
+        store.clones.track(clones, groups=own, top_n=1)
     monkeypatch.setattr(store, "memoryBytes", rows)
-    assert len(store.clones.track(clones, groups=own, top=1).cells) == 128
+    assert len(store.clones.track(clones, groups=own, top_n=1).table) == 128
 
 
 def test_overlap_needs_two_groups_of_one_lineage(kept_apart) -> None:

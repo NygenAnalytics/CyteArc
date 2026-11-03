@@ -9,7 +9,7 @@ import pytest
 
 from cytearc.clones import barcode_clones
 from cytearc.clones.barcode_clones import (
-    PRESETS,
+    BARCODE_PRESETS,
     BarcodeRecords,
     allowlist_texts,
     barcode_call_settings,
@@ -71,7 +71,7 @@ def _call(records, n_cells, groups=None, allowlist=None, **options):
 PUBLISHED = {
     "larry": {
         "min_reads": 10,
-        "distance": 3,
+        "max_distance": 3,
         "metric": "hamming",
         "min_umis": 3,
         "min_fraction": 0.0,
@@ -86,7 +86,7 @@ PUBLISHED = {
     },
     "trex": {
         "min_reads": 0,
-        "distance": 5,
+        "max_distance": 5,
         "metric": "hamming",
         "min_umis": 0,
         "min_fraction": 0.0,
@@ -101,7 +101,7 @@ PUBLISHED = {
     },
     "celltag": {
         "min_reads": 0,
-        "distance": 0,
+        "max_distance": 0,
         "metric": None,
         "min_umis": 2,
         "min_fraction": 0.0,
@@ -116,7 +116,7 @@ PUBLISHED = {
     },
     "celltag_multi": {
         "min_reads": 2,
-        "distance": 2,
+        "max_distance": 2,
         "metric": "levenshtein",
         "min_umis": 2,
         "min_fraction": 0.0,
@@ -132,18 +132,22 @@ PUBLISHED = {
 }
 
 
-@pytest.mark.parametrize("preset", list(PRESETS))
+@pytest.mark.parametrize("preset", list(BARCODE_PRESETS))
 def test_each_preset_resolves_to_its_published_rules(preset) -> None:
-    allowlist = [A] if PRESETS[preset].get("allowlist") else None
+    allowlist = [A] if BARCODE_PRESETS[preset].get("allowlist") else None
     settings = barcode_call_settings(preset, allowlist=allowlist)
     assert settings.record() == {"preset": preset, **PUBLISHED[preset]}
     assert settings.allowlist == (allowlist is not None)
 
 
 def test_given_values_replace_a_presets_and_zero_turns_a_filter_off() -> None:
-    settings = barcode_call_settings("larry", min_reads=0, min_umis=5, distance=0)
+    settings = barcode_call_settings("larry", min_reads=0, min_umis=5, max_distance=0)
     record = settings.record()
-    assert (record["min_reads"], record["min_umis"], record["distance"]) == (0, 5, 0)
+    assert (record["min_reads"], record["min_umis"], record["max_distance"]) == (
+        0,
+        5,
+        0,
+    )
     # Without correction the preset's metric falls away.
     assert record["metric"] is None
     settings = barcode_call_settings(
@@ -172,26 +176,41 @@ def test_given_values_replace_a_presets_and_zero_turns_a_filter_off() -> None:
         ({}, ValueError, "needs a preset or a method"),
         ({"method": "jaccard"}, ValueError, "needs similarity"),
         ({"method": "jaccard", "similarity": 0.7}, ValueError, "needs inclusive"),
-        ({"method": "sets", "distance": 2}, ValueError, "needs a metric"),
-        ({"method": "sets", "metric": "hamming"}, ValueError, "give a distance"),
+        ({"method": "sets", "max_distance": 2}, ValueError, "needs a metric"),
+        ({"method": "sets", "metric": "hamming"}, ValueError, "give a max_distance"),
         (
             {"preset": "celltag", "allowlist": False, "metric": "hamming"},
             ValueError,
-            "give a distance",
+            "give a max_distance",
         ),
         (
-            {"preset": "larry", "distance": 0, "metric": "levenshtein"},
+            {"preset": "larry", "max_distance": 0, "metric": "levenshtein"},
             ValueError,
-            "give a distance",
+            "give a max_distance",
         ),
         (
-            {"method": "sets", "distance": 2, "metric": "jaro"},
+            {"method": "sets", "max_distance": 2, "metric": "jaro"},
             ValueError,
             "metric must be",
         ),
         ({"preset": "celltag"}, ValueError, "allowlist=False"),
         ({"preset": "celltag_multi"}, ValueError, "allowlist=False"),
         ({"preset": "trex", "metric": "levenshtein"}, ValueError, "metric='hamming'"),
+        (
+            {"preset": "celltag_multi", "allowlist": False, "trex_rules": True},
+            ValueError,
+            "TREX's rules compare cloneIDs .* metric='hamming'; pass trex_rules=False",
+        ),
+        (
+            {"preset": "trex", "trex_rules": 1},
+            TypeError,
+            "trex_rules must be a boolean",
+        ),
+        (
+            {"preset": "trex", "trex_rules": "yes"},
+            TypeError,
+            "trex_rules must be a boolean",
+        ),
         (
             {"preset": "trex", "method": "sets", "prune": True},
             ValueError,
@@ -239,7 +258,7 @@ def test_given_values_replace_a_presets_and_zero_turns_a_filter_off() -> None:
         ({"method": "sets", "allowlist": "ACGT"}, TypeError, "sequence of barcodes"),
         ({"method": "sets", "prune": 1}, ValueError, "change nothing"),
         (
-            {"method": "sets", "distance": 9, "metric": "levenshtein"},
+            {"method": "sets", "max_distance": 9, "metric": "levenshtein"},
             ValueError,
             "at most 8, since the barcode matches expected by chance .* "
             "metric='hamming'",
@@ -255,8 +274,8 @@ def test_settings_name_what_is_missing_or_wrong(arguments, error, message) -> No
 def test_edits_correct_within_at_most_eight_edits_and_substitutions_within_any() -> (
     None
 ):
-    assert barcode_call_settings(method="sets", distance=8, metric="levenshtein")
-    assert barcode_call_settings(method="sets", distance=30, metric="hamming")
+    assert barcode_call_settings(method="sets", max_distance=8, metric="levenshtein")
+    assert barcode_call_settings(method="sets", max_distance=30, metric="hamming")
 
 
 def test_a_filter_of_every_cell_with_a_barcode_is_none() -> None:
@@ -325,7 +344,7 @@ def test_min_reads_refuses_molecules_without_reads_and_libraries_of_pairs() -> N
 
 def test_an_error_merges_into_the_more_abundant_barcode() -> None:
     rows = _molecules(0, A, 5) + _molecules(1, A1, 1) + _molecules(2, A, 2)
-    calls = _call(_records(rows), 3, method="sets", distance=1, metric="hamming")
+    calls = _call(_records(rows), 3, method="sets", max_distance=1, metric="hamming")
     assert clone_partition(calls.calls.codes) == {frozenset({0, 1, 2})}
     assert calls.counts["barcodes_corrected"] == 1
     assert calls.counts["records_corrected"] == 1
@@ -338,18 +357,23 @@ def test_equally_abundant_barcodes_merge_into_the_one_that_sorts_last() -> None:
     rows = _molecules(0, A, 2) + _molecules(1, later, 2)
     records = _records(rows)
     calls = _call(
-        records, 2, method="sets", distance=1, metric="hamming", allowlist=[later]
+        records, 2, method="sets", max_distance=1, metric="hamming", allowlist=[later]
     )
     # Only the barcode that the tie kept passes an allowlist of it.
     assert calls.n_barcodes.tolist() == [1, 1]
     calls = _call(
-        records, 2, method="sets", distance=1, metric="hamming", allowlist=[A]
+        records, 2, method="sets", max_distance=1, metric="hamming", allowlist=[A]
     )
     assert calls.n_barcodes.tolist() == [0, 0]
     # One more molecule of A makes it the more abundant, whatever its order.
     rows += _molecules(2, A, 1)
     calls = _call(
-        _records(rows), 3, method="sets", distance=1, metric="hamming", allowlist=[A]
+        _records(rows),
+        3,
+        method="sets",
+        max_distance=1,
+        metric="hamming",
+        allowlist=[A],
     )
     assert calls.n_barcodes.tolist() == [1, 1, 1]
 
@@ -358,7 +382,7 @@ def test_a_chain_of_close_barcodes_merges_into_one_component() -> None:
     # A and A2 are two substitutions apart, but each is one from A1, so
     # within one substitution the three are one component, merged into A.
     rows = _molecules(0, A, 3) + _molecules(1, A1, 1) + _molecules(2, A2, 2)
-    calls = _call(_records(rows), 3, method="sets", distance=1, metric="hamming")
+    calls = _call(_records(rows), 3, method="sets", max_distance=1, metric="hamming")
     assert clone_partition(calls.calls.codes) == {frozenset({0, 1, 2})}
     assert calls.counts["barcodes_corrected"] == 2
 
@@ -380,7 +404,7 @@ def test_correction_counts_the_distinct_barcodes_of_each_block_and_those_it_merg
     )
     libraries = (("lib", "molecules"), ("other", "molecules"))
     records = _records(rows, libraries)
-    corrected = _call(records, 3, method="sets", distance=3, metric="hamming")
+    corrected = _call(records, 3, method="sets", max_distance=3, metric="hamming")
     assert corrected.diagnostics["distinctBarcodes"] == 6
     assert corrected.diagnostics["mergedBarcodes"] == 2
     assert corrected.counts["barcodes_corrected"] == 2
@@ -391,7 +415,7 @@ def test_correction_counts_the_distinct_barcodes_of_each_block_and_those_it_merg
         3,
         groups=np.asarray([0, 1, 0]),
         method="sets",
-        distance=3,
+        max_distance=3,
         metric="hamming",
     )
     assert within.diagnostics["distinctBarcodes"] == 7
@@ -404,7 +428,7 @@ def test_correction_counts_the_distinct_barcodes_of_each_block_and_those_it_merg
     assert plain.diagnostics["expectedChanceMatches"] == 0.0
     # A barcode whose only molecule falls below min_reads is never compared.
     shallow = _records(rows + [(3, 0, C, "U3_C", 1, 1)], libraries)
-    for options in ({}, {"distance": 3, "metric": "hamming"}):
+    for options in ({}, {"max_distance": 3, "metric": "hamming"}):
         counted = _call(shallow, 4, method="sets", **options)
         filtered = _call(shallow, 4, method="sets", min_reads=2, **options)
         assert counted.diagnostics["distinctBarcodes"] == 7
@@ -423,7 +447,7 @@ def test_trex_counts_the_cloneids_it_compares(distance) -> None:
         + _molecules(2, T, 2)
         + _molecules(3, short, 2)
     )
-    calls = _call(_records(rows), 4, preset="trex", distance=distance)
+    calls = _call(_records(rows), 4, preset="trex", max_distance=distance)
     assert calls.counts["molecules_of_low_complexity"] == 3
     assert calls.diagnostics["distinctBarcodes"] == 1
     assert calls.diagnostics["mergedBarcodes"] == 0
@@ -519,13 +543,18 @@ def test_the_expected_matches_are_those_of_each_library_as_correction_links_it(
     rng = np.random.default_rng(12)
     if preset == "trex":
         texts = [_random_cloneids(rng, 300), _random_cloneids(rng, 300)]
-        search = {"metric": "hamming", "cutoff": 5, "unknown": "-0", "min_compared": 20}
+        search = {
+            "metric": "hamming",
+            "max_distance": 5,
+            "unknown": "-0",
+            "min_compared": 20,
+        }
     else:
         texts = [
             sorted({"".join(rng.choice(list("ACGT"), size=8)) for _ in range(300)})
             for _library in range(2)
         ]
-        search = {"metric": "levenshtein", "cutoff": 2}
+        search = {"metric": "levenshtein", "max_distance": 2}
     rows = [
         (cell, library, text, f"U{cell}", 1, 20)
         for library, barcodes in enumerate(texts)
@@ -564,7 +593,7 @@ def test_barcodes_without_errors_expect_as_if_each_were_its_own_component() -> N
     texts = sorted({"".join(rng.choice(list("ACGT"), size=24)) for _ in range(800)})
     rows = [(cell, 0, text, f"U{cell}", 1, 20) for cell, text in enumerate(texts)]
     calls = _call(
-        _records(rows), len(texts), method="sets", distance=2, metric="hamming"
+        _records(rows), len(texts), method="sets", max_distance=2, metric="hamming"
     )
     assert calls.diagnostics["mergedBarcodes"] == 0
     assert calls.diagnostics["expectedChanceMatches"] == pytest.approx(
@@ -601,7 +630,7 @@ def test_error_variants_weigh_no_more_than_their_parents_in_the_expectation() ->
         reads = 5 if text in parents else 1
         rows += [(cell, 0, text, f"U{cell}_{k}", 1, 20) for k in range(reads)]
     calls = _call(
-        _records(rows), len(texts), method="sets", distance=3, metric="hamming"
+        _records(rows), len(texts), method="sets", max_distance=3, metric="hamming"
     )
     expected = calls.diagnostics["expectedChanceMatches"]
     # The pairs of parents within 3 substitutions, by brute force.
@@ -644,7 +673,7 @@ def test_the_most_abundant_barcode_represents_its_component_in_the_expectation()
         for k in range(count)
     ]
     calls = _call(
-        _records(rows), len(texts), method="sets", distance=1, metric="hamming"
+        _records(rows), len(texts), method="sets", max_distance=1, metric="hamming"
     )
     assert calls.diagnostics["mergedBarcodes"] == 1
     assert calls.diagnostics["expectedChanceMatches"] == pytest.approx(
@@ -684,7 +713,7 @@ def test_the_expectation_may_hold_what_the_search_could(monkeypatch) -> None:
         _records(rows),
         3,
         groups=np.zeros(3, dtype=np.int64),
-        settings=barcode_call_settings(method="sets", distance=1, metric="hamming"),
+        settings=barcode_call_settings(method="sets", max_distance=1, metric="hamming"),
         max_bytes=budget,
     )
     assert calls.diagnostics["mergedBarcodes"] == 1
@@ -757,7 +786,7 @@ def test_barcodes_that_correction_chains_into_one_component_expect_nothing() -> 
     )
     rows = [(cell, 0, text, f"U{cell}", 1, 20) for cell, text in enumerate(texts)]
     calls = _call(
-        _records(rows), len(texts), method="sets", distance=2, metric="levenshtein"
+        _records(rows), len(texts), method="sets", max_distance=2, metric="levenshtein"
     )
     assert calls.diagnostics["mergedBarcodes"] == len(texts) - 1
     assert calls.diagnostics["expectedChanceMatches"] == 0
@@ -787,7 +816,12 @@ def test_barcodes_of_two_groups_or_libraries_never_merge() -> None:
     rows = _molecules(0, A, 5) + _molecules(1, A1, 1)
     groups = np.asarray([0, 1])
     calls = _call(
-        _records(rows), 2, groups=groups, method="sets", distance=1, metric="hamming"
+        _records(rows),
+        2,
+        groups=groups,
+        method="sets",
+        max_distance=1,
+        metric="hamming",
     )
     assert calls.counts["barcodes_corrected"] == 0
     two = _molecules(0, A, 5) + _molecules(1, A1, 1, library=1)
@@ -795,7 +829,7 @@ def test_barcodes_of_two_groups_or_libraries_never_merge() -> None:
         _records(two, (("a", "molecules"), ("b", "molecules"))),
         2,
         method="sets",
-        distance=1,
+        max_distance=1,
         metric="hamming",
     )
     assert calls.counts["barcodes_corrected"] == 0
@@ -805,7 +839,7 @@ def test_edits_merge_an_indel_that_substitutions_cannot() -> None:
     shifted = A[:5] + A[6:] + "G"
     rows = _molecules(0, A, 5) + _molecules(1, shifted, 1)
     for metric, merged in (("hamming", 0), ("levenshtein", 1)):
-        calls = _call(_records(rows), 2, method="sets", distance=2, metric=metric)
+        calls = _call(_records(rows), 2, method="sets", max_distance=2, metric=metric)
         assert calls.counts["barcodes_corrected"] == merged
 
 
@@ -813,11 +847,11 @@ def test_molecules_that_correction_gives_one_barcode_and_umi_are_one() -> None:
     # One UMI read under two barcodes is one molecule once both are A.
     rows = [(0, 0, A, "u", 1, 3), (0, 0, A1, "u", 1, 2)] + _molecules(1, A, 4)
     calls = _call(
-        _records(rows), 2, method="sets", distance=1, metric="hamming", min_umis=2
+        _records(rows), 2, method="sets", max_distance=1, metric="hamming", min_umis=2
     )
     # Cell 0 holds one molecule of A, below two UMIs.
     assert calls.n_barcodes.tolist() == [0, 1]
-    calls = _call(_records(rows), 2, method="sets", distance=1, metric="hamming")
+    calls = _call(_records(rows), 2, method="sets", max_distance=1, metric="hamming")
     assert calls.n_barcodes.tolist() == [1, 1]
 
 
@@ -831,7 +865,7 @@ def test_molecules_rank_by_their_umis_whatever_their_reads() -> None:
             _records(rows),
             2,
             method="sets",
-            distance=1,
+            max_distance=1,
             metric="hamming",
             allowlist=allowed,
         )
@@ -846,7 +880,7 @@ def test_pairs_of_a_library_without_umis_rank_by_reads() -> None:
         _records(rows, (("atac", "pairs"),)),
         3,
         method="sets",
-        distance=1,
+        max_distance=1,
         metric="hamming",
     )
     assert calls.units == ("reads",)
@@ -861,7 +895,7 @@ def test_correction_refuses_a_library_whose_counts_are_partly_unknown() -> None:
             _records(rows, (("q", "pairs"),)),
             2,
             method="sets",
-            distance=1,
+            max_distance=1,
             metric="hamming",
         )
     # Without correction or count filters, the counts are never read.
@@ -876,7 +910,12 @@ def test_correction_refuses_a_library_whose_counts_are_partly_unknown() -> None:
 def test_barcodes_outside_the_allowlist_are_dropped_after_correction() -> None:
     rows = _molecules(0, A, 5) + _molecules(1, A1, 1) + _molecules(2, B, 3)
     calls = _call(
-        _records(rows), 3, allowlist=[A], method="sets", distance=1, metric="hamming"
+        _records(rows),
+        3,
+        allowlist=[A],
+        method="sets",
+        max_distance=1,
+        metric="hamming",
     )
     # A1 becomes A before the allowlist is read, so only B goes.
     assert calls.n_barcodes.tolist() == [1, 1, 0]
@@ -965,7 +1004,7 @@ def test_trex_drops_cloneids_of_low_complexity_and_few_bases() -> None:
         + _molecules(3, partial, 2, reads=3)
         + _molecules(4, T[:20] + "-" * 10, 2, reads=3)
     )
-    calls = _call(_records(rows), 5, preset="trex", distance=0)
+    calls = _call(_records(rows), 5, preset="trex", max_distance=0)
     assert calls.n_barcodes.tolist() == [1, 0, 1, 0, 1]
     assert calls.counts["molecules_of_low_complexity"] == 2
     assert calls.counts["molecules_of_few_bases"] == 2
@@ -996,7 +1035,7 @@ def test_trex_drops_one_umi_cloneids_that_another_cell_holds_or_one_read_support
         # One UMI of V, held nowhere else, read once: dropped.
         + [(3, 0, V, "u3", 1, 1)]
     )
-    calls = _call(_records(rows), 4, preset="trex", distance=0)
+    calls = _call(_records(rows), 4, preset="trex", max_distance=0)
     assert calls.n_barcodes.tolist() == [1, 0, 1, 0]
     assert calls.counts["pairs_of_one_umi_shared"] == 1
     assert calls.counts["pairs_of_one_read"] == 1
@@ -1008,23 +1047,81 @@ def test_trex_tests_a_one_umi_cloneid_against_the_cells_of_its_group_and_library
     # Cell 1's one UMI of T is shared with cell 0 only when both are in one
     # group and one library.
     rows = _molecules(0, T, 3, reads=3) + [(1, 0, T, "u1", 1, 5)]
-    shared = _call(_records(rows), 2, preset="trex", distance=0)
+    shared = _call(_records(rows), 2, preset="trex", max_distance=0)
     assert shared.n_barcodes.tolist() == [1, 0]
     apart = _call(
-        _records(rows), 2, groups=np.asarray([0, 1]), preset="trex", distance=0
+        _records(rows), 2, groups=np.asarray([0, 1]), preset="trex", max_distance=0
     )
     assert apart.n_barcodes.tolist() == [1, 1]
     assert apart.counts["pairs_of_one_umi_shared"] == 0
     other_library = _molecules(0, T, 3, reads=3) + [(1, 1, T, "u1", 1, 5)]
     libraries = (("a", "molecules"), ("b", "molecules"))
-    calls = _call(_records(other_library, libraries), 2, preset="trex", distance=0)
+    calls = _call(_records(other_library, libraries), 2, preset="trex", max_distance=0)
     assert calls.n_barcodes.tolist() == [1, 1]
+
+
+def test_trex_rules_follow_the_preset_unless_given() -> None:
+    # None follows the preset; True or False sets the rules in any call, and
+    # the rest of the preset stays.
+    trex = barcode_call_settings("trex")
+    assert trex.trex_rules is True
+    assert barcode_call_settings("trex", trex_rules=np.True_).trex_rules is True
+    without = barcode_call_settings("trex", trex_rules=False)
+    assert without.record() == {**trex.record(), "trex_rules": False}
+    assert barcode_call_settings("larry").trex_rules is False
+    assert barcode_call_settings("larry", trex_rules=True).record() == {
+        **barcode_call_settings("larry").record(),
+        "trex_rules": True,
+    }
+    assert barcode_call_settings(method="sets").trex_rules is False
+    assert barcode_call_settings(method="sets", trex_rules=True).trex_rules is True
+
+
+def test_trex_rules_turn_on_and_off_whatever_the_preset() -> None:
+    # A cloneID of low complexity, a one-UMI cloneID held by another cell
+    # and one supported by a single read: TREX's rules drop all three.
+    low = "A" * 29 + "C"
+    V = "GGGGCCCCAAAATTTTGCGCGCGCATATAT"
+    rows = (
+        _molecules(0, T, 3, reads=3)
+        + _molecules(1, low, 3, reads=3)
+        + [(2, 0, T, "u2", 1, 5)]
+        + [(3, 0, V, "u3", 1, 1)]
+    )
+    with_rules = _call(_records(rows), 4, preset="trex", max_distance=0)
+    assert with_rules.n_barcodes.tolist() == [1, 0, 0, 0]
+    without = _call(_records(rows), 4, preset="trex", max_distance=0, trex_rules=False)
+    assert without.n_barcodes.tolist() == [1, 1, 1, 1]
+    assert "molecules_of_low_complexity" not in without.counts
+    # The rules alone, beside LARRY's other rules, drop the same barcodes.
+    larry = _call(
+        _records(rows),
+        4,
+        preset="larry",
+        min_reads=0,
+        min_umis=0,
+        max_distance=0,
+        trex_rules=True,
+    )
+    assert larry.n_barcodes.tolist() == [1, 0, 0, 0]
+    assert larry.counts["molecules_of_low_complexity"] == 3
+    assert larry.counts["pairs_of_one_umi_shared"] == 1
+    assert larry.counts["pairs_of_one_read"] == 1
 
 
 def test_trex_rules_need_molecules_and_their_reads() -> None:
     pairs = [(0, 0, T, None, 3, 9)]
-    with pytest.raises(ValueError, match="applies TREX's rules to molecules"):
+    with pytest.raises(ValueError, match="TREX's rules apply to molecules"):
         _call(_records(pairs, (("p", "pairs"),)), 1, preset="trex")
+    # The rules need molecules whichever call turns them on.
+    with pytest.raises(ValueError, match="TREX's rules apply to molecules"):
+        _call(_records(pairs, (("p", "pairs"),)), 1, method="sets", trex_rules=True)
+    assert (
+        _call(
+            _records(pairs, (("p", "pairs"),)), 1, preset="trex", trex_rules=False
+        ).calls.n_clones
+        == 1
+    )
     # Two of the three molecules of the library count no reads; the route
     # from an earlier run's reads.txt is named.
     rows = _molecules(0, T, 2, reads=-1) + _molecules(1, T, 1, reads=4)
@@ -1151,7 +1248,7 @@ def _synthetic_records(
     [
         (True, {"preset": "larry"}),
         (True, {"preset": "trex"}),
-        (True, {"preset": "trex", "distance": 0}),
+        (True, {"preset": "trex", "max_distance": 0}),
         (False, {"preset": "celltag", "allowlist": False}),
         (False, {"preset": "celltag_multi", "allowlist": False, "min_reads": 0}),
         (False, {"method": "sets", "min_fraction": 0.3}),

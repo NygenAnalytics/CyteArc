@@ -277,4 +277,4 @@ def test_clones_call_from_allele_frequencies(bench) -> None:
         for label in np.unique(called.clusters[called.clusters > 0]).tolist():
             assert len(np.unique(clones[called.clusters == label])) == 1
 
-    bench("variants.clones", make, CLONE_LADDER, check=check)
+    bench("variants.frequency_clones", make, CLONE_LADDER, check=check)

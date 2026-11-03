@@ -94,7 +94,7 @@ _IMPORT_ATTRIBUTES = (
     "unmatched_barcode_examples",
 )
 #: The values of ``format`` of ``export_characters``.
-EXPORT_FORMATS = ("cassiopeia", "laml")
+EXPORT_FORMATS = ("treedata", "laml")
 # A chunk of a file may take a twentieth of the budget.
 _CHUNK_SHARE = 20
 # Bytes that the per-cell arrays and the arrays written take per selected cell.
@@ -157,9 +157,6 @@ _STORE_BYTES_PER_CELL = 24
 # Bytes that writing a store takes per byte of the alleles of its table of
 # states: each value encoded as UTF-8 and the chunk's buffer of them.
 _STORE_BYTES_PER_ALLELE_BYTE = 2
-# The columns of the table of loaded clones, which a within column may not
-# share.
-_CLONE_COLUMNS = frozenset({"clone", "clone_size", "n_alleles"})
 # Bytes of each row of a bank while it is checked: its allele as a Python
 # string with its references, sorted copies and packed bytes for the
 # fingerprint, and its frequency and samples with their copies, 73 as traced
@@ -336,7 +333,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             format: One of ``"carlin"``, ``"darlin"``, ``"cassiopeia"``,
                 ``"cassiopeia_parquet"``, ``"petracer"``,
                 ``"petracer_characters"``, ``"typewriter"``,
-                ``"typewriter_chains"``, ``"treedata"``, ``"characters"`` and
+                ``"typewriter_chains"``, ``"treedata"``, ``"laml"`` and
                 ``"table"``, or None to recognise each file's format.
             integrations: For a file that holds one array, its name, such as
                 ``"CA"``; for DNA Typewriter's ordered slots, a mapping of
@@ -829,7 +826,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         alleles: ArtifactRef,
         path: str | os.PathLike[str],
         *,
-        format: str = "cassiopeia",
+        format: str = "treedata",
         unknown: str = "state",
     ) -> int:
         """Write saved recorder alleles as a character matrix for tree builders.
@@ -855,7 +852,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         builder's model. Cells that read no character and characters that
         no cell reads are left out.
 
-        ``"cassiopeia"`` writes a TreeData ``.zarr`` store, which Cassiopeia
+        ``"treedata"`` writes a TreeData ``.zarr`` store, which Cassiopeia
         3.0's solvers read: ``obsm['characters']`` with one int64 column per
         character, ``uns['missing_state']`` -1, ``uns['unmodified_state']``
         0 and ``uns['character_states']``, the ``character``, ``state`` and
@@ -864,15 +861,18 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         missing, and beside it ``<stem>_priors.csv``, headerless rows of a
         character's position from 0, a state and its probability, each
         state's share of the exported cells with an edit at its character,
-        and ``<stem>_states.csv``, the table of each state's allele. Cell IDs
-        are this store's.
+        and ``<stem>_states.csv``, the table of each state's allele. Each
+        export reads back with its own token:
+        :meth:`~cytearc.datastore.namespaces.ClonesAccessor.import_alleles`
+        reads the store as ``format="treedata"`` and the CSV as
+        ``format="laml"``. Cell IDs are this store's.
 
         Args:
             alleles: A ``lineage_alleles`` artifact.
-            path: For ``"cassiopeia"``, the ``.zarr`` store to create, which
+            path: For ``"treedata"``, the ``.zarr`` store to create, which
                 must not exist; for ``"laml"``, the CSV to write, replacing a
                 file of that name, as the files beside it are.
-            format: ``"cassiopeia"`` or ``"laml"``.
+            format: ``"treedata"`` or ``"laml"``.
             unknown: ``"state"`` gives each distinct unknown mark that names
                 its allele, such as an insertion outside PEtracer's lookup, a
                 state of its own after the marks; ``"missing"`` writes every
@@ -891,7 +891,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 hold.
             KeyError: If the store holds no such artifact.
             RuntimeError: If the artifact is incomplete.
-            FileExistsError: For ``"cassiopeia"``, if ``path`` exists.
+            FileExistsError: For ``"treedata"``, if ``path`` exists.
             MemoryError: If the export does not fit the memory budget.
         """
         if not isinstance(path, str | os.PathLike):
@@ -907,7 +907,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 f"not {unknown!r}"
             )
         target = os.fspath(path)
-        if format == "cassiopeia" and os.path.lexists(target):
+        if format == "treedata" and os.path.lexists(target):
             raise FileExistsError(
                 f"{target} exists; export the characters to a new path, since a Zarr "
                 "store is a folder that an export would have to delete"
@@ -933,7 +933,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             + (
                 _STORE_BYTES_PER_ALLELE_BYTE * counts["allele_bytes"]
                 + zarr_write_buffer_bytes()
-                if format == "cassiopeia"
+                if format == "treedata"
                 else 0
             )
         )
@@ -970,10 +970,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 "the export keeps the row of most UMIs, then most reads, then most "
                 "sites read, of each"
             )
-        if format == "cassiopeia":
-            from ...writers.characters import write_cassiopeia_characters
+        if format == "treedata":
+            from ...writers.characters import write_treedata_characters
 
-            write_cassiopeia_characters(target, cell_ids, matrix)
+            write_treedata_characters(target, cell_ids, matrix)
         else:
             from ...writers.characters import laml_row_bytes, write_laml_characters
 
@@ -1129,7 +1129,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             fdr=fdr,
             banks=banks,
         )
-        columns = group_columns(within, "within", _CLONE_COLUMNS)
+        columns = group_columns(within, "within")
         cell_selection = inspect_artifact(self.zw, alleles).input_ref("cell_selection")
         counts = self._allele_counts(group)
         n_cells = counts["cells"]
@@ -1149,7 +1149,6 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             columns,
             with_edits,
             memory_bytes=self.memoryBytes - bank_bytes - n_cells,
-            reserved=_CLONE_COLUMNS,
             what="an edit",
         )
         del with_edits

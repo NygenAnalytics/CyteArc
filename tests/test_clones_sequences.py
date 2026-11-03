@@ -182,7 +182,7 @@ def test_a_percentage_of_one_half_rounds_up(monkeypatch, path) -> None:
 
 
 @pytest.mark.parametrize("path", ["keyed", "pairwise"])
-def test_a_cutoff_of_zero_links_only_equal_texts(monkeypatch, path) -> None:
+def test_a_max_distance_of_zero_links_only_equal_texts(monkeypatch, path) -> None:
     # One substitution in 201 letters is 0.498%, which rounds to 0%, but
     # scirpy compares identity at a cutoff of 0.
     long = "A" * 201
@@ -196,10 +196,10 @@ def test_a_cutoff_of_zero_links_only_equal_texts(monkeypatch, path) -> None:
 def test_neighbor_pairs_check_their_arguments() -> None:
     with pytest.raises(ValueError, match="metric must be one of"):
         neighbor_pairs(["A"], "identity", 0)
-    with pytest.raises(ValueError, match="cutoff must be at least 0"):
+    with pytest.raises(ValueError, match="max_distance must be at least 0"):
         neighbor_pairs(["A"], "hamming", -1)
     for cutoff in (1.5, 1.0, True, "1"):
-        with pytest.raises(TypeError, match="cutoff must be an integer"):
+        with pytest.raises(TypeError, match="max_distance must be an integer"):
             neighbor_pairs(["A"], "hamming", cutoff)
     with pytest.raises(ValueError, match="blocks must hold one block per text"):
         neighbor_pairs(["A", "C"], "hamming", 1, blocks=[0])

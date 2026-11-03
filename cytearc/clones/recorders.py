@@ -627,7 +627,7 @@ class LineageAlleles:
             ``n_integrations``, its integrations with a site read, and
             ``n_records``, its rows of ``records``.
         records: One row per cell, integration, site and allele row, by
-            cell, file and file row: ``cell``, ``file``, ``integration``,
+            cell, file and file row: ``ids``, the cell, ``file``, ``integration``,
             ``site``, ``state`` (one of ``STATES``) and ``allele`` as
             categoricals, ``allele`` missing for states other than marks
             and unknown marks and for placeholders of unknown marks, such as
@@ -638,7 +638,7 @@ class LineageAlleles:
         files: One row per file, in canonical order: ``file`` (its
             position), ``format``, ``tool``, ``pipeline``, ``kind``,
             ``integration`` (the one integration of a file that holds one,
-            else missing), ``rows`` and ``records``.
+            else missing), ``n_rows`` and ``n_records``.
     """
 
     cells: pd.DataFrame = field(repr=False)
@@ -655,12 +655,12 @@ class LineageAlleles:
         site is missing there.
 
         Returns:
-            ``integration``, ``site``, ``state`` and ``cells``, one row per
+            ``integration``, ``site``, ``state`` and ``n_cells``, one row per
             integration, site and state.
         """
         records = self.records
         return _site_state_counts(
-            records["cell"].cat.codes.to_numpy(),
+            records["ids"].cat.codes.to_numpy(),
             records["integration"].cat.codes.to_numpy(),
             records["site"].cat.codes.to_numpy(),
             records["state"].cat.codes.to_numpy(),
@@ -703,7 +703,7 @@ def lineage_allele_frames(
 
     records = pd.DataFrame(
         {
-            "cell": pd.Categorical.from_codes(
+            "ids": pd.Categorical.from_codes(
                 np.asarray(table.cells, dtype=np.int64), categories=ids
             ),
             "file": pd.Categorical.from_codes(
@@ -729,10 +729,10 @@ def lineage_allele_frames(
                 name: pd.Series([source.get(name) for source in sources], dtype=object)
                 for name in ("format", "tool", "pipeline", "kind", "integration")
             },
-            "rows": pd.Series(
+            "n_rows": pd.Series(
                 [int(source["rows"]) for source in sources], dtype=np.int64
             ),
-            "records": pd.Series(
+            "n_records": pd.Series(
                 [int(source["records"]) for source in sources], dtype=np.int64
             ),
         }
@@ -866,7 +866,7 @@ def _site_state_counts(
             "integration": pd.Series([row[0] for row in rows], dtype=object),
             "site": pd.Series([row[1] for row in rows], dtype=object),
             "state": pd.Series([row[2] for row in rows], dtype=object),
-            "cells": pd.Series([row[3] for row in rows], dtype=np.int64),
+            "n_cells": pd.Series([row[3] for row in rows], dtype=np.int64),
         }
     )
 
@@ -881,7 +881,7 @@ def site_state_counts(table: RecordTable) -> pd.DataFrame:
 
     Returns:
         One row per integration, site and state: ``integration``, ``site``,
-        ``state`` and ``cells``, by integration and site in natural order,
+        ``state`` and ``n_cells``, by integration and site in natural order,
         then state in ``STATES`` order.
     """
     return _site_state_counts(
@@ -915,7 +915,7 @@ class CharacterMatrix:
         codes: The state of each cell and character, as int32.
         states: One row per character and edited state: ``character``,
             ``state``, ``allele``, ``kind`` (``"mark"`` or
-            ``"unknown_mark"``) and ``cells``, the exported cells in it.
+            ``"unknown_mark"``) and ``n_cells``, the exported cells in it.
         n_resolved: Cells and integrations that several allele rows give,
             of which the export kept one.
         n_without_states: Cells with records whose every exported state is
@@ -947,12 +947,12 @@ class CharacterMatrix:
         """
         names = {name: position for position, name in enumerate(self.characters)}
         states = self.states
-        totals = states.groupby("character", sort=False)["cells"].transform("sum")
+        totals = states.groupby("character", sort=False)["n_cells"].transform("sum")
         return pd.DataFrame(
             {
                 "character": states["character"].map(names).astype(np.int64),
                 "state": states["state"].astype(np.int64),
-                "probability": states["cells"].to_numpy(dtype=np.float64)
+                "probability": states["n_cells"].to_numpy(dtype=np.float64)
                 / totals.to_numpy(dtype=np.float64),
             }
         )
@@ -1187,7 +1187,7 @@ def character_matrix(
             "kind": pd.Series(
                 np.where(distinct[:, 1] == 0, "mark", "unknown_mark"), dtype=object
             ),
-            "cells": pd.Series(
+            "n_cells": pd.Series(
                 np.bincount(inverse, minlength=len(distinct)), dtype=np.int64
             ),
         }

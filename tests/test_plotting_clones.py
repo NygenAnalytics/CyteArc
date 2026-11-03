@@ -70,7 +70,7 @@ def test_without_groups_the_plot_counts_every_cell(plotted) -> None:
     assert result.tables["top"].to_dict("list") == {
         "clone": ["a", "b"],
         "label": ["a", "b"],
-        "cells": [3, 1],
+        "n_cells": [3, 1],
     }
     assert set(result.axes) == {"sizes", "top"}
     assert result.legends == ()
@@ -209,7 +209,7 @@ def test_clones_of_equal_size_list_in_rank_order(plotted) -> None:
     assert result.tables["top"].to_dict("list") == {
         "clone": ["9", "10", "x"],
         "label": ["9", "10", "x"],
-        "cells": [2, 2, 1],
+        "n_cells": [2, 2, 1],
     }
     plt.close(result.figure)
 
@@ -252,7 +252,7 @@ def test_the_expansion_plot_draws_the_expansions_own_groups(truth_plot) -> None:
     result = truth_plot.store.plots.clonal_expansion(truth_plot.by_sample, show=False)
 
     table = result.tables["categories"]
-    assert table.columns.tolist() == ["group", "category", "cells", "fraction"]
+    assert table.columns.tolist() == ["group", "category", "n_cells", "fraction"]
     assert table["group"].tolist() == ["d2"] * 6 + ["d4"] * 6
     # Each sample's cells per category, from its clone sizes.
     expected = []
@@ -262,10 +262,10 @@ def test_the_expansion_plot_draws_the_expansions_own_groups(truth_plot) -> None:
             category = 0 if size == 1 else 1 if size == 2 else 2 if size <= 5 else 3
             cells[CATEGORIES[category]] += size
         expected += list(cells.values())
-    assert table["cells"].tolist() == expected
+    assert table["n_cells"].tolist() == expected
     ranks = result.tables["rank_windows"]
     first = ranks[ranks["window"] == "1 to 10"]
-    assert first["cells"].tolist() == [_in_sample()["d2"], _in_sample()["d4"]]
+    assert first["n_cells"].tolist() == [_in_sample()["d2"], _in_sample()["d4"]]
     assert first["fraction"].tolist() == [1.0, 1.0]
     assert result.provenance.n_cells == 32
     assert result.provenance.extras["grouping"] == "sample"
@@ -307,12 +307,12 @@ def test_the_expansion_plot_regroups_cells_by_another_column(truth_plot) -> None
     table = result.tables["categories"].set_index(["group", "category"])
     for cell_type in CELL_TYPES:
         for name in names:
-            assert table.loc[(cell_type, name), "cells"] == counted[(cell_type, name)]
+            assert table.loc[(cell_type, name), "n_cells"] == counted[(cell_type, name)]
     # The ranks are counted within the plotted groups.
     ranks = result.tables["rank_windows"].set_index(["group", "window"])
     for cell_type, found in TRUTH.group_clone_sizes(TRUTH.cell_types).items():
-        assert ranks.loc[(cell_type, "1"), "cells"] == found[0]
-        assert ranks.loc[(cell_type, "after 1"), "cells"] == sum(found[1:])
+        assert ranks.loc[(cell_type, "1"), "n_cells"] == found[0]
+        assert ranks.loc[(cell_type, "after 1"), "n_cells"] == sum(found[1:])
     assert result.axes["categories"].get_xlabel() == "Cells"
     assert (
         result.axes["categories"].get_legend().get_title().get_text()
@@ -333,11 +333,13 @@ def test_the_expansion_plot_regroups_cells_by_another_column(truth_plot) -> None
     }
     per_type = Counter((cell_type, name) for cell_type, _clone, name in triples)
     table = clone_counts.tables["categories"].set_index(["group", "category"])
-    assert table.columns.tolist() == ["clones", "fraction"]
+    assert table.columns.tolist() == ["n_clones", "fraction"]
     for cell_type in CELL_TYPES:
         n_clones = sum(per_type[(cell_type, name)] for name in names)
         for name in names:
-            assert table.loc[(cell_type, name), "clones"] == per_type[(cell_type, name)]
+            assert (
+                table.loc[(cell_type, name), "n_clones"] == per_type[(cell_type, name)]
+            )
             assert table.loc[(cell_type, name), "fraction"] == pytest.approx(
                 per_type[(cell_type, name)] / n_clones
             )
@@ -606,7 +608,7 @@ def test_the_overlap_plot_checks_its_arguments(truth_plot) -> None:
 
 def test_the_tracking_plot_draws_one_line_per_clone(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
-    result = store.plots.clone_tracking(clones, group_by="sample", top=2, show=False)
+    result = store.plots.clone_tracking(clones, group_by="sample", top_n=2, show=False)
     ax = result.axes["tracking"]
     # The two largest clones of each sample: 1 and 4, of 3 cells each, in
     # d2, and 1 and 2 in d4.
@@ -624,7 +626,7 @@ def test_the_tracking_plot_draws_one_line_per_clone(truth_plot) -> None:
         assert line.get_ydata().tolist() == pytest.approx(
             [by_sample[sample].get(clone, 0) / totals[sample] for sample in SAMPLES]
         )
-    assert result.tables["cells"]["cells"].tolist() == [3, 6, 2, 4, 3, 1]
+    assert result.tables["cells"]["n_cells"].tolist() == [3, 6, 2, 4, 3, 1]
     assert result.provenance.n_cells == 19
     assert result.provenance.extras["order"] == ["d2", "d4"]
     assert ax.get_ylabel() == "Fraction of the group's cells"
@@ -633,7 +635,7 @@ def test_the_tracking_plot_draws_one_line_per_clone(truth_plot) -> None:
         store,
         clones,
         group_by="sample",
-        top=1,
+        top_n=1,
         order=["d4", "d2"],
         show_legend=False,
         show=False,
@@ -673,7 +675,7 @@ def test_the_tracking_plot_places_groups_by_all_their_labels(truth_plot) -> None
         "group",
         "sample",
         "cluster_labels",
-        "cells",
+        "n_cells",
         "fraction",
     ]
     plt.close(result.figure)
@@ -692,7 +694,7 @@ def test_the_tracking_plot_needs_only_the_tracked_clones(truth_plot) -> None:
         _TrackOnly(truth_plot.store),
         truth_plot.clones,
         group_by="sample",
-        top=1,
+        top_n=1,
         show=False,
     )
     legend = result.axes["tracking"].get_legend()
@@ -702,7 +704,7 @@ def test_the_tracking_plot_needs_only_the_tracked_clones(truth_plot) -> None:
 
 def test_the_tracking_plot_checks_its_arguments(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
-    shown = clone_tracking(store, clones, group_by="sample", top=1)
+    shown = clone_tracking(store, clones, group_by="sample", top_n=1)
     assert shown.provenance.n_cells == 9
     assert shown.figure.number not in plt.get_fignums()
     with pytest.raises(ValueError, match="order must list the groups"):
@@ -718,8 +720,8 @@ def test_the_tracking_plot_checks_its_arguments(truth_plot) -> None:
     ax = ordered.axes["tracking"]
     assert [tick.get_text() for tick in ax.get_xticklabels()] == ["d4", "d2"]
     plt.close(ordered.figure)
-    with pytest.raises(ValueError, match="top must be a positive integer"):
-        clone_tracking(store, clones, group_by="sample", top=0, show=False)
+    with pytest.raises(ValueError, match="^top_n must be a positive integer"):
+        clone_tracking(store, clones, group_by="sample", top_n=0, show=False)
     with pytest.raises(TypeError, match="store does not provide clones.track"):
         clone_tracking(object(), clones, show=False)
 
@@ -728,10 +730,10 @@ def test_the_tracking_plot_takes_an_order_of_numbers(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
     assert store.cells.get_dtype("time_point") == np.int64
     by_text = clone_tracking(
-        store, clones, group_by="time_point", top=1, order=["4", "2"], show=False
+        store, clones, group_by="time_point", top_n=1, order=["4", "2"], show=False
     )
     by_number = clone_tracking(
-        store, clones, group_by="time_point", top=1, order=[4, 2], show=False
+        store, clones, group_by="time_point", top_n=1, order=[4, 2], show=False
     )
     # Clone 1 holds 6 of the 19 cells of time point 4 and 3 of the 13 of 2.
     for result in (by_text, by_number):
@@ -843,7 +845,7 @@ def _fits_the_figure(result) -> bool:
 def test_the_tracking_plot_fits_many_clones_and_groups(many_groups) -> None:
     store, clones = many_groups.store, many_groups.clones
     # Each cell is a group of one clone: 100 clones through 200 groups.
-    every = clone_tracking(store, clones, group_by="cell", top=1, show=False)
+    every = clone_tracking(store, clones, group_by="cell", top_n=1, show=False)
     ax = every.axes["tracking"]
     legend = ax.get_legend()
     assert legend.get_title().get_text() == "Clone (80 of 100)"
@@ -856,7 +858,7 @@ def test_the_tracking_plot_fits_many_clones_and_groups(many_groups) -> None:
     plt.close(every.figure)
     # The ten largest clones of each of eight groups: the legend lists all
     # of them, in columns that fit the figure.
-    eighths = clone_tracking(store, clones, group_by="eighth", top=10, show=False)
+    eighths = clone_tracking(store, clones, group_by="eighth", top_n=10, show=False)
     legend = eighths.axes["tracking"].get_legend()
     n_tracked = len(eighths.provenance.extras["tracked"])
     assert n_tracked > 20
@@ -871,7 +873,7 @@ def test_the_tracking_plot_fits_many_clones_and_groups(many_groups) -> None:
 
 def test_the_coupling_plot_draws_z_scores_in_the_order_of_the_tree(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
-    coupling = store.clones.coupling(clones, group_by="cell_type", permutations=200)
+    coupling = store.clones.coupling(clones, group_by="cell_type", n_permutations=200)
     result = store.plots.clone_coupling(coupling, show=False)
     matrix = result.tables["matrix"]
     order = list(coupling.order)
@@ -922,11 +924,11 @@ def test_the_coupling_plot_draws_z_scores_in_the_order_of_the_tree(truth_plot) -
 def test_the_coupling_plot_blanks_values_that_are_not_finite(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
     coupling = store.clones.coupling(
-        clones, group_by="cell_type", method="normalized_covariance", permutations=50
+        clones, group_by="cell_type", method="normalized_covariance", n_permutations=50
     )
     # Without permutations there are no z-scores to draw.
     with pytest.raises(ValueError, match="without permutations, so it has no"):
-        clone_coupling(store, replace(coupling, permutations=0), show=False)
+        clone_coupling(store, replace(coupling, n_permutations=0), show=False)
     # A null without spread gives a z-score of NaN, or an infinite one, which
     # stay blank; the finite one is printed on both sides.
     blank = replace(
@@ -953,7 +955,7 @@ def test_the_coupling_plot_blanks_values_that_are_not_finite(truth_plot) -> None
 
 def test_the_coupling_plot_checks_its_arguments(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
-    coupling = store.clones.coupling(clones, group_by="cell_type", permutations=0)
+    coupling = store.clones.coupling(clones, group_by="cell_type", n_permutations=0)
     with pytest.raises(ValueError, match="value must be one of"):
         clone_coupling(store, coupling, value="p_value", show=False)
     with pytest.raises(TypeError, match="CloneCoupling"):
@@ -999,8 +1001,8 @@ def test_the_fates_plot_groups_clones_by_their_dominant_fate(fates_plot) -> None
     assert table.columns.tolist() == [
         "clone",
         "fate",
-        "early_cells",
-        "late_cells",
+        "n_early_cells",
+        "n_late_cells",
         *types,
     ]
     tested = sorted({int(c) for c in TRUTH.clones[TRUTH.samples == "d4"] if c >= 0})
@@ -1031,8 +1033,8 @@ def test_the_fates_plot_groups_clones_by_their_dominant_fate(fates_plot) -> None
         assert [getattr(row, name) for name in types] == [
             found.get(name, 0) for name in types
         ]
-        assert row.late_cells == sum(found.values())
-        assert row.early_cells == int(
+        assert row.n_late_cells == sum(found.values())
+        assert row.n_early_cells == int(
             np.count_nonzero((TRUTH.clones == clone) & (TRUTH.samples == "d2"))
         )
     fates = result.axes["fates"]
@@ -1043,9 +1045,9 @@ def test_the_fates_plot_groups_clones_by_their_dominant_fate(fates_plot) -> None
     heights = np.zeros(len(table))
     for container in fates.containers:
         heights += [bar.get_height() for bar in container]
-    np.testing.assert_array_equal(heights, table["late_cells"])
+    np.testing.assert_array_equal(heights, table["n_late_cells"])
     assert [bar.get_height() for bar in result.axes["early"].patches] == table[
-        "early_cells"
+        "n_early_cells"
     ].tolist()
     assert result.axes["early"].get_xlim() == fates.get_xlim()
     assert result.provenance.extras["clones"] == table["clone"].tolist()
@@ -1091,7 +1093,7 @@ def test_the_coupling_plot_names_at_most_40_groups(many_groups) -> None:
             many_groups.clones,
             group_by="cell",
             cell_selection=store.snapshot_cell_selection(f"first_{n_first}"),
-            permutations=0,
+            n_permutations=0,
         )
         # Each cell is a group of its own, and the two cells of a clone share
         # all of it.

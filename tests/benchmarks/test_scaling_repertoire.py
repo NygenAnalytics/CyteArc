@@ -230,7 +230,7 @@ def test_assign_clonotype_clusters(bench) -> None:
         texts = _table(n_cells).text["junction_aa"].categories
         groups = np.where((sequences >= 0).any(axis=1), 0, -1)
         return lambda: assign_clonotype_clusters(
-            sequences, texts, groups=groups, metric="hamming", cutoff=1
+            sequences, texts, groups=groups, metric="hamming", max_distance=1
         )
 
     def check(n_cells: int, assignment) -> None:
@@ -240,7 +240,7 @@ def test_assign_clonotype_clusters(bench) -> None:
         np.testing.assert_array_equal(assignment.codes >= 0, has)
         assert assignment.sizes.sum() == has.sum()
         assert (np.diff(assignment.sizes) <= 0).all()
-        # Identical chains are within any cutoff, so every clonotype lies
+        # Identical chains are within any distance, so every clonotype lies
         # within one cluster.
         identity = assign_clonotypes(sequences, groups=groups)
         frame = pd.DataFrame(

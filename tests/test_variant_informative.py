@@ -103,7 +103,7 @@ def test_statistics_follow_mgatk_definitions_over_every_listed_cell(store) -> No
         loaded.loc[expected.index, "mean_quality"], expected["mean_quality"], rtol=1e-6
     )
     assert selection.n_cells == TRUTH.n_cells
-    assert selection.counts == counts and selection.cells is None
+    assert selection.counts == counts and selection.cell_selection is None
     assert selection.stranded is True and selection.qualities is True
 
 
@@ -115,13 +115,22 @@ def test_the_atac_preset_selects_exactly_the_clone_variants(store) -> None:
     assert informative == mito_variant_labels(TRUTH)
     assert selection.preset == "atac"
     assert selection.thresholds == {
-        "min_cells": 5.0,
+        "min_cells": 5,
         "min_strand_correlation": 0.65,
         "min_vmr": 0.01,
         "min_depth": None,
         "min_quality": None,
     }
+    assert type(selection.thresholds["min_cells"]) is int
+    # The resolved settings have one home, the provenance parameters, which
+    # the record reads.
+    parameters = store.artifacts.inspect(ref).parameters
+    assert selection.thresholds == {
+        name: parameters[name] for name in selection.thresholds
+    }
+    assert (parameters["preset"], parameters["mask"]) == ("atac", [])
     attributes = store.artifacts.load(ref).attrs
+    assert not {"preset", "thresholds", "masks"} & set(attributes)
     assert attributes["n_informative"] == len(mito_variant_labels(TRUTH))
     assert attributes["n_variants"] == len(selection.variants)
     assert attributes["stranded"] is True and attributes["qualities"] is False
@@ -138,12 +147,12 @@ def test_cells_restrict_the_statistics_to_their_cells(store) -> None:
     store.cells.insert("in_d2", TRUTH.clones.samples == "d2")
     chosen = store.snapshot_cell_selection("in_d2")
     selection = store.variants.load_informative(
-        store.variants.informative(counts, cells=chosen, min_vmr=0.01)
+        store.variants.informative(counts, cell_selection=chosen, min_vmr=0.01)
     )
     rows = np.flatnonzero(TRUTH.clones.samples == "d2").tolist()
     expected = expected_mito_statistics(TRUTH, rows)
     assert selection.n_cells == len(rows)
-    assert selection.cells == chosen
+    assert selection.cell_selection == chosen
     pd.testing.assert_frame_equal(
         selection.variants.loc[expected.index, STATISTICS].astype(float),
         expected[STATISTICS].astype(float),
@@ -197,7 +206,7 @@ def test_scattered_cells_are_read_through_short_gaps_within_the_budget(
     every_read = len(reads)
     reads.clear()
     selection = store.variants.load_informative(
-        store.variants.informative(counts, cells=chosen, min_vmr=0.01)
+        store.variants.informative(counts, cell_selection=chosen, min_vmr=0.01)
     )
     expected = expected_mito_statistics(TRUTH, rows.tolist())
     pd.testing.assert_frame_equal(
@@ -236,7 +245,7 @@ def test_cells_a_chunk_apart_are_read_alone(store, monkeypatch, tmp_path) -> Non
     reads = _recorded_depth_reads(monkeypatch)
     selection = store.variants.load_informative(
         store.variants.informative(
-            counts, cells=store.snapshot_cell_selection("tenth"), min_vmr=0.01
+            counts, cell_selection=store.snapshot_cell_selection("tenth"), min_vmr=0.01
         )
     )
     expected = expected_mito_statistics(TRUTH, rows.tolist())
@@ -314,7 +323,7 @@ def test_cells_that_no_file_names_are_left_out(tmp_path) -> None:
     store.cells.insert("first", np.arange(SMALL.n_cells) < 5)
     with pytest.raises(ValueError, match="No chosen cell is named"):
         store.variants.informative(
-            counts, cells=store.snapshot_cell_selection("first"), min_vmr=0.0
+            counts, cell_selection=store.snapshot_cell_selection("first"), min_vmr=0.0
         )
 
 
@@ -346,7 +355,8 @@ def test_thresholds_given_by_name_replace_the_presets(store) -> None:
         & (frame["vmr"] > 0.5)
     )
     assert frame["informative"].tolist() == expected.fillna(False).tolist()
-    assert selection.thresholds["min_cells"] == 0.0
+    assert selection.thresholds["min_cells"] == 0
+    assert type(selection.thresholds["min_cells"]) is int
 
 
 def test_tests_the_counts_cannot_make_fail_before_scoring(
@@ -400,7 +410,7 @@ def test_masks_keep_listed_variants_from_being_informative(tmp_path) -> None:
         16293: True,
     }
     assert frame["informative"].tolist() == (~frame["masked"]).tolist()
-    assert selection.masks == ("artifact_prone", "numt", "rna_editing")
+    assert selection.mask == ("artifact_prone", "numt", "rna_editing")
     one = store.variants.load_informative(
         store.variants.informative(counts, min_vmr=0.0, mask="artifact_prone")
     )
@@ -474,8 +484,8 @@ def test_scoring_checks_its_arguments_and_memory(store) -> None:
     counts = _counts(store)
     with pytest.raises(TypeError, match="counts must be an ArtifactRef"):
         store.variants.informative("counts", preset="atac")
-    with pytest.raises(TypeError, match="cells must be a cell selection"):
-        store.variants.informative(counts, cells="d2", preset="atac")
+    with pytest.raises(TypeError, match="^cell_selection must be a cell selection"):
+        store.variants.informative(counts, cell_selection="d2", preset="atac")
     with pytest.raises(TypeError, match="invalidate_cache must be a boolean"):
         store.variants.informative(counts, preset="atac", invalidate_cache=1)
     with pytest.raises(ValueError, match="needs a preset"):
@@ -494,8 +504,63 @@ def test_scoring_checks_its_arguments_and_memory(store) -> None:
 def test_load_informative_refuses_other_artifacts(store) -> None:
     with pytest.raises(ValueError, match="variant_selection artifact"):
         store.variants.load_informative(_counts(store))
-    with pytest.raises(TypeError, match="variants must be an ArtifactRef"):
+    with pytest.raises(TypeError, match="^informative must be an ArtifactRef"):
         store.variants.load_informative("selection")
+
+
+def test_selections_and_counts_that_an_earlier_version_saved_are_refused(
+    store,
+) -> None:
+    import zarr
+
+    from cytearc.storage.artifacts import artifact_path
+
+    def writable(ref) -> zarr.Group:
+        return zarr.open_group(store.zarr_loc, mode="r+")[artifact_path(ref)]
+
+    counts = _counts(store)
+    cells = every_cell(store)
+    selection = store.variants.informative(counts, cell_selection=cells, preset="atac")
+    # An earlier version named the operation informative_variants and its
+    # cell selection cells, which would read as no selection.
+    group = writable(selection)
+    provenance = dict(group.attrs["provenance"])
+    inputs = dict(provenance["inputs"])
+    inputs["cells"] = inputs.pop("cell_selection")
+    group.attrs["provenance"] = {
+        **provenance,
+        "operation": "informative_variants",
+        "inputs": inputs,
+    }
+    refusal = (
+        "^informative was saved by an earlier version of CyteArc, by the operation "
+        "'informative_variants'; select the informative variants again with "
+        "ds.variants.informative"
+    )
+    with pytest.raises(ValueError, match=refusal):
+        store.variants.load_informative(selection)
+    with pytest.raises(ValueError, match=refusal):
+        store.variants.frequency_clones(selection)
+    with pytest.raises(ValueError, match=refusal):
+        store.plots.variant_statistics(selection, show=False)
+    # The call that the refusal names selects them anew.
+    again = store.variants.informative(counts, cell_selection=cells, preset="atac")
+    assert again != selection
+    assert store.variants.load_informative(again).cell_selection == cells
+    # An earlier version stored each cell's covered sites as covered_sites.
+    group = writable(counts)
+    group.create_array("covered_sites", data=np.asarray(group["n_covered_sites"][:]))
+    del group["n_covered_sites"]
+    refusal = (
+        "^counts was saved by an earlier version of CyteArc, without the arrays "
+        "n_covered_sites; import the counts again with ds.variants.import_counts"
+    )
+    with pytest.raises(ValueError, match=refusal):
+        store.variants.load_counts(counts)
+    with pytest.raises(ValueError, match=refusal):
+        store.variants.informative(counts, preset="atac", invalidate_cache=True)
+    with pytest.raises(ValueError, match=refusal):
+        store.variants.load_informative(again)
 
 
 class _Accepted(Exception):
@@ -522,7 +587,7 @@ def test_scoring_holds_no_more_than_a_budget_near_the_smallest_it_accepts(
         def call(budget: int, cells=cells) -> None:
             store.memoryBytes = budget
             store.variants.informative(
-                counts, cells=cells, min_vmr=0.0, invalidate_cache=True
+                counts, cell_selection=cells, min_vmr=0.0, invalidate_cache=True
             )
 
         def scores(budget: int, call=call) -> None:

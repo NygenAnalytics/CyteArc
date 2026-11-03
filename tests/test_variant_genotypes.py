@@ -413,7 +413,6 @@ def test_genotype_rules_resolve_their_defaults() -> None:
     gift = genotype_rules("gift", swap_probabilities={1: 0.5, 3: 0.0})
     assert gift.min_posterior == 0.6 and gift.min_umis == 1
     assert gift.swap_record == ((1, 0.5), (3, 0.0))
-    assert gift.record()["swap_probabilities"] == [[1, 0.5], [3, 0.0]]
     source = genotype_rules("source")
     assert source.min_umis is None and source.swap is None
     # NumPy's integers and floats read as Python's.

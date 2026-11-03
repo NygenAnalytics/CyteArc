@@ -16,7 +16,10 @@ if TYPE_CHECKING:
         VariantGenotypes as VariantGenotypes,
     )
     from .masks import VARIANT_MASKS as VARIANT_MASKS
-    from .statistics import PRESETS as PRESETS, VariantSelection as VariantSelection
+    from .statistics import (
+        INFORMATIVE_PRESETS as INFORMATIVE_PRESETS,
+        VariantSelection as VariantSelection,
+    )
 
 __all__ = [
     "ALLELE_ROLES",
@@ -24,7 +27,7 @@ __all__ = [
     "COUNT_UNITS",
     "DEPTH_DEFINITIONS",
     "GENOTYPE_METHODS",
-    "PRESETS",
+    "INFORMATIVE_PRESETS",
     "SOURCE_CALLS",
     "VARIANT_MASKS",
     "VariantCounts",
@@ -40,7 +43,7 @@ __getattr__, __dir__ = _lazy_facade(
         "COUNT_UNITS": ".counts",
         "DEPTH_DEFINITIONS": ".counts",
         "GENOTYPE_METHODS": ".genotypes",
-        "PRESETS": ".statistics",
+        "INFORMATIVE_PRESETS": ".statistics",
         "SOURCE_CALLS": ".genotypes",
         "VARIANT_MASKS": ".masks",
         "VariantCounts": ".counts",

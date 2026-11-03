@@ -117,9 +117,6 @@ _CALLED_CELL_BYTES = 24
 # of distinct barcodes, its packed bytes, and the string itself when a
 # fixed-width array gave it, 294 for barcodes of 28 bases as traced.
 _ALLOWLIST_BYTES = 300
-# The columns of the table of loaded clones, which a within column may not
-# share.
-_CLONE_COLUMNS = frozenset({"clone", "clone_size", "n_barcodes", "doublet"})
 
 
 def _files_text(n_files: int) -> str:
@@ -706,7 +703,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         *,
         preset: str | None = None,
         min_reads: int | None = None,
-        distance: int | None = None,
+        max_distance: int | None = None,
         metric: str | None = None,
         allowlist: Sequence[str] | bool | None = None,
         min_umis: int | None = None,
@@ -717,6 +714,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         inclusive: bool | None = None,
         prune: bool | None = None,
         doublets: bool | None = None,
+        trex_rules: bool | None = None,
         min_size: int | None = None,
         within: str | Sequence[str] | None = None,
         invalidate_cache: bool = False,
@@ -726,7 +724,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         Cells that carry the same lineage barcodes descend from one labelled
         cell. The barcodes of each cell pass the rules of the method that
         made them, in this order: molecules with fewer than ``min_reads``
-        reads are dropped; barcodes within ``distance`` of each other by
+        reads are dropped; barcodes within ``max_distance`` of each other by
         ``metric`` merge, within each group and library, into the most
         abundant of their connected component, ties going to the barcode
         that sorts last; barcodes outside ``allowlist`` are dropped; a cell's
@@ -745,8 +743,17 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         ``"celltag_multi"`` (CellTag-multi). An argument given replaces the
         preset's value, and 0 turns a count filter off. Without a preset,
         ``method`` is required, ``"jaccard"`` needs ``similarity`` and
-        ``inclusive``, and ``distance`` needs a ``metric``. The clones API
-        reference lists each preset's rules.
+        ``inclusive``, and ``max_distance`` needs a ``metric``. The clones API
+        reference lists each preset's rules, which
+        ``cytearc.clones.BARCODE_PRESETS`` holds.
+
+        ``preset="trex"`` also applies TREX's rules for its partial cloneIDs:
+        molecules of low complexity are dropped, cloneIDs are compared where
+        both hold a base and need 20 such bases, and a one-UMI barcode is
+        dropped where another cell of its group holds it, as is a barcode
+        whose only molecule has one read. ``trex_rules`` left None follows
+        the preset, and True or False turns these rules on or off in any
+        call, so a call with and without them shows what they remove.
 
         Counts are read in each library's unit: UMIs, or reads in a library
         that counts no UMIs, such as scATAC-seq CellTags. A rule that needs a
@@ -762,7 +769,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         returns, shows when correction merges unrelated barcodes:
         ``distinctBarcodes``, the distinct barcodes of each group and
         library that correction compares; ``expectedChanceMatches``, the
-        pairs of them expected within ``distance`` by chance;
+        pairs of them expected within ``max_distance`` by chance;
         ``mergedBarcodes``, those that correction merged into another; and
         ``largestCloneShare``, the cells of the largest clone over the
         cells given a clone.
@@ -773,8 +780,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             preset: ``"larry"``, ``"trex"``, ``"celltag"``,
                 ``"celltag_multi"`` or None.
             min_reads: The fewest reads of a molecule.
-            distance: The largest distance at which barcodes merge, 0 for no
-                correction.
+            max_distance: The largest distance at which barcodes merge, 0 for
+                no correction.
             metric: ``"hamming"`` or ``"levenshtein"``.
             allowlist: The barcodes of the library, a sequence of text; the
                 CellTag presets require one, and False calls them without.
@@ -790,6 +797,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             prune: Remove the edges whose ends share no neighbour.
             doublets: Remove the cells whose neighbours fall apart without
                 them.
+            trex_rules: Apply TREX's rules for partial cloneIDs: None with
+                ``preset="trex"`` alone, or True or False in any call.
             min_size: The fewest cells of a clone.
             within: Cell metadata columns whose labels keep clones apart, such
                 as the mouse; every cell with a barcode needs a label.
@@ -804,12 +813,11 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``barcodes`` is not a ``lineage_barcodes`` artifact,
                 the preset is unknown, a required rule is missing, a value is
-                out of range, ``metric="levenshtein"`` has a ``distance``
-                above 8, an argument does not apply to the method, a
-                rule needs counts that a library does not hold, or a within
-                column is missing, is named like a column of the loaded
-                clones (``clone``, ``clone_size``, ``n_barcodes`` or
-                ``doublet``) or has no label for a cell with a barcode.
+                out of range, ``metric="levenshtein"`` has a ``max_distance``
+                above 8, TREX's rules meet another metric than Hamming's, an
+                argument does not apply to the method, a rule needs counts
+                that a library does not hold, or a within column is missing,
+                is named twice or has no label for a cell with a barcode.
             KeyError: If the store holds no such artifact.
             RuntimeError: If the artifact is incomplete.
             PermissionError: If the store is read-only and the clones are not
@@ -842,7 +850,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         settings = barcode_call_settings(
             preset,
             min_reads=min_reads,
-            distance=distance,
+            max_distance=max_distance,
             metric=metric,
             allowlist=allowlist,
             min_umis=min_umis,
@@ -854,8 +862,9 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             prune=prune,
             doublets=doublets,
             min_size=min_size,
+            trex_rules=trex_rules,
         )
-        columns = group_columns(within, "within", _CLONE_COLUMNS)
+        columns = group_columns(within, "within")
         cell_selection = inspect_artifact(self.zw, barcodes).input_ref("cell_selection")
         stored_counts = as_zarr_array(group["n_barcodes"], name="n_barcodes")
         n_cells = int(stored_counts.shape[0])
@@ -879,7 +888,6 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             columns,
             with_barcodes,
             memory_bytes=self.memoryBytes - allowlist_bytes,
-            reserved=_CLONE_COLUMNS,
             what="a barcode",
         )
         del with_barcodes
@@ -890,7 +898,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             allowlist_fingerprint=allowlist_fingerprint,
             preset=record["preset"],
             min_reads=record["min_reads"],
-            distance=record["distance"],
+            max_distance=record["max_distance"],
             metric=record["metric"],
             min_umis=record["min_umis"],
             min_fraction=record["min_fraction"],
