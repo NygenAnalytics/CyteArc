@@ -191,7 +191,7 @@ _PETRACER_CHARACTER_RULES = SiteRules(
 # missing, are none; the format's own tokens are read before this applies.
 _MATRIX_STATE = (
     r"(?!(?:"
-    + "|".join(re.escape(token) for token in sorted(MISSING_TEXT | {"none"}) if token)
+    + "|".join(re.escape(token) for token in sorted(MISSING_TEXT) if token)
     + r"|-\d+)$)\S(?:.*\S)?"
 )
 # A whole number written with a fraction of zeros, as pandas writes the

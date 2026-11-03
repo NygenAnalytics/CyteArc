@@ -6,6 +6,7 @@ variant callers read their headers and entries through
 """
 
 import gzip
+import zipfile
 
 import pytest
 
@@ -119,3 +120,98 @@ def test_entries_of_another_shape_than_their_fields_are_refused(tmp_path) -> Non
     path = _write(tmp_path, _BANNER.format(field="integer") + "2 2 1\n1 1\n")
     with pytest.raises(ValueError, match="Could not parse Matrix Market coordinates"):
         list(matrix_market_entries(matrix_market_header(path), 10))
+
+
+@pytest.mark.parametrize("chunk_rows", [1, 2, 1000])
+@pytest.mark.parametrize(
+    ("field", "body", "wider"),
+    [
+        # A pattern clone matrix whose entries carry a value.
+        ("pattern", "1 2 1\n2 3 1\n4 1 1\n", 1),
+        # An integer matrix whose entries carry a fourth field: the first,
+        # one within the entries, and the last.
+        ("integer", "1 2 1 1\n2 3 2 1\n3 1 3 1\n", 1),
+        ("integer", "1 2 1\n2 3 2 9\n3 1 3\n", 2),
+        ("integer", "1 2 1\n2 3 2\n3 1 3 1\n", 3),
+    ],
+)
+def test_entries_of_more_fields_than_their_field_are_refused_wherever_chunks_start(
+    tmp_path, field, body, wider, chunk_rows
+) -> None:
+    # pandas read the first field of a wider first entry as an index, so
+    # every coordinate shifted, and dropped the last field of one that
+    # started a chunk; neither was refused.
+    path = _write(tmp_path, _BANNER.format(field=field) + "4 4 3\n" + body)
+    header = matrix_market_header(path, fields=("integer", "real", "pattern"))
+    n_fields = 2 if field == "pattern" else 3
+    message = (
+        f"Each entry of a Matrix Market {field} matrix holds {n_fields} fields, .*"
+        f"but (entry {wider} of .*m.mtx holds more"
+        f"|line {wider + 2} of .*m.mtx holds {n_fields + 1})$"
+    )
+    with pytest.raises(ValueError, match=message):
+        list(matrix_market_entries(header, chunk_rows))
+
+
+def test_entries_of_two_fields_more_are_refused_naming_their_line(tmp_path) -> None:
+    path = _write(
+        tmp_path, _BANNER.format(field="integer") + "4 4 3\n1 2 1\n2 3 2\n3 1 3 1 1\n"
+    )
+    header = matrix_market_header(path)
+    with pytest.raises(ValueError, match="but line 5 of .*m.mtx holds 5$"):
+        list(matrix_market_entries(header, 1000))
+    # A chunk that starts at the entry keeps its fourth field.
+    with pytest.raises(ValueError, match="but entry 3 of .*m.mtx holds more$"):
+        list(matrix_market_entries(header, 1))
+
+
+def test_counts_of_more_fields_are_refused_by_each_matrix_reader(tmp_path) -> None:
+    from cytearc.readers import MtxReader, inspect_mtx
+    from cytearc.readers.clone_tables import clone_layout, matrix_entries
+
+    # A count matrix as master's reader reads it, whose entries carry a
+    # fourth field: every coordinate was read shifted, and its counts were
+    # the fourth fields.
+    folder = tmp_path / "mex"
+    folder.mkdir()
+    _write(
+        folder,
+        _BANNER.format(field="integer") + "3 3 3\n1 2 1 1\n2 3 2 1\n3 1 3 1\n",
+        "matrix.mtx",
+    )
+    (folder / "features.tsv").write_text("".join(f"f{i}\tg{i}\n" for i in range(3)))
+    (folder / "barcodes.tsv").write_text("".join(f"c{i}\n" for i in range(3)))
+    with pytest.raises(ValueError, match="but entry 1 of .*matrix.mtx holds more"):
+        MtxReader(inspect_mtx(folder)[0], temp_dir=str(tmp_path))
+    # A pattern clone matrix whose entries carry a value, as a clone matrix.
+    clones = tmp_path / "clones"
+    clones.mkdir()
+    _write(clones, _BANNER.format(field="pattern") + "3 2 2\n1 2 1\n3 1 1\n", "c.mtx")
+    (clones / "cells.tsv").write_text("cell\nAAAC-1\nAAAG-1\nAAAT-1\n")
+    (clones / "clones.tsv").write_text("clone\nk1\nk2\n")
+    layout = clone_layout(clones / "c.mtx")
+    with pytest.raises(ValueError, match="but entry 1 of .*c.mtx holds more"):
+        list(matrix_entries(layout, 1000))
+
+
+def test_errors_of_an_archives_matrix_name_its_member_and_the_archive(
+    tmp_path,
+) -> None:
+    from cytearc.readers import MtxReader, inspect_mtx
+
+    archive_path = tmp_path / "sample_MEX.zip"
+    with zipfile.ZipFile(archive_path, mode="w") as archive:
+        archive.writestr(
+            "matrix.mtx",
+            _BANNER.format(field="integer") + "2 2 3\n2 2 1\n1 1 1\n3 1 1\n",
+        )
+        archive.writestr("features.tsv", "f1\tg1\nf2\tg2\n")
+        archive.writestr("barcodes.tsv", "c1\nc2\n")
+    # The member is read from a temporary file, which is gone once the
+    # reader fails, so errors name the member of the archive instead.
+    with pytest.raises(
+        ValueError,
+        match=r"coordinate of matrix\.mtx in .*sample_MEX\.zip is outside the declared",
+    ) as error:
+        MtxReader(inspect_mtx(archive_path)[0], temp_dir=str(tmp_path))
+    assert "cytearc-mtx-archive" not in str(error.value)

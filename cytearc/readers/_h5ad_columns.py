@@ -571,6 +571,12 @@ def index_names(
     elif form == "nullable":
         values = np.asarray(node["values"][rows]).reshape(-1)
         missing = np.asarray(node["mask"][rows], dtype=bool).reshape(-1)
+        if missing.shape != values.shape:
+            where = str(getattr(table, "name", "")).strip("/") or "dataframe"
+            raise ValueError(
+                f"The index of the {where} of {path} has a missing-value mask that "
+                "does not align with its names"
+            )
     else:
         codes = np.asarray(node["codes"][rows], dtype=np.int64).reshape(-1)
         categories = np.asarray(node["categories"][:]).reshape(-1)

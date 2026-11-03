@@ -87,7 +87,8 @@ def _read_table(path: str) -> _Table:
     first row of one field more than the header holds R's row names, a table
     whose rows of one field more all end in a delimiter with nothing after it
     reads alike with a delimiter after each row's last field and is refused,
-    and a row of fewer or more fields than the header is refused.
+    and a row of fewer or more fields than the header is refused. A row whose
+    every field is empty, as spreadsheets end a table, holds no cell.
 
     Raises:
         ValueError: If the file is empty, a row holds another number of fields
@@ -101,17 +102,19 @@ def _read_table(path: str) -> _Table:
     lines = np.concatenate(
         [part_lines for part_lines, _chunk in parts] or [np.empty(0, np.int64)]
     )
+    columns = [
+        np.concatenate(
+            [chunk[position].str.strip().to_numpy(dtype=object) for _l, chunk in parts]
+            or [np.empty(0, dtype=object)]
+        )
+        for position in range(len(names))
+    ]
+    filled = np.zeros(len(lines), dtype=bool)
+    for values in columns:
+        filled |= values != ""
+    lines = lines[filled]
     frame = pd.DataFrame(
-        {
-            position: np.concatenate(
-                [
-                    chunk[position].str.strip().to_numpy(dtype=object)
-                    for _l, chunk in parts
-                ]
-                or [np.empty(0, dtype=object)]
-            )
-            for position in range(len(names))
-        }
+        {position: values[filled] for position, values in enumerate(columns)}
     )
     frame.columns = pd.Index(names, dtype=object)
     if frame.columns.duplicated().any():

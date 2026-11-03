@@ -71,7 +71,9 @@ def contig_chunks(
             fields than the header names, a cell ID is missing, or a field
             holds a value of the wrong kind.
     """
-    text = text_layout(os.fspath(path), what=what, quoted=quoted)
+    # Contig files never hold R's row names, so a row of one field more than
+    # the header is refused as any other row of another width is.
+    text = text_layout(os.fspath(path), what=what, quoted=quoted, allow_row_names=False)
     positions = [
         position for position, name in enumerate(text.names) if name in columns
     ]

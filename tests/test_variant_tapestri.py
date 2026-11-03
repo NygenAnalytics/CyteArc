@@ -1435,8 +1435,10 @@ def test_a_source_refuses_a_cell_whose_sample_or_barcode_is_empty(tmp_path) -> N
         barcodes[3] = b""
         del rows["barcode"]
         rows.create_dataset("barcode", data=barcodes)
-    with pytest.raises(
-        ValueError,
-        match="has cells without a sample name or a barcode, the first in row 4;",
-    ):
-        list(source.batches(10_000))
+    # The row counts in the file, whichever block of cells holds it.
+    for cells in (10_000, 3, 1):
+        with pytest.raises(
+            ValueError,
+            match="has cells without a sample name or a barcode, the first in row 4;",
+        ):
+            list(source.batches(cells))

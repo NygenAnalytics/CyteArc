@@ -2,7 +2,7 @@
 
 The clone tables of lineage tracing tools, the barcode tables of their
 extractors, the allele tables of lineage recorders, receptor contigs and the
-tables of variant callers share their quirks: plain or gzip-compressed text,
+tables of GoT and giftwrap share their quirks: plain or gzip-compressed text,
 whatever the file's name, separated by tabs, commas or spaces, quoted as R
 quotes, without a final newline, a header that starts with ``#`` as TREX
 writes it, and R's row-name layout, whose header holds one field fewer than
@@ -60,8 +60,18 @@ __all__ = [
 _SAMPLE_ROWS = 100
 # What reading a gzip file that is cut short or corrupt raises.
 _CORRUPT = (EOFError, zlib.error, gzip.BadGzipFile)
-# The characters of text that the rows hand pandas at least at a time.
-_READ_CHARACTERS = 1 << 16
+# The characters of text that the rows read from the file at a time, past
+# the line they end in, whatever pandas asks for: a batch of short lines holds
+# about 0.2 MB of Python objects, and larger batches read no faster.
+_READ_CHARACTERS = 1 << 14
+# The fields of a space-separated row: pandas separates them by spaces and
+# tabs alone, as other whitespace, such as a no-break space, is text.
+_SPACE_FIELDS = re.compile(r"[^ \t\r\n]+")
+# The whitespace that Python's str.split splits on besides spaces, tabs and
+# line ends, which pandas reads as text.
+_OTHER_WHITESPACE = re.compile(
+    "[\x0b\x0c\x1c-\x1f\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,25 +186,35 @@ def _for_csv(line: str, delimiter: str) -> str:
 def split_fields(line: str, delimiter: str, *, quoted: bool = True) -> list[str]:
     """Split one row into its fields, as the table's reader splits it.
 
-    Spaces separate fields of a space-separated row however many there are,
-    and spaces at its ends separate none.
+    Spaces and tabs separate fields of a space-separated row however many
+    there are, and those at its ends separate none.
     """
     if not quoted or '"' not in line:
-        return line.split() if delimiter == " " else line.split(delimiter)
-    return next(csv.reader([_for_csv(line, delimiter)], **_dialect(delimiter)), [])
+        if delimiter == " ":
+            return _SPACE_FIELDS.findall(line)
+        return line.split(delimiter)
+    if delimiter != " ":
+        try:
+            return next(csv.reader([line], **_dialect(delimiter)), [])
+        except csv.Error:
+            # A field longer than the csv module reads, 131,072 characters.
+            pass
+    # The csv module separates fields by spaces alone, so a quoted field of
+    # space-separated text keeps its tabs only when split here.
+    return _tokenize(_for_scan(line, delimiter), delimiter)[1]
 
 
 def _is_blank(line: str, delimiter: str) -> bool:
-    """Whether a line holds no row: only whitespace, and no delimiter."""
-    return not line.strip() and (delimiter == " " or delimiter not in line)
+    """Whether a line holds no row: only spaces and tabs, and no delimiter."""
+    return not line.strip(" \t\r\n") and (delimiter == " " or delimiter not in line)
 
 
-# The states of a row's text as the quote machine reads it, as pandas'
-# tokenizer reads quoted fields: at the start of a field, in an unquoted
-# field, in a quoted field, and just after a quote within a quoted field,
-# which closes the field unless another quote follows it.
+# The states of a row's text as ``_tokenize`` reads it, as pandas' tokenizer
+# reads quoted fields: at the start of a field, in an unquoted field, in a
+# quoted field, and just after a quote within a quoted field, which closes the
+# field unless another quote follows it.
 _FIELD_START, _UNQUOTED, _QUOTED, _QUOTE = 0, 1, 2, 3
-# What the quote machine stops at: quotes, and each delimiter or, between
+# What ``_tokenize`` stops at: quotes, and each delimiter or, between
 # space-separated fields, each run of spaces and tabs.
 _SPECIAL = {
     "\t": re.compile('["\t]'),
@@ -203,47 +223,59 @@ _SPECIAL = {
 }
 
 
-def _scan(text: str, state: int, delimiter: str) -> tuple[int, int]:
-    """Read one line of a row's text, without its line end, from ``state``.
+def _tokenize(
+    text: str, delimiter: str, state: int = _FIELD_START
+) -> tuple[int, list[str]]:
+    """Split one line of a row's text, without its line end, as pandas does.
+
+    The csv module splits rows faster, and this reads what it does not: a
+    field longer than 131,072 characters, and the state at a line's end.
+
+    Args:
+        text: The line.
+        delimiter: The table's delimiter.
+        state: The state at the start of the line: ``_QUOTED`` for a line
+            that goes on with a quoted field of the line before it.
 
     Returns:
-        The state at the line's end, and the fields that the line ends: one
-        per delimiter outside quotes. A line that ends in ``_QUOTED`` goes on
-        with the next line, within the quoted field.
+        The state at the line's end, ``_QUOTED`` where its quoted field goes
+        on with the next line, and the line's fields: those it ends, then the
+        one it leaves open, of which a quoted field that goes on holds the
+        line's part.
     """
-    ended = 0
-    field_start = 0
-    previous = -2
+    fields: list[str] = []
+    value: list[str] = []
+    position = 0
     for match in _SPECIAL[delimiter].finditer(text):
-        at = match.start()
-        quote = text[at] == '"'
-        if state == _FIELD_START and at > field_start:
-            state = _UNQUOTED
-        elif state == _QUOTE and at > previous + 1:
+        at, end = match.start(), match.end()
+        if at > position:
+            value.append(text[position:at])
             # Text after a closing quote joins the field, as pandas reads it.
-            state = _UNQUOTED
-        if state == _QUOTED:
-            if quote:
+            if state in (_FIELD_START, _QUOTE):
+                state = _UNQUOTED
+        if text[at] == '"':
+            if state == _FIELD_START:
+                state = _QUOTED
+            elif state == _QUOTED:
                 state = _QUOTE
-        elif state == _QUOTE:
-            if quote:
-                state = _QUOTED
             else:
-                ended += 1
-                state = _FIELD_START
-                field_start = match.end()
-        elif state == _FIELD_START:
-            if quote:
-                state = _QUOTED
-            else:
-                ended += 1
-                field_start = match.end()
-        elif not quote:
-            ended += 1
-            state = _FIELD_START
-            field_start = match.end()
-        previous = match.end() - 1
-    return state, ended
+                # A doubled quote within a quoted field is one quote, and a
+                # quote within an unquoted field is text.
+                value.append('"')
+                if state == _QUOTE:
+                    state = _QUOTED
+        elif state == _QUOTED:
+            value.append(text[at:end])
+        else:
+            fields.append("".join(value))
+            value, state = [], _FIELD_START
+        position = end
+    if len(text) > position:
+        value.append(text[position:])
+        if state in (_FIELD_START, _QUOTE):
+            state = _UNQUOTED
+    fields.append("".join(value))
+    return state, fields
 
 
 def _quoted_record(
@@ -256,15 +288,17 @@ def _quoted_record(
         a quoted field.
     """
     lines = [first]
-    state, ended = _scan(_for_scan(first, delimiter), _FIELD_START, delimiter)
+    state, fields = _tokenize(_for_scan(first, delimiter), delimiter)
+    n_fields = len(fields)
     while state == _QUOTED:
         line = next(rest, None)
         if line is None:
-            return lines, ended + 1, True
+            return lines, n_fields, True
         lines.append(line)
-        state, more = _scan(_for_scan(line, delimiter), state, delimiter)
-        ended += more
-    return lines, ended + 1, False
+        state, more = _tokenize(_for_scan(line, delimiter), delimiter, state)
+        # The line's first field goes on with the last of the line before.
+        n_fields += len(more) - 1
+    return lines, n_fields, False
 
 
 def _for_scan(line: str, delimiter: str) -> str:
@@ -330,10 +364,11 @@ class _Rows:
 
     def read(self, size: int = -1) -> str:
         # Text without rows would end pandas' reading, so lines are read
-        # until some hold a row or the file ends.
+        # until some hold a row or the file ends. A read holds at most about
+        # _READ_CHARACTERS of lines however much pandas asks for.
         while not self._ended:
             try:
-                text = self._read(max(int(size), _READ_CHARACTERS))
+                text = self._read(_READ_CHARACTERS)
             except UnicodeDecodeError:
                 self._end(_text_error(self._text.path))
             except _CORRUPT as error:
@@ -352,7 +387,7 @@ class _Rows:
     def count(self) -> int:
         """Hand on the remaining rows, counting them rather than keeping their lines."""
         n_rows = 0
-        while self.read(1 << 20):
+        while self.read(_READ_CHARACTERS):
             n_rows += len(self._lines)
             del self._lines[:]
         return n_rows
@@ -390,21 +425,22 @@ class _Rows:
         joined = "".join(batch)
         delimiter = self._text.delimiter
         if self._text.quoted and '"' in joined:
-            return self._read_quoted(batch, first)
+            quoted = _quoted_widths(batch, delimiter)
+            if quoted is None:
+                return self._read_quoted(batch, first)
+            widths = quoted
+        else:
+            widths = _widths(batch, joined, delimiter)
         if delimiter == " ":
-            widths = np.fromiter(
-                map(len, map(str.split, batch)), dtype=np.int64, count=len(batch)
-            )
             blank = widths == 0
         else:
-            widths = 1 + np.fromiter(
-                map(str.count, batch, itertools.repeat(delimiter)),
-                dtype=np.int64,
-                count=len(batch),
-            )
-            blank = (widths == 1) & np.fromiter(
+            # Python's whitespace is wider than pandas', so a line that
+            # Python finds blank is checked for spaces and tabs alone.
+            blank = (widths <= 1) & np.fromiter(
                 map(str.isspace, batch), dtype=bool, count=len(batch)
             )
+            for position in np.flatnonzero(blank).tolist():
+                blank[position] = _is_blank(batch[position], delimiter)
         wrong = np.flatnonzero((widths != self._n_fields) & ~blank)
         if len(wrong):
             at = int(wrong[0])
@@ -417,23 +453,18 @@ class _Rows:
         return "".join(batch[position] for position in kept.tolist())
 
     def _read_quoted(self, batch: list[str], first: int) -> str:
-        """Hand on the rows of a batch whose lines hold quotes, row by row.
+        """Hand on the rows of a batch whose quoted fields may hold line breaks.
 
-        A row whose quoted field goes on past the batch takes lines from the
-        handle until the field closes.
+        The csv module counts the fields of each row whose text holds a
+        quote, as pandas' tokenizer splits them, and ``_tokenize`` counts
+        those of a row whose field is longer than the csv module reads. A row
+        whose quoted field goes on past the batch takes lines from the handle
+        until the field closes.
         """
         delimiter = self._text.delimiter
-        extra = 0
-
-        def rest() -> Iterator[str]:
-            nonlocal extra
-            yield from lines
-            while line := self._handle.readline():
-                extra += 1
-                yield line
-
         lines = iter(batch)
-        following = rest()
+        feed = _Feed(lines, self._handle, delimiter)
+        reader = csv.reader(feed, **_dialect(delimiter))
         parts: list[str] = []
         line = first
         for physical in lines:
@@ -445,7 +476,15 @@ class _Rows:
                 n_fields = len(split_fields(physical, delimiter, quoted=False))
                 taken = [physical]
             else:
-                taken, n_fields, cut = _quoted_record(physical, following, delimiter)
+                feed.start(physical)
+                try:
+                    n_fields = len(next(reader))
+                    taken, cut = feed.taken, feed.ended
+                except csv.Error:
+                    taken, n_fields, cut = _quoted_record(
+                        feed.taken[0], feed.rest(), delimiter
+                    )
+                    reader = csv.reader(feed, **_dialect(delimiter))
                 line += len(taken)
                 if cut:
                     self._end(_never_closes(self._text.path, start))
@@ -455,8 +494,107 @@ class _Rows:
                 break
             self._lines.append(start)
             parts.append("".join(taken))
-        self._line += extra
+        self._line += feed.extra
         return "".join(parts)
+
+
+def _widths(batch: list[str], joined: str, delimiter: str) -> np.ndarray:
+    """Return the fields of each of a batch's lines, where no quote counts."""
+    if delimiter != " ":
+        return 1 + np.fromiter(
+            map(str.count, batch, itertools.repeat(delimiter)),
+            dtype=np.int64,
+            count=len(batch),
+        )
+    split = (
+        str.split if _OTHER_WHITESPACE.search(joined) is None else _SPACE_FIELDS.findall
+    )
+    return np.fromiter(map(len, map(split, batch)), dtype=np.int64, count=len(batch))
+
+
+def _quoted_widths(batch: list[str], delimiter: str) -> np.ndarray | None:
+    """Return the fields of each of a batch's lines when each line holds its row whole.
+
+    The csv module splits quoted fields as pandas' tokenizer does, a line at
+    a time. Returns None for a batch where a row's quoted field holds a line
+    break or goes on past the batch, or a field holds more characters than
+    the csv module reads, 131,072.
+    """
+    lines: Iterator[str] | list[str] = batch
+    if delimiter == " ":
+        lines = map(
+            str.replace,
+            map(str.strip, batch, itertools.repeat(" \t\r\n")),
+            itertools.repeat("\t"),
+            itertools.repeat(" "),
+        )
+    reader = csv.reader(lines, **_dialect(delimiter))
+    try:
+        widths = np.fromiter(map(len, reader), dtype=np.int64)
+    except csv.Error:
+        return None
+    # A quoted field that holds a line break joins lines into one row.
+    if len(widths) != len(batch):
+        return None
+    last = batch[-1]
+    if '"' in last and _tokenize(_for_scan(last, delimiter), delimiter)[0] == _QUOTED:
+        return None
+    return widths
+
+
+class _Feed:
+    """Lines for the csv module: a row's first line, then those of a batch,
+    then those of the file, each kept as read.
+
+    The csv module asks for a line beyond a row's first only while a quoted
+    field goes on, so the lines it takes for a row are that row's.
+    """
+
+    def __init__(self, lines: Iterator[str], handle: Any, delimiter: str) -> None:
+        self._lines = lines
+        self._handle = handle
+        self._delimiter = delimiter
+        self._first: str | None = None
+        self.taken: list[str] = []
+        # Lines read from the file beyond the batch.
+        self.extra = 0
+        # Whether the file ended within a quoted field.
+        self.ended = False
+
+    def start(self, line: str) -> None:
+        """Begin a row at ``line``."""
+        self._first = line
+        self.taken = []
+
+    def __iter__(self) -> "_Feed":
+        return self
+
+    def __next__(self) -> str:
+        line = self._next()
+        if line is None:
+            self.ended = True
+            raise StopIteration
+        return _for_csv(line, self._delimiter)
+
+    def _next(self) -> str | None:
+        line: str | None = self._first
+        if line is not None:
+            self._first = None
+        else:
+            line = next(self._lines, None)
+            if line is None:
+                line = self._handle.readline()
+                if not line:
+                    return None
+                self.extra += 1
+        self.taken.append(line)
+        return line
+
+    def rest(self) -> Iterator[str]:
+        """The lines a row's first line goes on with: those taken, then the rest."""
+        yield from self.taken[1:]
+        while (line := self._next()) is not None:
+            yield line
 
 
 def text_layout(
@@ -465,6 +603,7 @@ def text_layout(
     what: str = "a clone table",
     prefer_row_names: bool = False,
     quoted: bool = True,
+    allow_row_names: bool = True,
 ) -> TextLayout:
     """Read a table's header and delimiter from its first line and rows.
 
@@ -492,6 +631,10 @@ def text_layout(
             row's last field gives.
         quoted: Whether a field may be quoted; without quoting, a quote is
             part of its value.
+        allow_row_names: Whether the table may hold R's row names. A table
+            that never does, such as a file of receptor contigs, refuses a
+            first row of one field more than its header, as it refuses rows
+            of any other number of fields.
 
     Raises:
         ValueError: If the file is empty, is not UTF-8 text, a gzip file is
@@ -511,7 +654,7 @@ def text_layout(
     row_names = False
     if rows.texts:
         fields = split_fields(rows.texts[0], separator, quoted=quoted)
-        if len(fields) == len(header) + 1:
+        if allow_row_names and len(fields) == len(header) + 1:
             # R's write.table leaves its row names out of the header, and a
             # delimiter after each row's last field gives one field more too,
             # an empty one. The two differ only where a row holds something
@@ -539,7 +682,7 @@ def text_layout(
                 f"The header of {path} names {len(header)} columns, but its first "
                 f"row holds {len(fields)} fields"
             )
-        elif header[0] == "":
+        elif allow_row_names and header[0] == "":
             # R's write.csv writes its row names under an empty name.
             row_names = True
     return TextLayout(

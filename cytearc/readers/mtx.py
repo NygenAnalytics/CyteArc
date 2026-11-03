@@ -524,7 +524,9 @@ class _MtxEngine:
             self.matrixPath = self._local_path(candidate.matrixPath)
             self.featurePath = self._local_path(candidate.featurePath)
             self.cellPath = self._local_path(candidate.cellPath)
-            self.header = matrix_market_header(self.matrixPath)
+            self.header = matrix_market_header(
+                self.matrixPath, name=self._matrix_name()
+            )
             self.matrixEntryCount = self.header.n_entries
             self.rawCellCount = candidate.nCells
             self.nFeatures = candidate.nFeatures
@@ -632,6 +634,12 @@ class _MtxEngine:
 
     def _local_path(self, path: str) -> str:
         return self._archivePaths.get(path, path)
+
+    def _matrix_name(self) -> str:
+        """The matrix as errors name it: its path, or its member of a ZIP archive."""
+        if self.candidate.archivePath is None:
+            return self.candidate.matrixPath
+        return f"{self.candidate.matrixPath} in {self.candidate.archivePath}"
 
     def _set_valid_cells(self, valid: np.ndarray) -> None:
         self.validCellIndexes = valid
@@ -829,8 +837,9 @@ class _MtxEngine:
     ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
         # An archive's matrix moves each time the archive is extracted.
         for axis1, axis2, raw_values in matrix_market_entries(
-            replace(self.header, path=self.matrixPath),
+            self.header,
             lines_in_mem,
+            source=self.matrixPath,
             separator=self.separator,
             index_offset=self.indexOffset,
             counts=True,

@@ -836,6 +836,23 @@ def test_got_tables_refuse_malformed_text(tmp_path, text, message) -> None:
         got_source(path, format="got")
 
 
+def test_got_tables_leave_out_rows_of_empty_fields(tmp_path) -> None:
+    # Spreadsheets end a table in rows of empty fields, which hold no cell.
+    path = tmp_path / "t.csv"
+    path.write_text("BC,wtUMIs,mutUMIs\nA,1,0\n,,\nB,0,2\n,,\n , ,\n")
+    cells = [
+        batch.barcodes.tolist()
+        for batch in got_source(path, format="got").batches(10)
+        if batch.kind == "cells"
+    ]
+    assert cells == [["A", "B"]]
+    # A row of empty fields that holds the delimiter fewer times than the
+    # header's columns is refused, as every row of another width is.
+    path.write_text("BC,wtUMIs,mutUMIs\nA,1,0\n,\n")
+    with pytest.raises(ValueError, match="line 3 holds 2 fields"):
+        got_source(path, format="got")
+
+
 def test_got_tables_read_r_row_names_as_clone_tables_do(tmp_path) -> None:
     """A delimiter after each row's last field gives one field more than the
     header, as R's row names do, so a table whose rows of one field more all

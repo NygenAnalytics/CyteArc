@@ -306,3 +306,14 @@ def test_masters_gene_reference_reads_a_plain_download_named_gz(
     monkeypatch.setattr(reference, "_download_gff3", compressed)
     again = reference.ensure_reference("homo_sapiens", cacheDir=tmp_path / "gzip")
     assert again.geneId == found.geneId and again.symbol == found.symbol
+
+    # The one opener keeps line ends as the file holds them, and a GFF3 file
+    # with CRLF line ends reads as one with LF line ends.
+    def crlf(url: str, destination: Path, *, timeout: float) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(text.replace("\n", "\r\n").encode())
+
+    monkeypatch.setattr(reference, "_download_gff3", crlf)
+    windows = reference.ensure_reference("homo_sapiens", cacheDir=tmp_path / "crlf")
+    assert windows.symbol == found.symbol == ("A1", "MT-B2")
+    assert windows.geneId == found.geneId

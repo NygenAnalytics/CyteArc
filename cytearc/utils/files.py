@@ -45,11 +45,26 @@ def is_hdf5(path: str | os.PathLike[str]) -> bool:
     return file_signature(path) == HDF5_SIGNATURE
 
 
+class _GzipStream(gzip.GzipFile):
+    """A gzip stream that closes the stream it decompresses when it closes,
+    as a plain stream read in its place closes."""
+
+    def __init__(self, source: io.BufferedIOBase) -> None:
+        self._source = source
+        super().__init__(fileobj=source, mode="rb")
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            self._source.close()
+
+
 def open_binary(source: str | os.PathLike[str] | IO[bytes]) -> io.BufferedIOBase:
     """Open a file, or an open binary stream, for reading its bytes.
 
-    A gzip-compressed file is decompressed. A stream stays open when the
-    decompressed stream read from it closes, so its owner closes it.
+    A gzip-compressed file is decompressed. Closing the stream returned for
+    a stream closes that stream too, compressed or not.
 
     Args:
         source: A path, or a binary stream such as a member of a ZIP archive.
@@ -64,7 +79,7 @@ def open_binary(source: str | os.PathLike[str] | IO[bytes]) -> io.BufferedIOBase
     )
     head = cast(Any, stream).peek(len(GZIP_SIGNATURE))[: len(GZIP_SIGNATURE)]
     if head == GZIP_SIGNATURE:
-        return gzip.GzipFile(fileobj=stream, mode="rb")
+        return _GzipStream(stream)
     return stream
 
 
@@ -73,7 +88,8 @@ def open_text(source: str | os.PathLike[str] | IO[bytes]) -> io.TextIOWrapper:
 
     A gzip-compressed file is decompressed, a byte-order mark at the start is
     dropped, and lines keep their endings. Text that is not UTF-8 raises
-    ``UnicodeDecodeError`` as it is read.
+    ``UnicodeDecodeError`` as it is read. Closing the text of a stream closes
+    that stream too.
 
     Args:
         source: A path, or a binary stream such as a member of a ZIP archive.

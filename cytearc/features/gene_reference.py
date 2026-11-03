@@ -154,7 +154,7 @@ def parse_gff3_genes(lines: Iterable[str]) -> list[tuple[str, str, str]]:
     for line in lines:
         if not line or line.startswith("#"):
             continue
-        parts = line.rstrip("\n").split("\t")
+        parts = line.rstrip("\r\n").split("\t")
         if len(parts) < 9 or parts[2] not in _GENE_TYPES:
             continue
         attrs = _parse_attributes(parts[8])

@@ -181,14 +181,18 @@ def test_a_byte_order_mark_is_not_part_of_the_header(tmp_path, compress) -> None
 def test_a_separator_ending_every_row_is_refused_unless_the_header_ends_so_too(
     tmp_path,
 ) -> None:
-    # A separator after each row's last field reads alike with R's row names
-    # under a header that leaves them out, so a contig file reads as every
-    # table does: refused until its header ends in the separator too, which
-    # names an empty last column.
+    # A separator after each row's last field gives each row one field more
+    # than the header, an empty one, and a contig file's rows hold as many
+    # fields as its header names: refused until the header ends in the
+    # separator too, which names an empty last column.
     airr = _write(
         tmp_path / "trailing.tsv", [AIRR_HEADER, *(row + "\t" for row in AIRR_ROWS)]
     )
-    with pytest.raises(ValueError, match="end the header with the delimiter too"):
+    n_names = len(AIRR_HEADER.split("\t"))
+    with pytest.raises(
+        ValueError,
+        match=f"names {n_names} columns, but its first row holds {n_names + 1} fields",
+    ):
         list(iter_airr_rearrangements(airr))
     airr = _write(
         tmp_path / "ended.tsv",
@@ -201,7 +205,7 @@ def test_a_separator_ending_every_row_is_refused_unless_the_header_ends_so_too(
         tmp_path / "trailing.csv",
         [CELLRANGER_HEADER, *(row + "," for row in CELLRANGER_ROWS)],
     )
-    with pytest.raises(ValueError, match="end the header with the delimiter too"):
+    with pytest.raises(ValueError, match="but its first row holds"):
         list(iter_vdj_contigs(cellranger))
     cellranger = _write(
         tmp_path / "ended.csv",
@@ -338,6 +342,30 @@ def test_malformed_airr_files_are_refused(tmp_path, header, row, message) -> Non
     path = _write(tmp_path / "rearrangements.tsv", [header, row])
     with pytest.raises(ValueError, match=message):
         list(iter_airr_rearrangements(path))
+
+
+@pytest.mark.parametrize("chunk_rows", [1, 2, 1000])
+def test_rows_of_a_field_more_than_the_header_are_refused_not_read_shifted(
+    tmp_path, chunk_rows
+) -> None:
+    # Contig files hold no R row names, so a field more in every row is no
+    # row name that would shift every column one place to the right.
+    n_names = len(AIRR_HEADER.split("\t"))
+    airr = _write(
+        tmp_path / "extra.tsv", [AIRR_HEADER, *(row + "\t4" for row in AIRR_ROWS)]
+    )
+    with pytest.raises(
+        ValueError,
+        match=f"names {n_names} columns, but its first row holds {n_names + 1} fields",
+    ):
+        list(iter_airr_rearrangements(airr, chunk_rows=chunk_rows))
+    # A later row of a field more is refused by its line.
+    rows = [*AIRR_ROWS[:2], AIRR_ROWS[2] + "\t4"]
+    airr = _write(tmp_path / "later.tsv", [AIRR_HEADER, *rows])
+    with pytest.raises(
+        ValueError, match=f"line 4 holds {n_names + 1} fields, but its header names"
+    ):
+        list(iter_airr_rearrangements(airr, chunk_rows=chunk_rows))
 
 
 def test_cellranger_columns_take_their_airr_names(tmp_path) -> None:

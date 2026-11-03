@@ -903,3 +903,41 @@ def test_obs_names_need_an_obs_table(tmp_path) -> None:
         pytest.raises(ValueError, match="has no AnnData obs table with cell names"),
     ):
         obs_names(handle, path=str(path))
+
+
+def test_a_missing_cell_name_is_named_by_its_row_in_the_index(tmp_path) -> None:
+    from cytearc.readers._h5ad_columns import obs_names
+
+    path = tmp_path / "masked.h5ad"
+    with h5py.File(path, "w") as handle:
+        obs = handle.create_group("obs")
+        obs.attrs["_index"] = "names"
+        names = obs.create_group("names")
+        names.attrs["encoding-type"] = "nullable-string-array"
+        names.attrs["encoding-version"] = "0.1.0"
+        names.create_dataset("values", data=np.asarray([b"A", b"B", b"", b"D", b""]))
+        names.create_dataset("mask", data=np.asarray([0, 0, 1, 0, 1], dtype=bool))
+    with h5py.File(path, "r") as handle:
+        assert obs_names(handle, 0, 2, path=str(path)).tolist() == ["A", "B"]
+        # Rows count from the start of the index, wherever a read starts.
+        for start in (0, 1, 2):
+            with pytest.raises(ValueError, match="in the index.*the first in row 3$"):
+                obs_names(handle, start, path=str(path))
+        with pytest.raises(ValueError, match="the first in row 5$"):
+            obs_names(handle, 3, path=str(path))
+    with h5py.File(path, "a") as handle:
+        del handle["obs/names/mask"]
+        handle["obs/names"].create_dataset("mask", data=np.zeros(4, dtype=bool))
+    with (
+        h5py.File(path, "r") as handle,
+        pytest.raises(ValueError, match="mask that does not align with its names"),
+    ):
+        obs_names(handle, path=str(path))
+    # A group of neither values and a mask nor codes and categories.
+    with h5py.File(path, "a") as handle:
+        del handle["obs/names/mask"]
+    with (
+        h5py.File(path, "r") as handle,
+        pytest.raises(ValueError, match="stores its index of names in a form CyteArc"),
+    ):
+        obs_names(handle, path=str(path))

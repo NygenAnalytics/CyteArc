@@ -78,3 +78,19 @@ def test_text_that_is_not_utf8_raises_as_it_is_read_not_as_it_opens(tmp_path) ->
     path.write_bytes(b"cell\n\xff\xfe\n")
     with open_text(path) as handle, pytest.raises(UnicodeDecodeError):
         handle.read()
+
+
+@pytest.mark.parametrize("compress", [False, True])
+def test_closing_what_a_stream_opens_closes_the_stream_compressed_or_not(
+    compress,
+) -> None:
+    data = TEXT.encode()
+    payload = gzip.compress(data, mtime=0) if compress else data
+    stream = io.BytesIO(payload)
+    with open_text(stream) as text:
+        assert text.read() == TEXT.removeprefix("\ufeff")
+    assert stream.closed
+    stream = io.BytesIO(payload)
+    with open_binary(stream) as handle:
+        assert handle.read() == data
+    assert stream.closed

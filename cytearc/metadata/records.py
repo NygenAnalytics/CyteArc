@@ -90,7 +90,7 @@ _KINDS = (TEXT, RAGGED, INTEGER, FLAG, NUMBER)
 #: spreadsheets ``#N/A``. These are the tokens that pandas reads as missing by
 #: default, and ``none``: the one set of every table read by its column
 #: names, clone tables, contigs, lineage barcodes, recorder alleles and the
-#: tables of variant callers among them. A format whose tool writes its own
+#: tables of GoT and giftwrap among them. A format whose tool writes its own
 #: notation takes that instead, as Cassiopeia writes ``None`` for a site that
 #: is not cut and CARLIN ``[]`` for an unedited array, and an export refuses a
 #: value that its importer would read as missing.
