@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from ..storage.refs import ArtifactRef
+from .groups import checked_group_names
 
 __all__ = [
     "DEFAULT_BREAKPOINTS",
@@ -378,12 +379,16 @@ def expansion_tables(
         sizes: Each cell's clone size in its group.
         frequencies: Each cell's clone frequency in its group.
         splits: The last rank of each window but the last.
+
+    Raises:
+        ValueError: If ``group_names`` does not hold one text name for each
+            group or names two groups alike.
     """
     categories = np.asarray(categories, dtype=np.int64)
     groups = np.asarray(groups, dtype=np.int64)
     clones = np.asarray(clones, dtype=np.int64)
     names = np.asarray(list(labels), dtype=object)
-    group_labels = np.asarray(list(group_names), dtype=object)
+    group_labels = checked_group_names(group_names).to_numpy(dtype=object)
     n_groups, n_categories = len(group_labels), len(names)
     counted = categories >= 0
     # Each cell's labels are categories coded by the stored codes, so the

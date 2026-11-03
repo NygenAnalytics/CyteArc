@@ -6,6 +6,7 @@ from itertools import combinations
 from math import comb, fsum, log, ulp
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from cytearc.clones import diversity as dv
@@ -648,6 +649,10 @@ def test_rarefaction_curves_hold_each_group_order_and_size() -> None:
         dv.rarefaction_curves(groups, names[:1])
     with pytest.raises(ValueError, match="names must name each of the 2 groups, not 3"):
         dv.rarefaction_curves(groups, [*names, "c"])
+    with pytest.raises(ValueError, match="one text name for each group"):
+        dv.rarefaction_curves(groups, pd.DataFrame({"group": names}))
+    with pytest.raises(ValueError, match="'a' names two"):
+        dv.rarefaction_curves(groups, ["a", "a"])
 
 
 def _grouped(*sizes) -> dv.GroupedCloneSizes:
@@ -927,6 +932,12 @@ def test_diversity_tables_refuse_groups_without_cells_and_misaligned_names() -> 
         dv.diversity_tables(_grouped(A, B), names[:1])
     with pytest.raises(ValueError, match="names must name each of the 2 groups, not 3"):
         dv.diversity_tables(_grouped(A, B), ["a", "b", "c"])
+    # A frame of names and labels names no group, nor do repeated names.
+    frame = pd.DataFrame({"group": ["a", "b"], "sample": ["a", "b"]})
+    with pytest.raises(ValueError, match="one text name for each group"):
+        dv.diversity_tables(_grouped(A, B), frame)
+    with pytest.raises(ValueError, match="'a' names two"):
+        dv.diversity_tables(_grouped(A, B), ["a", "a"])
     for level in (0.0, -0.5, float("nan")):
         with pytest.raises(ValueError, match="coverage must be between 0 and 1"):
             dv.diversity_tables(_grouped(A, B), names, coverage=level)

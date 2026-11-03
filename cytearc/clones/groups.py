@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from ..utils.arguments import quoted_value
 
-__all__ = ["group_key_table", "group_names", "pair_counts"]
+__all__ = ["checked_group_names", "group_key_table", "group_names", "pair_counts"]
 
 
 def group_names(group_keys: Sequence[dict[str, str]]) -> list[str]:
@@ -61,6 +61,43 @@ def group_key_table(
         {column: [key[column] for key in group_keys] for column in key_columns},
         index=pd.Index(group_names(group_keys), name=index),
     )
+
+
+def checked_group_names(names: Sequence[str], n_groups: int | None = None) -> pd.Index:
+    """The groups' names as an index, one text name for each group.
+
+    The table builders of the summaries take the groups' names, so a frame
+    of names and labels, whose rows pandas would turn into tuples, is
+    refused rather than named row by row.
+
+    Args:
+        names: Each group's name, in the order of the groups.
+        n_groups: The number of groups, or None when ``names`` sets it.
+
+    Raises:
+        ValueError: If ``names`` is not one text name for each group, names
+            two groups alike, or names another number of groups than
+            ``n_groups``.
+    """
+    if isinstance(names, pd.DataFrame | np.ndarray) and np.ndim(names) != 1:
+        raise ValueError("names must hold one text name for each group")
+    named = pd.Index(names)
+    if (
+        isinstance(named, pd.MultiIndex)
+        or named.hasnans
+        or (len(named) and pd.api.types.infer_dtype(named, skipna=False) != "string")
+    ):
+        raise ValueError("names must hold one text name for each group")
+    if n_groups is not None and len(named) != n_groups:
+        raise ValueError(
+            f"names must name each of the {n_groups} groups, not {len(named)}"
+        )
+    if named.has_duplicates:
+        repeated = named[named.duplicated()][0]
+        raise ValueError(
+            f"names must name each group once; {quoted_value(repeated)} names two"
+        )
+    return named
 
 
 def pair_counts(

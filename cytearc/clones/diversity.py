@@ -40,6 +40,7 @@ from scipy.special import digamma
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import sorted_unique
 from ..utils.numba import njit
+from .groups import checked_group_names
 from .groups import pair_counts
 from ..utils.arguments import quoted_value
 
@@ -1478,15 +1479,12 @@ def diversity_tables(
         the common coverage.
 
     Raises:
-        ValueError: If a group holds no cell, ``names`` does not name each
-            group once, ``coverage`` is not above 0, or there is no group and
-            ``size`` or ``coverage`` is None.
+        ValueError: If a group holds no cell, ``names`` does not hold one
+            text name for each group, names two groups alike, ``coverage``
+            is not above 0, or there is no group and ``size`` or
+            ``coverage`` is None.
     """
-    named = pd.Index(names)
-    if len(named) != len(groups):
-        raise ValueError(
-            f"names must name each of the {len(groups)} groups, not {len(named)}"
-        )
+    named = checked_group_names(names, len(groups))
     if (groups.n == 0).any():
         raise ValueError("Every group must hold a cell")
     tables, held = groups.distinct()
@@ -1566,14 +1564,10 @@ def rarefaction_curves(
         ``method``, ``diversity`` and ``coverage``.
 
     Raises:
-        ValueError: If ``names`` does not name each group once, or an order
-            is not 0, 1 or 2.
+        ValueError: If ``names`` does not hold one text name for each group
+            or names two groups alike, or an order is not 0, 1 or 2.
     """
-    named = pd.Index(names)
-    if len(named) != len(groups):
-        raise ValueError(
-            f"names must name each of the {len(groups)} groups, not {len(named)}"
-        )
+    named = checked_group_names(names, len(groups))
     chosen = tuple(orders)
     for order in chosen:
         _check_order(order)

@@ -28,6 +28,7 @@ from ..storage.refs import ArtifactRef
 from ..utils.arrays import sorted_unique
 from ..utils.digest import mix64
 from ..utils.numba import njit, numba_threads
+from .groups import checked_group_names
 from .overlap import group_clone_matrix
 from ..utils.arguments import quoted_value
 
@@ -878,8 +879,12 @@ def fate_bias_tables(
         fate of its stratum, by clone code and then fate: ``clone``,
         ``fate``, ``n_early_cells``, ``n_late_cells``, ``n_cells``,
         ``fraction``, ``p_value`` and ``q_value``.
+
+    Raises:
+        ValueError: If ``fates`` does not hold one text name for each column
+            of the fractions or names two fates alike.
     """
-    fate_names = pd.Index(fates)
+    fate_names = checked_group_names(fates, np.shape(fractions)[1])
     names = fate_names.to_numpy(dtype=object)
     labels = pd.Index(np.asarray(clone_ids, dtype=object))
     cell_columns: dict[str, Any] = {

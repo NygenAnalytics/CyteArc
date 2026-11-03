@@ -228,13 +228,8 @@ def _group_clone_sizes(n_groups: int):
 
     pair_groups, _codes, pair_cells = _group_pairs(n_groups)
     groups = GroupedCloneSizes.from_clones(pair_groups, pair_cells, n_groups)
-    keys = pd.DataFrame(
-        {
-            "group": [f"g{at:05d}" for at in range(n_groups)],
-            "sample": [f"g{at:05d}" for at in range(n_groups)],
-        }
-    )
-    return groups, keys
+    names = [f"g{at:05d}" for at in range(n_groups)]
+    return groups, names
 
 
 def test_diversity_tables(bench) -> None:
@@ -247,13 +242,13 @@ def test_diversity_tables(bench) -> None:
     )
 
     def make(n_groups: int):
-        groups, keys = _group_clone_sizes(n_groups)
-        return lambda: diversity_tables(groups, keys)
+        groups, names = _group_clone_sizes(n_groups)
+        return lambda: diversity_tables(groups, names)
 
     def check(n_groups: int, result) -> None:
-        groups, keys = _group_clone_sizes(n_groups)
+        groups, names = _group_clone_sizes(n_groups)
         table, hill, size, level = result
-        assert table["group"].tolist() == keys["group"].tolist()
+        assert table["group"].tolist() == names
         assert table["n_cells"].tolist() == groups.n.tolist()
         assert size == 2 * int(groups.n.min())
         assert 0 < level < 1
@@ -290,17 +285,19 @@ def test_rarefaction_curves(bench) -> None:
     )
 
     def make(n_groups: int):
-        groups, keys = _group_clone_sizes(n_groups)
-        return lambda: rarefaction_curves(groups, keys)
+        groups, names = _group_clone_sizes(n_groups)
+        return lambda: rarefaction_curves(groups, names)
 
     def check(n_groups: int, curves) -> None:
-        groups, keys = _group_clone_sizes(n_groups)
+        groups, names = _group_clone_sizes(n_groups)
         lengths = [3 * len(default_sizes(n)) for n in groups.n.tolist()]
         assert len(curves) == sum(lengths)
         observed = curves[curves["method"] == "observed"]
         assert len(observed) == 3 * n_groups
         for at in (0, n_groups - 1):
-            rows = observed[observed["group"] == keys["group"].iat[at]]
+            rows = observed[observed["group"] == names[at]]
+            # Each spot-checked group has its observed point of each order.
+            assert rows["order"].tolist() == [0, 1, 2]
             for order, value in zip(rows["order"], rows["diversity"], strict=True):
                 assert value == pytest.approx(
                     observed_hill(groups.group(at), int(order)), rel=1e-12, abs=0

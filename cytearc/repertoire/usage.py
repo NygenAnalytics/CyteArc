@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..clones.groups import checked_group_names
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import sorted_unique, unique_rows
 
@@ -212,8 +213,12 @@ def count_chains(
         locus: ``group``, ``locus``, the values, the count and ``fraction``,
         the count's share of the group's chains of that locus; and the cells
         with a counted chain.
+
+    Raises:
+        ValueError: If ``names`` does not hold one text name for each group
+            or names two groups alike.
     """
-    named = pd.Index(names)
+    named = checked_group_names(names)
     column = f"n_{count}"
     columns = ["group", "locus", *values, column, "fraction"]
     codes = [

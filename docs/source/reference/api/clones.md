@@ -526,7 +526,7 @@ diversity.group_keys  # one row per group: its sample and cell type
 diversity.indices.join(diversity.group_keys, on="group")
 ```
 
-pandas asks for a suffix, such as `rsuffix="_label"`, when a key column shares a name with a column of the table. The groups follow the natural order of their labels, and so do the rows of `group_keys`. Each group needs a name of its own and each key column a name of its own, so labels that hold commas and give two groups one name are refused, as is a key column named twice, such as a `group_by` column named like the `groups` artifact's kind or like a column that the clones keep apart. Fate bias names its groups fates, so its tables name them in `fate` and its `group_keys` is indexed by `fate`.
+pandas asks for a suffix, such as `rsuffix="_label"`, when a key column shares a name with a column of the table. A key column named `group`, or `fate` in fate bias, also shares its name with the index, which `reset_index`, `merge`, `sort_values` and `groupby` refuse as ambiguous: join on the name as above, or rename the index first, as in `keys.rename_axis("group_name").reset_index()`. The groups follow the natural order of their labels, and so do the rows of `group_keys`. Each group needs a name of its own and each key column a name of its own, so labels that hold commas and give two groups one name are refused, as is a key column named twice, such as a `group_by` column named like the `groups` artifact's kind or like a column that the clones keep apart. Fate bias names its groups fates, so its tables name them in `fate` and its `group_keys` is indexed by `fate`.
 
 ## Measure clonal expansion
 

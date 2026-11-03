@@ -708,6 +708,27 @@ def test_the_tables_name_cells_clones_and_fates() -> None:
     ]
     assert table["n_early_cells"].tolist() == [1, 1, 1, 1, 0, 0]
     assert table["fraction"].tolist() == [1.0, 0.0, 0.0, 1.0, 0.0, 1.0]
+    # Each column of the fractions needs a fate's name of its own.
+    for fates, message in (
+        (["Neu"], "name each of the 2 groups, not 1"),
+        (["Neu", "Neu"], "'Neu' names two"),
+        (pd.DataFrame({"group": ["Neu", "Mono"]}), "one text name"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            fate_bias_tables(
+                np.array(["e0", "e1", "e2"]),
+                codes=np.array([0, -1, 1]),
+                dominant=result.dominant,
+                late_cells=result.late_cells,
+                fractions=result.fractions,
+                clone_ids=np.array(["c0", "c1", "c2"], dtype=object),
+                clones=result.clones,
+                clone_cells=result.clone_cells,
+                clone_early_cells=result.clone_early_cells,
+                p_values=result.p_values,
+                q_values=result.q_values,
+                fates=fates,
+            )
 
 
 def test_a_clones_cells_in_any_order_couple_to_the_last_bit() -> None:

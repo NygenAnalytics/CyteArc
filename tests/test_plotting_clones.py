@@ -1516,3 +1516,59 @@ def test_the_fates_plot_draws_clones_without_a_dominant_fate_last(fates_plot) ->
     # Clones without a dominant fate come after every other clone.
     assert tied[-1] and not tied[:-1].any()
     plt.close(result.figure)
+
+
+def test_a_regrouped_expansion_of_a_label_artifact_keeps_apart_only_its_kept_labels(
+    truth_plot, truth_clonotypes
+) -> None:
+    store = truth_plot.store
+    # Clonotypes measured within the cell types of a label artifact, whose
+    # groups' keys are the label artifact's kind and then the receptor type.
+    expansion = store.clones.expansion(truth_clonotypes, groups=truth_plot.labels)
+    assert store.clones.load_expansion(expansion).group_keys.columns.tolist() == [
+        "cluster_labels",
+        "receptor_type",
+    ]
+    result = clonal_expansion(store, expansion, group_by="sample", show=False)
+    result.close()
+    # Regrouped by sample, each cell keeps its receptor type, which the
+    # clonotypes keep apart, and leaves its cell type, which only grouped
+    # the expansion; the groups are the samples by receptor type of the cells
+    # with a clonotype.
+    clones = store.clones.load_clones(truth_clonotypes).cells.loc[TRUTH.cell_ids]
+    with_clone = clones["clone"].notna().to_numpy()
+    expected = {
+        f"{sample}, {kind}"
+        for sample, kind in zip(
+            TRUTH.samples[with_clone],
+            clones["receptor_type"].astype(str).to_numpy()[with_clone],
+            strict=True,
+        )
+    }
+    assert set(result.tables["categories"]["group"]) == expected
+    assert result.provenance.extras["grouping"] == "sample, receptor_type"
+
+
+def test_default_figure_sizes_follow_the_clones_and_groups_drawn(
+    truth_plot, many_groups, truth_clonotypes
+) -> None:
+    # The largest clones' panel grows with the clones drawn, not with the
+    # rows of its table, one per clone and group: 20 clones in 200 groups.
+    store = many_groups.store
+    result = clone_abundance(
+        store, many_groups.clones, group_by="cell", max_clones=20, show=False
+    )
+    size = tuple(result.figure.get_size_inches())
+    result.close()
+    assert len(result.tables["top"]) == 20 * 200
+    assert size == pytest.approx((12.0, 6.8))
+    # receptor_qc widens with its groups, half an inch each: a label for each
+    # of the truth's 48 cells.
+    store = truth_plot.store
+    store.cells.insert("own", TRUTH.cell_ids.astype(object), overwrite=True)
+    receptors = store.artifacts.inspect(truth_clonotypes).input_ref("receptors")
+    qc = store.plots.receptor_qc(receptors, group_by="own", show=False)
+    size = tuple(qc.figure.get_size_inches())
+    qc.close()
+    assert qc.tables["receptor_type"]["group"].nunique() == N_CELLS
+    assert size == pytest.approx((4.0 + 0.5 * N_CELLS, 4.4))

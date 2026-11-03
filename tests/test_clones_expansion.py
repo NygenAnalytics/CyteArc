@@ -425,3 +425,23 @@ def test_tables_without_clones_or_key_columns() -> None:
     assert table["group"].tolist() == ["all cells", "all cells"]
     assert table["fraction"].isna().all()
     assert ranks["n_cells"].tolist() == [0, 0]
+
+
+def test_tables_take_one_text_name_for_each_group() -> None:
+    for names, message in (
+        (pd.DataFrame({"group": ["A"], "sample": ["A"]}), "one text name"),
+        (["A", "A"], "'A' names two"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            expansion_tables(
+                np.asarray(["cell0", "cell1"]),
+                categories=np.array([0, 0]),
+                labels=("1 cell",),
+                clones=np.array([0, 1]),
+                clone_ids=np.asarray(["c1", "c2"]),
+                groups=np.array([0, 0]),
+                group_names=names,
+                sizes=np.ones(2, dtype=int),
+                frequencies=np.full(2, 0.5),
+                splits=(10,),
+            )

@@ -325,3 +325,21 @@ def test_an_empty_table_keeps_the_types_of_its_columns() -> None:
     for column in ("group", "length", "n_cells", "fraction"):
         assert empty[column].dtype == full[column].dtype, column
     assert empty["n_cells"].dtype == np.int64 and empty["fraction"].dtype == np.float64
+
+
+def test_chains_are_counted_only_for_one_text_name_per_group() -> None:
+    # A frame of names and labels, whose rows pandas reads as tuples, and
+    # repeated names name no group.
+    for names, message in (
+        (pd.DataFrame({"group": ["s1", "s2"], "sample": ["s1", "s2"]}), "one text"),
+        (["s1", "s1"], "'s1' names two"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            count_chains(
+                names,
+                np.asarray([0, 1]),
+                np.asarray([0, 1]),
+                (np.zeros(2, dtype=np.int64), np.asarray(["TRB"], dtype=object)),
+                {"length": (np.asarray([1, 2]), np.arange(3))},
+                "cells",
+            )

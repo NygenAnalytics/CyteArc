@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cytearc.clones.groups import group_key_table, group_names, pair_counts
+from cytearc.clones.groups import (
+    checked_group_names,
+    group_key_table,
+    group_names,
+    pair_counts,
+)
 
 
 def _pairs(groups: np.ndarray, clones: np.ndarray):
@@ -94,3 +99,22 @@ def test_key_columns_may_take_the_names_of_the_index_and_of_a_tables_columns() -
         "group_label": ["g2", "g1", "g2"],
         "n_cells_label": ["y", "x", "y"],
     }
+
+
+def test_group_names_are_one_text_name_for_each_group() -> None:
+    keys = group_key_table(("sample",), [{"sample": "s1"}, {"sample": "s2"}])
+    assert checked_group_names(["s1", "s2"], 2).tolist() == ["s1", "s2"]
+    assert checked_group_names(keys.index).tolist() == ["s1", "s2"]
+    assert checked_group_names([], 0).tolist() == []
+    # A frame of names and labels, which pandas would read row by row as
+    # tuples, names no group.
+    frame = keys.reset_index()
+    for given in (frame, frame.to_numpy(), [("s1",), ("s2",)], [("s1", "a")], [1, 2]):
+        with pytest.raises(ValueError, match="one text name for each group"):
+            checked_group_names(given)
+    with pytest.raises(ValueError, match="name each of the 3 groups, not 2"):
+        checked_group_names(["s1", "s2"], 3)
+    with pytest.raises(ValueError, match="'s1' names two"):
+        checked_group_names(["s1", "s2", "s1"])
+    with pytest.raises(ValueError, match="one text name for each group"):
+        checked_group_names(["s1", None])
