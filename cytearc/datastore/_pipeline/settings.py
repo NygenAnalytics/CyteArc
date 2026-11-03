@@ -29,7 +29,7 @@ from ...perturbation.profiles import profile_settings
 from ...perturbation.signature import signature_settings
 from ...quality_control.cell_calling import validated_fdr, validated_settings
 from ...quality_control.hto import _validated_positive_quantile
-from ...utils.arguments import integer_argument
+from ...utils.arguments import bool_argument, integer_argument
 from ...utils.logging import logger
 from .._operations.cell_calling import _CellCallingOperationsMixin
 from .._operations.embeddings import _EmbeddingOperationsMixin
@@ -522,10 +522,10 @@ def stage_settings(
     """
     if allowed is None:
         allowed = STAGE_SETTINGS[stage]
-    if isinstance(value, bool):
+    if isinstance(value, bool | np.bool_):
         if not optional:
             raise TypeError(f"{stage} must be a mapping because the stage always runs")
-        return value, {}
+        return bool_argument(value, stage), {}
     if value is None and not optional:
         return True, {}
     if not isinstance(value, Mapping):

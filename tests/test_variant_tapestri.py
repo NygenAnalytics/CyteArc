@@ -1201,7 +1201,7 @@ def test_a_source_must_give_each_call_one_quality() -> None:
         buffer_bytes=1 << 20,
     )
 
-    def add(quality: np.ndarray) -> None:
+    def add(quality: np.ndarray, call_fields: tuple[str, ...] = ("quality",)) -> None:
         _VariantOperationsMixin._add_variant_batch(
             sorter,
             EntryBatch(
@@ -1222,11 +1222,15 @@ def test_a_source_must_give_each_call_one_quality() -> None:
             call_values=_Vocabulary(),
             path="run.h5",
             field_paths={},
+            call_fields=call_fields,
         )
 
     with sorter:
         with pytest.raises(ValueError, match="run.h5 gives 1 call qualities for 2"):
             add(np.asarray([30.0]))
+        # A source whose format lists no call quality may not give one.
+        with pytest.raises(ValueError, match="run.h5 gives call qualities, which"):
+            add(np.asarray([30.0, 99.0]), call_fields=())
         add(np.asarray([30.0, 99.0]))
         add(np.empty(0))
         rows = next(sorter.bands(10))[2]["calls"]

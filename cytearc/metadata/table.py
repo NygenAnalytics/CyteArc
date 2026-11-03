@@ -32,6 +32,7 @@ from .rows import (
     default_block_rows as _default_block_rows,
     iter_row_blocks as _iter_row_blocks,
 )
+from ..utils.arguments import bool_argument
 
 _RESERVED_COLUMNS = ("I", "ids", "names")
 _RESERVED_COLUMN_SET = frozenset(_RESERVED_COLUMNS)
@@ -470,6 +471,7 @@ class MetaData:
 
     def index_to_bool(self, idx: np.ndarray, invert: bool = False) -> np.ndarray:
         """Convert row indices into a table-sized boolean array."""
+        invert = bool_argument(invert, "invert")
         values = np.zeros(self.N, dtype=bool)
         if len(idx) > 0:
             values[idx] = True
@@ -500,6 +502,8 @@ class MetaData:
                 Zarr reads as path separators, or if a Series is labelled by
                 anything other than those ids.
         """
+        overwrite = bool_argument(overwrite, "overwrite")
+        force = bool_argument(force, "force")
         validate_metadata_column_name(column_name)
         if column_name in ["I", "ids"] and force is False:
             raise ValueError(
@@ -577,6 +581,7 @@ class MetaData:
 
         Rows flagged by the column's linked missing mask never pass.
         """
+        keep_bounds = bool_argument(keep_bounds, "keep_bounds")
         return _sift(self, column, min_v, max_v, keep_bounds)
 
     def multi_sift(
@@ -587,6 +592,7 @@ class MetaData:
         keep_bounds: bool = False,
     ) -> np.ndarray:
         """Return a boolean mask where all column filters are satisfied."""
+        keep_bounds = bool_argument(keep_bounds, "keep_bounds")
         return _multi_sift(self, columns, lows, highs, keep_bounds)
 
     def head(self, n: int = 5) -> pd.DataFrame:
@@ -611,6 +617,7 @@ class MetaData:
 
     def grep(self, pattern: str, only_valid: bool = False) -> list[str]:
         """Return the stored names that match a case-insensitive regex, sorted, once each."""
+        only_valid = bool_argument(only_valid, "only_valid")
         return _grep(self, pattern, only_valid)
 
     def __repr__(self) -> str:

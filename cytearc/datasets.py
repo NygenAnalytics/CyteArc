@@ -22,6 +22,7 @@ from huggingface_hub import (
 )
 from huggingface_hub.utils import disable_progress_bars
 
+from .utils.arguments import bool_argument
 from .utils.logging import progress_enabled
 
 __all__ = ["Repository", "connect", "list_repositories"]
@@ -162,7 +163,15 @@ class Repository:
         *,
         zarr: bool = False,
     ) -> Path:
-        """Download one dataset, optionally selecting its Zarr archive."""
+        """Download one dataset, optionally selecting its Zarr archive.
+
+        Raises:
+            TypeError: If ``zarr`` is not a boolean.
+            KeyError: If the repository holds no such dataset.
+            FileNotFoundError: If ``zarr`` is set and the dataset has no Zarr
+                archive.
+        """
+        zarr = bool_argument(zarr, "zarr")
         name = _safe_name(name, kind="dataset name")
         destination = Path(destination).absolute()
         if zarr:

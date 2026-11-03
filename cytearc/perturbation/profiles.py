@@ -83,7 +83,7 @@ def profile_settings(
     """
     rows_setting(by)
     floor = integer_argument(min_cells, "min_cells", minimum=1)
-    bool_argument(mask_targets, "mask_targets")
+    mask_targets = bool_argument(mask_targets, "mask_targets")
     id_column_setting(id_column)
     optional_name_argument(sample_column, "sample_column")
     return floor

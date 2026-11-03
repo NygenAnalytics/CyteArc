@@ -11,7 +11,7 @@ from ....metadata.selection import valid_category_mask
 from ....storage.artifacts import ArtifactRef
 from ....storage.selections import read_stored_selection_mask
 from ....storage.types import as_zarr_group
-from ....utils.arguments import integer_argument
+from ....utils.arguments import bool_argument, integer_argument
 from ..executor import PlannedStage
 from ..fields import reserved_fields
 from ..filtering import filter_columns, resolve_filtering, snapshot_column_values
@@ -119,12 +119,6 @@ def resolve_label(label: object) -> str | None:
     if not isinstance(label, str) or not label:
         raise TypeError("label must be a non-empty string or None")
     return label
-
-
-def require_bool(value: object, name: str) -> bool:
-    if not isinstance(value, bool):
-        raise TypeError(f"{name} must be a boolean")
-    return value
 
 
 def modality_assay(
@@ -450,6 +444,8 @@ def resolve_run_filtering(
     """
     if filtering is None:
         filtering = default_on and (qc_stages or cells.column is not None)
+    if isinstance(filtering, np.bool_):
+        filtering = bool_argument(filtering, "filtering")
     if not isinstance(filtering, bool | Mapping):
         raise TypeError("filtering must be a mapping, bool, or None")
     config = resolve_filtering(store, filtering, default_attrs=default_attrs)

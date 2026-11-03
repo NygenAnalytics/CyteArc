@@ -50,6 +50,7 @@ from ._store import (
     keyed_metadata_columns,
     resolve_import_cell_selection,
 )
+from ..utils.arguments import bool_argument
 
 if TYPE_CHECKING:
     from ..storage.identity import CountSummary
@@ -225,6 +226,7 @@ class SeuratToZarr:
         overwrite: bool = False,
         default_assay: str | None = None,
     ) -> None:
+        overwrite = bool_argument(overwrite, "overwrite")
         from ..storage.budget import resolve_budget
         from ..storage.schema import (
             create_empty_cell_data,

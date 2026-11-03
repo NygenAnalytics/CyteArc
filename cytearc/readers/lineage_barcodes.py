@@ -92,6 +92,7 @@ from .cellranger import (
     iter_molecule_info,
     molecule_info_library,
 )
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "BARCODE_FORMATS",
@@ -383,7 +384,7 @@ def _file_library(path: str, library: str | None) -> str:
     stem = Path(path).name.split(".", 1)[0]
     if not stem:
         raise ValueError(
-            f"The barcode file {path!r} has no name before its extensions to name "
+            f"The barcode file {quoted_value(path)} has no name before its extensions to name "
             "its library; give it a library"
         )
     return stem
@@ -411,7 +412,7 @@ def _role_columns(columns: Any) -> dict[str, Any]:
                 raise ValueError(
                     "columns['separator'] must be one of "
                     + ", ".join(map(repr, LIST_SEPARATORS))
-                    + f", not {value!r}"
+                    + f", not {quoted_value(value)}"
                 )
             resolved[role] = value
             continue
@@ -431,9 +432,9 @@ def _role_columns(columns: Any) -> dict[str, Any]:
                 if role in ("cell", "barcode")
                 else "a column name"
             )
-            raise TypeError(f"columns[{role!r}] must be {what}")
+            raise TypeError(f"columns[{quoted_value(role)}] must be {what}")
         if any(not name for name in names):
-            raise ValueError(f"columns[{role!r}] names an empty column")
+            raise ValueError(f"columns[{quoted_value(role)}] names an empty column")
         resolved[role] = names
     return resolved
 
@@ -518,7 +519,7 @@ def _headerless_layout(path: str, found: str | None, format: str) -> TextLayout:
     if n_fields != len(names):
         raise ValueError(
             f"{path} has no header, so it must hold the {len(names)} columns of "
-            f"format={format!r} in order, but its first row holds {n_fields} fields"
+            f"format={quoted_value(format)} in order, but its first row holds {n_fields} fields"
         )
     return TextLayout(
         path=path,
@@ -637,14 +638,14 @@ def _table_layout(
     refused = sorted(set(roles) - allowed)
     if refused:
         raise ValueError(
-            f"format={format!r} reads no column for "
+            f"format={quoted_value(format)} reads no column for "
             + ", ".join(map(repr, refused))
             + "; its roles are "
             + ", ".join(map(repr, sorted(allowed)))
         )
     if "barcode" not in roles:
         raise ValueError(
-            f"format={format!r} needs the barcode column: columns={{'barcode': ...}}"
+            f"format={quoted_value(format)} needs the barcode column: columns={{'barcode': ...}}"
         )
     if format == "molecules" and "umi" not in roles:
         raise ValueError(
@@ -702,7 +703,7 @@ def _h5ad_layout(path: str, library: str, roles: dict[str, Any]) -> BarcodeLayou
         raise ValueError("X counts UMIs or reads, so name one of them in columns")
     if counts and roles[counts[0]][0] != "X":
         raise ValueError(
-            f"columns[{counts[0]!r}] must name 'X', the counts of the file"
+            f"columns[{quoted_value(counts[0])}] must name 'X', the counts of the file"
         )
     library_column = roles["library"][0] if "library" in roles else None
     with h5py.File(path, "r") as handle:
@@ -714,7 +715,7 @@ def _h5ad_layout(path: str, library: str, roles: dict[str, Any]) -> BarcodeLayou
         if "X" not in handle:
             raise ValueError(f"{path} has no X matrix of barcode counts")
         if library_column is not None and library_column not in obs:
-            raise ValueError(f"{path} has no obs column {library_column!r}")
+            raise ValueError(f"{path} has no obs column {quoted_value(library_column)}")
         matrix = _matrix(handle, path)
     return BarcodeLayout(
         format="h5ad",
@@ -806,7 +807,7 @@ def _name_blocks(node: Any, path: str) -> Iterator[list[str]]:
         if np.any(missing):
             row = start + int(np.flatnonzero(missing)[0]) + 1
             raise ValueError(
-                f"{path} has a name missing from the index {node.name!r}, the first "
+                f"{path} has a name missing from the index {quoted_value(node.name)}, the first "
                 f"in row {row}"
             )
         yield [as_text(value) for value in np.asarray(values).tolist()]
@@ -827,7 +828,7 @@ def _library_blocks(
         )
         if np.any(np.asarray(absent, dtype=bool)):
             raise ValueError(
-                f"The obs column {column!r} of {path} lacks the library of some cells"
+                f"The obs column {quoted_value(column)} of {path} lacks the library of some cells"
             )
         yield [as_text(value) for value in np.asarray(labels).tolist()]
 
@@ -912,7 +913,7 @@ def barcode_layout(
     if format is not None and format not in BARCODE_FORMATS:
         raise ValueError(
             f"format must be one of {', '.join(BARCODE_FORMATS)}, or None, not "
-            f"{format!r}"
+            f"{quoted_value(format)}"
         )
     if library is not None and not isinstance(library, str):
         raise TypeError("library must be text or None")
@@ -927,7 +928,11 @@ def barcode_layout(
         raise ValueError(
             "columns names the columns of a table read with format='reads', "
             "'molecules' or 'pairs', or of an AnnData file read with format='h5ad'"
-            + ("" if format is None else f"; format={format!r} reads fixed columns")
+            + (
+                ""
+                if format is None
+                else f"; format={quoted_value(format)} reads fixed columns"
+            )
         )
     if roles.get("library") is not None and library is not None:
         raise ValueError(
@@ -935,7 +940,9 @@ def barcode_layout(
         )
     if head.startswith(HDF5_SIGNATURE):
         if format is not None and format not in _HDF5_FORMATS:
-            raise ValueError(f"{name} is an HDF5 file, not format={format!r}")
+            raise ValueError(
+                f"{name} is an HDF5 file, not format={quoted_value(format)}"
+            )
         if format == "molecule_info" or (format is None and is_molecule_info(name)):
             molecules = molecule_info_library(name, library)
             return BarcodeLayout(
@@ -949,7 +956,7 @@ def barcode_layout(
             )
         return _h5ad_layout(name, _file_library(name, library), roles)
     if format in _HDF5_FORMATS:
-        raise ValueError(f"{name} is a text table, not format={format!r}")
+        raise ValueError(f"{name} is a text table, not format={quoted_value(format)}")
     file_library = _file_library(name, library)
     found = compression(name)
     if format in TABLE_FORMATS:
@@ -965,7 +972,7 @@ def barcode_layout(
         text = text_layout(name, what="a barcode table")
         detected = _detected_text_format(text)
         if detected is None:
-            shown = ", ".join(repr(column) for column in text.names if column)
+            shown = ", ".join(quoted_value(column) for column in text.names if column)
             raise ValueError(
                 f"{name} has the columns {shown}, which match no barcode table "
                 "that CyteArc knows" + _hint(text)
@@ -1124,13 +1131,13 @@ def _item_counts(
     if bad.any():
         raise ValueError(
             f"{name} must be a whole number of at least 0, but holds "
-            f"{str(items[np.flatnonzero(bad)[0]]).strip()!r} on "
+            f"{quoted_value(str(items[np.flatnonzero(bad)[0]]).strip())} on "
             + _on_lines(sorted_unique(origin[bad]), first_line, text)
         )
     if huge.any():
         raise ValueError(
             f"{name} holds a number too large for int64, "
-            f"{str(items[np.flatnonzero(huge)[0]]).strip()!r}, on "
+            f"{quoted_value(str(items[np.flatnonzero(huge)[0]]).strip())}, on "
             + _on_lines(sorted_unique(origin[huge]), first_line, text)
         )
     return counts
@@ -1216,7 +1223,7 @@ def _check_pycashier(
     if len(bad):
         raise ValueError(
             f"pycashier's cell and umi fields must be nucleotide sequences, but "
-            f"{text.path} holds {str(cells[bad[0]])!r} and {str(umis[bad[0]])!r} on "
+            f"{text.path} holds {quoted_value(str(cells[bad[0]]))} and {quoted_value(str(umis[bad[0]]))} on "
             + _on_lines(bad, first_line, text)
             + "; a read name that holds '_' shifts the fields of its row"
         )
@@ -1232,7 +1239,7 @@ def _refuse_unfilled(
         raise ValueError(
             f"{layout.path} has rows without {column} on "
             + _on_lines(rows, first_line, layout._text)
-            + f", which format={layout.format!r} fills in every row; the file may "
+            + f", which format={quoted_value(layout.format)} fills in every row; the file may "
             "be cut short"
         )
 
@@ -1362,8 +1369,8 @@ def _refuse_wide_lines(
     if len(wrong):
         row, column = divmod(int(wrong[0]), len(positions))
         raise ValueError(
-            f"{layout.path} holds {str(block[row, column]).strip()!r} as the count "
-            f"of barcode {text.names[positions[column]]!r} on "
+            f"{layout.path} holds {quoted_value(str(block[row, column]).strip())} as the count "
+            f"of barcode {quoted_value(text.names[positions[column]])} on "
             + file_lines(numbers[sorted_unique(wrong // len(positions))], 0)
             + "; every field of QuiCAT's merged table holds a count of UMIs, a "
             "whole number of at least 0 and below 2**63"

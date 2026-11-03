@@ -15,6 +15,7 @@ from ..storage.profiles import (
 from ..utils.arrays import assay_feature_ranges
 from ..utils.logging import logger
 from ..utils.progress import iter_progress
+from ..utils.arguments import bool_argument
 
 
 class CrToZarr:
@@ -77,6 +78,7 @@ class CrToZarr:
         *,
         overwrite: bool = False,
     ) -> None:
+        overwrite = bool_argument(overwrite, "overwrite")
         from ..storage.budget import resolve_budget
         from ..storage.schema import (
             create_cell_data,

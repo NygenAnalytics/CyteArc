@@ -56,6 +56,7 @@ from ._style import (
     size_legend_layout,
     theme_context,
 )
+from ..utils.arguments import bool_argument
 
 
 def _wrap_tick_labels(values: Sequence[Any], width: int | None) -> list[str]:
@@ -404,6 +405,10 @@ def dotplot(
     equally: CyteArc first summarizes within sample, then averages across samples.
     Without it, every cell contributes equally.
     """
+    swap_axes = bool_argument(swap_axes, "swap_axes")
+    italicize_features = bool_argument(italicize_features, "italicize_features")
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     _, mpl = require_matplotlib()
     color_scale = color_scale or ColorScale(cmap="viridis")
     if color_scale.scale != "linear":
@@ -836,6 +841,10 @@ def matrixplot(
     ``feature_group`` and ``feature``. Grouped rows keep their groups, so they
     cannot be clustered.
     """
+    cluster_features = bool_argument(cluster_features, "cluster_features")
+    cluster_groups = bool_argument(cluster_groups, "cluster_groups")
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     _, mpl = require_matplotlib()
     if value not in ("mean", "fraction"):
         raise ValueError("value must be 'mean' or 'fraction'")

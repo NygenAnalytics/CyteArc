@@ -39,6 +39,7 @@ from typing import Literal
 
 import numpy as np
 
+from ..utils.arguments import bool_argument, quoted_value
 from ..utils.arrays import unique_inverse
 from ..utils.digest import mix64
 from ..utils.numba import njit
@@ -661,8 +662,7 @@ def jaccard_edges(
     """
     limit = _max_bytes(max_bytes)
     within = _similarity(similarity, "similarity")
-    if not isinstance(inclusive, bool | np.bool_):
-        raise TypeError("inclusive must be a boolean")
+    inclusive = bool_argument(inclusive, "inclusive")
     n_nodes = nodes.n_nodes
     if across is None:
         if modalities is not None:
@@ -1194,10 +1194,15 @@ def set_clones(
     limit = _max_bytes(max_bytes)
     if method not in CALLING_METHODS:
         raise ValueError(f"method must be one of {', '.join(CALLING_METHODS)}")
-    flags = (("prune", prune), ("doublets", doublets), ("ambiguous", ambiguous))
-    for name, flag in flags:
-        if not isinstance(flag, bool | np.bool_):
-            raise TypeError(f"{name} must be a boolean")
+    flags = tuple(
+        (name, bool_argument(flag, name))
+        for name, flag in (
+            ("prune", prune),
+            ("doublets", doublets),
+            ("ambiguous", ambiguous),
+        )
+    )
+    prune, doublets, ambiguous = (flag for _name, flag in flags)
     if isinstance(min_size, bool | np.bool_) or not isinstance(
         min_size, int | np.integer
     ):
@@ -1224,7 +1229,7 @@ def set_clones(
                 else "links the sets that share any item"
             )
             raise ValueError(
-                f"method={method!r} {rule}, so {', '.join(given)} would change "
+                f"method={quoted_value(method)} {rule}, so {', '.join(given)} would change "
                 "nothing; use method='jaccard'"
             )
     elif similarity is None or inclusive is None:

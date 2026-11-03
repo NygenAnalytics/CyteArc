@@ -29,10 +29,10 @@ from ..stages import (
 )
 from ..summaries import summarize_stage
 from ...pipeline_run import PipelineRun
+from ....utils.arguments import bool_argument
 from .common import (
     check_tsne,
     resolve_embeddings,
-    require_bool,
     resolve_label,
     resolve_snapshot_columns,
     run_reserved_fields,
@@ -253,8 +253,8 @@ def resolve_multimodal(
         raise ValueError("method must be 'wnn' or 'snn'")
     resolved_label = resolve_label(label)
     sources, selection = _resolve_runs(store, runs, method)
-    membership_strength = require_bool(membership_strength, "membership_strength")
-    markers = require_bool(markers, "markers")
+    membership_strength = bool_argument(membership_strength, "membership_strength")
+    markers = bool_argument(markers, "markers")
     _integration, integration_settings = stage_settings(
         "integration", integration, optional=False
     )

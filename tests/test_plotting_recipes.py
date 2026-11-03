@@ -602,12 +602,12 @@ def test_inline_json_is_parsed_as_text_when_the_file_check_fails(
         (
             {"filename": "plot.png", "transparent": 1},
             TypeError,
-            "flags must be boolean",
+            "^transparent must be a boolean$",
         ),
         (
             {"filename": "plot.png", "exact_size": 0},
             TypeError,
-            "flags must be boolean",
+            "^exact_size must be a boolean$",
         ),
     ],
 )

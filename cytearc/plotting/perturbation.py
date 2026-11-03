@@ -16,7 +16,7 @@ from ..perturbation.mixtures import (
     poisson_gaussian_posterior,
 )
 from ..storage.refs import ArtifactRef
-from ..utils.arguments import float_argument, integer_argument
+from ..utils.arguments import bool_argument, float_argument, integer_argument
 from ._contracts import CategoricalScale, ColorScale, PlotProvenance
 from ._deps import require_matplotlib
 from ._figure import (
@@ -225,6 +225,8 @@ def guide_calls(
     of its guide UMIs may carry one guide and ambient molecules of the others.
     The plot raises ValueError when the calls hold no cell.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     max_guides_per_cell = integer_argument(
         max_guides_per_cell, "max_guides_per_cell", minimum=2
     )
@@ -839,6 +841,8 @@ def guide_thresholds(
     each drawn count: every count when the guide's largest is at most 1,000,
     and otherwise 1,000 counts spread evenly on the log scale.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     max_panels = integer_argument(max_panels, "max_panels", minimum=1)
     # The guides index of a loaded record, or an array, names guides as a
     # list does, as load_guide_thresholds takes them.
@@ -1105,6 +1109,8 @@ def efficiency(
     no row was tested. The table ``"efficiency"`` holds
     the drawn rows of the record, with every column, in drawing order.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     max_rows = integer_argument(max_rows, "max_rows", minimum=1)
     alpha = _alpha_argument(alpha)
     loaded = _load(store, "load_efficiency", efficiency)
@@ -1244,6 +1250,8 @@ def edistance(
     counts them by status; the plot raises ValueError when no row was tested. The table ``"edistance"`` holds the drawn rows of the
     record, with every column, in drawing order.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     max_rows = integer_argument(max_rows, "max_rows", minimum=1)
     alpha = _alpha_argument(alpha)
     loaded = _load(store, "load_edistance", edistance)
@@ -1733,6 +1741,8 @@ def mixscape(
     crowded figure. A title counts a target whose splits have different
     statuses under each status.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if not isinstance(panel, str) or panel not in (_CLASSES_PANEL, _SCORES_PANEL):
         raise ValueError(f"panel must be 'classes' or 'scores', not {panel!r}")
     max_targets = integer_argument(max_targets, "max_targets", minimum=1)
@@ -2085,6 +2095,8 @@ def association_volcano(
     largest, ties broken as for the labels, so its first ``label_top`` rows
     are the labelled pairs.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     label_top = integer_argument(label_top, "label_top", minimum=0)
     requested = _distinct_values(targets, "targets", "target")
     loaded = _load(store, "load_associations", tests)
@@ -2637,6 +2649,8 @@ def association_calibration(
     ``bin_stop`` and ``pairs``; and ``"controls"`` holds the drawn controls
     with ``set``, ``target``, ``feature`` and ``p_value``.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     loaded = _load(store, "load_associations", tests)
     side = str(loaded.side)
     alpha = float(loaded.alpha)
@@ -3105,6 +3119,8 @@ def perturbation_clusters(
     and the cluster numbers. The table ``"perturbations"`` holds the drawn
     rows of the record's table, indexed by perturbation, in leaf order.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if not isinstance(panel, str) or panel not in (_HEATMAP_PANEL, _EMBEDDING_PANEL):
         raise ValueError(f"panel must be 'heatmap' or 'embedding', not {panel!r}")
     requested = _distinct_values(perturbations, "perturbations", "perturbation")

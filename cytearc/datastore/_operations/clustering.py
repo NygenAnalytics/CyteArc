@@ -27,7 +27,7 @@ from ...storage.artifact_writer import (
 from ...storage.arrays import create_zarr_dataset
 from ...storage.types import as_zarr_array, as_zarr_group
 from ...storage.errors import ArtifactResolutionError
-from ...utils.arguments import integer_argument
+from ...utils.arguments import bool_argument, integer_argument
 from ...utils.logging import logger
 from ...utils.shutdown import shutdown_checkpoint
 
@@ -520,6 +520,9 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
             PermissionError: If new labels are needed and the store is not
                 opened with ``zarr_mode='r+'``, before the graph is read.
         """
+        symmetric_graph = bool_argument(symmetric_graph, "symmetric_graph")
+        graph_upper_only = bool_argument(graph_upper_only, "graph_upper_only")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         return self._run_leiden_artifact(
             graph,
             resolution=resolution,
@@ -662,6 +665,7 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
         exactly that many clusters at one height. Otherwise a ``ValueError``
         names the alternatives, such as ``n_clusters='auto'``.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         return self._run_paris_artifact(
             graph,
             n_clusters=n_clusters,

@@ -12,7 +12,7 @@ from ..clones.expansion import DEFAULT_RANK_SPLITS, rank_window_labels, rank_win
 from ..clones.groups import group_names
 from ..clones.overlap import OVERLAP_INDICES
 from ..storage.refs import ArtifactRef
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument, quoted_value
 from ..utils.arrays import sort_categories, sorted_unique, unique_rows
 from ._contracts import PlotProvenance
 from ._deps import require_matplotlib
@@ -170,12 +170,25 @@ def clone_abundance(
 
     Tables: ``sizes`` (``group``, ``clone_size``, ``n_clones``) and ``top``
     (``clone``, ``label``, then the cells of each group, or ``n_cells``).
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If ``clones`` is not a clone artifact, ``group_by``
+            names a column whose labels the clones keep apart, no cell, or
+            no cell with a group, has a clone, or a group is named like a
+            column of the table of the largest clones.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact does not fit the memory budget.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     top = integer_argument(top, "top", minimum=1)
     loaded = _load_clones(store, clones)
     if group_by in loaded.kept_apart:
         raise ValueError(
-            f"group_by names {group_by!r}, whose labels the clones keep apart "
+            f"group_by names {quoted_value(group_by)}, whose labels the clones keep apart "
             "already; leave it out, or copy the cell metadata column under "
             "another name"
         )
@@ -210,7 +223,7 @@ def clone_abundance(
     clashing = sorted({"clone", "label"} & {str(name) for name in group_order})
     if clashing:
         raise ValueError(
-            f"A group is named {clashing[0]!r}, which the table of the largest "
+            f"A group is named {quoted_value(clashing[0])}, which the table of the largest "
             "clones uses for a column of its own; rename that label"
         )
     pair_groups = np.searchsorted(held, pairs // n_clones)
@@ -415,11 +428,23 @@ def clonal_expansion(
     Tables: ``categories`` (``group``, ``category``, then ``n_cells`` or
     ``n_clones``, and ``fraction``) and ``rank_windows`` (``group``,
     ``window``, ``n_cells`` and ``fraction``).
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If ``expansion`` is not a ``clonal_expansion``
+            artifact, ``count`` is neither ``"cells"`` nor
+            ``"clones"``, or ``group_by`` names a column whose labels the
+            clones keep apart.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact does not fit the memory budget.
     """
+    normalize = bool_argument(normalize, "normalize")
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if count not in ("cells", "clones"):
         raise ValueError("count must be 'cells' or 'clones'")
-    if not isinstance(normalize, bool):
-        raise TypeError("normalize must be a boolean")
     loaded = _clones_method(store, "load_expansion")(expansion, splits=splits)
     # The expansion's key columns lie between the group's name and the
     # category; those of neither its group_by nor its label artifact hold the
@@ -430,7 +455,7 @@ def clonal_expansion(
     kept_apart = [column for column in key_columns if column not in own]
     if group_by in kept_apart:
         raise ValueError(
-            f"group_by names {group_by!r}, whose labels the clones keep apart "
+            f"group_by names {quoted_value(group_by)}, whose labels the clones keep apart "
             "already; leave it out, or copy the cell metadata column under "
             "another name"
         )
@@ -593,7 +618,19 @@ def clonal_rarefaction(
 
     Tables: ``curves`` (``group``, the groups' key columns, ``order``,
     ``size``, ``method``, ``diversity``, ``coverage``).
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If ``clones`` is not a clone artifact, ``base`` is
+            neither ``"size"`` nor ``"coverage"``, or the summary
+            refuses its groups, as ``ds.clones.diversity`` does.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact does not fit the memory budget.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if base not in ("size", "coverage"):
         raise ValueError("base must be 'size' or 'coverage'")
     result = _clones_method(store, "rarefaction")(
@@ -737,7 +774,19 @@ def clonal_overlap(
     figure grows with the groups up to the width of a page.
 
     Tables: ``matrix`` (groups by groups) and ``pairs``.
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If ``clones`` is not a clone artifact, ``index`` is not
+            an overlap index, or the summary refuses its groups, as
+            ``ds.clones.overlap`` does.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact does not fit the memory budget.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if index not in OVERLAP_INDICES:
         raise ValueError(f"index must be one of {', '.join(OVERLAP_INDICES)}")
     result = _clones_method(store, "overlap")(
@@ -859,7 +908,20 @@ def clone_tracking(
 
     Tables: ``cells``, the record's ``table`` (``clone``, ``group``, the key
     columns, ``n_cells`` and ``fraction``).
+
+    Raises:
+        TypeError: If an argument has the wrong type, or ``order`` is not a
+            sequence of group names.
+        ValueError: If ``clones`` is not a clone artifact, ``order`` does
+            not list the groups, or the summary refuses its groups, as
+            ``ds.clones.track`` does.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact does not fit the memory budget.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if order is not None:
         if isinstance(order, np.ndarray) and order.ndim == 1:
             order = order.tolist()
@@ -1021,7 +1083,15 @@ def clone_coupling(
     figure grows with the groups up to the width of a page.
 
     Tables: ``matrix`` (groups by groups, in the drawn order) and ``pairs``.
+
+    Raises:
+        TypeError: If ``coupling`` is not a ``CloneCoupling`` record, or
+            another argument has the wrong type.
+        ValueError: If ``value`` is unknown, or names z-scores of a
+            coupling measured without permutations.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if not isinstance(coupling, CloneCoupling):
         raise TypeError("coupling must be the CloneCoupling of ds.clones.coupling")
     if value not in _COUPLING_VALUES:
@@ -1167,10 +1237,19 @@ def clone_fates(
     Tables: ``clones`` (``clone``, ``fate``, the dominant fate, missing for a
     tie, ``n_early_cells``, ``n_late_cells``, then the late cells of each
     fate).
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If ``bias`` is not a ``clone_fate_bias`` artifact.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact does not fit the memory budget.
     """
+    normalize = bool_argument(normalize, "normalize")
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     top = integer_argument(top, "top", minimum=1)
-    if not isinstance(normalize, bool):
-        raise TypeError("normalize must be a boolean")
     loaded = _clones_method(store, "load_fate_bias")(bias)
     fate_names = [str(name) for name in loaded.fates["fate"].tolist()]
     rows = loaded.clone_fates

@@ -9,6 +9,7 @@ import pandas as pd
 from ..metadata.records import file_lines, parse_columns, parse_text
 from ..repertoire.chains import infer_loci
 from ..repertoire.contigs import FIELDS
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "compression",
@@ -68,7 +69,7 @@ def header_fields(path: str | os.PathLike[str], separator: str) -> tuple[str, ..
     """
     header = first_line(path)
     if not header.strip():
-        raise ValueError(f"{os.fspath(path)!r} has no header line")
+        raise ValueError(f"{quoted_value(os.fspath(path))} has no header line")
     return tuple(field.strip() for field in header.split(separator))
 
 

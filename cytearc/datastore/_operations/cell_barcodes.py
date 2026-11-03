@@ -22,6 +22,7 @@ import pandas as pd
 from ...utils.arrays import union_sorted
 from ...utils.digest import file_sha256
 from ...utils.warnings import warn
+from ...utils.arguments import quoted_value
 
 __all__ = [
     "LOOKUP_BYTES_PER_CELL",
@@ -88,11 +89,11 @@ def barcode_pattern(value: Any, name: str = "barcode_pattern") -> str | None:
         compiled = re.compile(value)
     except re.error as error:
         raise ValueError(
-            f"{name} {value!r} is not a valid regular expression: {error}"
+            f"{name} {quoted_value(value)} is not a valid regular expression: {error}"
         ) from None
     if _BARCODE_GROUP not in compiled.groupindex:
         raise ValueError(
-            f"{name} {value!r} has no named group 'barcode'; name the part of "
+            f"{name} {quoted_value(value)} has no named group 'barcode'; name the part of "
             "the barcode to keep, such as r'_(?P<barcode>[ACGT]{16})-1$'"
         )
     return value
@@ -504,7 +505,8 @@ def unmatched_barcodes_warning(attributes: Mapping[str, Any], files: str) -> str
         f"{n_unmatched} of {int(attributes['n_file_barcodes'])} barcodes of "
         f"{files} match no selected cell, for example "
         + ", ".join(
-            repr(str(value)) for value in attributes["unmatched_barcode_examples"]
+            quoted_value(str(value))
+            for value in attributes["unmatched_barcode_examples"]
         )
         + ". Check barcode_prefix and cell_selection."
     )

@@ -29,6 +29,7 @@ from ..stages import (
     resolve_cells,
 )
 from ..summaries import summarize_stage
+from ....utils.arguments import bool_argument
 from .common import (
     cell_snapshots,
     check_tsne,
@@ -37,7 +38,6 @@ from .common import (
     resolve_embeddings,
     resolve_graph,
     resolve_harmony,
-    require_bool,
     resolve_label,
     resolve_run_filtering,
     resolve_snapshot_columns,
@@ -100,8 +100,8 @@ def resolve_atac(
     )
     resolved_label = resolve_label(label)
     resolved_species = resolve_species(species)
-    membership_strength = require_bool(membership_strength, "membership_strength")
-    markers = require_bool(markers, "markers")
+    membership_strength = bool_argument(membership_strength, "membership_strength")
+    markers = bool_argument(markers, "markers")
     _peaks, peak_settings = stage_settings(
         "prevalent_peaks", prevalent_peaks, optional=False
     )
@@ -119,8 +119,7 @@ def resolve_atac(
     )
     _lsi, lsi_settings = stage_settings("lsi", lsi, optional=False)
     skip_first = lsi_settings.get("skip_first", LSI_SKIP_FIRST_DEFAULT)
-    if not isinstance(skip_first, bool):
-        raise TypeError("lsi skip_first must be a boolean")
+    skip_first = bool_argument(skip_first, "lsi skip_first")
     lsi_rank = lsi_settings.get("dims", LSI_DIMS_DEFAULT) + int(skip_first)
     if lsi_rank > top_n:
         raise ValueError(

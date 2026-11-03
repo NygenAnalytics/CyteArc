@@ -40,6 +40,7 @@ import numpy as np
 
 from ..utils.arrays import sort_categories
 from ..utils.numba import njit
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "FORMATS",
@@ -99,8 +100,6 @@ _JSON_BYTES_PER_VALUE = 64
 # The parser reads objects and arrays nested this deep at most; Python's own
 # JSON reader stops a little deeper.
 _JSON_DEPTH = 8192
-# Values shown in errors are cut to this many characters.
-_SHOWN_CHARACTERS = 60
 # Each node of a TreeData tree read from Zarr holds its name, its time and
 # length and its place in the lists that order the nodes, besides the text
 # of its name.
@@ -283,7 +282,7 @@ def tree_container(path: Path) -> str:
         if _is_zarr_store(path):
             return "zarr"
         raise ValueError(
-            f"The tree path {os.fspath(path)!r} is a directory but not a Zarr "
+            f"The tree path {quoted_value(os.fspath(path))} is a directory but not a Zarr "
             "store; pass a Newick file or a TreeData .h5td file or .zarr store"
         )
     signature = _signature(path)
@@ -317,11 +316,11 @@ def _newick_layout(path: Path, compression: str | None) -> TreeFileLayout:
                 ascii_text = ascii_text and block.isascii()
     except (OSError, EOFError, zlib.error) as error:
         raise ValueError(
-            f"The Newick file {os.fspath(path)!r} cannot be read: {error}"
+            f"The Newick file {quoted_value(os.fspath(path))} cannot be read: {error}"
         ) from None
     if head.lstrip(_BYTE_ORDER_MARK).lstrip().upper().startswith(b"#NEXUS"):
         raise ValueError(
-            f"The tree file {os.fspath(path)!r} is a NEXUS file; export its trees "
+            f"The tree file {quoted_value(os.fspath(path))} is a NEXUS file; export its trees "
             "as Newick, one tree per line, and import that file"
         )
     return TreeFileLayout(
@@ -351,12 +350,12 @@ def _hdf5_tree_bytes(path: Path) -> int:
         if "obst" not in handle:
             if "raw.treedata" in handle:
                 raise ValueError(
-                    f"The TreeData file {os.fspath(path)!r} keeps its trees in "
+                    f"The TreeData file {quoted_value(os.fspath(path))} keeps its trees in "
                     "'raw.treedata', as the earliest treedata releases did; read it "
                     "with treedata and write it again"
                 )
             raise ValueError(
-                f"The HDF5 file {os.fspath(path)!r} has no 'obst' element, so it "
+                f"The HDF5 file {quoted_value(os.fspath(path))} has no 'obst' element, so it "
                 "holds no TreeData trees"
             )
         obst = handle["obst"]
@@ -365,7 +364,7 @@ def _hdf5_tree_bytes(path: Path) -> int:
             or h5py.check_string_dtype(obst.dtype) is None
         ):
             raise ValueError(
-                f"The TreeData file {os.fspath(path)!r} does not store 'obst' as "
+                f"The TreeData file {quoted_value(os.fspath(path))} does not store 'obst' as "
                 "one JSON string, as .h5td files do"
             )
         datasets: list[h5py.Dataset] = []
@@ -394,11 +393,11 @@ def _zarr_obst(path: Path) -> Any:
         root = zarr.open_group(os.fspath(path), mode="r", use_consolidated=False)
     except Exception as error:
         raise ValueError(
-            f"The Zarr store {os.fspath(path)!r} cannot be opened: {error}"
+            f"The Zarr store {quoted_value(os.fspath(path))} cannot be opened: {error}"
         ) from None
     if "obst" not in root:
         raise ValueError(
-            f"The Zarr store {os.fspath(path)!r} has no 'obst' element, so it "
+            f"The Zarr store {quoted_value(os.fspath(path))} has no 'obst' element, so it "
             "holds no TreeData trees"
         )
     return root["obst"]
@@ -433,7 +432,7 @@ def _treedata_layout(path: Path, container: str) -> TreeFileLayout:
         # Its size is unknown until it is read, and reading it can cost far
         # more than its text, so it is not read.
         raise ValueError(
-            f"The TreeData store {os.fspath(path)!r} holds 'obst' as one JSON "
+            f"The TreeData store {quoted_value(os.fspath(path))} holds 'obst' as one JSON "
             "string, as treedata wrote Zarr stores before 0.3.0; write it again "
             "with treedata 0.3.0 or later, or as a .h5td file"
         )
@@ -443,7 +442,7 @@ def _treedata_layout(path: Path, container: str) -> TreeFileLayout:
             nodes = tree.get("nodes")
             if not isinstance(nodes, zarr.Array) or len(nodes.shape) != 1:
                 raise ValueError(
-                    f"The tree {key!r} of the TreeData store {os.fspath(path)!r} "
+                    f"The tree {quoted_value(key)} of the TreeData store {quoted_value(os.fspath(path))} "
                     "has no one-dimensional 'nodes' array"
                 )
             n_nodes += int(nodes.shape[0])
@@ -474,11 +473,13 @@ def tree_file_layout(
     """
     if format is not None and format not in FORMATS:
         raise ValueError(
-            f"format must be one of {', '.join(FORMATS)} or None, not {format!r}"
+            f"format must be one of {', '.join(FORMATS)} or None, not {quoted_value(format)}"
         )
     resolved = Path(os.fspath(path))
     if not resolved.exists():
-        raise FileNotFoundError(f"The tree file {os.fspath(path)!r} does not exist")
+        raise FileNotFoundError(
+            f"The tree file {quoted_value(os.fspath(path))} does not exist"
+        )
     container = tree_container(resolved)
     detected = "treedata" if container in ("hdf5", "zarr") else "newick"
     if format is not None and format != detected:
@@ -489,8 +490,8 @@ def tree_file_layout(
             "text": "text",
         }[container]
         raise ValueError(
-            f"The tree file {os.fspath(path)!r} is {what}, which holds "
-            f"{detected} trees, not {format} trees; pass format={detected!r} or "
+            f"The tree file {quoted_value(os.fspath(path))} is {what}, which holds "
+            f"{detected} trees, not {format} trees; pass format={quoted_value(detected)} or "
             "None"
         )
     if detected == "treedata":
@@ -514,7 +515,7 @@ def read_trees(
         MemoryError: If reading the trees does not fit the memory budget.
     """
     _check(
-        f"Reading the trees of {layout.path!r}",
+        f"Reading the trees of {quoted_value(layout.path)}",
         held_bytes + layout.read_bytes,
         memory_bytes,
     )
@@ -716,14 +717,16 @@ def _read_text(layout: TreeFileLayout) -> bytearray:
             grown = bool(handle.read(1))
     except (OSError, EOFError, zlib.error) as error:
         raise ValueError(
-            f"The Newick file {layout.path!r} cannot be read: {error}"
+            f"The Newick file {quoted_value(layout.path)} cannot be read: {error}"
         ) from None
     finally:
         view.release()
     # Names are costed by whether the text is ASCII, as its layout found,
     # and the scan refuses text of more marks than the layout counted.
     if filled != len(text) or grown or text.isascii() != layout.ascii_text:
-        raise ValueError(f"The Newick file {layout.path!r} changed while it was read")
+        raise ValueError(
+            f"The Newick file {quoted_value(layout.path)} changed while it was read"
+        )
     return text
 
 
@@ -734,8 +737,8 @@ def _label_text(text: bytearray, start: int, end: int, flag: int, path: str) -> 
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError:
         raise ValueError(
-            f"The Newick file {path!r} has a label that is not UTF-8 text at "
-            f"byte {start} of its text: {_context(text, start)!r}"
+            f"The Newick file {quoted_value(path)} has a label that is not UTF-8 text at "
+            f"byte {start} of its text: {quoted_value(_context(text, start))}"
         ) from None
     return decoded.replace("''", "'") if quoted else decoded
 
@@ -748,13 +751,13 @@ def _branch_length(
         value = float(raw)
     except ValueError:
         raise ValueError(
-            f"The Newick file {path!r} has a branch length that is not a number "
-            f"at byte {start} of its text: {_context(text, start)!r}"
+            f"The Newick file {quoted_value(path)} has a branch length that is not a number "
+            f"at byte {start} of its text: {quoted_value(_context(text, start))}"
         ) from None
     if math.isinf(value):
         raise ValueError(
-            f"The Newick file {path!r} has a branch length that is not finite at "
-            f"byte {start} of its text: {_context(text, start)!r}"
+            f"The Newick file {quoted_value(path)} has a branch length that is not finite at "
+            f"byte {start} of its text: {quoted_value(_context(text, start))}"
         )
     # A length written as NaN is unknown, as no length is.
     return value
@@ -792,19 +795,21 @@ def _read_newick(
     )
     del stack
     if code == _CHANGED:
-        raise ValueError(f"The Newick file {layout.path!r} changed while it was read")
+        raise ValueError(
+            f"The Newick file {quoted_value(layout.path)} changed while it was read"
+        )
     if code:
         at = position + skip
         place = (
             "at its end"
             if at >= len(text)
-            else f"at byte {at} of its text: {_context(text, at)!r}"
+            else f"at byte {at} of its text: {quoted_value(_context(text, at))}"
         )
         raise ValueError(
-            f"The Newick file {layout.path!r} has {_SCAN_ERRORS[code]} {place}"
+            f"The Newick file {quoted_value(layout.path)} has {_SCAN_ERRORS[code]} {place}"
         )
     if not n_trees:
-        raise ValueError(f"The Newick file {layout.path!r} holds no tree")
+        raise ValueError(f"The Newick file {quoted_value(layout.path)} holds no tree")
     n_named = label_bytes = 0
     for batch in _batches(n_nodes):
         named = (flags[batch] & _HAS_LABEL) != 0
@@ -812,7 +817,7 @@ def _read_newick(
         label_bytes += int(np.sum((label_end[batch] - label_start[batch])[named]))
     ascii_text = layout.ascii_text
     _check(
-        f"Reading the names and branch lengths of {n_nodes} nodes of {layout.path!r}",
+        f"Reading the names and branch lengths of {n_nodes} nodes of {quoted_value(layout.path)}",
         held_bytes
         + layout.read_bytes
         + _TREE_BYTES_PER_NODE * n_nodes
@@ -878,14 +883,6 @@ class _GraphTree:
     lengths: list[Any]
 
 
-def _shown(value: Any) -> str:
-    """A value as an error shows it, cut short when it is long."""
-    text = repr(value)
-    if len(text) <= _SHOWN_CHARACTERS:
-        return text
-    return text[:_SHOWN_CHARACTERS] + "..."
-
-
 def _number(value: Any, what: str, path: str, key: str) -> float:
     """A time or length as a float, NaN for an absent, null or NaN value.
 
@@ -895,14 +892,14 @@ def _number(value: Any, what: str, path: str, key: str) -> float:
         return math.nan
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError(
-            f"The tree {key!r} of the TreeData file {path!r} has a {what} that "
-            f"is not a number: {_shown(value)}"
+            f"The tree {quoted_value(key)} of the TreeData file {quoted_value(path)} has a {what} that "
+            f"is not a number: {quoted_value(value)}"
         )
     number = float(value)
     if math.isinf(number):
         raise ValueError(
-            f"The tree {key!r} of the TreeData file {path!r} has a {what} that "
-            f"is not finite: {value!r}"
+            f"The tree {quoted_value(key)} of the TreeData file {quoted_value(path)} has a {what} that "
+            f"is not finite: {quoted_value(value)}"
         )
     return number
 
@@ -929,17 +926,21 @@ def _tree_in_preorder(
         known.setdefault(target)
         if target in parent_of:
             raise ValueError(
-                f"The tree {key!r} of the TreeData file {path!r} gives the node "
-                f"{target!r} two parents, {parent_of[target]!r} and {source!r}"
+                f"The tree {quoted_value(key)} of the TreeData file {quoted_value(path)} gives the node "
+                f"{quoted_value(target)} two parents, {quoted_value(parent_of[target])} and {quoted_value(source)}"
             )
         parent_of[target] = source
         children.setdefault(source, []).append((target, index))
     roots = [name for name in known if name not in parent_of]
     if len(roots) != 1:
         raise ValueError(
-            f"The tree {key!r} of the TreeData file {path!r} has "
+            f"The tree {quoted_value(key)} of the TreeData file {quoted_value(path)} has "
             f"{len(roots)} roots, not one"
-            + (f", such as {roots[:3]!r}" if roots else "; its edges form a cycle")
+            + (
+                f", such as {quoted_value(roots[:3])}"
+                if roots
+                else "; its edges form a cycle"
+            )
         )
     names: list[str] = []
     parents: list[int] = []
@@ -959,7 +960,7 @@ def _tree_in_preorder(
             pending.append((child, position, index))
     if len(names) != len(known):
         raise ValueError(
-            f"The tree {key!r} of the TreeData file {path!r} has "
+            f"The tree {quoted_value(key)} of the TreeData file {quoted_value(path)} has "
             f"{len(known) - len(names)} nodes that its root does not reach"
         )
     return names, parents, times, lengths
@@ -986,7 +987,9 @@ def _file_trees(graphs: Sequence[_GraphTree], path: str) -> FileTrees:
         offsets.append(len(names))
         keys.append(graph.key)
     if not keys:
-        raise ValueError(f"The TreeData file {path!r} holds no tree in 'obst'")
+        raise ValueError(
+            f"The TreeData file {quoted_value(path)} holds no tree in 'obst'"
+        )
     parent = np.asarray(parents, dtype=np.int64)
     has_children = np.zeros(len(parent), dtype=bool)
     has_children[parent[parent >= 0]] = True
@@ -1128,8 +1131,8 @@ def _is_mapping(value: Any) -> bool:
 def _attributes(value: Any, what: str, key: str, path: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(
-            f"The tree {key!r} of the TreeData file {path!r} has {what} whose "
-            f"attributes are not an object: {value!r}"
+            f"The tree {quoted_value(key)} of the TreeData file {quoted_value(path)} has {what} whose "
+            f"attributes are not an object: {quoted_value(value)}"
         )
     return value
 
@@ -1141,12 +1144,12 @@ def _json_graphs(text: str, path: str) -> list[_GraphTree]:
         # Besides malformed JSON, Python refuses integers of over 4,300
         # digits and nesting deeper than it can follow.
         raise ValueError(
-            f"The TreeData file {path!r} has an 'obst' that is not JSON that "
+            f"The TreeData file {quoted_value(path)} has an 'obst' that is not JSON that "
             f"Python can read: {error}"
         ) from None
     if not _is_mapping(trees):
         raise ValueError(
-            f"The TreeData file {path!r} has an 'obst' that does not map tree "
+            f"The TreeData file {quoted_value(path)} has an 'obst' that does not map tree "
             "keys to trees"
         )
     graphs = []
@@ -1158,7 +1161,7 @@ def _json_graphs(text: str, path: str) -> list[_GraphTree]:
             or not _is_mapping(tree.get("edges"))
         ):
             raise ValueError(
-                f"The tree {key!r} of the TreeData file {path!r} has no 'nodes' "
+                f"The tree {quoted_value(key)} of the TreeData file {quoted_value(path)} has no 'nodes' "
                 "and 'edges' that map names to objects"
             )
         edges: list[tuple[str, str]] = []
@@ -1166,19 +1169,21 @@ def _json_graphs(text: str, path: str) -> list[_GraphTree]:
         for source, targets in tree["edges"].items():
             if not _is_mapping(targets):
                 raise ValueError(
-                    f"The tree {key!r} of the TreeData file {path!r} has edges "
-                    f"from {source!r} that do not map targets to objects"
+                    f"The tree {quoted_value(key)} of the TreeData file {quoted_value(path)} has edges "
+                    f"from {quoted_value(source)} that do not map targets to objects"
                 )
             for target, attributes in targets.items():
                 edges.append((str(source), str(target)))
                 lengths.append(
                     _attributes(
-                        attributes, f"an edge to {target!r}", str(key), path
+                        attributes, f"an edge to {quoted_value(target)}", str(key), path
                     ).get("length")
                 )
         times = {}
         for name, attributes in tree["nodes"].items():
-            node = _attributes(attributes, f"a node {name!r}", str(key), path)
+            node = _attributes(
+                attributes, f"a node {quoted_value(name)}", str(key), path
+            )
             if "time" in node:
                 times[str(name)] = node["time"]
         graphs.append(
@@ -1203,7 +1208,7 @@ def _parse_json_trees(
     )
     if n_objects < 0:
         raise ValueError(
-            f"The TreeData file {layout.path!r} has an 'obst' whose objects and "
+            f"The TreeData file {quoted_value(layout.path)} has an 'obst' whose objects and "
             f"arrays nest more than {_JSON_DEPTH} deep"
         )
     # Python stores text at one, two or four bytes a character, by the
@@ -1211,7 +1216,7 @@ def _parse_json_trees(
     width = 1 if largest < 0xC4 else 2 if largest < 0xF0 else 4
     # Each node and edge is an object of the JSON, so the objects bound them.
     _check(
-        f"Parsing the trees of {layout.path!r}",
+        f"Parsing the trees of {quoted_value(layout.path)}",
         held_bytes
         + len(raw)
         + 2 * width * n_characters
@@ -1224,7 +1229,7 @@ def _parse_json_trees(
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         raise ValueError(
-            f"The TreeData file {layout.path!r} has an 'obst' that is not UTF-8"
+            f"The TreeData file {quoted_value(layout.path)} has an 'obst' that is not UTF-8"
         ) from None
     del raw
     graphs = _json_graphs(text, layout.path)
@@ -1299,7 +1304,7 @@ def _zarr_attribute(
     array = group[name]
     if not isinstance(array, zarr.Array) or array.shape != (n_values,):
         raise ValueError(
-            f"The tree {key!r} of the TreeData store {path!r} has a {name!r} "
+            f"The tree {quoted_value(key)} of the TreeData store {quoted_value(path)} has a {quoted_value(name)} "
             f"attribute that does not hold one value per element"
         )
     if array.dtype.kind in "iufb":
@@ -1307,7 +1312,7 @@ def _zarr_attribute(
         return values.tolist(), int(values.nbytes)
     texts, held = _zarr_texts(
         array,
-        f"Reading the {name!r} of the tree {key!r} of {path!r}",
+        f"Reading the {quoted_value(name)} of the tree {quoted_value(key)} of {quoted_value(path)}",
         memory_bytes=memory_bytes,
         held_bytes=held_bytes,
     )
@@ -1320,15 +1325,15 @@ def _zarr_attribute(
             # A list or an object is no time or length, and is refused before
             # it is parsed, so its values are never held.
             raise ValueError(
-                f"The tree {key!r} of the TreeData store {path!r} has a {name!r} "
-                f"that is not a number: {_shown(text)}"
+                f"The tree {quoted_value(key)} of the TreeData store {quoted_value(path)} has a {quoted_value(name)} "
+                f"that is not a number: {quoted_value(text)}"
             )
         try:
             decoded.append(json.loads(text))
         except (ValueError, RecursionError):
             raise ValueError(
-                f"The tree {key!r} of the TreeData store {path!r} has a {name!r} "
-                f"that is not JSON that Python can read: {_shown(text)}"
+                f"The tree {quoted_value(key)} of the TreeData store {quoted_value(path)} has a {quoted_value(name)} "
+                f"that is not JSON that Python can read: {quoted_value(text)}"
             ) from None
     return decoded, held
 
@@ -1346,10 +1351,10 @@ def _zarr_graph(
         or (edges_array.shape[0] and edges_array.shape[1] != 2)
     ):
         raise ValueError(
-            f"The tree {key!r} of the TreeData store {path!r} has no 'edges' "
+            f"The tree {quoted_value(key)} of the TreeData store {quoted_value(path)} has no 'edges' "
             "array of source and target pairs"
         )
-    what = f"Reading the tree {key!r} of {path!r}"
+    what = f"Reading the tree {quoted_value(key)} of {quoted_value(path)}"
     nodes, held = _zarr_texts(
         nodes_array, what, memory_bytes=memory_bytes, held_bytes=held_bytes
     )
@@ -1402,7 +1407,7 @@ def _read_zarr(
     obst = _zarr_obst(Path(layout.path))
     if not isinstance(obst, zarr.Group):
         raise ValueError(
-            f"The TreeData store {layout.path!r} changed while it was read"
+            f"The TreeData store {quoted_value(layout.path)} changed while it was read"
         )
     graphs = []
     held = held_bytes + layout.read_bytes

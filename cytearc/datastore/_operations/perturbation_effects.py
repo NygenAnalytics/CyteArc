@@ -192,12 +192,12 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
                 saved yet.
             MemoryError: If the comparison does not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
 
         _require_ref(labels, "labels", PerturbationLabelArguments.artifact_kind)
         if not isinstance(from_assay, str) or from_assay not in self.assay_names:
             raise ValueError(f"from_assay must name an assay, not {from_assay!r}")
         efficiency_settings(by, id_column)
-        bool_argument(invalidate_cache, "invalidate_cache")
         rows = _label_rows(self, labels, by)
         status = rows.status
         row_names = rows.names
@@ -384,6 +384,9 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         Raises:
             TypeError: If ``efficiency`` is not an ArtifactRef.
             ValueError: If it is not a ``perturbation_efficiency`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as a call that
+                stopped before it finished leaves it.
         """
         _require_ref(
             efficiency, "efficiency", PerturbationEfficiencyArguments.artifact_kind
@@ -469,12 +472,12 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
                 saved yet.
             MemoryError: If the measurement does not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...graph.feature_projection import resolve_coordinate_inputs
 
         _require_ref(labels, "labels", PerturbationLabelArguments.artifact_kind)
         _require_ref(coordinates, "coordinates", *_COORDINATE_KINDS)
         permutations, seed = edistance_settings(by, n_permutations, random_seed)
-        bool_argument(invalidate_cache, "invalidate_cache")
         rows = _label_rows(self, labels, by)
         inputs = resolve_coordinate_inputs(self.zw, coordinates)
         arguments = PerturbationEDistanceArguments(
@@ -622,6 +625,9 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         Raises:
             TypeError: If ``edistance`` is not an ArtifactRef.
             ValueError: If it is not a ``perturbation_edistance`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as a call that
+                stopped before it finished leaves it.
         """
         _require_ref(
             edistance, "edistance", PerturbationEDistanceArguments.artifact_kind

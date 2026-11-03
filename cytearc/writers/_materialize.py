@@ -11,6 +11,7 @@ from ..storage.materialize import (
 from ..assay.normalization import (
     write_renorm_subset_to_zarr as _write_renorm_subset_to_zarr,
 )
+from ..utils.arguments import bool_argument
 
 
 def write_renorm_subset_to_zarr(
@@ -40,6 +41,7 @@ def write_renorm_subset_to_zarr(
         msg: Optional progress message.
         mirror: Optional second array of the same shape written in the same pass.
     """
+    log_transform = bool_argument(log_transform, "log_transform")
     return _write_renorm_subset_to_zarr(
         assay,
         cell_idx,

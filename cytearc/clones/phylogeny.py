@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 from ..utils.numba import njit
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "TREE_SEPARATOR",
@@ -88,12 +89,12 @@ def phylogeny_cut(time: Any, depth: Any) -> PhylogenyCut:
             raise TypeError("time must be a real number")
         value = float(time)
         if not np.isfinite(value):
-            raise ValueError(f"time must be finite, not {time!r}")
+            raise ValueError(f"time must be finite, not {quoted_value(time)}")
         return PhylogenyCut(time=value, depth=None)
     if isinstance(depth, bool) or not isinstance(depth, int | np.integer):
         raise TypeError("depth must be an integer")
     if int(depth) < 0:
-        raise ValueError(f"depth must be at least 0, not {depth!r}")
+        raise ValueError(f"depth must be at least 0, not {quoted_value(depth)}")
     return PhylogenyCut(time=None, depth=int(depth))
 
 

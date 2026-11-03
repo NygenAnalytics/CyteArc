@@ -41,6 +41,7 @@ from ..storage.refs import ArtifactRef
 from ..utils.arrays import sorted_unique
 from ..utils.numba import njit
 from .groups import pair_counts
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "LARGEST_SIZE",
@@ -233,7 +234,7 @@ class GroupedCloneSizes:
         """
         if not 0 <= index < len(self):
             raise ValueError(
-                f"index must be between 0 and {len(self) - 1}, not {index!r}"
+                f"index must be between 0 and {len(self) - 1}, not {quoted_value(index)}"
             )
         rows = slice(int(self.starts[index]), int(self.starts[index + 1]))
         return CloneSizes(

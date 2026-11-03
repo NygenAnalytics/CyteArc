@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+from ..utils.arguments import quoted_value
 
 __all__ = ["write_clone_matrix", "write_clone_table"]
 
@@ -123,7 +124,7 @@ def write_clone_matrix(
         )
         if broken is not None:
             raise ValueError(
-                f"The {what} {broken!r} holds a line break, which the matrix's "
+                f"The {what} {quoted_value(broken)} holds a line break, which the matrix's "
                 "lists cannot hold; write the clones as a clone table instead"
             )
     folder = Path(os.fspath(path)).parent

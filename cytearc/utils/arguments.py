@@ -27,16 +27,58 @@ def float_argument(value: object, name: str) -> float:
 
 
 def bool_argument(value: object, name: str) -> bool:
-    """Return ``value`` after checking that it is ``True`` or ``False``.
+    """Return ``value`` as a Python boolean.
 
-    NumPy booleans and integers are rejected.
+    Python and NumPy booleans are accepted, so ``np.True_`` gives ``True``,
+    and integers and text are rejected.
+
+    Args:
+        value: The argument to validate.
+        name: Argument name used in error messages.
 
     Raises:
-        TypeError: If ``value`` is not a Python boolean.
+        TypeError: If ``value`` is not a boolean.
     """
-    if not isinstance(value, bool):
+    if not isinstance(value, bool | np.bool_):
         raise TypeError(f"{name} must be a boolean")
-    return value
+    return bool(value)
+
+
+def optional_bool_argument(value: object, name: str) -> bool | None:
+    """Return ``value`` as a Python boolean, or None.
+
+    Accepts what :func:`bool_argument` accepts, and None.
+
+    Args:
+        value: The argument to validate.
+        name: Argument name used in error messages.
+
+    Raises:
+        TypeError: If ``value`` is neither None nor a boolean.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, bool | np.bool_):
+        raise TypeError(f"{name} must be a boolean or None")
+    return bool(value)
+
+
+#: The most characters of a value that an error message quotes.
+QUOTED_LIMIT = 80
+
+
+def quoted_value(value: object) -> str:
+    """Return ``repr(value)`` for an error message, cut to ``QUOTED_LIMIT``.
+
+    A value longer than that, such as a contig ID of 20,000 characters, keeps
+    its start and its end around ``...``, so the message stays readable and a
+    long path still shows its file's name.
+    """
+    text = repr(value)
+    if len(text) <= QUOTED_LIMIT:
+        return text
+    head = (QUOTED_LIMIT - 3) // 2
+    return text[:head] + "..." + text[head + 3 - QUOTED_LIMIT :]
 
 
 def optional_name_argument(

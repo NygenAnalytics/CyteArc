@@ -25,6 +25,7 @@ from ._contracts import (
     SizeScale,
     StudyDesign,
 )
+from ..utils.arguments import bool_argument
 
 
 ALLOWED_PLOTS = frozenset(
@@ -291,11 +292,8 @@ class PlotOutputSettings:
             isinstance(self.dpi, bool) or not isinstance(self.dpi, int) or self.dpi <= 0
         ):
             raise ValueError("Plot output dpi must be a positive integer or None")
-        if not isinstance(self.transparent, bool) or not isinstance(
-            self.exact_size,
-            bool,
-        ):
-            raise TypeError("Plot output flags must be boolean")
+        for name in ("transparent", "exact_size"):
+            object.__setattr__(self, name, bool_argument(getattr(self, name), name))
 
 
 @dataclass(frozen=True, slots=True)
@@ -721,11 +719,9 @@ def run_recipe(
 
     Plots do not display themselves unless ``show`` is set.
     """
+    show = bool_argument(show, "show")
+    continue_on_error = bool_argument(continue_on_error, "continue_on_error")
     resolved_recipe = _load_recipe(recipe)
-    if not isinstance(show, bool):
-        raise TypeError("show must be a boolean")
-    if not isinstance(continue_on_error, bool):
-        raise TypeError("continue_on_error must be a boolean")
     if artifacts is not None and not isinstance(artifacts, Mapping):
         raise TypeError("artifacts must be a mapping or None")
     if targets is not None and not isinstance(targets, Mapping):

@@ -11,6 +11,7 @@ from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
+from ..utils.arguments import quoted_value
 
 __all__ = ["group_frame", "group_names", "pair_counts"]
 
@@ -27,7 +28,7 @@ def group_names(group_keys: Sequence[dict[str, str]]) -> list[str]:
     for key, name in zip(group_keys, names, strict=True):
         if name in first and first[name] != key:
             raise ValueError(
-                f"The groups {first[name]} and {key} are both named {name!r}; "
+                f"The groups {first[name]} and {key} are both named {quoted_value(name)}; "
                 "remove the commas from their labels"
             )
         first.setdefault(name, key)

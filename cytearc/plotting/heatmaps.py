@@ -31,7 +31,7 @@ from ._heatmap_utils import (
     order_heatmap,
     validate_linkage,
 )
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument, optional_bool_argument
 from ..utils.arrays import sort_categories
 from ._style import (
     apply_figure_chrome,
@@ -51,11 +51,9 @@ def _marker_log_transform(assay: Any, value: bool | None) -> bool:
     values of ``norm_dummy`` and of custom normalizers, and raises
     ``ValueError`` for a normalizer that cannot be logged.
     """
-    if value is not None and not isinstance(value, (bool, np.bool_)):
-        raise TypeError("log_transform must be a boolean or None")
     return resolve_normalization_params(
         assay,
-        {"log_transform": value},
+        {"log_transform": optional_bool_argument(value, "log_transform")},
         caller="marker_heatmap",
         default=True,
     )["log_transform"]
@@ -331,6 +329,11 @@ def marker_heatmap(
     **heatmap_kwargs: Any,
 ) -> PlotResult:
     """Plot standardized expression of the top marker features."""
+    log_transform = optional_bool_argument(log_transform, "log_transform")
+    cluster_rows = bool_argument(cluster_rows, "cluster_rows")
+    cluster_columns = bool_argument(cluster_columns, "cluster_columns")
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     cluster_rows = bool(heatmap_kwargs.pop("row_cluster", cluster_rows))
     cluster_columns = bool(heatmap_kwargs.pop("col_cluster", cluster_columns))
     cluster_method = str(heatmap_kwargs.pop("method", cluster_method))
@@ -715,6 +718,8 @@ def pseudotime_heatmap(
     show: bool = True,
 ) -> PlotResult:
     """Plot binned feature dynamics ordered by pseudotime."""
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     resolved_color_scale = color_scale or ColorScale(
         cmap=heatmap_cmap or "coolwarm",
         vmin=vmin,

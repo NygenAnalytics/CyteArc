@@ -52,6 +52,7 @@ from ..storage.selections import (
     validate_cell_selection,
 )
 from ..storage.types import as_zarr_array
+from ..utils.arguments import bool_argument
 from ..utils.arrays import read_only_copy
 from .confidence import _label_vote_block, _LabelVotes, distance_weights
 from .models import LabelTransferResult
@@ -925,8 +926,7 @@ def load_label_transfer(
         raise ValueError(
             "transfer must identify an assay-scoped label_transfer artifact"
         )
-    if not isinstance(load_votes, bool):
-        raise TypeError("load_votes must be a boolean")
+    load_votes = bool_argument(load_votes, "load_votes")
     try:
         return _load_label_transfer(root, ref, load_votes=load_votes)
     except ArtifactResolutionError:

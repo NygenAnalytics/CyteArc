@@ -36,6 +36,7 @@ from ._style import (
     scatter_edgecolor,
     theme_context,
 )
+from ..utils.arguments import bool_argument
 
 
 def _reference_layout(
@@ -131,6 +132,11 @@ def mapping_score(
     column or cell-label artifact of the reference datastore. Reference cells
     without a usable label are left out of the boxes.
     """
+    size_by_score = bool_argument(size_by_score, "size_by_score")
+    log_transform = bool_argument(log_transform, "log_transform")
+    weighted = bool_argument(weighted, "weighted")
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if kind not in ("embedding", "histogram", "box"):
         raise ValueError("kind must be 'embedding', 'histogram', or 'box'")
     if kind == "embedding" and layout is None:
@@ -440,6 +446,8 @@ def mapping_evidence(
     ``ds.mapping.transfer_labels``. The plot reads its saved evidence, so it
     shows exactly the votes and distances that decided the saved labels.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if kind not in ("histogram", "box"):
         raise ValueError("kind must be 'histogram' or 'box'")
     if bins < 1:
@@ -580,6 +588,8 @@ def mapping_confusion(
     ``abstention_label`` column, which must differ from every known and
     transferred label.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if normalize not in ("none", "true", "predicted", "all"):
         raise ValueError("normalize must be 'none', 'true', 'predicted', or 'all'")
     if not isinstance(abstention_label, str) or not abstention_label:
@@ -775,6 +785,7 @@ def mapping_calibration(
     joins the default thresholds, and with explicit ``thresholds`` it is marked
     only when it is one of them.
     """
+    show = bool_argument(show, "show")
     if n_thresholds < 2:
         raise ValueError("n_thresholds must be at least 2")
     if direction not in ("auto", "higher", "lower"):

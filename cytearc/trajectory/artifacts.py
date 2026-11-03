@@ -22,7 +22,7 @@ from .parameters import (
     AGGREGATION_ANN_PARAMETER_NAMES,
     AGGREGATION_ANN_STATIC_PARAMETER_NAMES,
 )
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument
 
 PSEUDOTIME_INPUTS = frozenset({"connectivity_map", "source_sink", "cell_selection"})
 PSEUDOTIME_PARAMETERS = frozenset(
@@ -161,12 +161,6 @@ def _real_parameter(
     return resolved
 
 
-def _boolean_parameter(value: Any, name: str) -> bool:
-    if not isinstance(value, bool | np.bool_):
-        raise TypeError(f"{name} must be a boolean")
-    return bool(value)
-
-
 def _label_parameters(
     values: Any,
     name: str,
@@ -197,7 +191,7 @@ def _normalization_parameters(value: Any) -> dict[str, bool]:
     }:
         raise ValueError("normalization parameters are malformed")
     return {
-        name: _boolean_parameter(value[name], f"normalization.{name}")
+        name: bool_argument(value[name], f"normalization.{name}")
         for name in ("log_transform", "renormalize_subset")
     }
 
@@ -240,7 +234,7 @@ def validate_pseudotime_parameters(parameters: Mapping[str, Any]) -> dict[str, A
         ),
         "sources": sources,
         "sinks": sinks,
-        "min_max_norm_ptime": _boolean_parameter(
+        "min_max_norm_ptime": bool_argument(
             parameters["min_max_norm_ptime"],
             "min_max_norm_ptime",
         ),
@@ -369,8 +363,8 @@ def validate_aggregation_parameters(parameters: Mapping[str, Any]) -> dict[str, 
             "chunk_size",
             minimum=1,
         ),
-        "smoothen": _boolean_parameter(parameters["smoothen"], "smoothen"),
-        "z_scale": _boolean_parameter(parameters["z_scale"], "z_scale"),
+        "smoothen": bool_argument(parameters["smoothen"], "smoothen"),
+        "z_scale": bool_argument(parameters["z_scale"], "z_scale"),
         "n_neighbours": integer_argument(
             parameters["n_neighbours"],
             "n_neighbours",
@@ -1166,9 +1160,7 @@ def validate_lineage_driver_parameters(
     )
     return {
         **_feature_analysis_parameters(parameters),
-        "include_sinks": _boolean_parameter(
-            parameters["include_sinks"], "include_sinks"
-        ),
+        "include_sinks": bool_argument(parameters["include_sinks"], "include_sinks"),
         "min_cells": integer_argument(parameters["min_cells"], "min_cells", minimum=1),
         "confidence_level": _real_parameter(
             parameters["confidence_level"],
@@ -1201,7 +1193,7 @@ def validate_lineage_aggregation_parameters(
         "n_bins": integer_argument(parameters["n_bins"], "n_bins", minimum=2),
         "smoothing": _real_parameter(parameters["smoothing"], "smoothing", minimum=0.0),
         "min_exp": _real_parameter(parameters["min_exp"], "min_exp", minimum=0.0),
-        "z_scale": _boolean_parameter(parameters["z_scale"], "z_scale"),
+        "z_scale": bool_argument(parameters["z_scale"], "z_scale"),
         "n_neighbours": integer_argument(
             parameters["n_neighbours"], "n_neighbours", minimum=1
         ),

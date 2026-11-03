@@ -1055,6 +1055,27 @@ def test_two_files_that_give_one_cell_two_depths_or_calls_are_refused(
         store.variants.import_counts(calls, cell_selection=every_cell(store))
 
 
+def test_counts_without_call_fields_are_refused_as_an_earlier_version_saved_them(
+    store, tmp_path
+) -> None:
+    import zarr
+
+    from cytearc.storage.artifacts import artifact_path
+
+    counts, _ = _import(store, write_mgatk(TRUTH, tmp_path / "final"))
+    group = zarr.open_group(store.zarr_loc, mode="r+")[artifact_path(counts)]
+    del group.attrs["call_fields"]
+    message = (
+        "^counts was saved by an earlier version of CyteArc, without the "
+        "attribute call_fields; import the counts again with "
+        "ds.variants.import_counts, which saves them anew$"
+    )
+    with pytest.raises(ValueError, match=message):
+        store.variants.load_counts(counts)
+    with pytest.raises(ValueError, match=message):
+        store.variants.informative(counts, preset="atac")
+
+
 def test_an_artifact_that_lost_a_table_is_not_reused(store, tmp_path) -> None:
     import zarr
 
@@ -1075,10 +1096,16 @@ def test_an_artifact_that_lost_a_table_is_not_reused(store, tmp_path) -> None:
     del writable(third)["counts_forward"]
     fourth, _ = _import(store, folder)
     assert fourth not in (first, second, third)
-    # Counts saved without call qualities, which every source's calls now
-    # carry, are imported again.
-    del writable(fourth)["call_quality"]
-    assert _import(store, folder)[0] not in (first, second, third, fourth)
+    # mgatk's calls carry no quality, so its counts store none; counts that
+    # list a call quality they lost, or that list no call fields, as an
+    # earlier version saved them, are imported again.
+    assert store.artifacts.load(fourth).attrs["call_fields"] == []
+    assert "call_quality" not in store.artifacts.load(fourth)
+    writable(fourth).attrs["call_fields"] = ["quality"]
+    fifth, _ = _import(store, folder)
+    assert fifth not in (first, second, third, fourth)
+    del writable(fifth).attrs["call_fields"]
+    assert _import(store, folder)[0] not in (first, second, third, fourth, fifth)
 
 
 def test_repeated_calls_must_agree_in_their_quality() -> None:
@@ -1295,6 +1322,7 @@ def test_every_source_is_checked_against_the_unit_and_the_others() -> None:
                 alleles_overlap=False,
                 open_alleles=False,
                 count_fields=(),
+                call_fields=(),
             )
         )
 
@@ -1377,10 +1405,11 @@ def test_short_tables_are_one_chunk_no_longer_than_their_rows(store, tmp_path) -
     )
     calls = store.artifacts.load(calls_ref)
     n_calls = len(expected_got_calls(TRUTH, site="CALR", source="Genotype"))
-    for name in ("call_alleles", "call_sources", "call_values", "call_quality"):
+    for name in ("call_alleles", "call_sources", "call_values"):
         assert calls[name].shape[0] == calls[name].chunks[0] == n_calls
-    # GoT tables give no quality of their calls.
-    assert np.isnan(calls["call_quality"][:]).all()
+    # GoT tables give no quality of their calls, so none is stored.
+    assert "call_quality" not in calls
+    assert calls.attrs["call_fields"] == []
 
 
 def test_long_tables_are_chunked_in_bands_of_a_million_rows(tmp_path) -> None:

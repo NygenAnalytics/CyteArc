@@ -35,6 +35,7 @@ import pandas as pd
 
 from ..storage.refs import ArtifactRef
 from .counts import SiteTable
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "HETEROPLASMY_LEVELS",
@@ -438,15 +439,22 @@ def _pearson(n: np.ndarray, sums: Mapping[str, np.ndarray]) -> np.ndarray:
 
 
 #: The thresholds that select informative variants, each with the statistic
-#: it tests and whether the statistic must exceed it (``">"``) or reach it
-#: (``">="``), as the published rules compare them.
-THRESHOLDS: Mapping[str, tuple[str, str]] = {
-    "min_cells": ("n_cells_conf_detected", ">="),
-    "min_strand_correlation": ("strand_correlation", ">="),
-    "min_vmr": ("vmr", ">"),
-    "min_depth": ("mean_coverage", ">"),
-    "min_quality": ("mean_quality", ">"),
+#: it tests. A variant passes a threshold when its statistic reaches it.
+THRESHOLDS: Mapping[str, str] = {
+    "min_cells": "n_cells_conf_detected",
+    "min_strand_correlation": "strand_correlation",
+    "min_vmr": "vmr",
+    "min_depth": "mean_coverage",
+    "min_quality": "mean_quality",
 }
+
+
+def _above(value: float) -> float:
+    """The next floating-point number above ``value``, which a statistic that
+    must exceed ``value`` reaches."""
+    return float(np.nextafter(value, np.inf))
+
+
 #: The published rules of each preset of ``informative``, by argument, read
 #: only: ``"atac"`` is the rule of Lareau et al. (2020) for mtscATAC-seq as
 #: Signac's vignette applies it: at least 5 cells with 2 reads on each strand,
@@ -454,14 +462,20 @@ THRESHOLDS: Mapping[str, tuple[str, str]] = {
 #: MAESTER's for RNA libraries, whose strands follow the transcript (Miller et
 #: al. 2022): a mean depth above 20 and a mean base quality above 30, with
 #: Signac's VMR above 0.01 for the variability that MAESTER tests by
-#: percentiles of the allele frequencies.
+#: percentiles of the allele frequencies. Every threshold is reached, so a rule
+#: that a statistic must exceed holds the next floating-point number above its
+#: value, such as 0.010000000000000002 for a VMR above 0.01.
 INFORMATIVE_PRESETS: Mapping[str, Mapping[str, int | float]] = MappingProxyType(
     {
         "atac": MappingProxyType(
-            {"min_cells": 5, "min_strand_correlation": 0.65, "min_vmr": 0.01}
+            {"min_cells": 5, "min_strand_correlation": 0.65, "min_vmr": _above(0.01)}
         ),
         "rna": MappingProxyType(
-            {"min_depth": 20.0, "min_quality": 30.0, "min_vmr": 0.01}
+            {
+                "min_depth": _above(20.0),
+                "min_quality": _above(30.0),
+                "min_vmr": _above(0.01),
+            }
         ),
     }
 )
@@ -486,12 +500,12 @@ def resolve_thresholds(
     if preset is not None and not isinstance(preset, str):
         raise TypeError(
             f"preset must be one of {', '.join(INFORMATIVE_PRESETS)}, or None, not "
-            f"{preset!r}"
+            f"{quoted_value(preset)}"
         )
     if preset is not None and preset not in INFORMATIVE_PRESETS:
         raise ValueError(
             f"preset must be one of {', '.join(INFORMATIVE_PRESETS)}, or None, not "
-            f"{preset!r}"
+            f"{quoted_value(preset)}"
         )
     unknown = sorted(set(given) - set(THRESHOLDS))
     if unknown:
@@ -544,7 +558,7 @@ def informative_variants(
     for name, value in thresholds.items():
         if value is None:
             continue
-        column, comparison = THRESHOLDS[name]
+        column = THRESHOLDS[name]
         if column not in statistics:
             raise ValueError(
                 f"{name} tests {column}, which these counts cannot give: "
@@ -557,7 +571,7 @@ def informative_variants(
             )
         values = np.asarray(statistics[column], dtype=np.float64)
         with np.errstate(invalid="ignore"):
-            test = values >= value if comparison == ">=" else values > value
+            test = values >= value
         passed &= test & ~np.isnan(values)
     return passed
 

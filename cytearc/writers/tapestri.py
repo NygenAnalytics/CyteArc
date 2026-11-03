@@ -8,6 +8,7 @@ from ..storage.io_policy import StorageIoPolicy
 from ..storage.profiles import StorageProfile, ZarrLocation
 from ..storage.types import as_zarr_group
 from .cellranger import CrToZarr
+from ..utils.arguments import bool_argument
 
 __all__ = ["TapestriToZarr"]
 
@@ -77,6 +78,7 @@ class TapestriToZarr(CrToZarr):
         *,
         overwrite: bool = False,
     ) -> None:
+        overwrite = bool_argument(overwrite, "overwrite")
         if not isinstance(reader, TapestriReader):
             raise TypeError(
                 f"reader must be a TapestriReader, not {type(reader).__name__}"

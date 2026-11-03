@@ -21,6 +21,7 @@ import zarr
 from zarr.codecs import BloscCodec
 
 from ..utils.logging import logger
+from ..utils.arguments import quoted_value
 
 __all__ = ["CellRowSorter", "sort_rows"]
 
@@ -131,7 +132,7 @@ class CellRowSorter:
             names = set(dtype.names or ())
             if not keys or keys[0] != "cell" or not set(keys) <= names:
                 raise ValueError(
-                    f"The stream {name!r} must sort by 'cell' first and by fields "
+                    f"The stream {quoted_value(name)} must sort by 'cell' first and by fields "
                     "of its rows"
                 )
             self._streams[name] = _Stream(
@@ -173,12 +174,14 @@ class CellRowSorter:
             raise ValueError("Rows cannot be added once bands are read")
         state = self._streams[stream]
         if rows.dtype != state.dtype:
-            raise ValueError(f"Rows of {stream!r} must have the dtype {state.dtype}")
+            raise ValueError(
+                f"Rows of {quoted_value(stream)} must have the dtype {state.dtype}"
+            )
         if not len(rows):
             return
         cells = rows["cell"]
         if int(cells.min()) < 0 or int(cells.max()) >= self._n_cells:
-            raise ValueError(f"Rows of {stream!r} name a cell out of range")
+            raise ValueError(f"Rows of {quoted_value(stream)} name a cell out of range")
         state.rows_per_cell += np.bincount(cells, minlength=self._n_cells)
         state.buffered.append(rows)
         state.buffered_bytes += rows.nbytes

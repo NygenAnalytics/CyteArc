@@ -89,7 +89,7 @@ from ...storage.async_execution import zarr_io_concurrency
 from ...storage.geometry import array_geometry
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import bool_argument, integer_argument
+from ...utils.arguments import bool_argument, integer_argument, quoted_value
 from ...utils.logging import logger
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
@@ -290,8 +290,8 @@ def _contig_sources(
     if format is not None and format not in formats:
         raise ValueError(
             "format must be "
-            + " or ".join(repr(name) for name in formats)
-            + f", or None to read each file's format from its header, not {format!r}"
+            + " or ".join(quoted_value(name) for name in formats)
+            + f", or None to read each file's format from its header, not {quoted_value(format)}"
         )
     files = barcode_files(
         paths,
@@ -370,8 +370,8 @@ def _encode_contigs(
     if repeated:
         position, name = repeated[0]
         raise ValueError(
-            f"Contig ID {name!r} repeats in "
-            f"{os.fspath(sources[position].file.path)!r}; each contig of a file "
+            f"Contig ID {quoted_value(name)} repeats in "
+            f"{quoted_value(os.fspath(sources[position].file.path))}; each contig of a file "
             "needs its own ID"
         )
     return encoder.finish()
@@ -821,10 +821,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 contigs, 400 bytes per selected cell and each cell's ID as
                 text, and reading the IDs decodes a stored chunk of them.
         """
+        productive_only = bool_argument(productive_only, "productive_only")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        bool_argument(productive_only, "productive_only")
-        bool_argument(invalidate_cache, "invalidate_cache")
         sources = _contig_sources(
             paths,
             barcode_prefix=barcode_prefix,
@@ -984,6 +984,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 not a sequence of names.
             ValueError: If it is not an ``immune_receptors`` artifact, or a
                 field is not stored.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as a call that
+                stopped before it finished leaves it.
             MemoryError: If the tables do not fit the datastore memory budget.
         """
         group, stored = self._receptor_group(receptors)
@@ -996,7 +999,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             if unknown:
                 raise ValueError(
                     "The receptors store no field "
-                    + ", ".join(repr(str(name)) for name in unknown)
+                    + ", ".join(quoted_value(str(name)) for name in unknown)
                     + "; they store "
                     + ", ".join(stored)
                 )
@@ -1068,7 +1071,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if receptors.kind != ImmuneReceptorImportArguments.artifact_kind:
             raise ValueError(
                 "receptors must be an immune_receptors artifact, not "
-                f"{receptors.kind!r}"
+                f"{quoted_value(receptors.kind)}"
             )
         require_complete_artifact(self.zw, receptors)
         group = artifact_group(self.zw, receptors)
@@ -1202,6 +1205,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 match, 32
                 bytes each, do not fit what is left.
         """
+        same_v_gene = bool_argument(same_v_gene, "same_v_gene")
+        same_j_gene = bool_argument(same_j_gene, "same_j_gene")
+        within_receptor_type = bool_argument(
+            within_receptor_type, "within_receptor_type"
+        )
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         group, fields = self._receptor_group(receptors)
         if sequence not in SEQUENCES:
             raise ValueError(f"sequence must be one of {', '.join(SEQUENCES)}")
@@ -1209,13 +1218,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             raise ValueError(f"receptor_arms must be one of {', '.join(RECEPTOR_ARMS)}")
         if dual_ir not in DUAL_IR:
             raise ValueError(f"dual_ir must be one of {', '.join(DUAL_IR)}")
-        for name, flag in (
-            ("same_v_gene", same_v_gene),
-            ("same_j_gene", same_j_gene),
-            ("within_receptor_type", within_receptor_type),
-            ("invalidate_cache", invalidate_cache),
-        ):
-            bool_argument(flag, name)
         columns = group_columns(within, "within", _CLONOTYPE_COLUMNS)
         if metric not in METRICS:
             raise ValueError(f"metric must be one of {', '.join(METRICS)}")
@@ -1231,7 +1233,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         else:
             if max_distance is None:
                 raise ValueError(
-                    f"metric={metric!r} needs a max_distance, such as 1 or 2 "
+                    f"metric={quoted_value(metric)} needs a max_distance, such as 1 or 2 "
                     "substitutions or edits, or 15 percent"
                 )
             limit = integer_argument(max_distance, "max_distance", minimum=0)
@@ -1244,12 +1246,18 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if field_name not in fields:
             raise ValueError(
                 f"The receptors store no {field_name}, so they cannot be compared "
-                f"by sequence={sequence!r}; pass sequence="
-                f"{'aa' if sequence == 'nt' else 'nt'!r}"
+                f"by sequence={quoted_value(sequence)}; pass sequence="
+                f"{quoted_value('aa' if sequence == 'nt' else 'nt')}"
             )
-        for flag, gene in ((same_v_gene, "v_call"), (same_j_gene, "j_call")):
+        for name, flag, gene in (
+            ("same_v_gene", same_v_gene, "v_call"),
+            ("same_j_gene", same_j_gene, "j_call"),
+        ):
             if flag and gene not in fields:
-                raise ValueError(f"The receptors store no {gene} to match")
+                raise ValueError(
+                    f"{name} compares each chain's {gene}, which these receptors "
+                    f"do not store; leave {name} False"
+                )
         status = inspect_artifact(self.zw, receptors)
         cell_selection = status.input_ref("cell_selection")
         stored_types = as_zarr_array(group["values"], name="values")
@@ -1426,7 +1434,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             raise TypeError("clonotypes must be an ArtifactRef")
         if clonotypes.kind != ClonotypeArguments.artifact_kind:
             raise ValueError(
-                f"clonotypes must be a clonotypes artifact, not {clonotypes.kind!r}"
+                f"clonotypes must be a clonotypes artifact, not {quoted_value(clonotypes.kind)}"
             )
         status = require_complete_artifact(self.zw, clonotypes)
         if set(status.parameters or {}) != _CLONOTYPE_PARAMETERS:
@@ -1633,6 +1641,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         cell_selection: ArtifactRef | None,
         reserved: frozenset[str],
         what: str,
+        chosen_by: str,
     ) -> tuple[
         pd.DataFrame, dict[str, np.ndarray], tuple[str, ...], zarr.Group, _Reads
     ]:
@@ -1675,12 +1684,17 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         else:
             raise ValueError(
                 "source must be an immune_receptors or clonotypes artifact, not "
-                f"{source.kind!r}"
+                f"{quoted_value(source.kind)}"
             )
         group, stored = self._receptor_group(receptors)
-        for name in ("locus", *fields):
+        if "locus" not in stored:
+            raise ValueError("The receptors store no locus")
+        for name in fields:
             if name not in stored:
-                raise ValueError(f"The receptors store no {name}")
+                raise ValueError(
+                    f"{chosen_by} reads each chain's {name}, which these receptors "
+                    f"do not store; they store {', '.join(stored)}"
+                )
         stored_slots = as_zarr_array(group["chain_slots"], name="chain_slots")
         n_cells = int(stored_slots.shape[0])
         kept = len(chosen) * stored_slots.dtype.itemsize
@@ -1924,6 +1938,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 cell_selection=cell_selection,
                 reserved=_USAGE_COLUMNS,
                 what="Counting the genes of the chains",
+                chosen_by="Counting gene usage",
             )
             # Each distinct call is decoded and named once.
             named = {
@@ -2032,6 +2047,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 cell_selection=cell_selection,
                 reserved=_SPECTRATYPE_COLUMNS,
                 what="Counting the junction lengths of the chains",
+                chosen_by=f"sequence={quoted_value(sequence)}",
             )
             # Each distinct junction is measured once, and a chain without
             # one is not counted.
@@ -2141,13 +2157,13 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             MemoryError: If a step of the export would hold more than the
                 memory budget.
         """
+        chains_only = bool_argument(chains_only, "chains_only")
         from ...writers.airr import (
             AIRR_REQUIRED_FIELDS,
             AirrRearrangementWriter,
             suffix_repeated_ids,
         )
 
-        bool_argument(chains_only, "chains_only")
         if not isinstance(path, str | os.PathLike):
             raise TypeError("path must be a path")
         if not isinstance(source, ArtifactRef):
@@ -2162,7 +2178,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         else:
             raise ValueError(
                 "source must be an immune_receptors or clonotypes artifact, not "
-                f"{source.kind!r}"
+                f"{quoted_value(source.kind)}"
             )
         if fields is not None:
             if isinstance(fields, str) or not isinstance(fields, Sequence):
@@ -2186,7 +2202,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             if unknown:
                 raise ValueError(
                     "The receptors store no field "
-                    + ", ".join(repr(str(name)) for name in unknown)
+                    + ", ".join(quoted_value(str(name)) for name in unknown)
                     + "; they store "
                     + ", ".join(stored)
                 )

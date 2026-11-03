@@ -16,6 +16,7 @@ import numpy as np
 from ..clones.recorders import CharacterMatrix
 from ..readers._treedata import write_character_store
 from ..utils.arrays import sorted_unique
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "laml_paths",
@@ -83,7 +84,7 @@ def _refuse_laml_names(names: list[str], what: str) -> None:
     for name in names:
         if not name or _LAML_FORBIDDEN & set(name):
             raise ValueError(
-                f"The {what} {name!r} holds a character that LAML's CSV or the "
+                f"The {what} {quoted_value(name)} holds a character that LAML's CSV or the "
                 "Newick trees it writes cannot hold: a comma, semicolon, colon, "
                 "bracket, quote or space"
             )
@@ -151,7 +152,7 @@ def write_laml_characters(
     priors = matrix.priors()
     with open(priors_path, "w", encoding="utf-8", newline="") as handle:
         handle.writelines(
-            f"{character},{state},{probability!r}\n"
+            f"{character},{state},{probability}\n"
             for character, state, probability in zip(
                 priors["character"].tolist(),
                 priors["state"].tolist(),

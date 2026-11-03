@@ -49,6 +49,7 @@ from ..metadata.records import (
     pack_text,
 )
 from ..utils.arrays import sorted_unique
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "FIELDS",
@@ -292,7 +293,7 @@ class BarcodeCounter:
             self._library_molecules.append(molecules)
         elif self._library_molecules[code] != molecules:
             raise ValueError(
-                f"The library {name!r} holds molecules in one file and barcode "
+                f"The library {quoted_value(name)} holds molecules in one file and barcode "
                 "counts without UMIs in another; give each its own library"
             )
         return code

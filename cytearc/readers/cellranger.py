@@ -36,6 +36,7 @@ from ..utils.count_values import (
     compressed_count_ranges,
     new_count_ranges,
 )
+from ..utils.arguments import bool_argument
 
 
 class CrReader(ABC):
@@ -324,6 +325,7 @@ class CrH5Reader(CrReader):
         *,
         duplicate_feature_ids: DuplicateFeatureIds = "error",
     ) -> None:
+        is_filtered = bool_argument(is_filtered, "is_filtered")
         if filtering_cutoff < 0:
             raise ValueError("filtering_cutoff cannot be negative")
         self.duplicateFeatureIds = duplicate_feature_ids_option(duplicate_feature_ids)

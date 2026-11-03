@@ -67,7 +67,7 @@ import numpy as np
 import pandas as pd
 
 from ..metadata.records import take_text
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument, quoted_value
 from ..utils.arrays import sorted_unique
 from .calling import SetClones, cell_sets, set_clones
 from .sequences import MAX_CHANCE_EDITS, expected_chance_pairs, neighbor_pairs
@@ -365,12 +365,6 @@ def _bounds(value: Any) -> tuple[int, int | None] | None:
     return low, high
 
 
-def _flag(value: Any, name: str) -> bool:
-    if not isinstance(value, bool | np.bool_):
-        raise TypeError(f"{name} must be a boolean")
-    return bool(value)
-
-
 def barcode_call_settings(
     preset: str | None = None,
     *,
@@ -484,7 +478,11 @@ def barcode_call_settings(
             "metric='hamming', which counts them within any distance but matches "
             "only barcodes of one length"
         )
-    trex = preset == "trex" if trex_rules is None else _flag(trex_rules, "trex_rules")
+    trex = (
+        preset == "trex"
+        if trex_rules is None
+        else bool_argument(trex_rules, "trex_rules")
+    )
     if trex and metric_value not in (None, "hamming"):
         raise ValueError(
             "TREX's rules compare cloneIDs at the positions where both hold a "
@@ -496,7 +494,7 @@ def barcode_call_settings(
         listed = bool(listed)
     if isinstance(listed, str) and listed == _REQUIRED and "allowlist" not in given:
         raise ValueError(
-            f"preset={preset!r} keeps the CellTags of the library's allowlist, as "
+            f"preset={quoted_value(preset)} keeps the CellTags of the library's allowlist, as "
             "its published rules do; pass allowlist=, the CellTags of the "
             "library, or allowlist=False to call clones without one"
         )
@@ -507,7 +505,7 @@ def barcode_call_settings(
     fraction_value = _unit_number(fraction, "min_fraction")
     if chosen == "jaccard":
         within, across = _similarities(values["similarity"])
-        inclusive_value: bool | None = _flag(values["inclusive"], "inclusive")
+        inclusive_value: bool | None = bool_argument(values["inclusive"], "inclusive")
     else:
         within, across, inclusive_value = None, None, None
     min_size_value = integer_argument(values.get("min_size", 1), "min_size", minimum=1)
@@ -525,8 +523,8 @@ def barcode_call_settings(
         similarity=within,
         across=across,
         inclusive=inclusive_value,
-        prune=_flag(values.get("prune", False), "prune"),
-        doublets=_flag(values.get("doublets", False), "doublets"),
+        prune=bool_argument(values.get("prune", False), "prune"),
+        doublets=bool_argument(values.get("doublets", False), "doublets"),
         min_size=min_size_value,
         trex_rules=trex,
     )
@@ -649,7 +647,7 @@ def _library_units(
 def _unknown_unit(detail: Mapping[str, Any], rule: str) -> ValueError:
     return ValueError(
         f"{rule} counts each barcode of a cell in its library's UMIs, or reads in a "
-        f"library that counts no UMIs, and library {detail['library']!r} counts "
+        f"library that counts no UMIs, and library {quoted_value(detail['library'])} counts "
         f"UMIs for {detail['records'] - detail['without_umis']} of its "
         f"{detail['records']} pairs and reads for "
         f"{detail['records'] - detail['without_reads']}; import its counts again, or "
@@ -915,7 +913,7 @@ def barcode_clone_calls(
             if detail["level"] != "molecules" and detail["records"]:
                 raise ValueError(
                     "TREX's rules apply to molecules, and library "
-                    f"{detail['library']!r} holds pairs of a cell and a barcode"
+                    f"{quoted_value(detail['library'])} holds pairs of a cell and a barcode"
                 )
         missing = reads < 0
         if np.any(missing):
@@ -925,7 +923,7 @@ def barcode_clone_calls(
                 "TREX's rules drop a barcode whose only molecule has one read, "
                 f"and {int(np.count_nonzero(missing & of_library))} of the "
                 f"{int(np.count_nonzero(of_library))} molecules of library "
-                f"{details[source]['library']!r} count no reads. TREX writes "
+                f"{quoted_value(details[source]['library'])} count no reads. TREX writes "
                 "read_count to molecules.txt since September 2024; the reads.txt "
                 "of an earlier run gives each molecule's reads, imported with "
                 "format='reads' and columns={'cell': 'cell_id', 'umi': 'umi', "
@@ -972,7 +970,7 @@ def barcode_clone_calls(
             detail = details[int(sources[np.argmax(unknown)])]
             raise ValueError(
                 "min_reads needs the reads of every molecule, and library "
-                f"{detail['library']!r} counts none for {int(unknown.sum())} of "
+                f"{quoted_value(detail['library'])} counts none for {int(unknown.sum())} of "
                 "its molecules; import a table with reads, or pass min_reads=0"
             )
         dropped = tested & (reads < settings.min_reads)

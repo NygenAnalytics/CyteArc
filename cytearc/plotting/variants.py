@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from ..storage.refs import ArtifactRef
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument, quoted_value
 from ..utils.arrays import sorted_unique
 from ._contracts import PlotProvenance
 from ._deps import require_matplotlib
@@ -63,6 +63,14 @@ def _load_selection(store: Any, variants: ArtifactRef) -> Any:
     loader = getattr(getattr(store, "variants", None), "load_informative", None)
     if not callable(loader):
         raise TypeError("store does not provide variants.load_informative")
+    # The loader names its own argument, so the plot checks its argument first.
+    if not isinstance(variants, ArtifactRef):
+        raise TypeError("variants must be an ArtifactRef")
+    if variants.kind != "variant_selection":
+        raise ValueError(
+            "variants must be a variant_selection artifact from "
+            f"ds.variants.informative, not {quoted_value(variants.kind)}"
+        )
     return loader(variants)
 
 
@@ -102,6 +110,8 @@ def variant_depth(
     Raises:
         ValueError: If no file names a cell, or no named cell has a group.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     by_site = _load_counts(store, counts, cell_selection=[])
     by_cell = _load_counts(store, counts, sites=[])
     cells = by_cell.cells
@@ -262,6 +272,8 @@ def variant_statistics(
     Raises:
         ValueError: If no variant has a value on the x axis.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     selection = _load_selection(store, variants)
     frame = selection.variants
     strand = frame["strand_correlation"].to_numpy(dtype=np.float64)
@@ -397,6 +409,8 @@ def allele_frequencies(
         ValueError: If the selection has no informative variant, or no cell
             has a clone.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     max_cells = integer_argument(max_cells, "max_cells", minimum=1)
     selection = _load_selection(store, variants)
     chosen = selection.variants[selection.variants["informative"]]
@@ -584,6 +598,8 @@ def genotypes(
         ValueError: If no cell has a group, ``site`` names a site that is not
             drawn, or several sites are drawn on a layout without ``site``.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     from ._data import _fetch_cell_column
 
     loaded = _load_genotypes(store, genotypes, sites=sites)
@@ -646,7 +662,7 @@ def genotypes(
                 )
             site = site_names[0]
         if site not in site_names:
-            raise ValueError(f"site {site!r} is not among the drawn sites")
+            raise ValueError(f"site {quoted_value(site)} is not among the drawn sites")
         from ..metadata.selection import cell_selection_indices
         from ..storage.artifacts import inspect_artifact
 

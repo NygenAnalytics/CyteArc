@@ -33,6 +33,7 @@ from ._variant_files import (
     read_barcodes,
     read_vcf,
 )
+from ..utils.arguments import quoted_value
 
 __all__ = ["VartrixSource", "vartrix_source"]
 
@@ -47,6 +48,7 @@ class VartrixSource:
     count_unit: str | None
     depth_definition: str
     count_fields: tuple[str, ...]
+    call_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
     alleles_overlap: bool
@@ -172,7 +174,7 @@ def vartrix_source(path: str | os.PathLike[str]) -> VartrixSource:
     if same.any():
         raise ValueError(
             f"A record of {vcf_path} has the same reference and alternative allele, "
-            f"{references[same][0]!r}"
+            f"{quoted_value(references[same][0])}"
         )
     sites = SiteTable(
         contigs=tuple(
@@ -212,6 +214,7 @@ def vartrix_source(path: str | os.PathLike[str]) -> VartrixSource:
         count_unit=None,
         depth_definition="reference_and_alternative",
         count_fields=(),
+        call_fields=(),
         depth_roles=None,
         reference_from_depth=False,
         alleles_overlap=False,

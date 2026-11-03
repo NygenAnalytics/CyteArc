@@ -31,6 +31,7 @@ from ..stages import (
     resolve_cells,
 )
 from ..summaries import summarize_stage
+from ....utils.arguments import bool_argument
 from .common import (
     cell_snapshots,
     check_tsne,
@@ -39,7 +40,6 @@ from .common import (
     resolve_embeddings,
     resolve_graph,
     resolve_harmony,
-    require_bool,
     resolve_label,
     resolve_run_filtering,
     resolve_snapshot_columns,
@@ -141,8 +141,8 @@ def resolve_adt(
     )
     resolved_label = resolve_label(label)
     resolved_species = resolve_species(species)
-    membership_strength = require_bool(membership_strength, "membership_strength")
-    markers = require_bool(markers, "markers")
+    membership_strength = bool_argument(membership_strength, "membership_strength")
+    markers = bool_argument(markers, "markers")
     pattern, panel_config, panel_size = _resolve_panel(store, assay_name, panel)
     _norm, normalization_settings = stage_settings(
         "normalization", normalization, optional=False

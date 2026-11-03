@@ -811,4 +811,7 @@ def test_times_given_as_lists_or_long_text_are_refused_briefly(tmp_path) -> None
     graph["nodes"]["a"]["time"] = "x" * 1_000
     with pytest.raises(ValueError) as refused:
         _read(_h5td(tmp_path / "text.h5td", {"t": graph}))
-    assert str(refused.value).endswith("not a number: '" + "x" * 59 + "...")
+    # Quoted values keep their first 38 and last 39 characters of 80.
+    assert str(refused.value).endswith(
+        "not a number: '" + "x" * 37 + "..." + "x" * 38 + "'"
+    )

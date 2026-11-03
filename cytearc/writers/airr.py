@@ -43,6 +43,7 @@ from ..metadata.records import EncodedText, decode_text
 from ..utils.arrays import sorted_unique
 from ..utils.logging import logger
 from ..utils.numba import njit
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "AIRR_LOGICAL_FIELDS",
@@ -120,7 +121,7 @@ def _logical_column(values: pd.Series, name: str) -> np.ndarray:
     if not known.all():
         raise ValueError(
             f"{name} must hold logical values, but holds "
-            f"{present.iloc[int(np.flatnonzero(~known)[0])]!r}"
+            f"{quoted_value(present.iloc[int(np.flatnonzero(~known)[0])])}"
         )
     rendered = np.where(flags, "T", "F").astype(object)
     rendered[(text == "").to_numpy()] = ""
@@ -148,7 +149,7 @@ def _text_column(values: pd.Series, name: str, whole: bool) -> np.ndarray:
         numbers = values.to_numpy(dtype=np.float64, na_value=np.nan)
         rendered = np.asarray(
             [
-                str(int(number)) if whole else repr(float(number))
+                str(int(number)) if whole else str(float(number))
                 for number in np.where(missing, 0.0, numbers)
             ],
             dtype=object,
@@ -388,7 +389,7 @@ def _forbidden_message(found: Sequence[tuple[str, int, str]], subject: str) -> s
     """
     parts = [
         f"{count} value{'s' if count > 1 else ''} of {field}, "
-        f"{'the first ' if count > 1 else ''}in contig {contig!r}"
+        f"{'the first ' if count > 1 else ''}in contig {quoted_value(contig)}"
         for field, count, contig in found
     ]
     return (
@@ -476,14 +477,14 @@ def _value_text(column: _Bytes, row: int) -> str:
 
 
 def _real_text(numbers: np.ndarray, whole: bool) -> np.ndarray:
-    """Render real numbers as ``repr`` writes them, or as integers when whole."""
+    """Render real numbers as Python writes them, or as integers when whole."""
     out = np.full(len(numbers), "", dtype=object)
     present = ~np.isnan(numbers)
     values = numbers[present].tolist()
     out[present] = np.asarray(
         [str(int(number)) for number in values]
         if whole
-        else [repr(number) for number in values],
+        else [str(number) for number in values],
         dtype=object,
     )
     return out
@@ -876,7 +877,7 @@ def write_airr_rearrangements(
     if not ids.is_unique:
         repeated = ids[ids.duplicated()].iloc[0]
         raise ValueError(
-            f"sequence_id {repeated!r} repeats, but the schema requires each "
+            f"sequence_id {quoted_value(repeated)} repeats, but the schema requires each "
             "contig's ID to be unique"
         )
     names = list(table.columns) if columns is None else list(_column_names(columns))

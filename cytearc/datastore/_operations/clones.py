@@ -98,7 +98,7 @@ from ...storage.artifacts import (
 from ...storage.selections import validate_cell_selection
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import bool_argument
+from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sorted_unique
 from ...utils.digest import file_sha256
 from ...utils.logging import logger
@@ -145,20 +145,22 @@ def _stored_diagnostics(group: zarr.Group, operation: str) -> dict[str, int | fl
     if not names:
         if recorded is not None:
             raise ValueError(
-                f"Clones saved by {operation!r} record no diagnostics, and this "
-                f"artifact records {recorded!r}"
+                f"Clones saved by {quoted_value(operation)} record no diagnostics, and this "
+                f"artifact records {quoted_value(recorded)}"
             )
         return {}
     if not isinstance(recorded, Mapping) or set(recorded) != set(names):
         raise ValueError(
-            f"Clones saved by {operation!r} must record exactly the diagnostics "
-            f"{', '.join(names)}, and this artifact records {recorded!r}"
+            f"Clones saved by {quoted_value(operation)} must record exactly the diagnostics "
+            f"{', '.join(names)}, and this artifact records {quoted_value(recorded)}"
         )
     numbers: dict[str, int | float] = {}
     for name in names:
         value = recorded[name]
         if not isinstance(value, int | float) or isinstance(value, bool):
-            raise ValueError(f"The diagnostic {name!r} must be a number, not {value!r}")
+            raise ValueError(
+                f"The diagnostic {quoted_value(name)} must be a number, not {quoted_value(value)}"
+            )
         numbers[name] = value
     return numbers
 
@@ -349,7 +351,7 @@ def _file_namespace(file: BarcodeFile) -> str:
     stem = Path(os.fspath(file.path)).name.split(".", 1)[0]
     if not stem:
         raise ValueError(
-            f"The clone file {os.fspath(file.path)!r} has no name before its "
+            f"The clone file {quoted_value(os.fspath(file.path))} has no name before its "
             "extensions to namespace its clones; give it a barcode_prefix"
         )
     return f"{stem}_"
@@ -373,8 +375,8 @@ def _namespaces(files: Sequence[BarcodeFile]) -> list[str | None]:
                 "first '.'"
             )
             raise ValueError(
-                f"The clone files {os.fspath(other.path)!r} and "
-                f"{os.fspath(file.path)!r} share the namespace {namespace!r} of "
+                f"The clone files {quoted_value(os.fspath(other.path))} and "
+                f"{quoted_value(os.fspath(file.path))} share the namespace {quoted_value(namespace)} of "
                 f"their clone labels, so equal clone IDs would merge; {remedy}"
             )
     return list(namespaces)
@@ -527,6 +529,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 saved yet.
             MemoryError: If the import does not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...readers.clone_tables import clone_layout
 
         if not isinstance(cell_selection, ArtifactRef):
@@ -534,10 +537,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if multiple not in MULTIPLE_POLICIES:
             raise ValueError(
                 f"multiple must be one of {', '.join(MULTIPLE_POLICIES)}, not "
-                f"{multiple!r}"
+                f"{quoted_value(multiple)}"
             )
         policy: MultiplePolicy = "drop" if multiple == "drop" else "error"
-        bool_argument(invalidate_cache, "invalidate_cache")
         if format is not None and not isinstance(format, str):
             raise TypeError("format must be a format name or None")
         files = barcode_files(
@@ -754,13 +756,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 saved yet.
             MemoryError: If the labels do not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(column, str):
             raise TypeError("column must be the name of a cell metadata column")
         if column not in self.cells.columns:
-            raise ValueError(f"{column!r} is not a cell metadata column")
+            raise ValueError(f"{quoted_value(column)} is not a cell metadata column")
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        bool_argument(invalidate_cache, "invalidate_cache")
         cell_index = self._clone_selection_indices(cell_selection)
         n_cells = len(cell_index)
         # Blocks of labels are read at their stored width, decoding whole
@@ -829,7 +831,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if clones.kind not in _CLONE_SOURCE_KINDS:
             raise ValueError(
                 f"clones must be a {' or '.join(_CLONE_SOURCE_KINDS)} artifact, "
-                f"not {clones.kind!r}"
+                f"not {quoted_value(clones.kind)}"
             )
         require_complete_artifact(self.zw, clones)
         return artifact_group(self.zw, clones)
@@ -973,7 +975,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise TypeError("path must be a path")
         if format not in EXPORT_FORMATS:
             raise ValueError(
-                f"format must be one of {', '.join(EXPORT_FORMATS)}, not {format!r}"
+                f"format must be one of {', '.join(EXPORT_FORMATS)}, not {quoted_value(format)}"
             )
         group = self._clone_group(clones)
         n_cells = int(as_zarr_array(group["codes"], name="codes").shape[0])
@@ -999,7 +1001,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             if lost:
                 raise ValueError(
                     "The clone labels "
-                    + ", ".join(repr(label) for label in lost[:5])
+                    + ", ".join(quoted_value(label) for label in lost[:5])
                     + " read as no clone in a clone table; export these clones "
                     "with format='matrix', whose clone list keeps them"
                 )
@@ -1263,7 +1265,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if cell_selection.kind != "cell_selection":
             raise ValueError(
                 "cell_selection must be a cell_selection artifact, not "
-                f"{cell_selection.kind!r}"
+                f"{quoted_value(cell_selection.kind)}"
             )
         n_measured = int(
             validate_cell_selection(self.zw, cell_selection).selected_count
@@ -1476,7 +1478,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 measurement, about 300 bytes per cell, does not fit the memory
                 budget.
         """
-        bool_argument(invalidate_cache, "invalidate_cache")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if breakpoints is not None and frequency_breakpoints is not None:
             raise ValueError("Pass breakpoints or frequency_breakpoints, not both")
         counts: tuple[int, ...] | None = None
@@ -1639,7 +1641,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise TypeError("expansion must be an ArtifactRef")
         if expansion.kind != ClonalExpansionArguments.artifact_kind:
             raise ValueError(
-                f"expansion must be a clonal_expansion artifact, not {expansion.kind!r}"
+                f"expansion must be a clonal_expansion artifact, not {quoted_value(expansion.kind)}"
             )
         bounds = checked_bounds(splits, "splits", whole=True)
         require_complete_artifact(self.zw, expansion)
@@ -2278,7 +2280,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         """
         if not isinstance(method, str) or method not in COUPLING_METHODS:
             raise ValueError(
-                f"method must be one of {', '.join(COUPLING_METHODS)}, not {method!r}"
+                f"method must be one of {', '.join(COUPLING_METHODS)}, not {quoted_value(method)}"
             )
         if isinstance(n_permutations, bool) or not isinstance(
             n_permutations, int | np.integer
@@ -2448,7 +2450,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a clone artifact, ``early`` or
                 ``late`` is not a cell selection or selects no cell, a cell is
-                both early and late, no late cell has both a clone and a fate,
+                both early and late, the clones give no late cell a clone, no
+                late cell with a clone has a fate,
                 a clone's early and late cells carry two labels that the clones
                 keep apart, fewer than two fates hold a late cell, a column of the fates
                 is missing or named twice, a key column names a column of the
@@ -2464,13 +2467,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             MemoryError: If reading the clones, grouping the late cells, or
                 the measurement does not fit the memory budget.
         """
-        bool_argument(invalidate_cache, "invalidate_cache")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         for name, selection in (("early", early), ("late", late)):
             if not isinstance(selection, ArtifactRef):
                 raise TypeError(f"{name} must be an ArtifactRef")
             if selection.kind != "cell_selection":
                 raise ValueError(
-                    f"{name} must be a cell_selection artifact, not {selection.kind!r}"
+                    f"{name} must be a cell_selection artifact, not {quoted_value(selection.kind)}"
                 )
         source = self._read_clone_input(clones)
         held = self._clone_input_bytes(clones, with_ids=False)
@@ -2521,8 +2524,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             reserved=_FATE_BIAS_COLUMNS,
         )
         counted = (late_codes >= 0) & (grouped.codes >= 0)
+        if not (late_codes >= 0).any():
+            raise ValueError(
+                f"None of the {len(late_codes)} cells of late has a clone; pass "
+                "late cells that the clones give a clone"
+            )
         if not counted.any():
-            raise ValueError("No cell has both a clone and a group")
+            raise ValueError(
+                "No cell has both a clone and a group among the late cells: "
+                "group_by and groups label none of the late cells with a clone"
+            )
         keys = group_frame(grouped.key_columns, grouped.keys)
         if len(keys) < 2:
             raise ValueError("Fate bias needs at least two fates among the late cells")
@@ -2530,7 +2541,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         clashes = [name for name in names.tolist() if name in FATE_CELL_COLUMNS]
         if clashes:
             raise ValueError(
-                f"A fate is named {clashes[0]!r}, which is also a column of the "
+                f"A fate is named {quoted_value(clashes[0])}, which is also a column of the "
                 "table of early cells; rename its label"
             )
         columns = group_columns(group_by)
@@ -2685,7 +2696,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise TypeError("bias must be an ArtifactRef")
         if bias.kind != CloneFateBiasArguments.artifact_kind:
             raise ValueError(
-                f"bias must be a clone_fate_bias artifact, not {bias.kind!r}"
+                f"bias must be a clone_fate_bias artifact, not {quoted_value(bias.kind)}"
             )
         require_complete_artifact(self.zw, bias)
         group = artifact_group(self.zw, bias)
@@ -2878,7 +2889,7 @@ def _refuse_clones_across_kept_labels(
         if across:
             raise ValueError(
                 f"{len(across)} clones hold early or late cells of two labels in "
-                f"{column!r}, which the clones keep apart, as clonotypes that "
+                f"{quoted_value(column)}, which the clones keep apart, as clonotypes that "
                 "within_receptor_type=False defines can span receptor types; "
                 "fate bias tests each clone in the fates of one label. Define "
                 "the clonotypes with within_receptor_type=True, or pass early "

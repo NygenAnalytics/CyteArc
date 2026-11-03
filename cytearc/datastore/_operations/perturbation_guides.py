@@ -1079,6 +1079,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             MemoryError: If the import does not fit the memory budget; the
                 message names a budget that runs it.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...readers.cellranger import protospacer_calls_size, read_protospacer_calls
 
         import_settings(path, barcode_prefix)
@@ -1086,7 +1087,6 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             raise TypeError("barcode_suffix must be text or None")
         barcode_pattern = checked_barcode_pattern(barcode_pattern)
         _require_ref(cell_selection, "cell_selection")
-        bool_argument(invalidate_cache, "invalidate_cache")
         assay, guide_ids, cell_index = self._guide_call_cells(
             from_assay, cell_selection, GuideCallImportArguments.operation
         )
@@ -1246,6 +1246,9 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         Raises:
             TypeError: If ``calls`` is not an ArtifactRef.
             ValueError: If it is not a ``guide_calls`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as a call that
+                stopped before it finished leaves it.
             MemoryError: If its values do not fit the datastore memory budget.
         """
         _require_ref(calls, "calls", GuideCallImportArguments.artifact_kind)
@@ -1676,13 +1679,13 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 budget. The histograms raise it while the counts are read,
                 before they would hold more than the counts leave them.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         _require_ref(cell_selection, "cell_selection")
         resolved_min_umi, fraction = call_settings(
             method, min_umi, fraction_threshold, sample_column
         )
         fitted = method in FITTED_METHODS
         _require_cell_column(self, sample_column, "sample_column")
-        bool_argument(invalidate_cache, "invalidate_cache")
         assay, guide_ids, cell_index = self._guide_call_cells(
             from_assay, cell_selection, GuideCallArguments.operation
         )
@@ -1882,6 +1885,9 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 is text or not a collection of guide IDs.
             ValueError: If ``thresholds`` holds no fitted thresholds, or a
                 guide is not a guide of the assay.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as a call that
+                stopped before it finished leaves it.
             MemoryError: If the tables do not fit the memory budget.
         """
         _require_ref(thresholds, "thresholds")
@@ -2079,9 +2085,9 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 saved yet.
             MemoryError: If the labelling does not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         _require_ref(calls, "calls", GuideCallImportArguments.artifact_kind)
         control_names = label_settings(controls, target_column, targets, policy)
-        bool_argument(invalidate_cache, "invalidate_cache")
         status = require_complete_artifact(self.zw, calls)
         assay = self._get_assay(str(calls.assay))
         group = artifact_group(self.zw, calls)
@@ -2196,6 +2202,9 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         Raises:
             TypeError: If ``labels`` is not an ArtifactRef.
             ValueError: If it is not a ``perturbation_labels`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as a call that
+                stopped before it finished leaves it.
             MemoryError: If its values do not fit the datastore memory budget.
         """
         _require_ref(labels, "labels", PerturbationLabelArguments.artifact_kind)

@@ -264,6 +264,8 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             MemoryError: If the profiles and one feature's sums, beside the
                 read of its counts, do not fit the memory budget.
         """
+        mask_targets = bool_argument(mask_targets, "mask_targets")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...perturbation.profiles import (
             CONTROL_SD_DDOF,
             control_moments,
@@ -282,7 +284,6 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         _require_ref(features, "features", "feature_selection")
         floor = profile_settings(by, min_cells, mask_targets, id_column, sample_column)
         _require_cell_column(self, sample_column, "sample_column")
-        bool_argument(invalidate_cache, "invalidate_cache")
         cells = self._profile_cells(labels, by)
         expression = self._get_assay(str(features.assay))
         self._require_measured_cells(
@@ -586,6 +587,9 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         Raises:
             TypeError: If ``profiles`` is not an ArtifactRef.
             ValueError: If it is not a ``perturbation_profiles`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as a call that
+                stopped before it finished leaves it.
             MemoryError: If its profiles do not fit the memory budget.
         """
         _require_ref(profiles, "profiles", PerturbationProfileArguments.artifact_kind)
@@ -733,6 +737,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             MemoryError: If the profiles and the distances between them,
                 with their working copies, do not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...perturbation.clusters import (
             cluster_memory_bytes,
             cluster_profiles,
@@ -742,7 +747,6 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         cluster_size, core_size, resolved_seed, requested = cluster_settings(
             metric, min_cluster_size, min_samples, selection, seed, perturbations
         )
-        bool_argument(invalidate_cache, "invalidate_cache")
         require_complete_artifact(self.zw, profiles)
         group = artifact_group(self.zw, profiles)
         names = read_array(group, "perturbations").astype(str)
@@ -867,6 +871,9 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         Raises:
             TypeError: If ``clusters`` is not an ArtifactRef.
             ValueError: If it is not a ``perturbation_clusters`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as a call that
+                stopped before it finished leaves it.
             MemoryError: If the distances between the profiles do not fit the
                 memory budget.
         """

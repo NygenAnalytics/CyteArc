@@ -165,6 +165,29 @@ def test_a_site_table_refuses_repeated_sites_text_types_and_two_references() -> 
         shuffled.allele_offsets()
 
 
+def test_two_references_name_their_site_when_the_alleles_are_not_sorted_by_site() -> (
+    None
+):
+    # The reference alleles sit at sites 2, 2, 0 and 1, so the repeat is site
+    # 2, chrM:9. Sorted, the sites read 0, 1, 2, 2, and the third allele as
+    # stored is at site 0, chrM:7, which a position among the sorted sites
+    # would name if it read the stored order.
+    table = SiteTable(
+        contigs=(Contig("chrM"),),
+        site_contig=np.zeros(3),
+        site_position=np.asarray([7, 8, 9]),
+        site_name=np.full(3, "", dtype=object),
+        site_channel=np.full(3, "", dtype=object),
+        allele_site=np.asarray([2, 2, 0, 1]),
+        allele=np.asarray(["A", "C", "G", "T"], dtype=object),
+        allele_role=np.asarray(
+            ["reference", "reference", "reference", "reference"], dtype=object
+        ),
+    )
+    with pytest.raises(ValueError, match="^The site chrM:9 has two reference alleles$"):
+        table.reference_alleles()
+
+
 def test_merge_orders_contigs_naturally_then_positions_then_names() -> None:
     first = SiteTable(
         contigs=(Contig("chr10"), Contig("chr2")),

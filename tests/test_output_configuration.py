@@ -90,7 +90,7 @@ def test_reconfiguration_tolerates_a_stale_cytearc_handler(capsys):
 
 @pytest.mark.parametrize("setting", ["progress", "timestamps"])
 def test_configure_output_requires_boolean_settings(setting):
-    with pytest.raises(TypeError, match=f"^{setting} must be a bool$"):
+    with pytest.raises(TypeError, match=f"^{setting} must be a boolean or None$"):
         configure_output(**{setting: 1})
 
 

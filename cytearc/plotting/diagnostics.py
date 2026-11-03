@@ -15,6 +15,7 @@ from ._figure import (
 )
 from ..utils.arrays import sort_categories
 from ._style import apply_figure_chrome, theme_context
+from ..utils.arguments import bool_argument
 
 
 def _clean_axis(ax: Any, *, tick_size: float = 10.0) -> None:
@@ -49,6 +50,8 @@ def qc(
     theme: str = "notebook",
 ) -> PlotResult:
     """Plot grouped distributions for cell-level QC metrics."""
+    show_on_single_row = bool_argument(show_on_single_row, "show_on_single_row")
+    show = bool_argument(show, "show")
     require_matplotlib()
     sns = require_seaborn()
     if "groups" not in data.columns:
@@ -236,6 +239,7 @@ def elbow(
     show: bool = True,
 ) -> PlotResult:
     """Plot explained variance and mark the detected elbow."""
+    show = bool_argument(show, "show")
     require_matplotlib()
     values = np.asarray(variance_explained, dtype=np.float64)
     if values.ndim != 1 or len(values) == 0:
@@ -328,6 +332,7 @@ def graph_qc(
     show: bool = True,
 ) -> PlotResult:
     """Plot node degree and edge weight distributions for a sparse graph."""
+    show = bool_argument(show, "show")
     require_matplotlib()
     shape = getattr(graph, "shape", None)
     if shape is None or len(shape) != 2:
@@ -440,6 +445,7 @@ def highly_variable_features(
     show: bool = True,
 ) -> PlotResult:
     """Plot mean-variance diagnostics for feature selection."""
+    show = bool_argument(show, "show")
     require_matplotlib()
     means = np.asarray(mean_nonzero, dtype=np.float64)
     variances = np.asarray(corrected_variance, dtype=np.float64)

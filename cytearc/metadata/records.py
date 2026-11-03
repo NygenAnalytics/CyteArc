@@ -41,6 +41,7 @@ import pandas as pd
 
 from ..utils.arrays import sorted_unique
 from ..utils.numba import njit
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "FLAG",
@@ -126,7 +127,7 @@ def _checked_fields(fields: Mapping[str, FieldKind]) -> Mapping[str, FieldKind]:
     if unknown:
         name, kind = next(iter(unknown.items()))
         raise ValueError(
-            f"Field {name!r} has the kind {kind!r}; a field's kind is one of "
+            f"Field {quoted_value(name)} has the kind {quoted_value(kind)}; a field's kind is one of "
             + ", ".join(map(repr, _KINDS))
         )
     return MappingProxyType(dict(fields))
@@ -147,7 +148,9 @@ def _require_text(values: np.ndarray, what: str) -> None:
         # for a value such as a list.
         missing = pd.isna(value)
         if not (isinstance(missing, bool | np.bool_) and missing):
-            raise TypeError(f"{what} must be text or missing, but holds {value!r}")
+            raise TypeError(
+                f"{what} must be text or missing, but holds {quoted_value(value)}"
+            )
 
 
 def file_lines(rows: np.ndarray, first_line: int) -> str:
@@ -229,7 +232,7 @@ def parse_flags(
     if unknown.any():
         rows = np.flatnonzero(unknown)
         raise ValueError(
-            f"{name} must be true or false, but holds {text.iloc[rows[0]]!r} on "
+            f"{name} must be true or false, but holds {quoted_value(text.iloc[rows[0]])} on "
             + file_lines(rows, first_line)
         )
     flags: np.ndarray = mapped.fillna(-1).to_numpy(dtype=np.int8)
@@ -284,7 +287,7 @@ def parse_integers(
         where = file_lines(rows, first_line) if lines is None else lines(rows)
         raise ValueError(
             f"{name} must be a whole number of at least 0, but holds "
-            f"{text.iloc[rows[0]]!r} on {where}"
+            f"{quoted_value(text.iloc[rows[0]])} on {where}"
         )
     if present.any() and numbers[present].max() >= 2.0**63:
         raise ValueError(f"{name} holds a number too large for int64")
@@ -319,7 +322,7 @@ def parse_numbers(
     if bad.any():
         rows = np.flatnonzero(bad)
         raise ValueError(
-            f"{name} must be a finite number, but holds {text.iloc[rows[0]]!r} on "
+            f"{name} must be a finite number, but holds {quoted_value(text.iloc[rows[0]])} on "
             + file_lines(rows, first_line)
         )
     numbers[absent] = np.nan
@@ -658,17 +661,19 @@ class RecordTable:
                 n_records and (codes.min() < -1 or codes.max() >= n_values)
             ):
                 raise ValueError(
-                    f"Text field {name!r} needs one code per record: -1, or the "
+                    f"Text field {quoted_value(name)} needs one code per record: -1, or the "
                     f"position of one of its {n_values} values"
                 )
         for name, (_data, offsets) in self.ragged.items():
             if np.asarray(offsets).shape != (n_records + 1,):
                 raise ValueError(
-                    f"Ragged field {name!r} needs one offset per record, and one more"
+                    f"Ragged field {quoted_value(name)} needs one offset per record, and one more"
                 )
         for name, column in self.values.items():
             if np.asarray(column).shape != (n_records,):
-                raise ValueError(f"Field {name!r} needs one value per record")
+                raise ValueError(
+                    f"Field {quoted_value(name)} needs one value per record"
+                )
 
     @property
     def fields(self) -> tuple[str, ...]:
@@ -682,7 +687,7 @@ class RecordTable:
     def _kind(self, name: str) -> FieldKind:
         kind = self.kinds.get(name)
         if kind is None:
-            raise KeyError(f"The table holds no field {name!r}")
+            raise KeyError(f"The table holds no field {quoted_value(name)}")
         return kind
 
     def column(self, name: str) -> np.ndarray:
@@ -763,7 +768,7 @@ class RecordEncoder:
         self._kinds = _checked_fields(fields)
         if id_field is not None and self._kinds.get(id_field) != RAGGED:
             raise ValueError(
-                f"id_field {id_field!r} must name a ragged field of fields, whose "
+                f"id_field {quoted_value(id_field)} must name a ragged field of fields, whose "
                 "values identify each record"
             )
         self._id_field = id_field
@@ -822,7 +827,9 @@ class RecordEncoder:
         n_rows = len(chunk)
         cell_positions = _checked_positions(cells, n_rows)
         if isinstance(source, bool) or not isinstance(source, int | np.integer):
-            raise TypeError(f"source must be the position of a file, not {source!r}")
+            raise TypeError(
+                f"source must be the position of a file, not {quoted_value(source)}"
+            )
         if source < 0:
             raise ValueError(f"source must be a position of at least 0, not {source}")
         encoded = _Chunk(
@@ -844,12 +851,14 @@ class RecordEncoder:
                 codes, distinct = pd.factorize(
                     chunk[name].to_numpy(dtype=object), use_na_sentinel=True
                 )
-                _require_text(np.asarray(distinct, dtype=object), f"Field {name!r}")
+                _require_text(
+                    np.asarray(distinct, dtype=object), f"Field {quoted_value(name)}"
+                )
                 data, offsets = pack_text(distinct)
                 encoded.text[name] = (np.asarray(codes, dtype=np.int32), data, offsets)
             elif kind == RAGGED:
                 values = chunk[name].to_numpy(dtype=object)
-                _require_text(values, f"Field {name!r}")
+                _require_text(values, f"Field {quoted_value(name)}")
                 encoded.ragged[name] = encode_ragged(values)
                 if name == self._id_field:
                     missing_ids += int(np.count_nonzero(pd.isna(values)))
@@ -1072,13 +1081,13 @@ def _checked_values(kind: str, column: Any, name: str) -> np.ndarray:
     if kind == NUMBER:
         if values.size and values.dtype.kind not in "iuf":
             raise TypeError(
-                f"Field {name!r} holds numbers, so its values must be real "
+                f"Field {quoted_value(name)} holds numbers, so its values must be real "
                 f"numbers, not {values.dtype}"
             )
         numbers = values.astype(np.float64)
         if np.isinf(numbers).any():
             raise ValueError(
-                f"Field {name!r} holds numbers, which must be finite, with NaN "
+                f"Field {quoted_value(name)} holds numbers, which must be finite, with NaN "
                 "for a missing value"
             )
         return numbers
@@ -1086,7 +1095,7 @@ def _checked_values(kind: str, column: Any, name: str) -> np.ndarray:
     if values.size and values.dtype.kind not in accepted:
         noun = "integers" if kind == INTEGER else "flags"
         raise TypeError(
-            f"Field {name!r} holds {noun}, so its values must be integers, not "
+            f"Field {quoted_value(name)} holds {noun}, so its values must be integers, not "
             f"{values.dtype}"
         )
     if kind == INTEGER:
@@ -1094,13 +1103,13 @@ def _checked_values(kind: str, column: Any, name: str) -> np.ndarray:
             values.min() < -1 or (values.dtype.kind == "u" and values.max() >= 2**63)
         ):
             raise ValueError(
-                f"Field {name!r} holds whole numbers of at least 0, with -1 for "
+                f"Field {quoted_value(name)} holds whole numbers of at least 0, with -1 for "
                 f"a missing value, but holds {values.min()} or a value beyond int64"
             )
         return values.astype(np.int64)
     if values.size and (values.min() < -1 or values.max() > 1):
         raise ValueError(
-            f"Field {name!r} holds flags, which are 1 for true, 0 for false and "
+            f"Field {quoted_value(name)} holds flags, which are 1 for true, 0 for false and "
             f"-1 for a missing value, but holds {values.min()} or {values.max()}"
         )
     return values.astype(np.int8)

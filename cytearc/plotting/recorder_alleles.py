@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from ..storage.refs import ArtifactRef
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument
 from ._contracts import PlotProvenance
 from ._deps import require_matplotlib
 from ._figure import (
@@ -94,7 +94,17 @@ def recorder_states(
     Tables: ``site_states`` (``integration``, ``site``, ``state``,
     ``n_cells``, ``share``), one row per site and state, the record's
     :meth:`~cytearc.clones.LineageAlleles.site_states` with each share.
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If ``alleles`` is not a ``lineage_alleles`` artifact.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact does not fit the memory budget.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     max_sites = integer_argument(max_sites, "max_sites", minimum=1)
     loaded = _load_alleles(store, alleles)
     table = _site_table(loaded.site_states())

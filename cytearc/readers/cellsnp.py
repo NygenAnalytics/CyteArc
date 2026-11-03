@@ -40,6 +40,7 @@ from ._variant_files import (
     read_barcodes,
     read_vcf,
 )
+from ..utils.arguments import quoted_value
 
 __all__ = ["CellsnpSource", "cellsnp_source"]
 
@@ -66,7 +67,7 @@ def _check_records(records: _Records, path: str) -> None:
         bad = [value for value in values.tolist() if not value or "," in value]
         if bad:
             raise ValueError(
-                f"{path} holds the {name} allele {bad[0]!r}; each record needs one "
+                f"{path} holds the {name} allele {quoted_value(bad[0])}; each record needs one "
                 "reference and one alternative allele"
             )
     same = records.ref == records.alt
@@ -74,7 +75,7 @@ def _check_records(records: _Records, path: str) -> None:
         position = int(np.flatnonzero(same)[0])
         raise ValueError(
             f"Record {position + 1} of {path} has the same reference and alternative "
-            f"allele, {records.ref[position]!r}"
+            f"allele, {quoted_value(records.ref[position])}"
         )
     keys = pd.Series(
         list(zip(records.contig.tolist(), records.position.tolist(), strict=True))
@@ -125,6 +126,7 @@ class CellsnpSource:
     count_unit: str | None
     depth_definition: str
     count_fields: tuple[str, ...]
+    call_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
     alleles_overlap: bool
@@ -204,7 +206,7 @@ def _mquad_records(names_path: str, bic_path: str | None) -> _Records:
         match = _VARIANT_NAME.match(name)
         if match is None:
             raise ValueError(
-                f"{names_path} names the variant {name!r}; MQuad names variants as "
+                f"{names_path} names the variant {quoted_value(name)}; MQuad names variants as "
                 "position, reference, '>' and alternative, such as '2956C>A'"
             )
         parsed.append(
@@ -224,7 +226,7 @@ def _mquad_records(names_path: str, bic_path: str | None) -> _Records:
             match = _BIC_NAME.match(value)
             if match is None:
                 raise ValueError(
-                    f"{bic_path} names the variant {value!r}; MQuad names them as "
+                    f"{bic_path} names the variant {quoted_value(value)}; MQuad names them as "
                     "contig, position, reference and alternative joined by '_'"
                 )
             key = (int(match["position"]), match["ref"].upper(), match["alt"].upper())
@@ -236,7 +238,7 @@ def _mquad_records(names_path: str, bic_path: str | None) -> _Records:
         ]
         if missing:
             raise ValueError(
-                f"{bic_path} does not list the passed variant {missing[0]!r}"
+                f"{bic_path} does not list the passed variant {quoted_value(missing[0])}"
             )
         contig_names = {by_variant[key] for key in parsed}
         if len(contig_names) > 1:
@@ -315,7 +317,9 @@ def cellsnp_source(path: str | os.PathLike[str], *, format: str) -> CellsnpSourc
         if bic is not None:
             files.append(("bic_params", bic))
     else:
-        raise ValueError(f"format must be cellsnp_lite or mquad, not {format!r}")
+        raise ValueError(
+            f"format must be cellsnp_lite or mquad, not {quoted_value(format)}"
+        )
     barcodes = read_barcodes(samples)
     matrices = {
         tag: matrix_header(file) for tag, file in tags.items() if file is not None
@@ -331,6 +335,7 @@ def cellsnp_source(path: str | os.PathLike[str], *, format: str) -> CellsnpSourc
         count_unit=None,
         depth_definition="all" if other else "reference_and_alternative",
         count_fields=(),
+        call_fields=(),
         depth_roles=frozenset({"reference", "alternative"}),
         reference_from_depth=True,
         alleles_overlap=False,

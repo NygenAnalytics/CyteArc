@@ -2,6 +2,7 @@
 
 import functools
 import json
+import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
@@ -23,6 +24,7 @@ from ._style import (
     size_legend_layout,
     theme_context,
 )
+from ..utils.arguments import bool_argument
 
 
 def _json_ready(value: Any) -> Any:
@@ -225,8 +227,21 @@ class PlotResult:
         supplies its own background. ``exact_size=True`` keeps the inch size you set
         when the figure was created; set it to False only when you want a tight
         crop for display. ``provenance_sidecar=True`` writes a sibling JSON
-        file with the plot metadata.
+        file with the plot metadata, and a path writes it there.
+
+        Raises:
+            TypeError: If ``transparent`` or ``exact_size`` is not a boolean,
+                or ``provenance_sidecar`` is neither a boolean nor a path.
+            ValueError: If the path has no extension or a format the canvas
+                cannot write, ``dpi`` is not positive, or the sidecar's path is
+                the figure's.
         """
+        transparent = bool_argument(transparent, "transparent")
+        exact_size = bool_argument(exact_size, "exact_size")
+        if isinstance(provenance_sidecar, bool | np.bool_):
+            provenance_sidecar = bool_argument(provenance_sidecar, "provenance_sidecar")
+        elif not isinstance(provenance_sidecar, str | os.PathLike):
+            raise TypeError("provenance_sidecar must be a boolean or a path")
         out = Path(path)
         if not out.suffix:
             raise ValueError("Export path must include a file extension")
@@ -860,6 +875,10 @@ def compose_results(
     whose scale has no order or palette, keeps the legends and colorbars it
     drew.
     """
+    shared_legends = bool_argument(shared_legends, "shared_legends")
+    owns_figure = bool_argument(owns_figure, "owns_figure")
+    if isinstance(panel_labels, bool | np.bool_):
+        panel_labels = bool_argument(panel_labels, "panel_labels")
     if isinstance(results, Mapping):
         named_results = list(results.items())
     else:

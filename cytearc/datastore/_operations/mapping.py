@@ -68,6 +68,7 @@ from ...storage.feature_selection import (
     _ordered_feature_ids_fingerprint,
     _write_feature_selection,
 )
+from ...utils.arguments import bool_argument
 
 if TYPE_CHECKING:
     from ..graph_datastore import GraphDataStore as _MappingOperationsBase
@@ -275,6 +276,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
                 written and the query store is not opened with
                 ``zarr_mode='r+'``, before any query cell is projected.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(reference, MappingReference):
             raise TypeError("reference must be a MappingReference")
         reference = validate_mapping_reference_binding(reference)
@@ -297,8 +299,6 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             )
         if query_batches is not None and not isinstance(query_batches, pd.DataFrame):
             raise TypeError("query_batches must be a pandas DataFrame or None")
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
         if _same_physical_store(self, reference):
             raise ValueError(
                 "Query and reference cannot use the same physical Zarr store. "
@@ -645,6 +645,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         load_arrays: bool = False,
     ) -> MappingResult:
         """Load one complete query-owned mapping projection."""
+        load_arrays = bool_argument(load_arrays, "load_arrays")
         if not isinstance(result, ArtifactRef):
             raise TypeError("result must be an ArtifactRef")
         if not isinstance(reference, MappingReference):
@@ -671,6 +672,8 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         fixed_weight: float = 0.1,
     ) -> Generator[tuple[Any, np.ndarray], None, None]:
         """Yield reference-sized mapping scores for each requested query group."""
+        log_transform = bool_argument(log_transform, "log_transform")
+        weighted = bool_argument(weighted, "weighted")
         loaded = self._mapping_load_result(
             result, reference=reference, load_arrays=False
         )
@@ -740,10 +743,8 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         weighted: bool,
         fixed_weight: float,
     ) -> tuple[np.ndarray, float, float]:
-        if not isinstance(log_transform, bool):
-            raise TypeError("log_transform must be a boolean")
-        if not isinstance(weighted, bool):
-            raise TypeError("weighted must be a boolean")
+        log_transform = bool_argument(log_transform, "log_transform")
+        weighted = bool_argument(weighted, "weighted")
         scale = _finite_in_range(
             multiplier,
             "multiplier must be finite and non-negative",
@@ -899,6 +900,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             PermissionError: If no matching transfer exists and the query
                 datastore is not opened with ``zarr_mode='r+'``.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(projection, ArtifactRef):
             raise TypeError("projection must be an ArtifactRef")
         if not isinstance(reference, MappingReference):
@@ -919,8 +921,6 @@ class _MappingOperationsMixin(_MappingOperationsBase):
                 low=0.0,
             )
         )
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
         loaded = self._mapping_load_result(
             projection,
             reference=reference,
@@ -995,6 +995,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         Returns:
             The transferred labels, their evidence, and the exact inputs.
         """
+        load_votes = bool_argument(load_votes, "load_votes")
         if not isinstance(transfer, ArtifactRef):
             raise TypeError("transfer must be an ArtifactRef")
         return load_label_transfer(self.zw, transfer, load_votes=load_votes)

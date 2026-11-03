@@ -5,7 +5,7 @@ import numpy as np
 from numba import prange
 from scipy.sparse import coo_matrix
 
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
 from ..utils.numba import njit, numba_threads
@@ -893,8 +893,7 @@ def _wnn_integration_many(
     read float32 and float64 coordinates; other floating types, such as
     float16, are scored one cell at a time in their own precision.
     """
-    if not isinstance(l2_normalize, bool | np.bool_):
-        raise TypeError("l2_normalize must be a boolean")
+    l2_normalize = bool_argument(l2_normalize, "l2_normalize")
     if len(modalities) < 2:
         raise ValueError("WNN integration requires at least two modalities")
 

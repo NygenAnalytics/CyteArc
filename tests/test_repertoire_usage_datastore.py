@@ -256,9 +256,23 @@ def test_usage_refuses_other_sources_and_missing_fields(tmp_path) -> None:
     sparse = store.repertoire.import_receptors(
         bare, cell_selection=store.snapshot_cell_selection()
     )
-    with pytest.raises(ValueError, match="The receptors store no v_call"):
-        store.repertoire.gene_usage(sparse)
-    with pytest.raises(ValueError, match="The receptors store no junction"):
+    # The plots that count gene usage pass genes on, so the message names
+    # what is counted rather than an argument.
+    for count in (
+        lambda: store.repertoire.gene_usage(sparse),
+        lambda: plotting.gene_usage(store, sparse, show=False),
+        lambda: plotting.gene_pairing(store, sparse, show=False),
+    ):
+        with pytest.raises(
+            ValueError,
+            match="^Counting gene usage reads each chain's v_call, which these "
+            "receptors do not store",
+        ):
+            count()
+    with pytest.raises(
+        ValueError,
+        match="^sequence='nt' reads each chain's junction, which these receptors",
+    ):
         store.repertoire.spectratype(sparse, sequence="nt")
 
 

@@ -30,7 +30,7 @@ from ...storage.selections import (
 )
 from ...storage.types import as_zarr_array, as_zarr_group
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import integer_argument
+from ...utils.arguments import bool_argument, integer_argument
 from ...utils.logging import logger
 
 if TYPE_CHECKING:
@@ -222,6 +222,7 @@ class _CellCallingOperationsMixin(_CellCallingOperationsBase):
                 not saved yet.
             MemoryError: If the computation does not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         settings = validated_settings(
             lower=lower,
             retain=retain,
@@ -230,8 +231,6 @@ class _CellCallingOperationsMixin(_CellCallingOperationsBase):
             random_seed=random_seed,
         )
         threshold = validated_fdr(fdr)
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
         if cell_selection is not None and not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
         assay = self._get_assay(from_assay)

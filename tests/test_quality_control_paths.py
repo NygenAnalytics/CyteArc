@@ -553,7 +553,7 @@ def test_cell_cycle_scoring_matches_gene_names_and_validates_gene_lists(
         (
             {"s_genes": ["RNA0"], "g2m_genes": ["RNA1"], "log_transform": 1},
             TypeError,
-            "^log_transform must be a bool$",
+            "^log_transform must be a boolean or None$",
         ),
         (
             {"s_genes": ["absent"], "g2m_genes": ["RNA1"]},

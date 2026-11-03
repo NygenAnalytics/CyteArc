@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+from ...utils.arguments import bool_argument
 from ...utils.arrays import has_duplicates, read_only_copy
 from ...utils.logging import logger
 
@@ -229,8 +230,7 @@ def prepare_network(
         raise TypeError("net must be a pandas DataFrame")
     if isinstance(tmin, bool) or not isinstance(tmin, int) or tmin < 1:
         raise ValueError("tmin must be an integer greater than or equal to 1")
-    if not isinstance(weighted, bool):
-        raise TypeError("weighted must be a boolean")
+    weighted = bool_argument(weighted, "weighted")
     if ambiguous_targets not in ("drop", "error"):
         raise ValueError("ambiguous_targets must be 'drop' or 'error'")
     if not {"source", "target"}.issubset(net.columns):

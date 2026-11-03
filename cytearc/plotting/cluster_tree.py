@@ -24,6 +24,7 @@ from ._style import (
     resolve_color_limits,
     theme_context,
 )
+from ..utils.arguments import bool_argument
 
 
 def _hierarchy_positions(
@@ -263,6 +264,9 @@ def cluster_tree(
     show: bool = True,
 ) -> PlotResult:
     """Plot the coalesced hierarchy for a clustering result."""
+    force_ints_as_cats = bool_argument(force_ints_as_cats, "force_ints_as_cats")
+    show_labels = bool_argument(show_labels, "show_labels")
+    show = bool_argument(show, "show")
     import networkx as nx
 
     prepared = store._prepare_cluster_tree(

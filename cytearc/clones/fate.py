@@ -28,6 +28,7 @@ from ..utils.arrays import sorted_unique
 from ..utils.digest import mix64
 from ..utils.numba import njit, numba_threads
 from .overlap import group_clone_matrix
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "COUPLING_METHODS",
@@ -97,7 +98,7 @@ _BIAS_BYTES_PER_FATE = 1_000
 def _checked_method(method: Any) -> int:
     if not isinstance(method, str) or method not in COUPLING_METHODS:
         raise ValueError(
-            f"method must be one of {', '.join(COUPLING_METHODS)}, not {method!r}"
+            f"method must be one of {', '.join(COUPLING_METHODS)}, not {quoted_value(method)}"
         )
     return COUPLING_METHODS.index(method)
 

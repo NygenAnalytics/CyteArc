@@ -270,7 +270,9 @@ def test_nucleotide_clonotypes_need_nucleotide_junctions(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="store no junction"):
         store.repertoire.clonotypes(receptors)
-    with pytest.raises(ValueError, match="store no v_call"):
+    with pytest.raises(
+        ValueError, match="^same_v_gene compares each chain's v_call, which these"
+    ):
         store.repertoire.clonotypes(receptors, sequence="aa", same_v_gene=True)
     loaded = store.repertoire.load_clonotypes(
         store.repertoire.clonotypes(receptors, sequence="aa")

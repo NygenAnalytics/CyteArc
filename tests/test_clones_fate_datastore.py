@@ -473,6 +473,25 @@ def test_a_read_only_store_reuses_saved_fate_bias(copied) -> None:
         )
 
 
+def test_fate_bias_names_late_when_none_of_its_cells_has_a_clone(copied) -> None:
+    store, clones = copied.store, copied.clones
+    # Late cells of the clones' own cells, none of which the clones give a
+    # clone, and early cells that hold clones.
+    without = (TRUTH.clones < 0) & LATE
+    assert without.any()
+    store.cells.insert("late_without_clone", without)
+    late = store.snapshot_cell_selection("late_without_clone")
+    with pytest.raises(
+        ValueError,
+        match=f"^None of the {int(without.sum())} cells of late has a clone; pass "
+        "late cells that the clones give a clone$",
+    ):
+        store.clones.fate_bias(
+            clones, group_by="cell_type", early=copied.early, late=late
+        )
+    assert store.artifacts.list(kind="clone_fate_bias", scope="datastore") == []
+
+
 def test_fate_bias_arguments_are_checked(copied) -> None:
     store, clones = copied.store, copied.clones
     early, late = copied.early, copied.late

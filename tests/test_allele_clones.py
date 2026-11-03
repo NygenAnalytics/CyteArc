@@ -37,8 +37,13 @@ from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
 DATA = Path(__file__).parent / "data" / "recorders"
-# DARLIN's rules on the synthetic bank.
-DARLIN_RULES = {"max_frequency": 2e-5, "max_samples": 1, "max_alleles": 3}
+# DARLIN's rules on the synthetic bank: alleles of a frequency below 2e-5,
+# which max_frequency keeps at most its value, in at most one bank sample.
+DARLIN_RULES = {
+    "max_frequency": float(np.nextafter(2e-5, 0.0)),
+    "max_samples": 1,
+    "max_alleles": 3,
+}
 
 
 @pytest.fixture(scope="module")
@@ -573,6 +578,11 @@ def test_allele_clones_name_missing_and_incomplete_alleles(store, tmp_path) -> N
         store.clones.allele_clones(missing, method="graph", max_frequency=0.5)
     # The arguments are checked before the store is read.
     with pytest.raises(TypeError, match="invalidate_cache must be a boolean"):
+        store.clones.allele_clones(
+            missing, method="graph", max_frequency=0.5, invalidate_cache=1
+        )
+    # A NumPy boolean is a flag, so the store is read next.
+    with pytest.raises(KeyError, match="Artifact does not exist"):
         store.clones.allele_clones(
             missing, method="graph", max_frequency=0.5, invalidate_cache=np.True_
         )

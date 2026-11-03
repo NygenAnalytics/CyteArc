@@ -274,7 +274,7 @@ def _settings_only(
     A signature runs with Mixscape and profiles with clusters; their settings
     without that stage are refused, never recorded unused.
     """
-    if isinstance(value, bool):
+    if isinstance(value, bool | np.bool_):
         raise TypeError(
             f"{stage} must be a mapping or None; {runs_with} runs the {stage} stage"
         )

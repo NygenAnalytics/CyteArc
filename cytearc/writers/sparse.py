@@ -18,6 +18,7 @@ from ..utils.arrays import has_duplicates, max_window_nnz, sparse_matrix_bytes
 from ..utils.count_values import compressed_count_ranges
 from ..utils.logging import logger
 from ._store import decode_text
+from ..utils.arguments import bool_argument
 
 
 def _identifiers(values: Any, label: str) -> np.ndarray:
@@ -111,6 +112,7 @@ class SparseToZarr:
         *,
         overwrite: bool = False,
     ) -> None:
+        overwrite = bool_argument(overwrite, "overwrite")
         from ..storage.budget import resolve_budget
         from ..storage.schema import (
             create_cell_data,

@@ -163,12 +163,28 @@ def test_the_patient_rule_calls_one_mutant_umi_mutant() -> None:
     ]
 
 
-def test_the_cell_line_rule_needs_a_share_above_the_fraction() -> None:
-    # 9 of 10 is 90% exactly, which does not exceed 90%; 10 of 11 does.
+def test_the_cell_line_rule_keeps_a_share_that_reaches_the_fraction() -> None:
+    # 9 of 10 is 90% exactly, which reaches 0.9 but not the next number above
+    # it, GoT's rule of more than 90%; 10 of 11 passes both.
     reference = np.asarray([1, 1, 10, 5, 0, 11])
     alternative = np.asarray([9, 10, 1, 5, 3, 1])
     calls = threshold_calls(
         reference, alternative, min_umis=1, min_mutant_umis=None, min_fraction=0.9
+    )
+    assert calls.tolist() == [
+        ALTERNATIVE_PRESENT,
+        ALTERNATIVE_PRESENT,
+        WILD_TYPE,
+        FILTERED,
+        ALTERNATIVE_PRESENT,
+        WILD_TYPE,
+    ]
+    calls = threshold_calls(
+        reference,
+        alternative,
+        min_umis=1,
+        min_mutant_umis=None,
+        min_fraction=float(np.nextafter(0.9, 1.0)),
     )
     assert calls.tolist() == [
         FILTERED,
@@ -178,11 +194,20 @@ def test_the_cell_line_rule_needs_a_share_above_the_fraction() -> None:
         ALTERNATIVE_PRESENT,
         WILD_TYPE,
     ]
+    # A wild type of exactly 90% reaches the rule as a mutant does.
+    calls = threshold_calls(
+        np.asarray([9]),
+        np.asarray([1]),
+        min_umis=1,
+        min_mutant_umis=None,
+        min_fraction=0.9,
+    )
+    assert calls.tolist() == [WILD_TYPE]
     # With both rules, a mutant call needs both.
     calls = threshold_calls(
         reference, alternative, min_umis=1, min_mutant_umis=4, min_fraction=0.9
     )
-    assert calls.tolist()[1] == ALTERNATIVE_PRESENT
+    assert calls.tolist()[:2] == [ALTERNATIVE_PRESENT, ALTERNATIVE_PRESENT]
     assert calls.tolist()[4] == FILTERED
 
 
@@ -342,7 +367,9 @@ def test_many_umis_do_not_underflow() -> None:
     assert posteriors[0].tolist() == pytest.approx([1.0, 0.0, 0.0])
 
 
-def test_gift_calls_need_a_posterior_above_the_bound_and_confident_umis() -> None:
+def test_gift_calls_need_a_posterior_that_reaches_the_bound_and_confident_umis() -> (
+    None
+):
     posteriors = np.asarray(
         [
             [0.7, 0.2, 0.1],
@@ -355,7 +382,19 @@ def test_gift_calls_need_a_posterior_above_the_bound_and_confident_umis() -> Non
     )
     confident = np.asarray([1, 1, 2, 1, 0, 3])
     calls = gift_calls(posteriors, confident, min_posterior=0.6, min_umis=1)
-    # 0.6 exactly does not exceed 0.6; the fifth row has no confident UMI.
+    # 0.6 exactly reaches 0.6; the fifth row has no confident UMI.
+    assert calls.tolist() == [
+        WILD_TYPE,
+        WILD_TYPE,
+        HETEROZYGOUS,
+        HOMOZYGOUS_ALTERNATIVE,
+        FILTERED,
+        FILTERED,
+    ]
+    # GIFT's rule, a posterior above 0.6, leaves 0.6 exactly uncalled.
+    calls = gift_calls(
+        posteriors, confident, min_posterior=float(np.nextafter(0.6, 1.0)), min_umis=1
+    )
     assert calls.tolist() == [
         WILD_TYPE,
         FILTERED,
@@ -383,15 +422,17 @@ def test_gift_calls_need_a_posterior_above_the_bound_and_confident_umis() -> Non
             ValueError,
             "uses no min_posterior",
         ),
-        ("threshold", {"min_fraction": 0.4}, ValueError, "from 0.5 to below 1"),
-        ("threshold", {"min_fraction": 1.0}, ValueError, "from 0.5 to below 1"),
+        ("threshold", {"min_fraction": 0.4}, ValueError, "above 0.5 and at most 1"),
+        ("threshold", {"min_fraction": 0.5}, ValueError, "above 0.5 and at most 1"),
+        ("threshold", {"min_fraction": 1.5}, ValueError, "above 0.5 and at most 1"),
         ("threshold", {"min_fraction": True}, TypeError, "must be a number"),
         ("threshold", {"min_mutant_umis": 0}, ValueError, "at least 1"),
         ("threshold", {"min_mutant_umis": 1.5}, TypeError, "whole number"),
         ("threshold", {"min_mutant_umis": True}, TypeError, "whole number"),
         ("gift", {"min_mutant_umis": 1}, ValueError, "uses no min_mutant_umis"),
         ("gift", {"min_fraction": 0.9}, ValueError, "uses no min_fraction"),
-        ("gift", {"min_posterior": 1.0}, ValueError, "from 0.0 to below 1.0"),
+        ("gift", {"min_posterior": 1.5}, ValueError, "from 0 to 1, not 1.5"),
+        ("gift", {"min_posterior": -0.1}, ValueError, "from 0 to 1, not -0.1"),
         ("gift", {"alleles": ["A", "C"]}, TypeError, "must map site labels"),
         ("gift", {"alleles": {"p": "AC"}}, TypeError, "a wild-type and an"),
         ("gift", {"alleles": {3: ("A", "C")}}, TypeError, "keyed by site labels"),
@@ -411,7 +452,15 @@ def test_genotype_rules_resolve_their_defaults() -> None:
     assert threshold.min_umis == 1
     assert threshold.min_posterior is None
     gift = genotype_rules("gift", swap_probabilities={1: 0.5, 3: 0.0})
-    assert gift.min_posterior == 0.6 and gift.min_umis == 1
+    # GIFT's rule, a posterior above 0.6, is the next number above it.
+    assert gift.min_posterior == 0.6000000000000001 and gift.min_umis == 1
+    assert gift.min_posterior == np.nextafter(0.6, 1.0)
+    # A posterior given is reached, at either end of its range.
+    assert genotype_rules("gift", min_posterior=0.6).min_posterior == 0.6
+    assert genotype_rules("gift", min_posterior=1).min_posterior == 1.0
+    assert genotype_rules("gift", min_posterior=0).min_posterior == 0.0
+    # A share of all UMIs is a rule a cell can reach.
+    assert genotype_rules("threshold", min_fraction=1).min_fraction == 1.0
     assert gift.swap_record == ((1, 0.5), (3, 0.0))
     source = genotype_rules("source")
     assert source.min_umis is None and source.swap is None

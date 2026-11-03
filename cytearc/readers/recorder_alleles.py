@@ -121,6 +121,7 @@ from ._treedata import (
     character_table,
     is_zarr_store,
 )
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "ALLELE_FORMATS",
@@ -420,7 +421,7 @@ def _checked_tokens(value: Any, name: str) -> frozenset[str]:
         tokens = list(value)
         if all(isinstance(token, str) for token in tokens):
             return frozenset(tokens)
-    raise TypeError(f"columns[{name!r}] must be text or a sequence of text")
+    raise TypeError(f"columns[{quoted_value(name)}] must be text or a sequence of text")
 
 
 def _carlin_pair(path: Path) -> tuple[Path, Path] | None:
@@ -452,21 +453,21 @@ def allele_file(path: str | os.PathLike[str]) -> str | os.PathLike[str]:
     """
     location = Path(path)
     if not location.exists():
-        raise FileNotFoundError(f"No allele file at {os.fspath(path)!r}")
+        raise FileNotFoundError(f"No allele file at {quoted_value(os.fspath(path))}")
     if is_zarr_store(location):
         return path
     pair = _carlin_pair(location)
     if pair is None:
         if location.is_dir():
             raise ValueError(
-                f"{os.fspath(path)!r} is a folder that holds neither a CARLIN pair "
+                f"{quoted_value(os.fspath(path))} is a folder that holds neither a CARLIN pair "
                 "nor a Zarr store"
             )
         return path
     for part in pair:
         if not part.is_file():
             raise FileNotFoundError(
-                f"The CARLIN pair of {os.fspath(path)!r} lacks {part.name}, which "
+                f"The CARLIN pair of {quoted_value(os.fspath(path))} lacks {part.name}, which "
                 "must sit beside the other file"
             )
     return os.fspath(pair[1])
@@ -544,7 +545,7 @@ def _detected_format(path: str) -> str:
         )
     raise ValueError(
         f"The allele format of {path} is unknown; its columns are "
-        + ", ".join(repr(name) for name in names if name)
+        + ", ".join(quoted_value(name) for name in names if name)
         + ". Pass format, one of "
         + ", ".join(map(repr, ALLELE_FORMATS))
         + "; 'laml' reads a character matrix and 'table' any table by the "
@@ -571,7 +572,7 @@ def _integration_option(
         if not isinstance(integrations, str):
             raise TypeError(
                 f"integrations must name the array of {path}, as text, not "
-                f"{integrations!r}"
+                f"{quoted_value(integrations)}"
             )
     if integrations is None:
         return None, {}
@@ -599,7 +600,7 @@ def _integration_option(
                 )
             if n_slots is not None and not 1 <= int(slots) <= n_slots:
                 raise ValueError(
-                    f"The integration {name!r} has {slots} slots, but the arrays of "
+                    f"The integration {quoted_value(name)} has {slots} slots, but the arrays of "
                     f"{path} have from 1 to {n_slots}"
                 )
             lengths[name] = int(slots)
@@ -664,7 +665,7 @@ def _carlin_layout(path: str, integration: str) -> AlleleLayout:
     run = _results_type(annotations)
     if run is not None and not run.startswith("sc"):
         raise ValueError(
-            f"{os.fspath(colonies)} comes from a CARLIN run of type {run!r}, which "
+            f"{os.fspath(colonies)} comes from a CARLIN run of type {quoted_value(run)}, which "
             "lists UMIs or reads rather than cells; import single-cell runs, whose "
             "type starts with 'sc'"
         )
@@ -885,7 +886,7 @@ def _parquet_rules(
             ambiguous=_AMBIGUOUS_INSERTION,
         )
     raise ValueError(
-        f"The sites of {path} follow Cassiopeia's {model!r} edit model, which "
+        f"The sites of {path} follow Cassiopeia's {quoted_value(model)} edit model, which "
         "CyteArc does not read"
     )
 
@@ -993,7 +994,7 @@ def _split_character(name: str, path: str) -> tuple[str, str]:
         return name, ""
     if not integration or not site:
         raise ValueError(
-            f"The character {name!r} of {path} has no integration or no site on "
+            f"The character {quoted_value(name)} of {path} has no integration or no site on "
             "either side of its last hyphen"
         )
     return integration, site
@@ -1026,7 +1027,7 @@ def _matrix_layout(path: str, format: str) -> AlleleLayout:
         # holds no more fields than its header, and its first character would
         # read as the cells' column.
         raise ValueError(
-            f"{path} names its first column {text.names[0]!r}, as PEtracer names "
+            f"{path} names its first column {quoted_value(text.names[0])}, as PEtracer names "
             "a character, but its rows hold no more fields than its header, so "
             "that column would read as the cells': a space-separated matrix "
             "loses an empty state at the end of a row unless its fields are "
@@ -1042,7 +1043,7 @@ def _matrix_layout(path: str, format: str) -> AlleleLayout:
             # likely a cell column before rows that end in a delimiter.
             hint = (
                 f"; its rows hold one field more than its header, so its first "
-                f"column, {text.names[1]!r}, reads as a character, as R's "
+                f"column, {quoted_value(text.names[1])}, reads as a character, as R's "
                 "write.table leaves the cells' column unnamed: write the matrix "
                 "without a delimiter at the end of each row"
                 if rows_end_in_delimiter(text)
@@ -1131,7 +1132,7 @@ def _chains_layout(path: str, lengths: Mapping[str, int]) -> AlleleLayout:
     if names[:1] not in ([name] for name in _TYPEWRITER_CELL_COLUMNS):
         raise ValueError(
             f"The first column of {path} must be cell or cell_id, as DNA Typewriter "
-            f"writes it, not {names[0]!r}"
+            f"writes it, not {quoted_value(names[0])}"
         )
     integrations = []
     for name in names[1:]:
@@ -1139,7 +1140,7 @@ def _chains_layout(path: str, lengths: Mapping[str, int]) -> AlleleLayout:
             continue
         if not _NUCLEOTIDE_NAME.match(name):
             raise ValueError(
-                f"{path} has a column {name!r} that is neither an integration "
+                f"{path} has a column {quoted_value(name)} that is neither an integration "
                 "barcode nor one of DNA Typewriter's quality columns, "
                 + ", ".join(sorted(_TYPEWRITER_QC_COLUMNS))
             )
@@ -1256,7 +1257,7 @@ def _table_roles(columns: Any) -> dict[str, Any]:
         raise ValueError("columns must name the 'cell' column, as text")
     for role in ("integration", "site", "allele", "umis", "reads"):
         if role in roles and not (isinstance(roles[role], str) and roles[role]):
-            raise TypeError(f"columns[{role!r}] must be a column name")
+            raise TypeError(f"columns[{quoted_value(role)}] must be a column name")
     shapes = [role for role in ("sites", "site") if role in roles]
     if "sites" in roles:
         sites = roles["sites"]
@@ -1294,7 +1295,7 @@ def _table_roles(columns: Any) -> dict[str, Any]:
     if kind not in SITE_KINDS:
         raise ValueError(
             f"columns['kind'] must be one of {', '.join(map(repr, SITE_KINDS))}, not "
-            f"{kind!r}"
+            f"{quoted_value(kind)}"
         )
     if kind == "ordered" and "site" in roles:
         raise ValueError(
@@ -1425,12 +1426,12 @@ def allele_layout(
     if format is not None and format not in ALLELE_FORMATS:
         raise ValueError(
             f"format must be one of {', '.join(map(repr, ALLELE_FORMATS))}, not "
-            f"{format!r}"
+            f"{quoted_value(format)}"
         )
     if columns is not None and format not in (None, "table"):
         raise ValueError(
             "columns reads tables of other tools with format='table', so it does "
-            f"not apply to format={format!r}"
+            f"not apply to format={quoted_value(format)}"
         )
     found = (
         ("table" if columns is not None else _detected_format(text))
@@ -1466,7 +1467,7 @@ def allele_layout(
         for name, length in lengths.items():
             if not 1 <= length <= (layout.n_slots or 0):
                 raise ValueError(
-                    f"The integration {name!r} has {length} slots, but the arrays of "
+                    f"The integration {quoted_value(name)} has {length} slots, but the arrays of "
                     f"{text} have from 1 to {layout.n_slots}"
                 )
         return layout
@@ -2002,7 +2003,7 @@ def _expanded_chains(
             parts = text.split("|")
             if len(parts) != n_slots:
                 raise ValueError(
-                    f"{path} holds {text!r} for {name}, {len(parts)} slots where its "
+                    f"{path} holds {quoted_value(text)} for {name}, {len(parts)} slots where its "
                     f"arrays have {n_slots}"
                 )
             expanded[position] = [
@@ -2012,7 +2013,7 @@ def _expanded_chains(
         parts = text.split("-")
         if len(parts) > n_slots or any(not part for part in parts):
             raise ValueError(
-                f"{path} holds {text!r} for {name}, which is no chain of at most "
+                f"{path} holds {quoted_value(text)} for {name}, which is no chain of at most "
                 f"{n_slots} symbols joined by '-'"
             )
         expanded[position] = parts + [""] * (n_slots - len(parts))
@@ -2283,10 +2284,11 @@ def classified_rows(layout: AlleleLayout, rows: AlleleRows) -> ChunkStates:
         )
     except RefusedTokens as refused:
         shown = ", ".join(
-            f"{token!r} at {site or 'its allele'}" for site, token in refused.tokens
+            f"{quoted_value(token)} at {site or 'its allele'}"
+            for site, token in refused.tokens
         )
         raise ValueError(
-            f"{layout.path} holds tokens that {layout.format!r} does not read, "
+            f"{layout.path} holds tokens that {quoted_value(layout.format)} does not read, "
             f"{shown}, on {_where(layout, rows.rows[list(refused.rows)])}"
         ) from None
 

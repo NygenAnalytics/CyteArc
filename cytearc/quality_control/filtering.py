@@ -9,6 +9,7 @@ import pandas as pd
 from scipy.stats import norm
 
 from ..metadata.selection import NamedCellArtifact
+from ..utils.arguments import bool_argument
 from ..utils.arrays import within_bounds
 from ..utils.warnings import warn
 
@@ -773,8 +774,7 @@ def validate_filter_bounds(
     Numeric bounds must be finite and cannot be booleans. Text bounds compare
     text columns lexically. A lower bound cannot exceed its upper bound.
     """
-    if not isinstance(keep_bounds, bool):
-        raise TypeError("keep_bounds must be a boolean")
+    bool_argument(keep_bounds, "keep_bounds")
     for low, high in zip(lows, highs, strict=True):
         _check_filter_bound(low, "lows")
         _check_filter_bound(high, "highs")

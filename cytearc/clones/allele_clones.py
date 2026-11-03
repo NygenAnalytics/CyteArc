@@ -14,7 +14,7 @@ Two methods decide which alleles are rare, within each group of cells such
 as a mouse:
 
 - ``"graph"``, DARLIN's rule (Li et al., Cell 2023): an allele is rare when
-  its frequency is below ``max_frequency``, and when it was found in at
+  its frequency is at most ``max_frequency``, and when it was found in at
   most ``max_samples`` of its bank's samples, such as the mice in which a
   bank was collected.
 - ``"p_clonal"``, CARLIN's test (Bowling et al., Cell 2020): an allele of
@@ -50,7 +50,7 @@ import numpy as np
 import pandas as pd
 from scipy.special import pdtrc
 
-from ..utils.arguments import float_argument, integer_argument
+from ..utils.arguments import float_argument, integer_argument, quoted_value
 from ..utils.arrays import sorted_unique, unique_inverse
 from .calling import cell_sets, set_clones
 
@@ -172,9 +172,9 @@ def _bank_texts(values: pd.Series, character: str) -> np.ndarray:
         if not isinstance(value, str)
     ]
     if bad:
-        examples = ", ".join(repr(texts[position]) for position in bad[:3])
+        examples = ", ".join(quoted_value(texts[position]) for position in bad[:3])
         raise ValueError(
-            f"The bank of {character!r} holds {len(bad)} alleles that are not text, "
+            f"The bank of {quoted_value(character)} holds {len(bad)} alleles that are not text, "
             f"such as {examples}; every allele must be text, as the import writes it"
         )
     # The import strips each token, so the bank's alleles compare stripped.
@@ -191,12 +191,12 @@ def _bank_numbers(values: pd.Series, character: str, column: str) -> np.ndarray:
         )
     except (TypeError, ValueError):
         raise ValueError(
-            f"The bank of {character!r} holds {column} values that are not numbers"
+            f"The bank of {quoted_value(character)} holds {column} values that are not numbers"
         ) from None
     bad = int(np.count_nonzero(~np.isfinite(numbers)))
     if bad:
         raise ValueError(
-            f"The bank of {character!r} holds {bad} {column} values that are missing "
+            f"The bank of {quoted_value(character)} holds {bad} {column} values that are missing "
             "or not finite"
         )
     return numbers
@@ -238,24 +238,24 @@ def allele_banks(frequencies: Any) -> dict[str, AlleleBank]:
             raise TypeError("frequencies must be keyed by character names, as text")
         if not isinstance(table, pd.DataFrame):
             raise TypeError(
-                f"The bank of {character!r} must be a pandas DataFrame, not "
+                f"The bank of {quoted_value(character)} must be a pandas DataFrame, not "
                 f"{type(table).__name__}"
             )
         missing = [name for name in (_ALLELE, _FREQUENCY) if name not in table.columns]
         if missing:
             raise ValueError(
-                f"The bank of {character!r} lacks the column {missing[0]!r}; a bank "
-                f"needs {_ALLELE!r} and {_FREQUENCY!r}, and {_SAMPLES!r} for "
+                f"The bank of {quoted_value(character)} lacks the column {quoted_value(missing[0])}; a bank "
+                f"needs {quoted_value(_ALLELE)} and {quoted_value(_FREQUENCY)}, and {quoted_value(_SAMPLES)} for "
                 "max_samples, as DARLIN's banks name them"
             )
         if not len(table):
-            raise ValueError(f"The bank of {character!r} holds no allele")
+            raise ValueError(f"The bank of {quoted_value(character)} holds no allele")
         texts = _bank_texts(table[_ALLELE], character)
         rates = _bank_numbers(table[_FREQUENCY], character, _FREQUENCY)
         outside = (rates < 0.0) | (rates > 1.0)
         if np.any(outside):
             raise ValueError(
-                f"The bank of {character!r} holds {int(np.count_nonzero(outside))} "
+                f"The bank of {quoted_value(character)} holds {int(np.count_nonzero(outside))} "
                 f"{_FREQUENCY} values outside 0 to 1, such as "
                 f"{float(rates[outside][0])}; a frequency is a share of the bank's "
                 "edited observations"
@@ -266,7 +266,7 @@ def allele_banks(frequencies: Any) -> dict[str, AlleleBank]:
             wrong = (counts < 0) | (counts != np.floor(counts))
             if np.any(wrong):
                 raise ValueError(
-                    f"The bank of {character!r} holds {int(np.count_nonzero(wrong))} "
+                    f"The bank of {quoted_value(character)} holds {int(np.count_nonzero(wrong))} "
                     f"{_SAMPLES} values that are not whole numbers of at least 0, "
                     f"such as {float(counts[wrong][0])}"
                 )
@@ -275,9 +275,11 @@ def allele_banks(frequencies: Any) -> dict[str, AlleleBank]:
         texts = texts[order]
         repeated = np.flatnonzero(texts[1:] == texts[:-1])
         if len(repeated):
-            examples = ", ".join(repr(texts[position]) for position in repeated[:3])
+            examples = ", ".join(
+                quoted_value(texts[position]) for position in repeated[:3]
+            )
             raise ValueError(
-                f"The bank of {character!r} lists {len(repeated)} alleles more than "
+                f"The bank of {quoted_value(character)} lists {len(repeated)} alleles more than "
                 f"once, such as {examples}; each allele needs one row"
             )
         banks[character] = AlleleBank(
@@ -294,7 +296,7 @@ class AlleleCallSettings:
 
     Attributes:
         method: ``"graph"`` or ``"p_clonal"``.
-        max_frequency: The frequency below which an allele is rare, for
+        max_frequency: The highest frequency of a rare allele, for
             ``"graph"``; None for no such filter.
         max_samples: The most samples of a bank in which a rare allele is
             found, or None for no such filter.
@@ -348,7 +350,7 @@ def allele_call_settings(
     if not isinstance(method, str) or method not in ALLELE_METHODS:
         raise ValueError(
             f"method must be one of {', '.join(map(repr, ALLELE_METHODS))}, not "
-            f"{method!r}: 'graph' links cells through alleles below max_frequency, "
+            f"{quoted_value(method)}: 'graph' links cells through alleles at most max_frequency, "
             "as DARLIN does, and 'p_clonal' through alleles whose CARLIN p-value "
             "survives the false discovery rate"
         )
@@ -382,7 +384,7 @@ def allele_call_settings(
         if uncounted:
             raise ValueError(
                 f"max_samples reads each bank's sample_count, which the bank of "
-                f"{uncounted[0]!r} lacks"
+                f"{quoted_value(uncounted[0])} lacks"
             )
     if method == "graph":
         if frequency is None and samples is None:
@@ -390,7 +392,8 @@ def allele_call_settings(
                 "method='graph' links cells through rare alleles, so it needs "
                 "max_frequency, max_samples or both: DARLIN linked cells through "
                 "alleles of frequency below 2e-5 found in at most one mouse of its "
-                "bank"
+                "bank, which max_frequency=float(np.nextafter(2e-5, 0)) and "
+                "max_samples=1 reproduce"
             )
         return AlleleCallSettings(
             method=method,
@@ -401,7 +404,8 @@ def allele_call_settings(
         )
     if frequency is not None:
         raise ValueError(
-            "max_frequency is the frequency below which method='graph' links cells; "
+            "max_frequency is the highest frequency at which method='graph' links "
+            "cells; "
             "method='p_clonal' tests each allele's p-value at fdr instead"
         )
     if banks is None:
@@ -634,13 +638,13 @@ def allele_clone_calls(
         if unknown:
             listed = ", ".join(map(repr, sorted(known))) if known else "none"
             raise ValueError(
-                f"frequencies names {unknown[0]!r}, which is no character of these "
+                f"frequencies names {quoted_value(unknown[0])}, which is no character of these "
                 f"alleles; their characters are {listed}"
             )
         shared = sorted(name for name in set(names) if names.count(name) > 1)
         if shared:
             raise ValueError(
-                f"Two characters of these alleles share the name {shared[0]!r}, so a "
+                f"Two characters of these alleles share the name {quoted_value(shared[0])}, so a "
                 "bank cannot name one of them"
             )
     n_characters = max(1, len(names))
@@ -716,7 +720,7 @@ def allele_clone_calls(
     if settings.method == "graph":
         rare = np.ones(n_tests, dtype=bool)
         if settings.max_frequency is not None:
-            rare = rates < settings.max_frequency
+            rare = rates <= settings.max_frequency
             counts["alleles_too_frequent"] = int(np.count_nonzero(~rare))
     else:
         assert settings.fdr is not None
@@ -824,7 +828,7 @@ def _bank_rates(
     lacking = sorted({names[character] for character in present} - set(banks))
     if lacking:
         raise ValueError(
-            f"frequencies holds no bank of {lacking[0]!r}, whose cells hold alleles; "
+            f"frequencies holds no bank of {quoted_value(lacking[0])}, whose cells hold alleles; "
             "pass a bank for every character with alleles, or import only the "
             "characters that have one"
         )
@@ -843,7 +847,7 @@ def _bank_rates(
             + sum(len(text) for text in texts.tolist())
             + _LOOKUP_BYTES * len(bank)
             + _FIXED_BYTES,
-            f"the alleles of {name!r} in its bank",
+            f"the alleles of {quoted_value(name)} in its bank",
         )
         found = bank.positions(texts)
         positions = found[inverse]

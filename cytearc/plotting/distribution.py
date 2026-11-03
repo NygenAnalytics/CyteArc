@@ -72,6 +72,7 @@ from ._style import (
     resolve_color_limits,
     theme_context,
 )
+from ..utils.arguments import bool_argument, optional_bool_argument
 
 
 def _fetch_metadata_series(
@@ -1068,6 +1069,12 @@ def distribution(
     Raises:
         ValueError: If a gene's assay measured none of the plotted cells.
     """
+    row_standardize = bool_argument(row_standardize, "row_standardize")
+    share_y = optional_bool_argument(share_y, "share_y")
+    italicize_features = bool_argument(italicize_features, "italicize_features")
+    show_legend = bool_argument(show_legend, "show_legend")
+    stats_show_p = bool_argument(stats_show_p, "stats_show_p")
+    show = bool_argument(show, "show")
     plt, mpl = require_matplotlib()
     value_artifact = keys if isinstance(keys, ArtifactRef) else None
     if value_artifact is not None:

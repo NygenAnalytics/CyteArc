@@ -19,7 +19,7 @@ from ..storage.types import (
     read_fresh_group,
 )
 from ..storage.virtual_arrays import read_selection
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument
 from ..utils.arrays import array_digest, regex_match_mask
 from ..utils.compute import controlled_compute
 from ..utils.logging import logger
@@ -329,6 +329,8 @@ class Assay:
         Raises:
             ValueError: If the configured normalizer cannot apply a requested flag.
         """
+        renormalize_subset = bool_argument(renormalize_subset, "renormalize_subset")
+        log_transform = bool_argument(log_transform, "log_transform")
         from ..storage.identity import read_dataset_fingerprint
 
         log_transform, _ = check_normalization_flags(
@@ -723,6 +725,7 @@ class Assay:
         Returns:
             Generator yielding DataFrames or (matrix, feature index) tuples.
         """
+        as_dataframe = bool_argument(as_dataframe, "as_dataframe")
         from ..storage.feature_stream import plan_feature_stream
         from ..utils.progress import iter_progress
 
@@ -964,6 +967,7 @@ class Assay:
         Raises:
             ValueError: If ``log_transform`` is True and the normalizer cannot apply it.
         """
+        log_transform = bool_argument(log_transform, "log_transform")
 
         from .rna import RNAassay
 

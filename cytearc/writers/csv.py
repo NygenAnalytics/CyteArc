@@ -16,6 +16,7 @@ from ..storage.profiles import (
 )
 from ..storage.sharding import write_dense_from_row_batches
 from ..utils.logging import logger
+from ..utils.arguments import bool_argument
 
 
 class CSVtoZarr:
@@ -72,6 +73,7 @@ class CSVtoZarr:
         *,
         overwrite: bool = False,
     ) -> None:
+        overwrite = bool_argument(overwrite, "overwrite")
         from ..storage.budget import resolve_budget
         from ..storage.schema import (
             create_cell_data,

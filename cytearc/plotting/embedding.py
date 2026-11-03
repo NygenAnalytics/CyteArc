@@ -52,7 +52,11 @@ from ._figure import (
     normalize_axes_target,
 )
 from ._labels import place_layout_labels, register_layout_labels
-from ..utils.arguments import clip_fraction_argument
+from ..utils.arguments import (
+    bool_argument,
+    clip_fraction_argument,
+    optional_bool_argument,
+)
 from ..utils.arrays import sort_categories
 from ._style import (
     DEFAULT_PANEL_INCHES,
@@ -1436,6 +1440,10 @@ def embedding(
     Returns a :class:`PlotResult`. Access ``.figure`` in notebooks, or call
     ``.save(...)`` / ``.close()`` when you own the figure.
     """
+    sort_values = optional_bool_argument(sort_values, "sort_values")
+    show_legend = bool_argument(show_legend, "show_legend")
+    show_titles = bool_argument(show_titles, "show_titles")
+    show = bool_argument(show, "show")
     clip_fraction = clip_fraction_argument(clip_fraction)
     if (layout_key is None) == (layout is None):
         raise ValueError("Provide exactly one of layout_key or layout")

@@ -294,15 +294,23 @@ def index_chains(
 
     Returns:
         The slots of each cell and the number of chains of each arm.
+
+    Raises:
+        ValueError: If ``productive_only`` is set and the contigs have no
+            ``productive`` field.
     """
     arms = chain_arms(locus)
     junction_aa = _text_codes(table, "junction_aa")
     eligible = (arms >= 0) & (junction_aa >= 0)
     if productive_only:
         productive = table.values.get("productive")
-        if productive is None:
-            eligible &= False
-        else:
+        if productive is None and table.n_records:
+            raise ValueError(
+                "productive_only counts the contigs that the files flag "
+                "productive, and these contigs have no productive field; pass "
+                "productive_only=False to count every contig"
+            )
+        if productive is not None:
             eligible &= np.asarray(productive) == 1
     # Cell Ranger's all_contig_annotations.csv also holds contigs outside the
     # cells it calls and contigs of low confidence, which its filtered file
