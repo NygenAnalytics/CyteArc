@@ -487,3 +487,115 @@ def sparse_shape(group: h5py.Group) -> tuple[int, int] | None:
     if values.size != 2:
         return None
     return int(values[0]), int(values[1])
+
+
+def _is_array(node: Any) -> bool:
+    """Whether a node of an HDF5 file or a Zarr store holds an array."""
+    return hasattr(node, "shape") and hasattr(node, "dtype")
+
+
+def _index_node(table: Any, path: str) -> tuple[Any, str]:
+    """Return the node of a dataframe's index and how it is stored.
+
+    AnnData writes a text index as an array, or, in current releases, as a
+    nullable string array: a group of values and a mask; a categorical index
+    reads too. Nodes of HDF5 files and of Zarr stores read alike.
+
+    Raises:
+        ValueError: If the dataframe names no index, or stores it in a form
+            CyteArc cannot read.
+    """
+    where = str(getattr(table, "name", "")).strip("/") or "dataframe"
+    raw = None if _is_array(table) else table.attrs.get("_index")
+    key = None if raw is None else as_text(raw)
+    node = None if key is None or key not in table else table[key]
+    if node is None:
+        raise ValueError(f"The {where} of {path} has no index of names")
+    unreadable = ValueError(
+        f"The {where} of {path} stores its index of names in a form CyteArc cannot read"
+    )
+    if _is_array(node):
+        if len(node.shape) != 1:
+            raise unreadable
+        return node, "array"
+    members = set(node.keys())
+    if CATEGORICAL_KEYS <= members:
+        return node, "categorical"
+    if NULLABLE_KEYS <= members:
+        return node, "nullable"
+    raise unreadable
+
+
+def index_length(table: Any, path: str) -> int:
+    """Return the rows of a dataframe of an AnnData file or a TreeData store.
+
+    Raises:
+        ValueError: As :func:`index_names` raises for its index.
+    """
+    node, form = _index_node(table, path)
+    if form == "array":
+        return int(node.shape[0])
+    return int(node["codes" if form == "categorical" else "values"].shape[0])
+
+
+def index_names(
+    table: Any,
+    start: int = 0,
+    stop: int | None = None,
+    *,
+    path: str,
+    what: str,
+) -> np.ndarray:
+    """Return the names of rows ``[start, stop)`` of a dataframe's index, as text.
+
+    Args:
+        table: The dataframe's group, such as ``obs``, ``var`` or a TreeData
+            store's ``obsm['characters']``, of an HDF5 file or a Zarr store.
+        start: The first row.
+        stop: The row after the last, or None for the last row.
+        path: The file, as errors name it.
+        what: What a row is, such as ``"cell"``, for errors.
+
+    Returns:
+        An object array of each row's name.
+
+    Raises:
+        ValueError: If the index is stored in a form CyteArc cannot read, or
+            a name is missing.
+    """
+    node, form = _index_node(table, path)
+    rows = slice(start, stop)
+    if form == "array":
+        values = np.asarray(node[rows]).reshape(-1)
+        missing = np.zeros(len(values), dtype=bool)
+    elif form == "nullable":
+        values = np.asarray(node["values"][rows]).reshape(-1)
+        missing = np.asarray(node["mask"][rows], dtype=bool).reshape(-1)
+    else:
+        codes = np.asarray(node["codes"][rows], dtype=np.int64).reshape(-1)
+        categories = np.asarray(node["categories"][:]).reshape(-1)
+        missing = (codes < 0) | (codes >= len(categories))
+        values = np.empty(len(codes), dtype=object)
+        values[~missing] = categories[codes[~missing]]
+    if missing.any():
+        where = str(getattr(table, "name", "")).strip("/") or "dataframe"
+        raise ValueError(
+            f"{path} has {what}s without a name in the index of its {where}, the "
+            f"first in row {start + int(np.flatnonzero(missing)[0]) + 1}"
+        )
+    return np.asarray([as_text(value) for value in values.tolist()], dtype=object)
+
+
+def obs_names(
+    handle: Any, start: int = 0, stop: int | None = None, *, path: str
+) -> np.ndarray:
+    """Return the names of cells ``[start, stop)`` of an AnnData file, as text.
+
+    Raises:
+        ValueError: If the file has no ``obs`` table, stores its index in a
+            form CyteArc cannot read, or a cell has no name.
+    """
+    obs = handle.get("obs")
+    if obs is None or _is_array(obs):
+        raise ValueError(f"{path} has no AnnData obs table with cell names")
+    return index_names(obs, start, stop, path=path, what="cell")

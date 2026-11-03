@@ -40,6 +40,7 @@ from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sorted_unique
+from ...utils.files import is_hdf5
 from ...utils.logging import logger
 from ...variants.counts import (
     CALL_DTYPE,
@@ -280,7 +281,7 @@ def _read_source(
     if detected is None:
         if os.path.isdir(path):
             detected = files.folder_format(path)
-        elif files.is_hdf5(path):
+        elif is_hdf5(path):
             detected = files.hdf5_format(path)
         else:
             from ...readers.got import got_table_format

@@ -17,11 +17,14 @@ import pytest
 import scipy.io
 import scipy.sparse as sp
 
+from cytearc.readers._delimited import first_lines
+from cytearc.readers._matrix_market import (
+    matrix_market_entries,
+    matrix_market_header,
+)
 from cytearc.readers._variant_files import (
     folder_format,
     hdf5_format,
-    matrix_entries,
-    matrix_header,
     read_barcodes,
     read_vcf,
 )
@@ -662,42 +665,47 @@ def test_vartrix_reader_needs_its_four_files(tmp_path) -> None:
     (folder / "test_coverage.mtx").write_text(
         (folder / "test_coverage.mtx").read_text().replace("3 18 7", "3 18 0.25")
     )
-    with pytest.raises(ValueError, match="counts are whole numbers"):
+    with pytest.raises(ValueError, match="counts must be finite non-negative integers"):
         list(vartrix_source(folder).batches(10))
 
 
 def test_matrix_market_and_vcf_helpers_refuse_malformed_files(tmp_path) -> None:
     path = tmp_path / "m.mtx"
     for text, message in (
-        ("not a matrix\n", "is not a Matrix Market file"),
+        ("not a matrix\n", "coordinate matrix format, but .* begins 'not a matrix'"),
         (
             "%%MatrixMarket matrix array real general\n2 2\n",
-            "counts are a general coordinate",
+            "must use coordinate matrix format",
         ),
         (
             "%%MatrixMarket matrix coordinate pattern general\n2 2 1\n1 1\n",
-            "counts are a general coordinate",
+            "integer or real coordinate values, but .* holds pattern values",
         ),
-        ("%%MatrixMarket matrix coordinate integer general\n%\n", "has no size line"),
+        (
+            "%%MatrixMarket matrix coordinate integer general\n%\n",
+            "dimensions line must contain three integers, but .* ends before it",
+        ),
         (
             "%%MatrixMarket matrix coordinate integer general\n2 x 1\n",
-            "must hold three whole numbers",
+            "dimensions line must contain three integers, but .* has '2 x 1'",
         ),
     ):
         path.write_text(text)
         with pytest.raises(ValueError, match=message):
-            matrix_header(str(path))
+            matrix_market_header(str(path))
     for body, message in (
-        ("3 1 1\n", "outside its 2 by 2 shape"),
-        ("1 1 -1\n", "counts are whole numbers"),
-        ("1 1 a\n", "is not three numbers"),
-        ("1 1 1\n1 2 1\n", "declares 1 entries but holds 2"),
+        ("3 1 1\n", "outside the declared dimensions, 2 by 2"),
+        ("1 1 -1\n", "finite non-negative integers, but .* holds -1"),
+        ("1 1 a\n", "Could not parse Matrix Market coordinates"),
+        ("1 1 1\n1 2 1\n", "header declares 1 entries, but 2 were read"),
     ):
         path.write_text(
             "%%MatrixMarket matrix coordinate integer general\n2 2 1\n" + body
         )
         with pytest.raises(ValueError, match=message):
-            list(matrix_entries(matrix_header(str(path)), 10))
+            list(
+                matrix_market_entries(matrix_market_header(str(path)), 10, counts=True)
+            )
     vcf = tmp_path / "v.vcf"
     vcf.write_text("1\t2\t.\tA\tC\n")
     with pytest.raises(ValueError, match="no #CHROM header line before"):
@@ -806,7 +814,17 @@ def test_giftwrap_manifest_with_one_gapfill_as_both_reads_it_as_the_reference(
     ("text", "message"),
     [
         ("", "is empty"),
-        ("BC\tWT.calls\tMUT.calls\nA\t1\n", "Line 2 of .* holds 2 fields"),
+        (
+            "BC\tWT.calls\tMUT.calls\nA\t1\n",
+            "header of .* names 3 columns, but its first row holds 2 fields",
+        ),
+        # A later row of another width is refused by its line, as every table's.
+        (
+            "BC\tWT.calls\tMUT.calls\nA\t1\t2\n\nB\t1\n",
+            "is malformed: line 4 holds 2 fields, but its header names 3 columns",
+        ),
+        ("BC\tGenotype\nA\tWT\n\t\tMUT\n", "line 3 holds 3 fields"),
+        ("BC\tGenotype\nA\tWT\n\tMUT\n", "has rows without a cell barcode on line 3$"),
         ("cell_name\tGenotype\nA\tWT\n", "has no column of cell barcodes"),
         ("BC\tBC\tGenotype\nA\tA\tWT\n", "names the column 'BC' twice"),
     ],
@@ -1103,12 +1121,10 @@ def test_mito_reader_refuses_var_and_obs_it_cannot_read(tmp_path) -> None:
 
 
 def test_text_helpers_refuse_binary_text_and_short_vcf_records(tmp_path) -> None:
-    from cytearc.readers._variant_files import first_line
-
     binary = tmp_path / "binary.txt"
     binary.write_bytes(b"\xff\xfe\x00\x01")
     with pytest.raises(ValueError, match="is not a text file"):
-        first_line(binary)
+        first_lines(str(binary), 1)
     vcf = tmp_path / "v.vcf"
     vcf.write_text("#CHROM\tPOS\tID\n1\t2\t.\n")
     with pytest.raises(
@@ -1283,3 +1299,52 @@ def test_got_multi_example_outputs_import_together(tmp_path) -> None:
     assert _group.attrs["n_repeated_calls"] == int(
         called.duplicated(["BC", "target"]).sum()
     )
+
+
+def test_giftwrap_tables_read_rows_ending_in_tabs_as_every_table_reads_them(
+    tmp_path,
+) -> None:
+    # A tab after each row's last field gives one field more than the header,
+    # as R's row names do, so the table is refused rather than read with its
+    # columns shifted; a header that ends in a tab too names an empty column.
+    from tests.variant_truth import variant_truth, write_giftwrap_tables
+
+    folder = write_giftwrap_tables(variant_truth(), tmp_path / "gift")
+    expected = giftwrap_source(folder)
+    path = folder / "GSM0_GAP_barcodes.tsv.gz"
+    header, *rows = gzip.decompress(path.read_bytes()).decode().splitlines()
+    ended = [f"{row}\t" for row in rows]
+    path.write_bytes(gzip.compress(("\n".join([header, *ended]) + "\n").encode()))
+    with pytest.raises(ValueError, match="end the header with the delimiter too"):
+        giftwrap_source(folder)
+    path.write_bytes(
+        gzip.compress(("\n".join([f"{header}\t", *ended]) + "\n").encode())
+    )
+    found = giftwrap_source(folder)
+    assert found._barcodes.tolist() == expected._barcodes.tolist()
+    # A row of another width than the first is refused by its line.
+    path.write_bytes(
+        gzip.compress(("\n".join([header, rows[0], rows[1] + "\tx"]) + "\n").encode())
+    )
+    with pytest.raises(ValueError, match="is malformed: line 3 holds"):
+        giftwrap_source(folder)
+
+
+def test_got_tables_read_every_missing_value_token_as_not_covered(tmp_path) -> None:
+    # GoT's tables read missing values as every table read by its column
+    # names does: NULL or N/A counts read as NA counts do.
+    path = tmp_path / "t.tsv"
+    path.write_text("BC\twtUMIs\tmutUMIs\nA\t1\tNA\nB\tNA\t2\n")
+    expected = list(got_source(path, format="got").batches(10))
+    for token in ("NULL", "N/A", "None", "null", ""):
+        path.write_text(f"BC\twtUMIs\tmutUMIs\nA\t1\t{token}\nB\t{token}\t2\n")
+        found = list(got_source(path, format="got").batches(10))
+        assert len(found) == len(expected)
+        for batch, wanted in zip(found, expected, strict=True):
+            assert batch.kind == wanted.kind
+            assert np.array_equal(batch.barcode_codes, wanted.barcode_codes)
+            for name in ("keys", "values"):
+                left, right = getattr(batch, name), getattr(wanted, name)
+                assert (left is None) == (right is None)
+                if left is not None:
+                    assert np.array_equal(left, right)

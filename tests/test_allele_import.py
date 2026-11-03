@@ -740,8 +740,8 @@ def test_imports_count_a_buffer_for_each_write_zarr_runs_at_once(tmp_path):
     assert stated(20) - stated(10) == 10 * io.DEFAULT_BUFFER_SIZE
 
 
-def test_saved_records_keep_each_rows_line_as_its_table_numbers_it(tmp_path):
-    """A table's rows are numbered from its header, past blank lines and quoted breaks."""
+def test_saved_records_keep_each_rows_line_in_its_file(tmp_path):
+    """A table's rows keep the lines they start on, past blank lines and quoted breaks."""
     from tests.storage_helpers import open_store, write_count_store
 
     write_count_store(
@@ -763,8 +763,8 @@ def test_saved_records_keep_each_rows_line_as_its_table_numbers_it(tmp_path):
     records = store.clones.load_alleles(ref).records
     assert dict(records.groupby("ids", observed=True)["row"].first()) == {
         "c1": 2,
-        "c2": 3,
-        "c3": 4,
+        "c2": 4,
+        "c3": 6,
     }
 
 

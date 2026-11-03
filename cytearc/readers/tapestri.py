@@ -128,8 +128,27 @@ _WIDTH_CHUNK = 4_096
 _ID_ENTRIES = 2
 
 
-def tapestri_cell_ids(samples: Sequence[str], barcodes: Sequence[str]) -> np.ndarray:
-    """The IDs of a Tapestri file's cells: ``<sample>__<barcode>``."""
+def tapestri_cell_ids(
+    samples: Sequence[str], barcodes: Sequence[str], path: str
+) -> np.ndarray:
+    """The IDs of a Tapestri file's cells: ``<sample>__<barcode>``.
+
+    Raises:
+        ValueError: If a cell's sample or barcode is empty, which would join
+            to an ID that lacks a part.
+    """
+    lacking = [
+        position
+        for position, (sample, barcode) in enumerate(
+            zip(samples, barcodes, strict=True)
+        )
+        if not str(sample).strip() or not str(barcode).strip()
+    ]
+    if lacking:
+        raise ValueError(
+            f"{path} has cells without a sample name or a barcode, the first in row "
+            f"{lacking[0] + 1}; each cell's ID joins both"
+        )
     return np.asarray(
         [
             f"{sample}{CELL_ID_SEPARATOR}{barcode}"
@@ -193,7 +212,7 @@ def _assay_cells(handle: h5py.File, assay: str, path: str) -> _Cells:
             f"assays/{assay}/ra of {path} names {len(barcodes)} barcodes but "
             f"{len(samples)} samples"
         )
-    ids = tapestri_cell_ids(samples.tolist(), barcodes.tolist())
+    ids = tapestri_cell_ids(samples.tolist(), barcodes.tolist(), path)
     repeated = pd.Index(ids).duplicated()
     if repeated.any():
         raise ValueError(
@@ -834,7 +853,7 @@ class TapestriSource:
         if len(parts) == 1:
             return parts[0]
         samples, barcodes = parts
-        return tapestri_cell_ids(samples.tolist(), barcodes.tolist())
+        return tapestri_cell_ids(samples.tolist(), barcodes.tolist(), self.path)
 
     def _read(self, layer: h5py.Dataset, start: int, stop: int) -> np.ndarray:
         return np.asarray(layer[start:stop, self._columns.columns])

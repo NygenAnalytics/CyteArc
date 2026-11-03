@@ -208,6 +208,26 @@ def _reverse_cells(handle, assay: str) -> None:
             lambda h: h["assays/dna_read_counts"].__delitem__("ra"),
             "lacks assays/dna_read_counts/ra",
         ),
+        # A cell's ID joins its sample to its barcode, so neither may be empty.
+        (
+            lambda h: _replace(
+                h["assays/dna_read_counts/ra"],
+                "barcode",
+                np.asarray(
+                    [b""] + [f"B{row}".encode() for row in range(1, TRUTH.n_rows)]
+                ),
+            ),
+            "has cells without a sample name or a barcode, the first in row 1;",
+        ),
+        (
+            lambda h: _replace(
+                h["assays/dna_read_counts/ra"],
+                "sample_name",
+                np.asarray([b"d2"] * (TRUTH.n_rows - 1) + [b" "]),
+            ),
+            f"has cells without a sample name or a barcode, the first in row "
+            f"{TRUTH.n_rows};",
+        ),
         (
             lambda h: h["assays/dna_read_counts/ra"].__delitem__("barcode"),
             "lacks assays/dna_read_counts/ra/barcode",

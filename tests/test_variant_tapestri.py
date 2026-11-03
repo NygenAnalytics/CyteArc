@@ -1418,3 +1418,25 @@ def test_the_traced_peak_of_a_wide_tapestri_import_fits_the_smallest_budget(
 
     budget, peak = _smallest_and_peak(store, run)
     assert peak <= budget, (peak, budget)
+
+
+def test_a_source_refuses_a_cell_whose_sample_or_barcode_is_empty(tmp_path) -> None:
+    # Each block of cells joins their samples to their barcodes as it reads
+    # them, so an empty part is refused there as the store reader refuses it.
+    from cytearc.readers.tapestri import tapestri_source
+
+    path = write_tapestri(TRUTH, tmp_path / "run.h5")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        source = tapestri_source(path)
+    with h5py.File(path, "a") as handle:
+        rows = handle["assays/dna_variants/ra"]
+        barcodes = rows["barcode"][:]
+        barcodes[3] = b""
+        del rows["barcode"]
+        rows.create_dataset("barcode", data=barcodes)
+    with pytest.raises(
+        ValueError,
+        match="has cells without a sample name or a barcode, the first in row 4;",
+    ):
+        list(source.batches(10_000))

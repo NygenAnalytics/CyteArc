@@ -39,6 +39,8 @@ from tests.barcode_join_helpers import (
     write_clone_file,
     write_contig_file,
     write_guide_call_file,
+    write_joined_barcode_file,
+    write_joined_clone_file,
     write_tree_file,
     write_variant_file,
 )
@@ -1016,3 +1018,46 @@ def test_very_long_and_unicode_cell_ids_join_exactly() -> None:
     )
     assert positions.tolist() == [0, 1, -1]
     assert join.examples == ["ACGT" * 2499]
+
+
+# The importers whose cell barcode may join several columns, with a writer of
+# a file whose cells join a sample column to a barcode column and the options
+# that read it.
+JOINED_CELLS = {
+    "import_clones": (
+        write_joined_clone_file,
+        {"columns": {"cell": ["sample", "barcode"], "clone": "clone"}},
+    ),
+    "import_barcodes": (
+        write_joined_barcode_file,
+        {
+            "format": "pairs",
+            "columns": {"cell": ["sample", "barcode"], "barcode": "lb", "umis": "n"},
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(JOINED_CELLS))
+@pytest.mark.parametrize(
+    "parts",
+    [("s1", ""), ("", "CCCG-1"), (" ", "CCCG-1")],
+    ids=["barcode", "sample", "blank"],
+)
+def test_a_cell_joined_from_columns_without_a_part_is_refused(
+    joined, tmp_path, name, parts
+) -> None:
+    store, selection = joined
+    importer = IMPORTERS[name]
+    write, options = JOINED_CELLS[name]
+    whole = write(tmp_path / "whole.tsv", [("s1", "AAAC-1"), ("s2", "GGGT-1")])
+    ref = importer.run(store, [whole], cell_selection=selection, **options)
+    assert importer.joined(store, ref) == {"s1__AAAC-1", "s2__GGGT-1"}
+    # A part left empty would join to "s1__" or "__CCCG-1", which names no
+    # cell, so the row is refused with its line rather than counted unmatched.
+    path = write(tmp_path / "part.tsv", [("s1", "AAAC-1"), parts])
+    with pytest.raises(
+        ValueError,
+        match=r"lack a part of their cell barcode \('sample', 'barcode'\) on line 3$",
+    ):
+        importer.run(store, [path], cell_selection=selection, **options)

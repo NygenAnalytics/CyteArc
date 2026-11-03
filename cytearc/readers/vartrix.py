@@ -26,14 +26,13 @@ from typing import Any
 import numpy as np
 
 from ..variants.counts import Contig, EntryBatch, SiteTable
-from ._variant_files import (
-    MatrixHeader,
-    matrix_entries,
-    matrix_header,
-    read_barcodes,
-    read_vcf,
+from ._matrix_market import (
+    MatrixMarketHeader,
+    matrix_market_entries,
+    matrix_market_header,
 )
 from ..utils.arguments import quoted_value
+from ._variant_files import read_barcodes, read_vcf
 
 __all__ = ["VartrixSource", "vartrix_source"]
 
@@ -57,8 +56,8 @@ class VartrixSource:
     _sites: SiteTable = field(repr=False)
     _record_sites: np.ndarray = field(repr=False)
     _barcodes: np.ndarray = field(repr=False)
-    _alternative: MatrixHeader = field(repr=False)
-    _reference: MatrixHeader = field(repr=False)
+    _alternative: MatrixMarketHeader = field(repr=False)
+    _reference: MatrixMarketHeader = field(repr=False)
 
     def sites(self) -> SiteTable:
         """Each record with one alternative allele, with its two alleles."""
@@ -74,7 +73,10 @@ class VartrixSource:
         )
         # The site's alleles are its reference, then its alternative.
         for header, offset in ((self._reference, 0), (self._alternative, 1)):
-            for rows, columns, values in matrix_entries(header, chunk_rows):
+            for rows, columns, counts in matrix_market_entries(
+                header, chunk_rows, counts=True
+            ):
+                values = np.asarray(counts, dtype=np.int64)
                 sites = self._record_sites[rows]
                 skipped = sites < 0
                 if np.any(skipped & (values > 0)):
@@ -194,7 +196,7 @@ def vartrix_source(path: str | os.PathLike[str]) -> VartrixSource:
     )
     headers = []
     for matrix in (alternative_path, reference_path):
-        header = matrix_header(matrix)
+        header = matrix_market_header(matrix)
         if (header.n_rows, header.n_columns) != (len(vcf.pos), len(barcodes)):
             raise ValueError(
                 f"{matrix} is a {header.n_rows} by {header.n_columns} matrix, but "

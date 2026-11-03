@@ -62,6 +62,11 @@ def _molecules(rows: dict[str, list]) -> pd.DataFrame:
     )
 
 
+def _lines(n_values: int, first: int = 2) -> np.ndarray:
+    """The file lines of values that follow one another from ``first``."""
+    return np.arange(first, first + n_values)
+
+
 def test_text_parsing_turns_missing_tokens_into_none() -> None:
     parsed = parse_text([" TRBV1 ", "", "None", "NA", "nan", "null", None, "x"])
     assert parsed.tolist() == ["TRBV1", None, None, None, None, None, None, "x"]
@@ -85,6 +90,7 @@ def test_flags_accept_every_spelling_of_true_and_false() -> None:
             "None",
         ],
         name="productive",
+        lines=_lines(12),
     )
     assert flags.tolist() == [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, -1, -1]
     assert flags.dtype == np.int8
@@ -94,11 +100,15 @@ def test_unknown_flags_are_refused_with_their_lines() -> None:
     with pytest.raises(
         ValueError, match=r"productive must be true or false.*'maybe' on lines 4, 6"
     ):
-        parse_flags(["T", "F", "maybe", "T", "maybe"], name="productive", first_line=2)
+        parse_flags(
+            ["T", "F", "maybe", "T", "maybe"], name="productive", lines=_lines(5)
+        )
 
 
 def test_integers_parse_whole_numbers_and_mark_missing_values() -> None:
-    parsed = parse_integers(["3", "", "0", " 12 ", "None", "4.0"], name="umi_count")
+    parsed = parse_integers(
+        ["3", "", "0", " 12 ", "None", "4.0"], name="umi_count", lines=_lines(6)
+    )
     assert parsed.tolist() == [3, -1, 0, 12, -1, 4]
     assert parsed.dtype == np.int64
 
@@ -106,44 +116,45 @@ def test_integers_parse_whole_numbers_and_mark_missing_values() -> None:
 @pytest.mark.parametrize("value", ["-1", "2.5", "many", "inf"])
 def test_integers_refuse_values_that_are_not_counts(value) -> None:
     with pytest.raises(ValueError, match="umi_count must be a whole number"):
-        parse_integers(["1", value], name="umi_count", first_line=10)
+        parse_integers(["1", value], name="umi_count", lines=_lines(2, 10))
 
 
-def test_integers_name_lines_by_the_callers_rule_where_one_is_given() -> None:
-    # Rows 1 and 3 hold no count; the caller places them on file lines 7 and
-    # 12, as rows after blank lines sit.
+def test_errors_name_each_values_own_file_line() -> None:
+    # Rows 1 and 3 hold no count, on file lines 7 and 12, as rows after blank
+    # lines sit.
     file_lines_of_rows = np.array([5, 7, 9, 12])
-    named: list[list[int]] = []
-
-    def lines(rows: np.ndarray) -> str:
-        named.append(rows.tolist())
-        return "lines " + ", ".join(str(file_lines_of_rows[row]) for row in rows)
-
     with pytest.raises(ValueError, match=r"holds 'x' on lines 7, 12$"):
-        parse_integers(["1", "x", "2", "y"], name="umis", first_line=5, lines=lines)
-    assert named == [[1, 3]]
-    with pytest.raises(ValueError, match=r"holds 'x' on lines 6, 8$"):
-        parse_integers(["1", "x", "2", "y"], name="umis", first_line=5)
+        parse_integers(["1", "x", "2", "y"], name="umis", lines=file_lines_of_rows)
+    with pytest.raises(ValueError, match=r"must be true or false, .* on line 9$"):
+        parse_flags(["T", "F", "?", "T"], name="flag", lines=file_lines_of_rows)
+    with pytest.raises(ValueError, match=r"must be a finite number, .* on line 12$"):
+        parse_numbers(["1", "2", "3", "inf"], name="q", lines=file_lines_of_rows)
+    # A line for each value, or the lines named would be another row's.
+    with pytest.raises(
+        ValueError, match="the file line of each of the 4 values, not 3"
+    ):
+        parse_integers(["1", "x", "2", "y"], name="umis", lines=[5, 7, 9])
 
 
 def test_integers_refuse_values_beyond_int64() -> None:
     with pytest.raises(ValueError, match="too large"):
-        parse_integers(["1", str(2**64)], name="umi_count")
+        parse_integers(["1", str(2**64)], name="umi_count", lines=_lines(2))
 
 
 def test_numbers_parse_reals_and_refuse_non_finite_values() -> None:
-    parsed = parse_numbers(["0.95", "", "1"], name="v_identity")
+    parsed = parse_numbers(["0.95", "", "1"], name="v_identity", lines=_lines(3))
     np.testing.assert_array_equal(parsed, [0.95, np.nan, 1.0])
     with pytest.raises(ValueError, match="v_identity must be a finite number.*line 3"):
-        parse_numbers(["0.9", "inf"], name="v_identity")
+        parse_numbers(["0.9", "inf"], name="v_identity", lines=_lines(2))
     with pytest.raises(ValueError, match="'x'"):
-        parse_numbers(["x"], name="v_identity")
+        parse_numbers(["x"], name="v_identity", lines=_lines(1))
 
 
 def test_line_numbers_name_at_most_five_lines() -> None:
     with pytest.raises(ValueError, match=r"lines 2, 3, 4, 5, 6 and 2 more"):
-        parse_flags(["?"] * 7, name="is_cell")
-    assert file_lines(np.asarray([0]), 7) == "line 7"
+        parse_flags(["?"] * 7, name="is_cell", lines=_lines(7))
+    assert file_lines(np.asarray([7])) == "line 7"
+    assert file_lines([3, 9]) == "lines 3, 9"
 
 
 def test_text_encoding_sorts_distinct_values_and_marks_missing() -> None:
@@ -231,7 +242,7 @@ def test_columns_parse_by_kind_in_field_order_and_name_bad_lines() -> None:
         }
     )
 
-    parsed = parse_columns(frame, MOLECULE_FIELDS, first_line=40)
+    parsed = parse_columns(frame, MOLECULE_FIELDS, lines=_lines(2, 40))
 
     assert list(parsed) == ["barcode", "reads", "kept", "quality"]
     assert parsed["barcode"].tolist() == ["ACGT", None]
@@ -240,9 +251,9 @@ def test_columns_parse_by_kind_in_field_order_and_name_bad_lines() -> None:
     np.testing.assert_array_equal(parsed["quality"], [0.5, np.nan])
     frame.loc[1, "reads"] = "-2"
     with pytest.raises(ValueError, match="reads must be a whole number.*line 41"):
-        parse_columns(frame, MOLECULE_FIELDS, first_line=40)
+        parse_columns(frame, MOLECULE_FIELDS, lines=_lines(2, 40))
     with pytest.raises(ValueError, match="Field 'reads' has the kind 'count'"):
-        parse_columns(frame, {"reads": "count"}, first_line=40)  # type: ignore[dict-item]
+        parse_columns(frame, {"reads": "count"}, lines=_lines(2, 40))  # type: ignore[dict-item]
 
 
 @pytest.mark.parametrize("python_kernels", [False, True])
@@ -593,7 +604,7 @@ def test_parsers_read_only_the_missing_tokens_they_are_given():
     ]
     counts = np.array(["3", "-", "NA"], dtype=object)
     assert parse_integers(
-        counts, name="n", missing=frozenset({"-", "NA"})
+        counts, name="n", lines=_lines(3), missing=frozenset({"-", "NA"})
     ).tolist() == [
         3,
         -1,
@@ -601,17 +612,22 @@ def test_parsers_read_only_the_missing_tokens_they_are_given():
     ]
     # NA is a number of no kind once it is not missing.
     with pytest.raises(ValueError, match="'NA'"):
-        parse_integers(counts, name="n", missing=frozenset({"-"}))
+        parse_integers(counts, name="n", lines=_lines(3), missing=frozenset({"-"}))
     values = np.array(["1.5", "-", "nan"], dtype=object)
-    parsed = parse_numbers(values, name="q", missing=frozenset({"-", "nan"}))
+    parsed = parse_numbers(
+        values, name="q", lines=_lines(3), missing=frozenset({"-", "nan"})
+    )
     assert parsed[0] == 1.5 and np.isnan(parsed[1:]).all()
     flags = np.array(["true", "None", "false"], dtype=object)
-    assert parse_flags(flags, name="pass").tolist() == [1, -1, 0]
+    assert parse_flags(flags, name="pass", lines=_lines(3)).tolist() == [1, -1, 0]
     with pytest.raises(ValueError, match="'None'"):
-        parse_flags(flags, name="pass", missing=frozenset())
+        parse_flags(flags, name="pass", lines=_lines(3), missing=frozenset())
     frame = pd.DataFrame({"site": ["None", "AC"], "umis": ["-", "4"]})
     parsed = parse_columns(
-        frame, {"site": TEXT, "umis": INTEGER}, first_line=2, missing=frozenset({"-"})
+        frame,
+        {"site": TEXT, "umis": INTEGER},
+        lines=_lines(2),
+        missing=frozenset({"-"}),
     )
     assert parsed["site"].tolist() == ["None", "AC"]
     assert parsed["umis"].tolist() == [-1, 4]

@@ -73,6 +73,7 @@ from ...metadata.artifacts import (
     plan_cell_data_artifact,
     write_cell_data_artifact,
 )
+from ...metadata.records import MISSING_TEXT
 from ...metadata.rows import (
     array_row_selection_parts,
     metadata_column_fingerprint,
@@ -968,7 +969,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 clones that it reads and the text of the cells' IDs and of the
                 clone labels, does not fit the memory budget.
         """
-        from ...readers.clone_tables import MISSING_TEXT
         from ...writers.clone_tables import write_clone_matrix, write_clone_table
 
         if not isinstance(path, str | os.PathLike):
@@ -996,8 +996,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         assert source.clone_ids is not None
         codes, clone_ids = source.codes, source.clone_ids
         if format == "cospar":
-            # A clone table reads these labels back as cells without a clone.
-            lost = [label for label in clone_ids.tolist() if label in MISSING_TEXT]
+            # A clone table reads these labels back as cells without a clone,
+            # since its reader strips each label before it compares it.
+            lost = [
+                label
+                for label in clone_ids.tolist()
+                if str(label).strip() in MISSING_TEXT
+            ]
             if lost:
                 raise ValueError(
                     "The clone labels "

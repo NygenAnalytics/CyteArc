@@ -162,6 +162,24 @@ def write_contig_file(path: Path, barcodes: list[str]) -> Path:
     return path
 
 
+def write_joined_clone_file(path: Path, cells: list[tuple[str, str]]) -> Path:
+    """A clone table whose cells join a sample column to a barcode column."""
+    path.write_text(
+        "sample\tbarcode\tclone\n"
+        + "".join(f"{sample}\t{barcode}\t1\n" for sample, barcode in cells)
+    )
+    return path
+
+
+def write_joined_barcode_file(path: Path, cells: list[tuple[str, str]]) -> Path:
+    """A table of pairs whose cells join a sample column to a barcode column."""
+    path.write_text(
+        "sample\tbarcode\tlb\tn\n"
+        + "".join(f"{sample}\t{barcode}\tLB1\t3\n" for sample, barcode in cells)
+    )
+    return path
+
+
 def write_barcode_file(path: Path, barcodes: list[str]) -> Path:
     """BARtab's counts.tsv, which counts three UMIs of one lineage barcode per cell."""
     path.write_text(

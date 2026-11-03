@@ -27,7 +27,7 @@ import h5py
 import numpy as np
 
 from ..variants.counts import ALLELE_ROLES, Contig, EntryBatch, SiteTable
-from ._h5ad_columns import index_key, read_column, sparse_encoding, sparse_shape
+from ._h5ad_columns import index_names, read_column, sparse_encoding, sparse_shape
 from ._text import as_text
 from ..utils.arguments import quoted_value
 
@@ -53,14 +53,6 @@ def _column(table: h5py.Group, name: str, path: str) -> np.ndarray:
             f"The {quoted_value(name)} column of {path}'s var has missing values"
         )
     return np.asarray(values)
-
-
-def _names(table: h5py.Group, path: str, what: str) -> np.ndarray:
-    key = index_key(table)
-    if key is None or key not in table:
-        raise ValueError(f"{what} of {path} has no index of names")
-    values, _missing = read_column(table[key])
-    return _texts(values)
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,8 +166,8 @@ def mito_afm_source(path: str | os.PathLike[str]) -> MitoAfmSource:
                 raise ValueError(f"{text} lacks MiTo's {name}")
         obs = handle["obs"]
         var = handle["var"]
-        barcodes = _names(obs, text, "obs")
-        variants = _names(var, text, "var")
+        barcodes = index_names(obs, path=text, what="cell")
+        variants = index_names(var, path=text, what="variant")
         positions = _column(var, "pos", text).astype(np.int64)
         references = np.char.upper(
             _texts(_column(var, "ref", text)).astype(str)

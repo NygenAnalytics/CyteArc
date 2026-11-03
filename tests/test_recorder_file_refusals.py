@@ -576,7 +576,11 @@ def test_treedata_refuses_cells_without_names(tmp_path):
     index = frame.create_group("_index")
     index.create_array("codes", data=np.asarray([0, -1]))
     index.create_array("categories", data=np.asarray(["c1"], dtype=str))
-    with pytest.raises(ValueError, match="has a cell without a name"):
+    with pytest.raises(
+        ValueError,
+        match="has cells without a name in the index of its obsm/characters, the "
+        "first in row 2",
+    ):
         _states(path)
 
 
