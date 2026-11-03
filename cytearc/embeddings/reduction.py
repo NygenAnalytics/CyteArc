@@ -8,6 +8,7 @@ from ..matrix import ChunkedArray
 from ..utils.arguments import integer_argument
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
+from ..utils.memory_budget import MemoryBudgetError
 from ..utils.warnings import warn
 
 type PcaSolver = Literal["gram", "randomized"]
@@ -556,11 +557,14 @@ def require_materialized_lsi_budget(
         n_oversamples=n_oversamples,
     )
     if required > memory_bytes:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"Materialized LSI needs about {required} bytes to hold the "
             f"{n_rows} x {n_features} matrix and its SVD workspace, but the "
             f"operation limit is {memory_bytes} bytes. Use solver='streaming', "
-            "which reads the matrix in bounded blocks."
+            "which reads the matrix in bounded blocks.",
+            needed_bytes=required,
+            budget_bytes=int(memory_bytes),
+            item="the matrix and its SVD workspace",
         )
 
 

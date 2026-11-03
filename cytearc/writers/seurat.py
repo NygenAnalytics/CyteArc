@@ -41,6 +41,7 @@ from ..storage.profiles import StorageProfile, ZarrLocation
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import canonicalize_sparse
 from ..utils.count_values import CountValueRange
+from ..utils.memory_budget import MemoryBudgetError, refusal_words
 from ._store import (
     DEFAULT_IMPORT_BLOCK_ROWS,
     bounded_block_rows,
@@ -928,32 +929,48 @@ class SeuratToZarr:
         )
         # The count summary is allocated before the write and stays resident
         # through it, so preparation must fit beside it.
-        self.reader._prepare_assay(
-            assay.name,
-            max_bytes=int(self.resources.memoryBytes)
-            - other_sources
-            - CountSummary.nbytes_for(n_cells, n_features),
-        )
+        reserved = other_sources + CountSummary.nbytes_for(n_cells, n_features)
+        try:
+            self.reader._prepare_assay(
+                assay.name, max_bytes=int(self.resources.memoryBytes) - reserved
+            )
+        except MemoryBudgetError as error:
+            needed = reserved + error.needed_bytes
+            raise MemoryBudgetError(
+                f"{refusal_words(error)} Beside {reserved} bytes for the other "
+                "assays' sources and the count summary, the import needs at least "
+                f"{needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=int(self.resources.memoryBytes),
+                item=error.item,
+            ) from error
         value_range = CountValueRange()
         if n_cells:
             staging, window_values = self._source_estimates(source)
             itemsize = max(1, source.dtype.itemsize)
             available = int(self.resources.memoryBytes) - self._source_resident_bytes()
 
-            def fits(rows: int) -> bool:
+            def read_bytes(rows: int) -> int:
                 if source.is_sparse:
                     # Summing a block's duplicates costs one unbuffered pull.
                     scan = sparse_producer_peak_bytes(0, window_values(rows), itemsize)
                 else:
                     # The integrality check holds a truncated copy and masks.
                     scan = rows * n_features * (itemsize + 2)
-                return staging(rows) + scan <= available
+                return staging(rows) + scan
+
+            def fits(rows: int) -> bool:
+                return read_bytes(rows) <= available
 
             rows = affordable_width(fits, n_cells)
             if rows < 1:
-                raise MemoryError(
+                needed = self._source_resident_bytes() + read_bytes(1)
+                raise MemoryBudgetError(
                     f"Assay {assay.name!r} counts cannot be read one cell at a "
-                    "time within mem_budget"
+                    f"time within mem_budget. It needs at least {needed} bytes.",
+                    needed_bytes=needed,
+                    budget_bytes=int(self.resources.memoryBytes),
+                    item=f"reading one cell of assay {assay.name!r}",
                 )
             for start in range(0, n_cells, rows):
                 raw = source.read_cells(start, min(start + rows, n_cells))

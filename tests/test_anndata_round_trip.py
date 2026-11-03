@@ -710,3 +710,35 @@ def test_plans_check_obsp_and_varm_shapes(tmp_path) -> None:
     assert bool(exported.uns["flag"]) is True
     assert exported.uns["name"] == "x"
     assert exported.uns["nested"]["values"].tolist() == [1, 2]
+
+
+def test_a_graph_export_names_the_budget_of_its_edges(analysis, tmp_path) -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    store = analysis["store"]
+    graph = analysis["graph"]
+    cells = analysis["cells"]
+
+    def export(budget: int) -> MemoryBudgetError | None:
+        small = cytearc.DataStore(
+            store.zw.store, min_features_per_cell=0, nthreads=1, mem_budget=budget
+        )
+        try:
+            cytearc.to_h5ad(
+                small.RNA,
+                str(tmp_path / f"graph-{budget}.h5ad"),
+                cell_selection=cells,
+                graph=graph,
+            )
+        except MemoryBudgetError as refusal:
+            return refusal
+        return None
+
+    refusal = export(1000)
+    assert refusal is not None
+    assert (refusal.budget_bytes, refusal.item) == (1000, "the graph's 240 edges")
+    assert f"needs about {refusal.needed_bytes} bytes" in str(refusal)
+    below = export(refusal.needed_bytes - 1)
+    assert below is not None and below.item == refusal.item
+    later = export(refusal.needed_bytes)
+    assert later is None or later.item != refusal.item

@@ -25,12 +25,13 @@ from ..storage.types import as_zarr_array
 from ..storage.validation_scope import validation_scope
 from ..utils.arguments import integer_argument
 from ..utils.arrays import sort_categories
+from ..utils.memory_budget import MemoryBudgetError, MemoryLedger
 from .rows import (
     apply_missing_mask,
-    array_row_selection_parts,
-    read_array_rows_chunkwise,
     read_metadata_missing_rows,
     read_metadata_rows,
+    read_rows,
+    rows_read_charge,
 )
 
 LookupBy = Literal["name", "id", "index"]
@@ -704,10 +705,20 @@ def _selection_count(root: Any, selection: ArtifactRef) -> int:
 _INDEX_BYTES = np.dtype(np.int64).itemsize
 
 
-def _chunkwise_read_bytes(array: Any, n_rows: int) -> int:
-    """Bytes that reading ``n_rows`` rows of ``array`` chunk by chunk holds."""
-    fixed, per_row = array_row_selection_parts(array)
-    return int(fixed) + int(n_rows) * int(per_row)
+def _refuse_cell_read(
+    ledger: MemoryLedger, required: int, *, item: str, n_cells: int
+) -> None:
+    """Refuse a read of ``item`` for ``n_cells`` cells whose ``required`` bytes pass the ledger's budget."""
+    needed = ledger.held_bytes + required
+    if ledger.budget is not None and needed > ledger.budget:
+        raise MemoryBudgetError(
+            f"Reading {item} for {n_cells} cells needs about {needed} bytes, but "
+            f"the memory budget is {ledger.budget} bytes. Read fewer cells with "
+            "cell_selection, or raise mem_budget.",
+            needed_bytes=needed,
+            budget_bytes=ledger.budget,
+            item=item,
+        )
 
 
 def _unaligned_snapshot_error(
@@ -797,13 +808,23 @@ def resolve_cell_aligned_artifact(
     value_name: str | None = None,
     expected_kind: str | None = None,
     ndim: int | None = 1,
-    max_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
     caller_reads: Sequence[Any] = (),
 ) -> ResolvedCellArtifact:
     """Read one artifact array in the exact requested cell order.
 
+    With ``ledger``, what the read holds is charged to it: the cell positions
+    of the selections, and each array read through
+    :func:`~cytearc.metadata.rows.read_rows` at the selected rows, the
+    values, their missing mask, and ``caller_reads``, arrays that the caller
+    reads at the same rows. Before anything is read, the rows are charged as
+    the fewest bands of chunks they can span; once the positions are read,
+    and before any array is, as the bands they span. The values, the mask
+    and the positions of the cells stay charged when the read returns.
+    Without a ledger, the read checks no budget.
+
     Raises:
-        MemoryError: If ``max_bytes`` is set and the read needs more bytes.
+        MemoryBudgetError: If ``ledger`` cannot hold what the read holds.
     """
     if not isinstance(artifact, ArtifactRef):
         raise TypeError("artifact must be an ArtifactRef")
@@ -851,23 +872,31 @@ def resolve_cell_aligned_artifact(
             label=f"Cell-aligned artifact array {value_name!r}",
             values=values_array,
         )
-        if max_bytes is not None:
+        item = f"{value_name!r} of the {artifact.kind} artifact"
+        index_bytes = 0
+        row_arrays = [values_array, *caller_reads]
+        if missing_array is not None:
+            row_arrays.append(missing_array)
+        budgeted = ledger is not None
+        if ledger is None:
+            # A read without a budget still reads through the ledger's reads.
+            ledger = MemoryLedger(None, f"Reading {item}")
+        else:
             n_target = (
                 n_source if same_selection else _selection_count(root, target_selection)
             )
-            row_arrays = [values_array, *caller_reads]
-            if missing_array is not None:
-                row_arrays.append(missing_array)
-            required = _INDEX_BYTES * (
+            # The positions of the source cells, and of the requested cells
+            # among them and in the store when those differ.
+            index_bytes = _INDEX_BYTES * (
                 n_source + n_target + (0 if same_selection else n_target)
-            ) + sum(_chunkwise_read_bytes(array, n_target) for array in row_arrays)
-            if required > max_bytes:
-                raise MemoryError(
-                    f"Reading {value_name!r} of the {artifact.kind} artifact for "
-                    f"{n_target} cells needs about {required} bytes, but the "
-                    f"memory budget is {max_bytes} bytes. Read fewer cells with "
-                    "cell_selection, or raise mem_budget."
-                )
+            )
+            # Before the positions are read, the rows are charged as the
+            # fewest bands of chunks they can span, which no rows undercut.
+            fewest = sum(
+                rows_read_charge(ledger, array, n_target)[0] for array in row_arrays
+            )
+            _refuse_cell_read(ledger, index_bytes + fewest, item=item, n_cells=n_target)
+            ledger.hold(f"the cell positions of {item}", index_bytes)
 
         source_idx = cell_selection_indices(root, source_selection)
         if same_selection:
@@ -888,7 +917,21 @@ def resolve_cell_aligned_artifact(
                 )
             # Only the positions of the requested cells are read from here.
             del source_idx, in_bounds
-    values = read_array_rows_chunkwise(values_array, compact_idx)
+    if budgeted:
+        # Every array is read at the rows of the requested cells, which the
+        # read charges by the bands they span.
+        span = (
+            (int(compact_idx.min()), int(compact_idx.max()))
+            if compact_idx.size
+            else None
+        )
+        required = sum(
+            rows_read_charge(ledger, array, compact_idx.size, span=span)[0]
+            for array in row_arrays
+        )
+        _refuse_cell_read(ledger, required, item=item, n_cells=len(target_idx))
+        ledger.peak(item, required)
+    values = read_rows(ledger, values_array, compact_idx, item=item)
     if values.shape != (len(target_idx), *shape[1:]):
         raise ValueError("Cell-aligned artifact values do not match the selection")
     missing = (
@@ -896,11 +939,20 @@ def resolve_cell_aligned_artifact(
         if missing_array is None
         else _row_missing_mask(
             np.asarray(
-                read_array_rows_chunkwise(missing_array, compact_idx), dtype=bool
+                read_rows(
+                    ledger,
+                    missing_array,
+                    compact_idx,
+                    item=f"the missing mask of {item}",
+                ),
+                dtype=bool,
             ),
             value_name,
         )
     )
+    if index_bytes:
+        # The requested cells' positions in the store stay with the values.
+        ledger.release(index_bytes - _INDEX_BYTES * len(target_idx))
     return ResolvedCellArtifact(
         source=artifact,
         values=values,

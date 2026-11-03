@@ -31,6 +31,7 @@ from ...storage.arrays import create_zarr_dataset
 from ...storage.errors import ArtifactResolutionError
 from ...storage.types import as_zarr_array
 from ...utils.arguments import integer_argument
+from ...utils.memory_budget import MemoryBudgetError
 from ...utils.shutdown import shutdown_checkpoint
 
 # The coordinates that cluster selection scores, by kind: the operations that
@@ -241,11 +242,14 @@ def _admitted_coordinates(
     )
     limit = int(store.resources.memoryBytes)
     if required > limit:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"Cluster selection needs about {required} bytes to score "
             f"{n_rows} sampled cells with {dims} dimensions, but the operation "
             f"limit is {limit} bytes. Raise mem_budget, or score fewer "
-            "dimensions, such as a PCA reduction instead of normalized values."
+            "dimensions, such as a PCA reduction instead of normalized values.",
+            needed_bytes=required,
+            budget_bytes=limit,
+            item="the sampled coordinates and the silhouette's distances",
         )
     return coordinates
 

@@ -32,6 +32,7 @@ from ...storage.types import as_zarr_array, as_zarr_group
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument, integer_argument
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryBudgetError
 
 if TYPE_CHECKING:
     from ...assay import Assay
@@ -101,11 +102,14 @@ class _CellCallingOperationsMixin(_CellCallingOperationsBase):
             + 8 * self.nthreads * (n_features + len(rows))
         )
         if resident > self.memoryBytes:
-            raise MemoryError(
+            raise MemoryBudgetError(
                 f"Cell calling over {len(rows)} barcodes and {n_features} features "
                 f"holds about {resident} bytes, more than the memory budget of "
                 f"{self.memoryBytes} bytes. Raise mem_budget, or pass a smaller "
-                "cell_selection or lower."
+                "cell_selection or lower.",
+                needed_bytes=resident,
+                budget_bytes=int(self.memoryBytes),
+                item="the barcodes' totals, the ambient profile and the simulations",
             )
         totals = np.asarray(self.cells.fetch_all(assay._totals_name))[rows]
         tested = totals > settings.lower

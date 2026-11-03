@@ -49,13 +49,19 @@ from ..utils.arrays import (
     sparse_matrix_bytes,
 )
 from ..utils.logging import logger
+from ..utils.memory_budget import MemoryBudgetError, refusal_words
 
 if TYPE_CHECKING:
     from .identity import CountSummary
 
 
-class CountLayoutMemoryError(MemoryError):
-    """A requested count layout cannot be written within its memory budget."""
+class CountLayoutMemoryError(MemoryBudgetError):
+    """A requested count layout cannot be written within its memory budget.
+
+    Its ``needed_bytes`` is the smallest budget that admits the requested
+    layout at the step that refused it, and its message names the largest
+    halving of the layout that fits.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,20 +348,24 @@ def _resolve_sparse_import_geometries(
         def fits(width: int) -> bool:
             try:
                 admit(width)
-            except MemoryError:
+            except MemoryBudgetError:
                 return False
             return True
 
         # The widest fitting width is admitted again for its reserve. Only one
-        # row can fail here, when no width fits, and its MemoryError says why.
+        # row can fail here, when no width fits, and its refusal says why.
         resolved_rows = max(1, affordable_width(fits, preferred_rows))
         try:
             producer_reserve = admit(resolved_rows)
-        except MemoryError as exc:
-            raise MemoryError(
+        except MemoryBudgetError as exc:
+            raise MemoryBudgetError(
                 "Automatic sparse import cannot fit one source row and one "
                 f"complete destination row band in {resources.memoryBytes} "
-                f"bytes. Increase mem_budget. {exc}"
+                f"bytes. Increase mem_budget. {refusal_words(exc).rstrip('.')}. It needs "
+                f"at least {exc.needed_bytes} bytes.",
+                needed_bytes=exc.needed_bytes,
+                budget_bytes=int(resources.memoryBytes),
+                item="one source row and one complete destination row band",
             ) from exc
 
     return SparseImportPlan(
@@ -691,7 +701,7 @@ def _writable_batch_plan(
     for size in range(len(pending), 1, -1):
         try:
             return _sparse_batch_plan(pending, resources, residentBytes, size, io)
-        except MemoryError:
+        except MemoryBudgetError:
             continue
     return _sparse_batch_plan(pending, resources, residentBytes, 1, io)
 
@@ -732,9 +742,12 @@ def write_sparse_bands(
     def pull() -> SparseWriteBand:
         reserved = pull_bytes()
         if reserved > resources.memoryBytes:
-            raise MemoryError(
+            raise MemoryBudgetError(
                 f"Sparse producer needs about {reserved} bytes before a write "
-                f"task, but the operation limit is {resources.memoryBytes} bytes"
+                f"task, but the operation limit is {resources.memoryBytes} bytes",
+                needed_bytes=reserved,
+                budget_bytes=int(resources.memoryBytes),
+                item="the bands that the sparse producer buffers",
             )
         return next(source)
 
@@ -755,7 +768,7 @@ def write_sparse_bands(
                     resources.workers,
                     resolved_io,
                 )
-            except MemoryError:
+            except MemoryBudgetError:
                 # Not every pending band fits in one batch, as after a band
                 # wider than the earlier ones; they are written first.
                 return
@@ -926,9 +939,17 @@ def write_dense_from_row_batches(
                 if values.shape[0] == 0:
                     continue
                 if values.nbytes > producer_bytes:
-                    raise MemoryError(
+                    # The write reserved its plan beside the producer's
+                    # reservation; with this batch in its place it would
+                    # reserve the batch's bytes instead.
+                    raise MemoryBudgetError(
                         f"Dense source batch needs {values.nbytes} bytes, exceeding "
-                        f"its {producer_bytes}-byte producer reservation"
+                        f"its {producer_bytes}-byte producer reservation",
+                        needed_bytes=write_plan.reservedBytes
+                        - producer_bytes
+                        + values.nbytes,
+                        budget_bytes=int(resources.memoryBytes),
+                        item="a source batch beyond its producer reservation",
                     )
                 if position + buffered_rows + values.shape[0] > dst.shape[0]:
                     raise ValueError(
@@ -1294,10 +1315,13 @@ def preflight_counts_t_spec(
         + max(0, int(residentBytes))
     )
     if needed > int(resources.memoryBytes):
-        raise MemoryError(
+        raise MemoryBudgetError(
             "countsT write needs at least "
             f"{needed} bytes, but the operation limit is "
-            f"{int(resources.memoryBytes)} bytes"
+            f"{int(resources.memoryBytes)} bytes",
+            needed_bytes=needed,
+            budget_bytes=int(resources.memoryBytes),
+            item="the countsT write",
         )
     return plan.countsT
 
@@ -1380,8 +1404,8 @@ def fit_count_layout(
     """Return the count-matrix layout an import writes within its budget.
 
     An explicit ``requested`` policy is used exactly: when its writes do not
-    fit, the MemoryError is raised before the writer creates its destination
-    and names the largest halving of the policy that fits. Otherwise
+    fit, a :class:`CountLayoutMemoryError` is raised before the writer creates
+    its destination and names the largest halving of the policy that fits. Otherwise
     ``unitBytes`` and ``chunkBytes`` of the default policy are halved
     together, keeping its chunks per shard, until the counts write of every
     assay and the ``countsT`` transpose of every transposed assay fit.
@@ -1395,17 +1419,18 @@ def fit_count_layout(
         profile: Storage profile of the destination.
         memoryBytes: Memory budget of the import.
         transposed: Assays that also write ``countsT``.
-        admitCounts: Raises MemoryError when the ``counts`` arrays planned
-            with the given specifications cannot be written within the given
-            budget, such as :func:`sparse_counts_admission` and
-            :func:`dense_counts_admission` return.
+        admitCounts: Raises MemoryBudgetError when the ``counts`` arrays
+            planned with the given specifications cannot be written within the
+            given budget, such as :func:`sparse_counts_admission` and
+            :func:`dense_counts_admission` return. Any other error, an
+            allocation that fails included, reaches the caller.
         requested: Explicit policy, or None to fit the default policy.
         countsTResidentBytes: Bytes the writer holds while it writes
             ``countsT``.
 
     Raises:
-        MemoryError: If ``requested`` does not fit, or nothing fits, not even
-            count shards of one row.
+        CountLayoutMemoryError: If ``requested`` does not fit.
+        MemoryBudgetError: If nothing fits, not even count shards of one row.
     """
     resources = ResourceBudget(int(memoryBytes), 1)
 
@@ -1435,11 +1460,16 @@ def fit_count_layout(
         while True:
             try:
                 admit(policy)
-            except MemoryError as error:
+            except MemoryBudgetError as error:
                 if policy.unitBytes < 2 * row_bytes:
-                    raise MemoryError(
+                    raise MemoryBudgetError(
                         "Count import does not fit mem_budget even with count "
-                        f"shards of one row. Increase mem_budget. {error}"
+                        f"shards of one row. Increase mem_budget. "
+                        f"{refusal_words(error).rstrip('.')}. It needs at least "
+                        f"{error.needed_bytes} bytes.",
+                        needed_bytes=error.needed_bytes,
+                        budget_bytes=int(memoryBytes),
+                        item="count shards of one row",
                     ) from error
                 policy = CountMatrixPolicy(
                     unitBytes=policy.unitBytes // 2,
@@ -1451,10 +1481,10 @@ def fit_count_layout(
     if requested is not None:
         try:
             admit(requested)
-        except MemoryError as error:
+        except MemoryBudgetError as error:
             try:
                 smaller = largest_fit(requested)
-            except MemoryError:
+            except MemoryBudgetError:
                 advice = "Increase mem_budget; even count shards of one row do not fit."
             else:
                 advice = (
@@ -1469,7 +1499,11 @@ def fit_count_layout(
             raise CountLayoutMemoryError(
                 f"The {kind} count-matrix policy (unitBytes={requested.unitBytes}, "
                 f"chunkBytes={requested.chunkBytes}) does not fit mem_budget. "
-                f"{str(error).rstrip('.')}. {advice}"
+                f"{refusal_words(error).rstrip('.')}. {advice} It needs at least "
+                f"{error.needed_bytes} bytes.",
+                needed_bytes=error.needed_bytes,
+                budget_bytes=int(memoryBytes),
+                item=f"the {kind} count-matrix policy",
             ) from error
         return requested
     policy = largest_fit(DEFAULT_COUNT_MATRIX_POLICY)

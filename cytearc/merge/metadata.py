@@ -1,6 +1,7 @@
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from functools import partial
+from typing import Any, NoReturn
 
 import numpy as np
 import zarr
@@ -33,6 +34,7 @@ from ..storage.partition import affordable_width
 from ..storage.profiles import StorageProfile
 from ..storage.types import as_zarr_array, as_zarr_group
 from ..utils.logging import logger
+from ..utils.memory_budget import MemoryBudgetError
 from .row_plan import (
     RowPlan,
     RowPlanSegment,
@@ -163,6 +165,29 @@ def effective_metadata_segment_rows(
     )
 
 
+def _admits(admit: Callable[[int], None], width: int) -> bool:
+    """Whether ``admit`` admits ``width`` rows; it refuses with MemoryBudgetError."""
+    try:
+        admit(width)
+    except MemoryBudgetError:
+        return False
+    return True
+
+
+def _refuse_one_row(admit: Callable[[int], None], words: str, item: str) -> NoReturn:
+    """Raise the refusal of one row, which names the budget that admits it."""
+    try:
+        admit(1)
+    except MemoryBudgetError as error:
+        raise MemoryBudgetError(
+            f"{words}. It needs at least {error.needed_bytes} bytes.",
+            needed_bytes=error.needed_bytes,
+            budget_bytes=error.budget_bytes,
+            item=item,
+        ) from error
+    raise RuntimeError(f"{item} was admitted after it was refused")
+
+
 def resolve_metadata_segment_rows(
     metadata_plan: CellMetadataPlan,
     row_plan: RowPlan,
@@ -177,26 +202,24 @@ def resolve_metadata_segment_rows(
     )
     chunk_rows = metadata_chunk_rows(row_plan)
 
-    def fits(width: int) -> bool:
-        try:
-            admitted_worker_split(
-                resources,
-                nTasks=1,
-                residentBytes=max(0, int(resident_bytes)),
-                taskBytes=lambda _: metadata_plan.peak_write_bytes_at(
-                    width,
-                    chunk_rows=chunk_rows,
-                ),
-                requested=1,
-            )
-        except MemoryError:
-            return False
-        return True
+    def admit(width: int) -> None:
+        admitted_worker_split(
+            resources,
+            nTasks=1,
+            residentBytes=max(0, int(resident_bytes)),
+            taskBytes=lambda _: metadata_plan.peak_write_bytes_at(
+                width,
+                chunk_rows=chunk_rows,
+            ),
+            requested=1,
+        )
 
-    rows = affordable_width(fits, preferred)
+    rows = affordable_width(partial(_admits, admit), preferred)
     if rows < 1:
-        raise MemoryError(
-            "Merged cell metadata cannot fit one row within the operation memory budget"
+        _refuse_one_row(
+            admit,
+            "Merged cell metadata cannot fit one row within the operation memory budget",
+            "one row of merged cell metadata",
         )
     return int(rows)
 
@@ -236,29 +259,27 @@ def resolve_identity_validation_rows(
     band_rows = min(max(1, int(stored_ids.chunks[0])), max(1, row_plan.nCells))
     band_bytes = band_rows * max(1, int(np.dtype(stored_ids.dtype).itemsize))
 
-    def fits(width: int) -> bool:
+    def admit(width: int) -> None:
         # One decoded chunk band of stored ids stays resident while the
         # expected ids of its segments are read and compared.
         task_bytes = band_bytes + max(
             stored_fixed, _column_working_bytes(ids_spec, width)
         )
-        try:
-            admitted_worker_split(
-                resources,
-                nTasks=1,
-                residentBytes=max(0, int(resident_bytes)),
-                taskBytes=lambda _: task_bytes,
-                requested=1,
-            )
-        except MemoryError:
-            return False
-        return True
+        admitted_worker_split(
+            resources,
+            nTasks=1,
+            residentBytes=max(0, int(resident_bytes)),
+            taskBytes=lambda _: task_bytes,
+            requested=1,
+        )
 
-    rows = affordable_width(fits, preferred)
+    rows = affordable_width(partial(_admits, admit), preferred)
     if rows < 1:
-        raise MemoryError(
+        _refuse_one_row(
+            admit,
             "Merged cell identity validation cannot fit one row within the "
-            "operation memory budget"
+            "operation memory budget",
+            "one row of the merged cell identity validation",
         )
     return int(rows)
 
@@ -347,8 +368,12 @@ def resolve_metadata_schema_scan_rows(
     *,
     resident_bytes: int,
     preferred_rows: int,
+    axis: str = "cell",
 ) -> int:
-    """Return the largest admitted metadata schema-scan width."""
+    """Return the largest admitted metadata schema-scan width.
+
+    ``axis`` names the tables scanned, cell or feature tables, in a refusal.
+    """
     arrays: list[Any] = []
     for table in source_cell_tables:
         for column in table.columns:
@@ -357,7 +382,7 @@ def resolve_metadata_schema_scan_rows(
                 arrays.append(table._get_array(column))
     preferred = max(1, int(preferred_rows))
 
-    def fits(width: int) -> bool:
+    def admit(width: int) -> None:
         task_bytes: list[int] = []
         for array in arrays:
             dtype = np.dtype(array.dtype)
@@ -369,23 +394,21 @@ def resolve_metadata_schema_scan_rows(
                 itemsize + text_itemsize + np.dtype(np.int64).itemsize
             )
             task_bytes.append(max(selection_peak, conversion_peak))
-        try:
-            admitted_worker_split(
-                resources,
-                nTasks=1,
-                residentBytes=max(0, int(resident_bytes)),
-                taskBytes=lambda _: max(task_bytes, default=1),
-                requested=1,
-            )
-        except MemoryError:
-            return False
-        return True
+        admitted_worker_split(
+            resources,
+            nTasks=1,
+            residentBytes=max(0, int(resident_bytes)),
+            taskBytes=lambda _: max(task_bytes, default=1),
+            requested=1,
+        )
 
-    rows = affordable_width(fits, preferred)
+    rows = affordable_width(partial(_admits, admit), preferred)
     if rows < 1:
-        raise MemoryError(
-            "Merged cell metadata schema discovery cannot fit one source row "
-            "within the operation memory budget"
+        _refuse_one_row(
+            admit,
+            f"Merged {axis} metadata schema discovery cannot fit one source row "
+            "within the operation memory budget",
+            f"one source row of merged {axis} metadata schema discovery",
         )
     return int(rows)
 
@@ -784,6 +807,7 @@ def _plan_feature_columns(
         resources,
         resident_bytes=resident_bytes + mapping_bytes,
         preferred_rows=PROFILE_METADATA_CHUNK,
+        axis="feature",
     )
     plans: list[_FeatureColumnPlan] = []
     for name in columns:
@@ -814,19 +838,23 @@ def _plan_feature_columns(
         )
         available = resources.memoryBytes - resident_bytes - mapping_bytes
 
-        def fits(rows: int) -> bool:
+        def cost(rows: int) -> int:
             return (
                 _column_working_bytes(spec, rows)
                 + rows * (4 * dtype.itemsize + 32)
                 + _chunk_resident_bytes(dtype, rows)
-            ) <= available
+            )
 
         block_rows = affordable_width(
-            fits, min(PROFILE_METADATA_CHUNK, max(1, n_features))
+            lambda rows: cost(rows) <= available,
+            min(PROFILE_METADATA_CHUNK, max(1, n_features)),
         )
         if block_rows < 1:
-            raise MemoryError(
-                f"Merged feature column {name!r} cannot fit the memory budget"
+            raise MemoryBudgetError(
+                f"Merged feature column {name!r} cannot fit the memory budget",
+                needed_bytes=resident_bytes + mapping_bytes + cost(1),
+                budget_bytes=int(resources.memoryBytes),
+                item=f"one row of merged feature column {name!r}",
             )
         plans.append(
             _FeatureColumnPlan(name, tuple(sources), tuple(arrays), dtype, block_rows)

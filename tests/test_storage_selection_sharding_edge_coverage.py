@@ -16,6 +16,7 @@ from cytearc.storage.geometry import ArrayGeometry
 from cytearc.storage.layout import ZarrArraySpec
 from cytearc.storage.refs import ArtifactRef
 from cytearc.storage.selections import ValidatedStoredSelection
+from cytearc.utils.memory_budget import MemoryBudgetError
 
 
 @pytest.mark.parametrize(
@@ -624,7 +625,9 @@ def test_sparse_geometry_and_batch_contracts(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(
         sharding,
         "admitted_worker_split",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(MemoryError("small")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            MemoryBudgetError("small", needed_bytes=2, budget_bytes=1, item="a band")
+        ),
     )
     with pytest.raises(MemoryError, match="cannot fit"):
         sharding._resolve_sparse_import_geometries(

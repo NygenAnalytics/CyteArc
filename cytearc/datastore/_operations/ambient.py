@@ -49,6 +49,7 @@ from ...storage.types import as_zarr_array, as_zarr_group
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument, float_argument, integer_argument
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryLedger
 
 if TYPE_CHECKING:
     from ..mapping_datastore import MappingDatastore as _AmbientOperationsBase
@@ -857,7 +858,11 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
             self.zw,
             contamination,
             expected_kind="ambient_contamination",
-            max_bytes=self.memoryBytes,
+            ledger=MemoryLedger(
+                self.memoryBytes,
+                "Correcting ambient RNA",
+                codec_threads=self.nthreads,
+            ),
         )
         fractions = np.asarray(resolved.values, dtype=np.float64)
         cell_idx = np.asarray(resolved.cell_idx, dtype=np.int64)

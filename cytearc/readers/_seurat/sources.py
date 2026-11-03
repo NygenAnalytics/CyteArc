@@ -19,6 +19,7 @@ from .errors import MatrixSourceError, ResourceLimitError
 from .values import decode_text_values, read_window
 from .._sparse import SparseRowStore
 from ...utils.arrays import cumulative_nnz, has_duplicates
+from ...utils.memory_budget import MemoryBudgetError, refusal_words
 
 
 type MatrixBlock = NDArray[Any] | coo_matrix | csr_matrix
@@ -151,24 +152,87 @@ def release_temporary_storage(source: MatrixSource) -> None:
 
 
 def prepare_matrix_sources(source: MatrixSource, max_bytes: int | None = None) -> None:
+    """Prepare every source of ``source`` to be read within ``max_bytes``.
+
+    ``max_bytes`` caps the block limit of each source at what the sources'
+    resident data leave of it.
+
+    Raises:
+        MemoryBudgetError: If the sources' resident data, preparing one cell,
+            or a block that the capped limit refuses does not fit
+            ``max_bytes``.
+        ResourceLimitError: If a block passes a limit that the source's
+            ``SourceLimits`` set.
+    """
     for current in _matrix_sources(source):
         if not isinstance(current, BaseMatrixSource):
             continue
         limits = current._limits
         try:
-            if max_bytes is not None:
-                available = max_bytes - source.resident_bytes
-                if available <= 0:
-                    raise MemoryError("Seurat source preparation exceeds mem_budget")
-                current._limits = replace(
-                    limits, maxBlockBytes=min(limits.maxBlockBytes, available)
+            if max_bytes is None:
+                current._prepare_for_read()
+                continue
+            available = max_bytes - source.resident_bytes
+            if available <= 0:
+                needed = source.resident_bytes + 1
+                raise MemoryBudgetError(
+                    "Seurat source preparation exceeds mem_budget. It needs "
+                    f"at least {needed} bytes.",
+                    needed_bytes=needed,
+                    budget_bytes=int(max_bytes),
+                    item="the resident data of the Seurat sources",
                 )
+            current._limits = replace(
+                limits, maxBlockBytes=min(limits.maxBlockBytes, available)
+            )
+            try:
                 estimate = current.estimate_read_memory(0, min(1, current.n_cells))
                 if estimate.blockBytes > available:
-                    raise MemoryError("Seurat source preparation exceeds mem_budget")
-            current._prepare_for_read()
+                    needed = source.resident_bytes + estimate.blockBytes
+                    raise MemoryBudgetError(
+                        "Seurat source preparation exceeds mem_budget. It needs "
+                        f"at least {needed} bytes.",
+                        needed_bytes=needed,
+                        budget_bytes=int(max_bytes),
+                        item="preparing one cell of a Seurat source",
+                    )
+                current._prepare_for_read()
+            except ResourceLimitError as error:
+                refusal = _budget_block_refusal(
+                    error, int(max_bytes), available, limits.maxBlockBytes
+                )
+                if refusal is None:
+                    raise
+                raise refusal from error
         finally:
             current._limits = limits
+
+
+def _budget_block_refusal(
+    error: ResourceLimitError, max_bytes: int, available: int, configured: int
+) -> MemoryBudgetError | None:
+    """Restate the refusal of a block limit that the budget set in terms of ``max_bytes``.
+
+    A source refuses its block limit with a ``ResourceLimitError`` whose cause
+    is a ``MemoryBudgetError`` naming the limit that passes the block. When
+    the budget set the limit below the ``configured`` one, by leaving
+    ``available`` bytes beside the resident data, a budget larger by the
+    limit's shortfall passes the block. ``None`` leaves the refusal to the
+    configured limit: it set the limit, or it would bind at that budget.
+    """
+    cause = error.__cause__
+    if available >= configured or not isinstance(cause, MemoryBudgetError):
+        return None
+    shortfall = cause.needed_bytes - cause.budget_bytes
+    if available + shortfall > configured:
+        return None
+    needed = max_bytes + shortfall
+    return MemoryBudgetError(
+        f"{refusal_words(cause)} It needs at least {needed} bytes.",
+        needed_bytes=needed,
+        budget_bytes=max_bytes,
+        item=cause.item,
+    )
 
 
 def _metadata_bytes(names: Sequence[str] | None) -> int:
@@ -570,12 +634,16 @@ class BaseMatrixSource(ABC):
                     self.dtype,
                     max_bytes=self._limits.maxBlockBytes - source_bytes,
                     max_nnz=self._limits.maxNnz,
+                    nnz_error=ResourceLimitError,
                     sum_duplicates=False,
                     temp_dir=self._tempDir,
                 )
-            except MemoryError as error:
+            except MemoryBudgetError as error:
+                # The cause names the conversion limit that passes, which
+                # prepare_matrix_sources restates when the budget set it.
                 raise ResourceLimitError(
-                    f"{error}; maxBlockBytes={self._limits.maxBlockBytes}"
+                    f"{refusal_words(error).removesuffix('.')}; "
+                    f"maxBlockBytes={self._limits.maxBlockBytes}"
                 ) from error
         return self._rowStore
 
@@ -1052,8 +1120,20 @@ class TransposeMatrixSource(BaseMatrixSource):
                 if estimate.blockBytes <= available // 2:
                     break
                 if width == 1:
+                    # A tile of one source column takes at most half of what
+                    # the block limit leaves beside a sparse transpose's row
+                    # pointers; the cause names the limit that passes it.
+                    limit = 2 * estimate.blockBytes + (
+                        self._limits.maxBlockBytes - available
+                    )
                     raise ResourceLimitError(
                         "Transpose source tile exceeds maxBlockBytes"
+                    ) from MemoryBudgetError(
+                        "Transpose source tile exceeds the block limit. It needs "
+                        f"at least {limit} bytes.",
+                        needed_bytes=limit,
+                        budget_bytes=self._limits.maxBlockBytes,
+                        item="a tile of one source column of the transpose",
                     )
                 width = max(1, width // 2)
             yield start, start + width, estimate

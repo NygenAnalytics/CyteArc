@@ -38,7 +38,11 @@ from ...metadata.arguments import (
     PseudotimeMarkerArguments,
     PseudotimeScoringArguments,
 )
-from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
+from ...metadata.artifacts import (
+    cell_data_write_bytes,
+    plan_cell_data_artifact,
+    write_cell_data_artifact,
+)
 from ...metadata.table import CaseInsensitiveIndex
 from ...storage.validation_scope import validation_scoped
 from ...storage.artifact_writer import (
@@ -68,7 +72,6 @@ from ...storage.selections import (
     validate_stored_selection_integrity,
 )
 from ...storage.arrays import create_zarr_dataset
-from ...storage.async_execution import zarr_io_concurrency
 from ...trajectory.feature_dynamics import (
     scatter_feature_clusters as _scatter_feature_clusters_impl,
     validate_pseudotime_regressor,
@@ -179,6 +182,8 @@ from ...trajectory.results import (
 from ...utils.arguments import bool_argument, integer_argument
 from ...utils.arrays import array_digest, sort_categories
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryBudgetError
+from .enrichment_store import _RowBandWriter
 
 if TYPE_CHECKING:
     from ..mapping_datastore import (
@@ -188,6 +193,29 @@ if TYPE_CHECKING:
 else:
     _TrajectoryFeatureOperationsBase = object
     _TrajectoryOperationsBase = object
+
+
+#: The rows of a chunk of the cells' positions and distances on lineage curves.
+_PLACEMENT_CHUNK_ROWS = 100_000
+
+
+def _placement_write_bytes(n_cells: int, n_lineages: int, chunk_rows: int) -> int:
+    """What placing ``n_cells`` cells on ``n_lineages`` curves holds to write their positions and distances.
+
+    Each of the two float64 arrays is written a whole chunk band of
+    ``chunk_rows`` rows at a time through ``_RowBandWriter``, which holds one
+    band. While a band is written, Zarr holds what writing a chunk holds, as
+    ``cell_data_write_bytes`` states, beside the encoded chunk that the write
+    before can still hold on a busy machine, and for a last band of fewer
+    rows than a chunk also the full chunk that it pads them into.
+    """
+    band = chunk_rows * n_lineages * np.dtype(np.float64).itemsize
+    write = cell_data_write_bytes(
+        {"band": ((chunk_rows, n_lineages), np.float64)},
+        chunk_lengths={"band": chunk_rows},
+    )
+    padded = band if n_cells % chunk_rows else 0
+    return 2 * band + write + band + padded
 
 
 def _validate_normalization_identity(
@@ -557,11 +585,16 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         del graph_matrix
         # Persist only an operator that loaders can read under this budget.
         nnz = int(diff_op.indptr[-1])
-        if diffusion_load_bytes(nnz, n_cells) >= self.memoryBytes:
-            raise MemoryError(
+        load_bytes = diffusion_load_bytes(nnz, n_cells)
+        if load_bytes >= self.memoryBytes:
+            raise MemoryBudgetError(
                 f"The diffusion operator has {nnz} entries and could not be "
                 f"loaded within the memory budget of {self.memoryBytes} bytes; "
-                "increase the memory budget or use a smaller diffusion power t."
+                "increase the memory budget or use a smaller diffusion power t. "
+                f"Loading it needs at least {load_bytes + 1} bytes.",
+                needed_bytes=load_bytes + 1,
+                budget_bytes=int(self.memoryBytes),
+                item="loading the diffusion operator",
             )
         with artifact_transaction(self.zw, planned) as store:
             write_diffusion_payload(store, diff_op)
@@ -766,9 +799,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             array.nbytes for array in (sparse.data, sparse.indices, sparse.indptr)
         )
         if resident_bytes >= self.memoryBytes:
-            raise MemoryError(
+            raise MemoryBudgetError(
                 "Imputed output and diffusion operator exceed the memory budget; "
-                "increase the memory budget or request fewer features per call."
+                "increase the memory budget or request fewer features per call. "
+                f"They need at least {resident_bytes + 1} bytes.",
+                needed_bytes=resident_bytes + 1,
+                budget_bytes=int(self.memoryBytes),
+                item="the imputed output and the diffusion operator",
             )
         result = np.zeros((len(cell_indices), len(names)), dtype=np.float64)
         for slot in metadata_slots:
@@ -1401,10 +1438,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             retained_graph.shape[0], retained_graph.nnz, len(requested_sink_labels)
         )
         if solver_bytes >= self.memoryBytes:
-            raise MemoryError(
+            raise MemoryBudgetError(
                 f"Fate mapping needs about {solver_bytes} bytes of working memory, "
                 f"which exceeds the memory budget of {self.memoryBytes} bytes. "
-                "Increase the memory budget or compute the pseudotime on fewer cells."
+                "Increase the memory budget or compute the pseudotime on fewer cells.",
+                needed_bytes=solver_bytes + 1,
+                budget_bytes=int(self.memoryBytes),
+                item="the fate solver",
             )
         retained_ptime = ptime[ptime_valid]
         retained_sink_values = sink_values[ptime_valid]
@@ -1791,11 +1831,17 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             + n_cells * 8
             + n_lineages * CURVE_FIT_BINS * (n_dims + 3) * 8
         )
-        if resident_bytes >= self.memoryBytes:
-            raise MemoryError(
-                f"Lineage curves need about {resident_bytes} bytes of working "
+        chunk_rows = min(max(n_cells, 1), _PLACEMENT_CHUNK_ROWS)
+        placement_bytes = _placement_write_bytes(n_cells, n_lineages, chunk_rows)
+        working_bytes = resident_bytes + placement_bytes
+        if working_bytes >= self.memoryBytes:
+            raise MemoryBudgetError(
+                f"Lineage curves need about {working_bytes} bytes of working "
                 f"memory, which exceeds the memory budget of {self.memoryBytes} "
-                "bytes. Increase the memory budget or fit fewer lineages."
+                "bytes. Increase the memory budget or fit fewer lineages.",
+                needed_bytes=working_bytes + 1,
+                budget_bytes=int(self.memoryBytes),
+                item="the lineages' weights, ranks and placement writes",
             )
         # The coordinates hold every cell of the selection; unscored cells
         # carry no weight and no rank.
@@ -1821,7 +1867,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             n_points=n_points,
             degrees_of_freedom=degrees_of_freedom,
         )
-        chunk_rows = min(max(n_cells, 1), 100_000)
         with artifact_transaction(self.zw, planned) as group:
             for name, values in (
                 ("points", fit.points),
@@ -1845,10 +1890,12 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 np.float64,
                 (n_cells, n_lineages),
             )
+            # Whole chunk bands are written, so no block rewrites a chunk.
+            writers = (_RowBandWriter(positions), _RowBandWriter(distances))
             for start, block in self._lineage_coordinate_blocks(
                 data,
                 message="Placing cells on lineage curves",
-                resident_bytes=resident_bytes,
+                resident_bytes=working_bytes,
                 scratch_bytes_per_row=(
                     n_dims * 8 + 2 * n_lineages * 8 + projection_scratch_bytes(n_points)
                 ),
@@ -1870,12 +1917,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                         )
                         block_progress[scored, lineage] = position
                         block_distance[scored, lineage] = distance
-                # A block across a chunk boundary rewrites two chunks of up to
-                # 100,000 rows, which Zarr would rewrite at once; one at a time,
-                # the writes hold the buffers of one chunk.
-                with zarr_io_concurrency(1):
-                    positions[start:stop] = block_progress
-                    distances[start:stop] = block_distance
+                writers[0].add(block_progress)
+                writers[1].add(block_distance)
+                del block_progress, block_distance
+            for writer in writers:
+                writer.finish()
             valid_array = create_zarr_dataset(
                 group, "valid", (chunk_rows,), np.bool_, (n_cells,)
             )
@@ -2132,10 +2178,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             + (3 * n_dims * n_dims + n_dims) * 8
         )
         if resident_bytes >= self.memoryBytes:
-            raise MemoryError(
+            raise MemoryBudgetError(
                 f"The lineage tree needs about {resident_bytes} bytes of working "
                 f"memory, which exceeds the memory budget of {self.memoryBytes} "
-                "bytes. Use coordinates with fewer dimensions."
+                "bytes. Use coordinates with fewer dimensions.",
+                needed_bytes=resident_bytes + 1,
+                budget_bytes=int(self.memoryBytes),
+                item="the cluster moments of the lineage tree",
             )
         counts, means, covariances = _cluster_moments_impl(
             self._lineage_coordinate_blocks(
@@ -3904,11 +3953,14 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             len(axes.cell_indices), n_lineages, n_bins
         )
         if operator_bytes >= self.memoryBytes:
-            raise MemoryError(
+            raise MemoryBudgetError(
                 f"Binning {len(axes.cell_indices)} cells along {n_lineages} "
                 f"lineages needs about {operator_bytes} bytes, which exceeds the "
                 f"memory budget of {self.memoryBytes} bytes. Increase the memory "
-                "budget or profile fewer lineages."
+                "budget or profile fewer lineages.",
+                needed_bytes=operator_bytes + 1,
+                budget_bytes=int(self.memoryBytes),
+                item="the bin operator beside the fate weights",
             )
         operator, bin_ordering, lineage_weight = _equal_mass_bin_operator_impl(
             axes.ordering, axes.weights, n_bins

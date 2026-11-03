@@ -359,7 +359,7 @@ def test_values_beyond_the_memory_budget_are_refused_before_anything_is_read(
 
     for module, name in (
         (selection_module, "cell_selection_indices"),
-        (selection_module, "read_array_rows_chunkwise"),
+        (selection_module, "read_rows"),
         (base_datastore_module, "read_metadata_rows_chunkwise"),
     ):
         monkeypatch.setattr(module, name, recorded(name, getattr(module, name)))
@@ -491,13 +491,13 @@ def test_select_cells_admits_its_read_against_the_memory_budget(
     """select_cells charges its read as load_cell_values does, before reading."""
     scores, arrays = _write_declared(store, "doublet_score")
     reads: list[object] = []
-    original = selection_module.read_array_rows_chunkwise
+    original = selection_module.read_rows
 
-    def recording(array, rows):
+    def recording(ledger, array, rows, *, item):
         reads.append(array)
-        return original(array, rows)
+        return original(ledger, array, rows, item=item)
 
-    monkeypatch.setattr(selection_module, "read_array_rows_chunkwise", recording)
+    monkeypatch.setattr(selection_module, "read_rows", recording)
     budget = store.memoryBytes
     store.memoryBytes = 64
 
@@ -853,3 +853,32 @@ def test_cell_value_specs_are_immutable_and_exact() -> None:
     assert cell_value_spec("pseudotime").name == "pseudotime"
     with pytest.raises(ValueError, match="'normalized' is not a cell-aligned"):
         cell_value_spec("normalized")
+
+
+def test_values_name_the_budget_that_reads_them_in_one_refusal(large_store) -> None:
+    from tests.memory_helpers import follow_refusals
+
+    store = large_store
+    n_cells = store.cells.N
+    scores = _write_masked(
+        store,
+        "doublet_score",
+        "values",
+        np.linspace(0.0, 1.0, n_cells),
+        np.arange(n_cells) % 7 == 0,
+        case="named budget",
+        cells="I",
+    )
+    half = store.snapshot_cell_selection("half")
+    for options in ({}, {"cell_selection": half}):
+
+        def read(budget: int, options=options) -> object:
+            store.memoryBytes = budget
+            return store.artifacts.load_values(scores, **options)
+
+        # One check covers the cells' positions, the values, their mask and
+        # the cells' IDs, so the first refusal names the budget that reads them.
+        _budget, refusals = follow_refusals(read)
+        assert [refusal.item for refusal in refusals] == [
+            "'values' of the doublet_score artifact"
+        ]

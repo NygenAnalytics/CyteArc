@@ -21,6 +21,7 @@ from .layout import PROFILE_METADATA_CHUNK, normed_array_spec
 from .partition import affordable_width, row_band, scan_band
 from .profiles import StorageProfile
 from .sharding import write_dense_in_shard_rows
+from ..utils.memory_budget import MemoryBudgetError
 
 COLUMN_METADATA_ATTRIBUTES = (
     "display",
@@ -249,10 +250,13 @@ def copy_zarr_group_tree(
             # Every block holds at least one chunk of its column, so no plan,
             # serial or not, stays within a budget below one chunk.
             column = max(chunk_bytes, key=chunk_bytes.__getitem__)
-            raise MemoryError(
+            raise MemoryBudgetError(
                 f"Copying one chunk of metadata column {column!r} needs {minimum} "
                 f"bytes, but the memory budget is {resources.memoryBytes} bytes. "
-                "Increase mem_budget."
+                "Increase mem_budget.",
+                needed_bytes=minimum,
+                budget_bytes=int(resources.memoryBytes),
+                item=f"one chunk of metadata column {column!r}",
             )
         workers = max(
             1,

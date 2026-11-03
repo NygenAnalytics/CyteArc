@@ -128,6 +128,7 @@ from ...utils.arguments import (
     quoted_value,
 )
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryBudgetError
 from ...utils.moments import ColumnMoments
 from ...utils.numba import numba_threads
 from ...utils.shutdown import shutdown_checkpoint
@@ -238,9 +239,12 @@ def _streaming_lsi_block_rows(
     )
     if available < row_bytes:
         required = accumulator_bytes + decode_bytes + row_bytes
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"Streaming LSI needs about {required} bytes for one row block, "
-            f"but the operation limit is {resources.memoryBytes} bytes"
+            f"but the operation limit is {resources.memoryBytes} bytes",
+            needed_bytes=required,
+            budget_bytes=int(resources.memoryBytes),
+            item="one row of streaming LSI beside its accumulators",
         )
     return max(1, min(n_rows, available // row_bytes))
 
@@ -321,7 +325,7 @@ def _lsi_write_block_rows(
                 dims=dims,
                 transform_bytes=transform_bytes,
             )
-        except MemoryError:
+        except MemoryBudgetError:
             return False
         return True
 
@@ -376,12 +380,15 @@ def _require_pca_fit_budget(
     )
     limit = int(resources.memoryBytes)
     if required > limit:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"PCA with the {pca_solver(n_features)} solver needs about "
             f"{required} bytes to fit {dims} components of {n_features} "
             f"features in blocks of {block_rows} rows, but the operation limit "
             f"is {limit} bytes. Pass a smaller batch_size, select fewer "
-            "features, or raise mem_budget."
+            "features, or raise mem_budget.",
+            needed_bytes=required,
+            budget_bytes=limit,
+            item="the PCA fit",
         )
 
 
@@ -475,7 +482,7 @@ def _require_kmeans_fit_budget(
     if required <= limit:
         return
     if batch_size >= n_cells:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"The in-memory k-means fit of {n_cells} cells needs about "
             f"{required} bytes for their coordinates and the fit, but the "
             f"operation limit is {limit} bytes. Pass a batch_size below "
@@ -483,14 +490,20 @@ def _require_kmeans_fit_budget(
             "sample of the cells, the label of every cell, and one block of "
             "coordinates at a time, or raise mem_budget. The batch size is "
             "part of the result's identity, so the fit does not switch on its "
-            "own."
+            "own.",
+            needed_bytes=required,
+            budget_bytes=limit,
+            item="the in-memory k-means fit",
         )
-    raise MemoryError(
+    raise MemoryBudgetError(
         f"The streamed k-means fit of {n_cells} cells needs about {required} "
         "bytes for its seeding sample, the labels of every cell, and one "
         f"block of coordinates, but the operation limit is {limit} bytes. "
         "Lower kmeans_sampling, kmeans_batch_size, or batch_size, or raise "
-        "mem_budget."
+        "mem_budget.",
+        needed_bytes=required,
+        budget_bytes=limit,
+        item="the streamed k-means fit",
     )
 
 
@@ -546,12 +559,15 @@ def _require_harmony_fit_budget(
     )
     limit = int(resources.memoryBytes)
     if required > limit:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"Harmony needs about {required} bytes to correct {n_cells} cells "
             f"with {dims} dimensions in {n_clusters} clusters over {n_levels} "
             f"batch levels, {labels} of them for the batch labels, but the "
             f"operation limit is {limit} bytes. Use fewer clusters (n_clusters in "
-            "harmony_params) or fewer dimensions, or raise mem_budget."
+            "harmony_params) or fewer dimensions, or raise mem_budget.",
+            needed_bytes=required,
+            budget_bytes=limit,
+            item="the Harmony fit",
         )
     return reading
 
@@ -606,10 +622,13 @@ def _require_ann_index_budget(
     limit = int(resources.memoryBytes)
     if required <= limit:
         return
-    raise MemoryError(
+    raise MemoryBudgetError(
         f"{work} needs about {required} bytes, {index_bytes} of them for the "
         f"hnswlib index with ann_m={m}, but the operation limit is {limit} "
-        f"bytes. {remedy}"
+        f"bytes. {remedy}",
+        needed_bytes=required,
+        budget_bytes=limit,
+        item=f"the hnswlib index with ann_m={m} and its work",
     )
 
 
@@ -621,9 +640,12 @@ def _require_integration_budget(
     """Raise MemoryError, before any graph or coordinate is read, over budget."""
     limit = int(resources.memoryBytes)
     if required > limit:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"{description} needs about {required} bytes in memory, but the "
-            f"operation limit is {limit} bytes. Raise mem_budget."
+            f"operation limit is {limit} bytes. Raise mem_budget.",
+            needed_bytes=required,
+            budget_bytes=limit,
+            item="the integration's inputs and work",
         )
 
 
@@ -639,10 +661,13 @@ def _require_graph_budget(
     limit = int(resources.memoryBytes)
     if required <= limit:
         return
-    raise MemoryError(
+    raise MemoryBudgetError(
         f"{work} of {n_cells} cells needs about {required} bytes in memory "
         f"for a graph of {n_edges} edges, but the operation limit is {limit} "
-        "bytes. Raise mem_budget."
+        "bytes. Raise mem_budget.",
+        needed_bytes=required,
+        budget_bytes=limit,
+        item=f"the graph of {n_edges} edges and its work",
     )
 
 

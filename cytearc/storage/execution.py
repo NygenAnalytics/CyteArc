@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..utils.logging import logger
+from ..utils.memory_budget import MemoryBudgetError
 from .budget import ResourceBudget, detect_workers
 from .io_policy import DEFAULT_STORAGE_IO_POLICY, StorageIoPolicy
 
@@ -234,16 +235,24 @@ def _nested_read_mix(
     outer_limit: int,
     inner_limit: int,
     minimum_outer: int,
+    reserved: int,
 ) -> tuple[int, int]:
-    """Maximize bounded nested I/O without starving the compute width."""
+    """Maximize bounded nested I/O without starving the compute width.
+
+    ``reserved`` is what the budget holds beside the ``available`` bytes,
+    which a refusal adds back to name the whole budget.
+    """
     feasible_outer = min(
         max(1, int(outer_limit)),
         available // max(1, per_unit + inner_read),
     )
     if feasible_outer < 1:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"One live unit plus one inner read needs about "
-            f"{per_unit + inner_read} bytes, but only {available} bytes are available"
+            f"{per_unit + inner_read} bytes, but only {available} bytes are available",
+            needed_bytes=reserved + per_unit + inner_read,
+            budget_bytes=reserved + available,
+            item="one unit and one inner read beside the resident data",
         )
     outer_floor = min(max(1, int(minimum_outer)), feasible_outer)
     resolved_inner_limit = max(1, int(inner_limit))
@@ -297,13 +306,24 @@ def plan_operation(
     chunks = max(1, int(shape.chunksPerShard))
     workers = max(1, int(resources.workers))
     available = int(resources.memoryBytes) - resident - scratch
+    per_unit = unit_bytes + decode
+    # The smallest budget that plans the operation holds the resident data
+    # and one unit, with one inner read when the units read in parts.
+    needed = resident + scratch + per_unit + inner_read
+    item = (
+        "one unit and one inner read beside the resident data"
+        if inner_read
+        else "one unit beside the resident data"
+    )
     if available <= 0:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"Resident data needs {resident + scratch} bytes, but the operation "
-            f"limit is {resources.memoryBytes} bytes"
+            f"limit is {resources.memoryBytes} bytes",
+            needed_bytes=needed,
+            budget_bytes=int(resources.memoryBytes),
+            item=item,
         )
 
-    per_unit = unit_bytes + decode
     units = max(1, n_units)
     write_limit = min(requested_write or workers, workers, units) if shape.writes else 1
     write_workers = min(
@@ -311,10 +331,13 @@ def plan_operation(
         max(1, available // max(1, per_unit + inner_read)),
     )
     if per_unit > available:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"One unit needs about {per_unit} bytes in addition to "
             f"{resident + scratch} reserved bytes, but the operation limit is "
-            f"{resources.memoryBytes} bytes"
+            f"{resources.memoryBytes} bytes",
+            needed_bytes=needed,
+            budget_bytes=int(resources.memoryBytes),
+            item=item,
         )
     memory_live = max(1, available // per_unit)
     read_auto = min(units, memory_live, auto_read_width(workers))
@@ -358,6 +381,7 @@ def plan_operation(
             outer_limit=read_limit,
             inner_limit=inner_limit,
             minimum_outer=minimum_outer,
+            reserved=resident + scratch,
         )
     else:
         read_workers = read_limit
@@ -477,10 +501,16 @@ def admitted_worker_split(
     tasks = max(1, int(nTasks))
     resident = max(0, int(residentBytes))
     available = resources.memoryBytes - resident
+    # The smallest budget that admits the work holds one task of one inner
+    # worker beside the resident data.
+    one_task = max(1, int(taskBytes(1)))
     if available <= 0:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"Resident data needs about {resident} bytes, but the operation "
-            f"limit is {resources.memoryBytes} bytes"
+            f"limit is {resources.memoryBytes} bytes",
+            needed_bytes=resident + one_task,
+            budget_bytes=int(resources.memoryBytes),
+            item="one task beside the resident data",
         )
 
     for outer in range(min(cpu, tasks), 0, -1):
@@ -489,10 +519,12 @@ def admitted_worker_split(
             if outer * per_task <= available:
                 return outer, inner
 
-    one_task = max(1, int(taskBytes(1)))
-    raise MemoryError(
+    raise MemoryBudgetError(
         f"One task needs about {one_task} bytes in addition to {resident} "
-        f"resident bytes, but the operation limit is {resources.memoryBytes} bytes"
+        f"resident bytes, but the operation limit is {resources.memoryBytes} bytes",
+        needed_bytes=resident + one_task,
+        budget_bytes=int(resources.memoryBytes),
+        item="one task beside the resident data",
     )
 
 

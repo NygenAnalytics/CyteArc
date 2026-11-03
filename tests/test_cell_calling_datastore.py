@@ -532,3 +532,33 @@ def test_cell_calling_methods_keep_their_signatures() -> None:
         "lower: int = 100) -> cytearc.quality_control.cell_calling.BarcodeRanks"
     )
     assert math.isclose(operations._DEFAULT_FDR, 0.001)
+
+
+def test_call_cells_names_the_budget_that_passes_its_resident_arrays(
+    store_path,
+) -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    store = _open(store_path, mem_budget="100K")
+    with pytest.raises(MemoryBudgetError) as refused:
+        store.qc.call_cells(n_iter=N_ITER)
+    refusal = refused.value
+    assert refusal.budget_bytes == 100 * 1024
+    assert refusal.item == (
+        "the barcodes' totals, the ambient profile and the simulations"
+    )
+    assert f"holds about {refusal.needed_bytes} bytes" in str(refusal)
+    store.memoryBytes = refusal.needed_bytes - 1
+    with pytest.raises(MemoryBudgetError) as below:
+        store.qc.call_cells(n_iter=N_ITER)
+    assert (below.value.needed_bytes, below.value.item) == (
+        refusal.needed_bytes,
+        refusal.item,
+    )
+    # The named budget passes the check; a later step names more if it needs it.
+    store.memoryBytes = refusal.needed_bytes
+    try:
+        store.qc.call_cells(n_iter=N_ITER)
+    except MemoryBudgetError as later:
+        assert later.item != refusal.item
+        assert later.needed_bytes > refusal.needed_bytes

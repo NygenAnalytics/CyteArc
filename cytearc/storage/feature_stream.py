@@ -48,6 +48,7 @@ from .partition import (
     partition_indices,
 )
 from .types import as_zarr_array
+from ..utils.memory_budget import MemoryBudgetError
 
 type BlockBytes = Callable[[int], int]
 T = TypeVar("T")
@@ -215,11 +216,6 @@ def plan_feature_stream(
     requested = _positive_requested(requestedBatchSize)
     resident = max(0, int(residentBytes))
     available = resources.memoryBytes - resident
-    if available <= 0:
-        raise MemoryError(
-            f"Resident data needs {resident} bytes, but the operation limit is "
-            f"{resources.memoryBytes} bytes"
-        )
 
     n_cells = int(cell_indices.size)
     cell_chunks = -(-geometry.axisShard(cell_axis) // geometry.axisChunk(cell_axis))
@@ -245,9 +241,20 @@ def plan_feature_stream(
         decode = geometry.readBytes(0, chunks, decodes=1)
         return geometry.readBytes(result, chunks, decodes=1) - result - decode, decode
 
+    def block_cost(width: int, bins: int | None = None) -> int:
+        """What one block of ``width`` features holds: the caller's bytes and its read."""
+        return _owned_bytes(blockBytes, width) + sum(read_bytes(width, bins))
+
     def fits(width: int, bins: int | None = None) -> bool:
-        return (
-            _owned_bytes(blockBytes, width) + sum(read_bytes(width, bins)) <= available
+        return block_cost(width, bins) <= available
+
+    if available <= 0:
+        raise MemoryBudgetError(
+            f"Resident data needs {resident} bytes, but the operation limit is "
+            f"{resources.memoryBytes} bytes",
+            needed_bytes=resident + block_cost(1),
+            budget_bytes=int(resources.memoryBytes),
+            item="one feature beside the resident data",
         )
 
     if feature_indices.size == 0:
@@ -268,11 +275,29 @@ def plan_feature_stream(
             maxWidth=requested,
         )
         if any(not fits(block.indices.size, len(block.bins)) for block in blocks):
-            raise MemoryError(
+            needed = resident + max(
+                block_cost(block.indices.size, len(block.bins)) for block in blocks
+            )
+            raise MemoryBudgetError(
                 f"Requested feature batch width {requested} does not fit; "
-                f"the affordable width is {affordable_width(fits, requested)}"
+                f"the affordable width is {affordable_width(fits, requested)}. "
+                f"It needs at least {needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=int(resources.memoryBytes),
+                item=f"feature batches of {requested} features",
             )
     else:
+        if not fits(1):
+            # Blocks are packed while the predicate accepts them, so one
+            # feature that does not fit refuses the stream here, naming it.
+            needed = resident + block_cost(1)
+            raise MemoryBudgetError(
+                "One index of the selection does not fit the operation budget. "
+                f"It needs at least {needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=int(resources.memoryBytes),
+                item="one feature of the selection",
+            )
         blocks = partition_indices(
             geometry,
             feature_axis,

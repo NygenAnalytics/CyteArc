@@ -90,21 +90,7 @@ s_score = ds.artifacts.load_values(run["cell_cycle"], value="s_score")  # anothe
 xy = ds.artifacts.load_values(run["umap"]).to_pandas()  # DataFrame, one column per dimension
 ```
 
-`artifacts.load_values` aligns rows to cell `ids` and flags rows the artifact records as missing, so
-prefer it to `artifacts.load(ref)["values"]`. `cell_selection=` reads a subset of the artifact's own
-cells. Cell selections, reference labels, graphs, reductions, and Harmony corrections are refused;
-open those with `artifacts.load`. A run's metadata snapshots are outputs of its `input_snapshot`
-stage, listed under `outputs` in `run.report()["stages"]`, not run outputs, so
-`run["cell_snapshot"]` raises `KeyError`. `cell_snapshot` holds the cell names and the QC columns
-that filtering reads, and `feature_snapshot` the feature names. Other cell columns are frozen
-apart, only when the run uses them: `column_snapshot` (its `snapshot_columns`),
-`harmony_snapshot` (Harmony batch columns), `capture_snapshot` (the per-capture cell-calling
-column) and `doublet_sample_snapshot`. Snapshots hold whole metadata columns, not cell-aligned
-values, and are refused too: read names and `snapshot_columns` with `run.cells.fetch(column)`,
-feature names with `run.features.fetch("names")`, and the other columns live, with
-`ds.cells.fetch_all(column)[run.cells.fetch_all("I")]`. The memory check runs before anything is
-read and charges the values, their mask, the cell ids, and the row indexes the read builds; on
-`MemoryError`, pass a smaller `cell_selection=` or raise `mem_budget`.
+`artifacts.load_values` aligns rows to cell `ids` and flags rows the artifact records as missing, so prefer it to `artifacts.load(ref)["values"]`. `cell_selection=` reads a subset of the artifact's own cells. Cell selections, reference labels, graphs, reductions, and Harmony corrections are refused; open those with `artifacts.load`. A run's metadata snapshots are outputs of its `input_snapshot` stage, listed under `outputs` in `run.report()["stages"]`, not run outputs, so `run["cell_snapshot"]` raises `KeyError`. `cell_snapshot` holds the cell names and the QC columns that filtering reads, and `feature_snapshot` the feature names. Other cell columns are frozen apart, only when the run uses them: `column_snapshot` (its `snapshot_columns`), `harmony_snapshot` (Harmony batch columns), `capture_snapshot` (the per-capture cell-calling column) and `doublet_sample_snapshot`. Snapshots hold whole metadata columns, not cell-aligned values, and are refused too: read names and `snapshot_columns` with `run.cells.fetch(column)`, feature names with `run.features.fetch("names")`, and the other columns live, with `ds.cells.fetch_all(column)[run.cells.fetch_all("I")]`. The memory checks run before anything is read and again before any value is read, once the cells' positions are, and charge the values, their mask, the cell ids, and the row indexes the read builds; on `MemoryBudgetError`, pass a smaller `cell_selection=` or raise `mem_budget` to its `needed_bytes`.
 
 ### Convert inputs to Zarr
 
@@ -120,9 +106,9 @@ Writers also refuse, with `ValueError`, a path inside another store (`s.zarr/RNA
 reader = cytearc.CrH5Reader("filtered_feature_bc_matrix.h5")
 print(reader.assayFeats)                  # assays and feature ranges that will be written
 cytearc.CrToZarr(reader, zarr_loc="pbmc.zarr", mem_budget="4G").dump()
-# A default count layout that does not fit mem_budget raises MemoryError before writing and
-# names a smaller policy=CountMatrixPolicy(...) (cytearc.storage.count_matrix); raise
-# mem_budget or pass that policy.
+# A default count layout that does not fit mem_budget raises CountLayoutMemoryError before
+# writing and names a smaller policy=CountMatrixPolicy(...) (cytearc.storage.count_matrix);
+# raise mem_budget to its needed_bytes or pass that policy.
 ds = cytearc.DataStore("pbmc.zarr", default_assay="RNA")   # required when there are 2+ assays
 
 # 10x directory (matrix.mtx, genes/features.tsv, barcodes.tsv; .gz accepted)
@@ -212,10 +198,7 @@ a repeated header: pandas renames it `ID.1`, `ID.2`, ... without a warning.
 reader = cytearc.CrDirReader("filtered_gene_bc_matrices/hg19", duplicate_feature_ids="make_unique")
 ```
 
-Every converter raises `CountLayoutMemoryError`, a `MemoryError` subclass, when the
-count layout does not fit the budget. Catch `MemoryError`. Prefer a larger `mem_budget` when the host has
-the memory. Otherwise copy the policy numbers from the message exactly and record that choice:
-smaller layouts make every later gene-major read slower.
+Every converter raises `CountLayoutMemoryError`, a `MemoryBudgetError`, when the count layout does not fit the budget; its `needed_bytes` is the budget that writes the layout. Catch `MemoryError`. Prefer a larger `mem_budget` when the host has the memory. Otherwise copy the policy numbers from the message exactly and record that choice: smaller layouts make every later gene-major read slower.
 
 ```python
 from cytearc.storage.count_matrix import CountMatrixPolicy

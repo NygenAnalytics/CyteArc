@@ -53,6 +53,7 @@ from ..storage.materialize import (
 )
 from ..utils.arguments import bool_argument
 from ..utils.compute import controlled_compute
+from ..utils.memory_budget import MemoryBudgetError, refusal_words
 from ..utils.moments import ColumnMoments
 from ..utils.numba import njit
 from ..storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
@@ -359,11 +360,15 @@ def stream_document_frequency(
             row_offset = row_stop
             # Release the block before the stream reads the next one.
             del block
-    except MemoryError as exc:
-        raise MemoryError(
+    except MemoryBudgetError as exc:
+        raise MemoryBudgetError(
             f"{operation} could not allocate the required memory. Its budget must "
             "cover retained arrays and the smallest one-row block, including "
-            "read and reduction buffers."
+            f"read and reduction buffers. It needs at least {exc.needed_bytes} "
+            "bytes.",
+            needed_bytes=exc.needed_bytes,
+            budget_bytes=exc.budget_bytes,
+            item=exc.item,
         ) from exc
     return document_frequency, term_frequency_sum
 
@@ -1041,6 +1046,20 @@ def _counts_t_renormalized_batches(
         raise RuntimeError("countsT reads did not cover every requested cell")
 
 
+def _budget_beside_writer(
+    writer_reserve: Callable[[int], int], budget: int, producer_bytes: int
+) -> int:
+    """The least budget from ``budget`` up that leaves ``producer_bytes`` beside a writer.
+
+    The writer reserves ``writer_reserve(b)`` of a budget ``b``, which grows
+    with the budget, so the budget is raised to the producer's bytes beside
+    the writer's reserve until the reserve stops growing.
+    """
+    while budget - writer_reserve(budget) < producer_bytes:
+        budget = producer_bytes + writer_reserve(budget)
+    return budget
+
+
 def write_renorm_subset_to_zarr(
     assay: "Assay",
     cell_idx: np.ndarray,
@@ -1116,25 +1135,36 @@ def write_renorm_subset_to_zarr(
             io=StorageIoPolicy(readWorkers=1, computeWorkers=1, writeWorkers=1),
             residentBytes=writer_resident,
         )
-        # The producer holds only a few in-flight bands. Give the writer up to a
-        # quarter of the budget, never less than one writer, so output chunks
-        # encode and upload in parallel instead of stalling the ordered stream.
-        writer_memory = min(
-            resources.memoryBytes,
-            max(single_writer.reservedBytes, resources.memoryBytes // 4),
-        )
         n_bands = -(-int(output.shape[0]) // array_shard_rows(output))
-        writer_plan = plan_dense_write(
-            output,
-            ResourceBudget(writer_memory, resources.workers),
-            n_bands,
-            io=assay.storageIo,
-            residentBytes=writer_resident,
-        )
-        producer_memory = resources.memoryBytes - writer_plan.reservedBytes
+
+        def writer_reserve(budget: int) -> int:
+            # The producer holds only a few in-flight bands. Give the writer up
+            # to a quarter of the budget, never less than one writer, so output
+            # chunks encode and upload in parallel instead of stalling the
+            # ordered stream.
+            writer_memory = min(budget, max(single_writer.reservedBytes, budget // 4))
+            return plan_dense_write(
+                output,
+                ResourceBudget(writer_memory, resources.workers),
+                n_bands,
+                io=assay.storageIo,
+                residentBytes=writer_resident,
+            ).reservedBytes
+
+        def whole_budget(producer_bytes: int) -> int:
+            return _budget_beside_writer(
+                writer_reserve, int(resources.memoryBytes), producer_bytes
+            )
+
+        producer_memory = resources.memoryBytes - writer_reserve(resources.memoryBytes)
         if producer_memory < 1:
-            raise MemoryError(
-                "Normalization needs memory for both its producer and writer"
+            needed = whole_budget(1)
+            raise MemoryBudgetError(
+                "Normalization needs memory for both its producer and writer. It "
+                f"needs at least {needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=int(resources.memoryBytes),
+                item="the producer of normalized values beside its writer",
             )
         producer_resources = ResourceBudget(
             producer_memory, max(1, resources.workers - 1)
@@ -1142,22 +1172,33 @@ def write_renorm_subset_to_zarr(
 
         def normalized_batches() -> Iterator[np.ndarray]:
             nonlocal summary
-            for block in _counts_t_renormalized_batches(
-                assay,
-                cell_idx,
-                feat_idx,
-                scaleFactor=float(scale_factor),
-                logTransform=log_transform,
-                resources=producer_resources,
-            ):
-                if stats_group is not None:
-                    current = _feature_summary(block)
-                    summary = (
-                        current
-                        if summary is None
-                        else _merge_feature_summaries(summary, current)
-                    )
-                yield block
+            try:
+                for block in _counts_t_renormalized_batches(
+                    assay,
+                    cell_idx,
+                    feat_idx,
+                    scaleFactor=float(scale_factor),
+                    logTransform=log_transform,
+                    resources=producer_resources,
+                ):
+                    if stats_group is not None:
+                        current = _feature_summary(block)
+                        summary = (
+                            current
+                            if summary is None
+                            else _merge_feature_summaries(summary, current)
+                        )
+                    yield block
+            except MemoryBudgetError as error:
+                # The producer plans within what the writer leaves it.
+                needed = whole_budget(error.needed_bytes)
+                raise MemoryBudgetError(
+                    f"{refusal_words(error)} Beside the writer of the normalized "
+                    f"values, the normalization needs at least {needed} bytes.",
+                    needed_bytes=needed,
+                    budget_bytes=int(resources.memoryBytes),
+                    item=error.item,
+                ) from error
 
         write_dense_from_row_batches(
             output,

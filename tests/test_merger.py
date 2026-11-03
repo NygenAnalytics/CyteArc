@@ -17,6 +17,7 @@ from cytearc.storage.count_matrix import (
     policy_from_payload,
 )
 from cytearc.storage.layout import count_array_spec
+from cytearc.utils.memory_budget import MemoryBudgetError
 
 
 class _MergeMeta:
@@ -2774,7 +2775,9 @@ def test_dataset_merge_sparse_write_respects_admitted_batch_geometry(
         return plan
 
     def refused_dense_write(*args, **kwargs):
-        raise MemoryError("dense write refused")
+        raise MemoryBudgetError(
+            "dense write refused", needed_bytes=2, budget_bytes=1, item="the write"
+        )
 
     monkeypatch.setattr(merge_writer, "remap_block_to_coo", tracking_remap)
     monkeypatch.setattr(merge_writer, "scatter_block_dense", tracking_scatter)
@@ -4969,6 +4972,33 @@ def test_dataset_merge_below_one_feature_metadata_row_fails_before_the_destinati
     assert not path.exists()
 
 
+def test_a_merged_feature_column_names_the_budget_beside_the_feature_mappings(
+    tmp_path,
+):
+    from tests.memory_helpers import named_budget_passes
+
+    long_text = {"description": np.array(["x" * 5_000, "y" * 5_000])}
+    sources = _feature_annotated_sources(long_text, long_text)
+    attempts = iter(range(1_000))
+
+    def plan(budget: int) -> None:
+        DataStoreMerge(
+            datasets=sources,
+            zarr_path=str(tmp_path / f"merge-{next(attempts)}.zarr"),
+            names=["left", "right"],
+            prepend_text="",
+            seed=0,
+            nthreads=1,
+            mem_budget=budget,
+        ).plan()
+
+    # The column's one row is planned beside the mappings of the features,
+    # so the budget it names holds both.
+    named_budget_passes(
+        plan, 150_000, item="one row of merged feature column 'description'"
+    )
+
+
 _MEMBERSHIP_ATTRIBUTES = {"role": "assay_membership", "assay": "ADT"}
 _PARTIAL_IDS = ["c0", "c1", "c2", "c3"]
 _PARTIAL_ADT = [[0, 0], [5, 1], [0, 0], [2, 7]]
@@ -5400,13 +5430,17 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
         if "dense" in refused or (
             "held_dense" in refused and calls["plan_dense_write"] == 1
         ):
-            raise MemoryError("refused dense write")
+            raise MemoryBudgetError(
+                "refused dense write", needed_bytes=2, budget_bytes=1, item="the write"
+            )
         return real["plan_dense_write"](*args, **kwargs)
 
     def sparse_plan(*args, **kwargs):
         # Only the plan that holds blocks names its batch rows.
         if "batchRows" in kwargs and "held_sparse" in refused:
-            raise MemoryError("refused held blocks")
+            raise MemoryBudgetError(
+                "refused held blocks", needed_bytes=2, budget_bytes=1, item="the blocks"
+            )
         return real["resolve_sparse_import_batch"](*args, **kwargs)
 
     def counted(name):

@@ -50,6 +50,7 @@ from ..storage.selections import (
     validate_stored_selection_integrity,
 )
 from ..utils.logging import logger
+from ..utils.memory_budget import MemoryLedger
 from ..utils.arguments import bool_argument
 
 if TYPE_CHECKING:
@@ -479,7 +480,11 @@ class BaseDataStore:
             cell_selection=cell_selection,
             value_name=value_name,
             ndim=None,
-            max_bytes=self.memoryBytes,
+            ledger=MemoryLedger(
+                self.memoryBytes,
+                f"Loading the values of the {ref.kind} artifact",
+                codec_threads=self.nthreads,
+            ),
             # The cell ids are read at the same rows, so the budget charges
             # them with the values.
             caller_reads=(self.cells._get_array("ids"),),

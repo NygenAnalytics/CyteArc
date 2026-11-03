@@ -248,3 +248,33 @@ def test_profiles_are_log_cpm_of_each_groups_summed_counts(store_path):
     expected = np.log1p(sums / sums.sum(axis=1, keepdims=True) * 1e6)
     assert profiles.columns.tolist() == [f"RNA{index}" for index in range(8)]
     np.testing.assert_allclose(profiles.to_numpy(), expected)
+
+
+def test_grn_names_the_budget_of_its_matrix_and_links(store_path):
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    store = _open(store_path)
+    cells = store.snapshot_cell_selection("everyone")
+    universe = store.features.universe()
+
+    def infer(budget: int) -> MemoryBudgetError | None:
+        small = _open(store_path, mem_budget=budget)
+        try:
+            small.regulons.grn(
+                cells, features=universe, tfs=TFS, random_seed=78, **FAST
+            )
+        except MemoryBudgetError as refusal:
+            return refusal
+        return None
+
+    refusal = infer(1024)
+    assert refusal is not None
+    assert (refusal.budget_bytes, refusal.item) == (
+        1024,
+        "the expression matrix and the links of GRN inference",
+    )
+    assert f"needs about {refusal.needed_bytes} bytes" in str(refusal)
+    below = infer(refusal.needed_bytes - 1)
+    assert below is not None and below.needed_bytes == refusal.needed_bytes
+    later = infer(refusal.needed_bytes)
+    assert later is None or later.item != refusal.item

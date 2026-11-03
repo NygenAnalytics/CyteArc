@@ -257,6 +257,80 @@ def check_budget(
     return budget, refusals, result
 
 
+def follow_refusals(
+    at_budget: Callable[[int], object], *, start: int = 1, limit: int = 60
+) -> tuple[int, list[Any]]:
+    """Follow the refusals of ``at_budget`` from ``start`` bytes to the budget that runs it.
+
+    Every refusal on the way must be a ``MemoryBudgetError`` of the budget
+    tried, ``budget_bytes``, that names a larger budget, ``needed_bytes``,
+    and a step, ``item``; the next attempt takes the budget it names, so a
+    refusal stated in other terms than the call's whole budget fails. One
+    byte below the budget that runs is refused naming it, as plans that
+    depend only on their budget do.
+
+    Returns:
+        The budget that runs the call, and the refusals on the way.
+    """
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    budget, refusals = start, []
+    for _attempt in range(limit):
+        try:
+            at_budget(budget)
+        except MemoryError as error:
+            assert isinstance(error, MemoryBudgetError), error
+            assert error.budget_bytes == budget, error
+            assert error.needed_bytes > budget, error
+            assert error.item, error
+            refusals.append(error)
+            budget = error.needed_bytes
+        else:
+            break
+    else:
+        raise AssertionError(f"{limit} refusals named no budget that runs")
+    assert refusals, f"{start} bytes ran the call"
+    with pytest.raises(MemoryError) as below:
+        at_budget(budget - 1)
+    assert isinstance(below.value, MemoryBudgetError), below.value
+    assert below.value.needed_bytes == budget, below.value
+    return budget, refusals
+
+
+def named_budget_passes(
+    at_budget: Callable[[int], object], budget: int, *, item: str
+) -> Any:
+    """Check the refusal of ``at_budget(budget)`` and that the budget it names passes its step, which a later step may refuse.
+
+    The refusal is a ``MemoryBudgetError`` that names ``budget``, ``item``
+    and more bytes than the budget; at the named budget the call runs or
+    refuses another step, and one byte less is refused naming the same
+    budget and step.
+
+    Returns:
+        The refusal.
+    """
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    def refusal_at(memory: int) -> MemoryBudgetError:
+        with pytest.raises(MemoryError) as raised:
+            at_budget(memory)
+        assert isinstance(raised.value, MemoryBudgetError), raised.value
+        return raised.value
+
+    refusal = refusal_at(budget)
+    assert refusal.budget_bytes == budget, refusal
+    assert refusal.needed_bytes > budget, refusal
+    assert refusal.item == item, refusal
+    try:
+        at_budget(refusal.needed_bytes)
+    except MemoryBudgetError as later:
+        assert later.item != item, later
+    below = refusal_at(refusal.needed_bytes - 1)
+    assert (below.needed_bytes, below.item) == (refusal.needed_bytes, item), below
+    return refusal
+
+
 def smallest_budget(call: Callable[[int], object], high: int) -> int:
     """The smallest budget below ``high`` at which ``call`` raises no MemoryError.
 

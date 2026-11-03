@@ -17,6 +17,7 @@ from ..storage.sharding import accumulate_sparse_to_shards
 from ..utils.arrays import has_duplicates, max_window_nnz, sparse_matrix_bytes
 from ..utils.count_values import compressed_count_ranges
 from ..utils.logging import logger
+from ..utils.memory_budget import MemoryBudgetError, refusal_words
 from ._store import decode_text
 from ..utils.arguments import bool_argument
 
@@ -157,17 +158,31 @@ class SparseToZarr:
         # The scan reads windows beside the matrix it holds.
         held = sparse_matrix_bytes(self.mat)
         if held >= self.resources.memoryBytes:
-            raise MemoryError(
+            raise MemoryBudgetError(
                 f"The sparse matrix holds {held} bytes, but mem_budget is "
-                f"{self.resources.memoryBytes} bytes. Increase mem_budget."
+                f"{self.resources.memoryBytes} bytes. Increase mem_budget.",
+                needed_bytes=held + 1,
+                budget_bytes=int(self.resources.memoryBytes),
+                item="the sparse matrix",
             )
-        (value_range,) = compressed_count_ranges(
-            self.mat.indptr,
-            self.mat.indices,
-            self.mat.data,
-            minorSize=self.nFeatures,
-            maxBytes=self.resources.memoryBytes - held,
-        )
+        try:
+            (value_range,) = compressed_count_ranges(
+                self.mat.indptr,
+                self.mat.indices,
+                self.mat.data,
+                minorSize=self.nFeatures,
+                maxBytes=self.resources.memoryBytes - held,
+            )
+        except MemoryBudgetError as error:
+            # The scan runs beside the matrix, so the budget it needs holds both.
+            needed = held + error.needed_bytes
+            raise MemoryBudgetError(
+                f"{refusal_words(error)} Beside the {held} bytes of the matrix, the "
+                f"import needs at least {needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=int(self.resources.memoryBytes),
+                item=error.item,
+            ) from error
         storage_dtype = count_storage_dtype(self.mat.dtype, value_range)
         # A layout that does not fit fails here, before the destination exists.
         layout = self._fit_count_layout(storage_dtype, policy)

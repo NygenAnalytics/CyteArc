@@ -25,6 +25,7 @@ from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument, integer_argument
 from ...utils.arrays import array_digest
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryBudgetError
 
 if TYPE_CHECKING:
     from ..mapping_datastore import MappingDatastore as _RegulonOperationsBase
@@ -272,10 +273,13 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
         needed += 8 * n_cells * 2 * max(n_regulators, 256)
         needed += 64 * n_genes * n_regulators
         if needed > self.resources.memoryBytes:
-            raise MemoryError(
+            raise MemoryBudgetError(
                 f"GRN inference over {n_cells} cells and {n_genes} genes needs "
                 f"about {needed} bytes, but the memory budget is "
-                f"{self.resources.memoryBytes} bytes; select fewer cells or genes"
+                f"{self.resources.memoryBytes} bytes; select fewer cells or genes",
+                needed_bytes=needed,
+                budget_bytes=int(self.resources.memoryBytes),
+                item="the expression matrix and the links of GRN inference",
             )
 
         from ...assay.normalization import feature_value_blocks

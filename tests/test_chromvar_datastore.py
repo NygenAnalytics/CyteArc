@@ -395,3 +395,49 @@ def test_profiles_name_atac_columns_by_peak_id(store_path):
     expected = np.log1p(sums / sums.sum(axis=1, keepdims=True) * 1e6)
     assert profiles.columns.tolist() == _peaks()
     np.testing.assert_allclose(profiles.to_numpy(), expected)
+
+
+def test_chromvar_names_twice_its_background_model(store_path):
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    path, fasta = store_path
+    store = _open(path)
+    cells = store.snapshot_cell_selection("everyone")
+    peaks = store.features.universe()
+    with IndexedFasta(fasta) as genome:
+        gc = gc_content(genome, _peaks())
+
+    def score(budget: int) -> MemoryBudgetError | None:
+        small = DataStore(
+            path,
+            default_assay="ATAC",
+            min_features_per_cell=-1,
+            nthreads=2,
+            mem_budget=budget,
+        )
+        try:
+            small.scores.chromvar(
+                _network(),
+                cells,
+                features=peaks,
+                gc=gc,
+                n_backgrounds=20,
+                background_seed=budget,
+            )
+        except MemoryBudgetError as refusal:
+            return refusal
+        return None
+
+    refusal = score(1024)
+    assert refusal is not None
+    assert (refusal.budget_bytes, refusal.item) == (
+        1024,
+        "the chromVAR background model",
+    )
+    # The model may take half of the budget, so it names twice the model.
+    model = int(str(refusal).split("needs about ")[1].split(" bytes")[0])
+    assert refusal.needed_bytes == 2 * model
+    below = score(refusal.needed_bytes - 1)
+    assert below is not None and below.item == refusal.item
+    later = score(refusal.needed_bytes)
+    assert later is None or later.item != refusal.item

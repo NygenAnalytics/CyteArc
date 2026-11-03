@@ -76,7 +76,12 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
         context={"kind": "cell_selection"},
     ),
     NonFiniteArtifactError: lambda: NonFiniteArtifactError("run_pca", "data", 7),
-    CountLayoutMemoryError: lambda: CountLayoutMemoryError("countsT needs 8 GB"),
+    CountLayoutMemoryError: lambda: CountLayoutMemoryError(
+        "countsT needs 8 GB",
+        needed_bytes=8 * 10**9,
+        budget_bytes=10**9,
+        item="the requested count-matrix policy",
+    ),
     HistogramMemoryError: lambda: HistogramMemoryError(
         4096, 1024, 128, rows_read=10, n_rows=20
     ),

@@ -30,6 +30,7 @@ from ...storage.selections import (
     validate_cell_selection,
 )
 from ...storage.types import as_zarr_array, read_array
+from ...utils.memory_budget import MemoryLedger
 
 # The most bytes of values that one band of features holds, in Mixscape and
 # the association tests, whatever the budget, so that a large budget does not
@@ -425,7 +426,15 @@ def _cell_values(store: Any, ref: ArtifactRef, value: str | None = None) -> np.n
     checked against the memory budget.
     """
     resolved = resolve_cell_aligned_artifact(
-        store.zw, ref, value_name=value, ndim=None, max_bytes=store.memoryBytes
+        store.zw,
+        ref,
+        value_name=value,
+        ndim=None,
+        ledger=MemoryLedger(
+            store.memoryBytes,
+            f"Reading the {ref.kind} artifact",
+            codec_threads=store.nthreads,
+        ),
     )
     values: np.ndarray = np.asarray(resolved.values)
     return values

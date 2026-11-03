@@ -2652,3 +2652,41 @@ def test_pipeline_run_cells_fetch_live_ids_and_the_frozen_selection(
     np.testing.assert_array_equal(run.cells.fetch("ids"), ids[selection])
     with pytest.raises(TypeError, match="non-empty string"):
         run.cells.fetch_all("")
+
+
+def test_cluster_selection_names_the_budget_of_its_sampled_coordinates() -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    store = _ClusterSelectionStore(root)
+    rng = np.random.default_rng(5)
+    coordinates = np.vstack(
+        [rng.normal(0, 0.1, (30, 2)), rng.normal(5, 0.1, (30, 2))]
+    ).astype(np.float32)
+    lineage = _cluster_selection_lineage(root, n_cells=60, coordinates=coordinates)
+    labels = _cluster_labels(
+        root,
+        values=np.repeat([0, 1], 30).astype(np.int32),
+        cell_selection=lineage["cell_selection"],
+        graph=lineage["connectivity_map"],
+    )
+
+    def select(budget: int) -> MemoryBudgetError | None:
+        store.resources = ResourceBudget(budget, 1)
+        try:
+            _select_clusters(store, lineage, (("clusters", labels),))
+        except MemoryBudgetError as refusal:
+            return refusal
+        return None
+
+    refusal = select(64)
+    assert refusal is not None
+    assert (refusal.budget_bytes, refusal.item) == (
+        64,
+        "the sampled coordinates and the silhouette's distances",
+    )
+    assert f"needs about {refusal.needed_bytes} bytes" in str(refusal)
+    below = select(refusal.needed_bytes - 1)
+    assert below is not None and below.needed_bytes == refusal.needed_bytes
+    later = select(refusal.needed_bytes)
+    assert later is None or later.item != refusal.item

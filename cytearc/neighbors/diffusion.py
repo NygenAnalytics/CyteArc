@@ -2,6 +2,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 
 from ..utils.arrays import sparse_matrix_bytes
+from ..utils.memory_budget import MemoryBudgetError
 from ..utils.numba import njit
 
 _INT32_MAX = int(np.iinfo(np.int32).max)
@@ -142,10 +143,13 @@ def bounded_diffusion_operator(
         )
         needed = held_bytes + _product_bytes(left, right, exact)
         if needed >= memory_bytes:
-            raise MemoryError(
+            raise MemoryBudgetError(
                 f"Diffusion step with {exact} operator entries needs about "
                 f"{needed} bytes, but the memory budget is {memory_bytes} bytes; "
-                "increase the memory budget or use a smaller diffusion power t."
+                "increase the memory budget or use a smaller diffusion power t.",
+                needed_bytes=needed + 1,
+                budget_bytes=int(memory_bytes),
+                item=f"a diffusion step of {exact} operator entries",
             )
 
     diagonal = _row_degree_diagonal(graph)

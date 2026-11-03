@@ -5,8 +5,9 @@ before each step allocates: what the step keeps, and the transient peak of
 what it builds and lets go. The ledger refuses a charge that would pass the
 budget with a :class:`MemoryBudgetError` that names the step, the bytes that
 it needs and the budget, so a call is refused before it reads or writes what
-would not fit. Planners that size work outside any ledger refuse through
-:func:`memory_refusal`, so every refusal reads one way.
+would not fit. Planners that size work outside any ledger raise the same
+error with the same fields in their own words, and :func:`memory_refusal`
+words the refusal of a step that has none.
 
 The shared costs below give the bytes of the structures that many steps
 build: Python strings, fixed-width text, object arrays, sorts and hash
@@ -28,6 +29,7 @@ __all__ = [
     "object_array_bytes",
     "observed_charges",
     "python_text_bytes",
+    "refusal_words",
     "sort_bytes",
 ]
 
@@ -39,7 +41,9 @@ class MemoryBudgetError(MemoryError):
         needed_bytes: The bytes that the call holds at the step that was
             refused: what it held before, what its last read may still hold,
             and the step's own charge. A budget of at least this many bytes
-            lets the call pass that step.
+            lets the call pass that step, except where a count write's
+            producer hands it a batch beyond the producer's reservation: that
+            refusal names what the write would reserve with the batch.
         budget_bytes: The memory budget that the step would pass.
         item: What the step's charge was for, such as ``"the cells' IDs"``.
     """
@@ -133,6 +137,17 @@ def memory_refusal(
         budget_bytes=budget_bytes,
         item=item,
     )
+
+
+def refusal_words(error: MemoryBudgetError) -> str:
+    """Return the message of ``error`` without the sentence that closes it with its bytes.
+
+    A step that refuses inside a larger one, such as a conversion beside the
+    data it converts, closes its message with "It needs at least
+    {needed_bytes} bytes." in its own terms. The larger step keeps these
+    words and states the bytes of its whole budget after them.
+    """
+    return str(error).removesuffix(f" It needs at least {error.needed_bytes} bytes.")
 
 
 #: Called at each charge and release of any ledger while a test observes

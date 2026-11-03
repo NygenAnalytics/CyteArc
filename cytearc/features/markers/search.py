@@ -19,6 +19,7 @@ from ...assay.normalization import (
 from ...utils.arguments import integer_argument
 from ...utils.arrays import has_duplicates
 from ...utils.compute import compute_with_progress
+from ...utils.memory_budget import MemoryBudgetError
 from ...utils.logging import logger
 from ...utils.numba import numba_threads
 from ..statistical import adjust_pvalues
@@ -497,10 +498,13 @@ def _gene_major_schedule(
         return resident_bytes + stream_bytes + calls * (scratch + group_bytes)
 
     if needed(1, 1) > memory_bytes:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"Marker search needs at least {needed(1, 1)} bytes to rank "
             f"{n_cells} cells with one thread, but the operation limit is "
-            f"{memory_bytes} bytes. Increase mem_budget."
+            f"{memory_bytes} bytes. Increase mem_budget.",
+            needed_bytes=needed(1, 1),
+            budget_bytes=int(memory_bytes),
+            item="ranking one read group with one thread",
         )
     rows = read_group_rows(counts_t, feature_index)
     slots = max(s for s in range(1, max_threads + 1) if needed(s, 1) <= memory_bytes)
