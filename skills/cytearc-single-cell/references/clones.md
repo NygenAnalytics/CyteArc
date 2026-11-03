@@ -150,6 +150,9 @@ clones = ds.clones.barcode_clones(barcodes, preset="celltag_multi", allowlist=al
 ```
 
 ```python
+import numpy as np
+import pandas as pd
+
 # DARLIN's three arrays of one library, each a CARLIN pair, then character matrices for tree builders.
 alleles = ds.clones.import_alleles(
     ["skull_CA", "skull_TA", "skull_RA"],

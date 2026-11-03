@@ -82,7 +82,7 @@ def _base_prefix(folder: str, base_files: list[tuple[str, str]]) -> str:
     if len(prefixes) > 1:
         raise ValueError(
             f"The base files of {folder} carry different prefixes, "
-            f"{', '.join(repr(prefix) for prefix in sorted(prefixes))}; they must "
+            f"{', '.join(quoted_value(prefix) for prefix in sorted(prefixes))}; they must "
             "come from one run"
         )
     return prefixes.pop()
@@ -107,7 +107,7 @@ def _contig_name(path: str, prefix: str) -> str:
         return ""
     contig = stem[:-1]
     if "." in _VERSION.sub("", contig):
-        carried = f"carry {prefix!r}" if prefix else "carry no prefix"
+        carried = f"carry {quoted_value(prefix)}" if prefix else "carry no prefix"
         raise ValueError(
             f"{name} may name the contig {quoted_value(contig)} or a contig after a sample "
             f"prefix, since the base files {carried} and the dot in {quoted_value(contig)} is "

@@ -8,9 +8,6 @@ from typing import Any
 
 from loguru import logger as _loguru_logger
 
-# Absolute, since this module also loads alone, from its file.
-from cytearc.utils.arguments import optional_bool_argument
-
 _CYTEARC_RECORD = "cytearc"
 
 logger = _loguru_logger.bind(**{_CYTEARC_RECORD: True})
@@ -275,6 +272,9 @@ def configure_output(
             attributes. False restores the stdout sink, or the file that
             ``set_verbosity`` chose.
     """
+    # Imported when called, so this module still loads alone from its file.
+    from cytearc.utils.arguments import optional_bool_argument
+
     progress = optional_bool_argument(progress, "progress")
     timestamps = optional_bool_argument(timestamps, "timestamps")
     stdlib = optional_bool_argument(stdlib, "stdlib")

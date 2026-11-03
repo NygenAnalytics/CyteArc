@@ -172,7 +172,7 @@ def _bank_texts(values: pd.Series, character: str) -> np.ndarray:
         if not isinstance(value, str)
     ]
     if bad:
-        examples = ", ".join(repr(texts[position]) for position in bad[:3])
+        examples = ", ".join(quoted_value(texts[position]) for position in bad[:3])
         raise ValueError(
             f"The bank of {quoted_value(character)} holds {len(bad)} alleles that are not text, "
             f"such as {examples}; every allele must be text, as the import writes it"
@@ -275,7 +275,9 @@ def allele_banks(frequencies: Any) -> dict[str, AlleleBank]:
         texts = texts[order]
         repeated = np.flatnonzero(texts[1:] == texts[:-1])
         if len(repeated):
-            examples = ", ".join(repr(texts[position]) for position in repeated[:3])
+            examples = ", ".join(
+                quoted_value(texts[position]) for position in repeated[:3]
+            )
             raise ValueError(
                 f"The bank of {quoted_value(character)} lists {len(repeated)} alleles more than "
                 f"once, such as {examples}; each allele needs one row"
@@ -845,7 +847,7 @@ def _bank_rates(
             + sum(len(text) for text in texts.tolist())
             + _LOOKUP_BYTES * len(bank)
             + _FIXED_BYTES,
-            f"the alleles of {name!r} in its bank",
+            f"the alleles of {quoted_value(name)} in its bank",
         )
         found = bank.positions(texts)
         positions = found[inverse]

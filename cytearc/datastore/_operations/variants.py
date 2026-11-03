@@ -593,7 +593,7 @@ def _site_positions(table: SiteTable, sites: Any) -> np.ndarray:
             chosen.append(site)
     if unknown:
         raise ValueError(
-            f"The artifact has no site {', '.join(repr(item) for item in unknown[:5])}"
+            f"The artifact has no site {', '.join(quoted_value(item) for item in unknown[:5])}"
         )
     return sorted_unique(np.asarray(chosen, dtype=np.int64))
 
@@ -1333,7 +1333,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
 
         def allele_text(allele: int) -> str:
             site = int(sites.allele_site[allele])
-            return f"{sites.allele[allele]!r} at the site {sites.label(site)}"
+            return (
+                f"{quoted_value(sites.allele[allele])} at the site {sites.label(site)}"
+            )
 
         n_entry_rows, n_call_rows = _stored_row_bounds(sorter)
         with artifact_transaction(self.zw, planned) as group:
@@ -1547,7 +1549,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             missing = wanted[positions < 0][:5]
             raise ValueError(
                 "The counts hold no cell "
-                + ", ".join(repr(str(cell)) for cell in missing)
+                + ", ".join(quoted_value(str(cell)) for cell in missing)
             )
         return sorted_unique(positions)
 
@@ -2790,7 +2792,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             )
         logger.info(
             f"Called the genotypes of {int(np.count_nonzero(n_called))} of {n_cells} "
-            f"cells at {len(genotyped)} sites by method={method!r}; "
+            f"cells at {len(genotyped)} sites by method={quoted_value(method)}; "
             f"{int(np.count_nonzero(n_mutant))} cells carry a mutant call"
         )
         return planned.ref
@@ -3119,7 +3121,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         if unknown:
             raise ValueError(
                 "The genotypes have no site "
-                + ", ".join(repr(item) for item in unknown[:5])
+                + ", ".join(quoted_value(item) for item in unknown[:5])
             )
         if not chosen:
             raise ValueError("sites names no site")

@@ -1001,7 +1001,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             if lost:
                 raise ValueError(
                     "The clone labels "
-                    + ", ".join(repr(label) for label in lost[:5])
+                    + ", ".join(quoted_value(label) for label in lost[:5])
                     + " read as no clone in a clone table; export these clones "
                     "with format='matrix', whose clone list keeps them"
                 )
@@ -2526,8 +2526,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         counted = (late_codes >= 0) & (grouped.codes >= 0)
         if not (late_codes >= 0).any():
             raise ValueError(
-                f"The clones give none of the {len(late_codes)} cells of late a "
-                "clone; pass late cells of the clones' cell selection"
+                f"None of the {len(late_codes)} cells of late has a clone; pass "
+                "late cells that the clones give a clone"
             )
         if not counted.any():
             raise ValueError(

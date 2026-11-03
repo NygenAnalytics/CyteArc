@@ -1055,6 +1055,27 @@ def test_two_files_that_give_one_cell_two_depths_or_calls_are_refused(
         store.variants.import_counts(calls, cell_selection=every_cell(store))
 
 
+def test_counts_without_call_fields_are_refused_as_an_earlier_version_saved_them(
+    store, tmp_path
+) -> None:
+    import zarr
+
+    from cytearc.storage.artifacts import artifact_path
+
+    counts, _ = _import(store, write_mgatk(TRUTH, tmp_path / "final"))
+    group = zarr.open_group(store.zarr_loc, mode="r+")[artifact_path(counts)]
+    del group.attrs["call_fields"]
+    message = (
+        "^counts was saved by an earlier version of CyteArc, without the "
+        "attribute call_fields; import the counts again with "
+        "ds.variants.import_counts, which saves them anew$"
+    )
+    with pytest.raises(ValueError, match=message):
+        store.variants.load_counts(counts)
+    with pytest.raises(ValueError, match=message):
+        store.variants.informative(counts, preset="atac")
+
+
 def test_an_artifact_that_lost_a_table_is_not_reused(store, tmp_path) -> None:
     import zarr
 

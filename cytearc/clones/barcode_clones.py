@@ -647,7 +647,7 @@ def _library_units(
 def _unknown_unit(detail: Mapping[str, Any], rule: str) -> ValueError:
     return ValueError(
         f"{rule} counts each barcode of a cell in its library's UMIs, or reads in a "
-        f"library that counts no UMIs, and library {detail['library']!r} counts "
+        f"library that counts no UMIs, and library {quoted_value(detail['library'])} counts "
         f"UMIs for {detail['records'] - detail['without_umis']} of its "
         f"{detail['records']} pairs and reads for "
         f"{detail['records'] - detail['without_reads']}; import its counts again, or "

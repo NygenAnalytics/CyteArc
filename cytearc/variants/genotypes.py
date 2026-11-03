@@ -165,7 +165,7 @@ GAPFILL_ERROR = 0.01
 HIGH_CONFIDENCE_SWAP = 0.1
 #: The posterior that GIFT's calls exceed. A call reaches ``min_posterior``,
 #: so GIFT's rule is the next floating-point number above it,
-#: 0.6000000000000001, the default of ``min_posterior``.
+#: 0.6000000000000001, to which a ``min_posterior`` of None resolves.
 GIFT_POSTERIOR = 0.6
 
 
@@ -359,7 +359,8 @@ def genotype_rules(
         raise ValueError(
             "method='threshold' needs min_mutant_umis or min_fraction, since GoT "
             "studies apply different rules: min_mutant_umis=1 for patients' cells, "
-            "min_fraction=0.9 for cell lines"
+            "and more than 90% of a cell's UMIs for cell lines, "
+            "min_fraction=float(np.nextafter(0.9, 1))"
         )
     return GenotypeRules(
         method=method,

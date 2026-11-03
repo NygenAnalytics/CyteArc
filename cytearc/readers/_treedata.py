@@ -301,7 +301,7 @@ def _dataframe(root: Any, path: str) -> tuple[_Column, list[_Column], str]:
                 _Column(name, _ColumnOf(node, position), "array")
                 for position, name in enumerate(names)
             ],
-            f"uns[{_EMBRYO_CHARACTERS!r}]",
+            f"uns[{quoted_value(_EMBRYO_CHARACTERS)}]",
         )
     if _encoding(node) != "dataframe":
         raise ValueError(f"{what} is no dataframe that CyteArc can read")

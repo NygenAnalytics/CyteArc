@@ -682,6 +682,25 @@ def test_run_plots_forward_frozen_cells_and_the_named_output(
     assert harness.calls == []
 
 
+@pytest.mark.parametrize("name", ["embedding", "embedding_raster"])
+def test_run_plots_check_show_before_they_draw(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+):
+    harness = _RunHarness(monkeypatch)
+    method = getattr(harness.accessor, name)
+    for value in (1, "no"):
+        with pytest.raises(TypeError, match="^show must be a boolean$"):
+            method(run=harness.run, color_by="sample_id", show=value)
+    # Nothing was drawn for a refused flag.
+    assert harness.calls == []
+    shown: list[object] = []
+    monkeypatch.setattr(splt.PlotResult, "show", lambda result: shown.append(result))
+    method(run=harness.run, color_by="sample_id", show=np.True_)
+    method(run=harness.run, color_by="sample_id", show=np.False_)
+    assert len(harness.calls) == 2 and len(shown) == 1
+
+
 def test_run_embedding_forwards_frozen_field_options_and_run_outputs(
     monkeypatch: pytest.MonkeyPatch,
 ):

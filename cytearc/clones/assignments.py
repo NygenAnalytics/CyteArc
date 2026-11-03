@@ -352,8 +352,8 @@ class CloneAssigner:
                     given.add(int(self._codes[cell]))
                 names = sorted(self._label_list[code] for code in given)
                 examples.append(
-                    f"{str(self._cell_ids[cell])!r} in "
-                    + " and ".join(repr(name) for name in names)
+                    f"{quoted_value(str(self._cell_ids[cell]))} in "
+                    + " and ".join(quoted_value(name) for name in names)
                 )
             n_several = int(np.count_nonzero(several))
             raise ValueError(

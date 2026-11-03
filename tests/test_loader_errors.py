@@ -155,3 +155,19 @@ def test_inspect_reports_a_missing_artifact_and_refuses_other_arguments(
     with pytest.raises(TypeError, match="^ref must be an ArtifactRef$"):
         store.artifacts.inspect("clones")
     assert "TypeError" in _documented(store.artifacts.inspect)
+
+
+@pytest.mark.parametrize("plot", ["variant_statistics", "allele_frequencies"])
+def test_the_variant_plots_name_their_own_argument(loader_store, plot) -> None:
+    import cytearc.plotting as splt
+
+    store, selection = loader_store
+    draw = getattr(splt, plot)
+    # The plots pass variants on to load_informative, whose argument is named
+    # informative, so they check theirs first.
+    with pytest.raises(TypeError, match="^variants must be an ArtifactRef$"):
+        draw(store, "variant_selection", show=False)
+    with pytest.raises(
+        ValueError, match="^variants must be a variant_selection artifact from"
+    ):
+        draw(store, selection, show=False)

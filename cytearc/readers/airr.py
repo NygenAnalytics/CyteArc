@@ -121,7 +121,7 @@ def iter_airr_rearrangements(
     if missing:
         raise ValueError(
             "The AIRR file lacks the fields "
-            + ", ".join(repr(name) for name in missing)
+            + ", ".join(quoted_value(name) for name in missing)
             + "; CyteArc needs "
             + ", ".join(REQUIRED_FIELDS)
             + ", with locus inferred from v_call, d_call, j_call or c_call when "

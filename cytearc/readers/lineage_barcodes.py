@@ -972,7 +972,7 @@ def barcode_layout(
         text = text_layout(name, what="a barcode table")
         detected = _detected_text_format(text)
         if detected is None:
-            shown = ", ".join(repr(column) for column in text.names if column)
+            shown = ", ".join(quoted_value(column) for column in text.names if column)
             raise ValueError(
                 f"{name} has the columns {shown}, which match no barcode table "
                 "that CyteArc knows" + _hint(text)

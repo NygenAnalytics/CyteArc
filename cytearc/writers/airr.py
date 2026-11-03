@@ -149,7 +149,7 @@ def _text_column(values: pd.Series, name: str, whole: bool) -> np.ndarray:
         numbers = values.to_numpy(dtype=np.float64, na_value=np.nan)
         rendered = np.asarray(
             [
-                str(int(number)) if whole else repr(float(number))
+                str(int(number)) if whole else str(float(number))
                 for number in np.where(missing, 0.0, numbers)
             ],
             dtype=object,
@@ -389,7 +389,7 @@ def _forbidden_message(found: Sequence[tuple[str, int, str]], subject: str) -> s
     """
     parts = [
         f"{count} value{'s' if count > 1 else ''} of {field}, "
-        f"{'the first ' if count > 1 else ''}in contig {contig!r}"
+        f"{'the first ' if count > 1 else ''}in contig {quoted_value(contig)}"
         for field, count, contig in found
     ]
     return (
@@ -477,14 +477,14 @@ def _value_text(column: _Bytes, row: int) -> str:
 
 
 def _real_text(numbers: np.ndarray, whole: bool) -> np.ndarray:
-    """Render real numbers as ``repr`` writes them, or as integers when whole."""
+    """Render real numbers as Python writes them, or as integers when whole."""
     out = np.full(len(numbers), "", dtype=object)
     present = ~np.isnan(numbers)
     values = numbers[present].tolist()
     out[present] = np.asarray(
         [str(int(number)) for number in values]
         if whole
-        else [repr(number) for number in values],
+        else [str(number) for number in values],
         dtype=object,
     )
     return out

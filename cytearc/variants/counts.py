@@ -262,7 +262,7 @@ class SiteTable:
         return (
             f"contig {int(self.site_contig[position])}, position "
             f"{int(self.site_position[position])}, name "
-            f"{self.site_name[position]!r}"
+            f"{quoted_value(self.site_name[position])}"
         )
 
     def _site_key_columns(self) -> tuple[list[str], list[int], list[str], list[str]]:
@@ -370,7 +370,9 @@ def _merged_contigs(tables: Sequence[SiteTable]) -> tuple[Contig, ...]:
                 and contig.sequence_sha256 is not None
                 and seen.sequence_sha256 != contig.sequence_sha256
             ):
-                described = repr(contig.name) if contig.name else "the unnamed contig"
+                described = (
+                    quoted_value(contig.name) if contig.name else "the unnamed contig"
+                )
                 raise ValueError(
                     f"The files hold {described} with different references "
                     f"({seen.length} and {contig.length} bases, or other bases), "
@@ -673,7 +675,7 @@ class VariantSource(Protocol):
 def _row_label(
     cell: int, site: int, name_cell: Callable[[int], str], sites: SiteTable
 ) -> str:
-    return f"cell {name_cell(cell)!r} at the site {sites.label(site)}"
+    return f"cell {quoted_value(name_cell(cell))} at the site {sites.label(site)}"
 
 
 def _run_sums(keys: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

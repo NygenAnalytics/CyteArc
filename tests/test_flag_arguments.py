@@ -11,6 +11,7 @@ accepted one gives the same outcome as the Python boolean it equals.
 """
 
 import dataclasses
+import functools
 import importlib
 import inspect
 import types
@@ -29,6 +30,7 @@ from cytearc.datastore import namespaces
 from cytearc.datastore.artifact_accessor import ArtifactAccessor
 from cytearc.datastore.datastore import DataStore
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
+from cytearc.datastore.plot_accessor import DataStorePlotAccessor
 from cytearc.metadata import MetaData
 from cytearc.plotting import PlotOutputSettings
 from cytearc.regulons import ModuleParameters
@@ -132,17 +134,25 @@ def _surface() -> Iterator[tuple[str, Callable[[Any], Callable[..., Any]], Any]]
         value = getattr(splt, name)
         if inspect.isfunction(value):
             yield f"cytearc.plotting.{name}", lambda _store, v=value: v, value
+    for method, function in _methods(DataStorePlotAccessor):
+        yield (
+            f"ds.plots.{method}",
+            lambda store, m=method: getattr(store.plots, m),
+            function,
+        )
     for package in (
         "cytearc",
         "cytearc.clones",
         "cytearc.repertoire",
         "cytearc.variants",
         "cytearc.perturbation",
+        "cytearc.plotting",
+        "cytearc.datasets",
     ):
         module = importlib.import_module(package)
         for name in getattr(module, "__all__", []):
             value = getattr(module, name)
-            if inspect.isfunction(value):
+            if inspect.isfunction(value) and package != "cytearc.plotting":
                 yield f"{package}.{name}", lambda _store, v=value: v, value
             elif inspect.isclass(value) and value.__module__.startswith("cytearc"):
                 if not _is_record(value) and "__init__" in vars(value):
@@ -151,6 +161,23 @@ def _surface() -> Iterator[tuple[str, Callable[[Any], Callable[..., Any]], Any]]
                         lambda _store, v=value: v,
                         vars(value)["__init__"],
                     )
+                # Each method checks its flags before it reads its instance,
+                # so a placeholder stands in for the instance.
+                for method, member in vars(value).items():
+                    if method.startswith("_"):
+                        continue
+                    if isinstance(member, staticmethod | classmethod):
+                        yield (
+                            f"{package}.{name}.{method}",
+                            lambda _store, v=value, m=method: getattr(v, m),
+                            member.__func__,
+                        )
+                    elif isinstance(member, FunctionType):
+                        yield (
+                            f"{package}.{name}.{method}",
+                            lambda _store, f=member: functools.partial(f, PLACEHOLDER),
+                            member,
+                        )
 
 
 def _public_flags() -> list[tuple[str, Callable[[Any], Callable[..., Any]], str, str]]:
@@ -331,3 +358,112 @@ def test_settings_objects_take_numpy_booleans_and_refuse_integers() -> None:
     assert type(rules.keepOnlyActivating) is bool and not rules.keepOnlyActivating
     with pytest.raises(TypeError, match="^keepOnlyActivating must be a boolean$"):
         ModuleParameters(keepOnlyActivating="no")
+
+
+def test_a_saved_figure_takes_numpy_booleans_and_refuses_integers(tmp_path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots()
+    try:
+        axis.plot([0, 1])
+        result = splt.PlotResult(
+            figure=figure,
+            axes={"main": axis},
+            tables={},
+            legends=(),
+            scales=(),
+            provenance=splt.PlotProvenance(cytearc_version="test"),
+            owns_figure=True,
+        )
+        # A refused flag writes nothing.
+        for name, value in (("transparent", "no"), ("exact_size", 0)):
+            with pytest.raises(TypeError, match=f"^{name} must be a boolean$"):
+                result.save(tmp_path / f"{name}.png", **{name: value})
+            assert not (tmp_path / f"{name}.png").exists()
+        with pytest.raises(
+            TypeError, match="^provenance_sidecar must be a boolean or a path$"
+        ):
+            result.save(tmp_path / "sidecar.png", provenance_sidecar=np.int8(1))
+        assert not (tmp_path / "sidecar.png").exists()
+        # A NumPy boolean names the sibling file, as True does.
+        result.save(tmp_path / "plot.png", provenance_sidecar=np.True_)
+        assert (tmp_path / "plot.png.json").is_file()
+        result.save(tmp_path / "plain.png", provenance_sidecar=np.False_)
+        assert not (tmp_path / "plain.png.json").exists()
+    finally:
+        plt.close(figure)
+
+
+def test_arguments_of_a_boolean_or_more_take_numpy_booleans(flag_store) -> None:
+    from cytearc.datastore._pipeline.recipes.common import resolve_run_filtering
+    from cytearc.datastore._pipeline.settings import stage_settings
+    from cytearc.datastore._pipeline.stages import CellSource
+
+    # A stage switch: a boolean, or a mapping of settings.
+    for value, expected in ((np.True_, True), (np.False_, False)):
+        enabled, settings = stage_settings("paris", value, optional=True)
+        assert type(enabled) is bool and enabled is expected and settings == {}
+    with pytest.raises(
+        TypeError, match="^hvg must be a mapping because the stage always runs$"
+    ):
+        stage_settings("hvg", np.True_, optional=False)
+    # A run's filtering: a boolean, a mapping or None.
+    cells = CellSource(column="I", selection=None)
+    options = {"cells": cells, "assay": "RNA", "default_attrs": (), "operation": "x"}
+    assert resolve_run_filtering(flag_store, np.False_, **options) == (
+        resolve_run_filtering(flag_store, False, **options)
+    )
+    # local_cache: a boolean, "auto" or a path, checked first.
+    for name in ("pca", "lsi", "custom"):
+        call = getattr(flag_store.reduction, name)
+        with pytest.raises(
+            TypeError,
+            match="^local_cache must be 'auto', True, False, or a path string, got 1$",
+        ):
+            call(**_arguments(call, "local_cache", 1))
+        for numpy_value, value in ((np.True_, True), (np.False_, False)):
+            found = _outcome(call, _arguments(call, "local_cache", numpy_value))
+            assert found == _outcome(call, _arguments(call, "local_cache", value))
+            assert not found[1].startswith("local_cache must be")
+
+
+def test_composed_panels_take_numpy_booleans_as_labels(tmp_path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    def labels(panel_labels: object) -> list[str]:
+        figure, axes = plt.subplots(1, 2)
+        try:
+            children = [
+                splt.PlotResult(
+                    figure=figure,
+                    axes={"main": axis},
+                    tables={},
+                    legends=(),
+                    scales=(),
+                    provenance=splt.PlotProvenance(cytearc_version="test"),
+                    owns_figure=False,
+                )
+                for axis in axes
+            ]
+            splt.compose_results(figure, children, panel_labels=panel_labels)
+            return [text.get_text() for axis in axes for text in axis.texts]
+        finally:
+            plt.close(figure)
+
+    assert labels(np.True_) == labels(True) != []
+    assert labels(np.False_) == labels(False) == []
+
+
+def test_a_numpy_false_force_keeps_the_protected_columns(flag_store) -> None:
+    before = flag_store.cells.fetch_all("I").tolist()
+    with pytest.raises(ValueError, match="I is a protected column name"):
+        flag_store.cells.insert(
+            "I", np.zeros(len(before), dtype=bool), overwrite=True, force=np.False_
+        )
+    assert flag_store.cells.fetch_all("I").tolist() == before

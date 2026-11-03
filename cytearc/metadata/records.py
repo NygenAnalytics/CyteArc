@@ -851,12 +851,14 @@ class RecordEncoder:
                 codes, distinct = pd.factorize(
                     chunk[name].to_numpy(dtype=object), use_na_sentinel=True
                 )
-                _require_text(np.asarray(distinct, dtype=object), f"Field {name!r}")
+                _require_text(
+                    np.asarray(distinct, dtype=object), f"Field {quoted_value(name)}"
+                )
                 data, offsets = pack_text(distinct)
                 encoded.text[name] = (np.asarray(codes, dtype=np.int32), data, offsets)
             elif kind == RAGGED:
                 values = chunk[name].to_numpy(dtype=object)
-                _require_text(values, f"Field {name!r}")
+                _require_text(values, f"Field {quoted_value(name)}")
                 encoded.ragged[name] = encode_ragged(values)
                 if name == self._id_field:
                     missing_ids += int(np.count_nonzero(pd.isna(values)))

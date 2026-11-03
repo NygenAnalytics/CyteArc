@@ -100,8 +100,6 @@ _JSON_BYTES_PER_VALUE = 64
 # The parser reads objects and arrays nested this deep at most; Python's own
 # JSON reader stops a little deeper.
 _JSON_DEPTH = 8192
-# Values shown in errors are cut to this many characters.
-_SHOWN_CHARACTERS = 60
 # Each node of a TreeData tree read from Zarr holds its name, its time and
 # length and its place in the lists that order the nodes, besides the text
 # of its name.
@@ -517,7 +515,7 @@ def read_trees(
         MemoryError: If reading the trees does not fit the memory budget.
     """
     _check(
-        f"Reading the trees of {layout.path!r}",
+        f"Reading the trees of {quoted_value(layout.path)}",
         held_bytes + layout.read_bytes,
         memory_bytes,
     )
@@ -805,7 +803,7 @@ def _read_newick(
         place = (
             "at its end"
             if at >= len(text)
-            else f"at byte {at} of its text: {_context(text, at)!r}"
+            else f"at byte {at} of its text: {quoted_value(_context(text, at))}"
         )
         raise ValueError(
             f"The Newick file {quoted_value(layout.path)} has {_SCAN_ERRORS[code]} {place}"
@@ -819,7 +817,7 @@ def _read_newick(
         label_bytes += int(np.sum((label_end[batch] - label_start[batch])[named]))
     ascii_text = layout.ascii_text
     _check(
-        f"Reading the names and branch lengths of {n_nodes} nodes of {layout.path!r}",
+        f"Reading the names and branch lengths of {n_nodes} nodes of {quoted_value(layout.path)}",
         held_bytes
         + layout.read_bytes
         + _TREE_BYTES_PER_NODE * n_nodes
@@ -885,14 +883,6 @@ class _GraphTree:
     lengths: list[Any]
 
 
-def _shown(value: Any) -> str:
-    """A value as an error shows it, cut short when it is long."""
-    text = repr(value)
-    if len(text) <= _SHOWN_CHARACTERS:
-        return text
-    return text[:_SHOWN_CHARACTERS] + "..."
-
-
 def _number(value: Any, what: str, path: str, key: str) -> float:
     """A time or length as a float, NaN for an absent, null or NaN value.
 
@@ -903,7 +893,7 @@ def _number(value: Any, what: str, path: str, key: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError(
             f"The tree {quoted_value(key)} of the TreeData file {quoted_value(path)} has a {what} that "
-            f"is not a number: {_shown(value)}"
+            f"is not a number: {quoted_value(value)}"
         )
     number = float(value)
     if math.isinf(number):
@@ -1186,12 +1176,14 @@ def _json_graphs(text: str, path: str) -> list[_GraphTree]:
                 edges.append((str(source), str(target)))
                 lengths.append(
                     _attributes(
-                        attributes, f"an edge to {target!r}", str(key), path
+                        attributes, f"an edge to {quoted_value(target)}", str(key), path
                     ).get("length")
                 )
         times = {}
         for name, attributes in tree["nodes"].items():
-            node = _attributes(attributes, f"a node {name!r}", str(key), path)
+            node = _attributes(
+                attributes, f"a node {quoted_value(name)}", str(key), path
+            )
             if "time" in node:
                 times[str(name)] = node["time"]
         graphs.append(
@@ -1224,7 +1216,7 @@ def _parse_json_trees(
     width = 1 if largest < 0xC4 else 2 if largest < 0xF0 else 4
     # Each node and edge is an object of the JSON, so the objects bound them.
     _check(
-        f"Parsing the trees of {layout.path!r}",
+        f"Parsing the trees of {quoted_value(layout.path)}",
         held_bytes
         + len(raw)
         + 2 * width * n_characters
@@ -1320,7 +1312,7 @@ def _zarr_attribute(
         return values.tolist(), int(values.nbytes)
     texts, held = _zarr_texts(
         array,
-        f"Reading the {name!r} of the tree {key!r} of {path!r}",
+        f"Reading the {quoted_value(name)} of the tree {quoted_value(key)} of {quoted_value(path)}",
         memory_bytes=memory_bytes,
         held_bytes=held_bytes,
     )
@@ -1334,14 +1326,14 @@ def _zarr_attribute(
             # it is parsed, so its values are never held.
             raise ValueError(
                 f"The tree {quoted_value(key)} of the TreeData store {quoted_value(path)} has a {quoted_value(name)} "
-                f"that is not a number: {_shown(text)}"
+                f"that is not a number: {quoted_value(text)}"
             )
         try:
             decoded.append(json.loads(text))
         except (ValueError, RecursionError):
             raise ValueError(
                 f"The tree {quoted_value(key)} of the TreeData store {quoted_value(path)} has a {quoted_value(name)} "
-                f"that is not JSON that Python can read: {_shown(text)}"
+                f"that is not JSON that Python can read: {quoted_value(text)}"
             ) from None
     return decoded, held
 
@@ -1362,7 +1354,7 @@ def _zarr_graph(
             f"The tree {quoted_value(key)} of the TreeData store {quoted_value(path)} has no 'edges' "
             "array of source and target pairs"
         )
-    what = f"Reading the tree {key!r} of {path!r}"
+    what = f"Reading the tree {quoted_value(key)} of {quoted_value(path)}"
     nodes, held = _zarr_texts(
         nodes_array, what, memory_bytes=memory_bytes, held_bytes=held_bytes
     )

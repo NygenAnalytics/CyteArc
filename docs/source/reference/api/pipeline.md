@@ -105,7 +105,7 @@ and ranks markers as the RNA recipe does. With Harmony, the run corrects its LSI
 whichever is smaller, and a given `top_n` must be below the assay's number of peaks; the run records
 the resolved `top_n`. The LSI needs `dims` prevalent peaks, one more when `skip_first` leaves out
 the first component, so `lsi` `dims` with that component must not exceed `top_n`, and `skip_first`
-must be a bool.
+must be a boolean.
 
 ### ADT
 

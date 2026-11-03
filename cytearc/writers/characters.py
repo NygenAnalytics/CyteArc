@@ -152,7 +152,7 @@ def write_laml_characters(
     priors = matrix.priors()
     with open(priors_path, "w", encoding="utf-8", newline="") as handle:
         handle.writelines(
-            f"{character},{state},{probability!r}\n"
+            f"{character},{state},{probability}\n"
             for character, state, probability in zip(
                 priors["character"].tolist(),
                 priors["state"].tolist(),

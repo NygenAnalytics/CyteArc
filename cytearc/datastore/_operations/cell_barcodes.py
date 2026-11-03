@@ -505,7 +505,8 @@ def unmatched_barcodes_warning(attributes: Mapping[str, Any], files: str) -> str
         f"{n_unmatched} of {int(attributes['n_file_barcodes'])} barcodes of "
         f"{files} match no selected cell, for example "
         + ", ".join(
-            repr(str(value)) for value in attributes["unmatched_barcode_examples"]
+            quoted_value(str(value))
+            for value in attributes["unmatched_barcode_examples"]
         )
         + ". Check barcode_prefix and cell_selection."
     )

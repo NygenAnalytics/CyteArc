@@ -70,13 +70,15 @@ QUOTED_LIMIT = 80
 def quoted_value(value: object) -> str:
     """Return ``repr(value)`` for an error message, cut to ``QUOTED_LIMIT``.
 
-    A value longer than that, such as a contig ID of 20,000 characters, ends
-    in ``...`` within the limit, so the message stays readable.
+    A value longer than that, such as a contig ID of 20,000 characters, keeps
+    its start and its end around ``...``, so the message stays readable and a
+    long path still shows its file's name.
     """
     text = repr(value)
     if len(text) <= QUOTED_LIMIT:
         return text
-    return text[: QUOTED_LIMIT - 3] + "..."
+    head = (QUOTED_LIMIT - 3) // 2
+    return text[:head] + "..." + text[head + 3 - QUOTED_LIMIT :]
 
 
 def optional_name_argument(

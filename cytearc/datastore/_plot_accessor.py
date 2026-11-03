@@ -31,6 +31,7 @@ from ..plotting.recipes import PlotRecipe, PlotRecipeResult
 from ..storage.refs import ArtifactRef
 from ..storage.validation_scope import scope_public_methods
 from .pipeline_run import PipelineRun
+from ..utils.arguments import bool_argument
 
 if TYPE_CHECKING:
     from .datastore import DataStore
@@ -393,6 +394,8 @@ class DataStorePlotAccessor:
     ) -> "PlotResult":
         """Plot cells in a stored two-dimensional embedding."""
         if run is not None:
+            # A run plot shows the result itself, after recording the run.
+            show = bool_argument(show, "show")
             run, layout_name = _require_run(self._store, run, layout_key, layout)
             if cell_key != "I":
                 raise ValueError(
@@ -451,6 +454,8 @@ class DataStorePlotAccessor:
     ) -> "PlotResult":
         """Rasterize continuous cell metadata over a stored embedding."""
         if run is not None:
+            # A run plot shows the result itself, after recording the run.
+            show = bool_argument(show, "show")
             run, layout_name = _require_run(self._store, run, layout_key, layout)
             if cell_key != "I":
                 raise ValueError("Run raster uses the frozen pipeline cell selection")

@@ -37,8 +37,13 @@ from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
 DATA = Path(__file__).parent / "data" / "recorders"
-# DARLIN's rules on the synthetic bank.
-DARLIN_RULES = {"max_frequency": 2e-5, "max_samples": 1, "max_alleles": 3}
+# DARLIN's rules on the synthetic bank: alleles of a frequency below 2e-5,
+# which max_frequency keeps at most its value, in at most one bank sample.
+DARLIN_RULES = {
+    "max_frequency": float(np.nextafter(2e-5, 0.0)),
+    "max_samples": 1,
+    "max_alleles": 3,
+}
 
 
 @pytest.fixture(scope="module")

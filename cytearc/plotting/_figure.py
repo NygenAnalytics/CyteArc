@@ -2,6 +2,7 @@
 
 import functools
 import json
+import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
@@ -226,8 +227,21 @@ class PlotResult:
         supplies its own background. ``exact_size=True`` keeps the inch size you set
         when the figure was created; set it to False only when you want a tight
         crop for display. ``provenance_sidecar=True`` writes a sibling JSON
-        file with the plot metadata.
+        file with the plot metadata, and a path writes it there.
+
+        Raises:
+            TypeError: If ``transparent`` or ``exact_size`` is not a boolean,
+                or ``provenance_sidecar`` is neither a boolean nor a path.
+            ValueError: If the path has no extension or a format the canvas
+                cannot write, ``dpi`` is not positive, or the sidecar's path is
+                the figure's.
         """
+        transparent = bool_argument(transparent, "transparent")
+        exact_size = bool_argument(exact_size, "exact_size")
+        if isinstance(provenance_sidecar, bool | np.bool_):
+            provenance_sidecar = bool_argument(provenance_sidecar, "provenance_sidecar")
+        elif not isinstance(provenance_sidecar, str | os.PathLike):
+            raise TypeError("provenance_sidecar must be a boolean or a path")
         out = Path(path)
         if not out.suffix:
             raise ValueError("Export path must include a file extension")

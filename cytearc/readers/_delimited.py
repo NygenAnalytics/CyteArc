@@ -28,6 +28,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "GZIP_SIGNATURE",
@@ -371,17 +372,17 @@ def require_columns(layout: TextLayout, names: Sequence[str]) -> None:
     counts = Counter(layout.names)
     missing = [name for name in names if name not in counts]
     if missing:
-        shown = ", ".join(repr(name) for name in layout.names if name)
+        shown = ", ".join(quoted_value(name) for name in layout.names if name)
         raise ValueError(
             f"{layout.path} has no column "
-            + ", ".join(repr(name) for name in missing)
+            + ", ".join(quoted_value(name) for name in missing)
             + f"; its columns are {shown}"
         )
     repeated = sorted({name for name in names if counts[name] > 1})
     if repeated:
         raise ValueError(
             f"{layout.path} names the column "
-            + ", ".join(repr(name) for name in repeated)
+            + ", ".join(quoted_value(name) for name in repeated)
             + " more than once, so which one to read is unclear"
         )
 

@@ -545,7 +545,7 @@ def _detected_format(path: str) -> str:
         )
     raise ValueError(
         f"The allele format of {path} is unknown; its columns are "
-        + ", ".join(repr(name) for name in names if name)
+        + ", ".join(quoted_value(name) for name in names if name)
         + ". Pass format, one of "
         + ", ".join(map(repr, ALLELE_FORMATS))
         + "; 'laml' reads a character matrix and 'table' any table by the "
@@ -1043,7 +1043,7 @@ def _matrix_layout(path: str, format: str) -> AlleleLayout:
             # likely a cell column before rows that end in a delimiter.
             hint = (
                 f"; its rows hold one field more than its header, so its first "
-                f"column, {text.names[1]!r}, reads as a character, as R's "
+                f"column, {quoted_value(text.names[1])}, reads as a character, as R's "
                 "write.table leaves the cells' column unnamed: write the matrix "
                 "without a delimiter at the end of each row"
                 if rows_end_in_delimiter(text)
@@ -2284,7 +2284,8 @@ def classified_rows(layout: AlleleLayout, rows: AlleleRows) -> ChunkStates:
         )
     except RefusedTokens as refused:
         shown = ", ".join(
-            f"{token!r} at {site or 'its allele'}" for site, token in refused.tokens
+            f"{quoted_value(token)} at {site or 'its allele'}"
+            for site, token in refused.tokens
         )
         raise ValueError(
             f"{layout.path} holds tokens that {quoted_value(layout.format)} does not read, "

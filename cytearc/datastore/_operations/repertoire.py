@@ -290,7 +290,7 @@ def _contig_sources(
     if format is not None and format not in formats:
         raise ValueError(
             "format must be "
-            + " or ".join(repr(name) for name in formats)
+            + " or ".join(quoted_value(name) for name in formats)
             + f", or None to read each file's format from its header, not {quoted_value(format)}"
         )
     files = barcode_files(
@@ -999,7 +999,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             if unknown:
                 raise ValueError(
                     "The receptors store no field "
-                    + ", ".join(repr(str(name)) for name in unknown)
+                    + ", ".join(quoted_value(str(name)) for name in unknown)
                     + "; they store "
                     + ", ".join(stored)
                 )
@@ -1938,7 +1938,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 cell_selection=cell_selection,
                 reserved=_USAGE_COLUMNS,
                 what="Counting the genes of the chains",
-                chosen_by="genes",
+                chosen_by="Counting gene usage",
             )
             # Each distinct call is decoded and named once.
             named = {
@@ -2202,7 +2202,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             if unknown:
                 raise ValueError(
                     "The receptors store no field "
-                    + ", ".join(repr(str(name)) for name in unknown)
+                    + ", ".join(quoted_value(str(name)) for name in unknown)
                     + "; they store "
                     + ", ".join(stored)
                 )

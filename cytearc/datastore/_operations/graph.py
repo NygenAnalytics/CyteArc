@@ -121,7 +121,12 @@ from ...storage.selections import (
     validate_run_metadata_snapshot,
 )
 from ...utils.arrays import clean_array
-from ...utils.arguments import bool_argument, integer_argument, optional_bool_argument
+from ...utils.arguments import (
+    bool_argument,
+    integer_argument,
+    optional_bool_argument,
+    quoted_value,
+)
 from ...utils.logging import logger
 from ...utils.moments import ColumnMoments
 from ...utils.numba import numba_threads
@@ -650,6 +655,22 @@ def _requested_block_rows(
     source_data = getattr(source, "data", None)
     source_rows = int(source_data.chunksize[0]) if source_data is not None else n_cells
     return min(source_rows if requested is None else int(requested), n_cells)
+
+
+def _local_cache_argument(value: object) -> bool | str:
+    """Return ``local_cache`` as True, False or the text it names.
+
+    Raises:
+        TypeError: If ``value`` is neither a boolean nor text.
+    """
+    if isinstance(value, bool | np.bool_):
+        return bool_argument(value, "local_cache")
+    if not isinstance(value, str):
+        raise TypeError(
+            "local_cache must be 'auto', True, False, or a path string, got "
+            f"{quoted_value(value)}"
+        )
+    return value
 
 
 class _GraphOperationsMixin(_GraphOperationsBase):
@@ -1661,8 +1682,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         feat_scaling = bool_argument(feat_scaling, "feat_scaling")
         show_elbow_plot = bool_argument(show_elbow_plot, "show_elbow_plot")
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
-        if isinstance(local_cache, bool | np.bool_):
-            local_cache = bool_argument(local_cache, "local_cache")
+        local_cache = _local_cache_argument(local_cache)
         return self._run_reduction_artifact(
             method="pca",
             normalized=normalized,
@@ -1717,8 +1737,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         """
         skip_first = bool_argument(skip_first, "skip_first")
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
-        if isinstance(local_cache, bool | np.bool_):
-            local_cache = bool_argument(local_cache, "local_cache")
+        local_cache = _local_cache_argument(local_cache)
         if solver not in {"streaming", "materialized"}:
             raise ValueError("solver must be 'streaming' or 'materialized'")
         n_iter = integer_argument(n_iter, "n_iter", minimum=0)
@@ -1768,8 +1787,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             Reference to the custom reduction artifact.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
-        if isinstance(local_cache, bool | np.bool_):
-            local_cache = bool_argument(local_cache, "local_cache")
+        local_cache = _local_cache_argument(local_cache)
         loading_values = np.asarray(loadings)
         if loading_values.dtype.kind not in "iuf":
             raise TypeError("Custom loadings must contain real numbers")

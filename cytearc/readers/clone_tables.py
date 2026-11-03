@@ -335,7 +335,7 @@ def _table_layout(
     if format is None:
         format = "table" if columns else _detected_preset(text)
         if format is None:
-            shown = ", ".join(repr(name) for name in text.names if name)
+            shown = ", ".join(quoted_value(name) for name in text.names if name)
             raise ValueError(
                 f"{path} has the columns {shown}, which match no clone table that "
                 "CyteArc knows; name the cell and clone columns with "
@@ -486,7 +486,7 @@ def _list_cell_columns(
         return ("cell",)
     raise ValueError(
         f"The cell list {text.path} has the columns "
-        + ", ".join(repr(name) for name in named)
+        + ", ".join(quoted_value(name) for name in named)
         + "; name the columns of each cell's barcode with columns={'cell': [...]}"
     )
 

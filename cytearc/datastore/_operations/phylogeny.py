@@ -449,8 +449,8 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         for cell in repeated_cells[:3].tolist():
             leaves = names[cells == cell].tolist()
             examples.append(
-                f"{str(cell_ids[cell])!r} by "
-                + " and ".join(repr(str(leaf)) for leaf in leaves)
+                f"{quoted_value(str(cell_ids[cell]))} by "
+                + " and ".join(quoted_value(str(leaf)) for leaf in leaves)
             )
         raise ValueError(
             f"{len(repeated_cells)} cells are named by several leaves, "
@@ -611,7 +611,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
                 )
             raise ValueError(
                 f"No leaf of {files_text} names a selected cell, for example "
-                + ", ".join(repr(value) for value in join.examples)
+                + ", ".join(quoted_value(value) for value in join.examples)
                 + ". Check barcode_prefix, barcode_suffix, barcode_pattern and "
                 "cell_selection."
             )
