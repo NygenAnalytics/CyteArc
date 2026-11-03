@@ -589,6 +589,146 @@ def test_work_that_runs_outside_every_named_read_is_let_go() -> None:
             assert read() is not None
 
 
+def test_work_that_finishes_after_its_named_read_returned_is_held_until_the_next_ends() -> (
+    None
+):
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def decode() -> np.ndarray:
+        started.set()
+        assert release.wait(10)
+        return np.ones(1000)
+
+    with ThreadPoolExecutor(1) as pool:
+
+        def read():
+            # The work starts within the read, which returns while the work
+            # still runs, as a read returns while its pool thread finishes.
+            future = pool.submit(decode)
+            assert started.wait(10)
+            return future
+
+        owner = SimpleNamespace(read=read, other=lambda: pool.submit(int).result())
+        with hold_finished_reads((owner, "read"), (owner, "other")):
+            future = owner.read()
+            release.set()
+            decoded = weakref.ref(future.result())
+            del future
+            # Once the thread has run other work, only the hold keeps the
+            # finished work, until the read after it ends.
+            pool.submit(int).result()
+            assert decoded() is not None
+            owner.other()
+            assert _gone(decoded)
+
+
+def test_work_that_finishes_after_the_next_read_ended_is_let_go() -> None:
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def decode() -> np.ndarray:
+        started.set()
+        assert release.wait(10)
+        return np.ones(1000)
+
+    with ThreadPoolExecutor(1) as pool:
+        with hold_finished_reads() as end_read:
+            future = pool.submit(decode)
+            assert started.wait(10)
+            # Its read and the read after it end before the work finishes, so
+            # no thread would still hold it beside a read.
+            end_read()
+            end_read()
+            release.set()
+            decoded = weakref.ref(future.result())
+            del future
+            pool.submit(int).result()
+            assert _gone(decoded)
+
+
+def test_a_named_read_that_raises_ends_its_read() -> None:
+    with ThreadPoolExecutor(1) as pool:
+        failed = []
+
+        def refused():
+            failed.append(_finished(pool))
+            raise ValueError("refused")
+
+        owner = SimpleNamespace(read=lambda: _finished(pool), refused=refused)
+        with hold_finished_reads((owner, "read"), (owner, "refused")):
+            with pytest.raises(ValueError, match="refused"):
+                owner.refused()
+            assert failed[0]() is not None
+            # The read is over, so work after it belongs to no read, and the
+            # read after it lets it go.
+            assert _gone(_finished(pool))
+            read = owner.read()
+            assert _gone(failed[0])
+            assert read() is not None
+
+
+def test_a_named_read_that_begins_while_another_runs_fails() -> None:
+    inner = SimpleNamespace(read=lambda: 1)
+    outer = SimpleNamespace(read=lambda: inner.read())
+    with hold_finished_reads((outer, "read"), (inner, "read")):
+        with pytest.raises(AssertionError, match="began while another named read"):
+            outer.read()
+        # Both calls are over, so the next read runs.
+        assert inner.read() == 1
+
+
+def test_named_methods_keep_their_kind_and_come_back_as_they_were() -> None:
+    class Base:
+        def inherited(self) -> str:
+            return "inherited"
+
+    class Reader(Base):
+        @staticmethod
+        def static(value: int) -> int:
+            return value + 1
+
+        @classmethod
+        def made(cls) -> str:
+            return cls.__name__
+
+    with hold_finished_reads(
+        (Reader, "static"), (Reader, "made"), (Reader, "inherited")
+    ):
+        assert Reader().static(1) == 2 and Reader.static(1) == 2
+        assert Reader().made() == "Reader" and Reader.made() == "Reader"
+        assert Reader().inherited() == "inherited"
+    assert isinstance(vars(Reader)["static"], staticmethod)
+    assert isinstance(vars(Reader)["made"], classmethod)
+    assert "inherited" not in vars(Reader)
+    assert Reader().static(1) == 2
+
+
+def test_work_that_finishes_after_the_context_closed_is_let_go() -> None:
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def decode() -> np.ndarray:
+        started.set()
+        assert release.wait(10)
+        return np.ones(1000)
+
+    with ThreadPoolExecutor(1) as pool:
+        with hold_finished_reads() as end_read:
+            future = pool.submit(decode)
+            assert started.wait(10)
+        release.set()
+        decoded = weakref.ref(future.result())
+        del future
+        pool.submit(int).result()
+        # The context's function outlives it, and keeps nothing.
+        assert callable(end_read)
+        assert _gone(decoded)
+
+
 # Chunks of 12,000 rows of 40 int32 values, 1.92 MB decoded, read one after
 # another in a fresh process whose pool runs no earlier test's reads. The
 # reads are traced alone until a trace holds under three decoded chunks, up to

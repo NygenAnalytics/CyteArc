@@ -611,8 +611,9 @@ def with_reads_held(step):
             return step(*args, **kwargs)
     return held_step
 
-results = {}
+results, full = {}, store.memoryBytes
 for name, call in cases.items():
+    store.memoryBytes = full
     call()
     budget, _, _, _ = budget_that_runs(
         store, lambda _: call(), refusal_budget=stated_bytes, max_refusals=100
@@ -658,8 +659,8 @@ def test_the_budgets_count_the_read_that_zarr_still_holds(data) -> None:
 # Grouping 400 cells, spread over 20,000, by text columns of 24 characters in
 # a fresh process. While the cells are grouped, all of the grouping's work in
 # Zarr's pool is held, and each row read ends a read, so each row read has the
-# work before it beside it, the reads of the selection and the clone codes
-# before the first.
+# work before it beside it, the two reads of the clones' cell selection before
+# the first.
 _CHUNKED_GROUPS_SCRIPT = """
 import json, sys, tracemalloc
 import numpy as np

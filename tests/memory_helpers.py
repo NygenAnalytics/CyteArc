@@ -7,6 +7,7 @@ estimates from both sides, and hold the reads that Zarr's pool threads may
 still hold on a busy machine, so that every memory test checks budgets one way.
 """
 
+import inspect
 import re
 import threading
 import tracemalloc
@@ -355,8 +356,10 @@ def cost_bound(
     return result, peak
 
 
-#: The methods in which every read of a stored Zarr array's values ends, by
-#: index or by selection, for :func:`hold_finished_reads` to end a read at each.
+#: The methods through which a read of a stored Zarr array's values goes, by
+#: index or by selection, for :func:`hold_finished_reads` to end a read at
+#: each. Reads through an array's ``async_array``, as the feature stream makes
+#: them, go through none of them, so holding these leaves such reads unheld.
 ZARR_READS: tuple[tuple[Any, str], ...] = tuple(
     (zarr.Array, name)
     for name in (
@@ -367,6 +370,10 @@ ZARR_READS: tuple[tuple[Any, str], ...] = tuple(
         "get_block_selection",
     )
 )
+
+
+#: An attribute that an owner does not hold itself.
+_ABSENT = object()
 
 
 @contextmanager
@@ -382,9 +389,12 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
     reads are let go at once.
 
     A read is a call of a function named in ``reads``, as (owner, attribute)
-    pairs, and ends when the call returns. Work that a pool thread starts while
-    no such call runs, such as the writes after an operation's last read,
-    belongs to no read and is let go as it would be without the hold. With no
+    pairs, and ends when the call returns or raises. Work belongs to the read
+    under way when a pool thread starts it, so work that finishes after its
+    read returned stays held, and work that starts while no named read runs,
+    such as the writes after an operation's last read, belongs to no read and
+    is let go as it would be without the hold. Named reads run one at a time:
+    one that begins while another runs, in any thread, fails. With no
     function named, the caller ends each read by calling the function that
     this context gives, and all work belongs to the read under way. The last
     read stays held until the context closes, so a test holds the reads of the
@@ -397,8 +407,9 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
     """
     lock = threading.Lock()
     reading = [0]
-    # The calls of named reads under way, in any thread.
+    # The calls of named reads under way, and whether the context has closed.
     running = [0]
+    closed = [False]
     held: dict[int, list[object]] = {}
     run = pool_thread._WorkItem.run
 
@@ -408,7 +419,7 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
             for_a_read = running[0] > 0 or not reads
         run(item, *args)  # type: ignore[arg-type]
         with lock:
-            if for_a_read and read >= reading[0] - 1:
+            if for_a_read and not closed[0] and read >= reading[0] - 1:
                 held.setdefault(read, []).append(item)
 
     def end_read() -> None:
@@ -419,27 +430,43 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
     def ending(function: Callable[..., Any]) -> Callable[..., Any]:
         def read(*args: Any, **kwargs: Any) -> Any:
             with lock:
+                assert not running[0], (
+                    f"{getattr(function, '__qualname__', function)} began while "
+                    "another named read ran; hold_finished_reads holds one read "
+                    "at a time"
+                )
                 running[0] += 1
             try:
-                value = function(*args, **kwargs)
+                return function(*args, **kwargs)
             finally:
                 with lock:
                     running[0] -= 1
-            end_read()
-            return value
+                end_read()
 
         return read
 
-    replaced = [(owner, name, getattr(owner, name)) for owner, name in reads]
-    for owner, name, function in replaced:
-        setattr(owner, name, ending(function))
+    # Each owner's own attribute, or none where it inherits the function, comes
+    # back when the context closes, and a static or class method stays one.
+    replaced = []
+    for owner, name in reads:
+        static = inspect.getattr_static(owner, name)
+        if isinstance(static, staticmethod | classmethod):
+            wrapper: object = type(static)(ending(static.__func__))
+        else:
+            wrapper = ending(getattr(owner, name))
+        replaced.append((owner, name, vars(owner).get(name, _ABSENT)))
+        setattr(owner, name, wrapper)
     pool_thread._WorkItem.run = run_and_hold  # type: ignore[method-assign]
     try:
         yield end_read
     finally:
         pool_thread._WorkItem.run = run  # type: ignore[method-assign]
-        for owner, name, function in reversed(replaced):
-            setattr(owner, name, function)
+        for owner, name, own in reversed(replaced):
+            if own is _ABSENT:
+                delattr(owner, name)
+            else:
+                setattr(owner, name, own)
         with lock:
+            closed[0] = True
             held.clear()
             reading[0] = 0
