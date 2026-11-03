@@ -1366,6 +1366,69 @@ def test_the_call_file_is_read_before_the_run_within_the_memory_budget(
     assert peak <= needed
 
 
+def test_the_call_file_check_counts_the_read_of_the_guide_ids_before_it(
+    tmp_path, monkeypatch
+) -> None:
+    from cytearc.metadata.table import MetaData
+    from tests.memory_helpers import budget_that_runs, named_budget
+
+    # Forty cells and ten guides whose IDs have 60 characters: a feature
+    # column is stored in chunks of 100,000 rows, so reading the IDs decodes
+    # 24 MB at 240 bytes a row, far more than the cells' IDs and the file.
+    n_cells = 40
+    guide_ids = [f"guide{index}-" + "x" * 53 for index in range(10)]
+    counts = np.zeros((n_cells, 10), dtype=np.uint16)
+    counts[np.arange(n_cells), np.arange(n_cells) % 10] = 20
+    location = tmp_path / "long.zarr"
+    write_count_store(
+        str(location),
+        {"RNA": np.ones((n_cells, 3), dtype=np.uint16), "CRISPR": counts},
+        "uint16",
+        feature_ids={"CRISPR": guide_ids},
+    )
+    path = tmp_path / "calls.csv"
+    pd.DataFrame(
+        {
+            "cell_barcode": [f"cell{cell}" for cell in range(n_cells)],
+            "num_features": 1,
+            "feature_call": [guide_ids[cell % 10] for cell in range(n_cells)],
+            "num_umis": 20,
+        }
+    ).to_csv(path, index=False)
+    ids = np.asarray([f"cell{cell}" for cell in range(n_cells)])
+    reads: list[str] = []
+    fetch_all = MetaData.fetch_all
+
+    def counted(table, column):
+        reads.append(column)
+        return fetch_all(table, column)
+
+    monkeypatch.setattr(MetaData, "fetch_all", counted)
+
+    def check(store: DataStore) -> None:
+        _check_call_file(store, store._get_assay("CRISPR"), str(path), ids, None)
+
+    store = _open(location)
+    budget, refusals, _result, peak = budget_that_runs(store, check)
+
+    # The budget holds the read of the IDs' chunk, the largest read.
+    assert 24_000_000 < peak <= budget
+    # The read of the IDs is refused before it reads them, then the read of
+    # the file beside them names more.
+    assert len(refusals) == 2, refusals
+    reading = named_budget(MemoryError(refusals[0]))
+    assert reading > 24_000_000
+    store.memoryBytes = reading - 1
+    reads.clear()
+    with pytest.raises(MemoryError, match=f"holds about {reading} bytes"):
+        check(store)
+    assert reads == []
+    store.memoryBytes = reading
+    with pytest.raises(MemoryError, match=f"holds about {budget} bytes"):
+        check(store)
+    assert reads == ["ids"]
+
+
 def test_a_screen_without_targets_besides_controls_has_none_to_cluster() -> None:
     ids = np.asarray(["CRISPR0", "CRISPR1"])
     targets = guide_targets(
