@@ -10,6 +10,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import pytest
 from matplotlib.colors import to_hex
 
@@ -55,20 +56,29 @@ def receptors(receptor_template, tmp_path) -> tuple[DataStore, object]:
     return _receptors(receptor_template, tmp_path)
 
 
+def _wide(table: pd.DataFrame, column: str) -> pd.DataFrame:
+    """A table of cells per group and category, as categories by groups."""
+    wide = table.pivot(index=column, columns="group", values="n_cells")
+    return wide.reindex(
+        index=pd.unique(table[column]), columns=pd.unique(table["group"])
+    )
+
+
 def test_receptor_qc_counts_cells_by_category(receptors) -> None:
     store, ref = receptors
     result = store.plots.receptor_qc(ref, show=False)
     try:
         assert set(result.axes) == {"receptor_type", "chain_pairing", "chains_per_cell"}
-        receptor_type = result.tables["receptor_type"]["n_cells"].to_dict()
-        assert receptor_type == {
-            "TCR": 2,
-            "BCR": 1,
-            "ambiguous": 1,
-            "multichain": 1,
-            "no IR": 3,
+        # Every cell is in one group without a grouping, and each category
+        # has a row, in the vocabulary's order.
+        assert result.tables["receptor_type"].to_dict("list") == {
+            "group": ["all cells"] * 5,
+            "receptor_type": ["TCR", "BCR", "ambiguous", "multichain", "no IR"],
+            "n_cells": [2, 1, 1, 1, 3],
         }
-        assert result.tables["chain_pairing"]["n_cells"].sum() == N_CELLS
+        pairing = result.tables["chain_pairing"]
+        assert pairing.columns.tolist() == ["group", "chain_pairing", "n_cells"]
+        assert pairing["n_cells"].sum() == N_CELLS
         chains = result.tables["chains_per_cell"]
         assert chains.index.tolist() == ["0", "1", "2", "3+"]
         assert chains.index.name == "n_chains"
@@ -88,7 +98,11 @@ def test_receptor_qc_stacks_groups_of_a_cell_column(receptors) -> None:
     store.cells.insert("sample", np.asarray(["a", "a", "b", "b", "a", "b", "a", "b"]))
     result = plotting.receptor_qc(store, ref, group_by="sample", show=False)
     try:
-        table = result.tables["receptor_type"]
+        long = result.tables["receptor_type"]
+        assert long.columns.tolist() == ["group", "receptor_type", "n_cells"]
+        # One row per group and receptor type, zeros included, by group.
+        assert long["group"].tolist() == ["a"] * 5 + ["b"] * 5
+        table = _wide(long, "receptor_type")
         assert table.columns.tolist() == ["a", "b"]
         assert table.loc["TCR"].tolist() == [1, 1]
         assert table.loc["no IR"].tolist() == [1, 2]
@@ -120,7 +134,7 @@ def test_receptor_qc_groups_by_labels_of_fewer_cells(receptors) -> None:
     )
     result = plotting.receptor_qc(store, ref, groups=labels, show=False)
     try:
-        table = result.tables["chain_pairing"]
+        table = _wide(result.tables["chain_pairing"], "chain_pairing")
         assert table.sum().tolist() == [2, 2]
         assert result.provenance.n_cells == 4
         assert result.tables["chains_per_cell"].sum().tolist() == [4, 4]
@@ -184,7 +198,8 @@ def test_receptor_qc_groups_by_integer_labels_of_fewer_cells(receptors) -> None:
     )
     result = plotting.receptor_qc(store, ref, groups=labels, show=False)
     try:
-        assert result.tables["chain_pairing"].sum().tolist() == [2, 2]
+        pairing = _wide(result.tables["chain_pairing"], "chain_pairing")
+        assert pairing.sum().tolist() == [2, 2]
         assert result.provenance.n_cells == 4
     finally:
         result.close()
@@ -240,7 +255,7 @@ def test_receptor_qc_groups_cells_by_several_columns(receptors) -> None:
         store, ref, group_by=["sample", "lane"], normalize=False, show=False
     )
     try:
-        table = result.tables["receptor_type"]
+        table = _wide(result.tables["receptor_type"], "receptor_type")
         # One column per combination of sample and lane, its cells counted by
         # receptor type cell by cell.
         groups = [f"{s}, {lane_}" for s, lane_ in zip(sample, lane, strict=True)]
@@ -265,7 +280,7 @@ def test_receptor_qc_groups_cells_by_several_columns(receptors) -> None:
         store, ref, group_by="sample", groups=labels, show=False
     )
     try:
-        assert both.tables["chain_pairing"].columns.tolist() == [
+        assert both.tables["chain_pairing"]["group"].drop_duplicates().tolist() == [
             "a, p",
             "a, q",
             "b, p",
@@ -277,18 +292,23 @@ def test_receptor_qc_groups_cells_by_several_columns(receptors) -> None:
         both.close()
 
 
-def test_receptor_qc_draws_one_group_named_like_the_ungrouped_column(
-    receptors,
+@pytest.mark.parametrize(
+    "label", ["n_cells", "group", "receptor_type", "chain_pairing", "all cells"]
+)
+def test_receptor_qc_draws_one_group_named_like_the_tables_columns(
+    receptors, label
 ) -> None:
     store, ref = receptors
     drawn = {}
-    for label in ("n_cells", "s1"):
-        store.cells.insert("batch", np.asarray([label] * N_CELLS), overwrite=True)
+    for name in (label, "s1"):
+        store.cells.insert("batch", np.asarray([name] * N_CELLS), overwrite=True)
         result = plotting.receptor_qc(store, ref, group_by="batch", show=False)
         try:
             ax = result.axes["receptor_type"]
-            drawn[label] = {
-                "table": result.tables["receptor_type"].to_numpy().tolist(),
+            table = result.tables["receptor_type"]
+            assert table["group"].tolist() == [name] * len(table)
+            drawn[name] = {
+                "table": table.drop(columns="group").to_numpy().tolist(),
                 "ticks": [tick.get_text() for tick in ax.get_xticklabels()],
                 "heights": sorted(round(bar.get_height(), 12) for bar in ax.patches),
                 "legend": ax.get_legend() is not None,
@@ -297,15 +317,14 @@ def test_receptor_qc_draws_one_group_named_like_the_ungrouped_column(
         finally:
             result.close()
     # One group of every cell draws one stacked bar of fractions, whatever its
-    # label, and a label named like the ungrouped column changes nothing else.
-    assert drawn["n_cells"]["ticks"] == ["n_cells"]
+    # label, and a label named like a column of the tables changes nothing
+    # else: the tables hold it as a value.
+    assert drawn[label]["ticks"] == [label]
     assert drawn["s1"]["ticks"] == ["s1"]
     for part in ("table", "heights", "legend", "axis"):
-        assert drawn["n_cells"][part] == drawn["s1"][part], part
-    assert (
-        drawn["n_cells"]["legend"] and drawn["n_cells"]["axis"] == "Fraction of cells"
-    )
-    assert sum(drawn["n_cells"]["heights"]) == pytest.approx(1.0)
+        assert drawn[label][part] == drawn["s1"][part], part
+    assert drawn[label]["legend"] and drawn[label]["axis"] == "Fraction of cells"
+    assert sum(drawn[label]["heights"]) == pytest.approx(1.0)
 
 
 def test_receptor_qc_needs_a_store_with_receptors(receptors) -> None:
@@ -321,7 +340,12 @@ def test_receptor_qc_leaves_out_cells_with_a_missing_group(receptors) -> None:
     insert_nullable_cell_column(store, "batch", np.asarray(list("pqpqpqpq")), missing)
     result = plotting.receptor_qc(store, ref, group_by="batch", show=False)
     try:
-        assert result.tables["receptor_type"].sum().tolist() == [3, 3]
+        assert _wide(
+            result.tables["receptor_type"], "receptor_type"
+        ).sum().tolist() == [
+            3,
+            3,
+        ]
         assert result.provenance.n_cells == 6
     finally:
         result.close()
@@ -329,7 +353,10 @@ def test_receptor_qc_leaves_out_cells_with_a_missing_group(receptors) -> None:
     store.cells.insert("lane", np.asarray(["p", " ", "p", "q", "", "q", "p", "q"]))
     result = plotting.receptor_qc(store, ref, group_by="lane", show=False)
     try:
-        assert result.tables["receptor_type"].columns.tolist() == ["p", "q"]
+        assert result.tables["receptor_type"]["group"].drop_duplicates().tolist() == [
+            "p",
+            "q",
+        ]
         assert result.provenance.n_cells == 6
     finally:
         result.close()

@@ -200,8 +200,17 @@ def test_within_columns_keep_donors_apart(tmp_path) -> None:
     first = loaded.cells.loc["cell0", "clonotype"]
     assert _members(loaded)[first] == ["cell0", "cell4"]
     assert loaded.cells.loc["cell1", "clonotype"] != first
-    assert loaded.clonotypes.set_index("clonotype").loc[first, "donor"] == "d1"
-    donors = set(loaded.clonotypes["donor"])
+    # The table names each clonotype's within group, whose labels sit in the
+    # keys under the within columns' own names.
+    assert "donor" not in loaded.clonotypes.columns
+    assert loaded.group_keys.index.name == "group"
+    assert loaded.group_keys.to_dict("index") == {
+        "d1": {"donor": "d1"},
+        "d2": {"donor": "d2"},
+    }
+    labelled = loaded.clonotypes.join(loaded.group_keys, on="group")
+    assert labelled.set_index("clonotype").loc[first, "donor"] == "d1"
+    donors = set(labelled["donor"])
     assert donors == {"d1", "d2"}
     status = store.artifacts.inspect(ref)
     assert status.parameters["within"] == ["donor"]
@@ -343,16 +352,16 @@ def test_clone_abundance_counts_the_clonotypes_of_each_receptor_type(
         }
         top = result.tables["top"]
         assert top.to_dict("list") == {
-            "clone": ["clonotype_1", "clonotype_2", "clonotype_3"],
+            "clone": ["clonotype_1"] * 2 + ["clonotype_2"] * 2 + ["clonotype_3"] * 2,
             # Each clonotype is named by its representative's junction, and
             # clonotype_1 and clonotype_3, which share their beta chain, by
             # their numbers too.
-            "label": ["CASSA 1", "CARW", "CASSA 3"],
-            "BCR": [0, 2, 0],
-            "TCR": [3, 0, 1],
+            "label": ["CASSA 1"] * 2 + ["CARW"] * 2 + ["CASSA 3"] * 2,
+            "group": ["BCR", "TCR"] * 3,
+            "n_cells": [0, 3, 2, 0, 0, 1],
         }
         ticks = [tick.get_text() for tick in result.axes["top"].get_yticklabels()]
-        assert ticks == top["label"].tolist()
+        assert ticks == top["label"].drop_duplicates().tolist()
         # The title names clonotypes once, so their labels need not.
         assert result.axes["top"].get_title() == "Largest 3 clonotypes"
         assert result.legends[0].label == "receptor_type"
@@ -387,9 +396,9 @@ def test_clone_abundance_splits_clonotypes_by_group_and_receptor_type(
         ]
         in_s1 = sizes[sizes["group"].str.startswith("s1")]
         assert in_s1.groupby("clone_size")["n_clones"].sum().to_dict() == {1: 2, 2: 1}
-        top = result.tables["top"].set_index("clone")
-        assert top.loc["clonotype_1", ["s1, TCR", "s2, TCR"]].tolist() == [2, 1]
-        assert top.loc["clonotype_1", ["s1, BCR", "s2, BCR"]].tolist() == [0, 0]
+        top = result.tables["top"].set_index(["clone", "group"])["n_cells"]
+        assert top.loc[("clonotype_1", ["s1, TCR", "s2, TCR"])].tolist() == [2, 1]
+        assert top.loc[("clonotype_1", ["s1, BCR", "s2, BCR"])].tolist() == [0, 0]
         assert result.legends[0].label == "sample, receptor_type"
         assert len(result.axes["sizes"].get_lines()) == 4
     finally:
@@ -398,10 +407,11 @@ def test_clone_abundance_splits_clonotypes_by_group_and_receptor_type(
         plotting.clone_abundance(store, ref, max_clones=0, show=False)
     # Shown by default: on Agg the owned figure is closed.
     shown = plotting.clone_abundance(store, ref, max_clones=2)
-    assert shown.tables["top"]["clone"].tolist() == ["clonotype_1", "clonotype_2"]
+    drawn = shown.tables["top"].drop_duplicates("clone")
+    assert drawn["clone"].tolist() == ["clonotype_1", "clonotype_2"]
     # clonotype_3 is not drawn, so clonotype_1 shares its junction with no
     # clonotype of the figure.
-    assert shown.tables["top"]["label"].tolist() == ["CASSA", "CARW"]
+    assert drawn["label"].tolist() == ["CASSA", "CARW"]
     with pytest.raises(TypeError, match="does not provide clones.load_clones"):
         plotting.clone_abundance(object(), ref, show=False)
 
@@ -849,7 +859,7 @@ def test_figures_name_clonotype_clusters_as_their_definition_does(tmp_path) -> N
     assert store._clone_figure_noun(imported) == "clones"
     result = plotting.clone_abundance(store, near, max_clones=3, show=False)
     try:
-        top = result.tables["top"]
+        top = result.tables["top"].drop_duplicates("clone")
         assert top["clone"].tolist() == ["clonotype_1", "clonotype_2", "clonotype_3"]
         assert top["label"].tolist() == ["CASSA 1", "CARW", "CASSA 3"]
         assert result.axes["top"].get_title() == "Largest 3 clonotype clusters"
@@ -858,7 +868,10 @@ def test_figures_name_clonotype_clusters_as_their_definition_does(tmp_path) -> N
     two = plotting.clone_abundance(store, near, max_clones=2, show=False)
     try:
         assert two.axes["top"].get_title() == "Largest 2 clonotype clusters"
-        assert two.tables["top"]["label"].tolist() == ["CASSA", "CARW"]
+        assert two.tables["top"]["label"].drop_duplicates().tolist() == [
+            "CASSA",
+            "CARW",
+        ]
     finally:
         two.close()
     # One clone drawn is named in the singular, of each kind.
@@ -936,7 +949,14 @@ def test_clonotypes_load_and_export_as_clones(tmp_path) -> None:
 def test_clone_summaries_measure_each_receptor_type_apart(tmp_path) -> None:
     store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
-    indices = store.clones.diversity(ref).indices
+    diversity = store.clones.diversity(ref)
+    # The receptor types that clonotypes keep apart are their groups' key
+    # column, beside the tables' own columns.
+    assert diversity.group_keys.to_dict("index") == {
+        "BCR": {"receptor_type": "BCR"},
+        "TCR": {"receptor_type": "TCR"},
+    }
+    indices = diversity.indices.join(diversity.group_keys, on="group")
     assert indices[
         [
             "group",
@@ -948,7 +968,8 @@ def test_clone_summaries_measure_each_receptor_type_apart(tmp_path) -> None:
         ]
     ].values.tolist() == [["BCR", "BCR", 2, 1, 0, 1], ["TCR", "TCR", 5, 3, 2, 0]]
     curves = store.clones.rarefaction(ref, orders=(0,))
-    observed = curves.curves[curves.curves["method"] == "observed"]
+    observed = curves.curves.join(curves.group_keys, on="group")
+    observed = observed[observed["method"] == "observed"]
     assert observed[["receptor_type", "size", "diversity"]].values.tolist() == [
         ["BCR", 2, 1.0],
         ["TCR", 5, 3.0],
@@ -968,7 +989,9 @@ def test_clone_summaries_measure_each_receptor_type_apart(tmp_path) -> None:
         "BCR",
         "-",
     ]
-    assert set(expansion.categories["receptor_type"]) == {"BCR", "TCR"}
+    assert set(
+        expansion.categories.join(expansion.group_keys, on="group")["receptor_type"]
+    ) == {"BCR", "TCR"}
 
 
 def test_summaries_keep_receptor_types_apart_within_one_clonotype(tmp_path) -> None:
@@ -985,7 +1008,8 @@ def test_summaries_keep_receptor_types_apart_within_one_clonotype(tmp_path) -> N
     assert store.clones.load_clones(together).clones["n_cells"].tolist() == [8]
     expansion = store.clones.load_expansion(store.clones.expansion(together))
     assert expansion.cells["group_clone_size"].tolist() == [5, 5, 5, 5, 5, 2, 2, 1]
-    indices = store.clones.diversity(together).indices
+    diversity = store.clones.diversity(together)
+    indices = diversity.indices.join(diversity.group_keys, on="group")
     assert indices[["receptor_type", "n_cells", "n_clones"]].values.tolist() == [
         ["ambiguous", 1, 1],
         ["BCR", 2, 1],
@@ -1045,7 +1069,7 @@ def test_summaries_keep_receptor_types_apart_within_one_clonotype(tmp_path) -> N
         ["x, TCR", 1],
         ["y, TCR", 1],
     ]
-    assert bias.cells[["x, TCR", "y, TCR"]].values.tolist() == [[0.5, 0.5]] * 3
+    assert bias.fractions[["x, TCR", "y, TCR"]].values.tolist() == [[0.5, 0.5]] * 3
 
 
 def test_summaries_of_clonotypes_follow_a_cell_selection(tmp_path) -> None:
@@ -1061,7 +1085,8 @@ def test_summaries_of_clonotypes_follow_a_cell_selection(tmp_path) -> None:
     assert expansion.cells["group_clone_size"].tolist() == [1, 1, 1, 0]
     groups = expansion.cells["group"].astype(object)
     assert groups.where(groups.notna(), "-").tolist() == ["TCR", "TCR", "BCR", "-"]
-    indices = store.clones.diversity(ref, cell_selection=chosen).indices
+    diversity = store.clones.diversity(ref, cell_selection=chosen)
+    indices = diversity.indices.join(diversity.group_keys, on="group")
     assert indices[["receptor_type", "n_cells", "n_clones"]].values.tolist() == [
         ["BCR", 1, 1],
         ["TCR", 2, 2],
@@ -1406,14 +1431,19 @@ def test_within_labels_are_an_array_that_opening_the_artifact_never_reads(
     # their labels, each stored as its donor and its site.
     assert group["within_labels"][:].tolist() == ["d1", "s2", "d1", "s10", "d2", "s2"]
     loaded = store.repertoire.load_clonotypes(ref)
+    assert loaded.group_keys.values.tolist() == [
+        ["d1", "s2"],
+        ["d1", "s10"],
+        ["d2", "s2"],
+    ]
+    assert loaded.group_keys.index.tolist() == ["d1, s2", "d1, s10", "d2, s2"]
     first = loaded.cells.loc["cell0", "clonotype"]
     assert _members(loaded)[first] == ["cell0", "cell4"]
-    row = loaded.clonotypes.set_index("clonotype").loc[first]
-    assert row[["donor", "site"]].tolist() == ["d1", "s10"]
-    cell1 = loaded.clonotypes.set_index("clonotype").loc[
-        loaded.cells.loc["cell1", "clonotype"]
-    ]
-    assert cell1[["donor", "site"]].tolist() == ["d2", "s2"]
+    labelled = loaded.clonotypes.join(loaded.group_keys, on="group")
+    row = labelled.set_index("clonotype").loc[first]
+    assert row[["group", "donor", "site"]].tolist() == ["d1, s10", "d1", "s10"]
+    cell1 = labelled.set_index("clonotype").loc[loaded.cells.loc["cell1", "clonotype"]]
+    assert cell1[["group", "donor", "site"]].tolist() == ["d2, s2", "d2", "s2"]
     # Clonotypes without within columns store no labels.
     assert "within_labels" not in artifact_group(
         store.zw, store.repertoire.clonotypes(receptors)
@@ -1430,20 +1460,46 @@ def test_renamed_within_labels_give_other_clonotypes(tmp_path) -> None:
     store.cells.insert("donor", np.where(donors == "d1", "x1", "x2"), overwrite=True)
     renamed = store.repertoire.clonotypes(receptors, within="donor")
     assert renamed != first
-    assert set(store.repertoire.load_clonotypes(renamed).clonotypes["donor"]) == {
-        "x1",
-        "x2",
-    }
+    loaded = store.repertoire.load_clonotypes(renamed)
+    assert set(loaded.clonotypes["group"]) == {"x1", "x2"}
+    assert loaded.group_keys["donor"].tolist() == ["x1", "x2"]
     store.cells.insert("donor", donors.copy(), overwrite=True)
     assert store.repertoire.clonotypes(receptors, within="donor") == first
 
 
-def test_within_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:
+def test_within_columns_may_take_the_names_of_the_tables_columns(tmp_path) -> None:
     store, receptors = clonal_receptors(tmp_path)
-    for column in ("clone_size", "VDJ_1_junction_aa", "VJ_2_j_call"):
-        store.cells.insert(column, np.arange(N_CELLS).astype(str))
-        with pytest.raises(ValueError, match=f"'{column}', which is also a column"):
+    donors = np.asarray(["d1", "d2", "d1", "d1", "d1", "d1", "d1", "d1"])
+    store.cells.insert("donor", donors)
+    neutral = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(receptors, within="donor")
+    )
+    # Columns named like the tables' own columns hold the donors' labels, and
+    # keep the donors' clonotypes apart as "donor" does; their labels stay in
+    # the keys.
+    for column in (
+        "clonotype",
+        "clone_size",
+        "n_cells",
+        "fraction",
+        "n_configurations",
+        "receptor_type",
+        "group",
+        "VDJ_1_junction_aa",
+        "VJ_2_j_call",
+    ):
+        store.cells.insert(column, donors, overwrite=True)
+        loaded = store.repertoire.load_clonotypes(
             store.repertoire.clonotypes(receptors, within=column)
+        )
+        pd.testing.assert_frame_equal(loaded.cells, neutral.cells)
+        pd.testing.assert_frame_equal(loaded.clonotypes, neutral.clonotypes)
+        assert loaded.group_keys.to_dict("index") == {
+            donor: {column: donor} for donor in ("d1", "d2")
+        }
+        joined = loaded.clonotypes.join(loaded.group_keys, on="group", rsuffix="_key")
+        label = f"{column}_key" if column in loaded.clonotypes.columns else column
+        assert joined[label].tolist() == joined["group"].tolist()
 
 
 def test_regrouped_expansion_plot_keeps_receptor_types_apart(tmp_path) -> None:

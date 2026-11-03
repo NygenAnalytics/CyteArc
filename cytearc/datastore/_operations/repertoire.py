@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import zarr
 
-from ...clones.groups import group_frame
+from ...clones.groups import group_key_table
 from ...metadata.arguments import ClonotypeArguments, ImmuneReceptorImportArguments
 from ...metadata.artifacts import (
     cell_data_write_bytes,
@@ -61,7 +61,6 @@ from ...repertoire.clonotypes import (
     clonotype_labels,
     clonotype_noun,
     representative_cells,
-    shared_text,
 )
 from ...repertoire.contigs import FIELDS, contig_encoder
 from ...repertoire.receptors import (
@@ -195,26 +194,12 @@ _JUNCTION_BYTES_PER_VALUE = 200
 _JUNCTION_BYTES_PER_BYTE = 7
 _KEPT_JUNCTION_BYTES_PER_VALUE = 100
 _KEPT_JUNCTION_BYTES_PER_BYTE = 4
-# The columns of the tables of clonotypes, which a within column may not share.
-_CLONOTYPE_COLUMNS = frozenset(
-    {"clonotype", "clone_size", "n_cells", "fraction", "n_configurations"}
-    | {"receptor_type"}
-    | {f"{slot}_{name}" for slot in SLOTS for name in REPRESENTATIVE_FIELDS}
-)
 # The parameters that this version records for clonotypes, which tell an
 # artifact that an earlier version saved from one it reads.
 _CLONOTYPE_PARAMETERS = frozenset(
     field.name
     for field in fields(ClonotypeArguments)
     if field.metadata.get("argument_role") == "parameter"
-)
-# The columns of the tables of gene usage and junction lengths besides the
-# groups' labels, which a key column of the groups may not share.
-_USAGE_COLUMNS = frozenset(
-    {"group", "locus", *GENE_FIELDS, "n_cells", "n_clonotypes", "fraction"}
-)
-_SPECTRATYPE_COLUMNS = frozenset(
-    {"group", "locus", "length", "n_cells", "n_clonotypes", "fraction"}
 )
 # Finding the chains of the chosen slots that grouped cells hold holds, for
 # each, its cell, group and clonotype and the codes of its locus and of each
@@ -712,14 +697,6 @@ def _sorted_codes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(distinct), np.asarray(codes, dtype=np.int64)
 
 
-def _labels_at(labels: np.ndarray, codes: np.ndarray) -> np.ndarray:
-    """Each code's label, None for -1, one string for each distinct label."""
-    taken = np.full(len(codes), None, dtype=object)
-    present = codes >= 0
-    taken[present] = shared_text(labels[codes[present]])
-    return taken
-
-
 def _files_text(n_files: int) -> str:
     return "the contig file" if n_files == 1 else "the contig files"
 
@@ -1091,7 +1068,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             columns,
             with_receptor,
             memory_bytes=self.memoryBytes,
-            reserved=_CLONOTYPE_COLUMNS,
             what="a receptor",
         )
 
@@ -1218,7 +1194,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             raise ValueError(f"receptor_arms must be one of {', '.join(RECEPTOR_ARMS)}")
         if dual_ir not in DUAL_IR:
             raise ValueError(f"dual_ir must be one of {', '.join(DUAL_IR)}")
-        columns = group_columns(within, "within", _CLONOTYPE_COLUMNS)
+        columns = group_columns(within, "within")
         if metric not in METRICS:
             raise ValueError(f"metric must be one of {', '.join(METRICS)}")
         if metric == "identity":
@@ -1525,7 +1501,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Returns:
             The clonotypes, with one row per cell and one row per clonotype,
             largest first, with the chains of each clonotype's representative
-            cell.
+            cell and the name of its ``within`` group, and each ``within``
+            group's labels in ``group_keys``.
 
         Raises:
             TypeError: If ``clonotypes`` is not an ArtifactRef.
@@ -1594,10 +1571,23 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             if name in fields
         }
         within_codes = read_array(group, "clonotype_within").astype(np.int64)
-        within_labels = (
-            read_array(group, "within_labels").reshape(-1, len(within))
+        # Each within group's labels, row by row; without within columns,
+        # every clonotype is in one group without labels.
+        within_keys = (
+            [
+                dict(zip(within, (str(label) for label in row), strict=True))
+                for row in read_array(group, "within_labels")
+                .reshape(-1, len(within))
+                .tolist()
+            ]
             if within
-            else np.empty((0, 0), dtype=object)
+            else [{}]
+        )
+        keys = group_key_table(within, within_keys)
+        names = keys.index.to_numpy(dtype=object)
+        # Clonotypes defined without within columns record no group, -1.
+        clonotype_groups = (
+            names[within_codes] if within else np.repeat(names, len(within_codes))
         )
         cells, table = clonotype_frames(
             self._artifact_cell_ids(clonotypes),
@@ -1607,16 +1597,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             clonotype_sizes=read_array(group, "clonotype_sizes"),
             n_configurations=read_array(group, "n_configurations"),
             receptor_type=read_array(receptor_group, "values")[representatives],
-            within={
-                column: _labels_at(within_labels[:, position], within_codes)
-                for position, column in enumerate(within)
-            },
+            groups=clonotype_groups,
             slots=local.reshape(slots.shape),
             chains=chains,
         )
         return Clonotypes(
             cells=cells,
             clonotypes=table,
+            group_keys=keys,
             receptors=receptors,
             sequence=str(parameters["sequence"]),
             receptor_arms=str(parameters["receptor_arms"]),
@@ -1639,7 +1627,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         group_by: str | Sequence[str] | None,
         groups: ArtifactRef | None,
         cell_selection: ArtifactRef | None,
-        reserved: frozenset[str],
         what: str,
         chosen_by: str,
     ) -> tuple[
@@ -1655,8 +1642,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         and so is the counting that follows, before the chains are found.
 
         Returns:
-            One row per group, with its name in ``group`` and its labels in
-            the key columns; for each chain, ``group``, ``cell``, the cell's
+            The groups' keys, one row per group, indexed by its name and
+            with its labels in the key columns; for each chain, ``group``,
+            ``cell``, the cell's
             row, the stored codes of ``locus`` and of each field, and
             ``clonotype``, the clonotype code, with a clonotypes source; the
             slots; the ``immune_receptors`` artifact's group; and what the
@@ -1742,7 +1730,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             groups=groups,
             cell_selection=cell_selection,
             memory_bytes=self.memoryBytes,
-            reserved=reserved,
             held_bytes=reads.held,
         )
         del rows
@@ -1753,7 +1740,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             + _KEY_BYTES_PER_GROUP_COLUMN * len(grouped.key_columns)
         )
         reads.reserve(keys_bytes)
-        keys = group_frame(grouped.key_columns, grouped.keys)
+        keys = group_key_table(grouped.key_columns, grouped.keys)
         reads.held += keys_bytes
         # Each chain of a grouped cell in a chosen slot is counted, and the
         # stored codes of each contig's text field are read one field at a
@@ -1838,12 +1825,13 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         """Check the counting and its table against the budget before they run.
 
         The table holds a row for each distinct group, locus and values that
-        a chain holds, at most one per chain and per combination of codes.
+        a chain holds, at most one per chain and per combination of codes, of
+        the group's name, the locus, the values, the count and the fraction.
         Counting each clonotype, or each cell, once also holds each chain's
         row with its clonotype or cell among the distinct rows.
         """
         n_rows = min(n_chains, math.prod([len(keys), *widths]))
-        n_columns = len(keys.columns) + len(widths) + 2
+        n_columns = 1 + len(widths) + 2
         needed = n_rows * (_ROW_BYTES + _ROW_BYTES_PER_COLUMN * n_columns)
         if once:
             needed += n_chains * (
@@ -1897,15 +1885,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             cell_selection: Only these cells, or None for every cell.
 
         Returns:
-            One row per group, locus and gene, or gene combination.
+            One row per group, locus and gene, or gene combination, and the
+            groups' labels in ``group_keys``.
 
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``source`` is not an ``immune_receptors`` or
                 ``clonotypes`` artifact, an option is unknown, a gene field is
                 not stored, ``count="clonotypes"`` is asked of receptors, a
-                column of the groups is missing or named twice, a key column
-                names a column of the result, or two groups get one name.
+                column of the groups is missing or named twice, two key columns
+                share a name, or two groups get one name.
             KeyError: If the store holds no such ``source`` artifact, or not
                 the receptors of the clonotypes.
             RuntimeError: If the ``source`` artifact or the receptors of the
@@ -1936,7 +1925,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 group_by=group_by,
                 groups=groups,
                 cell_selection=cell_selection,
-                reserved=_USAGE_COLUMNS,
                 what="Counting the genes of the chains",
                 chosen_by="Counting gene usage",
             )
@@ -1957,7 +1945,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             once=count == "clonotypes" or once_per_cell,
         )
         table, n_cells = count_chains(
-            keys,
+            keys.index,
             units["group"],
             units["cell"],
             loci,
@@ -1968,6 +1956,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         return GeneUsage(
             table=table,
+            group_keys=keys,
             source=source,
             genes=fields,
             level=level,
@@ -2013,16 +2002,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             cell_selection: Only these cells, or None for every cell.
 
         Returns:
-            One row per group, locus and length.
+            One row per group, locus and length, and the groups' labels in
+            ``group_keys``.
 
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``source`` is not an ``immune_receptors`` or
                 ``clonotypes`` artifact, an option is unknown, the junctions
                 are not stored, ``count="clonotypes"`` is asked of receptors,
-                a column of the groups is missing or named twice, a key
-                column names a column of the result, or two groups get one
-                name.
+                a column of the groups is missing or named twice, two key
+                columns share a name, or two groups get one name.
             KeyError: If the store holds no such ``source`` artifact, or not
                 the receptors of the clonotypes.
             RuntimeError: If the ``source`` artifact or the receptors of the
@@ -2045,7 +2034,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 group_by=group_by,
                 groups=groups,
                 cell_selection=cell_selection,
-                reserved=_SPECTRATYPE_COLUMNS,
                 what="Counting the junction lengths of the chains",
                 chosen_by=f"sequence={quoted_value(sequence)}",
             )
@@ -2065,7 +2053,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         # Rows follow the groups' natural order, then the locus and length.
         table, n_cells = count_chains(
-            keys,
+            keys.index,
             units["group"],
             units["cell"],
             loci,
@@ -2078,6 +2066,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         table["length"] = table["length"].astype(np.int64)
         return Spectratype(
             table=table,
+            group_keys=keys,
             source=source,
             sequence=sequence,
             slots=chosen,

@@ -67,30 +67,36 @@ def _store_method(store: Any, name: str, description: str | None = None) -> Any:
     return method
 
 
-def _category_table(
-    values: np.ndarray,
-    order: Sequence[str],
-    groups: np.ndarray | None,
-    names: Sequence[str],
-) -> pd.DataFrame:
-    """Count cells per category, one column per group, or ``n_cells`` without groups."""
+def _category_counts(
+    values: np.ndarray, order: Sequence[str], groups: np.ndarray, n_groups: int
+) -> np.ndarray:
+    """Count cells per group and category: one row per group, one column per category."""
     categories = pd.Index(list(order)).get_indexer(np.asarray(values, dtype=object))
-    if groups is None:
-        counts = np.bincount(categories[categories >= 0], minlength=len(order))
-        return pd.DataFrame({"n_cells": counts}, index=pd.Index(order))
     keep = (categories >= 0) & (groups >= 0)
-    matrix = np.bincount(
-        categories[keep] * len(names) + groups[keep],
-        minlength=len(order) * len(names),
-    ).reshape(len(order), len(names))
+    return np.bincount(
+        groups[keep] * len(order) + categories[keep],
+        minlength=n_groups * len(order),
+    ).reshape(n_groups, len(order))
+
+
+def _category_table(
+    counts: np.ndarray, names: Sequence[str], order: Sequence[str], column: str
+) -> pd.DataFrame:
+    """One row per group and category, zeros included: ``group``, the category, ``n_cells``."""
     return pd.DataFrame(
-        matrix, index=pd.Index(order), columns=pd.Index([str(name) for name in names])
+        {
+            "group": np.repeat(np.asarray(list(names), dtype=object), len(order)),
+            column: np.tile(np.asarray(list(order), dtype=object), len(names)),
+            "n_cells": counts.reshape(-1).astype(np.int64),
+        }
     )
 
 
 def _draw_categories(
     ax: Any,
-    table: pd.DataFrame,
+    counts: np.ndarray,
+    names: Sequence[str],
+    order: Sequence[str],
     colors: dict[str, str],
     *,
     grouped: bool,
@@ -100,40 +106,36 @@ def _draw_categories(
 ) -> None:
     """Draw one bar per category, or with a grouping one stacked bar per group.
 
-    Without a grouping the table holds one column, ``n_cells``; with one, a
-    column per group, which a group's name sets, ``n_cells`` among them.
+    ``counts`` holds the cells of each group, a row, in each category, a
+    column; without a grouping, its one row holds every cell.
     """
     if not grouped:
-        shown = table[table["n_cells"] > 0]
+        found = counts[0]
+        shown = np.flatnonzero(found > 0)
         positions = np.arange(len(shown))[::-1]
-        total = max(1, int(table["n_cells"].sum()))
-        values = shown["n_cells"].to_numpy(dtype=np.float64)
+        total = max(1, int(found.sum()))
+        values = found[shown].astype(np.float64)
         if normalize:
             values = values / total
-        ax.barh(
-            positions,
-            values,
-            color=[colors[name] for name in shown.index],
-        )
-        ax.set_yticks(positions, shown.index.tolist())
+        categories = [order[at] for at in shown.tolist()]
+        ax.barh(positions, values, color=[colors[name] for name in categories])
+        ax.set_yticks(positions, categories)
         ax.set_xlabel("Fraction of cells" if normalize else "Cells")
     else:
-        totals = table.sum(axis=0).to_numpy(dtype=np.float64)
-        positions = np.arange(table.shape[1])
-        bottom = np.zeros(table.shape[1])
-        for name, row in table.iterrows():
-            heights = row.to_numpy(dtype=np.float64)
+        totals = counts.sum(axis=1).astype(np.float64)
+        positions = np.arange(len(names))
+        bottom = np.zeros(len(names))
+        for at, name in enumerate(order):
+            heights = counts[:, at].astype(np.float64)
             if normalize:
                 heights = np.divide(
                     heights, totals, out=np.zeros_like(heights), where=totals > 0
                 )
             if not heights.any():
                 continue
-            ax.bar(
-                positions, heights, bottom=bottom, color=colors[str(name)], label=name
-            )
+            ax.bar(positions, heights, bottom=bottom, color=colors[name], label=name)
             bottom += heights
-        ax.set_xticks(positions, table.columns.tolist(), rotation=90)
+        ax.set_xticks(positions, [str(name) for name in names], rotation=90)
         ax.set_ylabel("Fraction of cells" if normalize else "Cells")
         if show_legend:
             ax.legend(
@@ -175,9 +177,12 @@ def receptor_qc(
     by default (``normalize``), and cells without a group are left out. A
     label artifact may hold fewer cells than the receptors.
 
-    Tables: ``receptor_type`` and ``chain_pairing`` (cells per category, one
-    column per group or ``n_cells``), and ``chains_per_cell`` (cells per
-    number of chains of each arm, indexed by ``n_chains``).
+    Tables: ``receptor_type`` and ``chain_pairing``, one row per group and
+    category, zeros included (``group``, the category in a column named like
+    the table, ``n_cells``), with every cell in the group ``"all cells"``
+    without a grouping, so a group may take any name; and
+    ``chains_per_cell`` (cells per number of chains of each arm, indexed by
+    ``n_chains``).
 
     Raises:
         TypeError: If an argument has the wrong type.
@@ -200,13 +205,22 @@ def receptor_qc(
     labels, names, group_name = cell_groups(
         store, receptors, group_by=group_by, groups=groups
     )
-    fractions = labels is not None if normalize is None else normalize
-    keep = np.ones(len(cells), dtype=bool) if labels is None else labels >= 0
-    receptor_type = _category_table(
-        cells["receptor_type"].to_numpy(dtype=object), RECEPTOR_TYPES, labels, names
+    grouped = labels is not None
+    fractions = grouped if normalize is None else normalize
+    if labels is None:
+        labels, names = np.zeros(len(cells), dtype=np.int64), ["all cells"]
+    keep = labels >= 0
+    receptor_counts = _category_counts(
+        cells["receptor_type"].to_numpy(dtype=object),
+        RECEPTOR_TYPES,
+        labels,
+        len(names),
     )
-    chain_pairing = _category_table(
-        cells["chain_pairing"].to_numpy(dtype=object), CHAIN_PAIRINGS, labels, names
+    pairing_counts = _category_counts(
+        cells["chain_pairing"].to_numpy(dtype=object),
+        CHAIN_PAIRINGS,
+        labels,
+        len(names),
     )
     bins = [str(count) for count in range(_MANY_CHAINS)] + [f"{_MANY_CHAINS}+"]
     chains_per_cell = pd.DataFrame(
@@ -220,10 +234,8 @@ def receptor_qc(
         index=pd.Index(bins, name="n_chains"),
     )
     if figsize is None and target is None:
-        width = (
-            13.0 if labels is None else max(13.0, 4.0 + 0.5 * receptor_type.shape[1])
-        )
-        figsize = (width, 3.8 if labels is None else 4.4)
+        width = 13.0 if not grouped else max(13.0, 4.0 + 0.5 * len(names))
+        figsize = (width, 3.8 if not grouped else 4.4)
     require_matplotlib()
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
@@ -231,18 +243,22 @@ def receptor_qc(
         )
         _draw_categories(
             axes["receptor_type"],
-            receptor_type,
+            receptor_counts,
+            names,
+            RECEPTOR_TYPES,
             _RECEPTOR_TYPE_COLORS,
-            grouped=labels is not None,
+            grouped=grouped,
             normalize=fractions,
             title="Receptor type",
             show_legend=show_legend,
         )
         _draw_categories(
             axes["chain_pairing"],
-            chain_pairing,
+            pairing_counts,
+            names,
+            CHAIN_PAIRINGS,
             _CHAIN_PAIRING_COLORS,
-            grouped=labels is not None,
+            grouped=grouped,
             normalize=fractions,
             title="Chain pairing",
             show_legend=show_legend,
@@ -269,8 +285,12 @@ def receptor_qc(
         figure=figure,
         axes=axes,
         tables={
-            "receptor_type": receptor_type,
-            "chain_pairing": chain_pairing,
+            "receptor_type": _category_table(
+                receptor_counts, names, RECEPTOR_TYPES, "receptor_type"
+            ),
+            "chain_pairing": _category_table(
+                pairing_counts, names, CHAIN_PAIRINGS, "chain_pairing"
+            ),
             "chains_per_cell": chains_per_cell,
         },
         legends=(

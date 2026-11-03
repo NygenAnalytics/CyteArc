@@ -13,7 +13,7 @@ of the truth; one that adds a summary adds a test here.
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,7 +21,21 @@ import pandas as pd
 import pytest
 from scipy.stats import fisher_exact
 
+import cytearc.metadata.selection as cell_values
+import cytearc.storage.refs as artifact_refs
+from cytearc.clones import (
+    ClonalDiversity,
+    ClonalExpansion,
+    CloneCoupling,
+    CloneFateBias,
+    CloneOverlap,
+    CloneTracking,
+    Rarefaction,
+)
 from cytearc.datastore.datastore import DataStore
+from cytearc.metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
+from cytearc.metadata.selection import CellValueSpec
+from cytearc.repertoire import GeneUsage, Spectratype
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import collect_warnings
@@ -423,8 +437,11 @@ def test_overlap_compares_the_clones_that_samples_share(source) -> None:
     result = source.store.clones.overlap(source.clones, group_by="sample")
     by_group = _group_cells(source, TRUTH.samples)
     kept = _kept_labels(source, TRUTH.samples)
+    assert result.group_sizes.columns.tolist() == ["group", "n_cells", "n_clones"]
+    assert result.group_keys.columns.tolist() == ["sample", *source.kept_apart]
+    sizes = result.group_sizes.join(result.group_keys, on="group")
     columns = ["group", "sample", *source.kept_apart, "n_cells", "n_clones"]
-    assert sorted(map(tuple, result.group_sizes[columns].values.tolist())) == sorted(
+    assert sorted(map(tuple, sizes[columns].values.tolist())) == sorted(
         (group, group.split(", ")[0], *kept[group], sum(found.values()), len(found))
         for group, found in by_group.items()
     )
@@ -459,8 +476,10 @@ def test_track_follows_each_samples_largest_clones(source) -> None:
     assert tracked.tracked == tuple(labels[key] for key in order)
     # Each clone is followed through the groups of its own labels kept apart,
     # zeros included.
+    assert tracked.table.columns.tolist() == ["clone", "group", "n_cells", "fraction"]
+    table = tracked.table.join(tracked.group_keys, on="group")
     columns = ["clone", "sample", *source.kept_apart, "n_cells"]
-    assert sorted(map(tuple, tracked.table[columns].values.tolist())) == sorted(
+    assert sorted(map(tuple, table[columns].values.tolist())) == sorted(
         (labels[key], group.split(", ")[0], *kept[group], found.get(key[0], 0))
         for key in order
         for group, found in by_group.items()
@@ -521,6 +540,9 @@ def test_fate_bias_follows_early_cells_to_their_clones_late_cells(source) -> Non
             clone_fates.setdefault(keys[cell], Counter())[fates[cell]] += 1
     names = loaded.fates["fate"].tolist()
     assert loaded.cells.index.tolist() == TRUTH.cell_ids[early].tolist()
+    assert loaded.cells.columns.tolist() == ["clone", "n_late_cells", "fate"]
+    assert loaded.fractions.columns.tolist() == names
+    assert loaded.fractions.index.tolist() == loaded.cells.index.tolist()
     for (cell_id, row), cell in zip(
         loaded.cells.iterrows(), np.flatnonzero(early), strict=True
     ):
@@ -528,7 +550,7 @@ def test_fate_bias_follows_early_cells_to_their_clones_late_cells(source) -> Non
         total = sum(found.values())
         assert row["n_late_cells"] == total, cell_id
         if total:
-            assert row[names].tolist() == pytest.approx(
+            assert loaded.fractions.loc[cell_id, names].tolist() == pytest.approx(
                 [found[name] / total for name in names]
             )
     assert set(loaded.clone_fates["clone"].astype(str)) == {
@@ -558,6 +580,16 @@ def test_fate_bias_follows_early_cells_to_their_clones_late_cells(source) -> Non
         assert p_value == pytest.approx(expected[name][1], rel=1e-9), name
 
 
+def _keyed_rows(table: pd.DataFrame, keys: pd.DataFrame, on: str = "group") -> set:
+    """The labels of the groups that a table's rows name, from the record's keys.
+
+    Every group that the table names is one of the keys' groups.
+    """
+    named = set(table[on].astype(str))
+    assert named <= set(keys.index), named - set(keys.index)
+    return set(map(tuple, keys.loc[sorted(named)].values.tolist()))
+
+
 def test_summaries_report_each_label_their_clones_keep_apart(source) -> None:
     store = source.store
     columns = ["sample", *source.kept_apart]
@@ -571,24 +603,30 @@ def test_summaries_report_each_label_their_clones_keep_apart(source) -> None:
             for cell in np.flatnonzero(clonal)
         }
     )
-    diversity = store.clones.diversity(source.clones, group_by="sample").indices
-    assert sorted(map(tuple, diversity[columns].values.tolist())) == expected
-    curves = store.clones.rarefaction(source.clones, group_by="sample").curves
-    assert sorted(set(map(tuple, curves[columns].values.tolist()))) == expected
+    diversity = store.clones.diversity(source.clones, group_by="sample")
+    curves = store.clones.rarefaction(source.clones, group_by="sample")
     expansion = store.clones.load_expansion(
         store.clones.expansion(source.clones, group_by="sample")
     )
-    assert sorted(set(map(tuple, expansion.categories[columns].values.tolist()))) == (
-        expected
-    )
     overlap = store.clones.overlap(source.clones, group_by="sample")
-    assert sorted(map(tuple, overlap.group_sizes[columns].values.tolist())) == expected
-    tracked = store.clones.track(source.clones, group_by="sample").table
-    assert set(map(tuple, tracked[columns].values.tolist())) <= set(expected)
     coupling = store.clones.coupling(source.clones, group_by="sample", n_permutations=0)
-    assert sorted(map(tuple, coupling.group_sizes[columns].values.tolist())) == (
-        expected
-    )
+    for record, table in (
+        (diversity, diversity.indices),
+        (curves, curves.curves),
+        (expansion, expansion.categories),
+        (overlap, overlap.group_sizes),
+        (coupling, coupling.group_sizes),
+    ):
+        keys = record.group_keys
+        assert keys.index.name == "group"
+        assert keys.columns.tolist() == columns
+        assert sorted(map(tuple, keys.values.tolist())) == expected
+        assert sorted(_keyed_rows(table, keys)) == expected
+        # The tables name the groups and hold none of their labels.
+        assert not set(columns) & set(table.columns)
+    tracked = store.clones.track(source.clones, group_by="sample")
+    assert tracked.group_keys.columns.tolist() == columns
+    assert _keyed_rows(tracked.table, tracked.group_keys) <= set(expected)
     # The fates of the late cells by cell type, with the labels of their
     # clones when the clones keep labels apart.
     late = TRUTH.samples == "d4"
@@ -608,12 +646,247 @@ def test_summaries_report_each_label_their_clones_keep_apart(source) -> None:
             late=store.snapshot_cell_selection("is_d4"),
         )
     )
-    fate_columns = ["cell_type", *source.kept_apart]
-    assert sorted(map(tuple, bias.fates[fate_columns].values.tolist())) == fates
+    assert bias.group_keys.index.name == "fate"
+    assert bias.group_keys.columns.tolist() == ["cell_type", *source.kept_apart]
+    assert sorted(map(tuple, bias.group_keys.values.tolist())) == fates
+    assert sorted(_keyed_rows(bias.fates, bias.group_keys, on="fate")) == fates
+    assert _keyed_rows(bias.clone_fates, bias.group_keys, on="fate") <= set(fates)
     if source.kept_apart:
         # T cells and B cells of one sample are measured apart.
         types = {key[:2] for key in expected}
         assert {("d2", "TCR"), ("d2", "BCR")} <= types
+
+
+#: The tables of each summary's record, which name its groups and hold none of
+#: their labels.
+TABLES: dict[type, tuple[str, ...]] = {
+    ClonalExpansion: ("cells", "categories", "rank_windows"),
+    ClonalDiversity: ("indices", "hill"),
+    Rarefaction: ("curves",),
+    CloneOverlap: ("group_sizes", "pairs"),
+    CloneTracking: ("table",),
+    CloneCoupling: ("group_sizes", "pairs"),
+    CloneFateBias: ("cells", "fractions", "clone_fates", "fates"),
+    GeneUsage: ("table",),
+    Spectratype: ("table",),
+}
+#: Names that the summaries' tables give columns of their own, which a
+#: grouping may take as any other name.
+OWN_COLUMNS = ("group", "clone", "n_cells", "fraction", "locus")
+
+
+def _summaries(store: DataStore, clones: ArtifactRef, **grouping) -> list:
+    """Every summary of the clones within the grouping, as its record."""
+    records = [
+        store.clones.load_expansion(store.clones.expansion(clones, **grouping)),
+        store.clones.diversity(clones, **grouping),
+        store.clones.rarefaction(clones, orders=(0, 2), **grouping),
+        store.clones.overlap(clones, **grouping),
+        store.clones.track(clones, top_n=2, **grouping),
+        store.clones.coupling(clones, n_permutations=0, **grouping),
+    ]
+    if clones.kind == "clonotypes":
+        # Gene usage and junction lengths read the clonotypes' chains.
+        records.append(store.repertoire.gene_usage(clones, **grouping))
+        records.append(store.repertoire.spectratype(clones, **grouping))
+    return records
+
+
+def _fate_bias(store: DataStore, clones: ArtifactRef, **grouping) -> CloneFateBias:
+    return store.clones.load_fate_bias(
+        store.clones.fate_bias(
+            clones,
+            early=store.snapshot_cell_selection("is_d2"),
+            late=store.snapshot_cell_selection("is_d4"),
+            **grouping,
+        )
+    )
+
+
+def _assert_same_tables(found, expected) -> None:
+    """The records hold equal tables, whatever their groupings were named."""
+    assert type(found) is type(expected)
+    for table in TABLES[type(found)]:
+        pd.testing.assert_frame_equal(
+            getattr(found, table), getattr(expected, table), obj=table
+        )
+
+
+def _assert_joins_recover(record, column: str, truth: dict[str, str]) -> None:
+    """Each row of the record's tables of groups joins to its group's label.
+
+    ``truth`` gives each group's label in ``column``, by the group's name, as
+    the truth's cells give it. A key column named like a column of a table
+    takes pandas' suffix in the join.
+    """
+    keys = record.group_keys
+    for table in TABLES[type(record)]:
+        rows = getattr(record, table)
+        if keys.index.name not in rows.columns:
+            continue
+        joined = rows.join(keys, on=keys.index.name, rsuffix="_label")
+        label = f"{column}_label" if column in rows.columns else column
+        found = joined[[keys.index.name, label]].dropna()
+        assert len(found) == rows[keys.index.name].notna().sum(), table
+        for name, value in found.itertuples(index=False):
+            assert value == truth[str(name)], (table, name)
+
+
+def _labels_of_groups(
+    source, grouping: np.ndarray, labels: np.ndarray, *, kept_apart: bool = True
+) -> dict[str, str]:
+    """Each group's label by its name, from the truth's cells of the group.
+
+    The groups are those of the ``grouping`` labels, and of the labels that the
+    source's clones keep apart unless ``kept_apart`` is False, as gene usage
+    groups the cells.
+    """
+    names = (
+        _groups(source, grouping) if kept_apart else np.asarray(grouping, dtype=object)
+    )
+    found: dict[str, str] = {}
+    for name, label in zip(names, labels, strict=True):
+        assert found.setdefault(str(name), str(label)) == str(label)
+    return found
+
+
+def _kept_apart_by(record) -> bool:
+    """Whether a record's groups keep the clones' labels apart.
+
+    Gene usage and junction lengths count chains within the groups alone.
+    """
+    return not isinstance(record, GeneUsage | Spectratype)
+
+
+@pytest.mark.slow
+def test_summaries_grouped_by_a_column_named_like_their_own_columns(source) -> None:
+    store = source.store
+    neutral = _summaries(store, source.clones, group_by="sample")
+    neutral_bias = _fate_bias(store, source.clones, group_by="cell_type")
+    for name in OWN_COLUMNS:
+        # The samples under the summaries' own column name measure what the
+        # samples do, and the joins give each row its sample, and the labels
+        # that the clones keep apart.
+        store.cells.insert(name, TRUTH.samples.astype(object), overwrite=True)
+        for found, expected in zip(
+            _summaries(store, source.clones, group_by=name), neutral, strict=True
+        ):
+            _assert_same_tables(found, expected)
+            kept = _kept_apart_by(found)
+            assert found.group_keys.columns.tolist() == [
+                name,
+                *(source.kept_apart if kept else ()),
+            ]
+            _assert_joins_recover(
+                found,
+                name,
+                _labels_of_groups(
+                    source, TRUTH.samples, TRUTH.samples, kept_apart=kept
+                ),
+            )
+            for column, values in source.kept_apart.items() if kept else ():
+                _assert_joins_recover(
+                    found, column, _labels_of_groups(source, TRUTH.samples, values)
+                )
+        # Each cell of the expansion joins to its own sample.
+        expansion = store.clones.load_expansion(
+            store.clones.expansion(source.clones, group_by=name)
+        )
+        cells = expansion.cells.join(expansion.group_keys, on="group", rsuffix="_label")
+        label = f"{name}_label" if name in expansion.cells.columns else name
+        joined = cells.loc[TRUTH.cell_ids, label]
+        grouped = cells.loc[TRUTH.cell_ids, "group"].notna().to_numpy()
+        assert joined[grouped].tolist() == TRUTH.samples[grouped].tolist()
+        assert joined[~grouped].isna().all()
+        # The fates under the name measure what the cell types do.
+        store.cells.insert(name, TRUTH.cell_types.astype(object), overwrite=True)
+        bias = _fate_bias(store, source.clones, group_by=name)
+        _assert_same_tables(bias, neutral_bias)
+        assert bias.group_keys.columns.tolist() == [name, *source.kept_apart]
+        _assert_joins_recover(
+            bias, name, _labels_of_groups(source, TRUTH.cell_types, TRUTH.cell_types)
+        )
+
+
+@pytest.mark.parametrize("name", ["clone", "n_late_cells", "fate", "ids"])
+def test_fates_named_like_the_tables_columns_keep_their_shares(source, name) -> None:
+    store = source.store
+    neutral = _fate_bias(store, source.clones, group_by="cell_type")
+    # The monocytes' fate takes a name of the tables' own columns, which the
+    # tables hold as a value; every share stays that of the cell types.
+    renamed = np.where(TRUTH.cell_types == "Monocyte", name, TRUTH.cell_types)
+    store.cells.insert("named_fate", renamed.astype(object), overwrite=True)
+    bias = _fate_bias(store, source.clones, group_by="named_fate")
+    names = {
+        fate: fate.replace("Monocyte", name, 1) if fate.startswith("Monocyte") else fate
+        for fate in neutral.fates["fate"].tolist()
+    }
+    order = bias.fates["fate"].tolist()
+    assert sorted(order) == sorted(names.values())
+    pd.testing.assert_frame_equal(
+        bias.fractions, neutral.fractions.rename(columns=names)[order]
+    )
+    assert bias.cells.columns.tolist() == ["clone", "n_late_cells", "fate"]
+    pd.testing.assert_series_equal(
+        bias.cells["n_late_cells"], neutral.cells["n_late_cells"]
+    )
+    assert bias.cells["fate"].astype(object).tolist() == [
+        names[fate] if isinstance(fate, str) else fate
+        for fate in neutral.cells["fate"].astype(object).tolist()
+    ]
+    # The fates' labels hold the name under the grouping column's own name.
+    renamed_fates = [fate for fate in order if fate.startswith(name)]
+    assert renamed_fates
+    assert set(bias.group_keys.loc[renamed_fates, "named_fate"]) == {name}
+
+
+def test_a_label_artifact_of_a_kind_named_like_a_column_groups_cells(
+    source, monkeypatch
+) -> None:
+    store = source.store
+    # A kind of label artifact named like the summaries' count column, which
+    # no release defines; its key column takes the kind's name.
+    monkeypatch.setattr(
+        artifact_refs, "ARTIFACT_KINDS", artifact_refs.ARTIFACT_KINDS | {"n_cells"}
+    )
+    monkeypatch.setattr(
+        cell_values,
+        "CELL_VALUE_NAMES",
+        MappingProxyType(
+            {**cell_values.CELL_VALUE_NAMES, "n_cells": CellValueSpec("values", True)}
+        ),
+    )
+    planned = plan_cell_data_artifact(
+        store.zw,
+        scope="datastore",
+        kind="n_cells",
+        operation="label_cells_for_test",
+        parameters={"labels": "samples"},
+        inputs={},
+        execution_options={},
+        cell_selection=every_cell(store),
+        arrays={"values": ((N_CELLS,), None)},
+    )
+    write_cell_data_artifact(
+        store.zw, planned, {"values": TRUTH.samples.astype(object)}
+    )
+    labelled = store.snapshot_cluster_labels("sample", cell_selection=every_cell(store))
+    for found, expected in zip(
+        _summaries(store, source.clones, groups=planned.ref),
+        _summaries(store, source.clones, groups=labelled),
+        strict=True,
+    ):
+        _assert_same_tables(found, expected)
+        kept = _kept_apart_by(found)
+        assert found.group_keys.columns.tolist() == [
+            "n_cells",
+            *(source.kept_apart if kept else ()),
+        ]
+        _assert_joins_recover(
+            found,
+            "n_cells",
+            _labels_of_groups(source, TRUTH.samples, TRUTH.samples, kept_apart=kept),
+        )
 
 
 def test_summaries_keep_to_a_cell_selection(source) -> None:

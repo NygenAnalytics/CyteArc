@@ -21,7 +21,7 @@ from ._figure import (
     close_figures_on_error,
     normalize_axes_target,
 )
-from ._groups import cell_groups, labels_by_group, record_groups, refuse_named_columns
+from ._groups import cell_groups, labels_by_group
 from ._heatmap_utils import draw_dendrogram
 from ._style import (
     LEGEND_SIDE_MAX_ENTRIES,
@@ -144,16 +144,18 @@ def clone_abundance(
     the receptor types, or each group's receptor types, named like
     ``"s1, TCR"``.
 
-    Tables: ``sizes`` (``group``, ``clone_size``, ``n_clones``) and ``top``
-    (``clone``, ``label``, then the cells of each group, or ``n_cells``).
+    Tables: ``sizes`` (``group``, ``clone_size``, ``n_clones``) and ``top``,
+    one row per clone drawn and group, the largest clone first, zeros
+    included (``clone``, ``label``, ``group``, ``n_cells``); without a
+    grouping, every cell is in the group ``"all cells"``. Groups are values
+    of the tables, so a group may take any name.
 
     Raises:
         TypeError: If an argument has the wrong type.
         ValueError: If ``clones`` is not a clone artifact, a ``group_by``
             column is missing, named twice or kept apart by the clones
-            already, two groups get one name, no cell, or no cell with a
-            group, has a clone, or a group is named like a column of the
-            table of the largest clones.
+            already, two groups get one name, or no cell, or no cell with a
+            group, has a clone.
         KeyError: If the store holds no such artifact.
         RuntimeError: If an artifact is incomplete, as a call that stopped
             before it finished leaves it.
@@ -190,10 +192,6 @@ def clone_abundance(
     )
     held = sorted_unique(pairs // n_clones)
     group_order = [names[code] for code in held.tolist()]
-    # The groups name columns of the table beside its own.
-    refuse_named_columns(
-        group_order, ("clone", "label"), what="group", table="the largest clones"
-    )
     pair_groups = np.searchsorted(held, pairs // n_clones)
     pair_codes = pairs % n_clones
     width = int(pair_cells.max()) + 1
@@ -217,16 +215,20 @@ def clone_abundance(
     matrix = np.zeros((len(chosen), len(group_order)), dtype=np.int64)
     matrix[rows[pair_codes[taken]], pair_groups[taken]] = pair_cells[taken]
     ids = loaded.clones["clone"].to_numpy(dtype=object)[chosen]
+    clone_labels = np.asarray(_figure_labels(store, clones, ids), dtype=object)
+    # One row per clone drawn and group, zeros included, so the groups are
+    # values of the table, whatever their names.
     top_table = pd.DataFrame(
-        matrix, columns=pd.Index([str(name) for name in group_order])
+        {
+            "clone": np.repeat(ids, len(group_order)),
+            "label": np.repeat(clone_labels, len(group_order)),
+            "group": np.tile(np.asarray(group_order, dtype=object), len(chosen)),
+            "n_cells": matrix.reshape(-1),
+        }
     )
-    top_table.insert(0, "clone", ids)
-    top_table.insert(1, "label", _figure_labels(store, clones, ids))
     drawn = _figure_noun(store, clones)
-    if not grouped:
-        top_table = top_table.rename(columns={"all cells": "n_cells"})
     if figsize is None and target is None:
-        figsize = (12.0, max(3.6, 0.28 * len(top_table) + 1.2))
+        figsize = (12.0, max(3.6, 0.28 * len(chosen) + 1.2))
     require_matplotlib()
     from matplotlib.ticker import LogFormatter
 
@@ -257,18 +259,18 @@ def clone_abundance(
         if show_legend and grouped:
             ax.legend(frameon=False, fontsize="small")
         ax = axes["top"]
-        positions = np.arange(len(top_table))[::-1]
-        left = np.zeros(len(top_table))
-        for column in top_table.columns[2:]:
-            widths = top_table[column].to_numpy(dtype=np.float64)
-            ax.barh(positions, widths, left=left, label=str(column))
+        positions = np.arange(len(chosen))[::-1]
+        left = np.zeros(len(chosen))
+        for position, group in enumerate(group_order):
+            widths = matrix[:, position].astype(np.float64)
+            ax.barh(positions, widths, left=left, label=str(group))
             left += widths
-        ax.set_yticks(positions, top_table["label"].tolist(), fontsize="small")
+        ax.set_yticks(positions, clone_labels.tolist(), fontsize="small")
         ax.set_xlabel("Cells")
         # One clone drawn is named in the singular: "Largest clonotype".
         ax.set_title(
-            f"Largest {len(top_table)} {drawn}"
-            if len(top_table) > 1
+            f"Largest {len(chosen)} {drawn}"
+            if len(chosen) > 1
             else f"Largest {drawn.removesuffix('s')}"
         )
         if show_legend and grouped:
@@ -416,13 +418,11 @@ def clonal_expansion(
     if count not in ("cells", "clones"):
         raise ValueError("count must be 'cells' or 'clones'")
     loaded = _clones_method(store, "load_expansion")(expansion, splits=splits)
-    # The expansion's key columns that are neither its group_by nor its
-    # label artifact hold the labels that its clones keep apart, such as the
+    # The expansion's key columns after its group_by columns and its label
+    # artifact's kind hold the labels that its clones keep apart, such as the
     # receptor type, which each cell takes from its group.
-    expansion_groups = record_groups(loaded.categories, "category")
-    key_columns = [str(column) for column in expansion_groups.columns[1:]]
-    own = {*loaded.group_by, *([loaded.groups.kind] if loaded.groups else [])}
-    kept_apart = [column for column in key_columns if column not in own]
+    key_columns = [str(column) for column in loaded.group_keys.columns]
+    kept_apart = key_columns[len(loaded.group_by) + (loaded.groups is not None) :]
     labels, names, group_name = (
         (None, [], None)
         if groups is None and not _names_columns(group_by)
@@ -432,7 +432,7 @@ def clonal_expansion(
             group_by=group_by,
             groups=groups,
             kept_apart=labels_by_group(
-                loaded.cells["group"], expansion_groups, kept_apart
+                loaded.cells["group"], loaded.group_keys, kept_apart
             ),
         )
     )
@@ -577,8 +577,9 @@ def clonal_rarefaction(
     is. Curves that keep rising at the observed point have not reached their
     plateau: more cells would find more clones.
 
-    Tables: ``curves``, the record's curves (``group``, the groups' key
-    columns, ``order``, ``size``, ``method``, ``diversity``, ``coverage``).
+    Tables: ``curves``, the record's curves (``group``, ``order``, ``size``,
+    ``method``, ``diversity``, ``coverage``); the record's ``group_keys``
+    holds each group's labels.
 
     Raises:
         TypeError: If ``rarefaction`` is not a ``Rarefaction`` record, or
@@ -593,8 +594,7 @@ def clonal_rarefaction(
     if base not in ("size", "coverage"):
         raise ValueError("base must be 'size' or 'coverage'")
     curves = rarefaction.curves
-    # The key columns lie between the group's name and the order.
-    key_columns = [str(column) for column in record_groups(curves, "order").columns[1:]]
+    key_columns = [str(column) for column in rarefaction.group_keys.columns]
     names = sort_categories(pd.unique(curves["group"]))
     colors = categorical_color_map(list(names))
     by_curve = dict(tuple(curves.groupby(["group", "order"], sort=False)))
@@ -843,20 +843,17 @@ def clone_tracking(
     the name, such as time points as integers, and by default the names
     follow their natural order. Plots of at most 40 groups name them on the
     axis, and the legend lists at most 80 clones, the largest first. By
-    default the figure grows with the groups up to the width of a page. The
-    plot raises ``ValueError`` when a key column of the groups is named
-    ``label``, which the figure's table gives each clone's label.
+    default the figure grows with the groups up to the width of a page.
 
     Tables: ``tracking``, the record's ``table`` with each clone's ``label``
-    after its ``clone`` (``clone``, ``label``, ``group``, the key columns,
-    ``n_cells`` and ``fraction``).
+    after its ``clone`` (``clone``, ``label``, ``group``, ``n_cells`` and
+    ``fraction``); the record's ``group_keys`` holds each group's labels.
 
     Raises:
         TypeError: If ``tracking`` is not a ``CloneTracking`` record,
             ``order`` is not a sequence of group names, or another argument
             has the wrong type.
-        ValueError: If ``order`` does not list the groups, or a key column
-            of the groups is named ``label``.
+        ValueError: If ``order`` does not list the groups.
         KeyError: If the store does not hold the record's clones.
         RuntimeError: If the record's clones are incomplete, as a call that
             stopped before it finished leaves them.
@@ -872,12 +869,6 @@ def clone_tracking(
             raise TypeError("order must be a sequence of group names")
     if not isinstance(tracking, CloneTracking):
         raise TypeError("tracking must be the CloneTracking of ds.clones.track")
-    if "label" in tracking.table.columns:
-        raise ValueError(
-            "The tracking's groups have a key column named 'label', which the "
-            "figure's table gives each clone's label; copy the cell metadata "
-            "column under another name"
-        )
     # Every followed clone is labelled at once, so that the junctions which
     # two followed clonotypes share are found among the lines of this figure.
     line_labels = dict(
@@ -897,21 +888,18 @@ def clone_tracking(
             [line_labels[clone] for clone in cells["clone"].tolist()], dtype=object
         ),
     )
-    keys = [
-        *tracking.group_by,
-        *((tracking.groups.kind,) if tracking.groups is not None else ()),
-    ]
     # Groups that differ only in labels that the clones keep apart share a
-    # position, named by their labels in the grouping columns alone.
-    tracked_groups = record_groups(tracking.table, "n_cells")
-    named = tracked_groups["group"].astype(str)
-    if keys:
-        named = tracked_groups[keys[0]].astype(str)
-        for column in keys[1:]:
-            named = named + ", " + tracked_groups[column].astype(str)
-    position_of = dict(
-        zip(tracked_groups["group"], named.to_numpy(dtype=object), strict=True)
-    )
+    # position, named by their labels in the grouping columns alone: the
+    # group_by columns and the label artifact's kind, the first key columns.
+    group_keys = tracking.group_keys
+    n_grouping = len(tracking.group_by) + (tracking.groups is not None)
+    names = [str(group) for group in group_keys.index.tolist()]
+    position_of = dict(zip(names, names, strict=True))
+    if n_grouping:
+        grouping = group_keys.iloc[:, :n_grouping].astype(str)
+        position_of = dict(
+            zip(names, grouping.agg(", ".join, axis=1).tolist(), strict=True)
+        )
     placed = cells.assign(
         position=np.asarray(
             [position_of[group] for group in cells["group"].tolist()], dtype=object
@@ -1197,14 +1185,16 @@ def clone_fate_bias(
     Plots of at most 40 clones name them on the axis. By default the figure
     grows with the clones up to the width of a page.
 
-    Tables: ``clones`` (``clone``, ``label``, ``fate``, the dominant fate,
-    missing for a tie, ``n_early_cells``, ``n_late_cells``, then the late
-    cells of each fate).
+    Tables: ``clones``, one row per clone drawn, in the drawn order
+    (``clone``, ``label``, ``fate``, the dominant fate, missing for a tie,
+    ``n_early_cells``, ``n_late_cells``), and ``fates``, one row per clone
+    drawn and fate, zeros included (``clone``, ``label``, ``fate``,
+    ``n_cells``, the clone's late cells in the fate). Fates are values of the
+    tables, so a fate may take any name.
 
     Raises:
         TypeError: If an argument has the wrong type.
-        ValueError: If ``bias`` is not a ``clone_fate_bias`` artifact, or a
-            fate is named like a column of the table of the clones.
+        ValueError: If ``bias`` is not a ``clone_fate_bias`` artifact.
         KeyError: If the store holds no such artifact.
         RuntimeError: If an artifact is incomplete, as a call that stopped
             before it finished leaves it.
@@ -1217,13 +1207,6 @@ def clone_fate_bias(
     max_clones = integer_argument(max_clones, "max_clones", minimum=1)
     loaded = _clones_method(store, "load_fate_bias")(bias)
     fate_names = [str(name) for name in loaded.fates["fate"].tolist()]
-    # The fates name columns of the table beside its own.
-    refuse_named_columns(
-        fate_names,
-        ("clone", "label", "fate", "n_early_cells", "n_late_cells"),
-        what="fate",
-        table="the clones",
-    )
     rows = loaded.clone_fates
     clone_codes = np.asarray(rows["clone"].cat.codes, dtype=np.int64)
     fate_codes = np.asarray(rows["fate"].cat.codes, dtype=np.int64)
@@ -1244,16 +1227,29 @@ def clone_fate_bias(
     ids = rows["clone"].cat.categories.to_numpy(dtype=object)[codes[chosen]]
     shown_ids = [str(clone) for clone in ids.tolist()]
     shown_labels = _figure_labels(store, loaded.clones, ids)
-    table = pd.DataFrame(cells[chosen], columns=pd.Index(fate_names, dtype=object))
-    table.insert(0, "clone", shown_ids)
-    table.insert(1, "label", shown_labels)
-    table.insert(
-        2,
-        "fate",
-        pd.Categorical.from_codes(dominant[chosen], categories=pd.Index(fate_names)),
+    fate_index = pd.Index(fate_names)
+    table = pd.DataFrame(
+        {
+            "clone": shown_ids,
+            "label": shown_labels,
+            "fate": pd.Categorical.from_codes(dominant[chosen], categories=fate_index),
+            "n_early_cells": early_cells[chosen],
+            "n_late_cells": late_cells[chosen],
+        }
     )
-    table.insert(3, "n_early_cells", early_cells[chosen])
-    table.insert(4, "n_late_cells", late_cells[chosen])
+    # One row per clone drawn and fate, zeros included, so the fates are
+    # values of the table, whatever their names.
+    n_fates = len(fate_names)
+    fates_table = pd.DataFrame(
+        {
+            "clone": np.repeat(np.asarray(shown_ids, dtype=object), n_fates),
+            "label": np.repeat(np.asarray(shown_labels, dtype=object), n_fates),
+            "fate": pd.Categorical.from_codes(
+                np.tile(np.arange(n_fates), len(chosen)), categories=fate_index
+            ),
+            "n_cells": cells[chosen].reshape(-1),
+        }
+    )
     if figsize is None and target is None:
         figsize = (
             min(max(6.0, 0.22 * len(chosen) + 3.5), MAX_FIGURE_WIDTH_INCHES),
@@ -1310,7 +1306,7 @@ def clone_fate_bias(
     plot_result = PlotResult(
         figure=figure,
         axes=axes,
-        tables={"clones": table},
+        tables={"clones": table, "fates": fates_table},
         legends=(LegendSpec(kind="categorical", label="Fate"),),
         scales=(),
         provenance=PlotProvenance(

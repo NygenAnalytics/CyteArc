@@ -81,18 +81,16 @@ GROUPING_BYTES_PER_DISTINCT_LABEL = 500
 GROUPING_BYTES_PER_GROUP = 500
 
 
-def group_columns(
-    value: Any, name: str = "group_by", reserved: frozenset[str] = frozenset()
-) -> tuple[str, ...]:
+def group_columns(value: Any, name: str = "group_by") -> tuple[str, ...]:
     """Return the cell metadata columns of an argument as a tuple of names.
 
-    A column may not share the name of a column of the result, in
-    ``reserved``, which it would overwrite.
+    A column may take any name, since results hold each group's labels in a
+    table of their own, apart from their own columns.
 
     Raises:
         TypeError: If ``value`` is not a column name, a sequence of names, or
             None.
-        ValueError: If it names a column twice, or a column of the result.
+        ValueError: If it names a column twice.
     """
     if value is None:
         return ()
@@ -106,12 +104,6 @@ def group_columns(
         raise TypeError(f"{name} must be a column name, a sequence of names, or None")
     if len(set(names)) != len(names):
         raise ValueError(f"{name} names a column twice")
-    clashes = [column for column in names if column in reserved]
-    if clashes:
-        raise ValueError(
-            f"{name} names {quoted_value(clashes[0])}, which is also a column of the result; "
-            "copy the cell metadata column under another name"
-        )
     return tuple(names)
 
 
@@ -211,7 +203,6 @@ def cell_groups(
     cell_selection: ArtifactRef | None,
     memory_bytes: int,
     kept_apart: Sequence[tuple[str, np.ndarray]] = (),
-    reserved: frozenset[str] = frozenset(),
     held_bytes: int = 0,
 ) -> CellGroups:
     """Group the cells of a cell-aligned artifact by their labels.
@@ -234,21 +225,22 @@ def cell_groups(
         memory_bytes: The memory budget.
         kept_apart: Key columns whose labels the artifact keeps apart, each
             with every artifact cell's label, such as a receptor type.
-        reserved: The columns of the result, which no key column may name.
         held_bytes: What the caller holds beside the grouping, which counts
             against the budget with it.
 
     Returns:
-        The groups' key columns and labels, and each cell's group.
+        The groups' key columns and labels, and each cell's group. A key
+        column may take any name, even one of the result's own columns,
+        since results hold the groups' labels in a table of their own.
 
     Raises:
         TypeError: If an argument has the wrong type.
         ValueError: If a ``group_by`` column is missing, named twice or kept
-            apart already, two key columns share a name, a key column names a
-            column of the result, or two groups get one name.
+            apart already, two key columns share a name, or two groups get
+            one name.
         MemoryError: If grouping the cells does not fit the memory budget.
     """
-    columns = group_columns(group_by, "group_by", reserved)
+    columns = group_columns(group_by, "group_by")
     if groups is not None and not isinstance(groups, ArtifactRef):
         raise TypeError("groups must be an ArtifactRef or None")
     if cell_selection is not None and not isinstance(cell_selection, ArtifactRef):
@@ -275,12 +267,6 @@ def cell_groups(
         raise ValueError(
             f"The groups' key columns {list(key_columns)} name {quoted_value(repeated[0])} "
             "twice; copy the cell metadata column under another name"
-        )
-    clashes = [column for column in key_columns[len(columns) :] if column in reserved]
-    if clashes:
-        raise ValueError(
-            f"The groups' key column {quoted_value(clashes[0])} is also a column of the "
-            "result; group the cells by labels of another kind"
         )
     has = np.asarray(rows, dtype=bool).copy()
     n_cells = len(has)
@@ -416,7 +402,6 @@ def within_groups(
     members: np.ndarray,
     *,
     memory_bytes: int,
-    reserved: frozenset[str] = frozenset(),
     what: str,
 ) -> tuple[np.ndarray, list[dict[str, str]], str | None]:
     """Group an artifact's member cells by their labels in the ``within`` columns.
@@ -433,8 +418,6 @@ def within_groups(
         members: The cells that need a group, as a mask aligned to the
             artifact's cells, such as the cells with a receptor.
         memory_bytes: The memory budget.
-        reserved: The columns of a result that the within labels join, which
-            no within column may name, such as the table of clonotypes.
         what: What the member cells hold, such as ``"a receptor"``, which
             the error names.
 
@@ -466,7 +449,6 @@ def within_groups(
         groups=None,
         cell_selection=None,
         memory_bytes=memory_bytes,
-        reserved=reserved,
     )
     unlabelled = int(np.count_nonzero(members & (grouped.codes < 0)))
     if unlabelled:

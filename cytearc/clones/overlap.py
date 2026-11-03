@@ -345,18 +345,23 @@ def tracking_cells(
 class CloneOverlap:
     """The clones that groups of cells share.
 
-    The groups are the combinations of the ``group_by`` columns' labels and
-    the ``groups`` artifact's labels; each table names a group by its labels
-    joined by commas.
+    The groups are the combinations of the ``group_by`` columns' labels, the
+    ``groups`` artifact's labels and the labels that the clones keep apart;
+    each table names a group by its labels joined by commas, and
+    ``group_keys`` holds its labels.
 
     Attributes:
-        group_sizes: One row per group: ``group``, the key columns,
-            ``n_cells`` and ``n_clones``.
+        group_sizes: One row per group: ``group``, ``n_cells`` and
+            ``n_clones``.
         pairs: One row per pair of groups: ``group_1`` and ``group_2``, the
             indices ``shared``, ``jaccard``, ``sorensen``, ``overlap``,
             ``cosine``, ``morisita_horn`` and ``abundance_cosine``, and
             ``shared_fraction_1`` and ``shared_fraction_2``, the share of each
             group's cells whose clone the other holds.
+        group_keys: One row per group, indexed by its name, ``group``, with
+            its label in each key column: the ``group_by`` columns, the kind
+            of the ``groups`` artifact, then the columns that the clones keep
+            apart, under their own names.
         clones: The clone artifact, such as a ``clones`` artifact.
         group_by: The cell metadata columns of the groups.
         groups: The label artifact of the groups, or None.
@@ -365,6 +370,7 @@ class CloneOverlap:
 
     group_sizes: pd.DataFrame = field(repr=False)
     pairs: pd.DataFrame = field(repr=False)
+    group_keys: pd.DataFrame = field(repr=False)
     clones: ArtifactRef
     group_by: tuple[str, ...]
     groups: ArtifactRef | None
@@ -375,11 +381,16 @@ class CloneOverlap:
 class CloneTracking:
     """The cells of chosen clones in each group of cells.
 
+    The groups are those of :class:`CloneOverlap`, and ``group_keys`` holds
+    their labels, so ``table.join(group_keys, on="group")`` gives each row
+    its group's labels.
+
     Attributes:
         table: One row per chosen clone and group, zeros included: ``clone``,
-            ``group`` (its labels joined by commas), the key columns,
-            ``n_cells`` and ``fraction``, the share of the group's cells with a
-            clone.
+            ``group`` (its labels joined by commas), ``n_cells`` and
+            ``fraction``, the share of the group's cells with a clone.
+        group_keys: One row per group, indexed by its name, ``group``, with
+            its label in each key column, as :class:`CloneOverlap` holds them.
         clones: The clone artifact, such as a ``clones`` artifact.
         tracked: The chosen clone labels, largest first.
         group_by: The cell metadata columns of the groups.
@@ -388,6 +399,7 @@ class CloneTracking:
     """
 
     table: pd.DataFrame = field(repr=False)
+    group_keys: pd.DataFrame = field(repr=False)
     clones: ArtifactRef
     tracked: tuple[str, ...]
     group_by: tuple[str, ...]

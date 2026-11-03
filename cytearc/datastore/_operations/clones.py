@@ -19,7 +19,6 @@ from ...clones.assignments import (
     clone_label_texts,
 )
 from ...clones.diversity import (
-    INDEX_COLUMNS,
     LARGEST_SIZE,
     ORDERS,
     ClonalDiversity,
@@ -41,7 +40,6 @@ from ...clones.expansion import (
 )
 from ...clones.fate import (
     COUPLING_METHODS,
-    FATE_CELL_COLUMNS,
     CloneCoupling,
     CloneFateBias,
     clone_coupling,
@@ -50,7 +48,7 @@ from ...clones.fate import (
     fate_bias_bytes,
     fate_bias_tables,
 )
-from ...clones.groups import group_frame, pair_counts
+from ...clones.groups import group_key_table, pair_counts
 from ...clones.overlap import (
     CloneOverlap,
     CloneTracking,
@@ -262,26 +260,8 @@ _SIZE_TABLE_BYTES_PER_ROW = 128
 _RAREFACTION_BYTES_PER_SIZE = 192
 # Each row of the rarefaction curves: its order, size, method, Hill number,
 # coverage and group, and the table built from them, 121 bytes as traced on
-# 2,000 groups at 40 sizes, and 8 bytes for each further key column.
+# 2,000 groups at 40 sizes. The groups' labels stay in their own table.
 _CURVE_BYTES_PER_ROW = 128
-_CURVE_BYTES_PER_KEY_COLUMN = 8
-# The columns of each summary's tables besides the groups' labels, which a
-# key column of the groups may not share; "group" names each group, and plots
-# of expansion add a "group" column.
-_EXPANSION_COLUMNS = frozenset(
-    {"group", "clone", "category", "group_clone_size", "group_clone_frequency"}
-    | {"n_cells", "n_clones", "fraction", "window"}
-)
-_DIVERSITY_COLUMNS = frozenset(
-    {"group", *INDEX_COLUMNS, "order", "observed", "estimated", "at_size"}
-    | {"coverage_at_size", "method_at_size", "at_coverage", "size_at_coverage"}
-    | {"method_at_coverage"}
-)
-_RAREFACTION_COLUMNS = frozenset(
-    {"group", "order", "size", "method", "diversity", "coverage"}
-)
-_OVERLAP_COLUMNS = frozenset({"group", "n_cells", "n_clones"})
-_TRACK_COLUMNS = frozenset({"group", "clone", "n_cells", "fraction"})
 # Comparing groups holds, at its peak, about 220 bytes per pair of groups of
 # one stratum, the pairs' indices and their table, and 16 bytes per product of
 # two groups of the largest stratum, as measured on 1,000 and 2,000 groups;
@@ -292,18 +272,10 @@ _OVERLAP_BYTES_PER_PRODUCT = 24
 # Each count of a clone's cells in a group holds its group, clone code and
 # cells, and its entries in the matrices that compare or follow the groups.
 _BYTES_PER_CLONE_COUNT = 40
-# Following clones holds, for each row of the table, about 82 bytes and 8
-# more for each key column, as traced on 3 million rows with 1 to 12 key
-# columns, and a byte per chosen clone and group.
+# Following clones holds, for each row of the table, its clone, group, cells
+# and fraction, about 82 bytes as traced on 3 million rows, and a byte per
+# chosen clone and group. The groups' labels stay in their own table.
 _TRACK_BYTES_PER_ROW = 100
-_TRACK_BYTES_PER_KEY_COLUMN = 16
-# The columns of the tables of coupling and fate bias besides the groups'
-# labels, which a key column of the groups may not share.
-_COUPLING_COLUMNS = frozenset({"group", "n_cells", "n_clones"})
-_FATE_BIAS_COLUMNS = frozenset(
-    {"group", "clone", "fate", "n_early_cells", "n_late_cells", "n_cells"}
-    | {"fraction", "p_value", "q_value"}
-)
 # Checking that no cell is both early and late holds, for each cell of the
 # two selections, its row and its place in their sorted union.
 _SELECTION_BYTES_PER_CELL = 40
@@ -315,13 +287,13 @@ _BYTES_PER_FATE_PAIR = 24
 _BIAS_WRITE_BYTES_PER_CELL = 40
 # The tables of loaded fate bias hold, for each early cell, its ID, clone,
 # fate and late cells and the pandas index, for each of its fractions the
-# value read and its column in the table, and for each row of the table of
-# clones and fates its labels, counts and tests: 92 to 113 bytes at their
-# peak as traced on 1 to 3 million rows with one to three key columns.
+# value read and its column in the table of fractions, and for each row of
+# the table of clones and fates its clone, fate, counts and tests: at most
+# 113 bytes at their peak as traced on 1 to 3 million rows that also held one
+# to three key columns, which the fates' own table now holds.
 _BIAS_TABLE_BYTES_PER_CELL = 200
 _BIAS_TABLE_BYTES_PER_FRACTION = 24
 _BIAS_TABLE_BYTES_PER_ROW = 160
-_BIAS_TABLE_BYTES_PER_KEY_COLUMN = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -1360,7 +1332,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         group_by: str | Sequence[str] | None,
         groups: ArtifactRef | None,
         cell_selection: ArtifactRef | None,
-        reserved: frozenset[str],
     ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
         """Group the cells with a clone and count each clone's cells in each group.
 
@@ -1368,10 +1339,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         clone, with the labels that the clones keep apart.
 
         Returns:
-            One row per group, in the natural order of the labels, with its
-            name in ``group`` and its labels in the key columns, and for each
-            distinct pair of group and clone, sorted by group and clone code,
-            its group, its clone code and its cells.
+            The groups' keys, one row per group in the natural order of the
+            labels, indexed by its name and with its labels in the key
+            columns, and for each distinct pair of group and clone, sorted by
+            group and clone code, its group, its clone code and its cells.
         """
         grouped = cell_groups(
             self.zw,
@@ -1383,13 +1354,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection=cell_selection,
             memory_bytes=self.memoryBytes,
             kept_apart=source.kept_apart,
-            reserved=reserved,
         )
         counted = grouped.codes >= 0
         pair_groups, pair_codes, pair_cells = pair_counts(
             grouped.codes[counted], source.codes[counted]
         )
-        keys = group_frame(grouped.key_columns, grouped.keys)
+        keys = group_key_table(grouped.key_columns, grouped.keys)
         return keys, pair_groups, pair_codes, pair_cells
 
     def _grouped_clone_sizes(
@@ -1399,9 +1369,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         group_by: str | Sequence[str] | None,
         groups: ArtifactRef | None,
         cell_selection: ArtifactRef | None,
-        reserved: frozenset[str],
     ) -> tuple[pd.DataFrame, GroupedCloneSizes]:
         """Group the cells with a clone and summarize each group's clone sizes.
+
+        Returns:
+            The groups' keys, as :meth:`_clone_pair_counts` gives them, and
+            each group's clone sizes.
 
         Raises:
             ValueError: If no cell has both a clone and a group.
@@ -1411,7 +1384,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
-            reserved=reserved,
         )
 
         def check(rows: int) -> None:
@@ -1566,7 +1538,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection=None,
             memory_bytes=self.memoryBytes,
             kept_apart=kept_apart,
-            reserved=_EXPANSION_COLUMNS,
         )
         if not grouped.keys:
             raise ValueError("No cell has both a clone and a group")
@@ -1679,7 +1650,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Returns:
             The clonal expansion, with one row per cell, one per group and
-            category, and one per group and rank window.
+            category, and one per group and rank window, each naming its
+            group, and the groups' labels in ``group_keys``.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1741,6 +1713,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         key_columns = tuple(
             str(column) for column in cast(list[str], group.attrs["key_columns"])
         )
+        keys = group_key_table(key_columns, group_keys)
         counts = parameters["breakpoints"]
         frequencies = parameters["frequency_breakpoints"]
         sizes = _read(group, "group_clone_size")
@@ -1761,8 +1734,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             clones=codes,
             clone_ids=source.clone_ids,
             groups=_read(group, "group_codes"),
-            group_keys=group_keys,
-            key_columns=key_columns,
+            group_names=keys.index.tolist(),
             sizes=sizes,
             frequencies=clone_frequencies,
             splits=bounds,
@@ -1771,6 +1743,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cells=cells,
             categories=table,
             rank_windows=ranks,
+            group_keys=keys,
             clones=clones,
             labels=labels,
             breakpoints=None if counts is None else tuple(int(v) for v in counts),
@@ -1827,7 +1800,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Returns:
             The groups' indices and Hill numbers, observed, asymptotic and
-            standardized.
+            standardized, and the groups' labels in ``group_keys``.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1859,14 +1832,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
-            reserved=_DIVERSITY_COLUMNS,
         )
         table, hill, common, level = diversity_tables(
-            clone_sizes, keys, size=size, coverage=coverage
+            clone_sizes, keys.index, size=size, coverage=coverage
         )
         return ClonalDiversity(
             indices=table,
             hill=hill,
+            group_keys=keys,
             clones=clones,
             group_by=group_columns(group_by),
             groups=groups,
@@ -1918,7 +1891,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             knots: The number of default sizes.
 
         Returns:
-            The curves, one row per group, order and size.
+            The curves, one row per group, order and size, and the groups'
+            labels in ``group_keys``.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1966,16 +1940,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
-            reserved=_RAREFACTION_COLUMNS,
         )
         # Each group is rarefied in turn to at most this many sizes, and the
-        # curves hold a row per group, order and size, with the groups' labels.
+        # curves hold a row per group, order and size, with the group's name.
         n_sizes = knots if listed_sizes is None else len(listed_sizes)
         n_rows = len(clone_sizes) * len(chosen) * n_sizes
-        row_bytes = _CURVE_BYTES_PER_ROW + _CURVE_BYTES_PER_KEY_COLUMN * (
-            len(keys.columns) - 1
-        )
-        resident = _RAREFACTION_BYTES_PER_SIZE * n_sizes + row_bytes * n_rows
+        resident = _RAREFACTION_BYTES_PER_SIZE * n_sizes + _CURVE_BYTES_PER_ROW * n_rows
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Rarefying {len(clone_sizes)} groups to {n_sizes} sizes holds "
@@ -1986,12 +1956,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         return Rarefaction(
             curves=rarefaction_curves(
                 clone_sizes,
-                keys,
+                keys.index,
                 chosen,
                 sizes=listed_sizes,
                 endpoint=endpoint,
                 knots=knots,
             ),
+            group_keys=keys,
             clones=clones,
             group_by=group_columns(group_by),
             groups=groups,
@@ -2038,7 +2009,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 clones.
 
         Returns:
-            The groups' cells and clones and the indices of every pair.
+            The groups' cells and clones, the indices of every pair, and the
+            groups' labels in ``group_keys``.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -2046,8 +2018,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 both a clone and a group, fewer than two groups hold a cell
                 with a clone, no two groups share the labels that the clones
                 keep apart, a column of the groups is missing or named twice,
-                a key column names a column of the result, or two groups get
-                one name.
+                two key columns share a name, or two groups get one name.
             KeyError: If the store holds no such ``clones`` artifact, or not the
                 receptors of the clonotypes.
             RuntimeError: If the ``clones`` artifact or the receptors of the
@@ -2062,7 +2033,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
-            reserved=_OVERLAP_COLUMNS,
         )
         if len(pair_cells) == 0:
             raise ValueError("No cell has both a clone and a group")
@@ -2095,12 +2065,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         pairs = overlap_pairs(
             pair_groups, pair_codes, pair_cells, len(keys), strata=strata
         )
-        names = keys["group"].to_numpy(dtype=object)
+        names = keys.index.to_numpy(dtype=object)
         pairs.insert(0, "group_1", names[pairs.pop("first").to_numpy()])
         pairs.insert(1, "group_2", names[pairs.pop("second").to_numpy()])
         return CloneOverlap(
             group_sizes=_group_sizes(keys, pair_groups, pair_cells),
             pairs=pairs,
+            group_keys=keys,
             clones=clones,
             group_by=group_columns(group_by),
             groups=groups,
@@ -2142,16 +2113,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 one-dimensional array, or None.
 
         Returns:
-            One row per chosen clone and group in its ``table``, and the
-            chosen clones' labels.
+            One row per chosen clone and group in its ``table``, the chosen
+            clones' labels, and the groups' labels in ``group_keys``.
 
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a clone artifact, ``top_n`` is not
                 positive, ``labels`` is empty or a label names no clone, no
                 cell has both a clone and a group, a column of the groups is
-                missing or named twice, a key column names a column of the
-                result, or two groups get one name.
+                missing or named twice, two key columns share a name, or two
+                groups get one name.
             KeyError: If the store holds no such ``clones`` artifact, or not the
                 receptors of the clonotypes.
             RuntimeError: If the ``clones`` artifact or the receptors of the
@@ -2178,7 +2149,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
-            reserved=_TRACK_COLUMNS,
         )
         if len(pair_cells) == 0:
             raise ValueError("No cell has both a clone and a group")
@@ -2207,13 +2177,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             _fallback_strata(source, keys, strata, chosen),
         )
         n_rows = int((reach * np.bincount(strata, minlength=reach.shape[1])).sum())
-        # The rows, each with its clone, group, labels, cells and fraction,
-        # and beside them the clones read, their counts in each group and
-        # each group's rows.
-        n_key_columns = len(keys.columns) - 1
+        # The rows, each with its clone, group, cells and fraction, and beside
+        # them the clones read, their counts in each group and each group's
+        # rows.
         resident = (
-            n_rows
-            * (_TRACK_BYTES_PER_ROW + _TRACK_BYTES_PER_KEY_COLUMN * n_key_columns)
+            n_rows * _TRACK_BYTES_PER_ROW
             + reach.shape[0] * len(keys)
             + _BYTES_PER_CLONE_COUNT * len(pair_cells)
             + _SUMMARY_BYTES_PER_GROUP * len(keys)
@@ -2232,17 +2200,21 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         )
         tracked = np.asarray(identifiers[chosen].tolist(), dtype=object)
         # Without rows, the table keeps its columns and their types; clone
-        # labels are text of the groups' labels' type, which pandas 3 stores
+        # labels are text of the groups' names' type, which pandas 3 stores
         # as its string type and pandas 2 as Python objects, never fixed-width.
         sizes = _group_sizes(keys, pair_groups, pair_cells)
-        table = keys.take(rows).reset_index(drop=True)
-        table.insert(
-            0, "clone", pd.array(tracked[followed], dtype=table["group"].dtype)
+        named = keys.index.take(rows)
+        table = pd.DataFrame(
+            {
+                "clone": pd.array(tracked[followed], dtype=named.dtype),
+                "group": named,
+                "n_cells": counts,
+                "fraction": counts / sizes["n_cells"].to_numpy()[rows],
+            }
         )
-        table["n_cells"] = counts
-        table["fraction"] = counts / sizes["n_cells"].to_numpy()[rows]
         return CloneTracking(
             table=table,
+            group_keys=keys,
             clones=clones,
             tracked=tuple(str(label) for label in tracked.tolist()),
             group_by=group_columns(group_by),
@@ -2313,7 +2285,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Returns:
             The groups' cells and clones, each pair's coupling with its null
-            and z-score, and the groups' order.
+            and z-score, the groups' order, and the groups' labels in
+            ``group_keys``.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -2322,8 +2295,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 negative or 2**64 or more, no cell has both a clone and a
                 group, fewer than two groups hold a cell with a clone, no two
                 groups share the labels that the clones keep apart, a column
-                of the groups is missing or named twice, a key column names a
-                column of the result, two groups get one name, or
+                of the groups is missing or named twice, two key columns share
+                a name, two groups get one name, or
                 ``"normalized_covariance"`` meets fewer than two clones.
             KeyError: If the store holds no such ``clones`` artifact, or not the
                 receptors of the clonotypes.
@@ -2359,7 +2332,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
-            reserved=_COUPLING_COLUMNS,
         )
         if len(pair_cells) == 0:
             raise ValueError("No cell has both a clone and a group")
@@ -2418,7 +2390,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             workers=workers,
             batch=batch,
         )
-        names = keys["group"].to_numpy(dtype=object)
+        names = keys.index.to_numpy(dtype=object)
         pairs.insert(0, "group_1", names[pairs.pop("first").to_numpy()])
         pairs.insert(1, "group_2", names[pairs.pop("second").to_numpy()])
         logger.info(
@@ -2431,6 +2403,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             pairs=pairs,
             order=tuple(str(name) for name in names[leaves_list(tree)].tolist()),
             linkage=tree,
+            group_keys=keys,
             method=method,
             n_permutations=int(n_permutations),
             random_seed=int(random_seed),
@@ -2509,10 +2482,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 both early and late, the clones give no late cell a clone, no
                 late cell with a clone has a fate,
                 a clone's early and late cells carry two labels that the clones
-                keep apart, fewer than two fates hold a late cell, a column of the fates
-                is missing or named twice, a key column names a column of the
-                result, two fates get one name, or a fate is named
-                ``"clone"``, ``"n_late_cells"`` or ``"fate"``.
+                keep apart, fewer than two fates hold a late cell, a column of
+                the fates is missing or named twice, two key columns share a
+                name, or two fates get one name.
             KeyError: If the store holds no such ``clones`` artifact, or not the
                 receptors of the clonotypes.
             RuntimeError: If the ``clones`` artifact or the receptors of the
@@ -2577,7 +2549,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection=None,
             memory_bytes=self.memoryBytes,
             kept_apart=late_kept,
-            reserved=_FATE_BIAS_COLUMNS,
         )
         counted = (late_codes >= 0) & (grouped.codes >= 0)
         if not (late_codes >= 0).any():
@@ -2590,16 +2561,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "No cell has both a clone and a group among the late cells: "
                 "group_by and groups label none of the late cells with a clone"
             )
-        keys = group_frame(grouped.key_columns, grouped.keys)
+        keys = group_key_table(grouped.key_columns, grouped.keys, index="fate")
         if len(keys) < 2:
             raise ValueError("Fate bias needs at least two fates among the late cells")
-        names = keys["group"].to_numpy(dtype=object)
-        clashes = [name for name in names.tolist() if name in FATE_CELL_COLUMNS]
-        if clashes:
-            raise ValueError(
-                f"A fate is named {quoted_value(clashes[0])}, which is also a column of the "
-                "table of early cells; rename its label"
-            )
+        names = keys.index.to_numpy(dtype=object)
         columns = group_columns(group_by)
         n_fates = len(keys)
         arguments = CloneFateBiasArguments(
@@ -2733,8 +2698,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 :meth:`~cytearc.datastore.namespaces.ClonesAccessor.fate_bias`.
 
         Returns:
-            The fate bias, with one row per early cell, one per clone with
-            late cells and fate of its stratum, and one per fate.
+            The fate bias, with one row per early cell, its shares of the
+            fates in a table of their own, one row per clone with late cells
+            and fate of its stratum, one per fate, and the fates' labels in
+            ``group_keys``.
 
         Raises:
             TypeError: If ``bias`` is not an ArtifactRef.
@@ -2789,12 +2756,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         resident = (
             n_early
             * (_BIAS_TABLE_BYTES_PER_CELL + _BIAS_TABLE_BYTES_PER_FRACTION * n_fates)
-            + n_tested
-            * n_fates
-            * (
-                _BIAS_TABLE_BYTES_PER_ROW
-                + _BIAS_TABLE_BYTES_PER_KEY_COLUMN * len(key_columns)
-            )
+            + n_tested * n_fates * _BIAS_TABLE_BYTES_PER_ROW
             + _SUMMARY_BYTES_PER_GROUP * n_fates
             # The early cells' IDs, read as text for the index of their table.
             + text_read_bytes(self.cells._get_array("ids"), n_early)
@@ -2803,8 +2765,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         self._check_clone_table_budget(n_early, 0, "fate bias", held=resident)
         source = self._read_clone_input(clones, with_ids=True)
         assert source.clone_ids is not None
-        keys = group_frame(key_columns, group_keys)
-        cells, clone_fates = fate_bias_tables(
+        keys = group_key_table(key_columns, group_keys, index="fate")
+        cells, fractions, clone_fates = fate_bias_tables(
             self._clone_cell_ids(bias),
             codes=_read(group, "codes"),
             dominant=_read(group, "fate_codes"),
@@ -2816,15 +2778,20 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             clone_early_cells=_read(group, "clone_early_cells"),
             p_values=_read(group, "clone_p_values"),
             q_values=_read(group, "clone_q_values"),
-            fates=keys,
+            fates=keys.index,
         )
-        fates = keys.rename(columns={"group": "fate"}).assign(
-            n_late_cells=_read(group, "fate_cells").astype(np.int64)
+        fates = pd.DataFrame(
+            {
+                "fate": keys.index,
+                "n_late_cells": _read(group, "fate_cells").astype(np.int64),
+            }
         )
         return CloneFateBias(
             cells=cells,
+            fractions=fractions,
             clone_fates=clone_fates,
             fates=fates,
+            group_keys=keys,
             clones=clones,
             early=status.input_ref("cell_selection"),
             late=status.input_ref("late"),
@@ -2836,13 +2803,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 def _group_sizes(
     keys: pd.DataFrame, pair_groups: np.ndarray, pair_cells: np.ndarray
 ) -> pd.DataFrame:
-    """One row per group: its name, labels, cells with a clone and clones."""
+    """One row per group of ``keys``: its name, cells with a clone and clones."""
     n_groups = len(keys)
-    return keys.assign(
-        n_cells=np.bincount(pair_groups, weights=pair_cells, minlength=n_groups).astype(
-            np.int64
-        ),
-        n_clones=np.bincount(pair_groups, minlength=n_groups),
+    return pd.DataFrame(
+        {
+            "group": keys.index,
+            "n_cells": np.bincount(
+                pair_groups, weights=pair_cells, minlength=n_groups
+            ).astype(np.int64),
+            "n_clones": np.bincount(pair_groups, minlength=n_groups),
+        }
     )
 
 

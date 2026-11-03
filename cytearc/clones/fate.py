@@ -16,6 +16,7 @@ the permutation, so the null does not depend on threads. These functions work on
 codes and never touch storage.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,12 +28,12 @@ from ..storage.refs import ArtifactRef
 from ..utils.arrays import sorted_unique
 from ..utils.digest import mix64
 from ..utils.numba import njit, numba_threads
+from .groups import checked_group_names
 from .overlap import group_clone_matrix
 from ..utils.arguments import quoted_value
 
 __all__ = [
     "COUPLING_METHODS",
-    "FATE_CELL_COLUMNS",
     "CloneCoupling",
     "CloneFateBias",
     "FateBiasArrays",
@@ -835,11 +836,6 @@ def fate_bias(
     )
 
 
-#: The columns of the cells table of fate bias besides one per fate, which no
-#: fate may share.
-FATE_CELL_COLUMNS = ("clone", "n_late_cells", "fate")
-
-
 def fate_bias_tables(
     cell_ids: np.ndarray,
     *,
@@ -853,9 +849,13 @@ def fate_bias_tables(
     clone_early_cells: np.ndarray,
     p_values: np.ndarray,
     q_values: np.ndarray,
-    fates: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """The tables of early cells and of clones with late cells.
+    fates: Sequence[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """The tables of early cells, of their fractions and of clones with late cells.
+
+    The fates' names are values of the tables' ``fate`` columns and the
+    columns of the table of fractions alone, which holds no other column, so
+    a fate may take any name.
 
     Args:
         cell_ids: The early cells' IDs.
@@ -870,18 +870,23 @@ def fate_bias_tables(
         clone_early_cells: Their early cells.
         p_values: Their p-values in each fate, NaN for fates not tested.
         q_values: Their adjusted p-values.
-        fates: One row per fate: ``group``, its name, and its key columns.
+        fates: Each fate's name, in the order of the fractions' columns.
 
     Returns:
-        One row per early cell, indexed by ID: ``clone``, ``n_late_cells``,
-        ``fate`` and one column per fate of its share; and one row per clone
-        and fate of its stratum, by clone code and then fate: ``clone``,
-        ``fate``, the key columns, ``n_early_cells``, ``n_late_cells``,
-        ``n_cells``, ``fraction``, ``p_value`` and ``q_value``.
+        One row per early cell, indexed by ID: ``clone``, ``n_late_cells``
+        and ``fate``; one row per early cell, indexed by ID, and one column
+        per fate, named by the fate, of its share; and one row per clone and
+        fate of its stratum, by clone code and then fate: ``clone``,
+        ``fate``, ``n_early_cells``, ``n_late_cells``, ``n_cells``,
+        ``fraction``, ``p_value`` and ``q_value``.
+
+    Raises:
+        ValueError: If ``fates`` does not hold one text name for each column
+            of the fractions or names two fates alike.
     """
-    names = fates["group"].to_numpy(dtype=object)
+    fate_names = checked_group_names(fates, np.shape(fractions)[1])
+    names = fate_names.to_numpy(dtype=object)
     labels = pd.Index(np.asarray(clone_ids, dtype=object))
-    fate_names = pd.Index(names)
     cell_columns: dict[str, Any] = {
         "clone": pd.Categorical.from_codes(np.asarray(codes, dtype=np.int64), labels),
         "n_late_cells": np.asarray(late_cells, dtype=np.int64),
@@ -889,19 +894,22 @@ def fate_bias_tables(
             np.asarray(dominant, dtype=np.int64), fate_names
         ),
     }
-    shares = np.asarray(fractions, dtype=np.float64)
-    for position, name in enumerate(names.tolist()):
-        cell_columns[str(name)] = shares[:, position]
-    cells = pd.DataFrame(cell_columns, index=pd.Index(np.asarray(cell_ids), name="ids"))
+    index = pd.Index(np.asarray(cell_ids), name="ids")
+    cells = pd.DataFrame(cell_columns, index=index)
+    shares = pd.DataFrame(
+        np.asarray(fractions, dtype=np.float64),
+        index=index,
+        columns=pd.Index([str(name) for name in names.tolist()]),
+    )
     rows, columns = np.nonzero(~np.isnan(np.asarray(p_values)))
     clone_late = np.asarray(clone_cells).sum(axis=1)
-    table = fates.take(columns).reset_index(drop=True)
-    table = table.rename(columns={"group": "fate"})
-    table["fate"] = pd.Categorical.from_codes(columns, fate_names)
-    table.insert(
-        0,
-        "clone",
-        pd.Categorical.from_codes(np.asarray(clones, dtype=np.int64)[rows], labels),
+    table = pd.DataFrame(
+        {
+            "clone": pd.Categorical.from_codes(
+                np.asarray(clones, dtype=np.int64)[rows], labels
+            ),
+            "fate": pd.Categorical.from_codes(columns, fate_names),
+        }
     )
     found = np.asarray(clone_cells)[rows, columns]
     table["n_early_cells"] = np.asarray(clone_early_cells, dtype=np.int64)[rows]
@@ -910,16 +918,19 @@ def fate_bias_tables(
     table["fraction"] = found / clone_late[rows]
     table["p_value"] = np.asarray(p_values)[rows, columns]
     table["q_value"] = np.asarray(q_values)[rows, columns]
-    return cells, table
+    return cells, shares, table
 
 
 @dataclass(frozen=True, slots=True)
 class CloneCoupling:
     """How strongly groups of cells share clones, against shuffled labels.
 
+    Each table names a group by its labels joined by commas, and
+    ``group_keys`` holds its labels.
+
     Attributes:
-        group_sizes: One row per group: ``group``, the key columns,
-            ``n_cells`` with a clone and ``n_clones``.
+        group_sizes: One row per group: ``group``, ``n_cells`` with a clone
+            and ``n_clones``.
         pairs: One row per pair of groups compared: ``group_1``, ``group_2``,
             ``coupling``, ``null_mean`` and ``null_sd`` of the permutations, and
             ``z_score``, ``(coupling - null_mean) / null_sd``.
@@ -927,6 +938,10 @@ class CloneCoupling:
             of the coupling.
         linkage: That tree, as SciPy's linkage matrix of the groups' positions
             in ``group_sizes``.
+        group_keys: One row per group, indexed by its name, ``group``, with
+            its label in each key column: the ``group_by`` columns, the kind
+            of the ``groups`` artifact, then the columns that the clones keep
+            apart, under their own names.
         method: The coupling method, one of ``COUPLING_METHODS``.
         n_permutations: The permutations of the null.
         random_seed: The seed of the permutations.
@@ -940,6 +955,7 @@ class CloneCoupling:
     pairs: pd.DataFrame = field(repr=False)
     order: tuple[str, ...]
     linkage: np.ndarray = field(repr=False)
+    group_keys: pd.DataFrame = field(repr=False)
     method: str
     n_permutations: int
     random_seed: int
@@ -953,22 +969,30 @@ class CloneCoupling:
 class CloneFateBias:
     """The fates that the late cells of each early cell's clone took.
 
+    The fates are the groups of the late cells. Each table names a fate in
+    ``fate``, its labels joined by commas, and ``group_keys`` holds its
+    labels, so ``clone_fates.join(group_keys, on="fate")`` gives each row its
+    fate's labels.
+
     Attributes:
         cells: One row per early cell, indexed by cell ``ids``: ``clone``,
-            ``n_late_cells`` (its clone's late cells with a fate), ``fate`` (the
-            fate that holds the most of them, missing for none or a tie), and
-            one column per fate, named by the fate, of the share of the
-            clone's late cells in it, NaN without late cells.
+            ``n_late_cells`` (its clone's late cells with a fate) and ``fate``
+            (the fate that holds the most of them, missing for none or a tie).
+        fractions: One row per early cell, indexed by cell ``ids``, and one
+            column per fate, named by the fate, of the share of the clone's
+            late cells in it, NaN without late cells.
         clone_fates: One row per clone with late cells and fate of its
-            stratum, by clone and then fate: ``clone``, ``fate``, the fate's
-            key columns,
+            stratum, by clone and then fate: ``clone``, ``fate``,
             ``n_early_cells``, ``n_late_cells``, ``n_cells`` (its late cells in
             the fate), ``fraction``, ``p_value`` of the one-sided Fisher test and
             ``q_value``, adjusted by Benjamini and Hochberg's method within
             the fate.
-        fates: One row per fate: ``fate``, the key columns, and ``n_late_cells``,
-            those without a clone included unless the clones keep labels
-            apart.
+        fates: One row per fate: ``fate`` and ``n_late_cells``, those without
+            a clone included unless the clones keep labels apart.
+        group_keys: One row per fate, indexed by its name, ``fate``, with its
+            label in each key column: the ``group_by`` columns, the kind of
+            the ``groups`` artifact, then the columns that the clones keep
+            apart, under their own names.
         clones: The clone artifact, such as a ``clones`` artifact.
         early: The selection of the early cells.
         late: The selection of the late cells.
@@ -977,8 +1001,10 @@ class CloneFateBias:
     """
 
     cells: pd.DataFrame = field(repr=False)
+    fractions: pd.DataFrame = field(repr=False)
     clone_fates: pd.DataFrame = field(repr=False)
     fates: pd.DataFrame = field(repr=False)
+    group_keys: pd.DataFrame = field(repr=False)
     clones: ArtifactRef
     early: ArtifactRef
     late: ArtifactRef

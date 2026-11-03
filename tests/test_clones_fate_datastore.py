@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 from scipy.cluster.hierarchy import leaves_list
 from scipy.stats import fisher_exact
@@ -83,7 +84,8 @@ def test_coupling_measures_every_pair_of_cell_types(shared, method) -> None:
     assert isinstance(result, CloneCoupling)
     assert store.artifacts.list(scope="datastore") == saved
     table = TRUTH.group_clone_cells(TRUTH.cell_types)
-    assert result.group_sizes[
+    assert result.group_sizes.columns.tolist() == ["group", "n_cells", "n_clones"]
+    assert result.group_sizes.join(result.group_keys, on="group")[
         ["group", "cell_type", "n_cells", "n_clones"]
     ].values.tolist() == [
         [name, name, sum(table[name].values()), len(table[name])] for name in TYPES
@@ -163,12 +165,10 @@ def test_coupling_keeps_to_a_cell_selection_and_takes_label_artifacts(shared) ->
     )
     by_labels = store.clones.coupling(clones, groups=labels, n_permutations=0)
     by_column = store.clones.coupling(clones, group_by="cell_type", n_permutations=0)
-    assert by_labels.group_sizes.columns.tolist() == [
-        "group",
-        "cluster_labels",
-        "n_cells",
-        "n_clones",
-    ]
+    assert by_labels.group_sizes.columns.tolist() == ["group", "n_cells", "n_clones"]
+    assert by_labels.group_keys.to_dict("index") == {
+        name: {"cluster_labels": name} for name in TYPES
+    }
     assert by_labels.pairs.equals(by_column.pairs)
     assert by_labels.groups == labels
 
@@ -221,16 +221,18 @@ def test_coupling_needs_two_groups_with_a_clone(copied) -> None:
         store.clones.coupling(clones, group_by="unlabelled")
     with pytest.raises(ValueError, match="at least two groups"):
         store.clones.coupling(clones, group_by="sample", cell_selection=copied.early)
-    store.cells.insert("n_cells", TRUTH.cell_types.astype(object))
-    with pytest.raises(ValueError, match="'n_cells', which is also a column"):
-        store.clones.coupling(clones, group_by="n_cells")
-    # The count columns are n_cells and n_clones, so a column named cells
-    # groups the cells as any other.
-    store.cells.insert("cells", TRUTH.cell_types.astype(object))
-    assert (
-        store.clones.coupling(clones, group_by="cells", n_permutations=0).order
-        == store.clones.coupling(clones, group_by="cell_type", n_permutations=0).order
-    )
+    # A column named like the result's own columns groups the cells as any
+    # other, and its labels stay in the keys.
+    neutral = store.clones.coupling(clones, group_by="cell_type", n_permutations=0)
+    for name in ("group", "n_cells", "n_clones", "coupling", "cells"):
+        store.cells.insert(name, TRUTH.cell_types.astype(object), overwrite=True)
+        named = store.clones.coupling(clones, group_by=name, n_permutations=0)
+        assert named.order == neutral.order
+        pd.testing.assert_frame_equal(named.group_sizes, neutral.group_sizes)
+        pd.testing.assert_frame_equal(named.pairs, neutral.pairs)
+        assert named.group_keys.to_dict("index") == {
+            type_: {name: type_} for type_ in TYPES
+        }
 
 
 # Clones that keep labels apart, as clonotypes keep receptor types apart,
@@ -314,7 +316,12 @@ def test_fate_bias_follows_each_early_cell_to_its_clones_late_cells(copied) -> N
     assert (loaded.group_by, loaded.groups) == (("cell_type",), None)
     cells = loaded.cells
     assert cells.index.tolist() == TRUTH.cell_ids[EARLY].tolist()
-    assert cells.columns.tolist() == ["clone", "n_late_cells", "fate", *TYPES]
+    assert cells.columns.tolist() == ["clone", "n_late_cells", "fate"]
+    # The shares of the fates sit in a table of their own, named by the fates.
+    fractions = loaded.fractions
+    assert fractions.index.name == "ids"
+    assert fractions.index.tolist() == cells.index.tolist()
+    assert fractions.columns.tolist() == TYPES
     dominant = []
     for (cell_id, row), clone in zip(
         cells.iterrows(), TRUTH.clones[EARLY], strict=True
@@ -327,11 +334,13 @@ def test_fate_bias_follows_each_early_cell_to_its_clones_late_cells(copied) -> N
         else:
             assert row["clone"] == number_label(int(clone))
         if total == 0:
-            assert row[TYPES].isna().all() and row.isna()["fate"]
+            assert fractions.loc[cell_id].isna().all() and row.isna()["fate"]
             dominant.append("")
             continue
         for name in TYPES:
-            assert row[name] == pytest.approx(found[name] / total, rel=1e-15)
+            assert fractions.loc[cell_id, name] == pytest.approx(
+                found[name] / total, rel=1e-15
+            )
         top = max(found.values())
         winners = [name for name in TYPES if found[name] == top]
         expected = winners[0] if len(winners) == 1 else None
@@ -353,8 +362,12 @@ def test_fate_bias_tests_each_clone_against_all_late_cells(shared) -> None:
     late_types = Counter(str(name) for name in TRUTH.cell_types[LATE])
     assert loaded.fates.to_dict("list") == {
         "fate": TYPES,
-        "cell_type": TYPES,
         "n_late_cells": [late_types[name] for name in TYPES],
+    }
+    # The fates' labels, indexed by the fates' names.
+    assert loaded.group_keys.index.name == "fate"
+    assert loaded.group_keys.to_dict("index") == {
+        name: {"cell_type": name} for name in TYPES
     }
     n_late = int(LATE.sum())
     tested = sorted({int(c) for c in TRUTH.clones[LATE] if c >= 0})
@@ -398,7 +411,8 @@ def test_an_early_cell_whose_clone_has_no_late_cells_has_no_bias(shared) -> None
     )
     alone = loaded.cells.loc[TRUTH.cell_ids[TRUTH.clones == 7]]
     assert alone["n_late_cells"].tolist() == [0]
-    assert alone[TYPES].isna().all(axis=None) and alone["fate"].isna().all()
+    shares = loaded.fractions.loc[alone.index, TYPES]
+    assert shares.isna().all(axis=None) and alone["fate"].isna().all()
     assert "8" not in set(loaded.clone_fates["clone"].astype(str))
 
 
@@ -516,43 +530,65 @@ def test_fate_bias_arguments_are_checked(copied) -> None:
         store.clones.fate_bias(clones, group_by="unlabelled", early=early, late=late)
     with pytest.raises(ValueError, match="at least two fates"):
         store.clones.fate_bias(clones, group_by="sample", early=early, late=late)
-    store.cells.insert(
-        "named",
-        np.where(TRUTH.cell_types == "Monocyte", "clone", "other").astype(object),
-    )
-    with pytest.raises(ValueError, match="A fate is named 'clone'"):
-        store.clones.fate_bias(clones, group_by="named", early=early, late=late)
-    # The table of early cells counts each one's late clone-mates as
-    # n_late_cells, so a fate of that name is refused too; one named as the
-    # count was named before is a fate like any other, as the end shows.
-    store.cells.insert(
-        "counted",
-        np.where(TRUTH.cell_types == "Monocyte", "n_late_cells", "other").astype(
-            object
-        ),
-    )
-    with pytest.raises(ValueError, match="A fate is named 'n_late_cells'"):
-        store.clones.fate_bias(clones, group_by="counted", early=early, late=late)
-    store.cells.insert("fraction", TRUTH.cell_types.astype(object))
-    with pytest.raises(ValueError, match="'fraction', which is also a column"):
-        store.clones.fate_bias(clones, group_by="fraction", early=early, late=late)
     assert store.artifacts.list(kind="clone_fate_bias", scope="datastore") == []
     with pytest.raises(TypeError, match="bias must be an ArtifactRef"):
         store.clones.load_fate_bias("bias")
     with pytest.raises(ValueError, match="bias must be a clone_fate_bias artifact"):
         store.clones.load_fate_bias(clones)
-    store.cells.insert(
-        "counted",
-        np.where(TRUTH.cell_types == "Monocyte", "late_cells", "other").astype(object),
-        overwrite=True,
+
+
+@pytest.mark.parametrize(
+    "name", ["clone", "n_late_cells", "fate", "n_early_cells", "fraction", "ids"]
+)
+def test_fates_may_take_the_names_of_the_tables_columns(copied, name) -> None:
+    store, clones = copied.store, copied.clones
+    early, late = copied.early, copied.late
+    neutral = store.clones.load_fate_bias(
+        store.clones.fate_bias(clones, group_by="cell_type", early=early, late=late)
     )
-    accepted = store.clones.fate_bias(
-        clones, group_by="counted", early=early, late=late
+    # The monocytes take a fate named like a column of the tables, which holds
+    # the shares of the monocytes' fate and changes nothing else.
+    renamed = np.where(TRUTH.cell_types == "Monocyte", name, TRUTH.cell_types)
+    store.cells.insert("named", renamed.astype(object), overwrite=True)
+    loaded = store.clones.load_fate_bias(
+        store.clones.fate_bias(clones, group_by="named", early=early, late=late)
     )
-    assert set(store.clones.load_fate_bias(accepted).fates["fate"]) == {
-        "late_cells",
-        "other",
+    names = {"Monocyte": name}
+    assert loaded.cells.columns.tolist() == ["clone", "n_late_cells", "fate"]
+    pd.testing.assert_series_equal(loaded.cells["clone"], neutral.cells["clone"])
+    pd.testing.assert_series_equal(
+        loaded.cells["n_late_cells"], neutral.cells["n_late_cells"]
+    )
+    assert loaded.cells["fate"].astype(object).tolist() == [
+        names.get(fate, fate) if isinstance(fate, str) else fate
+        for fate in neutral.cells["fate"].astype(object).tolist()
+    ]
+    # The shares are unchanged, under the fates' own names, in the order of
+    # the fates.
+    order = loaded.fates["fate"].tolist()
+    assert sorted(order) == sorted(names.get(fate, fate) for fate in TYPES)
+    assert loaded.fractions.columns.tolist() == order
+    pd.testing.assert_frame_equal(
+        loaded.fractions, neutral.fractions.rename(columns=names)[order]
+    )
+    assert loaded.group_keys.index.tolist() == order
+    assert loaded.group_keys.to_dict("index") == {
+        fate: {"named": fate} for fate in order
     }
+    by_fate = loaded.clone_fates.assign(fate=loaded.clone_fates["fate"].astype(str))
+    expected = neutral.clone_fates.assign(
+        fate=neutral.clone_fates["fate"].astype(str).replace(names)
+    )
+    columns = ["clone", "fate", "n_cells", "p_value"]
+    assert sorted(map(tuple, by_fate[columns].astype(str).values.tolist())) == sorted(
+        map(tuple, expected[columns].astype(str).values.tolist())
+    )
+    # Every saved fate bias reads back.
+    assert len(
+        store.clones.load_fate_bias(
+            store.clones.fate_bias(clones, group_by="named", early=early, late=late)
+        ).cells
+    ) == int(EARLY.sum())
 
 
 def test_fate_bias_tests_clones_within_the_labels_kept_apart(kept_apart) -> None:
@@ -725,17 +761,17 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
     monkeypatch.setattr(store, "memoryBytes", measured)
     saved = store.clones.fate_bias(clones, **options)
     # Loading: per early cell 200 bytes and 24 per fraction, per row of clone
-    # and fate 160 bytes and 16 per key column, 2,000 per fate, the clones
-    # read with their labels, eight of one stored character, and the early
-    # cells' IDs read as text.
+    # and fate 160 bytes, which leave the fates' labels to the keys, 2,000 per
+    # fate, the clones read with their labels, eight of one stored character,
+    # and the early cells' IDs read as text.
     loaded = (
         n_early * (200 + 24 * n_late)
-        + tested * n_late * (160 + 16)
+        + tested * n_late * 160
         + 2_000 * n_late
         + CODES_READ
         + 8 * (100 + 3 * 4)
     )
-    assert loaded == 111_296
+    assert loaded == 107_840
     loaded += ids_read_bytes(store, n_early)
     monkeypatch.setattr(store, "memoryBytes", loaded - 1)
     with pytest.raises(
@@ -743,7 +779,9 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
     ):
         store.clones.load_fate_bias(saved)
     monkeypatch.setattr(store, "memoryBytes", loaded)
-    assert store.clones.load_fate_bias(saved).cells.shape == (n_early, 3 + n_late)
+    bias = store.clones.load_fate_bias(saved)
+    assert bias.cells.shape == (n_early, 3)
+    assert bias.fractions.shape == (n_early, n_late)
 
 
 def test_the_artifact_stores_its_arrays_by_early_cell_clone_and_fate(shared) -> None:

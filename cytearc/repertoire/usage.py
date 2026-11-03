@@ -14,13 +14,14 @@ and codes and never touch storage.
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from ..clones.groups import checked_group_names
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import sorted_unique, unique_rows
 
@@ -174,7 +175,7 @@ def _distinct(
 
 
 def count_chains(
-    keys: pd.DataFrame,
+    names: Sequence[str],
     groups: np.ndarray,
     cells: np.ndarray,
     loci: tuple[np.ndarray, np.ndarray],
@@ -194,9 +195,8 @@ def count_chains(
     chains of an arm share their values.
 
     Args:
-        keys: One row per group: ``group``, its name, and its label in each
-            key column.
-        groups: Each chain's group, a position in ``keys``.
+        names: Each group's name, which the table holds in ``group``.
+        groups: Each chain's group, a position in ``names``.
         cells: Each chain's cell.
         loci: Each chain's locus, as a code, and the loci.
         values: For each counted column, each chain's code and the names.
@@ -210,12 +210,17 @@ def count_chains(
 
     Returns:
         One row per group, locus and values with a chain, by group and
-        locus: the columns of ``keys``, ``locus``, the values, the count and
-        ``fraction``, the count's share of the group's chains of that locus;
-        and the cells with a counted chain.
+        locus: ``group``, ``locus``, the values, the count and ``fraction``,
+        the count's share of the group's chains of that locus; and the cells
+        with a counted chain.
+
+    Raises:
+        ValueError: If ``names`` does not hold one text name for each group
+            or names two groups alike.
     """
+    named = checked_group_names(names)
     column = f"n_{count}"
-    columns = [*keys.columns, "locus", *values, column, "fraction"]
+    columns = ["group", "locus", *values, column, "fraction"]
     codes = [
         np.asarray(chain_codes, dtype=np.int64) for chain_codes, _ in values.values()
     ]
@@ -225,10 +230,10 @@ def count_chains(
     n_cells = len(sorted_unique(np.asarray(cells, dtype=np.int64)[known]))
     if not known.any():
         # The table keeps its columns and their types without rows.
-        empty = keys.iloc[:0].reset_index(drop=True)
+        empty = pd.DataFrame({"group": named[:0]})
         empty["locus"] = pd.Series(dtype=object)
-        for name, (_codes, names) in values.items():
-            empty[name] = pd.Series(dtype=np.asarray(names).dtype)
+        for name, (_codes, value_names) in values.items():
+            empty[name] = pd.Series(dtype=np.asarray(value_names).dtype)
         empty[column] = pd.Series(dtype=np.int64)
         empty["fraction"] = pd.Series(dtype=np.float64)
         return empty[columns], n_cells
@@ -237,7 +242,11 @@ def count_chains(
         np.asarray(loci[0], dtype=np.int64)[known],
         *(chain_codes[known] for chain_codes in codes),
     ]
-    widths = [len(keys), len(loci[1]), *(len(names) for _, names in values.values())]
+    widths = [
+        len(named),
+        len(loci[1]),
+        *(len(value_names) for _, value_names in values.values()),
+    ]
     if count == "clonotypes" or once_per_cell:
         # Each clonotype, or each cell, once per group, locus and values.
         identities = np.asarray(
@@ -260,10 +269,10 @@ def count_chains(
         )
     else:
         order = np.arange(len(distinct))
-    table = keys.take(distinct[order, 0]).reset_index(drop=True)
+    table = pd.DataFrame({"group": named.take(distinct[order, 0])})
     table["locus"] = np.asarray(loci[1], dtype=object)[distinct[order, 1]]
-    for at, (name, (_, names)) in enumerate(values.items()):
-        table[name] = np.asarray(names)[distinct[order, 2 + at]]
+    for at, (name, (_, value_names)) in enumerate(values.items()):
+        table[name] = np.asarray(value_names)[distinct[order, 2 + at]]
     table[column] = counts[order]
     table["fraction"] = fraction[order]
     return table, n_cells
@@ -273,13 +282,19 @@ def count_chains(
 class GeneUsage:
     """The gene usage of groups of cells.
 
+    The table names each group in ``group``, and ``group_keys`` holds its
+    labels, so ``table.join(group_keys, on="group")`` gives each row its
+    group's labels.
+
     Attributes:
         table: One row per group, locus and gene, or gene combination:
-            ``group`` (its labels joined by commas, or ``"all cells"``), the
-            group's key columns, ``locus``, one column per gene field,
-            ``n_cells`` or ``n_clonotypes``, the cells or clonotypes with the
-            genes, and their ``fraction`` of the group's chains of that
-            locus.
+            ``group`` (its labels joined by commas, or ``"all cells"``),
+            ``locus``, one column per gene field, ``n_cells`` or
+            ``n_clonotypes``, the cells or clonotypes with the genes, and
+            their ``fraction`` of the group's chains of that locus.
+        group_keys: One row per group, indexed by its name, ``group``, with
+            its label in each key column, the ``group_by`` columns and the
+            kind of the ``groups`` artifact, under their own names.
         source: The ``immune_receptors`` or ``clonotypes`` artifact.
         genes: The gene fields, such as ``("v_call", "j_call")``.
         level: ``"allele"``, ``"gene"`` or ``"family"``.
@@ -292,6 +307,7 @@ class GeneUsage:
     """
 
     table: pd.DataFrame = field(repr=False)
+    group_keys: pd.DataFrame = field(repr=False)
     source: ArtifactRef
     genes: tuple[str, ...]
     level: str
@@ -307,13 +323,19 @@ class GeneUsage:
 class Spectratype:
     """The junction lengths of groups of cells.
 
+    The table names each group in ``group``, and ``group_keys`` holds its
+    labels, as :class:`GeneUsage` holds them.
+
     Attributes:
         table: One row per group, locus and length, by group, locus and
             length: ``group`` (its labels joined by commas, or ``"all
-            cells"``), the group's key columns, ``locus``, ``length``
-            (residues or nucleotides), ``n_cells`` or ``n_clonotypes``, the
-            cells or clonotypes with junctions of that length, and their
-            ``fraction`` of the group's chains of that locus.
+            cells"``), ``locus``, ``length`` (residues or nucleotides),
+            ``n_cells`` or ``n_clonotypes``, the cells or clonotypes with
+            junctions of that length, and their ``fraction`` of the group's
+            chains of that locus.
+        group_keys: One row per group, indexed by its name, ``group``, with
+            its label in each key column, the ``group_by`` columns and the
+            kind of the ``groups`` artifact, under their own names.
         source: The ``immune_receptors`` or ``clonotypes`` artifact.
         sequence: ``"aa"`` for residues or ``"nt"`` for nucleotides.
         slots: The chain slots counted.
@@ -325,6 +347,7 @@ class Spectratype:
     """
 
     table: pd.DataFrame = field(repr=False)
+    group_keys: pd.DataFrame = field(repr=False)
     source: ArtifactRef
     sequence: str
     slots: tuple[str, ...]

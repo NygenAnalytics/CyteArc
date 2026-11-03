@@ -137,14 +137,12 @@ def _units(rng: np.random.Generator, n_chains: int):
 def test_chains_are_counted_as_count_units_counts_their_labels(seed, count) -> None:
     rng = np.random.default_rng(seed)
     groups, loci, genes, pairs, cells, clonotypes = _units(rng, 300)
-    keys = pd.DataFrame(
-        {"group": ["s1, a", "s2, a", "s10, b"], "sample": ["s1", "s2", "s10"]}
-    )
+    names = ["s1, a", "s2, a", "s10, b"]
     locus_names = np.asarray(["TRA", "TRB"], dtype=object)
     gene_labels = np.asarray(["TRAV1", "TRAV10", "TRAV2", "TRBV1"], dtype=object)
     pair_labels = np.asarray(["TRAJ1", "TRAJ2"], dtype=object)
     table, n_cells = count_chains(
-        keys,
+        names,
         groups,
         cells,
         (loci, locus_names),
@@ -174,18 +172,17 @@ def test_chains_are_counted_as_count_units_counts_their_labels(seed, count) -> N
         f"n_{count}",
     )
     positions = expected.pop("group").to_numpy()
-    expected.insert(0, "sample", keys["sample"].to_numpy()[positions])
-    expected.insert(0, "group", keys["group"].to_numpy()[positions])
+    expected.insert(0, "group", np.asarray(names, dtype=object)[positions])
     pd.testing.assert_frame_equal(table, expected, check_exact=True)
     known = (genes >= 0) & (pairs >= 0)
     assert n_cells == len(set(cells[known].tolist()))
 
 
 def test_chains_are_ordered_by_value_or_by_count() -> None:
-    keys = pd.DataFrame({"group": ["all cells"]})
+    names = ["all cells"]
     lengths = np.asarray([12, 14, 14, 13, 14, -1, 12])
     table, n_cells = count_chains(
-        keys,
+        names,
         np.zeros(7, dtype=np.int64),
         np.arange(7),
         (np.zeros(7, dtype=np.int64), np.asarray(["TRB"], dtype=object)),
@@ -193,10 +190,14 @@ def test_chains_are_ordered_by_value_or_by_count() -> None:
         "cells",
         by_count=False,
     )
-    assert table[["length", "n_cells"]].values.tolist() == [[12, 2], [13, 1], [14, 3]]
+    assert table[["group", "length", "n_cells"]].values.tolist() == [
+        ["all cells", 12, 2],
+        ["all cells", 13, 1],
+        ["all cells", 14, 3],
+    ]
     assert table["length"].dtype == np.int64 and n_cells == 6
     by_count = count_chains(
-        keys,
+        names,
         np.zeros(7, dtype=np.int64),
         np.arange(7),
         (np.zeros(7, dtype=np.int64), np.asarray(["TRB"], dtype=object)),
@@ -205,7 +206,7 @@ def test_chains_are_ordered_by_value_or_by_count() -> None:
     )[0]
     assert by_count["length"].tolist() == [14, 12, 13]
     empty, none = count_chains(
-        keys,
+        names,
         np.zeros(2, dtype=np.int64),
         np.arange(2),
         (np.zeros(2, dtype=np.int64), np.asarray(["TRB"], dtype=object)),
@@ -285,9 +286,8 @@ def test_gene_calls_lose_the_spaces_around_them() -> None:
 def test_a_cell_counts_once_per_value_on_request() -> None:
     # Cell 0 holds two chains of TRA with one V gene, as two alpha slots may;
     # cell 1 one chain of it and one of another gene.
-    keys = pd.DataFrame({"group": ["all cells"]})
     options = {
-        "keys": keys,
+        "names": ["all cells"],
         "groups": np.zeros(4, dtype=np.int64),
         "cells": np.asarray([0, 0, 1, 1]),
         "loci": (np.zeros(4, dtype=np.int64), np.asarray(["TRA"], dtype=object)),
@@ -307,7 +307,7 @@ def test_a_cell_counts_once_per_value_on_request() -> None:
 def test_an_empty_table_keeps_the_types_of_its_columns() -> None:
     def counted(length: int) -> tuple[pd.DataFrame, int]:
         return count_chains(
-            pd.DataFrame({"group": ["all cells"], "sample": ["s1"]}),
+            ["all cells"],
             np.zeros(1, dtype=np.int64),
             np.zeros(1, dtype=np.int64),
             (np.zeros(1, dtype=np.int64), np.asarray(["TRB"], dtype=object)),
@@ -316,10 +316,30 @@ def test_an_empty_table_keeps_the_types_of_its_columns() -> None:
         )
 
     # A chain without a length leaves no row, and the counts, fractions,
-    # lengths and key columns keep the types that a row gives them.
+    # lengths and the groups' names keep the types that a row gives them.
     empty, n_cells = counted(-1)
     full, _n_cells = counted(2)
     assert empty.empty and n_cells == 0 and len(full) == 1
-    for column in ("group", "sample", "length", "n_cells", "fraction"):
+    assert empty.columns.tolist() == full.columns.tolist()
+    assert full.columns.tolist() == ["group", "locus", "length", "n_cells", "fraction"]
+    for column in ("group", "length", "n_cells", "fraction"):
         assert empty[column].dtype == full[column].dtype, column
     assert empty["n_cells"].dtype == np.int64 and empty["fraction"].dtype == np.float64
+
+
+def test_chains_are_counted_only_for_one_text_name_per_group() -> None:
+    # A frame of names and labels, whose rows pandas reads as tuples, and
+    # repeated names name no group.
+    for names, message in (
+        (pd.DataFrame({"group": ["s1", "s2"], "sample": ["s1", "s2"]}), "one text"),
+        (["s1", "s1"], "'s1' names two"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            count_chains(
+                names,
+                np.asarray([0, 1]),
+                np.asarray([0, 1]),
+                (np.zeros(2, dtype=np.int64), np.asarray(["TRB"], dtype=object)),
+                {"length": (np.asarray([1, 2]), np.arange(3))},
+                "cells",
+            )

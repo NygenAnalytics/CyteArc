@@ -8,50 +8,23 @@ import pandas as pd
 
 from ..clones.groups import group_names
 from ..storage.refs import ArtifactRef
-from ..utils.arguments import quoted_value
 
-__all__ = ["cell_groups", "labels_by_group", "record_groups", "refuse_named_columns"]
-
-
-def record_groups(table: pd.DataFrame, values_from: str) -> pd.DataFrame:
-    """Return one row per group of a summary's table: ``group`` and its key columns.
-
-    A summary names each group in its table's ``group`` column and holds the
-    group's label in each key column, the columns between ``group`` and
-    ``values_from``, the first column that holds values. Figures read the
-    groups of a summary through this function alone.
-
-    Raises:
-        ValueError: If the table has no ``group`` column, or no
-            ``values_from`` column after it.
-    """
-    columns = [str(column) for column in table.columns]
-    if "group" not in columns or values_from not in columns:
-        raise ValueError(
-            f"A summary's table must hold 'group' and {quoted_value(values_from)}; it holds "
-            f"{quoted_value(columns)}"
-        )
-    start, stop = columns.index("group") + 1, columns.index(values_from)
-    if stop < start:
-        raise ValueError(
-            f"A summary's table must hold 'group' before {quoted_value(values_from)}"
-        )
-    keys = columns[start:stop]
-    return table[["group", *keys]].drop_duplicates("group", ignore_index=True)
+__all__ = ["cell_groups", "labels_by_group"]
 
 
 def labels_by_group(
-    cell_groups: Any, groups: pd.DataFrame, columns: Sequence[str]
+    cell_groups: Any, group_keys: pd.DataFrame, columns: Sequence[str]
 ) -> list[tuple[str, np.ndarray]]:
-    """Each cell's label in each column, from its group's row of ``groups``.
+    """Each cell's label in each column, from its group's row of ``group_keys``.
 
     ``cell_groups`` holds each cell's group name, missing for none, as a
-    categorical or as text, and ``groups`` one row per group, as
-    :func:`record_groups` returns them. A cell without a group, or of a group
-    that ``groups`` does not hold, has the label None. A categorical is
-    matched through its codes, so the names are looked up once per category.
+    categorical or as text, and ``group_keys`` one row per group, indexed by
+    its name, as a summary's record holds it. A cell without a group, or of a
+    group that ``group_keys`` does not hold, has the label None. A
+    categorical is matched through its codes, so the names are looked up
+    once per category.
     """
-    names = pd.Index(groups["group"])
+    names = pd.Index(group_keys.index)
     values = pd.Series(cell_groups)
     if isinstance(values.dtype, pd.CategoricalDtype):
         # Each category's row, and -1 at the end for the code of no category.
@@ -63,26 +36,9 @@ def labels_by_group(
     found = []
     for column in columns:
         labels = np.empty(len(names) + 1, dtype=object)
-        labels[:-1] = groups[column].to_numpy(dtype=object)
+        labels[:-1] = group_keys[column].to_numpy(dtype=object)
         found.append((column, labels[rows]))
     return found
-
-
-def refuse_named_columns(
-    labels: Sequence[Any], columns: Sequence[str], *, what: str, table: str
-) -> None:
-    """Refuse labels named like a table's own columns, which the labels sit beside.
-
-    Raises:
-        ValueError: If a label's text names one of ``columns``.
-    """
-    clashing = sorted({str(label) for label in labels} & set(columns))
-    if clashing:
-        raise ValueError(
-            f"A {what} is named {quoted_value(clashing[0])}, which the table of {table} uses "
-            f"for a column of its own; its own columns are "
-            f"{', '.join(map(quoted_value, columns))}, so rename that label"
-        )
 
 
 def cell_groups(

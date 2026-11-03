@@ -288,8 +288,7 @@ def test_tables_count_cells_and_clones_per_group() -> None:
         clones=clones,
         clone_ids=np.asarray(["c1", "c2", "c3", "c4"]),
         groups=groups,
-        group_keys=[{"sample": "A"}, {"sample": "B"}],
-        key_columns=["sample"],
+        group_names=["A", "B"],
         sizes=sizes,
         frequencies=frequencies,
         splits=(1, 2),
@@ -299,11 +298,10 @@ def test_tables_count_cells_and_clones_per_group() -> None:
         "clone",
         "category",
         "group",
-        "sample",
         "group_clone_size",
         "group_clone_frequency",
     ]
-    assert cells.loc["cell0"].tolist()[:5] == ["c1", "2 cells", "A", "A", 2]
+    assert cells.loc["cell0"].tolist()[:4] == ["c1", "2 cells", "A", 2]
     # Per-cell labels are categories coded by the stored codes; the expansion
     # categories keep their order, smallest clones first.
     assert cells["clone"].cat.categories.tolist() == ["c1", "c2", "c3", "c4"]
@@ -312,13 +310,12 @@ def test_tables_count_cells_and_clones_per_group() -> None:
     assert cells["group"].cat.codes.tolist() == groups.tolist()
     assert pd.isna(cells.loc["cell6", "clone"])
     assert pd.isna(cells.loc["cell6", "category"])
-    assert pd.isna(cells.loc["cell8", "sample"])
+    assert pd.isna(cells.loc["cell8", "group"])
     # cell8 has a clone without a group, so it has no category.
     assert cells.loc["cell8", "clone"] == "c4"
     assert pd.isna(cells.loc["cell8", "category"])
     assert table.to_dict("list") == {
         "group": ["A", "A", "A", "B", "B", "B"],
-        "sample": ["A", "A", "A", "B", "B", "B"],
         "category": [
             "1 cell",
             "2 cells",
@@ -333,43 +330,47 @@ def test_tables_count_cells_and_clones_per_group() -> None:
     }
     assert ranks.to_dict("list") == {
         "group": ["A", "A", "A", "B", "B", "B"],
-        "sample": ["A", "A", "A", "B", "B", "B"],
         "window": ["1", "2", "after 2", "1", "2", "after 2"],
         "n_cells": [2, 2, 1, 2, 1, 0],
         "fraction": [0.4, 0.4, 0.2, 2 / 3, 1 / 3, 0.0],
     }
 
 
-def test_tables_order_the_labels_of_key_columns_naturally() -> None:
-    # The groups' keys in natural order: s2 before s10, within each batch.
-    keys = [
-        {"batch": "b2", "site": "s10"},
-        {"batch": "b10", "site": "s2"},
-        {"batch": "b10", "site": "s10"},
-    ]
+def test_tables_hold_group_names_as_values_whatever_their_text() -> None:
+    # Groups named like the tables' own columns are values of their group
+    # column, and the tables keep the columns of any other names, in the
+    # groups' order.
     clones = np.array([0, 0, 1, 2])
     groups = np.array([0, 1, 2, -1])
     sizes, frequencies = group_clone_sizes(clones, groups)
     categories, labels = expansion_categories(sizes, frequencies, breakpoints=(1,))
-    cells, table, _ranks = expansion_tables(
-        np.asarray(["c0", "c1", "c2", "c3"]),
-        categories=categories,
-        labels=labels,
-        clones=clones,
-        clone_ids=np.asarray(["a", "b", "c"]),
-        groups=groups,
-        group_keys=keys,
-        key_columns=["batch", "site"],
-        sizes=sizes,
-        frequencies=frequencies,
-        splits=(1,),
-    )
-    assert cells["batch"].cat.categories.tolist() == ["b2", "b10"]
-    assert cells["site"].cat.categories.tolist() == ["s2", "s10"]
-    assert cells["batch"].astype(object).tolist()[:3] == ["b2", "b10", "b10"]
-    assert cells["site"].astype(object).tolist()[:3] == ["s10", "s2", "s10"]
-    assert pd.isna(cells.loc["c3", "site"])
-    assert table["site"].drop_duplicates().tolist() == ["s10", "s2"]
+    tables = {}
+    for names in (["n_cells", "category", "group"], ["x", "y", "z"]):
+        tables[names[0]] = expansion_tables(
+            np.asarray(["c0", "c1", "c2", "c3"]),
+            categories=categories,
+            labels=labels,
+            clones=clones,
+            clone_ids=np.asarray(["a", "b", "c"]),
+            groups=groups,
+            group_names=names,
+            sizes=sizes,
+            frequencies=frequencies,
+            splits=(1,),
+        )
+    cells, table, ranks = tables["n_cells"]
+    neutral = tables["x"]
+    for found, expected in zip((cells, table, ranks), neutral, strict=True):
+        assert found.columns.tolist() == expected.columns.tolist()
+        assert found.drop(columns="group").equals(expected.drop(columns="group"))
+    assert cells["group"].astype(object).tolist()[:3] == [
+        "n_cells",
+        "category",
+        "group",
+    ]
+    assert pd.isna(cells.loc["c3", "group"])
+    assert table["group"].drop_duplicates().tolist() == ["n_cells", "category", "group"]
+    assert table["n_cells"].tolist() == neutral[1]["n_cells"].tolist()
 
 
 def test_tables_without_clones_or_key_columns() -> None:
@@ -380,8 +381,7 @@ def test_tables_without_clones_or_key_columns() -> None:
         clones=np.array([-1, -1]),
         clone_ids=np.asarray([], dtype=str),
         groups=np.array([-1, -1]),
-        group_keys=[],
-        key_columns=[],
+        group_names=[],
         sizes=np.zeros(2, dtype=int),
         frequencies=np.full(2, np.nan),
         splits=(10,),
@@ -416,8 +416,7 @@ def test_tables_without_clones_or_key_columns() -> None:
         clones=np.array([-1]),
         clone_ids=np.asarray([], dtype=str),
         groups=np.array([0]),
-        group_keys=[{}],
-        key_columns=[],
+        group_names=["all cells"],
         sizes=np.zeros(1, dtype=int),
         frequencies=np.full(1, np.nan),
         splits=(10,),
@@ -426,3 +425,23 @@ def test_tables_without_clones_or_key_columns() -> None:
     assert table["group"].tolist() == ["all cells", "all cells"]
     assert table["fraction"].isna().all()
     assert ranks["n_cells"].tolist() == [0, 0]
+
+
+def test_tables_take_one_text_name_for_each_group() -> None:
+    for names, message in (
+        (pd.DataFrame({"group": ["A"], "sample": ["A"]}), "one text name"),
+        (["A", "A"], "'A' names two"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            expansion_tables(
+                np.asarray(["cell0", "cell1"]),
+                categories=np.array([0, 0]),
+                labels=("1 cell",),
+                clones=np.array([0, 1]),
+                clone_ids=np.asarray(["c1", "c2"]),
+                groups=np.array([0, 0]),
+                group_names=names,
+                sizes=np.ones(2, dtype=int),
+                frequencies=np.full(2, 0.5),
+                splits=(10,),
+            )

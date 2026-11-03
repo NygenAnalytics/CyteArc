@@ -22,12 +22,7 @@ from cytearc.plotting import (
     clone_overlap,
     clone_tracking,
 )
-from cytearc.plotting._groups import (
-    cell_groups,
-    labels_by_group,
-    record_groups,
-    refuse_named_columns,
-)
+from cytearc.plotting._groups import cell_groups, labels_by_group
 from cytearc.plotting._style import MAX_FIGURE_WIDTH_INCHES
 from tests.clone_helpers import (
     every_cell,
@@ -75,10 +70,11 @@ def test_without_groups_the_plot_counts_every_cell(plotted) -> None:
         "clone_size": [1, 3],
         "n_clones": [1, 1],
     }
-    # Clones are labelled by their IDs.
+    # Clones are labelled by their IDs, and every cell is in one group.
     assert result.tables["top"].to_dict("list") == {
         "clone": ["a", "b"],
         "label": ["a", "b"],
+        "group": ["all cells", "all cells"],
         "n_cells": [3, 1],
     }
     assert set(result.axes) == {"sizes", "top"}
@@ -114,10 +110,10 @@ def test_a_grouping_column_splits_each_clone_by_group(plotted) -> None:
         "n_clones": [1, 1, 1],
     }
     assert result.tables["top"].to_dict("list") == {
-        "clone": ["a"],
-        "label": ["a"],
-        "x": [2],
-        "y": [1],
+        "clone": ["a", "a"],
+        "label": ["a", "a"],
+        "group": ["x", "y"],
+        "n_cells": [2, 1],
     }
     assert result.legends[0].label == "group"
     assert len(result.axes["sizes"].get_lines()) == 2
@@ -134,10 +130,10 @@ def test_a_label_artifact_of_fewer_cells_leaves_the_others_ungrouped(plotted) ->
 
     # Of the first four cells, x holds a twice and b once and y holds a once.
     assert result.tables["top"].to_dict("list") == {
-        "clone": ["a", "b"],
-        "label": ["a", "b"],
-        "x": [2, 1],
-        "y": [1, 0],
+        "clone": ["a", "a", "b", "b"],
+        "label": ["a", "a", "b", "b"],
+        "group": ["x", "y", "x", "y"],
+        "n_cells": [2, 1, 1, 0],
     }
     assert result.legends[0].label == "cluster_labels"
     plt.close(result.figure)
@@ -167,16 +163,40 @@ def test_the_plot_refuses_clones_it_cannot_draw(plotted) -> None:
     )
     with pytest.raises(ValueError, match="^No cell with a group has a clone"):
         clone_abundance(store, clones, group_by="c4_group", show=False)
-    for name in ("label", "clone"):
-        store.cells.insert(
-            "named_group", np.asarray(["x", name, "x", "x", "x", None]), overwrite=True
-        )
-        with pytest.raises(
-            ValueError,
-            match=f"^A group is named '{name}', .* its own columns are 'clone', 'label'",
-        ):
-            clone_abundance(store, clones, group_by="named_group", show=False)
     assert set(plt.get_fignums()) == figures
+
+
+@pytest.mark.parametrize("name", ["clone", "label", "group", "n_cells", "all cells"])
+def test_groups_named_like_the_tables_columns_draw(plotted, name) -> None:
+    store, clones = plotted
+    # c1's group takes the name, beside x: c0 and c3 in x, c1 in the named
+    # group, and c2 in x too.
+    named = ["x", name, "x", "x", "x", None]
+    store.cells.insert("named_group", np.asarray(named), overwrite=True)
+    store.cells.insert(
+        "neutral_group", np.asarray(["x", "w", "x", "x", "x", None]), overwrite=True
+    )
+    found = clone_abundance(store, clones, group_by="named_group", show=False)
+    neutral = clone_abundance(store, clones, group_by="neutral_group", show=False)
+    try:
+        for table in ("sizes", "top"):
+            expected = neutral.tables[table].replace({"group": {"w": name}})
+            assert found.tables[table].columns.tolist() == expected.columns.tolist()
+            assert sorted(map(tuple, found.tables[table].values.tolist())) == sorted(
+                map(tuple, expected.values.tolist())
+            )
+        # Clone a holds c0 and c2 in x and c1 in the named group.
+        top = found.tables["top"].set_index(["clone", "group"])["n_cells"]
+        assert top.loc[("a", name)] == 1 and top.loc[("a", "x")] == 2
+        bars = sorted(patch.get_width() for patch in found.axes["top"].patches)
+        assert bars == sorted(
+            patch.get_width() for patch in neutral.axes["top"].patches
+        )
+        legend = [text.get_text() for text in found.axes["top"].get_legend().texts]
+        assert sorted(legend) == sorted([name, "x"])
+    finally:
+        found.close()
+        neutral.close()
 
 
 def test_cell_groups_align_labels_to_the_artifacts_cells(plotted) -> None:
@@ -221,6 +241,7 @@ def test_clones_of_equal_size_list_in_rank_order(plotted) -> None:
     assert result.tables["top"].to_dict("list") == {
         "clone": ["9", "10", "x"],
         "label": ["9", "10", "x"],
+        "group": ["all cells"] * 3,
         "n_cells": [2, 2, 1],
     }
     plt.close(result.figure)
@@ -441,17 +462,19 @@ def test_figures_group_cells_by_several_columns(truth_plot) -> None:
         for group, cells in found.items()
         for size, n_clones in Counter(cells.values()).items()
     )
-    top = result.tables["top"].set_index("clone")
-    assert top.columns[1:].tolist() == sorted(found)
+    top = result.tables["top"]
+    groups = top["group"].drop_duplicates().tolist()
+    assert groups == sorted(found)
+    by_pair = top.set_index(["clone", "group"])["n_cells"]
     for group, cells in found.items():
         for clone, n_cells in cells.items():
-            assert top.loc[str(clone + 1), group] == n_cells
-    assert top.drop(columns="label").to_numpy().sum() == 32
+            assert by_pair.loc[(str(clone + 1), group)] == n_cells
+    assert top["n_cells"].sum() == 32
     assert result.legends[0].label == "sample, cell_type"
     assert result.provenance.extras["grouping"] == "sample, cell_type"
     # The groups are those of the summaries, named and ordered alike.
     diversity = store.clones.diversity(clones, group_by=["sample", "cell_type"])
-    assert top.columns[1:].tolist() == diversity.indices["group"].tolist()
+    assert groups == diversity.indices["group"].tolist()
     result.close()
 
 
@@ -462,7 +485,7 @@ def test_figures_group_cells_by_columns_and_labels_together(truth_plot) -> None:
     # the sample and the type.
     found = TRUTH.group_clone_cells(_joined(TRUTH.samples, TRUTH.cell_types))
     top = abundance.tables["top"]
-    assert top.columns[2:].tolist() == sorted(found)
+    assert top["group"].drop_duplicates().tolist() == sorted(found)
     assert abundance.legends[0].label == "sample, cluster_labels"
     expansion = clonal_expansion(
         store, truth_plot.by_sample, group_by="sample", groups=labels, show=False
@@ -536,37 +559,13 @@ def test_the_expansion_plot_regroups_cells_by_two_columns(truth_plot) -> None:
     result.close()
 
 
-def test_a_summarys_groups_are_read_beside_its_values() -> None:
-    table = pd.DataFrame(
-        {
-            "clone": ["1", "1", "2", "2"],
-            "group": ["d2, TCR", "d4, TCR", "d2, TCR", "d4, TCR"],
-            "sample": ["d2", "d4", "d2", "d4"],
-            "receptor_type": ["TCR"] * 4,
-            "n_cells": [3, 6, 0, 2],
-            "fraction": [0.5, 0.6, 0.0, 0.2],
-        }
+def test_cells_take_their_groups_labels_from_a_records_keys() -> None:
+    keys = pd.DataFrame(
+        {"sample": ["d2", "d4"], "receptor_type": ["TCR", "TCR"]},
+        index=pd.Index(["d2, TCR", "d4, TCR"], name="group"),
     )
-    groups = record_groups(table, "n_cells")
-    # One row per group, in their order, with the key columns between the
-    # group's name and the values.
-    assert groups.to_dict("list") == {
-        "group": ["d2, TCR", "d4, TCR"],
-        "sample": ["d2", "d4"],
-        "receptor_type": ["TCR", "TCR"],
-    }
-    # Without key columns, a table holds the groups' names alone.
-    assert record_groups(table[["group", "n_cells"]], "n_cells").columns.tolist() == [
-        "group"
-    ]
-    for broken, message in (
-        (table.drop(columns="group"), "must hold 'group'"),
-        (table[["n_cells", "group"]], "'group' before 'n_cells'"),
-    ):
-        with pytest.raises(ValueError, match=message):
-            record_groups(broken, "n_cells")
     # Each cell takes its group's labels; a cell without a group, or of a
-    # group the table lacks, has none, whether the names are text or
+    # group the keys lack, has none, whether the names are text or
     # categories in another order.
     cells = ["d4, TCR", None, "d2, TCR", "d9, TCR"]
     expected = [
@@ -577,13 +576,15 @@ def test_a_summarys_groups_are_read_beside_its_values() -> None:
         pd.Series(cells, dtype=object),
         pd.Series(pd.Categorical(cells, categories=["d9, TCR", "d4, TCR", "d2, TCR"])),
     ):
-        found = labels_by_group(given, groups, ["sample", "receptor_type"])
+        found = labels_by_group(given, keys, ["sample", "receptor_type"])
         assert [(name, values.tolist()) for name, values in found] == expected
-    refuse_named_columns(["x", "y"], ("clone", "label"), what="group", table="t")
-    with pytest.raises(ValueError, match="^A group is named 'label', which the table"):
-        refuse_named_columns(
-            ["x", "label"], ("clone", "label"), what="group", table="t"
-        )
+    # A key column may take the name of the keys' index, which names the
+    # groups, and the cell takes the column's label.
+    named = pd.DataFrame(
+        {"group": ["a", "b"]}, index=pd.Index(["x", "y"], name="group")
+    )
+    ((column, labels),) = labels_by_group(pd.Series(["y", "x"]), named, ["group"])
+    assert (column, labels.tolist()) == ("group", ["b", "a"])
 
 
 @pytest.fixture(scope="module")
@@ -637,7 +638,7 @@ def test_the_rarefaction_plot_draws_one_panel_per_order(truth_plot) -> None:
     )
     assert list(result.axes) == ["order_0", "order_1", "order_2", "coverage"]
     curves = result.tables["curves"]
-    assert curves.columns[:2].tolist() == ["group", "sample"]
+    assert curves.columns[:2].tolist() == ["group", "order"]
     assert sorted(curves["group"].unique()) == ["d2", "d4"]
     assert result.provenance.n_cells == 32
     assert result.provenance.extras["grouping"] == "sample"
@@ -944,11 +945,10 @@ def test_the_tracking_plot_places_groups_by_all_their_labels(truth_plot) -> None
         "clone",
         "label",
         "group",
-        "sample",
-        "cluster_labels",
         "n_cells",
         "fraction",
     ]
+    assert tracking.group_keys.columns.tolist() == ["sample", "cluster_labels"]
     plt.close(result.figure)
 
 
@@ -993,16 +993,40 @@ def test_the_tracking_plot_checks_its_arguments(truth_plot) -> None:
         clone_tracking(store, clones, show=False)
 
 
-def test_the_tracking_table_keeps_a_column_for_the_labels(truth_plot) -> None:
+@pytest.mark.parametrize("name", ["label", "clone", "group", "n_cells", "fraction"])
+def test_tracking_groups_by_a_column_named_like_the_tables_columns(
+    truth_plot, name
+) -> None:
     store, clones = truth_plot.store, truth_plot.clones
-    store.cells.insert("label", TRUTH.samples.astype(object), overwrite=True)
-    # A key column named label would hold two columns of one name.
-    tracking = store.clones.track(clones, group_by="label", top_n=1)
-    assert "label" in tracking.table.columns
-    figures = set(plt.get_fignums())
-    with pytest.raises(ValueError, match="key column named 'label'"):
-        clone_tracking(store, tracking, show=False)
-    assert set(plt.get_fignums()) == figures
+    store.cells.insert(name, TRUTH.samples.astype(object), overwrite=True)
+    # The tracking's labels stay in its keys, so the figure's table gives
+    # each clone its label beside them, and the figure places the samples as
+    # a column of any other name does.
+    tracking = store.clones.track(clones, group_by=name, top_n=1)
+    assert tracking.table.columns.tolist() == ["clone", "group", "n_cells", "fraction"]
+    neutral = clone_tracking(
+        store, store.clones.track(clones, group_by="sample", top_n=1), show=False
+    )
+    result = clone_tracking(store, tracking, show=False)
+    try:
+        pd.testing.assert_frame_equal(
+            result.tables["tracking"], neutral.tables["tracking"]
+        )
+        assert result.tables["tracking"].columns.tolist() == [
+            "clone",
+            "label",
+            "group",
+            "n_cells",
+            "fraction",
+        ]
+        ax, other = result.axes["tracking"], neutral.axes["tracking"]
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == ["d2", "d4"]
+        assert [line.get_ydata().tolist() for line in ax.get_lines()] == [
+            line.get_ydata().tolist() for line in other.get_lines()
+        ]
+    finally:
+        result.close()
+        neutral.close()
 
 
 def test_the_tracking_plot_takes_an_order_of_numbers(truth_plot) -> None:
@@ -1283,8 +1307,18 @@ def test_the_fates_plot_groups_clones_by_their_dominant_fate(fates_plot) -> None
         "fate",
         "n_early_cells",
         "n_late_cells",
-        *types,
     ]
+    # Each clone's late cells in each fate, zeros included, in the drawn
+    # order and then the fates' order.
+    late = result.tables["fates"]
+    assert late.columns.tolist() == ["clone", "label", "fate", "n_cells"]
+    assert late["clone"].tolist() == [
+        clone for clone in table["clone"].tolist() for _fate in types
+    ]
+    assert late["label"].tolist() == [
+        label for label in table["label"].tolist() for _fate in types
+    ]
+    assert late["fate"].astype(str).tolist() == types * len(table)
     tested = sorted({int(c) for c in TRUTH.clones[TRUTH.samples == "d4"] if c >= 0})
 
     def dominant(clone: int) -> str | None:
@@ -1310,9 +1344,10 @@ def test_the_fates_plot_groups_clones_by_their_dominant_fate(fates_plot) -> None
     assert [
         name if isinstance(name, str) else None for name in table["fate"].tolist()
     ] == [dominant(clone) for clone in ordered]
+    by_fate = late.set_index(["clone", "fate"])["n_cells"]
     for row, clone in zip(table.itertuples(index=False), ordered, strict=True):
         found = _late_cells(clone)
-        assert [getattr(row, name) for name in types] == [
+        assert [by_fate.loc[(row.clone, name)] for name in types] == [
             found.get(name, 0) for name in types
         ]
         assert row.n_late_cells == sum(found.values())
@@ -1416,26 +1451,52 @@ def test_the_fates_plot_names_at_most_40_clones(many_groups) -> None:
     assert shown.figure.get_size_inches()[0] <= MAX_FIGURE_WIDTH_INCHES
 
 
-def test_the_fates_plot_keeps_the_columns_of_its_table(fates_plot) -> None:
+@pytest.mark.parametrize(
+    "name", ["label", "clone", "fate", "n_early_cells", "n_late_cells", "n_cells"]
+)
+def test_the_fates_plot_draws_fates_named_like_its_tables_columns(
+    fates_plot, name
+) -> None:
     store = fates_plot.store
-    figures = set(plt.get_fignums())
-    for name in ("label", "n_early_cells"):
-        # The monocytes take a fate named like a column of the table.
-        fate = np.where(TRUTH.cell_types == "Monocyte", name, TRUTH.cell_types)
-        store.cells.insert("named_fate", fate.astype(object), overwrite=True)
-        bias = store.clones.fate_bias(
-            fates_plot.clones,
-            group_by="named_fate",
-            early=store.snapshot_cell_selection("is_d2"),
-            late=store.snapshot_cell_selection("is_d4"),
+    neutral = clone_fate_bias(store, fates_plot.bias, show=False)
+    # The monocytes take a fate named like a column of the tables, which the
+    # tables hold as a value; the figure and the late cells stay those of the
+    # cell types.
+    fate = np.where(TRUTH.cell_types == "Monocyte", name, TRUTH.cell_types)
+    store.cells.insert("named_fate", fate.astype(object), overwrite=True)
+    bias = store.clones.fate_bias(
+        fates_plot.clones,
+        group_by="named_fate",
+        early=store.snapshot_cell_selection("is_d2"),
+        late=store.snapshot_cell_selection("is_d4"),
+    )
+    result = clone_fate_bias(store, bias, show=False)
+    try:
+        renamed = {"Monocyte": name}
+        for key in ("clones", "fates"):
+            found, expected = result.tables[key], neutral.tables[key]
+            assert found.columns.tolist() == expected.columns.tolist()
+            cells = expected.assign(
+                fate=expected["fate"].astype(object).replace(renamed)
+            )
+            assert sorted(
+                map(tuple, found.astype(object).fillna("-").values.tolist())
+            ) == sorted(map(tuple, cells.astype(object).fillna("-").values.tolist()))
+        legend = [text.get_text() for text in result.axes["fates"].get_legend().texts]
+        assert sorted(legend) == sorted(renamed.get(t, t) for t in CELL_TYPES)
+        heights = sorted(
+            bar.get_height()
+            for container in result.axes["fates"].containers
+            for bar in container
         )
-        with pytest.raises(
-            ValueError,
-            match=f"^A fate is named '{name}', .* its own columns are 'clone', 'label', "
-            "'fate', 'n_early_cells', 'n_late_cells'",
-        ):
-            clone_fate_bias(store, bias, show=False)
-    assert set(plt.get_fignums()) == figures
+        assert heights == sorted(
+            bar.get_height()
+            for container in neutral.axes["fates"].containers
+            for bar in container
+        )
+    finally:
+        result.close()
+        neutral.close()
 
 
 def test_the_fates_plot_draws_clones_without_a_dominant_fate_last(fates_plot) -> None:
@@ -1455,3 +1516,59 @@ def test_the_fates_plot_draws_clones_without_a_dominant_fate_last(fates_plot) ->
     # Clones without a dominant fate come after every other clone.
     assert tied[-1] and not tied[:-1].any()
     plt.close(result.figure)
+
+
+def test_a_regrouped_expansion_of_a_label_artifact_keeps_apart_only_its_kept_labels(
+    truth_plot, truth_clonotypes
+) -> None:
+    store = truth_plot.store
+    # Clonotypes measured within the cell types of a label artifact, whose
+    # groups' keys are the label artifact's kind and then the receptor type.
+    expansion = store.clones.expansion(truth_clonotypes, groups=truth_plot.labels)
+    assert store.clones.load_expansion(expansion).group_keys.columns.tolist() == [
+        "cluster_labels",
+        "receptor_type",
+    ]
+    result = clonal_expansion(store, expansion, group_by="sample", show=False)
+    result.close()
+    # Regrouped by sample, each cell keeps its receptor type, which the
+    # clonotypes keep apart, and leaves its cell type, which only grouped
+    # the expansion; the groups are the samples by receptor type of the cells
+    # with a clonotype.
+    clones = store.clones.load_clones(truth_clonotypes).cells.loc[TRUTH.cell_ids]
+    with_clone = clones["clone"].notna().to_numpy()
+    expected = {
+        f"{sample}, {kind}"
+        for sample, kind in zip(
+            TRUTH.samples[with_clone],
+            clones["receptor_type"].astype(str).to_numpy()[with_clone],
+            strict=True,
+        )
+    }
+    assert set(result.tables["categories"]["group"]) == expected
+    assert result.provenance.extras["grouping"] == "sample, receptor_type"
+
+
+def test_default_figure_sizes_follow_the_clones_and_groups_drawn(
+    truth_plot, many_groups, truth_clonotypes
+) -> None:
+    # The largest clones' panel grows with the clones drawn, not with the
+    # rows of its table, one per clone and group: 20 clones in 200 groups.
+    store = many_groups.store
+    result = clone_abundance(
+        store, many_groups.clones, group_by="cell", max_clones=20, show=False
+    )
+    size = tuple(result.figure.get_size_inches())
+    result.close()
+    assert len(result.tables["top"]) == 20 * 200
+    assert size == pytest.approx((12.0, 6.8))
+    # receptor_qc widens with its groups, half an inch each: a label for each
+    # of the truth's 48 cells.
+    store = truth_plot.store
+    store.cells.insert("own", TRUTH.cell_ids.astype(object), overwrite=True)
+    receptors = store.artifacts.inspect(truth_clonotypes).input_ref("receptors")
+    qc = store.plots.receptor_qc(receptors, group_by="own", show=False)
+    size = tuple(qc.figure.get_size_inches())
+    qc.close()
+    assert qc.tables["receptor_type"]["group"].nunique() == N_CELLS
+    assert size == pytest.approx((4.0 + 0.5 * N_CELLS, 4.4))
