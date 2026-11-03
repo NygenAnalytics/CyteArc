@@ -50,6 +50,7 @@ from ..storage.selections import (
     validate_stored_selection_integrity,
 )
 from ..utils.logging import logger
+from ..utils.arguments import bool_argument
 
 if TYPE_CHECKING:
     from ..storage.lineage import ArtifactLineage
@@ -341,7 +342,17 @@ class BaseDataStore:
 
     @validation_scoped
     def _artifacts_inspect(self, ref: ArtifactRef) -> ArtifactStatus:
-        """Inspect a logical artifact without mutating the store."""
+        """Inspect a logical artifact without mutating the store.
+
+        Returns:
+            Its status, whose ``exists`` and ``complete`` say whether the
+            store holds it and whether its write finished.
+
+        Raises:
+            TypeError: If ``ref`` is not an ArtifactRef.
+        """
+        if not isinstance(ref, ArtifactRef):
+            raise TypeError("ref must be an ArtifactRef")
         return inspect_artifact(self.zw, ref)
 
     @validation_scoped
@@ -396,7 +407,14 @@ class BaseDataStore:
 
     @validation_scoped
     def _artifacts_load(self, ref: ArtifactRef) -> zarr.Group:
-        """Open a complete artifact through a read-only Zarr group."""
+        """Open a complete artifact through a read-only Zarr group.
+
+        Raises:
+            TypeError: If ``ref`` is not an ArtifactRef.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as a call that
+                stopped before it finished leaves it.
+        """
         status = self._artifacts_inspect(ref)
         if not status.exists:
             raise KeyError(f"Artifact does not exist: {status.path}")
@@ -434,7 +452,11 @@ class BaseDataStore:
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``ref`` is not a complete cell-aligned artifact.
+            ValueError: If ``ref`` is not of a cell-aligned kind, ``value``
+                names no per-cell array of its kind, the store holds no such
+                artifact or it is incomplete, as a call that stopped before it
+                finished leaves it, or ``cell_selection`` is not within its
+                cells.
             MemoryError: If the read does not fit the datastore memory budget.
         """
         if not isinstance(ref, ArtifactRef):
@@ -489,6 +511,7 @@ class BaseDataStore:
         inputs: Mapping[str, Any] | None = None,
     ) -> list[ArtifactRef]:
         """List every artifact ref matching the exact provenance predicates."""
+        complete_only = bool_argument(complete_only, "complete_only")
         if scope == "assay" and from_assay is None:
             from_assay = self._defaultAssay
         return list_artifact_refs(
@@ -532,10 +555,9 @@ class BaseDataStore:
             PermissionError: If ``dry_run`` is False and the store was opened
                 with ``zarr_mode='r'``.
         """
+        dry_run = bool_argument(dry_run, "dry_run")
         from ..storage.artifact_writer import prune_incomplete_artifacts
 
-        if not isinstance(dry_run, bool):
-            raise TypeError("dry_run must be a bool")
         if not dry_run:
             self._require_writable("artifacts.prune_incomplete")
         paths = prune_incomplete_artifacts(self.zw, self._assayNames, dry_run=dry_run)

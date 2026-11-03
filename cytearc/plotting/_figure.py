@@ -23,6 +23,7 @@ from ._style import (
     size_legend_layout,
     theme_context,
 )
+from ..utils.arguments import bool_argument
 
 
 def _json_ready(value: Any) -> Any:
@@ -860,6 +861,10 @@ def compose_results(
     whose scale has no order or palette, keeps the legends and colorbars it
     drew.
     """
+    shared_legends = bool_argument(shared_legends, "shared_legends")
+    owns_figure = bool_argument(owns_figure, "owns_figure")
+    if isinstance(panel_labels, bool | np.bool_):
+        panel_labels = bool_argument(panel_labels, "panel_labels")
     if isinstance(results, Mapping):
         named_results = list(results.items())
     else:

@@ -557,10 +557,16 @@ def test_bool_argument_returns_a_boolean(value):
     assert bool_argument(value, "flag") is value
 
 
-@pytest.mark.parametrize("value", [1, 0, np.True_, "yes", None])
-def test_bool_argument_refuses_anything_but_a_python_boolean(value):
+@pytest.mark.parametrize("value", [1, 0, "yes", None])
+def test_bool_argument_refuses_anything_but_a_boolean(value):
     with pytest.raises(TypeError, match="^flag must be a boolean$"):
         bool_argument(value, "flag")
+
+
+@pytest.mark.parametrize(("value", "expected"), [(np.True_, True), (np.False_, False)])
+def test_bool_argument_takes_a_numpy_boolean_as_a_python_one(value, expected):
+    found = bool_argument(value, "flag")
+    assert type(found) is bool and found is expected
 
 
 def test_optional_name_argument_takes_a_name_or_none():

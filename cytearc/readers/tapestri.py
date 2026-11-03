@@ -57,6 +57,7 @@ from ..variants.counts import ALLELE_ROLES, Contig, EntryBatch, SiteTable
 from ._assay_names import auto_name_feat_table
 from ._text import as_text, require_unique_identifiers
 from .cellranger import CrReader
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "AMPLICON_FEATURE_TYPE",
@@ -196,8 +197,8 @@ def _assay_cells(handle: h5py.File, assay: str, path: str) -> _Cells:
     repeated = pd.Index(ids).duplicated()
     if repeated.any():
         raise ValueError(
-            f"assays/{assay} of {path} lists the barcode {barcodes[repeated][0]!r} "
-            f"of the sample {samples[repeated][0]!r} twice"
+            f"assays/{assay} of {path} lists the barcode {quoted_value(barcodes[repeated][0])} "
+            f"of the sample {quoted_value(samples[repeated][0])} twice"
         )
     return _Cells(samples=samples, barcodes=barcodes, ids=ids)
 
@@ -582,9 +583,9 @@ def _chosen_columns(
             chosen[by_position[item]] = True
         else:
             raise ValueError(
-                f"include_variants names {item!r}, which is neither a variant nor a "
+                f"include_variants names {quoted_value(item)}, which is neither a variant nor a "
                 f"position of {path}; name variants as {what} does, such as "
-                f"{variants.names[0] if n_columns else 'chr1:115256513:G/A'!r}, or "
+                f"{quoted_value(variants.names[0] if n_columns else 'chr1:115256513:G/A')}, or "
                 "positions such as 'chr1:115256513'"
             )
     alternative = variants.alternative
@@ -609,7 +610,7 @@ def _chosen_columns(
             else "alleles that are not bases"
         )
         raise ValueError(
-            f"The variant {name!r} of {path} has {reason}, which no documentation "
+            f"The variant {quoted_value(name)} of {path} has {reason}, which no documentation "
             "explains, so it cannot be imported; leave it out of include_variants"
         )
     n_empty = int(np.count_nonzero(skipped & empty))
@@ -703,8 +704,8 @@ def _sites(
             if not longest.startswith(reference):
                 other = labels[chosen_columns[references.index(longest)]]
                 raise ValueError(
-                    f"The variants {other!r} and {label!r} of {path} give one "
-                    f"position the references {longest!r} and {reference!r}, which "
+                    f"The variants {quoted_value(other)} and {quoted_value(label)} of {path} give one "
+                    f"position the references {quoted_value(longest)} and {quoted_value(reference)}, which "
                     "differ beyond their shared bases, so they cannot be alleles of "
                     "one site"
                 )
@@ -716,13 +717,13 @@ def _sites(
             )
             if text == longest:
                 raise ValueError(
-                    f"The variant {label!r} of {path} has the reference as its "
+                    f"The variant {quoted_value(label)} of {path} has the reference as its "
                     "alternative"
                 )
             if text in seen:
                 raise ValueError(
-                    f"The variants {labels[seen[text]]!r} and {label!r} of {path} "
-                    f"name the same allele {text!r} of one site"
+                    f"The variants {quoted_value(labels[seen[text]])} and {quoted_value(label)} of {path} "
+                    f"name the same allele {quoted_value(text)} of one site"
                 )
             seen[text] = chosen
             column_allele[chosen] = len(allele_text)
@@ -780,6 +781,7 @@ class TapestriSource:
     count_unit: str | None
     depth_definition: str
     count_fields: tuple[str, ...]
+    call_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
     alleles_overlap: bool
@@ -846,9 +848,9 @@ class TapestriSource:
             row, column = (int(value) for value in np.argwhere(disagree)[0])
             first = int(chosen.site_first[chosen.column_site[column]])
             raise ValueError(
-                f"The variants {chosen.labels[first]!r} and "
-                f"{chosen.labels[column]!r} of {self.path} share a position but "
-                f"give the cell {ids[row]!r} the DP {int(depth[row, first])} and "
+                f"The variants {quoted_value(chosen.labels[first])} and "
+                f"{quoted_value(chosen.labels[column])} of {self.path} share a position but "
+                f"give the cell {quoted_value(ids[row])} the DP {int(depth[row, first])} and "
                 f"{int(depth[row, column])}, while the variants of one position "
                 "are alleles of one site, whose depth they share"
             )
@@ -894,8 +896,8 @@ class TapestriSource:
         if bad.any():
             row, column = (int(value) for value in np.argwhere(bad)[0])
             raise ValueError(
-                f"{layer} of {self.path} gives the cell {ids[row]!r} at "
-                f"{self._columns.labels[column]!r} the genotype "
+                f"{layer} of {self.path} gives the cell {quoted_value(ids[row])} at "
+                f"{quoted_value(self._columns.labels[column])} the genotype "
                 f"{int(calls[row, column])}; genotypes are 0 to 3"
             )
 
@@ -910,8 +912,8 @@ class TapestriSource:
         if np.any(depth < 0):
             row, column = (int(value) for value in np.argwhere(depth < 0)[0])
             raise ValueError(
-                f"{self._layers['DP']} of {self.path} gives the cell {ids[row]!r} "
-                f"at {self._columns.labels[column]!r} the depth "
+                f"{self._layers['DP']} of {self.path} gives the cell {quoted_value(ids[row])} "
+                f"at {quoted_value(self._columns.labels[column])} the depth "
                 f"{int(depth[row, column])}"
             )
         site_depth = self._site_depth(depth, ids)
@@ -927,9 +929,9 @@ class TapestriSource:
         if outside.any():
             row, column = (int(value) for value in np.argwhere(outside)[0])
             raise ValueError(
-                f"{self._layers['AF']} of {self.path} gives the cell {ids[row]!r} "
-                f"at {self._columns.labels[column]!r} the allele frequency "
-                f"{float(frequency[row, column])!r}; frequencies lie from 0 to 100%"
+                f"{self._layers['AF']} of {self.path} gives the cell {quoted_value(ids[row])} "
+                f"at {quoted_value(self._columns.labels[column])} the allele frequency "
+                f"{quoted_value(float(frequency[row, column]))}; frequencies lie from 0 to 100%"
             )
         reads = frequency * depth
         reads /= 100
@@ -941,9 +943,9 @@ class TapestriSource:
         if np.any(reads > 0):
             row, column = (int(value) for value in np.argwhere(reads > 0)[0])
             raise ValueError(
-                f"The allele frequency {float(frequency[row, column])!r} and depth "
-                f"{int(depth[row, column])} of the cell {ids[row]!r} at "
-                f"{self._columns.labels[column]!r} in {self.path} do not give a "
+                f"The allele frequency {quoted_value(float(frequency[row, column]))} and depth "
+                f"{int(depth[row, column])} of the cell {quoted_value(ids[row])} at "
+                f"{quoted_value(self._columns.labels[column])} in {self.path} do not give a "
                 "whole number of reads as AF × DP / 100"
             )
         del reads, frequency
@@ -1003,9 +1005,9 @@ class TapestriSource:
             column = int(compared[position])
             first = int(chosen.reference_column[chosen.column_site[column]])
             raise ValueError(
-                f"The variants {chosen.labels[first]!r} and "
-                f"{chosen.labels[column]!r} of {self.path} share a position but "
-                f"give the cell {ids[row]!r} the reference reads "
+                f"The variants {quoted_value(chosen.labels[first])} and "
+                f"{quoted_value(chosen.labels[column])} of {self.path} share a position but "
+                f"give the cell {quoted_value(ids[row])} the reference reads "
                 f"{int(reference[row, first])} and {int(reference[row, column])}, "
                 "while the variants of one position count its reference reads once"
             )
@@ -1032,9 +1034,9 @@ class TapestriSource:
         if bad.any():
             row, column = (int(value) for value in np.argwhere(bad)[0])
             raise ValueError(
-                f"{name} of {self.path} gives the cell {ids[row]!r} at "
-                f"{self._columns.labels[column]!r} the value "
-                f"{values[row, column].item()!r}; DAb-seq writes a missing value as -1"
+                f"{name} of {self.path} gives the cell {quoted_value(ids[row])} at "
+                f"{quoted_value(self._columns.labels[column])} the value "
+                f"{quoted_value(values[row, column].item())}; DAb-seq writes a missing value as -1"
             )
 
 
@@ -1158,9 +1160,9 @@ def tapestri_source(
             or parts[2] != f"{reference}/{alternative}"
         ):
             raise ValueError(
-                f"The variant {name!r} at column {index} of {text} disagrees with its "
-                f"CHROM {contig!r}, POS {position}, REF {reference!r} and ALT "
-                f"{alternative!r}"
+                f"The variant {quoted_value(name)} at column {index} of {text} disagrees with its "
+                f"CHROM {quoted_value(contig)}, POS {position}, REF {quoted_value(reference)} and ALT "
+                f"{quoted_value(alternative)}"
             )
         contigs.append(parts[0])
     parsed = _Variants(
@@ -1192,6 +1194,7 @@ def tapestri_source(
         count_unit="reads",
         depth_definition="all",
         count_fields=(),
+        call_fields=("quality",),
         depth_roles=frozenset(ALLELE_ROLES),
         reference_from_depth=False,
         alleles_overlap=True,
@@ -1247,7 +1250,7 @@ def dab_seq_source(
     repeated = pd.Index(barcodes).duplicated()
     if repeated.any():
         raise ValueError(
-            f"CELL_BARCODES of {text} lists the barcode {barcodes[repeated][0]!r} twice"
+            f"CELL_BARCODES of {text} lists the barcode {quoted_value(barcodes[repeated][0])} twice"
         )
     n_cells = len(barcodes)
     del barcodes, repeated
@@ -1260,7 +1263,7 @@ def dab_seq_source(
         alleles = parts[3].split("/") if len(parts) == 4 else []
         if len(alleles) != 2 or not parts[2].isdigit():
             raise ValueError(
-                f"VARIANTS[{index}] of {text} is {name!r}, neither "
+                f"VARIANTS[{index}] of {text} is {quoted_value(name)}, neither "
                 "<gene>:<chrom>:<pos>:<ref>/<alt> nor <chrom>:<pos>:<ref>/<alt>"
             )
         contigs.append(parts[1])
@@ -1295,6 +1298,7 @@ def dab_seq_source(
         count_unit="reads",
         depth_definition="all",
         count_fields=(),
+        call_fields=("quality",),
         depth_roles=frozenset(ALLELE_ROLES),
         reference_from_depth=False,
         alleles_overlap=False,

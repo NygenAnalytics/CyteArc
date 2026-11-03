@@ -85,6 +85,7 @@ from ._h5ad_columns import (
     sparse_shape,
 )
 from ._text import as_text
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "CELL_ID_SEPARATOR",
@@ -304,9 +305,9 @@ def _columns_mapping(columns: Any) -> dict[str, tuple[str, ...]]:
                 if role == "cell"
                 else "a column name"
             )
-            raise TypeError(f"columns[{role!r}] must be {what}")
+            raise TypeError(f"columns[{quoted_value(role)}] must be {what}")
         if any(not name for name in names):
-            raise ValueError(f"columns[{role!r}] names an empty column")
+            raise ValueError(f"columns[{quoted_value(role)}] names an empty column")
         resolved[role] = names
     return resolved
 
@@ -343,7 +344,7 @@ def _table_layout(
     if format != "table":
         if columns:
             raise ValueError(
-                f"format={format!r} reads fixed columns; pass columns with "
+                f"format={quoted_value(format)} reads fixed columns; pass columns with "
                 "format='table', 'matrix' or 'h5ad'"
             )
         preset = _PRESETS[format]
@@ -418,7 +419,7 @@ def _matrix_header(path: str, compression: str | None) -> _MatrixHeader:
     except ValueError:
         raise ValueError(
             f"The size line of {path} must hold three whole numbers, not "
-            f"{' '.join(sizes)!r}"
+            f"{quoted_value(' '.join(sizes))}"
         ) from None
     return _MatrixHeader(
         n_rows=n_rows,
@@ -571,7 +572,7 @@ def _h5ad_layout(
             )
     if format != "h5ad" and columns:
         raise ValueError(
-            f"format={format!r} reads fixed columns; pass columns with "
+            f"format={quoted_value(format)} reads fixed columns; pass columns with "
             "format='table', 'matrix' or 'h5ad'"
         )
     if format == "cospar_h5ad":
@@ -593,7 +594,7 @@ def _h5ad_layout(
     probability = columns["probability"][0] if "probability" in columns else None
     for name in (clone, probability):
         if name is not None and name not in obs_names:
-            raise ValueError(f"{path} has no obs column {name!r}")
+            raise ValueError(f"{path} has no obs column {quoted_value(name)}")
     return CloneLayout(format=format, path=path, clone=clone, probability=probability)
 
 
@@ -628,7 +629,7 @@ def clone_layout(
         raise TypeError("path must be a path")
     if format is not None and format not in CLONE_FORMATS:
         raise ValueError(
-            f"format must be one of {', '.join(CLONE_FORMATS)}, or None, not {format!r}"
+            f"format must be one of {', '.join(CLONE_FORMATS)}, or None, not {quoted_value(format)}"
         )
     resolved = _columns_mapping(columns)
     name = os.fspath(path)
@@ -637,16 +638,20 @@ def clone_layout(
         raise ValueError(f"{name} is empty")
     if head.startswith(HDF5_SIGNATURE):
         if format is not None and format not in _H5AD_FORMATS:
-            raise ValueError(f"{name} is an AnnData file, not format={format!r}")
+            raise ValueError(
+                f"{name} is an AnnData file, not format={quoted_value(format)}"
+            )
         return _h5ad_layout(name, format, resolved)
     found = compression(name)
     first = first_lines(name, found, 1)
     if first and first[0].lower().startswith("%%matrixmarket"):
         if format not in (None, "matrix"):
-            raise ValueError(f"{name} is a Matrix Market file, not format={format!r}")
+            raise ValueError(
+                f"{name} is a Matrix Market file, not format={quoted_value(format)}"
+            )
         return _matrix_layout(name, found, resolved)
     if format is not None and format not in _TEXT_FORMATS:
-        raise ValueError(f"{name} is a text table, not format={format!r}")
+        raise ValueError(f"{name} is a text table, not format={quoted_value(format)}")
     return _table_layout(name, format, resolved)
 
 
@@ -778,7 +783,7 @@ def _iter_h5ad_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows]
                 )
                 if np.asarray(numbers).dtype.kind not in "biuf":
                     raise ValueError(
-                        f"The obs column {layout.probability!r} of {layout.path} "
+                        f"The obs column {quoted_value(layout.probability)} of {layout.path} "
                         "must hold numbers"
                     )
                 probabilities = np.asarray(numbers, dtype=np.float64).copy()
@@ -789,7 +794,7 @@ def _iter_h5ad_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows]
                 )
                 if len(bad):
                     raise ValueError(
-                        f"The obs column {layout.probability!r} of {layout.path} "
+                        f"The obs column {quoted_value(layout.probability)} of {layout.path} "
                         "must hold probabilities from 0 to 1"
                     )
             yield CloneRows(
@@ -812,7 +817,9 @@ def iter_clone_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows]
             probability is not a number from 0 to 1, or the file is malformed.
     """
     if layout.is_matrix:
-        raise ValueError(f"format={layout.format!r} is a matrix; read it by entries")
+        raise ValueError(
+            f"format={quoted_value(layout.format)} is a matrix; read it by entries"
+        )
     if layout.format in _H5AD_FORMATS:
         yield from _iter_h5ad_rows(layout, chunk_rows)
     else:
@@ -826,7 +833,7 @@ def matrix_cells(layout: CloneLayout, chunk_rows: int) -> Iterator[np.ndarray]:
         ValueError: If the layout is not a matrix, or a cell has no barcode.
     """
     if not layout.is_matrix:
-        raise ValueError(f"format={layout.format!r} is not a matrix")
+        raise ValueError(f"format={quoted_value(layout.format)} is not a matrix")
     if layout.format == "cospar_h5ad":
         with h5py.File(layout.path, "r") as handle:
             names = _obs_names(handle)
@@ -861,7 +868,7 @@ def matrix_clone_ids(layout: CloneLayout) -> np.ndarray:
             label or repeats.
     """
     if not layout.is_matrix:
-        raise ValueError(f"format={layout.format!r} is not a matrix")
+        raise ValueError(f"format={quoted_value(layout.format)} is not a matrix")
     if layout.format == "cospar_h5ad":
         with h5py.File(layout.path, "r") as handle:
             n_clones = _x_clone_shape(handle)[1]
@@ -993,7 +1000,7 @@ def matrix_entries(layout: CloneLayout, chunk_rows: int) -> Iterator[MatrixEntri
             than it declares, or its rows differ from its cells.
     """
     if not layout.is_matrix:
-        raise ValueError(f"format={layout.format!r} is not a matrix")
+        raise ValueError(f"format={quoted_value(layout.format)} is not a matrix")
     if layout.format == "cospar_h5ad":
         yield from _x_clone_entries(layout, chunk_rows)
     else:

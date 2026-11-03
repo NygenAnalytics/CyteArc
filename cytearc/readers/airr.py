@@ -19,6 +19,7 @@ import pandas as pd
 
 from ..repertoire.contigs import FIELDS, REQUIRED_FIELDS
 from ._contigs import first_line, header_fields, parse_contig_columns, read_options
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "AIRR_FORMAT",
@@ -57,7 +58,7 @@ def contig_file_format(path: str | os.PathLike[str]) -> str:
     if {"barcode", "contig_id"} <= comma_fields:
         return "cellranger"
     raise ValueError(
-        f"{os.fspath(path)!r} is neither an AIRR Rearrangement file, a "
+        f"{quoted_value(os.fspath(path))} is neither an AIRR Rearrangement file, a "
         "tab-separated file whose header names sequence_id, nor Cell Ranger's "
         "contig annotations, a comma-separated file whose header names barcode "
         "and contig_id"

@@ -35,7 +35,7 @@ from ..storage.partition import row_band
 from ..storage.profiles import StorageProfile
 from ..storage.selections import validate_cell_selection
 from ..storage.types import as_zarr_array, as_zarr_group
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument
 from .models import MappingResult, _MappingResultAxes
 from .reference import (
     MappingReference,
@@ -431,8 +431,7 @@ def load_projection(
     load_arrays: bool = False,
 ) -> MappingResult:
     """Load a query projection after validating the complete contract."""
-    if not isinstance(load_arrays, bool):
-        raise TypeError("load_arrays must be a boolean")
+    load_arrays = bool_argument(load_arrays, "load_arrays")
     if not isinstance(reference, MappingReference):
         raise TypeError("reference must be a MappingReference")
     try:

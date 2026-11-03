@@ -296,11 +296,11 @@ def _expected_threshold(min_mutant_umis=1, min_fraction=None, min_umis=1):
                     elif mutant == 0:
                         call = "wild_type"
                 else:
-                    if mutant / total > min_fraction and mutant >= (
+                    if mutant / total >= min_fraction and mutant >= (
                         min_mutant_umis or 0
                     ):
                         call = "alternative_present"
-                    elif wild / total > min_fraction:
+                    elif wild / total >= min_fraction:
                         call = "wild_type"
             expected[(cell, site)] = (call, "")
     return expected
@@ -313,7 +313,7 @@ def _expected_threshold(min_mutant_umis=1, min_fraction=None, min_umis=1):
         {"min_mutant_umis": 2},
         {"min_mutant_umis": 1, "min_umis": 3},
         {"min_fraction": 0.9},
-        {"min_fraction": 0.5, "min_mutant_umis": 2},
+        {"min_fraction": 0.6, "min_mutant_umis": 2},
     ],
 )
 def test_threshold_calls_follow_gots_rules(store, tmp_path, rules) -> None:
@@ -346,13 +346,14 @@ def _gift_store(store, tmp_path):
     return _import(store, write_giftwrap_h5(TRUTH, tmp_path / "counts.1.h5"))
 
 
-def _expected_gift(alleles, swap=None, min_posterior=0.6, min_umis=1):
+def _expected_gift(alleles, swap=None, min_posterior=None, min_umis=1):
     """GIFT's posterior written out per UMI of the truth, entry by entry.
 
     Each gapfill's likelihood under an allele is 0.01 per edit, normalized
     over the probe's two alleles; a UMI's scores are the larger of its swap
     probability and its allele's share, half of each for the heterozygote,
-    and a cell's likelihood their product.
+    and a cell's likelihood their product. A call's posterior reaches
+    ``min_posterior``, or exceeds 0.6 without it, as GIFT calls cells.
     """
     expected = {}
     by_cell: dict[tuple[int, str], list] = {}
@@ -389,7 +390,12 @@ def _expected_gift(alleles, swap=None, min_posterior=0.6, min_umis=1):
         best = posteriors.index(max(posteriors))
         call = (
             ("wild_type", "heterozygous", "homozygous_alternative")[best]
-            if max(posteriors) > min_posterior and confident >= min_umis
+            if (
+                max(posteriors) > 0.6
+                if min_posterior is None
+                else max(posteriors) >= min_posterior
+            )
+            and confident >= min_umis
             else "filtered"
         )
         expected[(TRUTH.row_ids[row], name)] = (call, posteriors)
@@ -434,7 +440,7 @@ def test_gift_calls_follow_the_posterior_of_each_cell(
     expected = _expected_gift(
         alleles,
         swap=options.get("swap_probabilities"),
-        min_posterior=options.get("min_posterior", 0.6),
+        min_posterior=options.get("min_posterior"),
     )
     assert found.keys() == expected.keys()
     for key, (call, posteriors) in expected.items():
@@ -447,14 +453,15 @@ def test_gift_calls_follow_the_posterior_of_each_cell(
         "JAK2 c.1849G>T": {"reference": "CAC", "alternative": "AAC"},
         "ASXL1 c.1772dup": {"reference": "GTAG", "alternative": "GTAAG"},
     }
-    # The rules as GIFT applied them: one UMI, the posterior given or 0.6,
-    # and the swap probabilities as (reads, probability) pairs by reads.
+    # The rules as GIFT applied them: one UMI, the posterior given or GIFT's,
+    # above 0.6, and the swap probabilities as (reads, probability) pairs by
+    # reads.
     assert loaded.method == "gift"
     assert loaded.rules == {
         "min_umis": 1,
         "min_mutant_umis": None,
         "min_fraction": None,
-        "min_posterior": options.get("min_posterior", 0.6),
+        "min_posterior": options.get("min_posterior", 0.6000000000000001),
         "swap_probabilities": [
             [reads, probability]
             for reads, probability in options.get("swap_probabilities", {}).items()

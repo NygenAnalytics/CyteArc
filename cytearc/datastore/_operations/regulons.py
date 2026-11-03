@@ -22,7 +22,7 @@ from ...storage.selections import (
 )
 from ...storage.types import as_zarr_array, as_zarr_group
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import integer_argument
+from ...utils.arguments import bool_argument, integer_argument
 from ...utils.arrays import array_digest
 from ...utils.logging import logger
 
@@ -149,6 +149,7 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             PermissionError: If the store is not opened with ``zarr_mode='r+'``.
             UnmeasuredCellsError: If the assay did not measure a selected cell.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...regulons.grn import GrnParameters, _grn_links, _pair_correlations
 
         if not isinstance(cell_selection, ArtifactRef):

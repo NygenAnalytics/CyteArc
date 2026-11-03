@@ -121,7 +121,7 @@ from ...storage.selections import (
     validate_run_metadata_snapshot,
 )
 from ...utils.arrays import clean_array
-from ...utils.arguments import integer_argument
+from ...utils.arguments import bool_argument, integer_argument, optional_bool_argument
 from ...utils.logging import logger
 from ...utils.moments import ColumnMoments
 from ...utils.numba import numba_threads
@@ -1029,6 +1029,11 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Raises:
             UnmeasuredCellsError: If the assay did not measure a selected cell.
         """
+        log_transform = optional_bool_argument(log_transform, "log_transform")
+        renormalize_subset = optional_bool_argument(
+            renormalize_subset, "renormalize_subset"
+        )
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
         if not isinstance(features, ArtifactRef):
@@ -1653,6 +1658,11 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             MemoryError: When the fit needs more than the datastore memory
                 budget, before the fit or the feature scaling starts.
         """
+        feat_scaling = bool_argument(feat_scaling, "feat_scaling")
+        show_elbow_plot = bool_argument(show_elbow_plot, "show_elbow_plot")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
+        if isinstance(local_cache, bool | np.bool_):
+            local_cache = bool_argument(local_cache, "local_cache")
         return self._run_reduction_artifact(
             method="pca",
             normalized=normalized,
@@ -1705,12 +1715,14 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Returns:
             Reference to the LSI reduction artifact.
         """
+        skip_first = bool_argument(skip_first, "skip_first")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
+        if isinstance(local_cache, bool | np.bool_):
+            local_cache = bool_argument(local_cache, "local_cache")
         if solver not in {"streaming", "materialized"}:
             raise ValueError("solver must be 'streaming' or 'materialized'")
         n_iter = integer_argument(n_iter, "n_iter", minimum=0)
         n_oversamples = integer_argument(n_oversamples, "n_oversamples", minimum=0)
-        if not isinstance(skip_first, bool | np.bool_):
-            raise TypeError("skip_first must be a boolean")
         rand_state = integer_argument(rand_state, "rand_state", minimum=0)
         return self._run_reduction_artifact(
             method="lsi",
@@ -1755,6 +1767,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Returns:
             Reference to the custom reduction artifact.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
+        if isinstance(local_cache, bool | np.bool_):
+            local_cache = bool_argument(local_cache, "local_cache")
         loading_values = np.asarray(loadings)
         if loading_values.dtype.kind not in "iuf":
             raise TypeError("Custom loadings must contain real numbers")
@@ -1821,6 +1836,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             numpy.linalg.LinAlgError: If a regression of the fit is not
                 positive definite.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         # Validate before the snapshot is written; the fit validates again
         # because the pipeline calls it with its own snapshot.
         self._resolve_harmony_reduction(reduction)
@@ -2266,6 +2282,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Raises:
             MemoryError: If the fit exceeds the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(coordinates, ArtifactRef):
             raise TypeError("coordinates must be an ArtifactRef")
         return self._build_embedding_initialization(
@@ -2325,6 +2342,8 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Raises:
             MemoryError: If the index exceeds the memory budget.
         """
+        ann_parallel = bool_argument(ann_parallel, "ann_parallel")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(coordinates, ArtifactRef):
             raise TypeError("coordinates must be an ArtifactRef")
         if coordinates.assay is None:
@@ -2337,8 +2356,6 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         resolved_rand_state = integer_argument(rand_state, "rand_state", minimum=0)
         if resolved_ann_m < 2:
             raise ValueError("ann_m must be at least two")
-        if not isinstance(ann_parallel, bool):
-            raise TypeError("ann_parallel must be a boolean")
         resolved_batch_size = (
             None
             if batch_size is None
@@ -2496,6 +2513,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Raises:
             MemoryError: If the query exceeds the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(ann_index, ArtifactRef):
             raise TypeError("ann_index must be an ArtifactRef")
         ann_ref = ann_index
@@ -2760,6 +2778,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Returns:
             Reference to the connectivity-map artifact.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(neighbors, ArtifactRef):
             raise TypeError("neighbors must be an ArtifactRef")
         neighbors_ref = neighbors
@@ -2909,12 +2928,11 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Returns:
             A scipy sparse matrix representing cell neighbourhood graph.
         """
+        symmetric = optional_bool_argument(symmetric, "symmetric")
+        upper_only = optional_bool_argument(upper_only, "upper_only")
 
         if not isinstance(graph, ArtifactRef):
             raise TypeError("graph must be an ArtifactRef")
-        for name, flag in (("symmetric", symmetric), ("upper_only", upper_only)):
-            if flag is not None and not isinstance(flag, bool | np.bool_):
-                raise TypeError(f"{name} must be a boolean or None")
         if use_k is not None and (
             isinstance(use_k, bool) or not isinstance(use_k, int | np.integer)
         ):
@@ -2975,6 +2993,8 @@ class _GraphOperationsMixin(_GraphOperationsBase):
 
         WNN modality weights remain in the returned immutable artifact.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
+        l2_normalize = bool_argument(l2_normalize, "l2_normalize")
         from ...neighbors.graph import merge_graphs, snn_merge_peak_bytes
         from ...neighbors.integration import _wnn_integration_many, wnn_peak_bytes
 
@@ -2988,8 +3008,6 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             raise ValueError("Assay integration requires at least two assays")
         if not all(isinstance(source, ArtifactRef) for source in sources):
             raise TypeError("sources must contain only ArtifactRef values")
-        if method == "wnn" and not isinstance(l2_normalize, bool | np.bool_):
-            raise TypeError("l2_normalize must be a boolean")
 
         def materialize_coordinate_blocks(
             blocks: Iterator[np.ndarray],

@@ -8,6 +8,9 @@ from typing import Any
 
 from loguru import logger as _loguru_logger
 
+# Absolute, since this module also loads alone, from its file.
+from cytearc.utils.arguments import optional_bool_argument
+
 _CYTEARC_RECORD = "cytearc"
 
 logger = _loguru_logger.bind(**{_CYTEARC_RECORD: True})
@@ -272,22 +275,19 @@ def configure_output(
             attributes. False restores the stdout sink, or the file that
             ``set_verbosity`` chose.
     """
+    progress = optional_bool_argument(progress, "progress")
+    timestamps = optional_bool_argument(timestamps, "timestamps")
+    stdlib = optional_bool_argument(stdlib, "stdlib")
     update_handler = False
     if level is not None:
         _config.level = _resolve_level(level)
         update_handler = True
     if progress is not None:
-        if not isinstance(progress, bool):
-            raise TypeError("progress must be a bool")
         _config.progress = progress
     if timestamps is not None:
-        if not isinstance(timestamps, bool):
-            raise TypeError("timestamps must be a bool")
         _config.timestamps = timestamps
         update_handler = True
     if stdlib is not None:
-        if not isinstance(stdlib, bool):
-            raise TypeError("stdlib must be a bool")
         _config.stdlib = stdlib
         update_handler = True
     if update_handler:

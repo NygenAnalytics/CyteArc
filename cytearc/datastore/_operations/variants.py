@@ -38,11 +38,12 @@ from ...storage.layout import get_compressors
 from ...storage.profiles import resolve_storage_profile
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import bool_argument
+from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sorted_unique
 from ...utils.logging import logger
 from ...variants.counts import (
     CALL_DTYPE,
+    CALL_FIELDS,
     COUNT_FIELDS,
     COUNT_UNITS,
     DEPTH_DTYPE,
@@ -239,9 +240,6 @@ _GENOTYPE_CLONE_ATTRIBUTES = (
 
 # The formats whose files hold a chosen subset of variants.
 _VARIANT_CHOICE_FORMATS = ("tapestri", "dab_seq")
-# The formats whose calls carry a quality, the genotype quality GQ, which
-# min_quality tests; the other formats' calls carry none.
-_CALL_QUALITY_FORMATS = ("tapestri", "dab_seq")
 
 
 def _variant_names(variants: Any) -> tuple[str, ...]:
@@ -354,11 +352,13 @@ class _Source:
 @dataclass(frozen=True, slots=True)
 class _ImportRules:
     """What every source of one import shares: the unit of its counts, how
-    its depth is defined, and the fields that counts carry.
+    its depth is defined, and the fields that counts and calls carry.
 
     Attributes:
         field_paths: For each count field, the first source, in canonical
             order, whose counts carry it.
+        call_fields: The fields of the calls beside the call, ``("quality",)``
+            when a source gives each call's quality, as Tapestri does.
     """
 
     count_unit: CountUnit
@@ -369,6 +369,7 @@ class _ImportRules:
     open_alleles: bool
     count_fields: tuple[str, ...]
     field_paths: dict[str, str]
+    call_fields: tuple[str, ...]
 
 
 def _repeated_row(rows: np.ndarray, keys: Sequence[str]) -> int | None:
@@ -836,22 +837,22 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 saved yet.
             MemoryError: If the import does not fit the memory budget.
         """
+        swap_strands = bool_argument(swap_strands, "swap_strands")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...readers._variant_files import VARIANT_FORMATS, source_sha256
 
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        bool_argument(swap_strands, "swap_strands")
-        bool_argument(invalidate_cache, "invalidate_cache")
         chosen_variants = _variant_names(include_variants)
         if format is not None and format not in VARIANT_FORMATS:
             raise ValueError(
                 f"format must be one of {', '.join(VARIANT_FORMATS)}, or None, not "
-                f"{format!r}"
+                f"{quoted_value(format)}"
             )
         if count_unit is not None and count_unit not in COUNT_UNITS:
             raise ValueError(
                 f"count_unit must be one of {', '.join(COUNT_UNITS)}, or None, not "
-                f"{count_unit!r}"
+                f"{quoted_value(count_unit)}"
             )
         readers: dict[str, tuple[VariantSource, str, dict[str, str]]] = {}
         threads = self.nthreads if self.memoryBytes >= _THREADED_PARSE_BYTES else 1
@@ -991,6 +992,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                         call_values=call_values,
                         path=source.reader.path,
                         field_paths=rules.field_paths,
+                        call_fields=rules.call_fields,
                     )
             if not n_rows:
                 raise ValueError(
@@ -1017,6 +1019,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "depth_definition": rules.depth_definition,
                 "stranded": "forward" in rules.count_fields,
                 "count_fields": list(rules.count_fields),
+                "call_fields": list(rules.call_fields),
                 "contigs": [contig.record() for contig in site_table.contigs],
                 "n_sorted_runs": 0,
             }
@@ -1061,13 +1064,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
     def _variant_import_rules(
         cls, sources: Sequence[_Source], count_unit: str | None
     ) -> _ImportRules:
-        """The unit, depth rules and count fields that every source shares.
+        """The unit, depth rules, count fields and call fields that every
+        source shares.
 
         Each source's unit and depth rules must agree with the others', so
         the artifact records them once whatever order the sources take. The
         count fields are those of all sources together: a table of calls
         alone gives none, and counts that lack a field another source gives
-        are refused as they arrive.
+        are refused as they arrive. The call fields are those of all sources
+        together, so the calls' quality is stored only when a source gives it.
 
         Raises:
             ValueError: If a source's unit is missing or differs from the
@@ -1101,12 +1106,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             ) != depth_rules:
                 raise ValueError(
                     f"The files define depth differently: {first.path} counts "
-                    f"{first.depth_definition!r} and {reader.path} "
-                    f"{reader.depth_definition!r}, as cellsnp-lite folders with "
+                    f"{quoted_value(first.depth_definition)} and {reader.path} "
+                    f"{quoted_value(reader.depth_definition)}, as cellsnp-lite folders with "
                     "and without OTH do; import them separately"
                 )
             for name in reader.count_fields:
                 field_paths.setdefault(name, reader.path)
+        given = {name for source in sources for name in source.reader.call_fields}
         return _ImportRules(
             count_unit=unit,
             depth_definition=first.depth_definition,
@@ -1116,6 +1122,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             open_alleles=first.open_alleles,
             count_fields=tuple(name for name in COUNT_FIELDS if name in field_paths),
             field_paths=field_paths,
+            call_fields=tuple(name for name in CALL_FIELDS if name in given),
         )
 
     def _plan_variant_counts(
@@ -1139,7 +1146,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "call_alleles",
                 "call_sources",
                 "call_values",
-                "call_quality",
                 "site_contigs",
                 "site_positions",
                 "site_names",
@@ -1156,6 +1162,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             if not isinstance(fields, list) or not required <= names:
                 return False
             if not {f"counts_{name}" for name in fields} <= names:
+                return False
+            call_fields = group.attrs.get("call_fields")
+            if not isinstance(call_fields, list) or not set(call_fields) <= set(
+                CALL_FIELDS
+            ):
+                return False
+            if not {f"call_{name}" for name in call_fields} <= names:
                 return False
             return all(
                 as_zarr_array(group[name], name=name).shape == (n_cells + 1,)
@@ -1185,6 +1198,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "count_unit",
                 "depth_definition",
                 "count_fields",
+                "call_fields",
                 "contigs",
             ),
             reuse_validator=has_tables,
@@ -1204,12 +1218,14 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         call_values: "_Vocabulary",
         path: str,
         field_paths: Mapping[str, str],
+        call_fields: tuple[str, ...],
     ) -> None:
         """Join a batch's rows to cells and add those of selected cells.
 
         Raises:
             ValueError: If counts lack a field that another source's counts
-                carry, or a value lies outside the stored range.
+                carry, calls carry a quality that their source does not list,
+                or a value lies outside the stored range.
         """
         if batch.kind == "counts":
             missing = [
@@ -1235,6 +1251,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             rows["source"] = call_sources.code(batch.call_source)
             rows["value"] = call_values.codes(batch.calls[kept])
             if len(batch.call_quality):
+                if "quality" not in call_fields:
+                    raise ValueError(
+                        f"{path} gives call qualities, which its format does not "
+                        "list among its call fields"
+                    )
                 if len(batch.call_quality) != batch.n_rows:
                     raise ValueError(
                         f"{path} gives {len(batch.call_quality)} call qualities for "
@@ -1330,7 +1351,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     "call_alleles": (np.int32, n_call_rows),
                     "call_sources": (np.int32, n_call_rows),
                     "call_values": (np.int32, n_call_rows),
-                    "call_quality": (np.float32, n_call_rows),
+                    **{
+                        f"call_{name}": (np.float32, n_call_rows)
+                        for name in rules.call_fields
+                    },
                 },
             )
             for first, stop, rows in sorter.bands(band_rows):
@@ -1338,7 +1362,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 repeated = _repeated_row(counts_rows, ("cell", "key"))
                 if repeated is not None:
                     raise ValueError(
-                        f"The cell {name_cell(int(counts_rows['cell'][repeated]))!r} "
+                        f"The cell {quoted_value(name_cell(int(counts_rows['cell'][repeated])))} "
                         "is counted twice for the allele "
                         f"{allele_text(int(counts_rows['key'][repeated]))}, by two "
                         "files or two rows of one file"
@@ -1347,7 +1371,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 repeated = _repeated_row(depth_rows, ("cell", "key"))
                 if repeated is not None:
                     raise ValueError(
-                        f"The cell {name_cell(int(depth_rows['cell'][repeated]))!r} "
+                        f"The cell {quoted_value(name_cell(int(depth_rows['cell'][repeated])))} "
                         "has two depths at the site "
                         f"{sites.label(int(depth_rows['key'][repeated]))}, from two "
                         "files or two rows of one file"
@@ -1357,7 +1381,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 call_rows, conflict, n_repeats = _distinct_calls(rows["calls"])
                 if conflict is not None:
                     raise ValueError(
-                        f"The cell {name_cell(int(call_rows['cell'][conflict]))!r} "
+                        f"The cell {quoted_value(name_cell(int(call_rows['cell'][conflict])))} "
                         "has two different calls of "
                         f"{source_names[source_remap[call_rows['source'][conflict]]]} "
                         f"for the allele {allele_text(int(call_rows['key'][conflict]))}"
@@ -1409,7 +1433,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 appender.append("call_alleles", call_rows["key"])
                 appender.append("call_sources", call_rows["source"])
                 appender.append("call_values", value_remap[call_rows["value"]])
-                appender.append("call_quality", call_rows["quality"])
+                for name in rules.call_fields:
+                    appender.append(f"call_{name}", call_rows[name])
             mean_depth = np.where(listed, depth_total / max(sites.n_sites, 1), np.nan)
             _write_array(group, "mean_depth", mean_depth)
             _write_array(group, "n_covered_sites", covered)
@@ -1445,7 +1470,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             raise TypeError("counts must be an ArtifactRef")
         if counts.kind != VariantCountImportArguments.artifact_kind:
             raise ValueError(
-                f"counts must be a variant_counts artifact, not {counts.kind!r}"
+                f"counts must be a variant_counts artifact, not {quoted_value(counts.kind)}"
             )
         require_complete_artifact(self.zw, counts)
         group = artifact_group(self.zw, counts)
@@ -1454,6 +1479,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             raise ValueError(
                 "counts was saved by an earlier version of CyteArc, without the "
                 f"arrays {', '.join(missing)}; import the counts again with "
+                "ds.variants.import_counts, which saves them anew"
+            )
+        if "call_fields" not in group.attrs:
+            raise ValueError(
+                "counts was saved by an earlier version of CyteArc, without the "
+                "attribute call_fields; import the counts again with "
                 "ds.variants.import_counts, which saves them anew"
             )
         return group
@@ -1603,6 +1634,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "counts",
             *(f"counts_{name}" for name in fields),
         )
+        call_fields = [
+            str(name) for name in cast(list[str], group.attrs["call_fields"])
+        ]
+        call_arrays = (
+            "call_alleles",
+            "call_sources",
+            "call_values",
+            *(f"call_{name}" for name in call_fields),
+        )
         resident = _LOADED_BYTES_PER_COUNTS_CELL * len(
             cell_index
         ) + _LOADED_BYTES_PER_CELL * len(positions)
@@ -1616,12 +1656,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 {
                     "depth": ("depth_sites", "depth"),
                     "count": count_arrays,
-                    "call": (
-                        "call_alleles",
-                        "call_sources",
-                        "call_values",
-                        "call_quality",
-                    ),
+                    "call": call_arrays,
                 },
             )
         if resident > self.memoryBytes:
@@ -1678,10 +1713,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "count", count_arrays, "count_alleles", allele_kept
         )
         call_cells, call_values = collect(
-            "call",
-            ("call_alleles", "call_sources", "call_values", "call_quality"),
-            "call_alleles",
-            allele_kept,
+            "call", call_arrays, "call_alleles", allele_kept
         )
         cell_ids = np.asarray(
             read_metadata_rows_chunkwise(self.cells, "ids", cell_index[positions]),
@@ -1710,7 +1742,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 call_values["call_alleles"],
                 call_values["call_sources"],
                 call_values["call_values"],
-                call_values["call_quality"],
+                {name: call_values[f"call_{name}"] for name in call_fields},
             ),
             call_sources=_read(group, "call_source_names").astype(str).tolist(),
             call_values=_read(group, "call_value_names").astype(str).tolist(),
@@ -1730,13 +1762,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         if informative.kind != VariantSelectionArguments.artifact_kind:
             raise ValueError(
                 "informative must be a variant_selection artifact from "
-                f"ds.variants.informative, not {informative.kind!r}"
+                f"ds.variants.informative, not {quoted_value(informative.kind)}"
             )
         status = require_complete_artifact(self.zw, informative)
         if status.operation != VariantSelectionArguments.operation:
             raise ValueError(
                 "informative was saved by an earlier version of CyteArc, by the "
-                f"operation {status.operation!r}; select the informative variants "
+                f"operation {quoted_value(status.operation)}; select the informative variants "
                 "again with ds.variants.informative, which saves them anew"
             )
         return artifact_group(self.zw, informative)
@@ -1797,11 +1829,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         sets MAESTER's for RNA libraries, whose strands follow the
         transcript: a mean depth above 20 and a mean base quality above 30,
         with a VMR above 0.01. A threshold given by name replaces the
-        preset's. VMR, depth and quality must exceed their thresholds; the
-        cell count and strand correlation must reach theirs, as the
-        published rules compare them, and a statistic that is undefined,
-        such as the strand correlation of a variant that one cell shows,
-        fails.
+        preset's. Every statistic must reach its threshold, so
+        ``min_vmr=0.01`` keeps a VMR of exactly 0.01; a preset's rule that a
+        statistic exceed its value holds the next floating-point number above
+        it, as ``cytearc.variants.INFORMATIVE_PRESETS`` shows, so the presets
+        keep exactly the variants of the published rules. A statistic that is
+        undefined, such as the strand correlation of a variant that one cell
+        shows, fails.
 
         Signac computes the same statistics but sets the frequency of an
         uncovered cell to 0 and, by default, replaces the frequency of a cell
@@ -1821,9 +1855,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             min_cells: The fewest cells with 2 or more reads of the allele on
                 each strand.
             min_strand_correlation: The lowest strand correlation.
-            min_vmr: The VMR that a variant must exceed.
-            min_depth: The mean depth at the site that a variant must exceed.
-            min_quality: The mean base quality that a variant must exceed.
+            min_vmr: The lowest VMR.
+            min_depth: The lowest mean depth at the site.
+            min_quality: The lowest mean base quality.
             mask: Names of lists of variants that artifacts mimic, which are
                 never informative: ``"numt"``, the 25 false positives of two
                 common NUMTs (Laricchia et al. 2022); ``"rna_editing"``, the
@@ -1857,12 +1891,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 not saved yet.
             MemoryError: If the statistics do not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         group = self._variant_group(counts)
         if cell_selection is not None and not isinstance(cell_selection, ArtifactRef):
             raise TypeError(
                 "cell_selection must be a cell selection ArtifactRef or None"
             )
-        bool_argument(invalidate_cache, "invalidate_cache")
         thresholds = resolve_thresholds(
             preset,
             {
@@ -2170,6 +2204,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 similarities or graph, or the clone labels as the store saves
                 them do not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...clustering.leiden import canonical_resolution
 
         selection = self._selection_group(informative)
@@ -2187,7 +2222,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             )
         resolution = canonical_resolution(resolution)
         columns = group_columns(within, "within")
-        bool_argument(invalidate_cache, "invalidate_cache")
         chosen = _read(selection, "informative").astype(bool)
         alleles = _read(selection, "variant_alleles").astype(np.int64)[chosen]
         if not len(alleles):
@@ -2329,7 +2363,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         if genotypes.kind != VariantGenotypeArguments.artifact_kind:
             raise ValueError(
                 f"genotypes must be a variant_genotypes artifact, not "
-                f"{genotypes.kind!r}"
+                f"{quoted_value(genotypes.kind)}"
             )
         require_complete_artifact(self.zw, genotypes)
         return artifact_group(self.zw, genotypes)
@@ -2345,7 +2379,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         min_umis: int | None = None,
         min_mutant_umis: int | None = None,
         min_fraction: float | None = None,
-        min_posterior: float = 0.6,
+        min_posterior: float | None = None,
         swap_probabilities: Mapping[int, float] | None = None,
         min_quality: float | None = None,
         min_depth: int | None = None,
@@ -2384,9 +2418,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
           and alternative by the rules given, since GoT studies apply
           different ones: ``min_mutant_umis=1`` calls a cell
           ``alternative_present`` with one mutant UMI and ``wild_type``
-          with none, as for patients' cells, and ``min_fraction=0.9`` calls
-          a cell mutant or wild type when that allele's share of its UMIs
-          exceeds 90%, as for cell lines. ``min_umis`` UMIs of the two, 1 by
+          with none, as for patients' cells, and ``min_fraction`` calls a
+          cell mutant or wild type when that allele's share of its UMIs
+          reaches it. Nam et al. (2019) called cell lines whose allele held
+          more than 90% of their UMIs, which
+          ``min_fraction=float(np.nextafter(0.9, 1))`` reproduces exactly;
+          ``min_fraction=0.9`` also calls a cell whose allele holds exactly
+          90%, such as 9 of 10 UMIs. ``min_umis`` UMIs of the two, 1 by
           default, are needed for any call.
         - ``"gift"`` applies GIFT's model to giftwrap's counts: each UMI's
           gapfill goes to the probe's wild type or mutant by its edit
@@ -2394,9 +2432,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
           the probability that ``swap_probabilities`` gives for its reads,
           and the UMIs of a cell give the posterior of the wild type, the
           heterozygote and the homozygous mutant under a uniform prior. The
-          most probable genotype is called when its posterior exceeds
+          most probable genotype is called when its posterior reaches
           ``min_posterior`` and the cell holds at least ``min_umis`` UMIs, 1
-          by default, whose swap probability lies below 0.1. Without
+          by default, whose swap probability lies below 0.1. By default the
+          posterior must exceed 0.6, as GIFT calls cells, which the artifact
+          records as the next number above 0.6, 0.6000000000000001. Without
           ``swap_probabilities`` every UMI counts, as GIFT treats cell lines
           once their UMIs of few reads are dropped.
 
@@ -2421,9 +2461,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 and ``"gift"``.
             min_mutant_umis: The fewest mutant UMIs of a mutant call, for
                 ``"threshold"``.
-            min_fraction: The share, from 0.5 to below 1, that the called
-                allele's UMIs must exceed, for ``"threshold"``.
-            min_posterior: The posterior that a ``"gift"`` call must exceed.
+            min_fraction: The share, above 0.5 and at most 1, that the
+                called allele's UMIs must reach, for ``"threshold"``.
+            min_posterior: The posterior, from 0 to 1, that a ``"gift"`` call
+                must reach; None for GIFT's rule, a posterior above 0.6.
             swap_probabilities: For ``"gift"``, the probability that a UMI of
                 each number of reads came from template switching, from 1
                 read up; a UMI takes the value of the most reads given that
@@ -2459,8 +2500,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             MemoryError: If the counts' rows, the calls or the cells' arrays
                 do not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         group = self._variant_group(counts)
-        bool_argument(invalidate_cache, "invalidate_cache")
         rules = genotype_rules(
             method,
             min_umis=min_umis,
@@ -2475,7 +2516,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         if method == "gift" and str(group.attrs["format"]) != "giftwrap":
             raise ValueError(
                 "method='gift' weighs the gapfills of giftwrap's probes, and these "
-                f"counts come from {str(group.attrs['format'])!r} files; use "
+                f"counts come from {quoted_value(str(group.attrs['format']))} files; use "
                 "method='threshold' for the UMIs of wild type and mutant"
             )
         if method == "threshold" and str(group.attrs["format"]) == "tapestri":
@@ -2484,13 +2525,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "alternative, and Tapestri's files hold no reads of the reference; "
                 "use method='source' to adopt its NGT calls"
             )
-        if (
-            rules.min_quality is not None
-            and str(group.attrs["format"]) not in _CALL_QUALITY_FORMATS
+        if rules.min_quality is not None and "quality" not in cast(
+            list[str], group.attrs["call_fields"]
         ):
             raise ValueError(
                 "min_quality tests call_quality, which these counts cannot give: "
-                f"their {str(group.attrs['format'])!r} calls carry no quality, "
+                f"their {quoted_value(str(group.attrs['format']))} calls carry no quality, "
                 "while Tapestri's and DAb-seq's carry their GQ; leave min_quality out"
             )
         table = _stored_sites(group)
@@ -2502,7 +2542,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         if rules.alleles:
             unknown = sorted(set(rules.alleles) - set(labels.tolist()))
             if unknown:
-                raise ValueError(f"alleles names {unknown[0]!r}, which no site is")
+                raise ValueError(
+                    f"alleles names {quoted_value(unknown[0])}, which no site is"
+                )
         n_cells = _n_counts_cells(group)
         # Each genotyped unit is a site or, for source calls at a site with
         # coordinates, one of its alternative alleles; -1 marks a whole site.
@@ -2522,7 +2564,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             site_sources = ["" for _ in genotyped]
         if not len(genotyped):
             raise ValueError(
-                f"No site of the counts can be genotyped with method={method!r}: "
+                f"No site of the counts can be genotyped with method={quoted_value(method)}: "
                 + (
                     "no site holds calls of the source"
                     if method == "source"
@@ -2537,7 +2579,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     "min_depth tests each cell's depth at the site, which these counts "
                     f"cannot give at {len(unread)} genotyped "
                     f"{'site' if len(unread) == 1 else 'sites'}, such as "
-                    f"{unread[0]!r}: no cell holds depth there or at the site's "
+                    f"{quoted_value(unread[0])}: no cell holds depth there or at the site's "
                     "channels, as when a source wrote calls alone; leave min_depth "
                     "out or name other sites"
                 )
@@ -2820,7 +2862,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             if site not in units_of_site:
                 if explicit:
                     raise ValueError(
-                        f"The site {labels[site]!r} holds no call of the source, so "
+                        f"The site {quoted_value(labels[site])} holds no call of the source, so "
                         "method='source' cannot genotype it; use method='threshold'"
                     )
                 continue
@@ -2837,8 +2879,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 unknown = [column for column in ranked if column not in SOURCE_CALLS]
                 if unknown:
                     raise ValueError(
-                        f"The calls of the column {unknown[0]!r} at the site "
-                        f"{labels[site]!r} have no vocabulary; the known call "
+                        f"The calls of the column {quoted_value(unknown[0])} at the site "
+                        f"{quoted_value(labels[site])} have no vocabulary; the known call "
                         f"columns are {', '.join(SOURCE_CALLS)}"
                     )
                 kept.append(site)
@@ -3142,8 +3184,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             MemoryError: If the cells' sets, the graph or the clone labels as
                 the store saves them do not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         group = self._genotype_group(genotypes)
-        bool_argument(invalidate_cache, "invalidate_cache")
         columns = group_columns(within, "within")
         site_labels = _read(group, "site_labels").astype(str)
         chosen = self._chosen_genotype_sites(genotypes, group, site_labels, sites)
@@ -3363,7 +3405,7 @@ def _compared_alleles(
             if len(wild) != 1 or len(mutants) != 1:
                 if explicit:
                     raise ValueError(
-                        f"The site {label!r} has {len(wild)} wild types and "
+                        f"The site {quoted_value(label)} has {len(wild)} wild types and "
                         f"{len(mutants)} alternatives in the counts; name its "
                         "wild type and alternative with alleles"
                     )
@@ -3373,15 +3415,15 @@ def _compared_alleles(
         if label in rules.alleles:
             if wild_type not in positions:
                 raise ValueError(
-                    f"alleles gives the site {label!r} the wild type {wild_type!r}, "
+                    f"alleles gives the site {quoted_value(label)} the wild type {quoted_value(wild_type)}, "
                     "which no cell shows there; its alleles are "
                     f"{', '.join(map(repr, positions)) or 'none'}, in the "
                     "orientation that the files give, such as a GIFT probe's"
                 )
             if mutant not in positions:
                 warnings.warn(
-                    f"No cell shows the alternative {mutant!r} that alleles gives "
-                    f"the site {label!r}; its alleles are "
+                    f"No cell shows the alternative {quoted_value(mutant)} that alleles gives "
+                    f"the site {quoted_value(label)}; its alleles are "
                     f"{', '.join(map(repr, positions))}",
                     UserWarning,
                     stacklevel=4,

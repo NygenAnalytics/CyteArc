@@ -24,6 +24,7 @@ from ..storage.profiles import (
 from ..utils.digest import file_sha256
 from ..utils.logging import logger
 from ..utils.progress import iter_progress
+from ..utils.arguments import bool_argument
 
 
 # Categories longer than this list are not stored with their column: AnnData
@@ -560,6 +561,7 @@ class H5adToZarr:
         *,
         overwrite: bool = False,
     ) -> None:
+        overwrite = bool_argument(overwrite, "overwrite")
         from ..storage.budget import resolve_budget
         from ..storage.schema import create_zarr_count_assay
         from ..storage.destinations import check_destination, create_destination

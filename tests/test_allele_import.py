@@ -548,11 +548,14 @@ def test_invalidate_cache_is_checked_before_the_store_is_read(
         scope="datastore", kind="cell_selection", artifact_id="f" * 64, assay=None
     )
     with pytest.raises(TypeError, match="invalidate_cache must be a boolean"):
+        store.clones.import_alleles(path, cell_selection=missing, invalidate_cache=1)
+    with pytest.raises(ArtifactResolutionError, match="does not exist"):
+        store.clones.import_alleles(path, cell_selection=missing)
+    # A NumPy boolean is a flag, so the store is read next.
+    with pytest.raises(ArtifactResolutionError, match="does not exist"):
         store.clones.import_alleles(
             path, cell_selection=missing, invalidate_cache=np.True_
         )
-    with pytest.raises(ArtifactResolutionError, match="does not exist"):
-        store.clones.import_alleles(path, cell_selection=missing)
 
 
 def test_loads_name_missing_incomplete_and_other_artifacts(

@@ -90,7 +90,7 @@ from ...storage.selections import (
     validate_stored_selection_integrity,
 )
 from ...storage.types import as_zarr_array, as_zarr_group
-from ...utils.arguments import integer_argument
+from ...utils.arguments import bool_argument, integer_argument, optional_bool_argument
 from ...utils.arrays import within_bounds
 from ...utils.compute import controlled_compute
 from ...utils.logging import logger
@@ -219,8 +219,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             "ctrl_size",
             minimum=1,
         )
-        if log_transform is not None and not isinstance(log_transform, bool):
-            raise TypeError("log_transform must be a bool")
+        log_transform = optional_bool_argument(log_transform, "log_transform")
         # Scores are logged by default when the normalizer's defaults log.
         log_transform = resolve_normalization_params(
             assay,
@@ -397,6 +396,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 or no cell passes the filter.
             UnmeasuredCellsError: If a column's assay did not measure a selected cell.
         """
+        keep_bounds = bool_argument(keep_bounds, "keep_bounds")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         attrs = list(attrs)
         lows = list(lows)
         highs = list(highs)
@@ -515,10 +516,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         Raises:
             ValueError: If no cell is selected.
         """
+        keep_bounds = bool_argument(keep_bounds, "keep_bounds")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(values, ArtifactRef):
             raise TypeError("values must be an ArtifactRef")
-        if not isinstance(keep_bounds, bool):
-            raise TypeError("keep_bounds must be a boolean")
         # The canonical array is read and recorded as before; any other array
         # is named in the selection's parameters.
         value_name: str | None = None
@@ -717,6 +718,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         Raises:
             ValueError: If ``assay`` is unknown or measured no selected cell.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(assay, str) or not assay:
             raise TypeError("assay must be the name of an assay")
         assay_name = self._get_assay(assay).name
@@ -1001,6 +1003,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 ``method="gaussian"``.
             UnmeasuredCellsError: If a metric's assay did not measure a selected cell.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if method not in ("mad", "gaussian"):
             raise ValueError("method must be 'mad' or 'gaussian'")
         if method == "gaussian":
@@ -1296,6 +1299,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         Raises:
             UnmeasuredCellsError: If the assay did not measure a selected cell.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
         if not isinstance(features, ArtifactRef):
@@ -1411,6 +1415,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 0 and 1.
             UnmeasuredCellsError: If the HTO assay did not measure a selected cell.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...assay.classification import declared_assay_type
 
         if from_assay is None:
@@ -1596,8 +1601,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         )
         smoothing = integer_argument(smoothing_t, "smoothing_t", minimum=0)
         seed = integer_argument(random_seed, "random_seed", minimum=0)
-        if not isinstance(normalize_scores, bool):
-            raise TypeError("normalize_scores must be a boolean")
+        normalize_scores = bool_argument(normalize_scores, "normalize_scores")
         columns = _doublet_sample_columns(sample_column)
         if len(columns) != (0 if sample_labels is None else len(sample_labels)):
             raise ValueError("Pass one array of sample labels per sample column")
@@ -1962,6 +1966,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             MemoryError: If a sample's simulation or neighbor index exceeds
                 the memory budget.
         """
+        normalize_scores = bool_argument(normalize_scores, "normalize_scores")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(graph, ArtifactRef):
             raise TypeError("graph must be an ArtifactRef")
         if not isinstance(clusters, ArtifactRef):
@@ -2102,6 +2108,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 computed and the store is not opened with ``zarr_mode='r+'``.
                 A read-only store returns a saved selection.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
         assay = self._get_assay(from_assay)
@@ -2224,6 +2231,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 computed and the store is not opened with ``zarr_mode='r+'``.
                 A read-only store returns saved scores.
         """
+        log_transform = optional_bool_argument(log_transform, "log_transform")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if from_assay is None:
             from_assay = self._defaultAssay
         assay = self._get_assay(from_assay)

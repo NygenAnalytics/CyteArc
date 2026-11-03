@@ -256,9 +256,14 @@ def test_usage_refuses_other_sources_and_missing_fields(tmp_path) -> None:
     sparse = store.repertoire.import_receptors(
         bare, cell_selection=store.snapshot_cell_selection()
     )
-    with pytest.raises(ValueError, match="The receptors store no v_call"):
+    with pytest.raises(
+        ValueError, match="^genes reads each chain's v_call, which these receptors"
+    ):
         store.repertoire.gene_usage(sparse)
-    with pytest.raises(ValueError, match="The receptors store no junction"):
+    with pytest.raises(
+        ValueError,
+        match="^sequence='nt' reads each chain's junction, which these receptors",
+    ):
         store.repertoire.spectratype(sparse, sequence="nt")
 
 

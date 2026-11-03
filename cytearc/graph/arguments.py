@@ -12,6 +12,7 @@ from ..storage.artifact_writer import (
     PlannedArtifact,
     plan_artifact,
 )
+from ..utils.arguments import bool_argument
 from ..storage.artifacts import (
     ArtifactRef,
     ArtifactScope,
@@ -19,13 +20,6 @@ from ..storage.artifacts import (
 )
 
 type ArgumentRole = Literal["input", "parameter", "execution"]
-
-
-def graph_flag(value: object, name: str) -> bool:
-    """Return a graph-loading flag as a Python bool; NumPy bools are accepted."""
-    if isinstance(value, bool | np.bool_):
-        return bool(value)
-    raise TypeError(f"{name} must be a boolean")
 
 
 def graph_load_flags(
@@ -38,8 +32,8 @@ def graph_load_flags(
     it applies only with ``symmetric_graph``. Alone it would change nothing
     and record an identical result under a second identity, so it raises.
     """
-    symmetric = graph_flag(symmetric_graph, "symmetric_graph")
-    upper_only = graph_flag(graph_upper_only, "graph_upper_only")
+    symmetric = bool_argument(symmetric_graph, "symmetric_graph")
+    upper_only = bool_argument(graph_upper_only, "graph_upper_only")
     if upper_only and not symmetric:
         raise ValueError(
             "graph_upper_only=True applies only with symmetric_graph=True; pass "
@@ -60,8 +54,8 @@ def umap_graph_flags(
     union of its upper triangle is the union of the graph, so neither flag
     has a correct effect of its own.
     """
-    symmetric = graph_flag(symmetric_graph, "symmetric_graph")
-    upper_only = graph_flag(graph_upper_only, "graph_upper_only")
+    symmetric = bool_argument(symmetric_graph, "symmetric_graph")
+    upper_only = bool_argument(graph_upper_only, "graph_upper_only")
     if symmetric or upper_only:
         raise ValueError(
             "embeddings.umap symmetrizes the graph itself with the fuzzy union "

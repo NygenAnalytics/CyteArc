@@ -7,7 +7,6 @@ modules find distinct values with ``sorted_unique`` and ``has_duplicates``.
 """
 
 import ast
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -20,51 +19,11 @@ from cytearc.utils.arrays import (
     unique_rows,
 )
 from tests.memory_helpers import traced_peak
+from tests.stack_modules import CYTEARC_ROOT, stack_module_paths
 
-_CYTEARC_ROOT = Path(__file__).resolve().parents[1] / "cytearc"
-# The clone stack's modules: its three packages, and its modules in shared
-# packages. Master's other modules keep their plain calls, on feature, chunk,
-# group and float arrays where sorting saves nothing measurable.
-_STACK_PACKAGES = ("clones", "repertoire", "variants")
-_STACK_MODULES = (
-    "datastore/_operations/cell_barcodes.py",
-    "datastore/_operations/cell_groups.py",
-    "datastore/_operations/clone_artifacts.py",
-    "datastore/_operations/clones.py",
-    "datastore/_operations/lineage_barcodes.py",
-    "datastore/_operations/phylogeny.py",
-    "datastore/_operations/record_tables.py",
-    "datastore/_operations/recorder_alleles.py",
-    "datastore/_operations/repertoire.py",
-    "datastore/_operations/variants.py",
-    "metadata/records.py",
-    "plotting/_groups.py",
-    "plotting/clones.py",
-    "plotting/lineage_barcodes.py",
-    "plotting/recorder_alleles.py",
-    "plotting/repertoire.py",
-    "plotting/variants.py",
-    "readers/_contigs.py",
-    "readers/_delimited.py",
-    "readers/_treedata.py",
-    "readers/_variant_files.py",
-    "readers/airr.py",
-    "readers/cellsnp.py",
-    "readers/clone_tables.py",
-    "readers/giftwrap.py",
-    "readers/got.py",
-    "readers/lineage_barcodes.py",
-    "readers/mgatk.py",
-    "readers/mito_afm.py",
-    "readers/phylogeny.py",
-    "readers/recorder_alleles.py",
-    "readers/tapestri.py",
-    "readers/vartrix.py",
-    "writers/airr.py",
-    "writers/characters.py",
-    "writers/clone_tables.py",
-    "writers/tapestri.py",
-)
+# The guard checks the clone stack's modules. Master's other modules keep their
+# plain calls, on feature, chunk, group and float arrays where sorting saves
+# nothing measurable.
 # np.unique sorts when a call asks for the indices, the inverse or the counts
 # of the values, and hashes them otherwise, whatever axis it names, as
 # np.unique_values always does.
@@ -128,22 +87,10 @@ def _hashed_unique_lines(source: str) -> list[int]:
     return sorted(lines)
 
 
-def _stack_module_paths() -> list[Path]:
-    paths = []
-    for package in _STACK_PACKAGES:
-        # A renamed or removed package must fail here instead of passing.
-        assert (_CYTEARC_ROOT / package / "__init__.py").is_file(), package
-        paths.extend(sorted((_CYTEARC_ROOT / package).rglob("*.py")))
-    for module in _STACK_MODULES:
-        assert (_CYTEARC_ROOT / module).is_file(), module
-        paths.append(_CYTEARC_ROOT / module)
-    return paths
-
-
 def test_stack_modules_find_distinct_values_by_sorting() -> None:
-    paths = _stack_module_paths()
+    paths = stack_module_paths()
     hashed = [
-        f"{path.relative_to(_CYTEARC_ROOT).as_posix()}:{line}"
+        f"{path.relative_to(CYTEARC_ROOT).as_posix()}:{line}"
         for path in paths
         for line in _hashed_unique_lines(path.read_text())
     ]

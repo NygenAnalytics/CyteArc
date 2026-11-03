@@ -33,6 +33,7 @@ from ..stages import (
     resolve_cells,
 )
 from ..summaries import summarize_stage
+from ....utils.arguments import bool_argument
 from .common import (
     cell_snapshots,
     check_labeled_cells,
@@ -40,7 +41,6 @@ from .common import (
     modality_assay,
     resolve_embeddings,
     resolve_graph,
-    require_bool,
     resolve_label,
     resolve_rna_head,
     resolve_run_filtering,
@@ -353,8 +353,8 @@ def resolve_rna(
     )
     hto_assay = _resolve_hto_assay(store, hashing_settings) if hashing_enabled else None
     resolved_species = resolve_species(species)
-    membership_strength = require_bool(membership_strength, "membership_strength")
-    markers = require_bool(markers, "markers")
+    membership_strength = bool_argument(membership_strength, "membership_strength")
+    markers = bool_argument(markers, "markers")
     calling_enabled, calling_settings = stage_settings(
         "cell_calling", cell_calling, optional=True
     )

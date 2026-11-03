@@ -30,11 +30,13 @@ import numpy as np
 import pandas as pd
 
 from ..utils.arrays import has_duplicates, sort_categories
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "ALLELE_ROLES",
     "BASES",
     "CALL_DTYPE",
+    "CALL_FIELDS",
     "COUNT_FIELDS",
     "COUNT_UNITS",
     "DEPTH_DEFINITIONS",
@@ -81,6 +83,10 @@ COUNT_FIELDS: Mapping[str, np.dtype[Any]] = {
 MAX_COUNT = int(np.iinfo(np.uint32).max)
 #: A depth row: the cell, the site and the depth.
 DEPTH_DTYPE = np.dtype([("cell", np.int32), ("key", np.int32), ("depth", np.uint32)])
+#: The optional fields of a call, by source: its quality, such as the genotype
+#: quality that Tapestri and DAb-seq give. A ``variant_counts`` artifact lists
+#: the ones its sources give in its ``call_fields`` attribute.
+CALL_FIELDS: tuple[str, ...] = ("quality",)
 #: A call row: the cell, the allele the call is about, the source of the call
 #: (a column of the file, such as GoT-Multi's ``genotype_final``) and the
 #: call, both as codes of text, and the call's quality, such as Tapestri's
@@ -247,7 +253,7 @@ class SiteTable:
         if repeated_alleles.any():
             first = int(np.flatnonzero(repeated_alleles)[0])
             raise ValueError(
-                f"The allele {self.allele[first]!r} of the site "
+                f"The allele {quoted_value(self.allele[first])} of the site "
                 f"{self.label(int(self.allele_site[first]))} is listed twice"
             )
 
@@ -325,7 +331,10 @@ class SiteTable:
         positions = np.flatnonzero(self.allele_role == "reference")
         sites = self.allele_site[positions]
         if has_duplicates(sites):
-            repeated = int(sites[np.flatnonzero(np.diff(np.sort(sites)) == 0)[0]])
+            # The repeat is found among the sorted sites, so it is named from
+            # them: the alleles need not be sorted by site.
+            ordered = np.sort(sites)
+            repeated = int(ordered[np.flatnonzero(np.diff(ordered) == 0)[0]])
             raise ValueError(
                 f"The site {self.label(repeated)} has two reference alleles"
             )
@@ -392,7 +401,7 @@ def _merged_contigs(tables: Sequence[SiteTable]) -> tuple[Contig, ...]:
         if other != name:
             raise ValueError(
                 f"The files hold one reference sequence under the contig names "
-                f"{other!r} and {name!r}, so each of its positions would be two "
+                f"{quoted_value(other)} and {quoted_value(name)}, so each of its positions would be two "
                 "sites; give it one name in every file, such as by naming mgatk's "
                 "reference files <contig>_refAllele.txt alike"
             )
@@ -486,7 +495,7 @@ def merge_sites(
             if seen != role:
                 label = _merged_label(ordered[site], contigs)
                 raise ValueError(
-                    f"The files call the allele {allele!r} of the site {label} "
+                    f"The files call the allele {quoted_value(allele)} of the site {label} "
                     f"{seen} and {role}; import them separately"
                 )
             per_site.setdefault(site, set()).add(allele)
@@ -603,6 +612,8 @@ class VariantSource(Protocol):
         depth_definition: What its depth counts, one of
             ``DEPTH_DEFINITIONS``.
         count_fields: The optional fields of its counts.
+        call_fields: The optional fields of its calls, of ``CALL_FIELDS``,
+            such as ``("quality",)`` for calls that carry their quality.
         depth_roles: The roles of the alleles that its stated depth counts,
             such as the reference and alternative of cellsnp-lite's DP, or
             None when its depth is the sum of its counts at the site.
@@ -635,6 +646,9 @@ class VariantSource(Protocol):
 
     @property
     def count_fields(self) -> tuple[str, ...]: ...
+
+    @property
+    def call_fields(self) -> tuple[str, ...]: ...
 
     @property
     def depth_roles(self) -> frozenset[str] | None: ...
@@ -869,9 +883,9 @@ class VariantCounts:
             ``quality_forward`` and ``quality_reverse`` (mean base quality,
             NaN where the strand count is 0), ``reads`` and ``support``.
         calls: ``ids``, ``site``, ``allele``, ``source`` (the column that
-            held the call), ``call``, as the source wrote it, and
-            ``quality``, the call's quality where the source gives one, such
-            as Tapestri's genotype quality ``GQ``, and NaN elsewhere.
+            held the call) and ``call``, as the source wrote it, then
+            ``quality``, the call's quality, when the source gives one, such
+            as Tapestri's genotype quality ``GQ``.
         contigs: One row per contig: ``name``, ``length`` and
             ``sequence_sha256``.
         format: The format of the imported files, such as ``"mgatk"``.
@@ -903,7 +917,9 @@ def variant_count_frames(
     n_covered_sites: np.ndarray,
     depth: tuple[np.ndarray, np.ndarray, np.ndarray],
     counts: tuple[np.ndarray, np.ndarray, Mapping[str, np.ndarray]],
-    calls: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    calls: tuple[
+        np.ndarray, np.ndarray, np.ndarray, np.ndarray, Mapping[str, np.ndarray]
+    ],
     call_sources: Sequence[str],
     call_values: Sequence[str],
 ) -> dict[str, pd.DataFrame]:
@@ -921,7 +937,7 @@ def variant_count_frames(
         depth: Depth rows: cells (positions in ``cell_ids``), sites, depths.
         counts: Count rows: cells, alleles and the count and its fields.
         calls: Call rows: cells, alleles, sources and values as codes, and
-            each call's quality.
+            the call fields that the source gives, by name.
         call_sources: The text of the source codes.
         call_values: The text of the value codes.
     """
@@ -1003,7 +1019,7 @@ def variant_count_frames(
             else array.astype(np.int64)
         )
     counts_frame = pd.DataFrame(count_columns)
-    call_cells, call_alleles, call_source_codes, call_value_codes, call_quality = calls
+    call_cells, call_alleles, call_source_codes, call_value_codes, call_fields = calls
     calls_frame = pd.DataFrame(
         {
             "ids": cell_column(call_cells),
@@ -1019,7 +1035,10 @@ def variant_count_frames(
             ]
             if len(call_value_codes)
             else np.empty(0, dtype=object),
-            "quality": np.asarray(call_quality, dtype=np.float64),
+            **{
+                name: np.asarray(values, dtype=np.float64)
+                for name, values in call_fields.items()
+            },
         }
     )
     contigs_frame = pd.DataFrame(

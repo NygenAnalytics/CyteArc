@@ -414,6 +414,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 high MOI the tests of one gene, do not fit the memory budget;
                 the message names the smallest budget that runs the tests.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...perturbation.associations import (
             ASSOCIATION_SETS,
             CALIBRATION_STATUSES,
@@ -467,7 +468,6 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         covariate_names = covariate_columns(covariates)
         for column in covariate_names:
             _require_cell_column(self, column, "covariate")
-        bool_argument(invalidate_cache, "invalidate_cache")
         by = "target" if integration == "union" else "guide"
         rows = _label_rows(self, labels, by)
         status = rows.status
@@ -1720,6 +1720,9 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         Raises:
             TypeError: If ``tests`` is not an ArtifactRef.
             ValueError: If it is not a ``perturbation_associations`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as a call that
+                stopped before it finished leaves it.
             MemoryError: If the tables of its pairs do not fit the datastore
                 memory budget.
         """

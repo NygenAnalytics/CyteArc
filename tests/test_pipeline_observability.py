@@ -966,7 +966,7 @@ def test_set_verbosity_ends_the_stdlib_bridge(
 def test_stdlib_must_be_a_bool(restored_output: None) -> None:
     stdlib = cytearc_logging._config.stdlib
 
-    with pytest.raises(TypeError, match="^stdlib must be a bool$"):
+    with pytest.raises(TypeError, match="^stdlib must be a boolean or None$"):
         configure_output(stdlib=1)  # type: ignore[arg-type]
 
     assert cytearc_logging._config.stdlib is stdlib

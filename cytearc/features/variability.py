@@ -30,7 +30,7 @@ from typing import Any, Literal, NamedTuple, cast
 import numpy as np
 import pandas as pd
 
-from ..utils.arguments import float_argument, integer_argument
+from ..utils.arguments import bool_argument, float_argument, integer_argument
 from ..utils.arrays import regex_match_mask, within_bounds
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
@@ -798,8 +798,7 @@ def hvg_options(
     checked_top_n = integer_argument(top_n, "top_n", minimum=1)
     checked_n_bins = integer_argument(n_bins, "n_bins", minimum=1)
     _lowess_frac(lowess_frac)
-    if not isinstance(keep_bounds, bool | np.bool_):
-        raise TypeError("keep_bounds must be a boolean")
+    keep_bounds = bool_argument(keep_bounds, "keep_bounds")
     return HvgOptions(
         min_cells=checked_min_cells,
         top_n=checked_top_n,

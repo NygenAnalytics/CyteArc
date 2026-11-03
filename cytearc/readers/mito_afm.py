@@ -29,6 +29,7 @@ import numpy as np
 from ..variants.counts import ALLELE_ROLES, Contig, EntryBatch, SiteTable
 from ._h5ad_columns import index_key, read_column, sparse_encoding, sparse_shape
 from ._text import as_text
+from ..utils.arguments import quoted_value
 
 __all__ = ["MitoAfmSource", "mito_afm_source"]
 
@@ -45,10 +46,12 @@ def _texts(values: Any) -> np.ndarray:
 
 def _column(table: h5py.Group, name: str, path: str) -> np.ndarray:
     if name not in table:
-        raise ValueError(f"var of {path} lacks MiTo's {name!r} column")
+        raise ValueError(f"var of {path} lacks MiTo's {quoted_value(name)} column")
     values, missing = read_column(table[name])
     if np.any(missing):
-        raise ValueError(f"The {name!r} column of {path}'s var has missing values")
+        raise ValueError(
+            f"The {quoted_value(name)} column of {path}'s var has missing values"
+        )
     return np.asarray(values)
 
 
@@ -70,6 +73,7 @@ class MitoAfmSource:
     count_unit: str | None
     depth_definition: str
     count_fields: tuple[str, ...]
+    call_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
     alleles_overlap: bool
@@ -219,7 +223,7 @@ def mito_afm_source(path: str | os.PathLike[str]) -> MitoAfmSource:
         if reference_of.setdefault(position, reference) != reference:
             raise ValueError(
                 f"{text} gives position {position} the reference bases "
-                f"{reference_of[position]!r} and {reference!r}"
+                f"{quoted_value(reference_of[position])} and {quoted_value(reference)}"
             )
     pairs: dict[tuple[int, str], str] = {}
     for position, reference in reference_of.items():
@@ -256,6 +260,7 @@ def mito_afm_source(path: str | os.PathLike[str]) -> MitoAfmSource:
         count_unit="molecules" if molecules else None,
         depth_definition="all",
         count_fields=(),
+        call_fields=(),
         depth_roles=frozenset(ALLELE_ROLES),
         reference_from_depth=False,
         alleles_overlap=False,

@@ -40,6 +40,7 @@ from ..storage.stores import load_zarr
 from ..storage.virtual_arrays import read_selection
 from ..utils.arrays import has_duplicates
 from ..utils.logging import logger
+from ..utils.arguments import bool_argument
 
 
 def _node_parts(path: str) -> tuple[str, ...]:
@@ -237,6 +238,10 @@ class SubsetZarr:
         policy: CountMatrixPolicy | None = None,
         io: StorageIoPolicy | None = None,
     ) -> None:
+        reset_cell_filter = bool_argument(reset_cell_filter, "reset_cell_filter")
+        overwrite_existing_file = bool_argument(
+            overwrite_existing_file, "overwrite_existing_file"
+        )
         from ..storage.budget import resolve_budget
 
         validate_workspace_name(out_workspace)

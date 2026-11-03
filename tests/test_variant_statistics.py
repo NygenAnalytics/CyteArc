@@ -230,16 +230,20 @@ def test_stranded_rows_need_their_strand_counts_and_cells_need_a_count() -> None
 
 def test_presets_hold_the_published_thresholds() -> None:
     # Signac's vignette and MAESTER's paper, with VMR for RNA's variability.
+    # A threshold is reached, so a rule that a statistic exceed a value holds
+    # the next floating-point number above it, written out here.
     assert dict(INFORMATIVE_PRESETS["atac"]) == {
         "min_cells": 5,
         "min_strand_correlation": 0.65,
-        "min_vmr": 0.01,
+        "min_vmr": 0.010000000000000002,
     }
     assert dict(INFORMATIVE_PRESETS["rna"]) == {
-        "min_depth": 20.0,
-        "min_quality": 30.0,
-        "min_vmr": 0.01,
+        "min_depth": 20.000000000000004,
+        "min_quality": 30.000000000000004,
+        "min_vmr": 0.010000000000000002,
     }
+    assert INFORMATIVE_PRESETS["atac"]["min_vmr"] > 0.01
+    assert np.nextafter(INFORMATIVE_PRESETS["rna"]["min_depth"], 0.0) == 20.0
     # The table is public and read-only, at both levels.
     import cytearc.variants
 
@@ -301,6 +305,42 @@ def test_thresholds_compare_as_the_published_rules_do() -> None:
         informative_variants(statistics, {"min_quality": 30.0}, n_variants=4)
     with pytest.raises(ValueError, match="no forward and reverse counts"):
         informative_variants({"vmr": np.ones(1)}, thresholds, n_variants=1)
+
+
+@pytest.mark.parametrize(
+    ("name", "column", "value", "preset", "published_exceeds"),
+    [
+        ("min_cells", "n_cells_conf_detected", 5, "atac", False),
+        ("min_strand_correlation", "strand_correlation", 0.65, "atac", False),
+        ("min_vmr", "vmr", 0.01, "atac", True),
+        ("min_vmr", "vmr", 0.01, "rna", True),
+        ("min_depth", "mean_coverage", 20.0, "rna", True),
+        ("min_quality", "mean_quality", 30.0, "rna", True),
+    ],
+)
+def test_a_statistic_at_a_threshold_passes_and_a_preset_keeps_its_published_rule(
+    name, column, value, preset, published_exceeds
+) -> None:
+    # Three variants: at the value, one step below it and one step above.
+    at = float(value)
+    tested = np.asarray([at, np.nextafter(at, -np.inf), np.nextafter(at, np.inf)])
+    # Every other statistic of the preset passes by far.
+    statistics = {
+        "n_cells_conf_detected": np.full(3, 100.0),
+        "strand_correlation": np.full(3, 1.0),
+        "vmr": np.full(3, 1.0),
+        "mean_coverage": np.full(3, 1000.0),
+        "mean_quality": np.full(3, 40.0),
+    }
+    statistics[column] = tested
+    given = informative_variants(statistics, {name: value}, n_variants=3)
+    assert given.tolist() == [True, False, True]
+    # The preset keeps exactly what the published rule keeps: the value itself
+    # only when the rule says "at least".
+    kept = informative_variants(
+        statistics, resolve_thresholds(preset, {}), n_variants=3
+    )
+    assert kept.tolist() == [not published_exceeds, False, True]
 
 
 def test_variants_are_named_after_their_site_as_mgatk_names_them() -> None:

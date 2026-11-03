@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 from ._text import as_text
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "HDF5_SIGNATURE",
@@ -91,10 +92,12 @@ def _scalar_token(value: Any) -> str:
         return value
     number = np.asarray(value).item()
     if isinstance(number, bool):
-        raise ValueError(f"A state cannot be the boolean {number!r}")
+        raise ValueError(f"A state cannot be the boolean {quoted_value(number)}")
     if isinstance(number, float):
         if not np.isfinite(number) or number != int(number):
-            raise ValueError(f"A state must be a whole number, not {number!r}")
+            raise ValueError(
+                f"A state must be a whole number, not {quoted_value(number)}"
+            )
         return str(int(number))
     return str(number)
 
@@ -153,9 +156,13 @@ def _column(name: str, node: Any, what: str) -> _Column:
             return _Column(name, node, "categorical")
         if {"values", "mask"} <= keys:
             return _Column(name, node, "nullable")
-        raise ValueError(f"{what} holds a column {name!r} that CyteArc cannot read")
+        raise ValueError(
+            f"{what} holds a column {quoted_value(name)} that CyteArc cannot read"
+        )
     if len(node.shape) != 1:
-        raise ValueError(f"{what} holds a column {name!r} of more than one dimension")
+        raise ValueError(
+            f"{what} holds a column {quoted_value(name)} of more than one dimension"
+        )
     return _Column(name, node, "array")
 
 
@@ -237,7 +244,7 @@ class _open:
             return zarr.open_group(self._path, mode="r", use_consolidated=False)
         except Exception as error:
             raise ValueError(
-                f"The Zarr store {self._path!r} cannot be opened: {error}"
+                f"The Zarr store {quoted_value(self._path)} cannot be opened: {error}"
             ) from None
 
     def __exit__(self, *exc: object) -> None:
@@ -278,12 +285,12 @@ def _dataframe(root: Any, path: str) -> tuple[_Column, list[_Column], str]:
                 f"{what} is an array whose columns have no names, so its "
                 "characters and their integrations are unknown; CyteArc reads "
                 "a dataframe of named columns, or the names that PEtracer's "
-                f"files list in uns[{_EMBRYO_CHARACTERS!r}]"
+                f"files list in uns[{quoted_value(_EMBRYO_CHARACTERS)}]"
             )
         names = _names(listed[:])
         if len(names) != int(node.shape[1]):
             raise ValueError(
-                f"uns[{_EMBRYO_CHARACTERS!r}] of {path} names {len(names)} "
+                f"uns[{quoted_value(_EMBRYO_CHARACTERS)}] of {path} names {len(names)} "
                 f"characters for the {int(node.shape[1])} columns of {what}"
             )
         if len(set(names)) != len(names):
@@ -308,7 +315,9 @@ def _dataframe(root: Any, path: str) -> tuple[_Column, list[_Column], str]:
     columns = []
     for name in names:
         if name not in node:
-            raise ValueError(f"{what} lists a character {name!r} that it does not hold")
+            raise ValueError(
+                f"{what} lists a character {quoted_value(name)} that it does not hold"
+            )
         columns.append(_column(name, node[name], what))
     return index, columns, "columns"
 
@@ -330,7 +339,7 @@ def _uns_state(root: Any, name: str) -> str | None:
         return None
     node = uns[name]
     if _is_group(node) or node.shape != ():
-        raise ValueError(f"uns[{name!r}] must hold one state")
+        raise ValueError(f"uns[{quoted_value(name)}] must hold one state")
     return _scalar_token(node[()])
 
 
@@ -369,7 +378,7 @@ def character_table(path: str | os.PathLike[str]) -> CharacterTable:
             )
             if length != n_cells:
                 raise ValueError(
-                    f"The character {column.name!r} of {text} holds {length} values "
+                    f"The character {quoted_value(column.name)} of {text} holds {length} values "
                     f"for {n_cells} cells"
                 )
         encoding = root.attrs.get("encoding-type")

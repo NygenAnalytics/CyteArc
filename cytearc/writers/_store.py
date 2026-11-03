@@ -22,6 +22,7 @@ from ..storage.metadata_keys import (
 from ..storage.profiles import StorageProfile
 from ..storage.refs import ArtifactRef
 from ..utils.logging import logger
+from ..utils.arguments import bool_argument
 
 DEFAULT_IMPORT_BLOCK_ROWS = 65_536
 
@@ -290,6 +291,7 @@ def create_zarr_dataset(
     Returns:
         A Zarr Array.
     """
+    overwrite = bool_argument(overwrite, "overwrite")
     return _create_zarr_dataset(g, name, chunks, dtype, shape, overwrite)
 
 
@@ -316,6 +318,7 @@ def create_zarr_obj_array(
     Returns:
         A Zarr Array.
     """
+    overwrite = bool_argument(overwrite, "overwrite")
     return _create_zarr_obj_array(
         g,
         name,

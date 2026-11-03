@@ -53,7 +53,7 @@ from ...storage.artifacts import (
 )
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import bool_argument
+from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sort_categories, sorted_unique
 from ...utils.digest import path_sha256
 from ...utils.logging import logger
@@ -179,9 +179,9 @@ def _tree_names(file: BarcodeFile, stem: str, trees: "FileTrees") -> list[str]:
     for name in names:
         if TREE_SEPARATOR in name:
             raise ValueError(
-                f"The tree {name!r} of {os.fspath(file.path)!r} has a "
-                f"{TREE_SEPARATOR!r} in its name, which separates a tree's name "
-                f"from a node's in clone labels; remove the {TREE_SEPARATOR!r} "
+                f"The tree {quoted_value(name)} of {quoted_value(os.fspath(file.path))} has a "
+                f"{quoted_value(TREE_SEPARATOR)} in its name, which separates a tree's name "
+                f"from a node's in clone labels; remove the {quoted_value(TREE_SEPARATOR)} "
                 "from barcode_prefix or from the tree's key in the TreeData file"
             )
     return names
@@ -427,9 +427,9 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             first = seen.setdefault(name, position)
             if first != position:
                 raise ValueError(
-                    f"Two trees are named {name!r}, of "
-                    f"{os.fspath(files[first].path)!r} and "
-                    f"{os.fspath(files[position].path)!r}, so their clones would "
+                    f"Two trees are named {quoted_value(name)}, of "
+                    f"{quoted_value(os.fspath(files[first].path))} and "
+                    f"{quoted_value(os.fspath(files[position].path))}, so their clones would "
                     "share labels; give the files different names or barcode_prefix "
                     "values"
                 )
@@ -539,6 +539,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
                 saved yet.
             MemoryError: If the import does not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...readers.phylogeny import tree_file_layout
 
         if not isinstance(cell_selection, ArtifactRef):
@@ -546,7 +547,6 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         unit = _time_unit(time_unit)
         if format is not None and not isinstance(format, str):
             raise TypeError("format must be a format name or None")
-        bool_argument(invalidate_cache, "invalidate_cache")
         files = barcode_files(
             paths,
             barcode_prefix=barcode_prefix,
@@ -666,7 +666,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             raise TypeError("phylogeny must be an ArtifactRef")
         if phylogeny.kind != PhylogenyImportArguments.artifact_kind:
             raise ValueError(
-                f"phylogeny must be a cell_phylogeny artifact, not {phylogeny.kind!r}"
+                f"phylogeny must be a cell_phylogeny artifact, not {quoted_value(phylogeny.kind)}"
             )
         require_complete_artifact(self.zw, phylogeny)
         return artifact_group(self.zw, phylogeny)
@@ -801,8 +801,8 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
                 saved yet.
             MemoryError: If the cut does not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         cut = phylogeny_cut(time, depth)
-        bool_argument(invalidate_cache, "invalidate_cache")
         group = self._phylogeny_group(phylogeny)
         unit = group.attrs.get("time_unit")
         if cut.time is not None and unit is None:
@@ -948,7 +948,9 @@ def _count(group: zarr.Group, name: str) -> int:
     """A count that a saved phylogeny records as an attribute."""
     value = group.attrs.get(name)
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"The phylogeny's {name!r} attribute is not a count")
+        raise ValueError(
+            f"The phylogeny's {quoted_value(name)} attribute is not a count"
+        )
     return value
 
 

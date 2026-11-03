@@ -24,6 +24,7 @@ from .pipeline_run import (
     list_pipeline_runs,
     open_pipeline_run,
 )
+from ..utils.arguments import bool_argument
 
 # Keep the documented event types' import and pickle identity here, where
 # users import them, though they are implemented beside the ledger.
@@ -241,6 +242,8 @@ class PipelineAccessor:
             >>> run = ds.pipeline.rna(label="rna", hvg={"top_n": 2000})
             >>> run["clusters"], run.cells.fetch("umap_1")
         """
+        membership_strength = bool_argument(membership_strength, "membership_strength")
+        markers = bool_argument(markers, "markers")
         self._require_runnable(callback)
         plan = resolve_rna(
             self._store,
@@ -330,6 +333,8 @@ class PipelineAccessor:
         The other arguments mean what they mean for :meth:`rna`. The run
         records the selected peaks as its ``prevalent_peaks`` feature field.
         """
+        membership_strength = bool_argument(membership_strength, "membership_strength")
+        markers = bool_argument(markers, "markers")
         self._require_runnable(callback)
         plan = resolve_atac(
             self._store,
@@ -420,6 +425,8 @@ class PipelineAccessor:
         The other arguments mean what they mean for :meth:`rna`. The run
         records the panel as its ``panel`` feature field.
         """
+        membership_strength = bool_argument(membership_strength, "membership_strength")
+        markers = bool_argument(markers, "markers")
         self._require_runnable(callback)
         plan = resolve_adt(
             self._store,
@@ -506,6 +513,8 @@ class PipelineAccessor:
 
         The other arguments mean what they mean for :meth:`rna`.
         """
+        membership_strength = bool_argument(membership_strength, "membership_strength")
+        markers = bool_argument(markers, "markers")
         self._require_runnable(callback)
         plan = resolve_multimodal(
             self._store,

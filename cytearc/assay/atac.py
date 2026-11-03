@@ -19,6 +19,7 @@ from .normalization import (
     norm_tf_idf,
     stream_document_frequency,
 )
+from ..utils.arguments import bool_argument
 
 
 class ATACassay(Assay):
@@ -94,6 +95,8 @@ class ATACassay(Assay):
 
         Returns: A chunked array (delayed matrix) containing normalized data.
         """
+        renormalize_subset = bool_argument(renormalize_subset, "renormalize_subset")
+        log_transform = bool_argument(log_transform, "log_transform")
         counts, state = self._fit_tf_idf(
             cell_idx,
             feat_idx,

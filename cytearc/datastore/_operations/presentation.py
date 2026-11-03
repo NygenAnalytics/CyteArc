@@ -45,6 +45,7 @@ from ...storage.selections import (
     read_stored_selection_indices,
     validate_stored_selection_integrity,
 )
+from ...utils.arguments import bool_argument
 
 if TYPE_CHECKING:
     from ...writers.export import (
@@ -916,6 +917,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             PermissionError: If no matching result exists and the store is
                 not opened with ``zarr_mode='r+'``.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...embeddings.imported import (
             imported_source_record,
             write_imported_coordinates,
@@ -1009,6 +1011,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             PermissionError: If no matching result exists and the store is
                 not opened with ``zarr_mode='r+'``.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(graph, ArtifactRef):
             raise TypeError("graph must be an ArtifactRef")
         require_graph_kind(graph)
@@ -1117,6 +1120,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             PermissionError: If no matching result exists and the store is
                 not opened with ``zarr_mode='r+'``.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         remedy = (
             "Select the cells labelled in both artifacts with select_cells(..., "
             "include=[...]) and freeze both over that selection with "

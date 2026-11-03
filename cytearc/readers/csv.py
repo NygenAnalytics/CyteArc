@@ -10,6 +10,7 @@ from pandas.io.common import get_handle
 from ..utils.count_values import CountValueRange
 from ..utils.progress import iter_progress
 from ._text import require_unique_identifiers
+from ..utils.arguments import bool_argument
 
 # read_csv settings that, besides the separator and ``quoting``, decide how
 # pandas splits a line into fields. The field check splits with the same ones.
@@ -120,6 +121,8 @@ class CSVReader:
         batch_size: int = 10000,
         pandas_kwargs: dict[str, Any] | None = None,
     ) -> None:
+        has_header = bool_argument(has_header, "has_header")
+        rows_are_cells = bool_argument(rows_are_cells, "rows_are_cells")
         self._fn = csv_fn
         if rows_are_cells is False:
             raise NotImplementedError(

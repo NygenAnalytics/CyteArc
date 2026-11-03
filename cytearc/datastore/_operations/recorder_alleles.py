@@ -49,7 +49,7 @@ from ...storage.artifacts import (
 from ...storage.geometry import array_geometry
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import bool_argument
+from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sorted_unique, unique_inverse
 from ...utils.digest import file_sha256, path_sha256
 from ...utils.logging import logger
@@ -228,7 +228,9 @@ def _saved_count(group: zarr.Group, name: str) -> int:
     """A count that a saved import records in its attributes."""
     value = group.attrs.get(name)
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"The lineage_alleles artifact records no count {name!r}")
+        raise ValueError(
+            f"The lineage_alleles artifact records no count {quoted_value(name)}"
+        )
     return value
 
 
@@ -376,9 +378,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 saved yet.
             MemoryError: If the import does not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        bool_argument(invalidate_cache, "invalidate_cache")
         if format is not None and not isinstance(format, str):
             raise TypeError("format must be a format name or None")
         files, layouts = self._allele_layouts(
@@ -735,7 +737,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             raise TypeError("alleles must be an ArtifactRef")
         if alleles.kind != RecorderAlleleImportArguments.artifact_kind:
             raise ValueError(
-                f"alleles must be a lineage_alleles artifact, not {alleles.kind!r}"
+                f"alleles must be a lineage_alleles artifact, not {quoted_value(alleles.kind)}"
             )
         require_complete_artifact(self.zw, alleles)
         return artifact_group(self.zw, alleles)
@@ -899,12 +901,12 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         if format not in EXPORT_FORMATS:
             raise ValueError(
                 f"format must be one of {', '.join(map(repr, EXPORT_FORMATS))}, not "
-                f"{format!r}"
+                f"{quoted_value(format)}"
             )
         if unknown not in UNKNOWN_POLICIES:
             raise ValueError(
                 f"unknown must be one of {', '.join(map(repr, UNKNOWN_POLICIES))}, "
-                f"not {unknown!r}"
+                f"not {quoted_value(unknown)}"
             )
         target = os.fspath(path)
         if format == "treedata" and os.path.lexists(target):
@@ -1029,9 +1031,11 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         and missing sites never link cells.
 
         ``method="graph"`` follows DARLIN (Li et al., Cell 2023): an allele is
-        rare when its frequency is below ``max_frequency`` and it was found in
-        at most ``max_samples`` of its bank's samples; DARLIN used ``2e-5``
-        and one mouse. ``method="p_clonal"`` follows CARLIN (Bowling et al.,
+        rare when its frequency is at most ``max_frequency`` and it was found
+        in at most ``max_samples`` of its bank's samples. DARLIN linked cells
+        through alleles of frequency below 2e-5 found in one mouse, which
+        ``max_frequency=float(np.nextafter(2e-5, 0))`` and ``max_samples=1``
+        reproduce exactly. ``method="p_clonal"`` follows CARLIN (Bowling et al.,
         Cell 2020): an allele of bank rate λ among the M cells of its group
         with an edit at its character arose more than once with probability
         p_clonal = (1 - e^(-λM) - λM e^(-λM)) / (1 - e^(-λM)), and is rare
@@ -1077,9 +1081,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 :meth:`~cytearc.datastore.namespaces.ClonesAccessor.export_characters`
                 names characters. Every character with an allele needs one.
                 None takes each allele's frequency from the cells.
-            max_frequency: For ``"graph"``, the frequency below which an
-                allele is rare, greater than 0 and at most 1, or None for no
-                such filter.
+            max_frequency: For ``"graph"``, the highest frequency of a rare
+                allele, greater than 0 and at most 1, or None for no such
+                filter.
             max_samples: The most samples of a bank in which a rare allele is
                 found, such as 1 for alleles of at most one bank mouse, or
                 None for no such filter; it needs banks with a
@@ -1111,7 +1115,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 saved yet.
             MemoryError: If the calling does not fit the memory budget.
         """
-        bool_argument(invalidate_cache, "invalidate_cache")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         group = self._allele_group(alleles)
         banks = None
         bank_bytes = 0

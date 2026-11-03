@@ -602,8 +602,15 @@ def test_barcode_clones_refuse_other_artifacts_and_arguments(store, tmp_path) ->
         store.clones.barcode_clones("barcodes", preset="larry")
     with pytest.raises(TypeError, match="invalidate_cache"):
         store.clones.barcode_clones(barcodes, preset="larry", invalidate_cache=1)
-    with pytest.raises(TypeError, match="invalidate_cache must be a boolean"):
-        store.clones.barcode_clones(barcodes, preset="larry", invalidate_cache=np.True_)
+    # A NumPy boolean is a flag: it computes the clones anew.
+    recomputed = store.clones.barcode_clones(
+        barcodes, preset="larry", invalidate_cache=np.True_
+    )
+    assert recomputed != clones
+    assert (
+        store.artifacts.inspect(recomputed).parameters
+        == store.artifacts.inspect(clones).parameters
+    )
     with pytest.raises(ValueError, match="needs a preset or a method"):
         store.clones.barcode_clones(barcodes)
     with pytest.raises(TypeError, match="as text"):

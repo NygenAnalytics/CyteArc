@@ -16,7 +16,7 @@ from ..storage.partition import (
     row_read_parts,
 )
 from ..storage.types import as_zarr_group
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument
 from ..utils.compute import compute_with_progress
 from ..utils.logging import logger
 from ..utils.moments import ColumnMoments, add_implicit_zeros, welford_add
@@ -249,6 +249,7 @@ class RNAassay(Assay):
         resident_bytes: int = 0,
         **norm_params: Any,
     ) -> Generator[pd.DataFrame | tuple[np.ndarray, np.ndarray], None, None]:
+        as_dataframe = bool_argument(as_dataframe, "as_dataframe")
         reject_unknown_normalization_params(
             norm_params, caller="iter_normed_feature_wise"
         )
@@ -463,6 +464,8 @@ class RNAassay(Assay):
         Returns:
             A chunked array (delayed matrix) containing normalized data.
         """
+        renormalize_subset = bool_argument(renormalize_subset, "renormalize_subset")
+        log_transform = bool_argument(log_transform, "log_transform")
         from ..storage.identity import read_dataset_fingerprint
 
         log_transform, renormalize_subset = check_normalization_flags(

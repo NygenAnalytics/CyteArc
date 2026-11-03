@@ -59,6 +59,7 @@ import pandas as pd
 
 from ..metadata.records import INTEGER, TEXT, EncodedText, FieldKind, RecordTable
 from ..utils.arrays import sort_categories, sorted_unique
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "FIELDS",
@@ -172,7 +173,7 @@ class SiteRules:
         if self.kind not in SITE_KINDS:
             raise ValueError(
                 f"kind must be one of {', '.join(map(repr, SITE_KINDS))}, not "
-                f"{self.kind!r}"
+                f"{quoted_value(self.kind)}"
             )
         named = {
             "not_applicable": self.not_applicable,
@@ -185,7 +186,7 @@ class SiteRules:
             for token in tokens:
                 if token in seen:
                     raise ValueError(
-                        f"The token {token!r} cannot mean both {seen[token]} and "
+                        f"The token {quoted_value(token)} cannot mean both {seen[token]} and "
                         f"{state}"
                     )
                 seen[token] = state
@@ -197,7 +198,7 @@ class SiteRules:
                 re.compile(expression)
             except re.error as error:
                 raise ValueError(
-                    f"{name} {expression!r} is not a regular expression: {error}"
+                    f"{name} {quoted_value(expression)} is not a regular expression: {error}"
                 ) from None
         if self.absent not in range(len(STATES)):
             raise ValueError("absent must be the code of a state")
@@ -1025,7 +1026,7 @@ def character_matrix(
     if unknown not in UNKNOWN_POLICIES:
         raise ValueError(
             f"unknown must be one of {', '.join(map(repr, UNKNOWN_POLICIES))}, not "
-            f"{unknown!r}"
+            f"{quoted_value(unknown)}"
         )
     cells = np.asarray(table.cells, dtype=np.int64)
     sources = np.asarray(table.sources, dtype=np.int64)
@@ -1138,7 +1139,7 @@ def character_matrix(
     if len(state_codes) and int(state_codes.max()) > _MAX_STATE + 1:
         position = int(np.argmax(state_codes))
         raise ValueError(
-            f"The states of the character {character_name(*ranked_names[int(distinct[position, 0])])!r} "
+            f"The states of the character {quoted_value(character_name(*ranked_names[int(distinct[position, 0])]))} "
             f"pass {_MAX_STATE + 1}, the largest that an int32 matrix holds; its "
             "edits follow marks numbered up to it"
         )
@@ -1170,8 +1171,8 @@ def character_matrix(
         for name, pair in zip(characters, ranked_names, strict=True):
             if name in seen:
                 raise ValueError(
-                    f"The integration {seen[name][0]!r} at site {seen[name][1]!r} and "
-                    f"{pair[0]!r} at {pair[1]!r} are both the character {name!r}; "
+                    f"The integration {quoted_value(seen[name][0])} at site {quoted_value(seen[name][1])} and "
+                    f"{quoted_value(pair[0])} at {quoted_value(pair[1])} are both the character {quoted_value(name)}; "
                     "rename an integration so that each character has its own name"
                 )
             seen[name] = pair

@@ -28,6 +28,7 @@ from ._style import (
     legend_side_rows,
     theme_context,
 )
+from ..utils.arguments import bool_argument, optional_bool_argument
 
 __all__ = ["gene_pairing", "gene_usage", "receptor_qc", "spectratype"]
 
@@ -170,9 +171,19 @@ def receptor_qc(
     Tables: ``receptor_type`` and ``chain_pairing`` (cells per category, one
     column per group or ``n_cells``), and ``chains_per_cell`` (cells per
     number of chains of each arm, indexed by ``n_chains``).
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If ``receptors`` is not an ``immune_receptors``
+            artifact, or the grouping refuses its labels.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact does not fit the memory budget.
     """
-    if normalize is not None and not isinstance(normalize, bool):
-        raise TypeError("normalize must be a boolean or None")
+    normalize = optional_bool_argument(normalize, "normalize")
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     loaded = _store_method(store, "load_receptors", "immune receptors")(
         receptors, fields=()
     )
@@ -370,7 +381,20 @@ def gene_usage(
     of it.
 
     Tables: ``usage``, the rows of ``ds.repertoire.gene_usage``.
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If ``source`` is not an ``immune_receptors`` or
+            ``clonotypes`` artifact, ``gene`` is not a gene field, or the
+            summary refuses its options, as ``ds.repertoire.gene_usage``
+            does.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact does not fit the memory budget.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     top = _top(top)
     if not isinstance(gene, str) or gene not in GENE_FIELDS:
         raise ValueError(f"gene must be one of {', '.join(GENE_FIELDS)}")
@@ -476,7 +500,19 @@ def gene_pairing(
     row. The plot raises ``ValueError`` when no chain has both calls.
 
     Tables: ``pairs``, the rows of ``ds.repertoire.gene_usage``.
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If ``source`` is not an ``immune_receptors`` or
+            ``clonotypes`` artifact, or the summary refuses its options,
+            as ``ds.repertoire.gene_usage`` does.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact does not fit the memory budget.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     top = _top(top)
     result = _store_method(store, "gene_usage")(
         source,
@@ -569,7 +605,19 @@ def spectratype(
     ``ValueError`` when no chain has a junction.
 
     Tables: ``spectratype``, the rows of ``ds.repertoire.spectratype``.
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If ``source`` is not an ``immune_receptors`` or
+            ``clonotypes`` artifact, or the summary refuses its options,
+            as ``ds.repertoire.spectratype`` does.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact does not fit the memory budget.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     result = _store_method(store, "spectratype")(
         source,
         sequence=sequence,

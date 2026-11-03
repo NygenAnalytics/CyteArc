@@ -27,6 +27,7 @@ from ._text import (
     require_unique_identifiers,
     unique_feature_identifiers,
 )
+from ..utils.arguments import bool_argument
 
 type MatrixOrientation = Literal["featuresByCells", "cellsByFeatures"]
 type CoordinateOrder = Literal["cellMajor", "featureMajor", "unordered"]
@@ -1810,6 +1811,7 @@ class MtxReader(CrReader):
         temp_dir: str | None = None,
         duplicate_feature_ids: DuplicateFeatureIds = "error",
     ) -> None:
+        is_filtered = bool_argument(is_filtered, "is_filtered")
         if isinstance(matrix_path, MtxCandidate):
             if feature_path is not None or cell_path is not None:
                 raise ValueError("Do not pass explicit sidecars with an MtxCandidate")
@@ -1991,6 +1993,7 @@ class CrDirReader(MtxReader):
         temp_dir: str | None = None,
         duplicate_feature_ids: DuplicateFeatureIds = "error",
     ) -> None:
+        is_filtered = bool_argument(is_filtered, "is_filtered")
         candidates = inspect_mtx(loc)
         if len(candidates) != 1:
             raise ValueError(

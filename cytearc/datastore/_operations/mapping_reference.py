@@ -34,6 +34,7 @@ from ...storage.artifacts import (
 from ...storage.types import as_zarr_array
 from ...storage.selections import validate_stored_selection_integrity
 from ...utils.arrays import has_duplicates
+from ...utils.arguments import bool_argument
 
 if TYPE_CHECKING:
     from .graph import _GraphOperationsMixin as _MappingReferenceOperationsBase
@@ -76,10 +77,9 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
             PermissionError: If the reference must be written and the store
                 is not opened with ``zarr_mode='r+'``.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(neighbors, ArtifactRef):
             raise TypeError("neighbors must be an ArtifactRef")
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
         if (
             neighbors.scope != "assay"
             or neighbors.assay is None

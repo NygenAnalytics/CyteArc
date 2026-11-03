@@ -27,6 +27,7 @@ from ._figure import (
 )
 from ._raster import draw_raster_canvas, raster_from_metadata
 from ._style import apply_figure_chrome, resolve_color_limits, theme_context
+from ..utils.arguments import bool_argument
 
 
 _ARTIFACT_X = "__cytearc_artifact_embedding_x"
@@ -279,6 +280,7 @@ def embedding_raster(
     default, or ``missing_color`` as an explicit override. Pass ``subset_by``
     to keep cells marked ``True`` in a boolean cell-metadata column.
     """
+    show = bool_argument(show, "show")
     require_matplotlib()
     if (layout_key is None) == (layout is None):
         raise ValueError("Provide exactly one of layout_key or layout")

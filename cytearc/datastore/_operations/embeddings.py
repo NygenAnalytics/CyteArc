@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ...graph.arguments import graph_flag, graph_load_flags, umap_graph_flags
+from ...graph.arguments import graph_load_flags, umap_graph_flags
 from ...graph.distances import validate_distance_provenance
 from ...graph.feature_projection import (
     graph_cell_selection,
@@ -22,7 +22,7 @@ from ...storage.artifacts import (
     inspect_artifact,
 )
 from ...storage.types import as_zarr_array, as_zarr_group
-from ...utils.arguments import float_argument, integer_argument
+from ...utils.arguments import bool_argument, float_argument, integer_argument
 from ...utils.logging import logger, progress_enabled
 from ...utils.shutdown import shutdown_checkpoint
 
@@ -215,6 +215,10 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
                 opened with ``zarr_mode='r+'``. The check runs before the graph
                 is read.
         """
+        symmetric_graph = bool_argument(symmetric_graph, "symmetric_graph")
+        graph_upper_only = bool_argument(graph_upper_only, "graph_upper_only")
+        verbose = bool_argument(verbose, "verbose")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...embeddings.sgtsne import (
             require_sgtsnepi,
             run_sgtsne,
@@ -377,8 +381,8 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
         dens_lambda = float_argument(dens_lambda, "dens_lambda")
         dens_frac = float_argument(dens_frac, "dens_frac")
         dens_var_shift = float_argument(dens_var_shift, "dens_var_shift")
-        use_density_map = graph_flag(use_density_map, "use_density_map")
-        parallel = graph_flag(parallel, "parallel")
+        use_density_map = bool_argument(use_density_map, "use_density_map")
+        parallel = bool_argument(parallel, "parallel")
         # UMAP optimizes its initialization in place and requires C-contiguous
         # float32 coordinates, so an array initialization becomes a private copy.
         cell_selection, n_cells, initialization_input, ini_embed = (
@@ -586,6 +590,11 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
                 opened with ``zarr_mode='r+'``. The check runs before the graph
                 is read.
         """
+        symmetric_graph = bool_argument(symmetric_graph, "symmetric_graph")
+        graph_upper_only = bool_argument(graph_upper_only, "graph_upper_only")
+        use_density_map = bool_argument(use_density_map, "use_density_map")
+        parallel = bool_argument(parallel, "parallel")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         return self._run_umap_artifact(
             graph,
             initialization,

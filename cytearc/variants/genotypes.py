@@ -40,6 +40,7 @@ import numpy as np
 import pandas as pd
 
 from ..storage.refs import ArtifactRef
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "ALTERNATIVE_PRESENT",
@@ -48,6 +49,7 @@ __all__ = [
     "GAPFILL_ERROR",
     "GENOTYPE_METHODS",
     "GENOTYPE_RULES",
+    "GIFT_POSTERIOR",
     "HETEROZYGOUS",
     "HIGH_CONFIDENCE_SWAP",
     "HOMOZYGOUS_ALTERNATIVE",
@@ -161,6 +163,10 @@ GAPFILL_ERROR = 0.01
 #: The swap probability below which a UMI counts as confident, as GIFT counts
 #: the UMIs of a genotyped cell.
 HIGH_CONFIDENCE_SWAP = 0.1
+#: The posterior that GIFT's calls exceed. A call reaches ``min_posterior``,
+#: so GIFT's rule is the next floating-point number above it,
+#: 0.6000000000000001, the default of ``min_posterior``.
+GIFT_POSTERIOR = 0.6
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,9 +178,9 @@ class GenotypeRules:
         min_umis: The fewest UMIs of a call, or None for ``"source"``.
         min_mutant_umis: The fewest mutant UMIs of a ``"threshold"`` mutant
             call, or None.
-        min_fraction: The share that a ``"threshold"`` call's allele must
-            exceed, or None.
-        min_posterior: The posterior that a ``"gift"`` call must exceed, or
+        min_fraction: The share of the cell's UMIs that a ``"threshold"``
+            call's allele must reach, or None.
+        min_posterior: The posterior that a ``"gift"`` call must reach, or
             None for the other methods.
         swap: GIFT's swap probabilities as ascending reads and their
             probabilities, or None.
@@ -232,14 +238,26 @@ def _quality_rule(value: Any) -> float | None:
     return number
 
 
-def _share(value: Any, name: str, low: float, high: float) -> float:
+def _share(value: Any, name: str) -> float:
     if isinstance(value, bool | np.bool_) or not isinstance(
         value, int | float | np.integer | np.floating
     ):
         raise TypeError(f"{name} must be a number")
-    number = float(value)
-    if not low <= number < high:
-        raise ValueError(f"{name} must lie from {low} to below {high}, not {number}")
+    return float(value)
+
+
+def _fraction_rule(value: Any) -> float:
+    # A share of exactly one half would call a cell of equal UMIs both ways.
+    number = _share(value, "min_fraction")
+    if not 0.5 < number <= 1.0:
+        raise ValueError(f"min_fraction must be above 0.5 and at most 1, not {number}")
+    return number
+
+
+def _posterior_rule(value: Any) -> float:
+    number = _share(value, "min_posterior")
+    if not 0.0 <= number <= 1.0:
+        raise ValueError(f"min_posterior must lie from 0 to 1, not {number}")
     return number
 
 
@@ -257,15 +275,17 @@ def _site_alleles(alleles: Any) -> dict[str, tuple[str, str]]:
             raise TypeError("alleles must be keyed by site labels")
         if isinstance(pair, str) or not isinstance(pair, Sequence) or len(pair) != 2:
             raise TypeError(
-                f"alleles must give the site {label!r} a wild-type and an "
+                f"alleles must give the site {quoted_value(label)} a wild-type and an "
                 "alternative allele"
             )
         wild_type, alternative = pair
         if not isinstance(wild_type, str) or not isinstance(alternative, str):
-            raise TypeError(f"The alleles of the site {label!r} must be text")
+            raise TypeError(
+                f"The alleles of the site {quoted_value(label)} must be text"
+            )
         if wild_type == alternative:
             raise ValueError(
-                f"alleles gives the site {label!r} one allele, {wild_type!r}, as both "
+                f"alleles gives the site {quoted_value(label)} one allele, {quoted_value(wild_type)}, as both "
                 "the wild type and the alternative"
             )
         resolved[label] = (wild_type, alternative)
@@ -278,13 +298,16 @@ def genotype_rules(
     min_umis: Any = None,
     min_mutant_umis: Any = None,
     min_fraction: Any = None,
-    min_posterior: Any = 0.6,
+    min_posterior: Any = None,
     swap_probabilities: Any = None,
     alleles: Any = None,
     min_quality: Any = None,
     min_depth: Any = None,
 ) -> GenotypeRules:
     """Check a genotype method's arguments and resolve its rules.
+
+    ``min_posterior`` None resolves to GIFT's rule, a posterior above
+    ``GIFT_POSTERIOR``, as the next floating-point number above it.
 
     Raises:
         TypeError: If an argument has the wrong type.
@@ -295,10 +318,12 @@ def genotype_rules(
         raise ValueError(f"method must be one of {', '.join(GENOTYPE_METHODS)}")
     umis = _count_rule(min_umis, "min_umis")
     mutant_umis = _count_rule(min_mutant_umis, "min_mutant_umis")
-    fraction = (
-        None if min_fraction is None else _share(min_fraction, "min_fraction", 0.5, 1.0)
+    fraction = None if min_fraction is None else _fraction_rule(min_fraction)
+    posterior = (
+        float(np.nextafter(GIFT_POSTERIOR, np.inf))
+        if min_posterior is None
+        else _posterior_rule(min_posterior)
     )
-    posterior = _share(min_posterior, "min_posterior", 0.0, 1.0)
     pairs = _site_alleles(alleles)
     quality = _quality_rule(min_quality)
     depth = _count_rule(min_depth, "min_depth")
@@ -306,7 +331,7 @@ def genotype_rules(
         "min_umis": umis is not None,
         "min_mutant_umis": mutant_umis is not None,
         "min_fraction": fraction is not None,
-        "min_posterior": posterior != 0.6,
+        "min_posterior": min_posterior is not None,
         "swap_probabilities": swap_probabilities is not None,
         "alleles": bool(pairs),
         "min_quality": quality is not None,
@@ -320,7 +345,7 @@ def genotype_rules(
     unused = [name for name, present in given.items() if present and name not in uses]
     if unused:
         raise ValueError(
-            f"method={method!r} uses no {', '.join(unused)}; "
+            f"method={quoted_value(method)} uses no {', '.join(unused)}; "
             + {
                 "source": "it adopts the calls that the tool wrote, those of too "
                 "low a quality or depth filtered by min_quality and min_depth",
@@ -375,7 +400,7 @@ def source_call_codes(
     mapping = SOURCE_CALLS.get(column)
     if mapping is None:
         raise ValueError(
-            f"The calls of the column {column!r} have no vocabulary; the known call "
+            f"The calls of the column {quoted_value(column)} have no vocabulary; the known call "
             f"columns are {', '.join(SOURCE_CALLS)}. Call genotypes from the "
             "counts with method='threshold' instead"
         )
@@ -383,13 +408,15 @@ def source_call_codes(
     # Python strings, as dense calls such as Tapestri's hold, takes seconds.
     inverse, distinct = pd.factorize(np.asarray(labels, dtype=object).reshape(-1))
     if np.any(inverse < 0):
-        raise ValueError(f"The column {column!r} holds a call that is not text")
+        raise ValueError(
+            f"The column {quoted_value(column)} holds a call that is not text"
+        )
     unknown = sorted(
         str(label) for label in distinct.tolist() if str(label) not in mapping
     )
     if unknown:
         raise ValueError(
-            f"The column {column!r} holds the call {unknown[0]!r}, which is none of "
+            f"The column {quoted_value(column)} holds the call {quoted_value(unknown[0])}, which is none of "
             f"its labels: {', '.join(mapping)}"
         )
     codes = np.asarray(
@@ -415,9 +442,9 @@ def threshold_calls(
     Without ``min_fraction``, a cell is ``alternative_present`` with at least
     ``min_mutant_umis`` mutant UMIs and ``wild_type`` with none, as GoT calls
     a patient's cells. With it, a cell is ``alternative_present`` when its
-    mutant share exceeds ``min_fraction``, and its mutant UMIs reach
+    mutant share reaches ``min_fraction``, and its mutant UMIs reach
     ``min_mutant_umis`` when that is given, and ``wild_type`` when its
-    wild-type share exceeds it, as GoT calls cell lines. Every other cell is
+    wild-type share reaches it, as GoT calls cell lines. Every other cell is
     ``filtered``.
 
     Args:
@@ -425,8 +452,8 @@ def threshold_calls(
         alternative: Each cell's UMIs of the alternative.
         min_umis: The fewest UMIs of the two that a call needs, at least 1.
         min_mutant_umis: The fewest mutant UMIs of a mutant call, or None.
-        min_fraction: The share, from 0.5 up to 1, that a call's allele must
-            exceed, or None.
+        min_fraction: The share, above 0.5 and at most 1, that a call's
+            allele must reach, or None.
 
     Returns:
         Each cell's call code, as int8.
@@ -442,10 +469,10 @@ def threshold_calls(
         wild_type = enough & (alternative == 0)
     else:
         safe = np.maximum(total, 1)
-        mutant = enough & (alternative / safe > min_fraction)
+        mutant = enough & (alternative / safe >= min_fraction)
         if min_mutant_umis is not None:
             mutant &= alternative >= min_mutant_umis
-        wild_type = enough & (reference / safe > min_fraction)
+        wild_type = enough & (reference / safe >= min_fraction)
     calls[wild_type] = WILD_TYPE
     calls[mutant] = ALTERNATIVE_PRESENT
     return calls
@@ -669,11 +696,11 @@ def gift_calls(
 ) -> np.ndarray:
     """Call each row at its most probable genotype when the posterior is high enough.
 
-    A row whose largest posterior exceeds ``min_posterior`` and that holds at
+    A row whose largest posterior reaches ``min_posterior`` and that holds at
     least ``min_umis`` confident UMIs is called ``wild_type``,
     ``heterozygous`` or ``homozygous_alternative``. Ties, which only a
-    ``min_posterior`` below 0.5 can call, go to that order. Every other row
-    is ``filtered``.
+    ``min_posterior`` of at most 0.5 can call, go to that order. Every other
+    row is ``filtered``.
     """
     posteriors = np.asarray(posteriors, dtype=np.float64)
     calls = np.full(len(posteriors), FILTERED, dtype=np.int8)
@@ -682,7 +709,7 @@ def gift_calls(
     largest = np.where(defined, posteriors.max(axis=1, initial=-1.0), -1.0)
     called = (
         defined
-        & (largest > min_posterior)
+        & (largest >= min_posterior)
         & (np.asarray(confident_umis, dtype=np.int64) >= min_umis)
     )
     codes = np.asarray([WILD_TYPE, HETEROZYGOUS, HOMOZYGOUS_ALTERNATIVE], dtype=np.int8)

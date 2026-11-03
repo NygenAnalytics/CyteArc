@@ -176,7 +176,7 @@ from ...trajectory.results import (
     PseudotimeMarkerResult,
     PseudotimeScoreResult,
 )
-from ...utils.arguments import integer_argument
+from ...utils.arguments import bool_argument, integer_argument
 from ...utils.arrays import array_digest, sort_categories
 from ...utils.logging import logger
 
@@ -246,12 +246,6 @@ def _feature_names_at(assay: Assay, feature_indices: np.ndarray) -> np.ndarray:
     """Return the names of the selected features, which errors cite."""
     names, _ = _feature_identity_arrays(assay)
     return np.asarray(read_array_rows_chunkwise(names, feature_indices)).astype(str)
-
-
-def _validate_invalidate_cache(value: Any) -> bool:
-    if not isinstance(value, bool):
-        raise TypeError("invalidate_cache must be a boolean")
-    return value
 
 
 def _resolve_feature_indices(
@@ -483,13 +477,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 would exceed the datastore memory budget. The check runs
                 before anything is persisted.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...neighbors.diffusion import bounded_diffusion_operator
 
         if not isinstance(graph, ArtifactRef):
             raise TypeError("graph must be an ArtifactRef")
         require_graph_kind(graph)
         power = integer_argument(t, "t", minimum=1)
-        invalidate_cache = _validate_invalidate_cache(invalidate_cache)
         graph_ref = graph
         graph_status = inspect_artifact(self.zw, graph_ref)
         if not graph_status.complete:
@@ -834,11 +828,12 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         Returns:
             Reference to an artifact containing ``pseudotime`` and ``valid``.
         """
+        min_max_norm_ptime = bool_argument(min_max_norm_ptime, "min_max_norm_ptime")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
 
         if not isinstance(graph, ArtifactRef):
             raise TypeError("graph must be an ArtifactRef")
         require_graph_kind(graph)
-        invalidate_cache = _validate_invalidate_cache(invalidate_cache)
         if sources is not None and not isinstance(sources, list):
             raise TypeError("sources must be a list")
         if sinks is not None and not isinstance(sinks, list):
@@ -1303,7 +1298,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         Returns:
             Reference to an artifact containing ``probabilities`` and ``valid``.
         """
-        invalidate_cache = _validate_invalidate_cache(invalidate_cache)
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if sinks is None:
             raise ValueError("sinks must be provided")
         if not isinstance(sinks, list):
@@ -1706,9 +1701,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             Reference to an artifact with ``points``, ``curve_pseudotime``,
             and each cell's ``progress``, ``distance``, and ``valid`` entry.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(fate, ArtifactRef):
             raise TypeError("fate must be an ArtifactRef")
-        invalidate_cache = _validate_invalidate_cache(invalidate_cache)
         batch_size = (
             None
             if batch_size is None
@@ -2045,12 +2040,12 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         Returns:
             Reference to a ``lineage_tree`` artifact.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(graph, ArtifactRef):
             raise TypeError("graph must be an ArtifactRef")
         if not isinstance(labels, ArtifactRef):
             raise TypeError("labels must be an ArtifactRef")
         require_graph_kind(graph)
-        invalidate_cache = _validate_invalidate_cache(invalidate_cache)
         batch_size = (
             None
             if batch_size is None
@@ -2458,6 +2453,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         Raises:
             UnmeasuredCellsError: If the assay did not measure a valid pseudotime cell.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...features.markers import find_markers_by_regression
 
         reject_unknown_normalization_params(
@@ -2469,7 +2465,6 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             if gene_batch_size is None
             else integer_argument(gene_batch_size, "gene_batch_size", minimum=1)
         )
-        invalidate_cache = _validate_invalidate_cache(invalidate_cache)
         assay = self._pseudotime_feature_assay(pseudotime, features)
         identity = _FrozenFeatureIdentity.capture(assay)
         validated_parameters = _validate_marker_parameters(
@@ -2696,6 +2691,9 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         Raises:
             UnmeasuredCellsError: If the assay did not measure a valid pseudotime cell.
         """
+        smoothen = bool_argument(smoothen, "smoothen")
+        z_scale = bool_argument(z_scale, "z_scale")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...trajectory.feature_dynamics import knn_clustering
 
         reject_unknown_normalization_params(
@@ -2707,7 +2705,6 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             if batch_size is None
             else integer_argument(batch_size, "batch_size", minimum=1)
         )
-        invalidate_cache = _validate_invalidate_cache(invalidate_cache)
         assay = self._pseudotime_feature_assay(pseudotime, features)
         identity = _FrozenFeatureIdentity.capture(assay)
         validated_parameters = _validate_aggregation_parameters(
@@ -3183,6 +3180,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         Raises:
             UnmeasuredCellsError: If the assay did not measure a scored cell.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         reject_unknown_normalization_params(
             norm_params,
             caller="run_lineage_marker_search",
@@ -3192,7 +3190,6 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             if gene_batch_size is None
             else integer_argument(gene_batch_size, "gene_batch_size", minimum=1)
         )
-        invalidate_cache = _validate_invalidate_cache(invalidate_cache)
         if lineages is not None and not isinstance(lineages, list):
             raise TypeError("lineages must be a list of sink labels or None")
         assay = self._lineage_feature_assay(fate, features)
@@ -3483,6 +3480,8 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         Raises:
             UnmeasuredCellsError: If the assay did not measure a correlated cell.
         """
+        include_sinks = bool_argument(include_sinks, "include_sinks")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         reject_unknown_normalization_params(
             norm_params,
             caller="run_lineage_driver_search",
@@ -3492,7 +3491,6 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             if gene_batch_size is None
             else integer_argument(gene_batch_size, "gene_batch_size", minimum=1)
         )
-        invalidate_cache = _validate_invalidate_cache(invalidate_cache)
         if lineages is not None and not isinstance(lineages, list):
             raise TypeError("lineages must be a list of sink labels or None")
         if cells is not None and not isinstance(cells, ArtifactRef):
@@ -3740,6 +3738,8 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         Raises:
             UnmeasuredCellsError: If the assay did not measure a scored cell.
         """
+        z_scale = bool_argument(z_scale, "z_scale")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...trajectory.feature_dynamics import knn_clustering
 
         reject_unknown_normalization_params(
@@ -3751,7 +3751,6 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             if batch_size is None
             else integer_argument(batch_size, "batch_size", minimum=1)
         )
-        invalidate_cache = _validate_invalidate_cache(invalidate_cache)
         if lineages is not None and not isinstance(lineages, list):
             raise TypeError("lineages must be a list of sink labels or None")
         assay = self._lineage_feature_assay(fate, features)

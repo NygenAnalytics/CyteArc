@@ -42,7 +42,7 @@ from ...storage.artifacts import (
 )
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import bool_argument
+from ...utils.arguments import bool_argument, optional_bool_argument, quoted_value
 from ...utils.logging import logger
 from .cell_groups import group_columns, within_groups
 from .cell_barcodes import (
@@ -259,9 +259,9 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 saved yet.
             MemoryError: If the import does not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        bool_argument(invalidate_cache, "invalidate_cache")
         if format is not None and not isinstance(format, str):
             raise TypeError("format must be a format name or None")
         files: tuple[BarcodeFile, ...] = ()
@@ -552,7 +552,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         count_dtype = np.dtype(assay.rawData.dtype)
         if count_dtype.kind not in "iu":
             raise TypeError(
-                f"The barcode counts of assay {assay.name!r} must be integers, not "
+                f"The barcode counts of assay {quoted_value(assay.name)} must be integers, not "
                 f"{count_dtype}"
             )
         return assay
@@ -824,7 +824,11 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 saved yet.
             MemoryError: If the calling does not fit the memory budget.
         """
-        bool_argument(invalidate_cache, "invalidate_cache")
+        inclusive = optional_bool_argument(inclusive, "inclusive")
+        prune = optional_bool_argument(prune, "prune")
+        doublets = optional_bool_argument(doublets, "doublets")
+        trex_rules = optional_bool_argument(trex_rules, "trex_rules")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         group = self._barcode_group(barcodes)
         listed = None
         if allowlist is not None and not isinstance(allowlist, bool | np.bool_):
@@ -1057,7 +1061,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             raise TypeError("barcodes must be an ArtifactRef")
         if barcodes.kind != LineageBarcodeImportArguments.artifact_kind:
             raise ValueError(
-                f"barcodes must be a lineage_barcodes artifact, not {barcodes.kind!r}"
+                f"barcodes must be a lineage_barcodes artifact, not {quoted_value(barcodes.kind)}"
             )
         require_complete_artifact(self.zw, barcodes)
         return artifact_group(self.zw, barcodes)

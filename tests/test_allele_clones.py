@@ -574,6 +574,11 @@ def test_allele_clones_name_missing_and_incomplete_alleles(store, tmp_path) -> N
     # The arguments are checked before the store is read.
     with pytest.raises(TypeError, match="invalidate_cache must be a boolean"):
         store.clones.allele_clones(
+            missing, method="graph", max_frequency=0.5, invalidate_cache=1
+        )
+    # A NumPy boolean is a flag, so the store is read next.
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        store.clones.allele_clones(
             missing, method="graph", max_frequency=0.5, invalidate_cache=np.True_
         )
     # An import that stopped before it finished leaves an incomplete artifact.

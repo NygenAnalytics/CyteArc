@@ -214,7 +214,7 @@ def test_contigs_that_are_not_chains_fill_no_slot() -> None:
     ]
 
 
-def test_without_a_productive_field_no_contig_is_productive() -> None:
+def test_without_a_productive_field_productive_only_is_refused() -> None:
     encoder = contig_encoder()
     encoder.add(
         pd.DataFrame(
@@ -228,7 +228,10 @@ def test_without_a_productive_field_no_contig_is_productive() -> None:
         source=0,
     )
     table = encoder.finish()
-    assert not index_chains(table, 1, locus=table.text["locus"]).eligible.any()
+    # The filter tests a field that the contigs lack, so it refuses rather
+    # than leave every contig out.
+    with pytest.raises(ValueError, match="^productive_only counts the contigs"):
+        index_chains(table, 1, locus=table.text["locus"])
     assert index_chains(
         table, 1, locus=table.text["locus"], productive_only=False
     ).eligible.all()

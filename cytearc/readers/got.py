@@ -49,6 +49,7 @@ import pandas as pd
 from ..variants.counts import EntryBatch, SiteTable
 from ._delimited import text_layout
 from ._variant_files import first_line, open_text
+from ..utils.arguments import quoted_value
 
 __all__ = ["GOT_FORMATS", "GotSource", "got_source", "got_table_format"]
 
@@ -119,7 +120,7 @@ def _read_table(path: str) -> _Table:
     )
     if frame.columns.duplicated().any():
         repeated = frame.columns[frame.columns.duplicated()][0]
-        raise ValueError(f"{path} names the column {repeated!r} twice")
+        raise ValueError(f"{path} names the column {quoted_value(repeated)} twice")
     cell_column = next((name for name in _CELL_COLUMNS if name in frame.columns), None)
     if cell_column is None and "" in frame.columns:
         cell_column = ""
@@ -152,7 +153,7 @@ def _counts(table: _Table, column: str) -> np.ndarray:
     if not whole.all():
         bad = texts[~missing][~whole][0]
         raise ValueError(
-            f"The column {column!r} of {table.path} holds {bad!r}; counts are whole "
+            f"The column {quoted_value(column)} of {table.path} holds {quoted_value(bad)}; counts are whole "
             "numbers of 0 or more, or NA"
         )
     values[~missing] = numbers
@@ -226,6 +227,7 @@ class GotSource:
     count_unit: str | None
     depth_definition: str
     count_fields: tuple[str, ...]
+    call_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
     alleles_overlap: bool
@@ -426,7 +428,9 @@ def _got_multi_targets(table: _Table) -> tuple[_Target, ...]:
         for channel, columns in channel_columns.items():
             if not set(columns.values()) <= set(frame.columns):
                 missing = sorted(set(columns.values()) - set(frame.columns))[0]
-                raise ValueError(f"{table.path} lacks the column {missing!r}")
+                raise ValueError(
+                    f"{table.path} lacks the column {quoted_value(missing)}"
+                )
             read_columns = {
                 allele: f"{column.split('_calls_')[0]}_reads_per_umi_total_{channel}"
                 for allele, column in columns.items()
@@ -437,7 +441,7 @@ def _got_multi_targets(table: _Table) -> tuple[_Target, ...]:
             if present and len(present) < len(read_columns):
                 missing = sorted(set(read_columns.values()) - set(present))[0]
                 raise ValueError(
-                    f"{table.path} lacks the column {missing!r}, which its other "
+                    f"{table.path} lacks the column {quoted_value(missing)}, which its other "
                     "reads_per_umi_total columns need"
                 )
             counts = {
@@ -451,8 +455,8 @@ def _got_multi_targets(table: _Table) -> tuple[_Target, ...]:
                     if unknown.any():
                         cell = part.cells[int(np.flatnonzero(unknown)[0])]
                         raise ValueError(
-                            f"The column {reads_column!r} of {table.path} is empty "
-                            f"for the cell {cell!r}, which has UMIs of that call"
+                            f"The column {quoted_value(reads_column)} of {table.path} is empty "
+                            f"for the cell {quoted_value(cell)}, which has UMIs of that call"
                         )
                     # Reads are kept only beside UMIs; rows without UMIs are
                     # not stored.
@@ -529,7 +533,7 @@ def got_source(path: str | os.PathLike[str], *, format: str) -> GotSource:
     text = os.fspath(path)
     if format not in GOT_FORMATS:
         raise ValueError(
-            f"format must be one of {', '.join(GOT_FORMATS)}, not {format!r}"
+            f"format must be one of {', '.join(GOT_FORMATS)}, not {quoted_value(format)}"
         )
     table = _read_table(text)
     if format == "ironthrone":
@@ -539,7 +543,9 @@ def got_source(path: str | os.PathLike[str], *, format: str) -> GotSource:
             if name not in table.frame
         ]
         if missing:
-            raise ValueError(f"{text} lacks the summTable column {missing[0]!r}")
+            raise ValueError(
+                f"{text} lacks the summTable column {quoted_value(missing[0])}"
+            )
         targets = _ironthrone_targets(table)
     elif format == "got":
         targets = _got_targets(table)
@@ -560,6 +566,7 @@ def got_source(path: str | os.PathLike[str], *, format: str) -> GotSource:
         count_unit="reads" if format == "gotcha" else "umis",
         depth_definition="all" if ambiguous else "reference_and_alternative",
         count_fields=("reads",) if reads else (),
+        call_fields=(),
         depth_roles=None,
         reference_from_depth=False,
         alleles_overlap=False,

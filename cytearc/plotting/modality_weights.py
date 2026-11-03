@@ -34,6 +34,7 @@ from ._style import (
     scatter_edgecolor,
     theme_context,
 )
+from ..utils.arguments import bool_argument
 
 
 def _wnn_assays(
@@ -148,6 +149,7 @@ def modality_weights(
     show: bool = True,
 ) -> PlotResult:
     """Plot each assay's WNN contribution over an explicit embedding."""
+    show = bool_argument(show, "show")
     if point_size is not None and (not np.isfinite(point_size) or point_size <= 0):
         raise ValueError("point_size must be positive and finite")
     if not np.isfinite(point_alpha) or not 0 <= point_alpha <= 1:

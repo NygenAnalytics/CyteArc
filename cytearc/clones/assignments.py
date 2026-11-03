@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from ..utils.arrays import sort_categories
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "MULTIPLE_POLICIES",
@@ -71,7 +72,7 @@ def clone_label_texts(values: Any, missing: Any | None = None) -> np.ndarray:
         if np.any(present & ~whole):
             example = array[present & ~whole][0]
             raise TypeError(
-                f"clone labels must be text or whole numbers, not {float(example)!r}"
+                f"clone labels must be text or whole numbers, not {quoted_value(float(example))}"
             )
         labels[whole] = array[whole].astype(np.int64).astype(str).astype(object)
     elif kind in "OUS":
@@ -104,7 +105,7 @@ def _label_text(value: Any) -> str | None:
             return None
         if value != np.floor(value):
             raise TypeError(
-                f"clone labels must be text or whole numbers, not {float(value)!r}"
+                f"clone labels must be text or whole numbers, not {quoted_value(float(value))}"
             )
         return str(int(value))
     try:
@@ -237,7 +238,7 @@ class CloneAssigner:
         if multiple not in MULTIPLE_POLICIES:
             raise ValueError(
                 f"multiple must be one of {', '.join(MULTIPLE_POLICIES)}, not "
-                f"{multiple!r}"
+                f"{quoted_value(multiple)}"
             )
         self._cell_ids = np.asarray(cell_ids)
         self._multiple = multiple
@@ -274,7 +275,7 @@ class CloneAssigner:
                 self._label_bytes += sys.getsizeof(label)
             elif self._label_sources[code] != source:
                 raise ValueError(
-                    f"The clone label {label!r} comes from two sources, so two "
+                    f"The clone label {quoted_value(label)} comes from two sources, so two "
                     "clones would merge; give each file its own barcode_prefix"
                 )
             mapped[index] = code
@@ -384,7 +385,7 @@ class CloneAssigner:
         if differ.any():
             cell = rows[starts][np.flatnonzero(differ)[0]]
             raise ValueError(
-                f"Cell {str(self._cell_ids[cell])!r} is listed with two "
+                f"Cell {quoted_value(str(self._cell_ids[cell]))} is listed with two "
                 "probabilities of its clone"
             )
         cells = rows[starts][settled]
@@ -393,7 +394,7 @@ class CloneAssigner:
         clash = ~np.isnan(stored) & ~np.isnan(new) & (stored != new)
         if clash.any():
             raise ValueError(
-                f"Cell {str(self._cell_ids[cells[clash][0]])!r} is listed with two "
+                f"Cell {quoted_value(str(self._cell_ids[cells[clash][0]]))} is listed with two "
                 "probabilities of its clone"
             )
         fill = np.isnan(stored)

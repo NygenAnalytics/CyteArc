@@ -74,6 +74,7 @@ from .writer import (
     write_assay_counts,
     write_assay_counts_t,
 )
+from ..utils.arguments import bool_argument
 
 _IMPORT_SOURCE = "DataStoreMerge"
 _MANIFEST_ATTR = "cytearc:merge_manifest"
@@ -191,6 +192,8 @@ class DataStoreMerge:
         missing_assay_policy: MissingAssayPolicy = "zero_fill",
         feature_key: FeatureKey = "ids",
     ) -> None:
+        overwrite = bool_argument(overwrite, "overwrite")
+        reset_cell_filter = bool_argument(reset_cell_filter, "reset_cell_filter")
         validate_workspace_name(out_workspace)
         if len(datasets) < 2:
             raise ValueError("DataStoreMerge requires at least two source DataStores")

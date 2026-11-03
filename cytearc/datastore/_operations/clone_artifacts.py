@@ -27,6 +27,7 @@ from ...metadata.artifacts import (
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import ArtifactRef
 from ...utils.logging import logger
+from ...utils.arguments import quoted_value
 
 __all__ = [
     "CLONE_PROBABILITY",
@@ -201,12 +202,12 @@ def write_clones(
     for name in sources:
         if name not in SOURCE_ARRAYS:
             raise ValueError(
-                f"{name!r} is not a per-cell array that a clone source adds beside "
+                f"{quoted_value(name)} is not a per-cell array that a clone source adds beside "
                 f"its clones; those are {', '.join(SOURCE_ARRAYS)}"
             )
         if name == CLONE_PROBABILITY and assignment.probabilities is not None:
             raise ValueError(
-                f"{name!r} is written from the assignment's probabilities already; "
+                f"{quoted_value(name)} is written from the assignment's probabilities already; "
                 "pass it once"
             )
     n_cells = len(assignment.codes)

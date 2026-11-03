@@ -35,6 +35,7 @@ from ...storage.selections import (
     validate_stored_selection_integrity,
 )
 from ...storage.types import as_zarr_array, as_zarr_group
+from ...utils.arguments import bool_argument
 
 if TYPE_CHECKING:
     from ...metrics import ClusterSeparabilityResult
@@ -187,6 +188,7 @@ class _IntegrationMetricsOperationsMixin(_IntegrationMetricsBase):
             this metric. The batch column is intentionally an imported metadata
             input.
         """
+        scale = bool_argument(scale, "scale")
         from ...metrics import ilisi_knn
 
         _, cell_indices, distances, indices = self._load_metric_knn(neighbors)
@@ -232,6 +234,7 @@ class _IntegrationMetricsOperationsMixin(_IntegrationMetricsBase):
             this metric. The annotation column is intentionally an imported
             metadata input, not a CyteArc-produced clustering.
         """
+        scale = bool_argument(scale, "scale")
         from ...metrics import clisi_knn
 
         _, cell_indices, distances, indices = self._load_metric_knn(neighbors)

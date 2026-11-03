@@ -114,10 +114,11 @@ def test_the_atac_preset_selects_exactly_the_clone_variants(store) -> None:
     informative = set(selection.variants.index[selection.variants["informative"]])
     assert informative == mito_variant_labels(TRUTH)
     assert selection.preset == "atac"
+    # Signac's VMR above 0.01 is recorded as the next number above it.
     assert selection.thresholds == {
         "min_cells": 5,
         "min_strand_correlation": 0.65,
-        "min_vmr": 0.01,
+        "min_vmr": 0.010000000000000002,
         "min_depth": None,
         "min_quality": None,
     }
@@ -340,7 +341,8 @@ def test_the_rna_preset_tests_depth_quality_and_vmr(store) -> None:
     )
     informative = selection.variants["informative"]
     assert set(informative.index[informative]) == set(passed.index[passed])
-    assert selection.thresholds["min_quality"] == 30.0
+    # MAESTER's quality above 30 is recorded as the next number above it.
+    assert selection.thresholds["min_quality"] == 30.000000000000004
 
 
 def test_thresholds_given_by_name_replace_the_presets(store) -> None:

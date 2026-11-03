@@ -51,6 +51,7 @@ from ..storage.materialize import (
     _write_feature_summaries,
     feature_summary_bytes,
 )
+from ..utils.arguments import bool_argument
 from ..utils.compute import controlled_compute
 from ..utils.moments import ColumnMoments
 from ..utils.numba import njit
@@ -644,17 +645,17 @@ def check_normalization_flags(
     renormalize_subset: object,
 ) -> tuple[bool, bool]:
     """Validate the flags requested for ``assay.normed`` and return them as bools."""
-    flags = {_LOG_TRANSFORM: log_transform, _RENORMALIZE_SUBSET: renormalize_subset}
-    for name, value in flags.items():
-        if not isinstance(value, bool | np.bool_):
-            raise TypeError(f"{name} must be a boolean")
+    flags = {
+        _LOG_TRANSFORM: bool_argument(log_transform, _LOG_TRANSFORM),
+        _RENORMALIZE_SUBSET: bool_argument(renormalize_subset, _RENORMALIZE_SUBSET),
+    }
     requested = [name for name, value in flags.items() if value]
     if requested:
         applicable = applicable_normalization_flags(assay)
         for name in requested:
             if name not in applicable:
                 raise ValueError(_inapplicable_flag_message(assay, name))
-    return bool(log_transform), bool(renormalize_subset)
+    return flags[_LOG_TRANSFORM], flags[_RENORMALIZE_SUBSET]
 
 
 def resolve_normalization_params(

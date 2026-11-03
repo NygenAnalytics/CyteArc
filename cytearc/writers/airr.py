@@ -43,6 +43,7 @@ from ..metadata.records import EncodedText, decode_text
 from ..utils.arrays import sorted_unique
 from ..utils.logging import logger
 from ..utils.numba import njit
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "AIRR_LOGICAL_FIELDS",
@@ -120,7 +121,7 @@ def _logical_column(values: pd.Series, name: str) -> np.ndarray:
     if not known.all():
         raise ValueError(
             f"{name} must hold logical values, but holds "
-            f"{present.iloc[int(np.flatnonzero(~known)[0])]!r}"
+            f"{quoted_value(present.iloc[int(np.flatnonzero(~known)[0])])}"
         )
     rendered = np.where(flags, "T", "F").astype(object)
     rendered[(text == "").to_numpy()] = ""
@@ -876,7 +877,7 @@ def write_airr_rearrangements(
     if not ids.is_unique:
         repeated = ids[ids.duplicated()].iloc[0]
         raise ValueError(
-            f"sequence_id {repeated!r} repeats, but the schema requires each "
+            f"sequence_id {quoted_value(repeated)} repeats, but the schema requires each "
             "contig's ID to be unique"
         )
     names = list(table.columns) if columns is None else list(_column_names(columns))

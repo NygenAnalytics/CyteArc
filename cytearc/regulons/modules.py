@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument
 
 __all__ = [
     "ModuleParameters",
@@ -60,6 +60,11 @@ class ModuleParameters:
         integer_argument(self.minGenes, "minGenes", minimum=1)
         if not self.rhoThreshold > 0:
             raise ValueError("rhoThreshold must be positive")
+        object.__setattr__(
+            self,
+            "keepOnlyActivating",
+            bool_argument(self.keepOnlyActivating, "keepOnlyActivating"),
+        )
 
 
 #: pySCENIC 0.12.1 defaults.

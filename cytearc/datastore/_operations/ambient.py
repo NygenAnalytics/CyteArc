@@ -47,7 +47,7 @@ from ...storage.refs import ArtifactRef
 from ...storage.selections import read_stored_selection_indices
 from ...storage.types import as_zarr_array, as_zarr_group
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import float_argument, integer_argument
+from ...utils.arguments import bool_argument, float_argument, integer_argument
 from ...utils.logging import logger
 
 if TYPE_CHECKING:
@@ -267,6 +267,7 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
             PermissionError: If no saved profile matches and the store is
                 read-only.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         operation = "estimate_ambient_profile"
         if (empty_droplets is None) == (total_counts is None):
             raise ValueError("Pass exactly one of empty_droplets and total_counts")
@@ -512,6 +513,7 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
             PermissionError: If no saved estimate matches and the store is
                 read-only.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         operation = "estimate_ambient_contamination"
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")

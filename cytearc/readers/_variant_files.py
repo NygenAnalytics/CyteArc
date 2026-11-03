@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import h5py
 import numpy as np
 import pandas as pd
+from ..utils.arguments import quoted_value
 
 from ..utils.digest import file_sha256
 
@@ -193,7 +194,7 @@ def matrix_header(path: str) -> MatrixHeader:
     except ValueError:
         raise ValueError(
             f"The size line of {path} must hold three whole numbers, not "
-            f"{' '.join(sizes)!r}"
+            f"{quoted_value(' '.join(sizes))}"
         ) from None
     return MatrixHeader(
         path=path,
@@ -262,7 +263,7 @@ def matrix_entries(
         whole = np.isfinite(values) & (values >= 0) & (values == np.floor(values))
         if not whole.all():
             raise ValueError(
-                f"{header.path} holds the value {values[~whole][0]!r}; counts are "
+                f"{header.path} holds the value {quoted_value(values[~whole][0])}; counts are "
                 "whole numbers of 0 or more"
             )
         yield rows, columns, values.astype(np.int64)
@@ -350,7 +351,7 @@ def read_vcf(path: str) -> VcfRecords:
         record = int(np.flatnonzero(~whole)[0])
         raise ValueError(
             f"Line {record + header_lines + 1} of {path} holds the position "
-            f"{table[1].iloc[record]!r}; positions are whole numbers of 1 or more"
+            f"{quoted_value(table[1].iloc[record])}; positions are whole numbers of 1 or more"
         )
     return VcfRecords(
         chrom=table[0].to_numpy(dtype=object),
@@ -381,7 +382,7 @@ def read_barcodes(path: str) -> np.ndarray:
     repeated = pd.Index(array).duplicated()
     if repeated.any():
         raise ValueError(
-            f"The barcode {array[repeated][0]!r} repeats in {path}; each column of "
+            f"The barcode {quoted_value(array[repeated][0])} repeats in {path}; each column of "
             "the matrices needs its own barcode"
         )
     return array

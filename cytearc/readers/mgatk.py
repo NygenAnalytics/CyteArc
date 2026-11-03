@@ -41,6 +41,7 @@ import pandas as pd
 
 from ..variants.counts import BASES, MAX_COUNT, Contig, EntryBatch, SiteTable
 from ._variant_files import find_file, first_line, is_gzip
+from ..utils.arguments import quoted_value
 
 __all__ = ["MGATK_FORMATS", "MgatkSource", "mgatk_source"]
 
@@ -108,8 +109,8 @@ def _contig_name(path: str, prefix: str) -> str:
     if "." in _VERSION.sub("", contig):
         carried = f"carry {prefix!r}" if prefix else "carry no prefix"
         raise ValueError(
-            f"{name} may name the contig {contig!r} or a contig after a sample "
-            f"prefix, since the base files {carried} and the dot in {contig!r} is "
+            f"{name} may name the contig {quoted_value(contig)} or a contig after a sample "
+            f"prefix, since the base files {carried} and the dot in {quoted_value(contig)} is "
             "not an accession's version, as in NC_012920.1; rename it "
             "<contig>_refAllele.txt"
         )
@@ -158,7 +159,7 @@ def _read_reference(path: str, prefix: str) -> _Reference:
     if not known.all():
         position = int(np.flatnonzero(~known)[0])
         raise ValueError(
-            f"Position {position + 1} of {path} holds {bases[position]!r}; a "
+            f"Position {position + 1} of {path} holds {quoted_value(bases[position])}; a "
             "reference base is A, C, G, T or N"
         )
     sequence = "".join(bases.tolist())
@@ -208,6 +209,7 @@ class MgatkSource:
     count_unit: str | None
     depth_definition: str
     count_fields: tuple[str, ...]
+    call_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
     alleles_overlap: bool
@@ -464,6 +466,7 @@ def mgatk_source(
         depth_definition="all",
         count_fields=("forward", "reverse")
         + (("quality_forward", "quality_reverse") if six else ()),
+        call_fields=(),
         depth_roles=None,
         reference_from_depth=False,
         alleles_overlap=False,

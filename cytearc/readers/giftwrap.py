@@ -43,6 +43,7 @@ import pandas as pd
 from ..utils.arrays import has_duplicates
 from ..variants.counts import EntryBatch, SiteTable
 from ._variant_files import find_file, is_gzip, open_text
+from ..utils.arguments import quoted_value
 
 __all__ = ["GiftwrapSource", "giftwrap_source"]
 
@@ -90,7 +91,7 @@ def _probes(
     same: list[str] = []
     for name, wild_type, mutant in manifest:
         if name in seen:
-            raise ValueError(f"{path} lists the probe {name!r} twice")
+            raise ValueError(f"{path} lists the probe {quoted_value(name)} twice")
         seen.add(name)
         names.append(name)
         if mutant is not None and mutant != wild_type:
@@ -135,6 +136,7 @@ class GiftwrapSource:
     count_unit: str | None
     depth_definition: str
     count_fields: tuple[str, ...]
+    call_fields: tuple[str, ...]
     depth_roles: frozenset[str] | None
     reference_from_depth: bool
     alleles_overlap: bool
@@ -314,6 +316,7 @@ def _h5_source(path: str) -> GiftwrapSource:
         count_unit="umis",
         depth_definition="all",
         count_fields=("reads", "support"),
+        call_fields=(),
         depth_roles=None,
         reference_from_depth=False,
         alleles_overlap=False,
@@ -352,7 +355,7 @@ def _manifest_rows(
     needed = ("name", "gap_probe_sequence", "original_gap_probe_sequence", "index")
     missing = [name for name in needed if name not in table.columns]
     if missing:
-        raise ValueError(f"{path} lacks the manifest column {missing[0]!r}")
+        raise ValueError(f"{path} lacks the manifest column {quoted_value(missing[0])}")
     manifest = [
         (str(name).strip(), _named(str(wild)), _named(str(mutant)))
         for name, wild, mutant in zip(
@@ -468,6 +471,7 @@ def _table_source(folder: str) -> GiftwrapSource:
         count_unit="umis",
         depth_definition="all",
         count_fields=("reads", "support"),
+        call_fields=(),
         depth_roles=None,
         reference_from_depth=False,
         alleles_overlap=False,

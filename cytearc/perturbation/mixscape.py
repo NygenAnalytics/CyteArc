@@ -121,7 +121,7 @@ def mixscape_settings(
         raise ValueError("min_fraction must be from 0 to 1")
     if not 0 < cutoff <= 1:
         raise ValueError("p_value_cutoff must be above 0 and at most 1")
-    bool_argument(scale, "scale")
+    scale = bool_argument(scale, "scale")
     if not isinstance(perturbation_type, str):
         raise TypeError("perturbation_type must be a string")
     if not perturbation_type or " " in perturbation_type:

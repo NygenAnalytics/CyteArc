@@ -9,7 +9,7 @@ import pandas as pd
 from ..storage.artifacts import ArtifactRef, inspect_artifact
 from ..trajectory.curves import smooth_against_progress
 from ..trajectory.lineages import select_lineages
-from ..utils.arguments import float_argument
+from ..utils.arguments import bool_argument, float_argument
 from ._contracts import CategoricalScale, ColorScale, PlotProvenance
 from ._data import _resolve_layout
 from ._deps import require_matplotlib
@@ -91,6 +91,8 @@ def lineage_heatmap(
     profiles stored without z-scaling, which the colorbar labels as mean
     expression.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if not isinstance(aggregation, ArtifactRef):
         raise TypeError("aggregation must be an ArtifactRef")
     for limit in (vmin, vmax):
@@ -311,6 +313,8 @@ def lineage_trends(
     ``axis="pseudotime"`` they sit at their mean pseudotime, where bins
     inside an endpoint crowd together.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if not isinstance(aggregation, ArtifactRef):
         raise TypeError("aggregation must be an ArtifactRef")
     if isinstance(features, str) or not isinstance(features, Sequence) or not features:
@@ -453,6 +457,8 @@ def lineage_curves(
     theirs, it lies between 2 and the size of their spline basis, 32 by
     default.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if not isinstance(curves, ArtifactRef):
         raise TypeError("curves must be an ArtifactRef")
     line_width = _positive(line_width, "line_width")
@@ -605,6 +611,10 @@ def lineage_tree(
     and the candidate sinks, the leaves other than the root, are coloured
     apart from the other clusters, and the legend names the colours.
     """
+    show_cells = bool_argument(show_cells, "show_cells")
+    labels = bool_argument(labels, "labels")
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     if not isinstance(tree, ArtifactRef):
         raise TypeError("tree must be an ArtifactRef")
     node_size = _positive(node_size, "node_size")

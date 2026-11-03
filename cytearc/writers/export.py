@@ -32,6 +32,7 @@ from ..metadata.rows import apply_missing_mask, metadata_missing_mask
 from ..storage.refs import ArtifactRef
 from ..utils.compute import compute_with_progress
 from ..utils.logging import logger
+from ..utils.arguments import bool_argument
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -1860,6 +1861,7 @@ def to_h5ad(
     anything is written, so a misaligned artifact raises ``ValueError`` and
     leaves no file.
     """
+    skip_recalc_nfeats = bool_argument(skip_recalc_nfeats, "skip_recalc_nfeats")
     if matrix not in ("raw", "normed"):
         raise ValueError("matrix must be either 'raw' or 'normed'")
     if dtype is not None:
@@ -2079,6 +2081,7 @@ def to_mtx(assay: Any, mtx_directory: str, compress: bool = False) -> None:
     Raises:
         UnmeasuredCellsError: If the assay did not measure a cell.
     """
+    compress = bool_argument(compress, "compress")
     from ..assay.classification import is_rna_assay_type
     from ..metadata.membership import require_measured_cells
 

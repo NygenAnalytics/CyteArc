@@ -131,7 +131,7 @@ from ...metadata.rows import (
     read_metadata_missing_rows,
     read_metadata_rows,
 )
-from ...utils.arguments import float_argument, integer_argument
+from ...utils.arguments import bool_argument, float_argument, integer_argument
 from ...utils.arrays import (
     array_digest,
     has_duplicates,
@@ -292,6 +292,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         A read-only store returns a saved selection of the same mask and
         refuses only to create one.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         assay = self._get_assay(from_assay)
         all_features = self._features_universe(from_assay=assay.name)
         if (mask is None) == (feature_indexes is None):
@@ -363,6 +364,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             PermissionError: If the selection or its feature summary must be
                 computed and the store is not opened with ``zarr_mode='r+'``.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if isinstance(min_cells, bool) or not isinstance(min_cells, int):
             raise TypeError("min_cells must be an integer")
         if min_cells < 0:
@@ -977,6 +979,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 feature-name snapshot must be saved and the store is not
                 opened with ``zarr_mode='r+'``, before any of them is computed.
         """
+        keep_bounds = bool_argument(keep_bounds, "keep_bounds")
+        show_plot = bool_argument(show_plot, "show_plot")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
         # The snapshots below write, so the options are checked first; the
@@ -1258,6 +1263,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             the prepared network, whose digest hashes only the retained edges. It
             assumes the stored count matrix is immutable.
         """
+        log_transform = bool_argument(log_transform, "log_transform")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...features.enrichment.net import prepare_network
         from ...features.enrichment.waggr import (
             build_waggr_model,
@@ -1266,8 +1273,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         if mode not in {"wmean", "wsum"}:
             raise ValueError("mode must be 'wmean' or 'wsum'")
-        if not isinstance(log_transform, bool):
-            raise TypeError("log_transform must be a boolean")
         assay, cell_index, feature_index, feature_selection = (
             self._prepare_enrichment_assay(
                 display_name="WAGGR",
@@ -1407,6 +1412,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             network, whose digest hashes only the retained edges. It assumes the
             stored count matrix is immutable.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...features.enrichment.aucell import (
             build_gene_set_index,
             make_rank_permutation,
@@ -1560,6 +1566,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             PermissionError: If the store is not opened with ``zarr_mode='r+'``.
             UnmeasuredCellsError: If the assay did not measure a selected cell.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from scipy.sparse import csc_matrix
 
         from ...assay import ATACassay
@@ -2043,6 +2050,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 the search.
             UnmeasuredCellsError: If the assay did not measure a labelled cell.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         reject_unknown_normalization_params(
             norm_params,
             caller="run_marker_search",
@@ -2665,6 +2673,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         Raises:
             PermissionError: If the store is not opened with ``zarr_mode='r+'``.
         """
+        renormalization = bool_argument(renormalization, "renormalization")
 
         from ...assay.classification import validate_assay_type
         from ...features.genomic.melding import write_melded_counts
@@ -2859,6 +2868,14 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 sub-group ``'c'`` and ``'a'`` with sub-group ``'b_c'``.
             UnmeasuredCellsError: If the assay did not measure a cell that is read.
         """
+        return_fraction = bool_argument(return_fraction, "return_fraction")
+        remove_empty_features = bool_argument(
+            remove_empty_features, "remove_empty_features"
+        )
+        remove_empty_columns = bool_argument(
+            remove_empty_columns, "remove_empty_columns"
+        )
+        return_n_cells = bool_argument(return_n_cells, "return_n_cells")
 
         def resolve_groups(
             source: ArtifactRef | str,
@@ -3257,6 +3274,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 value is computed.
             UnmeasuredCellsError: If a feature's assay did not measure a tested cell.
         """
+        skip_save = bool_argument(skip_save, "skip_save")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         resolved_grouping = resolve_grouping(
             self.zw,
             self.cells,

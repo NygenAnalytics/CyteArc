@@ -183,6 +183,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 cells' values and one block of counts beside the writer's band,
                 do not fit the memory budget.
         """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...graph.feature_projection import resolve_coordinate_inputs
 
         from ...perturbation.signature import (
@@ -207,7 +208,6 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             dims, n_neighbors, scale_factor, sample_column
         )
         _require_cell_column(self, sample_column, "sample_column")
-        bool_argument(invalidate_cache, "invalidate_cache")
         inputs = resolve_coordinate_inputs(self.zw, coordinates)
         if features is None:
             if inputs.feature_selection is None:
@@ -490,6 +490,9 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``signature`` is not a ``perturbation_signature``
                 artifact, or ``features`` names a feature it lacks.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as a call that
+                stopped before it finished leaves it.
             MemoryError: If the values read, a stored chunk of signatures and
                 the IDs of the cells and their neighbors do not fit the memory
                 budget.
@@ -704,6 +707,8 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 signatures in the target's DE genes, do not fit the memory
                 budget.
         """
+        scale = bool_argument(scale, "scale")
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...perturbation.mixscape import (
             MIXSCAPE_STATUSES,
             MixscapeFit,
@@ -731,7 +736,6 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             split_column,
         )
         _require_cell_column(self, split_column, "split_column")
-        bool_argument(invalidate_cache, "invalidate_cache")
         source = require_complete_artifact(self.zw, signature)
         stored = artifact_group(self.zw, signature)
         assay = self._get_assay(str(signature.assay))
@@ -1197,6 +1201,9 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         Raises:
             TypeError: If ``classes`` is not an ArtifactRef.
             ValueError: If it is not a ``mixscape_classes`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as a call that
+                stopped before it finished leaves it.
         """
         from ...perturbation.mixscape import MIXSCAPE_STATUSES
 

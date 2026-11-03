@@ -40,6 +40,7 @@ from ...storage.refs import ArtifactRef
 from ...storage.selections import read_stored_selection_indices, validate_cell_selection
 from ...storage.types import as_zarr_array
 from ...utils.arrays import unique_rows
+from ...utils.arguments import quoted_value
 
 __all__ = [
     "GROUPING_BYTES_PER_CELL",
@@ -108,7 +109,7 @@ def group_columns(
     clashes = [column for column in names if column in reserved]
     if clashes:
         raise ValueError(
-            f"{name} names {clashes[0]!r}, which is also a column of the result; "
+            f"{name} names {quoted_value(clashes[0])}, which is also a column of the result; "
             "copy the cell metadata column under another name"
         )
     return tuple(names)
@@ -256,13 +257,13 @@ def cell_groups(
     for column in columns:
         if column in kept:
             raise ValueError(
-                f"group_by names {column!r}, whose labels the artifact keeps apart "
+                f"group_by names {quoted_value(column)}, whose labels the artifact keeps apart "
                 "already; leave it out, or copy the cell metadata column under "
                 "another name"
             )
         if column not in cells.columns:
             raise ValueError(
-                f"group_by names {column!r}, which is not a cell metadata column"
+                f"group_by names {quoted_value(column)}, which is not a cell metadata column"
             )
     key_columns = (
         *columns,
@@ -272,13 +273,13 @@ def cell_groups(
     repeated = [column for column in key_columns if key_columns.count(column) > 1]
     if repeated:
         raise ValueError(
-            f"The groups' key columns {list(key_columns)} name {repeated[0]!r} "
+            f"The groups' key columns {list(key_columns)} name {quoted_value(repeated[0])} "
             "twice; copy the cell metadata column under another name"
         )
     clashes = [column for column in key_columns[len(columns) :] if column in reserved]
     if clashes:
         raise ValueError(
-            f"The groups' key column {clashes[0]!r} is also a column of the "
+            f"The groups' key column {quoted_value(clashes[0])} is also a column of the "
             "result; group the cells by labels of another kind"
         )
     has = np.asarray(rows, dtype=bool).copy()
@@ -376,7 +377,9 @@ def cell_groups(
     for name, labels in kept_apart:
         values = np.asarray(labels)
         if values.shape != (n_cells,):
-            raise ValueError(f"The labels of {name!r} must hold one per artifact cell")
+            raise ValueError(
+                f"The labels of {quoted_value(name)} must hold one per artifact cell"
+            )
         coded.append(coded_labels(values[has]))
     cell_codes = np.full(n_cells, -1, dtype=np.int64)
     if not coded:
@@ -452,7 +455,7 @@ def within_groups(
     for column in columns:
         if column not in cells.columns:
             raise ValueError(
-                f"within names {column!r}, which is not a cell metadata column"
+                f"within names {quoted_value(column)}, which is not a cell metadata column"
             )
     grouped = cell_groups(
         zw,

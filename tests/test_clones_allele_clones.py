@@ -423,9 +423,12 @@ def test_cells_that_share_a_rare_allele_at_any_character_are_one_clone() -> None
     assert called.n_alleles.tolist() == [1, 2, 1, 1, 0, 0]
     assert called.clone_alleles.tolist() == [2, 1]
     # An allele that every edited cell of its character holds, at frequency 1,
-    # is never below max_frequency: b alone on TA links no cell.
+    # is rare only at max_frequency=1: b alone on TA links cells 1 and 2 there,
+    # and no cell one step below.
     alone = _call(rows[:5], 5, max_frequency=1.0)
-    assert _partition(alone.codes) == {frozenset({0, 1}), frozenset({3})}
+    assert _partition(alone.codes) == {frozenset({0, 1, 2}), frozenset({3})}
+    below = _call(rows[:5], 5, max_frequency=float(np.nextafter(1.0, 0.0)))
+    assert _partition(below.codes) == {frozenset({0, 1}), frozenset({3})}
 
 
 def test_placeholders_never_link_cells_and_the_same_text_on_two_characters_is_two_alleles() -> (
@@ -444,18 +447,26 @@ def test_an_allele_listed_twice_for_a_cell_counts_once() -> None:
     # without a bank, a's frequency is the share of the 2 edited cells that
     # hold it, 1/2, not 2/3.
     rows = [(0, 0, 0), (0, 0, 0), (1, 0, 1)]
-    assert _call(rows, 2, max_frequency=0.51).counts["alleles_too_frequent"] == 0
-    assert _call(rows, 2, max_frequency=0.5).counts["alleles_too_frequent"] == 2
+    assert _call(rows, 2, max_frequency=0.5).counts["alleles_too_frequent"] == 0
+    below = float(np.nextafter(0.5, 0.0))
+    assert _call(rows, 2, max_frequency=below).counts["alleles_too_frequent"] == 2
+    # At 2/3, a would be too frequent for any bound below it.
+    assert _call(rows, 2, max_frequency=0.6).counts["alleles_too_frequent"] == 0
 
 
-def test_frequency_must_be_strictly_below_max_frequency() -> None:
+def test_a_frequency_at_max_frequency_is_rare() -> None:
     rows = [(0, 0, 0), (1, 0, 0), (2, 0, 1), (3, 0, 1)]
     banks = {"CA": _bank({"a": (2e-5, 1), "b": (np.nextafter(2e-5, 0.0), 1)})}
     called = _call(rows, 4, banks=banks, max_frequency=2e-5)
-    # a at exactly 2e-5 is not rare; b, one step below, is.
-    assert _partition(called.codes) == {frozenset({2, 3})}
-    assert called.counts["alleles_too_frequent"] == 1
-    assert called.counts["rare_alleles"] == 1
+    # a at exactly 2e-5 reaches the bound, as b, one step below, does.
+    assert _partition(called.codes) == {frozenset({0, 1}), frozenset({2, 3})}
+    assert called.counts["alleles_too_frequent"] == 0
+    assert called.counts["rare_alleles"] == 2
+    # DARLIN's rule, a frequency below 2e-5, is the bound one step below it.
+    darlin = _call(rows, 4, banks=banks, max_frequency=float(np.nextafter(2e-5, 0.0)))
+    assert _partition(darlin.codes) == {frozenset({2, 3})}
+    assert darlin.counts["alleles_too_frequent"] == 1
+    assert darlin.counts["rare_alleles"] == 1
 
 
 def test_max_samples_keeps_alleles_of_at_most_that_many_bank_samples() -> None:
@@ -727,7 +738,8 @@ def _expected(n_cells, names, rows, groups, banks, method, rules):
         rare = {
             key
             for key in holders
-            if rules.get("max_frequency") is None or rates[key] < rules["max_frequency"]
+            if rules.get("max_frequency") is None
+            or rates[key] <= rules["max_frequency"]
         }
     else:
         rare = set()

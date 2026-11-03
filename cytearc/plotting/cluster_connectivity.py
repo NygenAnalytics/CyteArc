@@ -36,6 +36,7 @@ from ._style import (
     scatter_edgecolor,
     theme_context,
 )
+from ..utils.arguments import bool_argument
 
 
 def _fetch_inputs(
@@ -321,6 +322,9 @@ def cluster_connectivity(
     cluster edges. Clusters with zero incident weight receive a normalized
     value of zero.
     """
+    show_cells = bool_argument(show_cells, "show_cells")
+    labels = bool_argument(labels, "labels")
+    show = bool_argument(show, "show")
     if not np.isfinite(minimum_edge_weight) or minimum_edge_weight < 0:
         raise ValueError("minimum_edge_weight must be finite and non-negative")
     if max_edges_per_node is not None and (

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from ..storage.refs import ArtifactRef
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument
 from ._contracts import PlotProvenance
 from ._deps import require_matplotlib
 from ._figure import (
@@ -103,7 +103,18 @@ def barcode_calls(
     Tables: ``barcodes_per_cell`` (``n_barcodes``, ``n_cells``),
     ``umis_per_barcode`` (``library``, ``umis``, ``n_pairs``) and
     ``reads_per_molecule`` (``library``, ``reads``, ``n_molecules``).
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If ``barcodes`` is not a ``lineage_barcodes``
+            artifact, or the grouping refuses its labels.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact does not fit the memory budget.
     """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
     max_barcodes = integer_argument(max_barcodes, "max_barcodes", minimum=1)
     loaded = _load_barcodes(store, barcodes)
     per_cell = loaded.cells["n_barcodes"].to_numpy(dtype=np.int64)
