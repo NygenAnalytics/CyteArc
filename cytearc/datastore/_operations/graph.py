@@ -571,9 +571,9 @@ def _ann_index_transfer_bytes(payload_bytes: int) -> int:
     the window it read from the file, Zarr's copy of it and the encoded
     chunks in flight, never more than a load, after hashing its file through
     one buffer of at most 256 KiB and at most the payload. The estimate
-    counts one window more than a load holds, beside what every save or load
-    holds, so it stays 1.25 to 1.5 times the traced peak of a payload of
-    1 MB or more on Python 3.13 to 3.15.
+    counts one window more than a load holds, a quarter to a third more than
+    the load of a payload of whole chunks or of several, beside what every
+    save or load holds.
     """
     window = min(int(payload_bytes), ANN_INDEX_IO_BYTES)
     chunk = min(int(payload_bytes), ANN_INDEX_CHUNK_BYTES)
