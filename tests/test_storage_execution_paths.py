@@ -3,13 +3,14 @@
 import asyncio
 import queue
 import threading
+import time
 import tracemalloc
 from collections import deque
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -220,17 +221,17 @@ def test_runner_reports_every_cleanup_failure(monkeypatch: pytest.MonkeyPatch) -
         close(loops)
         raise RuntimeError("I/O loop close failed")
 
-    io_limit = async_execution.zarr_io_concurrency
+    numba_threads = async_execution.numba_threads
 
     @contextmanager
-    def failing_io_limit(limit: int) -> Any:
-        with io_limit(limit):
+    def failing_numba_restore(threads: int) -> Any:
+        with numba_threads(threads):
             yield
-        raise RuntimeError("I/O limit restore failed")
+        raise RuntimeError("Numba thread restore failed")
 
     monkeypatch.setattr(async_execution, "ThreadPoolExecutor", FailingShutdownPool)
     monkeypatch.setattr(async_execution._IoLoops, "close", failing_close)
-    monkeypatch.setattr(async_execution, "zarr_io_concurrency", failing_io_limit)
+    monkeypatch.setattr(async_execution, "numba_threads", failing_numba_restore)
 
     async def operation(_active: AsyncStorageRunner) -> int:
         return 1
@@ -241,7 +242,7 @@ def test_runner_reports_every_cleanup_failure(monkeypatch: pytest.MonkeyPatch) -
         "cytearc-compute shutdown failed",
         "cytearc-zarr-codec shutdown failed",
         "I/O loop close failed",
-        "I/O limit restore failed",
+        "Numba thread restore failed",
     ]
     assert zarr.config.get("async.concurrency") == 10
 
@@ -570,6 +571,188 @@ def test_dense_row_batches_are_checked_against_their_destination() -> None:
             write_dense_from_row_batches(
                 destination(f"failure_{index}"), iter(stream), resources=resources
             )
+
+
+def test_a_counts_t_stream_leaves_its_consumer_the_blas_count() -> None:
+    from cytearc.storage.count_matrix import CountMatrixPolicy
+    from cytearc.storage.feature_stream import map_feature_cell_bands
+    from cytearc.storage.schema import create_zarr_count_assay
+    from cytearc.writers.counts_t import finalize_writer_counts_t
+    from tests.storage_helpers import finalize_test_counts
+    from tests.thread_helpers import blas_threads, raised_threads
+
+    from threadpoolctl import ThreadpoolController
+
+    dense = np.random.default_rng(7).integers(0, 30, (400, 101), dtype=np.uint16)
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    features = np.array([f"g{index}" for index in range(dense.shape[1])])
+    counts = create_zarr_count_assay(
+        root,
+        "RNA",
+        None,
+        dense.shape[0],
+        features,
+        features,
+        dense.dtype,
+        policy=CountMatrixPolicy(unitBytes=20_000, chunkBytes=2_000),
+    )
+    counts[:] = dense
+    finalize_test_counts(counts)
+    finalize_writer_counts_t(root, "RNA", None)
+
+    def process(band: Any) -> tuple[int, ...]:
+        # A band's own work on a compute worker, as its normalization.
+        time.sleep(0.005)
+        return band.values.shape
+
+    seen: list[set[int]] = []
+    with raised_threads(blas=2):
+        libraries = [
+            library
+            for library in ThreadpoolController().lib_controllers
+            if library.user_api == "blas"
+        ]
+        for _ in map_feature_cell_bands(
+            root["RNA/countsT"],
+            process,
+            resources=ResourceBudget(2**30, 4),
+            orderedCompute=False,
+        ):
+            # The consumer's own work starts while workers compute later bands.
+            seen.append({library.get_num_threads() for library in libraries})
+        assert blas_threads() == {2}
+    assert len(seen) >= 20
+    assert all(threads == {2} for threads in seen)
+
+
+@pytest.mark.parametrize("ordered", [True, False])
+def test_a_stream_whose_consumer_stopped_computes_no_unit_it_was_loading(ordered):
+    from contextlib import asynccontextmanager
+
+    from cytearc.storage.feature_stream import stream_units
+
+    plan = plan_operation(
+        ResourceBudget(1 << 20, 4), WorkShape(nUnits=8, unitBytes=1, ordered=False)
+    )
+    assert plan.readWorkers >= 2
+    gate = threading.Event()
+    computed: list[int] = []
+
+    @asynccontextmanager
+    async def load(_runner: Any, index: int, unit: int) -> Any:
+        if index > 0:
+            # Later units finish loading only once the consumer has stopped.
+            await asyncio.get_running_loop().run_in_executor(None, gate.wait, 10)
+        yield SimpleNamespace(readSec=0.0, unit=unit)
+
+    def process(item: Any) -> int:
+        computed.append(item.unit)
+        return item.unit
+
+    stream = stream_units(
+        list(range(8)),
+        load,
+        process,
+        plan=plan,
+        unitKind="testUnit",
+        orderedCompute=ordered,
+        progress=None,
+        metrics=None,
+        details={},
+    )
+    assert next(stream) == 0
+    opener = threading.Timer(0.2, gate.set)
+    opener.start()
+    try:
+        stream.close()
+    finally:
+        opener.cancel()
+        gate.set()
+    assert computed == [0]
+
+
+class _SlowSummary:
+    """A count summary that notes the BLAS count each write runs with, slowly."""
+
+    def __init__(self, seen: list[set[int]]) -> None:
+        self.seen = seen
+
+    def update(self, _start: int, _values: np.ndarray) -> None:
+        from tests.thread_helpers import blas_threads
+
+        self.seen.append(blas_threads())
+        # Slow writes, so that several run while the source computes.
+        time.sleep(0.005)
+
+
+def test_dense_row_batches_and_their_source_compute_under_the_callers_threads() -> None:
+    from tests.thread_helpers import blas_threads, raised_threads
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    target = root.create_array(
+        "values", shape=(64, 4), chunks=(4, 4), shards=(8, 4), dtype=np.float64
+    )
+    source: list[set[int]] = []
+    writes: list[set[int]] = []
+
+    def batches():
+        # As a projection between blocks, while earlier bands are written.
+        for start in range(0, 64, 4):
+            source.append(blas_threads())
+            yield np.full((4, 4), float(start))
+
+    with raised_threads(blas=2):
+        written = write_dense_from_row_batches(
+            target,
+            batches(),
+            resources=ResourceBudget(1 << 24, 4),
+            countSummary=cast(Any, _SlowSummary(writes)),
+        )
+        assert blas_threads() == {2}
+    assert written == 64
+    np.testing.assert_array_equal(target[:, 0], np.repeat(np.arange(0, 64, 4), 4))
+    # The writes hold no thread limit, so every batch and every write sees the
+    # caller's count, whichever writes are running.
+    assert source == [{2}] * 16
+    assert writes and all(threads == {2} for threads in writes)
+
+
+def test_sparse_band_writes_compute_under_the_callers_threads() -> None:
+    from tests.thread_helpers import blas_threads, raised_threads
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    destination = root.create_array(
+        "counts", shape=(32, 3), chunks=(4, 3), shards=(4, 3), dtype=np.uint16
+    )
+    source: list[set[int]] = []
+    writes: list[set[int]] = []
+
+    def bands():
+        for start in range(0, 32, 4):
+            source.append(blas_threads())
+            yield SparseWriteBand(
+                destination=destination,
+                band=SparseRowBand(
+                    start=start,
+                    end=start + 4,
+                    nColumns=3,
+                    row=np.arange(4, dtype=np.int64),
+                    column=np.zeros(4, dtype=np.int64),
+                    data=np.full(4, start + 1, dtype=np.uint16),
+                    dtype=np.uint16,
+                ),
+            )
+
+    with raised_threads(blas=2):
+        write_sparse_bands(
+            bands(),
+            resources=ResourceBudget(1 << 24, 4),
+            countSummaries={destination.path: cast(Any, _SlowSummary(writes))},
+        )
+        assert blas_threads() == {2}
+    np.testing.assert_array_equal(destination[:, 0], np.repeat(np.arange(1, 33, 4), 4))
+    assert source == [{2}] * 8
+    assert len(writes) == 8 and all(threads == {2} for threads in writes)
 
 
 def test_chunked_to_zarr_writes_every_band_to_its_mirror() -> None:

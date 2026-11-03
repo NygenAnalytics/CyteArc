@@ -414,6 +414,10 @@ def map_read_groups[T](
                                     blockBytes=values.nbytes,
                                     unitIndex=index,
                                 )
+                                if stop.is_set():
+                                    # The consumer has stopped, so the group
+                                    # is not computed.
+                                    return
                                 started = time.perf_counter()
                                 result = await active.compute(partial(process, item))
                                 compute_seconds += time.perf_counter() - started

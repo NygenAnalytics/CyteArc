@@ -830,9 +830,17 @@ def stream_units(
             turn = asyncio.Condition()
             next_idx = 0
 
+            async def compute_and_deliver(item: Any) -> None:
+                nonlocal compute_seconds, units_completed
+                compute_started = time.perf_counter()
+                result = await runner.compute(partial(process, item))
+                compute_seconds += time.perf_counter() - compute_started
+                await deliver(result)
+                del result
+                units_completed += 1
+
             async def one_unit(idx: int, unit: Any) -> None:
-                nonlocal next_idx, fetch_seconds, compute_seconds
-                nonlocal compute_wait_seconds, units_completed
+                nonlocal next_idx, fetch_seconds, compute_wait_seconds
                 if stop.is_set():
                     # Units start in order, so every later unit also sees the
                     # stop request and none of them waits for this one's turn.
@@ -840,24 +848,20 @@ def stream_units(
                 async with load(runner, idx, unit) as item:
                     fetch_seconds += item.readSec
                     wait_started = time.perf_counter()
+                    # Once the consumer has stopped, a loaded unit is not
+                    # computed, and in order it still passes its turn on.
                     if orderedCompute:
                         async with turn:
                             while next_idx != idx:
                                 await turn.wait()
                             compute_wait_seconds += time.perf_counter() - wait_started
-                            compute_started = time.perf_counter()
-                            result = await runner.compute(partial(process, item))
-                            compute_seconds += time.perf_counter() - compute_started
-                            await deliver(result)
+                            if not stop.is_set():
+                                await compute_and_deliver(item)
                             next_idx += 1
                             turn.notify_all()
-                    else:
-                        compute_started = time.perf_counter()
-                        result = await runner.compute(partial(process, item))
-                        compute_seconds += time.perf_counter() - compute_started
-                        await deliver(result)
-                    del item, result
-                    units_completed += 1
+                    elif not stop.is_set():
+                        await compute_and_deliver(item)
+                    del item
 
             pending: set[asyncio.Task[None]] = set()
             async with asyncio.TaskGroup() as tasks:

@@ -801,7 +801,6 @@ def write_sparse_bands(
                 batch,
                 write_one,
                 workers=admitted,
-                within_block_threads=1,
                 io_concurrency=inner,
             ):
                 if progress is not None:
@@ -1004,7 +1003,6 @@ def write_dense_from_row_batches(
                 aligned(),
                 write_band,
                 workers=workers,
-                within_block_threads=1,
                 io_concurrency=write_plan.ioConcurrency,
                 msg=msg or "Writing Zarr array",
                 total=n_bands,
@@ -1124,7 +1122,6 @@ def write_dense_in_shard_rows(
         slices,
         produce_and_write,
         workers=workers,
-        within_block_threads=plan.threadsPerComputeWorker,
         io_concurrency=inner,
         msg=msg or "Writing Zarr array",
         total=len(slices),

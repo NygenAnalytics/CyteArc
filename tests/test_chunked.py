@@ -574,6 +574,63 @@ class TestTransposedReads:
         assert self.stream(selected, row_mask=None)[1] == {"countsRowBlock"}
         np.testing.assert_array_equal(selected.compute(), dense[:, [21, 1, 7]])
 
+    def test_a_stream_stopped_by_an_error_that_is_kept_leaves_no_limit(
+        self, counts_pair
+    ):
+        import gc
+        import time
+        import weakref
+
+        from cytearc.storage import async_execution
+        from cytearc.storage.budget import ResourceBudget
+        from cytearc.utils import compute
+
+        counts, counts_t, _ = counts_pair
+        # The budget plans two reads at a time, below Zarr's default of 10.
+        matrix = ChunkedArray(
+            counts, nthreads=2, resources=ResourceBudget(10_000, 2)
+        ).with_transposed(counts_t)
+        selected = matrix[:, [21, 1, 7]]
+        before = zarr.config.get("async.concurrency")
+
+        def refuse_the_first_block() -> tuple[weakref.ref, list[BaseException]]:
+            blocks = selected._stream_blocks(
+                nthreads=2,
+                msg=None,
+                prefetch=None,
+                row_mask=None,
+                allow_transposed=True,
+            )
+            kept: list[BaseException] = []
+            try:
+                for block in blocks:
+                    raise ValueError(f"refused a block of {len(block)} rows")
+            except ValueError as error:
+                # As a notebook keeps the last error, whose traceback holds the
+                # frame that holds the stream.
+                kept.append(error)
+            return weakref.ref(blocks), kept
+
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            stream, kept = refuse_the_first_block()
+            assert stream() is not None
+            # The reads that were in flight end, and then nothing holds a limit.
+            deadline = time.monotonic() + 10
+            while async_execution._ACTIVE_IO_LIMITS and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert async_execution._ACTIVE_IO_LIMITS == {}
+            assert zarr.config.get("async.concurrency") == before
+            assert compute._active_thread_limits == {}
+        finally:
+            if enabled:
+                gc.enable()
+            del kept
+            gc.collect()
+        # Dropping the error closes the stream, and with it its threads.
+        assert stream() is None
+
     def test_derived_matrices_keep_the_transpose(self, counts_pair):
         counts, counts_t, _ = counts_pair
         matrix = ChunkedArray(counts).with_transposed(counts_t)

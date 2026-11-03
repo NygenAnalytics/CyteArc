@@ -25,6 +25,7 @@ from ...storage.artifacts import (
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
+from ...utils.compute import process_thread_limit
 from ...utils.logging import logger
 from ...utils.numba import numba_threads
 from ...utils.warnings import warn
@@ -732,8 +733,6 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             MemoryError: If the profiles and the distances between them,
                 with their working copies, do not fit the memory budget.
         """
-        from threadpoolctl import threadpool_limits
-
         from ...perturbation.clusters import (
             cluster_memory_bytes,
             cluster_profiles,
@@ -821,7 +820,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         self._require_writable(arguments.operation)
         values = np.asarray(stored.oindex[chosen, :])
         # The distances' matrix products use as many BLAS threads as the store.
-        with threadpool_limits(limits=self.nthreads, user_api="blas"):
+        with process_thread_limit(self.nthreads, user_api="blas"):
             arrays = cluster_profiles(
                 values,
                 metric=metric,
@@ -871,8 +870,6 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             MemoryError: If the distances between the profiles do not fit the
                 memory budget.
         """
-        from threadpoolctl import threadpool_limits
-
         from ...perturbation.clusters import profile_distances
 
         _require_ref(clusters, "clusters", PerturbationClusterArguments.artifact_kind)
@@ -899,7 +896,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         )
         parameters = status.parameters or {}
         metric = str(parameters["metric"])
-        with threadpool_limits(limits=self.nthreads, user_api="blas"):
+        with process_thread_limit(self.nthreads, user_api="blas"):
             distances = profile_distances(
                 np.asarray(values.oindex[positions, :]), metric
             )

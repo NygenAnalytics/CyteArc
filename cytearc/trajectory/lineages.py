@@ -12,15 +12,14 @@ import math
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-import numba
 import numpy as np
-from numba import prange, set_num_threads
+from numba import prange
 from scipy.sparse import csc_matrix, spmatrix
 from scipy.stats import norm
 
 from ..features.markers.regression import _regression_p_values
 from ..features.statistical import adjust_pvalues
-from ..utils.numba import njit, restore_numba_threads
+from ..utils.numba import njit, numba_threads
 
 __all__ = [
     "LINEAGE_NONFINITE",
@@ -238,7 +237,6 @@ def _weighted_correlation_kernel(
     return r_out, status
 
 
-@restore_numba_threads
 def weighted_correlations(
     values: np.ndarray,
     weights: np.ndarray,
@@ -293,16 +291,16 @@ def _correlate_block(
         raise ValueError("weights must have one row per cell")
     if len(feature_labels) != data.shape[1]:
         raise ValueError("feature_labels must name every feature")
-    set_num_threads(min(max(1, int(nthreads)), numba.config.NUMBA_NUM_THREADS))
-    r_values, status = _weighted_correlation_kernel(
-        data,
-        cell_weights,
-        centered,
-        regressor_ss,
-        totals,
-        float(min_mass),
-        float(np.finfo(np.float64).eps),
-    )
+    with numba_threads(nthreads):
+        r_values, status = _weighted_correlation_kernel(
+            data,
+            cell_weights,
+            centered,
+            regressor_ss,
+            totals,
+            float(min_mass),
+            float(np.finfo(np.float64).eps),
+        )
     bad = np.flatnonzero((status == LINEAGE_NONFINITE).any(axis=1))
     if bad.size:
         raise ValueError(
@@ -326,7 +324,6 @@ def _check_block(
     return stop
 
 
-@restore_numba_threads
 def stream_weighted_correlations(
     blocks: Iterable[tuple[np.ndarray, np.ndarray]],
     feature_order: np.ndarray,
@@ -373,7 +370,6 @@ def stream_weighted_correlations(
     return r_values, status
 
 
-@restore_numba_threads
 def stream_lineage_profiles(
     blocks: Iterable[tuple[np.ndarray, np.ndarray]],
     feature_order: np.ndarray,
@@ -696,14 +692,14 @@ def _block_profiles(
     feature_major = np.ascontiguousarray(np.asarray(values, dtype=np.float64).T)
     if feature_major.ndim != 2 or feature_major.shape[1] != columns.shape[1]:
         raise ValueError("values must have one row per operator column")
-    set_num_threads(min(max(1, int(nthreads)), numba.config.NUMBA_NUM_THREADS))
-    products, totals, finite = _bin_sums(
-        feature_major,
-        columns.indptr,
-        columns.indices,
-        np.asarray(columns.data, dtype=np.float64),
-        columns.shape[0],
-    )
+    with numba_threads(nthreads):
+        products, totals, finite = _bin_sums(
+            feature_major,
+            columns.indptr,
+            columns.indices,
+            np.asarray(columns.data, dtype=np.float64),
+            columns.shape[0],
+        )
     profiles = products.reshape(
         feature_major.shape[0], n_lineages, columns.shape[0] // n_lineages
     )
@@ -712,7 +708,6 @@ def _block_profiles(
     return np.ascontiguousarray(profiles), totals, finite
 
 
-@restore_numba_threads
 def lineage_profiles(
     values: np.ndarray,
     operator: spmatrix,

@@ -228,11 +228,12 @@ def _knn(n_cells: int, k: int, rng: np.random.Generator) -> np.ndarray:
 def test_wnn_peak_bytes_bounds_the_traced_peak(
     monkeypatch, n_cells, neighbor_counts, dims
 ) -> None:
-    # Setting a thread limit scans the process's loaded libraries, a
+    # Setting a thread limit can scan the process's loaded libraries, a
     # transient that grows with them, not with the data, and that the
     # estimate leaves out; these shapes are too small to outgrow it.
     monkeypatch.setattr(
-        "threadpoolctl.threadpool_limits", lambda **_options: nullcontext()
+        "cytearc.neighbors.integration.process_thread_limit",
+        lambda *_args, **_options: nullcontext(),
     )
     rng = np.random.default_rng(5)
     stored = [

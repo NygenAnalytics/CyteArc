@@ -1,5 +1,7 @@
 import asyncio
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import math
 import threading
 from typing import Any
@@ -628,8 +630,35 @@ def test_byte_ledger_is_empty_after_success() -> None:
     assert runner_holder[0].ledger.is_empty()
 
 
-async def _current_async_concurrency(_active: AsyncStorageRunner) -> int:
-    return int(zarr.config.get("async.concurrency"))
+async def _current_async_concurrency(active: AsyncStorageRunner) -> int:
+    """Zarr's async concurrency while one of the runner's own reads runs."""
+
+    async def read() -> int:
+        return int(zarr.config.get("async.concurrency"))
+
+    return await active.io(read())
+
+
+def test_the_runner_holds_its_io_limit_only_while_its_io_runs() -> None:
+    from cytearc.storage import async_execution
+
+    runner = _runner(ResourceBudget(1024, 4), chunksPerShard=1)
+    assert runner.plan.ioConcurrency == 1
+    seen: dict[str, Any] = {}
+
+    async def operation(active: AsyncStorageRunner) -> None:
+        seen["before"] = int(zarr.config.get("async.concurrency"))
+        seen["io"] = await _current_async_concurrency(active)
+        # Between its reads, as while it waits on a stopped consumer, the
+        # runner holds no limit.
+        seen["between"] = int(zarr.config.get("async.concurrency"))
+        seen["limits"] = dict(async_execution._ACTIVE_IO_LIMITS)
+        seen["compute"] = await active.compute(
+            lambda: int(zarr.config.get("async.concurrency"))
+        )
+
+    runner.run(operation)
+    assert seen == {"before": 10, "io": 1, "between": 10, "limits": {}, "compute": 10}
 
 
 def test_host_ceiling_is_fixed_by_its_first_use(monkeypatch) -> None:
@@ -747,9 +776,12 @@ def test_overlapping_io_limits_restore_the_remaining_operation() -> None:
 def test_runner_restores_async_concurrency_after_failure() -> None:
     runner = _runner(ResourceBudget(1024, 4), chunksPerShard=10)
 
-    async def boom(_active: AsyncStorageRunner) -> None:
+    async def failing_read() -> None:
         assert int(zarr.config.get("async.concurrency")) == runner.plan.ioConcurrency
         raise ValueError("operation failed")
+
+    async def boom(active: AsyncStorageRunner) -> None:
+        await active.io(failing_read())
 
     with pytest.raises(ValueError, match="operation failed"):
         runner.run(boom)
@@ -938,10 +970,6 @@ def test_async_runner_reports_failure_ledger_leaks() -> None:
 
 
 def test_async_runner_nested_loop_bounded_io_and_leaks() -> None:
-    from cytearc.storage.async_execution import (
-        _install_numba_thread_cap,
-    )
-
     with pytest.raises(ValueError, match="must be positive"):
         ByteLedger(0)
     with pytest.raises(ValueError, match="must be positive"):
@@ -1004,15 +1032,6 @@ def test_async_runner_nested_loop_bounded_io_and_leaks() -> None:
 
     with pytest.raises(ValueError, match="nested failure"):
         asyncio.run(nested_outer())
-
-    import sys
-
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setitem(sys.modules, "numba", None)
-    try:
-        assert _install_numba_thread_cap(2) is None
-    finally:
-        monkeypatch.undo()
 
     shrunk = plan_operation(ResourceBudget(1024, 4), WorkShape(nUnits=4, unitBytes=1))
     assert shrunk.threadsPerComputeWorker == 1
@@ -1117,15 +1136,15 @@ def test_io_failure_drains_sibling_encoders_before_releasing_buffers():
     runner.run(operation)
 
 
+@contextmanager
+def _failing_numba_restore(_threads: int) -> Iterator[None]:
+    yield
+    raise RuntimeError("restore failed")
+
+
 def test_cleanup_failure_does_not_skip_pool_shutdown(monkeypatch):
-    def install(_):
-        def restore():
-            raise RuntimeError("restore failed")
-
-        return restore
-
     monkeypatch.setattr(
-        "cytearc.storage.async_execution._install_numba_thread_cap", install
+        "cytearc.storage.async_execution.numba_threads", _failing_numba_restore
     )
     runner = _runner(ResourceBudget(100, 1))
 
@@ -1217,22 +1236,15 @@ def test_task_factory_forwards_keywords_that_newer_asyncio_passes():
 def test_operation_restores_blas_limits_left_by_concurrent_compute_tasks():
     import time
 
-    from threadpoolctl import ThreadpoolController, threadpool_limits
+    from threadpoolctl import threadpool_limits
 
-    controller = ThreadpoolController()
-
-    def blas_threads() -> list[int]:
-        return [
-            lib.num_threads
-            for lib in controller.lib_controllers
-            if lib.user_api == "blas"
-        ]
+    from tests.thread_helpers import blas_threads
 
     async def operation(runner):
         async def task() -> None:
             await runner.compute(lambda: time.sleep(0.001))
 
-        # Per-task limit scopes on several workers restore each other's values.
+        # Many compute calls on several workers leave BLAS as they found it.
         await asyncio.gather(*(task() for _ in range(64)))
 
     runner = _runner(ResourceBudget(1024**2, 8))
@@ -1247,16 +1259,10 @@ def test_operation_restores_blas_limits_left_by_concurrent_compute_tasks():
 
 
 def test_overlapping_thread_limits_restore_the_original_in_any_order():
-    from threadpoolctl import ThreadpoolController, threadpool_limits
+    from threadpoolctl import threadpool_limits
 
     from cytearc.utils.compute import enter_thread_limit, exit_thread_limit
-
-    def blas_threads() -> set[int]:
-        return {
-            lib.num_threads
-            for lib in ThreadpoolController().lib_controllers
-            if lib.user_api == "blas"
-        }
+    from tests.thread_helpers import blas_threads
 
     # The test session pins BLAS to one thread; raise it so a change shows.
     with threadpool_limits(limits=2, user_api="blas"):
@@ -1323,35 +1329,57 @@ def test_runner_keeps_groups_of_distinct_failures() -> None:
     assert {str(error) for error in raised.value.exceptions} == {"first", "second"}
 
 
-def test_blas_restore_failure_does_not_skip_later_cleanup(monkeypatch) -> None:
-    from threadpoolctl import ThreadpoolController
+def test_compute_calls_set_no_thread_limit_and_workers_keep_their_numba_count() -> None:
+    import numba
 
-    restored: list[bool] = []
+    from cytearc.utils import compute
+    from tests.thread_helpers import blas_threads, raised_threads
 
-    class FailingRestore:
-        def restore_original_limits(self) -> None:
-            raise RuntimeError("blas restore failed")
+    runner = _runner(ResourceBudget(1024 * 1024, 4))
+    assert runner.plan.threadsPerComputeWorker == 1
+    seen: list[tuple[set[int], int, dict]] = []
 
-    original_limit = ThreadpoolController.limit
+    async def operation(active: AsyncStorageRunner) -> None:
+        def probe() -> int:
+            seen.append(
+                (
+                    blas_threads(),
+                    numba.get_num_threads(),
+                    dict(compute._active_thread_limits),
+                )
+            )
+            return 0
 
-    def limit(self, *, limits=None, user_api=None):  # type: ignore[no-untyped-def]
-        if limits is None:
-            return FailingRestore()
-        return original_limit(self, limits=limits, user_api=user_api)
+        await asyncio.gather(*[active.compute(probe) for _ in range(8)])
 
-    def install(_threads: int):  # type: ignore[no-untyped-def]
-        return lambda: restored.append(True)
-
-    monkeypatch.setattr(ThreadpoolController, "limit", limit)
-    monkeypatch.setattr(
-        "cytearc.storage.async_execution._install_numba_thread_cap", install
-    )
-    runner = _runner(ResourceBudget(1024, 2), chunksPerShard=2)
-
-    async def operation(_active: AsyncStorageRunner) -> int:
-        return 1
-
-    with pytest.raises(RuntimeError, match="blas restore failed"):
+    caller_threads = numba.get_num_threads()
+    assert caller_threads >= 2
+    with raised_threads(blas=2):
         runner.run(operation)
-    assert restored == [True]
+        assert blas_threads() == {2}
+    # A BLAS limit would apply to the whole process, beside the caller's own
+    # work, so the calls hold none; each worker runs Numba on its share.
+    assert seen == [({2}, 1, {})] * 8
+    assert numba.get_num_threads() == caller_threads
+
+
+def test_a_read_whose_io_limit_fails_to_restore_reports_it(monkeypatch) -> None:
+    from cytearc.storage import async_execution
+
+    restore = async_execution.zarr_io_concurrency
+
+    @contextmanager
+    def failing_io_limit(limit: int) -> Iterator[None]:
+        with restore(limit):
+            yield
+        raise RuntimeError("I/O limit restore failed")
+
+    monkeypatch.setattr(async_execution, "zarr_io_concurrency", failing_io_limit)
+
+    async def operation(active: AsyncStorageRunner) -> int:
+        return await _current_async_concurrency(active)
+
+    with pytest.raises(RuntimeError, match="^I/O limit restore failed$"):
+        _runner(ResourceBudget(1024, 1)).run(operation)
+    assert async_execution._ACTIVE_IO_LIMITS == {}
     assert zarr.config.get("async.concurrency") == 10

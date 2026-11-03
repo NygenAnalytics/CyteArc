@@ -8,14 +8,12 @@ import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
 from typing import Any, TypeVar, cast
 
 import zarr
 
-from threadpoolctl import ThreadpoolController
-
-from ..utils.compute import enter_thread_limit, exit_thread_limit
+from ..utils.numba import numba_threads
 from ..utils.shutdown import ShutdownRequested, shutdown_checkpoint
 
 from .budget import detect_workers
@@ -31,8 +29,6 @@ _ACTIVE_IO_LIMITS: dict[object, int] = {}
 _IDLE_IO_LIMIT: int | None = None
 
 
-_NUMBA_THREAD_LOCK = threading.Lock()
-_WORKER_NUMBA_CAP = threading.local()
 _IO_TASKS: contextvars.ContextVar[set[asyncio.Future[Any]] | None] = (
     contextvars.ContextVar("storage_io_tasks", default=None)
 )
@@ -56,39 +52,6 @@ def zarr_io_concurrency(limit: int) -> Iterator[None]:
                 min(_ACTIVE_IO_LIMITS.values()) if _ACTIVE_IO_LIMITS else _IDLE_IO_LIMIT
             )
             zarr.config.set({"async.concurrency": restored})
-
-
-def _install_numba_thread_cap(threads: int) -> Callable[[], None] | None:
-    """Cap Numba threads. Concurrent set_num_threads can deadlock.
-
-    The setter is serialized. Each compute worker also applies the cap because
-    Numba's thread mask is thread-local on some builds. Profiled runs can already
-    look capped when Numba shares a process-wide thread count.
-    """
-    try:
-        import numba as numba_mod
-    except ImportError:
-        return None
-    getter = getattr(numba_mod, "get_num_threads")
-    setter = getattr(numba_mod, "set_num_threads")
-    cap = max(1, int(getattr(numba_mod.config, "NUMBA_NUM_THREADS")))
-    target = min(max(1, int(threads)), cap)
-    with _NUMBA_THREAD_LOCK:
-        previous = int(getter())
-        setter(target)
-
-    def _restore() -> None:
-        with _NUMBA_THREAD_LOCK:
-            setter(previous)
-
-    return _restore
-
-
-def _ensure_worker_numba_cap(threads: int) -> None:
-    if getattr(_WORKER_NUMBA_CAP, "applied", None) == threads:
-        return
-    _install_numba_thread_cap(threads)
-    _WORKER_NUMBA_CAP.applied = threads
 
 
 def _in_event_loop() -> bool:
@@ -334,7 +297,13 @@ class ByteLedger:
 
 
 class AsyncStorageRunner:
-    """Own one event loop, codec executor, compute pool, and byte ledger."""
+    """Own one event loop, codec executor, compute pool, and byte ledger.
+
+    The runner holds Zarr's process-wide I/O limit only while its own reads
+    and writes run, and sets no BLAS or OpenMP limit, since its compute calls
+    run no such work. A runner that waits on its caller, as a stream whose
+    consumer has stopped does, holds no process-wide limit.
+    """
 
     def __init__(
         self,
@@ -351,7 +320,7 @@ class AsyncStorageRunner:
         self._read_slots: asyncio.Semaphore | None = None
         self._commit_slots: asyncio.Semaphore | None = None
         self._io_loops: _IoLoops | None = None
-        self._blas: ThreadpoolController | None = None
+        self._worker_numba: list[AbstractContextManager[None]] = []
 
     def run(self, operation: Callable[["AsyncStorageRunner"], Awaitable[T]]) -> T:
         """Run ``operation`` to completion and return its result.
@@ -414,10 +383,10 @@ class AsyncStorageRunner:
         loop = asyncio.get_running_loop()
         result: Any = None
         errors: list[BaseException] = []
-        restore_numba = None
-        blas_token: int | None = None
-        io_context = zarr_io_concurrency(self.plan.ioConcurrency)
-        io_entered = False
+        # Numba keeps a count for each thread; this sets the count of the
+        # thread that runs the operation's own code.
+        numba_context = numba_threads(self.plan.threadsPerComputeWorker)
+        numba_entered = False
         try:
             ensure_zarr_host_ceiling()
             self._codec_pool = ThreadPoolExecutor(
@@ -426,25 +395,17 @@ class AsyncStorageRunner:
             )
             loop.set_default_executor(self._codec_pool)
             self._io_loops = _IoLoops(self.plan.codecWorkers, self._codec_pool)
-            # Scanning loaded libraries takes milliseconds under the GIL; scan
-            # once per operation instead of once per compute call.
-            self._blas = ThreadpoolController()
-            # Compute tasks limit BLAS threads process-wide, and concurrent
-            # limit scopes restore each other's values. The shared process
-            # limit restores the limits in force before the operation once
-            # every task and every overlapping scope has finished.
-            blas_token = enter_thread_limit(None)
             self._compute_pool = ThreadPoolExecutor(
                 max_workers=self.plan.computeWorkers,
                 thread_name_prefix="cytearc-compute",
+                initializer=self._start_compute_worker,
             )
             self._read_slots = asyncio.Semaphore(
                 self.plan.readWorkers * self.plan.innerReads
             )
             self._commit_slots = asyncio.Semaphore(self.plan.writeWorkers)
-            restore_numba = _install_numba_thread_cap(self.plan.threadsPerComputeWorker)
-            io_context.__enter__()
-            io_entered = True
+            numba_context.__enter__()
+            numba_entered = True
             shutdown_checkpoint()
             result = await operation(self)
             shutdown_checkpoint()
@@ -473,25 +434,22 @@ class AsyncStorageRunner:
                         pool.shutdown(wait=True, cancel_futures=True)
                     except BaseException as exc:
                         errors.append(exc)
+            # The workers have finished, so their settings end without a change.
+            for context in self._worker_numba:
+                try:
+                    context.__exit__(None, None, None)
+                except BaseException as exc:
+                    errors.append(exc)
+            self._worker_numba.clear()
             if self._io_loops is not None:
                 try:
                     self._io_loops.close()
                 except BaseException as exc:
                     errors.append(exc)
                 self._io_loops = None
-            if blas_token is not None:
+            if numba_entered:
                 try:
-                    exit_thread_limit(blas_token)
-                except BaseException as exc:
-                    errors.append(exc)
-            if restore_numba is not None:
-                try:
-                    restore_numba()
-                except BaseException as exc:
-                    errors.append(exc)
-            if io_entered:
-                try:
-                    io_context.__exit__(None, None, None)
+                    numba_context.__exit__(None, None, None)
                 except BaseException as exc:
                     errors.append(exc)
             leftover = self.ledger.held_bytes()
@@ -513,28 +471,42 @@ class AsyncStorageRunner:
     async def io(self, coroutine: Coroutine[Any, Any, T]) -> T:
         """Run a self-contained storage coroutine on one of the I/O loops.
 
-        The result comes back in a holder, so the I/O loop thread keeps no
-        reference to it once the coroutine has finished.
+        Zarr's async concurrency is held at the plan's limit, or a lower one
+        already in force, until the coroutine has finished. The result comes
+        back in a holder, so the I/O loop thread keeps no reference to it once
+        the coroutine has finished.
         """
         if self._io_loops is None:
             raise RuntimeError("I/O loops are not installed")
         results: list[T] = []
-        await _await_completion(
-            asyncio.wrap_future(self._io_loops.submit(_kept(results, coroutine)))
-        )
+        with zarr_io_concurrency(self.plan.ioConcurrency):
+            await _await_completion(
+                asyncio.wrap_future(self._io_loops.submit(_kept(results, coroutine)))
+            )
         return results.pop()
 
+    def _start_compute_worker(self) -> None:
+        """Run a compute worker's Numba kernels on the plan's threads for its life."""
+        context = numba_threads(max(1, int(self.plan.threadsPerComputeWorker)))
+        context.__enter__()
+        self._worker_numba.append(context)
+
     async def compute(self, fn: Callable[[], T]) -> T:
-        if self._compute_pool is None or self._blas is None:
+        """Run ``fn`` on the compute pool, whose workers run Numba's kernels on
+        the plan's threads per worker.
+
+        A call sets no BLAS or OpenMP limit: such a limit applies to the whole
+        process, beside the caller's own work, and the runner's calls assemble,
+        count and copy without BLAS or OpenMP work. A function that runs such
+        work holds its own through ``process_thread_limit``.
+        """
+        if self._compute_pool is None:
             raise RuntimeError("compute pool is not installed")
-        threads = max(1, int(self.plan.threadsPerComputeWorker))
-        blas = self._blas
 
         def _limited() -> T:
             from .parallel import _shard_context
 
-            _ensure_worker_numba_cap(threads)
-            with _shard_context(), blas.limit(limits=threads):
+            with _shard_context():
                 return fn()
 
         shutdown_checkpoint()

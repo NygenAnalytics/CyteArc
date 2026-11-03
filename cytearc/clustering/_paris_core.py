@@ -2,16 +2,11 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
-from numba import (
-    config,
-    get_num_threads,
-    prange,
-    set_num_threads,
-)
+from numba import get_num_threads, prange
 from scipy.sparse import csr_matrix, spmatrix
 from scipy.sparse.csgraph import connected_components
 
-from ..utils.numba import njit
+from ..utils.numba import njit, numba_threads
 
 
 @dataclass(frozen=True)
@@ -748,8 +743,6 @@ def fit_paris_hierarchy(
     component_seconds = time.perf_counter() - component_start
 
     requested_threads = get_num_threads() if nthreads is None else max(1, int(nthreads))
-    previous_threads = get_num_threads()
-    set_num_threads(min(requested_threads, config.NUMBA_NUM_THREADS))
     fit_start = time.perf_counter()
     child_blocks: list[np.ndarray] = []
     height_blocks: list[np.ndarray] = []
@@ -797,7 +790,7 @@ def fit_paris_hierarchy(
         size_blocks.extend(component_merge_sizes)
         component_roots[component_index] = component_root
 
-    try:
+    with numba_threads(requested_threads):
         for first, stop in _component_batches(
             component_sizes,
             _COMPONENT_BATCH_VERTICES,
@@ -831,8 +824,6 @@ def fit_paris_hierarchy(
                     continue
             for component_index in range(first, stop):
                 fit_one(component_index)
-    finally:
-        set_num_threads(previous_threads)
 
     synthetic_count = n_components - 1
     index_dtype = np.int32 if 2 * n_leaves - 1 <= np.iinfo(np.int32).max else np.int64

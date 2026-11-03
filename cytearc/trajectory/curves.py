@@ -23,12 +23,11 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-import numba
 import numpy as np
-from numba import prange, set_num_threads
+from numba import prange
 from scipy.interpolate import BSpline
 
-from ..utils.numba import njit, restore_numba_threads
+from ..utils.numba import njit, numba_threads
 
 __all__ = [
     "CURVE_FIT_BINS",
@@ -340,7 +339,6 @@ def _project_rows(
     return position, distance
 
 
-@restore_numba_threads
 def project_onto_curve(
     coordinates: np.ndarray,
     points: np.ndarray,
@@ -375,14 +373,14 @@ def project_onto_curve(
         raise ValueError("A curve must not collapse to one point")
     inverse = np.zeros_like(lengths)
     inverse[lengths > 0.0] = 1.0 / lengths[lengths > 0.0]
-    set_num_threads(min(max(1, int(nthreads)), numba.config.NUMBA_NUM_THREADS))
-    return _project_rows(
-        rows,
-        np.ascontiguousarray(curve[:-1]),
-        vectors,
-        inverse,
-        point_ranks,
-    )
+    with numba_threads(nthreads):
+        return _project_rows(
+            rows,
+            np.ascontiguousarray(curve[:-1]),
+            vectors,
+            inverse,
+            point_ranks,
+        )
 
 
 def curve_values_at(

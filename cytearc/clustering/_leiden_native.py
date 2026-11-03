@@ -102,7 +102,7 @@ import numpy as np
 from scipy.sparse import sparray, spmatrix
 
 from ..utils.logging import logger
-from ..utils.numba import restore_numba_threads
+from ..utils.numba import numba_threads
 from ..utils.shutdown import shutdown_checkpoint
 from ._leiden_aggregate import (
     aggregate_counts,
@@ -443,7 +443,6 @@ def _run_iteration(
     return gather(labels, base_map, n_workers)
 
 
-@restore_numba_threads
 def native_leiden_membership(
     graph: spmatrix | sparray,
     resolution: float,
@@ -475,35 +474,35 @@ def native_leiden_membership(
 
     requested = numba.get_num_threads() if nthreads is None else int(nthreads)
     threads = max(1, min(requested, int(numba.config.NUMBA_NUM_THREADS)))
-    numba.set_num_threads(threads)
-    started = time.perf_counter()
-    leiden_graph = build_leiden_graph(graph, threads, _parallel_min_items)
-    n_nodes = leiden_graph.n_nodes
-    if n_nodes == 0:
-        return np.empty(0, dtype=np.int64)
-    if not leiden_graph.has_offdiagonal:
-        return np.arange(1, n_nodes + 1, dtype=np.int64)
-    logger.debug(
-        f"native Leiden graph nodes={n_nodes} entries={int(leiden_graph.indptr[-1])} "
-        f"threads={threads} build_s={time.perf_counter() - started:.6f}"
-    )
-    settings = _RunSettings(
-        seed=np.uint64(int(random_seed) % 2**64),
-        null_coef=float(resolution)
-        / (leiden_graph.strength_scale * float(leiden_graph.total_strength)),
-        eps_coef=MOVE_TOLERANCE / leiden_graph.strength_scale,
-        theta_w=THETA * leiden_graph.mean_weight,
-        n_workers=threads,
-        sequential_level_entries=int(_sequential_level_entries),
-        parallel_min_items=int(_parallel_min_items),
-    )
-    flat = np.arange(n_nodes, dtype=np.int32)
-    for iteration in range(N_ITERATIONS):
-        shutdown_checkpoint()
-        flat = _run_iteration(leiden_graph, flat, iteration, settings)
-    labels = final_labels(flat, n_nodes, threads)
-    logger.debug(
-        f"native Leiden finished clusters={int(labels.max())} "
-        f"seconds={time.perf_counter() - started:.6f}"
-    )
-    return labels
+    with numba_threads(threads):
+        started = time.perf_counter()
+        leiden_graph = build_leiden_graph(graph, threads, _parallel_min_items)
+        n_nodes = leiden_graph.n_nodes
+        if n_nodes == 0:
+            return np.empty(0, dtype=np.int64)
+        if not leiden_graph.has_offdiagonal:
+            return np.arange(1, n_nodes + 1, dtype=np.int64)
+        logger.debug(
+            f"native Leiden graph nodes={n_nodes} entries={int(leiden_graph.indptr[-1])} "
+            f"threads={threads} build_s={time.perf_counter() - started:.6f}"
+        )
+        settings = _RunSettings(
+            seed=np.uint64(int(random_seed) % 2**64),
+            null_coef=float(resolution)
+            / (leiden_graph.strength_scale * float(leiden_graph.total_strength)),
+            eps_coef=MOVE_TOLERANCE / leiden_graph.strength_scale,
+            theta_w=THETA * leiden_graph.mean_weight,
+            n_workers=threads,
+            sequential_level_entries=int(_sequential_level_entries),
+            parallel_min_items=int(_parallel_min_items),
+        )
+        flat = np.arange(n_nodes, dtype=np.int32)
+        for iteration in range(N_ITERATIONS):
+            shutdown_checkpoint()
+            flat = _run_iteration(leiden_graph, flat, iteration, settings)
+        labels = final_labels(flat, n_nodes, threads)
+        logger.debug(
+            f"native Leiden finished clusters={int(labels.max())} "
+            f"seconds={time.perf_counter() - started:.6f}"
+        )
+        return labels

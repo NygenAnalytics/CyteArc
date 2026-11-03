@@ -4,7 +4,6 @@ from typing import Any
 import numba
 import numpy as np
 import pandas as pd
-from numba import set_num_threads
 
 from ...assay import Assay, ATACassay, RNAassay, lib_size_feature_stream_eligible
 from ...assay.normalization import (
@@ -21,7 +20,7 @@ from ...utils.arguments import integer_argument
 from ...utils.arrays import has_duplicates
 from ...utils.compute import compute_with_progress
 from ...utils.logging import logger
-from ...utils.numba import restore_numba_threads
+from ...utils.numba import numba_threads
 from ..statistical import adjust_pvalues
 from .rank import (
     _batch_stats,
@@ -107,7 +106,6 @@ def rank_marker_adapter(assay: Assay) -> str | None:
     return _NORMALIZATION_ADAPTERS.get(assay.normMethod)
 
 
-@restore_numba_threads
 def find_markers_by_rank(
     assay: Assay,
     groups: np.ndarray,
@@ -553,60 +551,59 @@ def _rank_normed_batches(
         max(1, int(worker_limit)),
         numba.config.NUMBA_NUM_THREADS,
     )
-    set_num_threads(threads)
-    n_cells = len(codes)
-    n_groups = len(group_sizes)
-    # The dense kernel's C-order float64 copy of each value, and its
-    # statistics of each feature spread over the feature's cells; the exact
-    # pass copies the values after the kernel and adds one p-value per group.
-    scratch_itemsize = 8 + -(-64 * n_groups // n_cells)
-    resident_bytes = held_bytes + batch_rank_scratch_bytes(
-        n_cells=n_cells,
-        n_groups=n_groups,
-        n_features=0,
-        nthreads=threads,
-    )
-    if exact is not None:
-        scratch_itemsize += -(-8 * n_groups // n_cells)
-        resident_bytes += exact.scratch_bytes()
-    start = 0
-    for batch in assay.iter_normed_feature_wise(
-        cell_idx=cell_idx,
-        feat_idx=feature_index,
-        batch_size=None,
-        msg="Finding markers",
-        scratch_itemsize=scratch_itemsize,
-        resident_bytes=resident_bytes,
-        **norm_params,
-    ):
-        if isinstance(batch, pd.DataFrame):
-            values = batch.to_numpy()
-            labels = np.asarray(batch.columns)
-        else:
-            feature_major, labels = batch
-            values = np.asarray(feature_major).T
-        stop = start + values.shape[1]
-        if not np.array_equal(labels, feature_index[start:stop]):
-            raise RuntimeError(
-                "Normalized feature batches must follow the requested features"
-            )
-        statistics[start:stop] = _batch_stats(
-            values,
-            codes,
-            group_sizes,
-            n_cells,
-            feature_labels=np.asarray(labels),
+    with numba_threads(threads):
+        n_cells = len(codes)
+        n_groups = len(group_sizes)
+        # The dense kernel's C-order float64 copy of each value, and its
+        # statistics of each feature spread over the feature's cells; the exact
+        # pass copies the values after the kernel and adds one p-value per group.
+        scratch_itemsize = 8 + -(-64 * n_groups // n_cells)
+        resident_bytes = held_bytes + batch_rank_scratch_bytes(
+            n_cells=n_cells,
+            n_groups=n_groups,
+            n_features=0,
+            nthreads=threads,
         )
         if exact is not None:
-            exact.out[start:stop] = exact_batch_p_values(
-                values, codes, exact.sizes, exact.groups, exact.max_size
+            scratch_itemsize += -(-8 * n_groups // n_cells)
+            resident_bytes += exact.scratch_bytes()
+        start = 0
+        for batch in assay.iter_normed_feature_wise(
+            cell_idx=cell_idx,
+            feat_idx=feature_index,
+            batch_size=None,
+            msg="Finding markers",
+            scratch_itemsize=scratch_itemsize,
+            resident_bytes=resident_bytes,
+            **norm_params,
+        ):
+            if isinstance(batch, pd.DataFrame):
+                values = batch.to_numpy()
+                labels = np.asarray(batch.columns)
+            else:
+                feature_major, labels = batch
+                values = np.asarray(feature_major).T
+            stop = start + values.shape[1]
+            if not np.array_equal(labels, feature_index[start:stop]):
+                raise RuntimeError(
+                    "Normalized feature batches must follow the requested features"
+                )
+            statistics[start:stop] = _batch_stats(
+                values,
+                codes,
+                group_sizes,
+                n_cells,
+                feature_labels=np.asarray(labels),
             )
-        start = stop
-    if start != len(feature_index):
-        raise RuntimeError("Normalized feature batches must cover every feature")
+            if exact is not None:
+                exact.out[start:stop] = exact_batch_p_values(
+                    values, codes, exact.sizes, exact.groups, exact.max_size
+                )
+            start = stop
+        if start != len(feature_index):
+            raise RuntimeError("Normalized feature batches must cover every feature")
 
 
-@restore_numba_threads
 def find_markers_by_regression(
     assay: Assay,
     cell_idx: np.ndarray,
@@ -648,62 +645,62 @@ def find_markers_by_regression(
         raise ValueError("min_cells must be at least 1")
 
     nthreads = getattr(assay, "nthreads", 1)
-    set_num_threads(min(max(1, int(nthreads)), numba.config.NUMBA_NUM_THREADS))
-    # Pearson r does not depend on the regressor's scale, and a power-of-two
-    # scale is exact, so scaling the regressor below one in magnitude keeps
-    # its centered sums finite and leaves r unchanged.
-    regressor = np.ldexp(regressor, -np.frexp(np.abs(regressor).max())[1])
-    x_centered = regressor - regressor.mean()
-    ssxm = float(np.dot(x_centered, x_centered) / regressor.shape[0])
+    with numba_threads(nthreads):
+        # Pearson r does not depend on the regressor's scale, and a power-of-two
+        # scale is exact, so scaling the regressor below one in magnitude keeps
+        # its centered sums finite and leaves r unchanged.
+        regressor = np.ldexp(regressor, -np.frexp(np.abs(regressor).max())[1])
+        x_centered = regressor - regressor.mean()
+        ssxm = float(np.dot(x_centered, x_centered) / regressor.shape[0])
 
-    labels: list[Any] = []
-    r_parts: list[np.ndarray] = []
-    p_parts: list[np.ndarray] = []
-    status_parts: list[np.ndarray] = []
-    for feature_major, raw_labels in assay.iter_normed_feature_wise(
-        cell_idx=cell_idx,
-        feat_idx=feat_idx,
-        batch_size=batch_size,
-        msg="Finding correlated features",
-        as_dataframe=False,
-        **norm_params,
-    ):
-        data = np.asarray(feature_major, dtype=np.float64).T
-        feat_labels = np.asarray(raw_labels)
-        if data.ndim != 2 or data.shape[0] != regressor.shape[0]:
-            raise ValueError(
-                "Regressor length does not match the number of selected cells"
+        labels: list[Any] = []
+        r_parts: list[np.ndarray] = []
+        p_parts: list[np.ndarray] = []
+        status_parts: list[np.ndarray] = []
+        for feature_major, raw_labels in assay.iter_normed_feature_wise(
+            cell_idx=cell_idx,
+            feat_idx=feat_idx,
+            batch_size=batch_size,
+            msg="Finding correlated features",
+            as_dataframe=False,
+            **norm_params,
+        ):
+            data = np.asarray(feature_major, dtype=np.float64).T
+            feat_labels = np.asarray(raw_labels)
+            if data.ndim != 2 or data.shape[0] != regressor.shape[0]:
+                raise ValueError(
+                    "Regressor length does not match the number of selected cells"
+                )
+            r_vals, p_vals, status = _regression_batch_results(
+                data,
+                x_centered,
+                ssxm,
+                regressor,
+                min_cells,
+                feat_labels,
             )
-        r_vals, p_vals, status = _regression_batch_results(
-            data,
-            x_centered,
-            ssxm,
-            regressor,
-            min_cells,
-            feat_labels,
-        )
-        labels.extend(feat_labels.tolist())
-        r_parts.append(r_vals)
-        p_parts.append(p_vals)
-        status_parts.append(status)
+            labels.extend(feat_labels.tolist())
+            r_parts.append(r_vals)
+            p_parts.append(p_vals)
+            status_parts.append(status)
 
-    if not labels:
-        return pd.DataFrame(columns=["r_value", "p_value", "p_value_adjusted"])
-    r_values = np.concatenate(r_parts)
-    p_values = np.concatenate(p_parts)
-    status = np.concatenate(status_parts)
-    adjusted = np.full(p_values.shape, np.nan, dtype=np.float64)
-    tested = status == _REG_OK
-    if np.any(tested):
-        adjusted[tested] = adjust_pvalues(p_values[tested], "fdr_bh")
-    untested = status == _REG_SENTINEL
-    p_values = p_values.astype(np.float64, copy=True)
-    p_values[untested] = np.nan
-    return pd.DataFrame(
-        {
-            "r_value": r_values,
-            "p_value": p_values,
-            "p_value_adjusted": adjusted,
-        },
-        index=labels,
-    )
+        if not labels:
+            return pd.DataFrame(columns=["r_value", "p_value", "p_value_adjusted"])
+        r_values = np.concatenate(r_parts)
+        p_values = np.concatenate(p_parts)
+        status = np.concatenate(status_parts)
+        adjusted = np.full(p_values.shape, np.nan, dtype=np.float64)
+        tested = status == _REG_OK
+        if np.any(tested):
+            adjusted[tested] = adjust_pvalues(p_values[tested], "fdr_bh")
+        untested = status == _REG_SENTINEL
+        p_values = p_values.astype(np.float64, copy=True)
+        p_values[untested] = np.nan
+        return pd.DataFrame(
+            {
+                "r_value": r_values,
+                "p_value": p_values,
+                "p_value_adjusted": adjusted,
+            },
+            index=labels,
+        )

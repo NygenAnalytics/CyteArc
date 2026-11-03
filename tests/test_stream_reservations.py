@@ -14,6 +14,7 @@ from cytearc.matrix.chunked import ChunkedArray
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.execution import ExecutionReport, execution_report_scope
 from cytearc.storage.geometry import ArrayGeometry
+from tests.thread_helpers import blas_threads, raised_threads
 
 
 def _traced_peak(
@@ -184,18 +185,18 @@ def test_document_frequency_rejects_impossible_row_before_read(
     assert f"operation limit is {budget} bytes" in str(cause)
 
 
-def test_fixed_row_blocks_preserve_compute_threads_with_one_prefetch() -> None:
-    from threadpoolctl import threadpool_info
-
+def test_fixed_row_blocks_with_one_prefetch_leave_the_consumer_its_threads() -> None:
     values = np.arange(12).reshape(6, 2)
     matrix = ChunkedArray(values, block_size=2, resources=ResourceBudget(1 << 20, 2))
     rows = 0
-    with execution_report_scope() as reports:
+    with raised_threads(blas=2), execution_report_scope() as reports:
         for block in matrix._stream_blocks(
             nthreads=2, msg=None, prefetch=1, row_mask=None
         ):
-            pools = [pool for pool in threadpool_info() if pool["user_api"] == "blas"]
-            assert all(pool["num_threads"] == 1 for pool in pools)
+            # The reads hold no thread limit, so the consumer's own work on
+            # each block runs under the count outside the stream, not under
+            # the plan's one thread per reader.
+            assert blas_threads() == {2}
             np.testing.assert_array_equal(block, values[rows : rows + len(block)])
             rows += len(block)
             del block
