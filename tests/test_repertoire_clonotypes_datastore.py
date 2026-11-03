@@ -23,13 +23,13 @@ from cytearc import plotting
 from cytearc.datastore._operations.record_tables import stored_text
 from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.rows import (
-    READ_OBJECT_BYTES,
     array_row_selection_parts,
     text_read_bytes,
 )
 from cytearc.repertoire import SLOTS, Clonotypes
 from cytearc.repertoire.clonotypes import clonotype_noun
 from cytearc.storage.artifacts import artifact_group
+from cytearc.storage.geometry import READ_OBJECT_BYTES
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import logger
 from tests.clone_helpers import (

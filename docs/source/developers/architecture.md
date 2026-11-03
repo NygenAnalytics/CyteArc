@@ -716,6 +716,7 @@ CyteArc validates persisted data and public arguments against the following cont
   band's partial statistics, and each compute worker's band scratch, and no longer keep the totals
   beside their inverses. `compare.compute_bulk` means that stream normalized row blocks reserve their group
   sums and divide them in place.
+- Row-block streams, and the checks that size them, such as those of perturbation profiles, the streaming LSI fit and the reduced-coordinate write, also reserve for each reader the chunk that its previous read can still hold, as [](zarr_internals.md) describes under "Memory controls": about twice the chunk and 64 KiB more, so their least budgets rise by that much for each reader.
 - Sparse count imports that write several assays from one source, such as Cell Ranger, MTX, and H5AD
   files with antibody or peak features, no longer raise `MemoryError` when a band of a wider assay
   arrives while bands of a narrower assay are pending and every band fits on its own. The writer

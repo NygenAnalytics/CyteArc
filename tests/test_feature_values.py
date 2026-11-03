@@ -60,36 +60,49 @@ def test_spreading_measured_rows_ignores_empty_blocks_and_keeps_missing_rows(
     assert offset == len(measured)
 
 
+def _count_store(
+    counts: np.ndarray,
+    policy: CountMatrixPolicy,
+    measured: np.ndarray | None = None,
+) -> DataStore:
+    """Write cells x features counts in the layout of ``policy`` to a store in memory.
+
+    ``measured`` marks the cells that the assay measured in its membership
+    column; without it the assay measures every cell.
+    """
+    n_cells, n_features = counts.shape
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    cells = np.array([f"c{index}" for index in range(n_cells)])
+    create_cell_data(root, None, ids=cells, names=cells)
+    if measured is not None:
+        column = root["cellData"].create_array("RNA_I", data=measured)
+        column.attrs.update(membership_attributes("RNA"))
+    features = np.array([f"gene{index}" for index in range(n_features)])
+    array = create_zarr_count_assay(
+        root, "RNA", None, n_cells, features, features, counts.dtype, policy=policy
+    )
+    array[:] = counts
+    finalize_test_counts(array)
+    finalize_writer_counts_t(root, "RNA", None)
+    store = DataStore(root.store, min_features_per_cell=0, nthreads=1)
+    store.cells.insert("everyone", np.ones(n_cells, dtype=bool))
+    return store
+
+
 @pytest.fixture(scope="module", params=["columns", "rows", "membership"])
 def feature_store(request):
     shape = (45, 25) if request.param == "rows" else (173, 401)
     counts = np.random.default_rng(19).integers(0, 40, shape, dtype=np.uint16)
     counts[0] = 0
     measured = np.ones(shape[0], dtype=bool)
-    root = zarr.open_group(store=MemoryStore(), mode="w")
-    cells = np.array([f"c{index}" for index in range(shape[0])])
-    create_cell_data(root, None, ids=cells, names=cells)
     if request.param == "membership":
         measured[1::7] = False
         counts[~measured] = 0
-        column = root["cellData"].create_array("RNA_I", data=measured)
-        column.attrs.update(membership_attributes("RNA"))
-    features = np.array([f"gene{index}" for index in range(shape[1])])
-    array = create_zarr_count_assay(
-        root,
-        "RNA",
-        None,
-        shape[0],
-        features,
-        features,
-        counts.dtype,
-        policy=CountMatrixPolicy(unitBytes=2_000, chunkBytes=200),
+    store = _count_store(
+        counts,
+        CountMatrixPolicy(unitBytes=2_000, chunkBytes=200),
+        measured if request.param == "membership" else None,
     )
-    array[:] = counts
-    finalize_test_counts(array)
-    finalize_writer_counts_t(root, "RNA", None)
-    store = DataStore(root.store, min_features_per_cell=0, nthreads=1)
-    store.cells.insert("everyone", np.ones(shape[0], dtype=bool))
     return store, measured, request.param
 
 
@@ -315,23 +328,30 @@ def test_feature_reads_accept_eager_normalized_values(feature_store, monkeypatch
     )
 
 
-# The other fixtures already read counts or hold a membership mask.
-@pytest.mark.parametrize("feature_store", ["columns"], indirect=True)
-def test_feature_reads_plan_counts_when_transpose_buffers_do_not_fit(
-    feature_store, monkeypatch
-):
-    store, _, _ = feature_store
+def test_feature_reads_plan_counts_when_transpose_buffers_do_not_fit(monkeypatch):
+    # With this many cells the buffers of a countsT read of one feature
+    # outgrow a read of counts row blocks beside the chunk that its previous
+    # read can still hold: row blocks fit from 236,000 bytes, countsT bands
+    # from 272,000.
+    counts = np.random.default_rng(19).integers(0, 40, (6000, 21), dtype=np.uint16)
+    store = _count_store(counts, CountMatrixPolicy(unitBytes=20_000, chunkBytes=2_000))
     cells = np.arange(store.cells.N)
     expected = store.RNA.normed(cells, np.array([7])).compute(nthreads=1)
-    budget = ResourceBudget(8_000, 1)
-    monkeypatch.setattr(store.RNA, "resources", budget)
-    monkeypatch.setattr(store.RNA.rawData, "_resources", budget)
-    with execution_report_scope() as reports:
-        actual = fetch_normalized_feature_matrix(
-            store, [resolve_feature(store, "gene7")], cells
-        )
-    np.testing.assert_array_equal(actual, expected)
-    assert {report.unitKind for report in reports} == {"countsRowBlock"}
+
+    def read(limit: int) -> set[str]:
+        budget = ResourceBudget(limit, 1)
+        monkeypatch.setattr(store.RNA, "resources", budget)
+        monkeypatch.setattr(store.RNA.rawData, "_resources", budget)
+        with execution_report_scope() as reports:
+            actual = fetch_normalized_feature_matrix(
+                store, [resolve_feature(store, "gene7")], cells
+            )
+        np.testing.assert_array_equal(actual, expected)
+        return {report.unitKind for report in reports}
+
+    # The countsT bands, which touch fewer chunk bytes, are read where they fit.
+    assert read(1 << 20) == {"countsTCellBand"}
+    assert read(254_000) == {"countsRowBlock"}
 
 
 @pytest.mark.parametrize("feature_store", ["columns"], indirect=True)

@@ -950,7 +950,7 @@ def test_correction_is_deterministic_in_any_memory_budget(store, path, monkeypat
         )
 
     monkeypatch.setattr(ambient_operations, "remove_ambient_counts", recorded)
-    small = _open(path, mem_budget="2M")
+    small = _open(path, mem_budget="3M")
     small.qc.correct_ambient(estimate, assay_label="small", random_seed=9)
 
     # Another run with the seed, in another store session and budget, gives

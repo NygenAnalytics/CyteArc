@@ -18,8 +18,9 @@ from scipy.stats import fisher_exact
 
 from cytearc.clones import COUPLING_METHODS, CloneCoupling, CloneFateBias
 from cytearc.datastore._operations import clones as clone_operations
-from cytearc.metadata.rows import READ_OBJECT_BYTES, array_row_selection_parts
+from cytearc.metadata.rows import array_row_selection_parts
 from cytearc.storage.artifacts import artifact_group
+from cytearc.storage.geometry import READ_OBJECT_BYTES
 from tests.clone_helpers import (
     benjamini_hochberg,
     coupling_reference,

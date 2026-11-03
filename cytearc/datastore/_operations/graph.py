@@ -217,7 +217,13 @@ def _streaming_lsi_block_rows(
     width = min(n_rows, n_features, n_components + n_oversamples)
     accumulator_bytes = _streaming_lsi_accumulator_bytes(n_features, width)
     geometry = array_geometry(array)
-    decode_bytes = 0 if geometry is None else geometry.nominalChunkBytes()
+    # The chunk that a block's read decodes, beside the one that the previous
+    # read can still hold.
+    decode_bytes = (
+        0
+        if geometry is None
+        else geometry.nominalChunkBytes() + geometry.heldReadBytes()
+    )
     available = resources.memoryBytes - accumulator_bytes - decode_bytes
     input_itemsize = max(int(np.dtype(array.dtype).itemsize), 1)
     row_bytes = (
@@ -249,11 +255,14 @@ def _reduction_write_bytes(
     from ...storage.io_policy import StorageIoPolicy
     from ...storage.sharding import plan_dense_write
 
-    # One block of float64 coordinates, which the checked writer casts into
-    # its float32 band.
+    # Three blocks of the input, which its one reader reads one after another,
+    # so the chunk that the reader's previous read can still hold counts once,
+    # and one block of float64 coordinates, which the checked writer casts
+    # into its float32 band.
     producer_bytes = (
         data._resident_bytes()
         + 3 * data._block_task_bytes()
+        - 2 * data._held_read_bytes()
         + data.chunksize[0] * dims * np.dtype(np.float64).itemsize
         + transform_bytes
     )
