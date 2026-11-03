@@ -2,14 +2,20 @@
 
 A gzip file whose name lacks ``.gz`` and a plain file named ``.gz`` read as
 the file itself does, for each reader of the stack and for master's readers
-of Matrix Market folders, gene references, Cell Ranger's call file and gene
-annotations, which all open their files through ``cytearc.utils.files``. A
+of Matrix Market folders, gene references, Cell Ranger's call file, gene
+annotations and CSV counts, which all open their files through
+``cytearc.utils.files`` or tell pandas their compression by its rule. A
 byte-order mark at the start of a file's text reads the same in every
 format: as no part of the text.
 """
 
+import bz2
 import gzip
+import io
+import lzma
 import shutil
+import tarfile
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -225,6 +231,110 @@ def test_masters_matrix_market_folders_read_their_files_by_their_bytes(
 
     variant = _variant(folder, tmp_path / "variant", kind)
     assert counts(variant) == counts(folder)
+
+
+def _csv_counts(path: Path | str, **options: Any) -> tuple:
+    from cytearc.readers import CSVReader
+
+    reader = CSVReader(str(path), id_column=0, batch_size=1, **options)
+    counts = np.vstack([batch for batch, _metadata in reader.consume()])
+    return reader.cell_ids().tolist(), reader.feature_ids().tolist(), counts.tolist()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_masters_csv_reader_finds_compression_by_the_files_bytes(
+    tmp_path, kind
+) -> None:
+    # pandas inferred compression from the name, so a gzip file without .gz
+    # failed to parse and a plain file named .gz failed to decompress.
+    original = tmp_path / "counts.csv"
+    original.write_text("cell,g0,g1\nc0,1,2\nc1,3,4\nc2,0,5\n")
+    expected = (["c0", "c1", "c2"], ["g0", "g1"], [[1, 2], [3, 4], [0, 5]])
+    assert _csv_counts(original) == expected
+    assert _csv_counts(_variant(original, tmp_path / "variant", kind)) == expected
+
+
+def test_masters_csv_reader_reads_each_compression_pandas_reads_by_its_bytes(
+    tmp_path,
+) -> None:
+    text = b"cell,g0,g1\nc0,1,2\nc1,3,4\n"
+    expected = (["c0", "c1"], ["g0", "g1"], [[1, 2], [3, 4]])
+    packed = tmp_path / "packed.zip"
+    with zipfile.ZipFile(packed, "w") as archive:
+        archive.writestr("counts.csv", text)
+    # Each under a name that names no compression, or another one.
+    files = {
+        "bzip2.csv": bz2.compress(text),
+        "xz.csv.gz": lzma.compress(text),
+        "zip.csv": packed.read_bytes(),
+    }
+    for name, data in files.items():
+        path = tmp_path / name
+        path.write_bytes(data)
+        assert _csv_counts(path) == expected, name
+    # A compression that pandas_kwargs names is kept, as pandas reads it,
+    # None among them.
+    named = tmp_path / "named.bin"
+    named.write_bytes(bz2.compress(text))
+    assert _csv_counts(named, pandas_kwargs={"compression": "bz2"}) == expected
+    with pytest.raises(OSError):
+        _csv_counts(named, pandas_kwargs={"compression": "gzip"})
+    with pytest.raises(UnicodeDecodeError):
+        _csv_counts(named, pandas_kwargs={"compression": None})
+
+
+@pytest.mark.parametrize("mode", ["w", "w:gz", "w:bz2", "w:xz"])
+@pytest.mark.parametrize("end", ["\n", ""])
+def test_masters_csv_reader_reads_a_tar_archive_by_its_members_header(
+    tmp_path, mode, end
+) -> None:
+    # Read as text, the archive's header joins the first line, so a CSV
+    # without a final line end kept its field counts with its first cell
+    # named after the member.
+    text = f"c0,1,2\nc1,3,4\nc2,0,5{end}".encode()
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode=mode) as handle:
+        member = tarfile.TarInfo("counts.csv")
+        member.size = len(text)
+        handle.addfile(member, io.BytesIO(text))
+    path = tmp_path / "counts.bin"
+    path.write_bytes(archive.getvalue())
+    cells, _features, counts = _csv_counts(path, has_header=False)
+    assert (cells, counts) == (["c0", "c1", "c2"], [[1, 2], [3, 4], [0, 5]])
+
+
+def test_masters_csv_reader_reads_the_first_bytes_with_the_storage_options(
+    tmp_path,
+) -> None:
+    fsspec = pytest.importorskip("fsspec")
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    class KeyedFileSystem(MemoryFileSystem):
+        """A filesystem in memory that opens nothing without its key, as an
+        object store opens nothing without its credentials."""
+
+        protocol = ("cytearc-keyed",)
+        store: dict = {}
+        pseudo_dirs = [""]
+
+        def __init__(self, *args: Any, key: str | None = None, **kwargs: Any) -> None:
+            if key != "secret":
+                raise PermissionError("the filesystem needs its key")
+            super().__init__(*args, **kwargs)
+
+        @classmethod
+        def _strip_protocol(cls, path: Any) -> Any:
+            return super()._strip_protocol(str(path).removeprefix("cytearc-keyed://"))
+
+    fsspec.register_implementation("cytearc-keyed", KeyedFileSystem, clobber=True)
+    with KeyedFileSystem(key="secret").open("/counts.csv", "wb") as handle:
+        handle.write(gzip.compress(b"cell,g0,g1\nc0,1,2\nc1,3,4\n", mtime=0))
+    # pandas opens the path with the options, and so does the reader that
+    # finds its compression.
+    assert _csv_counts(
+        "cytearc-keyed://counts.csv",
+        pandas_kwargs={"storage_options": {"key": "secret"}},
+    ) == (["c0", "c1"], ["g0", "g1"], [[1, 2], [3, 4]])
 
 
 @pytest.mark.parametrize("kind", KINDS)

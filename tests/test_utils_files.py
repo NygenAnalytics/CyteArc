@@ -11,11 +11,15 @@ import zipfile
 import pytest
 
 from cytearc.utils.files import (
+    COMPRESSION_SIGNATURE_BYTES,
     GZIP_SIGNATURE,
     HDF5_SIGNATURE,
+    TAR_SIGNATURE_BYTES,
+    compression_of,
     file_signature,
     is_gzip,
     is_hdf5,
+    is_tar,
     open_binary,
     open_text,
 )
@@ -94,3 +98,52 @@ def test_closing_what_a_stream_opens_closes_the_stream_compressed_or_not(
     with open_binary(stream) as handle:
         assert handle.read() == data
     assert stream.closed
+
+
+def test_the_first_bytes_name_each_compression_that_pandas_reads() -> None:
+    import bz2
+    import lzma
+
+    text = b"cell,clone\nA,1\n"
+    heads = {
+        "gzip": gzip.compress(text, mtime=0),
+        "bz2": bz2.compress(text),
+        "xz": lzma.compress(text),
+        # Zstandard's magic number and frame header, as zstd writes them.
+        "zstd": b"\x28\xb5\x2f\xfd\x24\x10\x81\x00\x00\x63",
+    }
+    # A skippable frame, of magic numbers 0x184D2A50 to 0x184D2A5F, may come
+    # first.
+    for first in (0x50, 0x5F):
+        skippable = bytes([first]) + b"\x2a\x4d\x18\x04\x00\x00\x00meta"
+        assert compression_of(skippable[:COMPRESSION_SIGNATURE_BYTES]) == "zstd"
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr("counts.csv", text)
+    heads["zip"] = archive.getvalue()
+    for name, data in heads.items():
+        assert compression_of(data[:COMPRESSION_SIGNATURE_BYTES]) == name
+    # An empty bzip2 stream ends at once.
+    assert compression_of(bz2.compress(b"")[:COMPRESSION_SIGNATURE_BYTES]) == "bz2"
+    # Text that starts as a signature does, or is cut short, is plain.
+    for head in (b"BZh9 reads", b"BZh", b"PK\x03", b"\x1f", b"", text):
+        assert compression_of(head[:COMPRESSION_SIGNATURE_BYTES]) is None
+
+
+def test_a_tar_archive_is_known_by_its_first_members_header() -> None:
+    import tarfile
+
+    for archive_format in (
+        tarfile.USTAR_FORMAT,
+        tarfile.GNU_FORMAT,
+        tarfile.PAX_FORMAT,
+    ):
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w", format=archive_format) as handle:
+            member = tarfile.TarInfo("counts.csv")
+            member.size = 4
+            handle.addfile(member, io.BytesIO(b"a,b\n"))
+        assert is_tar(archive.getvalue()[:TAR_SIGNATURE_BYTES])
+    # Text, and text cut short of the header's mark, is no tar archive.
+    assert not is_tar(b"cell,clone\n" * 30)
+    assert not is_tar(b" " * 257 + b"usta")
