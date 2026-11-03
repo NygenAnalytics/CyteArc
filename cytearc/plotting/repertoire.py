@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from ..repertoire.chains import CHAIN_PAIRINGS, RECEPTOR_TYPES
-from ..repertoire.usage import GENE_FIELDS
+from ..repertoire.usage import GeneUsage, Spectratype
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import sort_categories
 from ._contracts import PlotProvenance
@@ -93,12 +93,17 @@ def _draw_categories(
     table: pd.DataFrame,
     colors: dict[str, str],
     *,
+    grouped: bool,
     normalize: bool,
     title: str,
     show_legend: bool,
 ) -> None:
-    """Draw one bar per category, or one stacked bar per group."""
-    if list(table.columns) == ["n_cells"]:
+    """Draw one bar per category, or with a grouping one stacked bar per group.
+
+    Without a grouping the table holds one column, ``n_cells``; with one, a
+    column per group, which a group's name sets, ``n_cells`` among them.
+    """
+    if not grouped:
         shown = table[table["n_cells"] > 0]
         positions = np.arange(len(shown))[::-1]
         total = max(1, int(table["n_cells"].sum()))
@@ -142,7 +147,7 @@ def receptor_qc(
     store: Any,
     receptors: ArtifactRef,
     *,
-    group_by: str | None = None,
+    group_by: str | Sequence[str] | None = None,
     groups: ArtifactRef | None = None,
     normalize: bool | None = None,
     target: Any | None = None,
@@ -162,11 +167,13 @@ def receptor_qc(
     lost in capture, and many ``"multichain"`` or ``"ambiguous"`` cells to
     doublets.
 
-    ``group_by`` names a cell metadata column, such as the sample, and
-    ``groups`` a cell-label artifact, such as a clustering; with either, the
-    first two panels draw one stacked bar per group, of the fraction of its
-    cells by default (``normalize``), and cells without a group are left out.
-    A label artifact may hold fewer cells than the receptors.
+    ``group_by`` names cell metadata columns, one or several, such as the
+    sample, and ``groups`` a cell-label artifact, such as a clustering; the
+    groups are the combinations of their labels, as the clone summaries group
+    cells, named by their labels joined by commas. With a grouping, the first
+    two panels draw one stacked bar per group, of the fraction of its cells
+    by default (``normalize``), and cells without a group are left out. A
+    label artifact may hold fewer cells than the receptors.
 
     Tables: ``receptor_type`` and ``chain_pairing`` (cells per category, one
     column per group or ``n_cells``), and ``chains_per_cell`` (cells per
@@ -175,11 +182,13 @@ def receptor_qc(
     Raises:
         TypeError: If an argument has the wrong type.
         ValueError: If ``receptors`` is not an ``immune_receptors``
-            artifact, or the grouping refuses its labels.
+            artifact, a ``group_by`` column is missing or named twice, or
+            two groups get one name.
         KeyError: If the store holds no such artifact.
         RuntimeError: If an artifact is incomplete, as a call that stopped
             before it finished leaves it.
-        MemoryError: If reading the artifact does not fit the memory budget.
+        MemoryError: If reading the artifact or grouping the cells does not
+            fit the memory budget.
     """
     normalize = optional_bool_argument(normalize, "normalize")
     show_legend = bool_argument(show_legend, "show_legend")
@@ -224,6 +233,7 @@ def receptor_qc(
             axes["receptor_type"],
             receptor_type,
             _RECEPTOR_TYPE_COLORS,
+            grouped=labels is not None,
             normalize=fractions,
             title="Receptor type",
             show_legend=show_legend,
@@ -232,6 +242,7 @@ def receptor_qc(
             axes["chain_pairing"],
             chain_pairing,
             _CHAIN_PAIRING_COLORS,
+            grouped=labels is not None,
             normalize=fractions,
             title="Chain pairing",
             show_legend=show_legend,
@@ -287,14 +298,14 @@ def receptor_qc(
     return plot_result
 
 
-def _top(value: Any) -> int:
-    """Return a positive ``top``, refusing booleans and other types."""
+def _max_genes(value: Any) -> int:
+    """Return a positive ``max_genes``, refusing booleans and other types."""
     if (
         isinstance(value, bool | np.bool_)
         or not isinstance(value, int | np.integer)
         or value < 1
     ):
-        raise ValueError("top must be a positive integer")
+        raise ValueError("max_genes must be a positive integer")
     return int(value)
 
 
@@ -351,16 +362,9 @@ def _heatmap(
 @close_figures_on_error
 def gene_usage(
     store: Any,
-    source: ArtifactRef,
+    usage: GeneUsage,
     *,
-    gene: str = "v_call",
-    level: str = "gene",
-    slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
-    count: str = "cells",
-    group_by: str | Sequence[str] | None = None,
-    groups: ArtifactRef | None = None,
-    cell_selection: ArtifactRef | None = None,
-    top: int = 30,
+    max_genes: int = 30,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -369,53 +373,54 @@ def gene_usage(
 ) -> PlotResult:
     """Plot the gene usage of groups of cells, one panel per locus.
 
-    ``source`` and the options are those of ``ds.repertoire.gene_usage`` for
-    one ``gene`` field. Each panel holds one locus, such as TRA or TRB, and
-    its ``top`` genes with the most chains over all groups: with
-    ``group_by`` or ``groups``, a heatmap of each gene's fraction of each
-    group's chains of that locus, which names the group even where one group
-    holds the locus; without, bars. Panels stand two to a row. With
-    ``count="clonotypes"`` the bars count clonotypes, or clonotype clusters
-    for clonotypes that a distance metric linked. The plot raises
-    ``ValueError`` when ``gene`` is not one gene field or no chain has a call
-    of it.
+    ``usage`` is the result of ``ds.repertoire.gene_usage`` for one gene
+    field, such as ``genes="j_call"``, which sets the groups, the level, the
+    slots and what is counted. Each panel holds one locus, such as TRA or
+    TRB, and its ``max_genes`` genes with the most chains over all groups:
+    for groups of ``group_by`` columns or a ``groups`` artifact, a heatmap of
+    each gene's fraction of each group's chains of that locus, which names
+    the group even where one group holds the locus; without, bars. Panels
+    stand two to a row. With ``count="clonotypes"`` the bars count
+    clonotypes, or clonotype clusters for clonotypes that a distance metric
+    linked. The plot raises ``ValueError`` when ``usage`` counts several gene
+    fields or no chain has a call of its field.
 
-    Tables: ``usage``, the rows of ``ds.repertoire.gene_usage``.
+    Tables: ``usage``, the record's rows.
 
     Raises:
-        TypeError: If an argument has the wrong type.
-        ValueError: If ``source`` is not an ``immune_receptors`` or
-            ``clonotypes`` artifact, ``gene`` is not a gene field, or the
-            summary refuses its options, as ``ds.repertoire.gene_usage``
-            does.
-        KeyError: If the store holds no such artifact.
-        RuntimeError: If an artifact is incomplete, as a call that stopped
-            before it finished leaves it.
-        MemoryError: If reading the artifact does not fit the memory budget.
+        TypeError: If ``usage`` is not a ``GeneUsage`` record, or another
+            argument has the wrong type.
+        ValueError: If ``usage`` counts several gene fields, or no chain has
+            a call of its field.
+        KeyError: If the store does not hold the clonotypes that ``usage``
+            counts.
+        RuntimeError: If those clonotypes are incomplete, as a call that
+            stopped before it finished leaves them.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    top = _top(top)
-    if not isinstance(gene, str) or gene not in GENE_FIELDS:
-        raise ValueError(f"gene must be one of {', '.join(GENE_FIELDS)}")
-    result = _store_method(store, "gene_usage")(
-        source,
-        genes=gene,
-        level=level,
-        slots=slots,
-        count=count,
-        group_by=group_by,
-        groups=groups,
-        cell_selection=cell_selection,
-    )
-    table = result.table
+    max_genes = _max_genes(max_genes)
+    if not isinstance(usage, GeneUsage):
+        raise TypeError("usage must be the GeneUsage of ds.repertoire.gene_usage")
+    if len(usage.genes) != 1:
+        raise ValueError(
+            f"usage counts the combinations of {', '.join(usage.genes)}; "
+            "gene_usage draws one gene field, so pass the GeneUsage of one, "
+            "and draw V and J genes together with gene_pairing"
+        )
+    gene = usage.genes[0]
+    source, count = usage.source, usage.count
+    table = usage.table
     loci = _locus_panels(table, f"a {gene}")
     counted = _counted(store, source, count)
-    grouped = bool(result.group_by) or result.groups is not None
+    grouped = bool(usage.group_by) or usage.groups is not None
     by_locus = dict(tuple(table.groupby("locus", sort=False)))
     n_columns, size = _panel_grid(
         loci,
-        (max(5.0, 3.0 + 0.4 * table["group"].nunique()), max(4.0, 0.22 * top + 1.5)),
+        (
+            max(5.0, 3.0 + 0.4 * table["group"].nunique()),
+            max(4.0, 0.22 * max_genes + 1.5),
+        ),
     )
     if figsize is None and target is None:
         figsize = size
@@ -432,7 +437,7 @@ def gene_usage(
                 .sum()
                 .sort_values(ascending=False, kind="stable")
             )
-            shown = list(totals.index[:top])
+            shown = list(totals.index[:max_genes])
             wide = rows.pivot_table(
                 index=gene, columns="group", values="fraction", fill_value=0
             ).reindex(index=shown)
@@ -455,16 +460,16 @@ def gene_usage(
         provenance=PlotProvenance(
             assay=None,
             cell_key=None,
-            n_cells=int(result.n_cells),
+            n_cells=int(usage.n_cells),
             renderer="matplotlib",
             notes=(source.kind,),
             extras={
                 "source": source.to_dict(),
                 "gene": gene,
-                "level": level,
-                "slots": list(result.slots),
+                "level": usage.level,
+                "slots": list(usage.slots),
                 "count": count,
-                "top": top,
+                "max_genes": max_genes,
             },
         ),
         owns_figure=owns,
@@ -478,13 +483,9 @@ def gene_usage(
 @close_figures_on_error
 def gene_pairing(
     store: Any,
-    source: ArtifactRef,
+    usage: GeneUsage,
     *,
-    level: str = "gene",
-    slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
-    count: str = "cells",
-    cell_selection: ArtifactRef | None = None,
-    top: int = 20,
+    max_genes: int = 20,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -493,38 +494,43 @@ def gene_pairing(
 ) -> PlotResult:
     """Plot how the V and J genes of each locus pair, one panel per locus.
 
-    Each panel draws the fraction of the locus's chains with each pair of
-    its ``top`` V genes and ``top`` J genes with the most chains, as
-    ``ds.repertoire.gene_usage`` counts the pairs of ``v_call`` and
-    ``j_call`` among the cells of ``cell_selection``. Panels stand two to a
-    row. The plot raises ``ValueError`` when no chain has both calls.
+    ``usage`` is the result of ``ds.repertoire.gene_usage`` for the pairs of
+    ``genes=("v_call", "j_call")`` without groups, which sets the level, the
+    slots, the cells and what is counted. Each panel draws the fraction of
+    the locus's chains with each pair of its ``max_genes`` V genes and
+    ``max_genes`` J genes with the most chains. Panels stand two to a row.
+    The plot raises ``ValueError`` when ``usage`` counts other gene fields or
+    groups of cells, or no chain has both calls.
 
-    Tables: ``pairs``, the rows of ``ds.repertoire.gene_usage``.
+    Tables: ``pairs``, the record's rows.
 
     Raises:
-        TypeError: If an argument has the wrong type.
-        ValueError: If ``source`` is not an ``immune_receptors`` or
-            ``clonotypes`` artifact, or the summary refuses its options,
-            as ``ds.repertoire.gene_usage`` does.
-        KeyError: If the store holds no such artifact.
-        RuntimeError: If an artifact is incomplete, as a call that stopped
-            before it finished leaves it.
-        MemoryError: If reading the artifact does not fit the memory budget.
+        TypeError: If ``usage`` is not a ``GeneUsage`` record, or another
+            argument has the wrong type.
+        ValueError: If ``usage`` counts other gene fields or groups of
+            cells, or no chain has both calls.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    top = _top(top)
-    result = _store_method(store, "gene_usage")(
-        source,
-        genes=("v_call", "j_call"),
-        level=level,
-        slots=slots,
-        count=count,
-        cell_selection=cell_selection,
-    )
-    table = result.table
+    max_genes = _max_genes(max_genes)
+    if not isinstance(usage, GeneUsage):
+        raise TypeError("usage must be the GeneUsage of ds.repertoire.gene_usage")
+    if sorted(usage.genes) != ["j_call", "v_call"]:
+        raise ValueError(
+            f"usage counts {', '.join(usage.genes)}; gene_pairing draws the "
+            "pairs of v_call and j_call, so pass the GeneUsage of "
+            'genes=("v_call", "j_call")'
+        )
+    if usage.group_by or usage.groups is not None:
+        raise ValueError(
+            "usage counts the pairs within groups of cells; gene_pairing draws "
+            "the pairs of all its cells, so pass a GeneUsage without group_by "
+            "or groups, and choose the cells with cell_selection"
+        )
+    count = usage.count
+    table = usage.table
     loci = _locus_panels(table, "a v_call and a j_call")
-    n_columns, size = _panel_grid(loci, (6.5, max(4.0, 0.25 * top + 2.0)))
+    n_columns, size = _panel_grid(loci, (6.5, max(4.0, 0.25 * max_genes + 2.0)))
     if figsize is None and target is None:
         figsize = size
     require_matplotlib()
@@ -539,7 +545,7 @@ def gene_pairing(
                 rows.groupby(field)[f"n_{count}"]
                 .sum()
                 .sort_values(ascending=False, kind="stable")
-                .index[:top]
+                .index[:max_genes]
                 for field in ("v_call", "j_call")
             )
             wide = rows.pivot_table(
@@ -558,15 +564,15 @@ def gene_pairing(
         provenance=PlotProvenance(
             assay=None,
             cell_key=None,
-            n_cells=int(result.n_cells),
+            n_cells=int(usage.n_cells),
             renderer="matplotlib",
-            notes=(source.kind,),
+            notes=(usage.source.kind,),
             extras={
-                "source": source.to_dict(),
-                "level": level,
-                "slots": list(result.slots),
+                "source": usage.source.to_dict(),
+                "level": usage.level,
+                "slots": list(usage.slots),
                 "count": count,
-                "top": top,
+                "max_genes": max_genes,
             },
         ),
         owns_figure=owns,
@@ -580,14 +586,8 @@ def gene_pairing(
 @close_figures_on_error
 def spectratype(
     store: Any,
-    source: ArtifactRef,
+    spectratype: Spectratype,
     *,
-    sequence: str = "aa",
-    slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
-    count: str = "cells",
-    group_by: str | Sequence[str] | None = None,
-    groups: ArtifactRef | None = None,
-    cell_selection: ArtifactRef | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -596,38 +596,38 @@ def spectratype(
 ) -> PlotResult:
     """Plot the junction lengths of groups of cells, one panel per locus.
 
-    ``source`` and the options are those of ``ds.repertoire.spectratype``.
-    Each panel draws, for one locus, each group's fraction of chains at each
-    junction length, one line per group, or bars without groups; the legend
-    names the first 80 groups. Panels stand two to a row. With
-    ``count="clonotypes"`` the fractions count clonotypes, or clonotype
-    clusters for clonotypes that a distance metric linked. The plot raises
-    ``ValueError`` when no chain has a junction.
+    ``spectratype`` is the result of ``ds.repertoire.spectratype``, which
+    sets the groups, the sequence, the slots and what is counted. Each panel
+    draws, for one locus, each group's fraction of chains at each junction
+    length, one line per group, or bars for one group; the legend names the
+    first 80 groups. Panels stand two to a row. With ``count="clonotypes"``
+    the fractions count clonotypes, or clonotype clusters for clonotypes that
+    a distance metric linked. The plot raises ``ValueError`` when no chain
+    has a junction.
 
-    Tables: ``spectratype``, the rows of ``ds.repertoire.spectratype``.
+    Tables: ``spectratype``, the record's rows.
 
     Raises:
-        TypeError: If an argument has the wrong type.
-        ValueError: If ``source`` is not an ``immune_receptors`` or
-            ``clonotypes`` artifact, or the summary refuses its options,
-            as ``ds.repertoire.spectratype`` does.
-        KeyError: If the store holds no such artifact.
-        RuntimeError: If an artifact is incomplete, as a call that stopped
-            before it finished leaves it.
-        MemoryError: If reading the artifact does not fit the memory budget.
+        TypeError: If ``spectratype`` is not a ``Spectratype`` record, or
+            another argument has the wrong type.
+        ValueError: If no chain has a junction.
+        KeyError: If the store does not hold the clonotypes that
+            ``spectratype`` counts.
+        RuntimeError: If those clonotypes are incomplete, as a call that
+            stopped before it finished leaves them.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    result = _store_method(store, "spectratype")(
-        source,
-        sequence=sequence,
-        slots=slots,
-        count=count,
-        group_by=group_by,
-        groups=groups,
-        cell_selection=cell_selection,
+    if not isinstance(spectratype, Spectratype):
+        raise TypeError(
+            "spectratype must be the Spectratype of ds.repertoire.spectratype"
+        )
+    source, sequence, count = (
+        spectratype.source,
+        spectratype.sequence,
+        spectratype.count,
     )
-    table = result.table
+    table = spectratype.table
     loci = _locus_panels(table, "a junction")
     counted = _counted(store, source, count)
     group_order = sort_categories(pd.unique(table["group"]))
@@ -695,13 +695,13 @@ def spectratype(
         provenance=PlotProvenance(
             assay=None,
             cell_key=None,
-            n_cells=int(result.n_cells),
+            n_cells=int(spectratype.n_cells),
             renderer="matplotlib",
             notes=(source.kind,),
             extras={
                 "source": source.to_dict(),
                 "sequence": sequence,
-                "slots": list(result.slots),
+                "slots": list(spectratype.slots),
                 "count": count,
             },
         ),

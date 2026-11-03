@@ -1,10 +1,13 @@
 """The variant plots, on counts whose depths and calls are known by hand."""
 
+import hashlib
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
 from cytearc.plotting import genotypes, variant_depth
+from cytearc.storage.refs import ArtifactRef
 from tests.storage_helpers import open_store, write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
@@ -50,6 +53,28 @@ def plotted(tmp_path_factory):
     (mito / "s.depthTable.txt").write_text("c0\t2.25\nc1\t5\nc2\t0.5\nc3\t0\n")
     positions = store.variants.import_counts(mito, cell_selection=cells)
     return store, targets, positions
+
+
+def _embedding(store, column: str, coordinates) -> ArtifactRef:
+    """An imported embedding at these coordinates of the cells a column selects."""
+    from cytearc.embeddings.imported import write_imported_embedding
+    from cytearc.storage.artifacts import fingerprint_array
+
+    values = np.asarray(coordinates, dtype=np.float32)
+    ids = np.asarray(store.cells.fetch_all("ids")).astype(str)
+    rows = np.asarray(store.cells.fetch_all(column), dtype=bool)
+    return write_imported_embedding(
+        store.zw,
+        assay="RNA",
+        dimreduc_key="umap",
+        role="umap",
+        coordinates=values,
+        source_digest=hashlib.sha256(values.tobytes()).digest(),
+        payload_fingerprints={"values": fingerprint_array(values)},
+        source_cell_ids=ids[rows],
+        cell_selection=store.snapshot_cell_selection(column),
+        block_rows=4,
+    )
 
 
 def test_the_plot_draws_each_sites_mean_depth_over_named_cells(plotted) -> None:
@@ -100,8 +125,10 @@ def test_the_plot_refuses_what_it_cannot_draw(plotted, tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="No cell that a file names has a group"):
         variant_depth(store, targets, group_by="only_c4", show=False)
-    with pytest.raises(ValueError, match="Pass group_by or groups, not both"):
-        variant_depth(store, targets, group_by="group", groups=targets, show=False)
+    with pytest.raises(TypeError, match="groups must be an ArtifactRef"):
+        variant_depth(store, targets, group_by="group", groups="group", show=False)
+    with pytest.raises(ValueError, match="'nowhere', which is not a cell metadata"):
+        variant_depth(store, targets, group_by=["group", "nowhere"], show=False)
     unnamed = tmp_path / "other.tsv"
     unnamed.write_text("BC\twtUMIs\tmutUMIs\nnobody\t1\t0\n")
     cells = store.snapshot_cell_selection("every_cell")
@@ -114,6 +141,26 @@ def test_the_plot_refuses_what_it_cannot_draw(plotted, tmp_path) -> None:
         variant_depth(store, empty, show=False)
     with pytest.raises(TypeError, match="does not provide variants.load_counts"):
         variant_depth(object(), targets, show=False)
+
+
+def test_groups_of_several_columns_split_the_cells(plotted) -> None:
+    store, targets, _positions = plotted
+    store.cells.insert(
+        "half", np.asarray(["a", "b", "a", "b", "a"], dtype=object), overwrite=True
+    )
+    result = variant_depth(store, targets, group_by=["group", "half"], show=False)
+    # c4 has no group in the first column, so it has none.
+    assert result.tables["cells"]["group"].tolist() == ["x, a", "x, b", "y, a", "y, b"]
+    assert result.legends[0].label == "group, half"
+    plt.close(result.figure)
+    labels = store.snapshot_cluster_labels(
+        "half", cell_selection=store.snapshot_cell_selection("every_cell")
+    )
+    # A column and a label artifact group the cells together.
+    both = variant_depth(store, targets, group_by="group", groups=labels, show=False)
+    assert both.tables["cells"]["group"].tolist() == ["x, a", "x, b", "y, a", "y, b"]
+    assert both.provenance.extras["grouping"] == "group, cluster_labels"
+    plt.close(both.figure)
 
 
 def test_the_store_accessor_draws_the_same_plot(plotted) -> None:
@@ -448,14 +495,25 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     assert labels == ["CALR, x", "CALR, y", "SF3B1, x", "SF3B1, y"]
     plt.close(result.figure)
     plt.close(grouped.figure)
+    # Groups of two columns: c0 and c2 in a, c1 and c3 in b.
+    store.cells.insert(
+        "half", np.asarray(["a", "b", "a", "b", "a"], dtype=object), overwrite=True
+    )
+    crossed = genotypes(store, called, group_by=["group", "half"], show=False)
+    assert _shares(crossed)[("CALR", "x, a")] == {"alternative_present": 1.0}
+    assert _shares(crossed)[("CALR", "y, b")] == {"missing": 1.0}
+    assert crossed.provenance.extras["grouping"] == "group, half"
+    assert crossed.provenance.n_cells == 4
+    plt.close(crossed.figure)
 
 
 def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
     store, targets, _positions = plotted
     called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
-    store.cells.insert("UMAP1", np.arange(5, dtype=np.float64))
-    store.cells.insert("UMAP2", np.arange(5, 10, dtype=np.float64))
-    result = genotypes(store, called, layout_key="UMAP", site="CALR", show=False)
+    layout = _embedding(
+        store, "every_cell", np.column_stack([np.arange(5), np.arange(5, 10)])
+    )
+    result = genotypes(store, called, layout=layout, site="CALR", show=False)
     cells = result.tables["cells"]
     assert cells["ids"].tolist() == CELLS
     assert cells["x"].tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]
@@ -467,11 +525,13 @@ def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
         "missing",
         "missing",
     ]
-    layout = result.axes["layout"]
-    assert layout.get_title() == "CALR"
+    panel = result.axes["layout"]
+    assert panel.get_title() == "CALR"
+    assert (panel.get_xlabel(), panel.get_ylabel()) == ("Embedding1", "Embedding2")
+    assert result.provenance.extras["layout"] == layout.to_dict()
     # One point set per call that a cell holds.
     offsets = sorted(
-        tuple(map(tuple, collection.get_offsets())) for collection in layout.collections
+        tuple(map(tuple, collection.get_offsets())) for collection in panel.collections
     )
     assert offsets == [
         ((0.0, 5.0), (2.0, 7.0)),
@@ -479,14 +539,12 @@ def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
         ((3.0, 8.0), (4.0, 9.0)),
     ]
     # With one site drawn, the layout takes its calls.
-    alone = genotypes(store, called, sites=["SF3B1"], layout_key="UMAP", show=False)
+    alone = genotypes(store, called, sites=["SF3B1"], layout=layout, show=False)
     assert alone.tables["cells"]["call"].tolist() == [
         "alternative_present",
         *["missing"] * 4,
     ]
-    shown = store.plots.genotypes(
-        called, sites=["SF3B1"], layout_key="UMAP", show=False
-    )
+    shown = store.plots.genotypes(called, sites=["SF3B1"], layout=layout, show=False)
     assert shown.tables["cells"].equals(alone.tables["cells"])
     assert shown.tables["calls"].equals(alone.tables["calls"])
     for figure in (result.figure, alone.figure, shown.figure):
@@ -507,14 +565,20 @@ def test_genotypes_refuse_what_they_cannot_draw(plotted) -> None:
     store.cells.insert("nobody", np.asarray([None] * 5, dtype=object))
     with pytest.raises(ValueError, match="No cell of the genotypes has a group"):
         genotypes(store, called, group_by="nobody", show=False)
-    store.cells.insert("XY1", np.zeros(5))
-    store.cells.insert("XY2", np.zeros(5))
+    flat = _embedding(store, "every_cell", np.zeros((5, 2)))
     with pytest.raises(ValueError, match="draws 2 sites; name the one"):
-        genotypes(store, called, layout_key="XY", show=False)
+        genotypes(store, called, layout=flat, show=False)
     with pytest.raises(ValueError, match="site 'SF3B1' is not among the drawn"):
-        genotypes(
-            store, called, sites=["CALR"], layout_key="XY", site="SF3B1", show=False
-        )
+        genotypes(store, called, sites=["CALR"], layout=flat, site="SF3B1", show=False)
+    # The layout is an embedding of the genotypes' own cells.
+    store.cells.insert("first_four", np.arange(5) < 4, overwrite=True)
+    fewer = _embedding(store, "first_four", np.zeros((4, 2)))
+    with pytest.raises(ValueError, match="embedding of the genotypes' cells"):
+        genotypes(store, called, sites=["CALR"], layout=fewer, show=False)
+    with pytest.raises(ValueError, match="must identify an embedding artifact"):
+        genotypes(store, called, sites=["CALR"], layout=targets, show=False)
+    with pytest.raises(TypeError, match="layout must be an ArtifactRef"):
+        genotypes(store, called, sites=["CALR"], layout="UMAP", show=False)
     with pytest.raises(ValueError, match="variant_genotypes artifact"):
         genotypes(store, targets, show=False)
     with pytest.raises(TypeError, match="does not provide variants.load_genotypes"):

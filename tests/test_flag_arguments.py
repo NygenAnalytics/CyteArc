@@ -279,7 +279,7 @@ def test_the_surface_holds_the_flags_of_every_namespace_and_plot() -> None:
         ("ds.pipeline.rna", "markers"),
         ("ds.cells.insert", "overwrite"),
         ("ATACassay.normed", "log_transform"),
-        ("cytearc.plotting.clone_fates", "normalize"),
+        ("cytearc.plotting.clone_fate_bias", "normalize"),
         ("cytearc.plotting.embedding", "sort_values"),
         ("cytearc.CrToZarr", "overwrite"),
         ("cytearc.configure_output", "stdlib"),

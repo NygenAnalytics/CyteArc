@@ -109,7 +109,7 @@ from .cell_barcodes import (
     barcode_files,
     warn_unmatched_barcodes,
 )
-from .cell_groups import cell_groups, group_columns, selection_chunk_bytes
+from .cell_groups import CellGroups, cell_groups, group_columns, selection_chunk_bytes
 from .clone_artifacts import (
     SOURCE_ARRAYS,
     log_clones,
@@ -1239,6 +1239,57 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 )
             ],
             dtype=object,
+        )
+
+    def _figure_groups(
+        self,
+        artifact: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None,
+        groups: ArtifactRef | None,
+        kept_apart: Sequence[tuple[str, np.ndarray]] = (),
+    ) -> CellGroups:
+        """Group the cells of a cell-aligned artifact for one figure, as the summaries do.
+
+        The groups are those of :func:`cell_groups` over every cell of the
+        artifact: the combinations of the labels of the ``group_by`` columns,
+        of the ``groups`` artifact and of ``kept_apart``, such as the receptor
+        types that clonotypes keep apart, in the natural order of the labels.
+        A cell without a label has no group, and so does a cell that a label
+        artifact of fewer cells lacks.
+
+        Args:
+            artifact: A cell-aligned artifact, such as a ``clones`` artifact.
+            group_by: Cell metadata columns, or None.
+            groups: A cell-label artifact, or None.
+            kept_apart: Key columns whose labels the artifact keeps apart, each
+                with every artifact cell's label.
+
+        Returns:
+            The groups' key columns and labels, and each cell's group.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If a ``group_by`` column is missing, named twice or
+                kept apart already, two key columns share a name, or two
+                groups get one name.
+            KeyError: If the store holds no such artifact.
+            MemoryError: If grouping the cells does not fit the memory budget.
+        """
+        if not isinstance(artifact, ArtifactRef):
+            raise TypeError("artifact must be an ArtifactRef")
+        selection = inspect_artifact(self.zw, artifact).input_ref("cell_selection")
+        n_cells = int(validate_cell_selection(self.zw, selection).selected_count)
+        return cell_groups(
+            self.zw,
+            self.cells,
+            selection,
+            np.ones(n_cells, dtype=bool),
+            group_by=group_by,
+            groups=groups,
+            cell_selection=None,
+            memory_bytes=self.memoryBytes,
+            kept_apart=tuple(kept_apart),
         )
 
     def _measured_clone_cells(
@@ -2444,7 +2495,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             A complete datastore-scoped ``clone_fate_bias`` artifact that
             labels the early cells. Read it with
             :meth:`~cytearc.datastore.namespaces.ClonesAccessor.load_fate_bias`
-            or plot it with ``ds.plots.clone_fates``.
+            or plot it with ``ds.plots.clone_fate_bias``.
 
         Raises:
             TypeError: If an argument has the wrong type.
