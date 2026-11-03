@@ -26,6 +26,7 @@ from cytearc.quality_control import (
     good_turing_proportions,
 )
 from cytearc.quality_control import cell_calling as cc
+from tests.random_stream_helpers import child_key, splitmix64, uniform
 
 # References -----------------------------------------------------------------
 
@@ -995,6 +996,18 @@ def test_random_number_kernels_match_their_python_versions() -> None:
         int(cc._iteration_key(np.uint64(1), iteration)) for iteration in range(1000)
     }
     assert len(keys) == 1000
+
+
+def test_random_numbers_are_splitmix64_streams_of_the_seed_and_iteration() -> None:
+    # An iteration's key mixes the seed, the salt "EmptyDrp" in ASCII and the
+    # iteration, and its draws are the stream's uniforms, so a seed gives the
+    # same p-values in every release.
+    for seed in (0, 7, 2**63 + 5, 2**64 - 1):
+        for iteration in (0, 1, 10_000):
+            key = child_key(splitmix64(seed ^ 0x456D707479447270), iteration)
+            assert int(cc._iteration_key(np.uint64(seed), iteration)) == key
+            for counter in (0, 1, 2**31 + 3):
+                assert cc._uniform(np.uint64(key), counter) == uniform(key, counter)
 
 
 def test_simulation_kernels_match_their_python_versions() -> None:

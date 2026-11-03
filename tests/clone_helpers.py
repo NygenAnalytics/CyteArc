@@ -155,14 +155,6 @@ def coupling_reference(
     raise ValueError(f"no reference for {method!r}")
 
 
-def splitmix64(value: int) -> int:
-    """SplitMix64's finaliser (Steele, Lea and Flood 2014) on Python integers, from its published constants."""
-    mask = 2**64 - 1
-    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & mask
-    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & mask
-    return value ^ (value >> 31)
-
-
 def benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
     """Benjamini and Hochberg's adjusted p-values, step by step from the largest."""
     p = np.asarray(p_values, dtype=float)

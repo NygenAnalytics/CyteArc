@@ -61,17 +61,20 @@ def test_the_fixtures_keep_the_digests_that_identify_their_imports() -> None:
     digest = "48f4e63113da315569a9f0ac78af849ed9eec2646873eda4355aab570576faeb"
     assert directory_sha256(store) == path_sha256(store) == digest
     # An mgatk folder, as a variant import records it: the SHA-256 of each
-    # role's file and of the roles with their digests.
+    # file that the reader takes, by its role, and of the roles with their
+    # digests.
     from cytearc.readers._variant_files import source_sha256
+    from cytearc.readers.mgatk import mgatk_source
 
     folder = DATA / "variants" / "signac_test_mgatk"
-    files = [(path.name, str(path)) for path in sorted(folder.iterdir())]
-    digest, digests = source_sha256(files)
-    assert digest == "3a9ccd7e0d86f6173b4628d29fb51fcd795b75aa57be19be6552f796121a95b7"
+    reader = mgatk_source(folder, format="mgatk", swap_strands=False)
+    digest, digests = source_sha256(reader.files)
+    assert digest == "3fb404f880b3afd0f9b3fae77e1f34a82dc813bcd8f676bef1f4c6c177731e34"
     assert digests == {
-        name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        for name, path in files
+        role: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        for role, path in reader.files
     }
+    assert sorted(digests) == ["A", "C", "G", "T", "depth_table", "reference"]
 
 
 def test_a_directory_is_identified_by_the_paths_and_bytes_of_its_files(
@@ -157,6 +160,19 @@ def test_each_digest_refuses_a_path_it_cannot_read(tmp_path) -> None:
     )
 
 
+def test_a_directory_refuses_a_file_name_that_is_not_text(tmp_path) -> None:
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    try:
+        # A name of bytes that UTF-8 cannot decode, which Linux accepts.
+        with open(os.path.join(os.fsencode(folder), b"\xff.bin"), "wb") as handle:
+            handle.write(b"x")
+    except OSError:
+        pytest.skip("the file system refuses names that are not UTF-8")
+    with pytest.raises(UnicodeEncodeError):
+        directory_sha256(folder)
+
+
 @pytest.mark.parametrize("size", [0, 1000, 100_000, READ_BYTES + 1, 2_000_000])
 def test_a_digest_holds_one_buffer_no_larger_than_the_file(tmp_path, size) -> None:
     path = tmp_path / "file.bin"
@@ -189,7 +205,11 @@ def test_splitmix64s_multipliers_live_only_in_the_one_finaliser() -> None:
     # Every module mixes with utils.digest's mix64 or mix64_array; another
     # copy of the finaliser would be another place for a seeded result to
     # change.
-    multipliers = re.compile(r"0x(?:BF58476D1CE4E5B9|94D049BB133111EB)", re.IGNORECASE)
+    multipliers = re.compile(
+        r"0x(?:BF58476D1CE4E5B9|94D049BB133111EB)|13787848793156543929"
+        r"|10723151780598845931",
+        re.IGNORECASE,
+    )
     copies = sorted(
         path.relative_to(CYTEARC).as_posix()
         for path in CYTEARC.rglob("*.py")

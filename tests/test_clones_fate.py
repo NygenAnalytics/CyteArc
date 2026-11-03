@@ -27,7 +27,8 @@ from cytearc.clones.fate import (
 )
 from cytearc.clones.groups import pair_counts
 from cytearc.clones.overlap import overlap_pairs
-from tests.clone_helpers import benjamini_hochberg, coupling_reference, splitmix64
+from tests.clone_helpers import benjamini_hochberg, coupling_reference
+from tests.random_stream_helpers import child_key, splitmix64, uniform
 
 
 def _pairs(groups, clones):
@@ -166,19 +167,15 @@ def _shuffled_by_hand(labels, bounds, seed: int, permutation: int) -> list[int]:
     """Fisher and Yates's shuffle of each stratum from one permutation's SplitMix64 stream.
 
     The permutation's key mixes the seed's key, the seed with fate's salt,
-    and the permutation plus the golden-ratio increment. The draw for
-    position ``i`` mixes the key plus ``i`` increments and keeps its top 53
-    bits as a number below 1, whose product with the positions to choose from
-    is cut to a whole position.
+    and the permutation. The draw for position ``i`` is the stream's uniform
+    ``i``, whose product with the positions to choose from is cut to a whole
+    position.
     """
-    mask, golden = 2**64 - 1, 0x9E3779B97F4A7C15
-    seed_key = splitmix64((seed % 2**64) ^ 0x2545F4914F6CDD1D)
-    key = splitmix64(seed_key ^ splitmix64((permutation + golden) & mask))
+    key = child_key(splitmix64((seed % 2**64) ^ 0x2545F4914F6CDD1D), permutation)
     shuffled = [int(label) for label in labels]
     for start, end in zip(bounds[:-1], bounds[1:], strict=True):
         for position in range(int(end) - 1, int(start), -1):
-            mixed = splitmix64((key + position * golden) & mask)
-            chosen = int(start) + int((mixed >> 11) * 2.0**-53 * (position - start + 1))
+            chosen = int(start) + int(uniform(key, position) * (position - start + 1))
             shuffled[position], shuffled[chosen] = shuffled[chosen], shuffled[position]
     return shuffled
 

@@ -77,6 +77,9 @@ def directory_sha256(path: str | os.PathLike[str]) -> str:
         OSError: If the path is not a directory, or the directory or a folder
             below it cannot be listed, which would otherwise hash as if it
             held no file.
+        UnicodeEncodeError: If a path below the directory is not text, such
+            as a file name of bytes that the file system's encoding cannot
+            decode.
     """
     root = os.fspath(path)
 

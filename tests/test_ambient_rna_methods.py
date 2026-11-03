@@ -454,7 +454,8 @@ def test_rounding_draws_are_splitmix64_streams_of_the_seed_and_row_key():
     np.testing.assert_array_equal(
         _row_uniforms(2**64 + 3, keys), _row_uniforms(3, keys)
     )
-    # The finaliser is cell calling's, applied to whole arrays.
+    # The finaliser is utils.digest's, which cell calling compiles, applied
+    # to whole arrays.
     values = np.array([0, 1, 2**63 + 5, 2**64 - 1], dtype=np.uint64)
     with np.errstate(over="ignore"):
         compiled = [
