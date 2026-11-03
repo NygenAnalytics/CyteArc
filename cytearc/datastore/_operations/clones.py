@@ -23,7 +23,7 @@ from ...clones.diversity import (
     LARGEST_SIZE,
     ORDERS,
     ClonalDiversity,
-    CloneSizes,
+    GroupedCloneSizes,
     Rarefaction,
     checked_curve_arguments,
     diversity_tables,
@@ -235,15 +235,26 @@ _EXPANSION_BYTES_PER_CELL = 300
 # besides the clone labels that they read.
 _EXPANSION_TABLE_BYTES_PER_CELL = 500
 # Each group of a summary holds its clone sizes and its rows of the result's
-# tables, 1,950 bytes for diversity as traced on 180,057 groups.
+# tables, 650 bytes for diversity as traced on 179,932 groups.
 _SUMMARY_BYTES_PER_GROUP = 2_000
-# Rarefying a group holds, for each pair of a whole sample size below its
-# cells and a distinct clone size, the chance that the sample misses such a
-# clone and three temporary arrays of the same shape.
-_RAREFACTION_BYTES_PER_ENTRY = 40
+# Summarizing the groups' clone sizes holds the counts of each clone's cells
+# in each group and, while it sorts them by group and size into one table, a
+# key and its sorted copy of each, 48 bytes for each count as traced on
+# 800,000 counts in four groups.
+_SIZE_TABLE_BYTES_PER_COUNT = 56
+# Each row of the table beyond the first of its group holds its group, size
+# and count, and the temporaries of the measures summed over rows, 92 bytes as
+# traced on one group of 4,000 distinct sizes.
+_SIZE_TABLE_BYTES_PER_ROW = 128
+# Rarefying a group holds, for each of its sample sizes, the size as passed,
+# how its sample is reached and the whole sizes that it rarefies, 141 bytes as
+# traced on one group of 10,000 one-cell clones at 5,000 sizes.
+_RAREFACTION_BYTES_PER_SIZE = 192
 # Each row of the rarefaction curves: its order, size, method, Hill number,
-# coverage and group.
-_CURVE_BYTES_PER_ROW = 100
+# coverage and group, and the table built from them, 121 bytes as traced on
+# 2,000 groups at 40 sizes, and 8 bytes for each further key column.
+_CURVE_BYTES_PER_ROW = 128
+_CURVE_BYTES_PER_KEY_COLUMN = 8
 # The columns of each summary's tables besides the groups' labels, which a
 # key column of the groups may not share; "group" names each group, and plots
 # of expansion add a "group" column.
@@ -1321,7 +1332,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         groups: ArtifactRef | None,
         cell_selection: ArtifactRef | None,
         reserved: frozenset[str],
-    ) -> tuple[pd.DataFrame, list[CloneSizes]]:
+    ) -> tuple[pd.DataFrame, GroupedCloneSizes]:
         """Group the cells with a clone and summarize each group's clone sizes.
 
         Raises:
@@ -1334,20 +1345,27 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection=cell_selection,
             reserved=reserved,
         )
-        resident = _SUMMARY_BYTES_PER_GROUP * len(keys)
-        if resident > self.memoryBytes:
-            raise MemoryError(
-                f"Summarizing the clones of {len(keys)} groups holds about "
-                f"{resident} bytes, more than the memory budget of "
-                f"{self.memoryBytes} bytes. Group the cells by fewer labels, or "
-                "raise mem_budget."
+
+        def check(rows: int) -> None:
+            resident = (
+                _SUMMARY_BYTES_PER_GROUP * len(keys)
+                + _SIZE_TABLE_BYTES_PER_COUNT * len(pair_cells)
+                + _SIZE_TABLE_BYTES_PER_ROW * max(rows - len(keys), 0)
             )
-        bounds = np.searchsorted(pair_groups, np.arange(len(keys) + 1))
-        clone_sizes = [
-            CloneSizes.from_sizes(pair_cells[bounds[index] : bounds[index + 1]])
-            for index in range(len(keys))
-        ]
-        if not clone_sizes or all(sizes.n == 0 for sizes in clone_sizes):
+            if resident > self.memoryBytes:
+                raise MemoryError(
+                    f"Summarizing the clones of {len(keys)} groups holds about "
+                    f"{resident} bytes, more than the memory budget of "
+                    f"{self.memoryBytes} bytes. Group the cells by fewer labels, "
+                    "or raise mem_budget."
+                )
+
+        # Each group's table holds a row at least, and its further rows are
+        # counted once the table is built.
+        check(len(keys))
+        clone_sizes = GroupedCloneSizes.from_clones(pair_groups, pair_cells, len(keys))
+        check(len(clone_sizes.values))
+        if not clone_sizes.n.any():
             raise ValueError("No cell has both a clone and a group")
         return keys, clone_sizes
 
@@ -1883,15 +1901,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             reserved=_RAREFACTION_COLUMNS,
         )
         # Each group is rarefied in turn to at most this many sizes, and the
-        # curves hold a row per group, order and size.
+        # curves hold a row per group, order and size, with the groups' labels.
         n_sizes = knots if listed_sizes is None else len(listed_sizes)
-        largest = max(
-            min(n_sizes, group.n) * len(group.values) for group in clone_sizes
-        )
         n_rows = len(clone_sizes) * len(chosen) * n_sizes
-        resident = (
-            _RAREFACTION_BYTES_PER_ENTRY * largest + _CURVE_BYTES_PER_ROW * n_rows
+        row_bytes = _CURVE_BYTES_PER_ROW + _CURVE_BYTES_PER_KEY_COLUMN * (
+            len(keys.columns) - 1
         )
+        resident = _RAREFACTION_BYTES_PER_SIZE * n_sizes + row_bytes * n_rows
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Rarefying {len(clone_sizes)} groups to {n_sizes} sizes holds "
