@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc.metadata.artifacts import cell_data_write_bytes
 from cytearc.repertoire import ImmuneReceptors
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
@@ -516,12 +517,26 @@ def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
 
     monkeypatch.setattr(records.RecordEncoder, "add", recording_add)
     saved = store.repertoire.import_receptors(path, cell_selection=cells)
-    # At its peak the import holds three times its encoded contigs, 300 bytes
-    # per selected cell, and what the join holds: 100 bytes per cell for its
-    # lookup and each cell's ID as a Python string, 46 bytes for the five
-    # characters of cell0 to cell7.
-    estimate = 3 * max(encoded) + (300 + 100 + 46) * N_RECEPTOR_CELLS
-    reading = 400 * N_RECEPTOR_CELLS + ids_read_bytes(store, N_RECEPTOR_CELLS)
+    # At its peak the import holds three times its encoded contigs, 100 bytes
+    # per selected cell, what writing each cell's labels and counts holds,
+    # its labels at the widest of their kinds, and what the join holds: 100
+    # bytes per cell for its lookup and each cell's ID as a Python string, 46
+    # bytes for the five characters of cell0 to cell7.
+    n = N_RECEPTOR_CELLS
+    writing = cell_data_write_bytes(
+        {
+            "values": ((n,), "U10"),
+            "receptor_subtype": ((n,), "U10"),
+            "chain_pairing": ((n,), "U15"),
+            "multichain": ((n,), bool),
+            "n_vj": ((n,), np.int32),
+            "n_vdj": ((n,), np.int32),
+            "n_contigs": ((n,), np.int32),
+            "chain_slots": ((n, 4), np.int32),
+        }
+    )
+    estimate = 3 * max(encoded) + (100 + 100 + 46) * n + writing
+    reading = 200 * n + writing + ids_read_bytes(store, n)
     assert estimate > reading
     monkeypatch.setattr(store, "memoryBytes", estimate - 1)
     with pytest.raises(MemoryError, match=f"holds about {estimate} bytes at its peak"):

@@ -1,3 +1,4 @@
+import io
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +17,18 @@ from .types import as_zarr_array
 
 MISSING_MASK_PREFIX = "__cytearc_missing__"
 """Name prefix of the boolean array that flags missing values of a column."""
+
+
+def zarr_write_buffer_bytes() -> int:
+    """The bytes that Zarr's writes hold in file buffers at once.
+
+    Zarr writes each chunk and each array's metadata through a buffered file,
+    up to its async concurrency of them at once. Each buffer is counted as
+    one of io's default buffers, 8 KiB before Python 3.14 and 128 KiB from it,
+    which covers the buffer that Python gives a file on a file system whose
+    blocks are no larger.
+    """
+    return int(zarr.config.get("async.concurrency")) * io.DEFAULT_BUFFER_SIZE
 
 
 @dataclass(frozen=True, slots=True)

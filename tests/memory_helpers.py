@@ -3,8 +3,9 @@
 A memory budget bounds the bytes that tracemalloc sees a call allocate beside
 what the process held before it. These helpers trace that peak, find the
 smallest budget a call accepts, from its refusals or by bisection, bound
-estimates from both sides, and hold the reads that Zarr's pool threads may
-still hold on a busy machine, so that every memory test checks budgets one way.
+estimates from both sides, and hold the reads and writes that Zarr's pool
+threads may still hold on a busy machine, so that every memory test checks
+budgets one way.
 """
 
 import inspect
@@ -368,6 +369,24 @@ ZARR_READS: tuple[tuple[Any, str], ...] = tuple(
         "get_coordinate_selection",
         "get_mask_selection",
         "get_block_selection",
+    )
+)
+
+
+#: The methods through which a write of a Zarr array's values goes, by index
+#: or by selection. Each write of a text chunk is one call, so holding them
+#: with :func:`hold_finished_reads` keeps the work of each write, the block
+#: that Zarr encoded and the encoded chunk, until the next write ends, as a
+#: busy machine can; a whole array of numbers written in one call keeps every
+#: chunk until the next write, as no pool thread does.
+ZARR_WRITES: tuple[tuple[Any, str], ...] = tuple(
+    (zarr.Array, name)
+    for name in (
+        "set_basic_selection",
+        "set_orthogonal_selection",
+        "set_coordinate_selection",
+        "set_mask_selection",
+        "set_block_selection",
     )
 )
 

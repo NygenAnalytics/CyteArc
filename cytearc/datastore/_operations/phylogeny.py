@@ -43,6 +43,7 @@ from ...storage.arrays import (
     MetadataBlock,
     create_streamed_metadata_column,
     create_zarr_dataset,
+    zarr_write_buffer_bytes,
 )
 from ...storage.artifacts import (
     ArtifactRef,
@@ -64,7 +65,7 @@ from .cell_barcodes import (
     barcode_files,
     warn_unmatched_barcodes,
 )
-from .clone_artifacts import plan_clones, write_clones, zarr_write_buffer_bytes
+from .clone_artifacts import clone_write_bytes, plan_clones, write_clones
 
 if TYPE_CHECKING:
     from ...readers.phylogeny import FileTrees, TreeFileLayout
@@ -118,9 +119,9 @@ _CUT_BYTES_PER_NODE = 64
 # Each clone holds its root, its label as a Python string beside its stored
 # name, and its place in ranking the clones by size and label.
 _CUT_BYTES_PER_CLONE = 600
-# Each cell of a cut holds its clone code, its label's slot, and its stored
-# label four bytes a character while the clones are written.
-_CUT_BYTES_PER_CELL = 64
+# Each cell of a cut holds its clone code, and the masks and arrays that rank
+# the clones by size while they are ranked, beside what saving them holds.
+_CUT_BYTES_PER_CELL = 56
 # Loading a phylogeny holds, for each node, its tree, position, parent, time,
 # depth and leaf columns, and the slots of its name and cell.
 _LOAD_BYTES_PER_NODE = 160
@@ -872,16 +873,15 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         label_width = max(width, len(f"node{n_nodes}"))
         if len(tree_names) > 1:
             label_width += 1 + max(map(len, tree_names.tolist()))
-        # The clones are labelled and then written beside what Zarr's writes
-        # hold in file buffers.
+        # The clones are labelled and then saved.
         held += (
             n_clones * (_CUT_BYTES_PER_CLONE + 8 * (1 + label_width))
-            + n_cells * (_CUT_BYTES_PER_CELL + 4 * label_width)
+            + n_cells * _CUT_BYTES_PER_CELL
             + max(1, int(names_array.chunks[0])) * _NAME_READ_COPIES * 4 * width
-            + zarr_write_buffer_bytes()
         )
         self._check_phylogeny_budget(
-            f"Labelling {n_clones} clones of {n_cells} cells", held
+            f"Labelling {n_clones} clones of {n_cells} cells",
+            held + clone_write_bytes(n_cells, n_clones, label_width),
         )
         labels = clone_labels(
             clones,
@@ -910,6 +910,8 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
                 n_cells_in_several_clones=0,
             ),
             attributes,
+            memory_bytes=self.memoryBytes,
+            held_bytes=held,
         )
         if n_before:
             warn(

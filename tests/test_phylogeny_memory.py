@@ -167,6 +167,12 @@ def data(tmp_path_factory) -> SimpleNamespace:
     leaf_time = float(
         np.nansum(trees.length[_path_to_root(trees, len(trees.parent) - 1)])
     )
+    wide_trees = read_trees(tree_file_layout(wide), memory_bytes=10**10)
+    wide_leaf_time = float(
+        np.nansum(
+            wide_trees.length[_path_to_root(wide_trees, len(wide_trees.parent) - 1)]
+        )
+    )
     return SimpleNamespace(
         store=store,
         cells=cells,
@@ -181,6 +187,7 @@ def data(tmp_path_factory) -> SimpleNamespace:
             folder / "beside.h5td", ids[:5_000], nested=False, beside=True
         ),
         leaf_time=leaf_time,
+        wide_leaf_time=wide_leaf_time,
     )
 
 
@@ -219,6 +226,23 @@ def _cut(**cut: object) -> Callable[[SimpleNamespace], object]:
     return run
 
 
+def _cut_wide_leaves(data: SimpleNamespace) -> object:
+    """Cut the tree of 5,000 Greek-named leaves into one clone per leaf.
+
+    The clones label 5,000 of the store's 60,000 cells by their leaves' names
+    of about 250 characters, and the store saves every cell's label at that
+    width.
+    """
+    import warnings
+
+    phylogeny = _imported(data, data.wide, barcode_pattern=r"_(?P<barcode>cell\d+-1)$")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return data.store.clones.phylogeny_clones(
+            phylogeny, time=data.wide_leaf_time - 1e-6, invalidate_cache=True
+        )
+
+
 CASES: dict[str, Callable[[SimpleNamespace], object]] = {
     "import of 52,000 leaves on one line": lambda data: _imported(
         data, data.big, invalidate_cache=True
@@ -253,6 +277,7 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
     "cut into a few clones": _cut(time=2.0),
     "cut into one clone per cell": _cut(time="leaves"),
     "cut at a depth": _cut(depth=6),
+    "cut of 5,000 leaves with Greek names among 60,000 cells": _cut_wide_leaves,
 }
 
 

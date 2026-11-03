@@ -1,4 +1,5 @@
 import os
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -36,6 +37,7 @@ from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artif
 from ...metadata.records import RecordEncoder, RecordTable, pack_text, unpack_text
 from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
 from ...metadata.selection import cell_selection_indices
+from ...storage.arrays import zarr_write_buffer_bytes
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
@@ -44,6 +46,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.geometry import array_geometry
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
@@ -59,7 +62,7 @@ from .cell_barcodes import (
     barcode_files,
     warn_unmatched_barcodes,
 )
-from .clone_artifacts import plan_clones, write_clones, zarr_write_buffer_bytes
+from .clone_artifacts import clone_write_bytes, plan_clones, write_clones
 from .record_tables import (
     read_array,
     record_arrays,
@@ -190,14 +193,10 @@ _HELD_TEXT_BYTES = 68
 # The records whose characters are keyed at a time, while both full columns
 # of integrations and sites are held.
 _KEY_BLOCK = 1 << 16
-# Writing the clones holds, for each cell, its clone code and rare alleles
-# from the calls, its label's pointer and its code and size as written, and
-# for a cell of a clone, its clone's code and label or size as they are
-# gathered, 24 as traced; for each clone, its label as a Python string and
-# its size; each label is also written as fixed-width text of four bytes per
-# character; and Zarr's writes hold their file buffers.
-_WRITE_CELL_BYTES = 64
-_WRITE_CLONE_BYTES = 120
+# Saving the clones holds, for each cell beside what saving them holds, its
+# rare alleles from the calls as int64; each clone's label as a Python
+# string is counted at its size.
+_CALLED_CELL_BYTES = 8
 
 
 def _files_text(n_files: int) -> str:
@@ -1135,9 +1134,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         counts = self._allele_counts(group)
         n_cells = counts["cells"]
         # Every cell with an edit needs a label in the within columns: each
-        # cell's edits are read, then held as a mask while the cells group.
+        # cell's edits are read, beside the chunks that Zarr decodes at once,
+        # then held as a mask while the cells group.
         _check_calling(
-            bank_bytes + 9 * n_cells + _FIXED_BYTES,
+            bank_bytes + _edits_read_bytes(group) + n_cells + _FIXED_BYTES,
             self.memoryBytes,
             f"the edits of {n_cells} cells",
         )
@@ -1181,13 +1181,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             return planned.ref
         self._require_writable(arguments.operation)
         n_records = counts["records"]
-        # Writing the clones is checked first, as if every cell were a clone
-        # of its own, the most clones there can be.
-        width = len(f"clone_{n_cells}")
-        writing = (
-            n_cells * (_WRITE_CELL_BYTES + _WRITE_CLONE_BYTES + 8 * width)
-            + zarr_write_buffer_bytes()
-        )
+        # Saving the clones is checked first, as if every cell were a clone of
+        # its own, the most clones there can be.
+        writing = _saved_clone_bytes(n_cells, n_cells)
         held = bank_bytes + _CALL_CELL_BYTES * n_cells
         _check_calling(
             held + writing + _FIXED_BYTES,
@@ -1243,14 +1239,11 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             max_bytes=self.memoryBytes - held - _FIXED_BYTES,
         )
         del observations, banks
-        # The clones are written beside each cell's group and calls, now that
+        # The clones are saved beside each cell's group and calls, now that
         # their number is known.
-        width = len(f"clone_{called.n_clones}")
         _check_calling(
             _CALL_CELL_BYTES * n_cells
-            + n_cells * (_WRITE_CELL_BYTES + 8 * width)
-            + _WRITE_CLONE_BYTES * called.n_clones
-            + zarr_write_buffer_bytes()
+            + _saved_clone_bytes(n_cells, called.n_clones)
             + _FIXED_BYTES,
             self.memoryBytes,
             f"the {called.n_clones} clones of {n_cells} cells as they are written",
@@ -1273,6 +1266,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 "bank_coverage": called.coverage,
             },
             source_arrays={"n_alleles": called.n_alleles.astype(np.int32)},
+            memory_bytes=self.memoryBytes,
+            held_bytes=(_CALL_CELL_BYTES + _CALLED_CELL_BYTES) * n_cells
+            + sum(map(sys.getsizeof, labels.tolist()))
+            + _FIXED_BYTES,
         )
         for entry in called.coverage:
             share = (
@@ -1292,6 +1289,37 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             f"{largest} cells"
         )
         return planned.ref
+
+
+def _saved_clone_bytes(n_cells: int, n_clones: int) -> int:
+    """What saving the clones of ``n_cells`` holds beside each cell's group and calls.
+
+    The calls' rare alleles of each cell, each clone's label as a Python
+    string at the size of the longest, and what saving the clones holds.
+    """
+    longest = f"clone_{n_clones}"
+    return (
+        _CALLED_CELL_BYTES * n_cells
+        + sys.getsizeof(longest) * n_clones
+        + clone_write_bytes(
+            n_cells, n_clones, len(longest), source_arrays={"n_alleles": np.int32}
+        )
+    )
+
+
+def _edits_read_bytes(group: zarr.Group) -> int:
+    """What reading each cell's edits whole holds: the counts and the chunks Zarr decodes at once.
+
+    Zarr decodes up to its async concurrency of chunks at a time, each into a
+    buffer of its own, before it copies them into the counts it returns.
+    """
+    edits = as_zarr_array(group["n_edits"], name="n_edits")
+    geometry = array_geometry(edits)
+    assert geometry is not None
+    n_chunks = -(-int(edits.shape[0]) // geometry.axisChunk(0))
+    return geometry.readBytes(
+        int(edits.nbytes), n_chunks, decodes=int(zarr.config.get("async.concurrency"))
+    )
 
 
 def _check_calling(needed: int, budget: int, what: str) -> None:

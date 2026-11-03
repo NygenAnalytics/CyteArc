@@ -1,4 +1,5 @@
 import colorsys
+import math
 import re
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -7,10 +8,12 @@ import numpy as np
 import zarr
 
 from ..storage.arrays import (
+    MetadataBlock,
     _decode_metadata_values,
     _measured_text_dtype,
-    create_metadata_column,
+    create_streamed_metadata_column,
     create_zarr_dataset,
+    zarr_write_buffer_bytes,
 )
 from ..storage.artifact_writer import (
     ArrayRequirement,
@@ -49,6 +52,21 @@ _LABEL_KINDS = _TEXT_LABEL_KINDS | {"b", "i", "u"}
 # int64 holds the whole numbers in [-_INT64_BOUND, _INT64_BOUND). A float64
 # bound, unlike a Python float, compares with float16 labels without overflow.
 _INT64_BOUND = np.float64(2.0**63)
+# The rows of each stored chunk of an artifact's arrays, unless chunk_lengths
+# names others.
+_CHUNK_ROWS = 100_000
+# The pass that finds the widest value of a text array converts this many
+# values to text at a time.
+_MEASURED_ROWS = 4_096
+# Zarr's objects for each write of a chunk that runs at once, and the
+# transaction, metadata and objects of writing an artifact whatever its size.
+_CHUNK_WRITE_BYTES = 16 << 10
+_WRITE_FIXED_BYTES = 64 << 10
+# headroom_bytes adds a sixteenth of the bytes that a cost counts exactly past
+# the first mebibyte, of which the fixed allowance of a write is a sixteenth
+# already.
+_HEADROOM_SHARE = 16
+_HEADROOM_FREE_BYTES = _HEADROOM_SHARE * _WRITE_FIXED_BYTES
 
 
 def validate_display_metadata(
@@ -212,7 +230,10 @@ def write_cell_data_artifact(
     ``attributes`` are JSON values stored on the artifact group before it is
     published. Arrays are chunked in 100,000 rows; ``chunk_lengths`` sets the
     rows of each chunk of named numeric arrays instead, such as packed bytes,
-    which read and write faster in chunks of megabytes.
+    which read and write faster in chunks of megabytes. Text is stored as
+    ``values.astype(str)`` holds it, at the width of the widest value, and is
+    written a chunk at a time, so a write holds what
+    :func:`cell_data_write_bytes` states rather than copies of whole arrays.
     """
     if planned.reused:
         return reused_artifact_group(root, planned)
@@ -228,21 +249,12 @@ def write_cell_data_artifact(
             if values.dtype.kind in {"O", "S", "U"}:
                 if values.ndim != 1:
                     raise ValueError("String artifact arrays must be one-dimensional")
-                create_metadata_column(
-                    group,
-                    name,
-                    data=values.astype(str),
-                    overwrite=True,
-                    chunkSize=min(max(int(values.shape[0]), 1), 100_000),
-                )
+                _write_text_array(group, name, values)
             else:
-                length = (
-                    100_000
-                    if chunk_lengths is None
-                    else chunk_lengths.get(name, 100_000)
-                )
                 chunks = (
-                    min(max(int(values.shape[0]), 1), max(int(length), 1)),
+                    _chunk_rows(
+                        int(values.shape[0]), _chunk_length(name, chunk_lengths)
+                    ),
                     *values.shape[1:],
                 )
                 output = create_zarr_dataset(
@@ -262,6 +274,202 @@ def write_cell_data_artifact(
                 tuple(arrays),
             )
     return group
+
+
+def cell_data_write_bytes(
+    arrays: Mapping[str, tuple[tuple[int, ...], Any]],
+    *,
+    chunk_lengths: Mapping[str, int] | None = None,
+) -> int:
+    """The most bytes that :func:`write_cell_data_artifact` holds to write these arrays, beside them.
+
+    Each array is given as its shape and the dtype it is stored at; a text
+    array as the fixed-width text dtype of its widest value, such as
+    ``np.dtype("U12")`` for labels of up to 12 characters, whatever dtype the
+    caller holds it in. ``chunk_lengths`` is the writer's. Arrays are written
+    one after another, so the write holds what its costliest array holds:
+
+    - text, a stored chunk at a time: the chunk's values at the stored width,
+      four bytes a character, and the chunk that Zarr encodes from them, a
+      last chunk of fewer rows also copied into a full chunk first;
+    - numbers, written whole: each chunk that Zarr encodes at once, up to its
+      async concurrency of them, and a last chunk of fewer rows twice.
+
+    The thread of Zarr's pool that encoded a chunk keeps what it was given and
+    what it made until that thread next runs, which on a busy machine comes
+    after the next write has begun. So an array of more chunks than Zarr
+    writes at once also holds the chunk before: for text, the block of values
+    it was encoded from and the encoded chunk, which is as large as the block
+    when the text does not compress; for numbers, which Zarr encodes from the
+    caller's array, the encoded chunk. The chunks of text are counted exactly
+    as they are held, so the cost adds :func:`headroom_bytes` of them. Beside
+    them are Zarr's objects for each write of a chunk that runs at once, its
+    file buffers (:func:`~cytearc.storage.arrays.zarr_write_buffer_bytes`),
+    and a fixed allowance for the artifact's transaction and metadata
+    whatever the size of its arrays. Attributes that grow with the data, and
+    a payload fingerprint, which reads the arrays back after they are
+    written, are left to the caller.
+
+    Raises:
+        TypeError: If ``arrays`` is not a mapping of shapes and dtypes.
+        ValueError: If a size is not a non-negative integer, the shape is
+            empty, or a text array is not one-dimensional or is not given at
+            a fixed width of at least one character.
+    """
+    if not isinstance(arrays, Mapping):
+        raise TypeError("arrays must map each array's name to its shape and dtype")
+    costliest = 0
+    for name, spec in arrays.items():
+        if not isinstance(spec, tuple) or len(spec) != 2:
+            raise TypeError(
+                f"Array {name!r} must be given as a (shape, dtype) pair, not {spec!r}"
+            )
+        shape, raw_dtype = spec
+        dtype = np.dtype(raw_dtype)
+        if (
+            not isinstance(shape, tuple)
+            or not shape
+            or not all(
+                isinstance(size, int | np.integer)
+                and not isinstance(size, bool)
+                and size >= 0
+                for size in shape
+            )
+        ):
+            raise ValueError(
+                f"Array {name!r} needs a shape of one or more non-negative sizes, "
+                f"not {shape!r}"
+            )
+        if dtype.kind in {"O", "S"} or (dtype.kind == "U" and not dtype.itemsize):
+            raise ValueError(
+                f"Text array {name!r} must be given at the fixed width of its "
+                f"widest value, such as U12, not {dtype}"
+            )
+        if dtype.kind == "U" and len(shape) != 1:
+            raise ValueError(f"Text array {name!r} must be one-dimensional")
+        costliest = max(
+            costliest,
+            _array_write_bytes(
+                tuple(int(size) for size in shape),
+                dtype,
+                _chunk_length(name, chunk_lengths),
+            ),
+        )
+    return _WRITE_FIXED_BYTES + zarr_write_buffer_bytes() + costliest
+
+
+def headroom_bytes(counted: int) -> int:
+    """Return the headroom that a memory cost adds beside ``counted`` bytes it counts exactly.
+
+    The cost of writing text counts the chunks that the write holds, and the
+    cost of saving clones counts the arrays that the save builds and
+    gathers, each exactly as it is held. The headroom is a sixteenth of the
+    bytes past the first mebibyte: the fixed allowance of 64 KiB that a write
+    or a save adds is a sixteenth of the first already.
+
+    Without the headroom, the traced peaks of such writes and saves came
+    within 0.8% of their costs, and within 0.2% of one another on Python
+    3.13, 3.14 and 3.15, with the locked and the lowest direct dependencies,
+    and with the CPU idle and oversubscribed three times over. With it, each
+    of these peaks sits at least 5% under its cost, so a machine that holds a
+    little more than those still fits.
+    """
+    return max(0, int(counted) - _HEADROOM_FREE_BYTES) // _HEADROOM_SHARE
+
+
+def _chunk_length(name: str, chunk_lengths: Mapping[str, int] | None) -> int:
+    """The rows of a chunk of numeric array ``name``, as the writer chunks it."""
+    if chunk_lengths is None:
+        return _CHUNK_ROWS
+    return int(chunk_lengths.get(name, _CHUNK_ROWS))
+
+
+def _chunk_rows(n_rows: int, length: int) -> int:
+    """The rows of each stored chunk of an array of ``n_rows``: at most ``length``."""
+    return min(max(n_rows, 1), max(length, 1))
+
+
+def _array_write_bytes(
+    shape: tuple[int, ...], dtype: np.dtype[Any], length: int
+) -> int:
+    """What writing one array holds beside it, as :func:`cell_data_write_bytes` counts."""
+    n_rows = shape[0]
+    if dtype.kind == "U":
+        rows = _chunk_rows(n_rows, _CHUNK_ROWS)
+        # A chunk and its encoded copy, and from the second chunk on the block
+        # before and its encoded copy. Measuring the widest value converts
+        # 4,096 values at a time beside their lengths, which holds less.
+        chunks = 2 if n_rows <= rows else 4
+        held = dtype.itemsize * chunks * rows
+        partial = n_rows % rows if n_rows > rows else 0
+        return (
+            held + headroom_bytes(held) + dtype.itemsize * partial + _CHUNK_WRITE_BYTES
+        )
+    rows = _chunk_rows(n_rows, length)
+    chunk = rows * math.prod(shape[1:]) * dtype.itemsize
+    n_chunks = -(-n_rows // rows)
+    at_once = min(n_chunks, int(zarr.config.get("async.concurrency")))
+    held = 1 if n_chunks > at_once else 0
+    partial = 1 if n_rows > rows and n_rows % rows else 0
+    return (at_once + held + partial) * chunk + at_once * _CHUNK_WRITE_BYTES
+
+
+def _write_text_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
+    """Write text values a stored chunk at a time, after one pass that finds the widest."""
+    n_rows = len(values)
+    rows = _chunk_rows(n_rows, _CHUNK_ROWS)
+    dtype = _stored_text_dtype(values)
+    create_streamed_metadata_column(
+        group,
+        name,
+        shape=n_rows,
+        dtype=dtype,
+        chunkSize=rows,
+        blocks=(
+            MetadataBlock(start, _as_text(values[start : start + rows], dtype))
+            for start in range(0, n_rows, rows)
+        ),
+    )
+
+
+def _stored_text_dtype(values: np.ndarray) -> np.dtype[Any]:
+    """The fixed-width text dtype at which ``values.astype(str)`` holds the widest value.
+
+    Byte strings and objects are converted as ``astype(str)`` converts them, a
+    few thousand at a time, so that measuring them holds little beside them.
+    """
+    width = max(
+        (
+            _widest_text_length(values[start : start + _MEASURED_ROWS])
+            for start in range(0, len(values), _MEASURED_ROWS)
+        ),
+        default=0,
+    )
+    return np.dtype(f"U{max(1, width)}")
+
+
+def _widest_text_length(values: np.ndarray) -> int:
+    """The characters of the widest of ``values`` as text."""
+    if values.dtype.kind == "U":
+        return int(np.char.str_len(values).max())
+    if values.dtype.kind == "S":
+        # Byte strings decode as ASCII, one character a byte, which raises for
+        # any byte that is not ASCII.
+        width = max(1, int(np.char.str_len(values).max()))
+        return int(np.char.str_len(_as_text(values, np.dtype(f"U{width}"))).max())
+    return int(np.char.str_len(values.astype(str)).max())
+
+
+def _as_text(values: np.ndarray, dtype: np.dtype[Any]) -> np.ndarray:
+    """``values`` as fixed-width text of ``dtype``, at least as wide as each value.
+
+    Byte strings are first cut to that width, which loses no byte of a value,
+    since NumPy's cast of byte strings to text holds a buffer that grows with
+    their declared width.
+    """
+    if values.dtype.kind == "S":
+        values = values.astype(f"S{dtype.itemsize // 4}")
+    return values.astype(dtype)
 
 
 def snapshot_cluster_labels(

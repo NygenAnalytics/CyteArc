@@ -657,6 +657,28 @@ def test_writing_the_clones_counts_a_buffer_for_each_write_zarr_runs_at_once(
         for what in grown
     }
     assert sum(what.endswith("as they are written") for what in grown) == 2
+    # Before reading, saving is checked as if every cell were a clone of its
+    # own: 16 bytes per cell for its group and edits, 8 for the calls' rare
+    # alleles, each clone's label as a Python string at the size of the
+    # longest, what saving that many clones holds, and 8 MiB whatever the
+    # size.
+    import sys
+
+    from cytearc.datastore._operations.clone_artifacts import clone_write_bytes
+
+    longest = "clone_2000"
+    with zarr.config.set({"async.concurrency": 10}):
+        saving = clone_write_bytes(
+            2_000, 2_000, len(longest), source_arrays={"n_alleles": np.int32}
+        )
+    (before_reading,) = [
+        needed
+        for what, needed in ten
+        if what == "the clones of 2000 cells as they are written"
+    ]
+    assert before_reading == (16 + 8 + sys.getsizeof(longest)) * 2_000 + saving + (
+        8 << 20
+    )
 
 
 def test_real_darlin_alleles_join_the_cells_that_share_a_rare_one(tmp_path) -> None:
@@ -1310,3 +1332,36 @@ def test_each_step_on_many_alleles_and_clones_holds_no_more_than_its_check_state
     written = f"the {n_clones} clones of {n_cells} cells as they are written"
     assert traced[0][-1][0] == written
     _assert_steps_within(traced)
+
+
+@pytest.mark.slow
+def test_the_edits_check_counts_the_chunks_that_reading_the_edits_decodes(
+    tmp_path, monkeypatch
+) -> None:
+    # The edits of 300,000 cells are three stored chunks of int64 counts,
+    # which Zarr decodes at once, each into a buffer of its own, beside the
+    # counts that it returns: more than the counts and their mask, nine bytes
+    # a cell.
+    import cytearc.datastore._operations.recorder_alleles as operations
+    from cytearc.datastore._operations.record_tables import read_array
+    from cytearc.storage.artifacts import artifact_group
+    from cytearc.storage.geometry import READ_OBJECT_BYTES
+
+    n_cells = 300_000
+    store, alleles = _clones_of_their_own_alleles(tmp_path, n_cells, 75_000, 4, ("CA",))
+    stated: dict[str, int] = {}
+    check = operations._check_calling
+
+    def noted(needed: int, budget: int, what: str) -> None:
+        stated[what] = needed
+        check(needed, budget, what)
+
+    monkeypatch.setattr(operations, "_check_calling", noted)
+    store.clones.allele_clones(alleles, method="graph", max_frequency=0.5)
+    group = artifact_group(store.zw, alleles)
+
+    _result, peak = traced_peak(lambda: read_array(group, "n_edits") > 0, 1 << 30)
+
+    edits = stated[f"the edits of {n_cells} cells"] - operations._FIXED_BYTES
+    # Zarr's objects for the read are the fixed bytes' to cover.
+    assert 9 * n_cells < peak <= edits + READ_OBJECT_BYTES, (peak, edits)

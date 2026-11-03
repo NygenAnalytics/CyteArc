@@ -68,7 +68,11 @@ from ...metadata.arguments import (
     CloneImportArguments,
     ClonotypeArguments,
 )
-from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
+from ...metadata.artifacts import (
+    cell_data_write_bytes,
+    plan_cell_data_artifact,
+    write_cell_data_artifact,
+)
 from ...metadata.rows import (
     array_row_selection_parts,
     metadata_column_fingerprint,
@@ -104,7 +108,6 @@ from .cell_barcodes import (
 from .cell_groups import cell_groups, group_columns, selection_chunk_bytes
 from .clone_artifacts import (
     SOURCE_ARRAYS,
-    check_clone_write_budget,
     log_clones,
     plan_clones,
     write_clones,
@@ -299,10 +302,10 @@ _FATE_BIAS_COLUMNS = frozenset(
 _SELECTION_BYTES_PER_CELL = 40
 # Each pair of a fate and a clone holds its fate, clone code and cells.
 _BYTES_PER_FATE_PAIR = 24
-# Writing the fate bias holds, for each early cell, its dominant fate as
-# text of four bytes per character, and its other arrays.
+# Writing the fate bias builds, for each early cell, a reference to its
+# dominant fate's name, its codes as int32, and the mask and arrays that pick
+# the names, beside what the writer holds.
 _BIAS_WRITE_BYTES_PER_CELL = 40
-_BIAS_WRITE_BYTES_PER_CHARACTER = 4
 # The tables of loaded fate bias hold, for each early cell, its ID, clone,
 # fate and late cells and the pandas index, for each of its fractions the
 # value read and its column in the table, and for each row of the table of
@@ -629,18 +632,21 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 chunk_bytes=chunk_rows * row_bytes,
             )
         assignment = assigner.finish()
-        check_clone_write_budget(
-            self.memoryBytes,
-            held + _BYTES_PER_LABEL * assigner.n_labels + assigner.label_bytes,
-            assignment.clone_ids,
-            n_cells,
-        )
         attributes = {
             **join.attributes(),
             "n_clones": len(assignment.clone_ids),
             "n_cells_in_several_clones": assignment.n_cells_in_several_clones,
         }
-        write_clones(self.zw, planned, assignment, attributes)
+        write_clones(
+            self.zw,
+            planned,
+            assignment,
+            attributes,
+            memory_bytes=self.memoryBytes,
+            held_bytes=held
+            + _BYTES_PER_LABEL * assigner.n_labels
+            + assigner.label_bytes,
+        )
         warn_unmatched_barcodes(attributes, files_text)
         log_clones(assignment, n_cells)
         return planned.ref
@@ -799,16 +805,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 held, assigner.n_labels, assigner.label_bytes, block_rows * row_bytes
             )
         assignment = assigner.finish()
-        check_clone_write_budget(
-            self.memoryBytes,
-            _ASSIGNER_BYTES_PER_CELL * n_cells
+        write_clones(
+            self.zw,
+            planned,
+            assignment,
+            {"n_clones": len(assignment.clone_ids)},
+            memory_bytes=self.memoryBytes,
+            held_bytes=_ASSIGNER_BYTES_PER_CELL * n_cells
             + _BYTES_PER_LABEL * assigner.n_labels
             + assigner.label_bytes,
-            assignment.clone_ids,
-            n_cells,
-        )
-        write_clones(
-            self.zw, planned, assignment, {"n_clones": len(assignment.clone_ids)}
         )
         log_clones(assignment, n_cells)
         return planned.ref
@@ -2602,8 +2607,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             held
             + _BYTES_PER_FATE_PAIR * len(pair_cells)
             + fate_bias_bytes(n_early, n_tested, n_fates)
-            + n_early
-            * (_BIAS_WRITE_BYTES_PER_CELL + _BIAS_WRITE_BYTES_PER_CHARACTER * width)
+            + _fate_bias_write_bytes(n_early, n_tested, n_fates, width)
         )
         if resident > self.memoryBytes:
             raise MemoryError(
@@ -2780,6 +2784,31 @@ def _clones_by_stratum(codes: np.ndarray, code_strata: np.ndarray) -> np.ndarray
     if len(units) == len(sorted_unique(codes)):
         return codes
     return recoded.reshape(-1).astype(np.int64)
+
+
+def _fate_bias_write_bytes(
+    n_early: int, n_tested: int, n_fates: int, width: int
+) -> int:
+    """What writing fate bias holds: the arrays it builds and what the writer holds.
+
+    ``width`` is the characters of the longest fate name, at which each early
+    cell's dominant fate is stored.
+    """
+    return _BIAS_WRITE_BYTES_PER_CELL * n_early + cell_data_write_bytes(
+        {
+            "values": ((n_early,), f"U{max(1, width)}"),
+            "codes": ((n_early,), np.int32),
+            "fate_codes": ((n_early,), np.int32),
+            "late_cells": ((n_early,), np.int64),
+            "fractions": ((n_early, n_fates), np.float64),
+            "clone_codes": ((n_tested,), np.int64),
+            "clone_early_cells": ((n_tested,), np.int64),
+            "clone_fate_cells": ((n_tested, n_fates), np.int64),
+            "clone_p_values": ((n_tested, n_fates), np.float64),
+            "clone_q_values": ((n_tested, n_fates), np.float64),
+            "fate_cells": ((n_fates,), np.int64),
+        }
+    )
 
 
 def _refuse_clones_across_kept_labels(

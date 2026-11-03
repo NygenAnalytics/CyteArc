@@ -17,6 +17,7 @@ import zarr
 
 from tests.memory_helpers import (
     ZARR_READS,
+    ZARR_WRITES,
     budget_bounds,
     budget_refusals,
     budget_that_runs,
@@ -815,3 +816,42 @@ def test_reads_of_zarr_arrays_end_only_while_reads_are_held() -> None:
             getattr(zarr.Array, name) is not method for name, method in methods.items()
         )
     assert all(getattr(zarr.Array, name) is method for name, method in methods.items())
+
+
+def test_writes_of_zarr_arrays_end_only_while_writes_are_held(tmp_path) -> None:
+    # Each write of a chunk is a call of one of these methods, so holding them
+    # keeps the block that Zarr encoded beside the next write, until it ends.
+    methods = {name: getattr(zarr.Array, name) for _owner, name in ZARR_WRITES}
+    chunk = 1 << 20
+    values = np.random.default_rng(0).integers(0, 256, 3 * chunk, dtype=np.uint8)
+    array = zarr.open_group(str(tmp_path / "s.zarr"), mode="w").create_array(
+        "values", shape=values.shape, chunks=(chunk,), dtype="uint8"
+    )
+
+    def write_two(start: int) -> int:
+        """The peak of writing the chunk after ``start``, traced from writing ``start``'s."""
+        import tracemalloc
+
+        tracemalloc.start()
+        try:
+            block = values[start : start + chunk].copy()
+            array[start : start + chunk] = block
+            del block
+            tracemalloc.reset_peak()
+            array[start + chunk : start + 2 * chunk] = values[
+                start + chunk : start + 2 * chunk
+            ]
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    with hold_finished_reads(*ZARR_WRITES):
+        assert all(
+            getattr(zarr.Array, name) is not method for name, method in methods.items()
+        )
+        held = write_two(0)
+    assert all(getattr(zarr.Array, name) is method for name, method in methods.items())
+    # The first chunk's block, which only the held work keeps, and its
+    # encoded chunk are held beside the second write's encoded chunk.
+    assert held > 2.5 * chunk, held
+    np.testing.assert_array_equal(array[: 2 * chunk], values[: 2 * chunk])

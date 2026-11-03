@@ -648,7 +648,7 @@ def test_the_check_before_the_ids_are_read_counts_the_cells_and_their_read(
     file buffers that writing its records through Zarr will hold.
     """
     from cytearc.datastore._operations import recorder_alleles as operations
-    from cytearc.datastore._operations.clone_artifacts import zarr_write_buffer_bytes
+    from cytearc.storage.arrays import zarr_write_buffer_bytes
     from tests.clone_helpers import ids_read_bytes
     from tests.storage_helpers import open_store, write_count_store
 

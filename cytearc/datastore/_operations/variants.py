@@ -22,7 +22,7 @@ from ...metadata.arguments import (
 from ...metadata.artifacts import plan_cell_data_artifact
 from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
 from ...metadata.selection import cell_selection_indices
-from ...storage.arrays import create_metadata_column
+from ...storage.arrays import create_metadata_column, zarr_write_buffer_bytes
 from ...storage.artifact_writer import (
     PlannedArtifact,
     artifact_transaction,
@@ -101,13 +101,7 @@ from .cell_barcodes import (
     warn_unmatched_barcodes,
 )
 from .cell_groups import cell_groups, group_columns, within_groups
-from .clone_artifacts import (
-    check_clone_write_budget,
-    log_clones,
-    plan_clones,
-    write_clones,
-    zarr_write_buffer_bytes,
-)
+from .clone_artifacts import log_clones, plan_clones, write_clones
 
 if TYPE_CHECKING:
     from ..mapping_datastore import MappingDatastore as _VariantOperationsBase
@@ -178,9 +172,9 @@ _FREQUENCY_BYTES_PER_ENTRY = 8
 _BAND_FREQUENCY_BYTES = 32
 # The Leiden seed of variant clones, CyteArc's default.
 _CLONE_SEED = 4444
-# Bytes held for each cell while called clones are written: its position,
-# group, cluster and status of the call, and its code and clone size.
-_CLONE_WRITE_BYTES_PER_CELL = 50
+# Bytes held for each cell while called clones are saved, beside what saving
+# them holds: its position, group, cluster and status of the call.
+_CLONE_CALL_BYTES_PER_CELL = 34
 # The smallest Jaccard index of two neighbourhoods that Seurat's shared
 # neighbour graph keeps.
 _SHARED_NEIGHBOR_PRUNE = 1 / 15
@@ -228,9 +222,9 @@ _LOADED_GENOTYPE_BYTES_PER_ROW = 220
 # cell, site, rank and call as read, and its membership masks.
 _GENOTYPE_CLONE_BYTES_PER_CELL = 80
 _GENOTYPE_CLONE_BYTES_PER_ROW = 48
-# Bytes held for each cell while genotype clones are written: its clone code,
-# ambiguous flag and size as called and as written.
-_GENOTYPE_CLONE_WRITE_BYTES_PER_CELL = 40
+# Bytes held for each cell while genotype clones are saved, beside what saving
+# them holds: its ambiguous flag as called.
+_GENOTYPE_CLONE_CALL_BYTES_PER_CELL = 1
 # The columns of loaded genotype clones, which within columns may not name.
 _GENOTYPE_CLONE_COLUMNS = frozenset({"clone", "clone_size", "ambiguous"})
 # The attributes that saved genotype clones need to be reused.
@@ -2306,14 +2300,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "n_cells_without_group": counts_by_status["no_group"],
             "n_edges": called.n_edges,
         }
-        check_clone_write_budget(
-            self.memoryBytes,
-            _CLONE_WRITE_BYTES_PER_CELL * n_cells
+        write_clones(
+            self.zw,
+            planned,
+            assignment,
+            attributes,
+            memory_bytes=self.memoryBytes,
+            held_bytes=_CLONE_CALL_BYTES_PER_CELL * n_cells
             + sum(map(sys.getsizeof, assignment.clone_ids.tolist())),
-            assignment.clone_ids,
-            n_cells,
         )
-        write_clones(self.zw, planned, assignment, attributes)
         log_clones(assignment, n_cells)
         return planned.ref
 
@@ -3173,20 +3168,16 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "n_nodes": called.n_nodes,
             "n_edges": called.n_edges,
         }
-        check_clone_write_budget(
-            self.memoryBytes,
-            _GENOTYPE_FIXED_BYTES
-            + _GENOTYPE_CLONE_WRITE_BYTES_PER_CELL * n_cells
-            + sum(map(sys.getsizeof, labels.tolist())),
-            assignment.clone_ids,
-            n_cells,
-        )
         write_clones(
             self.zw,
             planned,
             assignment,
             attributes,
             source_arrays={"ambiguous": called.ambiguous.astype(bool)},
+            memory_bytes=self.memoryBytes,
+            held_bytes=_GENOTYPE_FIXED_BYTES
+            + _GENOTYPE_CLONE_CALL_BYTES_PER_CELL * n_cells
+            + sum(map(sys.getsizeof, labels.tolist())),
         )
         log_clones(assignment, n_cells)
         return planned.ref

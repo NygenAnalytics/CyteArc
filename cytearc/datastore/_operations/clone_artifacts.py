@@ -5,12 +5,11 @@ variants, allele clones and the clones of a phylogeny's cut all save the same
 artifact: per cell the clone label in ``values``, the clone's rank in
 ``codes`` and its size in ``clone_size``, and per clone ``clone_ids`` and
 ``clone_sizes``, beside the per-cell arrays that a source adds, such as each
-cell's probability of its clone. These helpers plan it, check that its labels
-fit the memory budget as the store saves them, write it and log it, once for
-every operation mixin that saves clones.
+cell's probability of its clone. These helpers plan it, state what saving it
+holds, refuse a save that would not fit the memory budget, write it and log
+it, once for every operation mixin that saves clones.
 """
 
-import io
 from collections.abc import Mapping
 from typing import Any, ClassVar, Protocol
 
@@ -19,7 +18,12 @@ import zarr
 
 from ...clones.assignments import CloneAssignment
 from ...graph.arguments import ArgumentRecord
-from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
+from ...metadata.artifacts import (
+    cell_data_write_bytes,
+    headroom_bytes,
+    plan_cell_data_artifact,
+    write_cell_data_artifact,
+)
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import ArtifactRef
 from ...utils.logging import logger
@@ -28,11 +32,10 @@ __all__ = [
     "CLONE_PROBABILITY",
     "SOURCE_ARRAYS",
     "CloneArguments",
-    "check_clone_write_budget",
+    "clone_write_bytes",
     "log_clones",
     "plan_clones",
     "write_clones",
-    "zarr_write_buffer_bytes",
 ]
 
 #: The per-cell array of each cell's probability of its clone.
@@ -49,6 +52,11 @@ SOURCE_ARRAYS: Mapping[str, Any] = {
     "ambiguous": bool,
     "n_alleles": np.int64,
 }
+# Bytes of a reference to a Python object in an array of objects.
+_REFERENCE_BYTES = 8
+# Python's objects of a save while it gathers the clone sizes, whatever the
+# number of cells, which the writer's own allowance covers once it writes.
+_GATHERING_FIXED_BYTES = 64 << 10
 
 
 class CloneArguments(Protocol):
@@ -116,40 +124,55 @@ def plan_clones(
     )
 
 
-def zarr_write_buffer_bytes() -> int:
-    """The bytes that Zarr's writes hold in file buffers at once.
+def clone_write_bytes(
+    n_cells: int,
+    n_clones: int,
+    width: int,
+    *,
+    with_probability: bool = False,
+    source_arrays: Mapping[str, Any] | None = None,
+) -> int:
+    """The most bytes that saving clones holds, from their assignment on.
 
-    Zarr writes each chunk and each array's metadata through a buffered file,
-    up to its async concurrency of them at once. Each buffer is counted as
-    one of io's default buffers, 8 KiB before Python 3.14 and 128 KiB from it,
-    which covers the buffer that Python gives a file on a file system whose
-    blocks are no larger.
+    ``width`` is the characters of the longest label, at which the store saves
+    every cell's label, and ``source_arrays`` maps each per-cell array that
+    the source adds to its dtype. Saving holds the assignment, each cell's
+    code as int64 with each clone's label and size and, when the source gives
+    them, each cell's probability, and the source's arrays as passed.
+    :func:`write_clones` builds each cell's label as a reference to its
+    clone's, its code as int32 and its clone's size, gathering the sizes
+    beside a mask of the cells with a clone and two int64 arrays, and copies
+    the clones' sizes and the probabilities; writing them holds what
+    :func:`~cytearc.metadata.artifacts.cell_data_write_bytes` states. What
+    the save builds and gathers is counted exactly as it is held, so the
+    cost adds :func:`~cytearc.metadata.artifacts.headroom_bytes` of it. The
+    labels' text is the caller's to count.
     """
-    return int(zarr.config.get("async.concurrency")) * io.DEFAULT_BUFFER_SIZE
-
-
-def check_clone_write_budget(
-    memory_bytes: int, held: int, clone_ids: np.ndarray, n_cells: int
-) -> None:
-    """Refuse clones whose labels would not fit the memory budget as stored.
-
-    The store saves text at the width of the longest value, so each cell's
-    label takes four bytes per character of the longest as it is written,
-    beside its code and Zarr's file buffers (``zarr_write_buffer_bytes``);
-    ``held`` is what the caller holds beside them.
-
-    Raises:
-        MemoryError: If the clones would not fit ``memory_bytes``.
-    """
-    width = max((len(str(label)) for label in clone_ids.tolist()), default=0)
-    peak = held + n_cells * (8 + 4 * width) + zarr_write_buffer_bytes()
-    if peak > memory_bytes:
-        raise MemoryError(
-            f"Saving the clones of {n_cells} cells holds about {peak} bytes, "
-            f"more than the memory budget of {memory_bytes} bytes, since the "
-            "store saves each cell's clone label at the width of the longest, "
-            f"{width} characters. Raise mem_budget."
-        )
+    label = np.dtype(f"U{max(1, width)}")
+    sources = {name: np.dtype(dtype) for name, dtype in (source_arrays or {}).items()}
+    probability = 8 * n_cells if with_probability else 0
+    given = (
+        8 * n_cells
+        + (_REFERENCE_BYTES + 8) * n_clones
+        + probability
+        + sum(n_cells * int(dtype.itemsize) for dtype in sources.values())
+    )
+    built = n_cells * (_REFERENCE_BYTES + 4 + 8) + 8 * n_clones + probability
+    gathering = n_cells * (_REFERENCE_BYTES + 4 + 8 + 1 + 8 + 8)
+    arrays: dict[str, tuple[tuple[int, ...], Any]] = {
+        "values": ((n_cells,), label),
+        "codes": ((n_cells,), np.int32),
+        "clone_size": ((n_cells,), np.int64),
+        "clone_ids": ((n_clones,), label),
+        "clone_sizes": ((n_clones,), np.int64),
+    }
+    if with_probability:
+        arrays[CLONE_PROBABILITY] = ((n_cells,), np.float64)
+    arrays.update({name: ((n_cells,), dtype) for name, dtype in sources.items()})
+    return given + max(
+        gathering + headroom_bytes(gathering) + _GATHERING_FIXED_BYTES,
+        built + headroom_bytes(built) + cell_data_write_bytes(arrays),
+    )
 
 
 def write_clones(
@@ -158,13 +181,52 @@ def write_clones(
     assignment: CloneAssignment,
     attributes: Mapping[str, Any],
     source_arrays: Mapping[str, np.ndarray] | None = None,
+    *,
+    memory_bytes: int,
+    held_bytes: int,
 ) -> None:
     """Write planned clones with their attributes and the arrays their source adds.
+
+    The save is refused before it writes anything when ``held_bytes``, what
+    the caller holds beside the assignment, such as its labels' text, and
+    what saving holds, as :func:`clone_write_bytes` states, pass
+    ``memory_bytes``.
 
     Raises:
         ValueError: If ``source_arrays`` names an array that is not one of
             ``SOURCE_ARRAYS``, or the assignment's probabilities already.
+        MemoryError: If saving the clones would not fit ``memory_bytes``.
     """
+    sources = dict(source_arrays or {})
+    for name in sources:
+        if name not in SOURCE_ARRAYS:
+            raise ValueError(
+                f"{name!r} is not a per-cell array that a clone source adds beside "
+                f"its clones; those are {', '.join(SOURCE_ARRAYS)}"
+            )
+        if name == CLONE_PROBABILITY and assignment.probabilities is not None:
+            raise ValueError(
+                f"{name!r} is written from the assignment's probabilities already; "
+                "pass it once"
+            )
+    n_cells = len(assignment.codes)
+    width = max((len(str(label)) for label in assignment.clone_ids.tolist()), default=0)
+    needed = held_bytes + clone_write_bytes(
+        n_cells,
+        len(assignment.clone_ids),
+        width,
+        with_probability=assignment.probabilities is not None,
+        source_arrays={
+            name: np.asarray(values).dtype for name, values in sources.items()
+        },
+    )
+    if needed > memory_bytes:
+        raise MemoryError(
+            f"Saving the clones of {n_cells} cells holds about {needed} bytes, more "
+            f"than the memory budget of {memory_bytes} bytes, since the store saves "
+            "each cell's clone label at the width of the longest, "
+            f"{width} characters. Raise mem_budget."
+        )
     arrays: dict[str, np.ndarray] = {
         "values": assignment.values,
         "codes": assignment.codes.astype(np.int32),
@@ -174,18 +236,7 @@ def write_clones(
     }
     if assignment.probabilities is not None:
         arrays[CLONE_PROBABILITY] = assignment.probabilities.astype(np.float64)
-    for name, values in (source_arrays or {}).items():
-        if name not in SOURCE_ARRAYS:
-            raise ValueError(
-                f"{name!r} is not a per-cell array that a clone source adds beside "
-                f"its clones; those are {', '.join(SOURCE_ARRAYS)}"
-            )
-        if name in arrays:
-            raise ValueError(
-                f"{name!r} is written from the assignment's probabilities already; "
-                "pass it once"
-            )
-        arrays[name] = values
+    arrays.update(sources)
     write_cell_data_artifact(root, planned, arrays, attributes=dict(attributes))
 
 

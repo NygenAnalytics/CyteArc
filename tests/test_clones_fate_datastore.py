@@ -18,6 +18,7 @@ from scipy.stats import fisher_exact
 
 from cytearc.clones import COUPLING_METHODS, CloneCoupling, CloneFateBias
 from cytearc.datastore._operations import clones as clone_operations
+from cytearc.metadata.artifacts import cell_data_write_bytes
 from cytearc.metadata.rows import array_row_selection_parts
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.geometry import READ_OBJECT_BYTES
@@ -607,20 +608,37 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
         store.clones.fate_bias(clones, **options)
     # Without the read before, a fate of its own for each late cell, named by
     # three characters, makes the measurement the largest step: per early cell
-    # 64 bytes, 24 per fraction, 40 to write and 4 per character of a fate's
-    # name; per clone with late cells and fate 80 bytes; 1,000 per fate; and
-    # 24 per count of a clone in a fate, here one per late cell with a clone.
+    # 64 bytes, 16 per fraction and 40 to write; per clone with late cells and
+    # fate 80 bytes; 1,000 per fate; 24 per count of a clone in a fate, here
+    # one per late cell with a clone; and what the writer states for the
+    # arrays, each early cell's fate at the three characters of its name.
     monkeypatch.setattr(clone_operations, "previous_read_bytes", lambda *chunks: 0)
     tested = len({int(c) for c in TRUTH.clones[LATE] if c >= 0})
     with_clone = int(np.count_nonzero(TRUTH.clones[LATE] >= 0))
+    writing = cell_data_write_bytes(
+        {
+            "values": ((n_early,), "U3"),
+            "codes": ((n_early,), np.int32),
+            "fate_codes": ((n_early,), np.int32),
+            "late_cells": ((n_early,), np.int64),
+            "fractions": ((n_early, n_late), np.float64),
+            "clone_codes": ((tested,), np.int64),
+            "clone_early_cells": ((tested,), np.int64),
+            "clone_fate_cells": ((tested, n_late), np.int64),
+            "clone_p_values": ((tested, n_late), np.float64),
+            "clone_q_values": ((tested, n_late), np.float64),
+            "fate_cells": ((n_late,), np.int64),
+        }
+    )
     measured = (
-        n_early * (64 + 24 * n_late + 40 + 4 * 3)
+        n_early * (64 + 16 * n_late + 40)
         + 80 * tested * n_late
         + 1_000 * n_late
         + 24 * with_clone
         + CODES_READ
+        + writing
     )
-    assert (tested, with_clone, measured) == (8, 19, 61_356)
+    assert (tested, with_clone, measured - writing) == (8, 19, 56_568)
     monkeypatch.setattr(store, "memoryBytes", measured - 1)
     with pytest.raises(
         MemoryError, match=f"8 clones in {n_late} fates holds about {measured}"
