@@ -1015,6 +1015,25 @@ def test_support_values_never_name_clones(store, tmp_path) -> None:
     }
 
 
+def test_a_clade_named_by_a_padded_missing_token_is_refused_by_the_table_export(
+    store, tmp_path
+) -> None:
+    a, b, c, d = _cell_ids(4)
+    path = tmp_path / "padded.nwk"
+    # A quoted name keeps its spaces, so a clone is labelled ' NA', which a
+    # clone table strips and then reads as no clone.
+    path.write_text(f"(({a},{b})' NA',({c},{d})x)r;")
+    phylogeny, _messages = _import(store, path)
+    clones, _messages = _cut(store, phylogeny, depth=1)
+    assert _clone_sets(store, clones) == {
+        " NA": frozenset([a, b]),
+        "x": frozenset([c, d]),
+    }
+    with pytest.raises(ValueError, match="The clone labels ' NA' read as no clone"):
+        store.clones.export_clones(clones, tmp_path / "clones.csv")
+    assert not (tmp_path / "clones.csv").exists()
+
+
 def test_unnamed_leaves_count_as_leaves_without_a_cell_and_not_as_barcodes(
     store, tmp_path
 ) -> None:

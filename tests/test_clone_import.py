@@ -882,11 +882,20 @@ def test_the_exported_matrix_lists_its_cells_and_clones_and_imports_back(
     )
 
 
+@pytest.mark.parametrize(
+    ("named", "refused"),
+    [
+        ({0: "NA", 1: "nan", 2: "NaN"}, "'NA', 'nan', 'NaN'"),
+        # The tokens that every table reads as missing, which clone tables
+        # read too; from_column strips a label, as a clone table's reader does.
+        ({0: "None", 1: "NULL", 2: "N/A"}, "'None', 'NULL', 'N/A'"),
+        ({0: " null", 1: "#N/A", 2: "<NA>"}, "'null', '#N/A', '<NA>'"),
+    ],
+)
 def test_labels_that_a_clone_table_reads_as_no_clone_export_only_as_a_matrix(
-    store, tmp_path
+    store, tmp_path, named, refused
 ) -> None:
     cells = every_cell(store)
-    named = {0: "NA", 1: "nan", 2: "NaN"}
     labels = np.asarray(
         [
             named.get(int(clone), f"L{clone}") if clone >= 0 else ""
@@ -898,7 +907,7 @@ def test_labels_that_a_clone_table_reads_as_no_clone_export_only_as_a_matrix(
     ref = store.clones.from_column("lineage", cell_selection=cells)
 
     # A clone table would read these labels back as cells without a clone.
-    with pytest.raises(ValueError, match="'NA', 'nan', 'NaN' read as no clone"):
+    with pytest.raises(ValueError, match=f"{re.escape(refused)} read as no clone"):
         store.clones.export_clones(ref, tmp_path / "clones.csv")
     assert not (tmp_path / "clones.csv").exists()
 
@@ -1181,3 +1190,50 @@ def test_long_cell_ids_count_against_the_budget(tmp_path) -> None:
         assert f"memory budget of {budget} bytes" in str(result)
     else:
         assert peak <= budget, peak
+
+
+@pytest.mark.parametrize("budget", [21_000_000, 27_000_000])
+@pytest.mark.parametrize(
+    ("row", "n_fields"), [("X9,1,extra", 3), ("X9", 1)], ids=["long", "short"]
+)
+def test_a_row_of_another_width_is_refused_wherever_the_budget_ends_a_chunk(
+    store, tmp_path, monkeypatch, budget, row, n_fields
+) -> None:
+    # The budget sizes the chunks of rows, and pandas, reading alone, drops
+    # the extra field of a row that starts a chunk and pads a short row with
+    # empty text. Placed first in the second chunk of each budget, the row is
+    # refused by its line all the same.
+    import cytearc.readers.clone_tables as tables
+
+    reader = tables.iter_clone_rows
+    used: list[int] = []
+
+    def recording(layout, chunk_rows):
+        used.append(chunk_rows)
+        yield from reader(layout, chunk_rows)
+
+    monkeypatch.setattr(tables, "iter_clone_rows", recording)
+    cells = every_cell(store)
+    ids = store.cells.fetch_all("ids").tolist()
+    rows = [f"{cell},1" for cell in ids] + [
+        f"X{index},1" for index in range(60_000 - len(ids))
+    ]
+    store.memoryBytes = budget
+    valid = tmp_path / "valid.csv"
+    valid.write_text("Cell_ID,Clone_ID\n" + "\n".join(rows) + "\n")
+    with collect_warnings():
+        store.clones.import_clones(valid, cell_selection=cells)
+    chunk_rows = used[-1]
+    assert len(ids) < chunk_rows < len(rows) - 1
+    rows[chunk_rows] = row
+    bad = tmp_path / "bad.csv"
+    bad.write_text("Cell_ID,Clone_ID\n" + "\n".join(rows) + "\n")
+    with (
+        collect_warnings(),
+        pytest.raises(
+            ValueError,
+            match=rf"is malformed: line {chunk_rows + 2} holds {n_fields} "
+            rf"fields?, but its header names 2 columns$",
+        ),
+    ):
+        store.clones.import_clones(bad, cell_selection=cells)

@@ -40,7 +40,9 @@ import numpy as np
 import pandas as pd
 
 from ..variants.counts import BASES, MAX_COUNT, Contig, EntryBatch, SiteTable
-from ._variant_files import find_file, first_line, is_gzip
+from ..utils.files import is_gzip
+from ._delimited import first_lines
+from ._variant_files import find_file
 from ..utils.arguments import quoted_value
 
 __all__ = ["MGATK_FORMATS", "MgatkSource", "mgatk_source"]
@@ -180,7 +182,8 @@ def _columns(path: str) -> tuple[str, ...]:
         ValueError: If the line holds neither four nor six fields, or four
             whose last is a mean quality, as mgatk wrote before 0.4.7.
     """
-    line = first_line(path)
+    lines = first_lines(path, 1)
+    line = lines[0] if lines else ""
     if not line:
         return _FOUR
     fields = line.split(",")
@@ -312,7 +315,7 @@ class MgatkSource:
         )
 
     def _chunks(self, path: str, chunk_rows: int) -> Iterator[pd.DataFrame]:
-        if os.path.getsize(path) == 0 or not first_line(path):
+        if os.path.getsize(path) == 0 or not "".join(first_lines(path, 1)):
             return
         dtypes: dict[str, Any] = {
             "position": np.int64,

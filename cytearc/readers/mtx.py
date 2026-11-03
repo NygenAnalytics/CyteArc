@@ -1,6 +1,5 @@
 import csv
 import gc
-import gzip
 import os
 import shutil
 import stat
@@ -10,7 +9,6 @@ import zipfile
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from io import TextIOWrapper
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, TextIO
 
@@ -20,6 +18,12 @@ from scipy.sparse import coo_matrix, csr_matrix
 
 from ..utils.arrays import cumulative_nnz, max_window_nnz
 from ..utils.count_values import CountValueRange, new_count_ranges
+from ..utils.files import is_gzip, open_text
+from ._matrix_market import (
+    matrix_market_entries,
+    matrix_market_header,
+    read_matrix_market_header,
+)
 from .cellranger import CrReader
 from ._text import (
     DuplicateFeatureIds,
@@ -59,14 +63,6 @@ class MtxCandidate:
     featureReferencePath: str | None = None
     cellIdKeys: tuple[str, ...] = ()
     relatedFiles: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class _MtxHeader:
-    field: Literal["integer", "real"]
-    nRows: int
-    nColumns: int
-    nEntries: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,12 +220,13 @@ def _resolve_triplet(
 
 @contextmanager
 def _open_path_text(path: str) -> Iterator[TextIO]:
-    if path.lower().endswith(".gz"):
-        with gzip.open(path, mode="rt", encoding="utf-8", newline="") as handle:
-            yield handle
-    else:
-        with open(path, mode="rt", encoding="utf-8", newline="") as handle:
-            yield handle
+    with open_text(path) as handle:
+        yield handle
+
+
+def _compression(path: str) -> str | None:
+    """The compression of a file for pandas to read, by its first bytes."""
+    return "gzip" if is_gzip(path) else None
 
 
 def _zip_member_mode(info: zipfile.ZipInfo) -> int:
@@ -265,57 +262,8 @@ def _open_zip_text(
     info: zipfile.ZipInfo,
 ) -> Iterator[TextIO]:
     with archive.open(info, mode="r") as raw:
-        if info.filename.lower().endswith(".gz"):
-            with gzip.GzipFile(fileobj=raw, mode="rb") as decoded:
-                with TextIOWrapper(decoded, encoding="utf-8", newline="") as text:
-                    yield text
-        else:
-            with TextIOWrapper(raw, encoding="utf-8", newline="") as text:
-                yield text
-
-
-def _read_header(open_text: Callable[[], Any]) -> _MtxHeader:
-    with open_text() as handle:
-        banner = handle.readline().strip().split()
-        if len(banner) != 5 or [part.lower() for part in banner[:3]] != [
-            "%%matrixmarket",
-            "matrix",
-            "coordinate",
-        ]:
-            raise ValueError("Matrix Market input must use coordinate matrix format")
-        field = banner[3].lower()
-        symmetry = banner[4].lower()
-        if field not in {"integer", "real"}:
-            raise ValueError(
-                "Matrix Market counts must use integer or real coordinate values"
-            )
-        if symmetry != "general":
-            raise ValueError("Matrix Market counts must use general symmetry")
-        dimensions = ""
-        for line in handle:
-            stripped = line.strip()
-            if stripped and not stripped.startswith("%"):
-                dimensions = stripped
-                break
-        fields = dimensions.split()
-        if len(fields) != 3:
-            raise ValueError(
-                "Matrix Market dimensions line must contain three integers"
-            )
-        try:
-            n_rows, n_columns, n_entries = (int(value) for value in fields)
-        except ValueError as exc:
-            raise ValueError(
-                "Matrix Market dimensions line must contain three integers"
-            ) from exc
-        if n_rows < 0 or n_columns < 0 or n_entries < 0:
-            raise ValueError("Matrix Market dimensions cannot be negative")
-        return _MtxHeader(
-            field=field,
-            nRows=n_rows,
-            nColumns=n_columns,
-            nEntries=n_entries,
-        )
+        with open_text(raw) as text:
+            yield text
 
 
 def _count_sidecar_rows(
@@ -341,7 +289,8 @@ def _candidate_from_triplet(
     triplet: _ResolvedTriplet,
     open_text: Callable[[str], Any],
 ) -> MtxCandidate:
-    header = _read_header(lambda: open_text(triplet.matrix))
+    with open_text(triplet.matrix) as handle:
+        header = read_matrix_market_header(handle, triplet.matrix)
     feature_rows = _count_sidecar_rows(
         lambda: open_text(triplet.features),
         header=triplet.parseLayout,
@@ -353,8 +302,8 @@ def _candidate_from_triplet(
     preferred: MatrixOrientation = (
         "cellsByFeatures" if triplet.parseLayout else "featuresByCells"
     )
-    features_by_cells = feature_rows == header.nRows and cell_rows == header.nColumns
-    cells_by_features = cell_rows == header.nRows and feature_rows == header.nColumns
+    features_by_cells = feature_rows == header.n_rows and cell_rows == header.n_columns
+    cells_by_features = cell_rows == header.n_rows and feature_rows == header.n_columns
     if preferred == "featuresByCells" and features_by_cells:
         orientation: MatrixOrientation = "featuresByCells"
     elif preferred == "cellsByFeatures" and cells_by_features:
@@ -365,7 +314,7 @@ def _candidate_from_triplet(
         orientation = "cellsByFeatures"
     else:
         raise ValueError(
-            f"Matrix dimensions ({header.nRows}, {header.nColumns}) do not "
+            f"Matrix dimensions ({header.n_rows}, {header.n_columns}) do not "
             f"match {feature_rows} feature rows and {cell_rows} cell rows"
         )
     cell_id_keys = (
@@ -377,8 +326,8 @@ def _candidate_from_triplet(
         if triplet.parseLayout
         else ()
     )
-    n_cells = header.nColumns if orientation == "featuresByCells" else header.nRows
-    n_features = header.nRows if orientation == "featuresByCells" else header.nColumns
+    n_cells = header.n_columns if orientation == "featuresByCells" else header.n_rows
+    n_features = header.n_rows if orientation == "featuresByCells" else header.n_columns
     return MtxCandidate(
         source=source,
         matrixPath=triplet.matrix,
@@ -387,7 +336,7 @@ def _candidate_from_triplet(
         matrixOrientation=orientation,
         nCells=n_cells,
         nFeatures=n_features,
-        nEntries=header.nEntries,
+        nEntries=header.n_entries,
         archivePath=archive_path,
         cellMetadataPath=triplet.cellMetadata,
         featureReferencePath=triplet.featureReference,
@@ -575,8 +524,10 @@ class _MtxEngine:
             self.matrixPath = self._local_path(candidate.matrixPath)
             self.featurePath = self._local_path(candidate.featurePath)
             self.cellPath = self._local_path(candidate.cellPath)
-            self.header = _read_header(lambda: _open_path_text(self.matrixPath))
-            self.matrixEntryCount = self.header.nEntries
+            self.header = matrix_market_header(
+                self.matrixPath, name=self._matrix_name()
+            )
+            self.matrixEntryCount = self.header.n_entries
             self.rawCellCount = candidate.nCells
             self.nFeatures = candidate.nFeatures
             (
@@ -684,6 +635,12 @@ class _MtxEngine:
     def _local_path(self, path: str) -> str:
         return self._archivePaths.get(path, path)
 
+    def _matrix_name(self) -> str:
+        """The matrix as errors name it: its path, or its member of a ZIP archive."""
+        if self.candidate.archivePath is None:
+            return self.candidate.matrixPath
+        return f"{self.candidate.matrixPath} in {self.candidate.archivePath}"
+
     def _set_valid_cells(self, valid: np.ndarray) -> None:
         self.validCellIndexes = valid
         self.nCells = int(valid.size)
@@ -705,7 +662,9 @@ class _MtxEngine:
             names = ids.copy()
             types = np.full(ids.size, "Peaks", dtype=object)
         elif _is_parse_matrix(self.candidate.matrixPath):
-            frame = pd.read_csv(self.featurePath, compression="infer")
+            frame = pd.read_csv(
+                self.featurePath, compression=_compression(self.featurePath)
+            )
             columns = tuple(str(value) for value in frame.columns)
             id_column = _column_name(
                 columns,
@@ -728,7 +687,7 @@ class _MtxEngine:
                 header=None,
                 dtype=str,
                 keep_default_na=False,
-                compression="infer",
+                compression=_compression(self.featurePath),
             )
             ids = frame.iloc[:, 0].astype(str).to_numpy()
             names = (
@@ -755,7 +714,7 @@ class _MtxEngine:
             header=None,
             dtype=str,
             keep_default_na=False,
-            compression="infer",
+            compression=_compression(self.featurePath),
         )
         if frame.shape[1] < 3:
             raise ValueError(
@@ -779,7 +738,7 @@ class _MtxEngine:
         cell_id_key: str | None,
     ) -> tuple[np.ndarray, dict[str, np.ndarray], str | None]:
         if _is_parse_matrix(self.candidate.matrixPath):
-            frame = pd.read_csv(self.cellPath, compression="infer")
+            frame = pd.read_csv(self.cellPath, compression=_compression(self.cellPath))
             aliases = [key for key in ("bc_wells", "bc_index") if key in frame.columns]
             if cell_id_key is None:
                 if len(aliases) != 1:
@@ -807,7 +766,7 @@ class _MtxEngine:
                     header=None,
                     dtype=str,
                     keep_default_na=False,
-                    compression="infer",
+                    compression=_compression(self.cellPath),
                 )
             except pd.errors.EmptyDataError:
                 # A sidecar without lines lists no cells.
@@ -833,7 +792,7 @@ class _MtxEngine:
         if reference_path is None:
             return {}
         path = self._local_path(reference_path)
-        frame = pd.read_csv(path, compression="infer")
+        frame = pd.read_csv(path, compression=_compression(path))
         columns = tuple(str(value) for value in frame.columns)
         id_column = _column_name(
             columns,
@@ -876,58 +835,21 @@ class _MtxEngine:
         self,
         lines_in_mem: int,
     ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        if self.header.nEntries == 0:
-            return
-        separator = r"\s+" if self.separator == " " else self.separator
-        count_dtype: Any = np.int64 if self.header.field == "integer" else np.float64
-        try:
-            stream = pd.read_csv(
-                self.matrixPath,
-                comment="%",
-                sep=separator,
-                header=0,
-                names=["axis1", "axis2", "count"],
-                chunksize=lines_in_mem,
-                dtype={
-                    "axis1": np.int64,
-                    "axis2": np.int64,
-                    "count": count_dtype,
-                },
-                compression="infer",
-            )
-            for frame in stream:
-                axis1 = frame["axis1"].to_numpy(dtype=np.int64, copy=False)
-                axis2 = frame["axis2"].to_numpy(dtype=np.int64, copy=False)
-                raw_values = frame["count"].to_numpy(copy=False)
-                if (
-                    not np.isfinite(raw_values).all()
-                    or np.any(raw_values < 0)
-                    or np.any(raw_values != np.floor(raw_values))
-                ):
-                    raise ValueError(
-                        "Matrix Market counts must be finite non-negative integers"
-                    )
-                values = raw_values.astype(np.uint64, copy=False)
-                if self.candidate.matrixOrientation == "featuresByCells":
-                    features = axis1 + self.indexOffset
-                    cells = axis2 + self.indexOffset
-                else:
-                    cells = axis1 + self.indexOffset
-                    features = axis2 + self.indexOffset
-                if (
-                    np.any(features < 0)
-                    or np.any(features >= self.nFeatures)
-                    or np.any(cells < 0)
-                    or np.any(cells >= self.rawCellCount)
-                ):
-                    raise ValueError(
-                        "Matrix Market coordinate is outside the declared dimensions"
-                    )
-                yield features, cells, values
-        except (TypeError, ValueError) as exc:
-            if isinstance(exc, ValueError) and str(exc).startswith("Matrix Market"):
-                raise
-            raise ValueError("Could not parse Matrix Market coordinates") from exc
+        # An archive's matrix moves each time the archive is extracted.
+        for axis1, axis2, raw_values in matrix_market_entries(
+            self.header,
+            lines_in_mem,
+            source=self.matrixPath,
+            separator=self.separator,
+            index_offset=self.indexOffset,
+            counts=True,
+        ):
+            assert raw_values is not None
+            values = raw_values.astype(np.uint64, copy=False)
+            if self.candidate.matrixOrientation == "featuresByCells":
+                yield axis1, axis2, values
+            else:
+                yield axis2, axis1, values
 
     @staticmethod
     def _order_violation(
@@ -1037,11 +959,6 @@ class _MtxEngine:
                 np.uint64(reduced[-1]),
             )
 
-        if parsed != self.header.nEntries:
-            raise ValueError(
-                f"Matrix Market header declares {self.header.nEntries} entries, "
-                f"but {parsed} were read"
-            )
         if pending is not None:
             account(
                 np.array([pending[0]], dtype=np.int64),
@@ -1135,11 +1052,6 @@ class _MtxEngine:
                 int(features[last]),
                 int(cells[last]),
                 np.uint64(reduced[-1]),
-            )
-        if parsed != self.header.nEntries:
-            raise ValueError(
-                f"Matrix Market header declares {self.header.nEntries} entries, "
-                f"but {parsed} were read"
             )
         if pending is not None:
             yield (

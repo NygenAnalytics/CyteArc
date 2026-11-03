@@ -44,7 +44,11 @@ its rows is R's row-name layout, whose first field is the row name; R's
 delimiter after each row's last field also gives one field more than the
 header, an empty one, so when every row ends in its delimiter with nothing
 after it the table is refused, since the two layouts read alike there.
-Blank lines hold no rows.
+Blank lines hold no rows, and a row of fewer or more fields than the header
+is refused (:mod:`cytearc.readers._delimited`). A clone label that is one of
+:data:`cytearc.metadata.records.MISSING_TEXT`, such as ``NA``, ``None`` or
+``NULL``, means no clone, and a cell barcode joined from several columns
+must have every part.
 """
 
 import os
@@ -59,32 +63,30 @@ import numpy as np
 import pandas as pd
 
 from ..clones.assignments import clone_label_texts
+from ..metadata.records import MISSING_TEXT, file_lines
+from ..utils.files import HDF5_SIGNATURE, file_signature
 from ._delimited import (
-    HDF5_SIGNATURE,
     TextLayout,
-    compression,
     count_rows,
     first_lines,
     joined_columns,
-    line_list,
-    open_text,
-    parsed_chunks,
     require_columns,
-    signature,
     text_chunks,
-    text_errors,
     text_layout,
 )
 from ._h5ad_columns import (
-    column_length,
     index_key,
-    is_nullable,
-    read_column,
+    index_length,
+    obs_names,
     read_table_column,
     sparse_encoding,
     sparse_shape,
 )
-from ._text import as_text
+from ._matrix_market import (
+    MatrixMarketHeader,
+    matrix_market_entries,
+    matrix_market_header,
+)
 from ..utils.arguments import quoted_value
 
 __all__ = [
@@ -92,7 +94,6 @@ __all__ = [
     "CLONE_FORMATS",
     "CloneLayout",
     "CloneRows",
-    "MISSING_TEXT",
     "MatrixEntries",
     "clone_layout",
     "iter_clone_rows",
@@ -134,9 +135,6 @@ _TEXT_FORMATS = frozenset(
 )
 _H5AD_FORMATS = frozenset({"cospar_h5ad", "mito", "h5ad"})
 _COLUMN_ROLES = frozenset({"cell", "clone", "probability"})
-#: Text that R and pandas write for a missing value, which a table's clone
-#: column reads as no clone.
-MISSING_TEXT = frozenset({"", "NA", "NaN", "nan"})
 _MITO_UNASSIGNED = "unassigned"
 
 
@@ -189,7 +187,9 @@ class CloneLayout:
     clones_path: str | None = None
     _text: "TextLayout | None" = field(default=None, repr=False)
     _cells_text: "TextLayout | None" = field(default=None, repr=False)
-    _matrix: "_MatrixHeader | None" = field(default=None, repr=False)
+    _matrix: "MatrixMarketHeader | None" = field(default=None, repr=False)
+    # The matrix axis that holds the cells: 0 for rows, 1 for columns.
+    _cell_axis: int = field(default=0, repr=False)
 
     @property
     def is_matrix(self) -> bool:
@@ -224,37 +224,19 @@ class CloneLayout:
 
 
 @dataclass(frozen=True, slots=True)
-class _MatrixHeader:
-    """A Matrix Market clone matrix's shape, cell axis and header lines."""
-
-    n_rows: int
-    n_columns: int
-    n_entries: int
-    pattern: bool
-    header_lines: int
-    compression: str | None
-    cell_axis: int = 0
-
-    @property
-    def n_clones(self) -> int:
-        return self.n_columns if self.cell_axis == 0 else self.n_rows
-
-
-@dataclass(frozen=True, slots=True)
 class CloneRows:
     """A chunk of rows of a clone table, in file order.
 
     Attributes:
-        first_line: The line of the first row, counting rows: the header is
-            line 1 of a table and blank lines hold no row, and an AnnData
-            file's first cell is line 1.
+        lines: Each row's line in the file, the header being line 1, or an
+            AnnData file's row of each cell, counting from 1.
         barcodes: Each row's cell barcode, as text.
         clones: Each row's clone label, None for none.
         probabilities: Each row's clone probability, NaN for none, or None
             when the format gives none.
     """
 
-    first_line: int
+    lines: np.ndarray
     barcodes: np.ndarray
     clones: np.ndarray
     probabilities: np.ndarray | None
@@ -389,48 +371,6 @@ def _table_layout(
     )
 
 
-def _matrix_header(path: str, compression: str | None) -> _MatrixHeader:
-    with text_errors(path), open_text(path, compression) as handle:
-        banner = handle.readline().strip().split()
-        if len(banner) < 5 or banner[0].lower() != "%%matrixmarket":
-            raise ValueError(f"{path} is not a Matrix Market file")
-        kind, layout, field_type, symmetry = (word.lower() for word in banner[1:5])
-        if kind != "matrix" or layout != "coordinate":
-            raise ValueError(
-                f"{path} is a {layout} Matrix Market {kind}; a clone matrix must be "
-                "a coordinate matrix"
-            )
-        if field_type not in ("integer", "real", "pattern") or symmetry != "general":
-            raise ValueError(
-                f"{path} holds {field_type} {symmetry} values; a clone matrix holds "
-                "integer, real or pattern values of a general matrix"
-            )
-        header_lines = 1
-        for line in handle:
-            header_lines += 1
-            if line.startswith("%") or not line.strip():
-                continue
-            sizes = line.split()
-            break
-        else:
-            raise ValueError(f"{path} has no size line after its comments")
-    try:
-        n_rows, n_columns, n_entries = (int(value) for value in sizes)
-    except ValueError:
-        raise ValueError(
-            f"The size line of {path} must hold three whole numbers, not "
-            f"{quoted_value(' '.join(sizes))}"
-        ) from None
-    return _MatrixHeader(
-        n_rows=n_rows,
-        n_columns=n_columns,
-        n_entries=n_entries,
-        pattern=field_type == "pattern",
-        header_lines=header_lines,
-        compression=compression,
-    )
-
-
 def _beside(path: str) -> tuple[str, str | None]:
     """Find a clone matrix's cell list, and its clone list, in its folder."""
     matrix = Path(path)
@@ -491,16 +431,14 @@ def _list_cell_columns(
     )
 
 
-def _matrix_layout(
-    path: str, compression: str | None, columns: dict[str, tuple[str, ...]]
-) -> CloneLayout:
+def _matrix_layout(path: str, columns: dict[str, tuple[str, ...]]) -> CloneLayout:
     extra = sorted(set(columns) - {"cell"})
     if extra:
         raise ValueError(
             "format='matrix' takes only columns={'cell': ...}, the columns of its "
             "cell list"
         )
-    header = _matrix_header(path, compression)
+    header = matrix_market_header(path, fields=("integer", "real", "pattern"))
     cells_path, clones_path = _beside(path)
     cells_text = text_layout(cells_path)
     cell = _list_cell_columns(cells_text, columns.get("cell"))
@@ -530,15 +468,8 @@ def _matrix_layout(
         cells_path=cells_path,
         clones_path=clones_path,
         _cells_text=cells_text,
-        _matrix=_MatrixHeader(
-            n_rows=header.n_rows,
-            n_columns=header.n_columns,
-            n_entries=header.n_entries,
-            pattern=header.pattern,
-            header_lines=header.header_lines,
-            compression=header.compression,
-            cell_axis=axes[0],
-        ),
+        _matrix=header,
+        _cell_axis=axes[0],
     )
 
 
@@ -633,7 +564,7 @@ def clone_layout(
         )
     resolved = _columns_mapping(columns)
     name = os.fspath(path)
-    head = signature(name)
+    head = file_signature(name)
     if not head:
         raise ValueError(f"{name} is empty")
     if head.startswith(HDF5_SIGNATURE):
@@ -642,25 +573,19 @@ def clone_layout(
                 f"{name} is an AnnData file, not format={quoted_value(format)}"
             )
         return _h5ad_layout(name, format, resolved)
-    found = compression(name)
-    first = first_lines(name, found, 1)
+    first = first_lines(name, 1)
     if first and first[0].lower().startswith("%%matrixmarket"):
         if format not in (None, "matrix"):
             raise ValueError(
                 f"{name} is a Matrix Market file, not format={quoted_value(format)}"
             )
-        return _matrix_layout(name, found, resolved)
+        return _matrix_layout(name, resolved)
     if format is not None and format not in _TEXT_FORMATS:
         raise ValueError(f"{name} is a text table, not format={quoted_value(format)}")
     return _table_layout(name, format, resolved)
 
 
-def _probabilities(
-    values: pd.Series,
-    first_line: int,
-    path: str,
-    table: "TextLayout | None" = None,
-) -> np.ndarray:
+def _probabilities(values: pd.Series, lines: np.ndarray, path: str) -> np.ndarray:
     text = values.str.strip()
     missing = text.isin(MISSING_TEXT).to_numpy()
     numbers = pd.to_numeric(text.where(~missing, None), errors="coerce").to_numpy(
@@ -672,9 +597,25 @@ def _probabilities(
     if len(invalid):
         raise ValueError(
             f"Clone probabilities of {path} must be numbers from 0 to 1, or NA, on "
-            f"lines {line_list(invalid, first_line, table)}"
+            f"{file_lines(lines[invalid])}"
         )
     return np.asarray(numbers, dtype=np.float64)
+
+
+def _refuse_cellless(
+    barcodes: np.ndarray, lines: np.ndarray, path: str, columns: Sequence[str]
+) -> None:
+    """Refuse rows without a cell barcode, or without a part of one."""
+    empty = np.flatnonzero(barcodes == "")
+    if len(empty):
+        what = (
+            "rows without a cell barcode"
+            if len(columns) < 2
+            else "rows that lack a part of their cell barcode ("
+            + ", ".join(quoted_value(name) for name in columns)
+            + ")"
+        )
+        raise ValueError(f"{path} has {what} on {file_lines(lines[empty])}")
 
 
 def _table_labels(values: pd.Series, format: str) -> np.ndarray:
@@ -703,71 +644,26 @@ def _iter_table_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows
     probability_position = (
         index[layout.probability] if layout.probability is not None else None
     )
-    for first_line, chunk in text_chunks(text, chunk_rows):
+    for lines, chunk in text_chunks(text, chunk_rows):
         barcodes = joined_columns(chunk, cell_positions, CELL_ID_SEPARATOR)
-        empty = np.flatnonzero(barcodes == "")
-        if len(empty):
-            raise ValueError(
-                f"{layout.path} has rows without a cell barcode on lines "
-                f"{line_list(empty, first_line, text)}"
-            )
+        _refuse_cellless(barcodes, lines, layout.path, layout.cell)
         probabilities = None
         if probability_position is not None:
             probabilities = _probabilities(
-                chunk[probability_position], first_line, layout.path, text
+                chunk[probability_position], lines, layout.path
             )
         yield CloneRows(
-            first_line=first_line,
+            lines=lines,
             barcodes=barcodes,
             clones=_table_labels(chunk[clone_position], layout.format),
             probabilities=probabilities,
         )
 
 
-def _obs_names(handle: h5py.File) -> h5py.Dataset | h5py.Group:
-    """Return the node of an AnnData file's cell names.
-
-    AnnData writes a text index as a dataset, or, in current releases, as a
-    nullable string array: a group of values and a mask.
-    """
-    obs = handle["obs"]
-    key = index_key(obs)
-    names = obs.get(str(key))
-    if not (isinstance(names, h5py.Dataset) and names.ndim == 1) and not is_nullable(
-        names
-    ):
-        raise ValueError(
-            f"{handle.filename} stores its cell names in a form CyteArc cannot read"
-        )
-    return names
-
-
-def _n_obs(names: h5py.Dataset | h5py.Group) -> int:
-    return int(column_length(names) or 0)
-
-
-def _decoded(values: np.ndarray) -> np.ndarray:
-    return np.asarray([as_text(value) for value in values.tolist()], dtype=object)
-
-
-def _obs_name_rows(
-    names: h5py.Dataset | h5py.Group, start: int, stop: int, path: str
-) -> np.ndarray:
-    """Return the names of cells ``[start, stop)`` as text, refusing missing ones."""
-    values, missing = read_column(names, start, stop)
-    if missing.any():
-        raise ValueError(
-            f"{path} has cells without a name in its obs index, the first in row "
-            f"{start + int(np.flatnonzero(missing)[0]) + 1}"
-        )
-    return _decoded(np.asarray(values))
-
-
 def _iter_h5ad_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows]:
     with h5py.File(layout.path, "r") as handle:
-        names = _obs_names(handle)
         obs = handle["obs"]
-        n_cells = _n_obs(names)
+        n_cells = index_length(obs, layout.path)
         for start in range(0, n_cells, chunk_rows):
             stop = min(start + chunk_rows, n_cells)
             values, missing = read_table_column(
@@ -798,8 +694,8 @@ def _iter_h5ad_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows]
                         "must hold probabilities from 0 to 1"
                     )
             yield CloneRows(
-                first_line=start + 1,
-                barcodes=_obs_name_rows(names, start, stop, layout.path),
+                lines=np.arange(start + 1, stop + 1, dtype=np.int64),
+                barcodes=obs_names(handle, start, stop, path=layout.path),
                 clones=labels,
                 probabilities=probabilities,
             )
@@ -836,24 +732,18 @@ def matrix_cells(layout: CloneLayout, chunk_rows: int) -> Iterator[np.ndarray]:
         raise ValueError(f"format={quoted_value(layout.format)} is not a matrix")
     if layout.format == "cospar_h5ad":
         with h5py.File(layout.path, "r") as handle:
-            names = _obs_names(handle)
-            n_cells = _n_obs(names)
+            n_cells = index_length(handle["obs"], layout.path)
             for start in range(0, n_cells, chunk_rows):
                 stop = min(start + chunk_rows, n_cells)
-                yield _obs_name_rows(names, start, stop, layout.path)
+                yield obs_names(handle, start, stop, path=layout.path)
         return
     text = layout._cells_text
     assert text is not None
     index = {name: position for position, name in enumerate(text.names)}
     positions = [index[name] for name in layout.cell] if layout.cell else [0]
-    for first_line, chunk in text_chunks(text, chunk_rows):
+    for lines, chunk in text_chunks(text, chunk_rows):
         barcodes = joined_columns(chunk, positions, CELL_ID_SEPARATOR)
-        empty = np.flatnonzero(barcodes == "")
-        if len(empty):
-            raise ValueError(
-                f"The cell list {text.path} has cells without a barcode on lines "
-                f"{line_list(empty, first_line, text)}"
-            )
+        _refuse_cellless(barcodes, lines, f"The cell list {text.path}", layout.cell)
         yield barcodes
 
 
@@ -876,12 +766,13 @@ def matrix_clone_ids(layout: CloneLayout) -> np.ndarray:
     header = layout._matrix
     assert header is not None
     if layout.clones_path is None:
-        return np.arange(header.n_clones).astype(str).astype(object)
+        n_clones = header.n_columns if layout._cell_axis == 0 else header.n_rows
+        return np.arange(n_clones).astype(str).astype(object)
     text = text_layout(layout.clones_path)
     labels = np.concatenate(
         [
             chunk[0].str.strip().to_numpy(dtype=object)
-            for _line, chunk in text_chunks(text, 1 << 20)
+            for _lines, chunk in text_chunks(text, 1 << 20)
         ]
         or [np.empty(0, dtype=object)]
     )
@@ -909,7 +800,7 @@ def _x_clone_shape(handle: h5py.File) -> tuple[int, int]:
 
 def _x_clone_entries(layout: CloneLayout, chunk_rows: int) -> Iterator[MatrixEntries]:
     with h5py.File(layout.path, "r") as handle:
-        n_obs = _n_obs(_obs_names(handle))
+        n_obs = index_length(handle["obs"], layout.path)
         n_rows, n_columns = _x_clone_shape(handle)
         if n_rows != n_obs:
             raise ValueError(
@@ -944,51 +835,17 @@ def _x_clone_entries(layout: CloneLayout, chunk_rows: int) -> Iterator[MatrixEnt
 def _mtx_entries(layout: CloneLayout, chunk_rows: int) -> Iterator[MatrixEntries]:
     header = layout._matrix
     assert header is not None
-    columns = [0, 1] if header.pattern else [0, 1, 2]
-    chunks = parsed_chunks(
-        layout.path,
-        sep=r"\s+",
-        header=None,
-        skiprows=header.header_lines,
-        usecols=columns,
-        compression=header.compression,
-        chunksize=chunk_rows,
-        dtype={column: np.float64 for column in columns},
-    )
-    seen = 0
-    for chunk in chunks:
-        seen += len(chunk)
-        coordinates = chunk[[0, 1]].to_numpy(dtype=np.float64)
-        whole = np.isfinite(coordinates) & (coordinates == np.floor(coordinates))
-        rows = coordinates[:, 0].astype(np.int64)
-        cols = coordinates[:, 1].astype(np.int64)
-        outside = (
-            ~whole.all(axis=1)
-            | (rows < 1)
-            | (rows > header.n_rows)
-            | (cols < 1)
-            | (cols > header.n_columns)
-        )
-        if outside.any():
-            raise ValueError(
-                f"The clone matrix {layout.path} has entries outside its "
-                f"{header.n_rows} by {header.n_columns} shape"
-            )
-        member = np.ones(len(chunk), dtype=bool)
-        if not header.pattern:
-            values = chunk[2].to_numpy(dtype=np.float64)
-            if not np.all(np.isfinite(values)):
+    for rows, columns, values in matrix_market_entries(header, chunk_rows):
+        member = np.ones(len(rows), dtype=bool)
+        if values is not None:
+            numbers = np.asarray(values, dtype=np.float64)
+            if not np.all(np.isfinite(numbers)):
                 raise ValueError(
                     f"The clone matrix {layout.path} holds values that are not finite"
                 )
-            member = values != 0
-        cells, clones = (rows, cols) if header.cell_axis == 0 else (cols, rows)
-        yield MatrixEntries(cells=cells[member] - 1, clones=clones[member] - 1)
-    if seen != header.n_entries:
-        raise ValueError(
-            f"The clone matrix {layout.path} declares {header.n_entries} entries but "
-            f"holds {seen}"
-        )
+            member = numbers != 0
+        cells, clones = (rows, columns) if layout._cell_axis == 0 else (columns, rows)
+        yield MatrixEntries(cells=cells[member], clones=clones[member])
 
 
 def matrix_entries(layout: CloneLayout, chunk_rows: int) -> Iterator[MatrixEntries]:

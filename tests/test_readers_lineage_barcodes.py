@@ -305,7 +305,7 @@ def test_a_file_without_a_name_before_its_extensions_needs_a_library(tmp_path) -
 
 def test_rows_name_their_lines_when_a_value_is_wrong(tmp_path) -> None:
     missing_cell = _file(tmp_path, "a.tsv", "gene\tcell\tcount\nLB\tA\t1\nLB\t\t2\n")
-    with pytest.raises(ValueError, match="without a cell barcode on lines 3"):
+    with pytest.raises(ValueError, match="without a cell barcode on line 3$"):
         _rows(barcode_layout(missing_cell))
     bad_count = _file(tmp_path, "b.tsv", "gene\tcell\tcount\nLB\tA\t1\nLB\tB\t2.5\n")
     with pytest.raises(ValueError, match="count must be a whole number .* line 3"):
@@ -339,7 +339,7 @@ _PAST_BLANK_LINES = {
     "a row without a cell": (
         "gene\tcell\tcount\nLB\tA\t1\n\n\nLB\t\t2\n",
         {},
-        "without a cell barcode on lines 5",
+        "without a cell barcode on line 5$",
     ),
     "a count that is not whole": (
         "gene\tcell\tcount\nLB\tA\t1\n\n\nLB\tB\t2.5\n",
@@ -354,7 +354,7 @@ _PAST_BLANK_LINES = {
     "a TREX molecule cut short": (
         "#cell_id\tumi\tclone_id\tread_count\nAAAC\tGG\tTTT\t3\n\n\nAAAC\tGC\tTTT\n",
         {},
-        "without read_count on line 5",
+        "line 5 holds 3 fields, but its header names 4 columns",
     ),
     "a pycashier row shifted by its read name": (
         "info\tumi\tcell\tbarcode\n@r\tGG\tAA\tT\n\n\n@r_2\tx\tAA\tT\n",
@@ -412,7 +412,10 @@ def test_a_cell_barcode_joined_from_columns_needs_every_part(tmp_path) -> None:
     assert chunks[0].cells.tolist() == ["s1__AA", "s2__CC"]
     for name, row in (("cell.tsv", "s2\t\tG"), ("sample.tsv", " \tCC\tG")):
         path = _file(tmp_path, name, f"s\tc\tb\ns1\tAA\tT\n\n{row}\n")
-        with pytest.raises(ValueError, match="without a cell barcode on lines 4"):
+        with pytest.raises(
+            ValueError,
+            match=r"rows that lack a part of their cell barcode \('s', 'c'\) on line 4$",
+        ):
             _rows(barcode_layout(path, format="pairs", columns=columns), 10)
 
 
@@ -722,7 +725,10 @@ def test_a_missing_name_and_an_index_of_another_form_are_refused(tmp_path) -> No
         flags = np.asarray(mask[:], dtype=bool)
         flags[2] = True
         mask[...] = flags
-    with pytest.raises(ValueError, match="name missing from the index .* row 3"):
+    with pytest.raises(
+        ValueError,
+        match="barcodes without a name in the index of its var, the first in row 3",
+    ):
         _rows(barcode_layout(path), 7)
     # An index that is neither a dataset of names nor a nullable string array.
     folder = tmp_path / "odd"
@@ -732,7 +738,9 @@ def test_a_missing_name_and_an_index_of_another_form_are_refused(tmp_path) -> No
         names = handle["obs/_index"][:]
         del handle["obs/_index"]
         handle["obs"].create_dataset("_index", data=np.stack([names, names], axis=1))
-    with pytest.raises(ValueError, match="stores its cell names in a form CyteArc"):
+    with pytest.raises(
+        ValueError, match="The obs of .* stores its index of names in a form CyteArc"
+    ):
         barcode_layout(odd)
 
 
@@ -1152,7 +1160,7 @@ def test_quicats_wide_table_names_the_lines_of_blank_lines_and_quotes(
     [
         ("s1,B_s1,0", "holds 3 fields on line 3, where its header names 4 columns"),
         ("s1,B_s1,0,1,5", "holds 5 fields on line 3, where its header names 4 columns"),
-        ("s1,,0,1", "rows without a cell barcode on lines 3"),
+        ("s1,,0,1", "rows without a cell barcode on line 3$"),
         ("s1,B_s1,inf,1", "holds 'inf' as the count of barcode 'TTT' on line 3"),
         ("s1,B_s1,1,nan", "holds 'nan' as the count of barcode 'GGG' on line 3"),
         # A line of two wrong counts is named once.
@@ -1213,22 +1221,31 @@ def test_quicats_wide_table_refuses_an_index_column(tmp_path) -> None:
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        # A pycashier read cut short before its barcode.
+        # A pycashier read cut short before its barcode: a row of fewer
+        # fields than its header is refused before any of its values.
         (
             "info\tumi\tcell\tbarcode\n@r1\tGGAT\tAAAC\tTTTG\n@r2\tGGAT\tAAAC\n",
-            "without barcode on line 3",
+            "line 3 holds 3 fields, but its header names 4 columns",
         ),
         # A TREX molecule without its reads.
         (
             "#cell_id\tumi\tclone_id\tread_count\nAAAC\tGG\tTTT\t3\nAAAC\tGC\tTTT\n",
+            "line 3 holds 3 fields, but its header names 4 columns",
+        ),
+        # A TREX molecule whose reads field is empty, which TREX fills.
+        (
+            "#cell_id\tumi\tclone_id\tread_count\nAAAC\tGG\tTTT\t3\nAAAC\tGC\tTTT\t\n",
             "without read_count on line 3",
         ),
         # A BARtab pair without its UMIs.
-        ("gene\tcell\tcount\nLB1\tAAAC\t4\nLB2\tAAAC\n", "without count on line 3"),
+        (
+            "gene\tcell\tcount\nLB1\tAAAC\t4\nLB2\tAAAC\n",
+            "line 3 holds 2 fields, but its header names 3 columns",
+        ),
         # A CellTag read without its tag.
         (
             "Cell.BC\tUMI\tCell.Tag\nAAAC-1\tGG\tTTTT\nAAAC-1\tGG\n",
-            "without Cell.Tag on line 3",
+            "line 3 holds 2 fields, but its header names 3 columns",
         ),
         # A QuiCAT pair with a barcode and no count.
         (
@@ -1239,12 +1256,13 @@ def test_quicats_wide_table_refuses_an_index_column(tmp_path) -> None:
         (
             "cellID\tUMI\tOriginalBarcode\tBC50StarcodeD8\tSampleNum\n"
             "AAAC\tGG\tTTTA\tTTTT\t1\nCCCG\tGC\tTTTA\tTTTT\n",
-            "without SampleNum on line 3",
+            "line 3 holds 4 fields, but its header names 5 columns",
         ),
-        # A BARtab annotation without its UMI list.
+        # A BARtab annotation without its UMI list, in R's row-name layout.
         (
             "barcode\tbc.umi.count\nAAAC\tLB1\t4\nCCCG\tLB2\n",
-            "without bc.umi.count on line 3",
+            "line 3 holds 2 fields, but its rows hold 3: a row name and the 2 "
+            "columns that its header names",
         ),
     ],
 )
@@ -1637,9 +1655,7 @@ def test_required_columns_are_found_in_time_linear_in_the_header(tmp_path) -> No
         __hash__ = str.__hash__
 
     names = tuple(Name(f"B{index}") for index in range(2_000))
-    text = TextLayout(
-        path="wide.csv", names=names, delimiter=",", compression=None, row_names=False
-    )
+    text = TextLayout(path="wide.csv", names=names, delimiter=",", row_names=False)
     require_columns(text, list(names))
     # Checking each name against the whole header compared 2,000 names about
     # 2,000 times each.
@@ -1883,7 +1899,7 @@ def test_a_fatemap_table_without_a_header_names_its_short_row(tmp_path) -> None:
     )
     layout = barcode_layout(path)
     assert (layout.format, layout.level) == ("fatemap", "molecules")
-    with pytest.raises(ValueError, match="without BC50StarcodeD8 on line 2"):
+    with pytest.raises(ValueError, match="line 2 holds 3 fields, but its rows hold 8"):
         _rows(layout, 10)
 
 
@@ -1893,3 +1909,27 @@ def test_a_gzip_file_of_no_text_is_refused_as_empty(tmp_path) -> None:
     path.write_bytes(gzip.compress(b""))
     with pytest.raises(ValueError, match="is empty; a barcode table needs a header"):
         barcode_layout(path)
+
+
+@pytest.mark.parametrize("chunk_rows", [1, 2, 3, 1000])
+@pytest.mark.parametrize(
+    ("row", "n_fields"),
+    [("LB3\tCCCG\t2\tLB9", 4), ("LB3\tCCCG", 2)],
+    ids=["long", "short"],
+)
+def test_a_row_of_another_width_is_refused_by_its_line_in_chunks_of_any_size(
+    tmp_path, chunk_rows, row, n_fields
+) -> None:
+    # Chunks of one and two rows start on the row, where pandas alone drops
+    # an extra field or pads a missing one; larger chunks hold it.
+    path = _file(
+        tmp_path,
+        "counts.tsv",
+        f"gene\tcell\tcount\nLB1\tAAAC\t4\nLB2\tAAAC\t1\n{row}\nLB4\tGGGT\t5\n",
+    )
+    with pytest.raises(
+        ValueError,
+        match=rf"is malformed: line 4 holds {n_fields} fields, but its header "
+        r"names 3 columns$",
+    ):
+        _rows(barcode_layout(path), chunk_rows)

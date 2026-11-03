@@ -7,6 +7,7 @@ import h5py
 import numpy as np
 import pytest
 
+from cytearc.metadata.records import MISSING_TEXT
 from cytearc.readers.clone_tables import (
     CELL_ID_SEPARATOR,
     CLONE_FORMATS,
@@ -278,21 +279,21 @@ def test_errors_name_the_file_line_of_a_row_after_blank_lines(
     tmp_path, chunk_rows
 ) -> None:
     path = _write(tmp_path / "clones.csv", "Cell_ID,Clone_ID\nA,1\n\n\nB,2\n,3\n")
-    with pytest.raises(ValueError, match="without a cell barcode on lines 6$"):
+    with pytest.raises(ValueError, match="without a cell barcode on line 6$"):
         _rows(path, chunk_rows=chunk_rows)
     # R's space-separated layout, where a row's name may be quoted empty text.
     spaced = _write(
         tmp_path / "celltag_data.txt",
         '"CellTagD0" "CellTagD3"\n"AAA-1" 16 NA\n\n"" NA 2\n',
     )
-    with pytest.raises(ValueError, match="without a cell barcode on lines 4$"):
+    with pytest.raises(ValueError, match="without a cell barcode on line 4$"):
         _rows(spaced, chunk_rows=chunk_rows, columns={"clone": "CellTagD3"})
     # A quoted field that holds a line break spans two lines of the file.
     quoted = _write(
         tmp_path / "clone_post_2.tsv",
         'cell\tclone_opt\tp_opt\nA\t"1\n2"\t0.5\n\nB\t1\t3\n',
     )
-    with pytest.raises(ValueError, match="or NA, on lines 5$"):
+    with pytest.raises(ValueError, match="or NA, on line 5$"):
         _rows(quoted, chunk_rows=chunk_rows)
 
 
@@ -363,7 +364,7 @@ def test_probabilities_outside_zero_to_one_name_their_lines(tmp_path, value) -> 
         tmp_path / "clone_post_2.tsv",
         f"cell\tclone_opt\tp_opt\nA\t1\t0.5\nB\t1\t{value}\n",
     )
-    with pytest.raises(ValueError, match="numbers from 0 to 1, or NA, on lines 3"):
+    with pytest.raises(ValueError, match="numbers from 0 to 1, or NA, on line 3$"):
         _rows(path)
 
 
@@ -525,30 +526,41 @@ def test_the_matrix_axis_whose_length_matches_the_cell_list_holds_the_cells(
         ),
         (
             "%%MatrixMarket matrix array integer general\n3 2\n",
-            "a clone matrix must be a coordinate matrix",
+            "must use coordinate matrix format, but .* begins",
+        ),
+        (
+            "%%MatrixMarket matrix coordinate complex general\n3 2 0\n",
+            "must use integer, real or pattern coordinate values, but .* holds "
+            "'complex' values",
         ),
         (
             "%%MatrixMarket matrix coordinate integer symmetric\n3 2 0\n",
-            "holds integer symmetric values",
+            "must use general symmetry, but .* is 'symmetric'",
         ),
-        ("%%MatrixMarket matrix coordinate integer general\n3 2\n", "size line of"),
-        ("%%MatrixMarket matrix coordinate integer general\n%\n", "has no size line"),
+        (
+            "%%MatrixMarket matrix coordinate integer general\n3 2\n",
+            "dimensions line must contain three integers, but .* has '3 2'",
+        ),
+        (
+            "%%MatrixMarket matrix coordinate integer general\n%\n",
+            "dimensions line must contain three integers, but .* ends before it",
+        ),
         (
             "%%MatrixMarket matrix coordinate integer general\n3 2 1\n4 1 1\n",
-            "entries outside its 3 by 2 shape",
+            "outside the declared dimensions, 3 by 2",
         ),
         (
             "%%MatrixMarket matrix coordinate integer general\n3 2 1\n1 0 1\n",
-            "entries outside its 3 by 2 shape",
+            "outside the declared dimensions, 3 by 2",
         ),
         # Matrix Market counts from 1, so a row of 0 would wrap to the last cell.
         (
             "%%MatrixMarket matrix coordinate integer general\n3 2 1\n0 1 1\n",
-            "entries outside its 3 by 2 shape",
+            "outside the declared dimensions, 3 by 2",
         ),
         (
             "%%MatrixMarket matrix coordinate integer general\n3 2 1\n1.5 1 1\n",
-            "entries outside its 3 by 2 shape",
+            "Could not parse Matrix Market coordinates",
         ),
         (
             "%%MatrixMarket matrix coordinate real general\n3 2 1\n1 1 inf\n",
@@ -556,13 +568,13 @@ def test_the_matrix_axis_whose_length_matches_the_cell_list_holds_the_cells(
         ),
         (
             "%%MatrixMarket matrix coordinate integer general\n3 2 2\n1 1 1\n",
-            "declares 2 entries but holds 1",
+            "header declares 2 entries, but 1 were read",
         ),
         (
             "%%MatrixMarket matrix coordinate integer general\n3 2 1\n1 x 1\n",
-            "is malformed",
+            "Could not parse Matrix Market coordinates",
         ),
-        ("%%MatrixMarket\n3 2 1\n", "is not a Matrix Market file"),
+        ("%%MatrixMarket\n3 2 1\n", "must use coordinate matrix format"),
     ],
 )
 def test_broken_clone_matrices_are_refused(tmp_path, matrix, message) -> None:
@@ -645,7 +657,9 @@ def test_cell_lists_name_cells_by_a_cell_column_or_row_names(tmp_path) -> None:
     assert layout.cell == ()
     assert np.concatenate(list(matrix_cells(layout, 5))).tolist() == ["A", "B"]
     _write(rows / "cells.tsv", "sample\nA\ts1\n\ts2\n")
-    with pytest.raises(ValueError, match="cells without a barcode on lines 3"):
+    with pytest.raises(
+        ValueError, match="cell list .* has rows without a cell barcode on line 3$"
+    ):
         list(matrix_cells(clone_layout(rows / "m.mtx"), 5))
 
 
@@ -788,11 +802,22 @@ def test_anndata_files_that_leave_the_clones_open_are_refused(
         clone_layout(path, **options)
 
 
-def test_cell_names_must_be_a_dataset_of_the_obs_table(tmp_path) -> None:
+def test_cell_names_are_an_index_that_anndata_writes(tmp_path) -> None:
+    # A categorical index reads as the barcode reader reads one, and refuses
+    # a code without a category as a cell without a name.
     path = _h5ad(tmp_path / "a.h5ad", mito=True)
     with h5py.File(path, "a") as handle:
         handle["obs"].attrs["_index"] = "named"
-    with pytest.raises(ValueError, match="stores its cell names in a form"):
+    with pytest.raises(
+        ValueError, match="has cells without a name in the index of its obs, the first"
+    ):
+        _rows(path)
+    with h5py.File(path, "a") as handle:
+        handle["obs"].create_dataset("square", data=np.zeros((2, 2)))
+        handle["obs"].attrs["_index"] = "square"
+    with pytest.raises(
+        ValueError, match="obs of .* stores its index of names in a form CyteArc"
+    ):
         _rows(path)
 
 
@@ -851,3 +876,68 @@ def test_celltag_multi_fixture_holds_its_published_clones() -> None:
     assert all(
         barcode.startswith("B4D") and barcode.endswith("-1") for barcode in barcodes
     )
+
+
+@pytest.mark.parametrize("token", sorted(MISSING_TEXT))
+def test_every_token_that_tables_read_as_missing_is_no_clone(tmp_path, token) -> None:
+    # Clone tables read missing values as every table read by its column
+    # names does, so a label None, NULL or N/A is a cell without a clone.
+    path = _write(tmp_path / "clones.csv", f"Cell_ID,Clone_ID\nA,{token}\nB,7\n")
+    assert _rows(path)[:2] == (["A", "B"], [None, "7"])
+    numbat = _write(
+        tmp_path / "clone_post_2.tsv",
+        f"cell\tclone_opt\tp_opt\nA\t1\t{token}\nB\t2\t0.5\n",
+    )
+    probabilities = _rows(numbat)[2]
+    assert np.isnan(probabilities[0]) and probabilities[1] == 0.5
+
+
+def test_obs_names_need_an_obs_table(tmp_path) -> None:
+    from cytearc.readers._h5ad_columns import obs_names
+
+    path = tmp_path / "no_obs.h5ad"
+    with h5py.File(path, "w") as handle:
+        handle.create_group("var")
+    with (
+        h5py.File(path, "r") as handle,
+        pytest.raises(ValueError, match="has no AnnData obs table with cell names"),
+    ):
+        obs_names(handle, path=str(path))
+
+
+def test_a_missing_cell_name_is_named_by_its_row_in_the_index(tmp_path) -> None:
+    from cytearc.readers._h5ad_columns import obs_names
+
+    path = tmp_path / "masked.h5ad"
+    with h5py.File(path, "w") as handle:
+        obs = handle.create_group("obs")
+        obs.attrs["_index"] = "names"
+        names = obs.create_group("names")
+        names.attrs["encoding-type"] = "nullable-string-array"
+        names.attrs["encoding-version"] = "0.1.0"
+        names.create_dataset("values", data=np.asarray([b"A", b"B", b"", b"D", b""]))
+        names.create_dataset("mask", data=np.asarray([0, 0, 1, 0, 1], dtype=bool))
+    with h5py.File(path, "r") as handle:
+        assert obs_names(handle, 0, 2, path=str(path)).tolist() == ["A", "B"]
+        # Rows count from the start of the index, wherever a read starts.
+        for start in (0, 1, 2):
+            with pytest.raises(ValueError, match="in the index.*the first in row 3$"):
+                obs_names(handle, start, path=str(path))
+        with pytest.raises(ValueError, match="the first in row 5$"):
+            obs_names(handle, 3, path=str(path))
+    with h5py.File(path, "a") as handle:
+        del handle["obs/names/mask"]
+        handle["obs/names"].create_dataset("mask", data=np.zeros(4, dtype=bool))
+    with (
+        h5py.File(path, "r") as handle,
+        pytest.raises(ValueError, match="mask that does not align with its names"),
+    ):
+        obs_names(handle, path=str(path))
+    # A group of neither values and a mask nor codes and categories.
+    with h5py.File(path, "a") as handle:
+        del handle["obs/names/mask"]
+    with (
+        h5py.File(path, "r") as handle,
+        pytest.raises(ValueError, match="stores its index of names in a form CyteArc"),
+    ):
+        obs_names(handle, path=str(path))

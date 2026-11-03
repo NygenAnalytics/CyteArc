@@ -316,7 +316,7 @@ def _contig_sources(
 
 def _iter_source(
     source: _ContigSource, chunk_rows: int
-) -> Iterator[tuple[int, pd.DataFrame]]:
+) -> Iterator[tuple[np.ndarray, pd.DataFrame]]:
     from ...readers.cellranger import CELLRANGER_VDJ_FORMAT, iter_vdj_contigs
 
     if source.format == CELLRANGER_VDJ_FORMAT:
@@ -348,7 +348,7 @@ def _encode_contigs(
     encoder = contig_encoder()
     for position, source in enumerate(sources):
         chunk_rows = chunk_rows_for(memory_bytes, columns=source.n_columns)
-        for _first_line, chunk in _iter_source(source, chunk_rows):
+        for _lines, chunk in _iter_source(source, chunk_rows):
             rows = join.cells(source.file, chunk["cell_id"].to_numpy(dtype=object))
             matched = rows >= 0
             encoder.add(

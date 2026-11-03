@@ -1,6 +1,5 @@
 """Gene annotations, transcription start sites, and region-to-gene windows."""
 
-import gzip
 import os
 import re
 from collections.abc import Iterable, Iterator
@@ -11,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from ...utils.arguments import integer_argument
+from ...utils.files import open_text
 from ...utils.numba import njit
 from .sequence import parse_coordinate_ids
 
@@ -24,15 +24,6 @@ __all__ = [
 GENE_COLUMNS = ("chrom", "start", "end", "strand", "gene_id", "gene_name", "gene_type")
 
 _GTF_ATTRIBUTE = re.compile(r'\s*([^\s";]+)\s+"?([^";]*)"?\s*')
-
-
-def open_text(path: str | os.PathLike[str]) -> TextIO:
-    """Open a text file, gzip-compressed (by its magic bytes, not its name) or not."""
-    with open(path, "rb") as handle:
-        compressed = handle.read(2) == b"\x1f\x8b"
-    if compressed:
-        return gzip.open(path, "rt", encoding="utf-8")
-    return open(path, encoding="utf-8")
 
 
 def shared_chromosomes(regions: np.ndarray, others: np.ndarray, what: str) -> list[str]:

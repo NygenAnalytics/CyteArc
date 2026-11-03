@@ -8,6 +8,12 @@ import pandas as pd
 from pandas.io.common import get_handle
 
 from ..utils.count_values import CountValueRange
+from ..utils.files import (
+    COMPRESSION_SIGNATURE_BYTES,
+    TAR_SIGNATURE_BYTES,
+    compression_of,
+    is_tar,
+)
 from ..utils.progress import iter_progress
 from ._text import require_unique_identifiers
 from ..utils.arguments import bool_argument
@@ -17,6 +23,9 @@ from ..utils.arguments import bool_argument
 _QUOTING_SETTINGS = ("quotechar", "doublequote", "escapechar", "skipinitialspace")
 # read_csv settings that split lines in ways Python's csv module cannot follow.
 _UNSUPPORTED_SETTINGS = frozenset({"comment", "dialect", "lineterminator"})
+# The compressions of a tar archive that pandas' tar reader decompresses
+# itself, None for an archive that is not compressed.
+_TAR_COMPRESSIONS = (None, "gzip", "bz2", "xz")
 
 
 def _count_dtype(frame: pd.DataFrame, value_range: CountValueRange) -> np.dtype[Any]:
@@ -96,7 +105,10 @@ class CSVReader:
         batch_size: Number of lines to read at a time. Decrease this value if you have too many columns.
                     (Default value: 50,000)
         pandas_kwargs: A dictionary of keyword arguments to be passed to Pandas read_csv function.
-                       It cannot set ``comment``, ``dialect``, or ``lineterminator``.
+                       It cannot set ``comment``, ``dialect``, or ``lineterminator``. Without
+                       ``compression`` here, the file's first bytes decide whether it is gzip,
+                       bzip2, xz, Zstandard or ZIP-compressed, or a tar archive, whatever its
+                       name.
 
     Attributes:
         nFeatures: Number of features in dataset.
@@ -155,6 +167,10 @@ class CSVReader:
         self.pandas_kwargs["skiprows"] = skip_rows
         self.pandas_kwargs["chunksize"] = batch_size
         self.pandas_kwargs["index_col"] = id_column
+        if "compression" not in self.pandas_kwargs:
+            # pandas infers compression from the file's name; the file's first
+            # bytes decide here, as they decide for every reader.
+            self.pandas_kwargs["compression"] = self._compression()
         if id_column is not None:
             # Cell IDs are text as the file holds them: type inference would
             # read "001" as the number 1.
@@ -182,6 +198,36 @@ class CSVReader:
             self.countRange,
         ) = self._consistency_check()
 
+    def _compression(self) -> str | None:
+        """Return the file's compression by its first bytes, as pandas names it.
+
+        A tar archive, whose first member's header follows its compression,
+        is ``"tar"``, since pandas' tar reader decompresses it too.
+        """
+        head = self._first_bytes(None)
+        compression = compression_of(head[:COMPRESSION_SIGNATURE_BYTES])
+        if compression in _TAR_COMPRESSIONS:
+            text = head if compression is None else self._first_bytes(compression)
+            if is_tar(text):
+                return "tar"
+        return compression
+
+    def _first_bytes(self, compression: str | None) -> bytes:
+        """Return the file's first bytes, decompressed as ``compression`` names.
+
+        The bytes are read through the handle that ``read_csv`` opens, so a
+        path that pandas opens with ``storage_options`` is read alike.
+        """
+        with get_handle(
+            self._fn,
+            "rb",
+            compression=compression,
+            is_text=False,
+            storage_options=self.pandas_kwargs.get("storage_options"),
+        ) as handles:
+            head: bytes = handles.handle.read(TAR_SIGNATURE_BYTES)
+        return head
+
     def _get_streamer(self) -> Generator[pd.DataFrame, None, None]:
         reader = pd.read_csv(self._fn, **self.pandas_kwargs)
         yield from reader
@@ -200,7 +246,7 @@ class CSVReader:
             self._fn,
             "r",
             encoding=kwargs.get("encoding"),
-            compression=kwargs.get("compression", "infer"),
+            compression=kwargs["compression"],
             errors=kwargs.get("encoding_errors", "strict"),
             storage_options=kwargs.get("storage_options"),
         ) as handles:

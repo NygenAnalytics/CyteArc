@@ -1,4 +1,3 @@
-import gzip
 import os
 import re
 from abc import ABC, abstractmethod
@@ -12,7 +11,8 @@ import pandas as pd
 from scipy.sparse import coo_matrix
 
 from ..utils.progress import iter_progress
-from ._contigs import header_fields, parse_contig_columns, read_options
+from ..utils.files import open_binary
+from ._contigs import contig_chunks, header_fields
 from ._assay_names import (
     AUTO_ASSAY_NAMES,
     auto_name_feat_table,
@@ -598,8 +598,6 @@ class CrH5Reader(CrReader):
 _PROTOSPACER_COLUMNS = ("cell_barcode", "num_features", "feature_call", "num_umis")
 # Rows without a call, which Cell Ranger may write as an empty field or None.
 _NO_CALL = frozenset({"", "None"})
-# The first bytes of a gzip stream, whatever the file's name.
-_GZIP_MAGIC = b"\x1f\x8b"
 # The largest UMI count of a call, the uint32 maximum that guide calls store.
 _MAX_UMIS = int(np.iinfo(np.uint32).max)
 # The decompressed bytes that the size scan reads at a time, a small share of
@@ -688,9 +686,7 @@ def _open_call_file(path: str | os.PathLike[str]) -> Any:
 
     A gzip stream is recognised by its first bytes, whatever the file's name.
     """
-    with open(path, "rb") as probe:
-        compressed = probe.read(len(_GZIP_MAGIC)) == _GZIP_MAGIC
-    return gzip.open(path, "rb") if compressed else open(path, "rb")
+    return open_binary(path)
 
 
 def protospacer_calls_size(path: str | os.PathLike[str]) -> ProtospacerCallsSize:
@@ -985,14 +981,14 @@ def vdj_contig_columns(path: str | os.PathLike[str]) -> tuple[str, ...]:
     Raises:
         ValueError: If the file has no header line.
     """
-    return header_fields(path, ",")
+    return header_fields(path, ",", quoted=True)
 
 
 def iter_vdj_contigs(
     path: str | os.PathLike[str],
     *,
     chunk_rows: int = 50_000,
-) -> Iterator[tuple[int, pd.DataFrame]]:
+) -> Iterator[tuple[np.ndarray, pd.DataFrame]]:
     """Parse Cell Ranger's contig annotations in chunks of rows.
 
     Cell Ranger's V(D)J pipeline writes ``filtered_contig_annotations.csv``,
@@ -1008,8 +1004,8 @@ def iter_vdj_contigs(
     ``fwr1_aa`` and ``fwr1``. ``is_cell``, ``high_confidence``,
     ``full_length``, ``raw_clonotype_id``, ``raw_consensus_id`` and
     ``exact_subclonotype_id`` keep their names, and other columns are not
-    kept. A plain or gzip-compressed file is read, and blank lines hold no
-    contig.
+    kept. A plain or gzip-compressed file is read, blank lines hold no contig,
+    and a row of fewer or more fields than the header is refused.
 
     Args:
         path: ``filtered_contig_annotations.csv`` or
@@ -1017,13 +1013,14 @@ def iter_vdj_contigs(
         chunk_rows: The most rows to parse at once.
 
     Yields:
-        The file line where each chunk starts and the chunk's parsed fields:
+        The file line of each contig of a chunk and the chunk's parsed fields:
         ``cell_id`` and each AIRR field that the file holds, text as Python
         strings with None where missing, flags as int8 and counts as int64.
 
     Raises:
         ValueError: If a required column is missing, a column is repeated, a
-            barcode is empty, or a value is of the wrong kind.
+            row holds another number of fields than the header, a barcode is
+            empty, or a value is of the wrong kind.
     """
     columns = vdj_contig_columns(path)
     repeated = sorted({name for name in columns if columns.count(name) > 1})
@@ -1039,18 +1036,14 @@ def iter_vdj_contigs(
             + "; Cell Ranger's contig annotations hold "
             + ", ".join(_VDJ_REQUIRED)
         )
-    line = 2
-    reader = pd.read_csv(
+    yield from contig_chunks(
         path,
-        usecols=lambda name: str(name).strip() in _VDJ_COLUMNS,
-        chunksize=max(1, int(chunk_rows)),
-        **read_options(path),
+        what="a contig annotation file",
+        columns=_VDJ_COLUMNS,
+        quoted=True,
+        chunk_rows=chunk_rows,
+        infer_locus=False,
     )
-    with reader:
-        for chunk in reader:
-            chunk.columns = [_VDJ_COLUMNS[str(name).strip()] for name in chunk.columns]
-            yield line, parse_contig_columns(chunk, first_line=line, infer_locus=False)
-            line += len(chunk)
 
 
 # The per-molecule datasets of Cell Ranger's molecule_info.h5 that a lineage

@@ -73,8 +73,8 @@ def test_airr_rows_are_parsed_by_field_kind(tmp_path) -> None:
     path = _write(tmp_path / "rearrangements.tsv", [AIRR_HEADER, *AIRR_ROWS])
     chunks = list(iter_airr_rearrangements(path))
     assert len(chunks) == 1
-    first_line, chunk = chunks[0]
-    assert first_line == 2
+    lines, chunk = chunks[0]
+    assert lines.tolist() == [2, 3, 4]
     assert list(chunk.columns) == [
         "cell_id",
         "sequence_id",
@@ -132,8 +132,8 @@ def test_cellranger_values_keep_their_csv_quoting(tmp_path) -> None:
 def test_airr_files_are_read_in_chunks_with_their_lines(tmp_path) -> None:
     path = _write(tmp_path / "rearrangements.tsv.gz", [AIRR_HEADER, *AIRR_ROWS], True)
     chunks = list(iter_airr_rearrangements(path, chunk_rows=2))
-    assert [first_line for first_line, _chunk in chunks] == [2, 4]
-    assert [len(chunk) for _first_line, chunk in chunks] == [2, 1]
+    assert [lines.tolist() for lines, _chunk in chunks] == [[2, 3], [4]]
+    assert [len(chunk) for _lines, chunk in chunks] == [2, 1]
 
 
 def test_airr_files_without_a_locus_have_it_inferred(tmp_path) -> None:
@@ -178,18 +178,40 @@ def test_a_byte_order_mark_is_not_part_of_the_header(tmp_path, compress) -> None
     assert cellranger_chunk["cell_id"].tolist() == ["AAAC-1", "AAAC-1", "AAAG-1"]
 
 
-def test_a_separator_ending_every_row_leaves_the_columns_in_place(tmp_path) -> None:
+def test_a_separator_ending_every_row_is_refused_unless_the_header_ends_so_too(
+    tmp_path,
+) -> None:
+    # A separator after each row's last field gives each row one field more
+    # than the header, an empty one, and a contig file's rows hold as many
+    # fields as its header names: refused until the header ends in the
+    # separator too, which names an empty last column.
     airr = _write(
         tmp_path / "trailing.tsv", [AIRR_HEADER, *(row + "\t" for row in AIRR_ROWS)]
     )
-    ((_line, chunk),) = iter_airr_rearrangements(airr)
+    n_names = len(AIRR_HEADER.split("\t"))
+    with pytest.raises(
+        ValueError,
+        match=f"names {n_names} columns, but its first row holds {n_names + 1} fields",
+    ):
+        list(iter_airr_rearrangements(airr))
+    airr = _write(
+        tmp_path / "ended.tsv",
+        [AIRR_HEADER + "\t", *(row + "\t" for row in AIRR_ROWS)],
+    )
+    ((_lines, chunk),) = iter_airr_rearrangements(airr)
     assert chunk["cell_id"].tolist() == ["c1", "c1", "c2"]
     assert chunk["productive"].tolist() == [1, 0, 1]
     cellranger = _write(
         tmp_path / "trailing.csv",
         [CELLRANGER_HEADER, *(row + "," for row in CELLRANGER_ROWS)],
     )
-    ((_line, chunk),) = iter_vdj_contigs(cellranger)
+    with pytest.raises(ValueError, match="but its first row holds"):
+        list(iter_vdj_contigs(cellranger))
+    cellranger = _write(
+        tmp_path / "ended.csv",
+        [CELLRANGER_HEADER + ",", *(row + "," for row in CELLRANGER_ROWS)],
+    )
+    ((_lines, chunk),) = iter_vdj_contigs(cellranger)
     assert chunk["sequence_id"].tolist() == [
         "AAAC-1_contig_1",
         "AAAC-1_contig_2",
@@ -322,10 +344,34 @@ def test_malformed_airr_files_are_refused(tmp_path, header, row, message) -> Non
         list(iter_airr_rearrangements(path))
 
 
+@pytest.mark.parametrize("chunk_rows", [1, 2, 1000])
+def test_rows_of_a_field_more_than_the_header_are_refused_not_read_shifted(
+    tmp_path, chunk_rows
+) -> None:
+    # Contig files hold no R row names, so a field more in every row is no
+    # row name that would shift every column one place to the right.
+    n_names = len(AIRR_HEADER.split("\t"))
+    airr = _write(
+        tmp_path / "extra.tsv", [AIRR_HEADER, *(row + "\t4" for row in AIRR_ROWS)]
+    )
+    with pytest.raises(
+        ValueError,
+        match=f"names {n_names} columns, but its first row holds {n_names + 1} fields",
+    ):
+        list(iter_airr_rearrangements(airr, chunk_rows=chunk_rows))
+    # A later row of a field more is refused by its line.
+    rows = [*AIRR_ROWS[:2], AIRR_ROWS[2] + "\t4"]
+    airr = _write(tmp_path / "later.tsv", [AIRR_HEADER, *rows])
+    with pytest.raises(
+        ValueError, match=f"line 4 holds {n_names + 1} fields, but its header names"
+    ):
+        list(iter_airr_rearrangements(airr, chunk_rows=chunk_rows))
+
+
 def test_cellranger_columns_take_their_airr_names(tmp_path) -> None:
     path = _write(tmp_path / "contigs.csv", [CELLRANGER_HEADER, *CELLRANGER_ROWS])
-    ((first_line, chunk),) = iter_vdj_contigs(path)
-    assert first_line == 2
+    ((lines, chunk),) = iter_vdj_contigs(path)
+    assert lines.tolist() == [2, 3, 4]
     # Fields come in storage order, whatever the file's column order.
     assert list(chunk.columns) == [
         "cell_id",
@@ -384,10 +430,7 @@ def test_cellranger_files_are_read_in_chunks(tmp_path) -> None:
         tmp_path / "contigs.csv.gz", [CELLRANGER_HEADER, *CELLRANGER_ROWS], True
     )
     chunks = list(iter_vdj_contigs(path, chunk_rows=2))
-    assert [(first_line, len(chunk)) for first_line, chunk in chunks] == [
-        (2, 2),
-        (4, 1),
-    ]
+    assert [lines.tolist() for lines, _chunk in chunks] == [[2, 3], [4]]
 
 
 @pytest.mark.parametrize(

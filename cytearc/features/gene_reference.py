@@ -1,13 +1,13 @@
 """Per-species Ensembl gene reference download and local lookup."""
 
-import gzip
 import os
 import re
 import urllib.request
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+
+from ..utils.files import open_text
 
 __all__ = [
     "GeneReference",
@@ -154,7 +154,7 @@ def parse_gff3_genes(lines: Iterable[str]) -> list[tuple[str, str, str]]:
     for line in lines:
         if not line or line.startswith("#"):
             continue
-        parts = line.rstrip("\n").split("\t")
+        parts = line.rstrip("\r\n").split("\t")
         if len(parts) < 9 or parts[2] not in _GENE_TYPES:
             continue
         attrs = _parse_attributes(parts[8])
@@ -275,12 +275,6 @@ def _download_gff3(url: str, destination: Path, *, timeout: float) -> None:
     tmp.replace(destination)
 
 
-def _open_text(path: Path) -> TextIO:
-    if path.suffix == ".gz" or path.name.endswith(".gz"):
-        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
-    return path.open(encoding="utf-8", errors="replace")
-
-
 def ensure_reference(
     species: str,
     *,
@@ -304,7 +298,7 @@ def ensure_reference(
     gff_url = f"{base_url.rstrip('/')}/{filename}"
     raw_path = cache_dir / species / filename
     _download_gff3(gff_url, raw_path, timeout=timeout)
-    with _open_text(raw_path) as handle:
+    with open_text(raw_path) as handle:
         rows = parse_gff3_genes(handle)
     if not rows:
         raise ValueError(f"no gene lines parsed from {gff_url}")

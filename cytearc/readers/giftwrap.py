@@ -32,7 +32,7 @@ sum of its gapfills' UMIs.
 """
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,16 +40,19 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from ..metadata.records import MISSING_TEXT
 from ..utils.arrays import has_duplicates
+from ..utils.files import open_text
 from ..variants.counts import EntryBatch, SiteTable
-from ._variant_files import find_file, is_gzip, open_text
+from ._delimited import require_columns, text_chunks, text_layout
+from ._variant_files import find_file
 from ..utils.arguments import quoted_value
 
 __all__ = ["GiftwrapSource", "giftwrap_source"]
 
-# Text that giftwrap writes for a missing manifest value.
-_MISSING = frozenset({"", "NA", "nan", "NaN", "None", "na"})
 _MATRICES = ("data", "total_reads", "percent_supporting")
+# Rows of a giftwrap table parsed at once.
+_CHUNK_ROWS = 1 << 16
 
 
 def _texts(values: Any) -> list[str]:
@@ -60,7 +63,7 @@ def _texts(values: Any) -> list[str]:
 
 
 def _named(value: str) -> str | None:
-    return None if value.strip() in _MISSING else value.strip()
+    return None if value.strip() in MISSING_TEXT else value.strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,15 +331,41 @@ def _h5_source(path: str) -> GiftwrapSource:
     )
 
 
-def _read_table(path: str, **options: Any) -> pd.DataFrame:
-    return pd.read_csv(
-        path,
-        sep="\t",
-        dtype=str,
-        keep_default_na=False,
-        comment=None,
-        compression="gzip" if is_gzip(path) else None,
-        **options,
+def _read_table(path: str, columns: Sequence[str] | None = None) -> pd.DataFrame:
+    """Read a giftwrap table as text, by the names of its header.
+
+    The table is read as :mod:`~cytearc.readers._delimited` reads tables, so
+    a row of fewer or more fields than the header is refused, and rows that
+    each end in a tab after their last field are refused rather than read as
+    R's row names.
+
+    Args:
+        path: The table.
+        columns: The columns to read, or None for every column.
+
+    Raises:
+        ValueError: If the table is malformed or lacks a column.
+    """
+    text = text_layout(path, what="a giftwrap table")
+    names = list(text.names)
+    if columns is not None:
+        require_columns(text, columns)
+    positions = (
+        list(range(len(names)))
+        if columns is None
+        else [names.index(name) for name in columns]
+    )
+    parts = [
+        chunk for _lines, chunk in text_chunks(text, _CHUNK_ROWS, columns=positions)
+    ]
+    return pd.DataFrame(
+        {
+            names[position]: np.concatenate(
+                [part[position].to_numpy(dtype=object) for part in parts]
+                or [np.empty(0, dtype=object)]
+            )
+            for position in positions
+        }
     )
 
 
@@ -397,7 +426,7 @@ def _table_source(folder: str) -> GiftwrapSource:
     )
     table = _read_table(
         reads_path,
-        usecols=[
+        [
             "cell_idx",
             "probe_idx",
             "gapfill",

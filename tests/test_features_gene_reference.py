@@ -437,7 +437,8 @@ def test_open_text_reads_plain_and_gzip(tmp_path: Path, compressed: bool) -> Non
     else:
         path.write_text(_GFF_SNIPPET, encoding="utf-8")
 
-    with gene_reference_module._open_text(path) as handle:
+    # The module opens its downloads through the one opener of utils.
+    with gene_reference_module.open_text(path) as handle:
         assert handle.read() == _GFF_SNIPPET
 
 

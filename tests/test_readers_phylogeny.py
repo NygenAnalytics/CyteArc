@@ -770,7 +770,7 @@ def test_files_of_the_earliest_treedata_name_their_layout(tmp_path) -> None:
 
 
 def test_the_json_scan_counts_objects_members_and_the_values_held() -> None:
-    from cytearc.readers.phylogeny import _scan_json
+    from cytearc.readers._treedata import _scan_json
 
     # Worked by hand: the open containers hold at most 7 values, at the ','
     # before "c"; the strings' marks, an escaped quote among them, count for

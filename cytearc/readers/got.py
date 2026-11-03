@@ -36,7 +36,6 @@ covered. These readers follow the tools' documentation and output files
 only, since the tools carry no licence or a non-commercial one.
 """
 
-import csv
 import os
 import re
 from collections.abc import Iterator, Sequence
@@ -46,9 +45,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..metadata.records import MISSING_TEXT, file_lines
 from ..variants.counts import EntryBatch, SiteTable
-from ._delimited import text_layout
-from ._variant_files import first_line, open_text
+from ._delimited import first_lines, text_chunks, text_layout
 from ..utils.arguments import quoted_value
 
 __all__ = ["GOT_FORMATS", "GotSource", "got_source", "got_table_format"]
@@ -60,7 +59,8 @@ MUTANT = "MUT"
 AMBIGUOUS = "ambiguous"
 #: GoT-Multi's evidence channels.
 CHANNELS: tuple[str, ...] = ("geneseq", "probebc")
-_MISSING = frozenset({"", "NA", "NaN", "nan", "None"})
+# Rows of a GoT table parsed at once; a table holds one row per cell.
+_CHUNK_ROWS = 1 << 16
 # Columns that name each cell, by preference; R's row names come last.
 _CELL_COLUMNS = ("BC", "CellBarcode", "WhiteListMatch", "cell", "barcode", "X")
 _WILD_TYPE_COLUMNS = ("WT.calls", "num.WT.call", "wtUMIs")
@@ -83,41 +83,40 @@ def _delimiter(line: str) -> str:
 def _read_table(path: str) -> _Table:
     """Read a GoT table as text, with its cells from a column or R's row names.
 
-    A first row of one field more than the header holds R's row names, as
-    :func:`~cytearc.readers._delimited.text_layout` reads them: a table whose
-    rows of one field more all end in a delimiter with nothing after it reads
-    alike with a delimiter after each row's last field, and is refused.
+    The table is read as :mod:`~cytearc.readers._delimited` reads tables: a
+    first row of one field more than the header holds R's row names, a table
+    whose rows of one field more all end in a delimiter with nothing after it
+    reads alike with a delimiter after each row's last field and is refused,
+    and a row of fewer or more fields than the header is refused. A row whose
+    every field is empty, as spreadsheets end a table, holds no cell.
 
     Raises:
-        ValueError: If the file is empty, its rows hold another number of
-            fields than its header, its rows of one field more than the header
-            all end in a delimiter with nothing after it, or no column names
-            the cells.
+        ValueError: If the file is empty, a row holds another number of fields
+            than its header, its rows of one field more than the header all end
+            in a delimiter with nothing after it, a column is named twice, no
+            column names the cells, or a row has no cell barcode.
     """
-    header = first_line(path)
-    if not header.strip():
-        raise ValueError(f"{path} is empty; a GoT table needs a header line")
-    delimiter = _delimiter(header)
-    with open_text(path) as handle:
-        rows = list(csv.reader(handle, delimiter=delimiter))
-    names = [name.strip() for name in rows[0]]
-    body = [row for row in rows[1:] if any(field.strip() for field in row)]
-    row_names = bool(body) and len(body[0]) == len(names) + 1
-    if row_names:
-        # Refuses the rows that a delimiter after each last field gives.
-        text_layout(path, what="a GoT table")
-        names = ["", *names]
-    for line, row in enumerate(body, start=2):
-        if len(row) != len(names):
-            raise ValueError(
-                f"Line {line} of {path} holds {len(row)} fields, but its header "
-                f"names {len(names) - row_names} columns"
-            )
-    frame = pd.DataFrame(
-        [[field.strip() for field in row] for row in body],
-        columns=pd.Index(names, dtype=object),
-        dtype=object,
+    text = text_layout(path, what="a GoT table")
+    names = list(text.names)
+    parts = list(text_chunks(text, _CHUNK_ROWS))
+    lines = np.concatenate(
+        [part_lines for part_lines, _chunk in parts] or [np.empty(0, np.int64)]
     )
+    columns = [
+        np.concatenate(
+            [chunk[position].str.strip().to_numpy(dtype=object) for _l, chunk in parts]
+            or [np.empty(0, dtype=object)]
+        )
+        for position in range(len(names))
+    ]
+    filled = np.zeros(len(lines), dtype=bool)
+    for values in columns:
+        filled |= values != ""
+    lines = lines[filled]
+    frame = pd.DataFrame(
+        {position: values[filled] for position, values in enumerate(columns)}
+    )
+    frame.columns = pd.Index(names, dtype=object)
     if frame.columns.duplicated().any():
         repeated = frame.columns[frame.columns.duplicated()][0]
         raise ValueError(f"{path} names the column {quoted_value(repeated)} twice")
@@ -129,11 +128,13 @@ def _read_table(path: str) -> _Table:
             f"{path} has no column of cell barcodes; GoT tables name cells in "
             f"{', '.join(_CELL_COLUMNS)} or in R's row names"
         )
-    return _Table(
-        path=path,
-        frame=frame,
-        cells=frame[cell_column].to_numpy(dtype=object),
-    )
+    cells = frame.iloc[:, names.index(cell_column)].to_numpy(dtype=object)
+    empty = np.flatnonzero(cells == "")
+    if len(empty):
+        raise ValueError(
+            f"{path} has rows without a cell barcode on {file_lines(lines[empty])}"
+        )
+    return _Table(path=path, frame=frame, cells=cells)
 
 
 def _counts(table: _Table, column: str) -> np.ndarray:
@@ -144,7 +145,7 @@ def _counts(table: _Table, column: str) -> np.ndarray:
             more.
     """
     texts = table.frame[column].to_numpy(dtype=object)
-    missing = np.asarray([text in _MISSING for text in texts.tolist()], dtype=bool)
+    missing = np.asarray([text in MISSING_TEXT for text in texts.tolist()], dtype=bool)
     values = np.full(len(texts), np.nan)
     numbers = pd.to_numeric(pd.Series(texts[~missing]), errors="coerce").to_numpy(
         dtype=np.float64
@@ -163,7 +164,8 @@ def _counts(table: _Table, column: str) -> np.ndarray:
 def _calls(table: _Table, column: str) -> np.ndarray:
     texts = table.frame[column].to_numpy(dtype=object)
     return np.asarray(
-        [None if text in _MISSING else text for text in texts.tolist()], dtype=object
+        [None if text in MISSING_TEXT else text for text in texts.tolist()],
+        dtype=object,
     )
 
 
@@ -186,7 +188,8 @@ def got_table_format(path: str | os.PathLike[str]) -> str:
         ValueError: If the columns fit no GoT format.
     """
     text = os.fspath(path)
-    header = first_line(text)
+    lines = first_lines(text, 1)
+    header = lines[0] if lines else ""
     names = {name.strip().strip('"') for name in header.split(_delimiter(header))}
     if {"whitelist", "WT.calls", "call.in.dups"} <= names:
         return "ironthrone"

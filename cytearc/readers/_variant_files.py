@@ -3,19 +3,18 @@
 The variant tools write folders of files with fixed suffixes, such as
 mgatk's ``<name>.A.txt.gz`` or cellsnp-lite's ``cellSNP.tag.AD.mtx``, often
 renamed with a prefix or gzip-compressed when deposited. These helpers find a
-folder's files by suffix, open text whether or not it is compressed, read
-Matrix Market entries and VCF records in bounded chunks, and identify a
+folder's files by suffix, read VCF records and barcode lists, and identify a
 folder by the digests of the files it holds. ``folder_format`` and
-``hdf5_format`` recognise the format of a folder or an HDF5 file.
+``hdf5_format`` recognise the format of a folder or an HDF5 file. Files open
+through :mod:`cytearc.utils.files`, and Matrix Market entries are read by
+:mod:`cytearc.readers._matrix_market`.
 """
 
-import gzip
 import hashlib
-import io
 import json
 import os
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import h5py
@@ -24,20 +23,14 @@ import pandas as pd
 from ..utils.arguments import quoted_value
 
 from ..utils.digest import file_sha256
+from ..utils.files import is_gzip, open_text
 
 __all__ = [
     "VARIANT_FORMATS",
-    "MatrixHeader",
     "VcfRecords",
     "find_file",
-    "first_line",
     "folder_format",
     "hdf5_format",
-    "is_gzip",
-    "is_hdf5",
-    "matrix_entries",
-    "matrix_header",
-    "open_text",
     "read_barcodes",
     "read_vcf",
     "source_sha256",
@@ -59,40 +52,6 @@ VARIANT_FORMATS: tuple[str, ...] = (
     "tapestri",
     "dab_seq",
 )
-_GZIP_SIGNATURE = b"\x1f\x8b"
-_HDF5_SIGNATURE = b"\x89HDF\r\n\x1a\n"
-
-
-def _signature(path: str | os.PathLike[str]) -> bytes:
-    with open(path, "rb") as handle:
-        return handle.read(8)
-
-
-def is_gzip(path: str | os.PathLike[str]) -> bool:
-    return _signature(path).startswith(_GZIP_SIGNATURE)
-
-
-def open_text(path: str | os.PathLike[str]) -> io.TextIOBase:
-    """Open a text file for reading, gzip-compressed or not, whatever its name.
-
-    A byte order mark, which Excel writes before UTF-8 text, is dropped.
-    """
-    if is_gzip(path):
-        return io.TextIOWrapper(gzip.open(path, "rb"), encoding="utf-8-sig", newline="")
-    return open(path, encoding="utf-8-sig", newline="")
-
-
-def first_line(path: str | os.PathLike[str]) -> str:
-    """The first line of a text file, without its line end, or "" when empty.
-
-    Raises:
-        ValueError: If the file is not UTF-8 text.
-    """
-    try:
-        with open_text(path) as handle:
-            return handle.readline().rstrip("\r\n")
-    except UnicodeDecodeError:
-        raise ValueError(f"{os.fspath(path)} is not a text file") from None
 
 
 def find_file(
@@ -144,133 +103,6 @@ def source_sha256(files: Sequence[tuple[str, str]]) -> tuple[str, dict[str, str]
         return next(iter(digests.values())), digests
     payload = json.dumps(sorted(digests.items()), separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest(), digests
-
-
-@dataclass(frozen=True, slots=True)
-class MatrixHeader:
-    """The banner and size line of a Matrix Market file."""
-
-    path: str
-    n_rows: int
-    n_columns: int
-    n_entries: int
-    field: str
-    header_lines: int
-
-
-def matrix_header(path: str) -> MatrixHeader:
-    """Read a Matrix Market file's banner and size line.
-
-    Raises:
-        ValueError: If the file is not a general coordinate matrix of integer
-            or real values, or its size line is malformed.
-    """
-    with open_text(path) as handle:
-        banner = handle.readline().strip().split()
-        if len(banner) < 5 or banner[0].lower() != "%%matrixmarket":
-            raise ValueError(f"{path} is not a Matrix Market file")
-        kind, layout, field, symmetry = (word.lower() for word in banner[1:5])
-        if (
-            kind != "matrix"
-            or layout != "coordinate"
-            or field not in ("integer", "real")
-            or symmetry != "general"
-        ):
-            raise ValueError(
-                f"{path} is a {layout} {field} {symmetry} Matrix Market {kind}; "
-                "counts are a general coordinate matrix of integer or real values"
-            )
-        header_lines = 1
-        for line in handle:
-            header_lines += 1
-            if line.startswith("%") or not line.strip():
-                continue
-            sizes = line.split()
-            break
-        else:
-            raise ValueError(f"{path} has no size line after its comments")
-    try:
-        n_rows, n_columns, n_entries = (int(value) for value in sizes)
-    except ValueError:
-        raise ValueError(
-            f"The size line of {path} must hold three whole numbers, not "
-            f"{quoted_value(' '.join(sizes))}"
-        ) from None
-    return MatrixHeader(
-        path=path,
-        n_rows=n_rows,
-        n_columns=n_columns,
-        n_entries=n_entries,
-        field=field,
-        header_lines=header_lines,
-    )
-
-
-def matrix_entries(
-    header: MatrixHeader, chunk_rows: int
-) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Yield a Matrix Market file's entries in chunks: rows, columns, values.
-
-    Rows and columns are 0-based. Values are counts: whole numbers of 0 or
-    more, which scipy writes as ``3.71E2`` in a real matrix, as MQuad does.
-
-    Raises:
-        ValueError: If an entry is not three numbers or lies outside the
-            matrix, a value is not a whole number of 0 or more, or the file
-            holds another number of entries than its size line says.
-    """
-    try:
-        reader = pd.read_csv(
-            header.path,
-            sep=r"\s+",
-            header=None,
-            skiprows=header.header_lines,
-            usecols=[0, 1, 2],
-            dtype=np.float64,
-            chunksize=chunk_rows,
-            compression="gzip" if is_gzip(header.path) else None,
-        )
-    except pd.errors.EmptyDataError:
-        reader = None
-    chunks = iter(reader if reader is not None else ())
-    seen = 0
-    while True:
-        try:
-            chunk = next(chunks)
-        except (StopIteration, pd.errors.EmptyDataError):
-            # A matrix without entries ends at its size line.
-            break
-        except ValueError as error:
-            raise ValueError(
-                f"{header.path} holds an entry that is not three numbers: {error}"
-            ) from None
-        seen += len(chunk)
-        coordinates = chunk[[0, 1]].to_numpy(dtype=np.float64)
-        rows = coordinates[:, 0].astype(np.int64) - 1
-        columns = coordinates[:, 1].astype(np.int64) - 1
-        if (
-            not np.all(coordinates == np.floor(coordinates))
-            or np.any(rows < 0)
-            or np.any(rows >= header.n_rows)
-            or np.any(columns < 0)
-            or np.any(columns >= header.n_columns)
-        ):
-            raise ValueError(
-                f"{header.path} has entries outside its {header.n_rows} by "
-                f"{header.n_columns} shape"
-            )
-        values = chunk[2].to_numpy(dtype=np.float64)
-        whole = np.isfinite(values) & (values >= 0) & (values == np.floor(values))
-        if not whole.all():
-            raise ValueError(
-                f"{header.path} holds the value {quoted_value(values[~whole][0])}; counts are "
-                "whole numbers of 0 or more"
-            )
-        yield rows, columns, values.astype(np.int64)
-    if seen != header.n_entries:
-        raise ValueError(
-            f"{header.path} declares {header.n_entries} entries but holds {seen}"
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,10 +248,6 @@ def folder_format(folder: str) -> str:
         f"{folder} holds none of the files of mgatk, maegatk, cellsnp-lite, MQuad, "
         "VarTrix or giftwrap; pass format to name its format"
     )
-
-
-def is_hdf5(path: str | os.PathLike[str]) -> bool:
-    return _signature(path) == _HDF5_SIGNATURE
 
 
 _DAB_SEQ_ARRAYS = ("AD", "RD", "DP", "GT", "VARIANTS", "CELL_BARCODES")

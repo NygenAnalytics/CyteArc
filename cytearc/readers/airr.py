@@ -11,14 +11,15 @@ single-cell file joins each row to its cell through ``cell_id``. Cell Ranger wri
 the same when they hold the fields that an import needs.
 """
 
-import csv
 import os
 from collections.abc import Iterator
 
+import numpy as np
 import pandas as pd
 
 from ..repertoire.contigs import FIELDS, REQUIRED_FIELDS
-from ._contigs import first_line, header_fields, parse_contig_columns, read_options
+from ._contigs import contig_chunks, header_fields
+from ._delimited import first_lines
 from ..utils.arguments import quoted_value
 
 __all__ = [
@@ -50,7 +51,8 @@ def contig_file_format(path: str | os.PathLike[str]) -> str:
     Raises:
         ValueError: If the header is neither.
     """
-    header = first_line(path)
+    lines = first_lines(os.fspath(path), 1)
+    header = lines[0] if lines else ""
     tab_fields = {field.strip() for field in header.split("\t")}
     comma_fields = {field.strip() for field in header.split(",")}
     if "sequence_id" in tab_fields:
@@ -71,35 +73,37 @@ def airr_columns(path: str | os.PathLike[str]) -> tuple[str, ...]:
     Raises:
         ValueError: If the file has no header line.
     """
-    return header_fields(path, "\t")
+    return header_fields(path, "\t", quoted=False)
 
 
 def iter_airr_rearrangements(
     path: str | os.PathLike[str],
     *,
     chunk_rows: int = 50_000,
-) -> Iterator[tuple[int, pd.DataFrame]]:
+) -> Iterator[tuple[np.ndarray, pd.DataFrame]]:
     """Parse an AIRR Rearrangement file in chunks of rows.
 
     A plain or gzip-compressed file is read, without quoting: the AIRR file
     format quotes no value, so quotes are read as part of their values. Fields
-    outside ``FIELDS`` are not kept, and blank lines hold no rearrangement. A
-    file without ``locus`` has each contig's locus inferred from its gene
-    calls (:func:`cytearc.repertoire.chains.infer_loci`).
+    outside ``FIELDS`` are not kept, blank lines hold no rearrangement, and a
+    row of fewer or more fields than the header is refused. A file without
+    ``locus`` has each contig's locus inferred from its gene calls
+    (:func:`cytearc.repertoire.chains.infer_loci`).
 
     Args:
         path: The AIRR Rearrangement file.
         chunk_rows: The most rows to parse at once.
 
     Yields:
-        The file line where each chunk starts and the chunk's parsed fields:
-        ``cell_id`` and each field of ``FIELDS`` that the file holds, text as
-        Python strings with None where missing, flags as int8, counts and
-        positions as int64 and numbers as float64.
+        The file line of each rearrangement of a chunk and the chunk's parsed
+        fields: ``cell_id`` and each field of ``FIELDS`` that the file holds,
+        text as Python strings with None where missing, flags as int8, counts
+        and positions as int64 and numbers as float64.
 
     Raises:
         ValueError: If the file lacks ``cell_id`` or a required field, a field
-            is repeated, or a value is of the wrong kind.
+            is repeated, a row holds another number of fields than the header,
+            or a value is of the wrong kind.
     """
     columns = airr_columns(path)
     repeated = sorted({name for name in columns if columns.count(name) > 1})
@@ -127,23 +131,14 @@ def iter_airr_rearrangements(
             + ", with locus inferred from v_call, d_call, j_call or c_call when "
             "the file has none"
         )
-    kept = frozenset({"cell_id", *FIELDS})
-    line = 2
+    kept = ("cell_id", *FIELDS)
     # The AIRR file format quotes no value, so a quote is part of its value,
     # also at the start of one.
-    reader = pd.read_csv(
+    yield from contig_chunks(
         path,
-        sep="\t",
-        usecols=lambda name: str(name).strip() in kept,
-        chunksize=max(1, int(chunk_rows)),
-        quoting=csv.QUOTE_NONE,
-        **read_options(path),
+        what="an AIRR Rearrangement file",
+        columns={name: name for name in kept},
+        quoted=False,
+        chunk_rows=chunk_rows,
+        infer_locus=infer_locus,
     )
-    with reader:
-        for chunk in reader:
-            chunk.columns = [str(name).strip() for name in chunk.columns]
-            yield (
-                line,
-                parse_contig_columns(chunk, first_line=line, infer_locus=infer_locus),
-            )
-            line += len(chunk)

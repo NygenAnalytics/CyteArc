@@ -1134,8 +1134,8 @@ def test_errors_name_the_file_line_past_blank_lines_and_quoted_breaks(tmp_path, 
 
 # Each table holds the rows of c1, c2 and c3 on file lines 2, 4 and 5 or 6:
 # a blank line follows c1, and a quoted field of c2 holds a line break where
-# the format quotes. A table numbers its rows from its header, line 1, so
-# blank lines and line breaks within quoted fields do not count: 2, 3 and 4.
+# the format quotes. Each record keeps its row's line in the file, the
+# header being line 1, as errors name it.
 _ROW_CASES = {
     "petracer": (
         "alleles.csv",
@@ -1180,7 +1180,7 @@ _ROW_CASES = {
 
 
 @pytest.mark.parametrize("case", sorted(_ROW_CASES))
-def test_records_keep_each_rows_line_as_its_table_numbers_it(tmp_path, case):
+def test_records_keep_each_rows_line_in_its_file(tmp_path, case):
     name, body, options = _ROW_CASES[case]
     folder = tmp_path / case
     folder.mkdir()
@@ -1188,7 +1188,8 @@ def test_records_keep_each_rows_line_as_its_table_numbers_it(tmp_path, case):
     path.write_text(body)
     read = read_all(path, **options)
     rows = dict(read.groupby("barcode")["row"].first())
-    assert rows == {"c1": 2, "c2": 3, "c3": 4}
+    # DNA Typewriter's table of 2022 quotes no field, so c2 holds one line.
+    assert rows == {"c1": 2, "c2": 4, "c3": 5 if case == "typewriter" else 6}
 
 
 def test_carlin_records_keep_the_line_of_their_allele(tmp_path):
@@ -1511,3 +1512,28 @@ def test_layouts_record_what_identifies_how_a_file_is_read():
         ("annotations", str(DATA / "carlin_fo864_lf" / "AlleleAnnotations.txt")),
     )
     assert re.fullmatch(r"\d+", str(carlin.held_bytes()))
+
+
+@pytest.mark.parametrize("chunk_rows", [1, 2, 3, 1000])
+@pytest.mark.parametrize(
+    ("row", "n_fields"),
+    [("i1,c3,None,None,None,9", 6), ("i1,c3,None", 3)],
+    ids=["long", "short"],
+)
+def test_a_row_of_another_width_is_refused_by_its_line_in_chunks_of_any_size(
+    tmp_path, chunk_rows, row, n_fields
+) -> None:
+    # Chunks of one and two rows start on the row, where pandas alone drops
+    # an extra field or pads the missing sites; larger chunks hold it.
+    path = tmp_path / "alleles.csv"
+    path.write_text(
+        "intID,cellBC,RNF2,HEK3,EMX1\ni1,c1,None,None,None\ni1,c2,None,None,None\n"
+        f"{row}\ni1,c4,None,None,None\n"
+    )
+    layout = allele_layout(path)
+    with pytest.raises(
+        ValueError,
+        match=rf"is malformed: line 4 holds {n_fields} fields, but its header "
+        r"names 5 columns$",
+    ):
+        list(iter_allele_rows(layout, chunk_rows))

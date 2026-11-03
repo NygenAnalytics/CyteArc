@@ -39,9 +39,8 @@ conflict mode and PEtracer write them. A record holds:
 - ``state``, the position of its state in ``STATES``;
 - ``umis`` and ``reads``, those of the allele row, which every site of the
   row shares, -1 where the file counts none;
-- ``row``, the allele row's line in its file: in a table, the header is line
-  1 and each row takes the next line, so blank lines and line breaks within
-  quoted fields, which hold no row, do not count; in a CARLIN pair, the line
+- ``row``, the allele row's line in its file: in a table, the line it starts
+  on, the header being line 1, as errors name it; in a CARLIN pair, the line
   of its allele, the same in both files; in a parquet table or a TreeData
   file, its position from 1.
 
@@ -317,11 +316,10 @@ class AlleleRows:
 
     Attributes:
         barcodes: Each row's cell barcode, as the file writes it.
-        rows: Each row's line in its file, as the records keep it: a
-            table's header is line 1 and each row the next line, blank lines
-            and line breaks within quoted fields uncounted; a CARLIN pair's
-            line of the allele; or the position from 1 in a parquet table or
-            a TreeData file.
+        rows: Each row's line in its file, as the records keep it: the
+            line it starts on in a table, whose header is line 1; a CARLIN
+            pair's line of the allele; or the position from 1 in a parquet
+            table or a TreeData file.
         columns: The integration (None when rows name it) and the site of
             each column of ``tokens``.
         tokens: The stripped token of each row and column, None where the
@@ -634,8 +632,8 @@ class LineageAlleles:
             and unknown marks and for placeholders of unknown marks, such as
             PEtracer's ``!``, ``umis`` and ``reads`` as ``Int64``, missing
             where unknown, and ``row``, the allele row's line in its file,
-            a table's blank lines and line breaks within quoted fields
-            uncounted, or its position in a parquet table or TreeData file.
+            the header being line 1, or its position in a parquet table or
+            TreeData file.
         files: One row per file, in canonical order: ``file`` (its
             position), ``format``, ``tool``, ``pipeline``, ``kind``,
             ``integration`` (the one integration of a file that holds one,

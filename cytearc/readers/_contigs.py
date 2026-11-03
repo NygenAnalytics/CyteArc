@@ -1,7 +1,12 @@
-"""Parsing shared by the readers of immune receptor contig files."""
+"""Parsing shared by the readers of immune receptor contig files.
 
-import gzip
+Contig files are delimited tables read by :mod:`cytearc.readers._delimited`,
+which refuses a row of fewer or more fields than the header names, so a row
+cut short is never read with empty fields.
+"""
+
 import os
+from collections.abc import Iterator, Mapping
 
 import numpy as np
 import pandas as pd
@@ -10,91 +15,97 @@ from ..metadata.records import file_lines, parse_columns, parse_text
 from ..repertoire.chains import infer_loci
 from ..repertoire.contigs import FIELDS
 from ..utils.arguments import quoted_value
+from ._delimited import first_lines, split_fields, text_chunks, text_layout
 
 __all__ = [
-    "compression",
-    "first_line",
+    "contig_chunks",
     "header_fields",
     "parse_contig_columns",
-    "read_options",
 ]
 
 _GENE_CALLS = ("v_call", "d_call", "j_call", "c_call")
 
 
-def compression(path: str | os.PathLike[str]) -> str | None:
-    """Return ``"gzip"`` for a gzip-compressed file, by its first bytes, else None.
-
-    The bytes decide rather than the file's suffix, so a compressed file
-    without ``.gz`` reads as well.
-    """
-    with open(path, "rb") as handle:
-        return "gzip" if handle.read(2) == b"\x1f\x8b" else None
-
-
-def first_line(path: str | os.PathLike[str]) -> str:
-    """Return the first line of a plain or gzip-compressed text file.
-
-    A UTF-8 byte order mark, which spreadsheet programs write, is not part of
-    the line.
-    """
-    opener = gzip.open if compression(path) == "gzip" else open
-    with opener(path, "rt", encoding="utf-8-sig", errors="replace") as text:
-        return text.readline().rstrip("\r\n")
-
-
-def read_options(path: str | os.PathLike[str]) -> dict[str, object]:
-    """Return the options of ``pandas.read_csv`` that every contig reader shares.
-
-    Every value is read as text, empty where a field is empty, and the first
-    column is never taken as an index, so a separator at the end of every
-    row leaves the columns in place. Blank lines are read as rows, so that
-    the rows of a chunk follow the file's lines.
-    """
-    return {
-        "dtype": str,
-        "keep_default_na": False,
-        "na_filter": False,
-        "index_col": False,
-        "skip_blank_lines": False,
-        "compression": compression(path),
-    }
-
-
-def header_fields(path: str | os.PathLike[str], separator: str) -> tuple[str, ...]:
+def header_fields(
+    path: str | os.PathLike[str], separator: str, *, quoted: bool
+) -> tuple[str, ...]:
     """Return the stripped fields of a file's header line, repeats included.
 
     Raises:
-        ValueError: If the file has no header line.
+        ValueError: If the file has no header line, or is not UTF-8 text.
     """
-    header = first_line(path)
-    if not header.strip():
+    lines = first_lines(os.fspath(path), 1)
+    if not lines or not lines[0].strip():
         raise ValueError(f"{quoted_value(os.fspath(path))} has no header line")
-    return tuple(field.strip() for field in header.split(separator))
+    return tuple(
+        field.strip() for field in split_fields(lines[0], separator, quoted=quoted)
+    )
+
+
+def contig_chunks(
+    path: str | os.PathLike[str],
+    *,
+    what: str,
+    columns: Mapping[str, str],
+    quoted: bool,
+    chunk_rows: int,
+    infer_locus: bool,
+) -> Iterator[tuple[np.ndarray, pd.DataFrame]]:
+    """Parse the contigs of a table in chunks of rows.
+
+    Args:
+        path: The table.
+        what: What the table is, for the error about an empty file.
+        columns: The file's column names, mapped to the AIRR names they take;
+            other columns are not read.
+        quoted: Whether a field may be quoted.
+        chunk_rows: The most rows to parse at once.
+        infer_locus: Infer ``locus`` from the gene calls.
+
+    Yields:
+        The file line of each contig of the chunk, and its parsed fields, as
+        :func:`parse_contig_columns` returns them.
+
+    Raises:
+        ValueError: If the file is malformed, a row holds another number of
+            fields than the header names, a cell ID is missing, or a field
+            holds a value of the wrong kind.
+    """
+    # Contig files never hold R's row names, so a row of one field more than
+    # the header is refused as any other row of another width is.
+    text = text_layout(os.fspath(path), what=what, quoted=quoted, allow_row_names=False)
+    positions = [
+        position for position, name in enumerate(text.names) if name in columns
+    ]
+    names = [columns[text.names[position]] for position in positions]
+    for lines, chunk in text_chunks(text, max(1, int(chunk_rows)), columns=positions):
+        chunk.columns = names
+        yield parse_contig_columns(chunk, lines=lines, infer_locus=infer_locus)
 
 
 def parse_contig_columns(
     frame: pd.DataFrame,
     *,
-    first_line: int,
+    lines: np.ndarray,
     infer_locus: bool,
-) -> pd.DataFrame:
+) -> tuple[np.ndarray, pd.DataFrame]:
     """Parse the AIRR fields of a chunk of contig rows.
 
-    A row whose every field is empty, as a blank line reads, holds no contig
-    and is left out.
+    A row whose every field is empty, as spreadsheets end a table, holds no
+    contig and is left out.
 
     Args:
-        frame: Raw text of one chunk, one row per file line, with AIRR field
-            names, including ``cell_id``.
-        first_line: The file line of the chunk's first row, named in errors.
+        frame: Raw text of one chunk, one row per contig row of the file,
+            with AIRR field names, including ``cell_id``.
+        lines: The file line of each row, named in errors.
         infer_locus: Infer ``locus`` from the gene calls; for a file without a
             ``locus`` field.
 
     Returns:
-        ``cell_id`` and each field of ``FIELDS`` that the chunk holds, text as
-        Python strings with None where missing, flags as int8, counts and
-        positions as int64 and numbers as float64.
+        The file line of each contig, and ``cell_id`` and each field of
+        ``FIELDS`` that the chunk holds, text as Python strings with None
+        where missing, flags as int8, counts and positions as int64 and
+        numbers as float64.
 
     Raises:
         ValueError: If a cell ID is missing, or a field holds a value of the
@@ -113,9 +124,9 @@ def parse_contig_columns(
         np.fromiter((value is None for value in cell_ids), bool, len(cell_ids)) & ~blank
     )
     if len(missing):
-        raise ValueError(f"cell_id is missing on {file_lines(missing, first_line)}")
+        raise ValueError(f"cell_id is missing on {file_lines(lines[missing])}")
     parsed["cell_id"] = cell_ids
-    parsed.update(parse_columns(frame, FIELDS, first_line=first_line))
+    parsed.update(parse_columns(frame, FIELDS, lines=lines))
     if infer_locus:
         parsed["locus"] = infer_loci(
             {name: parsed[name] for name in _GENE_CALLS if name in parsed}
@@ -129,5 +140,5 @@ def parse_contig_columns(
         }
     )
     if blank.any():
-        chunk = chunk.loc[~blank].reset_index(drop=True)
-    return chunk
+        return lines[~blank], chunk.loc[~blank].reset_index(drop=True)
+    return lines, chunk

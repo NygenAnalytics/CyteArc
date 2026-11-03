@@ -30,17 +30,14 @@ import numpy as np
 import pandas as pd
 
 from ..variants.counts import Contig, EntryBatch, SiteTable
-from ._variant_files import (
-    MatrixHeader,
-    find_file,
-    is_gzip,
-    matrix_entries,
-    matrix_header,
-    open_text,
-    read_barcodes,
-    read_vcf,
+from ..utils.files import is_gzip, open_text
+from ._matrix_market import (
+    MatrixMarketHeader,
+    matrix_market_entries,
+    matrix_market_header,
 )
 from ..utils.arguments import quoted_value
+from ._variant_files import find_file, read_barcodes, read_vcf
 
 __all__ = ["CellsnpSource", "cellsnp_source"]
 
@@ -134,7 +131,7 @@ class CellsnpSource:
     notes: dict[str, Any]
     _records: _Records = field(repr=False)
     _barcodes: np.ndarray = field(repr=False)
-    _matrices: dict[str, MatrixHeader] = field(repr=False)
+    _matrices: dict[str, MatrixMarketHeader] = field(repr=False)
 
     def sites(self) -> SiteTable:
         """Each record's site, with its reference, its alternative and, where
@@ -154,27 +151,29 @@ class CellsnpSource:
         for tag, offset in (("AD", 1), ("OTH", 2)):
             if tag not in self._matrices:
                 continue
-            for rows, columns, values in matrix_entries(
-                self._matrices[tag], chunk_rows
+            for rows, columns, values in matrix_market_entries(
+                self._matrices[tag], chunk_rows, counts=True
             ):
                 yield EntryBatch(
                     kind="counts",
                     barcodes=barcodes,
                     barcode_codes=columns,
                     keys=rows * width + offset,
-                    values=values,
+                    values=np.asarray(values, dtype=np.int64),
                 )
-        for rows, columns, values in matrix_entries(self._matrices["DP"], chunk_rows):
+        for rows, columns, values in matrix_market_entries(
+            self._matrices["DP"], chunk_rows, counts=True
+        ):
             yield EntryBatch(
                 kind="depth",
                 barcodes=barcodes,
                 barcode_codes=columns,
                 keys=rows,
-                values=values,
+                values=np.asarray(values, dtype=np.int64),
             )
 
 
-def _check_shape(header: MatrixHeader, n_records: int, n_cells: int) -> None:
+def _check_shape(header: MatrixMarketHeader, n_records: int, n_cells: int) -> None:
     if (header.n_rows, header.n_columns) != (n_records, n_cells):
         raise ValueError(
             f"{header.path} is a {header.n_rows} by {header.n_columns} matrix, but its "
@@ -322,7 +321,9 @@ def cellsnp_source(path: str | os.PathLike[str], *, format: str) -> CellsnpSourc
         )
     barcodes = read_barcodes(samples)
     matrices = {
-        tag: matrix_header(file) for tag, file in tags.items() if file is not None
+        tag: matrix_market_header(file)
+        for tag, file in tags.items()
+        if file is not None
     }
     for tag, header in matrices.items():
         _check_shape(header, len(records.position), len(barcodes))
