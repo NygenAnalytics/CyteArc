@@ -23,6 +23,7 @@ import numpy as np
 
 from cytearc.perturbation.guide_calls import checked_count_blocks
 from cytearc.utils.arguments import integer_argument
+from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.utils.numba import njit
 
 __all__ = [
@@ -310,13 +311,14 @@ def _assemble(
     offsets[dense.shape[0]] = position
 
 
-class HistogramMemoryError(MemoryError):
+class HistogramMemoryError(MemoryBudgetError):
     """The guide count histograms need more memory than they may hold.
 
     Attributes:
-        needed: The bytes that the histograms need at the point where they
-            stopped, within their memory limit.
-        memory_bytes: The bytes that the histograms may hold.
+        needed_bytes: The bytes that the histograms need at the point where
+            they stopped, within their memory limit.
+        budget_bytes: The bytes that the histograms may hold.
+        item: ``"the guide count histograms"``.
         n_distinct: The distinct counts that they held then.
         rows_read: The rows of counts read when they stopped.
         n_rows: The rows of counts, one per cell.
@@ -324,28 +326,29 @@ class HistogramMemoryError(MemoryError):
 
     def __init__(
         self,
-        needed: int,
-        memory_bytes: int,
+        needed_bytes: int,
+        budget_bytes: int,
         n_distinct: int,
         *,
         rows_read: int,
         n_rows: int,
     ) -> None:
-        self.needed = needed
-        self.memory_bytes = memory_bytes
         self.n_distinct = n_distinct
         self.rows_read = rows_read
         self.n_rows = n_rows
         remain = (
             f", and {n_rows - rows_read} of {n_rows} rows of counts remain to be "
             "read, so they may need more"
-            if self.counts_remain
+            if rows_read < n_rows
             else ""
         )
         super().__init__(
-            f"The guide count histograms need about {needed} bytes for "
-            f"{n_distinct} distinct counts, more than the {memory_bytes} bytes "
-            f"they may hold{remain}"
+            f"The guide count histograms need about {needed_bytes} bytes for "
+            f"{n_distinct} distinct counts, more than the {budget_bytes} bytes "
+            f"they may hold{remain}",
+            needed_bytes=needed_bytes,
+            budget_bytes=budget_bytes,
+            item="the guide count histograms",
         )
 
     @property
@@ -358,8 +361,8 @@ class HistogramMemoryError(MemoryError):
             _restore_histogram_memory_error,
             (
                 type(self),
-                self.needed,
-                self.memory_bytes,
+                self.needed_bytes,
+                self.budget_bytes,
                 self.n_distinct,
                 self.rows_read,
                 self.n_rows,
@@ -370,15 +373,15 @@ class HistogramMemoryError(MemoryError):
 
 def _restore_histogram_memory_error(
     error_type: type[HistogramMemoryError],
-    needed: int,
-    memory_bytes: int,
+    needed_bytes: int,
+    budget_bytes: int,
     n_distinct: int,
     rows_read: int,
     n_rows: int,
 ) -> HistogramMemoryError:
     """Rebuild a pickled HistogramMemoryError, whose row counts are keywords."""
     return error_type(
-        needed, memory_bytes, n_distinct, rows_read=rows_read, n_rows=n_rows
+        needed_bytes, budget_bytes, n_distinct, rows_read=rows_read, n_rows=n_rows
     )
 
 

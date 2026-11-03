@@ -27,13 +27,13 @@ from tests.clone_helpers import (
     airr_file,
     bcr_file,
     every_cell,
-    ids_read_bytes,
     receptor_store,
     tcr_file,
     write_lines,
     write_truth_store,
 )
-from tests.memory_helpers import budget_that_runs, stated_bytes
+from cytearc.utils.memory_budget import MemoryBudgetError
+from tests.memory_helpers import budget_that_runs, charges, stated_bytes
 from tests.storage_helpers import copy_store, open_store
 from tests.clone_truth import (
     N_OUTSIDE,
@@ -490,22 +490,22 @@ def test_import_refuses_contigs_larger_than_the_memory_budget(
 def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
     tmp_path, monkeypatch
 ) -> None:
-    from cytearc.datastore._operations import repertoire as operations
     from cytearc.metadata import records
+    from cytearc.metadata import rows as metadata_rows
+    from cytearc.storage.geometry import array_geometry
 
     store = receptor_store(tmp_path)
     cells = store.snapshot_cell_selection()
-    # 1,250 contigs for each cell, with long junctions of their own, outweigh
-    # the read of the cells' IDs, which decodes a stored chunk of 100,000 of them; 10,000
-    # rows are parsed as one chunk at any budget, so the encoded bytes do not
-    # depend on the budget.
+    # 125 contigs for each cell, with junctions of 2,000 nucleotides of their
+    # own, outweigh the read of the cells' IDs and a chunk's parse; their
+    # 1,000 rows are parsed as one chunk, the fewest a chunk holds, at any
+    # budget that accepts one, so the encoded bytes do not depend on it.
     rows = [
         f"cell{cell},true,cell{cell}_contig_{k},true,500,TRB,TRBV1,,TRBJ1,TRBC1,"
-        f"true,true,CASSLGQ{cell}{k:05d}YEQYFGPGTRLTVL,{'TGTGCCAGC' * 10}{cell}{k:05d},"
-        "40,3,"
-        f"ct{cell},ct{cell}_{k}"
+        f"true,true,CASSLGQ{cell}{k:05d}YEQYFGPGTRLTVL,"
+        f"{'TGTGCCAGC' * 222}{cell}{k:05d},40,3,ct{cell},ct{cell}_{k}"
         for cell in range(N_RECEPTOR_CELLS)
-        for k in range(1_250)
+        for k in range(125)
     ]
     path = write_lines(tmp_path, "many.csv", CELLRANGER_HEADER, rows)
     encoded: list[int] = []
@@ -516,12 +516,16 @@ def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
         encoded.append(self.nbytes)
 
     monkeypatch.setattr(records.RecordEncoder, "add", recording_add)
-    saved = store.repertoire.import_receptors(path, cell_selection=cells)
+    saved, taken = charges(
+        lambda: store.repertoire.import_receptors(path, cell_selection=cells)
+    )
+    assert len(encoded) == 1
     # At its peak the import holds three times its encoded contigs, 100 bytes
     # per selected cell, what writing each cell's labels and counts holds,
-    # its labels at the widest of their kinds, and what the join holds: 100
-    # bytes per cell for its lookup and each cell's ID as a Python string, 46
-    # bytes for the five characters of cell0 to cell7.
+    # its labels at the widest of their kinds, the join's lookup of 100 bytes
+    # per cell, each cell's ID as a Python string, 41 bytes and the five
+    # characters of cell0 to cell7, with its object's slot, and what the read
+    # of the IDs may still hold: a stored chunk of them and Zarr's objects.
     n = N_RECEPTOR_CELLS
     writing = cell_data_write_bytes(
         {
@@ -535,14 +539,34 @@ def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
             "chain_slots": ((n, 4), np.int32),
         }
     )
-    estimate = 3 * max(encoded) + (100 + 100 + 46) * n + writing
-    reading = 200 * n + writing + ids_read_bytes(store, n)
-    assert estimate > reading
+    ids = store.cells._get_array("ids")
+    left = array_geometry(ids).heldReadBytes()
+    estimate = 3 * encoded[0] + (100 + 100 + 8 + 41 + 5) * n + writing + left
+    peaks = [
+        planned for item, _nbytes, planned in taken if item.endswith("import's peak")
+    ]
+    assert peaks == [estimate]
+    # Within a budget this large, chunks hold the most rows, 50,000, and the
+    # parse of each counts its 18 fields of 64 bytes a row beside 1 MiB and
+    # the contigs encoded before it: none for the first chunk, and all of
+    # them for the read that finds the end of the file.
+    parse = (1 << 20) + 50_000 * 18 * 64
+    parses = [
+        (item, nbytes) for item, nbytes, _planned in taken if item.endswith("parsed")
+    ]
+    assert parses == [
+        ("a chunk of 50000 contig rows as parsed", parse),
+        ("a chunk of 50000 contig rows as parsed", parse + encoded[0]),
+    ]
     monkeypatch.setattr(store, "memoryBytes", estimate - 1)
-    with pytest.raises(MemoryError, match=f"holds about {estimate} bytes at its peak"):
+    with pytest.raises(
+        MemoryBudgetError, match=f"holds about {estimate} bytes for the 1000 contigs"
+    ) as refused:
         store.repertoire.import_receptors(
             path, cell_selection=cells, invalidate_cache=True
         )
+    assert refused.value.needed_bytes == estimate
+    assert str(refused.value).endswith(", or pass a smaller cell_selection.")
     assert store.artifacts.list(kind="immune_receptors", scope="datastore") == [saved]
     monkeypatch.setattr(store, "memoryBytes", estimate)
     assert (
@@ -552,15 +576,23 @@ def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
         != saved
     )
 
-    # Below the cells' share and the read of their IDs as text, the import
-    # refuses before it reads a cell ID.
+    # Below the cells' share, the join's lookup and the read of the IDs, the
+    # import refuses before it reads a cell ID: the read holds the eight IDs
+    # at their stored width and their indices, one stored chunk of them and
+    # Zarr's objects.
     def unread(*_arguments, **_options):
         raise AssertionError("the cell IDs were read")
 
-    monkeypatch.setattr(operations, "read_metadata_rows_chunkwise", unread)
+    monkeypatch.setattr(metadata_rows, "read_array_rows_chunkwise", unread)
+    reading = (
+        (100 + 100) * n
+        + writing
+        + metadata_rows.row_read_bytes(array_geometry(ids), np.arange(n))
+    )
     monkeypatch.setattr(store, "memoryBytes", reading - 1)
     with pytest.raises(
-        MemoryError, match=f"holds about {reading} bytes before the first"
+        MemoryBudgetError,
+        match=f"holds about {reading} bytes for the selected cells' IDs",
     ):
         store.repertoire.import_receptors(
             path, cell_selection=cells, invalidate_cache=True
@@ -614,9 +646,11 @@ def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
     # Each import runs at the smallest budget it accepts, which the budget
     # reaches from one byte by the bytes that each refusal states.
     budget, _refusals, ref, peak = budget_that_runs(
-        store, lambda _store: run_import(), refusal_budget=_stated, max_refusals=20
+        store, lambda _store: run_import(), refusal_budget=_stated, max_refusals=100
     )
-    assert peak <= budget, (peak, budget)
+    # The import counts three times its encoded contigs at its peak, and the
+    # IDs' read their stored chunk at the bound of incompressible bytes.
+    assert peak is not None and peak <= budget <= 3 * peak + (1 << 20), (peak, budget)
 
     def run_load():
         return store.repertoire.load_receptors(ref, fields=[])
@@ -777,7 +811,7 @@ def test_loading_refuses_tables_larger_than_the_memory_budget(
         tcr_file(tmp_path), cell_selection=store.snapshot_cell_selection()
     )
     monkeypatch.setattr(store, "memoryBytes", 100)
-    with pytest.raises(MemoryError, match="Pass fields="):
+    with pytest.raises(MemoryError, match="or pass fields= with fewer fields"):
         store.repertoire.load_receptors(ref)
 
 

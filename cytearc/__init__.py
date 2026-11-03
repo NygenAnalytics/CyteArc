@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from .storage.artifacts import ArtifactStatus as ArtifactStatus
     from .storage.errors import ArtifactResolutionError as ArtifactResolutionError
     from .storage.refs import ArtifactRef as ArtifactRef
+    from .utils.memory_budget import MemoryBudgetError as MemoryBudgetError
     from .storage.stores import load_zarr as load_zarr
     from .merge import (
         DataStoreMerge as DataStoreMerge,
@@ -148,6 +149,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "LabelTransferResult": ".mapping.models",
     "MappingReference": ".mapping.reference",
     "MappingResult": ".mapping.models",
+    "MemoryBudgetError": ".utils.memory_budget",
     "mount_datastore": ".datastore.datastore",
     "PseudotimeAggregationResult": ".trajectory.results",
     "PseudotimeMarkerResult": ".trajectory.results",

@@ -54,7 +54,6 @@ __all__ = [
     "FieldKind",
     "RecordEncoder",
     "RecordTable",
-    "chunk_rows_for",
     "decode_ragged",
     "decode_text",
     "encode_ragged",
@@ -1149,15 +1148,3 @@ def _concatenate_ragged(
         ends.append(np.where(chunk_ends < 0, -1, chunk_ends + base))
         base += len(data)
     return np.concatenate(datas), np.concatenate([np.zeros(1, np.int64), *ends])
-
-
-def chunk_rows_for(budget_bytes: int, *, columns: int) -> int:
-    """Return how many file rows to parse at once within a memory budget.
-
-    Parsing holds about 1,000 bytes per row and column, across the raw text,
-    its stripped copy and the parsed values, and a chunk may take a twentieth
-    of the budget, within 10,000 and 50,000 rows: smaller chunks would repeat
-    the distinct values that each chunk holds.
-    """
-    rows = int(budget_bytes) // (20 * 1_000 * max(1, int(columns)))
-    return int(min(50_000, max(10_000, rows)))

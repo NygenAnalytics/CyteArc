@@ -357,6 +357,64 @@ def cost_bound(
     return result, peak
 
 
+def charges(call: Callable[[], Any]) -> tuple[Any, list[tuple[str, int, int]]]:
+    """Run ``call`` and return its result with each charge that its memory ledgers took, in order.
+
+    Each charge is its item, its bytes and what its ledger then planned: what
+    it held, beside what its last read may still hold, and a transient
+    peak's bytes. A release is ``("a release", bytes, planned)``.
+    """
+    from cytearc.utils.memory_budget import observed_charges
+
+    taken: list[tuple[str, int, int]] = []
+    with observed_charges(
+        lambda item, nbytes, planned: taken.append((item, nbytes, planned))
+    ):
+        result = call()
+    return result, taken
+
+
+def audited(
+    call: Callable[[], Any], *, allowance: int = 64 * 1024
+) -> tuple[Any, list[tuple[str, int, int]]]:
+    """Run ``call`` and return its result with each charge whose traced interval passed what its ledger planned.
+
+    tracemalloc traces the call. From each charge or release of a memory
+    ledger to the next, the most bytes traced beside what the process held
+    when the call began must stay within what the ledger planned at the
+    first of them: what it held then, beside what its last read may still
+    hold, and that charge's transient peak, as ``observed_charges`` reports
+    it. The last interval runs to the end of the call; what runs before the
+    first charge belongs to no ledger. ``allowance`` covers the Python
+    objects of the call's frames and of the ledger itself: each interval
+    that passed its plan by more is returned as the item that planned it,
+    the bytes planned and the bytes traced. Run ``call`` once before, so
+    that one-off costs such as lazy imports and the interpreter's string
+    table do not count.
+    """
+    from cytearc.utils.memory_budget import observed_charges
+
+    overruns: list[tuple[str, int, int]] = []
+    pending: list[tuple[str, int]] = []
+
+    def observe(item: str, _nbytes: int, planned: int) -> None:
+        traced = tracemalloc.get_traced_memory()[1] - start
+        if pending and traced > pending[0][1] + allowance:
+            overruns.append((pending[0][0], pending[0][1], traced))
+        tracemalloc.reset_peak()
+        pending[:] = [(item, planned)]
+
+    tracemalloc.start()
+    try:
+        start = tracemalloc.get_traced_memory()[0]
+        with observed_charges(observe):
+            result = call()
+        observe("the end of the call", 0, 0)
+    finally:
+        tracemalloc.stop()
+    return result, overruns
+
+
 #: The methods through which a read of a stored Zarr array's values goes, by
 #: index or by selection, for :func:`hold_finished_reads` to end a read at
 #: each. Reads through an array's ``async_array``, as the feature stream makes

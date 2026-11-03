@@ -23,6 +23,14 @@ separate `cytebase` package, documented at <https://docs.nygen.io/CyteBase/>.
 .. autofunction:: cytearc.read_gmt
 ```
 
+## Memory budget refusals
+
+A call that would hold more than its memory budget at a step raises `MemoryBudgetError`, a `MemoryError` whose message names the step, the bytes that the call needs there and the budget, and closes with the budget that passes the step ([what a refusal names](../concepts/memory-and-execution)).
+
+```{eval-rst}
+.. autoclass:: cytearc.MemoryBudgetError
+```
+
 ## Logging and progress
 
 CyteArc starts with `INFO` logs and progress enabled, without timestamps.

@@ -79,6 +79,26 @@ An RNA run with `pca={"dims": 0}` builds its graph on the normalized values of t
 At 1,000,000 cells the index alone holds about 4.3 GB with 1,000 HVGs and 8.3 GB with 2,000 at the default `ann_m=24`, and the embedding initialization holds every cell's coordinates, 4 bytes per HVG per cell, when one stored band holds every cell; pass `embedding_initialization={"batch_size": ...}` with a batch size below the cell count to select its streamed fit, which holds a sample of the cells and one block of coordinates at a time.
 
 A Zarr codec thread can keep the chunk it decoded, as stored and decoded, for a moment after its read, which on a busy machine lasts into the next read; a stream of cell row blocks reserves one such chunk for each of its readers. Outside these reservations, the reads of gene-major streams, which read `countsT`, can leave such a chunk too, and decoding a chunk of an unsharded array, such as normalized data, also holds that chunk's compressed bytes; leave host headroom.
+
+(memory_refusals)=
+#### What a refusal names
+
+The receptor import, `clonotypes`, `gene_usage`, `spectratype`, `export_airr` and the other repertoire steps charge what each step will hold to the budget before the step allocates, and refuse a step that would pass it before anything is written. The refusal is a `MemoryBudgetError`, a `MemoryError`, whose message names the step, the bytes the call needs at that step and the budget, and closes with the budget that passes the step:
+
+```text
+Importing contigs for 8 selected cells holds about 4260297 bytes for the selected cells' IDs,
+more than the memory budget of 1000000 bytes. Raise mem_budget to at least 4260297 bytes, or
+pass a smaller cell_selection.
+```
+
+The error holds the same numbers as `needed_bytes` and `budget_bytes`, and the step as `item`. A budget of `needed_bytes` passes that step; a later step can need more, and names it the same way. Grouping the cells by metadata columns, joining a file's barcodes to the cells and searching for near junctions refuse with a `MemoryError` of their own, which names the bytes too. Each step is charged:
+
+- a read of a stored array: its result and the chunks that Zarr decodes at once, each as stored, at the bound of its compressed bytes, and decoded, beside Zarr's objects for the read. A whole read runs at the highest Zarr concurrency, up to the operation's, whose decoded chunks fit what the budget leaves, and one chunk at a time when only that fits. A read of selected rows reads a band of chunks at a time beside each row's indices, 48 bytes a row while it orders them and 32 while it reads. A sharded array is read a band of inner chunks at a time, so that no fetch takes more than a band of a shard;
+- what the read before may still hold: one chunk, as stored and decoded, on each of the operation's codec threads, as many as the store's `nthreads`, up to the chunks that read decoded, since Zarr's pool spreads a read's chunks over its threads even one at a time; and Zarr's objects for that read and the next, until the next read replaces them. A read of one chunk leaves one chunk;
+- what the step builds: Python strings at 41 bytes and one per character in ASCII, 57 and one up to U+00FF, 58 and two up to U+FFFF and 60 and four beyond, by the widest character a string holds; NumPy and Zarr text at four bytes a character of its widest value; an object array at 8 bytes a value; a sort's copy, and half as much again for a stable sort or, on values of one or two bytes, as much again; and a pandas hash table at 16 bytes and a bit for each bucket, a power of two at most 77% full, for every value hashed up to about a million and then for every distinct value;
+- writing an artifact: what `cell_data_write_bytes` states, which counts the last chunk that the array written before left behind beside each array's first chunk.
+
+The budget bounds the bytes that these steps allocate, as `tracemalloc` traces them, not the resident memory of the process.
 The identity checks of stored cell and feature selections, which most operations run once on their inputs, read the row identifiers in bands of whole chunks up to 64 MiB and hold one band, with its selected rows where they check a row order, outside the budget.
 glibc can also keep freed buffers of 32 MiB or less resident after an operation; setting the `MALLOC_MMAP_THRESHOLD_` environment variable, for example to `131072`, before Python starts returns them to the system.
 

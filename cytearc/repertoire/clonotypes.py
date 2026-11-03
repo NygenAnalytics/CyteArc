@@ -50,6 +50,7 @@ from scipy.sparse.csgraph import connected_components
 from ..clones.sequences import DISTANCE_METRICS, neighbor_pairs
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import unique_inverse, unique_rows
+from ..utils.memory_budget import MemoryLedger
 from ..utils.numba import njit
 from .chains import SLOTS
 
@@ -381,7 +382,7 @@ def assign_clonotype_clusters(
     j_genes: np.ndarray | None = None,
     receptor_arms: str = "all",
     dual_ir: str = "any",
-    max_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> ClonotypeAssignment:
     """Group cells into clonotype clusters by similar chains.
 
@@ -401,8 +402,8 @@ def assign_clonotype_clusters(
     through the arm whose chains reach the fewest configurations, in chunks
     of ``_PAIRS_PER_CHUNK`` pairs that are checked in the other arm. Links
     join two near chains of a group, or under ``dual_ir="all"`` two arms of
-    a group whose chains match one by one; each is counted against
-    ``max_bytes`` before it is allocated.
+    a group whose chains match one by one; each is charged to ``ledger``
+    before it is allocated.
 
     Args:
         sequences: Each cell's sequence code in its four slots, -1 for none.
@@ -414,11 +415,12 @@ def assign_clonotype_clusters(
         j_genes: Each slot's J gene code, alike.
         receptor_arms: The arms that must agree.
         dual_ir: The chains of an arm that must agree.
-        max_bytes: The memory that linking the cells may hold beyond the
-            ``CLUSTER_SEARCH_BYTES`` that the search for near chains and the
-            chunks of candidate cells hold: 32 bytes for each pair of chains
-            within ``max_distance``, and 32 for each link while it is held. None
-            for no limit.
+        ledger: What the caller holds, and the budget, charged with 32 bytes
+            for each pair of chains within ``max_distance`` and 32 for each
+            link while it is held, and let go of them on return. The search for
+            near chains and the chunks of candidate cells may hold
+            ``CLUSTER_SEARCH_BYTES`` beside the ledger's room, which the caller
+            holds in the ledger. None for no limit.
 
     Returns:
         The clonotype cluster of each cell, ranked as clonotypes are.
@@ -426,8 +428,10 @@ def assign_clonotype_clusters(
     Raises:
         ValueError: If an option is unknown or the arrays do not align.
         MemoryError: If the search for the pairs of chains within ``max_distance``
-            would hold more than ``CLUSTER_SEARCH_BYTES`` and ``max_bytes``
-            together, or the pairs and links need more than ``max_bytes``.
+            would hold more than ``CLUSTER_SEARCH_BYTES`` and the ledger's room
+            together.
+        MemoryBudgetError: If the pairs and links would pass the ledger's
+            budget.
     """
     if metric not in DISTANCE_METRICS:
         raise ValueError(f"metric must be one of {', '.join(DISTANCE_METRICS)}")
@@ -441,21 +445,18 @@ def assign_clonotype_clusters(
     held = 0
 
     def reserve(needed: int, what: str) -> None:
-        """Count ``needed`` more bytes held; MemoryError beyond ``max_bytes``."""
+        """Charge ``needed`` more bytes held to the ledger, which refuses them beyond its budget."""
         nonlocal held
-        if max_bytes is not None and held + needed > max_bytes:
-            raise MemoryError(
-                f"Linking the cells of clonotype clusters needs about {held + needed} "
-                f"bytes for {what}, more than the {max_bytes} bytes left in the "
-                "memory budget. Require the same V and J genes, lower max_distance, "
-                "or raise mem_budget."
-            )
+        if ledger is not None:
+            ledger.hold(what, needed, remedy=_LINKING_REMEDY)
         held += needed
 
     def release(freed: int) -> None:
-        """Count ``freed`` bytes as no longer held."""
+        """Let go of ``freed`` bytes held."""
         nonlocal held
         held -= freed
+        if ledger is not None:
+            ledger.release(freed)
 
     # Elements within max_distance, with matching genes when asked: their
     # sequences are compared within blocks of equal gene calls.
@@ -466,7 +467,11 @@ def assign_clonotype_clusters(
         metric,
         int(max_distance),
         blocks=blocks,
-        max_bytes=None if max_bytes is None else CLUSTER_SEARCH_BYTES + max_bytes,
+        max_bytes=(
+            None
+            if ledger is None or ledger.room is None
+            else CLUSTER_SEARCH_BYTES + ledger.room
+        ),
     )
     n_pairs = len(low)
     reserve(
@@ -723,9 +728,13 @@ def assign_clonotype_clusters(
             offset += int(labels.max()) + 1
     else:
         clusters = either_components(np.arange(n_configurations), taking)
-    return _ranked(
+    ranked = _ranked(
         clusters, found.inverse, found.cells, found.n_cells, found.configurations
     )
+    # The pairs within max_distance, held until now, are let go.
+    low = high = near_codes = np.empty(0, dtype=np.int64)
+    release(held)
+    return ranked
 
 
 # Sorts missing elements last.
@@ -739,6 +748,9 @@ CLUSTER_SEARCH_BYTES = 512 * 2**20
 # are linked: its two codes, and its codes in both directions among those
 # that tell whether two chains are near.
 _NEAR_PAIR_BYTES = 32
+# What a refusal of the links of clonotype clusters suggests beside a larger
+# budget.
+_LINKING_REMEDY = "require the same V and J genes, or lower max_distance"
 # The bytes that each link holds while the cells are linked: its two nodes,
 # and its two places among the nodes' neighbours while candidate cells are
 # drawn through it. A link joins two nodes of one group: near chains, or

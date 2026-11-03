@@ -24,18 +24,18 @@ from ...metadata.records import (
     TEXT,
     EncodedText,
     RecordTable,
-    chunk_rows_for,
     decode_ragged,
     pack_text,
     take_text,
     unpack_text,
 )
 from ...metadata.rows import (
-    array_row_selection_parts,
-    read_array_rows_chunkwise,
     read_metadata_rows_chunkwise,
+    read_rows,
+    read_text_rows,
+    read_whole,
+    row_read_bytes,
     text_read_bytes,
-    text_row_selection_parts,
 )
 from ...metadata.selection import cell_selection_indices
 from ...repertoire.chains import (
@@ -85,11 +85,17 @@ from ...storage.artifacts import (
     require_complete_artifact,
 )
 from ...storage.async_execution import zarr_io_concurrency
-from ...storage.geometry import array_geometry
-from ...storage.types import as_zarr_array
+from ...storage.geometry import ROW_INDEX_BYTES, array_geometry
+from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument, integer_argument, quoted_value
 from ...utils.logging import logger
+from ...utils.memory_budget import (
+    MemoryLedger,
+    hash_table_bytes,
+    object_array_bytes,
+    python_text_bytes,
+)
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
     BarcodeFile,
@@ -99,7 +105,6 @@ from .cell_barcodes import (
 )
 from .cell_groups import cell_groups, group_columns, within_groups
 from .record_tables import (
-    read_array,
     record_arrays,
     record_chunk_lengths,
     stored_column,
@@ -137,6 +142,14 @@ _IMPORT_ATTRIBUTES = (
 # Cell Ranger files with and without region sequences and on AIRR files with
 # sequences and alignments.
 _PEAK_PER_ENCODED_BYTE = 3
+# Parsing a chunk of a contig file holds its raw text, its split fields and
+# the parsed table, about 55 to 59 bytes for each field of a row as traced on
+# chunks of 10,000 to 50,000 rows of 18 and 31 columns, and objects of about
+# 0.8 MB whatever the chunk's size. Chunks hold 1,000 to 50,000 rows.
+_PARSE_BYTES_PER_FIELD = 64
+_PARSE_FIXED_BYTES = 1 << 20
+_LEAST_PARSED_ROWS = 1_000
+_MOST_PARSED_ROWS = 50_000
 # Bytes that an import holds for each selected cell beside the join's lookup
 # of cell IDs and their text, which the join counts, the read of the IDs,
 # which text_read_bytes counts, and what writing the cells' arrays holds,
@@ -154,17 +167,12 @@ _TABLE_BYTES_PER_FIELD = 64
 _CELL_TABLE_BYTES_PER_CELL = 700
 # The prefix of the stored contig arrays, such as contig_cells.
 _CONTIGS = "contig"
-# Reading the receptor types holds each cell's stored text and, while it is
-# coded, a Python string and a code for each cell, 92 bytes beside the text as
-# traced on 200,000 cells.
-_RECEPTOR_TYPE_CODING_BYTES = 100
 # Defining clonotypes holds the chains of every slot, their distinct
 # configurations and keys, and the labels: 340 bytes per cell at the peak, as
 # traced on 1,000,000 simulated cells of about two chains each. Cells with more
-# chains give more keys, so the check reserves 1,000 bytes per cell, beside the
-# stored code and its int64 copy of each contig's compared field.
+# chains give more keys, so the definition reserves 1,000 bytes per cell,
+# beside the stored code and its int64 copy of each contig's compared field.
 _CLONOTYPE_BYTES_PER_CELL = 1_000
-_CODE_BYTES = 8
 # Loading clonotypes holds, beside the cells' IDs as text, up to 300 bytes per
 # cell: each cell's codes and sizes as read and in the table, and the
 # receptors' slots and types that the representatives are taken from.
@@ -189,11 +197,9 @@ _DECODE_BYTES_PER_BATCH_VALUE = 160
 # figure or one that clusters compare, while it is decoded: its bounds as read
 # and as Python integers, its object and its string's header; and each of its
 # bytes as read, joined and decoded, and up to four bytes per character in its
-# string. Once decoded, each keeps its bounds, its object and its string.
+# string. Once decoded, each keeps its string.
 _JUNCTION_BYTES_PER_VALUE = 200
 _JUNCTION_BYTES_PER_BYTE = 7
-_KEPT_JUNCTION_BYTES_PER_VALUE = 100
-_KEPT_JUNCTION_BYTES_PER_BYTE = 4
 # The parameters that this version records for clonotypes, which tell an
 # artifact that an earlier version saved from one it reads.
 _CLONOTYPE_PARAMETERS = frozenset(
@@ -312,40 +318,56 @@ def _iter_source(
 
 
 def _encode_contigs(
-    sources: Sequence[_ContigSource],
-    join: CellBarcodeJoin,
-    *,
-    memory_bytes: int,
-    held_bytes: int,
+    sources: Sequence[_ContigSource], join: CellBarcodeJoin, ledger: MemoryLedger
 ) -> RecordTable:
     """Read the contig files and encode the contigs of the selected cells.
 
     Each contig joins the selected cell that its barcode names, through
     ``join``, which counts the contigs and barcodes of the files and those
-    that match no selected cell. ``held_bytes`` are held beside the encoded
-    contigs.
+    that match no selected cell. Each file is parsed in chunks of as many
+    rows as half the ledger's room holds, from 1,000 to 50,000, so that the
+    encoded contigs keep the other half; each chunk's parse is charged beside
+    the contigs encoded so far before it is read, and after each chunk, the
+    peak that the encoded contigs reach while the import orders them, ranks
+    the chains and writes the artifact.
 
     Raises:
-        MemoryError: If the import's peak would exceed ``memory_bytes``.
+        MemoryBudgetError: If a chunk's parse or the import's peak would pass
+            the ledger's budget.
         ValueError: If a contig of a selected cell has no ID, or an ID repeats
             among the contigs of selected cells within one file.
     """
     encoder = contig_encoder()
     for position, source in enumerate(sources):
-        chunk_rows = chunk_rows_for(memory_bytes, columns=source.n_columns)
-        for _lines, chunk in _iter_source(source, chunk_rows):
+        per_row = _PARSE_BYTES_PER_FIELD * source.n_columns
+        room = ledger.room
+        fitting = (
+            _MOST_PARSED_ROWS
+            if room is None
+            else (room // 2 - _PARSE_FIXED_BYTES - encoder.nbytes) // per_row
+        )
+        chunk_rows = min(_MOST_PARSED_ROWS, max(_LEAST_PARSED_ROWS, fitting))
+        chunks = _iter_source(source, chunk_rows)
+        while True:
+            ledger.peak(
+                f"a chunk of {chunk_rows} contig rows as parsed",
+                _PARSE_FIXED_BYTES + chunk_rows * per_row + encoder.nbytes,
+            )
+            parsed = next(chunks, None)
+            if parsed is None:
+                break
+            chunk = parsed[1]
             rows = join.cells(source.file, chunk["cell_id"].to_numpy(dtype=object))
             matched = rows >= 0
             encoder.add(
                 chunk.loc[matched].drop(columns="cell_id"), rows[matched], position
             )
-            peak = _PEAK_PER_ENCODED_BYTE * encoder.nbytes + held_bytes
-            if peak > memory_bytes:
-                raise MemoryError(
-                    f"Importing the contigs of {encoder.n_records} matched rows "
-                    f"holds about {peak} bytes at its peak, more than the memory "
-                    f"budget of {memory_bytes} bytes. Raise mem_budget."
-                )
+            del chunk, parsed
+            ledger.peak(
+                f"the {encoder.n_records} contigs of the selected cells at the "
+                "import's peak",
+                _PEAK_PER_ENCODED_BYTE * encoder.nbytes,
+            )
     if encoder.missing_ids:
         raise ValueError(
             f"{encoder.missing_ids} contigs of the selected cells have no "
@@ -379,6 +401,36 @@ def _receptor_write_bytes(n_cells: int) -> int:
             "chain_slots": ((n_cells, len(SLOTS)), np.int32),
         }
     )
+
+
+def _clonotype_write_bytes(
+    n_cells: int, columns: tuple[str, ...], within_labels: list[dict[str, str]]
+) -> int:
+    """What writing the arrays of clonotypes holds, as many as there are cells at most.
+
+    Each label is counted at the width of the label of the last of as many
+    clonotypes as cells, and each ``within`` label at the widest of them.
+    """
+    width = len(f"clonotype_{max(1, n_cells)}")
+    arrays: dict[str, tuple[tuple[int, ...], Any]] = {
+        "values": ((n_cells,), f"U{width}"),
+        "codes": ((n_cells,), np.int32),
+        "clone_size": ((n_cells,), np.int64),
+        "clonotype_ids": ((n_cells,), f"U{width}"),
+        "clonotype_sizes": ((n_cells,), np.int64),
+        "representatives": ((n_cells,), np.int64),
+        "n_configurations": ((n_cells,), np.int64),
+        "clonotype_within": ((n_cells,), np.int64),
+    }
+    if columns:
+        widest = max(
+            (len(key[column]) for key in within_labels for column in columns), default=1
+        )
+        arrays["within_labels"] = (
+            (len(within_labels) * len(columns),),
+            f"U{max(1, widest)}",
+        )
+    return cell_data_write_bytes(arrays)
 
 
 def _stored_fields(group: zarr.Group) -> tuple[str, ...]:
@@ -421,89 +473,40 @@ def _stored_text_at(group: zarr.Group, name: str, positions: np.ndarray) -> np.n
     return values
 
 
-def _slot_codes(group: zarr.Group, name: str, slots: np.ndarray) -> np.ndarray:
-    """Return a text field's code in each cell's slots, -1 for an empty slot."""
-    codes = read_array(group, f"contig_{name}").astype(np.int64)
+def _slot_codes(
+    ledger: MemoryLedger, group: zarr.Group, name: str, slots: np.ndarray
+) -> np.ndarray:
+    """Return a text field's code in each cell's slots, -1 for an empty slot.
+
+    Every contig's stored code is read whole and copied as int64, each read
+    and copy charged to ``ledger`` and let go once the slots' codes are
+    taken. The caller charges the slots' codes it keeps.
+    """
+    stored = read_whole(ledger, group, f"contig_{name}", item=f"each contig's {name}")
+    # The codes as int64, and the slots' codes with the mask of the filled
+    # slots, their contigs and their codes as gathered.
+    ledger.peak(f"each contig's {name} as int64", 8 * len(stored) + 25 * slots.size)
+    codes = stored.astype(np.int64)
+    stored_bytes = stored.nbytes
+    del stored
+    ledger.release(stored_bytes)
     taken = np.full(slots.shape, -1, dtype=np.int64)
     filled = slots >= 0
     taken[filled] = codes[slots[filled]]
     return taken
 
 
-@dataclass(slots=True)
-class _Reads:
-    """What a sequence of reads holds, checked against the budget before each read.
-
-    Attributes:
-        limit: The memory budget.
-        held: The bytes held so far, by the caller and by earlier reads.
-        what: What the reads are for, named in errors.
-        remedy: What to do when a read does not fit, named in errors.
-        lingering: What reading the stored chunk read last held, which Zarr's
-            decoding thread may still hold a moment after the read returns,
-            and every check counts. Reads that set it count two chunks.
-    """
-
-    limit: int
-    held: int
-    what: str
-    remedy: str
-    lingering: int = 0
-
-    def reserve(self, needed: int) -> None:
-        """Raise MemoryError if ``needed`` more bytes would exceed the budget."""
-        total = self.held + self.lingering + needed
-        if total > self.limit:
-            raise MemoryError(
-                f"{self.what} holds about {total} bytes, more than the memory "
-                f"budget of {self.limit} bytes. {self.remedy}"
-            )
-
-    def read_bytes(self, chunk: int) -> int:
-        """What reads of stored chunks of ``chunk`` bytes hold beside ``lingering``.
-
-        A read holds the chunk that it decodes while the chunk read before it
-        may still be held, so reads hold two chunks at once: the one that
-        ``lingering`` counts, or one of their own where that is larger, and
-        the one that they decode.
-        """
-        return chunk + max(0, chunk - self.lingering)
-
-    def rows(self, source: zarr.Group, name: str, wanted: np.ndarray) -> np.ndarray:
-        """Read distinct rows of an array a chunk at a time, keeping them held."""
-        array = as_zarr_array(source[name], name=name)
-        fixed, per_row = array_row_selection_parts(array)
-        self.reserve(fixed + len(wanted) * per_row)
-        values = np.asarray(read_array_rows_chunkwise(array, wanted))
-        self.held += int(values.nbytes)
-        return values
-
-    def whole(self, source: zarr.Group, name: str) -> np.ndarray:
-        """Read an array whole, keeping it held.
-
-        Read under a Zarr concurrency of one, the read holds one decoded chunk
-        and its compressed bytes at a time beside the array, and the chunk read
-        before it may still be held.
-        """
-        array = as_zarr_array(source[name], name=name)
-        chunk = array_row_selection_parts(array)[0]
-        self.reserve(self.read_bytes(chunk) + int(array.nbytes))
-        values = np.asarray(array[:])
-        self.held += int(values.nbytes)
-        self.lingering = chunk
-        return values
-
-
 def _value_bounds(
-    reads: _Reads, group: zarr.Group, name: str, codes: np.ndarray
+    ledger: MemoryLedger, group: zarr.Group, name: str, codes: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """Read where the stored values of some codes of a contig text field lie.
 
-    The bounds are read a chunk at a time, or whole where that holds less,
-    each read checked first, and stay counted in ``reads``.
+    The bounds are read a chunk at a time, or whole where that holds less;
+    each read is charged to ``ledger`` first, and the bounds of the codes
+    stay charged.
 
     Args:
-        reads: What the caller holds, and the budget.
+        ledger: What the caller holds, and the budget.
         group: An ``immune_receptors`` artifact's group.
         name: The text field, such as ``junction_aa``.
         codes: Distinct codes of the field in ascending order.
@@ -511,37 +514,48 @@ def _value_bounds(
     Returns:
         The start and end of each code's value among the packed bytes.
     """
-    offsets = as_zarr_array(group[f"contig_{name}_offsets"], name=name)
+    item = f"the bounds of the {len(codes)} {name} values"
+    offsets_name = f"contig_{name}_offsets"
+    offsets = as_zarr_array(group[offsets_name], name=name)
+    # Each code's bound and the next, sorted and joined.
+    ledger.peak(item, 48 * len(codes))
     bound_rows = np.union1d(codes, codes + 1)
-    fixed, per_row = array_row_selection_parts(offsets)
-    serial = fixed + len(bound_rows) * per_row
-    whole = 2 * int(offsets.nbytes) + fixed
-    if whole < serial:
-        # Most values are named: reading the bounds whole holds less.
-        reads.reserve(whole)
-        stored = np.asarray(offsets[:], dtype=np.int64)
-        starts, ends = stored[codes], stored[codes + 1]
-        del stored
-        reads.held += int(starts.nbytes + ends.nbytes)
+    geometry = array_geometry(offsets)
+    whole = geometry is None or geometry.wholeReadBytes(1) < row_read_bytes(
+        geometry, bound_rows
+    )
+    # The bounds as read, or every bound where most values are named, which
+    # holds less, then each code's start and end as int64.
+    if whole:
+        bounds = read_whole(ledger, group, offsets_name, item=item)
+        ledger.peak(item, 24 * len(codes))
+        starts = bounds[codes].astype(np.int64)
+        ends = bounds[codes + 1].astype(np.int64)
     else:
-        bounds = reads.rows(group, f"contig_{name}_offsets", bound_rows)
+        bounds = read_rows(ledger, offsets, bound_rows, item=item)
+        ledger.peak(item, 32 * len(codes))
         starts = bounds[np.searchsorted(bound_rows, codes)].astype(np.int64)
         ends = bounds[np.searchsorted(bound_rows, codes + 1)].astype(np.int64)
+    bounds_bytes = bounds.nbytes
+    del bounds, bound_rows
+    ledger.release(bounds_bytes)
+    ledger.hold(item, starts.nbytes + ends.nbytes)
     return starts, ends
 
 
 def _decoded_values(
-    reads: _Reads, group: zarr.Group, name: str, codes: np.ndarray
+    ledger: MemoryLedger, group: zarr.Group, name: str, codes: np.ndarray
 ) -> np.ndarray:
     """Decode the stored values of some codes of a contig text field.
 
     The bounds of the values are read as :func:`_value_bounds` reads them,
     and their bytes a chunk at a time, so values that no code names are
-    never decoded. Each read, and the decoding, is checked first, and the
-    decoded values stay counted in ``reads``.
+    never decoded. Each read, and the decoding, is charged to ``ledger``
+    first; the decoded values stay charged as the Python strings they are,
+    and the bounds are let go.
 
     Args:
-        reads: What the caller holds, and the budget.
+        ledger: What the caller holds, and the budget.
         group: An ``immune_receptors`` artifact's group.
         name: The text field, such as ``junction_aa``.
         codes: Distinct codes of the field in ascending order.
@@ -550,23 +564,46 @@ def _decoded_values(
         The value of each code, as an object array of text.
     """
     values = as_zarr_array(group[f"contig_{name}_values"], name=name)
-    starts, ends = _value_bounds(reads, group, name, codes)
+    starts, ends = _value_bounds(ledger, group, name, codes)
     n_bytes = int((ends - starts).sum())
     geometry = array_geometry(values)
-    chunk = 0 if geometry is None else geometry.nominalChunkBytes()
-    reads.reserve(
-        array_row_selection_parts(values)[0]
-        + chunk
+    # A stored chunk of the bytes and its slice as read, with the chunk read
+    # before, the bytes joined, and each value while it is decoded.
+    reading = (
+        0
+        if geometry is None
+        else geometry.bandReadBytes(geometry.axisChunk(0), 1, bands=2)
+    )
+    ledger.peak(
+        f"decoding the {len(codes)} {name} values",
+        reading
         + _JUNCTION_BYTES_PER_VALUE * len(codes)
-        + _JUNCTION_BYTES_PER_BYTE * n_bytes
+        + _JUNCTION_BYTES_PER_BYTE * n_bytes,
     )
     lengths = np.zeros(len(codes) + 1, dtype=np.int64)
     np.cumsum(ends - starts, out=lengths[1:])
-    text = unpack_text(_byte_ranges(values, starts, ends), lengths)
-    reads.held += (
-        _KEPT_JUNCTION_BYTES_PER_VALUE * len(codes)
-        + _KEPT_JUNCTION_BYTES_PER_BYTE * n_bytes
+    joined = _byte_ranges(values, starts, ends)
+    if geometry is not None and len(joined):
+        # The chunks from the first range to the last, each read once, leave
+        # one on each of the ledger's codec threads.
+        step = geometry.axisChunk(0)
+        spanned = (int(ends[-1]) - 1) // step - int(starts[0]) // step + 1
+        ledger.leave(geometry.heldReadBytes(ledger.holding_threads(spanned)))
+    # Each value is a string of one byte a character when every byte is
+    # ASCII, and of up to four otherwise.
+    widest = int(joined.max()) if len(joined) else 0
+    text = unpack_text(joined, lengths)
+    del joined, lengths
+    ledger.hold(
+        f"the {len(codes)} {name} values as text",
+        object_array_bytes(len(codes))
+        + python_text_bytes(
+            len(codes), n_bytes, widest=widest if widest < 0x80 else 0x10FFFF
+        ),
     )
+    bounds_bytes = starts.nbytes + ends.nbytes
+    del starts, ends
+    ledger.release(bounds_bytes)
     return text
 
 
@@ -630,7 +667,7 @@ def _value_ranks(codes: np.ndarray, n_values: int) -> tuple[np.ndarray, np.ndarr
 
 
 def _value_lengths(
-    reads: _Reads, group: zarr.Group, name: str, codes: np.ndarray
+    ledger: MemoryLedger, group: zarr.Group, name: str, codes: np.ndarray
 ) -> np.ndarray:
     """Measure the stored values of some codes of a contig text field.
 
@@ -639,11 +676,11 @@ def _value_lengths(
     them, so the read holds one chunk whatever the field stores. Each value
     is measured in characters without being decoded: in a chunk beyond
     ASCII, the bytes that continue a character are counted, which adds up
-    over the chunks that one value spans. Each read is checked first; the
-    lengths stay counted in ``reads``.
+    over the chunks that one value spans. Each read is charged to ``ledger``
+    first; the lengths stay charged, and the bounds are let go.
 
     Args:
-        reads: What the caller holds, and the budget.
+        ledger: What the caller holds, and the budget.
         group: An ``immune_receptors`` artifact's group.
         name: The text field, such as ``junction_aa``.
         codes: Distinct codes of the field in ascending order.
@@ -655,14 +692,20 @@ def _value_lengths(
     n_bytes = int(packed.shape[0])
     geometry = array_geometry(packed)
     step = max(1, n_bytes if geometry is None else geometry.axisChunk(0))
-    starts, ends = _value_bounds(reads, group, name, codes)
-    # One chunk as it is read and as the block of bytes that the read
-    # returns, and for text beyond ASCII the block's mask and running count
-    # as int32, beside each value's bounds and length.
-    reads.reserve(
-        array_row_selection_parts(packed)[0]
-        + (1 + _CONTINUED_BYTES_PER_BYTE) * min(step, n_bytes)
-        + _LENGTH_BYTES_PER_VALUE * len(codes)
+    starts, ends = _value_bounds(ledger, group, name, codes)
+    # One chunk as it is read, with the chunk read before, and for text beyond
+    # ASCII the block's mask and running count as int32, beside each value's
+    # bounds and length.
+    reading = (
+        0
+        if geometry is None
+        else geometry.bandReadBytes(min(step, n_bytes), 1, bands=2)
+    )
+    ledger.peak(
+        f"measuring the {len(codes)} {name} values",
+        reading
+        + _CONTINUED_BYTES_PER_BYTE * min(step, n_bytes)
+        + _LENGTH_BYTES_PER_VALUE * len(codes),
     )
     lengths: np.ndarray = ends - starts
     filled = np.flatnonzero(lengths > 0)
@@ -683,8 +726,29 @@ def _value_lengths(
         characters = text_lengths(block, parts, np.arange(0, len(parts), 2))
         lengths[begin:stop] -= np.diff(parts)[0::2] - characters
         del block
-    reads.held += int(lengths.nbytes)
+    if geometry is not None and len(filled):
+        ledger.leave(geometry.heldReadBytes(ledger.holding_threads(last - first + 1)))
+    bounds_bytes = starts.nbytes + ends.nbytes
+    del starts, ends, filled
+    ledger.release(bounds_bytes)
+    ledger.hold(f"the lengths of the {len(codes)} {name} values", lengths.nbytes)
     return lengths
+
+
+def _coding_bytes(n_values: int, width: int, n_distinct: int) -> int:
+    """What coding ``n_values`` stored labels of up to ``width`` ASCII characters with :func:`_sorted_codes` holds.
+
+    pandas hashes a Python string for each label, as an object array, into a
+    table sized for every label, and gives each its code beside a reference
+    to each label; sorting the ``n_distinct`` distinct labels renumbers the
+    codes in place.
+    """
+    return (
+        object_array_bytes(n_values)
+        + python_text_bytes(n_values, n_values * width)
+        + hash_table_bytes(n_values, n_distinct=n_distinct)
+        + 16 * n_values
+    )
 
 
 def _sorted_codes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -862,33 +926,39 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             )
             return planned.ref
         self._require_writable(arguments.operation)
-        # What the import holds for the selected cells, and the read of their
-        # IDs as text, are checked before the IDs are read.
-        cell_bytes = _IMPORT_BYTES_PER_CELL * n_cells + _receptor_write_bytes(n_cells)
-        reading = (
-            LOOKUP_BYTES_PER_CELL * n_cells
-            + cell_bytes
-            + text_read_bytes(self.cells._get_array("ids"), n_cells)
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Importing contigs for {n_cells} selected cells",
+            remedy="pass a smaller cell_selection",
+            codec_threads=self.nthreads,
         )
-        if reading > self.memoryBytes:
-            raise MemoryError(
-                f"Importing contigs for {n_cells} selected cells holds about "
-                f"{reading} bytes before the first contig is read, more than the "
-                f"memory budget of {self.memoryBytes} bytes. Raise mem_budget, or "
-                "pass a smaller cell_selection."
-            )
+        # What the import holds for each selected cell, what writing their
+        # labels and counts holds, and the join's lookup of their IDs are
+        # charged before the IDs are read.
+        ledger.hold(
+            "each selected cell's chain slots, counts and labels",
+            _IMPORT_BYTES_PER_CELL * n_cells,
+        )
+        ledger.hold(
+            "writing each cell's labels and counts", _receptor_write_bytes(n_cells)
+        )
+        cell_bytes = ledger.held_bytes
+        ledger.hold(
+            "the join's lookup of the cells' IDs", LOOKUP_BYTES_PER_CELL * n_cells
+        )
         # Only the selected cells' IDs are read, a sample's in a merged store.
-        cell_ids = np.asarray(
-            read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
+        cell_ids = read_text_rows(
+            ledger,
+            self.cells._get_array("ids"),
+            cell_index,
+            item="the selected cells' IDs",
         )
+        # The join counts its lookup and the IDs as text itself, beside what
+        # the import holds for each cell.
         join = CellBarcodeJoin(
             cell_ids, memory_bytes=self.memoryBytes, held_bytes=cell_bytes
         )
-        # Beside the encoded contigs, the import holds what the join counts:
-        # its lookup, the cells' IDs as text and the bytes held for each cell.
-        table = _encode_contigs(
-            sources, join, memory_bytes=self.memoryBytes, held_bytes=join.held_bytes
-        )
+        table = _encode_contigs(sources, join, ledger)
         # Files without a contig row give no locus field and no contig.
         locus = (
             table.text["locus"]
@@ -996,13 +1066,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             + (_CELL_TABLE_BYTES_PER_CELL + _TABLE_BYTES_PER_FIELD * slot_columns)
             * n_cells
         )
-        if resident > self.memoryBytes:
-            raise MemoryError(
-                f"The tables of {n_cells} cells and {n_contigs} contigs with "
-                f"{len(chosen)} fields hold about {resident} bytes, more than the "
-                f"memory budget of {self.memoryBytes} bytes. Pass fields= with "
-                "fewer fields, or raise mem_budget."
-            )
+        MemoryLedger(
+            self.memoryBytes,
+            f"Loading the receptors of {n_cells} cells and {n_contigs} contigs "
+            f"with {len(chosen)} fields",
+            remedy="pass fields= with fewer fields",
+        ).peak("the tables of the cells and the contigs", resident)
         # The canonical values come with the cell IDs; the other per-cell
         # arrays are aligned to the same cells.
         loaded = self._artifacts_load_values(receptors)
@@ -1238,23 +1307,38 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         cell_selection = status.input_ref("cell_selection")
         stored_types = as_zarr_array(group["values"], name="values")
         n_cells = int(stored_types.shape[0])
-        held = n_cells * (stored_types.dtype.itemsize + _RECEPTOR_TYPE_CODING_BYTES)
-        if held > self.memoryBytes:
-            raise MemoryError(
-                f"Reading the receptor types of {n_cells} cells holds about {held} "
-                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
-                "Raise mem_budget."
-            )
-        receptor_type = np.asarray(stored_types[:])
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Defining the clonotypes of {n_cells} cells",
+            codec_threads=self.nthreads,
+        )
+        receptor_type = read_whole(
+            ledger, group, "values", item="the cells' receptor types"
+        )
+        # Whether each cell has a receptor, and its type's code, as hashed and
+        # sorted from a Python string for each cell.
+        ledger.hold("whether each cell has a receptor", n_cells)
         with_receptor = receptor_type != NO_RECEPTOR
+        ledger.hold("each cell's receptor type code", 8 * n_cells)
         if within_receptor_type:
+            ledger.peak(
+                "coding the cells' receptor types",
+                _coding_bytes(
+                    n_cells, stored_types.dtype.itemsize // 4, len(RECEPTOR_TYPES)
+                ),
+            )
             _types, type_codes = _sorted_codes(receptor_type)
         else:
             type_codes = np.zeros(n_cells, dtype=np.int64)
+        types_bytes = receptor_type.nbytes
         del receptor_type
+        ledger.release(types_bytes)
         within_codes, within_labels, fingerprint = self._within_groups(
             cell_selection, columns, with_receptor
         )
+        # Each cell's within group, and its group among the receptor types and
+        # the within groups.
+        ledger.hold("each cell's group", 16 * n_cells)
         groups = np.where(
             with_receptor, type_codes * max(1, len(within_labels)) + within_codes, -1
         )
@@ -1293,26 +1377,24 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable(arguments.operation)
-        # Each compared field's code of every contig is read, one field at a
-        # time.
-        contig_codes = as_zarr_array(group[f"contig_{field_name}"], name=field_name)
-        resident = _CLONOTYPE_BYTES_PER_CELL * n_cells + int(contig_codes.shape[0]) * (
-            contig_codes.dtype.itemsize + _CODE_BYTES
+        ledger.hold(
+            "writing the clonotypes",
+            _clonotype_write_bytes(n_cells, columns, within_labels),
+        )
+        ledger.hold(
+            "the chains and clonotypes of each cell",
+            _CLONOTYPE_BYTES_PER_CELL * n_cells,
         )
         if metric != "identity":
             # A cluster search holds its encoded junctions, one pass of keys
             # with their candidate pairs, and one chunk of candidate cells.
-            resident += CLUSTER_SEARCH_BYTES
-        if resident > self.memoryBytes:
-            raise MemoryError(
-                f"Defining the clonotypes of {n_cells} cells holds about {resident} "
-                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
-                "Raise mem_budget."
-            )
-        slots = read_array(group, "chain_slots")
-        compared = _slot_codes(group, field_name, slots)
-        v_genes = _slot_codes(group, "v_call", slots) if same_v_gene else None
-        j_genes = _slot_codes(group, "j_call", slots) if same_j_gene else None
+            ledger.hold("the search for near junctions", CLUSTER_SEARCH_BYTES)
+        slots = read_whole(ledger, group, "chain_slots", item="each cell's chain slots")
+        # Each compared field's code of every contig is read, one field at a
+        # time.
+        compared = _slot_codes(ledger, group, field_name, slots)
+        v_genes = _slot_codes(ledger, group, "v_call", slots) if same_v_gene else None
+        j_genes = _slot_codes(ledger, group, "j_call", slots) if same_j_gene else None
         if metric == "identity":
             assignment = assign_clonotypes(
                 compared,
@@ -1331,24 +1413,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             present = compared >= 0
             compared_codes, local = np.unique(compared[present], return_inverse=True)
             compared[present] = local.reshape(-1)
-            reads = _Reads(
-                limit=self.memoryBytes,
-                held=resident - CLUSTER_SEARCH_BYTES,
-                what=(
-                    f"Decoding the {len(compared_codes)} junctions that the clonotype "
-                    f"clusters of {n_cells} cells compare"
-                ),
-                remedy="Raise mem_budget.",
-            )
-            texts = _decoded_values(reads, group, field_name, compared_codes)
-            held = reads.held + CLUSTER_SEARCH_BYTES
-            if held > self.memoryBytes:
-                raise MemoryError(
-                    f"Defining the clonotype clusters of {n_cells} cells holds about "
-                    f"{held} bytes with the {len(compared_codes)} junctions they "
-                    f"compare, more than the memory budget of {self.memoryBytes} "
-                    "bytes. Raise mem_budget."
-                )
+            texts = _decoded_values(ledger, group, field_name, compared_codes)
             assignment = assign_clonotype_clusters(
                 compared,
                 texts,
@@ -1359,7 +1424,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 j_genes=j_genes,
                 receptor_arms=receptor_arms,
                 dual_ir=dual_ir,
-                max_bytes=self.memoryBytes - held,
+                ledger=ledger,
             )
         labels = clonotype_labels(assignment.n_clonotypes)
         has = assignment.codes >= 0
@@ -1432,12 +1497,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         cells share. Of the receptors, only the representatives' slots and
         junction codes, the bounds of the junctions they name, a chunk at a
         time or whole where that holds less, and those junctions' bytes are
-        read, each array a physical chunk at a time. Before each read, what it
-        holds is checked against the memory budget beside ``held_bytes`` and
-        what earlier reads keep: one decoded chunk and its compressed bytes,
-        with three copies and the index arrays of each row it reads, and for
-        the junctions' bytes the chunk's slice, the bytes and each junction
-        while it is decoded.
+        read, each array a physical chunk at a time. Each read, and the
+        decoding, is charged to a memory ledger beside ``held_bytes`` and what
+        earlier reads keep.
 
         Args:
             clonotypes: A complete ``clonotypes`` artifact.
@@ -1450,7 +1512,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             has no junction amino-acid sequence, as an object array.
 
         Raises:
-            MemoryError: If a read does not fit the memory budget.
+            MemoryBudgetError: If a read does not fit the memory budget.
         """
         group = self._clonotype_group(clonotypes)
         status = inspect_artifact(self.zw, clonotypes)
@@ -1458,16 +1520,27 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         naming = ("VJ_1", "VDJ_1")
         if (status.parameters or {}).get("receptor_arms") != "VJ":
             naming = ("VDJ_1", "VJ_1")
-        reads = _Reads(
-            limit=self.memoryBytes,
-            held=int(held_bytes),
-            what="Labelling clonotypes by their junctions",
-            remedy="Raise mem_budget, or label fewer clonotypes.",
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            "Labelling clonotypes by their junctions",
+            remedy="label fewer clonotypes",
+            codec_threads=self.nthreads,
         )
+        ledger.hold("what labelling them sits beside", int(held_bytes))
         wanted, back = np.unique(np.asarray(codes, dtype=np.int64), return_inverse=True)
-        cells = reads.rows(group, "representatives", wanted).astype(np.int64)
+        cells = read_rows(
+            ledger,
+            as_zarr_array(group["representatives"], name="representatives"),
+            wanted,
+            item="their representatives",
+        ).astype(np.int64)
         distinct_cells, cell_back = np.unique(cells, return_inverse=True)
-        stored_slots = reads.rows(receptor_group, "chain_slots", distinct_cells)
+        stored_slots = read_rows(
+            ledger,
+            as_zarr_array(receptor_group["chain_slots"], name="chain_slots"),
+            distinct_cells,
+            item="their representatives' chain slots",
+        )
         slots = np.asarray(
             stored_slots[:, [SLOTS.index(slot) for slot in naming]], dtype=np.int64
         )[cell_back.reshape(-1)]
@@ -1478,15 +1551,20 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             distinct_contigs, contig_back = np.unique(
                 contigs[present], return_inverse=True
             )
-            junction_codes[present] = reads.rows(
-                receptor_group, "contig_junction_aa", distinct_contigs
+            junction_codes[present] = read_rows(
+                ledger,
+                as_zarr_array(
+                    receptor_group["contig_junction_aa"], name="contig_junction_aa"
+                ),
+                distinct_contigs,
+                item="their junctions' codes",
             ).astype(np.int64)[contig_back.reshape(-1)]
         junctions = np.full(len(wanted), None, dtype=object)
         named = junction_codes >= 0
         if named.any():
             # Only the bytes of the junctions needed are read and decoded.
             needed, inverse = np.unique(junction_codes[named], return_inverse=True)
-            text = _decoded_values(reads, receptor_group, "junction_aa", needed)
+            text = _decoded_values(ledger, receptor_group, "junction_aa", needed)
             junctions[np.flatnonzero(named)] = text[inverse.reshape(-1)]
         return junctions[back.reshape(-1)]
 
@@ -1554,12 +1632,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                     + _FIELD_BYTES_PER_PACKED_BYTE * int(packed.nbytes)
                 )
         resident += _DECODE_BYTES_PER_BATCH_VALUE * min(decoded, _DECODE_BATCH_VALUES)
-        if resident > self.memoryBytes:
-            raise MemoryError(
-                f"Loading the clonotypes of {n_cells} cells holds about {resident} "
-                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
-                "Raise mem_budget."
-            )
+        MemoryLedger(
+            self.memoryBytes, f"Loading the clonotypes of {n_cells} cells"
+        ).peak("the tables of the cells and the clonotypes", resident)
         representatives = read_array(group, "representatives").astype(np.int64)
         slots = read_array(receptor_group, "chain_slots")[representatives]
         # Only the representatives' contigs are decoded.
@@ -1630,7 +1705,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         what: str,
         chosen_by: str,
     ) -> tuple[
-        pd.DataFrame, dict[str, np.ndarray], tuple[str, ...], zarr.Group, _Reads
+        pd.DataFrame, dict[str, np.ndarray], tuple[str, ...], zarr.Group, MemoryLedger
     ]:
         """Each counted chain of the chosen slots, with its fields' stored codes.
 
@@ -1638,8 +1713,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         ``count="clonotypes"`` each clonotype once per group and value. The
         cells are grouped through :func:`cell_groups`. Reading the slots and
         the clonotypes, grouping the cells and holding the chains are each
-        checked against the memory budget beside what the earlier steps hold,
-        and so is the counting that follows, before the chains are found.
+        charged to a memory ledger beside what the earlier steps hold, and so
+        is the counting that follows, before the chains are found.
 
         Returns:
             The groups' keys, one row per group, indexed by its name and
@@ -1647,8 +1722,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             ``cell``, the cell's
             row, the stored codes of ``locus`` and of each field, and
             ``clonotype``, the clonotype code, with a clonotypes source; the
-            slots; the ``immune_receptors`` artifact's group; and what the
-            step holds, against the budget.
+            slots; the ``immune_receptors`` artifact's group; and the ledger
+            of what the step holds.
         """
         if isinstance(slots, str):
             slots = (slots,)
@@ -1689,38 +1764,35 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         # Reading the slots and the codes of every contig is sized by every
         # cell and contig of the receptors; the chains and their counting by
         # the chains of the cells and slots counted.
-        reads = _Reads(
-            limit=self.memoryBytes,
-            held=0,
-            what=f"{what} of {n_cells} cells",
-            remedy="Raise mem_budget.",
+        ledger = MemoryLedger(
+            self.memoryBytes, f"{what} of {n_cells} cells", codec_threads=self.nthreads
         )
-        # The slots are read whole, beside the chosen ones and the cells with
-        # a chain in them; the clonotypes' codes with their int64 copy.
-        reading = (
-            array_row_selection_parts(stored_slots)[0]
-            + int(stored_slots.nbytes)
-            + n_cells * (kept + len(chosen) + 1)
+        # The slots are read whole, beside the chosen ones, whether each cell
+        # holds a chain in them, and the cells with one.
+        all_slots = read_whole(
+            ledger, group, "chain_slots", item="each cell's chain slots"
         )
-        if clonotype_group is not None:
-            stored_codes = as_zarr_array(clonotype_group["codes"], name="codes")
-            reading += (
-                array_row_selection_parts(stored_codes)[0]
-                + int(stored_codes.nbytes)
-                + n_cells * (_CODE_BYTES + 1)
-            )
-        reads.reserve(reading)
-        slot_contigs = read_array(group, "chain_slots")[
-            :, [SLOTS.index(slot) for slot in chosen]
-        ]
+        ledger.peak("the chosen slots", n_cells * (kept + len(chosen) + 1))
+        slot_contigs = all_slots[:, [SLOTS.index(slot) for slot in chosen]]
         rows = (slot_contigs >= 0).any(axis=1)
+        slots_bytes = all_slots.nbytes
+        del all_slots
+        ledger.release(slots_bytes)
+        ledger.hold("the chosen slots", slot_contigs.nbytes + rows.nbytes)
         codes = None
         if clonotype_group is not None:
-            codes = read_array(clonotype_group, "codes").astype(np.int64)
+            # The clonotypes' codes, with their int64 copy and the mask of the
+            # cells with a clonotype.
+            stored_codes = read_whole(
+                ledger, clonotype_group, "codes", item="each cell's clonotype"
+            )
+            ledger.peak("each cell's clonotype as int64", 9 * n_cells)
+            codes = stored_codes.astype(np.int64)
             rows &= codes >= 0
-        reads.held = int(slot_contigs.nbytes + rows.nbytes) + (
-            0 if codes is None else int(codes.nbytes)
-        )
+            codes_bytes = stored_codes.nbytes
+            del stored_codes
+            ledger.release(codes_bytes)
+            ledger.hold("each cell's clonotype as int64", codes.nbytes)
         grouped = cell_groups(
             self.zw,
             self.cells,
@@ -1730,55 +1802,55 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             groups=groups,
             cell_selection=cell_selection,
             memory_bytes=self.memoryBytes,
-            held_bytes=reads.held,
+            held_bytes=ledger.held_bytes,
+        )
+        # Each cell's group, and each group's labels, name and row of the keys,
+        # beside the cells with a chain until they are let go.
+        ledger.hold(
+            "each cell's group and each group's labels and name",
+            int(grouped.codes.nbytes)
+            + len(grouped.keys)
+            * (
+                _KEY_BYTES_PER_GROUP
+                + _KEY_BYTES_PER_GROUP_COLUMN * len(grouped.key_columns)
+            ),
         )
         del rows
-        reads.held -= n_cells
-        # Each cell's group, and each group's labels, name and row of the keys.
-        keys_bytes = int(grouped.codes.nbytes) + len(grouped.keys) * (
-            _KEY_BYTES_PER_GROUP
-            + _KEY_BYTES_PER_GROUP_COLUMN * len(grouped.key_columns)
-        )
-        reads.reserve(keys_bytes)
+        ledger.release(n_cells)
         keys = group_key_table(grouped.key_columns, grouped.keys)
-        reads.held += keys_bytes
         # Each chain of a grouped cell in a chosen slot is counted, and the
         # stored codes of each contig's text field are read one field at a
         # time.
-        reads.reserve((2 * len(chosen) + 1) * n_cells)
+        ledger.peak("the chains of the grouped cells", (2 * len(chosen) + 1) * n_cells)
         counted = (grouped.codes >= 0)[:, None] & (slot_contigs >= 0)
         n_chains = int(np.count_nonzero(counted))
         n_fields = 1 + len(fields) + (codes is not None)
-        stored_locus = as_zarr_array(group["contig_locus"], name="locus")
-        n_contigs = int(stored_locus.shape[0])
-        code_read = array_row_selection_parts(stored_locus)[0] + n_contigs * (
-            stored_locus.dtype.itemsize + _CODE_BYTES
+        ledger.remedy = (
+            "count fewer chains, of a smaller cell_selection or of fewer slots"
         )
-        chains = n_chains * (_CHAIN_BYTES + _CHAIN_BYTES_PER_FIELD * n_fields)
-        reads.remedy = (
-            "Raise mem_budget, or count fewer chains, of a smaller cell_selection "
-            "or of fewer slots."
+        ledger.hold(
+            f"the {n_chains} chains counted",
+            n_chains * (_CHAIN_BYTES + _CHAIN_BYTES_PER_FIELD * n_fields),
         )
-        reads.reserve(len(counted.reshape(-1)) + code_read + chains)
+        ledger.peak("the chains counted", len(counted.reshape(-1)))
         cells, positions = np.nonzero(counted)
         del counted
         contigs = slot_contigs[cells, positions]
         del positions
         units = {"group": grouped.codes[cells], "cell": cells}
         for name in ("locus", *fields):
-            units[name] = _slot_codes(group, name, contigs)
+            units[name] = _slot_codes(ledger, group, name, contigs)
         if codes is not None:
             units["clonotype"] = codes[cells]
-        reads.held += chains
-        return keys, units, chosen, group, reads
+        return keys, units, chosen, group, ledger
 
     def _value_names(
-        self, reads: _Reads, group: zarr.Group, name: str, codes: np.ndarray
+        self, ledger: MemoryLedger, group: zarr.Group, name: str, codes: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
         """Decode the distinct values of a stored text field among some codes.
 
         Only the values that the codes name are decoded, through
-        :func:`_decoded_values`, which checks each read against the budget.
+        :func:`_decoded_values`, which charges each read to ``ledger``.
 
         Returns:
             Each code's position among the distinct values, -1 for a missing
@@ -1786,19 +1858,19 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         """
         offsets = as_zarr_array(group[f"contig_{name}_offsets"], name=name)
         n_values = int(offsets.shape[0]) - 1
-        reads.reserve(_RANK_BYTES_PER_VALUE * n_values)
+        ledger.peak(f"ranking the {name} values", _RANK_BYTES_PER_VALUE * n_values)
         local, needed = _value_ranks(codes, n_values)
         if not len(needed):
             return local, np.empty(0, dtype=object)
-        return local, _decoded_values(reads, group, name, needed)
+        return local, _decoded_values(ledger, group, name, needed)
 
     def _value_measures(
-        self, reads: _Reads, group: zarr.Group, name: str, codes: np.ndarray
+        self, ledger: MemoryLedger, group: zarr.Group, name: str, codes: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
         """Measure the distinct values of a stored text field among some codes.
 
         Only the values that the codes name are measured, through
-        :func:`_value_lengths`, which checks each read against the budget.
+        :func:`_value_lengths`, which charges each read to ``ledger``.
 
         Returns:
             Each code's length in characters, -1 for a missing value, and
@@ -1806,9 +1878,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         """
         offsets = as_zarr_array(group[f"contig_{name}_offsets"], name=name)
         n_values = int(offsets.shape[0]) - 1
-        reads.reserve(_RANK_BYTES_PER_VALUE * n_values)
+        ledger.peak(f"ranking the {name} values", _RANK_BYTES_PER_VALUE * n_values)
         local, needed = _value_ranks(codes, n_values)
-        lengths = _value_lengths(reads, group, name, needed)
+        lengths = _value_lengths(ledger, group, name, needed)
         measured = np.full(len(local), -1, dtype=np.int64)
         known = local >= 0
         measured[known] = lengths[local[known]]
@@ -1816,13 +1888,13 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
 
     def _check_count_budget(
         self,
-        reads: _Reads,
+        ledger: MemoryLedger,
         keys: pd.DataFrame,
         n_chains: int,
         widths: list[int],
         once: bool,
     ) -> None:
-        """Check the counting and its table against the budget before they run.
+        """Charge the counting and its table to ``ledger`` before they run.
 
         The table holds a row for each distinct group, locus and values that
         a chain holds, at most one per chain and per combination of codes, of
@@ -1837,7 +1909,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             needed += n_chains * (
                 _ONCE_BYTES_PER_CHAIN + _ONCE_BYTES_PER_COLUMN * (len(widths) + 2)
             )
-        reads.reserve(needed)
+        ledger.peak("counting the chains and their table", needed)
 
     @validation_scoped
     def _repertoire_gene_usage(
@@ -1915,30 +1987,28 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 f"genes must hold distinct fields from {', '.join(GENE_FIELDS)}"
             )
         gene_names(np.asarray([], dtype=object), level)
-        # Each stored array is read a chunk at a time, as the checks count.
-        with zarr_io_concurrency(1):
-            keys, units, chosen, group, reads = self._slot_units(
-                source,
-                fields,
-                slots=slots,
-                count=count,
-                group_by=group_by,
-                groups=groups,
-                cell_selection=cell_selection,
-                what="Counting the genes of the chains",
-                chosen_by="Counting gene usage",
+        keys, units, chosen, group, ledger = self._slot_units(
+            source,
+            fields,
+            slots=slots,
+            count=count,
+            group_by=group_by,
+            groups=groups,
+            cell_selection=cell_selection,
+            what="Counting the genes of the chains",
+            chosen_by="Counting gene usage",
+        )
+        # Each distinct call is decoded and named once.
+        named = {
+            name: gene_codes(
+                *self._value_names(ledger, group, name, units.pop(name)), level
             )
-            # Each distinct call is decoded and named once.
-            named = {
-                name: gene_codes(
-                    *self._value_names(reads, group, name, units.pop(name)), level
-                )
-                for name in fields
-            }
-            loci = self._value_names(reads, group, "locus", units.pop("locus"))
+            for name in fields
+        }
+        loci = self._value_names(ledger, group, "locus", units.pop("locus"))
         once_per_cell = count == "cells" and _shares_an_arm(chosen)
         self._check_count_budget(
-            reads,
+            ledger,
             keys,
             len(units["cell"]),
             [len(loci[1]), *(len(names) for _codes, names in named.values())],
@@ -2024,28 +2094,26 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if sequence not in SEQUENCES:
             raise ValueError(f"sequence must be one of {', '.join(SEQUENCES)}")
         field_name = "junction_aa" if sequence == "aa" else "junction"
-        # Each stored array is read a chunk at a time, as the checks count.
-        with zarr_io_concurrency(1):
-            keys, units, chosen, group, reads = self._slot_units(
-                source,
-                (field_name,),
-                slots=slots,
-                count=count,
-                group_by=group_by,
-                groups=groups,
-                cell_selection=cell_selection,
-                what="Counting the junction lengths of the chains",
-                chosen_by=f"sequence={quoted_value(sequence)}",
-            )
-            # Each distinct junction is measured once, and a chain without
-            # one is not counted.
-            measured, names = self._value_measures(
-                reads, group, field_name, units.pop(field_name)
-            )
-            loci = self._value_names(reads, group, "locus", units.pop("locus"))
+        keys, units, chosen, group, ledger = self._slot_units(
+            source,
+            (field_name,),
+            slots=slots,
+            count=count,
+            group_by=group_by,
+            groups=groups,
+            cell_selection=cell_selection,
+            what="Counting the junction lengths of the chains",
+            chosen_by=f"sequence={quoted_value(sequence)}",
+        )
+        # Each distinct junction is measured once, and a chain without one is
+        # not counted.
+        measured, names = self._value_measures(
+            ledger, group, field_name, units.pop(field_name)
+        )
+        loci = self._value_names(ledger, group, "locus", units.pop("locus"))
         once_per_cell = count == "cells" and _shares_an_arm(chosen)
         self._check_count_budget(
-            reads,
+            ledger,
             keys,
             len(units["cell"]),
             [len(loci[1]), len(names)],
@@ -2206,24 +2274,26 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         ]
         order = [*leading, *[name for name in columns if name not in leading]]
         n_cells = int(as_zarr_array(group["values"], name="values").shape[0])
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Exporting the {_n_contigs(group)} contigs of {n_cells} cells with "
+            f"{len(chosen)} fields",
+            remedy="pass fields= with fewer fields",
+            codec_threads=self.nthreads,
+        )
+        ledger.hold(
+            "the export's objects and the file's buffer",
+            _EXPORT_OBJECT_BYTES + _EXPORT_OBJECT_BYTES_PER_FIELD * len(chosen),
+        )
         # A clonotypes artifact's labels replace an imported clone_id.
         contigs = _ExportContigs(
             group,
             tuple(name for name in chosen if not (clonotypes and name == "clone_id")),
             chains_only=chains_only,
-            reads=_Reads(
-                limit=self.memoryBytes,
-                held=_EXPORT_OBJECT_BYTES
-                + _EXPORT_OBJECT_BYTES_PER_FIELD * len(chosen),
-                what=(
-                    f"Exporting the {_n_contigs(group)} contigs of {n_cells} cells "
-                    f"with {len(chosen)} fields"
-                ),
-                remedy="Raise mem_budget, or pass fields= with fewer fields.",
-            ),
+            ledger=ledger,
         )
-        reads = contigs.reads
         block_bytes = max(1, min(_EXPORT_BLOCK_BYTES, self.memoryBytes // 16))
+        # Every stored array is read a chunk at a time, as the blocks count.
         with zarr_io_concurrency(1):
             contigs.hold_text()
             clones: EncodedText | None = None
@@ -2231,24 +2301,29 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             if clonotype_group is not None:
                 # Each cell's clonotype is its code among the clonotypes'
                 # labels, which follow the receptors' cells.
-                codes = reads.whole(clonotype_group, "codes")
+                codes = read_whole(
+                    ledger, clonotype_group, "codes", item="each cell's clonotype"
+                )
                 labels, clone_width = _packed_text(
-                    reads,
+                    ledger,
                     as_zarr_array(
                         clonotype_group["clonotype_ids"], name="clonotype_ids"
                     ),
                     None,
                     block_bytes,
+                    item="the clonotypes' labels",
                 )
                 clones = EncodedText(codes, labels.data, labels.offsets)
             cells, cell_width = self._export_cell_ids(
-                reads, receptors, n_cells, block_bytes
+                ledger, receptors, n_cells, block_bytes
             )
             contigs.measure(block_bytes, cells=cells, clones=clones)
             hashes, id_rows = contigs.scan(block_bytes)
             # Sorting the hashes and finding those that repeat.
-            reads.reserve(_NAMING_BYTES_PER_ROW * len(hashes))
-            naming = reads.held + _NAMING_BYTES_PER_ROW * len(hashes)
+            naming = ledger.hold(
+                "finding the contig IDs that repeat",
+                _NAMING_BYTES_PER_ROW * len(hashes),
+            )
             per_id = _ID_BYTES + _ID_BYTES_PER_BYTE * contigs.width("sequence_id")
             # The pass that reads the repeated IDs holds a block of IDs, their
             # bytes and their offsets as read and searched.
@@ -2261,18 +2336,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 # The IDs read earlier stay held while later ones are read.
                 nonlocal asked
                 asked += len(rows)
-                _Reads(
-                    limit=self.memoryBytes,
-                    held=naming + passing,
-                    what=f"Naming {asked} repeated contig IDs",
-                    remedy="Raise mem_budget.",
-                    lingering=reads.lingering,
-                ).reserve(per_id * asked)
+                ledger.peak(
+                    f"naming {asked} repeated contig IDs", passing + per_id * asked
+                )
                 return contigs.ids_at(rows, id_rows)
 
             renamed = suffix_repeated_ids(hashes, ids_at)
             del hashes
-            reads.held += per_id * len(renamed[0]) - contigs.hash_bytes
+            ledger.release(naming + contigs.hash_bytes)
+            ledger.hold("the repeated IDs' new names", per_id * len(renamed[0]))
             block_rows = contigs.plan_blocks(
                 n_columns=len(AIRR_REQUIRED_FIELDS)
                 + sum(name not in AIRR_REQUIRED_FIELDS for name in order),
@@ -2296,13 +2368,17 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         return written
 
     def _export_cell_ids(
-        self, reads: _Reads, receptors: ArtifactRef, n_cells: int, slice_bytes: int
+        self,
+        ledger: MemoryLedger,
+        receptors: ArtifactRef,
+        n_cells: int,
+        slice_bytes: int,
     ) -> tuple[EncodedText, int]:
         """The IDs of the receptors' cells as packed text, for an AIRR export.
 
         The positions of the receptors' cell selection are read, then the IDs
         a slice at a time, as :func:`_packed_text` reads them; each step is
-        checked first, and the packed IDs stay counted in ``reads``.
+        charged to ``ledger`` first, and the packed IDs stay charged.
 
         Returns:
             The IDs, whose codes are unused, and the bytes of the longest.
@@ -2312,15 +2388,28 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         mask = as_zarr_array(
             artifact_group(self.zw, selection)["values"], name="values"
         )
-        chunk = array_row_selection_parts(mask)[0]
-        reads.reserve(reads.read_bytes(chunk) + _SELECTION_BYTES_PER_CELL * n_cells)
-        cell_index = cell_selection_indices(self.zw, selection)
-        reads.held += int(cell_index.nbytes)
-        reads.lingering = chunk
-        packed = _packed_text(
-            reads, self.cells._get_array("ids"), cell_index, slice_bytes
+        geometry = array_geometry(mask)
+        chunk = 0 if geometry is None else geometry.storedChunkBytes()
+        ledger.peak(
+            "the positions of the receptors' cells",
+            _chunk_reads(ledger, chunk) + _SELECTION_BYTES_PER_CELL * n_cells,
         )
-        reads.held -= int(cell_index.nbytes)
+        cell_index = cell_selection_indices(self.zw, selection)
+        if geometry is not None:
+            n_chunks = -(-geometry.shape[0] // geometry.axisChunk(0))
+            ledger.leave(geometry.heldReadBytes(ledger.holding_threads(n_chunks)))
+        positions = ledger.hold(
+            "the positions of the receptors' cells", int(cell_index.nbytes)
+        )
+        packed = _packed_text(
+            ledger,
+            self.cells._get_array("ids"),
+            cell_index,
+            slice_bytes,
+            item="the cells' IDs",
+        )
+        del cell_index
+        ledger.release(positions)
         return packed
 
 
@@ -2380,6 +2469,12 @@ _ID_BYTES = 200
 _ID_BYTES_PER_BYTE = 4
 
 
+def _stored_chunk_bytes(array: zarr.Array) -> int:
+    """The bytes of one stored chunk of an array as stored and decoded, 0 without chunks."""
+    geometry = array_geometry(array)
+    return 0 if geometry is None else geometry.storedChunkBytes()
+
+
 def _n_contigs(group: zarr.Group) -> int:
     return int(as_zarr_array(group["contig_cells"], name="contig_cells").shape[0])
 
@@ -2390,54 +2485,69 @@ def _even_rows(chunk: int, wanted: int) -> int:
     return -(-chunk // -(-chunk // wanted))
 
 
+def _chunk_reads(ledger: MemoryLedger, chunk: int) -> int:
+    """What reads of stored chunks of ``chunk`` bytes, one after another, hold beside what the ledger counts.
+
+    A read holds the chunk that it decodes while the chunk read before it may
+    still be held, so reads hold two chunks at once: the one that the
+    ledger's last read left behind, or one of their own where that is larger,
+    and the one that they decode.
+    """
+    return chunk + max(0, chunk - ledger.left)
+
+
 def _packed_text(
-    reads: _Reads, array: zarr.Array, rows: np.ndarray | None, slice_bytes: int
+    ledger: MemoryLedger,
+    array: zarr.Array,
+    rows: np.ndarray | None,
+    slice_bytes: int,
+    *,
+    item: str,
 ) -> tuple[EncodedText, int]:
     """Read rows of a stored text array as packed UTF-8 bytes, a slice at a time.
 
-    Each slice is read as :func:`text_read_bytes` counts it, then packed,
-    which holds its joined text, the text's UTF-8 bytes and their copy, up to
-    four bytes per character each, and its lengths and offsets. The packed
-    slices are joined once all are read. Each step is checked first, and the
-    packed text stays counted in ``reads``.
+    Each slice is read through :func:`~cytearc.metadata.rows.read_rows`, then
+    packed, which holds its joined text, the text's UTF-8 bytes and their
+    copy, up to four bytes per character each, and its lengths and offsets.
+    The packed slices are joined once all are read. Each step is charged to
+    ``ledger`` first, and the packed text stays charged.
 
     Args:
-        reads: What the caller holds, and the budget.
+        ledger: What the caller holds, and the budget.
         array: A stored text array.
         rows: The rows to read, in this order, or None for every row.
         slice_bytes: About the most bytes that reading and packing a slice
             holds; a slice holds at least one row.
+        item: What the rows are, as refusals name them.
 
     Returns:
         The text, whose codes are unused, and the bytes of its longest value.
     """
     n_rows = int(array.shape[0]) if rows is None else len(rows)
-    fixed, per_row = text_row_selection_parts(array)
-    per_row += 3 * int(np.dtype(array.dtype).itemsize) + 24
-    step = max(1, slice_bytes // per_row)
-    reads.reserve(8 * (n_rows + 1))
+    itemsize = int(np.dtype(array.dtype).itemsize)
+    packing = 3 * itemsize + 24
+    step = max(1, slice_bytes // (itemsize + ROW_INDEX_BYTES + packing))
+    ledger.hold(f"the offsets of {item}", 8 * (n_rows + 1))
     offsets = np.zeros(n_rows + 1, dtype=np.int64)
-    reads.held += int(offsets.nbytes)
     parts = []
     longest = 0
     for start in range(0, n_rows, step):
         stop = min(start + step, n_rows)
-        reads.reserve(reads.read_bytes(fixed) + (stop - start) * per_row)
-        values = np.asarray(
-            array[start:stop]
-            if rows is None
-            else read_array_rows_chunkwise(array, rows[start:stop])
-        )
-        reads.lingering = fixed
+        chosen = np.arange(start, stop) if rows is None else rows[start:stop]
+        values = read_rows(ledger, array, chosen, item=item)
+        ledger.peak(f"packing {item}", (stop - start) * packing)
         data, bounds = pack_text(values)
-        del values
         offsets[start + 1 : stop + 1] = bounds[1:] + offsets[start]
         longest = max(longest, int(np.diff(bounds).max()))
         del bounds
         parts.append(data)
-        reads.held += int(data.nbytes)
+        # The packed slice is charged before the stored rows are let go.
+        ledger.hold(item, int(data.nbytes))
+        values_bytes = values.nbytes
+        del values, chosen
+        ledger.release(values_bytes)
     # The packed slices, and the bytes that they are joined into.
-    reads.reserve(int(offsets[-1]))
+    ledger.peak(f"joining {item}", int(offsets[-1]))
     joined = np.concatenate(parts) if parts else np.empty(0, dtype=np.uint8)
     del parts
     return EncodedText(np.empty(0, dtype=np.int32), joined, offsets), longest
@@ -2508,8 +2618,8 @@ class _ExportContigs:
 
     Each pass reads blocks of contigs in order from the first; with
     ``chains_only``, a block's rows are its contigs that count as chains.
-    Each step checks what it reads and holds in ``reads`` first, and what it
-    keeps stays counted there.
+    Each step charges what it reads and holds to ``ledger`` first, and what
+    it keeps stays charged there.
     """
 
     def __init__(
@@ -2518,12 +2628,12 @@ class _ExportContigs:
         fields: tuple[str, ...],
         *,
         chains_only: bool,
-        reads: _Reads,
+        ledger: MemoryLedger,
     ) -> None:
         self._group = group
         self._fields = fields
         self._chains_only = chains_only
-        self.reads = reads
+        self.ledger = ledger
         cells = self._array("contig_cells")
         self.n_contigs = int(cells.shape[0])
         self._chunk = max(1, int(cells.chunks[0]))
@@ -2550,10 +2660,20 @@ class _ExportContigs:
         for name in self._fields:
             if FIELDS[name] != TEXT:
                 continue
-            data = self.reads.whole(self._group, f"contig_{name}_values")
-            offsets = self.reads.whole(self._group, f"contig_{name}_offsets")
+            data = read_whole(
+                self.ledger,
+                self._group,
+                f"contig_{name}_values",
+                item=f"the distinct {name} values",
+            )
+            offsets = read_whole(
+                self.ledger,
+                self._group,
+                f"contig_{name}_offsets",
+                item=f"the bounds of the distinct {name} values",
+            )
             # Each value's length, while the longest is found.
-            self.reads.reserve(int(offsets.nbytes))
+            self.ledger.peak(f"measuring the {name} values", int(offsets.nbytes))
             self._widths[name] = int(np.diff(offsets).max()) if len(offsets) > 1 else 0
             self._texts[name] = (data, offsets)
 
@@ -2604,10 +2724,11 @@ class _ExportContigs:
         ]
         span = max(1, min(self._chunk, span_bytes // _MEASURE_BYTES_PER_ROW))
         chunk = self._read_bytes(read)
-        self.reads.reserve(
-            self.reads.read_bytes(chunk)
+        self.ledger.peak(
+            "measuring the widest value of each field",
+            _chunk_reads(self.ledger, chunk)
             + self._piece_bytes(ragged)
-            + _MEASURE_BYTES_PER_ROW * min(span, self.n_contigs)
+            + _MEASURE_BYTES_PER_ROW * min(span, self.n_contigs),
         )
         ends = dict.fromkeys(ragged, 0)
         longest = dict.fromkeys(ragged, 0)
@@ -2618,7 +2739,14 @@ class _ExportContigs:
         counts: dict[str, int] = {}
         firsts: dict[str, int] = {}
 
-        def count(name: str, marks: np.ndarray, kept: np.ndarray | None) -> None:
+        def measure_spans() -> None:
+            """Measure each span of contigs, whose arrays are let go on return."""
+            for first in range(0, self.n_contigs, span):
+                measure_span(first)
+
+        def count(
+            name: str, first: int, marks: np.ndarray, kept: np.ndarray | None
+        ) -> None:
             chosen = _kept(marks, kept)
             n_marked = int(np.count_nonzero(chosen))
             if n_marked:
@@ -2628,7 +2756,7 @@ class _ExportContigs:
                     name, first + (row if kept is None else int(kept[row]))
                 )
 
-        for first in range(0, self.n_contigs, span):
+        def measure_span(first: int) -> None:
             last = min(first + span, self.n_contigs)
             kept = (
                 np.flatnonzero(np.asarray(self._array("contig_chain")[first:last]))
@@ -2652,7 +2780,7 @@ class _ExportContigs:
                 del lengths
                 marks[:] = False
                 self._mark_ragged(name, bounds, marks)
-                count(name, marks, kept)
+                count(name, first, marks, kept)
             for name, (array, marked, through) in coded.items():
                 values = np.asarray(self._array(array)[first:last])
                 marks[:] = False
@@ -2664,7 +2792,7 @@ class _ExportContigs:
                     marks,
                 )
                 del values
-                count(name, marks, kept)
+                count(name, first, marks, kept)
             for name in numbers:
                 if not whole[name]:
                     continue
@@ -2677,8 +2805,10 @@ class _ExportContigs:
                 )
                 if whole[name] and len(present):
                     largest[name] = max(largest[name], float(np.abs(present).max()))
+
+        measure_spans()
         if self.n_contigs:
-            self.reads.lingering = chunk
+            self.ledger.leave(self._held_bytes(read))
         self._widths.update(longest)
         for name in numbers:
             # A whole number is written as an integer, with its sign.
@@ -2698,7 +2828,9 @@ class _ExportContigs:
                 )
             )
         # The codes of values that no contig of the file holds are let go.
-        self.reads.held -= sum(8 * len(marked) for _, marked, _ in coded.values())
+        released = sum(8 * len(marked) for _, marked, _ in coded.values())
+        coded.clear()
+        self.ledger.release(released)
 
     def _forbidden_codes(
         self, cells: EncodedText, clones: EncodedText | None
@@ -2737,13 +2869,15 @@ class _ExportContigs:
         for name, array, data, offsets, through in sources:
             n_values = _count_forbidden_values(data, offsets)
             if n_values:
-                self.reads.reserve(8 * n_values)
+                self.ledger.hold(
+                    f"the codes of the {name} values that the format forbids",
+                    8 * n_values,
+                )
                 coded[name] = (
                     array,
                     _forbidden_values(data, offsets, n_values),
                     through,
                 )
-                self.reads.held += 8 * n_values
         return coded
 
     def _piece_bytes(self, ragged: list[str]) -> int:
@@ -2776,10 +2910,11 @@ class _ExportContigs:
     def _contig_id(self, position: int) -> str:
         """Read the ``sequence_id`` of one contig, checked first."""
         names = ["contig_sequence_id_offsets", "contig_sequence_id"]
-        self.reads.reserve(
-            self.reads.read_bytes(self._read_bytes(names))
+        self.ledger.peak(
+            "the sequence_id of a contig whose value the format forbids",
+            _chunk_reads(self.ledger, self._read_bytes(names))
             + 16
-            + self.width("sequence_id")
+            + self.width("sequence_id"),
         )
         start, end = np.asarray(self._array(names[0])[position : position + 2]).tolist()
         return bytes(np.asarray(self._array(names[1])[start:end])).decode("utf-8")
@@ -2808,8 +2943,28 @@ class _ExportContigs:
     def _read_bytes(self, names: list[str]) -> int:
         """What reading one stored chunk of the arrays holds, the most of any."""
         return max(
-            (array_row_selection_parts(self._array(name))[0] for name in names),
-            default=0,
+            (_stored_chunk_bytes(self._array(name)) for name in names), default=0
+        )
+
+    def _held_bytes(self, names: list[str]) -> int:
+        """What a pass over the stored chunks of the arrays may leave behind.
+
+        Each of the ledger's codec threads can still hold a chunk of one of
+        them, up to the chunks of the arrays, each counted at the largest.
+        """
+        geometries = [
+            geometry
+            for name in names
+            if (geometry := array_geometry(self._array(name))) is not None
+        ]
+        threads = self.ledger.holding_threads(
+            sum(
+                -(-geometry.shape[0] // geometry.axisChunk(0)) * geometry.bandChunks()
+                for geometry in geometries
+            )
+        )
+        return max(
+            (geometry.heldReadBytes(threads) for geometry in geometries), default=0
         )
 
     def _id_arrays(self) -> list[tuple[str, int]]:
@@ -2821,8 +2976,9 @@ class _ExportContigs:
     def id_pass_bytes(self, block_rows: int) -> int:
         """What a pass over the contigs' IDs holds beside their own blocks."""
         windows = self._id_arrays()
-        return self._window_bytes(windows, block_rows) + self.reads.read_bytes(
-            self._read_bytes([name for name, _ in windows] + ["contig_sequence_id"])
+        return self._window_bytes(windows, block_rows) + _chunk_reads(
+            self.ledger,
+            self._read_bytes([name for name, _ in windows] + ["contig_sequence_id"]),
         )
 
     def scan(self, block_bytes: int) -> tuple[np.ndarray, int]:
@@ -2838,13 +2994,12 @@ class _ExportContigs:
             "sequence_id"
         )
         block_rows = _even_rows(self._chunk, block_bytes // per_row)
-        self.reads.reserve(
-            self.hash_bytes
-            + per_row * min(block_rows, self.n_contigs)
-            + self.id_pass_bytes(block_rows)
+        self.ledger.hold("the hashes of the contigs' IDs", self.hash_bytes)
+        self.ledger.peak(
+            "hashing a block of the contigs' IDs",
+            per_row * min(block_rows, self.n_contigs) + self.id_pass_bytes(block_rows),
         )
         hashes = np.empty(self.n_contigs, dtype=np.uint64)
-        self.reads.held += self.hash_bytes
         ids = _RaggedWindow(self._group, "sequence_id")
         n_rows = 0
         for start, stop, kept in self._spans(block_rows):
@@ -2854,8 +3009,10 @@ class _ExportContigs:
             hashes[n_rows : n_rows + len(block)] = block
             n_rows += len(block)
         if self.n_contigs:
-            self.reads.lingering = self._read_bytes(
-                [name for name, _ in self._id_arrays()] + ["contig_sequence_id"]
+            self.ledger.leave(
+                self._held_bytes(
+                    [name for name, _ in self._id_arrays()] + ["contig_sequence_id"]
+                )
             )
         return hashes[:n_rows], block_rows
 
@@ -2923,11 +3080,13 @@ class _ExportContigs:
                 if kind == RAGGED
                 else (f"contig_{name}", 0)
             )
-        self.reads.reserve(
+        self.ledger.peak(
+            "writing a block of contigs",
             per_row * min(block_rows, self.n_contigs)
             + (_GZIP_BYTES if compressed else 0)
             + self._window_bytes(windows, block_rows)
-            + self.reads.read_bytes(
+            + _chunk_reads(
+                self.ledger,
                 self._read_bytes(
                     [name for name, _ in windows]
                     + [
@@ -2935,8 +3094,8 @@ class _ExportContigs:
                         for name, kind in zip(self._fields, kinds)
                         if kind == RAGGED
                     ]
-                )
-            )
+                ),
+            ),
         )
         return block_rows
 

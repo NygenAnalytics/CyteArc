@@ -12,10 +12,16 @@ from cytearc.repertoire.clonotypes import (
     clonotype_labels,
     shared_text,
 )
+from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 
 # Sequences by name, so the tests read as receptors: a* are VJ junctions and
 # b* VDJ junctions.
 _CODES = {name: code for code, name in enumerate(["a1", "a2", "a3", "b1", "b2", "b3"])}
+
+
+def _ledger(budget: int) -> MemoryLedger:
+    """A ledger of ``budget`` bytes for linking clonotype clusters, holding nothing yet."""
+    return MemoryLedger(budget, "Linking the cells of clonotype clusters")
 
 
 def _slots(*cells: tuple) -> np.ndarray:
@@ -359,12 +365,22 @@ def test_cluster_pairs_are_checked_against_the_memory_left() -> None:
     texts = ["CASSF", "CASTF", "CAGSF"]
     groups = np.zeros(3, dtype=np.int64)
     options = dict(groups=groups, metric="hamming", max_distance=1, receptor_arms="VDJ")
-    linked = assign_clonotype_clusters(sequences, texts, max_bytes=128, **options)
+    ledger = _ledger(128)
+    linked = assign_clonotype_clusters(sequences, texts, ledger=ledger, **options)
     assert linked.codes.tolist() == [0, 0, 0]
-    with pytest.raises(MemoryError, match="for the 2 links between near chains"):
-        assign_clonotype_clusters(sequences, texts, max_bytes=127, **options)
+    # The pairs and links are let go once the cells are linked.
+    assert ledger.held_bytes == 0
+    with pytest.raises(
+        MemoryBudgetError, match="for the 2 links between near chains"
+    ) as refused:
+        assign_clonotype_clusters(sequences, texts, ledger=_ledger(127), **options)
+    assert (refused.value.needed_bytes, refused.value.budget_bytes) == (128, 127)
+    assert str(refused.value).endswith(
+        "Raise mem_budget to at least 128 bytes, or require the same V and J "
+        "genes, or lower max_distance."
+    )
     with pytest.raises(MemoryError, match="for the 2 pairs of chains within"):
-        assign_clonotype_clusters(sequences, texts, max_bytes=63, **options)
+        assign_clonotype_clusters(sequences, texts, ledger=_ledger(63), **options)
 
 
 def test_the_links_of_one_arm_are_released_before_the_next_arm_links() -> None:
@@ -381,10 +397,10 @@ def test_the_links_of_one_arm_are_released_before_the_next_arm_links() -> None:
         max_distance=1,
         receptor_arms="any",
     )
-    linked = assign_clonotype_clusters(sequences, texts, max_bytes=96, **options)
+    linked = assign_clonotype_clusters(sequences, texts, ledger=_ledger(96), **options)
     assert linked.codes.tolist() == [0, 0]
     with pytest.raises(MemoryError, match="for the 1 links between near chains"):
-        assign_clonotype_clusters(sequences, texts, max_bytes=95, **options)
+        assign_clonotype_clusters(sequences, texts, ledger=_ledger(95), **options)
 
 
 def test_links_count_once_for_each_group_that_holds_both_chains() -> None:
@@ -398,11 +414,11 @@ def test_links_count_once_for_each_group_that_holds_both_chains() -> None:
     groups = np.asarray([0, 0, 0, 1, 1, 1, 2, 2, 2, 3])
     options = dict(groups=groups, metric="hamming", max_distance=1, receptor_arms="VDJ")
     texts = ["CASSF", "CASTF", "CAGSF"]
-    linked = assign_clonotype_clusters(sequences, texts, max_bytes=256, **options)
+    linked = assign_clonotype_clusters(sequences, texts, ledger=_ledger(256), **options)
     assert linked.n_clonotypes == 4
     assert len(set(linked.codes[[0, 1, 2]].tolist())) == 1
     with pytest.raises(MemoryError, match="for the 6 links between near chains"):
-        assign_clonotype_clusters(sequences, texts, max_bytes=255, **options)
+        assign_clonotype_clusters(sequences, texts, ledger=_ledger(255), **options)
 
 
 def test_matching_arms_are_checked_as_they_are_found() -> None:
@@ -421,11 +437,11 @@ def test_matching_arms_are_checked_as_they_are_found() -> None:
         receptor_arms="VJ",
         dual_ir="all",
     )
-    linked = assign_clonotype_clusters(sequences, texts, max_bytes=320, **options)
+    linked = assign_clonotype_clusters(sequences, texts, ledger=_ledger(320), **options)
     assert linked.codes.tolist() == [0, 0]
     with pytest.raises(MemoryError, match="2 more arms whose chains match one by"):
-        assign_clonotype_clusters(sequences, texts, max_bytes=319, **options)
+        assign_clonotype_clusters(sequences, texts, ledger=_ledger(319), **options)
     with pytest.raises(MemoryError, match="for the 4 links between near chains"):
-        assign_clonotype_clusters(sequences, texts, max_bytes=255, **options)
+        assign_clonotype_clusters(sequences, texts, ledger=_ledger(255), **options)
     with pytest.raises(MemoryError, match="for the 4 pairs of chains within"):
-        assign_clonotype_clusters(sequences, texts, max_bytes=127, **options)
+        assign_clonotype_clusters(sequences, texts, ledger=_ledger(127), **options)

@@ -1449,12 +1449,12 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             # from those read; with the budget named, the counts stream in
             # full blocks and the histograms get at least what they needed
             # where they stopped.
-            estimate = error.needed
+            estimate = error.needed_bytes
             remain = ""
             if error.counts_remain:
                 estimate = max(
-                    error.needed,
-                    -(-error.needed * error.n_rows // max(error.rows_read, 1)),
+                    error.needed_bytes,
+                    -(-error.needed_bytes * error.n_rows // max(error.rows_read, 1)),
                 )
                 remain = (
                     f"; {error.n_rows - error.rows_read} of {error.n_rows} rows of "
@@ -1463,7 +1463,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 )
             raise MemoryError(
                 f"The guide count histograms of {n_cells} cells need about "
-                f"{error.needed} bytes for {error.n_distinct} distinct counts, more "
+                f"{error.needed_bytes} bytes for {error.n_distinct} distinct counts, more "
                 f"than the {histogram_memory} bytes that the memory budget of "
                 f"{self.memoryBytes} bytes leaves them beside the streamed counts"
                 f"{remain}. Raise mem_budget to at least "
