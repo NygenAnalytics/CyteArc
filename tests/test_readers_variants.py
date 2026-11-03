@@ -6,6 +6,7 @@ and SciPy from the files, or from values that the tools' own tests pin.
 """
 
 import gzip
+import re
 import shutil
 import warnings
 from pathlib import Path
@@ -638,6 +639,36 @@ def test_cellsnp_and_mquad_readers_refuse_inconsistent_folders(tmp_path) -> None
         cellsnp_source(folder, format="mquad")
 
 
+@pytest.mark.parametrize(
+    ("source", "name", "value"),
+    [
+        # cellsnp-lite writes integer matrices, so only a negative count parses.
+        ("cellsnp_lite", "cellSNP.tag.AD.mtx", "-1"),
+        ("cellsnp_lite", "cellSNP.tag.DP.mtx", "-1"),
+        # MQuad writes real matrices, in which a count of 2.5 parses.
+        ("mquad", "passed_ad.mtx", "2.5"),
+        ("mquad", "passed_dp.mtx", "2.5"),
+    ],
+)
+def test_cellsnp_and_mquad_counts_must_be_whole_numbers_of_at_least_zero(
+    tmp_path, source, name, value
+) -> None:
+    folder = _copy(DATA / source, tmp_path / source)
+    path = folder / name
+    lines = path.read_text().splitlines(keepends=True)
+    # The first entry follows the banner, a comment line and the dimensions.
+    row, column, _count = lines[3].split()
+    lines[3] = f"{row} {column} {value}\n"
+    path.write_text("".join(lines))
+    source_counts = cellsnp_source(folder, format=source)
+    with pytest.raises(
+        ValueError,
+        match="counts must be finite non-negative integers, but "
+        f".*{re.escape(name)} holds {re.escape(value)}$",
+    ):
+        list(source_counts.batches(10))
+
+
 def test_vartrix_reader_needs_its_four_files(tmp_path) -> None:
     folder = _copy(DATA / "vartrix", tmp_path / "a")
     (folder / "test_coverage_ref.mtx").rename(folder / "test_coverage_alt.mtx")
@@ -679,7 +710,7 @@ def test_matrix_market_and_vcf_helpers_refuse_malformed_files(tmp_path) -> None:
         ),
         (
             "%%MatrixMarket matrix coordinate pattern general\n2 2 1\n1 1\n",
-            "integer or real coordinate values, but .* holds pattern values",
+            "integer or real coordinate values, but .* holds 'pattern' values",
         ),
         (
             "%%MatrixMarket matrix coordinate integer general\n%\n",

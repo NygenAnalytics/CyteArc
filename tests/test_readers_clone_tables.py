@@ -531,11 +531,11 @@ def test_the_matrix_axis_whose_length_matches_the_cell_list_holds_the_cells(
         (
             "%%MatrixMarket matrix coordinate complex general\n3 2 0\n",
             "must use integer, real or pattern coordinate values, but .* holds "
-            "complex values",
+            "'complex' values",
         ),
         (
             "%%MatrixMarket matrix coordinate integer symmetric\n3 2 0\n",
-            "must use general symmetry, but .* is symmetric",
+            "must use general symmetry, but .* is 'symmetric'",
         ),
         (
             "%%MatrixMarket matrix coordinate integer general\n3 2\n",

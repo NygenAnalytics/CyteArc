@@ -99,11 +99,12 @@ def read_matrix_market_header(
         allowed = ", ".join(fields[:-1]) + " or " + fields[-1]
         raise ValueError(
             f"Matrix Market input must use {allowed} coordinate values, but "
-            f"{path} holds {field} values"
+            f"{path} holds {quoted_value(field)} values"
         )
     if symmetry != "general":
         raise ValueError(
-            f"Matrix Market input must use general symmetry, but {path} is {symmetry}"
+            "Matrix Market input must use general symmetry, but "
+            f"{path} is {quoted_value(symmetry)}"
         )
     header_lines = 1
     dimensions = None

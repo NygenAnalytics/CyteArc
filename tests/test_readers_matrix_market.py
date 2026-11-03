@@ -116,6 +116,45 @@ def test_files_that_are_no_text_or_cut_short_are_refused_by_name(tmp_path) -> No
         list(matrix_market_entries(header, 1000))
 
 
+# Text of 10,000 characters from a header, and how a message quotes it: its
+# first 37 and last 38 characters around "...", 80 characters with the quotes.
+_LONG = "a" * 5_000 + "z" * 5_000
+_QUOTED = "'" + "a" * 37 + "..." + "z" * 38 + "'"
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        (_LONG + "\n2 2 0\n", f"begins {_QUOTED}"),
+        (_BANNER.format(field=_LONG) + "2 2 0\n", f"holds {_QUOTED} values"),
+        (
+            "%%MatrixMarket matrix coordinate integer " + _LONG + "\n2 2 0\n",
+            f"is {_QUOTED}",
+        ),
+        (
+            _BANNER.format(field="integer") + "1 1 " + _LONG + "\n",
+            "has '1 1 " + "a" * 33 + "..." + "z" * 38 + "'",
+        ),
+        # Python reads whole numbers of up to 4,300 digits from text.
+        (
+            _BANNER.format(field="integer") + "-1 1 " + "0" * 4_000 + "\n",
+            "declares '-1 1 " + "0" * 32 + "..." + "0" * 38 + "'",
+        ),
+    ],
+    ids=["banner", "field", "symmetry", "dimensions", "negative dimensions"],
+)
+def test_a_header_quotes_its_long_text_cut_to_80_characters(
+    tmp_path, text, shown
+) -> None:
+    path = _write(tmp_path, text)
+    with pytest.raises(ValueError) as refused:
+        matrix_market_header(path, fields=("integer", "real", "pattern"))
+    message = str(refused.value)
+    assert shown in message
+    # The message's own words take at most 91 characters beside the file.
+    assert len(message) <= 91 + len(_QUOTED) + len(str(path))
+
+
 def test_entries_of_another_shape_than_their_fields_are_refused(tmp_path) -> None:
     path = _write(tmp_path, _BANNER.format(field="integer") + "2 2 1\n1 1\n")
     with pytest.raises(ValueError, match="Could not parse Matrix Market coordinates"):
