@@ -30,7 +30,7 @@ from cytearc.metadata.rows import (
     text_read_bytes,
 )
 from cytearc.repertoire import SLOTS, Clonotypes
-from cytearc.repertoire.clonotypes import clonotype_noun
+from cytearc.repertoire.clonotypes import clonotype_nouns
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.geometry import READ_OBJECT_BYTES, array_geometry
 from cytearc.storage.refs import ArtifactRef
@@ -663,10 +663,10 @@ def test_figure_labels_name_missing_and_incomplete_clonotypes(tmp_path) -> None:
     with pytest.raises(KeyError, match="Artifact does not exist"):
         store._clone_figure_labels(missing, ["clonotype_1"])
     with pytest.raises(KeyError, match="Artifact does not exist"):
-        store._clone_figure_noun(missing)
+        store._clone_figure_nouns(missing)
     for read in (
         lambda clones: store._clone_figure_labels(clones, ["clonotype_1"]),
-        store._clone_figure_noun,
+        store._clone_figure_nouns,
     ):
         with pytest.raises(TypeError, match="clones must be an ArtifactRef"):
             read("clonotype_1")
@@ -682,7 +682,7 @@ def test_figure_labels_name_missing_and_incomplete_clonotypes(tmp_path) -> None:
     with pytest.raises(RuntimeError, match="Artifact is incomplete"):
         store._clone_figure_labels(ref, ["clonotype_1"])
     with pytest.raises(RuntimeError, match="Artifact is incomplete"):
-        store._clone_figure_noun(ref)
+        store._clone_figure_nouns(ref)
 
 
 def test_clone_abundance_needs_a_store_that_labels_clones(tmp_path) -> None:
@@ -695,12 +695,18 @@ def test_clone_abundance_needs_a_store_that_labels_clones(tmp_path) -> None:
     with pytest.raises(TypeError, match="does not provide the groups of figures"):
         plotting.clone_abundance(loader, ref, show=False)
     loader._figure_groups = store._figure_groups
-    with pytest.raises(TypeError, match="does not provide the figure labels"):
-        plotting.clone_abundance(loader, ref, show=False)
-    # Labels without the name of the clones drawn do not title the figure.
-    loader._clone_figure_labels = store._clone_figure_labels
+    # The names of the clones drawn title the figure, and come first.
     with pytest.raises(TypeError, match="does not provide what figures call clones"):
         plotting.clone_abundance(loader, ref, show=False)
+    loader._clone_figure_nouns = store._clone_figure_nouns
+    with pytest.raises(TypeError, match="does not provide the figure labels"):
+        plotting.clone_abundance(loader, ref, show=False)
+    loader._clone_figure_labels = store._clone_figure_labels
+    result = plotting.clone_abundance(loader, ref, show=False)
+    try:
+        assert result.axes["top"].get_title() == "Largest 4 clonotypes"
+    finally:
+        result.close()
 
 
 # The cells' samples for following clonotypes: clonotype_1 holds cell0 and
@@ -709,12 +715,13 @@ def test_clone_abundance_needs_a_store_that_labels_clones(tmp_path) -> None:
 TRACKED_SAMPLES = np.asarray(["s1", "s2", "s1", "s2", "s1", "s1", "s2", "s1"])
 
 
-class _LabelsOnly:
-    """A store that labels clones, but loads neither clones nor clonotypes."""
+class _NamesOnly:
+    """A store that names and labels clones, but loads neither clones nor clonotypes."""
 
     def __init__(self, store: DataStore) -> None:
         self.clones = SimpleNamespace(load_clones=_loads)
         self.repertoire = SimpleNamespace(load_clonotypes=_loads)
+        self._clone_figure_nouns = store._clone_figure_nouns
         self._clone_figure_labels = store._clone_figure_labels
 
 
@@ -738,12 +745,13 @@ def test_the_tracking_plot_labels_clonotypes_by_their_junctions(tmp_path) -> Non
     # show no numbers; the labels need neither the clones nor the clonotypes
     # loaded.
     tracking = store.clones.track(ref, group_by="sample", top_n=1)
-    result = plotting.clone_tracking(_LabelsOnly(store), tracking, show=False)
+    result = plotting.clone_tracking(_NamesOnly(store), tracking, show=False)
     try:
         assert result.provenance.extras["tracked"] == ["clonotype_1", "clonotype_2"]
         assert _legend(result) == ["CASSA", "CARW"]
         legend = result.axes["tracking"].get_legend()
-        assert legend.get_title().get_text() == "Clone"
+        assert legend.get_title().get_text() == "Clonotype"
+        assert result.axes["tracking"].get_title() == "Clonotypes across groups"
         # The table holds each clonotype's ID beside the label drawn.
         table = result.tables["tracking"]
         assert table[["clone", "label"]].drop_duplicates().values.tolist() == [
@@ -752,7 +760,7 @@ def test_the_tracking_plot_labels_clonotypes_by_their_junctions(tmp_path) -> Non
         ]
     finally:
         result.close()
-    unlabelled = _LabelsOnly(store)
+    unlabelled = _NamesOnly(store)
     del unlabelled._clone_figure_labels
     with pytest.raises(TypeError, match="does not provide the figure labels"):
         plotting.clone_tracking(unlabelled, tracking, show=False)
@@ -850,7 +858,12 @@ def test_the_fate_plot_labels_clonotypes_by_their_junctions(tmp_path) -> None:
         assert table["label"].tolist() == [named[clone] for clone in ids]
         ticks = [tick.get_text() for tick in result.axes["fates"].get_xticklabels()]
         assert ticks == table["label"].tolist()
-        assert result.provenance.extras["clones"] == ids
+        assert result.provenance.extras["clones"] == ref.to_dict()
+        assert result.provenance.extras["bias"] == bias.to_dict()
+        assert result.axes["fates"].get_xlabel() == "Clonotype"
+        assert result.axes["early"].get_title() == (
+            "Fates of the clonotypes of early cells"
+        )
     finally:
         result.close()
 
@@ -863,18 +876,24 @@ def test_figures_name_clonotype_clusters_as_their_definition_does(tmp_path) -> N
     # which then holds four T cells; clonotype_2 holds the B cells and
     # clonotype_3 cell3, whose beta chain alone is clonotype_1's CASSA.
     near = store.repertoire.clonotypes(receptors, metric="hamming", max_distance=3)
-    assert store._clone_figure_noun(identical) == "clonotypes"
-    assert store._clone_figure_noun(near) == "clonotype clusters"
+    assert store._clone_figure_nouns(identical) == ("clonotypes", "clonotype")
+    assert store._clone_figure_nouns(near) == (
+        "clonotype clusters",
+        "clonotype cluster",
+    )
     # A distance metric defines clusters even at a max_distance that links
     # only identical junctions, as the definition's log names them.
     exact = store.repertoire.clonotypes(receptors, metric="levenshtein", max_distance=0)
-    assert store._clone_figure_noun(exact) == "clonotype clusters"
+    assert store._clone_figure_nouns(exact) == (
+        "clonotype clusters",
+        "clonotype cluster",
+    )
     path = tmp_path / "clusters.csv"
     store.clones.export_clones(near, path)
     imported = store.clones.import_clones(
         path, cell_selection=store.snapshot_cell_selection()
     )
-    assert store._clone_figure_noun(imported) == "clones"
+    assert store._clone_figure_nouns(imported) == ("clones", "clone")
     result = plotting.clone_abundance(store, near, max_clones=3, show=False)
     try:
         top = result.tables["top"].drop_duplicates("clone")
@@ -911,7 +930,7 @@ def test_figures_name_clonotype_clusters_as_their_definition_does(tmp_path) -> N
     finally:
         tracked.close()
     with pytest.raises(ValueError, match="metric must be one of"):
-        clonotype_noun("tcrdist")
+        clonotype_nouns("tcrdist")
 
 
 def test_clonotypes_load_and_export_as_clones(tmp_path) -> None:

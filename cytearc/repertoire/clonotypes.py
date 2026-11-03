@@ -67,7 +67,7 @@ __all__ = [
     "assign_clonotypes",
     "clonotype_frames",
     "clonotype_labels",
-    "clonotype_noun",
+    "clonotype_nouns",
     "representative_cells",
     "shared_text",
 ]
@@ -95,15 +95,17 @@ def clonotype_labels(n_clonotypes: int) -> np.ndarray:
     )
 
 
-def clonotype_noun(metric: str) -> str:
-    """Return what the clonotypes that ``metric`` defines are called, in the plural.
+def clonotype_nouns(metric: str) -> tuple[str, str]:
+    """Return what the clonotypes that ``metric`` defines are called, plural and singular.
 
-    Identical junctions define ``"clonotypes"``, and a distance metric
-    ``"clonotype clusters"``.
+    Identical junctions define ``"clonotypes"``, one ``"clonotype"``, and a
+    distance metric ``"clonotype clusters"``, one ``"clonotype cluster"``.
     """
     if metric not in METRICS:
         raise ValueError(f"metric must be one of {', '.join(METRICS)}")
-    return "clonotypes" if metric == "identity" else "clonotype clusters"
+    if metric == "identity":
+        return "clonotypes", "clonotype"
+    return "clonotype clusters", "clonotype cluster"
 
 
 @dataclass(frozen=True, slots=True)

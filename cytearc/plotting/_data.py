@@ -30,6 +30,21 @@ from ._contracts import (
 )
 
 
+def store_method(store: Any, path: str, description: str | None = None) -> Any:
+    """Return the store's method at a dotted ``path``, such as ``"clones.load_clones"``.
+
+    Raises:
+        TypeError: If the store provides no such method, naming the method,
+            or what ``description`` says it does.
+    """
+    found = store
+    for name in path.split("."):
+        found = getattr(found, name, None)
+    if not callable(found):
+        raise TypeError(f"store does not provide {description or path}")
+    return found
+
+
 def _artifact_input(store: Any, ref: ArtifactRef, name: str) -> ArtifactRef:
     """Return the artifact an artifact's provenance records as input ``name``."""
     return inspect_artifact(store.zw, ref).input_ref(name)

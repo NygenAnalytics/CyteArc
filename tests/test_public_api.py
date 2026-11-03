@@ -137,6 +137,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "association_calibration",
     "association_volcano",
     "barcode_calls",
+    "clonal_diversity",
     "clonal_expansion",
     "clonal_rarefaction",
     "clone_abundance",

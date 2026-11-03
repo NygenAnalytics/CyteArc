@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 
-from ..clones.diversity import Rarefaction
+from ..clones.diversity import ClonalDiversity, Rarefaction
 from ..clones.fate import CloneCoupling
 from ..clones.overlap import CloneOverlap, CloneTracking
 from ..features.values import resolve_feature, resolve_feature_batch
@@ -607,6 +607,20 @@ class DataStorePlotAccessor:
         """Plot the clonal expansion and clonal space of groups of cells."""
         return self._forward(PlotResult, "clonal_expansion", locals())
 
+    def clonal_diversity(
+        self,
+        diversity: ClonalDiversity,
+        *,
+        indices: str | Sequence[str] = ("n_clones", "shannon", "inverse_simpson"),
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot diversity indices of groups of cells, one panel of bars per index."""
+        return self._forward(PlotResult, "clonal_diversity", locals())
+
     def clonal_rarefaction(
         self,
         rarefaction: Rarefaction,
@@ -626,6 +640,7 @@ class DataStorePlotAccessor:
         overlap: CloneOverlap,
         *,
         index: str = "morisita_horn",
+        color_scale: ColorScale | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -654,6 +669,7 @@ class DataStorePlotAccessor:
         coupling: CloneCoupling,
         *,
         value: str = "z_score",
+        color_scale: ColorScale | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",

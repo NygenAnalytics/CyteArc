@@ -59,7 +59,7 @@ from ...repertoire.clonotypes import (
     assign_clonotypes,
     clonotype_frames,
     clonotype_labels,
-    clonotype_noun,
+    clonotype_nouns,
     representative_cells,
 )
 from ...repertoire.contigs import FIELDS, contig_encoder
@@ -1463,7 +1463,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             arrays,
             attributes={"n_clonotypes": assignment.n_clonotypes},
         )
-        defined = clonotype_noun(metric)
+        defined = clonotype_nouns(metric)[0]
         logger.info(
             f"Defined {assignment.n_clonotypes} {defined} of {int(has.sum())} of "
             f"{n_cells} cells; the largest holds "

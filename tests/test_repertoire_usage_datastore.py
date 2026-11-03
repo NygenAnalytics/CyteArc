@@ -831,7 +831,7 @@ def test_figures_of_clonotypes_need_the_store_to_name_them(tmp_path) -> None:
         (plotting.gene_usage, store.repertoire.gene_usage),
         (plotting.spectratype, store.repertoire.spectratype),
     ):
-        with pytest.raises(TypeError, match="what figures call clonotypes"):
+        with pytest.raises(TypeError, match="what figures call clones"):
             plot(bare, measure(clonotypes, count="clonotypes"), show=False)
         # Cells need no name from the store.
         plot(bare, measure(clonotypes), show=False).close()

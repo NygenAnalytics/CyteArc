@@ -17,9 +17,12 @@ from ._deps import require_matplotlib
 from ._labels import place_layout_labels
 from ._style import (
     LEGEND_SIDE_ENTRIES_PER_COLUMN,
+    LEGEND_SIDE_MAX_ENTRIES,
     LegendMarkerBoxes,
+    apply_figure_chrome,
     continuous_norm,
     legend_side_columns,
+    legend_side_rows,
     refresh_layout_point_sizes,
     size_legend_layout,
     theme_context,
@@ -957,3 +960,96 @@ def compose_results(
         owns_figure=owns_figure,
         theme=resolved_theme,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class Drawn:
+    """A legend that a chart drew, or hid with ``show_legend=False``, and its scale.
+
+    :func:`finish_plot` reports each in ``PlotResult.legends`` with its scale
+    in ``PlotResult.scales``, so :func:`compose_results` can draw a legend
+    that several figures share once.
+    """
+
+    legend: LegendSpec
+    scale: CategoricalScale | ColorScale
+
+
+def side_legend_title(title: str, n_entries: int) -> str:
+    """Return a side legend's title, saying how many entries it lists when it leaves some out.
+
+    A legend lists at most ``LEGEND_SIDE_MAX_ENTRIES`` entries, so the title
+    of one of 120 reads ``"Clone (80 of 120)"``.
+    """
+    shown = min(int(n_entries), LEGEND_SIDE_MAX_ENTRIES)
+    return title if shown == n_entries else f"{title} ({shown} of {n_entries})"
+
+
+def side_legend(
+    ax: Any, handles: Sequence[Any], labels: Sequence[str], *, title: str
+) -> Any:
+    """Draw a titled legend beside a panel's right edge, its first entries in order.
+
+    The legend lists at most ``LEGEND_SIDE_MAX_ENTRIES`` entries, titled as
+    :func:`side_legend_title` titles them, in columns that hold the rows that
+    fit the figure's height.
+    """
+    shown = min(len(handles), LEGEND_SIDE_MAX_ENTRIES)
+    rows = legend_side_rows(float(ax.figure.get_size_inches()[1]), title=True)
+    return ax.legend(
+        handles=list(handles[:shown]),
+        labels=list(labels[:shown]),
+        title=side_legend_title(title, len(handles)),
+        frameon=False,
+        fontsize="small",
+        title_fontsize="small",
+        loc="upper left",
+        bbox_to_anchor=(1, 1),
+        ncols=legend_side_columns(shown, rows=rows),
+    )
+
+
+def finish_plot(
+    figure: Any,
+    axes: dict[Hashable, Any],
+    owns: bool,
+    *,
+    name: str,
+    theme: str,
+    tables: dict[str, pd.DataFrame],
+    drawn: Sequence[Drawn | None],
+    inputs: Mapping[str, Any],
+    settings: Mapping[str, Any],
+    n_cells: int,
+    show: bool,
+) -> PlotResult:
+    """Return the result of a figure that charts drew, and show it when asked.
+
+    The figure takes the theme's background and spines. Its legends are
+    those of ``drawn``, each with its scale, and its provenance names the
+    plot in ``notes``, and holds each input under its argument's name, as
+    the input's ``to_dict()``, and each setting under its own.
+    """
+    apply_figure_chrome(figure, theme)
+    reported = [item for item in drawn if item is not None]
+    result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables=tables,
+        legends=tuple(item.legend for item in reported),
+        scales=tuple(item.scale for item in reported),
+        provenance=PlotProvenance(
+            n_cells=int(n_cells),
+            renderer="matplotlib",
+            notes=(name,),
+            extras={
+                **{key: value.to_dict() for key, value in inputs.items()},
+                **settings,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        result.show()
+    return result

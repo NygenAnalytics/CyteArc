@@ -17,7 +17,7 @@ from ._figure import (
     close_figures_on_error,
     normalize_axes_target,
 )
-from ._groups import cell_groups
+from ._groups import plot_groups
 from ._style import apply_figure_chrome, palette_for_n, theme_context
 
 __all__ = ["allele_frequencies", "genotypes", "variant_depth", "variant_statistics"]
@@ -143,14 +143,10 @@ def variant_depth(
             "covered_fraction": sites["n_cells"].to_numpy(dtype=np.float64) / n_listed,
         }
     )
-    group_labels, names, group_name = cell_groups(
-        store, counts, group_by=group_by, groups=groups
+    plotted = plot_groups(
+        store, counts, group_by=group_by, groups=groups, n_cells=len(cells)
     )
-    if group_labels is None:
-        cell_group = np.zeros(len(cells), dtype=np.int64)
-        names = ["all cells"]
-    else:
-        cell_group = group_labels
+    cell_group, names, group_name = plotted.codes, list(plotted.names), plotted.title
     keep = listed & (cell_group >= 0)
     if not keep.any():
         raise ValueError(
@@ -223,7 +219,7 @@ def variant_depth(
         ax.set_xlabel(f"Mean depth per site ({by_site.count_unit})")
         ax.set_ylabel("Cells")
         ax.set_title("Depth per cell")
-        if show_legend and group_labels is not None:
+        if show_legend and plotted.columns:
             ax.legend(frameon=False, fontsize="small")
         apply_figure_chrome(figure, theme)
     plot_result = PlotResult(
@@ -231,7 +227,7 @@ def variant_depth(
         axes=axes,
         tables={"sites": sites_table, "cells": cells_table},
         legends=(LegendSpec(kind="categorical", label=group_name),)
-        if group_labels is not None
+        if plotted.columns
         else (),
         scales=(),
         provenance=PlotProvenance(
@@ -634,14 +630,10 @@ def genotypes(
     # The calls in the vocabulary's order, which their codes follow.
     calls = [str(call) for call in loaded.calls["call"].cat.categories]
     n_cells = len(loaded.cells)
-    group_labels, names, group_name = cell_groups(
-        store, genotypes, group_by=group_by, groups=groups
+    plotted = plot_groups(
+        store, genotypes, group_by=group_by, groups=groups, n_cells=n_cells
     )
-    if group_labels is None:
-        cell_group = np.zeros(n_cells, dtype=np.int64)
-        names = ["all cells"]
-    else:
-        cell_group = np.asarray(group_labels, dtype=np.int64)
+    cell_group, names, group_name = plotted.codes, list(plotted.names), plotted.title
     if not np.any(cell_group >= 0):
         raise ValueError(
             "No cell of the genotypes has a group, so there is nothing to plot"
@@ -659,7 +651,7 @@ def genotypes(
     np.add.at(counted, (row_sites[grouped], row_groups[grouped], row_calls[grouped]), 1)
     totals = np.bincount(cell_group[cell_group >= 0], minlength=len(names))
     counted[:, :, missing] += totals[None, :] - counted.sum(axis=2)
-    # Every group holds a cell of the genotypes, as cell_groups names only
+    # Every group holds a cell of the genotypes, as plot_groups names only
     # the groups that some cell holds.
     records = []
     for site_rank, name in enumerate(site_names):
@@ -742,7 +734,7 @@ def genotypes(
             positions,
             [
                 site_names[site]
-                if group_labels is None
+                if not plotted.columns
                 else f"{site_names[site]}, {names[group]}"
                 for site, group in zip(
                     bar_sites.tolist(), bar_groups.tolist(), strict=True
@@ -753,7 +745,7 @@ def genotypes(
         ax.invert_yaxis()
         ax.set_xlim(0, 1)
         ax.set_xlabel("Share of cells")
-        ax.set_title("Calls by group" if group_labels is not None else "Calls")
+        ax.set_title("Calls by group" if plotted.columns else "Calls")
         if show_legend:
             ax.legend(frameon=False, fontsize="small", loc="lower right")
         if cells_table is not None:

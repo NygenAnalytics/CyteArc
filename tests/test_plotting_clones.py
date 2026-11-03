@@ -14,6 +14,7 @@ import pytest
 from cytearc.clones import diversity as dv
 from cytearc.datastore.datastore import DataStore
 from cytearc.plotting import (
+    clonal_diversity,
     clonal_expansion,
     clonal_rarefaction,
     clone_abundance,
@@ -22,7 +23,7 @@ from cytearc.plotting import (
     clone_overlap,
     clone_tracking,
 )
-from cytearc.plotting._groups import cell_groups, labels_by_group
+from cytearc.plotting._groups import labels_by_group, plot_groups, table_groups
 from cytearc.plotting._style import MAX_FIGURE_WIDTH_INCHES
 from tests.clone_helpers import (
     every_cell,
@@ -58,6 +59,14 @@ def plotted(tmp_path_factory):
     cells = store.snapshot_cell_selection("every_cell")
     clones = store.clones.from_column("lineage", cell_selection=cells)
     return store, clones
+
+
+class _NamesOnly:
+    """A store that can name and label clones, and nothing else."""
+
+    def __init__(self, store: DataStore) -> None:
+        self._clone_figure_nouns = store._clone_figure_nouns
+        self._clone_figure_labels = store._clone_figure_labels
 
 
 def test_without_groups_the_plot_counts_every_cell(plotted) -> None:
@@ -199,14 +208,21 @@ def test_groups_named_like_the_tables_columns_draw(plotted, name) -> None:
         neutral.close()
 
 
-def test_cell_groups_align_labels_to_the_artifacts_cells(plotted) -> None:
+def _grouped(groups) -> tuple[list[int], tuple[str, ...], str | None]:
+    return groups.codes.tolist(), groups.names, groups.title
+
+
+def test_plot_groups_align_labels_to_the_artifacts_cells(plotted) -> None:
     store, clones = plotted
-    assert cell_groups(store, clones, group_by=None, groups=None) == (None, [], None)
-    codes, names, name = cell_groups(store, clones, group_by="group", groups=None)
-    assert (codes.tolist(), names, name) == ([0, 0, 1, 0, 1, -1], ["x", "y"], "group")
+    # Without a grouping, every cell is in one group, and the store is not
+    # read.
+    ungrouped = plot_groups(object(), clones, group_by=None, groups=None, n_cells=6)
+    assert _grouped(ungrouped) == ([0] * 6, ("all cells",), None)
+    grouped = plot_groups(store, clones, group_by="group", groups=None, n_cells=6)
+    assert _grouped(grouped) == ([0, 0, 1, 0, 1, -1], ("x", "y"), "group")
 
 
-def test_cell_groups_align_labels_to_clones_of_later_cells(plotted) -> None:
+def test_plot_groups_align_labels_to_clones_of_later_cells(plotted) -> None:
     store, _clones = plotted
     store.cells.insert("first_five", np.arange(6) < 5, overwrite=True)
     store.cells.insert("middle_three", np.isin(np.arange(6), [2, 3, 4]), overwrite=True)
@@ -218,8 +234,8 @@ def test_cell_groups_align_labels_to_clones_of_later_cells(plotted) -> None:
     )
     # The clones' cells, c2 to c4, lie in y, x and y; the labels' first
     # cells, c0 and c1, lie in x.
-    codes, names, _name = cell_groups(store, middle, group_by=None, groups=labels)
-    assert (codes.tolist(), names) == ([1, 0, 1], ["x", "y"])
+    found = plot_groups(store, middle, group_by=None, groups=labels, n_cells=3)
+    assert _grouped(found) == ([1, 0, 1], ("x", "y"), "cluster_labels")
 
 
 def test_clones_of_equal_size_list_in_rank_order(plotted) -> None:
@@ -434,13 +450,9 @@ def test_the_expansion_plot_of_a_grouping_without_labels(truth_plot) -> None:
         insert_nullable_cell_column(
             store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
         )
-    result = clonal_expansion(
-        store, truth_plot.by_sample, group_by="unlabelled", show=False
-    )
-    assert result.tables["categories"].empty
-    assert result.tables["rank_windows"].empty
-    assert result.provenance.n_cells == 0
-    plt.close(result.figure)
+    # No cell has a label, so no group holds a cell to draw.
+    with pytest.raises(ValueError, match="^No cell with a group has an expansion"):
+        clonal_expansion(store, truth_plot.by_sample, group_by="unlabelled", show=False)
 
 
 def _joined(*columns: np.ndarray) -> np.ndarray:
@@ -503,17 +515,20 @@ def test_figures_group_cells_by_columns_and_labels_together(truth_plot) -> None:
 
 def test_figures_group_cells_within_the_memory_budget(plotted, monkeypatch) -> None:
     store, clones = plotted
-    codes, names, name = cell_groups(store, clones, group_by=["group"], groups=None)
-    assert (codes.tolist(), names, name) == ([0, 0, 1, 0, 1, -1], ["x", "y"], "group")
+    found = plot_groups(store, clones, group_by=["group"], groups=None, n_cells=6)
+    assert _grouped(found) == ([0, 0, 1, 0, 1, -1], ("x", "y"), "group")
     # Figures group cells as the summaries do, within the store's budget.
     monkeypatch.setattr(store, "memoryBytes", 1_000)
     with pytest.raises(MemoryError, match="^Grouping 6 cells by 1 columns holds"):
-        cell_groups(store, clones, group_by="group", groups=None)
+        plot_groups(store, clones, group_by="group", groups=None, n_cells=6)
     with pytest.raises(TypeError, match="store does not provide the groups of"):
-        cell_groups(object(), clones, group_by="group", groups=None)
-    # No column names no group, through the store too.
+        plot_groups(object(), clones, group_by="group", groups=None, n_cells=6)
+    # No column names no group, and bytes are refused by the store's grouping.
     monkeypatch.undo()
-    assert cell_groups(store, clones, group_by=[], groups=None) == (None, [], None)
+    empty = plot_groups(object(), clones, group_by=[], groups=None, n_cells=6)
+    assert _grouped(empty) == ([0] * 6, ("all cells",), None)
+    with pytest.raises(TypeError, match="^group_by must be a column name"):
+        plot_groups(store, clones, group_by=b"group", groups=None, n_cells=6)
     with pytest.raises(TypeError, match="^artifact must be an ArtifactRef"):
         store._figure_groups("clones", group_by="group", groups=None)
 
@@ -644,8 +659,13 @@ def test_the_rarefaction_plot_draws_one_panel_per_order(truth_plot) -> None:
     assert result.provenance.extras["grouping"] == "sample"
     assert result.axes["order_1"].get_title() == "Shannon diversity (order 1)"
     assert result.axes["coverage"].get_ylabel() == "Sample coverage"
-    legend = result.axes["coverage"].get_legend()
+    # One legend of the samples, beside the last panel of the first row.
+    legend = result.axes["order_2"].get_legend()
     assert [text.get_text() for text in legend.get_texts()] == ["d2", "d4"]
+    assert legend.get_title().get_text() == "sample"
+    assert [
+        name for name, ax in result.axes.items() if ax.get_legend() is not None
+    ] == ["order_2"]
     # The first line of order 0 is d2's curve up to its observed size, which
     # ends at its clones.
     d2 = dv.CloneSizes.from_sizes(TRUTH.group_clone_sizes(TRUTH.samples)["d2"])
@@ -695,6 +715,120 @@ def test_the_coverage_panel_draws_the_coverage(truth_plot) -> None:
     plt.close(result.figure)
 
 
+def test_the_diversity_plot_draws_each_groups_indices(truth_plot) -> None:
+    store, clones = truth_plot.store, truth_plot.clones
+    diversity = store.clones.diversity(clones, group_by="sample")
+    result = store.plots.clonal_diversity(
+        diversity, indices=["n_clones", "gini", "chao1", "d50"], show=False
+    )
+    try:
+        assert list(result.axes) == ["n_clones", "gini", "chao1", "d50"]
+        assert result.tables["indices"] is diversity.indices
+        # Each panel draws each sample's index, d2 on top, the clones of each
+        # sample counted from the truth.
+        clones_of = {
+            sample: len(found)
+            for sample, found in TRUTH.group_clone_sizes(TRUTH.samples).items()
+        }
+        widths = [bar.get_width() for bar in result.axes["n_clones"].patches]
+        assert widths == [clones_of["d2"], clones_of["d4"]]
+        for index in ("gini", "chao1", "d50"):
+            bars = result.axes[index].patches
+            assert [bar.get_width() for bar in bars] == pytest.approx(
+                diversity.indices[index].tolist()
+            )
+        ticks = result.axes["gini"].get_yticklabels()
+        assert [tick.get_text() for tick in ticks] == ["d2", "d4"]
+        assert result.axes["n_clones"].get_title() == "Clones"
+        assert result.axes["chao1"].get_title() == "Chao1"
+        # One legend of the samples, beside the last panel of the first row,
+        # in the colours of the bars.
+        legend = result.axes["chao1"].get_legend()
+        assert [text.get_text() for text in legend.get_texts()] == ["d2", "d4"]
+        assert result.axes["d50"].get_legend() is None
+        assert result.provenance.extras["indices"] == [
+            "n_clones",
+            "gini",
+            "chao1",
+            "d50",
+        ]
+        assert result.provenance.n_cells == 32
+    finally:
+        result.close()
+    one = clonal_diversity(
+        _NamesOnly(store), store.clones.diversity(clones), show=False
+    )
+    try:
+        # Without a grouping, one bar per panel and no legend.
+        assert one.legends == ()
+        assert [len(ax.patches) for ax in one.axes.values()] == [1, 1, 1]
+    finally:
+        one.close()
+    # One index may be named as text.
+    gini = clonal_diversity(store, diversity, indices="gini", show=False)
+    try:
+        assert list(gini.axes) == ["gini"]
+        assert gini.provenance.extras["indices"] == ["gini"]
+    finally:
+        gini.close()
+
+
+def test_a_diversity_panel_of_no_defined_value_says_so(truth_plot) -> None:
+    store, clones = truth_plot.store, truth_plot.clones
+    diversity = store.clones.diversity(clones, group_by="sample")
+    undefined = replace(diversity, indices=diversity.indices.assign(ace=np.nan))
+    result = clonal_diversity(store, undefined, indices=["ace", "shannon"], show=False)
+    try:
+        assert [text.get_text() for text in result.axes["ace"].texts] == [
+            "Not defined for any group"
+        ]
+        assert len(result.axes["shannon"].texts) == 0
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize(
+    ("indices", "error", "message"),
+    [
+        (b"shannon", TypeError, "indices must be the name of an index"),
+        ([], ValueError, "indices must name at least one index"),
+        (["shannon", 3], TypeError, "indices must be the name of an index"),
+        (["entropy"], ValueError, "names 'entropy', which ds.clones.diversity does"),
+        (["gini", "gini"], ValueError, "indices names an index twice"),
+    ],
+)
+def test_the_diversity_plot_checks_its_indices(
+    truth_plot, indices, error, message
+) -> None:
+    store = truth_plot.store
+    diversity = store.clones.diversity(truth_plot.clones)
+    with pytest.raises(error, match=message):
+        clonal_diversity(store, diversity, indices=indices, show=False)
+    with pytest.raises(TypeError, match="^diversity must be the ClonalDiversity"):
+        clonal_diversity(store, truth_plot.clones, show=False)
+
+
+def test_record_groups_need_a_store_that_gives_their_labels(truth_plot) -> None:
+    store, clones = truth_plot.store, truth_plot.clones
+    grouped = store.clones.rarefaction(clones, group_by="sample")
+    # The colours of one column's groups range over the column's labels.
+    with pytest.raises(TypeError, match="^store does not provide the labels of its"):
+        table_groups(object(), grouped)
+    with pytest.raises(TypeError, match="^store does not provide the labels of its"):
+        clonal_rarefaction(_NamesOnly(store), grouped, show=False)
+    # Labels kept apart that are no vocabulary take colours over the groups
+    # drawn, as groups of several columns do.
+    kept = SimpleNamespace(
+        group_keys=pd.DataFrame(
+            {"lineage": ["a", "b"]}, index=pd.Index(["a", "b"], name="group")
+        ),
+        group_by=(),
+        groups=None,
+    )
+    found = table_groups(object(), kept)
+    assert found.colors is None and found.title == "lineage"
+
+
 def test_the_rarefaction_plot_of_complete_samples(truth_plot) -> None:
     store = truth_plot.store
     expanded = store.select_cells(
@@ -733,10 +867,13 @@ def test_the_rarefaction_plot_checks_its_arguments(truth_plot) -> None:
         clonal_rarefaction(store, curves, base="depth", show=False)
     with pytest.raises(TypeError, match="^rarefaction must be the Rarefaction"):
         clonal_rarefaction(store, truth_plot.clones, show=False)
-    # The record holds what the plot draws, so the plot reads nothing more.
-    drawn = clonal_rarefaction(object(), curves, show=False)
+    # The record holds what the plot draws, so the plot reads nothing more
+    # than what figures call its clones.
+    drawn = clonal_rarefaction(_NamesOnly(store), curves, show=False)
     assert drawn.tables["curves"] is curves.curves
     drawn.close()
+    with pytest.raises(TypeError, match="^store does not provide what figures call"):
+        clonal_rarefaction(object(), curves, show=False)
 
 
 def _documented_errors(plot) -> set[str]:
@@ -749,9 +886,9 @@ def _documented_errors(plot) -> set[str]:
 
 def test_the_record_plots_document_the_error_of_an_unknown_theme(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
-    # A plot of a record reads nothing from the store, so the theme is the
-    # one name it looks up, and its section lists the class that lookup
-    # raises.
+    # A plot of a record reads only what figures call its clones from the
+    # store, so the theme is the one other name it looks up, and its section
+    # lists the class that lookup raises.
     for plot, record in (
         (clonal_rarefaction, store.clones.rarefaction(clones, orders=(0,))),
         (clone_overlap, store.clones.overlap(clones, group_by="sample")),
@@ -761,7 +898,7 @@ def test_the_record_plots_document_the_error_of_an_unknown_theme(truth_plot) -> 
         ),
     ):
         with pytest.raises(KeyError, match="Unknown theme 'nope'"):
-            plot(object(), record, theme="nope", show=False)
+            plot(_NamesOnly(store), record, theme="nope", show=False)
         assert {"TypeError", "ValueError", "KeyError"} <= _documented_errors(plot)
 
 
@@ -785,7 +922,8 @@ def test_the_overlap_plot_draws_one_index_between_samples(truth_plot) -> None:
     # The pair prints its value on both sides; the diagonal stays blank.
     assert [text.get_text() for text in ax.texts] == [f"{expected:.3g}"] * 2
     assert len(result.figure.axes) == 2
-    assert result.legends[0].label == "morisita_horn"
+    assert result.legends[0].label == "Morisita-Horn index"
+    assert result.legends[0].kind == "colorbar"
     assert result.provenance.n_cells == 32
     assert result.provenance.extras["index"] == "morisita_horn"
     assert result.provenance.extras["groups"] == ["d2", "d4"]
@@ -870,8 +1008,11 @@ def test_the_overlap_plot_checks_its_arguments(truth_plot) -> None:
         clone_overlap(store, overlap, index="dice", show=False)
     with pytest.raises(TypeError, match="^overlap must be the CloneOverlap"):
         clone_overlap(store, clones, show=False)
-    # The record holds what the plot draws, so the plot reads nothing more.
-    drawn = clone_overlap(object(), overlap, show=False)
+    with pytest.raises(TypeError, match="^color_scale must be a ColorScale"):
+        clone_overlap(store, overlap, color_scale="viridis", show=False)
+    # The record holds what the plot draws, so the plot reads nothing more
+    # than what figures call its clones.
+    drawn = clone_overlap(_NamesOnly(store), overlap, show=False)
     assert drawn.tables["pairs"] is overlap.pairs
     drawn.close()
 
@@ -952,16 +1093,9 @@ def test_the_tracking_plot_places_groups_by_all_their_labels(truth_plot) -> None
     plt.close(result.figure)
 
 
-class _LabelsOnly:
-    """A store that can label clones, and nothing else."""
-
-    def __init__(self, store: DataStore) -> None:
-        self._clone_figure_labels = store._clone_figure_labels
-
-
 def test_the_tracking_plot_needs_only_the_tracked_clones(truth_plot) -> None:
     result = clone_tracking(
-        _LabelsOnly(truth_plot.store),
+        _NamesOnly(truth_plot.store),
         truth_plot.store.clones.track(truth_plot.clones, group_by="sample", top_n=1),
         show=False,
     )
@@ -1207,7 +1341,8 @@ def test_the_coupling_plot_draws_z_scores_in_the_order_of_the_tree(truth_plot) -
     dendrogram = result.axes["dendrogram"]
     assert dendrogram.get_gid() == "top-dendrogram"
     assert dendrogram.get_xlim() == ax.get_xlim()
-    assert result.legends[0].label == "z_score"
+    assert result.legends[0].label == "Z-score of the coupling"
+    assert result.legends[0].kind == "colorbar"
     assert result.provenance.extras["method"] == "share_cosine"
     assert result.provenance.extras["groups"] == order
     assert result.provenance.n_cells == 32
@@ -1367,7 +1502,9 @@ def test_the_fates_plot_groups_clones_by_their_dominant_fate(fates_plot) -> None
         "n_early_cells"
     ].tolist()
     assert result.axes["early"].get_xlim() == fates.get_xlim()
-    assert result.provenance.extras["clones"] == table["clone"].tolist()
+    assert result.provenance.extras["clones"] == fates_plot.clones.to_dict()
+    assert result.provenance.extras["bias"] == fates_plot.bias.to_dict()
+    assert result.provenance.notes == ("clone_fate_bias",)
     plt.close(result.figure)
 
 
@@ -1393,7 +1530,7 @@ def test_the_fates_plot_draws_the_top_clones_and_their_shares(fates_plot) -> Non
     for container in shares.axes["fates"].containers:
         heights += [bar.get_height() for bar in container]
     np.testing.assert_allclose(heights, 1.0)
-    assert shares.axes["fates"].get_ylabel() == "Share of late cells"
+    assert shares.axes["fates"].get_ylabel() == "Fraction of late cells"
     plt.close(shares.figure)
     with pytest.raises(ValueError, match="^max_clones must be at least 1$"):
         clone_fate_bias(store, bias, max_clones=0, show=False)
@@ -1561,7 +1698,7 @@ def test_default_figure_sizes_follow_the_clones_and_groups_drawn(
     size = tuple(result.figure.get_size_inches())
     result.close()
     assert len(result.tables["top"]) == 20 * 200
-    assert size == pytest.approx((12.0, 6.8))
+    assert size == pytest.approx((7.5, 6.8))
     # receptor_qc widens with its groups, half an inch each: a label for each
     # of the truth's 48 cells.
     store = truth_plot.store

@@ -6,36 +6,37 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..clones.diversity import Rarefaction
-from ..clones.fate import CloneCoupling, dominant_fates
+from ..clones.diversity import INDEX_COLUMNS, ClonalDiversity, Rarefaction
 from ..clones.expansion import DEFAULT_RANK_SPLITS, rank_window_labels, rank_windows
+from ..clones.fate import CloneCoupling, dominant_fates
 from ..clones.overlap import OVERLAP_INDICES, CloneOverlap, CloneTracking
 from ..storage.refs import ArtifactRef
-from ..utils.arguments import bool_argument, integer_argument
+from ..utils.arguments import bool_argument, integer_argument, quoted_value
 from ..utils.arrays import sort_categories, sorted_unique
-from ._contracts import PlotProvenance
-from ._deps import require_matplotlib
+from ._charts import draw_bars, draw_lines, draw_matrix, pair_matrix
+from ._clone_names import CloneNames, clone_names
+from ._contracts import CategoricalScale, ColorScale
+from ._data import store_method
 from ._figure import (
-    LegendSpec,
     PlotResult,
     close_figures_on_error,
+    finish_plot,
     normalize_axes_target,
 )
-from ._groups import cell_groups, labels_by_group
+from ._groups import labels_by_group, names_columns, plot_groups, table_groups
 from ._heatmap_utils import draw_dendrogram
 from ._style import (
-    LEGEND_SIDE_MAX_ENTRIES,
     MAX_FIGURE_WIDTH_INCHES,
-    apply_figure_chrome,
-    categorical_color_map,
     colormap_palette,
+    figure_size,
     foreground_color,
-    legend_side_columns,
-    legend_side_rows,
+    item_inches,
+    palette_for_n,
     theme_context,
 )
 
 __all__ = [
+    "clonal_diversity",
     "clonal_expansion",
     "clonal_rarefaction",
     "clone_abundance",
@@ -45,52 +46,88 @@ __all__ = [
     "clone_tracking",
 ]
 
-_ORDER_TITLES = {
-    0: "Clones (order 0)",
-    1: "Shannon diversity (order 1)",
-    2: "Simpson diversity (order 2)",
-}
+# A panel of a fixed size, such as one order of a rarefaction, is about this
+# many inches, and small multiples fill rows of at most three.
+_PANEL_INCHES = (4.2, 3.6)
+_SMALL_MULTIPLES = 3
+# Room in inches beside a heatmap for its colour bar.
+_COLORBAR_INCHES = 1.2
+# The indices that clonal_diversity draws unless told otherwise: the clones,
+# Shannon entropy and the inverse Simpson index, the observed Hill numbers of
+# orders 0, 1, as its logarithm, and 2.
+_DIVERSITY_INDICES = ("n_clones", "shannon", "inverse_simpson")
+_COUPLING_VALUES = ("z_score", "coupling")
 
 
-def _clones_method(store: Any, name: str) -> Any:
-    """Return a method of the store's clones namespace, or raise."""
-    method = getattr(getattr(store, "clones", None), name, None)
-    if not callable(method):
-        raise TypeError(f"store does not provide clones.{name}")
-    return method
+def _order_title(order: int, names: CloneNames) -> str:
+    return {
+        0: f"{names.plural.capitalize()} (order 0)",
+        1: "Shannon diversity (order 1)",
+        2: "Simpson diversity (order 2)",
+    }[order]
 
 
-def _load_clones(store: Any, clones: ArtifactRef) -> Any:
-    return _clones_method(store, "load_clones")(clones)
+def _overlap_titles(names: CloneNames) -> dict[str, str]:
+    return {
+        "shared": f"Shared {names.plural}",
+        "jaccard": "Jaccard index",
+        "sorensen": "Sørensen index",
+        "overlap": "Overlap coefficient",
+        "cosine": "Cosine of presence",
+        "morisita_horn": "Morisita-Horn index",
+        "abundance_cosine": f"Cosine of {names.singular} sizes",
+    }
 
 
-def _figure_labels(store: Any, clones: ArtifactRef, ids: np.ndarray) -> list[str]:
-    """The labels that one figure gives some clones: IDs, or junctions for clonotypes."""
-    method = getattr(store, "_clone_figure_labels", None)
-    if not callable(method):
-        raise TypeError("store does not provide the figure labels of clones")
-    return [str(label) for label in method(clones, ids.tolist())]
+def _coupling_titles(names: CloneNames) -> dict[str, str]:
+    return {
+        "share_cosine": f"Cosine of {names.singular} shares",
+        "abundance_cosine": f"Cosine of {names.singular} sizes",
+        "normalized_covariance": "Normalized covariance",
+        "jaccard": "Jaccard index",
+    }
 
 
-def _figure_noun(store: Any, clones: ArtifactRef) -> str:
-    """What figures call the clones: clones, clonotypes or clonotype clusters."""
-    method = getattr(store, "_clone_figure_noun", None)
-    if not callable(method):
-        raise TypeError("store does not provide what figures call clones")
-    return str(method(clones))
+def _index_titles(names: CloneNames) -> dict[str, str]:
+    """The title of each column of the diversity indices, as the figure names it."""
+    plural = names.plural.capitalize()
+    return {
+        "n_cells": "Cells",
+        "n_clones": plural,
+        "n_singletons": f"{plural} of one cell",
+        "n_doubletons": f"{plural} of two cells",
+        "coverage": "Sample coverage",
+        "shannon": "Shannon entropy",
+        "pielou": "Pielou's evenness",
+        "simpson": "Simpson index",
+        "inverse_simpson": "Inverse Simpson index",
+        "gini_simpson": "Gini-Simpson index",
+        "gini": "Gini coefficient",
+        "d50": "D50",
+        "chao1": "Chao1",
+        "chao1_bias_corrected": "Bias-corrected Chao1",
+        "ace": "ACE",
+    }
 
 
-def _names_columns(group_by: Any) -> bool:
-    """Whether ``group_by`` names a column: text, or a sequence that is not empty.
+def _color_scale(color_scale: Any) -> ColorScale | None:
+    if color_scale is not None and not isinstance(color_scale, ColorScale):
+        raise TypeError("color_scale must be a ColorScale or None")
+    return color_scale
 
-    A value of another type, bytes among them, counts as naming one, so that
-    the grouping refuses it.
+
+def _small_multiples(n_panels: int, height: float | None = None) -> tuple[float, float]:
+    """The size of each of small multiples, which share the page three to a row.
+
+    A panel is at most ``_PANEL_INCHES`` wide, and as tall as ``height``, or
+    of the shape of ``_PANEL_INCHES``.
     """
-    if group_by is None:
-        return False
-    if isinstance(group_by, str | bytes) or not isinstance(group_by, Sequence):
-        return True
-    return len(group_by) > 0
+    width = min(
+        _PANEL_INCHES[0], MAX_FIGURE_WIDTH_INCHES / min(_SMALL_MULTIPLES, n_panels)
+    )
+    return width, (
+        width * _PANEL_INCHES[1] / _PANEL_INCHES[0] if height is None else height
+    )
 
 
 def _kept_apart_labels(
@@ -127,10 +164,10 @@ def clone_abundance(
     those defined by ``receptor_arms="VJ"`` by the ``VJ_1`` chain first,
     which their cells share. Where two of the clonotypes drawn share a
     junction, each label also shows the clonotype's number, the rank in its
-    ID, such as ``CAVA 1`` and ``CAVA 3``. For clonotypes the panel's title
-    reads ``Largest 20 clonotypes``, so the word appears once rather than on
-    every label, and for clonotype clusters, which a distance metric defines,
-    ``Largest 20 clonotype clusters``.
+    ID, such as ``CAVA 1`` and ``CAVA 3``. The figure names the clones as
+    their artifact does, so for clonotypes the second panel's title reads
+    ``Largest 20 clonotypes``, and for clonotype clusters, which a distance
+    metric defines, ``Largest 20 clonotype clusters``.
 
     ``group_by`` names cell metadata columns, one or several, such as the
     sample or time point, and ``groups`` a cell-label artifact, such as a
@@ -138,11 +175,10 @@ def clone_abundance(
     summaries group cells, named by their labels joined by commas. With a
     grouping, the first panel draws one line per group, counting the cells of
     each clone within the group, and the second stacks each clone's cells by
-    group. Cells without a group are left out. The plot raises ``ValueError``
-    when no cell with a group has a clone. Clonotypes are counted within each
-    receptor type, as every clone summary counts them, so their groups are
-    the receptor types, or each group's receptor types, named like
-    ``"s1, TCR"``.
+    group, with one legend of the groups. Cells without a group are left
+    out. Clonotypes are counted within each receptor type, as every clone
+    summary counts them, so their groups are the receptor types, or each
+    group's receptor types, named like ``"s1, TCR"``.
 
     Tables: ``sizes`` (``group``, ``clone_size``, ``n_clones``) and ``top``,
     one row per clone drawn and group, the largest clone first, zeros
@@ -151,7 +187,8 @@ def clone_abundance(
     of the tables, so a group may take any name.
 
     Raises:
-        TypeError: If an argument has the wrong type.
+        TypeError: If an argument has the wrong type, or the store does not
+            load, group or name clones for figures.
         ValueError: If ``clones`` is not a clone artifact, a ``group_by``
             column is missing, named twice or kept apart by the clones
             already, two groups get one name, or no cell, or no cell with a
@@ -165,19 +202,17 @@ def clone_abundance(
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
     max_clones = integer_argument(max_clones, "max_clones", minimum=1)
-    loaded = _load_clones(store, clones)
-    cell_group, names, group_name = cell_groups(
+    loaded = store_method(store, "clones.load_clones")(clones)
+    plotted = plot_groups(
         store,
         clones,
         group_by=group_by,
         groups=groups,
         kept_apart=_kept_apart_labels(loaded.cells, loaded.kept_apart),
+        n_cells=len(loaded.cells),
     )
     codes = np.asarray(loaded.cells["clone"].cat.codes, dtype=np.int64)
-    grouped = cell_group is not None
-    if cell_group is None:
-        cell_group = np.zeros(len(codes), dtype=np.int64)
-        names = ["all cells"]
+    cell_group = plotted.codes
     keep = (codes >= 0) & (cell_group >= 0)
     if not keep.any():
         raise ValueError(
@@ -191,7 +226,7 @@ def clone_abundance(
         cell_group[keep] * n_clones + codes[keep], return_counts=True
     )
     held = sorted_unique(pairs // n_clones)
-    group_order = [names[code] for code in held.tolist()]
+    group_order = [plotted.names[code] for code in held.tolist()]
     pair_groups = np.searchsorted(held, pairs // n_clones)
     pair_codes = pairs % n_clones
     width = int(pair_cells.max()) + 1
@@ -215,7 +250,8 @@ def clone_abundance(
     matrix = np.zeros((len(chosen), len(group_order)), dtype=np.int64)
     matrix[rows[pair_codes[taken]], pair_groups[taken]] = pair_cells[taken]
     ids = loaded.clones["clone"].to_numpy(dtype=object)[chosen]
-    clone_labels = np.asarray(_figure_labels(store, clones, ids), dtype=object)
+    names = clone_names(store, clones)
+    clone_labels = np.asarray(names.labels(ids), dtype=object)
     # One row per clone drawn and group, zeros included, so the groups are
     # values of the table, whatever their names.
     top_table = pd.DataFrame(
@@ -226,116 +262,60 @@ def clone_abundance(
             "n_cells": matrix.reshape(-1),
         }
     )
-    drawn = _figure_noun(store, clones)
+    colors = plotted.scale(group_order)
     if figsize is None and target is None:
-        figsize = (12.0, max(3.6, 0.28 * len(chosen) + 1.2))
-    require_matplotlib()
-    from matplotlib.ticker import LogFormatter
-
+        figsize, _ = figure_size(
+            2,
+            panel=(
+                MAX_FIGURE_WIDTH_INCHES / 2,
+                item_inches(len(chosen), per_item=0.28, base=1.2, minimum=3.6),
+            ),
+            columns=2,
+        )
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
             target, panel_keys=["sizes", "top"], figsize=figsize, n_columns=2
         )
-        ax = axes["sizes"]
-        by_group = dict(tuple(sizes.groupby("group", sort=False)))
-        for group in group_order:
-            group_sizes = by_group[group]
-            ax.plot(
-                group_sizes["clone_size"],
-                group_sizes["n_clones"],
-                marker="o",
-                markersize=3,
-                linewidth=1.2,
-                label=str(group),
-            )
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        for axis in (ax.xaxis, ax.yaxis):
-            axis.set_major_formatter(LogFormatter())
-            axis.set_minor_formatter(LogFormatter())
-        ax.set_xlabel("Cells of the clone")
-        ax.set_ylabel("Clones")
-        ax.set_title("Clone sizes")
-        if show_legend and grouped:
-            ax.legend(frameon=False, fontsize="small")
-        ax = axes["top"]
-        positions = np.arange(len(chosen))[::-1]
-        left = np.zeros(len(chosen))
-        for position, group in enumerate(group_order):
-            widths = matrix[:, position].astype(np.float64)
-            ax.barh(positions, widths, left=left, label=str(group))
-            left += widths
-        ax.set_yticks(positions, clone_labels.tolist(), fontsize="small")
-        ax.set_xlabel("Cells")
-        # One clone drawn is named in the singular: "Largest clonotype".
-        ax.set_title(
-            f"Largest {len(chosen)} {drawn}"
-            if len(chosen) > 1
-            else f"Largest {drawn.removesuffix('s')}"
+        draw_lines(
+            axes["sizes"],
+            sizes,
+            x="clone_size",
+            y="n_clones",
+            series="group",
+            colors=colors,
+            markers=True,
+            log_x=True,
+            log_y=True,
+            x_label=f"Cells of the {names.singular}",
+            y_label=names.plural.capitalize(),
+            title=f"{names.singular.capitalize()} sizes",
         )
-        if show_legend and grouped:
-            ax.legend(frameon=False, fontsize="small", loc="lower right")
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={"sizes": sizes, "top": top_table},
-        legends=(LegendSpec(kind="categorical", label=group_name),) if grouped else (),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(keep.sum()),
-            renderer="matplotlib",
-            notes=("clones",),
-            extras={
-                "clones": clones.to_dict(),
-                "grouping": group_name,
-                "max_clones": max_clones,
-            },
-        ),
-        owns_figure=owns,
+        # One legend of the groups, beside the second panel, serves both.
+        drawn = draw_bars(
+            axes["top"],
+            top_table,
+            item="label",
+            value="n_cells",
+            segment="group",
+            colors=colors,
+            value_label="Cells",
+            title=names.largest(len(chosen)),
+            legend_title=plotted.title,
+            show_legend=show_legend,
+        )
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="clone_abundance",
         theme=theme,
+        tables={"sizes": sizes, "top": top_table},
+        drawn=[drawn],
+        inputs={"clones": clones},
+        settings={"grouping": plotted.title, "max_clones": max_clones},
+        n_cells=int(keep.sum()),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
-
-
-def _stacked_shares(
-    ax: Any,
-    table: pd.DataFrame,
-    colors: dict[str, str],
-    *,
-    normalize: bool,
-    xlabel: str,
-    title: str,
-    show_legend: bool,
-    legend_title: str,
-) -> None:
-    """Draw one horizontal stacked bar per group, the first group on top."""
-    totals = table.sum(axis=1).to_numpy(dtype=np.float64)
-    positions = np.arange(len(table))[::-1]
-    left = np.zeros(len(table))
-    for name in table.columns:
-        widths = table[name].to_numpy(dtype=np.float64)
-        if normalize:
-            widths = np.divide(
-                widths, totals, out=np.zeros_like(widths), where=totals > 0
-            )
-        ax.barh(positions, widths, left=left, color=colors[str(name)], label=str(name))
-        left += widths
-    ax.set_yticks(positions, [str(name) for name in table.index])
-    ax.set_xlabel(xlabel)
-    ax.set_title(title)
-    if show_legend and table.size:
-        ax.legend(
-            title=legend_title,
-            frameon=False,
-            fontsize="small",
-            loc="upper left",
-            bbox_to_anchor=(1, 1),
-        )
 
 
 def _long_table(wide: pd.DataFrame, column: str, value: str) -> pd.DataFrame:
@@ -377,13 +357,14 @@ def clonal_expansion(
 
     ``expansion`` is a ``clonal_expansion`` artifact, such as one from
     ``ds.clones.expansion``. The first panel draws one stacked bar per group:
-    the share of its cells (``count="cells"``) or of its clones
+    the fraction of its cells (``count="cells"``) or of its clones
     (``count="clones"``) in each expansion category, as scirpy's
     ``summarize_clonal_expansion`` and scRepertoire's ``clonalHomeostasis``
     do. The second panel ranks each group's clones by their cells in the
-    group and draws the share of its cells that the clones of each window of
-    ranks hold, as scRepertoire's ``clonalProportion`` does: a sample whose
-    ten largest clones hold most of its cells is dominated by a few clones.
+    group and draws the fraction of its cells that the clones of each window
+    of ranks hold, as scRepertoire's ``clonalProportion`` does: a sample
+    whose ten largest clones hold most of its cells is dominated by a few
+    clones. Windows that hold no cell are left out.
 
     The groups are the expansion's own, such as its samples, unless
     ``group_by`` names cell metadata columns, one or several, such as the
@@ -401,11 +382,13 @@ def clonal_expansion(
     ``window``, ``n_cells`` and ``fraction``).
 
     Raises:
-        TypeError: If an argument has the wrong type.
+        TypeError: If an argument has the wrong type, or the store does not
+            load, group or name clones for figures.
         ValueError: If ``expansion`` is not a ``clonal_expansion``
             artifact, ``count`` is neither ``"cells"`` nor
             ``"clones"``, a ``group_by`` column is missing, named twice or
-            kept apart by the clones already, or two groups get one name.
+            kept apart by the clones already, two groups get one name, or no
+            cell with a group has a category.
         KeyError: If the store holds no such artifact.
         RuntimeError: If an artifact is incomplete, as a call that stopped
             before it finished leaves it.
@@ -417,28 +400,15 @@ def clonal_expansion(
     show = bool_argument(show, "show")
     if count not in ("cells", "clones"):
         raise ValueError("count must be 'cells' or 'clones'")
-    loaded = _clones_method(store, "load_expansion")(expansion, splits=splits)
+    loaded = store_method(store, "clones.load_expansion")(expansion, splits=splits)
     # The expansion's key columns after its group_by columns and its label
     # artifact's kind hold the labels that its clones keep apart, such as the
     # receptor type, which each cell takes from its group.
     key_columns = [str(column) for column in loaded.group_keys.columns]
     kept_apart = key_columns[len(loaded.group_by) + (loaded.groups is not None) :]
-    labels, names, group_name = (
-        (None, [], None)
-        if groups is None and not _names_columns(group_by)
-        else cell_groups(
-            store,
-            expansion,
-            group_by=group_by,
-            groups=groups,
-            kept_apart=labels_by_group(
-                loaded.cells["group"], loaded.group_keys, kept_apart
-            ),
-        )
-    )
     category_names = list(loaded.labels)
     window_names = list(rank_window_labels(splits))
-    if labels is None:
+    if groups is None and not names_columns(group_by):
         # The expansion's own groups, which the loaded tables count.
         group_name = ", ".join(key_columns) or None
         order = sort_categories(pd.unique(loaded.categories["group"].to_numpy(object)))
@@ -456,11 +426,22 @@ def clonal_expansion(
         )
         n_cells = int(loaded.categories["n_cells"].sum())
     else:
+        plotted = plot_groups(
+            store,
+            expansion,
+            group_by=group_by,
+            groups=groups,
+            kept_apart=labels_by_group(
+                loaded.cells["group"], loaded.group_keys, kept_apart
+            ),
+            n_cells=len(loaded.cells),
+        )
+        labels, group_name = plotted.codes, plotted.title
         category = np.asarray(loaded.cells["category"].cat.codes, dtype=np.int64)
         clone = np.asarray(loaded.cells["clone"].cat.codes, dtype=np.int64)
         keep = (category >= 0) & (labels >= 0)
         held = sorted_unique(labels[keep])
-        order = [names[code] for code in held.tolist()]
+        order = [plotted.names[code] for code in held.tolist()]
         group_codes = np.searchsorted(held, labels[keep])
         width = len(category_names)
         if count == "cells":
@@ -483,73 +464,94 @@ def clonal_expansion(
             columns=pd.Index(window_names),
         )
         n_cells = int(keep.sum())
-    # Windows that hold no cell of any group are left out of the figure.
+    if not len(order):
+        raise ValueError(
+            "No cell with a group has an expansion category, so there is nothing to plot"
+        )
+    names = clone_names(store, loaded.clones)
+    noun = names.singular.capitalize()
+    counted = "cells" if count == "cells" else names.plural
     shown_windows = windows.loc[:, windows.sum(axis=0) > 0]
+    # Categories take colours in size order, as do the windows of ranks.
+    window_palette = colormap_palette(window_names, "viridis")
+    category_colors = CategoricalScale(
+        order=tuple(category_names),
+        palette=colormap_palette(category_names, "viridis_r"),
+    )
+    window_colors = CategoricalScale(
+        order=tuple(shown_windows.columns),
+        palette={window: window_palette[window] for window in shown_windows.columns},
+    )
     if figsize is None and target is None:
-        figsize = (13.0, max(3.2, 0.32 * len(order) + 1.6))
-    require_matplotlib()
+        figsize, _ = figure_size(
+            2,
+            panel=(
+                MAX_FIGURE_WIDTH_INCHES,
+                item_inches(len(order), per_item=0.22, base=1.2, minimum=2.4),
+            ),
+        )
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
             target,
             panel_keys=["categories", "rank_windows"],
             figsize=figsize,
-            n_columns=2,
+            n_columns=1,
         )
-        _stacked_shares(
-            axes["categories"],
-            wide,
-            colormap_palette(list(loaded.labels), "viridis_r"),
-            normalize=normalize,
-            xlabel=f"Fraction of {count}" if normalize else count.capitalize(),
-            title="Clonal expansion",
-            show_legend=show_legend,
-            legend_title=(
-                "Clone size" if loaded.breakpoints is not None else "Clone frequency"
+        drawn = [
+            draw_bars(
+                axes["categories"],
+                _long_table(wide, "category", f"n_{count}"),
+                item="group",
+                value=f"n_{count}",
+                segment="category",
+                colors=category_colors,
+                normalize=normalize,
+                value_label=(
+                    f"Fraction of {counted}" if normalize else counted.capitalize()
+                ),
+                title="Clonal expansion",
+                legend_title=(
+                    f"{noun} size"
+                    if loaded.breakpoints is not None
+                    else f"{noun} frequency"
+                ),
+                show_legend=show_legend,
             ),
-        )
-        _stacked_shares(
-            axes["rank_windows"],
-            shown_windows,
-            colormap_palette(window_names, "viridis"),
-            normalize=normalize,
-            xlabel="Fraction of cells" if normalize else "Cells",
-            title="Clonal space by clone rank",
-            show_legend=show_legend,
-            legend_title="Clone rank",
-        )
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
+            draw_bars(
+                axes["rank_windows"],
+                _long_table(shown_windows, "window", "n_cells"),
+                item="group",
+                value="n_cells",
+                segment="window",
+                colors=window_colors,
+                normalize=normalize,
+                value_label="Fraction of cells" if normalize else "Cells",
+                title=f"Clonal space by {names.singular} rank",
+                legend_title=f"{noun} rank",
+                show_legend=show_legend,
+            ),
+        ]
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="clonal_expansion",
+        theme=theme,
         tables={
             "categories": _long_table(wide, "category", f"n_{count}"),
             "rank_windows": _long_table(windows, "window", "n_cells"),
         },
-        legends=(
-            LegendSpec(kind="categorical", label="Expansion category"),
-            LegendSpec(kind="categorical", label="Clone rank"),
-        ),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=n_cells,
-            renderer="matplotlib",
-            notes=("clonal_expansion",),
-            extras={
-                "clonal_expansion": expansion.to_dict(),
-                "grouping": group_name,
-                "count": count,
-                "normalize": normalize,
-                "splits": list(loaded.splits),
-            },
-        ),
-        owns_figure=owns,
-        theme=theme,
+        drawn=drawn,
+        inputs={"expansion": expansion},
+        settings={
+            "grouping": group_name,
+            "count": count,
+            "normalize": normalize,
+            "splits": list(loaded.splits),
+        },
+        n_cells=n_cells,
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
 
 
 @close_figures_on_error
@@ -575,17 +577,24 @@ def clonal_rarefaction(
     observed size. With ``base="size"`` a last panel draws each group's
     sample coverage against its size, which shows how complete each sample
     is. Curves that keep rising at the observed point have not reached their
-    plateau: more cells would find more clones.
+    plateau: more cells would find more clones. The panels fill rows of
+    three, and one legend of the groups stands beside the first row.
 
     Tables: ``curves``, the record's curves (``group``, ``order``, ``size``,
     ``method``, ``diversity``, ``coverage``); the record's ``group_keys``
     holds each group's labels.
 
     Raises:
-        TypeError: If ``rarefaction`` is not a ``Rarefaction`` record, or
-            another argument has the wrong type.
-        ValueError: If ``base`` is neither ``"size"`` nor ``"coverage"``.
-        KeyError: If ``theme`` names no theme.
+        TypeError: If ``rarefaction`` is not a ``Rarefaction`` record,
+            another argument has the wrong type, or the store does not name
+            clones for figures or give the labels that the groups' colours
+            range over.
+        ValueError: If ``base`` is neither ``"size"`` nor ``"coverage"``, or
+            the record holds no curve.
+        KeyError: If ``theme`` names no theme, or the store does not hold
+            the record's clones.
+        RuntimeError: If the record's clones are incomplete, as a call that
+            stopped before it finished leaves them.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -594,104 +603,232 @@ def clonal_rarefaction(
     if base not in ("size", "coverage"):
         raise ValueError("base must be 'size' or 'coverage'")
     curves = rarefaction.curves
-    key_columns = [str(column) for column in rarefaction.group_keys.columns]
-    names = sort_categories(pd.unique(curves["group"]))
-    colors = categorical_color_map(list(names))
-    by_curve = dict(tuple(curves.groupby(["group", "order"], sort=False)))
+    if curves.empty:
+        raise ValueError("The rarefaction holds no curve, so there is nothing to plot")
+    names = clone_names(store, rarefaction.clones)
+    plotted = table_groups(store, rarefaction)
+    held = set(curves["group"].tolist())
+    colors = plotted.scale([name for name in plotted.names if name in held])
     panels = [f"order_{order}" for order in rarefaction.orders]
     if base == "size":
         panels.append("coverage")
+    # One legend of the groups, beside the last panel of the first row.
+    legend_panel = panels[min(_SMALL_MULTIPLES, len(panels)) - 1]
+    marked = curves.assign(
+        extrapolated=curves["method"].eq("extrapolation").to_numpy(),
+        observed=curves["method"].eq("observed").to_numpy(),
+    )
+    by_order = dict(tuple(marked.groupby("order", sort=False)))
     if figsize is None and target is None:
-        figsize = (4.2 * len(panels) + 1.5, 3.8)
-    require_matplotlib()
+        figsize, _ = figure_size(
+            len(panels), panel=_small_multiples(len(panels)), columns=_SMALL_MULTIPLES
+        )
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
-            target, panel_keys=panels, figsize=figsize, n_columns=len(panels)
+            target, panel_keys=panels, figsize=figsize, n_columns=_SMALL_MULTIPLES
         )
+        drawn = None
         for panel in panels:
-            ax = axes[panel]
             order = (
                 int(panel.split("_")[1])
                 if panel != "coverage"
                 else rarefaction.orders[0]
             )
-            for name in names:
-                rows = by_curve[(name, order)]
-                x = rows["size" if base == "size" else "coverage"].to_numpy()
-                y = rows["coverage" if panel == "coverage" else "diversity"].to_numpy()
-                method = rows["method"].to_numpy()
-                inner = method != "extrapolation"
-                outer = method != "rarefaction"
-                ax.plot(
-                    x[inner], y[inner], color=colors[name], linewidth=1.4, label=name
-                )
-                ax.plot(x[outer], y[outer], color=colors[name], linewidth=1.4, ls="--")
-                ax.plot(
-                    x[method == "observed"],
-                    y[method == "observed"],
-                    "o",
-                    color=colors[name],
-                    markersize=4,
-                )
-            ax.set_xlabel("Cells" if base == "size" else "Sample coverage")
-            if panel == "coverage":
-                ax.set_ylabel("Sample coverage")
-                ax.set_title("Sample completeness")
-            else:
-                ax.set_ylabel("Hill number")
-                ax.set_title(_ORDER_TITLES[int(panel.split("_")[1])])
-        if show_legend and len(names) > 1:
-            axes[panels[-1]].legend(
-                frameon=False, fontsize="small", loc="upper left", bbox_to_anchor=(1, 1)
+            found = draw_lines(
+                axes[panel],
+                by_order[order],
+                x="size" if base == "size" else "coverage",
+                y="coverage" if panel == "coverage" else "diversity",
+                series="group",
+                colors=colors,
+                dashed="extrapolated",
+                marked="observed",
+                x_label="Cells" if base == "size" else "Sample coverage",
+                y_label="Sample coverage" if panel == "coverage" else "Hill number",
+                title=(
+                    "Sample completeness"
+                    if panel == "coverage"
+                    else _order_title(order, names)
+                ),
+                legend_title=plotted.title,
+                show_legend=show_legend and panel == legend_panel,
             )
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={"curves": curves},
-        legends=(LegendSpec(kind="categorical", label="Group"),),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(
-                curves.loc[curves["method"] == "observed"]
-                .drop_duplicates("group")["size"]
-                .sum()
-            ),
-            renderer="matplotlib",
-            notes=("clones",),
-            extras={
-                "clones": rarefaction.clones.to_dict(),
-                "grouping": ", ".join(key_columns) or None,
-                "orders": list(rarefaction.orders),
-                "base": base,
-            },
-        ),
-        owns_figure=owns,
+            if panel == legend_panel:
+                drawn = found
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="clonal_rarefaction",
         theme=theme,
+        tables={"curves": curves},
+        drawn=[drawn],
+        inputs={"clones": rarefaction.clones},
+        settings={
+            "grouping": plotted.title,
+            "orders": list(rarefaction.orders),
+            "base": base,
+        },
+        n_cells=int(
+            curves.loc[curves["method"] == "observed"]
+            .drop_duplicates("group")["size"]
+            .sum()
+        ),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
 
 
-# Overlap matrices of at most this many groups print their values, and the
-# overlap and tracking plots of at most this many groups name them on their
-# axes; their tables name every group.
-_ANNOTATED_GROUPS = 12
-_NAMED_GROUPS = 40
-# Room in inches beside an overlap matrix for its colour bar.
-_COLORBAR_INCHES = 1.2
-_OVERLAP_TITLES = {
-    "shared": "Shared clones",
-    "jaccard": "Jaccard index",
-    "sorensen": "Sørensen index",
-    "overlap": "Overlap coefficient",
-    "cosine": "Cosine of presence",
-    "morisita_horn": "Morisita-Horn index",
-    "abundance_cosine": "Cosine of clone sizes",
-}
+def _diversity_indices(indices: Any) -> tuple[str, ...]:
+    """Return the diversity indices to draw, checked against the indices measured."""
+    if isinstance(indices, str):
+        chosen: list[Any] = [indices]
+    elif isinstance(indices, Sequence) and not isinstance(indices, bytes):
+        chosen = list(indices)
+    else:
+        raise TypeError("indices must be the name of an index or a sequence of names")
+    if not chosen:
+        raise ValueError("indices must name at least one index")
+    for name in chosen:
+        if not isinstance(name, str):
+            raise TypeError(
+                "indices must be the name of an index or a sequence of names"
+            )
+        if name not in INDEX_COLUMNS:
+            raise ValueError(
+                f"indices names {quoted_value(name)}, which ds.clones.diversity does not "
+                f"measure; choose from {', '.join(INDEX_COLUMNS)}"
+            )
+    if len(set(chosen)) != len(chosen):
+        raise ValueError("indices names an index twice")
+    return tuple(chosen)
+
+
+@close_figures_on_error
+def clonal_diversity(
+    store: Any,
+    diversity: ClonalDiversity,
+    *,
+    indices: str | Sequence[str] = _DIVERSITY_INDICES,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot diversity indices of groups of cells, one panel of bars per index.
+
+    ``diversity`` is the result of ``ds.clones.diversity``, which sets the
+    groups. ``indices`` names one or several columns of its ``indices``
+    table, by default ``("n_clones", "shannon", "inverse_simpson")``: the
+    clones, Shannon entropy and the inverse Simpson index, which are the
+    observed Hill numbers of orders 0, 1, as its logarithm, and 2. Each
+    panel draws one bar per group, in the groups' colours, and the panels
+    fill rows of three, with one legend of the groups beside the first row.
+    A group whose index is not defined, such as Pielou's evenness of a group
+    of one clone, draws no bar, and a panel of none says so. An observed
+    index grows with the cells of a group, so compare groups of different
+    sizes by the Hill numbers at a common coverage or size, which the
+    record's ``hill`` table holds.
+
+    Tables: ``indices``, the record's indices; the record's ``group_keys``
+    holds each group's labels.
+
+    Raises:
+        TypeError: If ``diversity`` is not a ``ClonalDiversity`` record,
+            another argument has the wrong type, or the store does not name
+            clones for figures or give the labels that the groups' colours
+            range over.
+        ValueError: If ``indices`` is empty, names an index twice or one that
+            ``ds.clones.diversity`` does not measure, or the record holds no
+            group.
+        KeyError: If ``theme`` names no theme, or the store does not hold
+            the record's clones.
+        RuntimeError: If the record's clones are incomplete, as a call that
+            stopped before it finished leaves them.
+    """
+    show_legend = bool_argument(show_legend, "show_legend")
+    show = bool_argument(show, "show")
+    chosen = _diversity_indices(indices)
+    if not isinstance(diversity, ClonalDiversity):
+        raise TypeError("diversity must be the ClonalDiversity of ds.clones.diversity")
+    table = diversity.indices
+    if table.empty:
+        raise ValueError("The diversity measures no group, so there is nothing to plot")
+    names = clone_names(store, diversity.clones)
+    plotted = table_groups(store, diversity)
+    colors = plotted.scale(table["group"].tolist())
+    titles = _index_titles(names)
+    legend_panel = chosen[min(_SMALL_MULTIPLES, len(chosen)) - 1]
+    if figsize is None and target is None:
+        width, height = _small_multiples(len(chosen))
+        figsize, _ = figure_size(
+            len(chosen),
+            panel=(
+                width,
+                item_inches(len(table), per_item=0.25, base=1.0, minimum=height),
+            ),
+            columns=_SMALL_MULTIPLES,
+        )
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=list(chosen), figsize=figsize, n_columns=_SMALL_MULTIPLES
+        )
+        drawn = None
+        for index in chosen:
+            ax = axes[index]
+            found = draw_bars(
+                ax,
+                table,
+                item="group",
+                value=index,
+                colors=colors,
+                value_label="",
+                title=titles[index],
+                legend_title=plotted.title if index == legend_panel else None,
+                show_legend=show_legend,
+            )
+            if index == legend_panel:
+                drawn = found
+            if not np.isfinite(table[index].to_numpy(dtype=np.float64)).any():
+                ax.text(
+                    0.5,
+                    0.5,
+                    "Not defined for any group",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize="small",
+                    color=foreground_color(theme),
+                )
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="clonal_diversity",
+        theme=theme,
+        tables={"indices": table},
+        drawn=[drawn],
+        inputs={"clones": diversity.clones},
+        settings={"grouping": plotted.title, "indices": list(chosen)},
+        n_cells=int(table["n_cells"].sum()),
+        show=show,
+    )
+
+
+def _matrix_figure_size(
+    n_groups: int, *, extra_height: float = 0.0
+) -> tuple[float, float]:
+    """The default size of a heatmap of groups by groups, beside its colour bar.
+
+    Its side grows by 0.55 inches a group from at least 4 and stops where
+    the colour bar still fits on the page.
+    """
+    side = min(
+        item_inches(n_groups, per_item=0.55, base=2.5, minimum=4.0),
+        MAX_FIGURE_WIDTH_INCHES - _COLORBAR_INCHES,
+    )
+    size, _ = figure_size(1, panel=(side + _COLORBAR_INCHES, side + extra_height))
+    return size
 
 
 @close_figures_on_error
@@ -700,6 +837,7 @@ def clone_overlap(
     overlap: CloneOverlap,
     *,
     index: str = "morisita_horn",
+    color_scale: ColorScale | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -712,19 +850,24 @@ def clone_overlap(
     groups. ``index`` is one of its indices: ``"shared"``, ``"jaccard"``,
     ``"sorensen"``, ``"overlap"``, ``"cosine"``, ``"morisita_horn"`` (the
     default) and ``"abundance_cosine"``. The diagonal is left blank so that
-    the colours span the pairs, and so are pairs that were not compared; the
-    ``matrix`` table holds each group's clones on its diagonal for
-    ``"shared"`` and 1 otherwise. Matrices of at most 12 groups print their
-    values, and of at most 40 name their groups on the axes. By default the
-    figure grows with the groups up to the width of a page.
+    the colours span the pairs, and pairs that were not compared take the
+    scale's missing colour; the ``matrix`` table holds each group's clones
+    on its diagonal for ``"shared"`` and 1 otherwise. ``color_scale`` sets
+    the colour map and limits, viridis over the pairs' values by default,
+    so two figures can share them.
 
     Tables: ``matrix`` (groups by groups) and ``pairs``, the record's pairs.
 
     Raises:
-        TypeError: If ``overlap`` is not a ``CloneOverlap`` record, or
-            another argument has the wrong type.
-        ValueError: If ``index`` is not an overlap index.
-        KeyError: If ``theme`` names no theme.
+        TypeError: If ``overlap`` is not a ``CloneOverlap`` record,
+            ``color_scale`` is not a ``ColorScale``, another argument has the
+            wrong type, or the store does not name clones for figures.
+        ValueError: If ``index`` is not an overlap index, or the record
+            compares no pair.
+        KeyError: If ``theme`` names no theme, or the store does not hold
+            the record's clones.
+        RuntimeError: If the record's clones are incomplete, as a call that
+            stopped before it finished leaves them.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -732,87 +875,52 @@ def clone_overlap(
         raise TypeError("overlap must be the CloneOverlap of ds.clones.overlap")
     if index not in OVERLAP_INDICES:
         raise ValueError(f"index must be one of {', '.join(OVERLAP_INDICES)}")
-    names = list(overlap.group_sizes["group"])
-    positions = pd.Index(names)
-    first = positions.get_indexer(overlap.pairs["group_1"])
-    second = positions.get_indexer(overlap.pairs["group_2"])
-    pair_values = overlap.pairs[index].to_numpy(dtype=np.float64)
-    values = np.full((len(names), len(names)), np.nan)
-    values[first, second] = pair_values
-    values[second, first] = pair_values
-    values[np.diag_indices(len(names))] = (
-        overlap.group_sizes["n_clones"].to_numpy(dtype=np.float64)
-        if index == "shared"
-        else 1.0
-    )
-    matrix = pd.DataFrame(values, index=pd.Index(names), columns=pd.Index(names))
-    if figsize is None and target is None:
-        side = min(
-            max(4.0, 0.55 * len(names) + 2.5),
-            MAX_FIGURE_WIDTH_INCHES - _COLORBAR_INCHES,
+    color_scale = _color_scale(color_scale)
+    if overlap.pairs.empty:
+        raise ValueError(
+            "The overlap compares no pair of groups, so there is nothing to plot"
         )
-        figsize = (side + _COLORBAR_INCHES, side)
-    require_matplotlib()
+    names = list(overlap.group_sizes["group"])
+    matrix = pair_matrix(
+        overlap.pairs,
+        names,
+        index,
+        diagonal=(
+            overlap.group_sizes["n_clones"].to_numpy(dtype=np.float64)
+            if index == "shared"
+            else 1.0
+        ),
+    )
+    title = _overlap_titles(clone_names(store, overlap.clones))[index]
+    if figsize is None and target is None:
+        figsize = _matrix_figure_size(len(names))
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
             target, panel_keys=["matrix"], figsize=figsize, n_columns=1
         )
-        ax = axes["matrix"]
-        drawn = values.copy()
-        drawn[np.diag_indices(len(names))] = np.nan
-        image = ax.imshow(np.ma.masked_invalid(drawn), cmap="viridis")
-        if len(names) <= _NAMED_GROUPS:
-            ax.set_xticks(np.arange(len(names)), names, rotation=90)
-            ax.set_yticks(np.arange(len(names)), names)
-        else:
-            ax.set_xticks([])
-            ax.set_yticks([])
-        ax.set_title(_OVERLAP_TITLES[index])
-        if len(names) <= _ANNOTATED_GROUPS:
-            for row in range(len(names)):
-                for column in range(len(names)):
-                    value = drawn[row, column]
-                    if np.isnan(value):
-                        continue
-                    # Dark text on light cells, light text on dark ones.
-                    red, green, blue, _alpha = image.cmap(image.norm(value))
-                    light = 0.299 * red + 0.587 * green + 0.114 * blue > 0.5
-                    ax.text(
-                        column,
-                        row,
-                        f"{value:.0f}" if index == "shared" else f"{value:.3g}",
-                        ha="center",
-                        va="center",
-                        color="black" if light else "white",
-                        fontsize="x-small",
-                    )
-        if show_legend:
-            figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={"matrix": matrix, "pairs": overlap.pairs},
-        legends=(LegendSpec(kind="continuous", label=index),),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(overlap.group_sizes["n_cells"].sum()),
-            renderer="matplotlib",
-            notes=("clones",),
-            extras={
-                "clones": overlap.clones.to_dict(),
-                "index": index,
-                "groups": names,
-            },
-        ),
-        owns_figure=owns,
+        drawn = draw_matrix(
+            axes["matrix"],
+            matrix,
+            color_scale=color_scale or ColorScale(cmap="viridis"),
+            value_label=title,
+            blank_diagonal=True,
+            value_format=".0f" if index == "shared" else ".3g",
+            show_legend=show_legend,
+        )
+        axes["matrix"].set_title(title)
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="clone_overlap",
         theme=theme,
+        tables={"matrix": matrix, "pairs": overlap.pairs},
+        drawn=[drawn],
+        inputs={"clones": overlap.clones},
+        settings={"index": index, "groups": names},
+        n_cells=int(overlap.group_sizes["n_cells"].sum()),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
 
 
 @close_figures_on_error
@@ -827,12 +935,12 @@ def clone_tracking(
     show_legend: bool = True,
     show: bool = True,
 ) -> PlotResult:
-    """Plot the share of cells of chosen clones across groups of cells.
+    """Plot the fraction of cells of chosen clones across groups of cells.
 
     ``tracking`` is the result of ``ds.clones.track``, which chooses the
     clones and sets the groups: the ``top_n`` clones with the most cells in
     each group, or the clones it was given. Each clone draws one line across
-    the groups, such as time points or cell types, of its share of each
+    the groups, such as time points or cell types, of its fraction of each
     group's cells with a clone. A line is labelled with its clone's ID, or
     for a clonotype with its representative's junction, such as ``CASSA``,
     and also its number where two of the clonotypes followed share a
@@ -841,9 +949,8 @@ def clone_tracking(
     ``group_by`` columns and the ``groups`` artifact, joined by commas;
     ``order`` lists those names from left to right, or values whose text is
     the name, such as time points as integers, and by default the names
-    follow their natural order. Plots of at most 40 groups name them on the
-    axis, and the legend lists at most 80 clones, the largest first. By
-    default the figure grows with the groups up to the width of a page.
+    follow their natural order. The legend lists the clones, the largest
+    first.
 
     Tables: ``tracking``, the record's ``table`` with each clone's ``label``
     after its ``clone`` (``clone``, ``label``, ``group``, ``n_cells`` and
@@ -851,9 +958,11 @@ def clone_tracking(
 
     Raises:
         TypeError: If ``tracking`` is not a ``CloneTracking`` record,
-            ``order`` is not a sequence of group names, or another argument
-            has the wrong type.
-        ValueError: If ``order`` does not list the groups.
+            ``order`` is not a sequence of group names, another argument has
+            the wrong type, or the store does not name or label clones for
+            figures.
+        ValueError: If ``order`` does not list the groups, or the record
+            follows no clone.
         KeyError: If the store does not hold the record's clones.
         RuntimeError: If the record's clones are incomplete, as a call that
             stopped before it finished leaves them.
@@ -869,16 +978,13 @@ def clone_tracking(
             raise TypeError("order must be a sequence of group names")
     if not isinstance(tracking, CloneTracking):
         raise TypeError("tracking must be the CloneTracking of ds.clones.track")
+    if not tracking.tracked:
+        raise ValueError("The tracking follows no clone, so there is nothing to plot")
+    names = clone_names(store, tracking.clones)
     # Every followed clone is labelled at once, so that the junctions which
     # two followed clonotypes share are found among the lines of this figure.
     line_labels = dict(
-        zip(
-            tracking.tracked,
-            _figure_labels(
-                store, tracking.clones, np.asarray(tracking.tracked, dtype=object)
-            ),
-            strict=True,
-        )
+        zip(tracking.tracked, names.labels(tracking.tracked), strict=True)
     )
     cells = tracking.table.copy(deep=False)
     cells.insert(
@@ -893,12 +999,12 @@ def clone_tracking(
     # group_by columns and the label artifact's kind, the first key columns.
     group_keys = tracking.group_keys
     n_grouping = len(tracking.group_by) + (tracking.groups is not None)
-    names = [str(group) for group in group_keys.index.tolist()]
-    position_of = dict(zip(names, names, strict=True))
+    group_names = [str(group) for group in group_keys.index.tolist()]
+    position_of = dict(zip(group_names, group_names, strict=True))
     if n_grouping:
         grouping = group_keys.iloc[:, :n_grouping].astype(str)
         position_of = dict(
-            zip(names, grouping.agg(", ".join, axis=1).tolist(), strict=True)
+            zip(group_names, grouping.agg(", ".join, axis=1).tolist(), strict=True)
         )
     placed = cells.assign(
         position=np.asarray(
@@ -914,95 +1020,51 @@ def clone_tracking(
         positions = [str(name) for name in order]
         if sorted(positions) != sorted(map(str, present)):
             raise ValueError(f"order must list the groups {present}")
-    by_clone = dict(tuple(placed.groupby("clone", sort=False)))
+    # The clones' colours, in the order they were chosen, the largest first.
+    labels = [line_labels[clone] for clone in tracking.tracked]
+    colors = CategoricalScale(
+        order=tuple(labels),
+        palette=dict(zip(labels, palette_for_n(len(labels)), strict=True)),
+    )
     if figsize is None and target is None:
-        figsize = (
-            min(max(6.0, 0.7 * len(positions) + 4.0), MAX_FIGURE_WIDTH_INCHES),
-            4.2,
+        figsize, _ = figure_size(
+            1,
+            panel=(
+                item_inches(len(positions), per_item=0.7, base=4.0, minimum=6.0),
+                4.2,
+            ),
         )
-    require_matplotlib()
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
             target, panel_keys=["tracking"], figsize=figsize, n_columns=1
         )
-        ax = axes["tracking"]
-        colors = categorical_color_map(list(tracking.tracked))
-        x = np.arange(len(positions))
-        for name in tracking.tracked:
-            rows = by_clone.get(name, placed.iloc[:0])
-            y = (
-                rows.set_index("position")["fraction"]
-                .reindex(positions)
-                .to_numpy(dtype=np.float64)
-            )
-            ax.plot(
-                x,
-                y,
-                marker="o",
-                markersize=3.5,
-                linewidth=1.2,
-                color=colors[name],
-                label=line_labels[name],
-            )
-        if len(positions) <= _NAMED_GROUPS:
-            ax.set_xticks(x, positions, rotation=45, ha="right")
-        else:
-            ax.set_xticks([])
-        ax.set_ylabel("Fraction of the group's cells")
-        ax.set_title("Clones across groups")
-        if show_legend:
-            # The largest clones, in columns that fit the figure's height.
-            lines = ax.get_lines()
-            shown = min(len(lines), LEGEND_SIDE_MAX_ENTRIES)
-            rows = legend_side_rows(float(figure.get_size_inches()[1]), title=True)
-            ax.legend(
-                handles=lines[:shown],
-                frameon=False,
-                fontsize="small",
-                title=(
-                    "Clone"
-                    if shown == len(lines)
-                    else f"Clone ({shown} of {len(lines)})"
-                ),
-                title_fontsize="small",
-                loc="upper left",
-                bbox_to_anchor=(1, 1),
-                ncols=legend_side_columns(shown, rows=rows),
-            )
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={"tracking": cells},
-        legends=(LegendSpec(kind="categorical", label="Clone"),),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(cells["n_cells"].sum()),
-            renderer="matplotlib",
-            notes=("clones",),
-            extras={
-                "clones": tracking.clones.to_dict(),
-                "tracked": list(tracking.tracked),
-                "order": positions,
-            },
-        ),
-        owns_figure=owns,
+        drawn = draw_lines(
+            axes["tracking"],
+            placed,
+            x="position",
+            y="fraction",
+            series="label",
+            colors=colors,
+            positions=positions,
+            markers=True,
+            y_label="Fraction of the group's cells",
+            title=f"{names.plural.capitalize()} across groups",
+            legend_title=names.singular.capitalize(),
+            show_legend=show_legend,
+        )
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="clone_tracking",
         theme=theme,
+        tables={"tracking": cells},
+        drawn=[drawn],
+        inputs={"clones": tracking.clones},
+        settings={"tracked": list(tracking.tracked), "order": positions},
+        n_cells=int(cells["n_cells"].sum()),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
-
-
-_COUPLING_TITLES = {
-    "share_cosine": "Cosine of clone shares",
-    "abundance_cosine": "Cosine of clone sizes",
-    "normalized_covariance": "Normalized covariance",
-    "jaccard": "Jaccard index",
-}
-_COUPLING_VALUES = ("z_score", "coupling")
 
 
 @close_figures_on_error
@@ -1011,6 +1073,7 @@ def clone_coupling(
     coupling: CloneCoupling,
     *,
     value: str = "z_score",
+    color_scale: ColorScale | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -1021,23 +1084,29 @@ def clone_coupling(
 
     ``coupling`` is the result of ``ds.clones.coupling``. ``value`` is
     ``"z_score"`` (the default), the coupling's distance from its null in
-    null standard deviations, on a colour scale centred on 0, or
-    ``"coupling"``, the method's value. The groups follow the result's
-    average-linkage order, whose dendrogram is drawn above the matrix. The
-    diagonal is left blank, and so are pairs that were not compared and
-    z-scores that are not finite; a coupling measured without permutations
-    has no z-scores and is refused. Matrices of at most 12 groups print their
-    values, and of at most 40 name their groups on the axes. By default the
-    figure grows with the groups up to the width of a page.
+    null standard deviations, or ``"coupling"``, the method's value. The
+    groups follow the result's average-linkage order, whose dendrogram is
+    drawn above the matrix. The diagonal is left blank, and pairs that were
+    not compared and z-scores that are not finite take the scale's missing
+    colour; a coupling measured without permutations has no z-scores and is
+    refused. By default z-scores, and couplings below 0, take a scale centred
+    on 0, from minus to plus their largest size, and other couplings
+    viridis; ``color_scale`` sets the map and limits instead, so two figures
+    can share them.
 
     Tables: ``matrix`` (groups by groups, in the drawn order) and ``pairs``.
 
     Raises:
-        TypeError: If ``coupling`` is not a ``CloneCoupling`` record, or
-            another argument has the wrong type.
+        TypeError: If ``coupling`` is not a ``CloneCoupling`` record,
+            ``color_scale`` is not a ``ColorScale``, another argument has the
+            wrong type, or the store does not name clones for figures.
         ValueError: If ``value`` is unknown, or names z-scores of a
-            coupling measured without permutations.
-        KeyError: If ``theme`` names no theme.
+            coupling measured without permutations, the record compares no
+            pair, or the coupling's order does not follow its linkage.
+        KeyError: If ``theme`` names no theme, or the store does not hold
+            the record's clones.
+        RuntimeError: If the record's clones are incomplete, as a call that
+            stopped before it finished leaves them.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -1045,102 +1114,66 @@ def clone_coupling(
         raise TypeError("coupling must be the CloneCoupling of ds.clones.coupling")
     if value not in _COUPLING_VALUES:
         raise ValueError(f"value must be one of {', '.join(_COUPLING_VALUES)}")
+    color_scale = _color_scale(color_scale)
     if value == "z_score" and not coupling.n_permutations:
         raise ValueError(
             "The coupling was measured without permutations, so it has no "
             "z-scores; plot value='coupling', or measure it with n_permutations"
         )
-    names = list(coupling.order)
-    positions = pd.Index(names)
-    first = positions.get_indexer(coupling.pairs["group_1"])
-    second = positions.get_indexer(coupling.pairs["group_2"])
-    pair_values = coupling.pairs[value].to_numpy(dtype=np.float64)
-    values = np.full((len(names), len(names)), np.nan)
-    values[first, second] = pair_values
-    values[second, first] = pair_values
-    matrix = pd.DataFrame(values, index=pd.Index(names), columns=pd.Index(names))
-    drawn = np.where(np.isfinite(values), values, np.nan)
-    finite = drawn[np.isfinite(drawn)]
-    centred = value == "z_score" or bool((finite < 0).any())
-    if figsize is None and target is None:
-        side = min(
-            max(4.0, 0.55 * len(names) + 2.5),
-            MAX_FIGURE_WIDTH_INCHES - _COLORBAR_INCHES,
+    if coupling.pairs.empty:
+        raise ValueError(
+            "The coupling compares no pair of groups, so there is nothing to plot"
         )
-        figsize = (side + _COLORBAR_INCHES, side + 0.8)
-    require_matplotlib()
+    names = list(coupling.order)
+    matrix = pair_matrix(coupling.pairs, names, value)
+    values = matrix.to_numpy(dtype=np.float64)
+    finite = values[np.isfinite(values)]
+    if color_scale is None:
+        if value == "z_score" or bool((finite < 0).any()):
+            limit = float(np.abs(finite).max()) if finite.size else 0.0
+            limit = limit if limit > 0 else 1.0
+            color_scale = ColorScale(
+                cmap="RdBu_r", vmin=-limit, vmax=limit, vcenter=0.0
+            )
+        else:
+            color_scale = ColorScale(cmap="viridis")
+    title = _coupling_titles(clone_names(store, coupling.clones)).get(
+        coupling.method, str(coupling.method)
+    )
+    tree = _ordered_linkage(coupling)
+    if figsize is None and target is None:
+        figsize = _matrix_figure_size(len(names), extra_height=0.8)
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
             target, panel_keys=["matrix"], figsize=figsize, n_columns=1
         )
         ax = axes["matrix"]
-        limit = float(np.abs(finite).max()) if finite.size else 1.0
-        image = ax.imshow(
-            np.ma.masked_invalid(drawn),
-            cmap="RdBu_r" if centred else "viridis",
-            vmin=-limit if centred else None,
-            vmax=limit if centred else None,
-        )
-        if len(names) <= _NAMED_GROUPS:
-            ax.set_xticks(np.arange(len(names)), names, rotation=90)
-            ax.set_yticks(np.arange(len(names)), names)
-        else:
-            ax.set_xticks([])
-            ax.set_yticks([])
-        title = _COUPLING_TITLES.get(coupling.method, str(coupling.method))
-        ax.set_title(f"{title}, z-score" if value == "z_score" else title, y=1.18)
-        if len(names) <= _ANNOTATED_GROUPS:
-            for row in range(len(names)):
-                for column in range(len(names)):
-                    shown = drawn[row, column]
-                    if np.isnan(shown):
-                        continue
-                    # Dark text on light cells, light text on dark ones.
-                    red, green, blue, _alpha = image.cmap(image.norm(shown))
-                    light = 0.299 * red + 0.587 * green + 0.114 * blue > 0.5
-                    ax.text(
-                        column,
-                        row,
-                        f"{shown:.2g}" if value == "z_score" else f"{shown:.3g}",
-                        ha="center",
-                        va="center",
-                        color="black" if light else "white",
-                        fontsize="x-small",
-                    )
-        axes["dendrogram"] = draw_dendrogram(
+        drawn = draw_matrix(
             ax,
-            _ordered_linkage(coupling),
-            side="top",
-            color=foreground_color(theme),
+            matrix,
+            color_scale=color_scale,
+            value_label="Z-score of the coupling" if value == "z_score" else title,
+            blank_diagonal=True,
+            value_format=".2g" if value == "z_score" else ".3g",
+            show_legend=show_legend,
         )
-        if show_legend:
-            figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={"matrix": matrix, "pairs": coupling.pairs},
-        legends=(LegendSpec(kind="continuous", label=value),),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(coupling.group_sizes["n_cells"].sum()),
-            renderer="matplotlib",
-            notes=("clones",),
-            extras={
-                "clones": coupling.clones.to_dict(),
-                "method": coupling.method,
-                "value": value,
-                "groups": names,
-            },
-        ),
-        owns_figure=owns,
+        ax.set_title(f"{title}, z-score" if value == "z_score" else title, y=1.18)
+        axes["dendrogram"] = draw_dendrogram(
+            ax, tree, side="top", color=foreground_color(theme)
+        )
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="clone_coupling",
         theme=theme,
+        tables={"matrix": matrix, "pairs": coupling.pairs},
+        drawn=[drawn],
+        inputs={"clones": coupling.clones},
+        settings={"method": coupling.method, "value": value, "groups": names},
+        n_cells=int(coupling.group_sizes["n_cells"].sum()),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
 
 
 def _ordered_linkage(coupling: Any) -> np.ndarray:
@@ -1177,13 +1210,13 @@ def clone_fate_bias(
     dominant fate, the fate that holds the most of their late cells, in the
     order of the fates, and within a fate from the most late cells to the
     fewest; clones whose late cells tie between fates come last. The lower
-    panel stacks each clone's late cells by fate, or their shares with
-    ``normalize=True``, and the upper panel draws its early cells, whose
-    fractions follow the clone's late cells. Clones are labelled as
+    panel stacks each clone's late cells by fate, the first fate on top, or
+    their fractions with ``normalize=True``, and the upper panel draws its
+    early cells. The fates take the colours of their groups, as every
+    figure grouped by the same columns colours them, and a title that drops
+    clones says how many it draws of how many. Clones are labelled as
     ``clone_abundance`` labels them: by their IDs, and clonotypes by their
     representative's junction, with their number where two drawn share one.
-    Plots of at most 40 clones name them on the axis. By default the figure
-    grows with the clones up to the width of a page.
 
     Tables: ``clones``, one row per clone drawn, in the drawn order
     (``clone``, ``label``, ``fate``, the dominant fate, missing for a tie,
@@ -1193,8 +1226,11 @@ def clone_fate_bias(
     tables, so a fate may take any name.
 
     Raises:
-        TypeError: If an argument has the wrong type.
-        ValueError: If ``bias`` is not a ``clone_fate_bias`` artifact.
+        TypeError: If an argument has the wrong type, or the store does not
+            load or name clones for figures, or give the labels that the
+            fates' colours range over.
+        ValueError: If ``bias`` is not a ``clone_fate_bias`` artifact, or no
+            clone of the early cells has late cells.
         KeyError: If the store holds no such artifact.
         RuntimeError: If an artifact is incomplete, as a call that stopped
             before it finished leaves it.
@@ -1205,9 +1241,13 @@ def clone_fate_bias(
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
     max_clones = integer_argument(max_clones, "max_clones", minimum=1)
-    loaded = _clones_method(store, "load_fate_bias")(bias)
+    loaded = store_method(store, "clones.load_fate_bias")(bias)
     fate_names = [str(name) for name in loaded.fates["fate"].tolist()]
     rows = loaded.clone_fates
+    if rows.empty:
+        raise ValueError(
+            "No clone of the early cells has late cells, so there is nothing to plot"
+        )
     clone_codes = np.asarray(rows["clone"].cat.codes, dtype=np.int64)
     fate_codes = np.asarray(rows["fate"].cat.codes, dtype=np.int64)
     # One row per clone, in the order of the clone codes, with its late cells
@@ -1226,7 +1266,8 @@ def clone_fate_bias(
     chosen = chosen[np.lexsort((codes[chosen], -late_cells[chosen], rank))]
     ids = rows["clone"].cat.categories.to_numpy(dtype=object)[codes[chosen]]
     shown_ids = [str(clone) for clone in ids.tolist()]
-    shown_labels = _figure_labels(store, loaded.clones, ids)
+    names = clone_names(store, loaded.clones)
+    shown_labels = names.labels(ids)
     fate_index = pd.Index(fate_names)
     table = pd.DataFrame(
         {
@@ -1250,12 +1291,20 @@ def clone_fate_bias(
             "n_cells": cells[chosen].reshape(-1),
         }
     )
+    fates = table_groups(store, loaded)
+    title = (
+        f"The {len(chosen)} of {len(codes)} {names.plural} with the most late cells"
+        if len(chosen) < len(codes)
+        else f"Fates of the {names.plural} of early cells"
+    )
     if figsize is None and target is None:
-        figsize = (
-            min(max(6.0, 0.22 * len(chosen) + 3.5), MAX_FIGURE_WIDTH_INCHES),
-            5.0,
+        figsize, _ = figure_size(
+            2,
+            panel=(
+                item_inches(len(chosen), per_item=0.22, base=3.5, minimum=6.0),
+                2.5,
+            ),
         )
-    require_matplotlib()
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
             target, panel_keys=["early", "fates"], figsize=figsize, n_columns=1
@@ -1263,68 +1312,47 @@ def clone_fate_bias(
         if owns:
             # The early cells take a quarter of the height.
             axes["early"].get_gridspec().set_height_ratios([1, 3])
-        colors = categorical_color_map(fate_names)
-        x = np.arange(len(chosen))
-        ax = axes["early"]
-        ax.bar(x, early_cells[chosen], color=foreground_color(theme), width=0.8)
-        ax.set_ylabel("Early cells")
-        ax.set_xticks([])
-        ax.set_title("Fates of the clones of early cells")
+        draw_bars(
+            axes["early"],
+            table,
+            item="label",
+            value="n_early_cells",
+            colors=foreground_color(theme),
+            horizontal=False,
+            value_label="Early cells",
+            title=title,
+        )
+        axes["early"].set_xticks([])
         ax = axes["fates"]
-        drawn = cells[chosen].astype(np.float64)
-        if normalize:
-            totals = drawn.sum(axis=1, keepdims=True)
-            drawn = np.divide(drawn, totals, out=np.zeros_like(drawn), where=totals > 0)
-        bottom = np.zeros(len(chosen))
-        for position, name in enumerate(fate_names):
-            ax.bar(
-                x,
-                drawn[:, position],
-                bottom=bottom,
-                color=colors[name],
-                label=name,
-                width=0.8,
-            )
-            bottom += drawn[:, position]
-        if len(chosen) <= _NAMED_GROUPS:
-            ax.set_xticks(x, shown_labels, rotation=90, fontsize="small")
-        else:
-            ax.set_xticks([])
-        ax.set_xlabel("Clone")
-        ax.set_ylabel("Share of late cells" if normalize else "Late cells")
+        drawn = draw_bars(
+            ax,
+            fates_table,
+            item="label",
+            value="n_cells",
+            segment="fate",
+            colors=fates.scale(fate_names),
+            horizontal=False,
+            normalize=normalize,
+            value_label="Fraction of late cells" if normalize else "Late cells",
+            legend_title=fates.title,
+            show_legend=show_legend,
+        )
+        ax.set_xlabel(names.singular.capitalize())
         axes["early"].set_xlim(ax.get_xlim())
-        if show_legend:
-            ax.legend(
-                title="Fate",
-                frameon=False,
-                fontsize="small",
-                title_fontsize="small",
-                loc="upper left",
-                bbox_to_anchor=(1, 1),
-            )
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={"clones": table, "fates": fates_table},
-        legends=(LegendSpec(kind="categorical", label="Fate"),),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(late_cells[chosen].sum()),
-            renderer="matplotlib",
-            notes=("clones",),
-            extras={
-                "bias": bias.to_dict(),
-                "max_clones": max_clones,
-                "normalize": normalize,
-                "clones": shown_ids,
-            },
-        ),
-        owns_figure=owns,
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="clone_fate_bias",
         theme=theme,
+        tables={"clones": table, "fates": fates_table},
+        drawn=[drawn],
+        inputs={"bias": bias, "clones": loaded.clones},
+        settings={
+            "grouping": fates.title,
+            "max_clones": max_clones,
+            "normalize": normalize,
+        },
+        n_cells=int(late_cells[chosen].sum()),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
