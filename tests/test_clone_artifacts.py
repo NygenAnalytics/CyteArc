@@ -145,18 +145,37 @@ def test_writing_refuses_arrays_that_no_source_adds(store) -> None:
         )
 
 
-def test_the_save_check_counts_a_buffer_for_each_write_zarr_runs_at_once(
+def _labelled(width: int, *, probabilities: bool = False) -> CloneAssignment:
+    """The truth's clones, each labelled by ``width`` characters."""
+    codes, clone_ids, clone_sizes = ranked_clones(
+        TRUTH.clones,
+        [f"{'c' * (width - 4)}{clone:04d}" for clone in range(TRUTH.n_clones)],
+    )
+    return CloneAssignment(
+        codes=codes,
+        clone_ids=clone_ids,
+        clone_sizes=clone_sizes,
+        probabilities=np.linspace(0.5, 1.0, N_CELLS) if probabilities else None,
+        n_cells_in_several_clones=0,
+    )
+
+
+def test_the_save_check_counts_the_labels_width_and_a_buffer_for_each_write(
     store,
 ) -> None:
     # Zarr writes each chunk and each array's metadata through a buffered
     # file, as many at once as its async concurrency allows, and Python 3.14
-    # made each buffer 128 KiB, where it was the file system's block.
+    # made each buffer 128 KiB, where it was the file system's block. The
+    # labels of these 48 cells are stored at their width, twice as the chunk
+    # and Zarr's encoded copy, four bytes a character.
     planned = _plan(store, _arguments(store))
-    assignment = _assignment()
 
-    def bytes_named(concurrency: int) -> int:
+    def bytes_named(width: int, concurrency: int = 10) -> int:
+        assignment = _labelled(width)
         with zarr.config.set({"async.concurrency": concurrency}):
-            with pytest.raises(MemoryError, match="Raise mem_budget") as refused:
+            with pytest.raises(
+                MemoryError, match=f"width of the longest, {width} characters"
+            ) as refused:
                 write_clones(
                     store.zw,
                     planned,
@@ -169,11 +188,30 @@ def test_the_save_check_counts_a_buffer_for_each_write_zarr_runs_at_once(
         assert found is not None
         return int(found.group(1))
 
-    assert bytes_named(20) - bytes_named(10) == 10 * io.DEFAULT_BUFFER_SIZE
-    width = max(len(label) for label in assignment.clone_ids.tolist())
-    with zarr.config.set({"async.concurrency": 1}):
-        stated = clone_write_bytes(N_CELLS, len(assignment.clone_ids), width)
-    assert bytes_named(1) == 1_000 + stated
+    assert bytes_named(40, 20) - bytes_named(40, 10) == 10 * io.DEFAULT_BUFFER_SIZE
+    assert bytes_named(40) - bytes_named(20) == 2 * 4 * 20 * N_CELLS
+    assert bytes_named(40) == 1_000 + clone_write_bytes(N_CELLS, TRUTH.n_clones, 40)
+
+
+def test_the_save_check_counts_the_probabilities(store) -> None:
+    # Each cell's probability is held as given and as copied to float64.
+    planned = _plan(store, _arguments(store))
+    needed = {}
+    for probabilities in (False, True):
+        assignment = _labelled(12, probabilities=probabilities)
+        with pytest.raises(MemoryError) as refused:
+            write_clones(
+                store.zw,
+                planned,
+                assignment,
+                {"n_clones": len(assignment.clone_ids)},
+                memory_bytes=1,
+                held_bytes=0,
+            )
+        found = re.search(r"holds about (\d+) bytes", str(refused.value))
+        assert found is not None
+        needed[probabilities] = int(found.group(1))
+    assert needed[True] - needed[False] == 2 * 8 * N_CELLS
 
 
 def test_a_save_one_byte_over_its_budget_is_refused_before_it_writes(store) -> None:
@@ -258,3 +296,53 @@ def test_saving_clones_holds_what_their_cost_states(tmp_path, probabilities) -> 
         given += assignment.probabilities.nbytes
     _result, peak = cost_bound(stated - given, save)
     assert peak >= 2 * 4 * 40 * n_cells
+
+
+def test_saving_clones_of_one_character_holds_what_gathering_their_sizes_holds(
+    tmp_path,
+) -> None:
+    # 200,000 cells in nine clones labelled 1 to 9: gathering each cell's
+    # clone size, beside a mask of the cells with a clone and two int64
+    # arrays, holds more than writing the labels, which hold four bytes each.
+    n_cells = 200_000
+    store = write_cells_store(
+        tmp_path / "store.zarr", [f"cell{index:06d}" for index in range(n_cells)]
+    )
+    codes = np.arange(n_cells) % 9
+    ranked, clone_ids, clone_sizes = ranked_clones(
+        codes, [str(clone + 1) for clone in range(9)]
+    )
+    assignment = CloneAssignment(
+        codes=ranked,
+        clone_ids=clone_ids,
+        clone_sizes=clone_sizes,
+        probabilities=None,
+        n_cells_in_several_clones=0,
+    )
+    cells = every_cell(store)
+    attempts = iter(range(10))
+
+    def save() -> None:
+        arguments = CloneColumnArguments(
+            cell_selection=cells,
+            labels_fingerprint=f"{next(attempts):064d}",
+            column="lineage",
+            invalidate_cache=False,
+        )
+        planned = plan_clones(
+            store.zw,
+            arguments,
+            cells,
+            n_cells,
+            with_probability=False,
+            required_attributes=("n_clones",),
+        )
+        write_clones(store.zw, planned, assignment, {"n_clones": 9}, **_ROOMY)
+
+    save()
+    given = ranked.nbytes + clone_ids.nbytes + clone_sizes.nbytes
+    stated = clone_write_bytes(n_cells, 9, 1) - given
+    _result, peak = cost_bound(stated, save)
+    # The gathering holds 37 bytes per cell at its peak, where writing holds
+    # 20 per cell and its chunks.
+    assert peak > 30 * n_cells, peak

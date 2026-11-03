@@ -13,6 +13,7 @@ import io
 import json
 import re
 import pickle
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ import pandas as pd
 import pytest
 import zarr
 
+from cytearc.datastore._operations.clone_artifacts import clone_write_bytes
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
@@ -633,6 +635,19 @@ def test_the_write_check_counts_a_buffer_for_each_write_zarr_runs_at_once(
         raise AssertionError("writing was not refused right after reading")
 
     assert bytes_as_written(20) - bytes_as_written(10) == 10 * io.DEFAULT_BUFFER_SIZE
+    # Before reading, saving is checked as if every cell were a clone of its
+    # own: 24 bytes per cell for its group and the calls' flags and barcodes,
+    # each clone's label as a Python string at the size of the longest, and
+    # what saving that many clones holds.
+    longest = f"clone_{N_CELLS}"
+    with zarr.config.set({"async.concurrency": 10}):
+        saving = clone_write_bytes(
+            N_CELLS,
+            N_CELLS,
+            len(longest),
+            source_arrays={"n_barcodes": np.int32, "doublet": bool},
+        )
+    assert bytes_as_written(10) == (24 + sys.getsizeof(longest)) * N_CELLS + saving
 
 
 @pytest.mark.slow

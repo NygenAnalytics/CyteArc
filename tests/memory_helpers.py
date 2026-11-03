@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import zarr
-from zarr.storage import _local as zarr_local_store
 
 from tests.storage_helpers import open_store, written
 
@@ -374,6 +373,24 @@ ZARR_READS: tuple[tuple[Any, str], ...] = tuple(
 )
 
 
+#: The methods through which a write of a Zarr array's values goes, by index
+#: or by selection. Each write of a text chunk is one call, so holding them
+#: with :func:`hold_finished_reads` keeps the work of each write, the block
+#: that Zarr encoded and the encoded chunk, until the next write ends, as a
+#: busy machine can; a whole array of numbers written in one call keeps every
+#: chunk until the next write, as no pool thread does.
+ZARR_WRITES: tuple[tuple[Any, str], ...] = tuple(
+    (zarr.Array, name)
+    for name in (
+        "set_basic_selection",
+        "set_orthogonal_selection",
+        "set_coordinate_selection",
+        "set_mask_selection",
+        "set_block_selection",
+    )
+)
+
+
 #: An attribute that an owner does not hold itself.
 _ABSENT = object()
 
@@ -472,33 +489,3 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
             closed[0] = True
             held.clear()
             reading[0] = 0
-
-
-@contextmanager
-def hold_previous_write() -> Iterator[None]:
-    """Hold the bytes that each write of a local Zarr store wrote until the next write ends.
-
-    The thread of Zarr's pool that wrote a chunk keeps its stored bytes until
-    that thread next runs, which on a busy machine comes after the next write
-    has begun. Within this context the bytes of the write that ended last
-    stay held, by whichever thread wrote them, until another write ends, so a
-    trace sees each write beside the stored bytes of the one before, without
-    timing.
-    """
-    put = zarr_local_store._put
-    lock = threading.Lock()
-    previous: list[object] = []
-
-    def put_and_hold(path: Path, value: object, *args: Any, **kwargs: Any) -> Any:
-        written = put(path, value, *args, **kwargs)
-        with lock:
-            previous[:] = [value]
-        return written
-
-    zarr_local_store._put = put_and_hold
-    try:
-        yield
-    finally:
-        zarr_local_store._put = put
-        with lock:
-            previous.clear()

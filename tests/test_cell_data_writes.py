@@ -6,7 +6,6 @@ writes one stored chunk at a time, so a write holds what
 ``cell_data_write_bytes`` states, rather than three copies of the column.
 """
 
-import contextlib
 import hashlib
 import io
 import itertools
@@ -25,7 +24,12 @@ from cytearc.storage.arrays import create_metadata_column, zarr_write_buffer_byt
 from cytearc.storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
 from cytearc.storage.refs import artifact_path
 from cytearc.storage.selections import resolve_generated_selection_artifact
-from tests.memory_helpers import cost_bound, hold_previous_write, traced_peak
+from tests.memory_helpers import (
+    ZARR_WRITES,
+    cost_bound,
+    hold_finished_reads,
+    traced_peak,
+)
 
 # The cells of the small store; arrays of other lengths are written beside a
 # per-cell array of this many rows.
@@ -268,10 +272,10 @@ def test_writing_text_of_many_chunks_holds_the_chunk_before_beside_the_next(
     tmp_path, kind, low, high
 ) -> None:
     # 250,000 labels are two full chunks and a last one of 50,000 rows, which
-    # Zarr copies into a full chunk. With the stored bytes of each chunk held
-    # until the next write ends, as a busy machine holds them, the write
-    # holds them beside the next chunk; labels of random characters hardly
-    # compress, four-byte ones not at all.
+    # Zarr copies into a full chunk. With each write's work held until the
+    # next write ends, as a busy machine can hold it, the block that Zarr
+    # encoded before and its encoded chunk stay beside the next chunk; labels
+    # of random characters hardly compress, four-byte ones not at all.
     values = _random_labels(250_000, 40, low, high)
     root, selection = _root(tmp_path / "store.zarr")
     write = _text_write(root, selection, values)
@@ -281,7 +285,7 @@ def test_writing_text_of_many_chunks_holds_the_chunk_before_beside_the_next(
     assert free <= stated
 
     def held() -> None:
-        with hold_previous_write():
+        with hold_finished_reads(*ZARR_WRITES):
             write()
 
     _result, peak = cost_bound(stated, held)
@@ -290,8 +294,9 @@ def test_writing_text_of_many_chunks_holds_the_chunk_before_beside_the_next(
     # The last chunk's rows, its full chunk and Zarr's encoded copy of it.
     assert free >= 2.5 * block, free
     if kind == "four-byte":
-        # Without the chunk before, the cost would leave out a block.
-        assert peak > stated - block + block // 2, (peak, stated)
+        # Without the block before and its encoded chunk in full, the cost
+        # would fall short.
+        assert peak > stated - block // 2, (peak, stated)
 
 
 def test_a_last_chunk_of_fewer_rows_holds_a_full_chunk_more(tmp_path) -> None:
@@ -310,10 +315,25 @@ def test_a_last_chunk_of_fewer_rows_holds_a_full_chunk_more(tmp_path) -> None:
     )
 
 
+def test_byte_strings_wider_than_their_values_are_measured_at_their_width(
+    tmp_path,
+) -> None:
+    # 20,000 byte strings declared 2,000 bytes wide hold three characters
+    # each: measuring them converts them at three characters, not at 2,000,
+    # which would hold 4,096 of them at 8 kB each.
+    values = np.full(20_000, b"abc", dtype="S2000")
+    root, selection = _root(tmp_path / "store.zarr")
+    write = _text_write(root, selection, values)
+    write()
+    _result, peak = traced_peak(write, _stated(values))
+    assert peak <= _stated(values) < 4 * 2_000 * 4_096, peak
+
+
 def test_the_whole_column_write_held_three_copies_of_the_column(tmp_path) -> None:
     # Master's write converted the column twice and Zarr encoded its chunks,
     # up to all three at once; the streamed write of 300,000 labels of 10
-    # characters holds two chunks, two thirds of one copy of the column.
+    # characters holds two chunks, and four on a busy machine, against two
+    # copies of the column and a chunk.
     values = np.asarray([f"c{index:09d}" for index in range(300_000)], dtype=object)
     group = zarr.open_group(tmp_path / "whole.zarr", mode="w")
 
@@ -335,12 +355,17 @@ def test_the_whole_column_write_held_three_copies_of_the_column(tmp_path) -> Non
 
     column = 4 * 10 * 300_000
     assert whole_peak >= 2 * column + column // 3, whole_peak
-    assert streamed < 0.7 * column, streamed
+    assert streamed <= _stated(values) < whole_peak, (streamed, whole_peak)
 
 
 def test_writing_numbers_holds_what_zarr_writes_at_once(tmp_path) -> None:
     # 1,050,000 int64 values that do not compress are ten full chunks and a
-    # short one; Zarr writes up to ten chunks at once.
+    # short one. Zarr writes up to ten chunks at once, as few as its pool's
+    # threads allow, and the short one twice, since it copies it into a full
+    # chunk; the thread of the last write can still hold its encoded chunk.
+    # A whole array is written in one call, whose every chunk a hold of the
+    # call's work would keep, as no pool thread does, so the write is traced
+    # without one.
     n_cells = 1_050_000
     root, selection = _root(tmp_path / "store.zarr", n_cells=n_cells)
     values = np.random.default_rng(1).integers(0, 2**63 - 1, n_cells)
@@ -353,10 +378,8 @@ def test_writing_numbers_holds_what_zarr_writes_at_once(tmp_path) -> None:
     chunk = 8 * _CHUNK_ROWS
     assert stated - zarr_write_buffer_bytes() >= 12 * chunk
     write()
-    for hold in (False, True):
-        with hold_previous_write() if hold else contextlib.nullcontext():
-            _result, peak = traced_peak(write, stated)
-        assert 9 * chunk <= peak <= stated, (hold, peak, stated)
+    _result, peak = traced_peak(write, stated)
+    assert 2 * chunk <= peak <= stated, (peak, stated)
 
 
 def test_the_cost_counts_a_buffer_for_each_write_zarr_runs_at_once() -> None:
@@ -393,8 +416,11 @@ def test_the_costliest_array_sets_the_cost_whatever_their_order() -> None:
         ({"labels": ((-1,), "U2")}, ValueError, "needs a shape of one or more"),
         ({"labels": ((3.0,), "U2")}, ValueError, "needs a shape of one or more"),
         ({"labels": ([3], "U2")}, ValueError, "needs a shape of one or more"),
+        ({"labels": ((True,), "U2")}, ValueError, "needs a shape of one or more"),
         ({"labels": ((3,), object)}, ValueError, "at the fixed width of its widest"),
         ({"labels": ((3,), "S4")}, ValueError, "at the fixed width of its widest"),
+        ({"labels": ((3,), str)}, ValueError, "at the fixed width of its widest"),
+        ({"labels": ((3,), "U0")}, ValueError, "at the fixed width of its widest"),
         ({"labels": ((3, 2), "U4")}, ValueError, "must be one-dimensional"),
     ],
 )

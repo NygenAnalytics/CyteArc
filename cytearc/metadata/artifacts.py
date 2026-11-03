@@ -286,27 +286,29 @@ def cell_data_write_bytes(
 
     - text, a stored chunk at a time: the chunk's values at the stored width,
       four bytes a character, and the chunk that Zarr encodes from them, a
-      last chunk of fewer rows also copied into a full chunk first, beside
-      the pass that measures the widest value, which converts 4,096 values
-      at a time;
+      last chunk of fewer rows also copied into a full chunk first;
     - numbers, written whole: each chunk that Zarr encodes at once, up to its
       async concurrency of them, and a last chunk of fewer rows twice.
 
-    The thread of Zarr's pool that wrote a chunk keeps its stored bytes until
-    that thread next runs, which on a busy machine comes after the next write
-    has begun, so an array of more chunks than Zarr writes at once also holds
-    one chunk more, as many bytes as its chunk when the values do not
-    compress. Beside them are Zarr's objects for each write of a chunk that
-    runs at once, its file buffers
+    The thread of Zarr's pool that encoded a chunk keeps what it was given and
+    what it made until that thread next runs, which on a busy machine comes
+    after the next write has begun. So an array of more chunks than Zarr
+    writes at once also holds the chunk before: for text, the block of values
+    it was encoded from and the encoded chunk, which is as large as the block
+    when the text does not compress; for numbers, which Zarr encodes from the
+    caller's array, the encoded chunk. Beside them are Zarr's objects for each
+    write of a chunk that runs at once, its file buffers
     (:func:`~cytearc.storage.arrays.zarr_write_buffer_bytes`), and a fixed
-    allowance for the artifact's transaction and metadata. A payload
-    fingerprint reads the arrays back after they are written, which this
-    leaves out.
+    allowance for the artifact's transaction and metadata whatever the size
+    of its arrays. Attributes that grow with the data, and a payload
+    fingerprint, which reads the arrays back after they are written, are left
+    to the caller.
 
     Raises:
         TypeError: If ``arrays`` is not a mapping of shapes and dtypes.
-        ValueError: If a shape is empty or negative, or a text array is not
-            one-dimensional or is not given at a fixed width.
+        ValueError: If a size is not a non-negative integer, the shape is
+            empty, or a text array is not one-dimensional or is not given at
+            a fixed width of at least one character.
     """
     if not isinstance(arrays, Mapping):
         raise TypeError("arrays must map each array's name to its shape and dtype")
@@ -322,14 +324,17 @@ def cell_data_write_bytes(
             not isinstance(shape, tuple)
             or not shape
             or not all(
-                isinstance(size, int | np.integer) and size >= 0 for size in shape
+                isinstance(size, int | np.integer)
+                and not isinstance(size, bool)
+                and size >= 0
+                for size in shape
             )
         ):
             raise ValueError(
                 f"Array {name!r} needs a shape of one or more non-negative sizes, "
                 f"not {shape!r}"
             )
-        if dtype.kind in {"O", "S"}:
+        if dtype.kind in {"O", "S"} or (dtype.kind == "U" and not dtype.itemsize):
             raise ValueError(
                 f"Text array {name!r} must be given at the fixed width of its "
                 f"widest value, such as U12, not {dtype}"
@@ -365,14 +370,13 @@ def _array_write_bytes(
     """What writing one array holds beside it, as :func:`cell_data_write_bytes` counts."""
     n_rows = shape[0]
     if dtype.kind == "U":
-        width = dtype.itemsize // 4
         rows = _chunk_rows(n_rows, _CHUNK_ROWS)
-        chunks = 2 if n_rows <= rows else 3
+        # A chunk and its encoded copy, and from the second chunk on the block
+        # before and its encoded copy. Measuring the widest value converts
+        # 4,096 values at a time beside their lengths, which holds less.
+        chunks = 2 if n_rows <= rows else 4
         partial = n_rows % rows if n_rows > rows else 0
-        writing = 4 * width * (chunks * rows + partial) + _CHUNK_WRITE_BYTES
-        # Measuring converts object values to text, a length per value beside.
-        measuring = (4 * width + 8) * min(n_rows, _MEASURED_ROWS)
-        return max(writing, measuring)
+        return dtype.itemsize * (chunks * rows + partial) + _CHUNK_WRITE_BYTES
     rows = _chunk_rows(n_rows, length)
     chunk = rows * math.prod(shape[1:]) * dtype.itemsize
     n_chunks = -(-n_rows // rows)
@@ -394,7 +398,7 @@ def _write_text_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
         dtype=dtype,
         chunkSize=rows,
         blocks=(
-            MetadataBlock(start, values[start : start + rows].astype(dtype))
+            MetadataBlock(start, _as_text(values[start : start + rows], dtype))
             for start in range(0, n_rows, rows)
         ),
     )
@@ -418,8 +422,26 @@ def _stored_text_dtype(values: np.ndarray) -> np.dtype[Any]:
 
 def _widest_text_length(values: np.ndarray) -> int:
     """The characters of the widest of ``values`` as text."""
-    text = values if values.dtype.kind == "U" else values.astype(str)
-    return int(np.char.str_len(text).max())
+    if values.dtype.kind == "U":
+        return int(np.char.str_len(values).max())
+    if values.dtype.kind == "S":
+        # Byte strings decode as ASCII, one character a byte, which raises for
+        # any byte that is not ASCII.
+        width = max(1, int(np.char.str_len(values).max()))
+        return int(np.char.str_len(_as_text(values, np.dtype(f"U{width}"))).max())
+    return int(np.char.str_len(values.astype(str)).max())
+
+
+def _as_text(values: np.ndarray, dtype: np.dtype[Any]) -> np.ndarray:
+    """``values`` as fixed-width text of ``dtype``, at least as wide as each value.
+
+    Byte strings are first cut to that width, which loses no byte of a value,
+    since NumPy's cast of byte strings to text holds a buffer that grows with
+    their declared width.
+    """
+    if values.dtype.kind == "S":
+        values = values.astype(f"S{dtype.itemsize // 4}")
+    return values.astype(dtype)
 
 
 def snapshot_cluster_labels(

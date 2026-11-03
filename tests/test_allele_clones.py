@@ -657,6 +657,28 @@ def test_writing_the_clones_counts_a_buffer_for_each_write_zarr_runs_at_once(
         for what in grown
     }
     assert sum(what.endswith("as they are written") for what in grown) == 2
+    # Before reading, saving is checked as if every cell were a clone of its
+    # own: 16 bytes per cell for its group and edits, 8 for the calls' rare
+    # alleles, each clone's label as a Python string at the size of the
+    # longest, what saving that many clones holds, and 8 MiB whatever the
+    # size.
+    import sys
+
+    from cytearc.datastore._operations.clone_artifacts import clone_write_bytes
+
+    longest = "clone_2000"
+    with zarr.config.set({"async.concurrency": 10}):
+        saving = clone_write_bytes(
+            2_000, 2_000, len(longest), source_arrays={"n_alleles": np.int32}
+        )
+    (before_reading,) = [
+        needed
+        for what, needed in ten
+        if what == "the clones of 2000 cells as they are written"
+    ]
+    assert before_reading == (16 + 8 + sys.getsizeof(longest)) * 2_000 + saving + (
+        8 << 20
+    )
 
 
 def test_real_darlin_alleles_join_the_cells_that_share_a_rare_one(tmp_path) -> None:

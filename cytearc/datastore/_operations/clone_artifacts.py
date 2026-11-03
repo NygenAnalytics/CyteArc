@@ -53,6 +53,9 @@ SOURCE_ARRAYS: Mapping[str, Any] = {
 }
 # Bytes of a reference to a Python object in an array of objects.
 _REFERENCE_BYTES = 8
+# Python's objects of a save while it gathers the clone sizes, whatever the
+# number of cells, which the writer's own allowance covers once it writes.
+_GATHERING_FIXED_BYTES = 64 << 10
 
 
 class CloneArguments(Protocol):
@@ -152,7 +155,9 @@ def clone_write_bytes(
         + sum(n_cells * int(dtype.itemsize) for dtype in sources.values())
     )
     built = n_cells * (_REFERENCE_BYTES + 4 + 8) + 8 * n_clones + probability
-    gathering = n_cells * (_REFERENCE_BYTES + 4 + 8 + 1 + 8 + 8)
+    gathering = (
+        n_cells * (_REFERENCE_BYTES + 4 + 8 + 1 + 8 + 8) + _GATHERING_FIXED_BYTES
+    )
     arrays: dict[str, tuple[tuple[int, ...], Any]] = {
         "values": ((n_cells,), label),
         "codes": ((n_cells,), np.int32),

@@ -17,13 +17,13 @@ import zarr
 
 from tests.memory_helpers import (
     ZARR_READS,
+    ZARR_WRITES,
     budget_bounds,
     budget_refusals,
     budget_that_runs,
     check_budget,
     cost_bound,
     hold_finished_reads,
-    hold_previous_write,
     named_budget,
     smallest_budget,
     stated_bytes,
@@ -818,42 +818,40 @@ def test_reads_of_zarr_arrays_end_only_while_reads_are_held() -> None:
     assert all(getattr(zarr.Array, name) is method for name, method in methods.items())
 
 
-def test_the_bytes_of_the_last_write_stay_held_until_the_next_one_ends(
-    tmp_path,
-) -> None:
-    import tracemalloc
-
-    # Chunks of random bytes do not compress, so each stored chunk is about
-    # as large as the chunk itself.
+def test_writes_of_zarr_arrays_end_only_while_writes_are_held(tmp_path) -> None:
+    # Each write of a chunk is a call of one of these methods, so holding them
+    # keeps the block that Zarr encoded beside the next write, until it ends.
+    methods = {name: getattr(zarr.Array, name) for _owner, name in ZARR_WRITES}
     chunk = 1 << 20
     values = np.random.default_rng(0).integers(0, 256, 3 * chunk, dtype=np.uint8)
     array = zarr.open_group(str(tmp_path / "s.zarr"), mode="w").create_array(
         "values", shape=values.shape, chunks=(chunk,), dtype="uint8"
     )
-    tracemalloc.start()
-    try:
-        with hold_previous_write():
-            array[:chunk] = values[:chunk]
-            after_first = tracemalloc.get_traced_memory()[0]
+
+    def write_two(start: int) -> int:
+        """The peak of writing the chunk after ``start``, traced from writing ``start``'s."""
+        import tracemalloc
+
+        tracemalloc.start()
+        try:
+            block = values[start : start + chunk].copy()
+            array[start : start + chunk] = block
+            del block
             tracemalloc.reset_peak()
-            array[chunk : 2 * chunk] = values[chunk : 2 * chunk]
-            # The second write held its own encoded chunk beside the first's
-            # stored bytes, which it then took the place of.
-            second_peak = tracemalloc.get_traced_memory()[1]
-            held = tracemalloc.get_traced_memory()[0]
-        released = tracemalloc.get_traced_memory()[0]
-    finally:
-        tracemalloc.stop()
-    assert after_first > chunk
-    assert second_peak - after_first > 0.9 * chunk
-    assert held - released > 0.9 * chunk
+            array[start + chunk : start + 2 * chunk] = values[
+                start + chunk : start + 2 * chunk
+            ]
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    with hold_finished_reads(*ZARR_WRITES):
+        assert all(
+            getattr(zarr.Array, name) is not method for name, method in methods.items()
+        )
+        held = write_two(0)
+    assert all(getattr(zarr.Array, name) is method for name, method in methods.items())
+    # The first chunk's block, which only the held work keeps, and its
+    # encoded chunk are held beside the second write's encoded chunk.
+    assert held > 2.5 * chunk, held
     np.testing.assert_array_equal(array[: 2 * chunk], values[: 2 * chunk])
-
-
-def test_writes_are_let_go_once_the_hold_ends() -> None:
-    from zarr.storage import _local
-
-    put = _local._put
-    with hold_previous_write():
-        assert _local._put is not put
-    assert _local._put is put
