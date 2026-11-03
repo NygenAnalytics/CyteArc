@@ -5,13 +5,27 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
+import zarr
 
-from ..storage.geometry import READ_OBJECT_BYTES, array_geometry
+from ..storage.async_execution import zarr_io_concurrency
+from ..storage.geometry import (
+    READ_OBJECT_BYTES,
+    ROW_INDEX_BYTES,
+    ROW_KEPT_INDEX_BYTES,
+    ArrayGeometry,
+    array_geometry,
+)
 from ..storage.partition import (
     checked_indices,
     is_contiguous,
     partition_indices,
     row_band,
+)
+from ..storage.types import as_zarr_array, read_array
+from ..utils.memory_budget import (
+    MemoryLedger,
+    object_array_bytes,
+    python_text_bytes,
 )
 
 
@@ -132,6 +146,174 @@ def read_array_rows_chunkwise(array: Any, rows: np.ndarray) -> np.ndarray:
             raise ValueError("Metadata row selection returned an invalid shape")
         output[block.destinations] = values
     return output
+
+
+def _operation_concurrency() -> int:
+    """The chunks that Zarr decodes at once for the operation under way."""
+    return max(1, int(zarr.config.get("async.concurrency")))
+
+
+def read_whole(
+    ledger: MemoryLedger, group: zarr.Group, name: str, *, item: str
+) -> np.ndarray:
+    """Read the whole array ``name`` of ``group`` within the ledger's room, and keep it charged as ``item``.
+
+    An unsharded array is read in one call, as :func:`~cytearc.storage.types.read_array`
+    reads it, at the highest Zarr concurrency up to the operation's whose
+    decoded chunks fit the room, and at one chunk at a time when only that
+    fits. A sharded array is read a band of inner chunks at a time, so that
+    no fetch takes more than one band of a shard. The ledger counts what the
+    read holds while it runs, as ``ArrayGeometry.wholeReadBytes`` states, or
+    the result beside what the read leaves behind where that is more: a
+    chunk on each of the ledger's codec threads, up to the chunks the read
+    decodes. It keeps the result charged and records what the read leaves
+    behind.
+
+    Raises:
+        MemoryBudgetError: If even a read of one chunk at a time would pass
+            the budget.
+        TypeError: If ``name`` is a group, not an array.
+    """
+    array = as_zarr_array(group[name], name=name)
+    geometry = array_geometry(array)
+    if geometry is None:
+        # An array without chunks, such as a scalar, is read as it is.
+        values = read_array(group, name) if array.ndim else np.asarray(array[()])
+        ledger.hold(item, values.nbytes)
+        return values
+    n_chunks = -(-geometry.shape[0] // geometry.axisChunk(0)) * geometry.bandChunks()
+    threads = ledger.holding_threads(n_chunks)
+    held = (
+        geometry.heldReadBytes(threads)
+        if geometry.shards is None
+        else geometry.bandHeldBytes(threads)
+    )
+    after = geometry.shape[0] * geometry.rowBytes() + held
+
+    def reading(concurrency: int) -> int:
+        return max(geometry.wholeReadBytes(concurrency), after)
+
+    concurrency = _fitting_concurrency(ledger, reading)
+    ledger.peak(item, reading(concurrency))
+    with zarr_io_concurrency(concurrency):
+        if geometry.shards is None:
+            values = read_array(group, name)
+        else:
+            values = np.empty(geometry.shape, dtype=array.dtype)
+            step = geometry.axisChunk(0)
+            for start in range(0, geometry.shape[0], step):
+                values[start : start + step] = array[start : start + step]
+    ledger.leave(held)
+    ledger.hold(item, values.nbytes)
+    return values
+
+
+def _fitting_concurrency(ledger: MemoryLedger, cost: Any) -> int:
+    """The highest concurrency, up to the operation's, whose read ``cost(c)`` fits the room; 1 when none does."""
+    limit = _operation_concurrency()
+    room = ledger.room
+    if room is None:
+        return limit
+    for concurrency in range(limit, 1, -1):
+        if cost(concurrency) <= room:
+            return concurrency
+    return 1
+
+
+def row_read_bytes(geometry: ArrayGeometry | None, rows: np.ndarray) -> int:
+    """What reading ``rows``, distinct rows of an array of ``geometry``, a band of chunks at a time holds, with the rows.
+
+    Ordering the rows by band holds their indices as
+    ``storage.geometry.ROW_INDEX_BYTES`` counts them. Reading the bands then
+    holds each row in the result and the indices it keeps, one band's
+    selected rows as Zarr returns them and what reading the band holds; a
+    read of several bands holds the band before beside the next, as
+    ``ArrayGeometry.bandReadBytes`` counts. An array without chunks is
+    counted by its rows' indices alone.
+    """
+    indices = np.asarray(rows)
+    n_rows = int(indices.size)
+    ordering = n_rows * ROW_INDEX_BYTES
+    if geometry is None:
+        return ordering
+    step = geometry.axisChunk(0)
+    first_band = int(indices.min()) // step if n_rows else 0
+    last_band = int(indices.max()) // step if n_rows else 0
+    bands = 1 if first_band == last_band else 2
+    reading = n_rows * (
+        geometry.rowBytes() + ROW_KEPT_INDEX_BYTES
+    ) + geometry.bandReadBytes(min(n_rows, step), _operation_concurrency(), bands=bands)
+    return max(ordering, reading)
+
+
+def read_rows(
+    ledger: MemoryLedger, array: Any, rows: np.ndarray, *, item: str
+) -> np.ndarray:
+    """Read distinct ``rows`` of a stored array a band of chunks at a time, keeping them charged as ``item``.
+
+    The rows are read as :func:`read_array_rows_chunkwise` reads them, in the
+    order given. The ledger counts what the read holds, as
+    :func:`row_read_bytes` states, or the rows beside what the read leaves
+    behind where that is more: a chunk on each of the ledger's codec threads,
+    up to the chunks of the bands the rows span. It keeps the rows charged
+    and records what the read leaves behind.
+
+    Raises:
+        MemoryBudgetError: If the read would pass the budget.
+    """
+    geometry = array_geometry(array)
+    indices = np.asarray(rows)
+    reading = row_read_bytes(geometry, indices)
+    held = 0
+    if geometry is not None and indices.size:
+        step = geometry.axisChunk(0)
+        bands = int(indices.max()) // step - int(indices.min()) // step + 1
+        chunks = min(int(indices.size), bands) * geometry.bandChunks()
+        held = geometry.bandHeldBytes(ledger.holding_threads(chunks))
+        reading = max(reading, int(indices.size) * geometry.rowBytes() + held)
+    ledger.peak(item, reading)
+    values = read_array_rows_chunkwise(array, indices)
+    if held:
+        ledger.leave(held)
+    ledger.hold(item, values.nbytes)
+    return values
+
+
+def read_text_rows(
+    ledger: MemoryLedger, array: Any, rows: np.ndarray, *, item: str
+) -> np.ndarray:
+    """Read distinct ``rows`` of a stored text array as Python strings, keeping them charged as ``item``.
+
+    The rows are read at their stored width through :func:`read_rows`, then
+    measured: their characters and their widest code point give what their
+    strings hold, as :func:`~cytearc.utils.memory_budget.python_text_bytes`
+    counts, which is charged before they are made. The stored rows are then
+    let go, and the strings stay charged.
+
+    Returns:
+        An object array of one string for each row.
+
+    Raises:
+        MemoryBudgetError: If the read or the strings would pass the budget.
+        TypeError: If the array does not store fixed-width text.
+    """
+    if np.dtype(array.dtype).kind != "U":
+        raise TypeError(f"{item} must be stored as text, not as {array.dtype}")
+    stored = read_rows(ledger, array, rows, item=item)
+    # Each value's length, while the characters are counted.
+    ledger.peak(item, 8 * len(stored))
+    characters = int(np.char.str_len(stored).sum()) if len(stored) else 0
+    widest = int(stored.view(np.uint32).max()) if stored.size else 0
+    ledger.hold(
+        item,
+        object_array_bytes(len(stored))
+        + python_text_bytes(len(stored), characters, widest=widest),
+    )
+    values = stored.astype(object)
+    stored_bytes = stored.nbytes
+    del stored
+    ledger.release(stored_bytes)
+    return values
 
 
 def read_metadata_rows(

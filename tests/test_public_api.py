@@ -39,6 +39,7 @@ _EXPECTED_EXPORTS = {
     "LabelTransferResult": "cytearc.mapping.models",
     "MappingReference": "cytearc.mapping.reference",
     "MappingResult": "cytearc.mapping.models",
+    "MemoryBudgetError": "cytearc.utils.memory_budget",
     "mount_datastore": "cytearc.datastore.datastore",
     "PseudotimeAggregationResult": "cytearc.trajectory.results",
     "PseudotimeMarkerResult": "cytearc.trajectory.results",

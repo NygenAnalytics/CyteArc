@@ -20,7 +20,6 @@ from cytearc.metadata.records import (
     EncodedText,
     RecordEncoder,
     RecordTable,
-    chunk_rows_for,
     decode_ragged,
     decode_text,
     encode_ragged,
@@ -182,12 +181,6 @@ def test_ragged_encoding_round_trips_and_tells_missing_from_values() -> None:
     assert decode_ragged(data, offsets).tolist() == ["ACGT", None, "", "TTGCA", None]
     data, offsets = encode_ragged(["αβ"])
     assert decode_ragged(data, offsets).tolist() == ["αβ"]
-
-
-def test_chunk_rows_follow_the_budget_within_bounds() -> None:
-    assert chunk_rows_for(10**3, columns=50) == 10_000
-    assert chunk_rows_for(10**12, columns=50) == 50_000
-    assert chunk_rows_for(20 * 1_000 * 10 * 20_000, columns=10) == 20_000
 
 
 def test_packed_text_round_trips_ascii_and_other_text() -> None:

@@ -39,6 +39,7 @@ from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.finite_values import NonFiniteArtifactError
 from cytearc.perturbation.histograms import HistogramMemoryError
 from cytearc.storage.sharding import CountLayoutMemoryError
+from cytearc.utils.memory_budget import MemoryBudgetError, memory_refusal
 from cytearc.utils.shutdown import ShutdownRequest, ShutdownRequested
 
 RUN_ID = "a" * 64
@@ -78,6 +79,13 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
     CountLayoutMemoryError: lambda: CountLayoutMemoryError("countsT needs 8 GB"),
     HistogramMemoryError: lambda: HistogramMemoryError(
         4096, 1024, 128, rows_read=10, n_rows=20
+    ),
+    MemoryBudgetError: lambda: memory_refusal(
+        "Importing contigs for 8 selected cells",
+        "the selected cells' IDs",
+        4096,
+        1024,
+        remedy="pass a smaller cell_selection",
     ),
     ShutdownRequested: lambda: ShutdownRequested(
         ShutdownRequest(

@@ -11,6 +11,7 @@ from cytearc.repertoire.clonotypes import (
     assign_clonotype_clusters,
     assign_clonotypes,
 )
+from cytearc.utils.memory_budget import MemoryLedger
 from tests.memory_helpers import smallest_budget, traced_peak
 from tests.clone_helpers import within_distance as _within
 
@@ -329,7 +330,7 @@ def test_linking_holds_no_more_than_the_smallest_budget_it_accepts(
             max_distance=2,
             receptor_arms=receptor_arms,
             dual_ir=dual_ir,
-            max_bytes=budget,
+            ledger=None if budget is None else MemoryLedger(budget, "Linking"),
         )
 
     whole = link(None)

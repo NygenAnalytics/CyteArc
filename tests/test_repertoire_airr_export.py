@@ -38,7 +38,15 @@ from tests.clone_helpers import (
     write_cells_store,
     write_lines,
 )
-from tests.memory_helpers import budget_refusals, traced_peak
+from cytearc.storage.geometry import READ_OBJECT_BYTES, ArrayGeometry, array_geometry
+from cytearc.utils.memory_budget import MemoryLedger
+from tests.memory_helpers import (
+    audited,
+    budget_refusals,
+    budget_that_runs,
+    charges,
+    traced_peak,
+)
 
 # Contig IDs repeat across the three files: X takes _3 and then _4, since the
 # TCR file names a contig X_2, and Z takes _3, or _2 when only chains are
@@ -784,7 +792,7 @@ def test_export_refuses_more_than_the_memory_budget(tmp_path, monkeypatch) -> No
     # Within the budget of the blocks, the repeated IDs may not fit.
     monkeypatch.setattr(store, "memoryBytes", 10**9)
     monkeypatch.setattr(repertoire_operations, "_ID_BYTES", 10**9)
-    with pytest.raises(MemoryError, match="Naming 5 repeated contig IDs"):
+    with pytest.raises(MemoryError, match="for naming 5 repeated contig IDs"):
         store.repertoire.export_airr(receptors, path)
     assert not path.exists()
 
@@ -859,22 +867,25 @@ def test_the_first_check_counts_one_chunk_of_the_first_text_values(tmp_path) -> 
     )
     values = group[f"contig_{first}_values"]
     # The Python objects of the arrays that the export opens, then the first
-    # text field's distinct values, read whole: a stored chunk and its
-    # compressed bytes as they are decoded, and as much again for a chunk
-    # that a read before may still hold, beside the values.
-    expected = (
+    # text field's distinct values, read whole a chunk at a time: the values,
+    # a stored chunk and its compressed bytes as they are decoded, Zarr's
+    # task and plan for it, and Zarr's objects for the read.
+    objects = (
         repertoire_operations._EXPORT_OBJECT_BYTES
         + repertoire_operations._EXPORT_OBJECT_BYTES_PER_FIELD * len(fields)
-        + 2 * repertoire_operations.array_row_selection_parts(values)[0]
-        + values.nbytes
+    )
+    reading = (
+        values.nbytes
+        + array_geometry(values).storedChunkBytes()
+        + 8 * 1024
+        + 2_304
+        + READ_OBJECT_BYTES
     )
     refusals = budget_refusals(
         store, lambda: store.repertoire.export_airr(receptors, tmp_path / "x.tsv")
     )
-    assert refusals[0] == (
-        f"Exporting the 10 contigs of 8 cells with {len(fields)} fields",
-        expected,
-    )
+    exporting = f"Exporting the 10 contigs of 8 cells with {len(fields)} fields"
+    assert refusals[:2] == [(exporting, objects), (exporting, objects + reading)]
 
 
 def test_measuring_finds_the_longest_value_of_each_field(tmp_path) -> None:
@@ -900,9 +911,7 @@ def test_measuring_finds_the_longest_value_of_each_field(tmp_path) -> None:
             group,
             fields,
             chains_only=chains_only,
-            reads=repertoire_operations._Reads(
-                limit=10**9, held=0, what="Measuring", remedy=""
-            ),
+            ledger=MemoryLedger(10**9, "Measuring"),
         )
         contigs.hold_text()
         contigs.measure(10**9, cells=_CELLS, clones=None)
@@ -964,9 +973,7 @@ def test_the_longest_value_sizes_the_blocks(tmp_path) -> None:
             group,
             tuple(group.attrs["fields"]),
             chains_only=False,
-            reads=repertoire_operations._Reads(
-                limit=10**9, held=0, what="Planning", remedy=""
-            ),
+            ledger=MemoryLedger(10**9, "Planning"),
         )
         contigs.hold_text()
         contigs.measure(10**9, cells=_CELLS, clones=None)
@@ -1141,7 +1148,9 @@ def test_exports_of_long_values_fit_the_smallest_budget(tmp_path, kind) -> None:
     store.memoryBytes = budget
     gc.collect()
     _result, peak = traced_peak(export, budget)
-    assert peak <= budget, (peak, budget)
+    # The reads of the cells' IDs count their one stored chunk of 100,000
+    # rows at the bound of incompressible bytes.
+    assert peak <= budget <= 3 * peak + (1 << 20), (peak, budget)
     written = _read(path)
     assert len(written) == 200 and written["sequence_id"].is_unique
 
@@ -1171,77 +1180,66 @@ def test_receptors_without_contigs_export_their_header(tmp_path) -> None:
 def test_the_cells_ids_are_checked_before_each_read(tmp_path) -> None:
     store, receptors = _edge_receptors(tmp_path)
     ids = store.cells._get_array("ids")
-    fixed = repertoire_operations.text_row_selection_parts(ids)[0]
     selection = inspect_artifact(store.zw, receptors).input_ref("cell_selection")
-    mask = _chunk(artifact_group(store.zw, selection)["values"])
-    refusals = []
-    limit = 1
-    while True:
-        reads = repertoire_operations._Reads(
-            limit=limit, held=0, what="Reading", remedy=""
-        )
-        try:
-            packed, longest = store._export_cell_ids(reads, receptors, 8, 1)
-            break
-        except MemoryError as error:
-            found = re.search(r"holds about (\d+) bytes", str(error))
-            assert found is not None and int(found.group(1)) > limit
-            refusals.append(int(found.group(1)))
-            limit = refusals[-1]
-    # The selection's positions, 32 bytes a cell as read and 8 as kept, with
-    # two chunks of its mask, one read and one held from a read before; the
-    # offsets of the eight IDs; then each slice of one ID of 5 characters,
-    # stored in 20 bytes: two stored chunks, one decoded and one held from
-    # the read before, the row as text_read_bytes counts it, and its
-    # packing, three copies of the stored bytes and 24 more, beside the IDs
-    # packed before it, 5 bytes each.
-    per_row = (3 * 20 + 16 * 8) + 64 + 4 * 5 + 3 * 20 + 24
-    held = 8 * 8 + 8 * 9
-    assert refusals == [32 * 8 + 2 * mask] + [
-        held + 5 * k + 2 * fixed + per_row for k in range(8)
+    mask = artifact_group(store.zw, selection)["values"]
+    ledgers = []
+
+    def read(limit):
+        ledgers.append(MemoryLedger(limit, "Reading"))
+        return store._export_cell_ids(ledgers[-1], receptors, 8, 1)
+
+    refusals = _walk(read)
+    packed, longest = read(10**9)
+    # The selection's positions, 32 bytes a cell as read, with two chunks of
+    # its mask, one read and one held from a read before; then the offsets of
+    # the eight IDs, 72 bytes, and each slice of one ID beside the positions
+    # kept, 8 bytes a cell, the IDs packed before it, 5 bytes each, and what
+    # the read before may still hold: the mask's chunk before the first, and
+    # a chunk of the IDs after it.
+    one_id = metadata_rows.row_read_bytes(array_geometry(ids), np.asarray([0]))
+    held_before = [array_geometry(mask).heldReadBytes()] + [
+        array_geometry(ids).heldReadBytes()
+    ] * 7
+    assert refusals == [32 * 8 + 2 * _chunk(mask)] + [
+        held_before[k] + 64 + 72 + 5 * k + one_id for k in range(8)
     ]
     assert bytes(packed.data) == b"".join(f"cell{k}".encode() for k in range(8))
     assert packed.offsets.tolist() == list(range(0, 45, 5)) and longest == 5
-    # The packed IDs and their offsets stay counted; the positions do not.
-    assert reads.held == 8 * 9 + 40
+    # The packed IDs and their offsets stay charged; the positions do not.
+    assert ledgers[-1].charged == 8 * 9 + 40
 
 
 def test_packing_text_counts_each_slice_and_their_join() -> None:
-    # 30 values of 1,000 characters beyond ASCII, 1,997 bytes each, in
+    # 60 values of 1,000 characters beyond ASCII, 1,997 bytes each, in
     # chunks of two rows, so joining the packed slices outweighs any slice.
-    values = np.asarray([f"{k:03d}" + "é" * 997 for k in range(30)])
+    values = np.asarray([f"{k:03d}" + "é" * 997 for k in range(60)])
     array = zarr.create_array(
-        store=zarr.storage.MemoryStore(), shape=(30,), chunks=(2,), dtype=values.dtype
+        store=zarr.storage.MemoryStore(), shape=(60,), chunks=(2,), dtype=values.dtype
     )
     array[:] = values
-    fixed = repertoire_operations.text_row_selection_parts(array)[0]
-    refusals = []
-    limit = 1
-    while True:
-        reads = repertoire_operations._Reads(
-            limit=limit, held=0, what="Packing", remedy=""
+    ledgers = []
+
+    def pack(limit):
+        ledgers.append(MemoryLedger(limit, "Packing"))
+        return repertoire_operations._packed_text(
+            ledgers[-1], array, None, 1, item="the values"
         )
-        try:
-            packed, longest = repertoire_operations._packed_text(reads, array, None, 1)
-            break
-        except MemoryError as error:
-            found = re.search(r"holds about (\d+) bytes", str(error))
-            assert found is not None and int(found.group(1)) > limit
-            refusals.append(int(found.group(1)))
-            limit = refusals[-1]
-    # The offsets; each slice of one row stored in 4,000 bytes, with two
-    # stored chunks, one decoded and one held from the read before, beside
-    # the slices packed before it; and the join, a second copy of every
-    # slice beside the chunk read last.
-    per_row = (3 * 4_000 + 16 * 8) + 64 + 4 * 1_000 + 3 * 4_000 + 24
-    offsets = 8 * 31
+
+    refusals = _walk(pack)
+    packed, longest = pack(10**9)
+    # The offsets; each slice of one row stored in 4,000 bytes, as a read of
+    # one row holds it, beside the slices packed before it and what the read
+    # before may still hold; and the join, a second copy of every slice.
+    one_row = metadata_rows.row_read_bytes(array_geometry(array), np.asarray([0]))
+    left = array_geometry(array).heldReadBytes()
+    offsets = 8 * 61
     assert refusals == [
         offsets,
-        *(offsets + 1_997 * k + 2 * fixed + per_row for k in range(30)),
-        offsets + 2 * 1_997 * 30 + fixed,
+        *(offsets + 1_997 * k + (left if k else 0) + one_row for k in range(60)),
+        offsets + 2 * 1_997 * 60 + left,
     ]
     assert bytes(packed.data).decode("utf-8") == "".join(values.tolist())
-    assert longest == 1_997 and reads.held == offsets + 1_997 * 30
+    assert longest == 1_997 and ledgers[-1].charged == offsets + 1_997 * 60
 
 
 def _walk(run) -> list[int]:
@@ -1265,13 +1263,18 @@ def _edge_contigs(store, receptors, limit, fields=("sequence_id", "v_call")):
         artifact_group(store.zw, receptors),
         fields,
         chains_only=False,
-        reads=repertoire_operations._Reads(limit=limit, held=0, what="", remedy=""),
+        ledger=MemoryLedger(limit, "Exporting"),
     )
 
 
 def _chunk(array) -> int:
-    """The bytes of one chunk that reading an array holds, by the store's model."""
-    return repertoire_operations.array_row_selection_parts(array)[0]
+    """The bytes of one chunk that reading an array holds, as stored and decoded."""
+    return array_geometry(array).storedChunkBytes()
+
+
+def _left(array) -> int:
+    """What a finished read of one chunk of an array may still hold beside the next."""
+    return array_geometry(array).heldReadBytes()
 
 
 @pytest.mark.parametrize("wider", [0, 2**20])
@@ -1280,18 +1283,18 @@ def test_measuring_is_checked_with_a_span_of_contigs(
 ) -> None:
     store, receptors = _edge_receptors(tmp_path)
     group = artifact_group(store.zw, receptors)
-    parts = repertoire_operations.array_row_selection_parts
+    stored = repertoire_operations._stored_chunk_bytes
 
     def model(array):
         # The bytes of the ragged fields, which measuring reads to check
         # each value, may come in stored chunks larger than their offsets'.
         name = str(array.path).rsplit("/", 1)[-1]
-        fixed, per_row = parts(array)
+        chunk = stored(array)
         if name in ("contig_sequence_id", "contig_sequence"):
-            fixed += wider
-        return fixed, per_row
+            chunk += wider
+        return chunk
 
-    monkeypatch.setattr(repertoire_operations, "array_row_selection_parts", model)
+    monkeypatch.setattr(repertoire_operations, "_stored_chunk_bytes", model)
     fields = ("sequence_id", "sequence", "v_identity", "d_identity")
     refusals = _walk(
         lambda limit: _edge_contigs(store, receptors, limit, fields).measure(
@@ -1304,7 +1307,7 @@ def test_measuring_is_checked_with_a_span_of_contigs(
     # and X, against the 10 of the sequences; and 64 bytes for each of the
     # ten contigs of the span.
     reading = max(
-        model(group[name])[0]
+        model(group[name])
         for name in (
             "contig_sequence_id_offsets",
             "contig_sequence_offsets",
@@ -1315,7 +1318,7 @@ def test_measuring_is_checked_with_a_span_of_contigs(
         )
     )
     if wider:
-        assert reading == parts(group["contig_sequence_id"])[0] + wider
+        assert reading == stored(group["contig_sequence_id"]) + wider
     assert refusals == [2 * reading + 40 + 64 * 10]
 
 
@@ -1326,44 +1329,61 @@ def test_hashing_the_ids_is_checked_with_the_hashes(tmp_path) -> None:
     def scan(limit):
         contigs = _edge_contigs(store, receptors, 10**9, ("sequence_id",))
         contigs.measure(10**9, cells=_CELLS, clones=None)
-        contigs.reads.limit = limit
+        contigs.ledger.budget = limit
         return contigs.scan(10**9)
 
-    # The hashes of the ten contigs; a block of all ten IDs, 300 bytes and 6
-    # per byte of the longest, cell5_contig_1, as they are decoded and hashed;
-    # the window of the eleven offsets; and two stored chunks, one decoded
-    # and one held from the read before.
-    reading = max(
-        _chunk(group[name])
-        for name in ("contig_sequence_id_offsets", "contig_sequence_id")
-    )
-    assert _walk(scan) == [8 * 10 + (300 + 6 * 14) * 10 + 11 * 8 + 2 * reading]
+    # Beside what measuring the IDs may still hold, the larger chunk of their
+    # offsets and their bytes and Zarr's objects: the hashes of the ten
+    # contigs, then a block of all ten IDs, 300 bytes and 6 per byte of the
+    # longest, cell5_contig_1, as they are decoded and hashed, the window of
+    # the eleven offsets, and a stored chunk of the IDs' arrays.
+    names = ("contig_sequence_id_offsets", "contig_sequence_id")
+    left = max(_left(group[name]) for name in names)
+    reading = max(_chunk(group[name]) for name in names)
+    hashes = 8 * 10
+    assert _walk(scan) == [
+        left + hashes,
+        left + hashes + (300 + 6 * 14) * 10 + 11 * 8 + reading,
+    ]
 
 
 @pytest.mark.slow
 def test_naming_repeated_ids_keeps_the_ids_read_before(tmp_path, monkeypatch) -> None:
     store, receptors = _edge_receptors(tmp_path)
+
+    def naming() -> list[tuple[str, int]]:
+        """The last two refusals on the way to the budget that runs: their items and bytes."""
+        _budget, refusals, _result, _peak = budget_that_runs(
+            store,
+            lambda opened: opened.repertoire.export_airr(
+                receptors, tmp_path / "named.tsv"
+            ),
+            traced=False,
+            max_refusals=100,
+        )
+        found = [
+            re.search(r"holds about (\d+) bytes for (.*), more than", refusal)
+            for refusal in refusals[-2:]
+        ]
+        return [
+            (matched.group(2), int(matched.group(1))) for matched in found if matched
+        ]
+
     # Naming outweighs every other step, so its checks refuse last.
     monkeypatch.setattr(repertoire_operations, "_ID_BYTES", 10**8)
-    refusals = budget_refusals(
-        store, lambda: store.repertoire.export_airr(receptors, tmp_path / "named.tsv")
-    )
-    (five, first), (seven, second) = refusals[-2:]
+    (five, first), (seven, second) = naming()
     # The five X and Z are read, then X_2 and Z_2, whose hashes the suffixed
     # names take, while the five stay held: each 10**8 bytes and 4 per byte
     # of the longest ID.
     assert (five, seven) == (
-        "Naming 5 repeated contig IDs",
-        "Naming 7 repeated contig IDs",
+        "naming 5 repeated contig IDs",
+        "naming 7 repeated contig IDs",
     )
     assert second - first == 2 * (10**8 + 4 * 14)
     # Finding the repeated hashes holds, for each of the ten contigs, the
     # sorted hashes and a search's positions and matches, beside the naming.
     monkeypatch.setattr(repertoire_operations, "_NAMING_BYTES_PER_ROW", 10**6)
-    widened = budget_refusals(
-        store, lambda: store.repertoire.export_airr(receptors, tmp_path / "named.tsv")
-    )
-    assert widened[-2] == (five, first + 10 * (10**6 - 40))
+    assert naming()[0] == (five, first + 10 * (10**6 - 40))
 
 
 @pytest.mark.parametrize("chunk_bytes", [None, 16])
@@ -1388,8 +1408,20 @@ def test_writing_a_block_counts_each_row_at_its_widest(
             compressed=False,
         )
 
-    refusals = _walk(plan)
-    held = group["contig_v_call_values"].nbytes + group["contig_v_call_offsets"].nbytes
+    _rows, taken = charges(lambda: plan(10**9))
+    (planned,) = [
+        planned for item, _n, planned in taken if item == "writing a block of contigs"
+    ]
+    # Beside the V calls' distinct values and their bounds, and what
+    # measuring may still hold, the largest chunk of what it read:
+    left = max(
+        _left(group[name])
+        for name in (
+            "contig_sequence_id_offsets",
+            "contig_sequence_id",
+            "contig_v_identity",
+        )
+    )
     # Each row at its widest: 16 separators, a cell ID of 5 bytes, an ID of
     # 14, a V call of 8 and a V identity of 2, the whole numbers 0 and 1 with
     # a sign, rendered; the ID and the identity read and rendered beside it;
@@ -1418,8 +1450,33 @@ def test_writing_a_block_counts_each_row_at_its_widest(
         # offsets and of identities span three chunks of two, and the codes
         # one chunk of four.
         rows, windows = 4, 4 * 4 + 6 * 8 + 4 * 4 + 6 * 8
-    # Two stored chunks, one decoded and one held from the read before.
-    assert refusals[-1] == held + per_row * rows + windows + 2 * reading
+    # A stored chunk decoded beside the one that measuring left behind.
+    held = group["contig_v_call_values"].nbytes + group["contig_v_call_offsets"].nbytes
+    assert planned == (
+        held + left + per_row * rows + windows + reading + max(0, reading - left)
+    )
+    # Once the text is held and measured, a budget of that plan fits the
+    # block, and one byte less refuses it.
+    for budget in (planned, planned - 1):
+        contigs = _edge_contigs(store, receptors, 10**9, fields)
+        contigs.hold_text()
+        contigs.measure(10**9, cells=_CELLS, clones=None)
+        contigs.ledger.budget = budget
+
+        def blocks(contigs=contigs) -> int:
+            return contigs.plan_blocks(
+                n_columns=16,
+                cell_width=5,
+                clone_width=None,
+                block_bytes=32 * 2**20,
+                compressed=False,
+            )
+
+        if budget == planned:
+            assert blocks() == rows
+        else:
+            with pytest.raises(MemoryError, match="for writing a block of contigs"):
+                blocks()
 
 
 def test_renamed_ids_stay_held_while_the_blocks_are_written(
@@ -1430,7 +1487,7 @@ def test_renamed_ids_stay_held_while_the_blocks_are_written(
     held = []
 
     def recorded(contigs, **options):
-        held.append(contigs.reads.held)
+        held.append(contigs.ledger.charged)
         return plan(contigs, **options)
 
     monkeypatch.setattr(repertoire_operations._ExportContigs, "plan_blocks", recorded)
@@ -1509,7 +1566,7 @@ def test_clonotypes_hold_their_codes_and_labels_while_blocks_are_written(
     held = []
 
     def recorded(contigs, **options):
-        held.append(contigs.reads.held)
+        held.append(contigs.ledger.charged)
         return plan(contigs, **options)
 
     monkeypatch.setattr(repertoire_operations._ExportContigs, "plan_blocks", recorded)
@@ -1545,17 +1602,17 @@ def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
 ) -> None:
     # Zarr's decoding thread may hold a read's decoded chunk a moment after
     # the read returns. Each read here holds a chunk of 50 MiB, as the
-    # store's model counts it, until after the next read, so every step's
-    # traced peak must stay within the check made before it, also while a
-    # compressed file's deflate state is held. Unless ``large`` is "every",
-    # only the arrays whose names start with it hold chunks of 50 MiB, and
-    # the others keep the store's own model, a few MiB at most: a step then
-    # reads chunks larger than the one left behind before it, or, with the J
-    # identities, the last field that measuring reads and the blocks next,
-    # smaller ones; with "values", the cell selection's mask holds one, and
-    # the cells' IDs read after it hold smaller chunks. An export of one
-    # field holds little beside the opened arrays' objects and the file,
-    # whose buffer, and gzip's, Python 3.14 made 16 times larger.
+    # store's geometry states it, until after the next read, so the traced
+    # peak of every step must stay within what the memory ledger planned for
+    # it, also while a compressed file's deflate state is held. Unless
+    # ``large`` is "every", only the arrays whose names start with it hold
+    # chunks of 50 MiB, and the others keep their own geometry, a few MiB at
+    # most: a step then reads chunks larger than the one left behind before
+    # it, or, with the J identities, the last field that measuring reads and
+    # the blocks next, smaller ones; with "values", the cell selection's mask
+    # holds one, and the cells' IDs read after it hold smaller chunks. An
+    # export of one field holds little beside the opened arrays' objects and
+    # the file, whose buffer, and gzip's, Python 3.14 made 16 times larger.
     # Zarr decodes inline here, so the chunks that this test holds are the
     # only ones left behind.
     async def inline(function, /, *args, **kwargs):
@@ -1566,19 +1623,29 @@ def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
     ref = (
         store.repertoire.clonotypes(receptors) if source == "clonotypes" else receptors
     )
-    parts = metadata_rows.array_row_selection_parts
 
-    def size(array) -> int:
+    def is_large(array) -> bool:
         name = str(getattr(array, "path", "")).rsplit("/", 1)[-1]
-        if large == "every" or name.startswith(large):
+        return large == "every" or name.startswith(large)
+
+    @dataclasses.dataclass(frozen=True, slots=True)
+    class LargeChunks(ArrayGeometry):
+        def storedChunkBytes(self) -> int:
             return 50 * 2**20
-        return parts(array)[0]
 
-    def model(array):
-        return size(array), parts(array)[1]
+    def geometry(array):
+        found = array_geometry(array)
+        if found is None or not is_large(array):
+            return found
+        return LargeChunks(
+            **{
+                field.name: getattr(found, field.name)
+                for field in dataclasses.fields(found)
+            }
+        )
 
-    monkeypatch.setattr(metadata_rows, "array_row_selection_parts", model)
-    monkeypatch.setattr(repertoire_operations, "array_row_selection_parts", model)
+    monkeypatch.setattr(metadata_rows, "array_geometry", geometry)
+    monkeypatch.setattr(repertoire_operations, "array_geometry", geometry)
     held: list[np.ndarray] = []
     getitem = zarr.Array.__getitem__
 
@@ -1586,57 +1653,31 @@ def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
         values = getitem(array, selection)
         if np.asarray(values).size:
             # The new chunk is held before the one before it is let go.
-            held[:] = [np.ones(size(array), dtype=np.uint8)]
+            size = (
+                50 * 2**20
+                if is_large(array)
+                else array_geometry(array).storedChunkBytes()
+            )
+            held[:] = [np.ones(size, dtype=np.uint8)]
         return values
 
     monkeypatch.setattr(zarr.Array, "__getitem__", read)
-    reserve = repertoire_operations._Reads.reserve
-    checks: list[int] = []
-    allowance: list[np.ndarray] = []
-    ceiling = 0
-
-    def recorded(reads, needed):
-        reserve(reads, needed)
-        # The bytes that the check counted, from its refusal of a copy of
-        # the reads with no budget. The refusal goes with its traceback when
-        # the handler ends: kept, it would hold this frame in a cycle, which
-        # Python 3.14's incremental collector frees only steps later.
-        try:
-            reserve(dataclasses.replace(reads, limit=-1), needed)
-        except MemoryError as error:
-            message = str(error)
-        else:
-            raise AssertionError("a check with no budget refused nothing")
-        found = re.search(r"holds about (-?\d+) bytes", message)
-        assert found is not None
-        checks.append(int(found.group(1)))
-        # Until the next check, the step also holds the bytes by which its
-        # check falls short of the largest check, allocated but never
-        # written, so the traced peak passes the largest check exactly when
-        # a step holds more than the check made before it.
-        allowance.clear()
-        if ceiling:
-            allowance.append(np.empty(ceiling - checks[-1], dtype=np.uint8))
-
-    monkeypatch.setattr(repertoire_operations._Reads, "reserve", recorded)
     path = tmp_path / f"lingering{suffix}"
 
     def export() -> None:
-        checks.clear()
         try:
             store.repertoire.export_airr(ref, path, fields=fields)
         finally:
-            allowance.clear()
             held.clear()
 
-    # A first export compiles the kernels and finds the checks; each step of
-    # the traced export is then held to the check made before it, and a peak
-    # above the largest check is traced again.
+    # A first export compiles the kernels; the audited one then holds each
+    # step to what the ledger planned before it.
     export()
-    ceiling = max(checks)
     gc.collect()
-    _result, peak = traced_peak(export, ceiling)
-    assert len(checks) >= 10 and peak <= ceiling, (peak - ceiling, checks)
+    _result, taken = charges(export)
+    assert len(taken) >= 10
+    _result, overruns = audited(export)
+    assert overruns == []
 
 
 def test_the_export_warns_of_discouraged_characters_and_repeated_ids(
@@ -1831,7 +1872,7 @@ def test_export_refuses_cell_ids_and_labels_the_format_forbids(tmp_path) -> None
         group,
         tuple(group.attrs["fields"]),
         chains_only=False,
-        reads=repertoire_operations._Reads(limit=10**9, held=0, what="", remedy=""),
+        ledger=MemoryLedger(10**9, "Exporting"),
     )
     contigs.hold_text()
     with pytest.raises(ValueError) as refused:
@@ -1852,8 +1893,8 @@ def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
     def contigs_within(limit):
         contigs = _edge_contigs(store, receptors, 10**9, fields)
         contigs.hold_text()
-        base[:] = [contigs.reads.held, contigs.reads.lingering]
-        contigs.reads.limit = limit
+        base[:] = [contigs.ledger.charged, contigs.ledger.left]
+        contigs.ledger.budget = limit
         return contigs
 
     def run(limit):
@@ -1885,12 +1926,21 @@ def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
     contigs = contigs_within(10**9)
     with pytest.raises(ValueError):
         contigs.measure(10**9, cells=_CELLS, clones=None)
-    contigs.reads.limit = 1
+    contigs.ledger.budget = 1
     ids = max(
         _chunk(group[name])
         for name in ("contig_sequence_id_offsets", "contig_sequence_id")
     )
-    reading_ids = held + 16 + reading + ids + max(0, ids - reading) + 16 + 11
+    # What measuring may still hold: the largest chunk of what it read.
+    measured = max(
+        _left(group[name])
+        for name in (
+            "contig_sequence_id_offsets",
+            "contig_sequence_id",
+            "contig_v_call",
+        )
+    )
+    reading_ids = held + 16 + measured + ids + max(0, ids - measured) + 16 + 11
     with pytest.raises(MemoryError, match=f"holds about {reading_ids} bytes"):
         contigs._contig_id(0)
 

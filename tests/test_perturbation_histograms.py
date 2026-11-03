@@ -14,6 +14,7 @@ from cytearc.perturbation.histograms import (
     guide_count_histograms,
     histogram_bytes,
 )
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.perturbation_helpers import histogram_of, screen_counts, use_python_kernels
 
 
@@ -373,7 +374,11 @@ def test_a_refusal_says_how_many_rows_remain_to_be_read() -> None:
     assert f"{n_cells - error.rows_read} of {n_cells} rows of counts remain" in str(
         error
     )
-    assert error.needed > least + 1
+    assert error.needed_bytes > least + 1
+    # It refuses as every memory budget refusal does, naming the histograms
+    # and the bytes they could hold.
+    assert isinstance(error, MemoryBudgetError)
+    assert (error.item, error.budget_bytes) == ("the guide count histograms", least + 1)
 
 
 def test_a_refusal_after_every_row_names_memory_that_finishes() -> None:
@@ -401,7 +406,7 @@ def test_a_refusal_after_every_row_names_memory_that_finishes() -> None:
                 samples,
                 n_samples=1,
                 n_guides=n_guides,
-                memory_bytes=error.needed,
+                memory_bytes=error.needed_bytes,
             )
             assert int(found.cells.sum()) == int(np.count_nonzero(counts))
             finished += 1
