@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from cytearc.datastore._operations.clone_artifacts import zarr_write_buffer_bytes
+from cytearc.storage.arrays import zarr_write_buffer_bytes
 from tests.clone_helpers import write_truth_store
 from tests.storage_helpers import open_store
 from tests.variant_truth import (

@@ -23,6 +23,7 @@ from tests.memory_helpers import (
     check_budget,
     cost_bound,
     hold_finished_reads,
+    hold_previous_write,
     named_budget,
     smallest_budget,
     stated_bytes,
@@ -815,3 +816,44 @@ def test_reads_of_zarr_arrays_end_only_while_reads_are_held() -> None:
             getattr(zarr.Array, name) is not method for name, method in methods.items()
         )
     assert all(getattr(zarr.Array, name) is method for name, method in methods.items())
+
+
+def test_the_bytes_of_the_last_write_stay_held_until_the_next_one_ends(
+    tmp_path,
+) -> None:
+    import tracemalloc
+
+    # Chunks of random bytes do not compress, so each stored chunk is about
+    # as large as the chunk itself.
+    chunk = 1 << 20
+    values = np.random.default_rng(0).integers(0, 256, 3 * chunk, dtype=np.uint8)
+    array = zarr.open_group(str(tmp_path / "s.zarr"), mode="w").create_array(
+        "values", shape=values.shape, chunks=(chunk,), dtype="uint8"
+    )
+    tracemalloc.start()
+    try:
+        with hold_previous_write():
+            array[:chunk] = values[:chunk]
+            after_first = tracemalloc.get_traced_memory()[0]
+            tracemalloc.reset_peak()
+            array[chunk : 2 * chunk] = values[chunk : 2 * chunk]
+            # The second write held its own encoded chunk beside the first's
+            # stored bytes, which it then took the place of.
+            second_peak = tracemalloc.get_traced_memory()[1]
+            held = tracemalloc.get_traced_memory()[0]
+        released = tracemalloc.get_traced_memory()[0]
+    finally:
+        tracemalloc.stop()
+    assert after_first > chunk
+    assert second_peak - after_first > 0.9 * chunk
+    assert held - released > 0.9 * chunk
+    np.testing.assert_array_equal(array[: 2 * chunk], values[: 2 * chunk])
+
+
+def test_writes_are_let_go_once_the_hold_ends() -> None:
+    from zarr.storage import _local
+
+    put = _local._put
+    with hold_previous_write():
+        assert _local._put is not put
+    assert _local._put is put

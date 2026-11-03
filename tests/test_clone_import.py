@@ -27,7 +27,7 @@ from tests.clone_helpers import (
     write_cells_store,
     write_truth_store,
 )
-from tests.memory_helpers import traced_peak
+from tests.memory_helpers import at_budget, smallest_budget, traced_peak
 from tests.storage_helpers import copy_store, open_store
 from tests.clone_truth import (
     CLONE_SIZES,
@@ -1093,6 +1093,27 @@ def test_saving_long_labels_holds_the_budget_or_refuses(tmp_path, method) -> Non
         loaded = long.store.clones.load_clones(saved)
         assert loaded.clones["n_cells"].tolist() == [1] * _N_LONG
         assert loaded.clones["clone"].tolist()[-1] == "X" * 5_000
+
+
+@pytest.mark.slow
+def test_importing_long_labels_runs_within_the_smallest_budget_it_accepts(
+    tmp_path,
+) -> None:
+    # The write of these labels holds them at 5,000 characters for each of
+    # the 2,000 cells, 40 MB, as stored and as Zarr encodes them; the import
+    # once accepted a budget at which it traced 3.58 times that budget,
+    # counting the labels once while the writer held three copies.
+    long = _long_label_store(tmp_path)
+
+    def run() -> object:
+        return long.store.clones.import_clones(
+            long.table, cell_selection=long.cells, invalidate_cache=True
+        )
+
+    budget = smallest_budget(at_budget(long.store, run), 1_000_000_000)
+    long.store.memoryBytes = budget
+    _result, peak = traced_peak(run, budget)
+    assert 2 * 4 * 5_000 * _N_LONG <= peak <= budget, (peak, budget)
 
 
 def test_a_table_whose_first_rows_are_long_needs_room_for_a_chunk(tmp_path) -> None:

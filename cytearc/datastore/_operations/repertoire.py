@@ -11,7 +11,11 @@ import zarr
 
 from ...clones.groups import group_frame
 from ...metadata.arguments import ClonotypeArguments, ImmuneReceptorImportArguments
-from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
+from ...metadata.artifacts import (
+    cell_data_write_bytes,
+    plan_cell_data_artifact,
+    write_cell_data_artifact,
+)
 from ...metadata.records import (
     FLAG,
     INTEGER,
@@ -35,7 +39,9 @@ from ...metadata.rows import (
 )
 from ...metadata.selection import cell_selection_indices
 from ...repertoire.chains import (
+    CHAIN_PAIRINGS,
     NO_RECEPTOR,
+    RECEPTOR_SUBTYPES,
     RECEPTOR_TYPES,
     SLOTS,
     index_chains,
@@ -133,13 +139,13 @@ _IMPORT_ATTRIBUTES = (
 # sequences and alignments.
 _PEAK_PER_ENCODED_BYTE = 3
 # Bytes that an import holds for each selected cell beside the join's lookup
-# of cell IDs and their text, which the join counts, and the read of the IDs,
-# which text_read_bytes counts: the selection, each cell's chain slots,
-# counts and labels, and the fixed-width text of the labels it writes.
-# With the lookup and the IDs of 12 characters, up to 290 bytes per cell were
-# resident at the peak on 200,000 and 1,000,000 cells, and tracemalloc traces
-# about 320.
-_IMPORT_BYTES_PER_CELL = 300
+# of cell IDs and their text, which the join counts, the read of the IDs,
+# which text_read_bytes counts, and what writing the cells' arrays holds,
+# which _receptor_write_bytes counts: the selection, and each cell's chain
+# slots, counts and labels, about 70 bytes as their arrays add up and 44 as
+# traced beside the rest at the peak of 50,000 cells of which 1,000 have
+# contigs.
+_IMPORT_BYTES_PER_CELL = 100
 # Bytes that a decoded contig field takes in a table, per contig, besides the
 # text of ragged fields.
 _TABLE_BYTES_PER_FIELD = 64
@@ -362,6 +368,25 @@ def _encode_contigs(
             "needs its own ID"
         )
     return encoder.finish()
+
+
+def _receptor_write_bytes(n_cells: int) -> int:
+    """What writing the per-cell arrays of imported receptors holds.
+
+    Each label is counted at the width of the longest label of its kind.
+    """
+    return cell_data_write_bytes(
+        {
+            "values": ((n_cells,), f"U{max(map(len, RECEPTOR_TYPES))}"),
+            "receptor_subtype": ((n_cells,), f"U{max(map(len, RECEPTOR_SUBTYPES))}"),
+            "chain_pairing": ((n_cells,), f"U{max(map(len, CHAIN_PAIRINGS))}"),
+            "multichain": ((n_cells,), bool),
+            "n_vj": ((n_cells,), np.int32),
+            "n_vdj": ((n_cells,), np.int32),
+            "n_contigs": ((n_cells,), np.int32),
+            "chain_slots": ((n_cells, len(SLOTS)), np.int32),
+        }
+    )
 
 
 def _stored_fields(group: zarr.Group) -> tuple[str, ...]:
@@ -855,9 +880,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         self._require_writable(arguments.operation)
         # What the import holds for the selected cells, and the read of their
         # IDs as text, are checked before the IDs are read.
+        cell_bytes = _IMPORT_BYTES_PER_CELL * n_cells + _receptor_write_bytes(n_cells)
         reading = (
-            LOOKUP_BYTES_PER_CELL + _IMPORT_BYTES_PER_CELL
-        ) * n_cells + text_read_bytes(self.cells._get_array("ids"), n_cells)
+            LOOKUP_BYTES_PER_CELL * n_cells
+            + cell_bytes
+            + text_read_bytes(self.cells._get_array("ids"), n_cells)
+        )
         if reading > self.memoryBytes:
             raise MemoryError(
                 f"Importing contigs for {n_cells} selected cells holds about "
@@ -870,9 +898,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
         )
         join = CellBarcodeJoin(
-            cell_ids,
-            memory_bytes=self.memoryBytes,
-            held_bytes=_IMPORT_BYTES_PER_CELL * n_cells,
+            cell_ids, memory_bytes=self.memoryBytes, held_bytes=cell_bytes
         )
         # Beside the encoded contigs, the import holds what the join counts:
         # its lookup, the cells' IDs as text and the bytes held for each cell.

@@ -3,8 +3,9 @@
 A memory budget bounds the bytes that tracemalloc sees a call allocate beside
 what the process held before it. These helpers trace that peak, find the
 smallest budget a call accepts, from its refusals or by bisection, bound
-estimates from both sides, and hold the reads that Zarr's pool threads may
-still hold on a busy machine, so that every memory test checks budgets one way.
+estimates from both sides, and hold the reads and writes that Zarr's pool
+threads may still hold on a busy machine, so that every memory test checks
+budgets one way.
 """
 
 import inspect
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import zarr
+from zarr.storage import _local as zarr_local_store
 
 from tests.storage_helpers import open_store, written
 
@@ -470,3 +472,33 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
             closed[0] = True
             held.clear()
             reading[0] = 0
+
+
+@contextmanager
+def hold_previous_write() -> Iterator[None]:
+    """Hold the bytes that each write of a local Zarr store wrote until the next write ends.
+
+    The thread of Zarr's pool that wrote a chunk keeps its stored bytes until
+    that thread next runs, which on a busy machine comes after the next write
+    has begun. Within this context the bytes of the write that ended last
+    stay held, by whichever thread wrote them, until another write ends, so a
+    trace sees each write beside the stored bytes of the one before, without
+    timing.
+    """
+    put = zarr_local_store._put
+    lock = threading.Lock()
+    previous: list[object] = []
+
+    def put_and_hold(path: Path, value: object, *args: Any, **kwargs: Any) -> Any:
+        written = put(path, value, *args, **kwargs)
+        with lock:
+            previous[:] = [value]
+        return written
+
+    zarr_local_store._put = put_and_hold
+    try:
+        yield
+    finally:
+        zarr_local_store._put = put
+        with lock:
+            previous.clear()

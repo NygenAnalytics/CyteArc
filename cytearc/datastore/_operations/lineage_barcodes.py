@@ -1,4 +1,5 @@
 import os
+import sys
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -52,7 +53,7 @@ from .cell_barcodes import (
     texts_per_file,
     warn_unmatched_barcodes,
 )
-from .clone_artifacts import plan_clones, write_clones, zarr_write_buffer_bytes
+from .clone_artifacts import clone_write_bytes, plan_clones, write_clones
 from .record_tables import (
     read_array,
     record_arrays,
@@ -107,12 +108,10 @@ _CALL_RECORD_BYTES = 48
 _CONVERTED_RECORD_BYTES = 8
 _CALL_TEXT_OFFSET_BYTES = 8
 _CALL_CELL_BYTES = 16
-# Writing the clones holds, for each cell, its clone code, doublet flag and
-# barcodes from the calls, its label's pointer and its code and size as
-# written, and for each clone, its label as a Python string and its size;
-# each label is also written as fixed-width text of four bytes per character.
-_WRITE_CELL_BYTES = 40
-_WRITE_CLONE_BYTES = 120
+# Saving the clones holds, for each cell beside what saving them holds, its
+# group and the doublet and ambiguous flags and barcodes of the calls; each
+# clone's label as a Python string is counted at its size.
+_CALLED_CELL_BYTES = 24
 # Bytes of each allowlisted barcode while its distinct values are sorted and
 # fingerprinted: the references to its Python string in the lists and the set
 # of distinct barcodes, its packed bytes, and the string itself when a
@@ -945,13 +944,17 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             + _CALL_TEXT_OFFSET_BYTES * int(barcode_offsets.shape[0])
             + int(barcode_values.shape[0])
         )
-        # Writing them is checked first, as if every cell were a clone of its
-        # own, the most clones there can be, beside the file buffers of
-        # Zarr's writes.
-        width = len(f"clone_{n_cells}")
+        # Saving them is checked first, as if every cell were a clone of its
+        # own, the most clones there can be.
         writing = (
-            n_cells * (_WRITE_CELL_BYTES + _WRITE_CLONE_BYTES + 8 * width)
-            + zarr_write_buffer_bytes()
+            _CALLED_CELL_BYTES * n_cells
+            + sys.getsizeof(f"clone_{n_cells}") * n_cells
+            + clone_write_bytes(
+                n_cells,
+                n_cells,
+                len(f"clone_{n_cells}"),
+                source_arrays={"n_barcodes": np.int32, "doublet": bool},
+            )
         )
         for needed, what in (
             (held + _CONVERTED_RECORD_BYTES * n_records, "as they are read"),
@@ -1028,6 +1031,9 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 "n_barcodes": called.n_barcodes.astype(np.int32),
                 "doublet": calls.doublets.astype(bool),
             },
+            memory_bytes=self.memoryBytes,
+            held_bytes=_CALLED_CELL_BYTES * n_cells
+            + sum(map(sys.getsizeof, labels.tolist())),
         )
         n_assigned = int(np.count_nonzero(calls.codes >= 0))
         largest = int(calls.sizes[0]) if calls.n_clones else 0
