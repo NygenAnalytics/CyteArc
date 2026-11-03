@@ -625,6 +625,8 @@ def genotypes(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    if layout is not None and not isinstance(layout, ArtifactRef):
+        raise TypeError("layout must be an ArtifactRef or None")
     from ._data import _resolve_layout
 
     loaded = _load_genotypes(store, genotypes, sites=sites)

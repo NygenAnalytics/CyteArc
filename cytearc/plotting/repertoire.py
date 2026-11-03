@@ -498,6 +498,7 @@ def gene_pairing(
             argument has the wrong type.
         ValueError: If ``usage`` counts other gene fields or groups of
             cells, or no chain has both calls.
+        KeyError: If ``theme`` names no theme.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")

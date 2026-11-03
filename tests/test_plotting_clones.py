@@ -1,5 +1,7 @@
 """The clone plots, on clones whose sizes are counted by hand."""
 
+import inspect
+import re
 from collections import Counter
 from dataclasses import replace
 from types import SimpleNamespace
@@ -502,6 +504,11 @@ def test_an_empty_grouping_draws_the_expansions_own_groups(truth_plot) -> None:
     assert empty.provenance.extras["grouping"] == "sample"
     own.close()
     empty.close()
+    # Bytes name no column, empty or not, and are refused as every grouping
+    # refuses them.
+    for value in (b"", b"sample"):
+        with pytest.raises(TypeError, match="^group_by must be a column name"):
+            clonal_expansion(store, truth_plot.by_sample, group_by=value, show=False)
 
 
 def test_the_expansion_plot_regroups_cells_by_two_columns(truth_plot) -> None:
@@ -729,6 +736,32 @@ def test_the_rarefaction_plot_checks_its_arguments(truth_plot) -> None:
     drawn = clonal_rarefaction(object(), curves, show=False)
     assert drawn.tables["curves"] is curves.curves
     drawn.close()
+
+
+def _documented_errors(plot) -> set[str]:
+    """The error classes that a plot's ``Raises:`` section lists."""
+    doc = inspect.getdoc(inspect.unwrap(plot)) or ""
+    found = re.search(r"^Raises:\n(.*?)(?=^\S|\Z)", doc, re.S | re.M)
+    assert found, f"{plot.__name__} documents no errors"
+    return set(re.findall(r"^\s+(\w+Error):", found.group(1), re.M))
+
+
+def test_the_record_plots_document_the_error_of_an_unknown_theme(truth_plot) -> None:
+    store, clones = truth_plot.store, truth_plot.clones
+    # A plot of a record reads nothing from the store, so the theme is the
+    # one name it looks up, and its section lists the class that lookup
+    # raises.
+    for plot, record in (
+        (clonal_rarefaction, store.clones.rarefaction(clones, orders=(0,))),
+        (clone_overlap, store.clones.overlap(clones, group_by="sample")),
+        (
+            clone_coupling,
+            store.clones.coupling(clones, group_by="cell_type", n_permutations=20),
+        ),
+    ):
+        with pytest.raises(KeyError, match="Unknown theme 'nope'"):
+            plot(object(), record, theme="nope", show=False)
+        assert {"TypeError", "ValueError", "KeyError"} <= _documented_errors(plot)
 
 
 def test_the_overlap_plot_draws_one_index_between_samples(truth_plot) -> None:

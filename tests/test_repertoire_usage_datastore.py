@@ -7,6 +7,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import inspect
 import re
 from collections import Counter
 from types import SimpleNamespace
@@ -387,6 +388,19 @@ def test_gene_pairing_plot_draws_v_against_j(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="pairs within groups of cells"):
         plotting.gene_pairing(store, grouped, show=False)
+
+
+def test_the_pairing_plot_documents_the_error_of_an_unknown_theme(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    pairs = store.repertoire.gene_usage(receptors, genes=("v_call", "j_call"))
+    # The plot reads nothing from the store, so the theme is the one name it
+    # looks up, and its section lists the class that lookup raises.
+    with pytest.raises(KeyError, match="Unknown theme 'nope'"):
+        plotting.gene_pairing(object(), pairs, theme="nope", show=False)
+    doc = inspect.getdoc(inspect.unwrap(plotting.gene_pairing)) or ""
+    raises = doc.split("Raises:\n", 1)[1]
+    documented = set(re.findall(r"^\s+(\w+Error):", raises, re.M))
+    assert {"TypeError", "ValueError", "KeyError"} <= documented
 
 
 def test_spectratype_plot_draws_lines_per_group(tmp_path) -> None:

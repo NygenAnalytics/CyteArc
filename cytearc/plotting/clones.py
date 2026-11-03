@@ -83,12 +83,12 @@ def _figure_noun(store: Any, clones: ArtifactRef) -> str:
 def _names_columns(group_by: Any) -> bool:
     """Whether ``group_by`` names a column: text, or a sequence that is not empty.
 
-    A value of another type counts as naming one, so that the grouping refuses
-    it.
+    A value of another type, bytes among them, counts as naming one, so that
+    the grouping refuses it.
     """
     if group_by is None:
         return False
-    if isinstance(group_by, str) or not isinstance(group_by, Sequence):
+    if isinstance(group_by, str | bytes) or not isinstance(group_by, Sequence):
         return True
     return len(group_by) > 0
 
@@ -584,6 +584,7 @@ def clonal_rarefaction(
         TypeError: If ``rarefaction`` is not a ``Rarefaction`` record, or
             another argument has the wrong type.
         ValueError: If ``base`` is neither ``"size"`` nor ``"coverage"``.
+        KeyError: If ``theme`` names no theme.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -723,6 +724,7 @@ def clone_overlap(
         TypeError: If ``overlap`` is not a ``CloneOverlap`` record, or
             another argument has the wrong type.
         ValueError: If ``index`` is not an overlap index.
+        KeyError: If ``theme`` names no theme.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -1047,6 +1049,7 @@ def clone_coupling(
             another argument has the wrong type.
         ValueError: If ``value`` is unknown, or names z-scores of a
             coupling measured without permutations.
+        KeyError: If ``theme`` names no theme.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -1205,7 +1208,8 @@ def clone_fate_bias(
         KeyError: If the store holds no such artifact.
         RuntimeError: If an artifact is incomplete, as a call that stopped
             before it finished leaves it.
-        MemoryError: If reading the artifact does not fit the memory budget.
+        MemoryError: If reading the artifact, or the labels of the clones
+            drawn, does not fit the memory budget.
     """
     normalize = bool_argument(normalize, "normalize")
     show_legend = bool_argument(show_legend, "show_legend")

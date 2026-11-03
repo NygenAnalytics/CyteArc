@@ -29,7 +29,7 @@ def record_groups(table: pd.DataFrame, values_from: str) -> pd.DataFrame:
     if "group" not in columns or values_from not in columns:
         raise ValueError(
             f"A summary's table must hold 'group' and {quoted_value(values_from)}; it holds "
-            f"{columns}"
+            f"{quoted_value(columns)}"
         )
     start, stop = columns.index("group") + 1, columns.index(values_from)
     if stop < start:

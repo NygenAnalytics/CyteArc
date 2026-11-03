@@ -640,6 +640,21 @@ def test_genotypes_refuse_what_they_cannot_draw(plotted) -> None:
         genotypes(object(), called, show=False)
 
 
+def test_genotypes_refuse_a_layout_of_another_type_before_reading_the_store(
+    plotted,
+) -> None:
+    store, targets, _positions = plotted
+    called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
+    # The text that layout_key took names no embedding: it is refused as the
+    # argument it is, before the calls of two sites ask which site to draw.
+    for layout in ("UMAP", 3):
+        with pytest.raises(TypeError, match="^layout must be an ArtifactRef or None$"):
+            genotypes(store, called, layout=layout, show=False)
+    # Nothing is read from the store before the refusal.
+    with pytest.raises(TypeError, match="^layout must be an ArtifactRef or None$"):
+        genotypes(object(), called, layout="UMAP", show=False)
+
+
 def test_genotypes_of_many_sites_and_groups_keep_a_drawable_height(tmp_path) -> None:
     import warnings
 

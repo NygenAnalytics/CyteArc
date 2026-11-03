@@ -107,7 +107,7 @@ def barcode_calls(
     Raises:
         TypeError: If an argument has the wrong type.
         ValueError: If ``barcodes`` is not a ``lineage_barcodes``
-            artifact, or the grouping refuses its labels.
+            artifact.
         KeyError: If the store holds no such artifact.
         RuntimeError: If an artifact is incomplete, as a call that stopped
             before it finished leaves it.

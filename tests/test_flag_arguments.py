@@ -35,6 +35,7 @@ from cytearc.metadata import MetaData
 from cytearc.plotting import PlotOutputSettings
 from cytearc.regulons import ModuleParameters
 from cytearc.utils.arguments import bool_argument, optional_bool_argument
+from tests.stack_modules import STACK_MODULES
 from tests.storage_helpers import open_store, write_count_store
 
 
@@ -210,6 +211,46 @@ def _arguments(function: Any, flag: str, value: object) -> dict[str, Any]:
     return arguments
 
 
+def _every_argument(function: Any, flag: str, value: object) -> dict[str, Any]:
+    """A placeholder for every argument but ``self`` and the flags, defaults too."""
+    arguments: dict[str, Any] = {}
+    for name, parameter in inspect.signature(function).parameters.items():
+        if name in ("self", "cls") or parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        if name == flag:
+            arguments[name] = value
+        elif _flag_kind(parameter.annotation) is None:
+            arguments[name] = PLACEHOLDER
+    return arguments
+
+
+def _stack_plot_flags() -> list[
+    tuple[str, Callable[[Any], Callable[..., Any]], str, str]
+]:
+    """The flags of the clone stack's plots and of their ``ds.plots`` forwarders."""
+    modules = {
+        "cytearc." + module.removesuffix(".py").replace("/", ".")
+        for module in STACK_MODULES
+        if module.startswith("plotting/") and not module.startswith("plotting/_")
+    }
+    names = {
+        name
+        for name in splt.__all__
+        if inspect.isfunction(getattr(splt, name))
+        and getattr(splt, name).__module__ in modules
+    }
+    labels = {f"cytearc.plotting.{name}" for name in names} | {
+        f"ds.plots.{name}" for name in names
+    }
+    return [row for row in PUBLIC_FLAGS if row[0] in labels]
+
+
+STACK_PLOT_FLAGS = _stack_plot_flags()
+
+
 def _called(call: Callable[..., Any], arguments: dict[str, Any]) -> Any:
     """Call, and start a generator, which checks its arguments when it starts."""
     result = call(**arguments)
@@ -326,6 +367,42 @@ def test_every_public_flag_takes_numpy_booleans_as_python_ones(
         assert not _outcome(call, _arguments(call, flag, None))[1].startswith(
             f"{flag} must be"
         )
+
+
+def test_the_stack_plots_are_found_with_their_caps_records_and_layouts() -> None:
+    # The selection can pass by finding nothing, so it must find the plots
+    # whose caps, records and layouts come after their flags.
+    labels = {(label, name) for label, _reach, name, _kind in STACK_PLOT_FLAGS}
+    for expected in (
+        ("cytearc.plotting.clone_abundance", "show"),
+        ("cytearc.plotting.clone_fate_bias", "normalize"),
+        ("cytearc.plotting.clonal_rarefaction", "show_legend"),
+        ("cytearc.plotting.gene_usage", "show"),
+        ("cytearc.plotting.barcode_calls", "show_legend"),
+        ("cytearc.plotting.genotypes", "show"),
+        ("ds.plots.receptor_qc", "normalize"),
+        ("ds.plots.gene_pairing", "show"),
+    ):
+        assert expected in labels
+    # Master's own plots are not the stack's.
+    assert ("cytearc.plotting.embedding", "sort_values") not in labels
+
+
+@pytest.mark.parametrize(
+    ("label", "reach", "flag", "kind"),
+    STACK_PLOT_FLAGS,
+    ids=[f"{label}-{flag}" for label, _reach, flag, _kind in STACK_PLOT_FLAGS],
+)
+def test_the_stack_plots_check_their_flags_before_every_other_argument(
+    flag_store, label, reach, flag, kind
+) -> None:
+    # Every other argument is wrong, defaults included, so a cap, a record, a
+    # grouping or a layout checked before the flag raises its own error.
+    call = reach(flag_store)
+    message = "a boolean or None" if kind == "optional" else "a boolean"
+    for value in (1, "yes"):
+        with pytest.raises(TypeError, match=rf"^{flag} must be {message}$"):
+            _called(call, _every_argument(call, flag, value))
 
 
 @pytest.mark.parametrize("value", [np.True_, np.False_, True, False])
