@@ -542,7 +542,7 @@ def clonal_expansion(
             "rank_windows": _long_table(windows, "window", "n_cells"),
         },
         drawn=drawn,
-        inputs={"expansion": expansion},
+        inputs={"expansion": expansion, "clones": loaded.clones},
         settings={
             "grouping": group_name,
             "count": count,
@@ -725,7 +725,8 @@ def clonal_diversity(
     panel draws one bar per group, in the groups' colours, and the panels
     fill rows of three, with one legend of the groups beside the first row.
     A group whose index is not defined, such as Pielou's evenness of a group
-    of one clone, draws no bar, and a panel of none says so. An observed
+    of one clone, draws no bar, and a panel of none says so; a figure of
+    none is refused. An observed
     index grows with the cells of a group, so compare groups of different
     sizes by the Hill numbers at a common coverage or size, which the
     record's ``hill`` table holds.
@@ -740,7 +741,7 @@ def clonal_diversity(
             range over.
         ValueError: If ``indices`` is empty, names an index twice or one that
             ``ds.clones.diversity`` does not measure, or the record holds no
-            group.
+            group, or no group of it has a value of any index named.
         KeyError: If ``theme`` names no theme, or the store does not hold
             the record's clones.
         RuntimeError: If the record's clones are incomplete, as a call that
@@ -754,6 +755,10 @@ def clonal_diversity(
     table = diversity.indices
     if table.empty:
         raise ValueError("The diversity measures no group, so there is nothing to plot")
+    if not np.isfinite(table[list(chosen)].to_numpy(dtype=np.float64)).any():
+        raise ValueError(
+            f"No group has a value of {', '.join(chosen)}, so there is nothing to plot"
+        )
     names = clone_names(store, diversity.clones)
     plotted = table_groups(store, diversity)
     colors = plotted.scale(table["group"].tolist())
@@ -864,8 +869,8 @@ def clone_overlap(
             wrong type, or the store does not name clones for figures.
         ValueError: If ``index`` is not an overlap index, or the record
             compares no pair.
-        KeyError: If ``theme`` names no theme, or the store does not hold
-            the record's clones.
+        KeyError: If ``theme`` names no theme, ``color_scale`` names no
+            colour map, or the store does not hold the record's clones.
         RuntimeError: If the record's clones are incomplete, as a call that
             stopped before it finished leaves them.
     """
@@ -917,7 +922,11 @@ def clone_overlap(
         tables={"matrix": matrix, "pairs": overlap.pairs},
         drawn=[drawn],
         inputs={"clones": overlap.clones},
-        settings={"index": index, "groups": names},
+        settings={
+            "grouping": table_groups(store, overlap).title,
+            "index": index,
+            "groups": names,
+        },
         n_cells=int(overlap.group_sizes["n_cells"].sum()),
         show=show,
     )
@@ -1061,7 +1070,11 @@ def clone_tracking(
         tables={"tracking": cells},
         drawn=[drawn],
         inputs={"clones": tracking.clones},
-        settings={"tracked": list(tracking.tracked), "order": positions},
+        settings={
+            "grouping": table_groups(store, tracking).title,
+            "tracked": list(tracking.tracked),
+            "order": positions,
+        },
         n_cells=int(cells["n_cells"].sum()),
         show=show,
     )
@@ -1103,8 +1116,8 @@ def clone_coupling(
         ValueError: If ``value`` is unknown, or names z-scores of a
             coupling measured without permutations, the record compares no
             pair, or the coupling's order does not follow its linkage.
-        KeyError: If ``theme`` names no theme, or the store does not hold
-            the record's clones.
+        KeyError: If ``theme`` names no theme, ``color_scale`` names no
+            colour map, or the store does not hold the record's clones.
         RuntimeError: If the record's clones are incomplete, as a call that
             stopped before it finished leaves them.
     """
@@ -1170,7 +1183,12 @@ def clone_coupling(
         tables={"matrix": matrix, "pairs": coupling.pairs},
         drawn=[drawn],
         inputs={"clones": coupling.clones},
-        settings={"method": coupling.method, "value": value, "groups": names},
+        settings={
+            "grouping": table_groups(store, coupling).title,
+            "method": coupling.method,
+            "value": value,
+            "groups": names,
+        },
         n_cells=int(coupling.group_sizes["n_cells"].sum()),
         show=show,
     )

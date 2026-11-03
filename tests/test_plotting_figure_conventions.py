@@ -133,6 +133,11 @@ def test_legends_are_reported_with_their_scales_and_agree_with_the_drawing(
                 (legend.extras["vmin"], legend.extras["vmax"])
             )
         assert result.provenance.notes == (name,)
+        # Every figure records the clones it draws and its grouping.
+        clones = truth.clones if source == "clones" else truth.clonotypes
+        assert result.provenance.extras["clones"] == clones.to_dict()
+        grouping = result.provenance.extras["grouping"]
+        assert grouping.split(", ")[0] in ("sample", "cell_type")
     finally:
         result.close()
 
@@ -298,6 +303,9 @@ def test_figures_of_many_groups_and_clones_stop_at_the_page_width(many) -> None:
             assert width <= MAX_FIGURE_WIDTH_INCHES, result.provenance.notes
             # A panel stops growing where its axis stops naming items.
             assert height <= 22.0, result.provenance.notes
+        # The tallest: two rows of diversity panels, each of 40 groups named.
+        diversity = results[3].figure.get_size_inches()
+        assert tuple(diversity) == pytest.approx((7.5, 2 * (1.0 + 0.25 * 40)))
     finally:
         for result in results:
             result.close()
@@ -447,16 +455,136 @@ def test_label_artifacts_colour_groups_over_all_their_labels(truth) -> None:
     labels = store.snapshot_cluster_labels(
         "cell_type", cell_selection=every_cell(store)
     )
+    store.cells.insert("not_monocyte", TRUTH.cell_types != "Monocyte", overwrite=True)
     every = store.plots.clone_abundance(clones, groups=labels, show=False)
-    d4 = store.plots.clonal_rarefaction(
+    # Without the monocytes, the first label, the two other types keep the
+    # second and third colours, which colours over the groups drawn would
+    # not give them.
+    rest = store.plots.clonal_rarefaction(
         store.clones.rarefaction(
-            clones, groups=labels, cell_selection=store.snapshot_cell_selection("is_d4")
+            clones,
+            groups=labels,
+            cell_selection=store.snapshot_cell_selection("not_monocyte"),
         ),
         show=False,
     )
     try:
         full = every.scales[0].palette
-        assert d4.scales[0].palette == {name: full[name] for name in d4.scales[0].order}
+        assert list(full) == ["Monocyte", "Neutrophil", "Undifferentiated"]
+        assert rest.scales[0].order == ("Neutrophil", "Undifferentiated")
+        assert rest.scales[0].palette == {
+            "Neutrophil": full["Neutrophil"],
+            "Undifferentiated": full["Undifferentiated"],
+        }
+        assert full["Neutrophil"] != full["Monocyte"]
     finally:
         every.close()
-        d4.close()
+        rest.close()
+
+
+def _insert_masked_labels(store) -> None:
+    """Insert labels x and y, each monocyte's missing, with a placeholder z."""
+    if "masked_xy" not in store.cells.columns:
+        insert_nullable_cell_column(
+            store,
+            "masked_xy",
+            np.where(
+                TRUTH.cell_types == "Monocyte",
+                "z",
+                np.where(TRUTH.samples == "d2", "x", "y"),
+            ),
+            TRUTH.cell_types == "Monocyte",
+        )
+
+
+def test_missing_labels_take_no_colour(truth) -> None:
+    store, clones = truth.store, truth.clones
+    _insert_masked_labels(store)
+    # A missing label, which would sort before x as the text of no label,
+    # takes no colour.
+    result = store.plots.clone_abundance(clones, group_by="masked_xy", show=False)
+    try:
+        assert result.scales[0].order == ("x", "y")
+        assert result.scales[0].palette == {"x": "#1f77b4", "y": "#ff7f0e"}
+    finally:
+        result.close()
+
+
+def test_a_columns_labels_are_read_in_blocks(truth, monkeypatch) -> None:
+    import cytearc.plotting._groups as groups_module
+
+    store = truth.store
+    _insert_masked_labels(store)
+    read = []
+    whole = groups_module.iter_metadata_column_blocks
+
+    def blocks(metadata, column, **options):
+        for block in whole(metadata, column, block_rows=5):
+            read.append(len(block))
+            yield block
+
+    monkeypatch.setattr(groups_module, "iter_metadata_column_blocks", blocks)
+    # Every label of the column from blocks of five rows, without the
+    # placeholder z of its missing rows, whose masks align with the blocks.
+    assert sorted(groups_module._column_labels(store, "masked_xy")) == ["x", "y"]
+    assert sum(read) == N_CELLS and max(read) == 5
+    assert sorted(groups_module._column_labels(store, "cell_type")) == sorted(
+        set(TRUTH.cell_types)
+    )
+
+
+# The panels of each clone figure, for drawing it on axes of a caller's.
+_PANELS = {
+    "clone_abundance": ["sizes", "top"],
+    "clonal_expansion": ["categories", "rank_windows"],
+    "clonal_rarefaction": ["order_0", "order_1", "order_2", "coverage"],
+    "clonal_diversity": ["n_clones", "shannon", "inverse_simpson"],
+    "clone_overlap": ["matrix"],
+    "clone_tracking": ["tracking"],
+    "clone_coupling": ["matrix"],
+    "clone_fate_bias": ["early", "fates"],
+}
+
+
+@pytest.mark.parametrize("name", CLONE_FIGURES)
+def test_each_figure_draws_in_a_composite_with_its_legends_once(truth, name) -> None:
+    panels = _PANELS[name]
+    figure = plt.figure(figsize=(12, 4), layout="constrained")
+    grid = figure.subplots(1, len(panels), squeeze=False)[0]
+    try:
+        result = truth.calls["clones"][name](
+            target=dict(zip(panels, grid, strict=True)), show=False
+        )
+        composite = compose_results(figure, [result])
+        # The composite lays out and draws, a heatmap's tree included.
+        figure.canvas.draw()
+        legends = list(figure.legends) + [
+            artist
+            for ax in figure.axes
+            for artist in ax.get_children()
+            if isinstance(artist, Legend)
+        ]
+        kinds = [legend.kind for legend in result.legends]
+        assert len(legends) == kinds.count("categorical")
+        colorbars = [ax for ax in figure.axes if is_colorbar_axes(ax)]
+        assert len(colorbars) == kinds.count("colorbar")
+        assert len(composite.legends) == len(result.legends)
+        if "dendrogram" in result.axes:
+            # The tree stays above its matrix, which the colour bar spans.
+            assert result.axes["dendrogram"] in result.axes["matrix"].child_axes
+    finally:
+        plt.close(figure)
+
+
+@pytest.mark.parametrize("theme", ["notebook", "dark"])
+@pytest.mark.parametrize("name", CLONE_FIGURES)
+def test_figures_take_their_themes_background(truth, name, theme) -> None:
+    result = truth.calls["clones"][name](theme=theme, show=False)
+    try:
+        # A light theme paints the figure white, and the dark one leaves it
+        # transparent.
+        alpha = 1.0 if theme == "notebook" else 0.0
+        assert result.figure.patch.get_alpha() == alpha
+        assert {ax.patch.get_alpha() for ax in result.figure.axes} == {alpha}
+    finally:
+        result.close()

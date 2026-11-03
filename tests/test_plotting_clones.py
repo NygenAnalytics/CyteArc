@@ -776,15 +776,30 @@ def test_the_diversity_plot_draws_each_groups_indices(truth_plot) -> None:
 def test_a_diversity_panel_of_no_defined_value_says_so(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
     diversity = store.clones.diversity(clones, group_by="sample")
-    undefined = replace(diversity, indices=diversity.indices.assign(ace=np.nan))
-    result = clonal_diversity(store, undefined, indices=["ace", "shannon"], show=False)
+    # ACE is undefined for every sample, and Pielou's evenness for d2 alone.
+    undefined = replace(
+        diversity,
+        indices=diversity.indices.assign(
+            ace=np.nan, pielou=[np.nan, diversity.indices["pielou"].iloc[1]]
+        ),
+    )
+    result = clonal_diversity(
+        store, undefined, indices=["ace", "pielou", "shannon"], show=False
+    )
     try:
         assert [text.get_text() for text in result.axes["ace"].texts] == [
             "Not defined for any group"
         ]
+        # A panel of some defined values draws them without the message.
+        assert len(result.axes["pielou"].texts) == 0
+        widths = [bar.get_width() for bar in result.axes["pielou"].patches]
+        assert np.isnan(widths[0]) and widths[1] == undefined.indices["pielou"].iloc[1]
         assert len(result.axes["shannon"].texts) == 0
     finally:
         result.close()
+    # With no value of any index named, there is nothing to plot.
+    with pytest.raises(ValueError, match="^No group has a value of ace, so there"):
+        clonal_diversity(store, undefined, indices=["ace"], show=False)
 
 
 @pytest.mark.parametrize(
@@ -812,10 +827,19 @@ def test_record_groups_need_a_store_that_gives_their_labels(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
     grouped = store.clones.rarefaction(clones, group_by="sample")
     # The colours of one column's groups range over the column's labels.
+    # They are read only when a figure colours its groups.
+    unread = table_groups(object(), grouped)
+    assert unread.title == "sample"
     with pytest.raises(TypeError, match="^store does not provide the labels of its"):
-        table_groups(object(), grouped)
+        unread.scale(["d2"])
     with pytest.raises(TypeError, match="^store does not provide the labels of its"):
         clonal_rarefaction(_NamesOnly(store), grouped, show=False)
+    # A figure that does not colour the groups never reads their labels.
+    drawn = clone_overlap(
+        _NamesOnly(store), store.clones.overlap(clones, group_by="sample"), show=False
+    )
+    assert drawn.provenance.extras["grouping"] == "sample"
+    drawn.close()
     # Labels kept apart that are no vocabulary take colours over the groups
     # drawn, as groups of several columns do.
     kept = SimpleNamespace(
@@ -826,7 +850,28 @@ def test_record_groups_need_a_store_that_gives_their_labels(truth_plot) -> None:
         groups=None,
     )
     found = table_groups(object(), kept)
-    assert found.colors is None and found.title == "lineage"
+    assert found.colors() is None and found.title == "lineage"
+
+
+def test_small_multiples_share_the_page_three_to_a_row(truth_plot) -> None:
+    store, clones = truth_plot.store, truth_plot.clones
+    sizes = {}
+    for orders, base in (((0,), "coverage"), ((0,), "size"), ((0, 1), "size")):
+        result = clonal_rarefaction(
+            store,
+            store.clones.rarefaction(clones, orders=orders),
+            base=base,
+            show=False,
+        )
+        sizes[len(result.axes)] = tuple(result.figure.get_size_inches())
+        result.close()
+    # One panel of 4.2 by 3.6 inches; two share the page, each 3.75 wide;
+    # three fill a row of the page, each 2.5 wide; each keeps the shape.
+    assert sizes == {
+        1: pytest.approx((4.2, 3.6)),
+        2: pytest.approx((7.5, 3.75 * 3.6 / 4.2)),
+        3: pytest.approx((7.5, 2.5 * 3.6 / 4.2)),
+    }
 
 
 def test_the_rarefaction_plot_of_complete_samples(truth_plot) -> None:

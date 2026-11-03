@@ -7,22 +7,34 @@ column takes the column's stored display palette, or colours assigned over
 every label of the column, as master's figures colour categories; a label
 artifact's groups take colours over every label of the artifact; receptor
 types take their vocabulary's palette; and groups of several columns take
-colours over the groups drawn.
+colours over the groups drawn. The labels that colours range over are read
+only when a figure colours its groups: a column's a stored chunk at a time,
+and a label artifact's within the store's memory budget.
 """
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from ..clones.groups import group_names
-from ..metadata.selection import valid_category_mask
+from ..metadata.rows import (
+    apply_missing_mask,
+    iter_metadata_column_blocks,
+    metadata_missing_mask,
+)
+from ..metadata.selection import (
+    cell_value_spec,
+    resolve_cell_aligned_artifact,
+    valid_category_mask,
+)
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import quoted_value
 from ._contracts import CategoricalScale
-from ._data import _category_universe, _resolve_grouping, store_method
+from ._data import store_method
 from ._display import stored_categorical_scale
 from ._style import RECEPTOR_TYPE_SCALE, palette_for_n, resolve_category_scale
 
@@ -49,14 +61,16 @@ class PlotGroups:
         columns: The grouping's key columns, empty without one.
         codes: Each cell's group, a position in ``names``, -1 for none; empty
             for the groups of a summary's record, whose tables name them.
-        colors: Every group's colour when the grouping keeps colours across
-            figures, or None when groups take colours over those drawn.
+        colors: Returns every group's colour when the grouping keeps colours
+            across figures, or None when groups take colours over those
+            drawn; :meth:`scale` calls it, so the labels that colours range
+            over are read only for a figure that colours its groups.
     """
 
     names: tuple[str, ...]
     columns: tuple[str, ...]
     codes: np.ndarray
-    colors: CategoricalScale | None
+    colors: Callable[[], CategoricalScale | None] = field(repr=False, compare=False)
 
     @property
     def title(self) -> str | None:
@@ -68,6 +82,10 @@ class PlotGroups:
 
         Raises:
             ValueError: If a drawn group is not a group of the figure.
+            TypeError: If the store does not give the labels that the
+                groups' colours range over.
+            MemoryError: If reading a label artifact's labels does not fit
+                the memory budget.
         """
         drawn = [str(name) for name in drawn]
         unknown = sorted(set(drawn) - set(self.names))
@@ -75,21 +93,22 @@ class PlotGroups:
             raise ValueError(
                 f"The figure has no group named {quoted_value(unknown[0])}"
             )
-        if self.colors is None:
+        colors = self.colors()
+        if colors is None:
             return CategoricalScale(
                 order=tuple(drawn),
                 palette=dict(zip(drawn, palette_for_n(len(drawn)), strict=True)),
             )
-        assert self.colors.order is not None and self.colors.palette is not None
+        assert colors.order is not None and colors.palette is not None
         wanted = set(drawn)
-        order = tuple(name for name in self.colors.order if name in wanted)
+        order = tuple(name for name in colors.order if name in wanted)
         return CategoricalScale(
             order=order,
-            palette={name: self.colors.palette[name] for name in order},
+            palette={name: colors.palette[name] for name in order},
             labels=(
                 None
-                if self.colors.labels is None
-                else {name: self.colors.labels[name] for name in order}
+                if colors.labels is None
+                else {name: colors.labels[name] for name in order}
             ),
         )
 
@@ -145,6 +164,46 @@ def _store_labels(store: Any) -> None:
         )
 
 
+def _column_labels(store: Any, column: str) -> list[str]:
+    """Every label of a cell metadata column, as groups name them, in bounded reads.
+
+    The column is read a stored chunk at a time, so the read holds one chunk
+    and the distinct labels, whatever the store's size. A row that the
+    column's missing mask flags holds no label.
+    """
+    cells = store.cells
+    mask = metadata_missing_mask(cells, column)
+    found: dict[str, None] = {}
+    start = 0
+    for block in iter_metadata_column_blocks(cells, column):
+        stop = start + len(block)
+        missing = None if mask is None else np.asarray(mask[start:stop], dtype=bool)
+        found.update(
+            dict.fromkeys(_texts(apply_missing_mask(block, missing, labels=True)))
+        )
+        start = stop
+    return list(found)
+
+
+def _artifact_labels(store: Any, groups: ArtifactRef) -> list[str]:
+    """Every label of a cell-label artifact, as groups name them, within the budget.
+
+    Raises:
+        MemoryError: If reading the artifact's labels does not fit the
+            store's memory budget.
+    """
+    resolved = resolve_cell_aligned_artifact(
+        store.zw,
+        groups,
+        value_name=cell_value_spec(groups.kind).name,
+        expected_kind=groups.kind,
+        max_bytes=int(store.memoryBytes),
+    )
+    return _texts(
+        apply_missing_mask(resolved.values, resolved.missing_mask, labels=True)
+    )
+
+
 def _colors(
     store: Any,
     names: Sequence[str],
@@ -163,18 +222,20 @@ def _colors(
         return resolve_category_scale(
             list(names),
             stored,
-            universe=(
-                _texts(_category_universe(store, column)) if stored is None else None
-            ),
+            universe=_column_labels(store, column) if stored is None else None,
         )
     if not group_by and groups is not None and column == groups.kind:
         _store_labels(store)
-        _keys, _cells, labels, _missing = _resolve_grouping(
-            store, group_by=None, groups=groups, cell_key="I"
+        return resolve_category_scale(
+            list(names), None, universe=_artifact_labels(store, groups)
         )
-        return resolve_category_scale(list(names), None, universe=_texts(labels[0]))
     if column in _VOCABULARY_SCALES:
         return resolve_category_scale(list(names), _VOCABULARY_SCALES[column])
+    return None
+
+
+def _no_colors() -> None:
+    """The colours of a figure's one group, which take the first colour drawn."""
     return None
 
 
@@ -201,8 +262,7 @@ def plot_groups(
     cells"``, and the store is not read.
 
     Raises:
-        TypeError: If the store does not group cells for figures, or does
-            not give the labels that a grouping's colours range over, or an
+        TypeError: If the store does not group cells for figures, or an
             argument has the wrong type.
         ValueError: If a ``group_by`` column is missing, named twice or kept
             apart already, or two groups get one name.
@@ -213,7 +273,7 @@ def plot_groups(
             names=("all cells",),
             columns=(),
             codes=np.zeros(int(n_cells), dtype=np.int64),
-            colors=None,
+            colors=_no_colors,
         )
     grouped = store_method(store, "_figure_groups", "the groups of figures")(
         artifact, group_by=group_by, groups=groups, kept_apart=tuple(kept_apart)
@@ -225,7 +285,7 @@ def plot_groups(
         names=names,
         columns=columns,
         codes=np.asarray(grouped.codes, dtype=np.int64),
-        colors=_colors(store, names, columns, group_by=by, groups=groups),
+        colors=partial(_colors, store, names, columns, group_by=by, groups=groups),
     )
 
 
@@ -237,9 +297,7 @@ def table_groups(store: Any, record: Any) -> PlotGroups:
     and its ``group_by`` and ``groups`` name the grouping, after which the
     key columns hold the labels the clones keep apart.
 
-    Raises:
-        TypeError: If the store does not give the labels that a grouping's
-            colours range over.
+    Nothing is read from the store until a figure colours the groups.
     """
     keys: pd.DataFrame = record.group_keys
     names = tuple(str(name) for name in keys.index.tolist())
@@ -248,8 +306,13 @@ def table_groups(store: Any, record: Any) -> PlotGroups:
         names=names,
         columns=columns,
         codes=np.empty(0, dtype=np.int64),
-        colors=_colors(
-            store, names, columns, group_by=record.group_by, groups=record.groups
+        colors=partial(
+            _colors,
+            store,
+            names,
+            columns,
+            group_by=tuple(record.group_by),
+            groups=record.groups,
         ),
     )
 

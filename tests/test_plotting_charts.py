@@ -185,6 +185,24 @@ def test_a_value_that_is_not_a_number_draws_no_bar_and_shifts_none(ax) -> None:
     assert np.isnan(bars[(0.0, RED)][1])
     # The second part starts at 0, where the first would have ended.
     assert bars[(0.0, GREEN)] == (0.0, 2.0)
+    ax.clear()
+    # Fractions are of the parts with a value: 2 and 2 of 4.
+    table = pd.DataFrame(
+        {"item": "a", "segment": ["s1", "s2", "s3"], "value": [np.nan, 2.0, 2.0]}
+    )
+    draw_bars(
+        ax,
+        table,
+        item="item",
+        value="value",
+        segment="segment",
+        colors=SEGMENTS,
+        normalize=True,
+        value_label="",
+    )
+    bars = _bars(ax)
+    assert np.isnan(bars[(0.0, RED)][1])
+    assert bars[(0.0, GREEN)] == (0.0, 0.5) and bars[(0.0, BLUE)] == (0.5, 0.5)
 
 
 def test_plain_bars_take_one_colour_or_their_items_colours(ax) -> None:
@@ -596,12 +614,9 @@ def test_heatmaps_colour_through_their_scale_and_blank_the_diagonal(ax) -> None:
     # Each coloured value is printed, dark on the light top of viridis and
     # light on its dark bottom.
     texts = {text.get_position(): text for text in ax.texts}
-    assert sorted(texts) == [(0, 2), (1, 0), (2, 0)] or sorted(texts) == [
-        (0, 1),
-        (0, 2),
-        (1, 0),
-        (2, 0),
-    ]
+    # The four pairs off the diagonal with a value, by column and row.
+    assert sorted(texts) == [(0, 1), (0, 2), (1, 0), (2, 0)]
+    assert texts[(0, 1)].get_text() == "0" and texts[(0, 2)].get_text() == "1"
     assert texts[(2, 0)].get_text() == "1" and texts[(2, 0)].get_color() == "black"
     assert texts[(1, 0)].get_text() == "0" and texts[(1, 0)].get_color() == "white"
     # The colour bar names the value and the result reports its limits.
@@ -691,26 +706,35 @@ def test_figures_stop_at_the_page_width() -> None:
 
 
 def test_plot_groups_keep_each_groups_colour_in_every_subset() -> None:
+    read = []
+
+    def colors() -> CategoricalScale:
+        read.append(True)
+        return CategoricalScale(
+            order=("d2", "d4", "d7"), palette={"d2": RED, "d4": GREEN, "d7": BLUE}
+        )
+
     every = PlotGroups(
         names=("d2", "d4", "d7"),
         columns=("sample",),
         codes=np.empty(0, dtype=np.int64),
-        colors=CategoricalScale(
-            order=("d2", "d4", "d7"), palette={"d2": RED, "d4": GREEN, "d7": BLUE}
-        ),
+        colors=colors,
     )
+    # The colours are read only when a figure colours its groups.
+    assert read == []
     assert every.title == "sample"
     subset = every.scale(["d7", "d4"])
     # The colours' order, and each group's colour, whatever is drawn.
     assert subset.order == ("d4", "d7")
     assert subset.palette == {"d4": GREEN, "d7": BLUE}
+    assert read == [True]
     with pytest.raises(ValueError, match="no group named 'd9'"):
         every.scale(["d9"])
     combined = PlotGroups(
         names=("d2, x", "d4, x"),
         columns=("sample", "type"),
         codes=np.empty(0, dtype=np.int64),
-        colors=None,
+        colors=lambda: None,
     )
     # Groups of several columns take colours over the groups drawn.
     assert combined.title == "sample, type"

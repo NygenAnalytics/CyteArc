@@ -667,12 +667,19 @@ def _shared_legend_parts(result: PlotResult) -> list[_SharedLegendPart] | None:
                 vmax = legend.extras.get("vmax", color_scale.vmax)
                 if vmin is None or vmax is None:
                     return None
+                # The colorbar spans the child's panels, not the insets that
+                # a panel holds, such as a heatmap's dendrogram.
+                insets = {
+                    id(inset)
+                    for ax in result.axes.values()
+                    for inset in getattr(ax, "child_axes", ())
+                }
                 targets = [
                     (
                         tuple(
                             ax
                             for ax in dict.fromkeys(result.axes.values())
-                            if not is_colorbar_axes(ax)
+                            if not is_colorbar_axes(ax) and id(ax) not in insets
                         ),
                         vmin,
                         vmax,
