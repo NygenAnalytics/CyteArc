@@ -80,6 +80,19 @@ def _figure_noun(store: Any, clones: ArtifactRef) -> str:
     return str(method(clones))
 
 
+def _names_columns(group_by: Any) -> bool:
+    """Whether ``group_by`` names a column: text, or a sequence that is not empty.
+
+    A value of another type counts as naming one, so that the grouping refuses
+    it.
+    """
+    if group_by is None:
+        return False
+    if isinstance(group_by, str) or not isinstance(group_by, Sequence):
+        return True
+    return len(group_by) > 0
+
+
 def _kept_apart_labels(
     cells: pd.DataFrame, columns: Sequence[str]
 ) -> list[tuple[str, np.ndarray]]:
@@ -412,7 +425,7 @@ def clonal_expansion(
     kept_apart = [column for column in key_columns if column not in own]
     labels, names, group_name = (
         (None, [], None)
-        if group_by is None and groups is None
+        if groups is None and not _names_columns(group_by)
         else cell_groups(
             store,
             expansion,
@@ -828,7 +841,9 @@ def clone_tracking(
     the name, such as time points as integers, and by default the names
     follow their natural order. Plots of at most 40 groups name them on the
     axis, and the legend lists at most 80 clones, the largest first. By
-    default the figure grows with the groups up to the width of a page.
+    default the figure grows with the groups up to the width of a page. The
+    plot raises ``ValueError`` when a key column of the groups is named
+    ``label``, which the figure's table gives each clone's label.
 
     Tables: ``tracking``, the record's ``table`` with each clone's ``label``
     after its ``clone`` (``clone``, ``label``, ``group``, the key columns,

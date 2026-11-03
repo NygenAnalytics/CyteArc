@@ -163,6 +163,21 @@ def test_groups_of_several_columns_split_the_cells(plotted) -> None:
     plt.close(both.figure)
 
 
+def test_groups_are_drawn_in_the_natural_order_of_their_labels(plotted) -> None:
+    store, targets, _positions = plotted
+    # The first named cell is of s10, which comes after s2 in natural order.
+    store.cells.insert(
+        "lane",
+        np.asarray(["s10", "s2", "s10", "s2", "s2"], dtype=object),
+        overwrite=True,
+    )
+    result = variant_depth(store, targets, group_by="lane", show=False)
+    legend = result.axes["cells"].get_legend()
+    assert [text.get_text() for text in legend.get_texts()] == ["s2", "s10"]
+    assert result.tables["cells"]["group"].tolist() == ["s10", "s2", "s10", "s2"]
+    plt.close(result.figure)
+
+
 def test_the_store_accessor_draws_the_same_plot(plotted) -> None:
     store, targets, _positions = plotted
     result = store.plots.variant_depth(targets, show=False)
@@ -505,6 +520,16 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     assert crossed.provenance.extras["grouping"] == "group, half"
     assert crossed.provenance.n_cells == 4
     plt.close(crossed.figure)
+    # A label artifact of the labelled cells draws the groups of the column.
+    labelled = np.asarray([group is not None for group in GROUPS])
+    store.cells.insert("labelled", labelled, overwrite=True)
+    labels = store.snapshot_cluster_labels(
+        "group", cell_selection=store.snapshot_cell_selection("labelled")
+    )
+    by_labels = genotypes(store, called, groups=labels, show=False)
+    assert _shares(by_labels) == _shares(grouped)
+    assert by_labels.provenance.extras["grouping"] == "cluster_labels"
+    plt.close(by_labels.figure)
 
 
 def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
@@ -549,6 +574,36 @@ def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
     assert shown.tables["calls"].equals(alone.tables["calls"])
     for figure in (result.figure, alone.figure, shown.figure):
         plt.close(figure)
+
+
+def test_genotypes_refuse_an_embedding_of_as_many_other_cells(
+    plotted, tmp_path
+) -> None:
+    store, _targets, _positions = plotted
+    store.cells.insert("first_four", np.arange(5) < 4, overwrite=True)
+    store.cells.insert("last_four", np.arange(5) > 0, overwrite=True)
+    calr = tmp_path / "CALR.tsv"
+    calr.write_text("BC\twtUMIs\tmutUMIs\nc0\t3\t1\nc1\t2\t0\n")
+    counts = store.variants.import_counts(
+        calr, cell_selection=store.snapshot_cell_selection("first_four")
+    )
+    called = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
+    # Four cells of an embedding are not the genotypes' four cells.
+    others = _embedding(store, "last_four", np.zeros((4, 2)))
+    with pytest.raises(ValueError, match="embedding of the genotypes' cells"):
+        genotypes(store, called, layout=others, show=False)
+    own = _embedding(store, "first_four", np.arange(8).reshape(4, 2))
+    drawn = genotypes(store, called, layout=own, show=False)
+    cells = drawn.tables["cells"]
+    assert cells["ids"].tolist() == ["c0", "c1", "c2", "c3"]
+    assert cells["x"].tolist() == [0.0, 2.0, 4.0, 6.0]
+    assert cells["call"].tolist() == [
+        "alternative_present",
+        "wild_type",
+        "missing",
+        "missing",
+    ]
+    plt.close(drawn.figure)
 
 
 def test_genotypes_show_and_close_the_figure_they_own(plotted) -> None:

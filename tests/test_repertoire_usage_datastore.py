@@ -303,13 +303,32 @@ def test_gene_usage_plot_draws_one_panel_per_locus(tmp_path) -> None:
     shown = plotting.gene_usage(store, j_genes)
     assert shown.provenance.extras["gene"] == "j_call"
     assert shown.tables["usage"] is j_genes.table
-    for cap in (0, True, 2.0):
-        with pytest.raises(ValueError, match="^max_genes must be a positive integer"):
+    with pytest.raises(ValueError, match="^max_genes must be at least 1$"):
+        plotting.gene_usage(store, j_genes, max_genes=0, show=False)
+    for cap in (True, 2.0, "3"):
+        with pytest.raises(TypeError, match="^max_genes must be an integer$"):
             plotting.gene_usage(store, j_genes, max_genes=cap, show=False)
     with pytest.raises(TypeError, match="^usage must be the GeneUsage"):
         plotting.gene_usage(store, receptors, show=False)
     # Cells need no name from the store, which the record makes unread.
     plotting.gene_usage(object(), j_genes, show=False).close()
+
+
+def test_gene_usage_of_a_label_artifact_alone_draws_a_heatmap(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    labels = store.snapshot_cluster_labels(
+        "sample", cell_selection=store.snapshot_cell_selection()
+    )
+    usage = store.repertoire.gene_usage(receptors, groups=labels)
+    assert not usage.group_by and usage.groups == labels
+    result = store.plots.gene_usage(usage, show=False)
+    try:
+        # Groups of a label artifact are groups as those of a column are.
+        ax = result.axes["TRA"]
+        assert not ax.patches and len(ax.images) == 1
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == ["s1", "s2"]
+    finally:
+        result.close()
 
 
 def test_gene_pairing_plot_draws_v_against_j(tmp_path) -> None:
@@ -343,7 +362,7 @@ def test_gene_pairing_plot_draws_v_against_j(tmp_path) -> None:
     ax = shown.axes["TRA"]
     assert [tick.get_text() for tick in ax.get_yticklabels()] == ["TRAV1"]
     assert [tick.get_text() for tick in ax.get_xticklabels()] == ["TRAJ1"]
-    with pytest.raises(ValueError, match="^max_genes must be a positive integer"):
+    with pytest.raises(TypeError, match="^max_genes must be an integer$"):
         plotting.gene_pairing(store, pairs, max_genes=True, show=False)
     with pytest.raises(TypeError, match="^usage must be the GeneUsage"):
         plotting.gene_pairing(store, receptors, show=False)

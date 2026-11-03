@@ -1467,6 +1467,14 @@ def test_regrouped_expansion_plot_keeps_receptor_types_apart(tmp_path) -> None:
     totals = result.tables["categories"].groupby("group")["n_cells"].sum()
     assert totals.to_dict() == {"blood, BCR": 2, "blood, TCR": 5}
     result.close()
+    # An empty grouping draws the expansion's own groups, as no grouping does.
+    own = store.plots.clonal_expansion(expansion, show=False)
+    empty = store.plots.clonal_expansion(expansion, group_by=[], show=False)
+    for name, table in own.tables.items():
+        pd.testing.assert_frame_equal(empty.tables[name], table)
+    assert empty.provenance.extras["grouping"] == "sample, receptor_type"
+    own.close()
+    empty.close()
     store.cells.insert("receptor_type", np.asarray(["x"] * N_CELLS))
     with pytest.raises(ValueError, match="'receptor_type', whose labels the artifact"):
         store.plots.clonal_expansion(expansion, group_by="receptor_type", show=False)

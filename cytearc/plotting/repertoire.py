@@ -9,6 +9,7 @@ import pandas as pd
 from ..repertoire.chains import CHAIN_PAIRINGS, RECEPTOR_TYPES
 from ..repertoire.usage import GeneUsage, Spectratype
 from ..storage.refs import ArtifactRef
+from ..utils.arguments import bool_argument, integer_argument, optional_bool_argument
 from ..utils.arrays import sort_categories
 from ._contracts import PlotProvenance
 from ._deps import require_matplotlib
@@ -28,7 +29,6 @@ from ._style import (
     legend_side_rows,
     theme_context,
 )
-from ..utils.arguments import bool_argument, optional_bool_argument
 
 __all__ = ["gene_pairing", "gene_usage", "receptor_qc", "spectratype"]
 
@@ -298,17 +298,6 @@ def receptor_qc(
     return plot_result
 
 
-def _max_genes(value: Any) -> int:
-    """Return a positive ``max_genes``, refusing booleans and other types."""
-    if (
-        isinstance(value, bool | np.bool_)
-        or not isinstance(value, int | np.integer)
-        or value < 1
-    ):
-        raise ValueError("max_genes must be a positive integer")
-    return int(value)
-
-
 def _locus_panels(table: pd.DataFrame, what: str) -> list[str]:
     """The loci of a table, in their natural order, or raise when it has none."""
     if table.empty:
@@ -399,7 +388,7 @@ def gene_usage(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    max_genes = _max_genes(max_genes)
+    max_genes = integer_argument(max_genes, "max_genes", minimum=1)
     if not isinstance(usage, GeneUsage):
         raise TypeError("usage must be the GeneUsage of ds.repertoire.gene_usage")
     if len(usage.genes) != 1:
@@ -512,7 +501,7 @@ def gene_pairing(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    max_genes = _max_genes(max_genes)
+    max_genes = integer_argument(max_genes, "max_genes", minimum=1)
     if not isinstance(usage, GeneUsage):
         raise TypeError("usage must be the GeneUsage of ds.repertoire.gene_usage")
     if sorted(usage.genes) != ["j_call", "v_call"]:

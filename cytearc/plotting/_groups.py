@@ -45,16 +45,27 @@ def labels_by_group(
 ) -> list[tuple[str, np.ndarray]]:
     """Each cell's label in each column, from its group's row of ``groups``.
 
-    ``cell_groups`` holds each cell's group name, missing for none, and
-    ``groups`` one row per group, as :func:`record_groups` returns them; a cell
-    without a group has no label.
+    ``cell_groups`` holds each cell's group name, missing for none, as a
+    categorical or as text, and ``groups`` one row per group, as
+    :func:`record_groups` returns them. A cell without a group, or of a group
+    that ``groups`` does not hold, has the label None. A categorical is
+    matched through its codes, so the names are looked up once per category.
     """
-    names = np.asarray(cell_groups, dtype=object)
-    by_group = groups.set_index("group")
-    return [
-        (column, by_group[column].reindex(names).to_numpy(dtype=object))
-        for column in columns
-    ]
+    names = pd.Index(groups["group"])
+    values = pd.Series(cell_groups)
+    if isinstance(values.dtype, pd.CategoricalDtype):
+        # Each category's row, and -1 at the end for the code of no category.
+        at = np.append(names.get_indexer(values.cat.categories), -1)
+        rows = at[np.asarray(values.cat.codes)]
+    else:
+        rows = names.get_indexer(values.to_numpy(dtype=object))
+    # The row -1 takes the None after the groups' labels.
+    found = []
+    for column in columns:
+        labels = np.empty(len(names) + 1, dtype=object)
+        labels[:-1] = groups[column].to_numpy(dtype=object)
+        found.append((column, labels[rows]))
+    return found
 
 
 def refuse_named_columns(

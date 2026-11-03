@@ -208,7 +208,9 @@ def variant_depth(
         )
         high = float(cells_table["mean_depth"].max()) if positive.any() else 10.0
         bins = np.geomspace(low, max(high, low * 10), _DEPTH_BINS)
-        for group in dict.fromkeys(cells_table["group"].tolist()):
+        # The groups in their natural order, as the grouping names them.
+        held = set(cells_table["group"].tolist())
+        for group in [name for name in names if name in held]:
             values = cells_table["mean_depth"][cells_table["group"] == group].to_numpy()
             ax.hist(
                 values[values > 0],

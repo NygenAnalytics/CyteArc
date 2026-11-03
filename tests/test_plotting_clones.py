@@ -30,10 +30,11 @@ from cytearc.plotting._style import MAX_FIGURE_WIDTH_INCHES
 from tests.clone_helpers import (
     every_cell,
     import_truth_clones,
+    import_truth_receptors,
     overlap_reference,
     write_truth_store,
 )
-from tests.clone_truth import CELL_TYPES, N_CELLS, clone_truth
+from tests.clone_truth import CELL_TYPES, N_CELLS, clone_truth, receptor_truth
 from tests.storage_helpers import (
     insert_nullable_cell_column,
     open_store,
@@ -485,6 +486,47 @@ def test_figures_group_cells_within_the_memory_budget(plotted, monkeypatch) -> N
         cell_groups(store, clones, group_by="group", groups=None)
     with pytest.raises(TypeError, match="store does not provide the groups of"):
         cell_groups(object(), clones, group_by="group", groups=None)
+    # No column names no group, through the store too.
+    monkeypatch.undo()
+    assert cell_groups(store, clones, group_by=[], groups=None) == (None, [], None)
+    with pytest.raises(TypeError, match="^artifact must be an ArtifactRef"):
+        store._figure_groups("clones", group_by="group", groups=None)
+
+
+def test_an_empty_grouping_draws_the_expansions_own_groups(truth_plot) -> None:
+    store = truth_plot.store
+    own = clonal_expansion(store, truth_plot.by_sample, show=False)
+    empty = clonal_expansion(store, truth_plot.by_sample, group_by=[], show=False)
+    for name, table in own.tables.items():
+        pd.testing.assert_frame_equal(empty.tables[name], table)
+    assert empty.provenance.extras["grouping"] == "sample"
+    own.close()
+    empty.close()
+
+
+def test_the_expansion_plot_regroups_cells_by_two_columns(truth_plot) -> None:
+    store = truth_plot.store
+    result = clonal_expansion(
+        store, truth_plot.by_sample, group_by=["sample", "cell_type"], show=False
+    )
+    # Each cell keeps the category of its clone's size in its sample, counted
+    # in the group of its sample and type.
+    sizes = TRUTH.cell_clone_sizes(TRUTH.samples)
+    groups = _joined(TRUTH.samples, TRUTH.cell_types)
+    counted = Counter(
+        (
+            group,
+            CATEGORIES[0 if size == 1 else 1 if size == 2 else 2 if size <= 5 else 3],
+        )
+        for group, size in zip(groups, sizes.tolist(), strict=True)
+        if size
+    )
+    table = result.tables["categories"]
+    assert table["group"].unique().tolist() == sorted({group for group, _ in counted})
+    for row in table.itertuples(index=False):
+        assert row.n_cells == counted[(row.group, row.category)]
+    assert result.provenance.extras["grouping"] == "sample, cell_type"
+    result.close()
 
 
 def test_a_summarys_groups_are_read_beside_its_values() -> None:
@@ -516,19 +558,69 @@ def test_a_summarys_groups_are_read_beside_its_values() -> None:
     ):
         with pytest.raises(ValueError, match=message):
             record_groups(broken, "n_cells")
-    # Each cell takes its group's labels; a cell without a group has none.
-    found = labels_by_group(
-        pd.Series(["d4, TCR", None, "d2, TCR"]), groups, ["sample", "receptor_type"]
-    )
-    assert [(name, values.tolist()) for name, values in found] == [
-        ("sample", ["d4", np.nan, "d2"]),
-        ("receptor_type", ["TCR", np.nan, "TCR"]),
+    # Each cell takes its group's labels; a cell without a group, or of a
+    # group the table lacks, has none, whether the names are text or
+    # categories in another order.
+    cells = ["d4, TCR", None, "d2, TCR", "d9, TCR"]
+    expected = [
+        ("sample", ["d4", None, "d2", None]),
+        ("receptor_type", ["TCR", None, "TCR", None]),
     ]
+    for given in (
+        pd.Series(cells, dtype=object),
+        pd.Series(pd.Categorical(cells, categories=["d9, TCR", "d4, TCR", "d2, TCR"])),
+    ):
+        found = labels_by_group(given, groups, ["sample", "receptor_type"])
+        assert [(name, values.tolist()) for name, values in found] == expected
     refuse_named_columns(["x", "y"], ("clone", "label"), what="group", table="t")
     with pytest.raises(ValueError, match="^A group is named 'label', which the table"):
         refuse_named_columns(
             ["x", "label"], ("clone", "label"), what="group", table="t"
         )
+
+
+@pytest.fixture(scope="module")
+def truth_clonotypes(truth_plot, tmp_path_factory):
+    """The truth's clonotypes, more than nine, on the store of its clones."""
+    folder = tmp_path_factory.mktemp("truth_receptors")
+    receptors = import_truth_receptors(truth_plot.store, receptor_truth(TRUTH), folder)
+    return truth_plot.store.repertoire.clonotypes(receptors, receptor_arms="any")
+
+
+def test_the_tracking_table_pairs_each_clone_with_its_label(
+    truth_plot, truth_clonotypes
+) -> None:
+    store = truth_plot.store
+    tracking = store.clones.track(truth_clonotypes, group_by="sample", top_n=2)
+    # Ranks past 9 come before 2 as text, so the clones followed, largest
+    # first, are not in the order of their IDs' text.
+    assert list(tracking.tracked) != sorted(tracking.tracked)
+    result = clone_tracking(store, tracking, show=False)
+    table = result.tables["tracking"]
+    representatives = store.repertoire.load_clonotypes(truth_clonotypes).clonotypes
+    junctions = {
+        row.clonotype: row.VDJ_1_junction_aa
+        if isinstance(row.VDJ_1_junction_aa, str)
+        else row.VJ_1_junction_aa
+        for row in representatives.itertuples(index=False)
+    }
+    labels = {}
+    for clone, label in (
+        table[["clone", "label"]].drop_duplicates().itertuples(index=False)
+    ):
+        # Each label is its own clonotype's junction, and its own number where
+        # two clonotypes followed share the junction.
+        junction, _space, number = label.partition(" ")
+        assert junction == junctions[clone], clone
+        assert number in ("", clone.removeprefix("clonotype_")), clone
+        labels[clone] = label
+    assert sorted(labels) == sorted(tracking.tracked)
+    # The legend lists the clones followed, largest first, by those labels.
+    legend = result.axes["tracking"].get_legend()
+    assert [text.get_text() for text in legend.get_texts()] == [
+        labels[clone] for clone in tracking.tracked
+    ]
+    result.close()
 
 
 def test_the_rarefaction_plot_draws_one_panel_per_order(truth_plot) -> None:
