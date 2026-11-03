@@ -51,12 +51,14 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.layout import column_chunk_rows
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sort_categories, sorted_unique
 from ...utils.digest import path_sha256
 from ...utils.logging import logger
+from ...utils.memory_budget import fixed_text_bytes
 from ...utils.warnings import warn
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
@@ -106,10 +108,8 @@ _FOREST_BYTES_PER_NODE = 88
 _ID_BYTES_PER_CELL = 88
 _ID_CHUNK_COPIES = 2
 # A node name is written at the width of the longest, four bytes a character,
-# in chunks of at most this many rows and bytes; writing a chunk holds the
-# block of names, Zarr's chunk and its compressed copy.
-_NAME_BLOCK_ROWS = 100_000
-_NAME_CHUNK_BYTES = 16 << 20
+# in the chunks of a new store's columns; writing a chunk holds the block of
+# names, Zarr's chunk and its compressed copy.
 _NAME_WRITE_COPIES = 3
 # Reading a chunk of names holds its compressed and its decoded bytes.
 _NAME_READ_COPIES = 2
@@ -215,10 +215,8 @@ def _unique_names(names: np.ndarray, tree_offsets: np.ndarray) -> np.ndarray:
 
 
 def _name_rows(width: int, n_names: int) -> int:
-    """Rows of node names to write and read at once: a chunk of at most 16 MiB."""
-    return int(
-        max(1, min(_NAME_BLOCK_ROWS, n_names, _NAME_CHUNK_BYTES // max(4 * width, 1)))
-    )
+    """Rows of node names to write and read at once: a chunk of a new store's text column."""
+    return column_chunk_rows(n_names, fixed_text_bytes(1, max(1, width)))
 
 
 def _names_width(names: np.ndarray) -> int:

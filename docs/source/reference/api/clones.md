@@ -767,7 +767,7 @@ The import checks the memory budget before it reads any file, for every file at 
 | Cutting | 64 per node; for each clone 608 and eight per character of the widest label; 56 per cell; a stored chunk of names twice; and what [saving clones](#read-export-and-plot-clones) holds |
 | Each import, load or cut | 4 MiB |
 
-Peaks that tracemalloc recorded stayed within these budgets on 52,000 leaves on one line, 240-character Greek names, 200 files, TreeData with character states, in Zarr, as a star of 50,000 leaves, with attributes that hold objects, and with a million lists and 300,000 keys beside its tree, loading, and cuts into a few clones, into one clone per cell and at a depth, and a 59 MB tree of 1.28 million leaves on one line parsed within its smallest budget. Master stores cell IDs in chunks of 100,000 rows, so reading a few IDs costs a whole chunk, which dominates the budget of small imports.
+Peaks that tracemalloc recorded stayed within these budgets on 52,000 leaves on one line, 240-character Greek names, 200 files, TreeData with character states, in Zarr, as a star of 50,000 leaves, with attributes that hold objects, and with a million lists and 300,000 keys beside its tree, loading, and cuts into a few clones, into one clone per cell and at a depth, and a 59 MB tree of 1.28 million leaves on one line parsed within its smallest budget. Reading a few cell IDs costs the stored chunk that holds them: in a new store a chunk of at most 100,000 of its cells ([cell column chunks](../developers/zarr-internals#cell-column-chunks)), and in a store written with chunks of 100,000 rows one of those, which dominates the budget of small imports there.
 
 ## Clones
 

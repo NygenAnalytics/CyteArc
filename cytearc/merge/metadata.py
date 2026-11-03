@@ -22,7 +22,11 @@ from ..storage.budget import ResourceBudget
 from ..storage.copy import COLUMN_METADATA_ATTRIBUTES
 from ..storage.execution import admitted_worker_split
 from ..storage.identity import GENERATED_FEATURE_COLUMNS, clear_column
-from ..storage.layout import PROFILE_METADATA_CHUNK, _encoded_chunk_bound
+from ..storage.layout import (
+    PROFILE_METADATA_CHUNK,
+    _encoded_chunk_bound,
+    column_chunk_rows,
+)
 from ..storage.metadata_keys import (
     ASSAY_MEMBERSHIP_ROLE,
     assay_membership_column,
@@ -144,15 +148,37 @@ class CellMetadataPlan:
     sourceColumns: tuple[dict[str, str], ...]
 
     def peak_write_bytes_at(self, rows: int, *, chunk_rows: int) -> int:
+        """Bound writing each column ``rows`` rows at a time, the costliest of them.
+
+        ``chunk_rows`` is the chunk of a column of narrow values, which a
+        wider column clips to the rows whose values fit 16 MiB.
+        """
         return max(
-            (_band_write_bytes(spec, rows, chunk_rows) for spec in self.columns),
+            (
+                _band_write_bytes(
+                    spec,
+                    rows,
+                    column_chunk_rows(
+                        chunk_rows, max(1, spec.dtype.itemsize), max_rows=chunk_rows
+                    ),
+                )
+                for spec in self.columns
+            ),
             default=1,
         )
 
 
-def metadata_chunk_rows(row_plan: RowPlan) -> int:
-    """Return the deterministic chunk width for merged cell metadata."""
-    return max(1, min(PROFILE_METADATA_CHUNK, int(row_plan.nCells)))
+def metadata_chunk_rows(row_plan: RowPlan, dtype: Any = bool) -> int:
+    """Return the rows of each stored chunk of a merged cell column of ``dtype``.
+
+    A column of narrow values, the default, has chunks of at most 100,000 of
+    the merged cells; a wider one, as many of them as fit 16 MiB.
+    """
+    return column_chunk_rows(
+        int(row_plan.nCells),
+        max(1, np.dtype(dtype).itemsize),
+        max_rows=PROFILE_METADATA_CHUNK,
+    )
 
 
 def effective_metadata_segment_rows(
@@ -1110,8 +1136,8 @@ def write_cell_metadata(
         del root[cell_slot]
     group = root.create_group(cell_slot)
     segment_rows = effective_metadata_segment_rows(metadata_plan, row_plan)
-    chunk_size = metadata_chunk_rows(row_plan)
     for spec in metadata_plan.columns:
+        chunk_size = metadata_chunk_rows(row_plan, spec.dtype)
         blocks = _iter_column_blocks(
             spec,
             row_plan,
@@ -1163,8 +1189,8 @@ def validate_cell_metadata(
     if group.attrs.get("complete") is not True:
         return f"cell metadata group {cell_path!r} is not complete"
 
-    expected_chunks = (metadata_chunk_rows(row_plan),)
     for spec in metadata_plan.columns:
+        expected_chunks = (metadata_chunk_rows(row_plan, spec.dtype),)
         if spec.name not in group:
             return f"cell metadata column {spec.name!r} is missing"
         array = as_zarr_array(group[spec.name], name=f"{cell_path}/{spec.name}")

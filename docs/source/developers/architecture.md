@@ -46,6 +46,7 @@ These calls do not create module-load cycles.
   profiles, materialization, ANN persistence, selection snapshots, run/stage records, Zarr runtime
   guards, and artifact lineage reports.
   It also owns the operation revision registry (`storage/operation_revisions.py`, see [](operation_revisions.md)), the finite-value contract of artifact arrays (`storage/finite_values.py`), and the writer destination contract (`storage/destinations.py`).
+  `storage/layout.py` holds `column_chunk_rows`, by which every writer of a cell table chunks a new column and a saved phylogeny its node names; the writers that cell and feature tables share take their chunk rows from their caller ({ref}`cell column chunks <cell_column_chunks>`).
   `storage/content_stamps.py` reuses a value computed from a stored array, such as the
   fingerprint of the ordered row IDs that every selection check compares, while a stamp of the
   array's metadata document and stored chunk bytes is unchanged; any change to those bytes

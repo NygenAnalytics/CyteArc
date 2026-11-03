@@ -890,7 +890,20 @@ def test_the_join_counts_the_cells_ids_once(tmp_path) -> None:
             found = re.search(r"about (\d+) bytes", str(error))
             assert found is not None and int(found.group(1)) > budget, str(error)
             budget = int(found.group(1))
-    assert refusals[-1].startswith(f"Joining 3001 nodes of 1 trees to {n_cells} cells")
+    # The join refuses once, so the budget it names passes it. The IDs are
+    # stored in the one chunk of their 3,000 rows, so where Zarr's file
+    # buffers are 128 KiB, from Python 3.14, writing the nodes' names holds
+    # more and refuses after it.
+    joined = [
+        index
+        for index, refusal in enumerate(refusals)
+        if refusal.startswith(f"Joining 3001 nodes of 1 trees to {n_cells} cells")
+    ]
+    assert len(joined) == 1
+    assert all(
+        refusal.startswith("Writing the names of 3001 nodes")
+        for refusal in refusals[joined[0] + 1 :]
+    )
 
 
 def test_a_budget_too_small_is_refused_before_anything_is_saved(

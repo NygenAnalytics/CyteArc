@@ -12,9 +12,15 @@ from .arrays import (
     create_metadata_column,
     create_streamed_metadata_column,
     create_zarr_obj_array,
+    encode_metadata_values,
 )
 from .count_matrix import CountMatrixPolicy, create_product_counts_array
-from .layout import _group_zarr_format
+from .layout import (
+    PROFILE_METADATA_CHUNK,
+    ChunkRows,
+    _group_zarr_format,
+    column_chunk_rows,
+)
 from .metadata_keys import (
     ASSAY_MEMBERSHIP_ROLE,
     assay_membership_attributes,
@@ -286,7 +292,9 @@ class DerivedAssayTransaction:
         """Write the pending assay's membership column.
 
         ``source`` names a boolean cell column to copy, or holds one boolean
-        per cell, which is chunked like the cell table's ``I`` column.
+        per cell. The column is chunked as
+        :func:`~cytearc.storage.layout.column_chunk_rows` chunks a new cell
+        column, whatever the chunks of the column it copies.
         """
         cells = as_zarr_group(
             self.root[_cell_data_path(self.workspace)], name="cellData"
@@ -294,10 +302,9 @@ class DerivedAssayTransaction:
         values: zarr.Array | np.ndarray
         if isinstance(source, str):
             values = as_zarr_array(cells[source], name=source)
-            rows = max(1, int(values.chunks[0]))
         else:
             values = np.asarray(source, dtype=bool)
-            rows = max(1, int(as_zarr_array(cells["I"], name="I").chunks[0]))
+        rows = column_chunk_rows(n_cells, np.dtype(bool).itemsize)
         # The copy streams one chunk at a time and never replaces a column.
         create_streamed_metadata_column(
             cells,
@@ -606,15 +613,25 @@ def _create_empty_columns(
     ids_dtype: Any,
     names_dtype: Any,
     profile: StorageProfile | None,
+    chunk_rows: ChunkRows | None = None,
 ) -> None:
-    """Create blockwise-fillable ``ids`` and ``names`` and an all-true ``I``."""
+    """Create blockwise-fillable ``ids`` and ``names`` and an all-true ``I``.
+
+    ``chunk_rows`` gives each column's chunk from its rows and the bytes of
+    its values, as a cell table's writer passes it; without it, chunks hold
+    100,000 rows.
+    """
     for name, dtype in (("ids", ids_dtype), ("names", names_dtype), ("I", bool)):
         column = create_metadata_column(
             group,
             name,
             dtype=dtype,
             shape=n_rows,
-            chunkSize=100_000,
+            chunkSize=(
+                PROFILE_METADATA_CHUNK
+                if chunk_rows is None
+                else chunk_rows(n_rows, max(1, np.dtype(dtype).itemsize))
+            ),
             profile=profile,
         )
         if name == "I":
@@ -629,11 +646,22 @@ def create_cell_data(
     profile: StorageProfile | None = None,
 ) -> zarr.Group:
     group = root.create_group(_cell_data_path(workspace))
-    create_zarr_obj_array(group, "ids", ids, ids.dtype, profile=profile)
-    create_zarr_obj_array(group, "names", names, names.dtype, profile=profile)
-    create_zarr_obj_array(
-        group, "I", np.ones(len(ids), dtype=bool), "bool", profile=profile
-    )
+    for name, values in (
+        ("ids", ids),
+        ("names", names),
+        ("I", np.ones(len(ids), dtype=bool)),
+    ):
+        # Encoded once: the stored width of the text sets its chunk, and
+        # writing the encoded values copies them no further.
+        stored = encode_metadata_values(values, values.dtype, name=name)
+        create_zarr_obj_array(
+            group,
+            name,
+            stored,
+            stored.dtype,
+            chunk_size=column_chunk_rows(len(stored), max(1, stored.dtype.itemsize)),
+            profile=profile,
+        )
     return group
 
 
@@ -648,6 +676,11 @@ def create_empty_cell_data(
     """Create cell metadata columns that can be filled blockwise."""
     group = root.create_group(_cell_data_path(workspace))
     _create_empty_columns(
-        group, n_cells, ids_dtype=id_dtype, names_dtype=name_dtype, profile=profile
+        group,
+        n_cells,
+        ids_dtype=id_dtype,
+        names_dtype=name_dtype,
+        profile=profile,
+        chunk_rows=column_chunk_rows,
     )
     return group

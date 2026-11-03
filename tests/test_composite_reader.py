@@ -29,8 +29,10 @@ from cytearc.storage.feature_stream import (
     map_feature_cell_bands,
     map_feature_read_groups,
 )
+from cytearc.storage.arrays import create_metadata_column
 from cytearc.storage.io_policy import StorageIoPolicy
 from cytearc.storage.geometry import array_geometry
+from cytearc.storage.layout import PROFILE_METADATA_CHUNK
 from tests.test_composite import _write_source, count_fallbacks
 
 
@@ -1634,6 +1636,19 @@ def test_composite_metadata_schema_prefetch_bounds_actual_reads(
     source.cells.insert(
         "cohort", [f"study-{index % 3}" for index in range(96)], key=None
     )
+    # The schema's columns in chunks of 100,000 rows, as stores written before
+    # cell columns were chunked by their rows keep them, so that each read of
+    # the schema holds about a megabyte: 8 MiB admits one at a time.
+    for column in ("ids", "names", "cohort"):
+        values = source.cells._get_array(column)[:]
+        create_metadata_column(
+            source.cells._group,
+            column,
+            data=values,
+            dtype=values.dtype,
+            chunkSize=PROFILE_METADATA_CHUNK,
+            overwrite=True,
+        )
     source = DataStore(
         source.zarr_loc,
         nthreads=4,
@@ -1762,9 +1777,9 @@ def test_composite_metadata_schema_prefetch_skips_working_set_that_cannot_fit(
         monkeypatch.setattr(
             module, "is_remote_zarr_location", lambda path: str(path) == source_root
         )
-    options = (
-        {"capacity_bytes": 2_000_000} if limit == "capacity" else {"max_entries": 2}
-    )
+    # The schema's chunks of 96 IDs, 96 names and 96 cohorts are 4,992 bytes:
+    # a cache one byte smaller, or of two entries, cannot hold them.
+    options = {"capacity_bytes": 4_991} if limit == "capacity" else {"max_entries": 2}
     monkeypatch.setattr(create, "new_source_cache", lambda: SourceCache(**options))
     get = LocalStore.get
     plan = create.plan_cell_metadata
@@ -1838,12 +1853,14 @@ def test_composite_metadata_cache_waits_for_memory_admission(
         return await get(self, key, *args, **kwargs)
 
     monkeypatch.setattr(LocalStore, "get", record)
+    # The largest budget at which the scan of the schema's chunks of 96 rows
+    # cannot admit one row, as measured; one byte more admits it.
     with pytest.raises(MemoryError, match="metadata schema discovery"):
         create_composite(
             {"source": source},
             at=tmp_path / "joint.zarr",
             features="union",
-            mem_budget="64K",
+            mem_budget=6_632,
             nthreads=1,
         )
     assert not requests

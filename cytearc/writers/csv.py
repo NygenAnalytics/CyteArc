@@ -170,6 +170,7 @@ class CSVtoZarr:
         from ..storage.identity import CountSummary, finalize_counts
         from ..storage.schema import load_count_array
         from ..storage.metadata_keys import metadata_column_keys
+        from ..storage.layout import column_chunk_rows
         from ._store import keyed_metadata_columns, write_metadata_column
 
         store = load_count_array(self.z, self.assayName, self.workspace)
@@ -231,6 +232,7 @@ class CSVtoZarr:
                 values,
                 missing,
                 profile=self.profile,
+                chunk_rows=column_chunk_rows,
             )
         logger.info(
             f"Wrote {self.csvr.nCells} cells and {self.csvr.nFeatures} features "

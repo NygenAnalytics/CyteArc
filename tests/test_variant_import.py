@@ -17,7 +17,7 @@ from cytearc.metadata.rows import text_read_bytes
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import every_cell
 from tests.memory_helpers import at_budget, smallest_budget, traced_peak
-from tests.storage_helpers import copy_store
+from tests.storage_helpers import copy_store, open_store, rechunk_column
 from tests.variant_helpers import (
     assert_tables,
     expected_gift,
@@ -750,9 +750,25 @@ def test_the_import_counts_the_read_of_cell_ids_before_it_reads_them(
         store.memoryBytes = reading - 1
         with pytest.raises(MemoryError, match=f"holds about {reading} bytes"):
             run()
-    store.memoryBytes = reading
-    ref = run()
+    # At the bound the IDs are read once, and the parse, which the read of the
+    # 48 IDs in the one chunk of their 48 rows no longer leaves room for,
+    # refuses before it reads a row, writing nothing.
+    reads: list[object] = []
+    read_ids = operations.read_metadata_rows_chunkwise
+
+    def counted(*arguments, **options):
+        reads.append(arguments)
+        return read_ids(*arguments, **options)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(operations, "read_metadata_rows_chunkwise", counted)
+        store.memoryBytes = reading
+        with pytest.raises(MemoryError, match="before it reads a row, which leaves"):
+            run()
+    assert len(reads) == 1
+    assert store.artifacts.list(kind="variant_counts") == []
     store.memoryBytes = 1 << 30
+    ref = run()
     assert store.variants.load_counts(ref, sites=[]).cells.shape[0] == len(
         TRUTH.clones.cell_ids
     )
@@ -822,18 +838,33 @@ def test_load_counts_counts_the_ids_it_reads_and_finds_cells_among(
     def unread(*_arguments, **_options):
         raise AssertionError("the cell IDs were read")
 
+    least = []
     for name, load in loads.items():
         needed = _refused_estimate(store, load, 1)
         assert needed > chunk, name
+        least.append(needed)
         with monkeypatch.context() as patched:
             patched.setattr(operations, "read_metadata_rows_chunkwise", unread)
             store.memoryBytes = needed - 1
             with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
                 load()
-    # Without a cell, no ID is read, so a budget far below a chunk of IDs
-    # loads the sites.
-    store.memoryBytes = chunk // 10
-    assert store.variants.load_counts(ref, cell_selection=[]).cells.empty
+    # Without a cell, no ID is read: the sites load at the budget that loading
+    # no cell names, below what reading the IDs needs, and read no row of
+    # them.
+    empty = _refused_estimate(
+        store, lambda: store.variants.load_counts(ref, cell_selection=[]), 1
+    )
+    assert empty < min(least)
+    read_ids = operations.read_metadata_rows_chunkwise
+
+    def no_row(metadata, column, rows):
+        assert column != "ids" or not len(rows), "the cell IDs were read"
+        return read_ids(metadata, column, rows)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(operations, "read_metadata_rows_chunkwise", no_row)
+        store.memoryBytes = empty
+        assert store.variants.load_counts(ref, cell_selection=[]).cells.empty
 
 
 def test_load_counts_names_counts_of_another_kind_missing_or_incomplete(
@@ -1603,9 +1634,12 @@ def test_got_multi_reads_come_with_every_call_that_has_umis(store, tmp_path) -> 
 def test_a_budget_without_room_for_the_rewritten_chunks_writes_nothing(
     store, tmp_path
 ) -> None:
-    # The rows parse and spill within the budget that reading the cells' IDs
-    # takes, but appending them rewrites chunks of about four times the
-    # 536,000 rows' 4-byte values.
+    # With the IDs in a chunk of 100,000 rows, as a store written before cell
+    # columns were chunked by their rows keeps them, the rows parse and spill
+    # within the budget that reading the cells' IDs takes, but appending them
+    # rewrites chunks of about four times the 536,000 rows' 4-byte values.
+    rechunk_column(store.cells._group, "ids")
+    store = open_store(store.zarr_loc)
     ids = [str(cell) for cell in store.cells.fetch_all("ids")]
     folder = tmp_path / "final"
     _large_mgatk(folder, ids, seed=4, n_positions=4_000)

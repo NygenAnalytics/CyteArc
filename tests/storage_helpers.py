@@ -120,6 +120,28 @@ def write_count_store(
         finalize_writer_counts_t(root, assay, None)
 
 
+def rechunk_column(group: zarr.Group, name: str, rows: int = 100_000) -> None:
+    """Store column ``name`` of ``group`` again in chunks of ``rows`` rows, with its attributes.
+
+    Stores written before cell columns were chunked by their rows and widths
+    keep them in chunks of 100,000 rows, which this writes for a test of how
+    such a store is read.
+    """
+    from cytearc.storage.arrays import create_metadata_column
+
+    array = group[name]
+    values, attributes = np.asarray(array[:]), dict(array.attrs)
+    create_metadata_column(
+        group,
+        name,
+        data=values,
+        dtype=values.dtype,
+        chunkSize=rows,
+        overwrite=True,
+        attributes=attributes,
+    )
+
+
 def insert_nullable_cell_column(
     datastore: Any,
     name: str,

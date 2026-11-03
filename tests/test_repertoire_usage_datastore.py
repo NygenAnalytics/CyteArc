@@ -50,6 +50,7 @@ from tests.memory_helpers import (
     named_budget,
 )
 from tests.clone_truth import clone_truth, receptor_truth
+from tests.storage_helpers import rechunk_column
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -605,6 +606,11 @@ def _chunk(array) -> int:
 )
 def test_each_step_is_checked_before_it_reads_or_allocates(tmp_path, source) -> None:
     store, receptors, clonotypes = _sources(tmp_path)
+    # The samples in a chunk of 100,000 rows, as a store written before cell
+    # columns were chunked by their rows keeps them, so that grouping by them
+    # holds the most of the steps and its refusal shows what it counts.
+    rechunk_column(store.cells._group, "sample")
+    store = receptor_store(tmp_path)
     group = artifact_group(store.zw, receptors)
     of_clonotypes = source == "clonotypes"
     ref = clonotypes if of_clonotypes else receptors
