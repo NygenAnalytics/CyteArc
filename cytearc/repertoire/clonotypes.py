@@ -78,7 +78,7 @@ DUAL_IR: tuple[str, ...] = ("any", "all", "primary_only")
 #: The values of ``sequence``: the junction's nucleotides or its residues.
 SEQUENCES: tuple[str, ...] = ("nt", "aa")
 #: The values of ``metric``: ``identity`` links identical junctions, and the
-#: distances link junctions within a cutoff.
+#: distances link junctions within ``max_distance``.
 METRICS: tuple[str, ...] = ("identity", *DISTANCE_METRICS)
 
 _VJ, _VDJ = 0, 1
@@ -376,7 +376,7 @@ def assign_clonotype_clusters(
     *,
     groups: np.ndarray,
     metric: str,
-    cutoff: int,
+    max_distance: int,
     v_genes: np.ndarray | None = None,
     j_genes: np.ndarray | None = None,
     receptor_arms: str = "all",
@@ -386,7 +386,7 @@ def assign_clonotype_clusters(
     """Group cells into clonotype clusters by similar chains.
 
     The rules are those of :func:`assign_clonotypes`, with two chains matching
-    when their sequences are within ``cutoff`` of each other by ``metric``,
+    when their sequences are within ``max_distance`` of each other by ``metric``,
     and share their gene calls when those are given, rather than identical:
     as in scirpy's ``define_clonotype_clusters``, two cells are linked when
     the arms that ``receptor_arms`` requires match, an arm matching through
@@ -409,7 +409,7 @@ def assign_clonotype_clusters(
         texts: The sequence of each code.
         groups: Each cell's group; -1 keeps a cell out.
         metric: ``"hamming"``, ``"normalized_hamming"`` or ``"levenshtein"``.
-        cutoff: The largest distance of matching chains.
+        max_distance: The largest distance of matching chains.
         v_genes: Each slot's V gene code, when matched chains must share it.
         j_genes: Each slot's J gene code, alike.
         receptor_arms: The arms that must agree.
@@ -417,7 +417,7 @@ def assign_clonotype_clusters(
         max_bytes: The memory that linking the cells may hold beyond the
             ``CLUSTER_SEARCH_BYTES`` that the search for near chains and the
             chunks of candidate cells hold: 32 bytes for each pair of chains
-            within the cutoff, and 32 for each link while it is held. None
+            within ``max_distance``, and 32 for each link while it is held. None
             for no limit.
 
     Returns:
@@ -425,7 +425,7 @@ def assign_clonotype_clusters(
 
     Raises:
         ValueError: If an option is unknown or the arrays do not align.
-        MemoryError: If the search for the pairs of chains within the cutoff
+        MemoryError: If the search for the pairs of chains within ``max_distance``
             would hold more than ``CLUSTER_SEARCH_BYTES`` and ``max_bytes``
             together, or the pairs and links need more than ``max_bytes``.
     """
@@ -447,7 +447,7 @@ def assign_clonotype_clusters(
             raise MemoryError(
                 f"Linking the cells of clonotype clusters needs about {held + needed} "
                 f"bytes for {what}, more than the {max_bytes} bytes left in the "
-                "memory budget. Require the same V and J genes, lower the cutoff, "
+                "memory budget. Require the same V and J genes, lower max_distance, "
                 "or raise mem_budget."
             )
         held += needed
@@ -457,20 +457,21 @@ def assign_clonotype_clusters(
         nonlocal held
         held -= freed
 
-    # Elements within the cutoff, with matching genes when asked: their
+    # Elements within max_distance, with matching genes when asked: their
     # sequences are compared within blocks of equal gene calls.
     n_elements = len(element_rows)
     blocks = unique_rows(element_rows[:, 1:])[1] if element_rows.shape[1] > 1 else None
     low, high = neighbor_pairs(
         names[element_rows[:, 0]],
         metric,
-        int(cutoff),
+        int(max_distance),
         blocks=blocks,
         max_bytes=None if max_bytes is None else CLUSTER_SEARCH_BYTES + max_bytes,
     )
     n_pairs = len(low)
     reserve(
-        _NEAR_PAIR_BYTES * n_pairs, f"the {n_pairs} pairs of chains within the cutoff"
+        _NEAR_PAIR_BYTES * n_pairs,
+        f"the {n_pairs} pairs of chains within max_distance",
     )
     # Each pair in both directions and each element with itself, codes that
     # are distinct, so a sort in place orders them for searching.
@@ -483,7 +484,7 @@ def assign_clonotype_clusters(
     near_codes.sort()
 
     def is_near(first: np.ndarray, second: np.ndarray) -> np.ndarray:
-        """Whether element pairs are within the cutoff; -1 is never near."""
+        """Whether element pairs are within max_distance; -1 is never near."""
         valid = (first >= 0) & (second >= 0)
         encoded = np.where(valid, first * n_elements + second, -1)
         found = np.searchsorted(near_codes, encoded)
@@ -734,7 +735,7 @@ _NONE = np.iinfo(np.int64).max
 #: variant keys with the candidate pairs that share them, and one chunk of
 #: candidate pairs of cells.
 CLUSTER_SEARCH_BYTES = 512 * 2**20
-# The bytes that each pair of chains within the cutoff holds while the cells
+# The bytes that each pair of chains within max_distance holds while the cells
 # are linked: its two codes, and its codes in both directions among those
 # that tell whether two chains are near.
 _NEAR_PAIR_BYTES = 32
@@ -1098,7 +1099,7 @@ class Clonotypes:
         within: The cell metadata columns that kept clonotypes apart.
         within_receptor_type: Whether receptor types kept clonotypes apart.
         metric: ``"identity"`` or the distance that linked similar chains.
-        cutoff: The largest distance of linked chains, 0 for identity.
+        max_distance: The largest distance of linked chains, 0 for identity.
     """
 
     cells: pd.DataFrame = field(repr=False)
@@ -1112,7 +1113,7 @@ class Clonotypes:
     within: tuple[str, ...]
     within_receptor_type: bool
     metric: str
-    cutoff: int
+    max_distance: int
 
 
 def clonotype_frames(

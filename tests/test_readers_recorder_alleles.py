@@ -307,7 +307,7 @@ def test_convexmls_character_matrix_names_one_character_per_column():
     raw = pd.read_csv(
         DATA / "convexml_tree_0_character_matrix.csv", dtype=str, keep_default_na=False
     )
-    read = read_all(DATA / "convexml_tree_0_character_matrix.csv", format="characters")
+    read = read_all(DATA / "convexml_tree_0_character_matrix.csv", format="laml")
     values = raw.iloc[:, 1:].to_numpy().reshape(-1)
     assert len(read) == len(values) == 400 * 39
     assert (read["state"] == "unedited").sum() == (values == "0").sum()
@@ -329,7 +329,7 @@ _TOKENS = {
     "typewriter": {"None": None, "NA": "missing", "": "unedited"},
     "typewriter_chains": {"None": None, "NA": "missing", "": "missing"},
     "treedata": {"None": None, "NA": "missing"},
-    "characters": {"None": None, "NA": "missing", "": None},
+    "laml": {"None": None, "NA": "missing", "": None},
     "table": {"None": "missing", "NA": "missing", "": "missing"},
 }
 
@@ -372,10 +372,10 @@ def _one_site_file(format: str, token: str, folder: Path) -> tuple[Path, dict]:
         path = folder / "consensus.tsv"
         path.write_text(f"cell\tACGTACGTACGT\tn_loci\nc1\t{token}\t1\n")
         return path, {}
-    if format == "characters":
+    if format == "laml":
         path = folder / "matrix.csv"
         path.write_text(f"cell,i1-a,i1-b\nc1,{token},0\n")
-        return path, {"format": "characters"}
+        return path, {"format": "laml"}
     if format == "table":
         path = folder / "table.tsv"
         path.write_text(f"cell\tallele\nc1\t{token}\n")
@@ -832,7 +832,7 @@ def test_each_format_is_recognised_from_its_header(tmp_path, header, format):
 def test_unknown_and_ambiguous_tables_name_the_formats(tmp_path):
     path = tmp_path / "unknown.csv"
     path.write_text("cell,clone\nc1,1\n")
-    with pytest.raises(ValueError, match="'characters' reads a character matrix"):
+    with pytest.raises(ValueError, match="'laml' reads a character matrix"):
         allele_layout(path)
     both = tmp_path / "both.csv"
     both.write_text("intID,cellBC,intBC,r1,RNF2,HEK3,EMX1\na,b,c,d,e,f,g\n")
@@ -1088,7 +1088,7 @@ _LINE_CASES = {
     "a matrix's state": (
         "matrix.csv",
         ',a-1,a-2\nc1,1,2\n\n"c\n2",1,2\nc3,1,\n',
-        {"format": "characters"},
+        {"format": "laml"},
         "'' at 2, on line 6$",
     ),
     "a DNA Typewriter chain without a cell": (
@@ -1154,10 +1154,10 @@ _ROW_CASES = {
         '2\tc2\t"23_268del\n"\n2\tc3\t23_268del\n',
         {"integrations": "CA"},
     ),
-    "characters": (
+    "laml": (
         "matrix.csv",
         ',a-1\nc1,1\n\nc2,"1\n"\nc3,1\n',
-        {"format": "characters"},
+        {"format": "laml"},
     ),
     "typewriter_chains": (
         "chains.csv",
@@ -1285,16 +1285,16 @@ def test_character_matrices_without_a_cell_column_name_read_as_r_writes_them(
     # none that a character matrix writes.
     path.write_text("a-1,a-2\ncell1,0,\ncell2,2,3\n")
     with pytest.raises(ValueError, match="'' at 2, on line 2$"):
-        read_all(path, format="characters")
+        read_all(path, format="laml")
     path.write_text("a-1,a-2\ncell1,1,-1\ncell2,2,3\n")
-    read = read_all(path, format="characters")
+    read = read_all(path, format="laml")
     assert read["allele"].tolist() == ["1", None, "2", "3"]
     # A matrix whose rows end in a delimiter after a named cell column gives
     # an empty last state, or PEtracer a cell column among its characters,
     # and is refused rather than read one column over.
     path.write_text("cell,a-1,a-2\ncell1,1,2,\ncell2,2,3,\n")
     with pytest.raises(ValueError, match="'' at 2, on lines 2, 3$"):
-        read_all(path, format="characters")
+        read_all(path, format="laml")
     path.write_text("cell_barcode,intID1-RNF2\ncell1,1,\n")
     with pytest.raises(
         ValueError,
@@ -1457,16 +1457,16 @@ def test_character_names_split_on_their_last_hyphen(tmp_path):
     path = tmp_path / "matrix.csv"
     path.write_text("cell,E7.5-R1-int3-RNF2,-a\nc1,0,0\n")
     with pytest.raises(ValueError, match="no integration or no site"):
-        allele_layout(path, format="characters")
+        allele_layout(path, format="laml")
     path.write_text("cell,E7.5-R1-int3-RNF2,int9\nc1,0,1\n")
-    read = read_all(path, format="characters")
+    read = read_all(path, format="laml")
     assert list(zip(read["integration"], read["site"], strict=True)) == [
         ("E7.5-R1-int3", "RNF2"),
         ("int9", ""),
     ]
     path.write_text("cell,a-1,a-1\nc1,0,1\n")
     with pytest.raises(ValueError, match="names a character twice"):
-        allele_layout(path, format="characters")
+        allele_layout(path, format="laml")
 
 
 def test_gzip_files_read_as_plain_ones(tmp_path):

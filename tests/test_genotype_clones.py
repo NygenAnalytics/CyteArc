@@ -10,6 +10,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from cytearc.storage.artifacts import artifact_group
@@ -17,7 +18,7 @@ from tests.clone_helpers import every_cell, write_cells_store
 from tests.memory_helpers import smallest_budget, traced_peak
 from tests.storage_helpers import copy_store
 from tests.variant_helpers import write_variant_store
-from tests.variant_truth import variant_truth
+from tests.variant_truth import mito_clone_truth, variant_truth, write_mgatk
 
 TRUTH = variant_truth()
 IDS = [str(cell) for cell in TRUTH.clones.cell_ids]
@@ -92,7 +93,7 @@ def test_cells_link_where_they_agree_and_ambiguous_cells_join_none(
     assert attributes["n_cells_mutant"] == 6
     assert attributes["n_sites"] == 2
     record = store.artifacts.inspect(clones)
-    assert record.operation == "genotype_clones"
+    assert record.operation == "call_genotype_clones"
     assert record.parameters["similarity"] == 1.0
     assert record.parameters["inclusive"] is True
 
@@ -222,6 +223,49 @@ def test_clones_of_chosen_sites_and_within_groups(store, tmp_path) -> None:
     assert within != store.variants.genotype_clones(genotypes)
 
 
+def test_every_genotype_method_names_sites_by_label_or_position(tmp_path) -> None:
+    # mgatk's counts lie on one contig, whose positions name its sites: a
+    # position resolves to the label that the genotypes record, so naming
+    # sites either way calls, loads and clones the same.
+    truth = mito_clone_truth()
+    mito = write_variant_store(tmp_path / "store.zarr", truth)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        counts = mito.variants.import_counts(
+            write_mgatk(truth, tmp_path / "final"), cell_selection=every_cell(mito)
+        )
+    (first, first_ref, first_alt), (second, second_ref, second_alt) = (
+        truth.variant_sites()[:2]
+    )
+    labels = [f"chrM:{first}", f"chrM:{second}"]
+    alleles = {labels[0]: (first_ref, first_alt), labels[1]: (second_ref, second_alt)}
+    genotypes = mito.variants.genotypes(
+        counts, method="threshold", sites=labels, alleles=alleles, min_mutant_umis=1
+    )
+    assert (
+        mito.variants.genotypes(
+            counts,
+            method="threshold",
+            sites=[first, second],
+            alleles=alleles,
+            min_mutant_umis=1,
+        )
+        == genotypes
+    )
+    by_position = mito.variants.load_genotypes(genotypes, sites=[np.int64(second)])
+    by_label = mito.variants.load_genotypes(genotypes, sites=[labels[1]])
+    assert by_position.sites.index.tolist() == [labels[1]]
+    pd.testing.assert_frame_equal(by_position.calls, by_label.calls)
+    assert len(by_label.calls) > 0
+    clones = mito.variants.genotype_clones(genotypes, sites=[labels[0]])
+    assert mito.variants.genotype_clones(genotypes, sites=[first]) == clones
+    assert mito.artifacts.inspect(clones).parameters["sites"] == [labels[0]]
+    with pytest.raises(ValueError, match="The genotypes have no site 4"):
+        mito.variants.genotype_clones(genotypes, sites=[4])
+    with pytest.raises(TypeError, match="must hold site labels or positions"):
+        mito.variants.load_genotypes(genotypes, sites=[True])
+
+
 def test_saved_genotype_clones_are_reused_and_called_again(store, tmp_path) -> None:
     genotypes = _genotypes(store, tmp_path)
     first = store.variants.genotype_clones(genotypes)
@@ -242,8 +286,6 @@ def test_genotype_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -
         store.variants.genotype_clones(genotypes, sites=["S3"])
     with pytest.raises(ValueError, match="sites names no site"):
         store.variants.genotype_clones(genotypes, sites=[])
-    with pytest.raises(ValueError, match="also a column of the result"):
-        store.variants.genotype_clones(genotypes, within="ambiguous")
     with pytest.raises(ValueError, match="not a cell metadata column"):
         store.variants.genotype_clones(genotypes, within="mouse")
     store.cells.insert(
@@ -251,6 +293,24 @@ def test_genotype_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -
     )
     with pytest.raises(ValueError, match="no label for 1 cells with a mutant call"):
         store.variants.genotype_clones(genotypes, within="half")
+
+
+def test_within_may_name_a_column_of_the_loaded_clones(store, tmp_path) -> None:
+    # The within labels join no table, so a column named like the loaded
+    # clones' ambiguous flag keeps clones apart as any column does.
+    genotypes = _genotypes(store, tmp_path)
+    donors = np.where(np.arange(len(IDS)) == 4, "d2", "d1").astype(object)
+    store.cells.insert("donor", donors)
+    store.cells.insert("ambiguous", donors.copy())
+    named = store.variants.genotype_clones(genotypes, within="ambiguous")
+    assert _clones(store, named) == _clones(
+        store, store.variants.genotype_clones(genotypes, within="donor")
+    )
+    assert list(store.clones.load_clones(named).cells.columns) == [
+        "clone",
+        "clone_size",
+        "ambiguous",
+    ]
 
 
 def test_genotype_clones_refuse_a_budget_too_small_before_writing(

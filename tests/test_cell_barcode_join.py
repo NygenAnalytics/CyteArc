@@ -214,7 +214,7 @@ def _phylogeny(store, paths, **options):
 
 def _leaf_cells(store, ref) -> set[str]:
     nodes = store.clones.load_phylogeny(ref).nodes
-    return set(nodes["cell"].dropna())
+    return set(nodes["ids"].dropna())
 
 
 IMPORTERS = {

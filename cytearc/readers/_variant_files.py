@@ -56,7 +56,7 @@ VARIANT_FORMATS: tuple[str, ...] = (
     "got_multi",
     "gotcha",
     "tapestri",
-    "dabseq",
+    "dab_seq",
 )
 _GZIP_SIGNATURE = b"\x1f\x8b"
 _HDF5_SIGNATURE = b"\x89HDF\r\n\x1a\n"
@@ -421,7 +421,7 @@ def is_hdf5(path: str | os.PathLike[str]) -> bool:
     return _signature(path) == _HDF5_SIGNATURE
 
 
-_DABSEQ_ARRAYS = ("AD", "RD", "DP", "GT", "VARIANTS", "CELL_BARCODES")
+_DAB_SEQ_ARRAYS = ("AD", "RD", "DP", "GT", "VARIANTS", "CELL_BARCODES")
 
 
 def hdf5_format(path: str) -> str:
@@ -440,8 +440,8 @@ def hdf5_format(path: str) -> str:
             return "mito"
         if isinstance(handle.get("assays/dna_variants"), h5py.Group):
             return "tapestri"
-        if all(isinstance(handle.get(name), h5py.Dataset) for name in _DABSEQ_ARRAYS):
-            return "dabseq"
+        if all(isinstance(handle.get(name), h5py.Dataset) for name in _DAB_SEQ_ARRAYS):
+            return "dab_seq"
     raise ValueError(
         f"{path} is an HDF5 file of none of giftwrap's counts, MiTo's allele "
         "frequency matrix, Tapestri's DNA variants and DAb-seq's genotypes"

@@ -236,9 +236,9 @@ def top_clones(
     pair_clones: np.ndarray,
     pair_cells: np.ndarray,
     n_groups: int,
-    top: int,
+    top_n: int,
 ) -> np.ndarray:
-    """The union of each group's ``top`` clones with the most cells.
+    """The union of each group's ``top_n`` clones with the most cells.
 
     Ties go to the lower clone code, the larger clone overall, so the choice
     does not depend on the order of the cells.
@@ -250,7 +250,7 @@ def top_clones(
     ordered_groups = np.asarray(pair_groups)[order]
     first = np.searchsorted(ordered_groups, np.arange(n_groups), side="left")
     rank = np.arange(len(order)) - first[ordered_groups]
-    return sorted_unique(np.asarray(pair_clones, dtype=np.int64)[order][rank < top])
+    return sorted_unique(np.asarray(pair_clones, dtype=np.int64)[order][rank < top_n])
 
 
 def _chosen_pairs(
@@ -350,8 +350,8 @@ class CloneOverlap:
     joined by commas.
 
     Attributes:
-        group_sizes: One row per group: ``group``, the key columns, ``cells``
-            and ``clones``.
+        group_sizes: One row per group: ``group``, the key columns,
+            ``n_cells`` and ``n_clones``.
         pairs: One row per pair of groups: ``group_1`` and ``group_2``, the
             indices ``shared``, ``jaccard``, ``sorensen``, ``overlap``,
             ``cosine``, ``morisita_horn`` and ``abundance_cosine``, and
@@ -376,9 +376,9 @@ class CloneTracking:
     """The cells of chosen clones in each group of cells.
 
     Attributes:
-        cells: One row per chosen clone and group, zeros included: ``clone``,
+        table: One row per chosen clone and group, zeros included: ``clone``,
             ``group`` (its labels joined by commas), the key columns,
-            ``cells`` and ``fraction``, the share of the group's cells with a
+            ``n_cells`` and ``fraction``, the share of the group's cells with a
             clone.
         clones: The clone artifact, such as a ``clones`` artifact.
         tracked: The chosen clone labels, largest first.
@@ -387,7 +387,7 @@ class CloneTracking:
         cell_selection: The cells kept, or None for every cell.
     """
 
-    cells: pd.DataFrame = field(repr=False)
+    table: pd.DataFrame = field(repr=False)
     clones: ArtifactRef
     tracked: tuple[str, ...]
     group_by: tuple[str, ...]

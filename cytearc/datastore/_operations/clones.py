@@ -120,7 +120,7 @@ else:
     _CloneOperationsBase = object
 
 #: The values of ``export_clones``'s ``format``.
-EXPORT_FORMATS = ("table", "matrix")
+EXPORT_FORMATS = ("cospar", "matrix")
 
 
 def _stored_diagnostics(group: zarr.Group, operation: str) -> dict[str, int | float]:
@@ -263,7 +263,7 @@ _CURVE_BYTES_PER_KEY_COLUMN = 8
 # of expansion add a "group" column.
 _EXPANSION_COLUMNS = frozenset(
     {"group", "clone", "category", "group_clone_size", "group_clone_frequency"}
-    | {"cells", "clones", "fraction", "window"}
+    | {"n_cells", "n_clones", "fraction", "window"}
 )
 _DIVERSITY_COLUMNS = frozenset(
     {"group", *INDEX_COLUMNS, "order", "observed", "estimated", "at_size"}
@@ -273,8 +273,8 @@ _DIVERSITY_COLUMNS = frozenset(
 _RAREFACTION_COLUMNS = frozenset(
     {"group", "order", "size", "method", "diversity", "coverage"}
 )
-_OVERLAP_COLUMNS = frozenset({"group", "cells", "clones"})
-_TRACK_COLUMNS = frozenset({"group", "clone", "cells", "fraction"})
+_OVERLAP_COLUMNS = frozenset({"group", "n_cells", "n_clones"})
+_TRACK_COLUMNS = frozenset({"group", "clone", "n_cells", "fraction"})
 # Comparing groups holds, at its peak, about 220 bytes per pair of groups of
 # one stratum, the pairs' indices and their table, and 16 bytes per product of
 # two groups of the largest stratum, as measured on 1,000 and 2,000 groups;
@@ -292,9 +292,9 @@ _TRACK_BYTES_PER_ROW = 100
 _TRACK_BYTES_PER_KEY_COLUMN = 16
 # The columns of the tables of coupling and fate bias besides the groups'
 # labels, which a key column of the groups may not share.
-_COUPLING_COLUMNS = frozenset({"group", "cells", "clones"})
+_COUPLING_COLUMNS = frozenset({"group", "n_cells", "n_clones"})
 _FATE_BIAS_COLUMNS = frozenset(
-    {"group", "clone", "fate", "early_cells", "late_cells", "cells"}
+    {"group", "clone", "fate", "n_early_cells", "n_late_cells", "n_cells"}
     | {"fraction", "p_value", "q_value"}
 )
 # Checking that no cell is both early and late holds, for each cell of the
@@ -923,24 +923,25 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         clones: ArtifactRef,
         path: str | os.PathLike[str],
         *,
-        format: str = "table",
+        format: str = "cospar",
     ) -> int:
         """Write saved clones as a file that lineage tracing tools read.
 
-        ``"table"`` writes CoSpar's clone table, a CSV of ``Cell_ID`` and
-        ``Clone_ID`` with one row per cell with a clone, which CoSpar and
-        ``import_clones`` read. ``"matrix"`` writes a cells by clones Matrix
-        Market file of the cells with a clone, holding a 1 where a cell
-        belongs to a clone, with ``cells.tsv`` and ``clones.tsv`` beside it
-        that name its rows and columns, replacing files of those names;
-        ``import_clones`` reads the matrix with its lists. Cell IDs are this
+        ``"cospar"`` writes CoSpar's clone table, a CSV of ``Cell_ID`` and
+        ``Clone_ID`` with one row per cell with a clone, which CoSpar reads
+        and ``import_clones`` reads as ``format="cospar"``. ``"matrix"``
+        writes a cells by clones Matrix Market file of the cells with a
+        clone, holding a 1 where a cell belongs to a clone, with
+        ``cells.tsv`` and ``clones.tsv`` beside it that name its rows and
+        columns, replacing files of those names; ``import_clones`` reads the
+        matrix with its lists as ``format="matrix"``. Cell IDs are this
         store's, and a path ending in ``.gz`` is gzip-compressed. Clone
         probabilities are not written.
 
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             path: The file to write.
-            format: ``"table"`` or ``"matrix"``.
+            format: ``"cospar"`` or ``"matrix"``.
 
         Returns:
             The number of cells written.
@@ -948,7 +949,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a ``clones`` or ``clonotypes``
-                artifact, ``format`` is unknown, a ``"table"`` would hold a
+                artifact, ``format`` is unknown, a ``"cospar"`` table would hold a
                 clone label that reads as no clone, such as ``"NA"``, or a
                 ``"matrix"`` would list a label or cell ID that holds a line
                 break.
@@ -988,7 +989,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         source = self._read_clone_input(clones, with_ids=True)
         assert source.clone_ids is not None
         codes, clone_ids = source.codes, source.clone_ids
-        if format == "table":
+        if format == "cospar":
             # A clone table reads these labels back as cells without a clone.
             lost = [label for label in clone_ids.tolist() if label in MISSING_TEXT]
             if lost:
@@ -1000,7 +1001,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 )
         assigned = codes >= 0
         cell_ids = np.asarray(self._clone_cell_ids(clones), dtype=object)[assigned]
-        if format == "table":
+        if format == "cospar":
             return write_clone_table(path, cell_ids, clone_ids[codes[assigned]])
         return write_clone_matrix(path, cell_ids, codes[assigned], clone_ids)
 
@@ -2052,15 +2053,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         group_by: str | Sequence[str] | None = None,
         groups: ArtifactRef | None = None,
         cell_selection: ArtifactRef | None = None,
-        top: int = 10,
+        top_n: int = 10,
         labels: Sequence[str] | None = None,
     ) -> CloneTracking:
         """Follow chosen clones across groups of cells.
 
-        By default the clones are the ``top`` with the most cells in each
+        By default the clones are the ``top_n`` with the most cells in each
         group, together, as scRepertoire's ``clonalCompare`` chooses them,
         with ties going to the larger clone overall; ``labels`` names them
-        instead, such as ``["3"]``. Each chosen clone gets its cells and share
+        instead, such as ``["clone_3"]``. Each chosen clone gets its cells and share
         of cells in every group, zeros included, so a clone that expands
         between time points or spreads between cell types shows it. The
         groups are those of
@@ -2074,16 +2075,17 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             groups: A cell-label artifact whose labels define the groups.
             cell_selection: Only these cells, or None for every cell of the
                 clones.
-            top: The clones with the most cells to take from each group.
+            top_n: The clones with the most cells to take from each group.
             labels: Clone labels to follow instead, as a sequence or a
                 one-dimensional array, or None.
 
         Returns:
-            One row per chosen clone and group, and the chosen clones' labels.
+            One row per chosen clone and group in its ``table``, and the
+            chosen clones' labels.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a clone artifact, ``top`` is not
+            ValueError: If ``clones`` is not a clone artifact, ``top_n`` is not
                 positive, ``labels`` is empty or a label names no clone, no
                 cell has both a clone and a group, a column of the groups is
                 missing or named twice, a key column names a column of the
@@ -2097,10 +2099,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 table of the chosen clones' groups does not fit the memory
                 budget.
         """
-        if isinstance(top, bool) or not isinstance(top, int | np.integer):
-            raise TypeError("top must be a positive integer")
-        if top < 1:
-            raise ValueError("top must be a positive integer")
+        if isinstance(top_n, bool) or not isinstance(top_n, int | np.integer):
+            raise TypeError("top_n must be a positive integer")
+        if top_n < 1:
+            raise ValueError("top_n must be a positive integer")
         if labels is not None:
             listed = _listed(labels)
             if listed is None or not all(isinstance(label, str) for label in listed):
@@ -2122,7 +2124,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         identifiers = source.clone_ids
         if labels is None:
             chosen = top_clones(
-                pair_groups, pair_codes, pair_cells, len(keys), int(top)
+                pair_groups, pair_codes, pair_cells, len(keys), int(top_n)
             )
         else:
             positions = pd.Index(identifiers).get_indexer(list(labels))
@@ -2160,7 +2162,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 f"Following {len(chosen)} clones through {len(keys)} groups "
                 f"gives {n_rows} rows and holds about {resident} bytes, more "
                 f"than the memory budget of {self.memoryBytes} bytes. Follow "
-                "fewer clones, with a smaller top or labels, or fewer groups, "
+                "fewer clones, with a smaller top_n or labels, or fewer groups, "
                 "or raise mem_budget."
             )
         followed, rows, counts = tracking_cells(
@@ -2175,10 +2177,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         table.insert(
             0, "clone", pd.array(tracked[followed], dtype=table["group"].dtype)
         )
-        table["cells"] = counts
-        table["fraction"] = counts / sizes["cells"].to_numpy()[rows]
+        table["n_cells"] = counts
+        table["fraction"] = counts / sizes["n_cells"].to_numpy()[rows]
         return CloneTracking(
-            cells=table,
+            table=table,
             clones=clones,
             tracked=tuple(str(label) for label in tracked.tolist()),
             group_by=group_columns(group_by),
@@ -2195,8 +2197,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         groups: ArtifactRef | None = None,
         cell_selection: ArtifactRef | None = None,
         method: str = COUPLING_METHODS[0],
-        permutations: int = 1000,
-        seed: int = 0,
+        n_permutations: int = 1000,
+        random_seed: int = 0,
     ) -> CloneCoupling:
         """Measure how strongly groups of cells share clones, against shuffled labels.
 
@@ -2226,11 +2228,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         the clones of both groups over the clones of either.
 
         Each value is compared with a null: the group labels of the cells with
-        a clone are shuffled ``permutations`` times, which keeps each clone's
+        a clone are shuffled ``n_permutations`` times, which keeps each clone's
         cells and each group's cells, and the coupling measured again. The
         z-score is the value's distance from the null mean in null standard
         deviations, so groups of different sizes compare. Permutation ``k``
-        draws from a random stream keyed by ``seed`` and ``k``, so the result
+        draws from a random stream keyed by ``random_seed`` and ``k``, so the result
         does not depend on ``nthreads``. The groups are ordered by average
         linkage on the coupling, the most coupled together.
 
@@ -2242,10 +2244,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 clones.
             method: ``"share_cosine"``, ``"abundance_cosine"``,
                 ``"normalized_covariance"`` or ``"jaccard"``.
-            permutations: The permutations of the null, 0 for none, or at
+            n_permutations: The permutations of the null, 0 for none, or at
                 least 2 to estimate its spread.
-            seed: The seed of the permutations, a non-negative integer below
-                2**64.
+            random_seed: The seed of the permutations, a non-negative integer
+                below 2**64.
 
         Returns:
             The groups' cells and clones, each pair's coupling with its null
@@ -2254,7 +2256,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a clone artifact, ``method`` is
-                unknown, ``permutations`` is 1 or negative, ``seed`` is
+                unknown, ``n_permutations`` is 1 or negative, ``random_seed`` is
                 negative or 2**64 or more, no cell has both a clone and a
                 group, fewer than two groups hold a cell with a clone, no two
                 groups share the labels that the clones keep apart, a column
@@ -2274,19 +2276,21 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise ValueError(
                 f"method must be one of {', '.join(COUPLING_METHODS)}, not {method!r}"
             )
-        if isinstance(permutations, bool) or not isinstance(
-            permutations, int | np.integer
+        if isinstance(n_permutations, bool) or not isinstance(
+            n_permutations, int | np.integer
         ):
-            raise TypeError("permutations must be a non-negative integer")
-        if permutations < 0 or permutations == 1:
+            raise TypeError("n_permutations must be a non-negative integer")
+        if n_permutations < 0 or n_permutations == 1:
             raise ValueError(
-                "permutations must be 0, for no null, or at least 2, to estimate "
+                "n_permutations must be 0, for no null, or at least 2, to estimate "
                 "its spread"
             )
-        if isinstance(seed, bool) or not isinstance(seed, int | np.integer):
-            raise TypeError("seed must be a non-negative integer")
-        if not 0 <= seed < 2**64:
-            raise ValueError("seed must be a non-negative integer below 2**64")
+        if isinstance(random_seed, bool) or not isinstance(
+            random_seed, int | np.integer
+        ):
+            raise TypeError("random_seed must be a non-negative integer")
+        if not 0 <= random_seed < 2**64:
+            raise ValueError("random_seed must be a non-negative integer below 2**64")
         source = self._read_clone_input(clones)
         keys, pair_groups, pair_codes, pair_cells = self._clone_pair_counts(
             source,
@@ -2323,7 +2327,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             n_pairs,
             int(pair_cells.sum()),
             len(pair_cells),
-            permutations=int(permutations),
+            n_permutations=int(n_permutations),
             # More workers than Numba's threads would only hold scratch.
             nthreads=min(
                 self.nthreads, int(getattr(numba.config, "NUMBA_NUM_THREADS"))
@@ -2347,8 +2351,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             len(keys),
             method=method,
             strata=strata,
-            permutations=int(permutations),
-            seed=int(seed),
+            n_permutations=int(n_permutations),
+            random_seed=int(random_seed),
             workers=workers,
             batch=batch,
         )
@@ -2357,7 +2361,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         pairs.insert(1, "group_2", names[pairs.pop("second").to_numpy()])
         logger.info(
             f"Measured the {method} coupling of {n_pairs} pairs of {len(keys)} "
-            f"groups against {int(permutations)} permutations on {workers} "
+            f"groups against {int(n_permutations)} permutations on {workers} "
             f"threads, {batch} at once, holding about {resident} bytes"
         )
         return CloneCoupling(
@@ -2366,8 +2370,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             order=tuple(str(name) for name in names[leaves_list(tree)].tolist()),
             linkage=tree,
             method=method,
-            permutations=int(permutations),
-            seed=int(seed),
+            n_permutations=int(n_permutations),
+            random_seed=int(random_seed),
             clones=clones,
             group_by=group_columns(group_by),
             groups=groups,
@@ -2418,7 +2422,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         fate, empty for none, so ``ds.select_cells(bias, include=["Neutrophil"])``
         keeps the early cells whose clones went mostly to neutrophils.
         ``codes``, each cell's clone, ``fate_codes``, its dominant fate's
-        position, ``late_cells`` and ``fractions``, one column per fate, are
+        position, ``n_late_cells``, its clone's late cells, and ``fractions``,
+        one column per fate, are
         its other per-cell arrays.
 
         Args:
@@ -2444,7 +2449,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 keep apart, fewer than two fates hold a late cell, a column of the fates
                 is missing or named twice, a key column names a column of the
                 result, two fates get one name, or a fate is named
-                ``"clone"``, ``"late_cells"`` or ``"fate"``.
+                ``"clone"``, ``"n_late_cells"`` or ``"fate"``.
             KeyError: If the store holds no such ``clones`` artifact, or not the
                 receptors of the clonotypes.
             RuntimeError: If the ``clones`` artifact or the receptors of the
@@ -2573,7 +2578,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "values": ((n_early,), None),
                 "codes": ((n_early,), "i"),
                 "fate_codes": ((n_early,), "i"),
-                "late_cells": ((n_early,), "i"),
+                "n_late_cells": ((n_early,), "i"),
                 "fractions": ((n_early, n_fates), "f"),
             },
             invalidate_cache=invalidate_cache,
@@ -2630,7 +2635,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "values": values,
                 "codes": early_codes.astype(np.int32),
                 "fate_codes": result.dominant.astype(np.int32),
-                "late_cells": result.late_cells,
+                "n_late_cells": result.late_cells,
                 "fractions": result.fractions,
                 "clone_codes": result.clones,
                 "clone_early_cells": result.clone_early_cells,
@@ -2720,7 +2725,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             self._clone_cell_ids(bias),
             codes=_read(group, "codes"),
             dominant=_read(group, "fate_codes"),
-            late_cells=_read(group, "late_cells"),
+            late_cells=_read(group, "n_late_cells"),
             fractions=_read(group, "fractions"),
             clone_ids=source.clone_ids,
             clones=_read(group, "clone_codes"),
@@ -2731,7 +2736,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             fates=keys,
         )
         fates = keys.rename(columns={"group": "fate"}).assign(
-            late_cells=_read(group, "fate_cells").astype(np.int64)
+            n_late_cells=_read(group, "fate_cells").astype(np.int64)
         )
         return CloneFateBias(
             cells=cells,
@@ -2751,10 +2756,10 @@ def _group_sizes(
     """One row per group: its name, labels, cells with a clone and clones."""
     n_groups = len(keys)
     return keys.assign(
-        cells=np.bincount(pair_groups, weights=pair_cells, minlength=n_groups).astype(
+        n_cells=np.bincount(pair_groups, weights=pair_cells, minlength=n_groups).astype(
             np.int64
         ),
-        clones=np.bincount(pair_groups, minlength=n_groups),
+        n_clones=np.bincount(pair_groups, minlength=n_groups),
     )
 
 

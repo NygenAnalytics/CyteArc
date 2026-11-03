@@ -125,7 +125,7 @@ def test_clusters_link_exactly_the_cells_that_the_pairwise_rules_link(
                     texts,
                     groups=groups,
                     metric=metric,
-                    cutoff=cutoff,
+                    max_distance=cutoff,
                     v_genes=genes if with_genes else None,
                     receptor_arms=receptor_arms,
                     dual_ir=dual_ir,
@@ -165,7 +165,7 @@ def test_a_zero_cutoff_gives_the_identity_clonotypes() -> None:
                 texts,
                 groups=groups,
                 metric="hamming",
-                cutoff=0,
+                max_distance=0,
                 receptor_arms=receptor_arms,
                 dual_ir=dual_ir,
             )
@@ -178,7 +178,7 @@ def test_cluster_assignment_checks_its_arguments() -> None:
     groups = np.array([0])
     with pytest.raises(ValueError, match="metric must be one of"):
         assign_clonotype_clusters(
-            sequences, texts, groups=groups, metric="identity", cutoff=0
+            sequences, texts, groups=groups, metric="identity", max_distance=0
         )
     with pytest.raises(ValueError, match="receptor_arms must be one of"):
         assign_clonotype_clusters(
@@ -186,20 +186,25 @@ def test_cluster_assignment_checks_its_arguments() -> None:
             texts,
             groups=groups,
             metric="hamming",
-            cutoff=1,
+            max_distance=1,
             receptor_arms="x",
         )
     with pytest.raises(ValueError, match="dual_ir must be one of"):
         assign_clonotype_clusters(
-            sequences, texts, groups=groups, metric="hamming", cutoff=1, dual_ir="x"
+            sequences,
+            texts,
+            groups=groups,
+            metric="hamming",
+            max_distance=1,
+            dual_ir="x",
         )
     with pytest.raises(ValueError, match="four slots"):
         assign_clonotype_clusters(
-            sequences[:, :3], texts, groups=groups, metric="hamming", cutoff=1
+            sequences[:, :3], texts, groups=groups, metric="hamming", max_distance=1
         )
     with pytest.raises(ValueError, match="one group per cell"):
         assign_clonotype_clusters(
-            sequences, texts, groups=np.array([0, 1]), metric="hamming", cutoff=1
+            sequences, texts, groups=np.array([0, 1]), metric="hamming", max_distance=1
         )
     with pytest.raises(ValueError, match="Gene codes must align"):
         assign_clonotype_clusters(
@@ -207,11 +212,11 @@ def test_cluster_assignment_checks_its_arguments() -> None:
             texts,
             groups=groups,
             metric="hamming",
-            cutoff=1,
+            max_distance=1,
             v_genes=np.zeros((1, 3)),
         )
     empty = assign_clonotype_clusters(
-        sequences, texts, groups=np.array([-1]), metric="hamming", cutoff=1
+        sequences, texts, groups=np.array([-1]), metric="hamming", max_distance=1
     )
     assert empty.codes.tolist() == [-1] and empty.n_clonotypes == 0
     chainless = assign_clonotype_clusters(
@@ -219,7 +224,7 @@ def test_cluster_assignment_checks_its_arguments() -> None:
         texts,
         groups=np.array([0, 0]),
         metric="levenshtein",
-        cutoff=1,
+        max_distance=1,
     )
     assert chainless.codes.tolist() == [-1, -1]
 
@@ -250,7 +255,7 @@ def test_clusters_do_not_depend_on_the_chunks_of_pairs(monkeypatch) -> None:
                 texts,
                 groups=groups,
                 metric="hamming",
-                cutoff=1,
+                max_distance=1,
                 receptor_arms=receptor_arms,
                 dual_ir=dual_ir,
             ).codes
@@ -261,7 +266,7 @@ def test_clusters_do_not_depend_on_the_chunks_of_pairs(monkeypatch) -> None:
             texts,
             groups=groups,
             metric="hamming",
-            cutoff=1,
+            max_distance=1,
             receptor_arms=receptor_arms,
             dual_ir=dual_ir,
         )
@@ -321,7 +326,7 @@ def test_linking_holds_no_more_than_the_smallest_budget_it_accepts(
             texts,
             groups=groups,
             metric="hamming",
-            cutoff=2,
+            max_distance=2,
             receptor_arms=receptor_arms,
             dual_ir=dual_ir,
             max_bytes=budget,

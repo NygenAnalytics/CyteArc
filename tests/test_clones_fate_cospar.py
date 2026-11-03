@@ -82,7 +82,7 @@ def test_coupling_equals_cospars_fate_coupling(experiment, method) -> None:
         group_by="cell_type",
         cell_selection=experiment.late,
         method=method,
-        permutations=0,
+        n_permutations=0,
     )
     assert sorted(result.group_sizes["group"]) == FATES
     found = _matrix(result.pairs, "coupling")
@@ -111,7 +111,7 @@ def test_the_null_agrees_with_cospars_permuted_couplings(experiment, method) -> 
         group_by="cell_type",
         cell_selection=experiment.late,
         method=method,
-        permutations=null["permutations"],
+        n_permutations=null["permutations"],
     )
     mean, spread = _matrix(result.pairs, "null_mean"), _matrix(result.pairs, "null_sd")
     expected_mean = np.asarray(null[method]["mean"])
@@ -147,7 +147,7 @@ def test_fate_fractions_equal_cospars_clonal_fate_map(experiment) -> None:
     expected = np.asarray(mapped["fractions"])
     # CoSpar gives an early cell whose clone has no late cell 0 in every
     # fate, where CyteArc gives it no fractions.
-    without = cells["late_cells"].to_numpy() == 0
+    without = cells["n_late_cells"].to_numpy() == 0
     assert 0 < without.sum() < len(without)
     assert np.isnan(found[without]).all() and (expected[without] == 0).all()
     # CoSpar divides by the clone's late cells plus 1e-10.
@@ -166,7 +166,7 @@ def test_clone_tests_equal_cospars_clonal_fate_bias(experiment) -> None:
     table = bias.clone_fates
     for fate, tests in GOLDEN["clonal_fate_bias"].items():
         rows = table[table["fate"] == fate].set_index("clone").loc[tests["clones"]]
-        assert rows["late_cells"].tolist() == tests["clone_size"]
+        assert rows["n_late_cells"].tolist() == tests["clone_size"]
         np.testing.assert_allclose(rows["fraction"], tests["fraction"], rtol=1e-12)
         # CoSpar's alternative="less" is the upper tail, P[X >= x].
         np.testing.assert_allclose(rows["p_value"], tests["p_value"], rtol=1e-12)

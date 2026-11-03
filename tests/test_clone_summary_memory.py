@@ -337,10 +337,10 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
         data.few,
         group_by=[f"own_{copy}" for copy in range(12)],
         groups=data.own_labels[800],
-        top=1,
+        top_n=1,
     ),
     "track of emoji clone labels by a label for each of 220 cells": lambda data: (
-        data.store.clones.track(data.emoji, groups=data.own_labels[220], top=1)
+        data.store.clones.track(data.emoji, groups=data.own_labels[220], top_n=1)
     ),
     "track of 1,000 named clones": lambda data: data.store.clones.track(
         data.clones, labels=data.named
@@ -352,13 +352,13 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
         "clones", group_by=["donor", "condition"]
     ),
     "coupling by a label for each of 300 cells": _coupling(
-        "clones", groups="own_labels_300", permutations=50
+        "clones", groups="own_labels_300", n_permutations=50
     ),
     "coupling on four threads by a label for each of 300 cells": _four_threads(
-        _coupling("clones", groups="own_labels_300", permutations=50)
+        _coupling("clones", groups="own_labels_300", n_permutations=50)
     ),
     "coupling of one-cell clones by a label for each of 300 cells": _coupling(
-        "long", groups="own_labels_300", method="jaccard", permutations=50
+        "long", groups="own_labels_300", method="jaccard", n_permutations=50
     ),
     "coupling of a few cells by labels of every cell": _coupling(
         "few", groups="labels", method="normalized_covariance"
@@ -435,10 +435,10 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
         data.store.clones.overlap(data.clonotypes, group_by=["donor", "condition"])
     ),
     "track of clonotypes by a label for each of 300 cells": lambda data: (
-        data.store.clones.track(data.clonotypes, groups=data.own_labels[300], top=1)
+        data.store.clones.track(data.clonotypes, groups=data.own_labels[300], top_n=1)
     ),
     "coupling of clonotypes by two columns of long labels": _coupling(
-        "clonotypes", group_by=["donor", "condition"], permutations=50
+        "clonotypes", group_by=["donor", "condition"], n_permutations=50
     ),
     "fate bias of clonotypes by long labels": _fate_bias(
         "clonotypes", group_by="donor"
@@ -526,24 +526,28 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
 
 # Clonotype clusters by residues, unless a case compares nucleotides.
 CLUSTER_CASES: dict[str, dict[str, object]] = {
-    "within one substitution": {"sequence": "aa", "metric": "hamming", "cutoff": 1},
-    "within one edit": {"sequence": "aa", "metric": "levenshtein", "cutoff": 1},
+    "within one substitution": {
+        "sequence": "aa",
+        "metric": "hamming",
+        "max_distance": 1,
+    },
+    "within one edit": {"sequence": "aa", "metric": "levenshtein", "max_distance": 1},
     "of nucleotides within 15 percent and a V gene": {
         "metric": "normalized_hamming",
-        "cutoff": 15,
+        "max_distance": 15,
         "same_v_gene": True,
     },
     "of either arm with every chain": {
         "sequence": "aa",
         "metric": "hamming",
-        "cutoff": 1,
+        "max_distance": 1,
         "receptor_arms": "any",
         "dual_ir": "all",
     },
     "within a label of each cell": {
         "sequence": "aa",
         "metric": "hamming",
-        "cutoff": 1,
+        "max_distance": 1,
         "within": "label_of_each_cell",
     },
 }
@@ -776,7 +780,7 @@ def test_the_null_on_four_threads_stays_within_the_bytes_it_plans(data) -> None:
 
     def run() -> object:
         return store.clones.coupling(
-            data.clones, groups=data.own_labels_300, permutations=200
+            data.clones, groups=data.own_labels_300, n_permutations=200
         )
 
     try:
@@ -965,7 +969,7 @@ def test_clusters_of_cells_with_contigs_beside_their_chains_fit_the_budget(
     peak, budget = _cluster_peak(
         extra_contigs.store,
         extra_contigs.receptors,
-        {"sequence": "nt", "metric": "hamming", "cutoff": 1},
+        {"sequence": "nt", "metric": "hamming", "max_distance": 1},
         monkeypatch,
     )
     assert peak <= budget, (peak, budget)

@@ -83,7 +83,7 @@ def _clonotype_clusters(store: DataStore, folder: Path) -> ArtifactRef:
     # clusters within one substitution keep each clone whole.
     receptors = import_truth_receptors(store, MUTATED_RECEPTORS, folder)
     return store.repertoire.clonotypes(
-        receptors, receptor_arms="any", metric="hamming", cutoff=1
+        receptors, receptor_arms="any", metric="hamming", max_distance=1
     )
 
 
@@ -105,7 +105,7 @@ def _variant_clones(store: DataStore, folder: Path) -> ArtifactRef:
     with pytest.warns(UserWarning, match="match no selected cell"):
         counts = store.variants.import_counts(path, cell_selection=every_cell(store))
     variants = store.variants.informative(counts, min_cells=2, min_vmr=0.01)
-    return store.variants.clones(counts, variants=variants)
+    return store.variants.frequency_clones(variants)
 
 
 def _genotype_clones(store: DataStore, folder: Path) -> ArtifactRef:
@@ -376,9 +376,9 @@ def test_expansion_counts_each_clone_within_each_sample(source) -> None:
         source.truth.cell_clone_sizes(_groups(source, TRUTH.samples)),
     )
     expected = _by_group(source, TRUTH.samples)
-    totals = loaded.categories.groupby("group")["cells"].sum().to_dict()
+    totals = loaded.categories.groupby("group")["n_cells"].sum().to_dict()
     assert totals == {group: sum(found) for group, found in expected.items()}
-    clones = loaded.categories.groupby("group")["clones"].sum().to_dict()
+    clones = loaded.categories.groupby("group")["n_clones"].sum().to_dict()
     assert clones == {group: len(found) for group, found in expected.items()}
 
 
@@ -391,7 +391,9 @@ def test_diversity_measures_the_clone_sizes_of_each_sample(source) -> None:
         found = np.asarray(sizes)
         shares = found / found.sum()
         row = indices.loc[group]
-        assert row[["cells", "clones", "singletons", "doubletons"]].tolist() == [
+        assert row[
+            ["n_cells", "n_clones", "n_singletons", "n_doubletons"]
+        ].tolist() == [
             found.sum(),
             len(found),
             np.count_nonzero(found == 1),
@@ -421,7 +423,7 @@ def test_overlap_compares_the_clones_that_samples_share(source) -> None:
     result = source.store.clones.overlap(source.clones, group_by="sample")
     by_group = _group_cells(source, TRUTH.samples)
     kept = _kept_labels(source, TRUTH.samples)
-    columns = ["group", "sample", *source.kept_apart, "cells", "clones"]
+    columns = ["group", "sample", *source.kept_apart, "n_cells", "n_clones"]
     assert sorted(map(tuple, result.group_sizes[columns].values.tolist())) == sorted(
         (group, group.split(", ")[0], *kept[group], sum(found.values()), len(found))
         for group, found in by_group.items()
@@ -441,7 +443,7 @@ def test_overlap_compares_the_clones_that_samples_share(source) -> None:
 
 
 def test_track_follows_each_samples_largest_clones(source) -> None:
-    tracked = source.store.clones.track(source.clones, group_by="sample", top=2)
+    tracked = source.store.clones.track(source.clones, group_by="sample", top_n=2)
     labels, ranks = _source_clones(source)
     if source.labels is not None:
         assert labels == {(clone,): source.labels(clone) for (clone,) in labels}
@@ -457,14 +459,14 @@ def test_track_follows_each_samples_largest_clones(source) -> None:
     assert tracked.tracked == tuple(labels[key] for key in order)
     # Each clone is followed through the groups of its own labels kept apart,
     # zeros included.
-    columns = ["clone", "sample", *source.kept_apart, "cells"]
-    assert sorted(map(tuple, tracked.cells[columns].values.tolist())) == sorted(
+    columns = ["clone", "sample", *source.kept_apart, "n_cells"]
+    assert sorted(map(tuple, tracked.table[columns].values.tolist())) == sorted(
         (labels[key], group.split(", ")[0], *kept[group], found.get(key[0], 0))
         for key in order
         for group, found in by_group.items()
         if kept[group] == key[1:]
     )
-    assert tuple(tracked.cells["clone"].drop_duplicates()) == tracked.tracked
+    assert tuple(tracked.table["clone"].drop_duplicates()) == tracked.tracked
 
 
 def test_coupling_couples_the_cell_types_that_share_clones(source) -> None:
@@ -473,7 +475,7 @@ def test_coupling_couples_the_cell_types_that_share_clones(source) -> None:
     )
     by_group = _group_cells(source, TRUTH.cell_types)
     sizes = result.group_sizes
-    assert dict(zip(sizes["group"], sizes["cells"], strict=True)) == {
+    assert dict(zip(sizes["group"], sizes["n_cells"], strict=True)) == {
         group: sum(found.values()) for group, found in by_group.items()
     }
     # Only groups of the same labels kept apart are coupled.
@@ -511,7 +513,7 @@ def test_fate_bias_follows_early_cells_to_their_clones_late_cells(source) -> Non
         if keys[cell] is not None or not source.kept_apart
     ]
     assert dict(
-        zip(loaded.fates["fate"], loaded.fates["late_cells"], strict=True)
+        zip(loaded.fates["fate"], loaded.fates["n_late_cells"], strict=True)
     ) == dict(Counter(fates[cell] for cell in with_fate))
     clone_fates: dict[tuple, Counter] = {}
     for cell in np.flatnonzero(late):
@@ -524,7 +526,7 @@ def test_fate_bias_follows_early_cells_to_their_clones_late_cells(source) -> Non
     ):
         found = clone_fates.get(keys[cell], Counter()) if keys[cell] else Counter()
         total = sum(found.values())
-        assert row["late_cells"] == total, cell_id
+        assert row["n_late_cells"] == total, cell_id
         if total:
             assert row[names].tolist() == pytest.approx(
                 [found[name] / total for name in names]
@@ -547,7 +549,7 @@ def test_fate_bias_follows_early_cells_to_their_clones_late_cells(source) -> Non
             p_value = fisher_exact(table, alternative="greater").pvalue
             expected[(labels[key], name)] = (x, p_value)
     tests = {
-        (str(row.clone), str(row.fate)): (row.cells, row.p_value)
+        (str(row.clone), str(row.fate)): (row.n_cells, row.p_value)
         for row in loaded.clone_fates.itertuples(index=False)
     }
     assert tests.keys() == expected.keys()
@@ -581,9 +583,9 @@ def test_summaries_report_each_label_their_clones_keep_apart(source) -> None:
     )
     overlap = store.clones.overlap(source.clones, group_by="sample")
     assert sorted(map(tuple, overlap.group_sizes[columns].values.tolist())) == expected
-    tracked = store.clones.track(source.clones, group_by="sample").cells
+    tracked = store.clones.track(source.clones, group_by="sample").table
     assert set(map(tuple, tracked[columns].values.tolist())) <= set(expected)
-    coupling = store.clones.coupling(source.clones, group_by="sample", permutations=0)
+    coupling = store.clones.coupling(source.clones, group_by="sample", n_permutations=0)
     assert sorted(map(tuple, coupling.group_sizes[columns].values.tolist())) == (
         expected
     )
@@ -623,7 +625,7 @@ def test_summaries_keep_to_a_cell_selection(source) -> None:
     assert {
         group: [cells, clones]
         for group, cells, clones in diversity.indices[
-            ["group", "cells", "clones"]
+            ["group", "n_cells", "n_clones"]
         ].values.tolist()
     } == {group: [sum(found), len(found)] for group, found in expected.items()}
     expansion = store.clones.load_expansion(
@@ -640,7 +642,7 @@ def test_summaries_keep_to_a_cell_selection(source) -> None:
         source.clones, group_by="cell_type", cell_selection=selection
     )
     sizes = overlap.group_sizes
-    assert dict(zip(sizes["group"], sizes["cells"], strict=True)) == cells_of
+    assert dict(zip(sizes["group"], sizes["n_cells"], strict=True)) == cells_of
     # The source's largest clone, followed through the cells of d2.
     labels, ranks = _source_clones(source)
     largest = min(ranks, key=ranks.__getitem__)
@@ -648,14 +650,14 @@ def test_summaries_keep_to_a_cell_selection(source) -> None:
         source.clones, labels=[labels[largest]], cell_selection=selection
     )
     in_d2 = sum(key == largest for key, in_d2 in zip(_keys(source), d2) if in_d2)
-    assert tracked.cells[["clone", "cells"]].values.tolist() == [
+    assert tracked.table[["clone", "n_cells"]].values.tolist() == [
         [labels[largest], in_d2]
     ]
     coupling = store.clones.coupling(
-        source.clones, group_by="cell_type", cell_selection=selection, permutations=0
+        source.clones, group_by="cell_type", cell_selection=selection, n_permutations=0
     )
     sizes = coupling.group_sizes
-    assert dict(zip(sizes["group"], sizes["cells"], strict=True)) == cells_of
+    assert dict(zip(sizes["group"], sizes["n_cells"], strict=True)) == cells_of
 
 
 def test_summaries_refuse_a_grouping_that_leaves_out_every_clone(source) -> None:
@@ -696,7 +698,7 @@ def test_summaries_name_missing_and_incomplete_clones(source, tmp_path) -> None:
         lambda clones: store.clones.overlap(clones, group_by="sample"),
         store.clones.track,
         lambda clones: store.clones.coupling(
-            clones, group_by="cell_type", permutations=0
+            clones, group_by="cell_type", n_permutations=0
         ),
         fate_bias,
     )

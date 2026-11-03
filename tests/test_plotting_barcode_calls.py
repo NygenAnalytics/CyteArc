@@ -75,8 +75,8 @@ def test_barcode_calls_count_cells_pairs_and_molecules(imported) -> None:
         per_cell = per_cell.reindex(TRUTH.cell_ids, fill_value=0)
         expected = per_cell.value_counts().sort_index()
         assert result.tables["barcodes_per_cell"].to_dict("list") == {
-            "barcodes": expected.index.tolist(),
-            "cells": expected.tolist(),
+            "n_barcodes": expected.index.tolist(),
+            "n_cells": expected.tolist(),
         }
         umis = result.tables["umis_per_barcode"]
         for library, frame in (("trex", molecules), ("bartab", corrected)):
@@ -85,11 +85,11 @@ def test_barcode_calls_count_cells_pairs_and_molecules(imported) -> None:
             )
             rows = umis[umis["library"] == library]
             assert rows["umis"].tolist() == pairs.index.tolist()
-            assert rows["pairs"].tolist() == pairs.tolist()
+            assert rows["n_pairs"].tolist() == pairs.tolist()
         reads = result.tables["reads_per_molecule"]
         # BARtab counts pairs, so only TREX's molecules have reads.
         assert set(reads["library"]) == {"trex"}
-        observed = dict(zip(reads["reads"], reads["molecules"], strict=True))
+        observed = dict(zip(reads["reads"], reads["n_molecules"], strict=True))
         assert observed == molecules["reads"].value_counts().to_dict()
         assert result.provenance.extras["libraries"] == ["bartab", "trex"]
         bars = result.axes["barcodes_per_cell"].patches
@@ -137,7 +137,7 @@ def test_a_library_of_pairs_alone_has_no_reads_panel(tmp_path) -> None:
         assert list(result.tables["reads_per_molecule"].columns) == [
             "library",
             "reads",
-            "molecules",
+            "n_molecules",
         ]
         texts = [text.get_text() for text in result.axes["reads_per_molecule"].texts]
         assert texts == ["No library counts reads per molecule"]
@@ -165,7 +165,9 @@ def test_a_library_without_umi_counts_has_no_umis_panel(tmp_path) -> None:
         assert [text.get_text() for text in result.axes["umis_per_barcode"].texts] == [
             "No library counts UMIs"
         ]
-        assert result.tables["barcodes_per_cell"]["cells"].sum() == len(TRUTH.cell_ids)
+        assert result.tables["barcodes_per_cell"]["n_cells"].sum() == len(
+            TRUTH.cell_ids
+        )
     finally:
         plt.close(result.figure)
 
@@ -189,7 +191,7 @@ def test_barcode_calls_show_their_figure_by_default(imported) -> None:
     store, ref = imported
     result = store.plots.barcode_calls(ref)
     plt.close(result.figure)
-    assert result.tables["barcodes_per_cell"]["cells"].sum() == len(TRUTH.cell_ids)
+    assert result.tables["barcodes_per_cell"]["n_cells"].sum() == len(TRUTH.cell_ids)
 
 
 def test_pairs_counted_by_reads_are_no_molecules_of_the_reads_panel(tmp_path) -> None:

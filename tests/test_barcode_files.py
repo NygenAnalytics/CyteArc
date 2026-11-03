@@ -38,7 +38,7 @@ def _records(store, ref) -> pd.DataFrame:
     records = store.clones.load_barcodes(ref).records
     return pd.DataFrame(
         {
-            "cell": records["cell"].astype(str).to_numpy(dtype=object),
+            "cell": records["ids"].astype(str).to_numpy(dtype=object),
             "barcode": records["barcode"].astype(str).to_numpy(dtype=object),
             "umi": pd.Series(
                 [None if pd.isna(umi) else str(umi) for umi in records["umi"]],

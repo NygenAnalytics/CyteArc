@@ -152,7 +152,7 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
             {
                 "codes": True,
                 "fate_codes": True,
-                "late_cells": False,
+                "n_late_cells": False,
                 "fractions": False,
             },
         ),
@@ -286,7 +286,7 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         # mean_depth is NaN for a selected cell that no imported file names;
         # listed marks the cells that a file names.
         "variant_counts": CellValueSpec(
-            "mean_depth", False, {"covered_sites": False, "listed": True}
+            "mean_depth", False, {"n_covered_sites": False, "listed": True}
         ),
         # n_mutant_sites counts the sites called heterozygous, homozygous
         # alternative or alternative present; n_called_sites those and the

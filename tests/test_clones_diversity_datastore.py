@@ -67,7 +67,7 @@ def test_diversity_measures_every_cell_together_by_default(shared) -> None:
     assert table["group"].tolist() == ["all cells"]
     # Clones of 9, 6, 5, 4, 3, 2, 2 and 1 cells.
     assert table[
-        ["cells", "clones", "singletons", "doubletons", "d50"]
+        ["n_cells", "n_clones", "n_singletons", "n_doubletons", "d50"]
     ].values.tolist() == [[32, 8, 1, 2, 3]]
     for column, value in dv.indices(ALL).items():
         assert table[column].iloc[0] == pytest.approx(value, nan_ok=True)
@@ -98,7 +98,7 @@ def test_diversity_groups_by_columns_labels_and_selections(shared) -> None:
     assert by_sample.coverage == 0.5
     table = by_sample.indices.set_index("sample")
     for sample, found in TRUTH.group_clone_sizes(TRUTH.samples).items():
-        assert table.loc[sample, ["cells", "clones", "singletons"]].tolist() == [
+        assert table.loc[sample, ["n_cells", "n_clones", "n_singletons"]].tolist() == [
             sum(found),
             len(found),
             found.count(1),
@@ -111,7 +111,7 @@ def test_diversity_groups_by_columns_labels_and_selections(shared) -> None:
     crossed = store.clones.diversity(clones, group_by=["sample"], groups=labels)
     assert crossed.groups == labels
     assert crossed.indices.columns[:3].tolist() == ["group", "sample", "cluster_labels"]
-    assert crossed.indices["cells"].sum() == 32
+    assert crossed.indices["n_cells"].sum() == 32
     # Each group is named by its labels joined by commas, in their order.
     names = crossed.indices[["sample", "cluster_labels"]].agg(", ".join, axis=1)
     assert crossed.indices["group"].tolist() == names.tolist()
@@ -122,8 +122,8 @@ def test_diversity_groups_by_columns_labels_and_selections(shared) -> None:
     selected = store.clones.diversity(clones, cell_selection=d2)
     assert selected.cell_selection == d2
     d2_sizes = TRUTH.group_clone_sizes(cells=TRUTH.samples == "d2")[0]
-    assert selected.indices["cells"].tolist() == [sum(d2_sizes)]
-    assert selected.indices["clones"].tolist() == [len(d2_sizes)]
+    assert selected.indices["n_cells"].tolist() == [sum(d2_sizes)]
+    assert selected.indices["n_clones"].tolist() == [len(d2_sizes)]
 
 
 def test_diversity_at_full_coverage_is_the_observed_diversity(shared) -> None:
@@ -146,15 +146,16 @@ def test_group_columns_may_not_share_a_name_with_the_result(copied) -> None:
         store.clones.diversity(clones, group_by="coverage")
     with pytest.raises(ValueError, match="'coverage', which is also a column"):
         store.clones.rarefaction(clones, group_by="coverage")
-    store.cells.insert("clones", TRUTH.samples.astype(object))
-    with pytest.raises(ValueError, match="'clones', which is also a column"):
-        store.clones.diversity(clones, group_by="clones")
-    with pytest.raises(ValueError, match="key column 'clones' is also a column"):
-        store.clones.diversity(clones, groups=clones)
+    store.cells.insert("n_clones", TRUTH.samples.astype(object))
+    with pytest.raises(ValueError, match="'n_clones', which is also a column"):
+        store.clones.diversity(clones, group_by="n_clones")
+    # The count columns are n_cells and n_clones, so a clones artifact as
+    # labels, whose key column is "clones", groups the cells.
+    assert len(store.clones.diversity(clones, groups=clones).indices) > 0
     # A name that only other results hold is free.
     store.cells.insert("window", TRUTH.samples.astype(object))
     assert len(store.clones.diversity(clones, group_by="window").indices) == 2
-    assert len(store.clones.rarefaction(clones, group_by="clones").curves)
+    assert len(store.clones.rarefaction(clones, group_by="n_clones").curves)
 
 
 def test_cells_without_a_label_are_left_out(copied) -> None:
@@ -163,7 +164,7 @@ def test_cells_without_a_label_are_left_out(copied) -> None:
     missing[np.flatnonzero(TRUTH.clones >= 0)[:2]] = True
     insert_nullable_cell_column(store, "partial", TRUTH.samples, missing)
     result = store.clones.diversity(clones, group_by="partial")
-    assert result.indices["cells"].sum() == 30
+    assert result.indices["n_cells"].sum() == 30
     insert_nullable_cell_column(
         store, "batch", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
     )
@@ -208,7 +209,7 @@ def test_diversity_refuses_other_artifacts_and_large_stores(
     with pytest.raises(MemoryError, match="by 0 columns holds about 4800 bytes"):
         store.clones.diversity(clones)
     monkeypatch.setattr(store, "memoryBytes", 4_800)
-    assert store.clones.diversity(clones).indices["cells"].tolist() == [32]
+    assert store.clones.diversity(clones).indices["n_cells"].tolist() == [32]
 
 
 def test_each_group_counts_beside_its_cells(copied, monkeypatch) -> None:
@@ -231,7 +232,7 @@ def test_each_group_counts_beside_its_cells(copied, monkeypatch) -> None:
         store.clones.rarefaction(clones, groups=own, orders=(0,), knots=2)
     monkeypatch.setattr(store, "memoryBytes", needed)
     result = store.clones.diversity(clones, groups=own)
-    assert result.indices["cells"].tolist() == [1] * 32
+    assert result.indices["n_cells"].tolist() == [1] * 32
 
 
 def _clone_counts(shape: str) -> tuple[int, int, np.ndarray]:
@@ -307,7 +308,7 @@ def test_summarizing_counts_each_row_of_a_group_beyond_its_first(
     with pytest.raises(MemoryError, match=f"2 groups holds about {needed} bytes"):
         store.clones.diversity(clones)
     monkeypatch.setattr(store, "memoryBytes", needed)
-    assert store.clones.diversity(clones).indices["cells"].tolist() == [10, 6]
+    assert store.clones.diversity(clones).indices["n_cells"].tolist() == [10, 6]
 
 
 def test_rarefaction_counts_the_key_columns_of_each_row(copied, monkeypatch) -> None:

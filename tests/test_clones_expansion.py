@@ -327,15 +327,15 @@ def test_tables_count_cells_and_clones_per_group() -> None:
             "2 cells",
             "more than 2 cells",
         ],
-        "cells": [1, 4, 0, 1, 2, 0],
-        "clones": [1, 2, 0, 1, 1, 0],
+        "n_cells": [1, 4, 0, 1, 2, 0],
+        "n_clones": [1, 2, 0, 1, 1, 0],
         "fraction": [0.2, 0.8, 0.0, 1 / 3, 2 / 3, 0.0],
     }
     assert ranks.to_dict("list") == {
         "group": ["A", "A", "A", "B", "B", "B"],
         "sample": ["A", "A", "A", "B", "B", "B"],
         "window": ["1", "2", "after 2", "1", "2", "after 2"],
-        "cells": [2, 2, 1, 2, 1, 0],
+        "n_cells": [2, 2, 1, 2, 1, 0],
         "fraction": [0.4, 0.4, 0.2, 2 / 3, 1 / 3, 0.0],
     }
 
@@ -398,14 +398,14 @@ def test_tables_without_clones_or_key_columns() -> None:
     assert table.empty and table.columns.tolist() == [
         "group",
         "category",
-        "cells",
-        "clones",
+        "n_cells",
+        "n_clones",
         "fraction",
     ]
     assert ranks.empty and ranks.columns.tolist() == [
         "group",
         "window",
-        "cells",
+        "n_cells",
         "fraction",
     ]
     # One group without key columns, whose cells all lack a clone.
@@ -422,7 +422,7 @@ def test_tables_without_clones_or_key_columns() -> None:
         frequencies=np.full(1, np.nan),
         splits=(10,),
     )
-    assert table["cells"].tolist() == [0, 0]
+    assert table["n_cells"].tolist() == [0, 0]
     assert table["group"].tolist() == ["all cells", "all cells"]
     assert table["fraction"].isna().all()
-    assert ranks["cells"].tolist() == [0, 0]
+    assert ranks["n_cells"].tolist() == [0, 0]

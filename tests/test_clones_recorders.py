@@ -279,9 +279,9 @@ def test_site_states_count_each_cell_once_in_its_first_state():
     )
     counts = site_state_counts(table)
     found = {
-        (row.integration, row.site, row.state): row.cells
+        (row.integration, row.site, row.state): row.n_cells
         for row in counts.itertuples()
-        if row.cells
+        if row.n_cells
     }
     assert found == {
         ("A", "1", "mark"): 1,
@@ -326,7 +326,7 @@ def test_the_matrix_keeps_each_integrations_most_abundant_allele():
     assert names == {("A-1", "y"): 1, ("A-2", "z"): 1}
     assert matrix.codes.tolist() == [[1, 1], [1, -1], [1, 1]]
     assert matrix.n_resolved == 3
-    assert states["cells"].tolist() == [3, 2]
+    assert states["n_cells"].tolist() == [3, 2]
 
 
 def test_whole_number_marks_keep_their_numbers_and_others_follow():

@@ -11,8 +11,8 @@ counts, and these functions compute them from those counts.
 Coupling is compared with a null that shuffles the group labels of the cells
 with a clone, which keeps each clone's cells and each group's cells, as
 CoSpar's ``pvalue_for_fate_coupling`` does. A compiled kernel shuffles and
-measures each permutation from a random stream keyed by the seed and the
-permutation, so the null does not depend on threads. These functions work on
+measures each permutation from a random stream keyed by the random seed and
+the permutation, so the null does not depend on threads. These functions work on
 codes and never touch storage.
 """
 
@@ -292,9 +292,9 @@ def _accumulate(
 
 
 def permuted_labels(
-    labels: np.ndarray, stratum_bounds: np.ndarray, seed: int, permutation: int
+    labels: np.ndarray, stratum_bounds: np.ndarray, random_seed: int, permutation: int
 ) -> np.ndarray:
-    """The labels as permutation ``permutation`` of ``seed`` shuffles them within strata.
+    """The labels as permutation ``permutation`` of ``random_seed`` shuffles them within strata.
 
     The null of :func:`clone_coupling` lays out the group labels of the cells
     with a clone stratum after stratum, clone after clone in the order of
@@ -305,7 +305,7 @@ def permuted_labels(
     """
     shuffled = np.array(labels, dtype=np.int32)
     # Compiled functions return unsigned keys as Python integers.
-    key = np.uint64(_permutation_key(_seed_key(seed), np.int64(permutation)))
+    key = np.uint64(_permutation_key(_seed_key(random_seed), np.int64(permutation)))
     _shuffle_within(shuffled, np.asarray(stratum_bounds, dtype=np.int64), key)
     return shuffled
 
@@ -349,7 +349,7 @@ def coupling_plan(
     n_cells: int,
     n_entries: int,
     *,
-    permutations: int,
+    n_permutations: int,
     nthreads: int,
     available: int,
 ) -> tuple[int, int, int]:
@@ -368,16 +368,16 @@ def coupling_plan(
         permutation at a time does not fit.
     """
     sizes = (n_groups, n_pairs, n_cells, n_entries)
-    if not permutations:
+    if not n_permutations:
         return 0, 0, coupling_bytes(*sizes, workers=0, batch=0)
-    workers = max(1, min(int(nthreads), int(permutations)))
+    workers = max(1, min(int(nthreads), int(n_permutations)))
     per_row = _BATCH_BYTES_PER_VALUE * n_pairs
     while True:
         base = coupling_bytes(*sizes, workers=workers, batch=0)
         rows = (int(available) - base) // per_row
         if rows >= workers or workers == 1:
             capped = max(workers, _BATCH_BYTES // per_row)
-            batch = max(1, min(int(permutations), 16 * workers, capped, rows))
+            batch = max(1, min(int(n_permutations), 16 * workers, capped, rows))
             return workers, batch, base + per_row * batch
         workers = max(1, workers // 2)
 
@@ -437,8 +437,8 @@ def clone_coupling(
     *,
     method: str = COUPLING_METHODS[0],
     strata: np.ndarray | None = None,
-    permutations: int = 1000,
-    seed: int = 0,
+    n_permutations: int = 1000,
+    random_seed: int = 0,
     workers: int = 1,
     batch: int | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray]:
@@ -461,9 +461,10 @@ def clone_coupling(
     - ``jaccard``: the clones of both groups over the clones of either.
 
     The null shuffles the group labels of the cells with a clone within each
-    stratum, ``permutations`` times, which keeps each clone's cells and each
-    group's cells. Permutation ``k`` draws from a stream keyed by ``seed`` and
-    ``k``, so the null depends neither on ``workers`` nor on ``batch``.
+    stratum, ``n_permutations`` times, which keeps each clone's cells and each
+    group's cells. Permutation ``k`` draws from a stream keyed by
+    ``random_seed`` and ``k``, so the null depends neither on ``workers`` nor
+    on ``batch``.
 
     Args:
         pair_groups: The group of each pair of group and clone, as for
@@ -476,8 +477,8 @@ def clone_coupling(
             the clones keep apart: only groups of one stratum are compared,
             labels are shuffled within strata, and ``normalized_covariance``
             counts the clones of each stratum. None makes one stratum.
-        permutations: The permutations of the null, 0 for none.
-        seed: The seed of the permutations, a non-negative integer.
+        n_permutations: The permutations of the null, 0 for none.
+        random_seed: The seed of the permutations, a non-negative integer.
         workers: The threads that measure the null, each with its own
             scratch arrays.
         batch: The permutations measured at once, or None for ``16 *
@@ -486,7 +487,7 @@ def clone_coupling(
     Returns:
         One row per pair of groups of one stratum, by ``first`` and then
         ``second``: ``first``, ``second``, ``coupling``, ``null_mean``,
-        ``null_sd`` (with ``permutations - 1`` degrees of freedom) and
+        ``null_sd`` (with ``n_permutations - 1`` degrees of freedom) and
         ``z_score``, NaN without permutations; and the average-linkage tree
         of :func:`coupling_linkage`.
 
@@ -550,7 +551,7 @@ def clone_coupling(
     ].astype(np.int64)
     del ordered, cells, entries, clone_strata
     n_pairs = len(first)
-    scratch_workers = max(1, int(workers)) if permutations else 1
+    scratch_workers = max(1, int(workers)) if n_permutations else 1
 
     def scratch(n: int) -> tuple[np.ndarray, ...]:
         return (
@@ -581,18 +582,18 @@ def clone_coupling(
     )
     mean = np.full(n_pairs, np.nan)
     spread = np.full(n_pairs, np.nan)
-    if permutations:
+    if n_permutations:
         rows = 16 * scratch_workers if batch is None else int(batch)
-        rows = max(min(rows, int(permutations)), 1)
+        rows = max(min(rows, int(n_permutations)), 1)
         shuffled = np.empty((scratch_workers, len(labels)), dtype=np.int32)
         out = np.empty((rows, n_pairs), dtype=np.float64)
         mean[:] = 0.0
         m2 = np.zeros(n_pairs, dtype=np.float64)
-        key = _seed_key(seed)
+        key = _seed_key(random_seed)
         count = 0
         with numba_threads(scratch_workers):
-            for start in range(0, int(permutations), rows):
-                n_rows = min(rows, int(permutations) - start)
+            for start in range(0, int(n_permutations), rows):
+                n_rows = min(rows, int(n_permutations) - start)
                 _permuted_couplings(
                     labels,
                     stratum_bounds,
@@ -835,7 +836,7 @@ def fate_bias(
 
 #: The columns of the cells table of fate bias besides one per fate, which no
 #: fate may share.
-FATE_CELL_COLUMNS = ("clone", "late_cells", "fate")
+FATE_CELL_COLUMNS = ("clone", "n_late_cells", "fate")
 
 
 def fate_bias_tables(
@@ -871,18 +872,18 @@ def fate_bias_tables(
         fates: One row per fate: ``group``, its name, and its key columns.
 
     Returns:
-        One row per early cell, indexed by ID: ``clone``, ``late_cells``,
+        One row per early cell, indexed by ID: ``clone``, ``n_late_cells``,
         ``fate`` and one column per fate of its share; and one row per clone
         and fate of its stratum, by clone code and then fate: ``clone``,
-        ``fate``, the key columns, ``early_cells``, ``late_cells``, ``cells``,
-        ``fraction``, ``p_value`` and ``q_value``.
+        ``fate``, the key columns, ``n_early_cells``, ``n_late_cells``,
+        ``n_cells``, ``fraction``, ``p_value`` and ``q_value``.
     """
     names = fates["group"].to_numpy(dtype=object)
     labels = pd.Index(np.asarray(clone_ids, dtype=object))
     fate_names = pd.Index(names)
     cell_columns: dict[str, Any] = {
         "clone": pd.Categorical.from_codes(np.asarray(codes, dtype=np.int64), labels),
-        "late_cells": np.asarray(late_cells, dtype=np.int64),
+        "n_late_cells": np.asarray(late_cells, dtype=np.int64),
         "fate": pd.Categorical.from_codes(
             np.asarray(dominant, dtype=np.int64), fate_names
         ),
@@ -902,9 +903,9 @@ def fate_bias_tables(
         pd.Categorical.from_codes(np.asarray(clones, dtype=np.int64)[rows], labels),
     )
     found = np.asarray(clone_cells)[rows, columns]
-    table["early_cells"] = np.asarray(clone_early_cells, dtype=np.int64)[rows]
-    table["late_cells"] = clone_late[rows]
-    table["cells"] = found
+    table["n_early_cells"] = np.asarray(clone_early_cells, dtype=np.int64)[rows]
+    table["n_late_cells"] = clone_late[rows]
+    table["n_cells"] = found
     table["fraction"] = found / clone_late[rows]
     table["p_value"] = np.asarray(p_values)[rows, columns]
     table["q_value"] = np.asarray(q_values)[rows, columns]
@@ -916,8 +917,8 @@ class CloneCoupling:
     """How strongly groups of cells share clones, against shuffled labels.
 
     Attributes:
-        group_sizes: One row per group: ``group``, the key columns, ``cells``
-            with a clone and ``clones``.
+        group_sizes: One row per group: ``group``, the key columns,
+            ``n_cells`` with a clone and ``n_clones``.
         pairs: One row per pair of groups compared: ``group_1``, ``group_2``,
             ``coupling``, ``null_mean`` and ``null_sd`` of the permutations, and
             ``z_score``, ``(coupling - null_mean) / null_sd``.
@@ -926,8 +927,8 @@ class CloneCoupling:
         linkage: That tree, as SciPy's linkage matrix of the groups' positions
             in ``group_sizes``.
         method: The coupling method, one of ``COUPLING_METHODS``.
-        permutations: The permutations of the null.
-        seed: The seed of the permutations.
+        n_permutations: The permutations of the null.
+        random_seed: The seed of the permutations.
         clones: The clone artifact, such as a ``clones`` artifact.
         group_by: The cell metadata columns of the groups.
         groups: The label artifact of the groups, or None.
@@ -939,8 +940,8 @@ class CloneCoupling:
     order: tuple[str, ...]
     linkage: np.ndarray = field(repr=False)
     method: str
-    permutations: int
-    seed: int
+    n_permutations: int
+    random_seed: int
     clones: ArtifactRef
     group_by: tuple[str, ...]
     groups: ArtifactRef | None
@@ -952,19 +953,19 @@ class CloneFateBias:
     """The fates that the late cells of each early cell's clone took.
 
     Attributes:
-        cells: One row per early cell, indexed by cell ID: ``clone``,
-            ``late_cells`` (its clone's late cells with a fate), ``fate`` (the
+        cells: One row per early cell, indexed by cell ``ids``: ``clone``,
+            ``n_late_cells`` (its clone's late cells with a fate), ``fate`` (the
             fate that holds the most of them, missing for none or a tie), and
             one column per fate, named by the fate, of the share of the
             clone's late cells in it, NaN without late cells.
         clone_fates: One row per clone with late cells and fate of its
             stratum, by clone and then fate: ``clone``, ``fate``, the fate's
             key columns,
-            ``early_cells``, ``late_cells``, ``cells`` (its late cells in the
-            fate), ``fraction``, ``p_value`` of the one-sided Fisher test and
+            ``n_early_cells``, ``n_late_cells``, ``n_cells`` (its late cells in
+            the fate), ``fraction``, ``p_value`` of the one-sided Fisher test and
             ``q_value``, adjusted by Benjamini and Hochberg's method within
             the fate.
-        fates: One row per fate: ``fate``, the key columns, and ``late_cells``,
+        fates: One row per fate: ``fate``, the key columns, and ``n_late_cells``,
             those without a clone included unless the clones keep labels
             apart.
         clones: The clone artifact, such as a ``clones`` artifact.

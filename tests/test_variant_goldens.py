@@ -228,9 +228,9 @@ def test_clones_agree_with_signac_find_clonotypes(tmp_path) -> None:
             cell_selection=store.snapshot_cell_selection("every_cell"),
         )
     selection = store.variants.informative(counts, preset="atac")
-    called = store.clones.load_clones(
-        store.variants.clones(counts, variants=selection)
-    ).cells["clone"]
+    called = store.clones.load_clones(store.variants.frequency_clones(selection)).cells[
+        "clone"
+    ]
     assigned = called.dropna()
     signac = pd.Series(golden["clones"])
     assert adjusted_rand_score(signac.loc[assigned.index], assigned.astype(str)) > 0.75
@@ -308,9 +308,9 @@ def test_maester_statistics_counts_and_clones_agree_with_mito_2_0_0(tmp_path) ->
         position = variant[:-3]
         assert depth.get((cell, position), 0) == site_depth
         assert count.get((cell, position, variant[-1]), 0) == alternative_count
-    called = store.clones.load_clones(
-        store.variants.clones(counts, variants=selection)
-    ).cells["clone"]
+    called = store.clones.load_clones(store.variants.frequency_clones(selection)).cells[
+        "clone"
+    ]
     assigned = called.dropna()
     ours = adjusted_rand_score(truth.loc[assigned.index], assigned.astype(str))
     mito = pd.Series(MITO["clones"])

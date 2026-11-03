@@ -319,8 +319,8 @@ def test_the_record_tables_name_cells_libraries_and_unknown_counts() -> None:
     assert loaded.cells.index.name == "ids"
     assert loaded.cells["n_umis"].tolist() == [3, 0, -1]
     records = loaded.records
-    assert records["cell"].astype(str).tolist() == ["c0", "c0", "c0", "c2", "c2"]
-    assert list(records["cell"].cat.categories) == ["c0", "c1", "c2"]
+    assert records["ids"].astype(str).tolist() == ["c0", "c0", "c0", "c2", "c2"]
+    assert list(records["ids"].cat.categories) == ["c0", "c1", "c2"]
     assert records["library"].astype(str).tolist() == ["rna"] * 3 + ["counts"] * 2
     assert records["umi"].isna().tolist() == [False, False, False, True, True]
     assert str(records["umis"].dtype) == "Int64"
@@ -329,7 +329,7 @@ def test_the_record_tables_name_cells_libraries_and_unknown_counts() -> None:
     assert loaded.libraries.to_dict("list") == {
         "library": ["counts", "rna"],
         "level": ["pairs", "molecules"],
-        "records": [2, 3],
+        "n_records": [2, 3],
         "has_umis": [False, True],
         "has_reads": [False, True],
     }
@@ -337,7 +337,7 @@ def test_the_record_tables_name_cells_libraries_and_unknown_counts() -> None:
     assert pairs["barcode"].astype(str).tolist() == ["A", "B", "A", "B"]
     assert pairs["umis"].fillna(-1).tolist() == [2, 1, 4, -1]
     assert pairs["molecules"].tolist() == [2, 1, 0, 0]
-    assert pairs["cell"].cat.categories.tolist() == ["c0", "c1", "c2"]
+    assert pairs["ids"].cat.categories.tolist() == ["c0", "c1", "c2"]
 
 
 def test_long_and_unicode_barcodes_survive_merges() -> None:

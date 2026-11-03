@@ -287,7 +287,7 @@ class CellPhylogeny:
             ``""`` for none), ``parent`` (its parent's position in the tree,
             -1 for the root), ``time`` (its time from the root plus any length
             above the root, NaN where unknown), ``depth`` (its branchings below
-            the root, single-child nodes merged), ``is_leaf`` and ``cell`` (the
+            the root, single-child nodes merged), ``is_leaf`` and ``ids`` (the
             ID of the selected cell that a leaf names, NA for none).
         trees: One row per tree: ``tree``, ``n_nodes``, ``n_leaves``,
             ``n_cells`` (its leaves that name a selected cell), ``root_time``,
@@ -336,7 +336,7 @@ def phylogeny_frames(
             "time": np.asarray(times, dtype=np.float64),
             "depth": collapsed_depths(parent),
             "is_leaf": is_leaf,
-            "cell": pd.array(np.asarray(cell_ids, dtype=object), dtype="string"),
+            "ids": pd.array(np.asarray(cell_ids, dtype=object), dtype="string"),
         }
     )
     earliest, latest = leaf_time_ranges(times, is_leaf, offsets)

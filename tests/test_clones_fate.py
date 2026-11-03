@@ -68,7 +68,7 @@ SHARED_ONE = (np.array([0, 0, 1, 1]), np.array([0, 1, 0, 2]), np.array([2, 3, 1,
 def test_two_groups_that_share_one_clone_couple_as_derived_by_hand(
     method, expected
 ) -> None:
-    pairs, tree = clone_coupling(*SHARED_ONE, 2, method=method, permutations=0)
+    pairs, tree = clone_coupling(*SHARED_ONE, 2, method=method, n_permutations=0)
     assert pairs.columns.tolist() == [
         "first",
         "second",
@@ -93,7 +93,7 @@ def test_a_clone_confined_to_one_group_adds_nothing_to_the_shared_terms() -> Non
         ("normalized_covariance", -2.0),
         ("jaccard", 0.0),
     ):
-        pairs, _tree = clone_coupling(*disjoint, 2, method=method, permutations=0)
+        pairs, _tree = clone_coupling(*disjoint, 2, method=method, n_permutations=0)
         assert pairs["coupling"].item() == pytest.approx(expected, abs=1e-15)
     # Clone 3 of four cells, confined to group 0, leaves the product of the
     # shared clone and only adds to group 0's own squares: 2 / sqrt(29 * 17).
@@ -104,7 +104,7 @@ def test_a_clone_confined_to_one_group_adds_nothing_to_the_shared_terms() -> Non
         np.append(cells, 4),
         2,
         method="abundance_cosine",
-        permutations=0,
+        n_permutations=0,
     )
     assert pairs["coupling"].item() == pytest.approx(2 / sqrt(493), rel=1e-14)
 
@@ -118,7 +118,7 @@ def test_couplings_match_a_reference_from_the_counts(seed, method) -> None:
     groups = rng.integers(0, n_groups, size=n_cells)
     groups[:n_groups] = np.arange(n_groups)
     pairs, _tree = clone_coupling(
-        *_pairs(groups, clones), n_groups, method=method, permutations=0
+        *_pairs(groups, clones), n_groups, method=method, n_permutations=0
     )
     table = _table(groups, clones)
     assert len(pairs) == n_groups * (n_groups - 1) // 2
@@ -137,7 +137,7 @@ def test_the_cosine_of_clone_sizes_and_the_jaccard_index_equal_overlaps() -> Non
     counted = _pairs(groups, clones)
     overlap = overlap_pairs(*counted, 5)
     for method in ("abundance_cosine", "jaccard"):
-        pairs, _tree = clone_coupling(*counted, 5, method=method, permutations=0)
+        pairs, _tree = clone_coupling(*counted, 5, method=method, n_permutations=0)
         # Both sum whole numbers, so they are equal to the last bit.
         np.testing.assert_array_equal(
             pairs["coupling"].to_numpy(), overlap[method].to_numpy()
@@ -235,8 +235,8 @@ def test_the_null_matches_every_arrangement_of_the_labels(method) -> None:
         *_pairs(groups, clones),
         3,
         method=method,
-        permutations=n_permutations,
-        seed=5,
+        n_permutations=n_permutations,
+        random_seed=5,
     )
     exact = _exact_null(groups, (3, 2, 1), method)
     for row in pairs.itertuples(index=False):
@@ -261,8 +261,8 @@ def test_the_null_is_the_coupling_of_the_arrangements_permuted_labels_draws(
         *_pairs(groups, clones),
         3,
         method=method,
-        permutations=n_permutations,
-        seed=12,
+        n_permutations=n_permutations,
+        random_seed=12,
         batch=2,
     )
     # The cells with a clone, clone after clone and each clone's groups in
@@ -306,8 +306,8 @@ def test_the_null_mean_of_the_normalized_covariance_is_its_expectation() -> None
         *_pairs(groups, clones),
         4,
         method="normalized_covariance",
-        permutations=n_permutations,
-        seed=1,
+        n_permutations=n_permutations,
+        random_seed=1,
     )
     for row in pairs.itertuples(index=False):
         assert abs(row.null_mean - expected) < 4 * row.null_sd / sqrt(n_permutations)
@@ -324,7 +324,7 @@ def test_clones_of_one_cell_give_a_null_without_spread() -> None:
         ("jaccard", 0.0),
     ):
         pairs, _tree = clone_coupling(
-            *_pairs(groups, clones), 3, method=method, permutations=50
+            *_pairs(groups, clones), 3, method=method, n_permutations=50
         )
         np.testing.assert_allclose(pairs["coupling"], expected, atol=1e-15)
         np.testing.assert_array_equal(pairs["null_mean"], pairs["coupling"])
@@ -340,14 +340,16 @@ def test_the_null_depends_neither_on_workers_nor_on_batches(method) -> None:
     counted = _pairs(groups, clones)
     runs = [
         clone_coupling(
-            *counted, 6, method=method, permutations=101, workers=w, batch=b
+            *counted, 6, method=method, n_permutations=101, workers=w, batch=b
         )[0].to_numpy()
         for w, b in ((1, None), (1, 1), (3, 7), (4, 101), (8, 16))
     ]
     for run in runs[1:]:
         np.testing.assert_array_equal(run, runs[0])
     # Another seed draws other permutations, and the same coupling.
-    other = clone_coupling(*counted, 6, method=method, permutations=101, seed=1)[0]
+    other = clone_coupling(
+        *counted, 6, method=method, n_permutations=101, random_seed=1
+    )[0]
     np.testing.assert_array_equal(other["coupling"].to_numpy(), runs[0][:, 2])
     assert not np.array_equal(other["null_mean"].to_numpy(), runs[0][:, 3])
 
@@ -364,7 +366,7 @@ def test_strata_compare_and_shuffle_only_the_groups_of_one_stratum() -> None:
         4,
         method="normalized_covariance",
         strata=strata,
-        permutations=200,
+        n_permutations=200,
     )
     assert pairs[["first", "second"]].values.tolist() == [[0, 1], [2, 3]]
     # Each stratum is measured on its own clones, as if alone.
@@ -373,7 +375,7 @@ def test_strata_compare_and_shuffle_only_the_groups_of_one_stratum() -> None:
             *_pairs(groups[kept] % 2, clones[kept] % 3),
             2,
             method="normalized_covariance",
-            permutations=0,
+            n_permutations=0,
         )
         assert row.coupling == pytest.approx(alone["coupling"].item(), rel=1e-12)
     # Labels shuffled within strata keep the clones of a stratum within it,
@@ -396,7 +398,7 @@ def test_no_label_crosses_into_another_stratum() -> None:
             4,
             method=method,
             strata=np.array(["a", "a", "b", "b"]),
-            permutations=200,
+            n_permutations=200,
         )
         first = pairs.iloc[0]
         assert (first["first"], first["second"]) == (0, 1)
@@ -409,13 +411,13 @@ def test_coupling_refuses_what_it_cannot_measure() -> None:
     with pytest.raises(ValueError, match="method must be one of"):
         clone_coupling(groups, clones, cells, 2, method="cosine")
     with pytest.raises(ValueError, match="whole numbers"):
-        clone_coupling(groups, clones, cells + 0.5, 2, permutations=0)
+        clone_coupling(groups, clones, cells + 0.5, 2, n_permutations=0)
     with pytest.raises(ValueError, match="Every group needs a cell"):
-        clone_coupling(groups, clones, cells, 3, permutations=0)
+        clone_coupling(groups, clones, cells, 3, n_permutations=0)
     with pytest.raises(ValueError, match="one stratum per group"):
-        clone_coupling(groups, clones, cells, 2, strata=np.zeros(3), permutations=0)
+        clone_coupling(groups, clones, cells, 2, strata=np.zeros(3), n_permutations=0)
     with pytest.raises(ValueError, match="No two groups share a stratum"):
-        clone_coupling(groups, clones, cells, 2, strata=np.arange(2), permutations=0)
+        clone_coupling(groups, clones, cells, 2, strata=np.arange(2), n_permutations=0)
     # Clone 0 lies in groups of two strata.
     with pytest.raises(ValueError, match="groups of two strata"):
         clone_coupling(
@@ -424,7 +426,7 @@ def test_coupling_refuses_what_it_cannot_measure() -> None:
             np.ones(4),
             3,
             strata=np.array([0, 0, 1]),
-            permutations=0,
+            n_permutations=0,
         )
     with pytest.raises(ValueError, match="at least two clones"):
         clone_coupling(
@@ -465,11 +467,11 @@ def test_the_tree_joins_the_most_coupled_groups_first() -> None:
 
 def test_the_plan_fits_the_null_into_the_memory_left() -> None:
     sizes = (10, 45, 50_000, 30_000)
-    roomy = coupling_plan(*sizes, permutations=1000, nthreads=4, available=10**9)
+    roomy = coupling_plan(*sizes, n_permutations=1000, nthreads=4, available=10**9)
     assert roomy[:2] == (4, 64)
     assert roomy[2] == coupling_bytes(*sizes, workers=4, batch=64)
     # Without permutations the null needs neither workers nor rows.
-    assert coupling_plan(*sizes, permutations=0, nthreads=4, available=0) == (
+    assert coupling_plan(*sizes, n_permutations=0, nthreads=4, available=0) == (
         0,
         0,
         coupling_bytes(*sizes, workers=0, batch=0),
@@ -478,41 +480,44 @@ def test_the_plan_fits_the_null_into_the_memory_left() -> None:
     # workers, and at last one worker and one permutation.
     one = coupling_bytes(*sizes, workers=1, batch=1)
     four = coupling_bytes(*sizes, workers=4, batch=4)
-    assert coupling_plan(*sizes, permutations=1000, nthreads=4, available=four) == (
+    assert coupling_plan(*sizes, n_permutations=1000, nthreads=4, available=four) == (
         4,
         4,
         four,
     )
     assert (
-        coupling_plan(*sizes, permutations=1000, nthreads=4, available=four - 1)[0] == 2
+        coupling_plan(*sizes, n_permutations=1000, nthreads=4, available=four - 1)[0]
+        == 2
     )
-    assert coupling_plan(*sizes, permutations=1000, nthreads=4, available=one) == (
+    assert coupling_plan(*sizes, n_permutations=1000, nthreads=4, available=one) == (
         1,
         1,
         one,
     )
-    assert coupling_plan(*sizes, permutations=1000, nthreads=4, available=one - 1) == (
+    assert coupling_plan(
+        *sizes, n_permutations=1000, nthreads=4, available=one - 1
+    ) == (
         1,
         1,
         one,
     )
     # Never more workers or rows than permutations.
-    assert coupling_plan(*sizes, permutations=3, nthreads=8, available=10**9)[:2] == (
+    assert coupling_plan(*sizes, n_permutations=3, nthreads=8, available=10**9)[:2] == (
         3,
         3,
     )
     # With millions of pairs, the rows measured at once hold at most 64 MiB
     # beyond one per worker.
     many = (2_000, 1_999_000, 1_000_000, 300_000)
-    assert coupling_plan(*many, permutations=1000, nthreads=8, available=10**12)[
+    assert coupling_plan(*many, n_permutations=1000, nthreads=8, available=10**12)[
         :2
     ] == (8, 8)
     assert coupling_plan(
-        *(10, 45_000, 50, 30), permutations=1000, nthreads=1, available=10**12
+        *(10, 45_000, 50, 30), n_permutations=1000, nthreads=1, available=10**12
     )[:2] == (1, 16)
     assert 64 * 1024**2 // (8 * 200_000) == 41
     assert coupling_plan(
-        *(10, 200_000, 50, 30), permutations=1000, nthreads=8, available=10**12
+        *(10, 200_000, 50, 30), n_permutations=1000, nthreads=8, available=10**12
     )[:2] == (8, 41)
 
 
@@ -673,7 +678,7 @@ def test_the_tables_name_cells_clones_and_fates() -> None:
         fates=fates,
     )
     assert cells.index.tolist() == ["e0", "e1", "e2"]
-    assert cells.columns.tolist() == ["clone", "late_cells", "fate", "Neu", "Mono"]
+    assert cells.columns.tolist() == ["clone", "n_late_cells", "fate", "Neu", "Mono"]
     assert cells["clone"].tolist()[0] == "c0" and pd.isna(cells["clone"].iloc[1])
     assert [
         name if isinstance(name, str) else None for name in cells["fate"].tolist()
@@ -682,14 +687,14 @@ def test_the_tables_name_cells_clones_and_fates() -> None:
         "clone",
         "fate",
         "cell_type",
-        "early_cells",
-        "late_cells",
-        "cells",
+        "n_early_cells",
+        "n_late_cells",
+        "n_cells",
         "fraction",
         "p_value",
         "q_value",
     ]
-    assert table[["clone", "fate", "cells"]].astype(object).values.tolist() == [
+    assert table[["clone", "fate", "n_cells"]].astype(object).values.tolist() == [
         ["c0", "Neu", 3],
         ["c0", "Mono", 0],
         ["c1", "Neu", 0],
@@ -697,7 +702,7 @@ def test_the_tables_name_cells_clones_and_fates() -> None:
         ["c2", "Neu", 0],
         ["c2", "Mono", 2],
     ]
-    assert table["early_cells"].tolist() == [1, 1, 1, 1, 0, 0]
+    assert table["n_early_cells"].tolist() == [1, 1, 1, 1, 0, 0]
     assert table["fraction"].tolist() == [1.0, 0.0, 0.0, 1.0, 0.0, 1.0]
 
 

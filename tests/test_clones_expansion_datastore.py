@@ -56,7 +56,7 @@ def _table_by_hand(sizes: dict[object, list[int]]) -> dict[object, dict[str, lis
         for size in found:
             cells[_category(size)] += size
             clones[_category(size)] += 1
-        tables[group] = {"cells": cells, "clones": clones}
+        tables[group] = {"n_cells": cells, "n_clones": clones}
     return tables
 
 
@@ -135,18 +135,18 @@ def test_expansion_counts_every_cell_together_by_default(shared) -> None:
     assert table.columns.tolist() == [
         "group",
         "category",
-        "cells",
-        "clones",
+        "n_cells",
+        "n_clones",
         "fraction",
     ]
     assert table["category"].tolist() == list(CATEGORIES)
-    assert table["cells"].tolist() == [1, 4, 12, 15, 0, 0]
-    assert table["clones"].tolist() == [1, 2, 3, 2, 0, 0]
+    assert table["n_cells"].tolist() == [1, 4, 12, 15, 0, 0]
+    assert table["n_clones"].tolist() == [1, 2, 3, 2, 0, 0]
     np.testing.assert_allclose(table["fraction"], np.array([1, 4, 12, 15, 0, 0]) / 32)
     ranks = loaded.rank_windows
-    assert ranks.columns.tolist() == ["group", "window", "cells", "fraction"]
+    assert ranks.columns.tolist() == ["group", "window", "n_cells", "fraction"]
     # Eight clones, all among the ten largest.
-    assert ranks["cells"].tolist() == [N_IN_CLONES, 0, 0, 0, 0, 0, 0]
+    assert ranks["n_cells"].tolist() == [N_IN_CLONES, 0, 0, 0, 0, 0, 0]
 
 
 def test_expansion_counts_cells_within_samples(shared) -> None:
@@ -190,20 +190,20 @@ def test_expansion_counts_cells_within_samples(shared) -> None:
         "group",
         "sample",
         "category",
-        "cells",
-        "clones",
+        "n_cells",
+        "n_clones",
         "fraction",
     ]
     for sample in ("d2", "d4"):
         rows = table[table["sample"] == sample]
         assert rows["group"].tolist() == [sample] * len(CATEGORIES)
-        assert rows["cells"].tolist() == by_hand[sample]["cells"]
-        assert rows["clones"].tolist() == by_hand[sample]["clones"]
+        assert rows["n_cells"].tolist() == by_hand[sample]["n_cells"]
+        assert rows["n_clones"].tolist() == by_hand[sample]["n_clones"]
     # The largest clone of each sample holds the window "1"; the rest follow.
     ranks = loaded.rank_windows.set_index(["sample", "window"])
     for sample, found in TRUTH.group_clone_sizes(TRUTH.samples).items():
-        assert ranks.loc[(sample, "1"), "cells"] == found[0]
-        assert ranks.loc[(sample, "after 1"), "cells"] == sum(found[1:])
+        assert ranks.loc[(sample, "1"), "n_cells"] == found[0]
+        assert ranks.loc[(sample, "after 1"), "n_cells"] == sum(found[1:])
         assert ranks.loc[(sample, "1"), "fraction"] == found[0] / sum(found)
 
 
@@ -229,7 +229,7 @@ def test_expansion_crosses_columns_with_a_label_artifact(shared) -> None:
     np.testing.assert_array_equal(
         loaded.cells["group_clone_size"], TRUTH.cell_clone_sizes(keys)
     )
-    totals = loaded.categories.groupby("group")["cells"].sum().to_dict()
+    totals = loaded.categories.groupby("group")["n_cells"].sum().to_dict()
     assert totals == {
         group: sum(found) for group, found in TRUTH.group_clone_sizes(keys).items()
     }
@@ -293,8 +293,8 @@ def test_frequency_bounds_place_cells_by_their_clone_share(shared) -> None:
     assert loaded.frequency_breakpoints == (0.1, 0.2, 1.0)
     # Of 32 cells, clones of 3, 2, 2 and 1 cells hold at most a tenth each,
     # clones of 6, 5 and 4 at most a fifth, and the clone of 9 more.
-    assert loaded.categories["cells"].tolist() == [8, 15, 9]
-    assert loaded.categories["clones"].tolist() == [4, 3, 1]
+    assert loaded.categories["n_cells"].tolist() == [8, 15, 9]
+    assert loaded.categories["n_clones"].tolist() == [4, 3, 1]
 
 
 def test_expansion_is_reused_and_selected_like_labels(copied) -> None:
@@ -351,7 +351,7 @@ def test_cells_without_a_label_are_counted_in_no_group(copied) -> None:
     )
     assert loaded.cells.loc[missing, "category"].isna().all()
     assert loaded.cells.loc[missing, "clone"].notna().all()
-    assert int(loaded.categories["cells"].sum()) == N_IN_CLONES - 5
+    assert int(loaded.categories["n_cells"].sum()) == N_IN_CLONES - 5
 
 
 def test_expansion_refuses_groups_that_labels_with_commas_name_alike(copied) -> None:
@@ -368,9 +368,12 @@ def test_group_columns_may_not_share_a_name_with_the_result(copied) -> None:
     store.cells.insert("category", TRUTH.samples.astype(object))
     with pytest.raises(ValueError, match="'category', which is also a column"):
         store.clones.expansion(copied.clones, group_by="category")
-    # A clones artifact as labels would name a key column after a result column.
-    with pytest.raises(ValueError, match="key column 'clones' is also a column"):
-        store.clones.expansion(copied.clones, groups=copied.clones)
+    store.cells.insert("n_clones", TRUTH.samples.astype(object))
+    with pytest.raises(ValueError, match="'n_clones', which is also a column"):
+        store.clones.expansion(copied.clones, group_by="n_clones")
+    # The count columns are n_cells and n_clones, so a clones artifact as
+    # labels, whose key column is "clones", groups the cells.
+    assert store.clones.expansion(copied.clones, groups=copied.clones)
     # A column that only other summaries hold is free.
     store.cells.insert("coverage", TRUTH.samples.astype(object))
     assert store.clones.expansion(copied.clones, group_by="coverage")
@@ -439,7 +442,7 @@ def test_frequency_bounds_that_print_alike_get_names_of_their_own(shared) -> Non
     )
     # Every clone of the truth holds more than an eighth of the cells.
     assert loaded.categories.groupby("category", sort=False)[
-        "cells"
+        "n_cells"
     ].sum().to_dict() == {
         "0 to 0.1234561": 1 + 2 + 2 + 3,
         "0.1234561 to 0.1234562": 0,
@@ -487,7 +490,7 @@ def test_a_read_only_store_reuses_saved_expansion(copied) -> None:
     saved = store.clones.expansion(clones)
     reader = open_store(Path(store.zw.store.root), zarr_mode="r")
     assert reader.clones.expansion(clones) == saved
-    assert reader.clones.load_expansion(saved).categories["cells"].sum() == 32
+    assert reader.clones.load_expansion(saved).categories["n_cells"].sum() == 32
     with pytest.raises(PermissionError, match="measure_clonal_expansion"):
         reader.clones.expansion(clones, breakpoints=(1,))
 
@@ -520,7 +523,7 @@ def test_expansion_refuses_more_cells_than_the_memory_budget(
     with pytest.raises(MemoryError, match=f"48 cells holds about {needed} bytes"):
         store.clones.load_expansion(saved)
     monkeypatch.setattr(store, "memoryBytes", needed)
-    assert store.clones.load_expansion(saved).categories["cells"].sum() == 32
+    assert store.clones.load_expansion(saved).categories["n_cells"].sum() == 32
 
 
 def test_reading_the_clones_is_checked_against_the_memory_budget(

@@ -1266,10 +1266,10 @@ def _d50(table: GroupedCloneSizes) -> np.ndarray:
 
 #: The columns of the table of indices, in order.
 INDEX_COLUMNS = (
-    "cells",
-    "clones",
-    "singletons",
-    "doubletons",
+    "n_cells",
+    "n_clones",
+    "n_singletons",
+    "n_doubletons",
     "coverage",
     "shannon",
     "pielou",
@@ -1283,7 +1283,9 @@ INDEX_COLUMNS = (
     "ace",
 )
 # The indices that count cells or clones.
-_COUNT_INDICES = frozenset({"cells", "clones", "singletons", "doubletons", "d50"})
+_COUNT_INDICES = frozenset(
+    {"n_cells", "n_clones", "n_singletons", "n_doubletons", "d50"}
+)
 
 
 def _indices(table: GroupedCloneSizes) -> dict[str, np.ndarray]:
@@ -1294,10 +1296,10 @@ def _indices(table: GroupedCloneSizes) -> dict[str, np.ndarray]:
     with np.errstate(divide="ignore", invalid="ignore"):
         pielou = np.where(richness > 1, shannon / np.log(richness), np.nan)
     return {
-        "cells": table.n,
-        "clones": richness,
-        "singletons": table.f1,
-        "doubletons": table.f2,
+        "n_cells": table.n,
+        "n_clones": richness,
+        "n_singletons": table.f1,
+        "n_doubletons": table.f2,
         "coverage": _coverage(table),
         "shannon": shannon,
         "pielou": pielou,
@@ -1316,8 +1318,9 @@ def indices(clones: CloneSizes) -> dict[str, float]:
     """The observed diversity indices and richness estimates of a group.
 
     Returns:
-        ``cells``, ``clones``, ``singletons``, ``doubletons``,
-        ``coverage``; ``shannon`` (entropy in nats), ``pielou`` (Shannon
+        ``n_cells``, ``n_clones``, ``n_singletons`` (clones of one cell),
+        ``n_doubletons`` (clones of two cells), ``coverage``; ``shannon``
+        (entropy in nats), ``pielou`` (Shannon
         entropy over its maximum, the log of the clones; NaN for one
         clone), ``simpson`` (sum of squared frequencies),
         ``inverse_simpson``, ``gini_simpson`` (one minus Simpson), ``gini``

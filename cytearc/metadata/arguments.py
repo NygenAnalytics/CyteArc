@@ -483,7 +483,7 @@ class CloneImportArguments(OperationArguments):
 
 @dataclass(frozen=True, slots=True)
 class CloneColumnArguments(OperationArguments):
-    operation: ClassVar[str] = "clones_from_column"
+    operation: ClassVar[str] = "import_clones_from_column"
     artifact_kind: ClassVar[str] = "clones"
 
     cell_selection: ArtifactRef = artifact_input()
@@ -558,9 +558,9 @@ class ClonotypeArguments(OperationArguments):
     same_j_gene: bool = parameter()
     within: tuple[str, ...] = parameter()
     within_receptor_type: bool = parameter()
-    # "identity" links identical junctions, with a cutoff of 0.
+    # "identity" links identical junctions, with a max_distance of 0.
     metric: str = parameter()
-    cutoff: int = parameter()
+    max_distance: int = parameter()
     invalidate_cache: bool = execution()
 
 
@@ -593,7 +593,7 @@ class BarcodeCloneArguments(OperationArguments):
     # The resolved rules: the preset's values, replaced by those given.
     preset: str | None = parameter()
     min_reads: int = parameter()
-    distance: int = parameter()
+    max_distance: int = parameter()
     metric: str | None = parameter()
     min_umis: int = parameter()
     min_fraction: float = parameter()
@@ -607,7 +607,7 @@ class BarcodeCloneArguments(OperationArguments):
     min_size: int = parameter()
     within: tuple[str, ...] = parameter()
     # TREX's rules for its partial cloneIDs and its pair filters, which
-    # preset="trex" applies.
+    # preset="trex" applies unless trex_rules says otherwise.
     trex_rules: bool = parameter()
     invalidate_cache: bool = execution()
 
@@ -632,17 +632,17 @@ class VariantCountImportArguments(OperationArguments):
 
 @dataclass(frozen=True, slots=True)
 class VariantSelectionArguments(OperationArguments):
-    operation: ClassVar[str] = "informative_variants"
+    operation: ClassVar[str] = "select_informative_variants"
     artifact_kind: ClassVar[str] = "variant_selection"
 
     counts: ArtifactRef = artifact_input()
     # The cells whose evidence the statistics use, or None for every cell
     # that the counts' files name.
-    cells: ArtifactRef | None = artifact_input()
+    cell_selection: ArtifactRef | None = artifact_input()
     preset: Literal["atac", "rna"] | None = parameter()
     # Each threshold as resolved from the preset and the arguments, None for
     # a test not made.
-    min_cells: float | None = parameter()
+    min_cells: int | None = parameter()
     min_strand_correlation: float | None = parameter()
     min_vmr: float | None = parameter()
     min_depth: float | None = parameter()
@@ -653,20 +653,19 @@ class VariantSelectionArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
-class VariantCloneArguments(OperationArguments):
-    operation: ClassVar[str] = "variant_clones"
+class FrequencyCloneArguments(OperationArguments):
+    operation: ClassVar[str] = "call_frequency_clones"
     artifact_kind: ClassVar[str] = "clones"
 
-    # The counts' cells, which the clones label.
+    # The cells of the selection's counts, which the clones label.
     cell_selection: ArtifactRef = artifact_input()
-    counts: ArtifactRef = artifact_input()
-    variants: ArtifactRef = artifact_input()
-    # The fingerprint of each cell's group in the within column, or None
-    # without groups.
+    informative: ArtifactRef = artifact_input()
+    # The fingerprint of each scored cell's labels in the within columns, or
+    # None without columns.
     within_fingerprint: str | None = artifact_input()
     n_neighbors: int = parameter()
     resolution: float = parameter()
-    within: str | None = parameter()
+    within: tuple[str, ...] = parameter()
     # Fixed choices of the method: the Leiden seed and the smallest Jaccard
     # index of the shared-neighbour graph that Seurat keeps.
     random_seed: int = parameter()
@@ -704,7 +703,7 @@ class VariantGenotypeArguments(OperationArguments):
 
 @dataclass(frozen=True, slots=True)
 class GenotypeCloneArguments(OperationArguments):
-    operation: ClassVar[str] = "genotype_clones"
+    operation: ClassVar[str] = "call_genotype_clones"
     artifact_kind: ClassVar[str] = "clones"
 
     # The genotypes' cells, which the clones label.
@@ -779,7 +778,7 @@ class PhylogenyImportArguments(OperationArguments):
 
 @dataclass(frozen=True, slots=True)
 class PhylogenyCloneArguments(OperationArguments):
-    operation: ClassVar[str] = "phylogeny_clones"
+    operation: ClassVar[str] = "cut_phylogeny_clones"
     artifact_kind: ClassVar[str] = "clones"
 
     phylogeny: ArtifactRef = artifact_input()

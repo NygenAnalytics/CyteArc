@@ -103,7 +103,7 @@ def test_clonotypes_follow_identical_chains(tmp_path) -> None:
         "within": [],
         "within_receptor_type": True,
         "metric": "identity",
-        "cutoff": 0,
+        "max_distance": 0,
     }
     assert status.input_ref("receptors") == receptors
     loaded = store.repertoire.load_clonotypes(ref)
@@ -704,7 +704,7 @@ def test_the_tracking_plot_labels_clonotypes_by_their_junctions(tmp_path) -> Non
     # show no numbers; the labels need neither the clones nor the clonotypes
     # loaded.
     result = plotting.clone_tracking(
-        _TrackOnly(store), ref, group_by="sample", top=1, show=False
+        _TrackOnly(store), ref, group_by="sample", top_n=1, show=False
     )
     try:
         assert result.provenance.extras["tracked"] == ["clonotype_1", "clonotype_2"]
@@ -728,7 +728,7 @@ def test_the_tracking_plot_numbers_clonotypes_that_share_a_junction(
     # The two largest of each group add cell2's clonotype_4 in s1's T cells
     # and cell3's clonotype_3 in s2's, whose beta chains are clonotype_1's
     # CASSA, so the three show their numbers.
-    result = store.plots.clone_tracking(ref, group_by="sample", top=2, show=False)
+    result = store.plots.clone_tracking(ref, group_by="sample", top_n=2, show=False)
     try:
         ax = result.axes["tracking"]
         assert result.provenance.extras["tracked"] == [
@@ -770,7 +770,7 @@ def test_the_tracking_plot_numbers_clonotypes_that_share_a_junction(
         path, cell_selection=store.snapshot_cell_selection()
     )
     plain = plotting.clone_tracking(
-        store, imported, group_by="sample", top=1, show=False
+        store, imported, group_by="sample", top_n=1, show=False
     )
     try:
         assert _legend(plain) == ["clonotype_1"]
@@ -785,12 +785,12 @@ def test_figures_name_clonotype_clusters_as_their_definition_does(tmp_path) -> N
     # Within three substitutions cell2's alpha chain joins it to clonotype_1,
     # which then holds four T cells; clonotype_2 holds the B cells and
     # clonotype_3 cell3, whose beta chain alone is clonotype_1's CASSA.
-    near = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    near = store.repertoire.clonotypes(receptors, metric="hamming", max_distance=3)
     assert store._clone_figure_noun(identical) == "clonotypes"
     assert store._clone_figure_noun(near) == "clonotype clusters"
-    # A distance metric defines clusters even at a cutoff that links only
-    # identical junctions, as the definition's log names them.
-    exact = store.repertoire.clonotypes(receptors, metric="levenshtein", cutoff=0)
+    # A distance metric defines clusters even at a max_distance that links
+    # only identical junctions, as the definition's log names them.
+    exact = store.repertoire.clonotypes(receptors, metric="levenshtein", max_distance=0)
     assert store._clone_figure_noun(exact) == "clonotype clusters"
     path = tmp_path / "clusters.csv"
     store.clones.export_clones(near, path)
@@ -823,7 +823,7 @@ def test_figures_name_clonotype_clusters_as_their_definition_does(tmp_path) -> N
             assert one.axes["top"].get_title() == title
         finally:
             one.close()
-    tracked = store.plots.clone_tracking(near, group_by="sample", top=2, show=False)
+    tracked = store.plots.clone_tracking(near, group_by="sample", top_n=2, show=False)
     try:
         assert _legend(tracked) == ["CASSA 1", "CARW", "CASSA 3"]
     finally:
@@ -887,7 +887,14 @@ def test_clone_summaries_measure_each_receptor_type_apart(tmp_path) -> None:
     ref = store.repertoire.clonotypes(receptors)
     indices = store.clones.diversity(ref).indices
     assert indices[
-        ["group", "receptor_type", "cells", "clones", "singletons", "doubletons"]
+        [
+            "group",
+            "receptor_type",
+            "n_cells",
+            "n_clones",
+            "n_singletons",
+            "n_doubletons",
+        ]
     ].values.tolist() == [["BCR", "BCR", 2, 1, 0, 1], ["TCR", "TCR", 5, 3, 2, 0]]
     curves = store.clones.rarefaction(ref, orders=(0,))
     observed = curves.curves[curves.curves["method"] == "observed"]
@@ -928,7 +935,7 @@ def test_summaries_keep_receptor_types_apart_within_one_clonotype(tmp_path) -> N
     expansion = store.clones.load_expansion(store.clones.expansion(together))
     assert expansion.cells["group_clone_size"].tolist() == [5, 5, 5, 5, 5, 2, 2, 1]
     indices = store.clones.diversity(together).indices
-    assert indices[["receptor_type", "cells", "clones"]].values.tolist() == [
+    assert indices[["receptor_type", "n_cells", "n_clones"]].values.tolist() == [
         ["ambiguous", 1, 1],
         ["BCR", 2, 1],
         ["TCR", 5, 1],
@@ -944,9 +951,9 @@ def test_summaries_keep_receptor_types_apart_within_one_clonotype(tmp_path) -> N
         ["a, TCR", "b, TCR", 1],
     ]
     coupling = store.clones.coupling(
-        together, group_by="tp", method="abundance_cosine", permutations=0
+        together, group_by="tp", method="abundance_cosine", n_permutations=0
     )
-    assert coupling.group_sizes[["group", "cells", "clones"]].values.tolist() == [
+    assert coupling.group_sizes[["group", "n_cells", "n_clones"]].values.tolist() == [
         ["a, BCR", 1, 1],
         ["a, TCR", 3, 1],
         ["b, ambiguous", 1, 1],
@@ -983,7 +990,7 @@ def test_summaries_keep_receptor_types_apart_within_one_clonotype(tmp_path) -> N
         )
     )
     # The late T cells, cell1 and cell3, lie in fates x and y.
-    assert bias.fates[["fate", "late_cells"]].values.tolist() == [
+    assert bias.fates[["fate", "n_late_cells"]].values.tolist() == [
         ["x, TCR", 1],
         ["y, TCR", 1],
     ]
@@ -1004,7 +1011,7 @@ def test_summaries_of_clonotypes_follow_a_cell_selection(tmp_path) -> None:
     groups = expansion.cells["group"].astype(object)
     assert groups.where(groups.notna(), "-").tolist() == ["TCR", "TCR", "BCR", "-"]
     indices = store.clones.diversity(ref, cell_selection=chosen).indices
-    assert indices[["receptor_type", "cells", "clones"]].values.tolist() == [
+    assert indices[["receptor_type", "n_cells", "n_clones"]].values.tolist() == [
         ["BCR", 1, 1],
         ["TCR", 2, 2],
     ]
@@ -1395,12 +1402,12 @@ def test_regrouped_expansion_plot_keeps_receptor_types_apart(tmp_path) -> None:
     # The five T cells, in three clonotypes, and the two B cells, in one, are
     # ranked apart within the tissue.
     windows = result.tables["rank_windows"]
-    held = windows[windows["cells"] > 0]
-    assert held[["group", "window", "cells"]].values.tolist() == [
+    held = windows[windows["n_cells"] > 0]
+    assert held[["group", "window", "n_cells"]].values.tolist() == [
         ["blood, BCR", "1 to 10", 2],
         ["blood, TCR", "1 to 10", 5],
     ]
-    totals = result.tables["categories"].groupby("group")["cells"].sum()
+    totals = result.tables["categories"].groupby("group")["n_cells"].sum()
     assert totals.to_dict() == {"blood, BCR": 2, "blood, TCR": 5}
     result.close()
     store.cells.insert("receptor_type", np.asarray(["x"] * N_CELLS))
@@ -1413,7 +1420,7 @@ def test_clonotype_clusters_need_room_for_their_search(tmp_path, monkeypatch) ->
     monkeypatch.setattr(store, "memoryBytes", 1_000_000)
     assert store.repertoire.clonotypes(receptors).kind == "clonotypes"
     with pytest.raises(MemoryError, match="Raise mem_budget"):
-        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=1)
+        store.repertoire.clonotypes(receptors, metric="hamming", max_distance=1)
 
 
 def test_clonotype_clusters_get_what_the_budget_leaves_for_their_pairs(
@@ -1435,48 +1442,51 @@ def test_clonotype_clusters_get_what_the_budget_leaves_for_their_pairs(
     with pytest.raises(
         MemoryError, match=f"holds about {reserved} bytes with the 6 junctions"
     ):
-        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+        store.repertoire.clonotypes(receptors, metric="hamming", max_distance=3)
     for budget, held in ((2 * 32 - 1, "the 2 pairs"), (4 * 32 - 1, "the 2 links")):
         monkeypatch.setattr(store, "memoryBytes", reserved + budget)
         with pytest.raises(MemoryError, match=f"bytes for {held}"):
-            store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+            store.repertoire.clonotypes(receptors, metric="hamming", max_distance=3)
     assert store.artifacts.list(kind="clonotypes", scope="datastore") == []
     monkeypatch.setattr(store, "memoryBytes", reserved + 4 * 32)
-    assert store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    assert store.repertoire.clonotypes(receptors, metric="hamming", max_distance=3)
 
 
 def test_clonotype_clusters_link_similar_junctions(tmp_path) -> None:
     store, receptors = clonal_receptors(tmp_path)
     # cell2's alpha junction differs from cell0's in 3 of 12 nucleotides.
     identical = store.repertoire.clonotypes(receptors)
-    near = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    near = store.repertoire.clonotypes(receptors, metric="hamming", max_distance=3)
     assert near != identical
     loaded = store.repertoire.load_clonotypes(near)
-    assert loaded.metric == "hamming" and loaded.cutoff == 3
+    assert loaded.metric == "hamming" and loaded.max_distance == 3
     assert _members(loaded)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
     status = store.artifacts.inspect(near)
-    assert (status.parameters["metric"], status.parameters["cutoff"]) == ("hamming", 3)
+    assert (status.parameters["metric"], status.parameters["max_distance"]) == (
+        "hamming",
+        3,
+    )
     two = store.repertoire.load_clonotypes(
-        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=2)
+        store.repertoire.clonotypes(receptors, metric="hamming", max_distance=2)
     )
     assert _members(two)["clonotype_1"] == ["cell0", "cell1", "cell4"]
     # 3 of 12 is 25 percent.
     for cutoff, joined in ((25, True), (24, False)):
         result = store.repertoire.load_clonotypes(
             store.repertoire.clonotypes(
-                receptors, metric="normalized_hamming", cutoff=cutoff
+                receptors, metric="normalized_hamming", max_distance=cutoff
             )
         )
         assert ("cell2" in _members(result)["clonotype_1"]) is joined
     edits = store.repertoire.load_clonotypes(
-        store.repertoire.clonotypes(receptors, metric="levenshtein", cutoff=3)
+        store.repertoire.clonotypes(receptors, metric="levenshtein", max_distance=3)
     )
     assert _members(edits)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
     # Residues: cell2's alpha chain is identical, so amino-acid clusters
     # equal amino-acid clonotypes.
     residues = store.repertoire.load_clonotypes(
         store.repertoire.clonotypes(
-            receptors, sequence="aa", metric="levenshtein", cutoff=1
+            receptors, sequence="aa", metric="levenshtein", max_distance=1
         )
     )
     assert _members(residues)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
@@ -1486,7 +1496,7 @@ def test_clusters_ignore_the_junctions_of_contigs_that_are_not_chains(
     tmp_path,
 ) -> None:
     store, receptors = clonal_receptors(tmp_path)
-    clusters = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    clusters = store.repertoire.clonotypes(receptors, metric="hamming", max_distance=3)
     expected = _members(store.repertoire.load_clonotypes(clusters))
     # Non-productive alpha contigs of cell3 and of cell7, which has no chain,
     # one substitution from cell0's alpha chain: the import keeps them, but no
@@ -1500,7 +1510,7 @@ def test_clusters_ignore_the_junctions_of_contigs_that_are_not_chains(
     shutil.copytree(tmp_path / "store.zarr", other / "store.zarr")
     store, receptors = clonal_receptors(other, rows)
     assert len(store.repertoire.load_receptors(receptors).chains) == 16
-    near = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    near = store.repertoire.clonotypes(receptors, metric="hamming", max_distance=3)
     assert _members(store.repertoire.load_clonotypes(near)) == expected
 
 
@@ -1557,7 +1567,7 @@ def test_the_log_names_clonotype_clusters_as_such(tmp_path) -> None:
     )
     try:
         store.repertoire.clonotypes(receptors)
-        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+        store.repertoire.clonotypes(receptors, metric="hamming", max_distance=3)
     finally:
         logger.remove(sink)
     # Of the seven cells with a receptor, cell0, cell1 and cell4 share their
@@ -1573,20 +1583,52 @@ def test_the_log_names_clonotype_clusters_as_such(tmp_path) -> None:
     ("kwargs", "error", "message"),
     [
         ({"metric": "tcrdist"}, ValueError, "metric must be one of"),
-        ({"metric": "identity", "cutoff": 1}, ValueError, "takes no cutoff"),
-        ({"metric": "identity", "cutoff": False}, ValueError, "takes no cutoff"),
-        ({"metric": "identity", "cutoff": 0.0}, ValueError, "takes no cutoff"),
         (
-            {"metric": "identity", "cutoff": np.asarray([0])},
+            {"metric": "identity", "max_distance": 1},
             ValueError,
-            "takes no cutoff",
+            "takes no max_distance",
         ),
-        ({"metric": "hamming"}, ValueError, "needs a cutoff"),
-        ({"metric": "hamming", "cutoff": 1.5}, TypeError, "cutoff must be an integer"),
-        ({"metric": "hamming", "cutoff": 1.0}, TypeError, "cutoff must be an integer"),
-        ({"metric": "levenshtein", "cutoff": True}, TypeError, "must be an integer"),
-        ({"metric": "hamming", "cutoff": -1}, ValueError, "cutoff must be at least 0"),
-        ({"metric": "normalized_hamming", "cutoff": 101}, ValueError, "at most 100"),
+        (
+            {"metric": "identity", "max_distance": False},
+            ValueError,
+            "takes no max_distance",
+        ),
+        (
+            {"metric": "identity", "max_distance": 0.0},
+            ValueError,
+            "takes no max_distance",
+        ),
+        (
+            {"metric": "identity", "max_distance": np.asarray([0])},
+            ValueError,
+            "takes no max_distance",
+        ),
+        ({"metric": "hamming"}, ValueError, "needs a max_distance"),
+        (
+            {"metric": "hamming", "max_distance": 1.5},
+            TypeError,
+            "^max_distance must be an integer",
+        ),
+        (
+            {"metric": "hamming", "max_distance": 1.0},
+            TypeError,
+            "^max_distance must be an integer",
+        ),
+        (
+            {"metric": "levenshtein", "max_distance": True},
+            TypeError,
+            "must be an integer",
+        ),
+        (
+            {"metric": "hamming", "max_distance": -1},
+            ValueError,
+            "^max_distance must be at least 0",
+        ),
+        (
+            {"metric": "normalized_hamming", "max_distance": 101},
+            ValueError,
+            "at most 100",
+        ),
     ],
 )
 def test_clonotype_cluster_options_are_checked(
@@ -1597,19 +1639,21 @@ def test_clonotype_cluster_options_are_checked(
         store.repertoire.clonotypes(receptors, **kwargs)
 
 
-def test_the_bounds_of_the_cutoff_are_accepted(tmp_path) -> None:
+def test_the_bounds_of_max_distance_are_accepted(tmp_path) -> None:
     store, receptors = clonal_receptors(tmp_path)
-    # Identity records a cutoff of 0, so a cutoff of 0 is the same request.
+    # Identity records a max_distance of 0, so 0 is the same request.
     identity = store.repertoire.clonotypes(receptors)
-    assert store.repertoire.clonotypes(receptors, cutoff=0) == identity
-    assert store.repertoire.clonotypes(receptors, cutoff=np.int64(0)) == identity
+    assert store.repertoire.clonotypes(receptors, max_distance=0) == identity
+    assert store.repertoire.clonotypes(receptors, max_distance=np.int64(0)) == identity
     # Within 100 percent, every chain is near every chain of its length: the
     # alpha chains of cell0, cell2 and cell4 join their T cells, and the B
     # cells stay apart in their own receptor type.
     whole = store.repertoire.load_clonotypes(
-        store.repertoire.clonotypes(receptors, metric="normalized_hamming", cutoff=100)
+        store.repertoire.clonotypes(
+            receptors, metric="normalized_hamming", max_distance=100
+        )
     )
-    assert whole.cutoff == 100
+    assert whole.max_distance == 100
     assert _members(whole)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
     assert _members(whole)["clonotype_2"] == ["cell5", "cell6"]
 
@@ -1625,7 +1669,7 @@ def test_clusters_keep_whole_the_b_cell_clones_that_mutations_split(tmp_path) ->
         split_by=receptors_truth.expected["receptor_type"].to_numpy(dtype=object)
     )
     clusters = store.repertoire.clonotypes(
-        receptors, receptor_arms="any", metric="hamming", cutoff=1
+        receptors, receptor_arms="any", metric="hamming", max_distance=1
     )
     assert loaded_partition(store, clusters) == expected
     # Identical junctions split each B cell clone of several cells into its

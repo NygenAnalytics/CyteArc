@@ -200,7 +200,8 @@ def count_chains(
         cells: Each chain's cell.
         loci: Each chain's locus, as a code, and the loci.
         values: For each counted column, each chain's code and the names.
-        count: ``"cells"`` or ``"clonotypes"``, the name of the count column.
+        count: ``"cells"`` or ``"clonotypes"``, what the count column,
+            ``n_cells`` or ``n_clonotypes``, counts.
         clonotypes: Each chain's clonotype code, to count clonotypes.
         by_count: Order the rows of each group and locus by count, most
             first, and then by value; otherwise by value.
@@ -209,11 +210,12 @@ def count_chains(
 
     Returns:
         One row per group, locus and values with a chain, by group and
-        locus: the columns of ``keys``, ``locus``, the values, ``count`` and
+        locus: the columns of ``keys``, ``locus``, the values, the count and
         ``fraction``, the count's share of the group's chains of that locus;
         and the cells with a counted chain.
     """
-    columns = [*keys.columns, "locus", *values, count, "fraction"]
+    column = f"n_{count}"
+    columns = [*keys.columns, "locus", *values, column, "fraction"]
     codes = [
         np.asarray(chain_codes, dtype=np.int64) for chain_codes, _ in values.values()
     ]
@@ -227,7 +229,7 @@ def count_chains(
         empty["locus"] = pd.Series(dtype=object)
         for name, (_codes, names) in values.items():
             empty[name] = pd.Series(dtype=np.asarray(names).dtype)
-        empty[count] = pd.Series(dtype=np.int64)
+        empty[column] = pd.Series(dtype=np.int64)
         empty["fraction"] = pd.Series(dtype=np.float64)
         return empty[columns], n_cells
     rows = [
@@ -262,7 +264,7 @@ def count_chains(
     table["locus"] = np.asarray(loci[1], dtype=object)[distinct[order, 1]]
     for at, (name, (_, names)) in enumerate(values.items()):
         table[name] = np.asarray(names)[distinct[order, 2 + at]]
-    table[count] = counts[order]
+    table[column] = counts[order]
     table["fraction"] = fraction[order]
     return table, n_cells
 
@@ -274,9 +276,10 @@ class GeneUsage:
     Attributes:
         table: One row per group, locus and gene, or gene combination:
             ``group`` (its labels joined by commas, or ``"all cells"``), the
-            group's key columns, ``locus``, one column per gene field, the
-            ``cells`` or ``clonotypes`` with the genes, and their
-            ``fraction`` of the group's chains of that locus.
+            group's key columns, ``locus``, one column per gene field,
+            ``n_cells`` or ``n_clonotypes``, the cells or clonotypes with the
+            genes, and their ``fraction`` of the group's chains of that
+            locus.
         source: The ``immune_receptors`` or ``clonotypes`` artifact.
         genes: The gene fields, such as ``("v_call", "j_call")``.
         level: ``"allele"``, ``"gene"`` or ``"family"``.
@@ -308,9 +311,9 @@ class Spectratype:
         table: One row per group, locus and length, by group, locus and
             length: ``group`` (its labels joined by commas, or ``"all
             cells"``), the group's key columns, ``locus``, ``length``
-            (residues or nucleotides), the ``cells`` or ``clonotypes`` with
-            junctions of that length, and their ``fraction`` of the group's
-            chains of that locus.
+            (residues or nucleotides), ``n_cells`` or ``n_clonotypes``, the
+            cells or clonotypes with junctions of that length, and their
+            ``fraction`` of the group's chains of that locus.
         source: The ``immune_receptors`` or ``clonotypes`` artifact.
         sequence: ``"aa"`` for residues or ``"nt"`` for nucleotides.
         slots: The chain slots counted.

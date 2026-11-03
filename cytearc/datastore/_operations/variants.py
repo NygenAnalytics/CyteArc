@@ -9,12 +9,12 @@ import numpy as np
 import pandas as pd
 import zarr
 
-from ...clones.assignments import CloneAssignment, ranked_clones
+from ...clones.assignments import CloneAssignment
 from ...clones.barcode_clones import clone_labels
 from ...clones.calling import cell_sets, set_clones
 from ...metadata.arguments import (
+    FrequencyCloneArguments,
     GenotypeCloneArguments,
-    VariantCloneArguments,
     VariantCountImportArguments,
     VariantGenotypeArguments,
     VariantSelectionArguments,
@@ -67,6 +67,7 @@ from ...variants.frequencies import (
 from ...variants.genotypes import (
     CALLS,
     FILTERED,
+    GENOTYPE_RULES,
     MISSING,
     MUTANT_CALLS,
     SOURCE_CALLS,
@@ -87,6 +88,7 @@ from ...variants.masks import VARIANT_MASKS, masked_variants
 from ...variants.sorting import CellRowSorter, sort_rows
 from ...variants.statistics import (
     HETEROPLASMY_LEVELS,
+    THRESHOLDS,
     VariantSelection,
     VariantStatisticsAccumulator,
     informative_variants,
@@ -100,7 +102,7 @@ from .cell_barcodes import (
     barcode_files,
     warn_unmatched_barcodes,
 )
-from .cell_groups import cell_groups, group_columns, within_groups
+from .cell_groups import group_columns, within_groups
 from .clone_artifacts import log_clones, plan_clones, write_clones
 
 if TYPE_CHECKING:
@@ -147,7 +149,7 @@ _LOADED_BYTES_PER_CELL = 200
 # whole one at a time; 32 bytes as traced on 500,000 cells.
 _LOADED_BYTES_PER_COUNTS_CELL = 40
 # The per-cell arrays of a variant_counts artifact, its canonical one first.
-_CELL_ARRAYS = ("mean_depth", "covered_sites", "listed")
+_CELL_ARRAYS = ("mean_depth", "n_covered_sites", "listed")
 _FILES_TEXT = ("the variant file", "the variant files")
 # Bytes per stored row of a band that statistics or allele frequencies read:
 # the depth and count rows with their cells, and the keys, lookups and
@@ -187,7 +189,6 @@ _CLONE_ATTRIBUTES = (
     "n_cells_without_coverage",
     "n_cells_without_alternative",
     "n_cells_without_neighbors",
-    "n_cells_without_group",
     "n_edges",
 )
 # Bytes that calling genotypes, or the clones they define, holds whatever the
@@ -225,8 +226,6 @@ _GENOTYPE_CLONE_BYTES_PER_ROW = 48
 # Bytes held for each cell while genotype clones are saved, beside what saving
 # them holds: its ambiguous flag as called.
 _GENOTYPE_CLONE_CALL_BYTES_PER_CELL = 1
-# The columns of loaded genotype clones, which within columns may not name.
-_GENOTYPE_CLONE_COLUMNS = frozenset({"clone", "clone_size", "ambiguous"})
 # The attributes that saved genotype clones need to be reused.
 _GENOTYPE_CLONE_ATTRIBUTES = (
     "n_clones",
@@ -239,14 +238,14 @@ _GENOTYPE_CLONE_ATTRIBUTES = (
 
 
 # The formats whose files hold a chosen subset of variants.
-_VARIANT_CHOICE_FORMATS = ("tapestri", "dabseq")
+_VARIANT_CHOICE_FORMATS = ("tapestri", "dab_seq")
 # The formats whose calls carry a quality, the genotype quality GQ, which
 # min_quality tests; the other formats' calls carry none.
-_CALL_QUALITY_FORMATS = ("tapestri", "dabseq")
+_CALL_QUALITY_FORMATS = ("tapestri", "dab_seq")
 
 
 def _variant_names(variants: Any) -> tuple[str, ...]:
-    """The variants or positions that ``variants`` names, sorted and once each."""
+    """The variants or positions that ``include_variants`` names, sorted and once each."""
     if variants is None:
         return ()
     variants = _listed(variants)
@@ -256,8 +255,8 @@ def _variant_names(variants: Any) -> tuple[str, ...]:
         or not all(isinstance(item, str) for item in variants)
     ):
         raise TypeError(
-            "variants must be a sequence of variant or position names, such as "
-            "['chr1:115256513:G/T'], or None"
+            "include_variants must be a sequence of variant or position names, "
+            "such as ['chr1:115256513:G/T'], or None"
         )
     return tuple(sorted(set(variants)))
 
@@ -267,7 +266,7 @@ def _read_source(
     format: str | None,
     swap_strands: bool,
     threads: int,
-    variants: tuple[str, ...] = (),
+    include_variants: tuple[str, ...] = (),
     memory_bytes: int | None = None,
 ) -> VariantSource:
     """Read the description of one file or folder of variant counts.
@@ -294,19 +293,20 @@ def _read_source(
             "swap_strands applies to mgatk files from call or bcall of mgatk 0.4.0 "
             f"to 0.5.8, not to {detected} files"
         )
-    if variants and detected not in _VARIANT_CHOICE_FORMATS:
+    if include_variants and detected not in _VARIANT_CHOICE_FORMATS:
         raise ValueError(
-            "variants chooses the variants of Tapestri and DAb-seq files, which "
-            f"import their passing variants by default, not of {detected} files"
+            "include_variants chooses the variants of Tapestri and DAb-seq files, "
+            f"which import their passing variants by default, not of {detected} "
+            "files"
         )
     if detected == "tapestri":
         from ...readers.tapestri import tapestri_source
 
-        return tapestri_source(path, variants, memory_bytes)
-    if detected == "dabseq":
-        from ...readers.tapestri import dabseq_source
+        return tapestri_source(path, include_variants, memory_bytes)
+    if detected == "dab_seq":
+        from ...readers.tapestri import dab_seq_source
 
-        return dabseq_source(path, variants, memory_bytes)
+        return dab_seq_source(path, include_variants, memory_bytes)
     if detected in ("mgatk", "maegatk"):
         from ...readers.mgatk import mgatk_source
 
@@ -711,7 +711,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         format: str | None = None,
         count_unit: str | None = None,
         swap_strands: bool = False,
-        variants: Sequence[str] | None = None,
+        include_variants: Sequence[str] | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Import per-cell allele counts of mitochondrial or targeted variants.
@@ -741,7 +741,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
 
         A Tapestri file imports the variants that pass the pipeline's default
         filters, and a DAb-seq file every variant, with those that
-        ``variants`` names. Each position is a site, whose alleles are its
+        ``include_variants`` names. Each position is a site, whose alleles are its
         reference and the alternatives of its variants; Tapestri gives each
         variant's alternative reads as ``AF × DP / 100``, its depth ``DP`` and
         its genotype ``NGT`` as a call with the genotype quality ``GQ``, and
@@ -772,7 +772,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
 
         The canonical ``mean_depth`` holds each cell's depth summed over the
         sites and divided by their number, NaN for a selected cell that no
-        file names; ``covered_sites`` counts its sites with depth above 0 and
+        file names; ``n_covered_sites`` counts its sites with depth above 0 and
         ``listed`` marks the cells a file names. ``ds.select_cells(counts,
         low=10)`` keeps cells with a mean depth above 10.
 
@@ -796,7 +796,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             format: One of ``"mgatk"``, ``"maegatk"``, ``"cellsnp_lite"``,
                 ``"mquad"``, ``"vartrix"``, ``"mito"``, ``"giftwrap"``,
                 ``"ironthrone"``, ``"got"``, ``"got_multi"``, ``"gotcha"``,
-                ``"tapestri"`` and ``"dabseq"``, or None to recognise each
+                ``"tapestri"`` and ``"dab_seq"``, or None to recognise each
                 path's format.
             count_unit: ``"reads"``, ``"umis"`` or ``"molecules"``: what
                 cellsnp-lite, MQuad and VarTrix counted, which their files do
@@ -807,8 +807,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             swap_strands: Swap the forward and reverse counts of mgatk files
                 written by ``call`` or ``bcall`` of mgatk 0.4.0 to 0.5.8, which
                 counted reverse-aligned reads as forward.
-            variants: Variants of Tapestri or DAb-seq files to import beside
-                those that pass, named as the file names them, such as
+            include_variants: Variants of Tapestri or DAb-seq files to import
+                beside those that pass, named as the file names them, such as
                 ``"chr1:115256513:G/T"``, or positions, such as
                 ``"chr1:115256513"`` for every variant there; None for the
                 passing variants alone. The source record counts the variants
@@ -828,7 +828,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 references, count in different units, define depth
                 differently or give their counts different fields, a cell is
                 counted twice at a site, an option lists a value for another
-                number of paths, ``variants`` is given for another format or
+                number of paths, ``include_variants`` is given for another format or
                 names a variant that a file lacks or cannot be read, a file
                 has no variant to import, or the selection holds no cell.
             FileNotFoundError: If a path or a file it needs is missing.
@@ -842,7 +842,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             raise TypeError("cell_selection must be an ArtifactRef")
         bool_argument(swap_strands, "swap_strands")
         bool_argument(invalidate_cache, "invalidate_cache")
-        chosen_variants = _variant_names(variants)
+        chosen_variants = _variant_names(include_variants)
         if format is not None and format not in VARIANT_FORMATS:
             raise ValueError(
                 f"format must be one of {', '.join(VARIANT_FORMATS)}, or None, not "
@@ -1173,7 +1173,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             cell_selection=cell_selection,
             arrays={
                 "mean_depth": ((n_cells,), "f"),
-                "covered_sites": ((n_cells,), "i"),
+                "n_covered_sites": ((n_cells,), "i"),
                 "listed": ((n_cells,), "b"),
             },
             invalidate_cache=arguments.invalidate_cache,
@@ -1412,7 +1412,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 appender.append("call_quality", call_rows["quality"])
             mean_depth = np.where(listed, depth_total / max(sites.n_sites, 1), np.nan)
             _write_array(group, "mean_depth", mean_depth)
-            _write_array(group, "covered_sites", covered)
+            _write_array(group, "n_covered_sites", covered)
             _write_array(group, "listed", listed)
             _write_array(group, "depth_offsets", offsets["depth"])
             _write_array(group, "count_offsets", offsets["count"])
@@ -1456,9 +1456,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         return cell_selection_indices(self.zw, selection)
 
     def _variant_cell_positions(
-        self, counts: ArtifactRef, cell_index: np.ndarray, cells: Any
+        self, counts: ArtifactRef, cell_index: np.ndarray, cell_selection: Any
     ) -> np.ndarray:
-        """The artifact's cells that ``cells`` names, as ascending positions."""
+        """The artifact's cells that ``cell_selection`` names, as ascending positions."""
+        cells = cell_selection
         if cells is None:
             return np.arange(len(cell_index), dtype=np.int64)
         if isinstance(cells, ArtifactRef):
@@ -1468,15 +1469,16 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             inside[inside] = cell_index[positions[inside]] == chosen[inside]
             if not inside.all():
                 raise ValueError(
-                    f"cells selects {int((~inside).sum())} cells that the counts do "
-                    "not hold; pass a selection within the counts' cell_selection"
+                    f"cell_selection selects {int((~inside).sum())} cells that the "
+                    "counts do not hold; pass a selection within the counts' "
+                    "cell_selection"
                 )
             return np.asarray(positions, dtype=np.int64)
         cells = _listed(cells)
         if isinstance(cells, str | bytes) or not isinstance(cells, Sequence):
             raise TypeError(
-                "cells must be a cell selection ArtifactRef, a sequence of cell IDs, "
-                "or None"
+                "cell_selection must be a cell selection ArtifactRef, a sequence of "
+                "cell IDs, or None"
             )
         wanted = np.asarray(list(cells), dtype=object)
         if not len(wanted):
@@ -1534,7 +1536,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         counts: ArtifactRef,
         *,
         sites: Sequence[str | int] | np.ndarray | pd.Index | None = None,
-        cells: ArtifactRef | Sequence[str] | np.ndarray | pd.Index | None = None,
+        cell_selection: ArtifactRef
+        | Sequence[str]
+        | np.ndarray
+        | pd.Index
+        | None = None,
     ) -> VariantCounts:
         """Read saved variant counts as tables of sites, alleles, cells and rows.
 
@@ -1543,9 +1549,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         calls its source made. A cell and site without a depth row was not
         covered, so a frequency there is undefined; one with depth but
         without a count row of an allele showed none of it. ``sites`` and
-        ``cells`` keep the tables to some sites and cells; ``cells=[]``
-        reads only the sites and alleles, with each site's depth summed over
-        all cells.
+        ``cell_selection`` keep the tables to some sites and cells;
+        ``cell_selection=[]`` reads only the sites and alleles, with each
+        site's depth summed over all cells.
 
         The budget counts each row read, at about 120 bytes, the two stored
         chunks that a read's first and last rows decompress whole, the cells'
@@ -1561,8 +1567,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 ``"chrM:310"`` or ``"IDH2_Mut1"``, or positions of an
                 artifact of one contig, such as ``310``, as a list, a NumPy
                 array or a pandas index; None for all sites.
-            cells: A cell selection within the counts' cells, or cell IDs as
-                a list, a NumPy array or a pandas index; None for all cells.
+            cell_selection: A cell selection within the counts' cells, or cell
+                IDs as a list, a NumPy array or a pandas index; None for all
+                cells.
 
         Returns:
             A :class:`~cytearc.variants.VariantCounts` record.
@@ -1581,7 +1588,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         table = _stored_sites(group)
         kept_sites = _site_positions(table, sites)
         cell_index = self._variant_cell_index(counts)
-        positions = self._variant_cell_positions(counts, cell_index, cells)
+        positions = self._variant_cell_positions(counts, cell_index, cell_selection)
         fields = [str(name) for name in cast(list[str], group.attrs["count_fields"])]
         count_arrays = (
             "count_alleles",
@@ -1680,7 +1687,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             cell_ids=cell_ids,
             listed=_read(group, "listed")[positions],
             mean_depth=_read(group, "mean_depth")[positions],
-            covered_sites=_read(group, "covered_sites")[positions],
+            n_covered_sites=_read(group, "n_covered_sites")[positions],
             depth=(depth_cells, depth["depth_sites"], depth["depth"]),
             counts=(
                 count_cells,
@@ -1711,22 +1718,25 @@ class _VariantOperationsMixin(_VariantOperationsBase):
     def _selection_group(self, informative: ArtifactRef) -> zarr.Group:
         """Return a complete ``variant_selection`` artifact's group."""
         if not isinstance(informative, ArtifactRef):
-            raise TypeError("variants must be an ArtifactRef")
+            raise TypeError("informative must be an ArtifactRef")
         if informative.kind != VariantSelectionArguments.artifact_kind:
             raise ValueError(
-                "variants must be a variant_selection artifact from "
+                "informative must be a variant_selection artifact from "
                 f"ds.variants.informative, not {informative.kind!r}"
             )
         require_complete_artifact(self.zw, informative)
         return artifact_group(self.zw, informative)
 
     def _statistic_positions(
-        self, counts: ArtifactRef, group: zarr.Group, cells: ArtifactRef | None
+        self,
+        counts: ArtifactRef,
+        group: zarr.Group,
+        cell_selection: ArtifactRef | None,
     ) -> np.ndarray:
         """The positions of the cells that statistics cover: the chosen cells
         that a file names."""
         cell_index = self._variant_cell_index(counts)
-        positions = self._variant_cell_positions(counts, cell_index, cells)
+        positions = self._variant_cell_positions(counts, cell_index, cell_selection)
         listed = _read(group, "listed").astype(bool)
         positions = np.asarray(positions[listed[positions]], dtype=np.int64)
         if not len(positions):
@@ -1741,7 +1751,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         self,
         counts: ArtifactRef,
         *,
-        cells: ArtifactRef | None = None,
+        cell_selection: ArtifactRef | None = None,
         preset: str | None = None,
         min_cells: int | None = None,
         min_strand_correlation: float | None = None,
@@ -1788,8 +1798,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         Args:
             counts: A ``variant_counts`` artifact, such as one from
                 :meth:`~cytearc.datastore.namespaces.VariantsAccessor.import_counts`.
-            cells: A cell selection within the counts' cells whose evidence
-                the statistics use, such as ``ds.select_cells(counts,
+            cell_selection: A cell selection within the counts' cells whose
+                evidence the statistics use, such as ``ds.select_cells(counts,
                 low=10)`` for the cells whose mean depth exceeds 10, as mgatk
                 scores them; None uses every cell that the counts' files
                 name. Cells that no file names are left out either way.
@@ -1814,7 +1824,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             it with
             :meth:`~cytearc.datastore.namespaces.VariantsAccessor.load_informative`,
             plot it with ``ds.plots.variant_statistics`` or call clones from
-            it with :meth:`~cytearc.datastore.namespaces.VariantsAccessor.clones`.
+            it with
+            :meth:`~cytearc.datastore.namespaces.VariantsAccessor.frequency_clones`.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1833,8 +1844,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             MemoryError: If the statistics do not fit the memory budget.
         """
         group = self._variant_group(counts)
-        if cells is not None and not isinstance(cells, ArtifactRef):
-            raise TypeError("cells must be a cell selection ArtifactRef or None")
+        if cell_selection is not None and not isinstance(cell_selection, ArtifactRef):
+            raise TypeError(
+                "cell_selection must be a cell selection ArtifactRef or None"
+            )
         bool_argument(invalidate_cache, "invalidate_cache")
         thresholds = resolve_thresholds(
             preset,
@@ -1869,12 +1882,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             n_variants=0,
         )
         sites = _stored_sites(group)
-        positions = self._statistic_positions(counts, group, cells)
+        positions = self._statistic_positions(counts, group, cell_selection)
         arguments = VariantSelectionArguments(
             counts=counts,
-            cells=cells,
+            cell_selection=cell_selection,
             preset=cast(Any, preset),
-            min_cells=thresholds["min_cells"],
+            min_cells=cast(int | None, thresholds["min_cells"]),
             min_strand_correlation=thresholds["min_strand_correlation"],
             min_vmr=thresholds["min_vmr"],
             min_depth=thresholds["min_depth"],
@@ -1949,9 +1962,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             & ~masked
         )
         attributes = {
-            "preset": preset,
-            "thresholds": thresholds,
-            "masks": list(masks),
             "n_cells": statistics.n_cells,
             "n_variants": statistics.n_variants,
             "n_informative": int(informative.sum()),
@@ -2011,8 +2021,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             execution_options=record.execution_options,
             invalidate_cache=arguments.invalidate_cache,
             required_attributes=(
-                "thresholds",
-                "masks",
                 "n_cells",
                 "n_variants",
                 "stranded",
@@ -2043,7 +2051,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 incomplete.
         """
         group = self._selection_group(informative)
-        counts = inspect_artifact(self.zw, informative).input_ref("counts")
+        status = inspect_artifact(self.zw, informative)
+        counts = status.input_ref("counts")
         sites = _stored_sites(self._variant_group(counts))
         alleles = _read(group, "variant_alleles").astype(np.int64)
         attributes = group.attrs
@@ -2052,31 +2061,30 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             alleles,
             {name: _read(group, name) for name in group.array_keys()},
         )
-        thresholds = cast(dict[str, float | None], attributes["thresholds"])
-        status = inspect_artifact(self.zw, informative)
+        # The settings come from the provenance parameters, their one home.
+        parameters = dict(status.parameters or {})
         return VariantSelection(
             variants=frame,
             counts=counts,
-            cells=None
-            if (status.inputs or {}).get("cells") is None
-            else status.input_ref("cells"),
-            preset=cast(str | None, attributes["preset"]),
-            thresholds=dict(thresholds),
-            masks=tuple(str(name) for name in cast(list[str], attributes["masks"])),
+            cell_selection=None
+            if (status.inputs or {}).get("cell_selection") is None
+            else status.input_ref("cell_selection"),
+            preset=cast(str | None, parameters["preset"]),
+            thresholds={name: parameters[name] for name in THRESHOLDS},
+            masks=tuple(str(name) for name in cast(list[str], parameters["mask"])),
             n_cells=int(cast(int, attributes["n_cells"])),
             stranded=bool(attributes["stranded"]),
             qualities=bool(attributes["qualities"]),
         )
 
     @validation_scoped
-    def _variants_clones(
+    def _variants_frequency_clones(
         self,
-        counts: ArtifactRef,
+        informative: ArtifactRef,
         *,
-        variants: ArtifactRef,
         n_neighbors: int = 10,
         resolution: float = 1.0,
-        within: str | None = None,
+        within: str | Sequence[str] | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Call clones from the allele frequencies of informative variants.
@@ -2107,19 +2115,23 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         and get none; the artifact counts them in its
         ``n_cells_without_coverage``, ``n_cells_without_alternative`` and
         ``n_cells_without_neighbors`` attributes. The clones cover the cells
-        that the statistics of ``variants`` covered.
+        of the counts that ``informative`` scored, and its statistics cover
+        the cells that the clones are called from.
+
+        Clones are numbered by size over every ``within`` group, so
+        ``clone_1`` is the largest, and ties follow their first cell.
 
         Args:
-            counts: The ``variant_counts`` artifact that ``variants`` scored.
-            variants: A ``variant_selection`` artifact from
-                :meth:`~cytearc.datastore.namespaces.VariantsAccessor.informative`.
+            informative: A ``variant_selection`` artifact from
+                :meth:`~cytearc.datastore.namespaces.VariantsAccessor.informative`,
+                whose counts the frequencies are read from.
             n_neighbors: The cells of a full neighbourhood, the cell itself
                 included as Seurat counts it, at least 2.
             resolution: The Leiden resolution; larger values give more,
                 smaller clones.
-            within: A cell metadata column, such as the donor or the mouse:
-                clones never join cells of two groups, and each clone's label
-                starts with its group. Cells without a group get no clone.
+            within: Cell metadata columns whose labels keep clones apart, such
+                as the donor or the mouse: clones never join cells of two
+                groups. Every cell that the statistics covered needs a label.
             invalidate_cache: Call clones again instead of reusing them.
 
         Returns:
@@ -2129,14 +2141,14 @@ class _VariantOperationsMixin(_VariantOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``counts`` is not a ``variant_counts`` artifact,
-                ``variants`` is not a ``variant_selection`` artifact or did
-                not score ``counts``, it selects no informative variant,
-                ``n_neighbors`` is below 2, the resolution is not finite and
-                positive, or ``within`` is not a cell metadata column.
-            KeyError: If the store holds no such ``counts`` or ``variants``
-                artifact.
-            RuntimeError: If the ``counts`` or ``variants`` artifact is
+            ValueError: If ``informative`` is not a ``variant_selection``
+                artifact or selects no informative variant, ``n_neighbors`` is
+                below 2, the resolution is not finite and positive, or a
+                within column is missing, is named twice or has no label for
+                a cell that the statistics covered.
+            KeyError: If the store holds no such ``informative`` artifact, or
+                not the counts that it scored.
+            RuntimeError: If the ``informative`` artifact or its counts are
                 incomplete.
             PermissionError: If the store is read-only and the clones are not
                 saved yet.
@@ -2146,14 +2158,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         """
         from ...clustering.leiden import canonical_resolution
 
+        selection = self._selection_group(informative)
+        status = inspect_artifact(self.zw, informative)
+        counts = status.input_ref("counts")
         group = self._variant_group(counts)
-        selection = self._selection_group(variants)
-        status = inspect_artifact(self.zw, variants)
-        if status.input_ref("counts") != counts:
-            raise ValueError(
-                "variants scored other counts; pass the counts that "
-                "ds.variants.informative read"
-            )
         if isinstance(n_neighbors, bool) or not isinstance(
             n_neighbors, int | np.integer
         ):
@@ -2164,17 +2172,14 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "itself and its most similar cells"
             )
         resolution = canonical_resolution(resolution)
-        if within is not None and not isinstance(within, str):
-            raise TypeError("within must be a cell metadata column or None")
-        if within is not None and within not in self.cells.columns:
-            raise ValueError(f"{within!r} is not a cell metadata column")
+        columns = group_columns(within, "within")
         bool_argument(invalidate_cache, "invalidate_cache")
         chosen = _read(selection, "informative").astype(bool)
         alleles = _read(selection, "variant_alleles").astype(np.int64)[chosen]
         if not len(alleles):
             raise ValueError(
-                "variants selects no informative variant, so no clone can be called; "
-                "relax its thresholds"
+                "informative selects no informative variant, so no clone can be "
+                "called; relax its thresholds"
             )
         cell_selection = inspect_artifact(self.zw, counts).input_ref("cell_selection")
         cell_index = self._variant_cell_index(counts)
@@ -2182,38 +2187,32 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         # The statistics covered the chosen cells, or every listed cell.
         chosen_cells = (
             None
-            if (status.inputs or {}).get("cells") is None
-            else status.input_ref("cells")
+            if (status.inputs or {}).get("cell_selection") is None
+            else status.input_ref("cell_selection")
         )
         positions = self._statistic_positions(counts, group, chosen_cells)
-        group_codes: np.ndarray | None = None
-        group_names: list[str] = []
-        fingerprint = None
-        if within is not None:
-            # The groups are those that the clone summaries group cells into,
-            # read and coded within the memory budget, and are identified by
-            # each cell's group and the groups' labels.
-            grouped = cell_groups(
-                self.zw,
-                self.cells,
-                cell_selection,
-                np.ones(n_cells, dtype=bool),
-                group_by=within,
-                groups=None,
-                cell_selection=None,
-                memory_bytes=self.memoryBytes,
-            )
-            group_codes = grouped.codes
-            group_names = [key[within] for key in grouped.keys]
-            fingerprint = grouped.fingerprint()
-        arguments = VariantCloneArguments(
+        # The groups are those that the clone summaries group cells into,
+        # read and coded within the memory budget, and are identified by
+        # each scored cell's group and the groups' labels.
+        scored = np.zeros(n_cells, dtype=bool)
+        scored[positions] = True
+        group_codes, _keys, fingerprint = within_groups(
+            self.zw,
+            self.cells,
+            cell_selection,
+            columns,
+            scored,
+            memory_bytes=self.memoryBytes,
+            what="counts that the statistics scored",
+        )
+        del scored
+        arguments = FrequencyCloneArguments(
             cell_selection=cell_selection,
-            counts=counts,
-            variants=variants,
+            informative=informative,
             within_fingerprint=fingerprint,
             n_neighbors=int(n_neighbors),
             resolution=resolution,
-            within=within,
+            within=columns,
             random_seed=_CLONE_SEED,
             shared_neighbor_prune=_SHARED_NEIGHBOR_PRUNE,
             invalidate_cache=invalidate_cache,
@@ -2277,17 +2276,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             )
         called = frequency_clones(
             frequencies,
-            groups=None if group_codes is None else group_codes[positions],
+            groups=group_codes[positions] if columns else None,
             n_neighbors=int(n_neighbors),
             resolution=resolution,
             random_seed=_CLONE_SEED,
             memory_bytes=self.memoryBytes - matrix_bytes - cell_bytes,
             nthreads=self.nthreads,
         )
-        del frequencies
-        assignment = _clone_assignment(
-            n_cells, positions, called, group_names if within is not None else None
-        )
+        del frequencies, group_codes
+        assignment = _clone_assignment(n_cells, positions, called)
         counts_by_status = clone_status_counts(called.status)
         attributes = {
             "n_clones": len(assignment.clone_ids),
@@ -2297,7 +2294,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "n_cells_without_coverage": counts_by_status["no_coverage"],
             "n_cells_without_alternative": counts_by_status["no_alternative"],
             "n_cells_without_neighbors": counts_by_status["no_neighbor"],
-            "n_cells_without_group": counts_by_status["no_group"],
             "n_edges": called.n_edges,
         }
         write_clones(
@@ -2402,7 +2398,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             counts: A ``variant_counts`` artifact from
                 :meth:`~cytearc.datastore.namespaces.VariantsAccessor.import_counts`.
             method: ``"source"``, ``"threshold"`` or ``"gift"``.
-            sites: Site labels, such as ``["CALR"]``, to genotype, or None.
+            sites: Site labels to genotype, such as ``["CALR"]`` or
+                ``["chrM:310"]``, or positions of counts of one contig, such
+                as ``[310]``, as a list, a NumPy array or a pandas index; None
+                for every site the method can call.
             alleles: Each site's wild-type and alternative allele, by label.
             min_umis: The fewest UMIs that a call needs, for ``"threshold"``
                 and ``"gift"``.
@@ -2726,8 +2725,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             _write_array(out, "call_label_names", np.asarray(label_names, dtype=object))
             out.attrs.update(
                 {
-                    "method": method,
-                    "rules": rules.record(),
                     "n_sites": len(genotyped),
                     "call_counts": {
                         name: int(call_counts[code]) for code, name in enumerate(CALLS)
@@ -2898,7 +2895,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "n_called_sites": ((n_cells,), "i"),
             },
             invalidate_cache=arguments.invalidate_cache,
-            required_attributes=("method", "rules", "n_sites", "call_counts"),
+            required_attributes=("n_sites", "call_counts"),
             reuse_validator=has_calls,
         )
 
@@ -2907,7 +2904,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         self,
         genotypes: ArtifactRef,
         *,
-        sites: Sequence[str] | np.ndarray | pd.Index | None = None,
+        sites: Sequence[str | int] | np.ndarray | pd.Index | None = None,
     ) -> VariantGenotypes:
         """Read saved genotype calls as tables of sites, cells and calls.
 
@@ -2917,24 +2914,30 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         Args:
             genotypes: A ``variant_genotypes`` artifact from
                 :meth:`~cytearc.datastore.namespaces.VariantsAccessor.genotypes`.
-            sites: The site labels to read the calls of, or None for every
-                genotyped site.
+            sites: The genotyped sites to read the calls of, by label as the
+                ``sites`` table names them, such as ``"CALR"`` or
+                ``"chr1:115256513:G/T"``, or by position on counts of one
+                contig, such as ``310``, which takes every genotyped site
+                there; None for every genotyped site.
 
         Returns:
             A :class:`~cytearc.variants.VariantGenotypes` record.
 
         Raises:
             TypeError: If ``genotypes`` is not an ArtifactRef or ``sites`` not
-                a sequence of labels.
+                a sequence of labels or positions.
             ValueError: If ``genotypes`` is not a ``variant_genotypes``
-                artifact or ``sites`` names a site it did not genotype.
-            KeyError: If the store holds no such artifact.
-            RuntimeError: If the artifact is incomplete.
+                artifact, ``sites`` names a site it did not genotype, or a
+                position is given for counts of several contigs.
+            KeyError: If the store holds no such artifact, or not its counts
+                when ``sites`` names a position.
+            RuntimeError: If the artifact is incomplete, or its counts when
+                ``sites`` names a position.
             MemoryError: If the tables do not fit the memory budget.
         """
         group = self._genotype_group(genotypes)
         site_labels = _read(group, "site_labels").astype(str)
-        chosen = _chosen_genotype_sites(site_labels, sites)
+        chosen = self._chosen_genotype_sites(genotypes, group, site_labels, sites)
         cell_index = cell_selection_indices(
             self.zw, inspect_artifact(self.zw, genotypes).input_ref("cell_selection")
         )
@@ -2990,21 +2993,85 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             ),
         )
         status = inspect_artifact(self.zw, genotypes)
+        # The method and its rules come from the provenance parameters, their
+        # one home.
+        parameters = dict(status.parameters or {})
         return VariantGenotypes(
             sites=frames["sites"],
             cells=frames["cells"],
             calls=frames["calls"],
             counts=status.input_ref("counts"),
-            method=str(group.attrs["method"]),
-            rules=dict(cast(Mapping[str, Any], group.attrs["rules"])),
+            method=str(parameters["method"]),
+            rules={name: parameters[name] for name in GENOTYPE_RULES},
         )
+
+    def _chosen_genotype_sites(
+        self,
+        genotypes: ArtifactRef,
+        group: zarr.Group,
+        site_labels: np.ndarray,
+        sites: Any,
+    ) -> np.ndarray:
+        """The genotyped sites that ``sites`` names, as ascending positions.
+
+        A label names the genotyped site of that label. A position names every
+        genotyped site at that position of the counts' one contig, so it is
+        read from the counts only when ``sites`` holds one.
+        """
+        if sites is None:
+            return np.arange(len(site_labels), dtype=np.int64)
+        sites = _listed(sites)
+        if isinstance(sites, str | bytes | int) or not isinstance(sites, Sequence):
+            raise TypeError(
+                "sites must be a sequence of site labels, such as ['CALR'], or of "
+                "positions, or None"
+            )
+        by_label = {
+            str(label): index for index, label in enumerate(site_labels.tolist())
+        }
+        unit_positions: np.ndarray | None = None
+        chosen: list[int] = []
+        unknown: list[Any] = []
+        for item in sites:
+            if isinstance(item, str):
+                found = [by_label[item]] if item in by_label else []
+            elif isinstance(item, int | np.integer) and not isinstance(item, bool):
+                if unit_positions is None:
+                    counts = inspect_artifact(self.zw, genotypes).input_ref("counts")
+                    table = _stored_sites(self._variant_group(counts))
+                    if len(table.contigs) != 1:
+                        raise ValueError(
+                            "Sites are named by position only on genotypes of counts "
+                            "of one contig; name them by label, such as 'chrM:310'"
+                        )
+                    units = _read(group, "genotype_sites").astype(np.int64)
+                    unit_positions = np.where(
+                        table.site_contig[units] >= 0, table.site_position[units], -1
+                    )
+                found = np.flatnonzero(unit_positions == int(item)).tolist()
+            else:
+                raise TypeError(
+                    f"sites must hold site labels or positions, not {type(item).__name__}"
+                )
+            if found:
+                chosen.extend(found)
+            else:
+                unknown.append(item)
+        if unknown:
+            raise ValueError(
+                "The genotypes have no site "
+                + ", ".join(repr(item) for item in unknown[:5])
+            )
+        if not chosen:
+            raise ValueError("sites names no site")
+        return sorted_unique(np.asarray(chosen, dtype=np.int64))
 
     @validation_scoped
     def _variants_genotype_clones(
         self,
         genotypes: ArtifactRef,
         *,
-        sites: Sequence[str] | np.ndarray | pd.Index | None = None,
+        sites: Sequence[str | int] | np.ndarray | pd.Index | None = None,
         within: str | Sequence[str] | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
@@ -3027,9 +3094,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         Args:
             genotypes: A ``variant_genotypes`` artifact from
                 :meth:`~cytearc.datastore.namespaces.VariantsAccessor.genotypes`.
-            sites: The site labels whose calls define the clones, or None for
-                every genotyped site.
-            within: Cell metadata columns to call clones within, or None.
+            sites: The genotyped sites whose calls define the clones, by label
+                or by position on counts of one contig, as
+                :meth:`~cytearc.datastore.namespaces.VariantsAccessor.load_genotypes`
+                takes them, or None for every genotyped site.
+            within: Cell metadata columns to call clones within, or None; every
+                cell with a mutant call needs a label.
             invalidate_cache: Call the clones again instead of reusing them.
 
         Returns:
@@ -3042,11 +3112,14 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``genotypes`` is not a ``variant_genotypes``
-                artifact, ``sites`` names a site it did not genotype,
-                ``within`` names a column twice, a column of the clones or
-                no cell metadata column, or a mutant cell has no label in it.
-            KeyError: If the store holds no such artifact.
-            RuntimeError: If the artifact is incomplete.
+                artifact, ``sites`` names a site it did not genotype or a
+                position of counts of several contigs, ``within`` names a
+                column twice or no cell metadata column, or a mutant cell has
+                no label in it.
+            KeyError: If the store holds no such artifact, or not its counts
+                when ``sites`` names a position.
+            RuntimeError: If the artifact is incomplete, or its counts when
+                ``sites`` names a position.
             PermissionError: If the store is read-only and the clones are not
                 saved yet.
             MemoryError: If the cells' sets, the graph or the clone labels as
@@ -3054,9 +3127,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         """
         group = self._genotype_group(genotypes)
         bool_argument(invalidate_cache, "invalidate_cache")
-        columns = group_columns(within, "within", _GENOTYPE_CLONE_COLUMNS)
+        columns = group_columns(within, "within")
         site_labels = _read(group, "site_labels").astype(str)
-        chosen = _chosen_genotype_sites(site_labels, sites)
+        chosen = self._chosen_genotype_sites(genotypes, group, site_labels, sites)
         cell_selection = inspect_artifact(self.zw, genotypes).input_ref(
             "cell_selection"
         )
@@ -3090,7 +3163,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             columns,
             members,
             memory_bytes=self.memoryBytes - reading,
-            reserved=_GENOTYPE_CLONE_COLUMNS,
             what="a mutant call",
         )
         arguments = GenotypeCloneArguments(
@@ -3201,32 +3273,39 @@ def _mask_names(mask: str | Sequence[str] | None) -> tuple[str, ...]:
 
 
 def _clone_assignment(
-    n_cells: int,
-    positions: np.ndarray,
-    called: FrequencyClones,
-    group_names: Sequence[str] | None,
+    n_cells: int, positions: np.ndarray, called: FrequencyClones
 ) -> CloneAssignment:
-    """Rank called clones over all of the counts' cells."""
+    """Number called clones by size over every group, ties by their first cell.
+
+    The clones are labelled ``clone_1`` and on by rank, as every clone that
+    CyteArc calls is.
+
+    Args:
+        n_cells: The counts' cells.
+        positions: The scored cells, as ascending positions among them.
+        called: The clones of the scored cells, numbered within each group.
+    """
     clustered = called.clusters > 0
+    cells = np.asarray(positions, dtype=np.int64)[clustered]
+    clusters = np.asarray(called.clusters, dtype=np.int64)[clustered]
+    keys = (
+        np.asarray(called.groups, dtype=np.int64)[clustered]
+        * (int(clusters.max(initial=0)) + 1)
+        + clusters
+    )
+    # A clone's first index among the clustered cells is its first cell, since
+    # the positions ascend.
+    _distinct, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
+    sizes = np.bincount(inverse.reshape(-1), minlength=len(first)).astype(np.int64)
+    order = np.lexsort((first, -sizes))
+    rank = np.empty(len(order), dtype=np.int64)
+    rank[order] = np.arange(len(order))
     codes = np.full(n_cells, -1, dtype=np.int64)
-    if group_names is None:
-        labels = [
-            str(cluster)
-            for cluster in range(1, int(called.clusters.max(initial=0)) + 1)
-        ]
-        codes[positions[clustered]] = called.clusters[clustered] - 1
-    else:
-        pairs = np.stack([called.groups[clustered], called.clusters[clustered]], axis=1)
-        distinct, inverse = np.unique(pairs, axis=0, return_inverse=True)
-        labels = [
-            f"{group_names[group]}:{cluster}" for group, cluster in distinct.tolist()
-        ]
-        codes[positions[clustered]] = np.asarray(inverse, dtype=np.int64).reshape(-1)
-    ranked, clone_ids, clone_sizes = ranked_clones(codes, labels)
+    codes[cells] = rank[inverse.reshape(-1)]
     return CloneAssignment(
-        codes=ranked,
-        clone_ids=clone_ids,
-        clone_sizes=clone_sizes,
+        codes=codes,
+        clone_ids=clone_labels(len(order)),
+        clone_sizes=sizes[order],
         probabilities=None,
         n_cells_in_several_clones=0,
     )
@@ -3439,26 +3518,6 @@ def _most_cell_rows(group: zarr.Group, tables: Mapping[str, Sequence[str]]) -> i
     """The most rows that one cell holds in ``tables`` together."""
     combined = np.sum([_read(group, f"{name}_offsets") for name in tables], axis=0)
     return int(np.diff(combined).max(initial=0))
-
-
-def _chosen_genotype_sites(site_labels: np.ndarray, sites: Any) -> np.ndarray:
-    """The genotyped sites that ``sites`` names, as ascending positions."""
-    if sites is None:
-        return np.arange(len(site_labels), dtype=np.int64)
-    sites = _listed(sites)
-    if isinstance(sites, str | bytes) or not isinstance(sites, Sequence):
-        raise TypeError("sites must be a sequence of site labels or None")
-    position = {str(label): index for index, label in enumerate(site_labels.tolist())}
-    chosen: list[int] = []
-    for item in sites:
-        if not isinstance(item, str):
-            raise TypeError(f"sites must hold site labels, not {type(item).__name__}")
-        if item not in position:
-            raise ValueError(f"The genotypes have no site {item!r}")
-        chosen.append(position[item])
-    if not chosen:
-        raise ValueError("sites names no site")
-    return sorted_unique(np.asarray(chosen, dtype=np.int64))
 
 
 @dataclass(frozen=True, slots=True)

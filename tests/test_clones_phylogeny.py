@@ -193,7 +193,7 @@ def test_the_tables_of_a_forest_hold_each_node_and_tree() -> None:
     assert nodes["parent"].tolist() == [-1, 0, 0, -1, 0, 1]
     assert nodes["depth"].tolist() == [0, 1, 1, 0, 0, 0]
     assert nodes["is_leaf"].tolist() == [False, True, True, False, False, True]
-    assert nodes["cell"].tolist() == [pd.NA, "cell_a", pd.NA, pd.NA, pd.NA, "cell_c"]
+    assert nodes["ids"].tolist() == [pd.NA, "cell_a", pd.NA, pd.NA, pd.NA, "cell_c"]
     assert trees.to_dict("records") == [
         {
             "tree": "first",

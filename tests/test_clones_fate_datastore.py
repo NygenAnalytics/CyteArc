@@ -84,7 +84,7 @@ def test_coupling_measures_every_pair_of_cell_types(shared, method) -> None:
     assert store.artifacts.list(scope="datastore") == saved
     table = TRUTH.group_clone_cells(TRUTH.cell_types)
     assert result.group_sizes[
-        ["group", "cell_type", "cells", "clones"]
+        ["group", "cell_type", "n_cells", "n_clones"]
     ].values.tolist() == [
         [name, name, sum(table[name].values()), len(table[name])] for name in TYPES
     ]
@@ -113,7 +113,11 @@ def test_coupling_measures_every_pair_of_cell_types(shared, method) -> None:
     names = result.group_sizes["group"].to_numpy(dtype=object)
     assert result.order == tuple(names[leaves_list(result.linkage)].tolist())
     assert sorted(result.order) == TYPES
-    assert (result.method, result.permutations, result.seed) == (method, 1000, 0)
+    assert (result.method, result.n_permutations, result.random_seed) == (
+        method,
+        1000,
+        0,
+    )
     assert (result.clones, result.group_by, result.groups) == (
         clones,
         ("cell_type",),
@@ -124,17 +128,17 @@ def test_coupling_measures_every_pair_of_cell_types(shared, method) -> None:
 
 def test_the_null_is_seeded_and_does_not_depend_on_threads(copied, monkeypatch) -> None:
     store, clones = copied.store, copied.clones
-    first = store.clones.coupling(clones, group_by="cell_type", permutations=300)
+    first = store.clones.coupling(clones, group_by="cell_type", n_permutations=300)
     monkeypatch.setattr(store, "nthreads", 4)
-    again = store.clones.coupling(clones, group_by="cell_type", permutations=300)
+    again = store.clones.coupling(clones, group_by="cell_type", n_permutations=300)
     assert again.pairs.equals(first.pairs)
     other = store.clones.coupling(
-        clones, group_by="cell_type", permutations=300, seed=9
+        clones, group_by="cell_type", n_permutations=300, random_seed=9
     )
     assert other.pairs["coupling"].equals(first.pairs["coupling"])
     assert not other.pairs["null_mean"].equals(first.pairs["null_mean"])
-    assert other.seed == 9
-    none = store.clones.coupling(clones, group_by="cell_type", permutations=0)
+    assert other.random_seed == 9
+    none = store.clones.coupling(clones, group_by="cell_type", n_permutations=0)
     assert none.pairs["coupling"].equals(first.pairs["coupling"])
     assert none.pairs[["null_mean", "null_sd", "z_score"]].isna().all(axis=None)
 
@@ -142,10 +146,10 @@ def test_the_null_is_seeded_and_does_not_depend_on_threads(copied, monkeypatch) 
 def test_coupling_keeps_to_a_cell_selection_and_takes_label_artifacts(shared) -> None:
     store, clones = shared.store, shared.clones
     within = store.clones.coupling(
-        clones, group_by="cell_type", cell_selection=shared.late, permutations=0
+        clones, group_by="cell_type", cell_selection=shared.late, n_permutations=0
     )
     table = TRUTH.group_clone_cells(TRUTH.cell_types, cells=LATE)
-    assert within.group_sizes["cells"].tolist() == [
+    assert within.group_sizes["n_cells"].tolist() == [
         sum(table[name].values()) for name in TYPES
     ]
     for row in within.pairs.itertuples(index=False):
@@ -157,13 +161,13 @@ def test_coupling_keeps_to_a_cell_selection_and_takes_label_artifacts(shared) ->
     labels = store.snapshot_cluster_labels(
         "cell_type", cell_selection=every_cell(store)
     )
-    by_labels = store.clones.coupling(clones, groups=labels, permutations=0)
-    by_column = store.clones.coupling(clones, group_by="cell_type", permutations=0)
+    by_labels = store.clones.coupling(clones, groups=labels, n_permutations=0)
+    by_column = store.clones.coupling(clones, group_by="cell_type", n_permutations=0)
     assert by_labels.group_sizes.columns.tolist() == [
         "group",
         "cluster_labels",
-        "cells",
-        "clones",
+        "n_cells",
+        "n_clones",
     ]
     assert by_labels.pairs.equals(by_column.pairs)
     assert by_labels.groups == labels
@@ -173,14 +177,14 @@ def test_coupling_keeps_to_a_cell_selection_and_takes_label_artifacts(shared) ->
     ("kwargs", "error", "message"),
     [
         ({"method": "cosine"}, ValueError, "method must be one of share_cosine"),
-        ({"permutations": 1}, ValueError, "permutations must be 0"),
-        ({"permutations": -3}, ValueError, "permutations must be 0"),
-        ({"permutations": True}, TypeError, "permutations must be"),
-        ({"permutations": 2.5}, TypeError, "permutations must be"),
-        ({"seed": -1}, ValueError, "seed must be a non-negative"),
+        ({"n_permutations": 1}, ValueError, "^n_permutations must be 0"),
+        ({"n_permutations": -3}, ValueError, "^n_permutations must be 0"),
+        ({"n_permutations": True}, TypeError, "^n_permutations must be"),
+        ({"n_permutations": 2.5}, TypeError, "^n_permutations must be"),
+        ({"random_seed": -1}, ValueError, "^random_seed must be a non-negative"),
         # A seed of 2**64 would draw the permutations of seed 0.
-        ({"seed": 2**64}, ValueError, r"below 2\*\*64"),
-        ({"seed": "0"}, TypeError, "seed must be a non-negative"),
+        ({"random_seed": 2**64}, ValueError, r"below 2\*\*64"),
+        ({"random_seed": "0"}, TypeError, "^random_seed must be a non-negative"),
         ({"group_by": "missing"}, ValueError, "not a cell metadata column"),
     ],
 )
@@ -203,7 +207,7 @@ def test_coupling_runs_on_no_more_threads_than_numba_has(copied, monkeypatch) ->
         lambda message: messages.append(message.record["message"]), level="INFO"
     )
     try:
-        store.clones.coupling(clones, group_by="cell_type", permutations=500)
+        store.clones.coupling(clones, group_by="cell_type", n_permutations=500)
     finally:
         logger.remove(sink)
     (line,) = [message for message in messages if "coupling of" in message]
@@ -217,9 +221,16 @@ def test_coupling_needs_two_groups_with_a_clone(copied) -> None:
         store.clones.coupling(clones, group_by="unlabelled")
     with pytest.raises(ValueError, match="at least two groups"):
         store.clones.coupling(clones, group_by="sample", cell_selection=copied.early)
+    store.cells.insert("n_cells", TRUTH.cell_types.astype(object))
+    with pytest.raises(ValueError, match="'n_cells', which is also a column"):
+        store.clones.coupling(clones, group_by="n_cells")
+    # The count columns are n_cells and n_clones, so a column named cells
+    # groups the cells as any other.
     store.cells.insert("cells", TRUTH.cell_types.astype(object))
-    with pytest.raises(ValueError, match="'cells', which is also a column"):
-        store.clones.coupling(clones, group_by="cells")
+    assert (
+        store.clones.coupling(clones, group_by="cells", n_permutations=0).order
+        == store.clones.coupling(clones, group_by="cell_type", n_permutations=0).order
+    )
 
 
 # Clones that keep labels apart, as clonotypes keep receptor types apart,
@@ -247,7 +258,7 @@ def kept_apart(copied, monkeypatch) -> SimpleNamespace:
 def test_coupling_compares_only_groups_of_the_labels_kept_apart(kept_apart) -> None:
     store, clones = kept_apart.store, kept_apart.clones
     result = store.clones.coupling(
-        clones, group_by="sample", method="normalized_covariance", permutations=200
+        clones, group_by="sample", method="normalized_covariance", n_permutations=200
     )
     assert result.group_sizes["group"].tolist() == ["d2, A", "d2, B", "d4, A", "d4, B"]
     assert result.pairs[["group_1", "group_2"]].values.tolist() == [
@@ -303,14 +314,14 @@ def test_fate_bias_follows_each_early_cell_to_its_clones_late_cells(copied) -> N
     assert (loaded.group_by, loaded.groups) == (("cell_type",), None)
     cells = loaded.cells
     assert cells.index.tolist() == TRUTH.cell_ids[EARLY].tolist()
-    assert cells.columns.tolist() == ["clone", "late_cells", "fate", *TYPES]
+    assert cells.columns.tolist() == ["clone", "n_late_cells", "fate", *TYPES]
     dominant = []
     for (cell_id, row), clone in zip(
         cells.iterrows(), TRUTH.clones[EARLY], strict=True
     ):
         found = _late_cells_by_type(int(clone)) if clone >= 0 else Counter()
         total = sum(found.values())
-        assert row["late_cells"] == total, cell_id
+        assert row["n_late_cells"] == total, cell_id
         if clone < 0:
             assert row.isna()["clone"]
         else:
@@ -343,7 +354,7 @@ def test_fate_bias_tests_each_clone_against_all_late_cells(shared) -> None:
     assert loaded.fates.to_dict("list") == {
         "fate": TYPES,
         "cell_type": TYPES,
-        "late_cells": [late_types[name] for name in TYPES],
+        "n_late_cells": [late_types[name] for name in TYPES],
     }
     n_late = int(LATE.sum())
     tested = sorted({int(c) for c in TRUTH.clones[LATE] if c >= 0})
@@ -358,8 +369,8 @@ def test_fate_bias_tests_each_clone_against_all_late_cells(shared) -> None:
         for row, clone in zip(rows.itertuples(index=False), tested, strict=True):
             found = _late_cells_by_type(clone)
             total, x, in_fate = sum(found.values()), found[fate], late_types[fate]
-            assert (row.cells, row.late_cells) == (x, total)
-            assert row.early_cells == int(
+            assert (row.n_cells, row.n_late_cells) == (x, total)
+            assert row.n_early_cells == int(
                 np.count_nonzero(EARLY & (TRUTH.clones == clone))
             )
             assert row.fraction == pytest.approx(x / total, rel=1e-15)
@@ -386,7 +397,7 @@ def test_an_early_cell_whose_clone_has_no_late_cells_has_no_bias(shared) -> None
         )
     )
     alone = loaded.cells.loc[TRUTH.cell_ids[TRUTH.clones == 7]]
-    assert alone["late_cells"].tolist() == [0]
+    assert alone["n_late_cells"].tolist() == [0]
     assert alone[TYPES].isna().all(axis=None) and alone["fate"].isna().all()
     assert "8" not in set(loaded.clone_fates["clone"].astype(str))
 
@@ -499,9 +510,9 @@ def test_fate_bias_tests_clones_within_the_labels_kept_apart(kept_apart) -> None
             TRUTH.cell_types[late_with_clone], LINEAGES[late_with_clone], strict=True
         )
     )
-    assert dict(zip(loaded.fates["fate"], loaded.fates["late_cells"], strict=True)) == (
-        dict(expected)
-    )
+    assert dict(
+        zip(loaded.fates["fate"], loaded.fates["n_late_cells"], strict=True)
+    ) == (dict(expected))
     assert loaded.fates["fate"].tolist() == sorted(expected)
     assert len(loaded.fates) == 5
     # Each clone is tested only in the fates of its lineage, among the late
@@ -516,8 +527,11 @@ def test_fate_bias_tests_clones_within_the_labels_kept_apart(kept_apart) -> None
         in_fate = int((in_lineage & (TRUTH.cell_types == fate)).sum())
         expected = fisher_exact(
             [
-                [row.cells, row.late_cells - row.cells],
-                [in_fate - row.cells, n_late - in_fate - (row.late_cells - row.cells)],
+                [row.n_cells, row.n_late_cells - row.n_cells],
+                [
+                    in_fate - row.n_cells,
+                    n_late - in_fate - (row.n_late_cells - row.n_cells),
+                ],
             ],
             alternative="greater",
         ).pvalue
@@ -565,12 +579,12 @@ def test_coupling_refuses_a_budget_below_one_worker(copied, monkeypatch) -> None
     with pytest.raises(MemoryError, match=f"496 pairs, holds about {needed} bytes"):
         store.clones.coupling(clones, groups=own)
     monkeypatch.setattr(store, "memoryBytes", needed)
-    tight = store.clones.coupling(clones, groups=own, permutations=50)
+    tight = store.clones.coupling(clones, groups=own, n_permutations=50)
     assert len(tight.pairs) == 496
     # More threads and more memory measure the same permutations.
     monkeypatch.setattr(store, "nthreads", 4)
     monkeypatch.setattr(store, "memoryBytes", 10**9)
-    roomy = store.clones.coupling(clones, groups=own, permutations=50)
+    roomy = store.clones.coupling(clones, groups=own, n_permutations=50)
     assert roomy.pairs.equals(tight.pairs)
 
 
@@ -678,10 +692,10 @@ def test_the_artifact_stores_its_arrays_by_early_cell_clone_and_fate(shared) -> 
     n_early = int(EARLY.sum())
     tested = len({int(c) for c in TRUTH.clones[LATE] if c >= 0})
     shapes = {name: group[name].shape for name in group.array_keys()}
-    assert {name: shapes[name] for name in ("codes", "fate_codes", "late_cells")} == {
+    assert {name: shapes[name] for name in ("codes", "fate_codes", "n_late_cells")} == {
         "codes": (n_early,),
         "fate_codes": (n_early,),
-        "late_cells": (n_early,),
+        "n_late_cells": (n_early,),
     }
     assert shapes["fractions"] == (n_early, 3)
     assert shapes["clone_codes"] == (tested,)

@@ -413,7 +413,7 @@ def within_groups(
     members: np.ndarray,
     *,
     memory_bytes: int,
-    reserved: frozenset[str],
+    reserved: frozenset[str] = frozenset(),
     what: str,
 ) -> tuple[np.ndarray, list[dict[str, str]], str | None]:
     """Group an artifact's member cells by their labels in the ``within`` columns.
@@ -430,7 +430,8 @@ def within_groups(
         members: The cells that need a group, as a mask aligned to the
             artifact's cells, such as the cells with a receptor.
         memory_bytes: The memory budget.
-        reserved: The columns of the result, which no within column may name.
+        reserved: The columns of a result that the within labels join, which
+            no within column may name, such as the table of clonotypes.
         what: What the member cells hold, such as ``"a receptor"``, which
             the error names.
 

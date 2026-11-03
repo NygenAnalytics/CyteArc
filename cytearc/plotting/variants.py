@@ -96,13 +96,13 @@ def variant_depth(
     names, are left out of it.
 
     Tables: ``sites`` (``site``, ``contig``, ``position``, ``mean_depth``,
-    ``covered_fraction``) and ``cells`` (``cell``, ``group``,
-    ``mean_depth``, ``covered_sites``).
+    ``covered_fraction``) and ``cells`` (``ids``, ``group``, ``mean_depth``,
+    ``n_covered_sites``).
 
     Raises:
         ValueError: If no file names a cell, or no named cell has a group.
     """
-    by_site = _load_counts(store, counts, cells=[])
+    by_site = _load_counts(store, counts, cell_selection=[])
     by_cell = _load_counts(store, counts, sites=[])
     cells = by_cell.cells
     listed = cells["listed"].to_numpy(dtype=bool)
@@ -119,7 +119,7 @@ def variant_depth(
             "contig": sites["contig"].to_numpy(dtype=object),
             "position": sites["position"].to_numpy(dtype=np.int64),
             "mean_depth": mean_site,
-            "covered_fraction": sites["cells"].to_numpy(dtype=np.float64) / n_listed,
+            "covered_fraction": sites["n_cells"].to_numpy(dtype=np.float64) / n_listed,
         }
     )
     group_labels, names, group_name = cell_groups(
@@ -137,10 +137,10 @@ def variant_depth(
         )
     cells_table = pd.DataFrame(
         {
-            "cell": cells.index.to_numpy(dtype=object)[keep],
+            "ids": cells.index.to_numpy(dtype=object)[keep],
             "group": np.asarray(names, dtype=object)[cell_group[keep]],
             "mean_depth": cells["mean_depth"].to_numpy(dtype=np.float64)[keep],
-            "covered_sites": cells["covered_sites"].to_numpy(dtype=np.int64)[keep],
+            "n_covered_sites": cells["n_covered_sites"].to_numpy(dtype=np.int64)[keep],
         }
     )
     if figsize is None and target is None:
@@ -381,16 +381,16 @@ def allele_frequencies(
     ``variants`` is a ``variant_selection`` artifact from
     ``ds.variants.informative``; its informative variants are the rows, in
     their order along the genome, and cells are the columns. With ``clones``,
-    such as one from ``ds.variants.clones``, the cells with a clone are drawn
-    ordered by clone, largest first, under a bar of clone colours; without
-    it, the cells that the statistics covered are drawn in their order. A
-    cell that was not covered at a variant's site has no allele frequency
-    and is drawn grey, apart from a frequency of 0. At most ``max_cells``
-    cells are drawn, chosen evenly along the order so that each clone keeps
-    its share.
+    such as one from ``ds.variants.frequency_clones``, the cells with a clone
+    are drawn ordered by clone, largest first, under a bar of clone colours;
+    without it, the cells that the statistics covered are drawn in their
+    order. A cell that was not covered at a variant's site has no allele
+    frequency and is drawn grey, apart from a frequency of 0. At most
+    ``max_cells`` cells are drawn, chosen evenly along the order so that each
+    clone keeps its share.
 
-    Tables: ``frequencies`` (``cell``, ``variant``, ``frequency``, NaN where
-    the cell was not covered) and ``cells`` (``cell``, ``clone``, NA without
+    Tables: ``frequencies`` (``ids``, ``variant``, ``frequency``, NaN where
+    the cell was not covered) and ``cells`` (``ids``, ``clone``, NA without
     clones).
 
     Raises:
@@ -416,7 +416,7 @@ def allele_frequencies(
         cell_clones = clone_cells["clone"].astype(object).to_numpy(dtype=object)[order]
     else:
         listed = _load_counts(
-            store, selection.counts, sites=[], cells=selection.cells
+            store, selection.counts, sites=[], cell_selection=selection.cell_selection
         ).cells
         listed = listed[listed["listed"].to_numpy(dtype=bool)]
         cell_ids = listed.index.to_numpy(dtype=object)
@@ -429,7 +429,7 @@ def allele_frequencies(
         cell_clones = cell_clones[picked]
     site_labels = list(dict.fromkeys(chosen["site"].tolist()))
     loaded = _load_counts(
-        store, selection.counts, sites=site_labels, cells=list(cell_ids)
+        store, selection.counts, sites=site_labels, cell_selection=list(cell_ids)
     )
     column = {cell: position for position, cell in enumerate(cell_ids.tolist())}
     depth = np.zeros((len(site_labels), len(cell_ids)), dtype=np.float64)
@@ -437,7 +437,7 @@ def allele_frequencies(
     depth_frame = loaded.depth
     depth[
         [site_row[site] for site in depth_frame["site"].astype(str)],
-        [column[cell] for cell in depth_frame["cell"].astype(str)],
+        [column[cell] for cell in depth_frame["ids"].astype(str)],
     ] = depth_frame["depth"].to_numpy(dtype=np.float64)
     count_frame = loaded.counts
     keys = {
@@ -450,7 +450,7 @@ def allele_frequencies(
     for site, allele, cell, count in zip(
         count_frame["site"].astype(str).tolist(),
         count_frame["allele"].astype(str).tolist(),
-        count_frame["cell"].astype(str).tolist(),
+        count_frame["ids"].astype(str).tolist(),
         count_frame["count"].tolist(),
         strict=True,
     ):
@@ -462,13 +462,13 @@ def allele_frequencies(
         matrix = np.where(variant_depth > 0, counts / variant_depth, np.nan)
     frequencies = pd.DataFrame(
         {
-            "cell": np.repeat(cell_ids, len(chosen)),
+            "ids": np.repeat(cell_ids, len(chosen)),
             "variant": np.tile(chosen.index.to_numpy(dtype=object), len(cell_ids)),
             "frequency": matrix.T.reshape(-1),
         }
     )
     cells_table = pd.DataFrame(
-        {"cell": cell_ids, "clone": pd.array(cell_clones, dtype="string")}
+        {"ids": cell_ids, "clone": pd.array(cell_clones, dtype="string")}
     )
     if figsize is None and target is None:
         figsize = (10.0, max(3.0, 0.25 * len(chosen) + 1.5))
@@ -576,8 +576,9 @@ def genotypes(
     ``<layout_key>2``, coloured by their call at ``site``, which may be left
     out when one site is drawn.
 
-    Tables: ``calls`` (``site``, ``group``, ``call``, ``cells``, ``share``)
-    and, with a layout, ``cells`` (``cell``, ``x``, ``y``, ``call``).
+    Tables: ``calls`` (``site``, ``group``, ``call``, ``n_cells``,
+    ``share``) and, with a layout, ``cells`` (``ids``, ``x``, ``y``,
+    ``call``).
 
     Raises:
         ValueError: If no cell has a group, ``site`` names a site that is not
@@ -603,7 +604,7 @@ def genotypes(
             "No cell of the genotypes has a group, so there is nothing to plot"
         )
     table = loaded.calls
-    row_cells = table["cell"].cat.codes.to_numpy(dtype=np.int64)
+    row_cells = table["ids"].cat.codes.to_numpy(dtype=np.int64)
     row_sites = table["site"].cat.codes.to_numpy(dtype=np.int64)
     row_calls = table["call"].cat.codes.to_numpy(dtype=np.int64)
     missing = calls.index("missing")
@@ -628,12 +629,12 @@ def genotypes(
                         "site": name,
                         "group": str(group),
                         "call": call,
-                        "cells": int(found[code]),
+                        "n_cells": int(found[code]),
                         "share": float(found[code]) / total,
                     }
                 )
     calls_table = pd.DataFrame.from_records(
-        records, columns=["site", "group", "call", "cells", "share"]
+        records, columns=["site", "group", "call", "n_cells", "share"]
     )
     cells_table = None
     if layout_key is not None:
@@ -662,7 +663,7 @@ def genotypes(
         chosen[row_cells[at_site]] = row_calls[at_site]
         cells_table = pd.DataFrame(
             {
-                "cell": loaded.cells.index.to_numpy(dtype=object),
+                "ids": loaded.cells.index.to_numpy(dtype=object),
                 "x": x,
                 "y": y,
                 "call": np.asarray(calls, dtype=object)[chosen],

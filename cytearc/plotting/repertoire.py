@@ -72,11 +72,11 @@ def _category_table(
     groups: np.ndarray | None,
     names: Sequence[str],
 ) -> pd.DataFrame:
-    """Count cells per category, one column per group, or ``cells`` without groups."""
+    """Count cells per category, one column per group, or ``n_cells`` without groups."""
     categories = pd.Index(list(order)).get_indexer(np.asarray(values, dtype=object))
     if groups is None:
         counts = np.bincount(categories[categories >= 0], minlength=len(order))
-        return pd.DataFrame({"cells": counts}, index=pd.Index(order))
+        return pd.DataFrame({"n_cells": counts}, index=pd.Index(order))
     keep = (categories >= 0) & (groups >= 0)
     matrix = np.bincount(
         categories[keep] * len(names) + groups[keep],
@@ -97,11 +97,11 @@ def _draw_categories(
     show_legend: bool,
 ) -> None:
     """Draw one bar per category, or one stacked bar per group."""
-    if list(table.columns) == ["cells"]:
-        shown = table[table["cells"] > 0]
+    if list(table.columns) == ["n_cells"]:
+        shown = table[table["n_cells"] > 0]
         positions = np.arange(len(shown))[::-1]
-        total = max(1, int(table["cells"].sum()))
-        values = shown["cells"].to_numpy(dtype=np.float64)
+        total = max(1, int(table["n_cells"].sum()))
+        values = shown["n_cells"].to_numpy(dtype=np.float64)
         if normalize:
             values = values / total
         ax.barh(
@@ -168,8 +168,8 @@ def receptor_qc(
     A label artifact may hold fewer cells than the receptors.
 
     Tables: ``receptor_type`` and ``chain_pairing`` (cells per category, one
-    column per group or ``cells``), and ``chains_per_cell`` (cells per number
-    of chains of each arm).
+    column per group or ``n_cells``), and ``chains_per_cell`` (cells per
+    number of chains of each arm).
     """
     if normalize is not None and not isinstance(normalize, bool):
         raise TypeError("normalize must be a boolean or None")
@@ -404,7 +404,7 @@ def gene_usage(
             ax = axes[locus]
             rows = by_locus[locus]
             totals = (
-                rows.groupby(gene)[count]
+                rows.groupby(gene)[f"n_{count}"]
                 .sum()
                 .sort_values(ascending=False, kind="stable")
             )
@@ -500,7 +500,7 @@ def gene_pairing(
         for locus in loci:
             rows = by_locus[locus]
             v_genes, j_genes = (
-                rows.groupby(field)[count]
+                rows.groupby(field)[f"n_{count}"]
                 .sum()
                 .sort_values(ascending=False, kind="stable")
                 .index[:top]

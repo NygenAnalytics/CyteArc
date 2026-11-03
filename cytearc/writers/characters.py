@@ -2,7 +2,7 @@
 
 Tree builders read a lineage recorder's alleles as a character matrix:
 cells by characters, one character per site of an integration, with integer
-states. ``write_cassiopeia_characters`` writes the TreeData ``.zarr`` store
+states. ``write_treedata_characters`` writes the TreeData ``.zarr`` store
 that Cassiopeia 3.0 reads, and ``write_laml_characters`` the CSV that LAML
 reads, with its priors and a table that names each state's allele.
 """
@@ -20,7 +20,7 @@ from ..utils.arrays import sorted_unique
 __all__ = [
     "laml_paths",
     "laml_row_bytes",
-    "write_cassiopeia_characters",
+    "write_treedata_characters",
     "write_laml_characters",
 ]
 
@@ -36,7 +36,7 @@ _LAML_BYTES_PER_STATE = 40
 _LAML_MAX_BLOCK = 50_000
 
 
-def write_cassiopeia_characters(
+def write_treedata_characters(
     path: str | os.PathLike[str], cell_ids: np.ndarray, matrix: CharacterMatrix
 ) -> None:
     """Write a character matrix as the TreeData ``.zarr`` store Cassiopeia reads.
@@ -161,9 +161,9 @@ def write_laml_characters(
         )
     with open(states_path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
-        writer.writerow(["character", "state", "allele", "kind", "cells"])
+        writer.writerow(["character", "state", "allele", "kind", "n_cells"])
         writer.writerows(
             matrix.states.loc[
-                :, ["character", "state", "allele", "kind", "cells"]
+                :, ["character", "state", "allele", "kind", "n_cells"]
             ].itertuples(index=False, name=None)
         )

@@ -10,8 +10,8 @@ ambient or contaminating molecules; and cells with too few or too many
 barcodes. :func:`barcode_clone_calls` applies the rules in this order:
 
 1. molecule filters: ``min_reads``, the fewest reads of a molecule;
-2. correction: within each group and library, barcodes within ``distance``
-   of each other by ``metric`` are linked, and each connected component
+2. correction: within each group and library, barcodes within
+   ``max_distance`` of each other by ``metric`` are linked, and each connected component
    merges into its most abundant barcode, ties going to the barcode that
    sorts last, as TREX picks its representatives; then ``allowlist``;
 3. pair filters: ``min_umis``, the fewest UMIs of a cell's barcode in a
@@ -27,11 +27,11 @@ Beside the clones, calling gives four numbers, named in
 ``BARCODE_DIAGNOSTICS``, that show when correction merges barcodes that are
 unrelated, which happens more often the more barcodes it compares: the
 distinct barcodes of each group and library that correction compares, the
-pairs of them expected within ``distance`` by chance, the distinct barcodes
+pairs of them expected within ``max_distance`` by chance, the distinct barcodes
 that it merged into another, and the share of the cells given a clone that
 the largest clone holds.
 
-``PRESETS`` holds the published rules of LARRY, TREX, CellTagR and
+``BARCODE_PRESETS`` holds the published rules of LARRY, TREX, CellTagR and
 CellTag-multi; every value a preset sets can be given instead.
 
 Counts are read in each library's unit. A molecule counts one UMI; a pair
@@ -49,8 +49,9 @@ barcode has a Shannon entropy below 1 bit are dropped before correction, two
 cloneIDs are compared at the positions where both hold a base and need 20 of
 them, a cloneID needs 20 bases after correction, a one-UMI barcode of a cell
 is dropped when another cell of its group holds the barcode, and so is a
-barcode whose only molecule has one read. These rules follow TREX's
-``run10x``, adapted from its MIT-licensed source.
+barcode whose only molecule has one read. ``trex_rules`` turns these rules on
+or off in any call. They follow TREX's ``run10x``, adapted from its
+MIT-licensed source.
 
 These functions never touch storage.
 """
@@ -74,7 +75,7 @@ from .sequences import MAX_CHANCE_EDITS, expected_chance_pairs, neighbor_pairs
 __all__ = [
     "BARCODE_DIAGNOSTICS",
     "BARCODE_METRICS",
-    "PRESETS",
+    "BARCODE_PRESETS",
     "BarcodeCallSettings",
     "BarcodeClones",
     "BarcodeRecords",
@@ -95,12 +96,15 @@ BARCODE_DIAGNOSTICS: tuple[str, ...] = (
     "mergedBarcodes",
     "largestCloneShare",
 )
-# A value of PRESETS that the user must give, such as a library's allowlist.
+# A value of BARCODE_PRESETS that the user must give, such as a library's
+# allowlist.
 _REQUIRED = "required"
-#: The published rules of each preset, by argument of ``barcode_clones``.
-#: ``similarity`` is one value, or a pair: within one library and across
+#: The published rules of each preset, by argument of ``barcode_clones``, read
+#: only. ``similarity`` is one value, or a pair: within one library and across
 #: libraries. ``"required"`` marks a value that only the user can give.
-PRESETS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
+#: ``preset="trex"`` also turns on TREX's rules for its partial cloneIDs,
+#: which ``trex_rules`` sets.
+BARCODE_PRESETS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
     {
         # Weinreb et al. 2018 (bioRxiv v2): triples of at least 10 reads,
         # barcodes within Hamming distance 3 collapsed by connected
@@ -109,7 +113,7 @@ PRESETS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
         "larry": MappingProxyType(
             {
                 "min_reads": 10,
-                "distance": 3,
+                "max_distance": 3,
                 "metric": "hamming",
                 "min_umis": 3,
                 "method": "sets",
@@ -121,7 +125,7 @@ PRESETS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
         # cut vertices removed as doublets, and singletons kept.
         "trex": MappingProxyType(
             {
-                "distance": 5,
+                "max_distance": 5,
                 "metric": "hamming",
                 "method": "jaccard",
                 "similarity": 0.7,
@@ -153,7 +157,7 @@ PRESETS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
         "celltag_multi": MappingProxyType(
             {
                 "min_reads": 2,
-                "distance": 2,
+                "max_distance": 2,
                 "metric": "levenshtein",
                 "allowlist": _REQUIRED,
                 "min_umis": 2,
@@ -247,7 +251,7 @@ class BarcodeCallSettings:
     Attributes:
         preset: The preset that set the defaults, or None.
         min_reads: The fewest reads of a molecule, 0 for no filter.
-        distance: The largest distance of corrected barcodes, 0 for none.
+        max_distance: The largest distance of corrected barcodes, 0 for none.
         metric: ``"hamming"`` or ``"levenshtein"``, None without correction.
         allowlist: Whether an allowlist applies.
         min_umis: The fewest UMIs, or reads, of a pair, 0 for no filter.
@@ -265,13 +269,13 @@ class BarcodeCallSettings:
         prune: Whether TREX's bridges are removed.
         doublets: Whether TREX's doublets are removed.
         min_size: The fewest cells of a clone.
-        trex: Whether TREX's rules for partial cloneIDs and its pair filters
-            apply.
+        trex_rules: Whether TREX's rules for partial cloneIDs and its pair
+            filters apply.
     """
 
     preset: str | None
     min_reads: int
-    distance: int
+    max_distance: int
     metric: str | None
     allowlist: bool
     min_umis: int
@@ -284,14 +288,14 @@ class BarcodeCallSettings:
     prune: bool
     doublets: bool
     min_size: int
-    trex: bool
+    trex_rules: bool
 
     def record(self) -> dict[str, Any]:
         """The resolved rules as the artifact records them."""
         return {
             "preset": self.preset,
             "min_reads": self.min_reads,
-            "distance": self.distance,
+            "max_distance": self.max_distance,
             "metric": self.metric,
             "min_umis": self.min_umis,
             "min_fraction": self.min_fraction,
@@ -310,7 +314,7 @@ class BarcodeCallSettings:
             "prune": self.prune,
             "doublets": self.doublets,
             "min_size": self.min_size,
-            "trex_rules": self.trex,
+            "trex_rules": self.trex_rules,
         }
 
 
@@ -371,7 +375,7 @@ def barcode_call_settings(
     preset: str | None = None,
     *,
     min_reads: Any = None,
-    distance: Any = None,
+    max_distance: Any = None,
     metric: Any = None,
     allowlist: Any = None,
     min_umis: Any = None,
@@ -383,15 +387,18 @@ def barcode_call_settings(
     prune: Any = None,
     doublets: Any = None,
     min_size: Any = None,
+    trex_rules: Any = None,
 ) -> BarcodeCallSettings:
     """Resolve the rules of a call: a preset's values, replaced by those given.
 
     An argument left None takes the preset's value. Without a preset, every
     filter is off and correction does not run, and ``method`` is required;
     ``method="jaccard"`` needs ``similarity`` and ``inclusive``, and
-    ``distance`` a ``metric``. A count of 0 turns its filter off, so
+    ``max_distance`` a ``metric``. A count of 0 turns its filter off, so
     ``min_reads=0`` lifts LARRY's read filter. ``allowlist=False`` calls a
-    CellTag preset without the allowlist it requires.
+    CellTag preset without the allowlist it requires. ``trex_rules`` left None
+    applies TREX's rules for partial cloneIDs with ``preset="trex"`` alone,
+    and True or False turns them on or off with any preset or none.
 
     Raises:
         TypeError: If an argument has the wrong type.
@@ -399,14 +406,14 @@ def barcode_call_settings(
             value is out of range, or an argument is given to a method that
             does not use it.
     """
-    if preset is not None and preset not in PRESETS:
-        raise ValueError(f"preset must be one of {', '.join(PRESETS)} or None")
-    rules = dict(PRESETS[preset]) if preset is not None else {}
+    if preset is not None and preset not in BARCODE_PRESETS:
+        raise ValueError(f"preset must be one of {', '.join(BARCODE_PRESETS)} or None")
+    rules = dict(BARCODE_PRESETS[preset]) if preset is not None else {}
     given = {
         name: value
         for name, value in (
             ("min_reads", min_reads),
-            ("distance", distance),
+            ("max_distance", max_distance),
             ("metric", metric),
             ("allowlist", allowlist),
             ("min_umis", min_umis),
@@ -453,34 +460,36 @@ def barcode_call_settings(
         ):
             if name not in values:
                 raise ValueError(f"method='jaccard' needs {name}: {example}")
-    distance_value = _count_argument(values.get("distance", 0), "distance")
+    distance_value = _count_argument(values.get("max_distance", 0), "max_distance")
     metric_value = values.get("metric")
     if distance_value == 0:
         if "metric" in given:
             raise ValueError(
-                "metric applies to barcode correction, which a distance of 0 turns "
-                "off; give a distance"
+                "metric applies to barcode correction, which a max_distance of 0 "
+                "turns off; give a max_distance"
             )
         metric_value = None
     elif metric_value is None:
         raise ValueError(
-            f"distance={distance_value} needs a metric: 'hamming' or 'levenshtein'"
+            f"max_distance={distance_value} needs a metric: 'hamming' or 'levenshtein'"
         )
     elif metric_value not in BARCODE_METRICS:
         raise ValueError(f"metric must be one of {', '.join(BARCODE_METRICS)}")
     elif metric_value == "levenshtein" and distance_value > MAX_CHANCE_EDITS:
         raise ValueError(
-            f"metric='levenshtein' takes a distance of at most {MAX_CHANCE_EDITS}, "
-            "since the barcode matches expected by chance within more edits take "
-            "too long to count: their cost grows about eightfold with every two "
-            "edits. Pass a smaller distance, or metric='hamming', which counts "
-            "them within any distance but matches only barcodes of one length"
+            f"metric='levenshtein' takes a max_distance of at most "
+            f"{MAX_CHANCE_EDITS}, since the barcode matches expected by chance "
+            "within more edits take too long to count: their cost grows about "
+            "eightfold with every two edits. Pass a smaller max_distance, or "
+            "metric='hamming', which counts them within any distance but matches "
+            "only barcodes of one length"
         )
-    trex = preset == "trex"
+    trex = preset == "trex" if trex_rules is None else _flag(trex_rules, "trex_rules")
     if trex and metric_value not in (None, "hamming"):
         raise ValueError(
-            "preset='trex' compares cloneIDs at the positions where both hold a "
-            "base, which needs metric='hamming'"
+            "TREX's rules compare cloneIDs at the positions where both hold a "
+            "base, which needs metric='hamming'; pass trex_rules=False to correct "
+            "barcodes by another metric"
         )
     listed = values.get("allowlist")
     if isinstance(listed, np.bool_):
@@ -506,7 +515,7 @@ def barcode_call_settings(
     return BarcodeCallSettings(
         preset=preset,
         min_reads=_count_argument(values.get("min_reads", 0), "min_reads"),
-        distance=distance_value,
+        max_distance=distance_value,
         metric=metric_value,
         allowlist=has_allowlist,
         min_umis=_count_argument(values.get("min_umis", 0), "min_umis"),
@@ -519,7 +528,7 @@ def barcode_call_settings(
         prune=_flag(values.get("prune", False), "prune"),
         doublets=_flag(values.get("doublets", False), "doublets"),
         min_size=min_size_value,
-        trex=trex,
+        trex_rules=trex,
     )
 
 
@@ -574,7 +583,7 @@ class BarcodeClones:
             the distinct barcodes of each group and library that correction
             compares, after the molecule filters, added up;
             ``expectedChanceMatches``, the pairs of them expected within the
-            distance by chance; ``mergedBarcodes``, those that correction
+            ``max_distance`` by chance; ``mergedBarcodes``, those that correction
             merged into another; and ``largestCloneShare``, the cells of the
             largest clone over the cells given a clone, 0 when none is.
             Without correction, the expectation and the merged barcodes are 0.
@@ -595,7 +604,8 @@ class _Correction:
         codes: Each kept record's barcode code after correction.
         distinct: The distinct barcodes of the blocks that it compared.
         merged: Those that it merged into another.
-        expected: The pairs of them expected within the distance by chance.
+        expected: The pairs of them expected within ``max_distance`` by
+            chance.
     """
 
     codes: np.ndarray
@@ -733,10 +743,10 @@ def _corrected(
     """Merge each kept record's barcode into its component's most abundant one.
 
     Barcodes are linked within each block, a group and a library, when
-    their distance by the metric is within the distance; a connected
+    their distance by the metric is within ``max_distance``; a connected
     component of linked barcodes merges into the barcode with the most
     UMIs, or reads, in the block, and of those the one that sorts last. The
-    pairs expected within the distance by chance are counted over the
+    pairs expected within ``max_distance`` by chance are counted over the
     barcodes and positions that the search compares, from the bases of each
     component's barcode of highest rank; the distinct barcodes it compares
     leave out those that ``uncompared`` flags by stored code, TREX's cloneIDs
@@ -766,12 +776,12 @@ def _corrected(
     room.check(entries, f"correcting {n_entries} barcodes of their blocks")
     room.held += entries
     texts = records.texts(distinct)[positions.reshape(-1)]
-    unknown = _TREX_UNKNOWN if settings.trex else ""
-    min_compared = _TREX_MIN_BASES if settings.trex else 0
+    unknown = _TREX_UNKNOWN if settings.trex_rules else ""
+    min_compared = _TREX_MIN_BASES if settings.trex_rules else 0
     first, second = neighbor_pairs(
         texts,
         str(settings.metric),
-        settings.distance,
+        settings.max_distance,
         entry_blocks,
         max_bytes=room.left(),
         unknown=unknown,
@@ -796,7 +806,7 @@ def _corrected(
     expected = expected_chance_pairs(
         texts,
         str(settings.metric),
-        settings.distance,
+        settings.max_distance,
         entry_blocks,
         components=components,
         priority=rank,
@@ -900,11 +910,11 @@ def barcode_clone_calls(
     keep = np.ones(n_records, dtype=bool)
     n_stored = max(0, len(records.barcode_offsets) - 1)
     uncompared: np.ndarray | None = None
-    if settings.trex:
+    if settings.trex_rules:
         for detail in details:
             if detail["level"] != "molecules" and detail["records"]:
                 raise ValueError(
-                    "preset='trex' applies TREX's rules to molecules, and library "
+                    "TREX's rules apply to molecules, and library "
                     f"{detail['library']!r} holds pairs of a cell and a barcode"
                 )
         missing = reads < 0
@@ -912,7 +922,7 @@ def barcode_clone_calls(
             source = int(sources[np.argmax(missing)])
             of_library = sources == source
             raise ValueError(
-                "preset='trex' drops a barcode whose only molecule has one read, "
+                "TREX's rules drop a barcode whose only molecule has one read, "
                 f"and {int(np.count_nonzero(missing & of_library))} of the "
                 f"{int(np.count_nonzero(of_library))} molecules of library "
                 f"{details[source]['library']!r} count no reads. TREX writes "
@@ -973,7 +983,7 @@ def barcode_clone_calls(
     corrected = barcodes.copy()
     n_kept = int(np.count_nonzero(keep))
     diagnostics: dict[str, int | float] = {}
-    if settings.distance:
+    if settings.max_distance:
         room.check(
             _CORRECTION_RECORD_BYTES * n_kept,
             f"correcting {n_kept} molecules and pairs",
@@ -1020,7 +1030,7 @@ def barcode_clone_calls(
     if uncompared is not None:
         del uncompared
         room.held -= _FLAG_BYTES * n_stored
-    if allowlist is not None or settings.trex:
+    if allowlist is not None or settings.trex_rules:
         room.check(
             _LOOKUP_RECORD_BYTES * n_records
             + _texts_bytes(records, n_stored)
@@ -1037,7 +1047,7 @@ def barcode_clone_calls(
             keep &= ~dropped
             counted["records_outside_allowlist"] = int(np.count_nonzero(dropped))
             del allowed, dropped
-        if settings.trex:
+        if settings.trex_rules:
             short = np.zeros(n_stored, dtype=bool)
             short[distinct] = np.fromiter(
                 (_known_bases(text) < _TREX_MIN_BASES for text in texts),
@@ -1069,7 +1079,7 @@ def barcode_clone_calls(
     room.held = _CELL_BYTES * n_cells + _PAIR_BYTES * n_pairs
     room.check(0, f"the {n_pairs} barcodes of the cells")
     keep_pair = np.ones(n_pairs, dtype=bool)
-    if settings.trex:
+    if settings.trex_rules:
         room.check(_FILTER_PAIR_BYTES * n_pairs, "TREX's filters of the barcodes")
         pair_blocks = (
             group_codes[pairs["cells"]] * max(n_libraries, 1) + pairs["sources"]

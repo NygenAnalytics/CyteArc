@@ -71,9 +71,9 @@ def expected_mito(
                             reverse,
                         )
                     )
-    depth = pd.DataFrame(depth_rows, columns=["cell", "site", "depth"])
+    depth = pd.DataFrame(depth_rows, columns=["ids", "site", "depth"])
     counts = pd.DataFrame(
-        count_rows, columns=["cell", "site", "allele", "count", "forward", "reverse"]
+        count_rows, columns=["ids", "site", "allele", "count", "forward", "reverse"]
     )
     return depth, counts
 
@@ -120,8 +120,8 @@ def expected_variant_sites(
                         (ids[row], mito_label(position, contig), allele, count)
                     )
     return (
-        pd.DataFrame(depth_rows, columns=["cell", "site", "depth"]),
-        pd.DataFrame(count_rows, columns=["cell", "site", "allele", "count"]),
+        pd.DataFrame(depth_rows, columns=["ids", "site", "depth"]),
+        pd.DataFrame(count_rows, columns=["ids", "site", "allele", "count"]),
     )
 
 
@@ -152,8 +152,8 @@ def expected_got(
             if count:
                 count_rows.append((ids[row], site, allele, count))
     return (
-        pd.DataFrame(depth_rows, columns=["cell", "site", "depth"]),
-        pd.DataFrame(count_rows, columns=["cell", "site", "allele", "count"]),
+        pd.DataFrame(depth_rows, columns=["ids", "site", "depth"]),
+        pd.DataFrame(count_rows, columns=["ids", "site", "allele", "count"]),
     )
 
 
@@ -166,7 +166,7 @@ def expected_got_calls(
         for row in range(truth.n_cells)
         if truth.got_call(row, target) != "NA"
     ]
-    return pd.DataFrame(rows, columns=["cell", "site", "allele", "source", "call"])
+    return pd.DataFrame(rows, columns=["ids", "site", "allele", "source", "call"])
 
 
 def expected_gift(truth: VariantTruth) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -184,11 +184,11 @@ def expected_gift(truth: VariantTruth) -> tuple[pd.DataFrame, pd.DataFrame]:
     return (
         pd.DataFrame(
             [(cell, site, value) for (cell, site), value in depth.items()],
-            columns=["cell", "site", "depth"],
+            columns=["ids", "site", "depth"],
         ),
         pd.DataFrame(
             count_rows,
-            columns=["cell", "site", "allele", "count", "reads", "support"],
+            columns=["ids", "site", "allele", "count", "reads", "support"],
         ),
     )
 
@@ -207,7 +207,7 @@ def table(frame: pd.DataFrame, columns: list[str] | None = None) -> pd.DataFrame
         }
     )
     keys = [
-        name for name in ("cell", "site", "allele", "source") if name in plain.columns
+        name for name in ("ids", "site", "allele", "source") if name in plain.columns
     ]
     return plain.sort_values(keys, kind="stable").reset_index(drop=True)
 
@@ -430,10 +430,10 @@ TAPESTRI_REFERENCES = {
 #: The variants that pass and whose alleles are bases.
 TAPESTRI_PASSING = (0, 1, 3, 4, 5, 9)
 #: DAb-seq's FLT3-ITD is a site of its own, named as the file names it.
-DABSEQ_ITD_SITE = "FLT3-ITD:chr13:28608251:T/TCTC"
+DAB_SEQ_ITD_SITE = "FLT3-ITD:chr13:28608251:T/TCTC"
 
 
-def dabseq_ids(truth: TapestriTruth) -> list[str]:
+def dab_seq_ids(truth: TapestriTruth) -> list[str]:
     """Each row's barcode as DAb-seq writes it: barcode, tube 1 and sample."""
     return [
         f"{barcode}-1-{sample}"
@@ -475,28 +475,28 @@ def expected_tapestri(
                     )
                 )
     return (
-        pd.DataFrame(depth_rows, columns=["cell", "site", "depth"]),
-        pd.DataFrame(count_rows, columns=["cell", "site", "allele", "count"]),
+        pd.DataFrame(depth_rows, columns=["ids", "site", "depth"]),
+        pd.DataFrame(count_rows, columns=["ids", "site", "allele", "count"]),
         pd.DataFrame(
             call_rows,
-            columns=["cell", "site", "allele", "source", "call", "quality"],
+            columns=["ids", "site", "allele", "source", "call", "quality"],
         ),
     )
 
 
-def expected_dabseq(
+def expected_dab_seq(
     truth: TapestriTruth,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """The depth, counts and calls of the truth's DAb-seq file.
 
-    The reads follow ``write_dabseq``'s rules, derived from the truth here:
+    The reads follow ``write_dab_seq``'s rules, derived from the truth here:
     the alternatives' reads, the overlap cell's second one dropped; the
     reference reads of a position, those that no alternative claims, once
     per position; FLT3-ITD's 25 of 60 reads in the cells of clone 4, without
     reference reads, at a site of its own; and the GT with its GQ where the
     cell has reads, NaN where GQ is missing.
     """
-    ids = dabseq_ids(truth)
+    ids = dab_seq_ids(truth)
     columns = tuple(sorted(TAPESTRI_ALLELES))
     alternative = truth.alternative.copy()
     alternative[truth.overlap_row, 6] = 0
@@ -527,14 +527,14 @@ def expected_dabseq(
         # DAb-seq's wild-type FLT3-ITD calls, in cells without ITDseek's
         # reads, are left out.
         if row in itd_rows:
-            depth_rows.append((ids[row], DABSEQ_ITD_SITE, 60))
-            count_rows.append((ids[row], DABSEQ_ITD_SITE, "TCTC", 25))
-            call_rows.append((ids[row], DABSEQ_ITD_SITE, "TCTC", "GT", "1", 100.0))
+            depth_rows.append((ids[row], DAB_SEQ_ITD_SITE, 60))
+            count_rows.append((ids[row], DAB_SEQ_ITD_SITE, "TCTC", 25))
+            call_rows.append((ids[row], DAB_SEQ_ITD_SITE, "TCTC", "GT", "1", 100.0))
     return (
-        pd.DataFrame(depth_rows, columns=["cell", "site", "depth"]),
-        pd.DataFrame(count_rows, columns=["cell", "site", "allele", "count"]),
+        pd.DataFrame(depth_rows, columns=["ids", "site", "depth"]),
+        pd.DataFrame(count_rows, columns=["ids", "site", "allele", "count"]),
         pd.DataFrame(
             call_rows,
-            columns=["cell", "site", "allele", "source", "call", "quality"],
+            columns=["ids", "site", "allele", "source", "call", "quality"],
         ),
     )

@@ -7,6 +7,7 @@ if TYPE_CHECKING:
         MULTIPLE_POLICIES as MULTIPLE_POLICIES,
         Clones as Clones,
     )
+    from .barcode_clones import BARCODE_PRESETS as BARCODE_PRESETS
     from .barcodes import LineageBarcodes as LineageBarcodes
     from .diversity import (
         ORDERS as ORDERS,
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from .recorders import LineageAlleles as LineageAlleles
 
 __all__ = [
+    "BARCODE_PRESETS",
     "COUPLING_METHODS",
     "MULTIPLE_POLICIES",
     "ORDERS",
@@ -48,6 +50,7 @@ __all__ = [
 __getattr__, __dir__ = _lazy_facade(
     __name__,
     {
+        "BARCODE_PRESETS": ".barcode_clones",
         "COUPLING_METHODS": ".fate",
         "MULTIPLE_POLICIES": ".assignments",
         "ORDERS": ".diversity",

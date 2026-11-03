@@ -353,12 +353,12 @@ def test_cluster_pairs_are_checked_against_the_memory_left() -> None:
     from cytearc.repertoire.clonotypes import assign_clonotype_clusters
 
     # Three cells whose beta chains differ by one residue from the first
-    # cell's: two pairs of chains within the cutoff, 32 bytes each, and in
+    # cell's: two pairs of chains within max_distance, 32 bytes each, and in
     # their one group two links between chains, 32 bytes each.
     sequences = np.asarray([[-1, -1, 0, -1], [-1, -1, 1, -1], [-1, -1, 2, -1]])
     texts = ["CASSF", "CASTF", "CAGSF"]
     groups = np.zeros(3, dtype=np.int64)
-    options = dict(groups=groups, metric="hamming", cutoff=1, receptor_arms="VDJ")
+    options = dict(groups=groups, metric="hamming", max_distance=1, receptor_arms="VDJ")
     linked = assign_clonotype_clusters(sequences, texts, max_bytes=128, **options)
     assert linked.codes.tolist() == [0, 0, 0]
     with pytest.raises(MemoryError, match="for the 2 links between near chains"):
@@ -378,7 +378,7 @@ def test_the_links_of_one_arm_are_released_before_the_next_arm_links() -> None:
     options = dict(
         groups=np.zeros(2, dtype=np.int64),
         metric="hamming",
-        cutoff=1,
+        max_distance=1,
         receptor_arms="any",
     )
     linked = assign_clonotype_clusters(sequences, texts, max_bytes=96, **options)
@@ -396,7 +396,7 @@ def test_links_count_once_for_each_group_that_holds_both_chains() -> None:
     sequences = np.full((10, 4), -1, dtype=np.int64)
     sequences[:, 2] = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0]
     groups = np.asarray([0, 0, 0, 1, 1, 1, 2, 2, 2, 3])
-    options = dict(groups=groups, metric="hamming", cutoff=1, receptor_arms="VDJ")
+    options = dict(groups=groups, metric="hamming", max_distance=1, receptor_arms="VDJ")
     texts = ["CASSF", "CASTF", "CAGSF"]
     linked = assign_clonotype_clusters(sequences, texts, max_bytes=256, **options)
     assert linked.n_clonotypes == 4
@@ -417,7 +417,7 @@ def test_matching_arms_are_checked_as_they_are_found() -> None:
     options = dict(
         groups=np.zeros(2, dtype=np.int64),
         metric="hamming",
-        cutoff=1,
+        max_distance=1,
         receptor_arms="VJ",
         dual_ir="all",
     )

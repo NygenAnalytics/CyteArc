@@ -158,8 +158,14 @@ def test_laml_files_hold_the_matrix_its_priors_and_states(
     )
     assert (priors["state"] >= 1).all()
     table = pd.read_csv(tmp_path / "out_states.csv", dtype={"allele": str})
-    assert table.columns.tolist() == ["character", "state", "allele", "kind", "cells"]
-    counted = {(row.character, row.state): row.cells for row in table.itertuples()}
+    assert table.columns.tolist() == [
+        "character",
+        "state",
+        "allele",
+        "kind",
+        "n_cells",
+    ]
+    counted = {(row.character, row.state): row.n_cells for row in table.itertuples()}
     assert counted == {
         (character, state): int((states[character] == state).sum())
         for character in states.columns
@@ -199,7 +205,7 @@ def test_exported_matrices_import_back_with_their_states(
     cells = every_cell(store)
     for path, options in (
         (tmp_path / "out.zarr", {}),
-        (tmp_path / "out.csv", {"format": "characters"}),
+        (tmp_path / "out.csv", {"format": "laml"}),
     ):
         again = store.clones.import_alleles(path, cell_selection=cells, **options)
         records = store.clones.load_alleles(again).records
@@ -217,12 +223,12 @@ def test_exported_matrices_import_back_with_their_states(
                 ),
             ),
         )
-        matrix = found.pivot(index="cell", columns="character", values="code")
+        matrix = found.pivot(index="ids", columns="character", values="code")
         matrix = matrix.loc[expected.index, expected.columns].astype(np.int64)
         np.testing.assert_array_equal(matrix.to_numpy(), expected.to_numpy())
     # The states survive a second export unchanged.
     reread = store.clones.import_alleles(
-        tmp_path / "out.csv", cell_selection=cells, format="characters"
+        tmp_path / "out.csv", cell_selection=cells, format="laml"
     )
     store.clones.export_characters(reread, tmp_path / "again.csv", format="laml")
     assert (tmp_path / "again.csv").read_text() == (tmp_path / "out.csv").read_text()
@@ -285,7 +291,7 @@ def test_convexmls_matrix_survives_an_import_and_an_export(tmp_path):
     alleles = store.clones.import_alleles(
         DATA / "convexml_tree_0_character_matrix.csv",
         cell_selection=store.snapshot_cell_selection(),
-        format="characters",
+        format="laml",
     )
     store.clones.export_characters(alleles, tmp_path / "out.csv", format="laml")
     written = pd.read_csv(tmp_path / "out.csv", dtype=str, keep_default_na=False)
@@ -359,11 +365,11 @@ def test_laml_refuses_names_its_files_cannot_hold(tmp_path):
     path = tmp_path / "matrix.csv"
     path.write_text('cell,"int:1-a"\n"cell 1",1\ncell2,0\n')
     alleles = store.clones.import_alleles(
-        path, cell_selection=store.snapshot_cell_selection(), format="characters"
+        path, cell_selection=store.snapshot_cell_selection(), format="laml"
     )
     with pytest.raises(ValueError, match="The cell 'cell 1' holds a character"):
         store.clones.export_characters(alleles, tmp_path / "out.csv", format="laml")
-    # Cassiopeia's store holds any name.
+    # A TreeData store holds any name.
     store.clones.export_characters(alleles, tmp_path / "out.zarr")
     assert read_treedata(tmp_path / "out.zarr")["obsm"][
         "characters"
@@ -376,7 +382,7 @@ def test_alleles_without_a_read_site_have_no_matrix(store, tmp_path, truth):
         "cell,i1-a\n" + "".join(f"{cell},-1\n" for cell in truth.cell_ids[:3])
     )
     alleles = store.clones.import_alleles(
-        path, cell_selection=every_cell(store), format="characters"
+        path, cell_selection=every_cell(store), format="laml"
     )
     with pytest.raises(ValueError, match="No cell reads a character"):
         store.clones.export_characters(alleles, tmp_path / "out.zarr")
@@ -399,7 +405,7 @@ def test_store_exports_count_a_buffer_for_each_write_zarr_runs_at_once(
     # Zarr writes each chunk and each array's metadata through a buffered
     # file, as many at once as its async concurrency allows, and Python 3.14
     # made each buffer 128 KiB, where it was the file system's block. An
-    # export to Cassiopeia writes a Zarr store and counts them; LAML's text
+    # export to TreeData writes a Zarr store and counts them; LAML's text
     # does not.
     import io
     import re
@@ -410,7 +416,7 @@ def test_store_exports_count_a_buffer_for_each_write_zarr_runs_at_once(
 
     def stated(format: str, concurrency: int) -> int:
         store.memoryBytes = 1
-        target = tmp_path / ("out.zarr" if format == "cassiopeia" else "out.csv")
+        target = tmp_path / ("out.zarr" if format == "treedata" else "out.csv")
         try:
             with zarr.config.set({"async.concurrency": concurrency}):
                 store.clones.export_characters(alleles, target, format=format)
@@ -420,7 +426,7 @@ def test_store_exports_count_a_buffer_for_each_write_zarr_runs_at_once(
             return int(found.group(1))
         raise AssertionError("a budget of one byte exported the characters")
 
-    assert stated("cassiopeia", 20) - stated("cassiopeia", 10) == (
+    assert stated("treedata", 20) - stated("treedata", 10) == (
         10 * io.DEFAULT_BUFFER_SIZE
     )
     assert stated("laml", 20) == stated("laml", 10)
@@ -437,7 +443,7 @@ def _matrix_of(codes: np.ndarray, largest: int):
             for name in names
             for state in range(1, largest + 1)
         ],
-        columns=["character", "state", "allele", "kind", "cells"],
+        columns=["character", "state", "allele", "kind", "n_cells"],
     )
     return CharacterMatrix(
         cells=np.arange(codes.shape[0]),

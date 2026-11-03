@@ -60,13 +60,13 @@ def test_recorder_states_count_each_sites_cells(imported) -> None:
             "integration",
             "site",
             "state",
-            "cells",
+            "n_cells",
             "share",
         ]
         found = {
-            (row.integration, row.site, row.state): int(row.cells)
+            (row.integration, row.site, row.state): int(row.n_cells)
             for row in table.itertuples()
-            if row.cells
+            if row.n_cells
         }
         assert found == _expected_counts()
         # Shares leave out the cells whose embryo lacks the integration.
@@ -89,7 +89,7 @@ def test_recorder_states_draw_the_sites_read_in_the_most_cells(imported) -> None
     try:
         table = result.tables["site_states"]
         read = table[table["state"].isin(["mark", "unknown_mark", "unedited"])]
-        most = read.groupby(["integration", "site"], sort=False)["cells"].sum()
+        most = read.groupby(["integration", "site"], sort=False)["n_cells"].sum()
         chosen = set(most.sort_values(ascending=False, kind="stable").index[:3])
         expected = [pair for pair in most.index if pair in chosen]
         labels = [

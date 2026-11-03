@@ -392,7 +392,12 @@ def test_indices_of_a_few_clones() -> None:
     got = dv.indices(clones)
     p = np.array([3, 2, 1, 1]) / 7
     assert list(got) == list(dv.INDEX_COLUMNS)
-    assert (got["cells"], got["clones"], got["singletons"], got["doubletons"]) == (
+    assert (
+        got["n_cells"],
+        got["n_clones"],
+        got["n_singletons"],
+        got["n_doubletons"],
+    ) == (
         7,
         4,
         2,
@@ -510,7 +515,9 @@ def test_diversity_tables_match_inext_for_every_group() -> None:
     assert level == pytest.approx(0.909807035796235, rel=1e-11, abs=0)
     assert table.columns.tolist() == ["group", "sample", *dv.INDEX_COLUMNS]
     assert table["group"].tolist() == ["a, s1", "b, s2"]
-    assert table[["cells", "clones", "singletons", "doubletons"]].values.tolist() == [
+    assert table[
+        ["n_cells", "n_clones", "n_singletons", "n_doubletons"]
+    ].values.tolist() == [
         [33, 12, 6, 2],
         [82, 9, 4, 2],
     ]
@@ -765,7 +772,7 @@ def test_groups_with_equal_tables_get_equal_rows() -> None:
         assert methods[again].tolist() == methods[first].tolist()
     # Groups 4 and 5 hold 13 cells in five clones, two singletons and a
     # doubleton each, and D50 of 2, but sizes 6 and 3 against 5 and 4.
-    counted = ["cells", "clones", "singletons", "doubletons", "d50"]
+    counted = ["n_cells", "n_clones", "n_singletons", "n_doubletons", "d50"]
     assert table.loc[4, counted].tolist() == table.loc[5, counted].tolist()
     assert table.loc[4, counted].tolist() == [13, 5, 2, 1, 2]
     assert table.loc[4, "gini"] == pytest.approx(2 * 51 / (5 * 13) - 6 / 5)
@@ -833,7 +840,7 @@ def test_a_group_of_one_cell_and_a_group_of_every_cell() -> None:
     for at in range(33):
         cell = by_group.loc[f"cell {at}"]
         assert cell[
-            ["cells", "clones", "singletons", "doubletons", "d50"]
+            ["n_cells", "n_clones", "n_singletons", "n_doubletons", "d50"]
         ].tolist() == [
             1,
             1,
@@ -865,7 +872,7 @@ def test_a_group_of_one_cell_and_a_group_of_every_cell() -> None:
     # coverage at 66 cells for the common coverage, and its rarefaction to two
     # cells, counted over every pair of its cells.
     every = by_group.loc["every"]
-    assert every[["cells", "clones", "singletons", "doubletons"]].tolist() == [
+    assert every[["n_cells", "n_clones", "n_singletons", "n_doubletons"]].tolist() == [
         33,
         12,
         6,

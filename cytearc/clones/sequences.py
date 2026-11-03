@@ -39,7 +39,7 @@ positions in the same two ways. These functions work on text and never touch
 storage.
 
 :func:`expected_chance_pairs` says how many of the pairs that the search
-compares would fall within the cutoff by chance, if texts of different
+compares would fall within ``max_distance`` by chance, if texts of different
 components, such as the barcodes that correction links, agreed at each
 position independently, as often as one text per component of each does: an
 expectation that grows with the square of the texts compared, which lineage
@@ -181,9 +181,9 @@ class _Memory:
             else f"more than the {self.limit} bytes it may hold"
         )
         raise MemoryError(
-            "Finding the pairs of texts within the cutoff needs about "
-            f"{self.held + needed} bytes for {what}, {allowed}. Lower the "
-            "cutoff, compare fewer texts at once or within smaller blocks, or "
+            "Finding the pairs of texts within max_distance needs about "
+            f"{self.held + needed} bytes for {what}, {allowed}. Lower "
+            "max_distance, compare fewer texts at once or within smaller blocks, or "
             "raise the memory budget."
         )
 
@@ -372,16 +372,16 @@ def _edit_pairs(
 
 # The search compares every pair or uses keys, whichever is estimated to take
 # less time: m * (m - 1) / 2 comparisons of m texts of one length (for edits,
-# of the texts of lengths within the cutoff), or the keys that the texts
+# of the texts of lengths within max_distance), or the keys that the texts
 # yield, each at the cost below in nanoseconds. A key costs its hash and its
 # share of the sort, of pairing the texts that share it and of checking them:
 # 25 to 50 ns, more as the keys grow from 100,000 to 50 million. A comparison
 # of substitutions costs 2 to 5 ns; one of edits about 90 ns plus 70 ns for
-# each edit of the cutoff, and several times more between similar texts, such
+# each edit of max_distance, and several times more between similar texts, such
 # as those of one B cell clone, which fill the whole band. Measured on one core
 # on simulated junctions of T cells (amino acids of 14 and 18 residues) and B
 # cells (nucleotides of 36 to 66 bases), 300 to 30,000 of a length, with
-# cutoffs of 1 to 3. On 200,000 simulated cells, the choices took at most 5%
+# distances of 1 to 3. On 200,000 simulated cells, the choices took at most 5%
 # longer than the faster way for each length within 1 to 3 substitutions.
 _KEY_NS = 40.0
 _PAIR_NS = 3.5
@@ -969,10 +969,10 @@ def _mismatch_chances(disagree: np.ndarray, limit: int) -> np.ndarray:
 
 
 def _chance_pairs(n_texts: int, split: int, chances: np.ndarray) -> float:
-    """The pairs of texts expected within the cutoff, from each pair's chances.
+    """The pairs of texts expected within ``max_distance``, from each pair's chances.
 
     ``chances`` holds the chance of each number of mismatches within the
-    cutoff. With a ``split`` above 0, each text below it pairs with each at
+    max_distance. With a ``split`` above 0, each text below it pairs with each at
     or above it; otherwise the texts are distinct and differ somewhere, so a
     pair's chance leaves out agreeing at every position and is scaled to the
     pairs that do not.
@@ -1154,7 +1154,7 @@ def _edit_chance_pairs(
             if first != second:
                 expected += n_first * n_second * chance
                 continue
-            # Identical texts take one path of the chance within the cutoff,
+            # Identical texts take one path of the chance within max_distance,
             # summed apart from it, so rounding may leave them a hair above.
             identical = float(np.prod(np.diag(agree)))
             if n_first > 1 and identical < 1.0:
@@ -1253,7 +1253,7 @@ def _edits_keyed(sizes: np.ndarray, lengths: np.ndarray, limit: int) -> bool:
         int(size) * _key_count(int(length), limit, True)
         for size, length in zip(sizes.tolist(), lengths.tolist(), strict=True)
     )
-    # Each length with itself, and with each longer length within the cutoff.
+    # Each length with itself, and with each longer length within max_distance.
     cumulative = np.concatenate([[0], np.cumsum(sizes)])
     reach = np.searchsorted(lengths, lengths + limit, side="right")
     longer = cumulative[reach] - cumulative[1:]
@@ -1426,7 +1426,7 @@ def _partial_pairs(
 
 def _search_arguments(
     metric: str,
-    cutoff: Any,
+    max_distance: Any,
     max_bytes: Any,
     unknown: Any,
     min_compared: Any,
@@ -1434,11 +1434,11 @@ def _search_arguments(
     """Check the arguments that a search and its expectation share.
 
     Returns:
-        The cutoff, the most bytes or None, and the fewest positions compared.
+        The max_distance, the most bytes or None, and the fewest positions compared.
     """
     if metric not in DISTANCE_METRICS:
         raise ValueError(f"metric must be one of {', '.join(DISTANCE_METRICS)}")
-    cutoff = integer_argument(cutoff, "cutoff", minimum=0)
+    max_distance = integer_argument(max_distance, "max_distance", minimum=0)
     limit_bytes = (
         None
         if max_bytes is None
@@ -1452,7 +1452,7 @@ def _search_arguments(
             "unknown and min_compared apply to metric='hamming' only, which "
             "compares texts position by position"
         )
-    return cutoff, limit_bytes, min_compared
+    return max_distance, limit_bytes, min_compared
 
 
 def _length_groups(
@@ -1495,17 +1495,17 @@ def _block_spans(
 def neighbor_pairs(
     texts: Any,
     metric: str,
-    cutoff: int,
+    max_distance: int,
     blocks: Any = None,
     *,
     max_bytes: int | None = None,
     unknown: str = "",
     min_compared: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Find every pair of texts within ``cutoff`` of each other.
+    """Find every pair of texts within ``max_distance`` of each other.
 
     Two texts at positions ``i < j`` form a pair when their distance by
-    ``metric`` is at most ``cutoff``; equal texts at two positions form a
+    ``metric`` is at most ``max_distance``; equal texts at two positions form a
     pair at distance 0. Only texts of one block are compared when ``blocks``
     is given.
 
@@ -1523,7 +1523,7 @@ def neighbor_pairs(
         texts: The texts, a sequence of str, such as the distinct junctions
             of receptor chains or the distinct barcodes of a library.
         metric: ``"hamming"``, ``"normalized_hamming"`` or ``"levenshtein"``.
-        cutoff: The largest distance that links two texts: substitutions,
+        max_distance: The largest distance that links two texts: substitutions,
             percent of the length, or edits. 0 links only equal texts, as
             scirpy compares them, even where one substitution is less than
             half a percent of the length.
@@ -1536,7 +1536,7 @@ def neighbor_pairs(
             and 64 KiB for its sorts and smaller arrays; 48 bytes for each
             length of each block; the variant keys and candidate pairs of one
             pass, 8 bytes each, and 8 more for each candidate within the
-            cutoff; and 32 bytes for each pair it finds, counted once for
+            max_distance; and 32 bytes for each pair it finds, counted once for
             each pass of keys that finds it, with 384 for the arrays of each
             length or block that has pairs. With ``unknown`` or
             ``min_compared``, each text of the length searched holds 48 bytes
@@ -1551,19 +1551,19 @@ def neighbor_pairs(
 
     Raises:
         TypeError: If ``texts`` is not a one-dimensional sequence of str,
-            ``blocks`` not one of integer codes, or the cutoff or
+            ``blocks`` not one of integer codes, or ``max_distance`` or
             ``max_bytes`` not an integer.
-        ValueError: If the metric is unknown, the cutoff, ``max_bytes`` or
+        ValueError: If the metric is unknown, ``max_distance``, ``max_bytes`` or
             ``min_compared`` is negative, ``blocks`` does not hold one block
             per text, the texts hold more than 256 distinct characters, or
             ``unknown`` or ``min_compared`` is given with a metric other than
             ``hamming``.
         MemoryError: If the search would hold more than ``max_bytes``: the
             encoded texts, the keys or candidate pairs of one pass, or the
-            pairs within the cutoff need more.
+            pairs within ``max_distance`` need more.
     """
-    cutoff, limit_bytes, min_compared = _search_arguments(
-        metric, cutoff, max_bytes, unknown, min_compared
+    max_distance, limit_bytes, min_compared = _search_arguments(
+        metric, max_distance, max_bytes, unknown, min_compared
     )
     values = _texts(texts)
     n_texts = len(values)
@@ -1585,8 +1585,8 @@ def neighbor_pairs(
     # them outlives the pairs found.
     if metric == "levenshtein":
         # Texts are at most as many edits apart as the longer is long, so a
-        # larger cutoff links every pair.
-        limit = min(cutoff, int(lengths.max()))
+        # larger distance links every pair.
+        limit = min(max_distance, int(lengths.max()))
         for low, high in _block_spans(ranks, order, starts):
             members = order[starts[low] : ends[high - 1]]
             if len(members) < 2:
@@ -1601,7 +1601,7 @@ def neighbor_pairs(
                 first, second = _ordered(first, second)
                 found.add(first, second)
                 continue
-            # Each pair of lengths within the cutoff, the shorter first.
+            # Each pair of lengths within max_distance, the shorter first.
             for group in range(low, high):
                 length = int(group_lengths[group])
                 texts_of = order[starts[group] : ends[group]]
@@ -1631,11 +1631,11 @@ def neighbor_pairs(
                 continue
             members = order[starts[group] : ends[group]]
             length = int(group_lengths[group])
-            # A cutoff of 0 links only equal texts, as scirpy's identity.
+            # A max_distance of 0 links only equal texts, as scirpy's identity.
             limit = (
-                cutoff
-                if metric == "hamming" or not cutoff
-                else allowed_mismatches(length, cutoff)
+                max_distance
+                if metric == "hamming" or not max_distance
+                else allowed_mismatches(length, max_distance)
             )
             limit = min(limit, length)
             if partial:
@@ -1811,7 +1811,7 @@ def _partial_chance_pairs(
 def expected_chance_pairs(
     texts: Any,
     metric: str,
-    cutoff: int,
+    max_distance: int,
     blocks: Any = None,
     *,
     components: Any = None,
@@ -1820,11 +1820,11 @@ def expected_chance_pairs(
     unknown: str = "",
     min_compared: int = 0,
 ) -> float:
-    """The pairs of texts expected within ``cutoff`` of each other by chance.
+    """The pairs of texts expected within ``max_distance`` of each other by chance.
 
     Of the pairs that :func:`neighbor_pairs` compares with the same texts,
-    metric, cutoff, blocks, ``unknown`` and ``min_compared``, these are the
-    pairs expected within the cutoff if each text's character at each
+    metric, max_distance, blocks, ``unknown`` and ``min_compared``, these are the
+    pairs expected within ``max_distance`` if each text's character at each
     position were drawn independently from the characters that one text per
     component holds there. ``components`` gives each text's component, such
     as the barcodes that correction linked, and ``priority`` ranks the texts
@@ -1860,13 +1860,13 @@ def expected_chance_pairs(
     positions agrees, treating the pairs of positions as independent, an
     approximation that comes within a tenth of exact counts on random texts
     of 6 to 20 characters of about equal frequency and overstates them where
-    one character dominates, more so for longer texts and larger cutoffs.
+    one character dominates, more so for longer texts and larger distances.
 
     Args:
         texts: The texts, a sequence of str, as :func:`neighbor_pairs` takes
             them.
         metric: ``"hamming"``, ``"normalized_hamming"`` or ``"levenshtein"``.
-        cutoff: The largest distance that links two texts.
+        max_distance: The largest distance that links two texts.
         blocks: Each text's block as an integer code, or None.
         components: Each text's component as an integer code, or None.
         priority: Each text's rank within its component, a finite number,
@@ -1898,20 +1898,20 @@ def expected_chance_pairs(
         ValueError: If an argument is out of range as :func:`neighbor_pairs`
             refuses it, ``components`` or ``priority`` does not hold one value
             per text, ``priority`` holds a number that is not finite or comes
-            without ``components``, or the cutoff under ``levenshtein`` is
+            without ``components``, or ``max_distance`` under ``levenshtein`` is
             above ``MAX_CHANCE_EDITS``.
         MemoryError: If it would hold more than ``max_bytes``.
     """
-    cutoff, limit_bytes, min_compared = _search_arguments(
-        metric, cutoff, max_bytes, unknown, min_compared
+    max_distance, limit_bytes, min_compared = _search_arguments(
+        metric, max_distance, max_bytes, unknown, min_compared
     )
-    if metric == "levenshtein" and cutoff > MAX_CHANCE_EDITS:
+    if metric == "levenshtein" and max_distance > MAX_CHANCE_EDITS:
         raise ValueError(
             f"The pairs expected by chance within more than {MAX_CHANCE_EDITS} "
             "edits take too long to count, since their cost grows about eightfold "
-            f"with every two edits; pass a cutoff of at most {MAX_CHANCE_EDITS} "
+            f"with every two edits; pass a max_distance of at most {MAX_CHANCE_EDITS} "
             "with metric='levenshtein', or use metric='hamming', whose chance "
-            "pairs are counted for any cutoff"
+            "pairs are counted for any max_distance"
         )
     values = _texts(texts)
     n_texts = len(values)
@@ -1928,7 +1928,7 @@ def expected_chance_pairs(
     )
     expected = 0.0
     if metric == "levenshtein":
-        limit = min(cutoff, int(lengths.max()))
+        limit = min(max_distance, int(lengths.max()))
         for low, high in _block_spans(block_ranks, order, starts):
             members = order[starts[low] : ends[high - 1]]
             if len(members) < 2:
@@ -1957,9 +1957,9 @@ def expected_chance_pairs(
         members = order[starts[group] : ends[group]]
         length = int(group_lengths[group])
         limit = (
-            cutoff
-            if metric == "hamming" or not cutoff
-            else allowed_mismatches(length, cutoff)
+            max_distance
+            if metric == "hamming" or not max_distance
+            else allowed_mismatches(length, max_distance)
         )
         limit = min(limit, length)
         if partial:

@@ -145,7 +145,7 @@ def test_the_tapestri_example_reads_into_a_store_and_its_variants(tmp_path) -> N
 
 @pytest.mark.slow
 @pytest.mark.integration
-def test_a_dabseq_file_of_geo_reads_into_variant_counts(tmp_path) -> None:
+def test_a_dab_seq_file_of_geo_reads_into_variant_counts(tmp_path) -> None:
     file = download_or_skip(_GEO, tmp_path / "GSM9567643.hdf5")
     with h5py.File(file, "r") as handle:
         barcodes = [value.decode() for value in handle["CELL_BARCODES"][:]]

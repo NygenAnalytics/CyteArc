@@ -238,6 +238,46 @@ def test_the_artifact_holds_barcodes_doublets_and_what_each_rule_removed(
     )
 
 
+def test_trex_rules_follow_the_preset_and_turn_on_or_off_in_any_call(
+    store, tmp_path
+) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "trex")
+    trex = store.clones.barcode_clones(barcodes, preset="trex")
+    # True is what the preset sets, so the call is the same.
+    assert store.clones.barcode_clones(barcodes, preset="trex", trex_rules=True) == trex
+    without = store.clones.barcode_clones(barcodes, preset="trex", trex_rules=False)
+    assert without != trex
+    record = store.artifacts.inspect(without)
+    assert record.parameters["trex_rules"] is False
+    assert record.parameters == {
+        **store.artifacts.inspect(trex).parameters,
+        "trex_rules": False,
+    }
+    counts = dict(store.artifacts.load(without).attrs["rule_counts"])
+    assert "molecules_of_low_complexity" not in counts
+    assert "pairs_of_one_umi_shared" not in counts
+    # TREX's settings given one by one, with its rules, call TREX's clones.
+    spelled = store.clones.barcode_clones(
+        barcodes,
+        max_distance=5,
+        metric="hamming",
+        method="jaccard",
+        similarity=0.7,
+        inclusive=False,
+        prune=True,
+        doublets=True,
+        min_size=1,
+        trex_rules=True,
+    )
+    assert spelled != trex
+    pd.testing.assert_series_equal(
+        store.clones.load_clones(spelled).cells["clone"],
+        store.clones.load_clones(trex).cells["clone"],
+    )
+    with pytest.raises(TypeError, match="trex_rules must be a boolean"):
+        store.clones.barcode_clones(barcodes, preset="trex", trex_rules="no")
+
+
 def test_saved_clones_are_reused_only_with_their_barcodes_and_doublets(
     store, tmp_path
 ) -> None:
@@ -355,8 +395,31 @@ def test_within_needs_a_label_for_every_cell_with_a_barcode(store, tmp_path) -> 
         store.clones.barcode_clones(barcodes, preset="larry", within="partly")
     with pytest.raises(ValueError, match="not a cell metadata column"):
         store.clones.barcode_clones(barcodes, preset="larry", within="mouse")
-    with pytest.raises(ValueError, match="also a column of the result"):
-        store.clones.barcode_clones(barcodes, preset="larry", within="doublet")
+
+
+def test_within_may_name_any_column_since_its_labels_join_no_table(
+    store, tmp_path
+) -> None:
+    # The within labels are recorded by their fingerprint and never join the
+    # loaded clones, so a column named like one of their columns keeps the
+    # clones apart as any other column does.
+    _calling, barcodes = _imported(store, tmp_path, "larry")
+    store.cells.insert("sample_copy", TRUTH.samples.astype(object))
+    expected = store.clones.load_clones(
+        store.clones.barcode_clones(barcodes, preset="larry", within="sample_copy")
+    ).cells["clone"]
+    for name in ("clone", "clone_size", "n_barcodes", "doublet"):
+        store.cells.insert(name, TRUTH.samples.astype(object))
+        loaded = store.clones.load_clones(
+            store.clones.barcode_clones(barcodes, preset="larry", within=name)
+        )
+        assert list(loaded.cells.columns) == [
+            "clone",
+            "clone_size",
+            "n_barcodes",
+            "doublet",
+        ]
+        pd.testing.assert_series_equal(loaded.cells["clone"], expected)
 
 
 def test_saved_clones_are_reused_by_their_resolved_rules(store, tmp_path) -> None:
@@ -585,7 +648,7 @@ def test_counts_that_a_table_leaves_unknown_are_refused_by_the_rules_that_read_t
         store.clones.barcode_clones(barcodes, method="sets", min_umis=2)
     with pytest.raises(ValueError, match="Barcode correction counts each barcode"):
         store.clones.barcode_clones(
-            barcodes, method="sets", distance=1, metric="hamming"
+            barcodes, method="sets", max_distance=1, metric="hamming"
         )
     # Rules that read no count call clones from every pair.
     clones = store.clones.barcode_clones(barcodes, method="sets")

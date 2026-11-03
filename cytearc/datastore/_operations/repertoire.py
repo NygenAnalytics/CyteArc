@@ -204,10 +204,10 @@ _CLONOTYPE_COLUMNS = frozenset(
 # The columns of the tables of gene usage and junction lengths besides the
 # groups' labels, which a key column of the groups may not share.
 _USAGE_COLUMNS = frozenset(
-    {"group", "locus", *GENE_FIELDS, "cells", "clonotypes", "fraction"}
+    {"group", "locus", *GENE_FIELDS, "n_cells", "n_clonotypes", "fraction"}
 )
 _SPECTRATYPE_COLUMNS = frozenset(
-    {"group", "locus", "length", "cells", "clonotypes", "fraction"}
+    {"group", "locus", "length", "n_cells", "n_clonotypes", "fraction"}
 )
 # Finding the chains of the chosen slots that grouped cells hold holds, for
 # each, its cell, group and clonotype and the codes of its locus and of each
@@ -1104,7 +1104,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         within: str | Sequence[str] | None = None,
         within_receptor_type: bool = True,
         metric: str = "identity",
-        cutoff: int | None = None,
+        max_distance: int | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Group the cells of imported receptors into clonotypes.
@@ -1128,15 +1128,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
 
         ``metric`` links chains whose junctions are similar instead, as
         scirpy's ``define_clonotype_clusters`` does: ``"hamming"`` (at most
-        ``cutoff`` substitutions between junctions of one length),
+        ``max_distance`` substitutions between junctions of one length),
         ``"normalized_hamming"`` (substitutions as a percentage of the length,
-        rounded half up, at most ``cutoff``) or ``"levenshtein"`` (at most
-        ``cutoff`` substitutions, insertions and deletions), under the same
-        rules for arms, dual chains, genes and groups. The resulting
+        rounded half up, at most ``max_distance``) or ``"levenshtein"`` (at
+        most ``max_distance`` substitutions, insertions and deletions), under
+        the same rules for arms, dual chains, genes and groups. The resulting
         clonotype clusters group T cells that likely share their epitope, or
-        B cells of one clone despite somatic mutations. ``cutoff`` has no
-        default for these metrics, since it decides the clusters, and a
-        cutoff of 0 links identical junctions alone, as in scirpy.
+        B cells of one clone despite somatic mutations. ``max_distance`` has
+        no default for these metrics, since it decides the clusters, and a
+        ``max_distance`` of 0 links identical junctions alone, as scirpy's
+        cutoff of 0 does.
 
         Clonotypes are numbered by size, so ``clonotype_1`` is the largest;
         ties follow the receptor type in sorted order, then the ``within``
@@ -1162,8 +1163,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 apart.
             metric: ``"identity"``, ``"hamming"``, ``"normalized_hamming"`` or
                 ``"levenshtein"``.
-            cutoff: The largest distance of linked chains for the distance
-                metrics: substitutions, percent, or edits; None with
+            max_distance: The largest distance of linked chains for the
+                distance metrics: substitutions, percent, or edits; None with
                 ``"identity"``.
             invalidate_cache: Define again instead of reusing saved clonotypes.
 
@@ -1176,7 +1177,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``receptors`` is not an ``immune_receptors``
                 artifact, an option is unknown, a distance metric has no
-                cutoff, the receptors store no junction of the compared kind,
+                ``max_distance``, the receptors store no junction of the
+                compared kind,
                 or a ``within`` column is not a cell metadata column or has
                 no label for a cell with a receptor.
             KeyError: If the store holds no such receptors.
@@ -1188,8 +1190,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 cell and 12 per contig and with a distance metric the 512 MiB
                 of the search, does not fit the memory budget; or, with a
                 distance metric, the junctions that the cells' chains hold,
-                decoded for the search, or the pairs of chains within the
-                cutoff and the links between the chains or arms that match, 32
+                decoded for the search, or the pairs of chains within
+                ``max_distance`` and the links between the chains or arms that
+                match, 32
                 bytes each, do not fit what is left.
         """
         group, fields = self._receptor_group(receptors)
@@ -1210,25 +1213,25 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if metric not in METRICS:
             raise ValueError(f"metric must be one of {', '.join(METRICS)}")
         if metric == "identity":
-            # Only the 0 that the artifact records stands for no cutoff.
-            if cutoff is not None and (
-                isinstance(cutoff, bool | np.bool_)
-                or not isinstance(cutoff, int | np.integer)
-                or cutoff != 0
+            # Only the 0 that the artifact records stands for no distance.
+            if max_distance is not None and (
+                isinstance(max_distance, bool | np.bool_)
+                or not isinstance(max_distance, int | np.integer)
+                or max_distance != 0
             ):
-                raise ValueError("metric='identity' takes no cutoff")
+                raise ValueError("metric='identity' takes no max_distance")
             limit = 0
         else:
-            if cutoff is None:
+            if max_distance is None:
                 raise ValueError(
-                    f"metric={metric!r} needs a cutoff, such as 1 or 2 "
+                    f"metric={metric!r} needs a max_distance, such as 1 or 2 "
                     "substitutions or edits, or 15 percent"
                 )
-            limit = integer_argument(cutoff, "cutoff", minimum=0)
+            limit = integer_argument(max_distance, "max_distance", minimum=0)
             if metric == "normalized_hamming" and limit > 100:
                 raise ValueError(
-                    "A normalized_hamming cutoff is a percentage of the length, "
-                    "at most 100"
+                    "A normalized_hamming max_distance is a percentage of the "
+                    "length, at most 100"
                 )
         field_name = "junction" if sequence == "nt" else "junction_aa"
         if field_name not in fields:
@@ -1275,7 +1278,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             within=columns,
             within_receptor_type=within_receptor_type,
             metric=metric,
-            cutoff=limit,
+            max_distance=limit,
             invalidate_cache=invalidate_cache,
         )
         record = arguments.to_record()
@@ -1360,7 +1363,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 texts,
                 groups=groups,
                 metric=metric,
-                cutoff=limit,
+                max_distance=limit,
                 v_genes=v_genes,
                 j_genes=j_genes,
                 receptor_arms=receptor_arms,
@@ -1602,7 +1605,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             within=within,
             within_receptor_type=bool(parameters["within_receptor_type"]),
             metric=str(parameters["metric"]),
-            cutoff=int(parameters["cutoff"]),
+            max_distance=int(parameters["max_distance"]),
         )
 
     def _slot_units(

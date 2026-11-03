@@ -10,7 +10,7 @@ import pytest
 from cytearc.variants.counts import Contig, SiteTable
 from cytearc.variants.masks import RCRS_LENGTH, VARIANT_MASKS, masked_variants
 from cytearc.variants.statistics import (
-    PRESETS,
+    INFORMATIVE_PRESETS,
     VariantStatisticsAccumulator,
     informative_variants,
     resolve_thresholds,
@@ -230,28 +230,42 @@ def test_stranded_rows_need_their_strand_counts_and_cells_need_a_count() -> None
 
 def test_presets_hold_the_published_thresholds() -> None:
     # Signac's vignette and MAESTER's paper, with VMR for RNA's variability.
-    assert dict(PRESETS["atac"]) == {
+    assert dict(INFORMATIVE_PRESETS["atac"]) == {
         "min_cells": 5,
         "min_strand_correlation": 0.65,
         "min_vmr": 0.01,
     }
-    assert dict(PRESETS["rna"]) == {
+    assert dict(INFORMATIVE_PRESETS["rna"]) == {
         "min_depth": 20.0,
         "min_quality": 30.0,
         "min_vmr": 0.01,
     }
+    # The table is public and read-only, at both levels.
+    import cytearc.variants
+
+    assert cytearc.variants.INFORMATIVE_PRESETS is INFORMATIVE_PRESETS
+    with pytest.raises(TypeError):
+        INFORMATIVE_PRESETS["atac"]["min_vmr"] = 0.5  # type: ignore[index]
+    with pytest.raises(TypeError):
+        INFORMATIVE_PRESETS["dna"] = {}  # type: ignore[index]
+    assert not hasattr(cytearc.variants, "PRESETS")
 
 
 def test_thresholds_combine_a_preset_with_overrides() -> None:
     resolved = resolve_thresholds("atac", {"min_vmr": 0.05, "min_cells": None})
     assert resolved == {
-        "min_cells": 5.0,
+        "min_cells": 5,
         "min_strand_correlation": 0.65,
         "min_vmr": 0.05,
         "min_depth": None,
         "min_quality": None,
     }
+    # Each threshold resolves in its argument's own type: a whole number of
+    # cells, and floats for the statistics.
+    assert type(resolved["min_cells"]) is int
+    assert type(resolve_thresholds(None, {"min_cells": 2.0})["min_cells"]) is int
     assert resolve_thresholds(None, {"min_depth": 3})["min_depth"] == 3.0
+    assert type(resolve_thresholds(None, {"min_depth": 3})["min_depth"]) is float
     with pytest.raises(ValueError, match="needs a preset"):
         resolve_thresholds(None, {"min_vmr": None})
     with pytest.raises(ValueError, match="preset must be one of"):

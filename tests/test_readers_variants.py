@@ -82,7 +82,7 @@ def _mgatk_oracle(folder: Path, *, six: bool, swapped: bool, contig: str, refere
     forward, reverse = ("rv", "fw") if swapped else ("fw", "rv")
     counts = pd.DataFrame(
         {
-            "cell": table["cell"],
+            "ids": table["cell"],
             "site": table["site"],
             "allele": table["base"],
             "count": table["count"],
@@ -92,7 +92,7 @@ def _mgatk_oracle(folder: Path, *, six: bool, swapped: bool, contig: str, refere
     )
     depth = (
         table.groupby(["cell", "site"], sort=False)["count"].sum().reset_index()
-    ).rename(columns={"count": "depth"})
+    ).rename(columns={"count": "depth", "cell": "ids"})
     return depth, counts
 
 
@@ -111,10 +111,10 @@ def test_signac_fixture_gives_the_frequencies_signac_pins(tmp_path) -> None:
     # Signac's ReadMGATK reads 11 cells.
     assert loaded.cells["listed"].sum() == 11
     depth = loaded.depth.assign(
-        cell=loaded.depth["cell"].astype(str), site=loaded.depth["site"].astype(str)
+        cell=loaded.depth["ids"].astype(str), site=loaded.depth["site"].astype(str)
     ).set_index(["cell", "site"])["depth"]
     counts = loaded.counts.assign(
-        cell=loaded.counts["cell"].astype(str), site=loaded.counts["site"].astype(str)
+        cell=loaded.counts["ids"].astype(str), site=loaded.counts["site"].astype(str)
     ).set_index(["cell", "site", "allele"])["count"]
 
     def frequency(cell: str, variant: str) -> float:
@@ -191,7 +191,7 @@ def test_mito_maester_subset_reads_as_maegatk_with_strands_swapped_back(
     table = _base_table(folder, "A", six=True)
     row = table[(table["fw"] > 0) & (table["rv"] > 0)].iloc[0]
     loaded_row = loaded.counts[
-        (loaded.counts["cell"].astype(str) == row["cell"])
+        (loaded.counts["ids"].astype(str) == row["cell"])
         & (loaded.counts["site"].astype(str) == f"chrM:{row['position']}")
         & (loaded.counts["allele"] == "A")
     ].iloc[0]
@@ -231,11 +231,11 @@ def test_cellsnp_lite_subset_derives_the_reference_from_dp(tmp_path) -> None:
                 if value:
                     count_rows.append((cells[cell], sites[record], allele, value))
     assert_tables(
-        loaded.depth, pd.DataFrame(depth_rows, columns=["cell", "site", "depth"])
+        loaded.depth, pd.DataFrame(depth_rows, columns=["ids", "site", "depth"])
     )
     assert_tables(
         loaded.counts,
-        pd.DataFrame(count_rows, columns=["cell", "site", "allele", "count"]),
+        pd.DataFrame(count_rows, columns=["ids", "site", "allele", "count"]),
     )
     # Contigs follow natural order.
     names = sorted({str(name) for name in records[0]}, key=int)
@@ -263,11 +263,11 @@ def test_mquad_example_reads_ad_and_dp_of_its_passed_variants(tmp_path) -> None:
                 if value:
                     count_rows.append((cell_id, site, allele, int(value)))
     assert_tables(
-        loaded.depth, pd.DataFrame(depth_rows, columns=["cell", "site", "depth"])
+        loaded.depth, pd.DataFrame(depth_rows, columns=["ids", "site", "depth"])
     )
     assert_tables(
         loaded.counts,
-        pd.DataFrame(count_rows, columns=["cell", "site", "allele", "count"]),
+        pd.DataFrame(count_rows, columns=["ids", "site", "allele", "count"]),
     )
     assert len(loaded.sites) == 12
 
@@ -290,7 +290,7 @@ def test_vartrix_test_matrices_give_hand_derived_counts(tmp_path) -> None:
                 (cells[14], "17:200", 1),
                 (cells[17], "2:200", 7),
             ],
-            columns=["cell", "site", "depth"],
+            columns=["ids", "site", "depth"],
         ),
     )
     assert_tables(
@@ -302,7 +302,7 @@ def test_vartrix_test_matrices_give_hand_derived_counts(tmp_path) -> None:
                 (cells[14], "17:200", "G", 1),
                 (cells[17], "2:200", "C", 7),
             ],
-            columns=["cell", "site", "allele", "count"],
+            columns=["ids", "site", "allele", "count"],
         ),
     )
     assert loaded.contigs["length"].tolist() == [400, 400, 400, 400]
@@ -331,7 +331,7 @@ def test_giftwrap_sample_subset_matches_its_matrices(tmp_path) -> None:
     rows, columns = umis.nonzero()
     expected = pd.DataFrame(
         {
-            "cell": np.asarray(cells)[rows],
+            "ids": np.asarray(cells)[rows],
             "site": probes[columns, 0],
             "allele": probes[columns, 1],
             "count": np.asarray(umis[rows, columns]).ravel(),
@@ -341,7 +341,7 @@ def test_giftwrap_sample_subset_matches_its_matrices(tmp_path) -> None:
     )
     assert_tables(loaded.counts, expected)
     depth = (
-        expected.groupby(["cell", "site"])["count"]
+        expected.groupby(["ids", "site"])["count"]
         .sum()
         .reset_index()
         .rename(columns={"count": "depth"})
@@ -371,7 +371,7 @@ def test_xv_seq_got_tables_count_wild_type_and_mutant_umis(
         [
             pd.DataFrame(
                 {
-                    "cell": table["BC"],
+                    "ids": table["BC"],
                     "site": site,
                     "allele": "WT",
                     "count": table["wtUMIs"],
@@ -379,7 +379,7 @@ def test_xv_seq_got_tables_count_wild_type_and_mutant_umis(
             ),
             pd.DataFrame(
                 {
-                    "cell": table["BC"],
+                    "ids": table["BC"],
                     "site": site,
                     "allele": "MUT",
                     "count": table["mutUMIs"],
@@ -389,7 +389,7 @@ def test_xv_seq_got_tables_count_wild_type_and_mutant_umis(
     )
     assert_tables(loaded.counts, counts[counts["count"] > 0])
     depth = pd.DataFrame(
-        {"cell": table["BC"], "site": site, "depth": table["wtUMIs"] + table["mutUMIs"]}
+        {"ids": table["BC"], "site": site, "depth": table["wtUMIs"] + table["mutUMIs"]}
     )
     assert_tables(loaded.depth, depth[depth["depth"] > 0])
     assert loaded.alleles["role"].tolist() == ["alternative", "reference"]
@@ -831,7 +831,7 @@ def test_got_tables_read_r_row_names_as_clone_tables_do(tmp_path) -> None:
         got_source(path, format="got")
     counts = pd.DataFrame(
         {
-            "cell": ["AAAC-1", "AAAC-1", "AAAG-1"],
+            "ids": ["AAAC-1", "AAAC-1", "AAAG-1"],
             "site": "CALR",
             "allele": ["WT", "MUT", "MUT"],
             "count": [1, 2, 3],
@@ -848,7 +848,7 @@ def test_got_tables_read_r_row_names_as_clone_tables_do(tmp_path) -> None:
     )
     loaded, _group = _import(store, selection, path, invalidate_cache=True)
     assert_tables(loaded.counts, counts)
-    assert loaded.calls[["cell", "call"]].to_numpy().tolist() == [["AAAG-1", "MUT"]]
+    assert loaded.calls[["ids", "call"]].to_numpy().tolist() == [["AAAG-1", "MUT"]]
 
 
 def test_got_formats_and_their_columns(tmp_path) -> None:
@@ -1188,7 +1188,7 @@ def test_gift_per_umi_tables_on_geo_count_umis_and_reads(tmp_path) -> None:
     )
     expected = pd.DataFrame(
         {
-            "cell": np.asarray(cells)[grouped["cell_idx"]],
+            "ids": np.asarray(cells)[grouped["cell_idx"]],
             "site": [name[index] for index in grouped["probe_idx"]],
             "allele": grouped["gapfill"],
             "count": grouped["count"],
@@ -1231,7 +1231,7 @@ def test_got_tables_on_geo_count_wild_type_and_mutant_umis(
         counts.append(
             pd.DataFrame(
                 {
-                    "cell": np.asarray(cells)[kept.to_numpy()],
+                    "ids": np.asarray(cells)[kept.to_numpy()],
                     "site": site,
                     "allele": allele,
                     "count": values[kept].astype(int).to_numpy(),
@@ -1265,7 +1265,7 @@ def test_got_multi_example_outputs_import_together(tmp_path) -> None:
             kept = column > 0
             expected = pd.DataFrame(
                 {
-                    "cell": counts_table["BC"][kept],
+                    "ids": counts_table["BC"][kept],
                     "site": counts_table["target"][kept] + f" ({channel})",
                     "allele": allele,
                     "count": column[kept],
@@ -1275,7 +1275,7 @@ def test_got_multi_example_outputs_import_together(tmp_path) -> None:
                 loaded.counts["site"].astype(str).str.endswith(f"({channel})")
                 & (loaded.counts["allele"] == allele)
             ]
-            assert_tables(chosen[["cell", "site", "allele", "count"]], expected)
+            assert_tables(chosen[["ids", "site", "allele", "count"]], expected)
     finals = loaded.calls[loaded.calls["source"] == "genotype_final"]
     # The refined table repeats two cells' calls at a target, which count once.
     called = final_table.dropna(subset=["genotype_final"])

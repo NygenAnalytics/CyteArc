@@ -134,7 +134,7 @@ def test_each_format_recovers_the_truths_clones(shared, tmp_path, name) -> None:
     loaded = shared.store.clones.load_clones(clones)
     # Clades are named by their roots, which carry the clones' labels.
     assert loaded.clones["clone"].tolist() == LABELS
-    assert loaded.source == "phylogeny_clones"
+    assert loaded.source == "cut_phylogeny_clones"
 
 
 def test_depth_one_cuts_the_truth_once_the_root_merges_with_its_child(shared) -> None:
@@ -551,8 +551,8 @@ def test_loaded_phylogenies_list_every_node_and_tree(
         name if name in set(TRUTH.cell_ids.tolist()) else pd.NA
         for name in leaves["name"]
     ]
-    assert leaves["cell"].tolist() == expected
-    assert nodes.loc[~nodes["is_leaf"], "cell"].isna().all()
+    assert leaves["ids"].tolist() == expected
+    assert nodes.loc[~nodes["is_leaf"], "ids"].isna().all()
     assert loaded.trees.to_dict("records") == [
         {
             "tree": "cuts",

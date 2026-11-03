@@ -169,7 +169,7 @@ def clone_abundance(
     ``"s1, TCR"``.
 
     Tables: ``sizes`` (``group``, ``clone_size``, ``n_clones``) and ``top``
-    (``clone``, ``label``, then the cells of each group, or ``cells``).
+    (``clone``, ``label``, then the cells of each group, or ``n_cells``).
     """
     top = integer_argument(top, "top", minimum=1)
     loaded = _load_clones(store, clones)
@@ -243,7 +243,7 @@ def clone_abundance(
     top_table.insert(1, "label", _figure_labels(store, clones, ids))
     drawn = _figure_noun(store, clones)
     if not grouped:
-        top_table = top_table.rename(columns={"all cells": "cells"})
+        top_table = top_table.rename(columns={"all cells": "n_cells"})
     if figsize is None and target is None:
         figsize = (12.0, max(3.6, 0.28 * len(top_table) + 1.2))
     require_matplotlib()
@@ -412,9 +412,9 @@ def clonal_expansion(
     group's receptor types, named like ``"blood, TCR"``. Cells without a
     category or a group are left out.
 
-    Tables: ``categories`` (``group``, ``category``, then ``cells`` or
-    ``clones``, and ``fraction``) and ``rank_windows`` (``group``,
-    ``window``, ``cells`` and ``fraction``).
+    Tables: ``categories`` (``group``, ``category``, then ``n_cells`` or
+    ``n_clones``, and ``fraction``) and ``rank_windows`` (``group``,
+    ``window``, ``n_cells`` and ``fraction``).
     """
     if count not in ("cells", "clones"):
         raise ValueError("count must be 'cells' or 'clones'")
@@ -447,16 +447,18 @@ def clonal_expansion(
         group_name = ", ".join(key_columns) or None
         order = sort_categories(pd.unique(loaded.categories["group"].to_numpy(object)))
         wide = (
-            loaded.categories.pivot(index="group", columns="category", values=count)
+            loaded.categories.pivot(
+                index="group", columns="category", values=f"n_{count}"
+            )
             .reindex(index=order, columns=category_names, fill_value=0)
             .astype(np.int64)
         )
         windows = (
-            loaded.rank_windows.pivot(index="group", columns="window", values="cells")
+            loaded.rank_windows.pivot(index="group", columns="window", values="n_cells")
             .reindex(index=order, columns=window_names, fill_value=0)
             .astype(np.int64)
         )
-        n_cells = int(loaded.categories["cells"].sum())
+        n_cells = int(loaded.categories["n_cells"].sum())
     else:
         category = np.asarray(loaded.cells["category"].cat.codes, dtype=np.int64)
         clone = np.asarray(loaded.cells["clone"].cat.codes, dtype=np.int64)
@@ -524,8 +526,8 @@ def clonal_expansion(
         figure=figure,
         axes=axes,
         tables={
-            "categories": _long_table(wide, "category", count),
-            "rank_windows": _long_table(windows, "window", "cells"),
+            "categories": _long_table(wide, "category", f"n_{count}"),
+            "rank_windows": _long_table(windows, "window", "n_cells"),
         },
         legends=(
             LegendSpec(kind="categorical", label="Expansion category"),
@@ -750,7 +752,7 @@ def clonal_overlap(
     values[first, second] = pair_values
     values[second, first] = pair_values
     values[np.diag_indices(len(names))] = (
-        result.group_sizes["clones"].to_numpy(dtype=np.float64)
+        result.group_sizes["n_clones"].to_numpy(dtype=np.float64)
         if index == "shared"
         else 1.0
     )
@@ -807,7 +809,7 @@ def clonal_overlap(
         provenance=PlotProvenance(
             assay=None,
             cell_key=None,
-            n_cells=int(result.group_sizes["cells"].sum()),
+            n_cells=int(result.group_sizes["n_cells"].sum()),
             renderer="matplotlib",
             notes=("clones",),
             extras={"clones": clones.to_dict(), "index": index, "groups": names},
@@ -828,7 +830,7 @@ def clone_tracking(
     group_by: str | Sequence[str] | None = None,
     groups: ArtifactRef | None = None,
     cell_selection: ArtifactRef | None = None,
-    top: int = 10,
+    top_n: int = 10,
     labels: Sequence[str] | None = None,
     order: Sequence[str] | None = None,
     target: Any | None = None,
@@ -840,7 +842,7 @@ def clone_tracking(
     """Plot the share of cells of chosen clones across groups of cells.
 
     ``clones`` is a clone artifact, such as ``clones`` or ``clonotypes``. The
-    plot follows the clones that ``ds.clones.track`` chooses: the ``top`` with
+    plot follows the clones that ``ds.clones.track`` chooses: the ``top_n`` with
     the most cells in each group, or ``labels``. Each draws one line across the
     groups, such as time points or cell types, of its share of each group's
     cells with a clone. A line is labelled with its clone's ID, or for a
@@ -855,8 +857,8 @@ def clone_tracking(
     clones, the largest first. By default the figure grows with the groups up
     to the width of a page.
 
-    Tables: ``cells`` (``clone``, ``group``, the key columns, ``cells`` and
-    ``fraction``).
+    Tables: ``cells``, the record's ``table`` (``clone``, ``group``, the key
+    columns, ``n_cells`` and ``fraction``).
     """
     if order is not None:
         if isinstance(order, np.ndarray) and order.ndim == 1:
@@ -868,7 +870,7 @@ def clone_tracking(
         group_by=group_by,
         groups=groups,
         cell_selection=cell_selection,
-        top=top,
+        top_n=top_n,
         labels=labels,
     )
     # Every followed clone is labelled at once, so that the junctions which
@@ -880,7 +882,7 @@ def clone_tracking(
             strict=True,
         )
     )
-    cells = tracked.cells
+    cells = tracked.table
     keys = [
         *tracked.group_by,
         *((tracked.groups.kind,) if tracked.groups is not None else ()),
@@ -967,7 +969,7 @@ def clone_tracking(
         provenance=PlotProvenance(
             assay=None,
             cell_key=None,
-            n_cells=int(cells["cells"].sum()),
+            n_cells=int(cells["n_cells"].sum()),
             renderer="matplotlib",
             notes=("clones",),
             extras={
@@ -1024,10 +1026,10 @@ def clone_coupling(
         raise TypeError("coupling must be the CloneCoupling of ds.clones.coupling")
     if value not in _COUPLING_VALUES:
         raise ValueError(f"value must be one of {', '.join(_COUPLING_VALUES)}")
-    if value == "z_score" and not coupling.permutations:
+    if value == "z_score" and not coupling.n_permutations:
         raise ValueError(
             "The coupling was measured without permutations, so it has no "
-            "z-scores; plot value='coupling', or measure it with permutations"
+            "z-scores; plot value='coupling', or measure it with n_permutations"
         )
     names = list(coupling.order)
     positions = pd.Index(names)
@@ -1104,7 +1106,7 @@ def clone_coupling(
         provenance=PlotProvenance(
             assay=None,
             cell_key=None,
-            n_cells=int(coupling.group_sizes["cells"].sum()),
+            n_cells=int(coupling.group_sizes["n_cells"].sum()),
             renderer="matplotlib",
             notes=("clones",),
             extras={
@@ -1163,7 +1165,8 @@ def clone_fates(
     width of a page.
 
     Tables: ``clones`` (``clone``, ``fate``, the dominant fate, missing for a
-    tie, ``early_cells``, ``late_cells``, then the late cells of each fate).
+    tie, ``n_early_cells``, ``n_late_cells``, then the late cells of each
+    fate).
     """
     top = integer_argument(top, "top", minimum=1)
     if not isinstance(normalize, bool):
@@ -1177,9 +1180,9 @@ def clone_fates(
     # in each fate.
     codes, at = np.unique(clone_codes, return_inverse=True)
     cells = np.zeros((len(codes), len(fate_names)), dtype=np.int64)
-    np.add.at(cells, (at.reshape(-1), fate_codes), rows["cells"].to_numpy(np.int64))
+    np.add.at(cells, (at.reshape(-1), fate_codes), rows["n_cells"].to_numpy(np.int64))
     early_cells = np.zeros(len(codes), dtype=np.int64)
-    early_cells[at.reshape(-1)] = rows["early_cells"].to_numpy(np.int64)
+    early_cells[at.reshape(-1)] = rows["n_early_cells"].to_numpy(np.int64)
     late_cells = cells.sum(axis=1)
     dominant = dominant_fates(cells)
     # The clones with the most late cells, ties to the lower code, the larger
@@ -1196,8 +1199,8 @@ def clone_fates(
         "fate",
         pd.Categorical.from_codes(dominant[chosen], categories=pd.Index(fate_names)),
     )
-    table.insert(2, "early_cells", early_cells[chosen])
-    table.insert(3, "late_cells", late_cells[chosen])
+    table.insert(2, "n_early_cells", early_cells[chosen])
+    table.insert(3, "n_late_cells", late_cells[chosen])
     if figsize is None and target is None:
         figsize = (
             min(max(6.0, 0.22 * len(chosen) + 3.5), MAX_FIGURE_WIDTH_INCHES),
