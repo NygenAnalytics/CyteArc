@@ -1448,7 +1448,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 f"counts must be a variant_counts artifact, not {counts.kind!r}"
             )
         require_complete_artifact(self.zw, counts)
-        return artifact_group(self.zw, counts)
+        group = artifact_group(self.zw, counts)
+        missing = [name for name in _CELL_ARRAYS if name not in group]
+        if missing:
+            raise ValueError(
+                "counts was saved by an earlier version of CyteArc, without the "
+                f"arrays {', '.join(missing)}; import the counts again with "
+                "ds.variants.import_counts, which saves them anew"
+            )
+        return group
 
     def _variant_cell_index(self, counts: ArtifactRef) -> np.ndarray:
         """The store rows of a variant_counts artifact's cells, in its order."""
@@ -1724,7 +1732,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "informative must be a variant_selection artifact from "
                 f"ds.variants.informative, not {informative.kind!r}"
             )
-        require_complete_artifact(self.zw, informative)
+        status = require_complete_artifact(self.zw, informative)
+        if status.operation != VariantSelectionArguments.operation:
+            raise ValueError(
+                "informative was saved by an earlier version of CyteArc, by the "
+                f"operation {status.operation!r}; select the informative variants "
+                "again with ds.variants.informative, which saves them anew"
+            )
         return artifact_group(self.zw, informative)
 
     def _statistic_positions(
@@ -2071,7 +2085,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             else status.input_ref("cell_selection"),
             preset=cast(str | None, parameters["preset"]),
             thresholds={name: parameters[name] for name in THRESHOLDS},
-            masks=tuple(str(name) for name in cast(list[str], parameters["mask"])),
+            mask=tuple(str(name) for name in cast(list[str], parameters["mask"])),
             n_cells=int(cast(int, attributes["n_cells"])),
             stranded=bool(attributes["stranded"]),
             qualities=bool(attributes["qualities"]),
@@ -3030,13 +3044,14 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             str(label): index for index, label in enumerate(site_labels.tolist())
         }
         unit_positions: np.ndarray | None = None
+        has_contig: np.ndarray | None = None
         chosen: list[int] = []
         unknown: list[Any] = []
         for item in sites:
             if isinstance(item, str):
                 found = [by_label[item]] if item in by_label else []
             elif isinstance(item, int | np.integer) and not isinstance(item, bool):
-                if unit_positions is None:
+                if unit_positions is None or has_contig is None:
                     counts = inspect_artifact(self.zw, genotypes).input_ref("counts")
                     table = _stored_sites(self._variant_group(counts))
                     if len(table.contigs) != 1:
@@ -3045,10 +3060,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                             "of one contig; name them by label, such as 'chrM:310'"
                         )
                     units = _read(group, "genotype_sites").astype(np.int64)
-                    unit_positions = np.where(
-                        table.site_contig[units] >= 0, table.site_position[units], -1
-                    )
-                found = np.flatnonzero(unit_positions == int(item)).tolist()
+                    unit_positions = table.site_position[units]
+                    # A named site, such as a GoT target, has no position.
+                    has_contig = table.site_contig[units] >= 0
+                found = np.flatnonzero(
+                    has_contig & (unit_positions == int(item))
+                ).tolist()
             else:
                 raise TypeError(
                     f"sites must hold site labels or positions, not {type(item).__name__}"

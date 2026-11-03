@@ -607,7 +607,8 @@ class VariantSelection:
         thresholds: Each threshold as the selection applied it, None for a
             test not made, from the artifact's provenance parameters:
             ``min_cells`` an integer and the others floats.
-        masks: The masks whose variants are never informative.
+        mask: The masks whose variants are never informative, as the
+            selection's ``mask`` names them.
         n_cells: The cells that the statistics cover.
         stranded: Whether the counts give forward and reverse reads, and so
             ``n_cells_conf_detected`` and ``strand_correlation``.
@@ -620,7 +621,7 @@ class VariantSelection:
     cell_selection: ArtifactRef | None
     preset: str | None
     thresholds: Mapping[str, int | float | None]
-    masks: tuple[str, ...]
+    mask: tuple[str, ...]
     n_cells: int
     stranded: bool
     qualities: bool

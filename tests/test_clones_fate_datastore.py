@@ -439,6 +439,27 @@ def test_saved_fate_bias_with_damaged_clone_arrays_is_measured_again(copied) -> 
     assert artifact_group(store.zw, rebuilt)["clone_p_values"].shape == p_values.shape
 
 
+def test_fate_bias_that_an_earlier_version_saved_is_refused(copied) -> None:
+    store, clones = copied.store, copied.clones
+    options = {"group_by": "cell_type", "early": copied.early, "late": copied.late}
+    saved = store.clones.fate_bias(clones, **options)
+    # An earlier version stored each early cell's late clone-mates as
+    # late_cells.
+    group = artifact_group(store.zw, saved)
+    group.create_array("late_cells", data=np.asarray(group["n_late_cells"][:]))
+    del group["n_late_cells"]
+    with pytest.raises(
+        ValueError,
+        match="^bias was saved by an earlier version of CyteArc, without the arrays "
+        "n_late_cells; measure the fate bias again with ds.clones.fate_bias",
+    ):
+        store.clones.load_fate_bias(saved)
+    # The call that the refusal names measures it anew.
+    again = store.clones.fate_bias(clones, **options)
+    assert again != saved
+    assert "n_late_cells" in store.clones.load_fate_bias(again).cells.columns
+
+
 def test_a_read_only_store_reuses_saved_fate_bias(copied) -> None:
     store, clones = copied.store, copied.clones
     options = {"group_by": "cell_type", "early": copied.early, "late": copied.late}
@@ -482,6 +503,17 @@ def test_fate_bias_arguments_are_checked(copied) -> None:
     )
     with pytest.raises(ValueError, match="A fate is named 'clone'"):
         store.clones.fate_bias(clones, group_by="named", early=early, late=late)
+    # The table of early cells counts each one's late clone-mates as
+    # n_late_cells, so a fate of that name is refused too; one named as the
+    # count was named before is a fate like any other, as the end shows.
+    store.cells.insert(
+        "counted",
+        np.where(TRUTH.cell_types == "Monocyte", "n_late_cells", "other").astype(
+            object
+        ),
+    )
+    with pytest.raises(ValueError, match="A fate is named 'n_late_cells'"):
+        store.clones.fate_bias(clones, group_by="counted", early=early, late=late)
     store.cells.insert("fraction", TRUTH.cell_types.astype(object))
     with pytest.raises(ValueError, match="'fraction', which is also a column"):
         store.clones.fate_bias(clones, group_by="fraction", early=early, late=late)
@@ -490,6 +522,18 @@ def test_fate_bias_arguments_are_checked(copied) -> None:
         store.clones.load_fate_bias("bias")
     with pytest.raises(ValueError, match="bias must be a clone_fate_bias artifact"):
         store.clones.load_fate_bias(clones)
+    store.cells.insert(
+        "counted",
+        np.where(TRUTH.cell_types == "Monocyte", "late_cells", "other").astype(object),
+        overwrite=True,
+    )
+    accepted = store.clones.fate_bias(
+        clones, group_by="counted", early=early, late=late
+    )
+    assert set(store.clones.load_fate_bias(accepted).fates["fate"]) == {
+        "late_cells",
+        "other",
+    }
 
 
 def test_fate_bias_tests_clones_within_the_labels_kept_apart(kept_apart) -> None:

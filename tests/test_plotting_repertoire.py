@@ -71,6 +71,7 @@ def test_receptor_qc_counts_cells_by_category(receptors) -> None:
         assert result.tables["chain_pairing"]["n_cells"].sum() == N_CELLS
         chains = result.tables["chains_per_cell"]
         assert chains.index.tolist() == ["0", "1", "2", "3+"]
+        assert chains.index.name == "n_chains"
         assert chains["VJ"].tolist() == [5, 2, 1, 0]
         assert chains["VDJ"].tolist() == [3, 3, 1, 1]
         # One bar per category with cells.

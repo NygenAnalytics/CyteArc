@@ -447,6 +447,21 @@ def test_gift_calls_follow_the_posterior_of_each_cell(
         "JAK2 c.1849G>T": {"reference": "CAC", "alternative": "AAC"},
         "ASXL1 c.1772dup": {"reference": "GTAG", "alternative": "GTAAG"},
     }
+    # The rules as GIFT applied them: one UMI, the posterior given or 0.6,
+    # and the swap probabilities as (reads, probability) pairs by reads.
+    assert loaded.method == "gift"
+    assert loaded.rules == {
+        "min_umis": 1,
+        "min_mutant_umis": None,
+        "min_fraction": None,
+        "min_posterior": options.get("min_posterior", 0.6),
+        "swap_probabilities": [
+            [reads, probability]
+            for reads, probability in options.get("swap_probabilities", {}).items()
+        ],
+        "min_quality": None,
+        "min_depth": None,
+    }
 
 
 def test_gift_counts_the_umis_that_match_each_allele(store, tmp_path) -> None:

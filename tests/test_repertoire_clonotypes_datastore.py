@@ -1639,6 +1639,32 @@ def test_clonotype_cluster_options_are_checked(
         store.repertoire.clonotypes(receptors, **kwargs)
 
 
+def test_clonotypes_that_an_earlier_version_saved_are_refused(tmp_path) -> None:
+    store, receptors = clonal_receptors(tmp_path)
+    saved = store.repertoire.clonotypes(receptors, metric="hamming", max_distance=1)
+    # An earlier version recorded the distance as cutoff.
+    group = artifact_group(store.zw, saved)
+    provenance = dict(group.attrs["provenance"])
+    parameters = dict(provenance["parameters"])
+    parameters["cutoff"] = parameters.pop("max_distance")
+    group.attrs["provenance"] = {**provenance, "parameters": parameters}
+    refusal = (
+        "^clonotypes was saved by an earlier version of CyteArc, whose parameters "
+        "this version names otherwise; define the clonotypes again with "
+        "ds.repertoire.clonotypes"
+    )
+    with pytest.raises(ValueError, match=refusal):
+        store.repertoire.load_clonotypes(saved)
+    with pytest.raises(ValueError, match=refusal):
+        store.repertoire.gene_usage(saved)
+    with pytest.raises(ValueError, match=refusal):
+        store.repertoire.export_airr(saved, tmp_path / "airr.tsv")
+    # The call that the refusal names defines them anew.
+    again = store.repertoire.clonotypes(receptors, metric="hamming", max_distance=1)
+    assert again != saved
+    assert store.repertoire.load_clonotypes(again).max_distance == 1
+
+
 def test_the_bounds_of_max_distance_are_accepted(tmp_path) -> None:
     store, receptors = clonal_receptors(tmp_path)
     # Identity records a max_distance of 0, so 0 is the same request.

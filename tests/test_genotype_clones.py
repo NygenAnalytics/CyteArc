@@ -266,6 +266,71 @@ def test_every_genotype_method_names_sites_by_label_or_position(tmp_path) -> Non
         mito.variants.load_genotypes(genotypes, sites=[True])
 
 
+def test_a_position_names_every_variant_genotyped_there_and_no_named_site(
+    tmp_path,
+) -> None:
+    import h5py
+
+    from tests.variant_truth import _texts_dataset
+
+    # A DAb-seq panel of one contig: two variants at chr13:100, which share
+    # its reference reads, and FLT3-ITD, a named site without a position.
+    n_cells = 12
+    barcodes = [f"AAAC{cell:04d}GGTT-1-all" for cell in range(n_cells)]
+    itd = "FLT3-ITD:chr13:28608251:T/TCTC"
+    names = ["FLT3:chr13:100:A/G", "FLT3:chr13:100:A/T", itd]
+    depth = np.full((n_cells, 3), 40, dtype=np.int16)
+    alternative = np.zeros((n_cells, 3), dtype=np.int16)
+    calls = np.zeros((n_cells, 3), dtype=np.int8)
+    alternative[:6, 0], calls[:6, 0] = 20, 1
+    alternative[6:9, 1], calls[6:9, 1] = 10, 1
+    alternative[::2, 2], calls[::2, 2] = 15, 1
+    reference = depth - alternative
+    reference[:, 0] = reference[:, 1] = depth[:, 0] - alternative[:, :2].sum(axis=1)
+    path = tmp_path / "run.hdf5"
+    with h5py.File(path, "w") as handle:
+        for name, values in (
+            ("AD", alternative),
+            ("RD", reference),
+            ("DP", depth),
+            ("GQ", np.full((n_cells, 3), 90, dtype=np.int8)),
+            ("GT", calls),
+        ):
+            handle.create_dataset(name, data=values)
+        _texts_dataset(handle, "VARIANTS", names)
+        _texts_dataset(handle, "CELL_BARCODES", barcodes)
+    store = write_cells_store(tmp_path / "store.zarr", barcodes)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        counts = store.variants.import_counts(path, cell_selection=every_cell(store))
+    genotypes = store.variants.genotypes(counts, method="source")
+    at_100 = ["chr13:100:A/G", "chr13:100:A/T"]
+    assert store.variants.load_genotypes(genotypes).sites.index.tolist() == [
+        *at_100,
+        itd,
+    ]
+    # Position 100 names both of its variants in all three methods.
+    assert (
+        store.variants.load_genotypes(
+            store.variants.genotypes(counts, method="source", sites=[100])
+        ).sites.index.tolist()
+        == at_100
+    )
+    assert store.variants.load_genotypes(
+        genotypes, sites=[100]
+    ).sites.index.tolist() == (at_100)
+    clones = store.variants.genotype_clones(genotypes, sites=[100])
+    assert store.artifacts.inspect(clones).parameters["sites"] == at_100
+    assert store.variants.genotype_clones(genotypes, sites=at_100) == clones
+    # A named site has no position, so no position names it, -1 included.
+    with pytest.raises(ValueError, match="^The artifact has no site -1"):
+        store.variants.genotypes(counts, method="source", sites=[-1])
+    with pytest.raises(ValueError, match="^The genotypes have no site -1"):
+        store.variants.load_genotypes(genotypes, sites=[-1])
+    with pytest.raises(ValueError, match="^The genotypes have no site -1"):
+        store.variants.genotype_clones(genotypes, sites=[-1])
+
+
 def test_saved_genotype_clones_are_reused_and_called_again(store, tmp_path) -> None:
     genotypes = _genotypes(store, tmp_path)
     first = store.variants.genotype_clones(genotypes)

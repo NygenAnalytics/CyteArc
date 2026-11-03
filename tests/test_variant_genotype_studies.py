@@ -45,7 +45,7 @@ def _counts(store, paths):
 def _calls(store, genotypes) -> dict[tuple[str, str], tuple[str, str]]:
     calls = store.variants.load_genotypes(genotypes).calls
     return {
-        (str(row.cell), str(row.site)): (str(row.call), str(row.label))
+        (str(row.ids), str(row.site)): (str(row.call), str(row.label))
         for row in calls.itertuples(index=False)
     }
 

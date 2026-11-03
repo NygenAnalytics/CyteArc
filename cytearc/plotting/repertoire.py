@@ -169,7 +169,7 @@ def receptor_qc(
 
     Tables: ``receptor_type`` and ``chain_pairing`` (cells per category, one
     column per group or ``n_cells``), and ``chains_per_cell`` (cells per
-    number of chains of each arm).
+    number of chains of each arm, indexed by ``n_chains``).
     """
     if normalize is not None and not isinstance(normalize, bool):
         raise TypeError("normalize must be a boolean or None")
@@ -197,7 +197,7 @@ def receptor_qc(
             )
             for arm, column in (("VJ", "n_vj"), ("VDJ", "n_vdj"))
         },
-        index=pd.Index(bins, name="chains"),
+        index=pd.Index(bins, name="n_chains"),
     )
     if figsize is None and target is None:
         width = (

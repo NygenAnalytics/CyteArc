@@ -391,7 +391,7 @@ def test_counts_of_cells_and_libraries_follow_the_records(shared, tmp_path) -> N
                 "barcode": pairs["barcode"].astype(str).to_numpy(dtype=object),
                 "umis": pairs["umis"].to_numpy(dtype=np.int64),
                 "reads": pairs["reads"].to_numpy(dtype=np.int64),
-                "molecules": pairs["molecules"].to_numpy(dtype=np.int64),
+                "molecules": pairs["n_molecules"].to_numpy(dtype=np.int64),
             }
         )
         .sort_values(["cell", "barcode"])

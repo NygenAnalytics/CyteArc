@@ -2,7 +2,7 @@ import io
 import math
 import os
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -200,6 +200,13 @@ _CLONOTYPE_COLUMNS = frozenset(
     {"clonotype", "clone_size", "n_cells", "fraction", "n_configurations"}
     | {"receptor_type"}
     | {f"{slot}_{name}" for slot in SLOTS for name in REPRESENTATIVE_FIELDS}
+)
+# The parameters that this version records for clonotypes, which tell an
+# artifact that an earlier version saved from one it reads.
+_CLONOTYPE_PARAMETERS = frozenset(
+    field.name
+    for field in fields(ClonotypeArguments)
+    if field.metadata.get("argument_role") == "parameter"
 )
 # The columns of the tables of gene usage and junction lengths besides the
 # groups' labels, which a key column of the groups may not share.
@@ -1421,7 +1428,13 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             raise ValueError(
                 f"clonotypes must be a clonotypes artifact, not {clonotypes.kind!r}"
             )
-        require_complete_artifact(self.zw, clonotypes)
+        status = require_complete_artifact(self.zw, clonotypes)
+        if set(status.parameters or {}) != _CLONOTYPE_PARAMETERS:
+            raise ValueError(
+                "clonotypes was saved by an earlier version of CyteArc, whose "
+                "parameters this version names otherwise; define the clonotypes "
+                "again with ds.repertoire.clonotypes, which saves them anew"
+            )
         return artifact_group(self.zw, clonotypes)
 
     def _representative_junctions(

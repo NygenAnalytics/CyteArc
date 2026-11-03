@@ -336,7 +336,7 @@ def test_the_record_tables_name_cells_libraries_and_unknown_counts() -> None:
     pairs = loaded.pairs()
     assert pairs["barcode"].astype(str).tolist() == ["A", "B", "A", "B"]
     assert pairs["umis"].fillna(-1).tolist() == [2, 1, 4, -1]
-    assert pairs["molecules"].tolist() == [2, 1, 0, 0]
+    assert pairs["n_molecules"].tolist() == [2, 1, 0, 0]
     assert pairs["ids"].cat.categories.tolist() == ["c0", "c1", "c2"]
 
 

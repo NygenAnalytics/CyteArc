@@ -410,7 +410,7 @@ def test_masks_keep_listed_variants_from_being_informative(tmp_path) -> None:
         16293: True,
     }
     assert frame["informative"].tolist() == (~frame["masked"]).tolist()
-    assert selection.masks == ("artifact_prone", "numt", "rna_editing")
+    assert selection.mask == ("artifact_prone", "numt", "rna_editing")
     one = store.variants.load_informative(
         store.variants.informative(counts, min_vmr=0.0, mask="artifact_prone")
     )
@@ -506,6 +506,61 @@ def test_load_informative_refuses_other_artifacts(store) -> None:
         store.variants.load_informative(_counts(store))
     with pytest.raises(TypeError, match="^informative must be an ArtifactRef"):
         store.variants.load_informative("selection")
+
+
+def test_selections_and_counts_that_an_earlier_version_saved_are_refused(
+    store,
+) -> None:
+    import zarr
+
+    from cytearc.storage.artifacts import artifact_path
+
+    def writable(ref) -> zarr.Group:
+        return zarr.open_group(store.zarr_loc, mode="r+")[artifact_path(ref)]
+
+    counts = _counts(store)
+    cells = every_cell(store)
+    selection = store.variants.informative(counts, cell_selection=cells, preset="atac")
+    # An earlier version named the operation informative_variants and its
+    # cell selection cells, which would read as no selection.
+    group = writable(selection)
+    provenance = dict(group.attrs["provenance"])
+    inputs = dict(provenance["inputs"])
+    inputs["cells"] = inputs.pop("cell_selection")
+    group.attrs["provenance"] = {
+        **provenance,
+        "operation": "informative_variants",
+        "inputs": inputs,
+    }
+    refusal = (
+        "^informative was saved by an earlier version of CyteArc, by the operation "
+        "'informative_variants'; select the informative variants again with "
+        "ds.variants.informative"
+    )
+    with pytest.raises(ValueError, match=refusal):
+        store.variants.load_informative(selection)
+    with pytest.raises(ValueError, match=refusal):
+        store.variants.frequency_clones(selection)
+    with pytest.raises(ValueError, match=refusal):
+        store.plots.variant_statistics(selection, show=False)
+    # The call that the refusal names selects them anew.
+    again = store.variants.informative(counts, cell_selection=cells, preset="atac")
+    assert again != selection
+    assert store.variants.load_informative(again).cell_selection == cells
+    # An earlier version stored each cell's covered sites as covered_sites.
+    group = writable(counts)
+    group.create_array("covered_sites", data=np.asarray(group["n_covered_sites"][:]))
+    del group["n_covered_sites"]
+    refusal = (
+        "^counts was saved by an earlier version of CyteArc, without the arrays "
+        "n_covered_sites; import the counts again with ds.variants.import_counts"
+    )
+    with pytest.raises(ValueError, match=refusal):
+        store.variants.load_counts(counts)
+    with pytest.raises(ValueError, match=refusal):
+        store.variants.informative(counts, preset="atac", invalidate_cache=True)
+    with pytest.raises(ValueError, match=refusal):
+        store.variants.load_informative(again)
 
 
 class _Accepted(Exception):

@@ -664,7 +664,7 @@ class LineageBarcodes:
 
         Each row holds the cell's ``ids``, the ``library`` and the
         ``barcode``. A pair's ``umis`` are its distinct UMIs, or the UMIs that
-        its library counts per barcode, and ``molecules`` its molecules;
+        its library counts per barcode, and ``n_molecules`` its molecules;
         ``umis`` and ``reads`` are missing where its library counts none.
         """
         records = self.records
@@ -689,7 +689,7 @@ class LineageBarcodes:
                 ),
                 "umis": _nullable_counts(pairs.umis),
                 "reads": _nullable_counts(pairs.reads),
-                "molecules": pairs.molecules,
+                "n_molecules": pairs.molecules,
             }
         )
 

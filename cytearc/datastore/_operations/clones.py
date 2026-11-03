@@ -83,7 +83,11 @@ from ...metadata.rows import (
     text_row_selection_parts,
     text_width,
 )
-from ...metadata.selection import category_codes, cell_selection_indices
+from ...metadata.selection import (
+    CELL_VALUE_NAMES,
+    category_codes,
+    cell_selection_indices,
+)
 from ...repertoire.clonotypes import clonotype_noun
 from ...storage.artifacts import (
     ArtifactRef,
@@ -2685,6 +2689,18 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
         require_complete_artifact(self.zw, bias)
         group = artifact_group(self.zw, bias)
+        declared = CELL_VALUE_NAMES[CloneFateBiasArguments.artifact_kind]
+        missing = [
+            name
+            for name in (declared.name, *declared.alternatives)
+            if name not in group
+        ]
+        if missing:
+            raise ValueError(
+                "bias was saved by an earlier version of CyteArc, without the "
+                f"arrays {', '.join(missing)}; measure the fate bias again with "
+                "ds.clones.fate_bias, which saves it anew"
+            )
         status = inspect_artifact(self.zw, bias)
         parameters = dict(status.parameters or {})
         clones = status.input_ref("clones")

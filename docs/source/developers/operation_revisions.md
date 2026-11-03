@@ -65,6 +65,8 @@ CyteArc accepts it without a warning, and lineage shows it as stale.
 
 ## When a change needs a revision
 
+An operation that no release has shipped takes no revisions: until a release records it, a change to its name, parameters, inputs or stored arrays makes the next call compute its artifacts anew, its loader refuses an artifact of the earlier form with a message that names the call which saves it anew, and the first release ships it at revision 1.
+
 Decide with this ladder, in order:
 
 1. The change only moves results by last-bit or reassociation noise, and old results stay equally

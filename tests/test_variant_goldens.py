@@ -288,7 +288,7 @@ def test_maester_statistics_counts_and_clones_agree_with_mito_2_0_0(tmp_path) ->
     depth = {
         (str(cell), str(site).split(":")[1]): int(value)
         for cell, site, value in zip(
-            loaded.depth["cell"],
+            loaded.depth["ids"],
             loaded.depth["site"],
             loaded.depth["depth"],
             strict=True,
@@ -297,7 +297,7 @@ def test_maester_statistics_counts_and_clones_agree_with_mito_2_0_0(tmp_path) ->
     count = {
         (str(cell), str(site).split(":")[1], str(allele)): int(value)
         for cell, site, allele, value in zip(
-            loaded.counts["cell"],
+            loaded.counts["ids"],
             loaded.counts["site"],
             loaded.counts["allele"],
             loaded.counts["count"],

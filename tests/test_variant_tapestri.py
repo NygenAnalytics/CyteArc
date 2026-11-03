@@ -296,6 +296,10 @@ def test_dab_seq_counts_are_its_reads_and_calls(dab_seq_store, tmp_path) -> None
     assert loaded.sites.index.tolist() == [*TAPESTRI_REFERENCES, DAB_SEQ_ITD_SITE]
     attributes = dab_seq_store.artifacts.load(ref).attrs
     assert attributes["format"] == "dab_seq"
+    assert loaded.cells.index.name == "ids"
+    # include_variants names a DAb-seq variant too, here as chrom:pos:ref/alt;
+    # every variant is read already, so it adds none and reuses the import.
+    assert _import(dab_seq_store, path, include_variants=["chr1:1000:G/A"])[0] == ref
     record = _source_record(dab_seq_store, ref)
     assert (
         record["n_variants"],
