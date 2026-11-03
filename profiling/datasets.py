@@ -13,6 +13,8 @@ from urllib.request import Request, urlopen
 import h5py
 import numpy as np
 
+from cytearc.utils.digest import file_sha256, mix64_array
+
 DEFAULT_SAMPLING_SEED = 0
 DEFAULT_TARGET_SIZES = (
     10_000,
@@ -28,8 +30,6 @@ DEFAULT_TARGET_SIZES = (
 )
 
 _SPLITMIX_INCREMENT = 0x9E3779B97F4A7C15
-_SPLITMIX_MULTIPLIER_1 = 0xBF58476D1CE4E5B9
-_SPLITMIX_MULTIPLIER_2 = 0x94D049BB133111EB
 _SAMPLING_DOMAIN = b"cytearc-cellxgene-row-sampling-v1"
 _SOURCE_ROWS_DIGEST_DOMAIN = b"cytearc-ordered-source-rows-v1\0"
 _DEFAULT_IO_CHUNK_BYTES = 16 * 1024 * 1024
@@ -39,19 +39,6 @@ _DEFAULT_ROW_BATCH_SIZE = 1024
 _DEFAULT_INDPTR_CHUNK_ROWS = 1_000_000
 _DEFAULT_LOAD_CHUNK_ELEMENTS = 8_388_608
 _H5_DATA_CHUNK_BYTES = 4 * 1024 * 1024
-
-
-def sha256_file(path: str | Path, *, chunkBytes: int = 16 * 1024 * 1024) -> str:
-    if chunkBytes <= 0:
-        raise ValueError("chunkBytes must be positive")
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        while True:
-            chunk = handle.read(chunkBytes)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,9 +184,7 @@ def row_priorities(
     values = np.arange(nRows, dtype=np.uint64)
     values += np.uint64(sampling_salt(seed, sourceVersion))
     values += np.uint64(_SPLITMIX_INCREMENT)
-    values = (values ^ (values >> np.uint64(30))) * np.uint64(_SPLITMIX_MULTIPLIER_1)
-    values = (values ^ (values >> np.uint64(27))) * np.uint64(_SPLITMIX_MULTIPLIER_2)
-    return values ^ (values >> np.uint64(31))
+    return mix64_array(values)
 
 
 def _normalize_targets(targetRows: Sequence[int], nRows: int) -> tuple[int, ...]:
@@ -1106,7 +1091,7 @@ def validate_prepared_h5ad(
     finally:
         reader.h5.close()
 
-    actual_sha256 = sha256_file(path)
+    actual_sha256 = file_sha256(path)
     if expectedSha256 is not None and actual_sha256 != expectedSha256.lower():
         raise ValueError(
             f"Prepared SHA256 is {actual_sha256}, expected {expectedSha256}"
@@ -1136,7 +1121,7 @@ def prepare_local_datasets(
     output_directory = Path(outputDirectory)
     output_directory.mkdir(parents=True, exist_ok=True)
     source_validation = validate_source_h5ad(source_path, spec=spec)
-    source_sha256 = sha256_file(source_path)
+    source_sha256 = file_sha256(source_path)
     selections = select_nested_rows(
         spec.nRows,
         targetRows,
@@ -1306,7 +1291,7 @@ def write_fixture_h5ad(
         nColumns=nColumns,
         nnz=nnz,
         fileBytes=destination_path.stat().st_size,
-        sha256=sha256_file(destination_path),
+        sha256=file_sha256(destination_path),
         sourceRowsSha256=ordered_source_row_digest(np.arange(nRows, dtype=np.int64)),
         finalSourceRow=nRows - 1,
         dataDtype=str(data.dtype),

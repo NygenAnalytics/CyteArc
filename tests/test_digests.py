@@ -20,7 +20,7 @@ from cytearc.utils.digest import directory_sha256, file_sha256, path_sha256
 from tests.memory_helpers import traced_peak
 
 DATA = Path(__file__).parent / "data"
-CYTEARC = Path(__file__).resolve().parent.parent / "cytearc"
+ROOT = Path(__file__).resolve().parent.parent
 # The most bytes that a digest reads at once.
 READ_BYTES = 256 * 1024
 
@@ -202,17 +202,18 @@ def test_a_file_whose_size_reads_as_zero_is_read_to_its_end() -> None:
 
 
 def test_splitmix64s_multipliers_live_only_in_the_one_finaliser() -> None:
-    # Every module mixes with utils.digest's mix64 or mix64_array; another
-    # copy of the finaliser would be another place for a seeded result to
-    # change.
+    # Every module of the package and of the profiling tools mixes with
+    # utils.digest's mix64 or mix64_array; another copy of the finaliser
+    # would be another place for a seeded result to change.
     multipliers = re.compile(
         r"0x(?:BF58476D1CE4E5B9|94D049BB133111EB)|13787848793156543929"
         r"|10723151780598845931",
         re.IGNORECASE,
     )
     copies = sorted(
-        path.relative_to(CYTEARC).as_posix()
-        for path in CYTEARC.rglob("*.py")
+        path.relative_to(ROOT).as_posix()
+        for package in ("cytearc", "profiling")
+        for path in (ROOT / package).rglob("*.py")
         if multipliers.search(path.read_text(encoding="utf-8"))
     )
-    assert copies == ["utils/digest.py"]
+    assert copies == ["cytearc/utils/digest.py"]

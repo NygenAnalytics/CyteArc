@@ -11,6 +11,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from cytearc.utils.digest import file_sha256
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SOURCE_PACKAGES = ("cytearc", "profiling")
@@ -53,9 +55,7 @@ def _lockfile_digest() -> str | None:
     lock_path = _REPO_ROOT / "uv.lock"
     if not lock_path.is_file():
         return None
-    digest = hashlib.sha256()
-    digest.update(lock_path.read_bytes())
-    return digest.hexdigest()
+    return file_sha256(lock_path)
 
 
 def _hash_bytes(payload: bytes) -> str:
@@ -65,7 +65,7 @@ def _hash_bytes(payload: bytes) -> str:
 def _hash_file(path: Path) -> str | None:
     if not path.is_file():
         return None
-    return _hash_bytes(path.read_bytes())
+    return file_sha256(path)
 
 
 def source_tree_files(root: Path) -> list[str]:
