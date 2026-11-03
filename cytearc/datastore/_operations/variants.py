@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import warnings
@@ -1000,17 +1001,23 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     f"No row of counts, depth, calls or cells is in {files_text}"
                 )
             # A band's rows sit beside the chunks that appending them rewrites.
-            n_entry_rows, _n_call_rows = _stored_row_bounds(sorter)
+            n_entry_rows, n_call_rows = _stored_row_bounds(sorter)
             rewritten = (
                 _REWRITTEN_CHUNKS * min(_ROW_BAND, max(1, n_entry_rows)) * _STORED_BYTES
             )
             band_bytes = int(room / _BAND_SHARE) - rewritten
-            if band_bytes < _BAND_COPIES * counts_dtype.itemsize:
+            # Appending a band rewrites the stored chunks that it ends in, so a
+            # band holds at least a chunk's rows, or every row if fewer: bands
+            # of a few cells each would rewrite every chunk once a band.
+            least_rows = min(_ROW_BAND, max(1, n_entry_rows + n_call_rows))
+            least_bytes = least_rows * _BAND_COPIES * counts_dtype.itemsize
+            if band_bytes < least_bytes:
+                needed = held + math.ceil(_BAND_SHARE * (rewritten + least_bytes))
                 raise MemoryError(
-                    f"Writing the variant counts rewrites stored chunks of about "
-                    f"{rewritten} bytes, more than the memory budget of "
-                    f"{self.memoryBytes} bytes leaves beside the sorted rows. Raise "
-                    "mem_budget."
+                    f"Writing the variant counts in bands of {least_rows} rows "
+                    f"holds about {needed} bytes, more than the memory budget of "
+                    f"{self.memoryBytes} bytes, as each band rewrites stored "
+                    f"chunks of about {rewritten} bytes. Raise mem_budget."
                 )
             band_rows = band_bytes // (_BAND_COPIES * counts_dtype.itemsize)
             attributes = {

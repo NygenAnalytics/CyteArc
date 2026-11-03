@@ -269,13 +269,18 @@ def test_old_mgatk_needs_swap_strands_and_keeps_them_otherwise(store, tmp_path) 
 
 
 def test_cell_order_and_spills_to_disk_do_not_change_the_counts(
-    template, tmp_path
+    template, tmp_path, monkeypatch
 ) -> None:
+    import cytearc.datastore._operations.variants as operations
+
     # Cells in another order than the store's, and a budget so small that
-    # the rows spill to sorted runs on disk, give the same artifact. The
-    # budget covers the read of the cells' IDs, which decodes a stored chunk
-    # of 100,000 of them, and leaves room for the chunks that writing
-    # rewrites; the rows outgrow the sort buffer that the rest leaves.
+    # the rows spill to sorted runs on disk, give the same artifact. A band
+    # holds at least a stored chunk's rows, so the stored arrays take chunks
+    # of 32,768 rows, fewer than the 536,536 rows: the budget holds such a
+    # band and the chunks that appending it rewrites, and the rows outgrow
+    # the sort buffer that the rest leaves. In one chunk of every row, a band
+    # would hold them all, and a budget that held it would not spill them.
+    monkeypatch.setattr(operations, "_ROW_BAND", 1 << 15)
     roomy = copy_store(template, tmp_path / "roomy")
     tight = copy_store(template, tmp_path / "tight")
     ids = [str(cell) for cell in roomy.cells.fetch_all("ids")]
