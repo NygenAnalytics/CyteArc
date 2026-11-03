@@ -608,7 +608,7 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
         store.clones.fate_bias(clones, **options)
     # Without the read before, a fate of its own for each late cell, named by
     # three characters, makes the measurement the largest step: per early cell
-    # 64 bytes, 24 per fraction and 40 to write; per clone with late cells and
+    # 64 bytes, 16 per fraction and 40 to write; per clone with late cells and
     # fate 80 bytes; 1,000 per fate; 24 per count of a clone in a fate, here
     # one per late cell with a clone; and what the writer states for the
     # arrays, each early cell's fate at the three characters of its name.
@@ -631,14 +631,14 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
         }
     )
     measured = (
-        n_early * (64 + 24 * n_late + 40)
+        n_early * (64 + 16 * n_late + 40)
         + 80 * tested * n_late
         + 1_000 * n_late
         + 24 * with_clone
         + CODES_READ
         + writing
     )
-    assert (tested, with_clone, measured - writing) == (8, 19, 61_104)
+    assert (tested, with_clone, measured - writing) == (8, 19, 56_568)
     monkeypatch.setattr(store, "memoryBytes", measured - 1)
     with pytest.raises(
         MemoryError, match=f"8 clones in {n_late} fates holds about {measured}"

@@ -601,7 +601,7 @@ Every summary checks the memory budget before each step that reads or allocates,
 | Following clones | 100 per row of the table and 16 more per row for each key column, a byte per chosen clone and group, 40 per clone of each group, and the clones and labels read |
 | Measuring coupling | 250 per pair of groups, 40 per product of two groups, 80 per clone of each group and 12 per cell with a clone; for each thread of the null 4 per cell with a clone, 8 per product of two groups and 32 per group; 8 per pair for each permutation measured at once; 40 per clone of each group and the clones read |
 | Checking that no cell is early and late | 40 per cell of the two selections, and the clones read |
-| Measuring fate bias | 64 per early cell and 24 more for each fate, 40 more per early cell to write, and what writing holds as for [saving clones](#read-export-and-plot-clones), each early cell's fate stored at four bytes per character of the longest fate name; 80 per fate of each clone with late cells, 1,000 per fate, 24 per clone of each fate, and the clones read |
+| Measuring fate bias | 64 per early cell and 16 more for each fate, 40 more per early cell to write, and what writing holds as for [saving clones](#read-export-and-plot-clones), each early cell's fate stored at four bytes per character of the longest fate name; 80 per fate of each clone with late cells, 1,000 per fate, 24 per clone of each fate, and the clones read |
 | Loading fate bias | 200 per early cell and 24 per fraction, 160 per row of clone and fate and 16 more per key column, the early cells' IDs as text, and the clones and labels read |
 | Each summary | 2,000 per group |
 

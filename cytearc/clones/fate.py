@@ -84,10 +84,12 @@ _BATCH_BYTES_PER_VALUE = 8
 # per worker, since more save little time.
 _BATCH_BYTES = 64 * 1024**2
 # Bytes that measuring fate bias holds for each early cell, besides its
-# fractions, for each of its fractions, the value and its copy as it is
-# written, for each fate of each clone with late cells, and for each fate.
+# fractions, for each of its fractions, for each fate of each clone with late
+# cells, and for each fate. Measuring traced 8.3 to 10.2 bytes per fraction
+# with all it holds, on 20,000 to 100,000 early cells in 50 to 200 fates; the
+# fractions' copy as they are written is the writer's to count.
 _BIAS_BYTES_PER_EARLY_CELL = 64
-_BIAS_BYTES_PER_FRACTION = 24
+_BIAS_BYTES_PER_FRACTION = 16
 _BIAS_BYTES_PER_CLONE_FATE = 80
 _BIAS_BYTES_PER_FATE = 1_000
 
