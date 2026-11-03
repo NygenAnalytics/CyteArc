@@ -81,7 +81,7 @@ def barcode_calls(
     store: Any,
     barcodes: ArtifactRef,
     *,
-    max_barcodes: int = 10,
+    max_barcodes_per_cell: int = 10,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -93,8 +93,8 @@ def barcode_calls(
     ``barcodes`` is a ``lineage_barcodes`` artifact, such as one from
     ``ds.clones.import_barcodes``. The three panels show what clone calling
     filters: the cells by their number of distinct barcodes, cells without a
-    barcode included, with ``max_barcodes`` or more in the last bar; each
-    library's pairs of a cell and a barcode by their UMIs; and each
+    barcode included, with ``max_barcodes_per_cell`` or more in the last bar;
+    each library's pairs of a cell and a barcode by their UMIs; and each
     library's molecules by their reads, on log scales, so molecules of 0
     reads appear in the table only. Barcodes of one or two UMIs and
     molecules of one read are mostly errors and ambient molecules. A library
@@ -107,7 +107,7 @@ def barcode_calls(
     Raises:
         TypeError: If an argument has the wrong type.
         ValueError: If ``barcodes`` is not a ``lineage_barcodes``
-            artifact, or the grouping refuses its labels.
+            artifact.
         KeyError: If the store holds no such artifact.
         RuntimeError: If an artifact is incomplete, as a call that stopped
             before it finished leaves it.
@@ -115,7 +115,9 @@ def barcode_calls(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    max_barcodes = integer_argument(max_barcodes, "max_barcodes", minimum=1)
+    max_barcodes_per_cell = integer_argument(
+        max_barcodes_per_cell, "max_barcodes_per_cell", minimum=1
+    )
     loaded = _load_barcodes(store, barcodes)
     per_cell = loaded.cells["n_barcodes"].to_numpy(dtype=np.int64)
     values, counts = np.unique(per_cell, return_counts=True)
@@ -140,13 +142,13 @@ def barcode_calls(
             target, panel_keys=list(_PANELS), figsize=figsize, n_columns=3
         )
         ax = axes["barcodes_per_cell"]
-        capped = np.minimum(per_cell, max_barcodes)
-        bars = np.bincount(capped, minlength=max_barcodes + 1)
-        labels = [str(position) for position in range(max_barcodes)] + [
-            f"{max_barcodes}+"
+        capped = np.minimum(per_cell, max_barcodes_per_cell)
+        bars = np.bincount(capped, minlength=max_barcodes_per_cell + 1)
+        labels = [str(position) for position in range(max_barcodes_per_cell)] + [
+            f"{max_barcodes_per_cell}+"
         ]
-        ax.bar(np.arange(max_barcodes + 1), bars)
-        ax.set_xticks(np.arange(max_barcodes + 1), labels)
+        ax.bar(np.arange(max_barcodes_per_cell + 1), bars)
+        ax.set_xticks(np.arange(max_barcodes_per_cell + 1), labels)
         ax.set_xlabel("Barcodes of the cell")
         ax.set_ylabel("Cells")
         ax.set_title("Barcodes per cell")
@@ -193,7 +195,7 @@ def barcode_calls(
             extras={
                 "barcodes": barcodes.to_dict(),
                 "libraries": libraries,
-                "max_barcodes": max_barcodes,
+                "max_barcodes_per_cell": max_barcodes_per_cell,
             },
         ),
         owns_figure=owns,

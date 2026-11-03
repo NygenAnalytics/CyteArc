@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 
+from ..clones.diversity import Rarefaction
 from ..clones.fate import CloneCoupling
+from ..clones.overlap import CloneOverlap, CloneTracking
 from ..features.values import resolve_feature, resolve_feature_batch
 from ..mapping.reference import MappingReference
 from ..plotting._contracts import (
@@ -28,6 +30,7 @@ from ..plotting._contracts import (
 )
 from ..plotting._figure import PlotResult
 from ..plotting.recipes import PlotRecipe, PlotRecipeResult
+from ..repertoire.usage import GeneUsage, Spectratype
 from ..storage.refs import ArtifactRef
 from ..storage.validation_scope import scope_public_methods
 from .pipeline_run import PipelineRun
@@ -574,9 +577,9 @@ class DataStorePlotAccessor:
         self,
         clones: ArtifactRef,
         *,
-        group_by: str | None = None,
+        group_by: str | Sequence[str] | None = None,
         groups: ArtifactRef | None = None,
-        top: int = 20,
+        max_clones: int = 20,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -590,7 +593,7 @@ class DataStorePlotAccessor:
         self,
         expansion: ArtifactRef,
         *,
-        group_by: str | None = None,
+        group_by: str | Sequence[str] | None = None,
         groups: ArtifactRef | None = None,
         count: str = "cells",
         normalize: bool = True,
@@ -606,15 +609,9 @@ class DataStorePlotAccessor:
 
     def clonal_rarefaction(
         self,
-        clones: ArtifactRef,
+        rarefaction: Rarefaction,
         *,
-        group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
-        cell_selection: ArtifactRef | None = None,
-        orders: Sequence[int] = (0, 1, 2),
         base: str = "size",
-        endpoint: int | None = None,
-        knots: int = 40,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -624,13 +621,10 @@ class DataStorePlotAccessor:
         """Plot the rarefaction and extrapolation curves of groups of cells."""
         return self._forward(PlotResult, "clonal_rarefaction", locals())
 
-    def clonal_overlap(
+    def clone_overlap(
         self,
-        clones: ArtifactRef,
+        overlap: CloneOverlap,
         *,
-        group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
-        cell_selection: ArtifactRef | None = None,
         index: str = "morisita_horn",
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
@@ -639,17 +633,12 @@ class DataStorePlotAccessor:
         show: bool = True,
     ) -> PlotResult:
         """Plot an overlap index between every pair of groups as a heatmap."""
-        return self._forward(PlotResult, "clonal_overlap", locals())
+        return self._forward(PlotResult, "clone_overlap", locals())
 
     def clone_tracking(
         self,
-        clones: ArtifactRef,
+        tracking: CloneTracking,
         *,
-        group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
-        cell_selection: ArtifactRef | None = None,
-        top_n: int = 10,
-        labels: Sequence[str] | None = None,
         order: Sequence[str] | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
@@ -674,11 +663,11 @@ class DataStorePlotAccessor:
         """Plot the fate coupling of every pair of groups as a heatmap with its dendrogram."""
         return self._forward(PlotResult, "clone_coupling", locals())
 
-    def clone_fates(
+    def clone_fate_bias(
         self,
         bias: ArtifactRef,
         *,
-        top: int = 40,
+        max_clones: int = 40,
         normalize: bool = False,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
@@ -687,13 +676,13 @@ class DataStorePlotAccessor:
         show: bool = True,
     ) -> PlotResult:
         """Plot the fates of the clones of early cells, each clone's late cells by fate."""
-        return self._forward(PlotResult, "clone_fates", locals())
+        return self._forward(PlotResult, "clone_fate_bias", locals())
 
     def receptor_qc(
         self,
         receptors: ArtifactRef,
         *,
-        group_by: str | None = None,
+        group_by: str | Sequence[str] | None = None,
         groups: ArtifactRef | None = None,
         normalize: bool | None = None,
         target: Any | None = None,
@@ -707,16 +696,9 @@ class DataStorePlotAccessor:
 
     def gene_usage(
         self,
-        source: ArtifactRef,
+        usage: GeneUsage,
         *,
-        gene: str = "v_call",
-        level: str = "gene",
-        slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
-        count: str = "cells",
-        group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
-        cell_selection: ArtifactRef | None = None,
-        top: int = 30,
+        max_genes: int = 30,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -728,13 +710,9 @@ class DataStorePlotAccessor:
 
     def gene_pairing(
         self,
-        source: ArtifactRef,
+        usage: GeneUsage,
         *,
-        level: str = "gene",
-        slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
-        count: str = "cells",
-        cell_selection: ArtifactRef | None = None,
-        top: int = 20,
+        max_genes: int = 20,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -746,14 +724,8 @@ class DataStorePlotAccessor:
 
     def spectratype(
         self,
-        source: ArtifactRef,
+        spectratype: Spectratype,
         *,
-        sequence: str = "aa",
-        slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
-        count: str = "cells",
-        group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
-        cell_selection: ArtifactRef | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -767,7 +739,7 @@ class DataStorePlotAccessor:
         self,
         barcodes: ArtifactRef,
         *,
-        max_barcodes: int = 10,
+        max_barcodes_per_cell: int = 10,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -781,7 +753,7 @@ class DataStorePlotAccessor:
         self,
         counts: ArtifactRef,
         *,
-        group_by: str | None = None,
+        group_by: str | Sequence[str] | None = None,
         groups: ArtifactRef | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
@@ -825,9 +797,9 @@ class DataStorePlotAccessor:
         genotypes: ArtifactRef,
         *,
         sites: Any | None = None,
-        group_by: str | None = None,
+        group_by: str | Sequence[str] | None = None,
         groups: ArtifactRef | None = None,
-        layout_key: str | None = None,
+        layout: ArtifactRef | None = None,
         site: str | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,

@@ -277,6 +277,7 @@ A cell field may read an artifact of any assay, since every assay shares `cellDa
 It has no import dependency on `datastore`.
 The removed `cytearc.plots`, `cytearc.plotting._legacy`, and `DataStore.plot_*` APIs must not be restored.
 New plots should return the established plotting result types, accept documented data contracts, and use narrow adapters instead of adding storage-path knowledge.
+Figures of clones, receptors and variants that split cells by group take the groups from one store adapter, `_figure_groups`, over the grouping of the clone summaries in `datastore._operations.cell_groups`, so a figure groups cells by several columns, a label artifact and the labels its artifact keeps apart as the summaries do; a figure of a summary takes the record the summary returns rather than computing it again.
 
 `DataStore.plots` is a thin, store-bound accessor over the canonical store-first functions in `cytearc.plotting`.
 The accessor imports concrete plot implementations only when a method is called, so this convenience namespace does not reverse the dependency from plotting to datastore.

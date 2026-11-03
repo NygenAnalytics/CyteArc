@@ -215,8 +215,9 @@ def test_receptor_qc_draws_on_caller_axes(receptors) -> None:
 @pytest.mark.parametrize(
     ("kwargs", "error", "message"),
     [
-        ({"group_by": "sample", "groups": "x"}, ValueError, "not both"),
-        ({"group_by": 3}, TypeError, "group_by must be the name"),
+        ({"group_by": "sample", "groups": "x"}, TypeError, "groups must be an Artif"),
+        ({"group_by": 3}, TypeError, "group_by must be a column name"),
+        ({"group_by": ["sample", "sample"]}, ValueError, "names a column twice"),
         ({"groups": "clusters"}, TypeError, "groups must be an ArtifactRef"),
         ({"normalize": "yes"}, TypeError, "normalize must be a boolean"),
     ],
@@ -226,6 +227,85 @@ def test_receptor_qc_checks_its_arguments(receptors, kwargs, error, message) -> 
     store.cells.insert("sample", np.asarray(list("aabbaabb")))
     with pytest.raises(error, match=message):
         plotting.receptor_qc(store, ref, show=False, **kwargs)
+
+
+def test_receptor_qc_groups_cells_by_several_columns(receptors) -> None:
+    store, ref = receptors
+    sample = np.asarray(["a", "a", "b", "b", "a", "b", "a", "b"])
+    lane = np.asarray(["p", "q", "p", "q", "q", "q", "p", "p"])
+    store.cells.insert("sample", sample)
+    store.cells.insert("lane", lane)
+    types = store.repertoire.load_receptors(ref, fields=()).cells["receptor_type"]
+    result = plotting.receptor_qc(
+        store, ref, group_by=["sample", "lane"], normalize=False, show=False
+    )
+    try:
+        table = result.tables["receptor_type"]
+        # One column per combination of sample and lane, its cells counted by
+        # receptor type cell by cell.
+        groups = [f"{s}, {lane_}" for s, lane_ in zip(sample, lane, strict=True)]
+        assert table.columns.tolist() == sorted(set(groups))
+        for group in table.columns:
+            held = [str(t) for t, g in zip(types, groups, strict=True) if g == group]
+            assert table[group].to_dict() == {
+                name: held.count(name) for name in table.index
+            }
+        assert result.provenance.extras["grouping"] == "sample, lane"
+        assert result.legends[0].label == "Receptor type"
+    finally:
+        result.close()
+    keep = np.zeros(N_CELLS, dtype=bool)
+    keep[:6] = True
+    store.cells.insert("first_six", keep)
+    labels = store.snapshot_cluster_labels(
+        "lane", cell_selection=store.snapshot_cell_selection("first_six")
+    )
+    # A column and a label artifact of fewer cells group the cells together.
+    both = plotting.receptor_qc(
+        store, ref, group_by="sample", groups=labels, show=False
+    )
+    try:
+        assert both.tables["chain_pairing"].columns.tolist() == [
+            "a, p",
+            "a, q",
+            "b, p",
+            "b, q",
+        ]
+        assert both.provenance.n_cells == 6
+        assert both.provenance.extras["grouping"] == "sample, cluster_labels"
+    finally:
+        both.close()
+
+
+def test_receptor_qc_draws_one_group_named_like_the_ungrouped_column(
+    receptors,
+) -> None:
+    store, ref = receptors
+    drawn = {}
+    for label in ("n_cells", "s1"):
+        store.cells.insert("batch", np.asarray([label] * N_CELLS), overwrite=True)
+        result = plotting.receptor_qc(store, ref, group_by="batch", show=False)
+        try:
+            ax = result.axes["receptor_type"]
+            drawn[label] = {
+                "table": result.tables["receptor_type"].to_numpy().tolist(),
+                "ticks": [tick.get_text() for tick in ax.get_xticklabels()],
+                "heights": sorted(round(bar.get_height(), 12) for bar in ax.patches),
+                "legend": ax.get_legend() is not None,
+                "axis": ax.get_ylabel(),
+            }
+        finally:
+            result.close()
+    # One group of every cell draws one stacked bar of fractions, whatever its
+    # label, and a label named like the ungrouped column changes nothing else.
+    assert drawn["n_cells"]["ticks"] == ["n_cells"]
+    assert drawn["s1"]["ticks"] == ["s1"]
+    for part in ("table", "heights", "legend", "axis"):
+        assert drawn["n_cells"][part] == drawn["s1"][part], part
+    assert (
+        drawn["n_cells"]["legend"] and drawn["n_cells"]["axis"] == "Fraction of cells"
+    )
+    assert sum(drawn["n_cells"]["heights"]) == pytest.approx(1.0)
 
 
 def test_receptor_qc_needs_a_store_with_receptors(receptors) -> None:

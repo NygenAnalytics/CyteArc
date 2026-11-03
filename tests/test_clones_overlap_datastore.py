@@ -471,7 +471,7 @@ def test_overlap_compares_only_groups_of_the_labels_kept_apart(kept_apart) -> No
         for column, value in expected.items():
             assert getattr(row, column) == pytest.approx(value, rel=1e-12)
     # The plot leaves the pairs of two lineages blank.
-    plot = store.plots.clonal_overlap(clones, group_by="sample", show=False)
+    plot = store.plots.clone_overlap(result, show=False)
     matrix = plot.tables["matrix"]
     assert np.isnan(matrix.loc["d2, A", "d4, B"]) and np.isnan(
         matrix.loc["d2, A", "d2, B"]
@@ -525,7 +525,9 @@ def test_track_follows_clones_through_the_groups_of_their_labels(kept_apart) -> 
     assert none.table["n_cells"].dtype == np.int64
     assert none.table["fraction"].dtype == np.float64
     # The plot places a sample's groups of both lineages at one position.
-    plot = store.plots.clone_tracking(clones, group_by="sample", top_n=1, show=False)
+    plot = store.plots.clone_tracking(
+        store.clones.track(clones, group_by="sample", top_n=1), show=False
+    )
     ax = plot.axes["tracking"]
     assert [tick.get_text() for tick in ax.get_xticklabels()] == ["d2", "d4"]
     assert all(len(line.get_xdata()) == 2 for line in ax.get_lines())

@@ -104,7 +104,7 @@ def test_barcode_calls_count_cells_pairs_and_molecules(imported) -> None:
 
 def test_cells_with_many_barcodes_share_the_last_bar(imported) -> None:
     store, ref = imported
-    result = plotting.barcode_calls(store, ref, max_barcodes=2, show=False)
+    result = plotting.barcode_calls(store, ref, max_barcodes_per_cell=2, show=False)
     try:
         heights = [bar.get_height() for bar in result.axes["barcodes_per_cell"].patches]
         per_cell = store.clones.load_barcodes(ref).cells["n_barcodes"]
@@ -174,8 +174,8 @@ def test_a_library_without_umi_counts_has_no_umis_panel(tmp_path) -> None:
 
 def test_barcode_calls_refuse_bad_arguments(imported) -> None:
     store, ref = imported
-    with pytest.raises(ValueError, match="max_barcodes"):
-        store.plots.barcode_calls(ref, max_barcodes=0, show=False)
+    with pytest.raises(ValueError, match="^max_barcodes_per_cell must be at least 1"):
+        store.plots.barcode_calls(ref, max_barcodes_per_cell=0, show=False)
     with pytest.raises(TypeError, match="clones.load_barcodes"):
         plotting.barcode_calls(object(), ref, show=False)
     figure, axes = plt.subplots(1, 3)

@@ -7,6 +7,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import inspect
 import re
 from collections import Counter
 from types import SimpleNamespace
@@ -256,19 +257,14 @@ def test_usage_refuses_other_sources_and_missing_fields(tmp_path) -> None:
     sparse = store.repertoire.import_receptors(
         bare, cell_selection=store.snapshot_cell_selection()
     )
-    # The plots that count gene usage pass genes on, so the message names
-    # what is counted rather than an argument.
-    for count in (
-        lambda: store.repertoire.gene_usage(sparse),
-        lambda: plotting.gene_usage(store, sparse, show=False),
-        lambda: plotting.gene_pairing(store, sparse, show=False),
+    # The message names what is counted rather than genes, which this call
+    # leaves at its default.
+    with pytest.raises(
+        ValueError,
+        match="^Counting gene usage reads each chain's v_call, which these "
+        "receptors do not store",
     ):
-        with pytest.raises(
-            ValueError,
-            match="^Counting gene usage reads each chain's v_call, which these "
-            "receptors do not store",
-        ):
-            count()
+        store.repertoire.gene_usage(sparse)
     with pytest.raises(
         ValueError,
         match="^sequence='nt' reads each chain's junction, which these receptors",
@@ -278,7 +274,7 @@ def test_usage_refuses_other_sources_and_missing_fields(tmp_path) -> None:
 
 def test_gene_usage_plot_draws_one_panel_per_locus(tmp_path) -> None:
     store, receptors, _clonotypes = _sources(tmp_path)
-    result = store.plots.gene_usage(receptors, show=False)
+    result = store.plots.gene_usage(store.repertoire.gene_usage(receptors), show=False)
     try:
         assert list(result.axes) == ["IGH", "IGK", "TRA", "TRB"]
         # Without groups each locus draws bars.
@@ -291,7 +287,11 @@ def test_gene_usage_plot_draws_one_panel_per_locus(tmp_path) -> None:
     finally:
         result.close()
     grouped = plotting.gene_usage(
-        store, receptors, group_by="sample", top=1, show_legend=False, show=False
+        store,
+        store.repertoire.gene_usage(receptors, group_by="sample"),
+        max_genes=1,
+        show_legend=False,
+        show=False,
     )
     try:
         ax = grouped.axes["TRA"]
@@ -300,17 +300,46 @@ def test_gene_usage_plot_draws_one_panel_per_locus(tmp_path) -> None:
         assert len(grouped.figure.axes) == 4
     finally:
         grouped.close()
-    shown = plotting.gene_usage(store, receptors, gene="j_call", group_by="sample")
+    j_genes = store.repertoire.gene_usage(receptors, genes="j_call", group_by="sample")
+    shown = plotting.gene_usage(store, j_genes)
     assert shown.provenance.extras["gene"] == "j_call"
-    with pytest.raises(ValueError, match="top must be a positive integer"):
-        plotting.gene_usage(store, receptors, top=0, show=False)
-    with pytest.raises(TypeError, match="does not provide gene_usage"):
-        plotting.gene_usage(object(), receptors, show=False)
+    assert shown.tables["usage"] is j_genes.table
+    with pytest.raises(ValueError, match="^max_genes must be at least 1$"):
+        plotting.gene_usage(store, j_genes, max_genes=0, show=False)
+    for cap in (True, 2.0, "3"):
+        with pytest.raises(TypeError, match="^max_genes must be an integer$"):
+            plotting.gene_usage(store, j_genes, max_genes=cap, show=False)
+    with pytest.raises(TypeError, match="^usage must be the GeneUsage"):
+        plotting.gene_usage(store, receptors, show=False)
+    # Cells need no name from the store, which the record makes unread.
+    plotting.gene_usage(object(), j_genes, show=False).close()
+
+
+def test_gene_usage_of_a_label_artifact_alone_draws_a_heatmap(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    labels = store.snapshot_cluster_labels(
+        "sample", cell_selection=store.snapshot_cell_selection()
+    )
+    usage = store.repertoire.gene_usage(receptors, groups=labels)
+    assert not usage.group_by and usage.groups == labels
+    result = store.plots.gene_usage(usage, show=False)
+    try:
+        # Groups of a label artifact are groups as those of a column are.
+        ax = result.axes["TRA"]
+        assert not ax.patches and len(ax.images) == 1
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == ["s1", "s2"]
+    finally:
+        result.close()
 
 
 def test_gene_pairing_plot_draws_v_against_j(tmp_path) -> None:
     store, receptors, _clonotypes = _sources(tmp_path)
-    result = store.plots.gene_pairing(receptors, slots=["VJ_1", "VJ_2"], show=False)
+    result = store.plots.gene_pairing(
+        store.repertoire.gene_usage(
+            receptors, genes=("v_call", "j_call"), slots=["VJ_1", "VJ_2"]
+        ),
+        show=False,
+    )
     try:
         ax = result.axes["TRA"]
         assert [tick.get_text() for tick in ax.get_yticklabels()] == [
@@ -327,19 +356,58 @@ def test_gene_pairing_plot_draws_v_against_j(tmp_path) -> None:
         ]
     finally:
         result.close()
-    shown = plotting.gene_pairing(store, receptors, top=1, show_legend=False)
-    assert shown.provenance.extras["top"] == 1
+    pairs = store.repertoire.gene_usage(receptors, genes=("v_call", "j_call"))
+    shown = plotting.gene_pairing(store, pairs, max_genes=1, show_legend=False)
+    assert shown.provenance.extras["max_genes"] == 1
     # The V and J genes with the most chains; ties go to the earlier name.
     ax = shown.axes["TRA"]
     assert [tick.get_text() for tick in ax.get_yticklabels()] == ["TRAV1"]
     assert [tick.get_text() for tick in ax.get_xticklabels()] == ["TRAJ1"]
-    with pytest.raises(ValueError, match="top must be a positive integer"):
-        plotting.gene_pairing(store, receptors, top=True, show=False)
+    with pytest.raises(TypeError, match="^max_genes must be an integer$"):
+        plotting.gene_pairing(store, pairs, max_genes=True, show=False)
+    with pytest.raises(TypeError, match="^usage must be the GeneUsage"):
+        plotting.gene_pairing(store, receptors, show=False)
+    # The pairs of the V and J genes, in either order, and no other fields.
+    flipped = store.repertoire.gene_usage(receptors, genes=("j_call", "v_call"))
+    found = plotting.gene_pairing(store, flipped, max_genes=1, show=False)
+    try:
+        assert [tick.get_text() for tick in found.axes["TRA"].get_yticklabels()] == [
+            "TRAV1"
+        ]
+    finally:
+        found.close()
+    for genes in ("v_call", ("v_call", "d_call"), ("v_call", "j_call", "c_call")):
+        with pytest.raises(ValueError, match="gene_pairing draws the pairs of v_call"):
+            plotting.gene_pairing(
+                store, store.repertoire.gene_usage(receptors, genes=genes), show=False
+            )
+    # Pairs counted within groups would be averaged over them, so they are
+    # refused rather than drawn.
+    grouped = store.repertoire.gene_usage(
+        receptors, genes=("v_call", "j_call"), group_by="sample"
+    )
+    with pytest.raises(ValueError, match="pairs within groups of cells"):
+        plotting.gene_pairing(store, grouped, show=False)
+
+
+def test_the_pairing_plot_documents_the_error_of_an_unknown_theme(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    pairs = store.repertoire.gene_usage(receptors, genes=("v_call", "j_call"))
+    # The plot reads nothing from the store, so the theme is the one name it
+    # looks up, and its section lists the class that lookup raises.
+    with pytest.raises(KeyError, match="Unknown theme 'nope'"):
+        plotting.gene_pairing(object(), pairs, theme="nope", show=False)
+    doc = inspect.getdoc(inspect.unwrap(plotting.gene_pairing)) or ""
+    raises = doc.split("Raises:\n", 1)[1]
+    documented = set(re.findall(r"^\s+(\w+Error):", raises, re.M))
+    assert {"TypeError", "ValueError", "KeyError"} <= documented
 
 
 def test_spectratype_plot_draws_lines_per_group(tmp_path) -> None:
     store, receptors, _clonotypes = _sources(tmp_path)
-    result = store.plots.spectratype(receptors, group_by="sample", show=False)
+    result = store.plots.spectratype(
+        store.repertoire.spectratype(receptors, group_by="sample"), show=False
+    )
     try:
         ax = result.axes["TRB"]
         assert len(ax.get_lines()) == 2
@@ -348,17 +416,19 @@ def test_spectratype_plot_draws_lines_per_group(tmp_path) -> None:
         assert ax.get_xlabel() == "Junction length (residues)"
     finally:
         result.close()
-    single = plotting.spectratype(store, receptors, sequence="nt", show=False)
+    single = plotting.spectratype(
+        store, store.repertoire.spectratype(receptors, sequence="nt"), show=False
+    )
     try:
         assert len(single.axes["TRA"].patches) == 1
         assert single.axes["TRA"].get_xlabel() == "Junction length (nucleotides)"
         assert single.axes["TRB"].get_legend() is None
     finally:
         single.close()
-    shown = plotting.spectratype(store, receptors)
+    shown = plotting.spectratype(store, store.repertoire.spectratype(receptors))
     assert shown.provenance.extras["sequence"] == "aa"
-    with pytest.raises(TypeError, match="does not provide spectratype"):
-        plotting.spectratype(object(), receptors, show=False)
+    with pytest.raises(TypeError, match="^spectratype must be the Spectratype"):
+        plotting.spectratype(store, receptors, show=False)
 
 
 def _unsaved(ref: ArtifactRef) -> ArtifactRef:
@@ -463,15 +533,10 @@ def test_group_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:
 @pytest.mark.parametrize("measure", ["gene_usage", "spectratype"])
 def test_missing_incomplete_and_other_sources_are_named(tmp_path, measure) -> None:
     store, receptors, clonotypes = _sources(tmp_path)
-    runs = (
-        getattr(store.repertoire, measure),
-        lambda source: getattr(store.plots, measure)(source, show=False),
-        *(
-            (lambda source: store.plots.gene_pairing(source, show=False),)
-            if measure == "gene_usage"
-            else ()
-        ),
-    )
+    runs = (getattr(store.repertoire, measure),)
+    # The plots take the summary's record, so they read no source.
+    with pytest.raises(TypeError, match="must be the"):
+        getattr(store.plots, measure)(receptors, show=False)
     expansion = store.clones.expansion(clonotypes)
     for run in runs:
         with pytest.raises(ValueError, match="immune_receptors or clonotypes artifact"):
@@ -596,8 +661,12 @@ def test_figures_name_what_they_count(tmp_path) -> None:
         (clonotypes, "clonotypes", "clonotypes"),
         (clusters, "clonotypes", "clonotype clusters"),
     ):
-        usage = store.plots.gene_usage(source, count=count, show=False)
-        lengths = store.plots.spectratype(source, count=count, show=False)
+        usage = store.plots.gene_usage(
+            store.repertoire.gene_usage(source, count=count), show=False
+        )
+        lengths = store.plots.spectratype(
+            store.repertoire.spectratype(source, count=count), show=False
+        )
         try:
             assert usage.axes["TRB"].get_xlabel() == f"Fraction of {noun}"
             assert lengths.axes["TRB"].get_ylabel() == f"Fraction of {noun}"
@@ -605,7 +674,7 @@ def test_figures_name_what_they_count(tmp_path) -> None:
             usage.close()
             lengths.close()
     # Four loci stand two to a row, within the width of a page.
-    figure = store.plots.gene_usage(receptors, show=False)
+    figure = store.plots.gene_usage(store.repertoire.gene_usage(receptors), show=False)
     try:
         rows = {round(ax.get_position().y0, 3) for ax in figure.axes.values()}
         assert len(rows) == 2
@@ -619,14 +688,26 @@ def test_figures_with_nothing_to_draw_are_refused(tmp_path) -> None:
     # No chain of the clonal rows has a D call.
     assert store.repertoire.gene_usage(receptors, genes="d_call").table.empty
     with pytest.raises(ValueError, match="has a d_call, so there is nothing to plot"):
-        store.plots.gene_usage(receptors, gene="d_call", show=False)
+        store.plots.gene_usage(
+            store.repertoire.gene_usage(receptors, genes="d_call"), show=False
+        )
     store.cells.insert("nobody", np.zeros(8, dtype=bool))
     nobody = store.snapshot_cell_selection("nobody")
-    for plot in (store.plots.gene_usage, store.plots.gene_pairing):
+    for plot, genes in (
+        (store.plots.gene_usage, "v_call"),
+        (store.plots.gene_pairing, ("v_call", "j_call")),
+    ):
         with pytest.raises(ValueError, match="nothing to plot"):
-            plot(receptors, cell_selection=nobody, show=False)
+            plot(
+                store.repertoire.gene_usage(
+                    receptors, genes=genes, cell_selection=nobody
+                ),
+                show=False,
+            )
     with pytest.raises(ValueError, match="has a junction, so there is nothing"):
-        store.plots.spectratype(receptors, cell_selection=nobody, show=False)
+        store.plots.spectratype(
+            store.repertoire.spectratype(receptors, cell_selection=nobody), show=False
+        )
 
 
 def _slot_genes(receptors, fields: tuple[str, ...]) -> dict[str, tuple]:
@@ -703,18 +784,16 @@ def test_gene_usage_recovers_the_truths_genes_in_each_sample(tmp_path) -> None:
 
 def test_figures_of_clonotypes_need_the_store_to_name_them(tmp_path) -> None:
     store, _receptors, clonotypes = _sources(tmp_path)
-    # A store that counts but cannot say what its clonotypes are called.
-    bare = SimpleNamespace(
-        repertoire=SimpleNamespace(
-            gene_usage=store.repertoire.gene_usage,
-            spectratype=store.repertoire.spectratype,
-        )
-    )
-    for plot in (plotting.gene_usage, plotting.spectratype):
+    # A store that cannot say what its clonotypes are called.
+    bare = SimpleNamespace()
+    for plot, measure in (
+        (plotting.gene_usage, store.repertoire.gene_usage),
+        (plotting.spectratype, store.repertoire.spectratype),
+    ):
         with pytest.raises(TypeError, match="what figures call clonotypes"):
-            plot(bare, clonotypes, count="clonotypes", show=False)
+            plot(bare, measure(clonotypes, count="clonotypes"), show=False)
         # Cells need no name from the store.
-        plot(bare, clonotypes, show=False).close()
+        plot(bare, measure(clonotypes), show=False).close()
 
 
 def test_a_read_only_store_counts_as_a_writable_one(tmp_path) -> None:
@@ -731,7 +810,9 @@ def test_a_read_only_store_counts_as_a_writable_one(tmp_path) -> None:
     }
     for name, table in expected.items():
         pd.testing.assert_frame_equal(found[name], table)
-    reader.plots.gene_pairing(receptors, show=False).close()
+    reader.plots.gene_pairing(
+        reader.repertoire.gene_usage(receptors, genes=("v_call", "j_call")), show=False
+    ).close()
 
 
 def test_the_lengths_legend_names_at_most_80_groups(tmp_path) -> None:
@@ -744,7 +825,9 @@ def test_the_lengths_legend_names_at_most_80_groups(tmp_path) -> None:
         contigs, cell_selection=every_cell(store)
     )
     store.cells.insert("own", np.asarray([f"g{i:03d}" for i in range(100)]))
-    result = store.plots.spectratype(receptors, group_by="own", show=False)
+    result = store.plots.spectratype(
+        store.repertoire.spectratype(receptors, group_by="own"), show=False
+    )
     try:
         legend = result.axes["TRB"].get_legend()
         assert legend.get_title().get_text() == "Group (80 of 100)"
@@ -862,7 +945,9 @@ def test_grouped_gene_usage_names_the_group_of_a_locus_held_by_one(tmp_path) -> 
     store, receptors, _clonotypes = _sources(tmp_path)
     # The B cells, cell5 and cell6, are all of group b, and the T cells of t.
     store.cells.insert("kind", np.asarray(["t"] * 5 + ["b", "b", "t"], dtype=object))
-    result = store.plots.gene_usage(receptors, group_by="kind", show=False)
+    result = store.plots.gene_usage(
+        store.repertoire.gene_usage(receptors, group_by="kind"), show=False
+    )
     try:
         for locus, group in (("IGH", "b"), ("IGK", "b"), ("TRA", "t"), ("TRB", "t")):
             ax = result.axes[locus]
@@ -872,11 +957,22 @@ def test_grouped_gene_usage_names_the_group_of_a_locus_held_by_one(tmp_path) -> 
         result.close()
 
 
-def test_the_gene_usage_plot_checks_its_gene_before_counting(tmp_path) -> None:
+def test_the_gene_usage_plot_draws_the_usage_of_one_gene_field(tmp_path) -> None:
     store, receptors, _clonotypes = _sources(tmp_path)
-    for gene in (("v_call", "j_call"), "junction", 3):
-        with pytest.raises(ValueError, match="gene must be one of v_call"):
-            store.plots.gene_usage(receptors, gene=gene, show=False)
+    for genes in (("v_call", "j_call"), ("d_call", "c_call")):
+        pairs = store.repertoire.gene_usage(receptors, genes=genes)
+        with pytest.raises(
+            ValueError, match=f"^usage counts the combinations of {genes[0]}"
+        ):
+            store.plots.gene_usage(pairs, show=False)
+    # A record of one field draws it, whichever field it is.
+    calls = store.repertoire.gene_usage(receptors, genes=["c_call"])
+    result = store.plots.gene_usage(calls, show=False)
+    try:
+        assert result.provenance.extras["gene"] == "c_call"
+        assert result.tables["usage"].columns[2] == "c_call"
+    finally:
+        result.close()
 
 
 def test_pairing_puts_j_genes_in_natural_order_and_v_genes_by_count(tmp_path) -> None:
@@ -897,7 +993,9 @@ def test_pairing_puts_j_genes_in_natural_order_and_v_genes_by_count(tmp_path) ->
     receptors = store.repertoire.import_receptors(
         path, cell_selection=store.snapshot_cell_selection()
     )
-    result = store.plots.gene_pairing(receptors, show=False)
+    result = store.plots.gene_pairing(
+        store.repertoire.gene_usage(receptors, genes=("v_call", "j_call")), show=False
+    )
     try:
         ax = result.axes["TRA"]
         # TRAJ2 comes before TRAJ10, though TRAJ10 holds three chains.
@@ -909,9 +1007,15 @@ def test_pairing_puts_j_genes_in_natural_order_and_v_genes_by_count(tmp_path) ->
 
 def test_two_rows_of_panels_make_the_figure_twice_as_tall(tmp_path) -> None:
     store, receptors, _clonotypes = _sources(tmp_path)
-    usage = store.plots.gene_usage(receptors, show=False)
-    pairing = store.plots.gene_pairing(receptors, top=4, show=False)
-    lengths = store.plots.spectratype(receptors, show=False)
+    usage = store.plots.gene_usage(store.repertoire.gene_usage(receptors), show=False)
+    pairing = store.plots.gene_pairing(
+        store.repertoire.gene_usage(receptors, genes=("v_call", "j_call")),
+        max_genes=4,
+        show=False,
+    )
+    lengths = store.plots.spectratype(
+        store.repertoire.spectratype(receptors), show=False
+    )
     try:
         # Four loci stand in two rows of two panels.
         for result, height in (

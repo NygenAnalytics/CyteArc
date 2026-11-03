@@ -117,7 +117,7 @@ The artifact holds a row per selected cell in its canonical `mean_depth`, the ce
 
 ## Plot depth
 
-`ds.plots.variant_depth(counts)` draws two panels: each site's mean depth over the cells that the files name, on a log scale, along the contig for positions and as bars for named sites; and how many cells have each mean depth over the sites. `group_by` names a cell metadata column, such as the sample, and `groups` a cell-label artifact; with either, the second panel draws one histogram per group. Its tables are `sites` (`site`, `contig`, `position`, `mean_depth`, `covered_fraction`) and `cells` (`ids`, `group`, `mean_depth`, `n_covered_sites`).
+`ds.plots.variant_depth(counts)` draws two panels: each site's mean depth over the cells that the files name, on a log scale, along the contig for positions and as bars for named sites; and how many cells have each mean depth over the sites. `group_by` names cell metadata columns, one or several, such as the sample, and `groups` a cell-label artifact; the groups are the combinations of their labels, as the clone summaries group cells, and the second panel draws one histogram per group. Its tables are `sites` (`site`, `contig`, `position`, `mean_depth`, `covered_fraction`) and `cells` (`ids`, `group`, `mean_depth`, `n_covered_sites`).
 
 ## Find informative variants
 
@@ -185,7 +185,7 @@ counts = ds.variants.import_counts(
 calls = ds.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
 ds.variants.load_genotypes(calls).calls.head()  # each cell's call at each site
 clones = ds.variants.genotype_clones(calls, within="donor")
-ds.plots.genotypes(calls, group_by="cell_type", layout_key="UMAP", site="Patient1_CALR")
+ds.plots.genotypes(calls, group_by="cell_type", layout=umap, site="Patient1_CALR")  # umap embeds the same cells
 ```
 
 ### Calls
@@ -249,7 +249,7 @@ The clones are saved as a `clones` artifact, which `ds.clones.load_clones`, ever
 
 ### Plot genotypes
 
-`ds.plots.genotypes(calls)` draws, for each site, one bar per group whose segments are the shares of the group's cells with each call; cells that the calls do not list at a site count as `missing`. `group_by` names a cell metadata column, such as the cell type, and `groups` a cell-label artifact; without either, each site has one bar of all cells, and cells without a group are left out. With `layout_key`, such as `"UMAP"`, a second panel draws the cells at the cell metadata columns `UMAP1` and `UMAP2`, coloured by their call at `site`, which may be left out when one site is drawn. Its tables are `calls` (`site`, `group`, `call`, `n_cells`, `share`) and, with a layout, `cells` (`ids`, `x`, `y`, `call`).
+`ds.plots.genotypes(calls)` draws, for each site, one bar per group whose segments are the shares of the group's cells with each call; cells that the calls do not list at a site count as `missing`. `group_by` names cell metadata columns, one or several, such as the cell type, and `groups` a cell-label artifact, which group the cells as the clone summaries do; without either, each site has one bar of all cells, and cells without a group are left out. With `layout`, an embedding artifact whose cell selection is the genotypes' own, such as a UMAP of the cells whose counts were imported, a second panel draws the cells at the embedding's coordinates, coloured by their call at `site`, which may be left out when one site is drawn. Its tables are `calls` (`site`, `group`, `call`, `n_cells`, `share`) and, with a layout, `cells` (`ids`, `x`, `y`, `call`).
 
 ## VariantCounts
 

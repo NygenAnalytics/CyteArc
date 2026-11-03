@@ -11,9 +11,10 @@ import zarr
 from zarr.storage import MemoryStore
 
 import cytearc.plotting as splt
-from cytearc.clones import CloneCoupling
+from cytearc.clones import CloneCoupling, CloneOverlap, CloneTracking, Rarefaction
 from cytearc.datastore.datastore import DataStore
 from cytearc.datastore.plot_accessor import DataStorePlotAccessor
+from cytearc.repertoire import GeneUsage, Spectratype
 from cytearc.storage import ArtifactRef
 
 
@@ -23,11 +24,11 @@ _STORE_PLOT_METHODS = (
     "association_volcano",
     "barcode_calls",
     "clonal_expansion",
-    "clonal_overlap",
     "clonal_rarefaction",
     "clone_abundance",
     "clone_coupling",
-    "clone_fates",
+    "clone_fate_bias",
+    "clone_overlap",
     "clone_tracking",
     "cluster_connectivity",
     "cluster_tree",
@@ -176,6 +177,30 @@ _COUPLING = CloneCoupling(
     groups=None,
     cell_selection=None,
 )
+_RAREFACTION = Rarefaction(
+    curves=None,  # type: ignore[arg-type]
+    clones=_CLONES_REF,
+    group_by=("sample",),
+    groups=None,
+    cell_selection=None,
+    orders=(0,),
+)
+_OVERLAP = CloneOverlap(
+    group_sizes=None,  # type: ignore[arg-type]
+    pairs=None,  # type: ignore[arg-type]
+    clones=_CLONES_REF,
+    group_by=("sample", "tissue"),
+    groups=None,
+    cell_selection=None,
+)
+_TRACKING = CloneTracking(
+    table=None,  # type: ignore[arg-type]
+    clones=_CLONES_REF,
+    tracked=("3",),
+    group_by=("timepoint",),
+    groups=None,
+    cell_selection=None,
+)
 _RECEPTORS_REF = ArtifactRef(
     scope="datastore",
     kind="immune_receptors",
@@ -185,6 +210,41 @@ _CLONOTYPES_REF = ArtifactRef(
     scope="datastore",
     kind="clonotypes",
     artifact_id="c" * 64,
+)
+_GENE_USAGE = GeneUsage(
+    table=None,  # type: ignore[arg-type]
+    source=_RECEPTORS_REF,
+    genes=("j_call",),
+    level="family",
+    slots=("VJ_1", "VDJ_1"),
+    count="cells",
+    group_by=(),
+    groups=None,
+    cell_selection=None,
+    n_cells=0,
+)
+_GENE_PAIRS = GeneUsage(
+    table=None,  # type: ignore[arg-type]
+    source=_CLONOTYPES_REF,
+    genes=("v_call", "j_call"),
+    level="gene",
+    slots=("VJ_1", "VDJ_1"),
+    count="clonotypes",
+    group_by=(),
+    groups=None,
+    cell_selection=None,
+    n_cells=0,
+)
+_SPECTRATYPE = Spectratype(
+    table=None,  # type: ignore[arg-type]
+    source=_RECEPTORS_REF,
+    sequence="nt",
+    slots=("VJ_1", "VDJ_1"),
+    count="cells",
+    group_by=("sample",),
+    groups=None,
+    cell_selection=None,
+    n_cells=0,
 )
 _BARCODES_REF = ArtifactRef(
     scope="datastore",
@@ -424,38 +484,26 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             (_CLUSTERS_REF,),
             {"panel": "embedding", "cluster_ids": [0, -1], "label": ["MYC"]},
         ),
-        ("clone_abundance", (_CLONES_REF,), {"group_by": "sample", "top": 7}),
+        ("clone_abundance", (_CLONES_REF,), {"group_by": "sample", "max_clones": 7}),
         (
             "clonal_expansion",
             (_EXPANSION_REF,),
             {"group_by": "cluster", "count": "clones"},
         ),
-        (
-            "clonal_rarefaction",
-            (_CLONES_REF,),
-            {"group_by": "sample", "orders": (0,), "base": "coverage"},
-        ),
-        (
-            "clonal_overlap",
-            (_CLONES_REF,),
-            {"group_by": ["sample", "tissue"], "index": "jaccard"},
-        ),
-        (
-            "clone_tracking",
-            (_CLONES_REF,),
-            {"group_by": "timepoint", "labels": ["3"], "order": ["d0", "d7"]},
-        ),
+        ("clonal_rarefaction", (_RAREFACTION,), {"base": "coverage"}),
+        ("clone_overlap", (_OVERLAP,), {"index": "jaccard"}),
+        ("clone_tracking", (_TRACKING,), {"order": ["d0", "d7"]}),
         ("clone_coupling", (_COUPLING,), {"value": "coupling", "theme": "paper"}),
-        ("clone_fates", (_FATE_BIAS_REF,), {"top": 12, "normalize": True}),
+        ("clone_fate_bias", (_FATE_BIAS_REF,), {"max_clones": 12, "normalize": True}),
         (
             "receptor_qc",
             (_RECEPTORS_REF,),
             {"group_by": "sample", "normalize": False},
         ),
-        ("gene_usage", (_RECEPTORS_REF,), {"gene": "j_call", "level": "family"}),
-        ("gene_pairing", (_CLONOTYPES_REF,), {"count": "clonotypes", "top": 5}),
-        ("spectratype", (_RECEPTORS_REF,), {"sequence": "nt", "group_by": "sample"}),
-        ("barcode_calls", (_BARCODES_REF,), {"max_barcodes": 6}),
+        ("gene_usage", (_GENE_USAGE,), {"max_genes": 12}),
+        ("gene_pairing", (_GENE_PAIRS,), {"max_genes": 5}),
+        ("spectratype", (_SPECTRATYPE,), {"show_legend": False}),
+        ("barcode_calls", (_BARCODES_REF,), {"max_barcodes_per_cell": 6}),
         ("variant_depth", (_VARIANT_COUNTS_REF,), {"group_by": "sample"}),
         ("variant_statistics", (_VARIANT_SELECTION_REF,), {"show_legend": False}),
         (
@@ -466,7 +514,7 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
         (
             "genotypes",
             (_VARIANT_GENOTYPES_REF,),
-            {"group_by": "cell_type", "layout_key": "UMAP", "site": "CALR"},
+            {"group_by": "cell_type", "layout": _EMBEDDING_REF, "site": "CALR"},
         ),
         ("recorder_states", (_ALLELES_REF,), {"max_sites": 12}),
     ],
@@ -514,23 +562,26 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("tests"))
     elif name == "perturbation_clusters":
         expected_args.append(expected_kwargs.pop("clusters"))
-    elif name in (
-        "clone_abundance",
-        "clonal_rarefaction",
-        "clonal_overlap",
-        "clone_tracking",
-    ):
+    elif name == "clone_abundance":
         expected_args.append(expected_kwargs.pop("clones"))
+    elif name == "clonal_rarefaction":
+        expected_args.append(expected_kwargs.pop("rarefaction"))
+    elif name == "clone_overlap":
+        expected_args.append(expected_kwargs.pop("overlap"))
+    elif name == "clone_tracking":
+        expected_args.append(expected_kwargs.pop("tracking"))
     elif name == "clonal_expansion":
         expected_args.append(expected_kwargs.pop("expansion"))
     elif name == "clone_coupling":
         expected_args.append(expected_kwargs.pop("coupling"))
-    elif name == "clone_fates":
+    elif name == "clone_fate_bias":
         expected_args.append(expected_kwargs.pop("bias"))
     elif name == "receptor_qc":
         expected_args.append(expected_kwargs.pop("receptors"))
-    elif name in ("gene_usage", "gene_pairing", "spectratype"):
-        expected_args.append(expected_kwargs.pop("source"))
+    elif name in ("gene_usage", "gene_pairing"):
+        expected_args.append(expected_kwargs.pop("usage"))
+    elif name == "spectratype":
+        expected_args.append(expected_kwargs.pop("spectratype"))
     elif name == "barcode_calls":
         expected_args.append(expected_kwargs.pop("barcodes"))
     elif name == "variant_depth":

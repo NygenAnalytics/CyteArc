@@ -70,21 +70,23 @@ Granular workflows pass exact refs to the same datastore-owned plotting surface:
 | clusters of perturbations by their profiles | `perturbation_clusters(clusters_ref)` for the heatmap of their correlations in leaf order, or `perturbation_clusters(clusters_ref, panel="embedding", label=[...])` for their layout with chosen perturbations named |
 | clones per clone size and the largest clones, of clones or clonotypes | `clone_abundance(clones_ref)`, or `clone_abundance(clones_ref, group_by="sample")` for one line per group, and per receptor type for clonotypes |
 | expansion categories and the clonal space of each group of cells | `clonal_expansion(expansion_ref)`, or `clonal_expansion(expansion_ref, group_by="cell_type")` to regroup the cells |
-| rarefaction and extrapolation curves of the Hill numbers of each group | `clonal_rarefaction(clones_ref, group_by="sample")`, or `base="coverage"` against the sample coverage |
-| clones shared between samples or cell types | `clonal_overlap(clones_ref, group_by="cell_type")`, or `index="jaccard"` for another index |
-| chosen clones across time points or cell types | `clone_tracking(clones_ref, group_by="time_point", order=[...])` |
+| rarefaction and extrapolation curves of the Hill numbers of each group | `clonal_rarefaction(ds.clones.rarefaction(clones_ref, group_by="sample"))`, or `base="coverage"` against the sample coverage |
+| clones shared between samples or cell types | `clone_overlap(ds.clones.overlap(clones_ref, group_by="cell_type"))`, or `index="jaccard"` for another index |
+| chosen clones across time points or cell types | `clone_tracking(ds.clones.track(clones_ref, group_by="time_point"), order=[...])` |
 | fate coupling of every pair of groups with the tree of their order | `clone_coupling(ds.clones.coupling(clones_ref, group_by="cell_type"))`, or `value="coupling"` for the couplings |
-| each clone's late cells by fate, by dominant fate | `clone_fates(bias_ref)`, or `normalize=True` for shares |
-| barcodes per cell, UMIs per barcode and reads per molecule of imported lineage barcodes | `barcode_calls(barcodes_ref)`, or `barcode_calls(barcodes_ref, max_barcodes=5)` to gather cells of five barcodes or more in the last bar |
+| each clone's late cells by fate, by dominant fate | `clone_fate_bias(bias_ref)`, or `normalize=True` for shares |
+| barcodes per cell, UMIs per barcode and reads per molecule of imported lineage barcodes | `barcode_calls(barcodes_ref)`, or `barcode_calls(barcodes_ref, max_barcodes_per_cell=5)` to gather cells of five barcodes or more in the last bar |
 | the share of cells that each site of a lineage recorder reads as unedited, marked, unknown or missing | `recorder_states(alleles_ref)`, or `recorder_states(alleles_ref, max_sites=20)` to draw the 20 sites read in the most cells |
 | receptor types, chain pairings and chains per cell of imported immune receptors | `receptor_qc(receptors_ref)`, or `receptor_qc(receptors_ref, group_by="sample")` for one bar per group |
-| V, D, J or constant gene usage of each locus | `gene_usage(receptors_ref, group_by="sample")`, or `gene="j_call"`, `level="family"` |
-| V-J gene pairing of each locus | `gene_pairing(receptors_ref, cell_selection=t_cells)` |
-| junction lengths of each locus | `spectratype(receptors_ref, group_by="sample")`, or `sequence="nt"` |
+| V, D, J or constant gene usage of each locus | `gene_usage(ds.repertoire.gene_usage(receptors_ref, group_by="sample"))`, or the usage of `genes="j_call"` or `level="family"` |
+| V-J gene pairing of each locus | `gene_pairing(ds.repertoire.gene_usage(receptors_ref, genes=("v_call", "j_call"), cell_selection=t_cells))` |
+| junction lengths of each locus | `spectratype(ds.repertoire.spectratype(receptors_ref, group_by="sample"))`, or the lengths of `sequence="nt"` |
 | depth of variant counts at each site and in each cell | `variant_depth(counts_ref)`, or `variant_depth(counts_ref, group_by="sample")` for one histogram per group |
 | each variant's variance-mean ratio against its strand correlation, informative variants marked | `variant_statistics(selection_ref)` |
 | each cell's allele frequency of each informative variant, uncovered entries apart | `allele_frequencies(selection_ref)`, or `allele_frequencies(selection_ref, clones=clones_ref)` for cells ordered by clone |
-| the share of cells with each genotype call at each site, by group, and the calls of one site on a layout | `genotypes(genotypes_ref, group_by="cell_type")`, or `genotypes(genotypes_ref, layout_key="UMAP", site="CALR")` to colour the cells of a layout |
+| the share of cells with each genotype call at each site, by group, and the calls of one site on a layout | `genotypes(genotypes_ref, group_by="cell_type")`, or `genotypes(genotypes_ref, layout=embedding_ref, site="CALR")` to colour the cells of an embedding of the genotypes' cells |
+
+A figure of a clone or repertoire summary takes the record that the summary returns, such as the `CloneOverlap` of `ds.clones.overlap`, so the summary is computed once, can be read before it is drawn, and sets the figure's groups and cells; a figure of a saved result takes its artifact. Figures that split cells by group take `group_by`, one cell metadata column or several, and `groups`, a label artifact, alone or together, and group the cells as the clone summaries do: by the combinations of their labels, named by the labels joined by commas. A limit on what a figure draws is named for the items it limits, such as `max_clones`, `max_genes` and `max_barcodes_per_cell`.
 
 `layout_key` and string forms on plotters that still accept them refer to deliberate live metadata
 inputs. Distribution grouping instead requires either an exact categorical artifact or an explicit
@@ -176,7 +178,7 @@ Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, a
 
 ```{eval-rst}
 .. automodule:: cytearc.plotting
-    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, mixscape, association_volcano, association_calibration, perturbation_clusters, clone_abundance, clonal_expansion, clonal_rarefaction, clonal_overlap, clone_tracking, clone_coupling, clone_fates, barcode_calls, recorder_states, receptor_qc, gene_usage, gene_pairing, spectratype, variant_depth, variant_statistics, allele_frequencies, genotypes, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
+    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, mixscape, association_volcano, association_calibration, perturbation_clusters, clone_abundance, clonal_expansion, clonal_rarefaction, clone_overlap, clone_tracking, clone_coupling, clone_fate_bias, barcode_calls, recorder_states, receptor_qc, gene_usage, gene_pairing, spectratype, variant_depth, variant_statistics, allele_frequencies, genotypes, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
     :imported-members:
     :undoc-members:
     :show-inheritance:

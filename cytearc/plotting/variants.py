@@ -1,5 +1,6 @@
 """Figures of per-cell allele evidence at variant sites."""
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -79,7 +80,7 @@ def variant_depth(
     store: Any,
     counts: ArtifactRef,
     *,
-    group_by: str | None = None,
+    group_by: str | Sequence[str] | None = None,
     groups: ArtifactRef | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
@@ -98,9 +99,11 @@ def variant_depth(
     each mean depth over the sites, on log scales: cells with little depth
     give little evidence about their variants.
 
-    ``group_by`` names a cell metadata column, such as the sample, and
-    ``groups`` a cell-label artifact; with either, the second panel draws one
-    histogram per group. Cells without a group, and cells that no file
+    ``group_by`` names cell metadata columns, one or several, such as the
+    sample, and ``groups`` a cell-label artifact; the groups are the
+    combinations of their labels, as the clone summaries group cells, named
+    by their labels joined by commas. With a grouping, the second panel draws
+    one histogram per group. Cells without a group, and cells that no file
     names, are left out of it.
 
     Tables: ``sites`` (``site``, ``contig``, ``position``, ``mean_depth``,
@@ -108,7 +111,15 @@ def variant_depth(
     ``n_covered_sites``).
 
     Raises:
-        ValueError: If no file names a cell, or no named cell has a group.
+        TypeError: If an argument has the wrong type.
+        ValueError: If no file names a cell, no named cell has a group, a
+            ``group_by`` column is missing or named twice, or two groups get
+            one name.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact or grouping the cells does not
+            fit the memory budget.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -197,7 +208,9 @@ def variant_depth(
         )
         high = float(cells_table["mean_depth"].max()) if positive.any() else 10.0
         bins = np.geomspace(low, max(high, low * 10), _DEPTH_BINS)
-        for group in dict.fromkeys(cells_table["group"].tolist()):
+        # The groups in their natural order, as the grouping names them.
+        held = set(cells_table["group"].tolist())
+        for group in [name for name in names if name in held]:
             values = cells_table["mean_depth"][cells_table["group"] == group].to_numpy()
             ax.hist(
                 values[values > 0],
@@ -565,9 +578,9 @@ def genotypes(
     genotypes: ArtifactRef,
     *,
     sites: Any | None = None,
-    group_by: str | None = None,
+    group_by: str | Sequence[str] | None = None,
     groups: ArtifactRef | None = None,
-    layout_key: str | None = None,
+    layout: ArtifactRef | None = None,
     site: str | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
@@ -581,26 +594,40 @@ def genotypes(
     ``ds.variants.genotypes``. The first panel draws, for each site, one bar
     per group whose segments are the shares of the group's cells with each
     call; a cell that the calls do not list at a site is ``missing`` there.
-    ``group_by`` names a cell metadata column, such as the cell type, and
-    ``groups`` a cell-label artifact; without either, each site has one bar
+    ``group_by`` names cell metadata columns, one or several, such as the
+    cell type, and ``groups`` a cell-label artifact; the groups are the
+    combinations of their labels, as the clone summaries group cells, named
+    by their labels joined by commas. Without either, each site has one bar
     of all cells. Cells without a group are left out.
 
-    With ``layout_key``, such as ``"UMAP"``, the second panel draws the cells
-    on the layout stored in the cell metadata columns ``<layout_key>1`` and
-    ``<layout_key>2``, coloured by their call at ``site``, which may be left
-    out when one site is drawn.
+    With ``layout``, an embedding artifact of the genotypes' cells, such as a
+    UMAP whose cell selection is the genotypes' own, the second panel draws
+    the cells at the embedding's coordinates, coloured by their call at
+    ``site``, which may be left out when one site is drawn.
 
     Tables: ``calls`` (``site``, ``group``, ``call``, ``n_cells``,
     ``share``) and, with a layout, ``cells`` (``ids``, ``x``, ``y``,
     ``call``).
 
     Raises:
-        ValueError: If no cell has a group, ``site`` names a site that is not
-            drawn, or several sites are drawn on a layout without ``site``.
+        TypeError: If ``layout`` is not an ArtifactRef, or another argument
+            has the wrong type.
+        ValueError: If no cell has a group, a ``group_by`` column is missing
+            or named twice, two groups get one name, ``site`` names a site
+            that is not drawn, several sites are drawn on a layout without
+            ``site``, or ``layout`` is not an embedding of the genotypes'
+            cells.
+        KeyError: If the store holds no such artifact.
+        RuntimeError: If an artifact is incomplete, as a call that stopped
+            before it finished leaves it.
+        MemoryError: If reading the artifact or grouping the cells does not
+            fit the memory budget.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    from ._data import _fetch_cell_column
+    if layout is not None and not isinstance(layout, ArtifactRef):
+        raise TypeError("layout must be an ArtifactRef or None")
+    from ._data import _resolve_layout
 
     loaded = _load_genotypes(store, genotypes, sites=sites)
     site_names = [str(name) for name in loaded.sites.index]
@@ -653,7 +680,7 @@ def genotypes(
         records, columns=["site", "group", "call", "n_cells", "share"]
     )
     cells_table = None
-    if layout_key is not None:
+    if layout is not None:
         if site is None:
             if len(site_names) != 1:
                 raise ValueError(
@@ -663,25 +690,23 @@ def genotypes(
             site = site_names[0]
         if site not in site_names:
             raise ValueError(f"site {quoted_value(site)} is not among the drawn sites")
-        from ..metadata.selection import cell_selection_indices
         from ..storage.artifacts import inspect_artifact
 
+        coordinates, _layout_cells, layout_selection = _resolve_layout(store, layout)
         selection = inspect_artifact(store.zw, genotypes).input_ref("cell_selection")
-        rows = cell_selection_indices(store.zw, selection)
-        x = np.asarray(
-            _fetch_cell_column(store, f"{layout_key}1", cell_idx=rows), dtype=np.float64
-        )
-        y = np.asarray(
-            _fetch_cell_column(store, f"{layout_key}2", cell_idx=rows), dtype=np.float64
-        )
+        if layout_selection != selection:
+            raise ValueError(
+                "layout must be an embedding of the genotypes' cells: its cell "
+                "selection must be the genotypes' own"
+            )
         at_site = row_sites == site_names.index(site)
         chosen = np.full(n_cells, missing, dtype=np.int64)
         chosen[row_cells[at_site]] = row_calls[at_site]
         cells_table = pd.DataFrame(
             {
                 "ids": loaded.cells.index.to_numpy(dtype=object),
-                "x": x,
-                "y": y,
+                "x": coordinates[:, 0],
+                "y": coordinates[:, 1],
                 "call": np.asarray(calls, dtype=object)[chosen],
             }
         )
@@ -744,8 +769,8 @@ def genotypes(
                         label=call,
                         rasterized=True,
                     )
-            ax.set_xlabel(f"{layout_key}1")
-            ax.set_ylabel(f"{layout_key}2")
+            ax.set_xlabel("Embedding1")
+            ax.set_ylabel("Embedding2")
             ax.set_title(str(site))
             if show_legend:
                 ax.legend(frameon=False, fontsize="small", markerscale=2)
@@ -769,7 +794,7 @@ def genotypes(
                 "genotypes": genotypes.to_dict(),
                 "grouping": group_name,
                 "method": loaded.method,
-                "layout_key": layout_key,
+                "layout": None if layout is None else layout.to_dict(),
                 "site": site,
             },
         ),
