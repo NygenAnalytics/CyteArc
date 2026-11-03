@@ -260,6 +260,28 @@ def test_writing_text_of_one_chunk_holds_what_its_cost_states(tmp_path, kind) ->
     assert 2 * block <= peak < 2.1 * block, peak
 
 
+def test_a_write_that_holds_a_little_more_of_its_chunks_still_fits_its_cost(
+    tmp_path,
+) -> None:
+    # The cost counts the two chunks that a write of 60,000 labels holds
+    # exactly, and adds headroom, so a machine that holds 1% more of them,
+    # such as through a library that copies a little more, still fits. The
+    # cost without headroom would fall short.
+    values = _labels(60_000, "ascii")
+    root, selection = _root(tmp_path / "store.zarr")
+    write = _text_write(root, selection, values)
+    write()
+    held = 2 * 4 * 40 * 60_000
+
+    def more() -> None:
+        extra = np.ones(held // 100, dtype=np.uint8)
+        write()
+        del extra
+
+    _result, peak = traced_peak(more, _stated(values))
+    assert held + held // 100 <= peak <= _stated(values), (peak, _stated(values))
+
+
 @pytest.mark.parametrize(
     ("kind", "low", "high"),
     [

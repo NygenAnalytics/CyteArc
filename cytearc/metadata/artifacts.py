@@ -62,6 +62,11 @@ _MEASURED_ROWS = 4_096
 # transaction, metadata and objects of writing an artifact whatever its size.
 _CHUNK_WRITE_BYTES = 16 << 10
 _WRITE_FIXED_BYTES = 64 << 10
+# headroom_bytes adds a sixteenth of the bytes that a cost counts exactly past
+# the first mebibyte, of which the fixed allowance of a write is a sixteenth
+# already.
+_HEADROOM_SHARE = 16
+_HEADROOM_FREE_BYTES = _HEADROOM_SHARE * _WRITE_FIXED_BYTES
 
 
 def validate_display_metadata(
@@ -296,13 +301,14 @@ def cell_data_write_bytes(
     writes at once also holds the chunk before: for text, the block of values
     it was encoded from and the encoded chunk, which is as large as the block
     when the text does not compress; for numbers, which Zarr encodes from the
-    caller's array, the encoded chunk. Beside them are Zarr's objects for each
-    write of a chunk that runs at once, its file buffers
-    (:func:`~cytearc.storage.arrays.zarr_write_buffer_bytes`), and a fixed
-    allowance for the artifact's transaction and metadata whatever the size
-    of its arrays. Attributes that grow with the data, and a payload
-    fingerprint, which reads the arrays back after they are written, are left
-    to the caller.
+    caller's array, the encoded chunk. The chunks of text are counted exactly
+    as they are held, so the cost adds :func:`headroom_bytes` of them. Beside
+    them are Zarr's objects for each write of a chunk that runs at once, its
+    file buffers (:func:`~cytearc.storage.arrays.zarr_write_buffer_bytes`),
+    and a fixed allowance for the artifact's transaction and metadata
+    whatever the size of its arrays. Attributes that grow with the data, and
+    a payload fingerprint, which reads the arrays back after they are
+    written, are left to the caller.
 
     Raises:
         TypeError: If ``arrays`` is not a mapping of shapes and dtypes.
@@ -352,6 +358,25 @@ def cell_data_write_bytes(
     return _WRITE_FIXED_BYTES + zarr_write_buffer_bytes() + costliest
 
 
+def headroom_bytes(counted: int) -> int:
+    """Return the headroom that a memory cost adds beside ``counted`` bytes it counts exactly.
+
+    The cost of writing text counts the chunks that the write holds, and the
+    cost of saving clones counts the arrays that the save builds and
+    gathers, each exactly as it is held. The headroom is a sixteenth of the
+    bytes past the first mebibyte: the fixed allowance of 64 KiB that a write
+    or a save adds is a sixteenth of the first already.
+
+    Without the headroom, the traced peaks of such writes and saves came
+    within 0.8% of their costs, and within 0.2% of one another on Python
+    3.13, 3.14 and 3.15, with the locked and the lowest direct dependencies,
+    and with the CPU idle and oversubscribed three times over. With it, each
+    of these peaks sits at least 5% under its cost, so a machine that holds a
+    little more than those still fits.
+    """
+    return max(0, int(counted) - _HEADROOM_FREE_BYTES) // _HEADROOM_SHARE
+
+
 def _chunk_length(name: str, chunk_lengths: Mapping[str, int] | None) -> int:
     """The rows of a chunk of numeric array ``name``, as the writer chunks it."""
     if chunk_lengths is None:
@@ -375,8 +400,11 @@ def _array_write_bytes(
         # before and its encoded copy. Measuring the widest value converts
         # 4,096 values at a time beside their lengths, which holds less.
         chunks = 2 if n_rows <= rows else 4
+        held = dtype.itemsize * chunks * rows
         partial = n_rows % rows if n_rows > rows else 0
-        return dtype.itemsize * (chunks * rows + partial) + _CHUNK_WRITE_BYTES
+        return (
+            held + headroom_bytes(held) + dtype.itemsize * partial + _CHUNK_WRITE_BYTES
+        )
     rows = _chunk_rows(n_rows, length)
     chunk = rows * math.prod(shape[1:]) * dtype.itemsize
     n_chunks = -(-n_rows // rows)

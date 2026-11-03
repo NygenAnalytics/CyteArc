@@ -46,6 +46,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.geometry import array_geometry
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
@@ -1133,9 +1134,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         counts = self._allele_counts(group)
         n_cells = counts["cells"]
         # Every cell with an edit needs a label in the within columns: each
-        # cell's edits are read, then held as a mask while the cells group.
+        # cell's edits are read, beside the chunks that Zarr decodes at once,
+        # then held as a mask while the cells group.
         _check_calling(
-            bank_bytes + 9 * n_cells + _FIXED_BYTES,
+            bank_bytes + _edits_read_bytes(group) + n_cells + _FIXED_BYTES,
             self.memoryBytes,
             f"the edits of {n_cells} cells",
         )
@@ -1302,6 +1304,21 @@ def _saved_clone_bytes(n_cells: int, n_clones: int) -> int:
         + clone_write_bytes(
             n_cells, n_clones, len(longest), source_arrays={"n_alleles": np.int32}
         )
+    )
+
+
+def _edits_read_bytes(group: zarr.Group) -> int:
+    """What reading each cell's edits whole holds: the counts and the chunks Zarr decodes at once.
+
+    Zarr decodes up to its async concurrency of chunks at a time, each into a
+    buffer of its own, before it copies them into the counts it returns.
+    """
+    edits = as_zarr_array(group["n_edits"], name="n_edits")
+    geometry = array_geometry(edits)
+    assert geometry is not None
+    n_chunks = -(-int(edits.shape[0]) // geometry.axisChunk(0))
+    return geometry.readBytes(
+        int(edits.nbytes), n_chunks, decodes=int(zarr.config.get("async.concurrency"))
     )
 
 

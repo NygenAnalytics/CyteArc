@@ -20,6 +20,7 @@ from ...clones.assignments import CloneAssignment
 from ...graph.arguments import ArgumentRecord
 from ...metadata.artifacts import (
     cell_data_write_bytes,
+    headroom_bytes,
     plan_cell_data_artifact,
     write_cell_data_artifact,
 )
@@ -142,7 +143,9 @@ def clone_write_bytes(
     clone's, its code as int32 and its clone's size, gathering the sizes
     beside a mask of the cells with a clone and two int64 arrays, and copies
     the clones' sizes and the probabilities; writing them holds what
-    :func:`~cytearc.metadata.artifacts.cell_data_write_bytes` states. The
+    :func:`~cytearc.metadata.artifacts.cell_data_write_bytes` states. What
+    the save builds and gathers is counted exactly as it is held, so the
+    cost adds :func:`~cytearc.metadata.artifacts.headroom_bytes` of it. The
     labels' text is the caller's to count.
     """
     label = np.dtype(f"U{max(1, width)}")
@@ -155,9 +158,7 @@ def clone_write_bytes(
         + sum(n_cells * int(dtype.itemsize) for dtype in sources.values())
     )
     built = n_cells * (_REFERENCE_BYTES + 4 + 8) + 8 * n_clones + probability
-    gathering = (
-        n_cells * (_REFERENCE_BYTES + 4 + 8 + 1 + 8 + 8) + _GATHERING_FIXED_BYTES
-    )
+    gathering = n_cells * (_REFERENCE_BYTES + 4 + 8 + 1 + 8 + 8)
     arrays: dict[str, tuple[tuple[int, ...], Any]] = {
         "values": ((n_cells,), label),
         "codes": ((n_cells,), np.int32),
@@ -168,7 +169,10 @@ def clone_write_bytes(
     if with_probability:
         arrays[CLONE_PROBABILITY] = ((n_cells,), np.float64)
     arrays.update({name: ((n_cells,), dtype) for name, dtype in sources.items()})
-    return given + max(gathering, built + cell_data_write_bytes(arrays))
+    return given + max(
+        gathering + headroom_bytes(gathering) + _GATHERING_FIXED_BYTES,
+        built + headroom_bytes(built) + cell_data_write_bytes(arrays),
+    )
 
 
 def write_clones(
