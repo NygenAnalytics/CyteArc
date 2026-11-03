@@ -29,7 +29,7 @@ from cytearc.readers.recorder_alleles import (
     classified_rows,
     iter_allele_rows,
 )
-from tests.perturbation_helpers import traced_peak
+from tests.memory_helpers import traced_peak
 
 DATA = Path(__file__).parent / "data" / "recorders"
 # treedata 0.4.0 wrote this store; its 'alignment' is a text scalar.

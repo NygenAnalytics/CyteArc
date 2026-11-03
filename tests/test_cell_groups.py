@@ -21,7 +21,11 @@ from cytearc.storage.arrays import MISSING_MASK_PREFIX
 from cytearc.storage.artifact_writer import artifact_transaction
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
-from tests.storage_helpers import insert_nullable_cell_column, write_count_store
+from tests.storage_helpers import (
+    insert_nullable_cell_column,
+    open_store,
+    write_count_store,
+)
 
 N_CELLS = 8
 # Natural order puts s2 before s10.
@@ -34,9 +38,7 @@ CLUSTERS = np.asarray(["x", "y", "x", "y", "x", "y", "x", "y"])
 def store(tmp_path_factory) -> DataStore:
     path = tmp_path_factory.mktemp("cell_groups") / "store.zarr"
     write_count_store(str(path), {"RNA": np.ones((N_CELLS, 3), dtype=int)}, "uint16")
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     store.cells.insert("sample", SAMPLES.astype(object))
     store.cells.insert("batch", BATCHES.astype(object))
     store.cells.insert("cluster", CLUSTERS.astype(object))
@@ -233,14 +235,10 @@ def test_grouping_is_checked_against_the_memory_budget(store) -> None:
 def test_a_column_of_several_chunks_counts_the_chunk_read_before(tmp_path) -> None:
     path = tmp_path / "store.zarr"
     write_count_store(str(path), {"RNA": np.ones((N_CELLS, 3), dtype=int)}, "uint16")
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
     store.zw["cellData"].create_array("halves", data=SAMPLES, chunks=(4,))
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     halves = store.cells._get_array("halves")
     assert halves.chunks == (4,)
     # One column of labels stored 3 characters wide is read a chunk of four

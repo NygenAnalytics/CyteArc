@@ -14,7 +14,7 @@ from cytearc.variants.frequencies import (
     cosine_neighborhoods,
     frequency_clones,
 )
-from tests.perturbation_helpers import traced_peak
+from tests.memory_helpers import smallest_budget, traced_peak
 
 
 def _sites() -> SiteTable:
@@ -436,24 +436,13 @@ def test_frequency_clones_check_inputs_and_memory() -> None:
         )
 
 
-def _smallest_accepted_budget(call, *, high: int) -> int:
-    """The smallest memory budget that ``call(budget)`` accepts, within 2%,
-    by bisection on its MemoryError."""
-    low = 1
-    while high - low > max(low // 50, 1024):
-        middle = (low + high) // 2
-        try:
-            call(middle)
-        except MemoryError:
-            low = middle
-        else:
-            high = middle
-    return high
-
-
 @pytest.mark.parametrize(
     ("n_cells", "n_variants", "n_groups"),
-    [(600, 100, 1), (600, 100, 3), (1500, 8, 1)],
+    [
+        pytest.param(600, 100, 1, marks=pytest.mark.slow),
+        pytest.param(600, 100, 3, marks=pytest.mark.slow),
+        (1500, 8, 1),
+    ],
 )
 def test_frequency_clones_hold_no_more_than_the_smallest_budget_they_accept(
     n_cells, n_variants, n_groups
@@ -484,7 +473,7 @@ def test_frequency_clones_hold_no_more_than_the_smallest_budget_they_accept(
             nthreads=1,
         )
 
-    budget = _smallest_accepted_budget(call, high=1 << 30)
+    budget = smallest_budget(call, 1 << 30)
     assert traced_peak(lambda: call(budget), budget)[1] <= budget
 
 

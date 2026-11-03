@@ -23,7 +23,7 @@ from cytearc.clones.barcodes import (
     repeated_keys,
 )
 from cytearc.metadata.records import decode_text
-from tests.perturbation_helpers import traced_peak
+from tests.memory_helpers import traced_peak
 
 
 def _random_reads(seed: int, n_rows: int) -> pd.DataFrame:

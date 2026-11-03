@@ -45,7 +45,11 @@ from tests.clone_helpers import (
     write_truth_store,
 )
 from tests.clone_truth import B_CELL_LIGHT_LOCI, clone_truth, receptor_truth
-from tests.storage_helpers import insert_nullable_cell_column, write_count_store
+from tests.storage_helpers import (
+    insert_nullable_cell_column,
+    open_store,
+    write_count_store,
+)
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -1266,9 +1270,7 @@ def test_clonotype_numbers_do_not_follow_the_order_of_the_cells(tmp_path) -> Non
         path = folder / "store.zarr"
         counts = np.ones((len(order), 2), dtype=np.uint16)
         write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=order)
-        store = DataStore(
-            str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-        )
+        store = open_store(path)
         receptors = store.repertoire.import_receptors(
             write_lines(folder, "contigs.csv", CELLRANGER_HEADER, rows),
             cell_selection=store.snapshot_cell_selection(),

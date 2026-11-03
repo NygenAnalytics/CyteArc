@@ -19,8 +19,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tests.storage_helpers import write_count_store
-from tests.variant_helpers import download_or_skip
+from tests.storage_helpers import open_store, write_count_store
+from tests.network_helpers import download_or_skip
 
 GOLDEN = json.loads((Path(__file__).parent / "giftwrap_0_6_2_golden.json").read_text())
 DATA = Path(__file__).parent / "data" / "variants"
@@ -35,7 +35,6 @@ _STEM = "GSM9714721_MPN_16plex_1_lane1_BC8"
 
 
 def _store(path: Path, cell_ids: list[str]):
-    from cytearc.datastore.datastore import DataStore
 
     write_count_store(
         str(path),
@@ -43,9 +42,7 @@ def _store(path: Path, cell_ids: list[str]):
         "uint16",
         cell_ids=cell_ids,
     )
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     store.cells.insert("every_cell", np.ones(len(cell_ids), dtype=bool))
     return store
 

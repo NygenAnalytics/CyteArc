@@ -18,7 +18,8 @@ import pytest
 
 from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
 from cytearc.datastore._operations.recorder_alleles import _CELL_BYTES, _FIXED_BYTES
-from tests.clone_helpers import copy_clone_store, every_cell, write_truth_store
+from tests.clone_helpers import every_cell, write_truth_store
+from tests.storage_helpers import copy_store
 from tests.clone_truth import (
     CHAIN_TAPES,
     DARLIN_ARRAYS,
@@ -69,7 +70,7 @@ def template(tmp_path_factory, truth) -> Path:
 
 @pytest.fixture
 def store(template, tmp_path):
-    return copy_clone_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 def records_of(store, ref) -> pd.DataFrame:
@@ -593,8 +594,7 @@ def test_the_selected_cells_ids_count_once_as_the_join_holds_them(
     from cytearc.datastore._operations.recorder_alleles import (
         _RecorderAlleleOperationsMixin,
     )
-    from tests.clone_helpers import open_clone_store
-    from tests.storage_helpers import write_count_store
+    from tests.storage_helpers import open_store, write_count_store
 
     checked: list[int] = []
     check = _RecorderAlleleOperationsMixin._check_allele_budget
@@ -617,7 +617,7 @@ def test_the_selected_cells_ids_count_once_as_the_join_holds_them(
             "uint16",
             cell_ids=ids,
         )
-        store = open_clone_store(folder / "store.zarr")
+        store = open_store(folder / "store.zarr")
         path = folder / "characters.csv"
         path.write_text(
             "cell_barcode,intID1-RNF2\n" + "".join(f"{cell},1\n" for cell in ids)
@@ -649,8 +649,8 @@ def test_the_check_before_the_ids_are_read_counts_the_cells_and_their_read(
     """
     from cytearc.datastore._operations import recorder_alleles as operations
     from cytearc.datastore._operations.clone_artifacts import zarr_write_buffer_bytes
-    from tests.clone_helpers import ids_read_bytes, open_clone_store
-    from tests.storage_helpers import write_count_store
+    from tests.clone_helpers import ids_read_bytes
+    from tests.storage_helpers import open_store, write_count_store
 
     ids = [f"cell{index:04d}" for index in range(200)]
     write_count_store(
@@ -659,7 +659,7 @@ def test_the_check_before_the_ids_are_read_counts_the_cells_and_their_read(
         "uint16",
         cell_ids=ids,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     path = tmp_path / "characters.csv"
     path.write_text(
         "cell_barcode,intID1-RNF2\n" + "".join(f"{cell},1\n" for cell in ids)
@@ -706,8 +706,7 @@ def test_imports_count_a_buffer_for_each_write_zarr_runs_at_once(tmp_path):
 
     import zarr
 
-    from tests.clone_helpers import open_clone_store
-    from tests.storage_helpers import write_count_store
+    from tests.storage_helpers import open_store, write_count_store
 
     ids = [f"cell{index:04d}" for index in range(20)]
     write_count_store(
@@ -716,7 +715,7 @@ def test_imports_count_a_buffer_for_each_write_zarr_runs_at_once(tmp_path):
         "uint16",
         cell_ids=ids,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     path = tmp_path / "characters.csv"
     path.write_text(
         "cell_barcode,intID1-RNF2\n" + "".join(f"{cell},1\n" for cell in ids)
@@ -740,8 +739,7 @@ def test_imports_count_a_buffer_for_each_write_zarr_runs_at_once(tmp_path):
 
 def test_saved_records_keep_each_rows_line_as_its_table_numbers_it(tmp_path):
     """A table's rows are numbered from its header, past blank lines and quoted breaks."""
-    from tests.clone_helpers import open_clone_store
-    from tests.storage_helpers import write_count_store
+    from tests.storage_helpers import open_store, write_count_store
 
     write_count_store(
         str(tmp_path / "store.zarr"),
@@ -749,7 +747,7 @@ def test_saved_records_keep_each_rows_line_as_its_table_numbers_it(tmp_path):
         "uint16",
         cell_ids=["c1", "c2", "c3"],
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     path = tmp_path / "alleles.csv"
     # The rows of c1, c2 and c3 sit on file lines 2, 4 and 6.
     path.write_text(
@@ -799,12 +797,12 @@ def test_artifacts_without_their_counts_or_files_are_refused(
 def test_a_read_only_store_reuses_saved_alleles_and_refuses_new_ones(
     store, truth, recorders, tmp_path
 ):
-    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import open_store
 
     path = write_petracer_characters(recorders, truth, tmp_path / "characters.csv.gz")
     cells = every_cell(store)
     ref = store.clones.import_alleles(path, cell_selection=cells)
-    reader = open_clone_store(Path(store.zarr_loc), zarr_mode="r")
+    reader = open_store(Path(store.zarr_loc), zarr_mode="r")
     assert reader.clones.import_alleles(path, cell_selection=cells) == ref
     other = write_petracer_characters(
         recorders, truth, tmp_path / "zenodo.csv.gz", layout="zenodo"
@@ -814,8 +812,7 @@ def test_a_read_only_store_reuses_saved_alleles_and_refuses_new_ones(
 
 
 def test_rows_without_an_integration_are_left_out_counted_and_warned(tmp_path):
-    from tests.clone_helpers import open_clone_store
-    from tests.storage_helpers import write_count_store
+    from tests.storage_helpers import open_store, write_count_store
 
     # PEtracer leaves intID empty where an intBC is not on its whitelist.
     path = (
@@ -834,7 +831,7 @@ def test_rows_without_an_integration_are_left_out_counted_and_warned(tmp_path):
         "uint16",
         cell_ids=cells,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     selection = store.snapshot_cell_selection()
     message = f"{lacking} rows of the allele files name no integration"
     with pytest.warns(UserWarning, match=message):
@@ -898,8 +895,7 @@ def test_an_empty_carlin_pair_imports_no_records(store, tmp_path):
 
 def test_a_pair_listed_twice_keeps_each_listings_integration(tmp_path):
     """Canonical order sorts files by prefix, but options follow their listing."""
-    from tests.clone_helpers import open_clone_store
-    from tests.storage_helpers import write_count_store
+    from tests.storage_helpers import open_store, write_count_store
 
     pair = Path(__file__).parent / "data" / "recorders" / "darlin_ll837_skull_CA"
     barcodes = sorted(
@@ -919,7 +915,7 @@ def test_a_pair_listed_twice_keeps_each_listings_integration(tmp_path):
         "uint16",
         cell_ids=cells,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         ref = store.clones.import_alleles(

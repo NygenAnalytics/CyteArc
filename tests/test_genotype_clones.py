@@ -13,13 +13,10 @@ import numpy as np
 import pytest
 
 from cytearc.storage.artifacts import artifact_group
-from tests.clone_helpers import (
-    every_cell,
-    smallest_budget,
-    write_cells_store,
-)
-from tests.perturbation_helpers import traced_peak
-from tests.variant_helpers import copy_variant_store, write_variant_store
+from tests.clone_helpers import every_cell, write_cells_store
+from tests.memory_helpers import smallest_budget, traced_peak
+from tests.storage_helpers import copy_store
+from tests.variant_helpers import write_variant_store
 from tests.variant_truth import variant_truth
 
 TRUTH = variant_truth()
@@ -47,7 +44,7 @@ def template(tmp_path_factory) -> Path:
 
 @pytest.fixture
 def store(template, tmp_path):
-    return copy_variant_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 def _genotypes(store, folder: Path, calls=CALLS):

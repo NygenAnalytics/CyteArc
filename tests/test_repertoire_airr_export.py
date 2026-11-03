@@ -29,17 +29,16 @@ from cytearc.writers.airr import (
     suffix_repeated_ids,
 )
 from tests.clone_helpers import (
-    clonal_receptors,
     BCR_ROWS,
     CELLRANGER_HEADER,
     CLONAL_ROWS,
     TCR_ROWS,
-    budget_refusals,
+    clonal_receptors,
     receptor_store,
     write_cells_store,
     write_lines,
 )
-from tests.perturbation_helpers import traced_peak
+from tests.memory_helpers import budget_refusals, traced_peak
 
 # Contig IDs repeat across the three files: X takes _3 and then _4, since the
 # TCR file names a contig X_2, and Z takes _3, or _2 when only chains are
@@ -825,6 +824,7 @@ def test_export_names_missing_and_incomplete_sources(tmp_path) -> None:
     assert not path.exists()
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("source", ["receptors", "clonotypes"])
 def test_every_refusal_comes_before_the_file_is_written(tmp_path, source) -> None:
     store, receptors = _edge_receptors(tmp_path)
@@ -849,6 +849,7 @@ def test_every_refusal_comes_before_the_file_is_written(tmp_path, source) -> Non
     assert len(_read(attempts[-1])) == 9
 
 
+@pytest.mark.slow
 def test_the_first_check_counts_one_chunk_of_the_first_text_values(tmp_path) -> None:
     store, receptors = _edge_receptors(tmp_path)
     group = artifact_group(store.zw, receptors)
@@ -1116,7 +1117,14 @@ def _long_files(folder, kind: str) -> list:
     ]
 
 
-@pytest.mark.parametrize("kind", ["text", "ragged", "ids"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "text",
+        pytest.param("ragged", marks=pytest.mark.slow),
+        pytest.param("ids", marks=pytest.mark.slow),
+    ],
+)
 def test_exports_of_long_values_fit_the_smallest_budget(tmp_path, kind) -> None:
     store = receptor_store(tmp_path)
     receptors = store.repertoire.import_receptors(
@@ -1332,6 +1340,7 @@ def test_hashing_the_ids_is_checked_with_the_hashes(tmp_path) -> None:
     assert _walk(scan) == [8 * 10 + (300 + 6 * 14) * 10 + 11 * 8 + 2 * reading]
 
 
+@pytest.mark.slow
 def test_naming_repeated_ids_keeps_the_ids_read_before(tmp_path, monkeypatch) -> None:
     store, receptors = _edge_receptors(tmp_path)
     # Naming outweighs every other step, so its checks refuse last.
@@ -1513,18 +1522,22 @@ def test_clonotypes_hold_their_codes_and_labels_while_blocks_are_written(
     assert held[1] - held[0] == 4 * 8 + 8 * (len(labels) + 1) + packed
 
 
+def _slow(*values: object) -> object:
+    return pytest.param(*values, marks=pytest.mark.slow)
+
+
 @pytest.mark.parametrize(
     ("source", "suffix", "large", "fields"),
     [
         ("receptors", ".tsv", "every", None),
-        ("clonotypes", ".tsv", "every", None),
-        ("receptors", ".tsv.gz", "every", None),
-        ("clonotypes", ".tsv", "contig_", None),
-        ("receptors", ".tsv", "contig_j_identity", None),
-        ("receptors", ".tsv", "values", None),
-        ("clonotypes", ".tsv", "values", None),
-        ("receptors", ".tsv", "every", ["umi_count"]),
-        ("receptors", ".tsv.gz", "every", ["umi_count"]),
+        _slow("clonotypes", ".tsv", "every", None),
+        _slow("receptors", ".tsv.gz", "every", None),
+        _slow("clonotypes", ".tsv", "contig_", None),
+        _slow("receptors", ".tsv", "contig_j_identity", None),
+        _slow("receptors", ".tsv", "values", None),
+        _slow("clonotypes", ".tsv", "values", None),
+        _slow("receptors", ".tsv", "every", ["umi_count"]),
+        _slow("receptors", ".tsv.gz", "every", ["umi_count"]),
     ],
 )
 def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(

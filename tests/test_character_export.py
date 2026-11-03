@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tests.clone_helpers import copy_clone_store, every_cell, write_truth_store
+from tests.clone_helpers import every_cell, write_truth_store
 from tests.clone_truth import (
     PETRACER_INTEGRATIONS,
     PETRACER_MARKS,
@@ -23,8 +23,8 @@ from tests.clone_truth import (
     write_petracer_characters,
     write_petracer_long,
 )
-from tests.perturbation_helpers import traced_peak
-from tests.storage_helpers import write_count_store
+from tests.memory_helpers import traced_peak
+from tests.storage_helpers import copy_store, write_count_store
 
 DATA = Path(__file__).parent / "data" / "recorders"
 
@@ -48,7 +48,7 @@ def template(tmp_path_factory, truth) -> Path:
 
 @pytest.fixture
 def store(template, tmp_path):
-    return copy_clone_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 def read_treedata(path: Path) -> dict:
@@ -279,9 +279,9 @@ def test_convexmls_matrix_survives_an_import_and_an_export(tmp_path):
         "uint16",
         cell_ids=cells,
     )
-    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import open_store
 
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     alleles = store.clones.import_alleles(
         DATA / "convexml_tree_0_character_matrix.csv",
         cell_selection=store.snapshot_cell_selection(),
@@ -346,7 +346,7 @@ def test_exports_refuse_what_they_cannot_write(store, truth, recorders, tmp_path
 
 
 def test_laml_refuses_names_its_files_cannot_hold(tmp_path):
-    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import open_store
 
     cells = ["cell 1", "cell2"]
     write_count_store(
@@ -355,7 +355,7 @@ def test_laml_refuses_names_its_files_cannot_hold(tmp_path):
         "uint16",
         cell_ids=cells,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     path = tmp_path / "matrix.csv"
     path.write_text('cell,"int:1-a"\n"cell 1",1\ncell2,0\n')
     alleles = store.clones.import_alleles(

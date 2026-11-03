@@ -18,12 +18,8 @@ from cytearc.clones.barcode_clones import (
 )
 from cytearc.clones.sequences import expected_chance_pairs, neighbor_pairs
 from cytearc.metadata.records import pack_text
-from tests.clone_helpers import (
-    clone_partition,
-    link_count_variance,
-    smallest_budget,
-)
-from tests.perturbation_helpers import traced_peak
+from tests.clone_helpers import clone_partition, link_count_variance
+from tests.memory_helpers import smallest_budget, traced_peak
 
 A = "ACGTACGTACGTACGTACGTACGTACGT"
 # One substitution from A, and one more.

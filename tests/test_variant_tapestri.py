@@ -16,12 +16,8 @@ import pandas as pd
 import pytest
 
 from cytearc.utils.logging import collect_warnings
-from tests.clone_helpers import (
-    copy_clone_store,
-    every_cell,
-    loaded_partition,
-    write_cells_store,
-)
+from tests.clone_helpers import every_cell, loaded_partition, write_cells_store
+from tests.storage_helpers import copy_store
 from tests.variant_helpers import (
     DABSEQ_ITD_SITE,
     TAPESTRI_ALLELES,
@@ -57,7 +53,7 @@ def template(tmp_path_factory) -> Path:
 
 @pytest.fixture
 def store(template, tmp_path):
-    return copy_clone_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 @pytest.fixture(scope="module")
@@ -69,7 +65,7 @@ def dabseq_template(tmp_path_factory) -> Path:
 
 @pytest.fixture
 def dabseq_store(dabseq_template, tmp_path):
-    return copy_clone_store(dabseq_template, tmp_path)
+    return copy_store(dabseq_template, tmp_path)
 
 
 def _import(store, path, **options):
@@ -1030,17 +1026,11 @@ def _large_store(tmp_path, file: Path):
 
 
 def _smallest_and_peak(store, run) -> tuple[int, int]:
-    from tests.clone_helpers import smallest_budget
-    from tests.perturbation_helpers import traced_peak
+    from tests.memory_helpers import at_budget, smallest_budget, traced_peak
 
     store.memoryBytes = 1 << 33
     run()
-
-    def at(budget: int) -> None:
-        store.memoryBytes = budget
-        run()
-
-    budget = smallest_budget(at, 1 << 30)
+    budget = smallest_budget(at_budget(store, run), 1 << 30)
     store.memoryBytes = budget
     return budget, traced_peak(run, budget)[1]
 
@@ -1346,15 +1336,21 @@ def _wide_dabseq(
 
 
 @pytest.mark.parametrize(
-    ("alternative_length", "variable_length"),
-    [(1, False), (1_000, False), (1_000, True)],
+    ("file_format", "alternative_length", "variable_length"),
+    [
+        ("tapestri", 1, False),
+        pytest.param("tapestri", 1_000, False, marks=pytest.mark.slow),
+        pytest.param("tapestri", 1_000, True, marks=pytest.mark.slow),
+        ("dabseq", 1, False),
+        pytest.param("dabseq", 1_000, False, marks=pytest.mark.slow),
+        pytest.param("dabseq", 1_000, True, marks=pytest.mark.slow),
+    ],
 )
-@pytest.mark.parametrize("file_format", ["tapestri", "dabseq"])
 def test_describing_a_file_holds_no_more_than_the_smallest_budget_accepted(
     tmp_path, file_format, alternative_length, variable_length
 ) -> None:
     from cytearc.readers.tapestri import dabseq_source, tapestri_source
-    from tests.perturbation_helpers import traced_peak
+    from tests.memory_helpers import traced_peak
 
     # SNVs make what the description holds for each variant most of it, and
     # insertions of 1,000 bases the variants' texts, however the file stores

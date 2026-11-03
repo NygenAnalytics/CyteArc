@@ -18,15 +18,13 @@ from cytearc.metadata.rows import READ_OBJECT_BYTES, array_row_selection_parts
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
-    copy_clone_store,
     every_cell,
     ids_read_bytes,
     import_truth_clones,
-    open_clone_store,
     write_truth_store,
 )
 from tests.clone_truth import CLONE_SIZES, N_CELLS, clone_truth
-from tests.storage_helpers import insert_nullable_cell_column
+from tests.storage_helpers import copy_store, insert_nullable_cell_column, open_store
 
 TRUTH = clone_truth()
 N_IN_CLONES = sum(CLONE_SIZES)
@@ -72,13 +70,13 @@ def template(tmp_path_factory) -> SimpleNamespace:
 @pytest.fixture(scope="module")
 def shared(template, tmp_path_factory) -> SimpleNamespace:
     """One writable copy for measurements that save artifacts of their own."""
-    store = copy_clone_store(template.path, tmp_path_factory.mktemp("shared"))
+    store = copy_store(template.path, tmp_path_factory.mktemp("shared"))
     return SimpleNamespace(store=store, clones=template.clones, cells=every_cell(store))
 
 
 @pytest.fixture
 def copied(template, tmp_path) -> SimpleNamespace:
-    store = copy_clone_store(template.path, tmp_path)
+    store = copy_store(template.path, tmp_path)
     return SimpleNamespace(store=store, clones=template.clones, cells=every_cell(store))
 
 
@@ -486,7 +484,7 @@ def test_expansion_refuses_other_artifacts(shared) -> None:
 def test_a_read_only_store_reuses_saved_expansion(copied) -> None:
     store, clones = copied.store, copied.clones
     saved = store.clones.expansion(clones)
-    reader = open_clone_store(Path(store.zw.store.root), zarr_mode="r")
+    reader = open_store(Path(store.zw.store.root), zarr_mode="r")
     assert reader.clones.expansion(clones) == saved
     assert reader.clones.load_expansion(saved).categories["cells"].sum() == 32
     with pytest.raises(PermissionError, match="measure_clonal_expansion"):

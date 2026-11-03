@@ -17,7 +17,7 @@ import pytest
 
 from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import every_cell, write_cells_store
-from tests.variant_helpers import download_or_skip
+from tests.network_helpers import download_or_skip
 
 DATA = Path(__file__).parent / "data" / "variants" / "got"
 # Each XV-seq table's sample and allowlisted cells, and what

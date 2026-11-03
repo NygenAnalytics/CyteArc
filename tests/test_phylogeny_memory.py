@@ -9,7 +9,6 @@ clones or one clone per cell.
 """
 
 import json
-import re
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,10 +17,9 @@ import h5py
 import numpy as np
 import pytest
 
-from cytearc.datastore.datastore import DataStore
 from cytearc.readers.phylogeny import read_trees, tree_file_layout
-from tests.perturbation_helpers import traced_peak
-from tests.storage_helpers import write_count_store
+from tests.memory_helpers import budget_that_runs, stated_bytes
+from tests.storage_helpers import open_store, write_count_store
 
 pytestmark = pytest.mark.slow
 
@@ -146,9 +144,7 @@ def data(tmp_path_factory) -> SimpleNamespace:
         "uint16",
         cell_ids=ids,
     )
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
+    store = open_store(path)
     store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
     cells = store.snapshot_cell_selection("every_cell")
     leaves = ids[:N_LEAVES] + [f"outside{i}-1" for i in range(N_OUTSIDE)]
@@ -260,36 +256,19 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
 }
 
 
-def _smallest_budget(store: DataStore, run: Callable[[], object]) -> int:
-    """Raise the budget to each refusal's estimate until ``run`` runs."""
-    budget = 1
-    for _attempt in range(100):
-        store.memoryBytes = budget
-        try:
-            run()
-            return budget
-        except MemoryError as error:
-            found = re.search(r"about (\d+) bytes", str(error))
-            assert found is not None, str(error)
-            estimate = int(found.group(1))
-            assert estimate > budget, str(error)
-            budget = estimate
-    raise AssertionError("the budget did not settle")
-
-
 @pytest.mark.parametrize("case", list(CASES))
 def test_the_traced_peak_fits_the_smallest_budget_accepted(data, case) -> None:
-    store, full = data.store, data.store.memoryBytes
     run = CASES[case]
-    try:
-        # Compiled kernels and saved inputs are made before anything is traced.
-        run(data)
-        budget = _smallest_budget(store, lambda: run(data))
-        store.memoryBytes = budget
-        # Imports and cuts are made afresh, and loads read, on each run.
-        _, peak = traced_peak(lambda: run(data), budget)
-    finally:
-        store.memoryBytes = full
+    # Compiled kernels and saved inputs are made before anything is traced.
+    run(data)
+    # The budget climbs from one byte to the bytes that each refusal states.
+    # Imports and cuts are made afresh, and loads read, on each run.
+    budget, _refusals, _result, peak = budget_that_runs(
+        data.store,
+        lambda _store: run(data),
+        refusal_budget=stated_bytes,
+        max_refusals=100,
+    )
     print(f"{case}: peak {peak} budget {budget} ratio {peak / budget:.2f}")
     assert peak <= budget, (case, peak, budget)
 
@@ -335,14 +314,12 @@ def test_a_59_megabyte_tree_on_one_line_parses_within_its_budget(tmp_path) -> No
         depth[node] = depth[trees.parent[node]] + 1
     assert depth.max() > 30_000
     del trees, depth
-    budget = 1
-    for _attempt in range(10):
-        try:
-            read_trees(layout, memory_bytes=budget)
-            break
-        except MemoryError as error:
-            budget = int(re.search(r"about (\d+) bytes", str(error)).group(1))
-    trees, peak = traced_peak(lambda: read_trees(layout, memory_bytes=budget), budget)
+    # The budget climbs from one byte to the bytes that each refusal states.
+    budget, _refusals, trees, peak = budget_that_runs(
+        lambda budget: budget,
+        lambda budget: read_trees(layout, memory_bytes=budget),
+        refusal_budget=stated_bytes,
+    )
     print(f"59 MB tree: peak {peak} budget {budget} ratio {peak / budget:.2f}")
     assert peak <= budget
     assert trees.names[2].startswith("exp1_P")

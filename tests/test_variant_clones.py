@@ -12,11 +12,11 @@ import pytest
 import zarr
 from sklearn.metrics import adjusted_rand_score
 
-from tests.clone_helpers import every_cell, open_clone_store
-from tests.perturbation_helpers import traced_peak
+from tests.clone_helpers import every_cell
+from tests.memory_helpers import at_budget, smallest_budget, traced_peak
+from tests.storage_helpers import copy_store, open_store
 from tests.variant_helpers import (
     clone_band_budget,
-    copy_variant_store,
     write_variant_store,
 )
 from tests.variant_truth import mito_clone_truth, variant_truth, write_mgatk
@@ -40,7 +40,7 @@ def template(tmp_path_factory) -> Path:
 
 @pytest.fixture
 def store(template, tmp_path):
-    return copy_variant_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 def _inputs(store):
@@ -186,7 +186,7 @@ def test_clones_are_reused_and_follow_their_arguments(store) -> None:
 def test_clones_do_not_depend_on_threads_or_budget(store, tmp_path) -> None:
     counts, selection = _inputs(store)
     first = _called(store, store.variants.clones(counts, variants=selection))
-    other = open_clone_store(Path(store.zarr_loc), nthreads=4)
+    other = open_store(Path(store.zarr_loc), nthreads=4)
     # Bands of 2,000 rows, a few cells each. Zarr writes the clones one file
     # at a time, so the buffer of that write fits beside them.
     other.memoryBytes = clone_band_budget(
@@ -227,7 +227,7 @@ def test_clones_of_scattered_cells_do_not_depend_on_the_budget(store) -> None:
 def test_a_read_only_store_reuses_saved_clones_and_refuses_new_ones(store) -> None:
     counts, selection = _inputs(store)
     clones = store.variants.clones(counts, variants=selection)
-    reader = open_clone_store(Path(store.zarr_loc), zarr_mode="r")
+    reader = open_store(Path(store.zarr_loc), zarr_mode="r")
     assert reader.variants.clones(counts, variants=selection) == clones
     with pytest.raises(PermissionError):
         reader.variants.clones(counts, variants=selection, n_neighbors=5)
@@ -344,23 +344,11 @@ def test_variant_operations_name_inputs_of_another_kind_missing_or_incomplete(
     assert len(store.variants.load_informative(selection).variants) > 0
 
 
-def _smallest_accepted_budget(store, run) -> int:
-    """The smallest budget at which ``run`` raises no ``MemoryError``."""
-    low, high = 1, 1 << 33
-    while low < high:
-        middle = (low + high) // 2
-        store.memoryBytes = middle
-        try:
-            run()
-            high = middle
-        except MemoryError:
-            low = middle + 1
-    return low
-
-
-def _traced_peak(store, run, budget: int) -> int:
+def _traced_at_smallest_budget(store, run) -> tuple[int, int]:
+    """The traced peak of ``run`` at the smallest budget it accepts, by bisection, and that budget."""
+    budget = smallest_budget(at_budget(store, run), 1 << 33)
     store.memoryBytes = budget
-    return traced_peak(run, budget)[1]
+    return traced_peak(run, budget)[1], budget
 
 
 @pytest.mark.slow
@@ -387,8 +375,8 @@ def test_clones_within_long_labels_fit_the_smallest_budget_they_accept(
         )
 
     run()
-    budget = _smallest_accepted_budget(store, run)
-    assert _traced_peak(store, run, budget) <= budget
+    peak, budget = _traced_at_smallest_budget(store, run)
+    assert peak <= budget, (peak, budget)
 
 
 @pytest.mark.slow
@@ -398,7 +386,6 @@ def test_scoring_and_clones_of_a_few_listed_cells_among_many_fit_the_budget(
     # Counts over 30,000 selected cells, of which the files name the truth's
     # 230: the offsets and arrays over every cell, and for clones the labels
     # written, outweigh the rows of the cells that are scored.
-    from cytearc.datastore.datastore import DataStore
     from tests.storage_helpers import write_count_store
 
     n_cells = 30_000
@@ -410,12 +397,7 @@ def test_scoring_and_clones_of_a_few_listed_cells_among_many_fit_the_budget(
         "uint16",
         cell_ids=ids,
     )
-    store = DataStore(
-        str(tmp_path / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-    )
+    store = open_store(tmp_path / "store.zarr")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         counts = store.variants.import_counts(
@@ -433,6 +415,5 @@ def test_scoring_and_clones_of_a_few_listed_cells_among_many_fit_the_budget(
     }.items():
         store.memoryBytes = 1 << 33
         run()
-        budget = _smallest_accepted_budget(store, run)
-        peak = _traced_peak(store, run, budget)
+        peak, budget = _traced_at_smallest_budget(store, run)
         assert peak <= budget, (name, peak, budget)

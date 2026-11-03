@@ -29,7 +29,6 @@ from cytearc.repertoire import SLOTS, GeneUsage, Spectratype
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
-    budget_refusals,
     CELLRANGER_HEADER,
     CLONAL_ROWS,
     airr_file,
@@ -41,6 +40,7 @@ from tests.clone_helpers import (
     write_lines,
     write_truth_store,
 )
+from tests.memory_helpers import budget_refusals
 from tests.clone_truth import clone_truth, receptor_truth
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
@@ -487,7 +487,9 @@ def _chunk(array) -> int:
     return array_row_selection_parts(array)[0]
 
 
-@pytest.mark.parametrize("source", ["receptors", "clonotypes"])
+@pytest.mark.parametrize(
+    "source", ["receptors", pytest.param("clonotypes", marks=pytest.mark.slow)]
+)
 def test_each_step_is_checked_before_it_reads_or_allocates(tmp_path, source) -> None:
     store, receptors, clonotypes = _sources(tmp_path)
     group = artifact_group(store.zw, receptors)
@@ -731,6 +733,7 @@ def test_the_lengths_legend_names_at_most_80_groups(tmp_path) -> None:
         result.close()
 
 
+@pytest.mark.slow
 def test_the_groups_keys_are_checked_before_their_frame_is_built(tmp_path) -> None:
     # 4,096 cells, each a group of its own by 24 key columns of two labels,
     # whose keys outweigh the grouping that names them.

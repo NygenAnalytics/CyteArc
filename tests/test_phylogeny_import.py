@@ -21,13 +21,7 @@ import pytest
 
 from cytearc.clones import CellPhylogeny
 from cytearc.utils.logging import collect_warnings
-from tests.clone_helpers import (
-    copy_clone_store,
-    every_cell,
-    loaded_partition,
-    open_clone_store,
-    write_truth_store,
-)
+from tests.clone_helpers import every_cell, loaded_partition, write_truth_store
 from tests.clone_truth import (
     LEAF_TIME,
     N_CELLS,
@@ -43,7 +37,7 @@ from tests.clone_truth import (
     write_newick,
     write_tree_zarr,
 )
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
 TREE = truth_phylogeny(TRUTH)
@@ -64,13 +58,13 @@ def template(tmp_path_factory) -> Path:
 def shared(template, tmp_path_factory) -> SimpleNamespace:
     """One writable copy for imports that save artifacts of their own."""
     folder = tmp_path_factory.mktemp("phylogeny_shared")
-    store = copy_clone_store(template, folder)
+    store = copy_store(template, folder)
     return SimpleNamespace(store=store, cells=every_cell(store), folder=folder)
 
 
 @pytest.fixture
 def store(template, tmp_path):
-    return copy_clone_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 def _import(store, paths, **options):
@@ -519,7 +513,7 @@ def test_read_only_stores_reuse_saved_work_and_refuse_new(store, tmp_path) -> No
     path = _write_newick(tmp_path / "truth_tree.nwk")
     phylogeny, first = _import(store, path)
     clones, _messages = _cut(store, phylogeny, time=1.0)
-    reader = open_clone_store(Path(store.zarr_loc), zarr_mode="r")
+    reader = open_store(Path(store.zarr_loc), zarr_mode="r")
     again, warned = _import(reader, path, cell_selection=every_cell(store))
     assert again == phylogeny and warned == first
     assert _cut(reader, phylogeny, time=1.0)[0] == clones
@@ -581,7 +575,6 @@ def test_writing_the_names_counts_what_the_join_holds(tmp_path) -> None:
     import warnings
 
     from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
-    from cytearc.datastore.datastore import DataStore
 
     n_cells, n_leaves = 25_000, 20_000
     ids = [f"cell{cell:06d}-1" for cell in range(n_cells)]
@@ -591,12 +584,7 @@ def test_writing_the_names_counts_what_the_join_holds(tmp_path) -> None:
         "uint16",
         cell_ids=ids,
     )
-    store = DataStore(
-        str(tmp_path / "names.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-    )
+    store = open_store(tmp_path / "names.zarr")
     store.cells.insert("in_tree", np.arange(n_cells) < n_leaves)
     pairs = ",".join(
         f"({ids[cell]}:1,{ids[cell + 1]}:1){'n' * 190}{cell:09d}:1"
@@ -699,7 +687,7 @@ def _cells_store(folder: Path, ids: list[str]):
     path = folder / "store.zarr"
     counts = np.ones((len(ids), 3), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=ids)
-    store = open_clone_store(path)
+    store = open_store(path)
     store.cells.insert("every_cell", np.ones(len(ids), dtype=bool))
     return store
 
@@ -868,8 +856,6 @@ def test_the_join_counts_the_cells_ids_once(tmp_path) -> None:
     import re
     import warnings
 
-    from cytearc.datastore.datastore import DataStore
-
     n_cells = 3_000
     ids = [f"{'sample_with_a_long_name_' * 3}{cell:08d}-1" for cell in range(n_cells)]
     write_count_store(
@@ -878,12 +864,7 @@ def test_the_join_counts_the_cells_ids_once(tmp_path) -> None:
         "uint16",
         cell_ids=ids,
     )
-    store = DataStore(
-        str(tmp_path / "long.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-    )
+    store = open_store(tmp_path / "long.zarr")
     pairs = ",".join(
         f"({ids[cell]}:1,{ids[cell + 1]}:1)g{cell}:1" for cell in range(0, 2_000, 2)
     )

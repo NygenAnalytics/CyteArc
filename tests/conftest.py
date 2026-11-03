@@ -66,6 +66,9 @@ pytest_plugins = [
     "tests.fixtures_datastore",
     "tests.fixtures_lineages",
     "tests.fixtures_hub",
+    # Downloads for integration tests, and the summary that names the tests
+    # they skipped for the network.
+    "tests.network_helpers",
     "tests.shards",
 ]
 

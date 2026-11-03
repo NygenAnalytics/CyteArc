@@ -20,13 +20,7 @@ import pytest
 
 from cytearc.clones.barcodes import LineageBarcodes
 from cytearc.utils.logging import collect_warnings
-from tests.clone_helpers import (
-    copy_clone_store,
-    every_cell,
-    ids_read_bytes,
-    open_clone_store,
-    write_truth_store,
-)
+from tests.clone_helpers import every_cell, ids_read_bytes, write_truth_store
 from tests.clone_truth import (
     N_CELLS,
     SAMPLES,
@@ -43,7 +37,7 @@ from tests.clone_truth import (
     write_quicat_wide,
     write_trex_molecules,
 )
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
 BARCODES = barcode_truth(TRUTH)
@@ -59,13 +53,13 @@ def template(tmp_path_factory) -> Path:
 @pytest.fixture(scope="module")
 def shared(template, tmp_path_factory) -> SimpleNamespace:
     """One writable copy for the imports that save artifacts of their own."""
-    store = copy_clone_store(template, tmp_path_factory.mktemp("barcode_shared"))
+    store = copy_store(template, tmp_path_factory.mktemp("barcode_shared"))
     return SimpleNamespace(store=store, cells=every_cell(store))
 
 
 @pytest.fixture
 def store(template, tmp_path):
-    return copy_clone_store(template, tmp_path)
+    return copy_store(template, tmp_path)
 
 
 def _records(loaded: LineageBarcodes) -> pd.DataFrame:
@@ -626,7 +620,7 @@ def test_barcodes_counted_as_an_assays_features_are_pairs(tmp_path) -> None:
         "uint16",
         cell_ids=TRUTH.cell_ids,
     )
-    store = open_clone_store(path)
+    store = open_store(path)
     store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
     cells = store.snapshot_cell_selection("every_cell")
 
@@ -666,7 +660,7 @@ def test_an_assay_import_refuses_file_options(tmp_path) -> None:
         "uint16",
         cell_ids=TRUTH.cell_ids,
     )
-    store = open_clone_store(path)
+    store = open_store(path)
     store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
     cells = store.snapshot_cell_selection("every_cell")
     with pytest.raises(ValueError, match="not both"):
@@ -704,7 +698,7 @@ def test_import_is_reused_by_contents_and_warns_again(store, tmp_path) -> None:
             )
             == ref
         )
-    reader = open_clone_store(Path(store.zarr_loc), zarr_mode="r")
+    reader = open_store(Path(store.zarr_loc), zarr_mode="r")
     with collect_warnings() as read_only:
         assert (
             reader.clones.import_barcodes(paths, cell_selection=cells, **options) == ref
@@ -950,7 +944,7 @@ def test_import_refuses_an_empty_selection_and_assays_without_integer_counts(
         "float32",
         cell_ids=TRUTH.cell_ids,
     )
-    store = open_clone_store(path)
+    store = open_store(path)
     store.cells.insert("no_cell", np.zeros(N_CELLS, dtype=bool))
     store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
     none = store.snapshot_cell_selection("no_cell")
@@ -1056,7 +1050,7 @@ def test_barcodes_of_an_assay_join_cells_across_its_blocks(
         "uint16",
         cell_ids=TRUTH.cell_ids,
     )
-    store = open_clone_store(path)
+    store = open_store(path)
     keep = np.arange(N_CELLS) % 3 != 0
     store.cells.insert("kept", keep)
     cells = store.snapshot_cell_selection("kept")
@@ -1430,7 +1424,7 @@ def test_the_lookup_of_the_selected_cells_counts_as_the_records_grow(
         "uint16",
         cell_ids=cell_ids,
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     path = tmp_path / "counts.tsv"
     path.write_text(
         "gene\tcell\tcount\n"

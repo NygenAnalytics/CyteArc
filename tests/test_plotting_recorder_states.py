@@ -122,8 +122,7 @@ def test_the_store_accessor_forwards_and_checks_its_arguments(imported) -> None:
 
 
 def test_alleles_without_records_draw_a_note_and_show_on_request(tmp_path):
-    from tests.clone_helpers import open_clone_store
-    from tests.storage_helpers import write_count_store
+    from tests.storage_helpers import open_store, write_count_store
 
     write_count_store(
         str(tmp_path / "store.zarr"),
@@ -131,7 +130,7 @@ def test_alleles_without_records_draw_a_note_and_show_on_request(tmp_path):
         "uint16",
         cell_ids=["c1", "c2"],
     )
-    store = open_clone_store(tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
     path = tmp_path / "alleles.csv"
     # The table's only cell is none of the store's.
     path.write_text(

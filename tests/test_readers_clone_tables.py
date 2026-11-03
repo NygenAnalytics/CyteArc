@@ -22,6 +22,7 @@ from tests.clone_truth import (
     write_cospar_h5ad,
     write_mito_h5ad,
 )
+from tests.memory_helpers import traced_peak
 
 DATA = Path(__file__).parent / "data" / "clones"
 TRUTH = clone_truth()
@@ -683,8 +684,6 @@ def test_cospars_clone_matrix_reads_in_any_storage(tmp_path, layout) -> None:
 
 
 def test_a_dense_clone_matrix_is_read_in_blocks_of_bounded_size(tmp_path) -> None:
-    import tracemalloc
-
     n_cells, n_clones = 2_000, 2_000
     path = tmp_path / "dense.h5ad"
     with h5py.File(path, "w") as handle:
@@ -699,12 +698,10 @@ def test_a_dense_clone_matrix_is_read_in_blocks_of_bounded_size(tmp_path) -> Non
         handle.create_group("obsm").create_dataset("X_clone", data=dense)
     layout = clone_layout(path)
 
-    tracemalloc.start()
-    try:
-        n_entries = sum(len(entries.cells) for entries in matrix_entries(layout, 1_000))
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    n_entries, peak = traced_peak(
+        lambda: sum(len(entries.cells) for entries in matrix_entries(layout, 1_000)),
+        2_000_000 - 1,
+    )
 
     assert n_entries == n_cells
     # A block of 1,000 rows would hold 8 MB of matrix values.

@@ -4,9 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from cytearc.datastore.datastore import DataStore
 from cytearc.plotting import genotypes, variant_depth
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import open_store, write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -23,12 +22,7 @@ def plotted(tmp_path_factory):
         "uint16",
         cell_ids=CELLS,
     )
-    store = DataStore(
-        str(folder / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-    )
+    store = open_store(folder / "store.zarr")
     store.cells.insert("group", np.asarray(GROUPS, dtype=object))
     store.cells.insert("every_cell", np.ones(5, dtype=bool))
     cells = store.snapshot_cell_selection("every_cell")
@@ -143,12 +137,7 @@ def test_several_contigs_draw_one_line_each(tmp_path) -> None:
         "uint16",
         cell_ids=cells,
     )
-    store = DataStore(
-        str(tmp_path / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-    )
+    store = open_store(tmp_path / "store.zarr")
     store.cells.insert("every_cell", np.ones(len(cells), dtype=bool))
     shutil.copytree(folder, tmp_path / "vartrix")
     counts = store.variants.import_counts(

@@ -36,6 +36,7 @@ from cytearc.metadata.records import (
     take_text,
     unpack_text,
 )
+from tests.memory_helpers import traced_peak
 from tests.perturbation_helpers import use_python_kernels
 
 # Molecules of a lineage barcode library: a molecule ID, the library and the
@@ -541,21 +542,18 @@ def test_a_table_refuses_arrays_that_do_not_fit_its_records(changes, message) ->
 
 
 def test_ids_and_text_are_encoded_without_a_copy_padded_to_the_longest_value() -> None:
-    import tracemalloc
-
     # A copy padded to the one long value would take 2,000 rows of 10,000
     # characters, 80 MB; the values themselves take about 10 MB.
     values = [f"m{row}" for row in range(1_999)] + ["x" * 10_000]
     frame = pd.DataFrame({"molecule": pd.Series(values, dtype=object)})
-    tracemalloc.start()
-    try:
+
+    def encode() -> None:
         RecordEncoder(MOLECULE_FIELDS, id_field="molecule").add(
             frame, np.arange(len(values)), source=0
         )
         encode_text(values)
-        _current, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+
+    _, peak = traced_peak(encode, 20 * 2**20 - 1)
     assert peak < 20 * 2**20
 
 

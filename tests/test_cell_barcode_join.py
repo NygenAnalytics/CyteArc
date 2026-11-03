@@ -44,7 +44,7 @@ from tests.barcode_join_helpers import (
     write_tree_file,
     write_variant_file,
 )
-from tests.perturbation_helpers import traced_peak
+from tests.memory_helpers import traced_peak
 
 _REFERENCE = Path(__file__).parent / "guide_calls_import_reference.json"
 # Attributes that differ between two writes of one artifact.
@@ -293,7 +293,7 @@ def joined(join_template, tmp_path):
     """A copy of the join store and its selection of every cell."""
     import shutil
 
-    from tests.perturbation_helpers import open_store
+    from tests.storage_helpers import open_store
 
     target = tmp_path / "store.zarr"
     shutil.copytree(join_template, target)
@@ -443,7 +443,7 @@ def test_unmatched_barcodes_are_counted_and_warned_again_on_reuse(
         ref = importer.run(store, [path], cell_selection=cells)
     with collect_warnings() as reused:
         assert importer.run(store, [path], cell_selection=cells) == ref
-    from tests.perturbation_helpers import open_store
+    from tests.storage_helpers import open_store
 
     reader = open_store(Path(store.zarr_loc), zarr_mode="r")
     with collect_warnings() as read_only:
@@ -651,8 +651,7 @@ def test_guide_calls_find_cells_outside_the_selection_through_the_options(
 
 
 def test_guide_calls_refuse_cells_that_the_suffix_cannot_reach(tmp_path) -> None:
-    from tests.perturbation_helpers import open_store, written
-    from tests.storage_helpers import write_count_store
+    from tests.storage_helpers import open_store, write_count_store, written
 
     # A 10x aggregate names the cells of its second library -2.
     ids = ("AAAC-1", "CCCG-1", "GGGT-2")
@@ -696,8 +695,8 @@ def test_guide_calls_refuse_cells_that_the_suffix_cannot_reach(tmp_path) -> None
 def test_guide_calls_with_every_option_run_within_the_budget_that_their_refusal_names(
     tmp_path,
 ) -> None:
-    from tests.perturbation_helpers import check_budget, open_store
-    from tests.storage_helpers import write_count_store
+    from tests.memory_helpers import check_budget
+    from tests.storage_helpers import open_store, write_count_store
 
     # 3,000 cells of one sample with 40-letter barcodes; the file names 2,400
     # selected cells, 300 cells outside the selection and 300 barcodes of no
@@ -1035,7 +1034,7 @@ def test_the_join_counts_each_chunks_new_hashes_beside_those_it_holds() -> None:
 
 @pytest.mark.slow
 def test_the_hashes_of_barcodes_that_match_no_cell_fit_the_smallest_budget() -> None:
-    from tests.clone_helpers import smallest_budget
+    from tests.memory_helpers import smallest_budget
 
     # 50,000 barcodes outside the selection, in 100 chunks, set the budget:
     # the join holds their hashes and merges each chunk's into them. Each

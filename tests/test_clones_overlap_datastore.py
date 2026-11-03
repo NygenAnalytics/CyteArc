@@ -18,14 +18,13 @@ from cytearc.clones import OVERLAP_INDICES, CloneOverlap, CloneTracking
 from cytearc.metadata.rows import array_row_selection_parts
 from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import (
-    copy_clone_store,
     every_cell,
     import_truth_clones,
     overlap_reference,
     write_truth_store,
 )
 from tests.clone_truth import N_CELLS, clone_truth, number_label
-from tests.storage_helpers import insert_nullable_cell_column
+from tests.storage_helpers import copy_store, insert_nullable_cell_column
 
 TRUTH = clone_truth()
 SAMPLES = ("d2", "d4")
@@ -50,13 +49,13 @@ def template(tmp_path_factory) -> SimpleNamespace:
 
 @pytest.fixture(scope="module")
 def shared(template, tmp_path_factory) -> SimpleNamespace:
-    store = copy_clone_store(template.path, tmp_path_factory.mktemp("shared"))
+    store = copy_store(template.path, tmp_path_factory.mktemp("shared"))
     return SimpleNamespace(store=store, clones=template.clones, cells=every_cell(store))
 
 
 @pytest.fixture
 def copied(template, tmp_path) -> SimpleNamespace:
-    store = copy_clone_store(template.path, tmp_path)
+    store = copy_store(template.path, tmp_path)
     return SimpleNamespace(store=store, clones=template.clones, cells=every_cell(store))
 
 

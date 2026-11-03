@@ -47,8 +47,13 @@ from cytearc.perturbation import PerturbationAssociations
 from cytearc.perturbation.labels import guide_targets
 from cytearc.readers.cellranger import protospacer_calls_size
 from cytearc.storage.artifacts import artifact_group
-from tests.perturbation_helpers import record_cell_reads, traced_peak, written
-from tests.storage_helpers import insert_nullable_cell_column, write_count_store
+from tests.perturbation_helpers import record_cell_reads
+from tests.memory_helpers import traced_peak
+from tests.storage_helpers import (
+    insert_nullable_cell_column,
+    write_count_store,
+    written,
+)
 
 N_GENES = 120
 # Each guide's target and its target gene's feature ID: two guides of GENE_A
