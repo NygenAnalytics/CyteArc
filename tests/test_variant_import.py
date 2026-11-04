@@ -16,7 +16,7 @@ import pytest
 from cytearc.metadata.rows import text_read_bytes
 from cytearc.utils.logging import collect_warnings
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.clone_helpers import every_cell
+from tests.clone_helpers import assert_joined, every_cell
 from tests.memory_helpers import (
     at_budget,
     budget_that_runs,
@@ -57,7 +57,7 @@ from tests.variant_truth import (
 )
 
 TRUTH = variant_truth()
-_UNMATCHED = "3 of 51 barcodes of the variant file match no selected cell"
+_UNMATCHED = "3 of 51 barcodes of the variant file match no cell of the store"
 
 
 @pytest.fixture(scope="module")
@@ -178,8 +178,16 @@ def test_mgatk_counts_every_base_and_strand_of_every_cell(store, tmp_path) -> No
         _UNMATCHED
         + ", for example "
         + ", ".join(repr(f"d2__{barcode}-1") for barcode in TRUTH.clones.outside)
-        + ". Check barcode_prefix and cell_selection."
+        + ". Check barcode_prefix, barcode_suffix and barcode_pattern against the "
+        "store's cell IDs."
     ]
+    # The file lists every cell of the store, each selected, and the droplets
+    # outside it.
+    assert_joined(
+        store.artifacts.inspect(ref).diagnostics,
+        n_file=51,
+        unmatched=[f"d2__{barcode}-1" for barcode in TRUTH.clones.outside],
+    )
 
 
 def test_mean_depth_covered_sites_and_listed_cells_come_from_the_truth(
@@ -1323,10 +1331,7 @@ def test_threads_parse_the_base_files_into_the_same_artifact(
         groups.append(store.artifacts.load(ref))
         warned.append(messages)
     assert warned[0] == warned[1]
-    assert (
-        groups[0].attrs["unmatched_barcode_examples"]
-        == groups[1].attrs["unmatched_barcode_examples"]
-    )
+    assert groups[0].attrs["diagnostics"] == groups[1].attrs["diagnostics"]
     for name in ("depth_offsets", "depth", "count_alleles", "counts", "counts_forward"):
         np.testing.assert_array_equal(groups[0][name][:], groups[1][name][:])
     # A malformed file stops the threads with its error.

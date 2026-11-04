@@ -55,6 +55,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.diagnostics import warn_diagnostics
 from ...storage.geometry import array_geometry
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
@@ -69,7 +70,7 @@ from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
-    warn_unmatched_barcodes,
+    unmatched_barcode_rules,
 )
 from .clone_artifacts import clone_write_bytes, plan_clones, write_clones
 from .record_tables import (
@@ -98,9 +99,6 @@ _IMPORT_ATTRIBUTES = (
     "n_unmatched_rows",
     "n_beyond_length",
     "n_rows_without_integration",
-    "n_file_barcodes",
-    "n_unmatched_barcodes",
-    "unmatched_barcode_examples",
 )
 #: The values of ``format`` of ``export_characters``.
 EXPORT_FORMATS = ("treedata", "laml")
@@ -253,9 +251,14 @@ def _without_integration_warning(n_rows: int) -> str | None:
     )
 
 
-def _warn_import(attributes: Any, files_text: str) -> None:
+def _warn_import(
+    arguments: RecorderAlleleImportArguments,
+    diagnostics: Mapping[str, Any],
+    attributes: Any,
+    files_text: str,
+) -> None:
     """Warn about what an import counted, as it does again when it is reused."""
-    warn_unmatched_barcodes(attributes, files_text)
+    warn_diagnostics(arguments, diagnostics, unmatched_barcode_rules(files_text))
     for message in (
         _beyond_length_warning(int(attributes["n_beyond_length"])),
         _without_integration_warning(int(attributes["n_rows_without_integration"])),
@@ -330,9 +333,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         ``barcode_prefix``, the barcode and ``barcode_suffix`` name a cell's
         ID, ``barcode_pattern`` keeps the part of each barcode that its
         ``barcode`` group matches, and barcodes that match no selected cell
-        are counted in the ``n_file_barcodes``, ``n_unmatched_barcodes`` and
-        ``unmatched_barcode_examples`` attributes and named in a warning,
-        which a reused import gives again. A file is identified by the
+        are counted in the join's diagnostics, apart from those of cells
+        outside the selection, and those that match no cell of the store are
+        named in a warning, which a reused import gives again. A file is identified by the
         SHA-256 of its bytes and of the files read beside it, so the order
         of the files does not matter.
 
@@ -424,8 +427,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             # Saved alleles warn as they did when they were imported.
             saved = artifact_group(self.zw, planned.ref)
             _warn_import(
+                arguments,
+                inspect_artifact(self.zw, planned.ref).diagnostics,
                 {
-                    **saved.attrs,
                     "n_beyond_length": _saved_count(saved, "n_beyond_length"),
                     "n_rows_without_integration": _saved_count(
                         saved, "n_rows_without_integration"
@@ -435,7 +439,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             )
             return planned.ref
         self._require_writable(arguments.operation)
-        table, ledger, attributes = self._read_alleles(files, layouts, selection)
+        table, ledger, attributes, diagnostics = self._read_alleles(
+            files, layouts, selection
+        )
         # Writing holds a copy of the records and, for each, its cells' and
         # files' int32 copies and its states' int8 copy and the keys that
         # count each cell's integrations, beside the file buffers of Zarr's
@@ -446,8 +452,13 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             + _WRITE_BYTES_PER_RECORD * table.n_records
             + zarr_write_buffer_bytes(),
         )
-        self._write_alleles(planned, table, n_cells, attributes)
-        _warn_import(attributes, files_text)
+        self._write_alleles(planned, table, n_cells, attributes, diagnostics)
+        _warn_import(
+            arguments,
+            inspect_artifact(self.zw, planned.ref).diagnostics,
+            attributes,
+            files_text,
+        )
         return planned.ref
 
     def _allele_layouts(
@@ -542,7 +553,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         files: Sequence[BarcodeFile],
         layouts: Sequence["AlleleLayout"],
         selection: CellSelectionRead,
-    ) -> tuple[RecordTable, MemoryLedger, dict[str, Any]]:
+    ) -> tuple[RecordTable, MemoryLedger, dict[str, Any], dict[str, Any]]:
         """Read the alleles of the files' rows that name selected cells.
 
         One ledger holds what the import keeps whatever its size, the
@@ -551,8 +562,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         before they merge.
 
         Returns:
-            The records, the import's ledger, which holds them, and the
-            artifact's attributes.
+            The records, the import's ledger, which holds them, the
+            artifact's attributes and the join's diagnostics.
         """
         n_cells = selection.cells
         single = sum(1 for layout in layouts if layout.integration is not None)
@@ -582,7 +593,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             cell_index,
             item="the selected cells' IDs",
         )
-        join = CellBarcodeJoin(cell_ids, ledger=ledger)
+        join = CellBarcodeJoin(
+            cell_ids, ledger=ledger, store_ids=self.cells._get_array("ids")
+        )
         del cell_ids
         named: list[np.ndarray | None] = []
         counted: list[dict[str, int]] = []
@@ -637,9 +650,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             "n_rows_without_integration": sum(
                 counts["without_integration"] for counts in counted
             ),
-            **join.attributes(),
         }
-        return table, ledger, attributes
+        return table, ledger, attributes, join.diagnostics()
 
     def _read_allele_file(
         self,
@@ -708,6 +720,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         table: RecordTable,
         n_cells: int,
         attributes: Mapping[str, Any],
+        diagnostics: Mapping[str, Any],
     ) -> None:
         summaries = cell_summaries(table, n_cells)
         arrays = record_arrays(table, _RECORDS)
@@ -725,6 +738,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 "states": list(STATES),
                 **attributes,
             },
+            diagnostics=diagnostics,
         )
         n_with = int(np.count_nonzero(summaries["n_records"]))
         logger.info(

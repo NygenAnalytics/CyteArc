@@ -5,9 +5,10 @@ barcode, while a store names them by cell ID. A barcode names the cell whose ID
 is the file's prefix, then the barcode, then the file's suffix; a pattern can
 first keep the part of the barcode that its ``barcode`` group matches. Every
 importer joins its files through ``CellBarcodeJoin`` and orders and identifies
-them through ``barcode_files``, so they share the rules, the counts of
-barcodes that match no selected cell, and the warning about them. The join
-charges what it holds to the importer's memory ledger.
+them through ``barcode_files``, so they share the rules, the diagnostics that
+count the barcodes that name no cell of the store and those that name a cell
+outside the selection, and the warning about the first. The join charges what
+it holds to the importer's memory ledger.
 """
 
 import functools
@@ -20,6 +21,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ...metadata.rows import operation_concurrency
+from ...storage.diagnostics import EXAMPLES, DiagnosticRule
+from ...storage.geometry import array_geometry
 from ...utils.arrays import union_sorted
 from ...utils.digest import file_sha256
 from ...utils.memory_budget import (
@@ -28,27 +32,24 @@ from ...utils.memory_budget import (
     object_array_bytes,
     python_text_bytes,
 )
-from ...utils.warnings import warn
 from ...utils.arguments import quoted_value
 
 __all__ = [
     "LOOKUP_BYTES_PER_CELL",
-    "UNMATCHED_EXAMPLES",
     "BarcodeFile",
     "CellBarcodeJoin",
+    "barcode_example",
     "barcode_files",
     "barcode_pattern",
     "derived_id_bytes",
+    "id_hashing_bytes",
     "join_bytes",
     "lookup_bytes",
+    "store_pass_bytes",
     "texts_per_file",
-    "unmatched_barcodes_warning",
-    "warn_unmatched_barcodes",
+    "unmatched_barcode_rules",
+    "unmatched_barcodes_message",
 ]
-
-#: The barcodes that match no selected cell named in an artifact's attributes
-#: and in the warning.
-UNMATCHED_EXAMPLES = 5
 #: Bytes of each ID of a pandas index of text IDs that finds some of them:
 #: the ID's slot and hash in the index. Clone figures and loaded variant
 #: counts count their lookups so; the join counts its own by ``lookup_bytes``.
@@ -73,12 +74,29 @@ _EXTRACTED_BYTES_PER_BARCODE = 176
 # its text, a byte for each character.
 _MATCH_BYTES_PER_BARCODE = 128
 # Bytes of each new hash of a chunk while it is merged: the hash, its sorted
-# copy and its place in the merged hashes.
-_NEW_HASH_BYTES = 24
+# copy, its place in the merged hashes, and its place among the hashes of the
+# store's cell IDs and whether it is one of them.
+_NEW_HASH_BYTES = 40
+# Bytes of each of the store's cell IDs while a block of them is hashed,
+# beside the block as Zarr returns it, the IDs' Python strings and their UTF-8
+# characters: each ID's reference, the header of its UTF-8 bytes, the pointer
+# to them, their length and their place in the list that hashing keeps, its
+# hash and the hash's shifted copy that pandas mixes in.
+_HASHED_BYTES_PER_STORE_ID = 8 + 33 + 8 + 8 + 8 + 8 + 8
+# The most bytes of a Python string beside its characters, which take up to
+# four bytes each.
+_STRING_HEADER_BYTES = 60
+# The store's cell IDs that become Python strings and are hashed at once; a
+# read of a band of chunks holds more of them as fixed-width text, and an
+# array without chunks is read this many at a time.
+_HASHED_IDS = 1 << 16
 # What a refusal of the hashes of barcodes that match no cell suggests.
 _UNMATCHED_REMEDY = (
     "check barcode_prefix, barcode_suffix, barcode_pattern and cell_selection"
 )
+# The store's cell IDs are hashed whatever the selection, so a refusal of them
+# suggests no smaller call.
+_STORE_REMEDY = ""
 # The named group of a barcode pattern that holds the barcode.
 _BARCODE_GROUP = "barcode"
 # What the options of an import may be, for their errors.
@@ -382,36 +400,155 @@ def _checked_pattern(value: Any) -> str | None:
     return barcode_pattern(value)
 
 
+def barcode_example(barcode: str, cell_id: str, named: bool = True) -> str:
+    """Show a file's barcode beside the cell ID it derives, as a diagnostic's example.
+
+    A barcode whose ID is the barcode itself shows once, and a barcode that
+    the file's pattern does not match, which names no cell, says so.
+    """
+    if not named:
+        return f"{barcode} -> (barcode_pattern does not match)"
+    if cell_id == barcode:
+        return barcode
+    return f"{barcode} -> {cell_id}"
+
+
+def _store_block_rows(store_ids: Any) -> int:
+    """The store's cell IDs that a block of the pass over them reads: a band of chunks."""
+    geometry = array_geometry(store_ids)
+    return _HASHED_IDS if geometry is None else geometry.axisChunk(0)
+
+
+def _store_read_bytes(store_ids: Any, n_rows: int) -> int:
+    """What reading a block of ``n_rows`` of the store's cell IDs holds, with them."""
+    geometry = array_geometry(store_ids)
+    rows_bytes = n_rows * int(np.dtype(store_ids.dtype).itemsize)
+    if geometry is None:
+        return rows_bytes
+    return rows_bytes + geometry.bandReadBytes(n_rows, operation_concurrency())
+
+
+def id_hashing_bytes(n_ids: int, characters: int, widest: int) -> int:
+    """Return what hashing ``n_ids`` of the store's cell IDs holds, beside them as fixed-width text.
+
+    Each ID becomes a Python string, as
+    :func:`~cytearc.utils.memory_budget.python_text_bytes` counts it, which
+    hashing encodes as UTF-8, up to one byte a character for ASCII text, two
+    to U+07FF, three to U+FFFF and four beyond, beside what it keeps for each
+    ID.
+
+    Args:
+        n_ids: The IDs hashed at once.
+        characters: Their characters.
+        widest: The widest code point of their characters.
+    """
+    width = next(
+        width
+        for limit, width in ((0x7F, 1), (0x7FF, 2), (0xFFFF, 3), (0x10FFFF, 4))
+        if widest <= limit
+    )
+    utf8 = width * characters
+    return (
+        n_ids * _HASHED_BYTES_PER_STORE_ID
+        + python_text_bytes(n_ids, characters, widest=widest)
+        + utf8
+    )
+
+
+def store_pass_bytes(store_ids: Any) -> int:
+    """Return the most bytes that the join's pass over the store's cell IDs holds.
+
+    The pass keeps the 64-bit hash of each of the store's cell IDs and reads
+    them a band of chunks at a time, as Zarr returns them, then hashes
+    65,536 of them at a time, each as a Python string of up to four bytes a
+    character, with what hashing it holds.
+
+    Args:
+        store_ids: The store's array of cell IDs, as fixed-width text.
+    """
+    n_ids = int(store_ids.shape[0])
+    rows = min(n_ids, _store_block_rows(store_ids))
+    hashed = min(rows, _HASHED_IDS)
+    width = int(np.dtype(store_ids.dtype).itemsize) // 4
+    return (
+        8 * n_ids
+        + _store_read_bytes(store_ids, rows)
+        + hashed * (_HASHED_BYTES_PER_STORE_ID + _STRING_HEADER_BYTES + 8 * width)
+    )
+
+
+def _hashes(values: np.ndarray) -> np.ndarray:
+    """The 64-bit hash of each text of an object array, as the join counts barcodes."""
+    hashed: np.ndarray = np.asarray(
+        pd.util.hash_array(values, categorize=False), dtype=np.uint64
+    )
+    return hashed
+
+
+def _members(hashes: np.ndarray, held: np.ndarray) -> np.ndarray:
+    """Whether each hash is one of ``held``, ascending and distinct."""
+    if not len(held):
+        return np.zeros(len(hashes), dtype=bool)
+    at = np.minimum(np.searchsorted(held, hashes), len(held) - 1)
+    found: np.ndarray = held[at] == hashes
+    return found
+
+
 class CellBarcodeJoin:
     """Match the barcodes of files to selected cells and count those that match none.
 
+    A barcode that matches no selected cell is either unmatched, naming no
+    cell of the store, or unselected, naming a cell of the store outside the
+    selection, such as one that QC filtering removed. The join tells them
+    apart by the 64-bit hashes of the store's cell IDs, which it reads once,
+    the first time a barcode that its file's options name matches no selected
+    cell; a selection of every cell of the store leaves no cell outside it,
+    so it reads none. A barcode that a file's pattern does not match names no
+    cell, and is unmatched.
+
     The join holds a lookup of the selected cells' IDs, whether each cell was
-    named, and the 64-bit hashes of the distinct barcodes that matched no
-    cell, and charges them to the caller's ledger as they grow: the lookup,
-    as :func:`lookup_bytes` counts it, when the join starts, and each chunk's
-    new hashes before they merge into those held. IDs given as an object
-    array of text are the caller's to charge; IDs given as fixed-width text
-    become the Python strings that the lookup keeps, which the join charges.
-    What matching a chunk's barcodes holds for a moment, as
+    named, the hashes of the store's cell IDs once read, and the hashes of
+    the distinct barcodes of each kind, and charges them to the caller's
+    ledger as they grow: the lookup, as :func:`lookup_bytes` counts it, when
+    the join starts; the store's hashes and a block of their IDs at a time,
+    as :func:`store_pass_bytes` bounds them, when it reads them; and each
+    chunk's new hashes before they merge into those held. IDs given as an
+    object array of text are the caller's to charge; IDs given as fixed-width
+    text become the Python strings that the lookup keeps, which the join
+    charges. What matching a chunk's barcodes holds for a moment, as
     :func:`join_bytes` states it, is the caller's chunk to charge. Barcodes
     are counted by the cell ID they name, so a barcode that two files name
-    with different prefixes counts twice. A barcode that a file's pattern
-    does not match names no cell.
+    with different prefixes counts twice.
 
     Args:
         cell_ids: The IDs of the selected cells, in selection order.
         ledger: The memory ledger of the import.
+        store_ids: The IDs of every cell of the store, as fixed-width text,
+            such as the store's stored array of them, read in blocks.
 
     Raises:
         MemoryBudgetError: If the lookup does not fit the ledger's budget.
-        TypeError: If the IDs are neither fixed-width text nor an object array.
+        TypeError: If the IDs are neither fixed-width text nor an object
+            array, or the store's IDs are not fixed-width text.
         ValueError: If a cell ID repeats.
     """
 
-    def __init__(self, cell_ids: np.ndarray, *, ledger: MemoryLedger) -> None:
+    def __init__(
+        self, cell_ids: np.ndarray, *, ledger: MemoryLedger, store_ids: Any
+    ) -> None:
         given = np.asarray(cell_ids)
         n_cells = len(given)
         self._ledger = ledger
+        if np.dtype(store_ids.dtype).kind != "U" or len(store_ids.shape) != 1:
+            raise TypeError(
+                "The store's cell IDs must be one-dimensional fixed-width text, not "
+                f"{store_ids.dtype}"
+            )
+        self._store_ids = store_ids
+        # A selection of every cell of the store leaves none outside it.
+        self._store_hashes: np.ndarray | None = (
+            np.empty(0, dtype=np.uint64) if n_cells == int(store_ids.shape[0]) else None
+        )
         if given.dtype.kind == "U":
             # The lookup keeps each ID as the Python string it becomes, which
             # is measured from each ID's length.
@@ -441,24 +578,105 @@ class CellBarcodeJoin:
             )
         self._named = np.zeros(n_cells, dtype=bool)
         self._unmatched = np.empty(0, dtype=np.uint64)
-        self._examples: list[str] = []
+        self._unselected = np.empty(0, dtype=np.uint64)
+        self._unmatched_examples: list[str] = []
+        self._unselected_examples: list[str] = []
         self.n_rows = 0
         self.n_unmatched_rows = 0
 
     @property
     def n_file_barcodes(self) -> int:
         """The distinct barcodes of the files, counted by the cell ID they name."""
-        return int(np.count_nonzero(self._named)) + len(self._unmatched)
+        return (
+            int(np.count_nonzero(self._named))
+            + len(self._unmatched)
+            + len(self._unselected)
+        )
 
     @property
     def n_unmatched_barcodes(self) -> int:
-        """The distinct barcodes that matched no selected cell."""
+        """The distinct barcodes that name no cell of the store."""
         return len(self._unmatched)
 
     @property
-    def examples(self) -> list[str]:
-        """Up to five barcodes that matched no selected cell, as the files hold them."""
-        return list(self._examples)
+    def n_unselected_barcodes(self) -> int:
+        """The distinct barcodes that name a cell of the store outside the selection."""
+        return len(self._unselected)
+
+    @property
+    def unmatched_examples(self) -> list[str]:
+        """Up to five barcodes that name no cell of the store, as :func:`barcode_example` shows them."""
+        return list(self._unmatched_examples)
+
+    @property
+    def unselected_examples(self) -> list[str]:
+        """Up to five barcodes of cells outside the selection, as :func:`barcode_example` shows them."""
+        return list(self._unselected_examples)
+
+    def _read_store_hashes(self) -> np.ndarray:
+        """Read the store's cell IDs a block at a time and keep their hashes, ascending."""
+        if self._store_hashes is not None:
+            return self._store_hashes
+        store_ids = self._store_ids
+        n_ids = int(store_ids.shape[0])
+        item = "the hashes of the store's cell IDs"
+        self._ledger.hold(item, 8 * n_ids, remedy=_STORE_REMEDY)
+        hashes = np.empty(n_ids, dtype=np.uint64)
+        step = _store_block_rows(store_ids)
+        geometry = array_geometry(store_ids)
+        for start in range(0, n_ids, step):
+            stop = min(n_ids, start + step)
+            self._ledger.peak(
+                "a block of the store's cell IDs",
+                _store_read_bytes(store_ids, stop - start),
+                remedy=_STORE_REMEDY,
+            )
+            block = np.asarray(store_ids[start:stop])
+            if geometry is not None:
+                self._ledger.leave(
+                    geometry.bandHeldBytes(
+                        self._ledger.holding_threads(geometry.bandChunks())
+                    )
+                )
+            for first in range(0, len(block), _HASHED_IDS):
+                part = block[first : first + _HASHED_IDS]
+                # Each ID becomes a Python string, which hashing encodes as
+                # UTF-8, measured from each ID's length.
+                self._ledger.peak(
+                    "a block of the store's cell IDs",
+                    block.nbytes + 8 * len(part),
+                    remedy=_STORE_REMEDY,
+                )
+                characters = int(np.char.str_len(part).sum())
+                widest = int(part.view(np.uint32).max()) if part.size else 0
+                self._ledger.peak(
+                    "a block of the store's cell IDs",
+                    block.nbytes + id_hashing_bytes(len(part), characters, widest),
+                    remedy=_STORE_REMEDY,
+                )
+                at = start + first
+                hashes[at : at + len(part)] = _hashes(part.astype(object))
+                del part
+            del block
+        hashes.sort()
+        self._store_hashes = hashes
+        return hashes
+
+    def _note_examples(
+        self,
+        examples: list[str],
+        held: np.ndarray,
+        kind: np.ndarray,
+        hashes: np.ndarray,
+        shown: Callable[[int], str],
+    ) -> None:
+        """Add examples of one kind from a chunk's new barcodes, in file order."""
+        if len(examples) == EXAMPLES or not kind.any():
+            return
+        # Barcodes counted by an earlier chunk have given their example.
+        fresh = np.flatnonzero(kind & ~_members(hashes, held))
+        for position in fresh[: EXAMPLES - len(examples)].tolist():
+            examples.append(shown(position))
 
     def cells(self, file: BarcodeFile, barcodes: np.ndarray) -> np.ndarray:
         """Return the selected cell that each barcode names, -1 for none.
@@ -471,8 +689,9 @@ class CellBarcodeJoin:
             Each row's cell, as its position in the selection, as int64.
 
         Raises:
-            MemoryBudgetError: If the hashes of the barcodes that matched no
-                cell outgrow the ledger's budget.
+            MemoryBudgetError: If the hashes of the store's cell IDs, or of
+                the barcodes that matched no selected cell, outgrow the
+                ledger's budget.
         """
         texts = np.asarray(barcodes, dtype=object)
         identifiers_array, named = file.cell_ids(texts)
@@ -484,72 +703,106 @@ class CellBarcodeJoin:
         matched = positions >= 0
         self._named[positions[matched]] = True
         self.n_rows += len(positions)
-        if not matched.all():
-            unmatched = ~matched
-            self.n_unmatched_rows += int(np.count_nonzero(unmatched))
-            missing = pd.unique(identifiers_array[unmatched])
-            # The new hashes merge into those held, which keep room for their
-            # copy in the next merge, before they are made.
-            self._ledger.peak(
-                "the hashes of the barcodes that match no selected cell",
-                _NEW_HASH_BYTES * len(missing),
-                remedy=_UNMATCHED_REMEDY,
+        if matched.all():
+            return positions
+        rows = np.flatnonzero(~matched)
+        self.n_unmatched_rows += len(rows)
+        # The first row of each distinct ID, in file order.
+        first = rows[
+            ~np.asarray(pd.Index(identifiers_array[rows], dtype=object).duplicated())
+        ]
+        del rows
+        missing = identifiers_array[first]
+        # The new hashes merge into those held, which keep room for their
+        # copy in the next merge, and are looked up among the store's, before
+        # they are made.
+        self._ledger.peak(
+            "the hashes of the barcodes that match no selected cell",
+            _NEW_HASH_BYTES * len(missing),
+            remedy=_UNMATCHED_REMEDY,
+        )
+        # The IDs are distinct already, so they are hashed as they are.
+        hashes = _hashes(missing)
+        missing_named = named[first]
+        unselected = np.zeros(len(missing), dtype=bool)
+        if missing_named.any():
+            unselected[missing_named] = _members(
+                hashes[missing_named], self._read_store_hashes()
             )
-            # The barcodes are distinct already, so they are hashed as they are.
-            hashes = np.asarray(
-                pd.util.hash_array(missing, categorize=False), dtype=np.uint64
+        unmatched = ~unselected
+
+        def shown(position: int) -> str:
+            return barcode_example(
+                str(texts[first[position]]),
+                str(missing[position]),
+                bool(missing_named[position]),
             )
-            held = len(self._unmatched)
-            self._unmatched = union_sorted(self._unmatched, hashes)
-            self._ledger.hold(
-                "the hashes of the barcodes that match no selected cell",
-                _UNMATCHED_BYTES_PER_BARCODE * (len(self._unmatched) - held),
-                remedy=_UNMATCHED_REMEDY,
-            )
-            if len(self._examples) < UNMATCHED_EXAMPLES:
-                for barcode in pd.unique(texts[unmatched]):
-                    if len(self._examples) == UNMATCHED_EXAMPLES:
-                        break
-                    if str(barcode) not in self._examples:
-                        self._examples.append(str(barcode))
+
+        self._note_examples(
+            self._unmatched_examples, self._unmatched, unmatched, hashes, shown
+        )
+        self._note_examples(
+            self._unselected_examples, self._unselected, unselected, hashes, shown
+        )
+        held = len(self._unmatched) + len(self._unselected)
+        self._unmatched = union_sorted(self._unmatched, hashes[unmatched])
+        self._unselected = union_sorted(self._unselected, hashes[unselected])
+        self._ledger.hold(
+            "the hashes of the barcodes that match no selected cell",
+            _UNMATCHED_BYTES_PER_BARCODE
+            * (len(self._unmatched) + len(self._unselected) - held),
+            remedy=_UNMATCHED_REMEDY,
+        )
         return positions
 
-    def attributes(self) -> dict[str, Any]:
-        """Return the counts that an artifact saves and the warning names."""
+    def diagnostics(self) -> dict[str, Any]:
+        """Return the join's diagnostics, as an importer saves them.
+
+        ``fileBarcodes`` counts the files' distinct barcodes by the cell ID
+        they name, ``unmatchedBarcodes`` those that name no cell of the store
+        and ``unselectedBarcodes`` those that name a cell of the store outside
+        the selection, with up to five examples of each, in the order the
+        importer joined them.
+        """
         return {
-            "n_file_barcodes": self.n_file_barcodes,
-            "n_unmatched_barcodes": self.n_unmatched_barcodes,
-            "unmatched_barcode_examples": self.examples,
+            "fileBarcodes": self.n_file_barcodes,
+            "unmatchedBarcodes": self.n_unmatched_barcodes,
+            "unselectedBarcodes": self.n_unselected_barcodes,
+            "unmatchedBarcodeExamples": self.unmatched_examples,
+            "unselectedBarcodeExamples": self.unselected_examples,
         }
 
 
-def unmatched_barcodes_warning(attributes: Mapping[str, Any], files: str) -> str | None:
-    """Name the barcodes of the files that match no selected cell, or return None.
-
-    An import warns with this message, and so does a saved import that is
-    reused, from the attributes it saved.
+def unmatched_barcodes_message(diagnostics: Mapping[str, Any], files: str) -> str:
+    """Name the barcodes of the files that match no cell of the store.
 
     Args:
-        attributes: ``n_file_barcodes``, ``n_unmatched_barcodes`` and
-            ``unmatched_barcode_examples``.
-        files: The files, such as ``"the call file"``.
+        diagnostics: The join's diagnostics, as an importer saved them.
+        files: The files, such as ``"the clone file"``.
     """
-    n_unmatched = int(attributes["n_unmatched_barcodes"])
-    if not n_unmatched:
-        return None
     return (
-        f"{n_unmatched} of {int(attributes['n_file_barcodes'])} barcodes of "
-        f"{files} match no selected cell, for example "
+        f"{int(diagnostics['unmatchedBarcodes'])} of "
+        f"{int(diagnostics['fileBarcodes'])} barcodes of {files} match no cell of "
+        "the store, for example "
         + ", ".join(
             quoted_value(str(value))
-            for value in attributes["unmatched_barcode_examples"]
+            for value in diagnostics["unmatchedBarcodeExamples"]
         )
-        + ". Check barcode_prefix and cell_selection."
+        + ". Check barcode_prefix, barcode_suffix and barcode_pattern against the "
+        "store's cell IDs."
     )
 
 
-def warn_unmatched_barcodes(attributes: Mapping[str, Any], files: str) -> None:
-    """Warn about the barcodes of the files that match no selected cell, if any."""
-    message = unmatched_barcodes_warning(attributes, files)
-    if message is not None:
-        warn(message)
+def unmatched_barcode_rules(files: str) -> tuple[DiagnosticRule, ...]:
+    """Return the join's warning: barcodes of the files that match no cell of the store.
+
+    Barcodes of cells outside the selection give no warning. ``files`` names
+    the files, such as ``"the clone files"``.
+    """
+    return (
+        DiagnosticRule(
+            "unmatchedBarcodes",
+            applies=lambda diagnostics: int(diagnostics["unmatchedBarcodes"]) > 0,
+            message=lambda diagnostics: unmatched_barcodes_message(diagnostics, files),
+        ),
+    )

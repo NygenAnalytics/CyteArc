@@ -23,13 +23,13 @@ barcodes. :func:`barcode_clone_calls` applies the rules in this order:
    barcodes, by identical sets or a Jaccard graph, with TREX's pruning and
    doublets, and clones of at least ``min_size`` cells.
 
-Beside the clones, calling gives four numbers, named in
+Beside the clones, calling gives three numbers, named in
 ``BARCODE_DIAGNOSTICS``, that show when correction merges barcodes that are
 unrelated, which happens more often the more barcodes it compares: the
 distinct barcodes of each group and library that correction compares, the
-pairs of them expected within ``max_distance`` by chance, the distinct barcodes
-that it merged into another, and the share of the cells given a clone that
-the largest clone holds.
+pairs of them expected within ``max_distance`` by chance, and the distinct
+barcodes that it merged into another. The clone writer adds the share of the
+cells given a clone that the largest clone holds, which chaining raises.
 
 ``BARCODE_PRESETS`` holds the published rules of LARRY, TREX, CellTagR and
 CellTag-multi; every value a preset sets can be given instead.
@@ -94,7 +94,6 @@ BARCODE_DIAGNOSTICS: tuple[str, ...] = (
     "distinctBarcodes",
     "expectedChanceMatches",
     "mergedBarcodes",
-    "largestCloneShare",
 )
 # A value of BARCODE_PRESETS that the user must give, such as a library's
 # allowlist.
@@ -581,10 +580,9 @@ class BarcodeClones:
             the distinct barcodes of each group and library that correction
             compares, after the molecule filters, added up;
             ``expectedChanceMatches``, the pairs of them expected within the
-            ``max_distance`` by chance; ``mergedBarcodes``, those that correction
-            merged into another; and ``largestCloneShare``, the cells of the
-            largest clone over the cells given a clone, 0 when none is.
-            Without correction, the expectation and the merged barcodes are 0.
+            ``max_distance`` by chance; and ``mergedBarcodes``, those that
+            correction merged into another. Without correction, the expectation and the
+            merged barcodes are 0.
     """
 
     calls: SetClones
@@ -1163,12 +1161,6 @@ def barcode_clone_calls(
         doublets=settings.doublets,
         min_size=settings.min_size,
         max_bytes=room.left(),
-    )
-    # The share of the cells given a clone that the largest clone holds;
-    # clones are numbered by size, the largest first.
-    n_assigned = int(calls.sizes.sum())
-    diagnostics["largestCloneShare"] = (
-        float(calls.sizes[0]) / n_assigned if n_assigned else 0.0
     )
     return BarcodeClones(
         calls=calls,

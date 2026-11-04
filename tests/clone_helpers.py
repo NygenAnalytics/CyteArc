@@ -36,6 +36,41 @@ if TYPE_CHECKING:
     from cytearc.storage.refs import ArtifactRef
 
 
+def example_ids(examples: Sequence[str]) -> list[str]:
+    """The cell ID that each example of a join names.
+
+    An example shows a barcode beside the ID it derives, as ``"AAAC ->
+    d2__AAAC-1"``, or the barcode alone when it is the ID.
+    """
+    return [example.rsplit(" -> ", 1)[-1] for example in examples]
+
+
+def assert_joined(
+    diagnostics: Mapping[str, object],
+    *,
+    n_file: int,
+    unmatched: Sequence[str] = (),
+    unselected: Sequence[str] = (),
+) -> None:
+    """Check the join's diagnostics of an import against the cell IDs of the truth.
+
+    ``unmatched`` holds the IDs that the files' barcodes name but the store
+    lacks, and ``unselected`` the IDs of the store's cells outside the
+    selection that they name; each kind's examples must be up to five of
+    them, each once.
+    """
+    from cytearc.storage.diagnostics import EXAMPLES
+
+    assert diagnostics["fileBarcodes"] == n_file
+    assert diagnostics["unmatchedBarcodes"] == len(set(unmatched))
+    assert diagnostics["unselectedBarcodes"] == len(set(unselected))
+    for kind, ids in (("unmatched", unmatched), ("unselected", unselected)):
+        shown = example_ids(diagnostics[f"{kind}BarcodeExamples"])  # type: ignore[arg-type]
+        assert len(shown) == min(EXAMPLES, len(set(ids))), (kind, shown)
+        assert len(set(shown)) == len(shown)
+        assert set(shown) <= set(ids), (kind, shown)
+
+
 def write_truth_store(path: Path, truth: CloneTruth) -> "DataStore":
     """Write a store whose cells are the truth's, with their sample, time and type."""
     n_cells = len(truth.cell_ids)
@@ -117,7 +152,7 @@ def import_truth_clones(
     """
     path = write_cospar(truth, folder / "truth_clones.csv")
     selection = every_cell(store) if cell_selection is None else cell_selection
-    with pytest.warns(UserWarning, match="match no selected cell"):
+    with pytest.warns(UserWarning, match="match no cell of the store"):
         return store.clones.import_clones(path, cell_selection=selection)
 
 
@@ -352,7 +387,7 @@ def import_truth_receptors(
         for receptor in ("TCR", "BCR")
     ]
     selection = every_cell(store) if cell_selection is None else cell_selection
-    with pytest.warns(UserWarning, match="match no selected cell"):
+    with pytest.warns(UserWarning, match="match no cell of the store"):
         return store.repertoire.import_receptors(
             paths,
             cell_selection=selection,

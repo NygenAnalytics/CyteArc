@@ -7,7 +7,7 @@ import secrets
 import struct
 import types
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -18,6 +18,7 @@ import zarr
 from ..utils.logging import logger
 from .arrays import _decode_metadata_values, text_dtype
 from .content_stamps import cached_for_content
+from .diagnostics import DIAGNOSTICS_ATTRIBUTE, DiagnosticValue, read_diagnostics
 from .errors import ArtifactErrorContextValue, ArtifactResolutionError
 from .geometry import array_geometry
 from .operation_revisions import (
@@ -699,6 +700,11 @@ class ArtifactStatus:
     execution_options: dict[str, Any] | None = None
     created_at_ns: int | None = None
     cytearc_version: str | None = None
+    #: The attributes that hold the artifact's saved diagnostics, as stored,
+    #: empty when it holds none.
+    stored_diagnostics: Mapping[str, Any] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
     @property
     def operation(self) -> str | None:
@@ -720,6 +726,24 @@ class ArtifactStatus:
             return None
         value = self.provenance.get("inputs")
         return dict(value) if isinstance(value, Mapping) else None
+
+    @property
+    def diagnostics(self) -> dict[str, DiagnosticValue]:
+        """The diagnostics that the artifact's operation saved, by name.
+
+        They are the numbers that the operation recorded about what it read,
+        kept, dropped and expected, empty when the operation records none or
+        the artifact does not exist.
+
+        Raises:
+            ValueError: If the operation records diagnostics and the artifact
+                holds none, as artifacts saved before CyteArc recorded them,
+                or other ones; the message names the call that computes it
+                anew.
+        """
+        if not self.exists:
+            return {}
+        return read_diagnostics(self.stored_diagnostics, self.operation, path=self.path)
 
     @property
     def revision(self) -> int | None:
@@ -793,11 +817,22 @@ def require_complete_artifact(
     root: zarr.Group,
     ref: ArtifactRef,
 ) -> ArtifactStatus:
+    """Inspect an artifact that a call reads, refusing one it cannot use.
+
+    Raises:
+        KeyError: If the artifact does not exist.
+        RuntimeError: If it is incomplete.
+        ValueError: If its operation saves diagnostics and it holds none, as
+            artifacts saved before CyteArc recorded them, or other ones; the
+            message names the call that computes it anew.
+    """
     status = inspect_artifact(root, ref)
     if not status.exists:
         raise KeyError(f"Artifact does not exist: {status.path}")
     if not status.complete:
         raise RuntimeError(f"Artifact is incomplete: {status.path}")
+    # Reading the diagnostics checks them against those the operation saves.
+    _ = status.diagnostics
     return status
 
 
@@ -881,6 +916,11 @@ def _artifact_status(group: zarr.Group, ref: ArtifactRef, path: str) -> Artifact
         execution_options=execution_options,
         created_at_ns=created_at_ns,
         cytearc_version=raw_cytearc_version,
+        stored_diagnostics=(
+            {DIAGNOSTICS_ATTRIBUTE: group.attrs[DIAGNOSTICS_ATTRIBUTE]}
+            if DIAGNOSTICS_ATTRIBUTE in group.attrs
+            else {}
+        ),
     )
 
 

@@ -52,7 +52,7 @@ def test_trex_clones_join_10x_cells_through_a_suffix(tmp_path) -> None:
         loaded.cells["clone"].astype(object).where(loaded.cells["clone"].notna(), None)
     )
     assert observed.to_dict() == expected
-    assert store.artifacts.load(ref).attrs["n_unmatched_barcodes"] == 0
+    assert store.artifacts.inspect(ref).diagnostics["unmatchedBarcodes"] == 0
 
 
 def test_celltag_multi_clones_join_cells_of_both_assays(tmp_path) -> None:

@@ -21,6 +21,7 @@ from ..storage.artifact_writer import (
     PlannedArtifact,
     artifact_transaction,
     plan_artifact,
+    planned_diagnostics,
     reused_artifact_group,
 )
 from ..storage.artifacts import (
@@ -29,6 +30,7 @@ from ..storage.artifacts import (
     fingerprint_array,
     fingerprint_stored_arrays,
 )
+from ..storage.diagnostics import DIAGNOSTICS_ATTRIBUTE
 from ..storage.finite_values import requires_finite_values, write_finite_array
 from ..storage.selections import validate_cell_selection
 from ..storage.types import as_zarr_array, as_zarr_group
@@ -223,12 +225,15 @@ def write_cell_data_artifact(
     *,
     fingerprint_payload: bool = False,
     attributes: Mapping[str, Any] | None = None,
+    diagnostics: Mapping[str, Any] | None = None,
     chunk_lengths: Mapping[str, int] | None = None,
 ) -> zarr.Group:
     """Write and publish a planned cell-data artifact, or return the reused one.
 
     ``attributes`` are JSON values stored on the artifact group before it is
-    published. Arrays are chunked in 100,000 rows; ``chunk_lengths`` sets the
+    published. ``diagnostics`` are those that the operation declares, checked
+    before anything is written and saved in the artifact's ``diagnostics``
+    attribute; an operation that declares none passes None. Arrays are chunked in 100,000 rows; ``chunk_lengths`` sets the
     rows of each chunk of named numeric arrays instead, such as packed bytes,
     which read and write faster in chunks of megabytes. Text is stored as
     ``values.astype(str)`` holds it, at the width of the widest value, and is
@@ -239,9 +244,19 @@ def write_cell_data_artifact(
         return reused_artifact_group(root, planned)
     kind = planned.ref.kind
     operation = str(planned.provenance["operation"])
+    if attributes is not None and DIAGNOSTICS_ATTRIBUTE in attributes:
+        raise ValueError(
+            f"{operation} passes its diagnostics as an attribute; pass them as "
+            "diagnostics, which checks them against those it declares"
+        )
+    saved = planned_diagnostics(planned, diagnostics)
+    stored = {
+        **(attributes or {}),
+        **({} if saved is None else {DIAGNOSTICS_ATTRIBUTE: saved}),
+    }
     with artifact_transaction(root, planned) as group:
-        if attributes is not None:
-            group.attrs.update(dict(attributes))
+        if stored:
+            group.attrs.update(stored)
         for name, raw_values in arrays.items():
             values = np.asarray(raw_values)
             if values.ndim < 1:

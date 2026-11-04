@@ -37,6 +37,7 @@ from ...storage.artifact_writer import (
     PlannedArtifact,
     artifact_transaction,
     plan_artifact,
+    planned_diagnostics,
 )
 from ...storage.artifacts import (
     ArtifactRef,
@@ -44,6 +45,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.diagnostics import DIAGNOSTICS_ATTRIBUTE, warn_diagnostics
 from ...storage.layout import get_compressors
 from ...storage.profiles import resolve_storage_profile
 from ...storage.types import as_zarr_array
@@ -113,7 +115,7 @@ from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
-    warn_unmatched_barcodes,
+    unmatched_barcode_rules,
 )
 from .cell_groups import group_columns, within_groups
 from .clone_artifacts import log_clones, plan_clones, write_clones
@@ -800,10 +802,14 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         A cell's ID is its file's ``barcode_prefix``, the barcode and
         ``barcode_suffix``, matched exactly; ``barcode_pattern`` keeps the
         part of each barcode that its ``barcode`` group matches first.
-        Barcodes that match no selected cell are counted, saved in the
-        artifact's ``n_file_barcodes``, ``n_unmatched_barcodes`` and
-        ``unmatched_barcode_examples`` attributes, and named in a warning,
-        which a reused import gives again. A source is identified by the
+        Barcodes that match no selected cell are counted by the cell ID they
+        name in the artifact's diagnostics, which
+        ``ds.artifacts.inspect(ref).diagnostics`` returns: ``fileBarcodes``,
+        ``unmatchedBarcodes``, those that name no cell of the store,
+        ``unselectedBarcodes``, those of cells of the store outside the
+        selection, and up to five examples of each, which show the barcode
+        beside the cell ID it derives. Barcodes of no cell are named in a
+        warning, which a reused import gives again. A source is identified by the
         SHA-256 of each file it reads, so moved files reuse the saved counts
         and the order of the paths does not matter.
 
@@ -956,9 +962,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         )
         planned = self._plan_variant_counts(arguments, cell_selection, n_cells)
         files_text = _FILES_TEXT[0] if len(sources) == 1 else _FILES_TEXT[1]
+        warnings = unmatched_barcode_rules(files_text)
         if planned.reused:
-            warn_unmatched_barcodes(
-                artifact_group(self.zw, planned.ref).attrs, files_text
+            warn_diagnostics(
+                arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
             )
             return planned.ref
         self._require_writable(arguments.operation)
@@ -978,7 +985,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             cell_index,
             item="the selected cells' IDs",
         )
-        join = CellBarcodeJoin(cell_ids, ledger=ledger)
+        join = CellBarcodeJoin(
+            cell_ids, ledger=ledger, store_ids=self.cells._get_array("ids")
+        )
         # The parsed chunks, the sort buffer and the bands share what the
         # ledger's room leaves once the join holds its lookup; the hashes of
         # barcodes that match no cell grow in what the shares leave.
@@ -1080,7 +1089,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             ledger.peak(item, rewritten + band_bytes)
             band_rows = band_bytes // row_bytes
             attributes = {
-                **join.attributes(),
+                DIAGNOSTICS_ATTRIBUTE: planned_diagnostics(planned, join.diagnostics()),
                 "format": formats[0],
                 "count_unit": rules.count_unit,
                 "depth_definition": rules.depth_definition,
@@ -1103,7 +1112,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 call_values=call_values,
                 attributes=attributes,
             )
-        warn_unmatched_barcodes(attributes, files_text)
+        warn_diagnostics(
+            arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
+        )
         logger.info(
             f"Saved the variant counts of {int(listed.sum())} of {n_cells} cells at "
             f"{site_table.n_sites} sites"
@@ -1258,9 +1269,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             },
             invalidate_cache=arguments.invalidate_cache,
             required_attributes=(
-                "n_file_barcodes",
-                "n_unmatched_barcodes",
-                "unmatched_barcode_examples",
                 "format",
                 "count_unit",
                 "depth_definition",

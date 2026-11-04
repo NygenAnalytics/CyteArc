@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -21,6 +21,7 @@ from .artifacts import (
     reusable_artifact_groups,
     serialize_artifact_value,
 )
+from .diagnostics import checked_diagnostics, declared_diagnostics, read_diagnostics
 from .operation_revisions import effective_revision
 from .stores import metadata_workers, run_concurrently
 
@@ -79,6 +80,47 @@ class PlannedArtifact:
     required_arrays: tuple[Any, ...]
     required_attributes: tuple[Any, ...]
     reuse_validator: Callable[[ArtifactRef, zarr.Group], bool] | None
+    #: The keys of the diagnostics that the operation saves with the artifact.
+    diagnostics: tuple[str, ...] = ()
+
+
+def planned_diagnostics(
+    planned: PlannedArtifact, values: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """Check the diagnostics of a planned artifact against those its operation declares.
+
+    Returns:
+        The diagnostics as the artifact saves them, or None for an operation
+        that declares none.
+
+    Raises:
+        ValueError: If the operation declares diagnostics and ``values`` is
+            None or holds other keys or values, or it declares none and
+            ``values`` holds some.
+    """
+    operation = str(planned.provenance["operation"])
+    if not planned.diagnostics:
+        if values:
+            raise ValueError(
+                f"{operation} declares no diagnostics, so its artifact saves none, "
+                f"not {sorted(values)}"
+            )
+        return None
+    if values is None:
+        raise ValueError(
+            f"{operation} saves the diagnostics {', '.join(planned.diagnostics)} "
+            "with every artifact; pass them"
+        )
+    return checked_diagnostics(values, planned.diagnostics, operation=operation)
+
+
+def _holds_diagnostics(group: zarr.Group, operation: str) -> bool:
+    """Whether an artifact holds the diagnostics that its operation declares."""
+    try:
+        read_diagnostics(group.attrs, operation, path=group.path)
+    except ValueError:
+        return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,7 +218,12 @@ def plan_artifact(
     required_attributes: tuple[str | AttributeRequirement, ...] = (),
     reuse_validator: Callable[[ArtifactRef, zarr.Group], bool] | None = None,
 ) -> PlannedArtifact:
-    """Reuse a complete artifact with this exact provenance or plan a new one."""
+    """Reuse a complete artifact with this exact provenance or plan a new one.
+
+    An artifact is reused only with the diagnostics that its operation
+    declares, so an artifact saved without them is computed anew.
+    """
+    diagnostics = declared_diagnostics(operation)
     provenance = make_provenance(
         operation=operation,
         parameters=parameters,
@@ -214,6 +261,8 @@ def plan_artifact(
             not requirement.matches(group) for requirement in attribute_requirements
         ):
             continue
+        if diagnostics and not _holds_diagnostics(group, operation):
+            continue
         if reuse_validator is not None and not reuse_validator(
             candidate,
             group,
@@ -231,6 +280,7 @@ def plan_artifact(
                 required_arrays=required_arrays,
                 required_attributes=required_attributes,
                 reuse_validator=reuse_validator,
+                diagnostics=diagnostics,
             )
         )
     # A random 256-bit ID does not collide; start_artifact refuses an existing path.
@@ -249,6 +299,7 @@ def plan_artifact(
             required_arrays=required_arrays,
             required_attributes=required_attributes,
             reuse_validator=reuse_validator,
+            diagnostics=diagnostics,
         )
     )
 

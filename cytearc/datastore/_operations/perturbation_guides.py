@@ -16,7 +16,6 @@ from ...metadata.arguments import (
 from ...metadata.artifacts import write_cell_data_artifact
 from ...metadata.rows import (
     array_row_selection_parts,
-    iter_metadata_column_blocks,
     read_array_rows_chunkwise,
     read_metadata_rows_chunkwise,
 )
@@ -83,10 +82,12 @@ from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
     fingerprint_strings,
+    inspect_artifact,
     require_complete_artifact,
 )
 from ...storage.geometry import ArrayGeometry, array_geometry
 from ...storage.layout import PROFILE_METADATA_CHUNK
+from ...storage.diagnostics import DiagnosticRule, warn_diagnostics
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
@@ -98,8 +99,8 @@ from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
-    derived_id_bytes,
     join_bytes,
+    store_pass_bytes,
 )
 from .cell_barcodes import barcode_pattern as checked_barcode_pattern
 from .perturbation_store import (
@@ -130,9 +131,6 @@ _GUIDE_CALL_ARRAYS = (
     "guide_codes",
     "guide_umis",
 )
-# Barcodes of the call file that are not selected cells, named in the
-# artifact's attributes and in the messages about them.
-_UNMATCHED_EXAMPLES = 5
 # The bytes of the Python objects that a call holds beside its arrays: the
 # guide IDs, the plans of its artifacts, and the store's metadata it opens.
 _CALL_FIXED_BYTES = 1 << 18
@@ -184,28 +182,34 @@ _MATCH_BYTES_PER_BARCODE = 40
 # The bytes of each barcode with its prefix as Python text, beside its
 # characters, and its pointers.
 _PREFIXED_BYTES_PER_BARCODE = 80
-# The store's cell IDs searched for the barcodes that match no selected cell,
-# a block at a time, and the bytes of each such barcode and of each searched
-# ID beside its fixed-width text.
-_SEARCH_BLOCK_IDS = 1 << 14
-_UNMATCHED_BYTES_PER_BARCODE = 120
-_SEARCHED_BYTES_PER_ID = 120
 # The bytes of each call of the file while its cells are matched and its calls
 # gathered for padding: its cell, whether it matched, and the gathered cell,
 # guide, UMIs and uint32 UMIs.
 _CALL_INPUT_BYTES_PER_CALL = 48
-# The bytes of numbering the IDs that a barcode pattern derives for the
-# barcodes that match no selected cell: each ID's code and pointer, and the
-# numbering's table.
-_NUMBERED_BYTES_PER_BARCODE = 64
 
 
-def _report_barcodes(attributes: Mapping[str, Any], call_file: BarcodeFile) -> None:
-    """Warn about the call file's barcodes that match no cell, and log those outside the selection."""
-    message = _unmatched_barcodes_warning(attributes, call_file)
-    if message is not None:
-        warn(message)
-    message = _unselected_barcodes_message(attributes)
+def _report_barcodes(
+    arguments: GuideCallImportArguments,
+    diagnostics: Mapping[str, Any],
+    call_file: BarcodeFile,
+) -> None:
+    """Warn about the call file's barcodes that match no cell, and log those outside the selection.
+
+    Imported calls report them from the diagnostics they saved, and so do
+    saved calls when an import reuses them.
+    """
+    warn_diagnostics(
+        arguments,
+        diagnostics,
+        (
+            DiagnosticRule(
+                "unmatchedBarcodes",
+                applies=lambda numbers: int(numbers["unmatchedBarcodes"]) > 0,
+                message=lambda numbers: _unmatched_barcodes_warning(numbers, call_file),
+            ),
+        ),
+    )
+    message = _unselected_barcodes_message(diagnostics)
     if message is not None:
         logger.info(message)
 
@@ -223,11 +227,11 @@ def _import_step_bytes(
     """Return the bytes that each step of importing Cell Ranger's calls holds.
 
     The import reads the selected cells' IDs and parses the call file
-    (``"parsing"``), matches its barcodes to the cells (``"matching"``),
-    searches the store's other cells for the barcodes that match none
-    (``"searching"``), pads the calls (``"padding"``), streams the counts to
-    summarise each cell's guides (``"streaming"``), and saves the calls
-    (``"saving"``). Each step's bytes include what the earlier steps keep,
+    (``"parsing"``), matches its barcodes to the cells, reading the store's
+    cell IDs to tell the barcodes of cells outside the selection from those
+    of no cell (``"matching"``), pads the calls (``"padding"``), streams the
+    counts to summarise each cell's guides (``"streaming"``), and saves the
+    calls (``"saving"``). Each step's bytes include what the earlier steps keep,
     but not the cells' positions and the fixed bytes that every step holds.
 
     Args:
@@ -240,9 +244,10 @@ def _import_step_bytes(
         prefix_length: The characters of the barcode prefix that the
             perturbation recipe's check adds to each barcode itself.
         call_file: The import's call file, whose barcodes join the cells
-            through ``CellBarcodeJoin``; matching and searching then count
-            what the join holds and the cell IDs that the file's prefix,
-            suffix and pattern derive, in place of ``prefix_length``.
+            through ``CellBarcodeJoin``; matching then counts what the join
+            holds, its pass over the store's cell IDs included, and the cell
+            IDs that the file's prefix, suffix and pattern derive, in place of
+            ``prefix_length``.
     """
     n_rows = size.n_rows
     n_calls = size.n_calls
@@ -261,29 +266,17 @@ def _import_step_bytes(
         )
         matched = derived + _MATCH_BYTES_PER_BARCODE * n_rows
     else:
-        # The barcodes' cell IDs, which the file's options derive, and what
-        # the join holds while it matches them; the file's bytes bound the
-        # barcodes' characters.
-        derived = derived_id_bytes(call_file, n_rows, size.n_bytes)
-        matched = join_bytes(call_file, n_rows, size.n_bytes)
-        if call_file.barcode_pattern is not None:
-            # A pattern can derive one ID from two barcodes, so the IDs of
-            # the barcodes that match no selected cell are numbered before
-            # they are searched: a code and a pointer for each, and the
-            # numbering's table.
-            derived += _NUMBERED_BYTES_PER_BARCODE * n_rows
+        # What the join holds while it matches the barcodes, the cell IDs
+        # that the file's options derive included, whose characters the
+        # file's bytes bound, and its pass over the store's cell IDs, which
+        # tells the barcodes of cells outside the selection from those of no
+        # cell.
+        matched = join_bytes(call_file, n_rows, size.n_bytes) + store_pass_bytes(
+            id_array
+        )
     parsed = size.parsed_bytes() + 8 * n_calls + 8 * n_rows
     parsing = ids + size.parse_bytes()
     matching = ids + parsed + matched + n_cells * (_ID_BYTES_PER_CELL + id_width)
-    # A block of the store's cell IDs at a time, beside the barcodes that match
-    # no selected cell.
-    searching = (
-        parsed
-        + derived
-        + _UNMATCHED_BYTES_PER_BARCODE * n_rows
-        + fixed
-        + _SEARCH_BLOCK_IDS * (_SEARCHED_BYTES_PER_ID + 2 * id_width * 4)
-    )
     padding = (
         parsed
         + _CALL_INPUT_BYTES_PER_CALL * n_calls
@@ -294,7 +287,6 @@ def _import_step_bytes(
     return {
         "parsing": parsing,
         "matching": matching,
-        "searching": searching,
         "padding": padding,
         "streaming": streaming,
         "saving": saving,
@@ -626,22 +618,18 @@ _GAUSSIAN_MULTIPLE_SHARE = 0.5
 
 
 def _unmatched_barcodes_warning(
-    attributes: Mapping[str, Any], call_file: BarcodeFile
-) -> str | None:
-    """Name the call file's barcodes that match no cell of the store, or return None.
+    diagnostics: Mapping[str, Any], call_file: BarcodeFile
+) -> str:
+    """Name the call file's barcodes that match no cell of the store.
 
     Imported calls warn with this message, and so do saved calls when an
     import reuses them.
 
     Args:
-        attributes: The attributes of the imported calls:
-            ``n_file_barcodes``, ``n_unmatched_barcodes`` and
-            ``unmatched_barcode_examples``.
+        diagnostics: The diagnostics of the imported calls: ``fileBarcodes``,
+            ``unmatchedBarcodes`` and ``unmatchedBarcodeExamples``.
         call_file: The call file, whose options the message names.
     """
-    n_unmatched = int(attributes["n_unmatched_barcodes"])
-    if not n_unmatched:
-        return None
     if call_file.barcode_suffix is None and call_file.barcode_pattern is None:
         rule = (
             "A cell matches a barcode when its ID is barcode_prefix followed by "
@@ -655,17 +643,18 @@ def _unmatched_barcodes_warning(
             "check these options against the cell IDs."
         )
     return (
-        f"{n_unmatched} of {int(attributes['n_file_barcodes'])} barcodes of the "
-        "call file match no cell of the store, for example "
+        f"{int(diagnostics['unmatchedBarcodes'])} of "
+        f"{int(diagnostics['fileBarcodes'])} barcodes of the call file match no "
+        "cell of the store, for example "
         + ", ".join(
-            repr(str(value)) for value in attributes["unmatched_barcode_examples"]
+            repr(str(value)) for value in diagnostics["unmatchedBarcodeExamples"]
         )
         + ". "
         + rule
     )
 
 
-def _unselected_barcodes_message(attributes: Mapping[str, Any]) -> str | None:
+def _unselected_barcodes_message(diagnostics: Mapping[str, Any]) -> str | None:
     """Name the call file's barcodes of cells outside the selection, or return None.
 
     Imported calls log this message, and so do saved calls when an import
@@ -673,19 +662,18 @@ def _unselected_barcodes_message(attributes: Mapping[str, Any]) -> str | None:
     cells, such as those that QC filtering removed.
 
     Args:
-        attributes: The attributes of the imported calls:
-            ``n_file_barcodes``, ``n_unselected_barcodes`` and
-            ``unselected_barcode_examples``.
+        diagnostics: The diagnostics of the imported calls: ``fileBarcodes``,
+            ``unselectedBarcodes`` and ``unselectedBarcodeExamples``.
     """
-    n_unselected = int(attributes["n_unselected_barcodes"])
+    n_unselected = int(diagnostics["unselectedBarcodes"])
     if not n_unselected:
         return None
     return (
-        f"{n_unselected} of {int(attributes['n_file_barcodes'])} barcodes of the "
+        f"{n_unselected} of {int(diagnostics['fileBarcodes'])} barcodes of the "
         "call file are cells of the store outside the selected cells, for "
         "example "
         + ", ".join(
-            repr(str(value)) for value in attributes["unselected_barcode_examples"]
+            repr(str(value)) for value in diagnostics["unselectedBarcodeExamples"]
         )
         + "; the import labels the selected cells only"
     )
@@ -977,53 +965,18 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             reads.append(fixed + (per_row + _SAMPLE_BYTES_PER_CELL) * n_cells)
         return int(_CALL_FIXED_BYTES + 16 * n_cells + max(reads))
 
-    def _store_cell_ids_among(self, ids: np.ndarray) -> np.ndarray:
-        """Return which of ``ids``, distinct texts, are IDs of cells of the store.
-
-        The store's cell IDs are read a block at a time, so the search holds
-        one block beside ``ids``.
-        """
-        found = np.zeros(len(ids), dtype=bool)
-        lookup = pd.Index(ids)
-        for block in iter_metadata_column_blocks(
-            self.cells, "ids", block_rows=_SEARCH_BLOCK_IDS
-        ):
-            positions = lookup.get_indexer(np.asarray(block).astype(str))
-            found[positions[positions >= 0]] = True
-        return found
-
-    def _unselected_barcodes(
-        self, call_file: BarcodeFile, barcodes: np.ndarray
-    ) -> np.ndarray:
-        """Return which barcodes of a call file name a cell of the store.
-
-        The barcodes match no selected cell. A barcode that the file's
-        pattern does not match names no cell.
-        """
-        ids, named = call_file.cell_ids(barcodes)
-        found = np.zeros(len(barcodes), dtype=bool)
-        if call_file.barcode_pattern is None:
-            # A prefix and a suffix keep distinct barcodes distinct.
-            found[:] = self._store_cell_ids_among(ids)
-            return found
-        # A pattern can derive one ID from two barcodes.
-        codes, distinct = pd.factorize(ids[named])
-        found[named] = self._store_cell_ids_among(np.asarray(distinct, dtype=object))[
-            codes
-        ]
-        return found
-
     def _write_guide_calls(
         self,
         planned: PlannedArtifact,
         arrays: GuideCallArrays,
         summary: GuideCountSummary,
         guide_ids: np.ndarray,
-        attributes: Mapping[str, Any] | None = None,
+        diagnostics: Mapping[str, Any] | None = None,
     ) -> None:
         """Save each cell's calls and its top guide, top UMIs and guide UMIs.
 
-        A cell without guide UMIs has an empty top guide.
+        A cell without guide UMIs has an empty top guide. Imported calls save
+        the join's ``diagnostics``; called ones save none.
         """
         top_guide = np.full(len(arrays.values), "", dtype=object)
         counted = summary.top_code >= 0
@@ -1042,7 +995,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 "guide_umis": arrays.guide_umis,
                 "guides": guide_ids,
             },
-            attributes=attributes,
+            diagnostics=diagnostics,
         )
 
     @validation_scoped
@@ -1076,12 +1029,14 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         underscores, so import each sample's file with its own prefix and a
         cell selection of that sample; a selection whose cells the file cannot
         reach is refused, since its other cells would be labelled
-        ``"Negative"``. Barcodes that match no cell of the store are counted
-        in the artifact's ``n_unmatched_barcodes`` and
-        ``unmatched_barcode_examples`` attributes and named in a warning, and
-        barcodes of cells outside the selection, such as cells that QC
-        filtering removed, in ``n_unselected_barcodes`` and
-        ``unselected_barcode_examples`` and in a log message; a reused import
+        ``"Negative"``. The artifact's diagnostics, which
+        ``ds.artifacts.inspect(calls).diagnostics`` returns, count the file's
+        barcodes by the cell ID they name in ``fileBarcodes``, those that
+        match no cell of the store in ``unmatchedBarcodes``, which a warning
+        names, and those of cells outside the selection, such as cells that
+        QC filtering removed, in ``unselectedBarcodes``, which a log message
+        names; ``unmatchedBarcodeExamples`` and ``unselectedBarcodeExamples``
+        show up to five of each beside the cell ID it derives. A reused import
         reports both again. Two barcodes that name one cell raise
         ``ValueError``.
 
@@ -1187,17 +1142,12 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             assay.name,
             n_cells,
             len(guide_ids),
-            required_attributes=(
-                "n_file_barcodes",
-                "n_unmatched_barcodes",
-                "unmatched_barcode_examples",
-                "n_unselected_barcodes",
-                "unselected_barcode_examples",
-            ),
         )
         if planned.reused:
             # Saved calls report their barcodes as they did when imported.
-            _report_barcodes(artifact_group(self.zw, planned.ref).attrs, call_file)
+            _report_barcodes(
+                arguments, inspect_artifact(self.zw, planned.ref).diagnostics, call_file
+            )
             return planned.ref
 
         counts = assay.rawData[cell_index, :]
@@ -1251,29 +1201,18 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             + size.parsed_bytes()
             + guide_positions.nbytes,
         )
-        join = CellBarcodeJoin(cell_ids, ledger=ledger)
+        # A barcode that matches no selected cell may be a cell of the store
+        # outside the selection, such as one that QC filtering removed, which
+        # the join tells from a barcode of no cell by the store's cell IDs.
+        join = CellBarcodeJoin(
+            cell_ids, ledger=ledger, store_ids=self.cells._get_array("ids")
+        )
         row_cells = join.cells(call_file, file_calls.barcodes)
         _refuse_shared_cells(row_cells, file_calls.barcodes, cell_ids)
-        del join, cell_ids
-        unmatched = np.flatnonzero(row_cells < 0)
-        # A barcode that matches no selected cell may be a cell of the store
-        # outside the selection, such as one that QC filtering removed.
-        unselected = (
-            self._unselected_barcodes(call_file, file_calls.barcodes[unmatched])
-            if len(unmatched)
-            else np.zeros(0, dtype=bool)
-        )
-        # The attributes hold what the messages name, so that saved calls
+        # The diagnostics hold what the messages name, so that saved calls
         # report their barcodes again as they did.
-        attributes: dict[str, Any] = {"n_file_barcodes": int(len(file_calls.barcodes))}
-        for kind, rows in (
-            ("unmatched", unmatched[~unselected]),
-            ("unselected", unmatched[unselected]),
-        ):
-            attributes[f"n_{kind}_barcodes"] = int(len(rows))
-            attributes[f"{kind}_barcode_examples"] = [
-                str(value) for value in file_calls.barcodes[rows[:_UNMATCHED_EXAMPLES]]
-            ]
+        diagnostics = join.diagnostics()
+        del join, cell_ids
         call_cells = row_cells[file_calls.rows]
         matched_calls = call_cells >= 0
         arrays = guide_call_arrays(
@@ -1302,8 +1241,10 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             scratch_bytes_per_row=_SUMMARY_BYTES_PER_ROW,
         )
         summary = summarize_guide_counts(blocks, n_cells, len(guide_ids))
-        self._write_guide_calls(planned, arrays, summary, guide_ids, attributes)
-        _report_barcodes(attributes, call_file)
+        self._write_guide_calls(planned, arrays, summary, guide_ids, diagnostics)
+        _report_barcodes(
+            arguments, inspect_artifact(self.zw, planned.ref).diagnostics, call_file
+        )
         logger.info(
             f"Imported guide calls of {int(np.count_nonzero(arrays.n_guides))} of "
             f"{n_cells} cells"

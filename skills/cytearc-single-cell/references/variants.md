@@ -39,8 +39,8 @@ Import each cell's counts of each allele at variant sites, from mitochondrial li
 ```python
 cells = ds.snapshot_cell_selection("I")
 counts = ds.variants.import_counts("mgatk/final", cell_selection=cells)
-attributes = ds.artifacts.load(counts).attrs
-print(attributes["n_unmatched_barcodes"], "of", attributes["n_file_barcodes"], "barcodes unmatched")
+joined = ds.artifacts.inspect(counts).diagnostics
+print(joined["unmatchedBarcodes"], "of", joined["fileBarcodes"], "barcodes name no cell")
 ds.plots.variant_depth(counts, group_by="sample")
 deep = ds.select_cells(counts, low=10)
 
@@ -106,7 +106,7 @@ clones = ds.variants.genotype_clones(genotypes, sites=share[share.between(0.15, 
 
 ## Checks
 
-- Check `n_unmatched_barcodes` first: a wrong prefix, suffix or pattern leaves every cell unlisted.
+- Check `unmatchedBarcodes` in `ds.artifacts.inspect(counts).diagnostics` first: a wrong prefix, suffix or pattern leaves every cell unlisted; `unselectedBarcodes` counts the barcodes of store cells outside the selection.
 - Check `.contigs`: mgatk picks hg19's 16,571-bp sequence when the BAM's contig has that length, and nf-MiTo's `refAllele.txt` names no contig, which then never combines with a named one.
 - Look at the depth plot before calling variants: most cells should cover most positions in mtscATAC-seq, while MAESTER and targeted panels cover few sites deeply.
 - Frequencies need the depth: never treat a missing depth row as frequency 0.

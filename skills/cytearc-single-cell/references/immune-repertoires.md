@@ -13,7 +13,7 @@ Import the T cell and B cell receptor contigs of single-cell immune profiling (1
 - Contig fields keep their AIRR names; Cell Ranger's columns are renamed: `barcode` to `cell_id`, `contig_id` to `sequence_id`, `chain` to `locus`, `v_gene`/`d_gene`/`j_gene`/`c_gene` to `v_call`/`d_call`/`j_call`/`c_call`, `cdr3`/`cdr3_nt` to `junction_aa`/`junction` (Cell Ranger's CDR3 includes the conserved C and F/W), `umis` to `umi_count`, `reads` to `consensus_count`, and region columns such as `fwr1`/`fwr1_nt` to `fwr1_aa`/`fwr1`. `cytearc.repertoire.FIELDS` lists the kept fields; other columns are dropped.
 - Required per file: a contig ID, `locus` or gene calls (an AIRR file without `locus` has it inferred from the calls that all name one locus), `junction_aa` and `productive`. AIRR files also need `cell_id`.
 - A cell ID is `barcode_prefix` + barcode + `barcode_suffix`, matched exactly; `barcode_pattern` (a regex with a named group `barcode`) keeps part of each barcode first. Each takes one value for every file or a list with one per file. Merged stores name cells `<sample>__<barcode>`. The rules are those of `clones.import_clones` and `perturbation.import_guide_calls`.
-- Contigs and barcodes outside the selection are counted (`n_file_contigs`, `n_unmatched_contigs`, `n_file_barcodes`, `n_unmatched_barcodes`, `unmatched_barcode_examples` attributes) and named in a warning, which a reused import gives again. Selected cells without contigs are kept as `"no IR"`.
+- Contigs outside the selection are counted (`n_file_contigs`, `n_unmatched_contigs` attributes), and barcodes in the join's diagnostics (`ds.artifacts.inspect(ref).diagnostics`: `fileBarcodes`, `unmatchedBarcodes` naming no cell of the store, `unselectedBarcodes` naming store cells outside the selection, and up to five examples of each as `"barcode -> cell ID"`); only barcodes of no cell are named in a warning, which a reused import gives again. Selected cells without contigs are kept as `"no IR"`.
 - Reuse follows each file's format, bytes, prefix, suffix and pattern, in any order; a moved file reuses, an edited file re-imports, `invalidate_cache=True` imports again. Up to 3x the encoded contigs plus what each selected cell holds and the cells' IDs as Python strings at the peak, charged to `mem_budget` before anything is written; a charged step refuses with `MemoryBudgetError` (a `MemoryError`), whose `needed_bytes` is the budget that passes that step. Encoded contigs take about 130 bytes each in Cell Ranger files without region sequences, 800 with them, 1,500 in AIRR files with sequences and alignments (about 1.2 GB per million cells with two contigs each of the first kind).
 - Chains (scirpy's receptor model): a contig counts when it has a locus of a receptor chain, a `junction_aa`, is productive (`productive_only=True`, default) and is not flagged `is_cell` or `high_confidence` False. Ranking within each arm: `umi_count`, `duplicate_count`, `consensus_count` (most first, missing as 0), then `junction` and `junction_aa` (later in sort order first), then contig ID. Arms: VJ (TRA, TRG, IGK, IGL) and VDJ (TRB, TRD, IGH). Up to two chains per arm fill `VJ_1`, `VJ_2`, `VDJ_1`, `VDJ_2`; more than two in an arm makes the cell `"multichain"`.
 - Labels, from the slots only:
@@ -60,7 +60,8 @@ receptors = ds.repertoire.import_receptors(
     cell_selection=cells,
 )
 attributes = ds.artifacts.load(receptors).attrs
-print(attributes["n_file_contigs"], attributes["n_unmatched_contigs"], attributes["unmatched_barcode_examples"])
+joined = ds.artifacts.inspect(receptors).diagnostics
+print(attributes["n_file_contigs"], attributes["n_unmatched_contigs"], joined["unmatchedBarcodeExamples"])
 
 table = ds.repertoire.load_receptors(receptors, fields=["junction_aa", "umi_count"])
 print(table.cells["receptor_type"].value_counts())
@@ -120,7 +121,7 @@ airr = ds.repertoire.import_receptors("airr_rearrangement.tsv", cell_selection=c
 
 ## Checks
 
-- Read `n_unmatched_contigs`, `n_unmatched_barcodes` and the warning. A few percent of barcodes outside the expression cells is usual (V(D)J and expression call cells separately); most barcodes unmatched means a wrong `barcode_prefix`, or barcodes with another suffix than the cell IDs (`barcode_suffix`, `barcode_pattern`).
+- Read `n_unmatched_contigs`, the diagnostics' `unmatchedBarcodes` and `unselectedBarcodes`, and the warning. A few percent of barcodes outside the expression cells is usual (V(D)J and expression call cells separately); barcodes of cells that QC removed count as unselected; most barcodes unmatched means a wrong `barcode_prefix`, or barcodes with another suffix than the cell IDs (`barcode_suffix`, `barcode_pattern`).
 - `"no IR"` among cells whose expression marks them as T or B cells points to a shallow V(D)J library; `"no IR"` monocytes and NK cells are expected.
 - `"orphan VJ"`/`"orphan VDJ"` cells lost a chain in capture and still carry clonal information. `"extra VJ"` (two alpha or two light chains) is often biological. `"extra VDJ"`, `"two full chains"`, `"multichain"` and `"ambiguous"` are more often doublets or ambient chains: count them per sample and compare with `qc.doublets` before removing anything.
 - An `"ambiguous"` T cell with a heavy chain, or B cell with a beta chain: scattered in expression clusters points to ambient contigs, a cluster of its own to doublets.

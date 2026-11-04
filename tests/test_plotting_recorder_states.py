@@ -139,7 +139,7 @@ def test_alleles_without_records_are_refused(tmp_path):
     path.write_text(
         "intID,cellBC,RNF2,HEK3,EMX1,UMI,readCount\nintID1,c9,ACAGT,None,None,3,30\n"
     )
-    with pytest.warns(UserWarning, match="match no selected cell"):
+    with pytest.warns(UserWarning, match="match no cell of the store"):
         ref = store.clones.import_alleles(
             path, cell_selection=store.snapshot_cell_selection()
         )

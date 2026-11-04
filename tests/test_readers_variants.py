@@ -1268,7 +1268,7 @@ def test_gift_per_umi_tables_on_geo_count_umis_and_reads(tmp_path) -> None:
         store.artifacts.list(kind="variant_counts", scope="datastore")[0]
     ).inputs["sources"][0]["same_gapfills"]
     assert "PPM1D c.1636_1639" in same
-    assert group.attrs["n_unmatched_barcodes"] == 0
+    assert group.attrs["diagnostics"]["unmatchedBarcodes"] == 0
 
 
 @pytest.mark.integration

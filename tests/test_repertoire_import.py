@@ -22,6 +22,7 @@ from cytearc.repertoire import ImmuneReceptors
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
     CELLRANGER_HEADER,
+    assert_joined,
     N_RECEPTOR_CELLS,
     TCR_ROWS,
     airr_file,
@@ -190,9 +191,9 @@ def test_import_classifies_each_cells_chains(tmp_path) -> None:
     assert group.attrs["n_file_contigs"] == 17
     assert group.attrs["n_unmatched_contigs"] == 1
     # cell0 to cell6 and outside-1, each counted once across the files.
-    assert group.attrs["n_file_barcodes"] == 8
-    assert group.attrs["n_unmatched_barcodes"] == 1
-    assert group.attrs["unmatched_barcode_examples"] == ["outside-1"]
+    assert_joined(
+        store.artifacts.inspect(ref).diagnostics, n_file=8, unmatched=["outside-1"]
+    )
 
 
 def test_unmatched_barcodes_are_named_in_a_warning(tmp_path) -> None:
@@ -203,8 +204,9 @@ def test_unmatched_barcodes_are_named_in_a_warning(tmp_path) -> None:
         )
     # cell0, cell1, cell2, cell3, cell5 and outside-1.
     assert list(messages) == [
-        "1 of 6 barcodes of the contig file match no selected cell, for example "
-        "'outside-1'. Check barcode_prefix and cell_selection."
+        "1 of 6 barcodes of the contig file match no cell of the store, for example "
+        "'outside-1'. Check barcode_prefix, barcode_suffix and barcode_pattern "
+        "against the store's cell IDs."
     ]
     attributes = store.artifacts.load(ref).attrs
     assert (attributes["n_file_contigs"], attributes["n_unmatched_contigs"]) == (12, 1)
@@ -222,7 +224,10 @@ def test_unmatched_barcodes_count_once_per_sample(tmp_path) -> None:
     )
     attributes = store.artifacts.load(ref).attrs
     barcodes = {row.split(",")[0] for row in TCR_ROWS}
-    assert attributes["n_unmatched_barcodes"] == len(barcodes) + 1
+    assert (
+        store.artifacts.inspect(ref).diagnostics["unmatchedBarcodes"]
+        == len(barcodes) + 1
+    )
     assert attributes["n_unmatched_contigs"] == len(TCR_ROWS) + 1
 
 
@@ -464,7 +469,8 @@ def test_a_file_without_contig_rows_leaves_every_cell_without_a_receptor(
         assert loaded.cells["n_contigs"].tolist() == [0] * N_CELLS
         assert len(loaded.chains) == 0
         attributes = store.artifacts.load(ref).attrs
-        assert (attributes["n_file_contigs"], attributes["n_file_barcodes"]) == (0, 0)
+        assert attributes["n_file_contigs"] == 0
+        assert_joined(store.artifacts.inspect(ref).diagnostics, n_file=0)
         assert list(messages) == []
 
 
@@ -954,12 +960,14 @@ def test_every_encoding_recovers_the_receptors_of_the_truth(
         int(counts.get(cell, 0)) for cell in range(len(expected))
     ]
     attributes = truth_store.store.artifacts.load(ref).attrs
-    assert attributes["n_unmatched_barcodes"] == N_OUTSIDE
+    diagnostics = truth_store.store.artifacts.inspect(ref).diagnostics
+    assert diagnostics["unmatchedBarcodes"] == N_OUTSIDE
+    assert diagnostics["unselectedBarcodes"] == 0
     assert attributes["n_unmatched_contigs"] == N_OUTSIDE
     assert attributes["n_file_contigs"] == len(listed)
     assert len(messages) == 1 and messages[0].startswith(
-        f"{N_OUTSIDE} of {attributes['n_file_barcodes']} barcodes of the contig "
-        "files match no selected cell"
+        f"{N_OUTSIDE} of {diagnostics['fileBarcodes']} barcodes of the contig "
+        "files match no cell of the store"
     )
 
 
@@ -991,8 +999,8 @@ def test_a_merged_store_needs_each_samples_prefix(truth_store, tmp_path) -> None
     paths = _write_truth(tmp_path, "filtered")
     with collect_warnings() as messages:
         ref = store.repertoire.import_receptors(paths, cell_selection=every_cell(store))
-    attributes = store.artifacts.load(ref).attrs
+    diagnostics = store.artifacts.inspect(ref).diagnostics
     # Without prefixes no barcode names a cell of the merged store.
-    assert attributes["n_unmatched_barcodes"] == attributes["n_file_barcodes"]
+    assert diagnostics["unmatchedBarcodes"] == diagnostics["fileBarcodes"]
     assert set(store.repertoire.load_receptors(ref).cells["receptor_type"]) == {"no IR"}
-    assert "Check barcode_prefix and cell_selection" in messages[0]
+    assert "Check barcode_prefix, barcode_suffix and barcode_pattern" in messages[0]

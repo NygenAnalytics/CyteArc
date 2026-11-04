@@ -185,14 +185,16 @@ def test_import_saves_calls_and_count_summaries(store, template, tmp_path) -> No
         [2, 3],
         [1, -1],
     ]
-    group = store.artifacts.load(ref)
-    assert group.attrs["n_file_barcodes"] == 7
     # cell6 is a cell of the store outside the selection, and no cell is
-    # named outside-1.
-    assert group.attrs["n_unmatched_barcodes"] == 1
-    assert group.attrs["unmatched_barcode_examples"] == ["outside-1"]
-    assert group.attrs["n_unselected_barcodes"] == 1
-    assert group.attrs["unselected_barcode_examples"] == ["cell6"]
+    # named outside-1. Each barcode is its cell's ID, which its example shows
+    # once.
+    assert status.diagnostics == {
+        "fileBarcodes": 7,
+        "unmatchedBarcodes": 1,
+        "unselectedBarcodes": 1,
+        "unmatchedBarcodeExamples": ["outside-1"],
+        "unselectedBarcodeExamples": ["cell6"],
+    }
     assert "CRISPR_n_guides" not in store.cells.columns
 
 
@@ -256,6 +258,7 @@ def test_a_barcode_prefix_joins_barcodes_to_cell_ids(store, template, tmp_path) 
         "cell_barcode,num_features,feature_call,num_umis\n"
         "0,1,CRISPR0,30\n"
         "5,1,CRISPR2,40\n"
+        "6,1,CRISPR0,4\n"
     )
     ref = store.perturbation.import_guide_calls(
         _call_file(tmp_path, text),
@@ -265,7 +268,12 @@ def test_a_barcode_prefix_joins_barcodes_to_cell_ids(store, template, tmp_path) 
 
     cells = store.perturbation.load_guide_calls(ref).cells
     assert cells.loc[["cell0", "cell5"], "call"].tolist() == ["CRISPR0", "CRISPR2"]
-    assert store.artifacts.load(ref).attrs["n_unmatched_barcodes"] == 0
+    # Barcode 6 names cell6, a cell of the store outside the selection, and
+    # its example shows the barcode beside the cell ID it derives.
+    diagnostics = store.artifacts.inspect(ref).diagnostics
+    assert diagnostics["unmatchedBarcodes"] == 0
+    assert diagnostics["unselectedBarcodes"] == 1
+    assert diagnostics["unselectedBarcodeExamples"] == ["6 -> cell6"]
 
 
 def _logged_import(
@@ -347,9 +355,9 @@ def test_barcodes_of_unselected_cells_need_no_warning(
         "selected cells, for example 'cell6'; the import labels the selected "
         "cells only"
     ]
-    attributes = store.artifacts.load(calls).attrs
-    assert attributes["n_unmatched_barcodes"] == 0
-    assert attributes["n_unselected_barcodes"] == 1
+    diagnostics = store.artifacts.inspect(calls).diagnostics
+    assert diagnostics["unmatchedBarcodes"] == 0
+    assert diagnostics["unselectedBarcodes"] == 1
 
 
 def test_an_empty_barcode_prefix_is_no_prefix(store, template, tmp_path) -> None:

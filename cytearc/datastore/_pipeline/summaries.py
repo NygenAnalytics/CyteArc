@@ -2,10 +2,13 @@
 
 Each summary is computed from the artifacts that the stage produced, so a
 reused artifact reports the same numbers as a computed one. Summaries read
-attributes and bounded blocks of small arrays, never a matrix.
+attributes, the diagnostics that artifacts saved and bounded blocks of small
+arrays, never a matrix. An output of a kind without a summary of its own
+reports the diagnostics that its operation saved.
 """
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -309,7 +312,10 @@ def _guide_thresholds(group: Any) -> dict[str, Any]:
     }
 
 
-def _guide_calls(group: Any) -> dict[str, Any]:
+def _guide_calls(
+    group: Any, diagnostics: Mapping[str, Any] = MappingProxyType({})
+) -> dict[str, Any]:
+    """Count the cells of each call and the called guides; imported calls add their join's counts."""
     arrays = _arrays(group, "n_guides", "guide_codes", "guides")
     if arrays is None:
         return {}
@@ -331,15 +337,12 @@ def _guide_calls(group: Any) -> dict[str, Any]:
         "multiple": int(calls[2]),
         "calledGuides": int(np.count_nonzero(called)),
     }
-    # Imported calls count the barcodes of Cell Ranger's file: those that
-    # match no cell of the store, and those of cells outside the run's cells.
-    for key, name in (
-        ("fileBarcodes", "n_file_barcodes"),
-        ("unmatchedBarcodes", "n_unmatched_barcodes"),
-        ("unselectedBarcodes", "n_unselected_barcodes"),
-    ):
-        if name in group.attrs:
-            summary[key] = int(group.attrs[name])
+    # Imported calls saved their counts of the barcodes of Cell Ranger's file:
+    # those that match no cell of the store, and those of cells outside the
+    # run's cells.
+    for key in ("fileBarcodes", "unmatchedBarcodes", "unselectedBarcodes"):
+        if key in diagnostics:
+            summary[key] = int(diagnostics[key])
     return summary
 
 
@@ -610,11 +613,16 @@ _BY_KIND: Mapping[str, Callable[[Any], dict[str, Any]]] = {
     "hto_identity": _hashtags,
     "cell_calling": _cell_calling,
     "guide_thresholds": _guide_thresholds,
-    "guide_calls": _guide_calls,
     "perturbation_labels": _perturbation_labels,
     "perturbation_signature": _signature,
     "perturbation_profiles": _profiles,
     "perturbation_clusters": _perturbation_clusters,
+}
+# The summaries that also read the diagnostics that the artifact saved.
+_BY_KIND_WITH_DIAGNOSTICS: Mapping[
+    str, Callable[[Any, Mapping[str, Any]], dict[str, Any]]
+] = {
+    "guide_calls": _guide_calls,
 }
 # The summaries that also read the artifact's recorded parameters.
 _BY_KIND_WITH_PARAMETERS: Mapping[
@@ -635,8 +643,10 @@ def summarize_stage(
     """Return the diagnostics of one completed stage, keyed by its outputs.
 
     A stage with one summarized output records that summary itself; one with
-    several records a summary per output key. Metadata snapshots and ANN
-    indexes have none, so a stage that produced only those records None.
+    several records a summary per output key. An output of a kind without a
+    summary of its own reports the diagnostics that its operation saved, and
+    one whose operation saves none, such as a metadata snapshot or an ANN
+    index, reports nothing, so a stage that produced only those records None.
     """
     del stage
     root = store.zw
@@ -649,11 +659,17 @@ def summarize_stage(
             summary = _BY_KIND_WITH_PARAMETERS[ref.kind](
                 group, inspect_artifact(root, ref).parameters or {}
             )
+        elif ref.kind in _BY_KIND_WITH_DIAGNOSTICS:
+            summary = _BY_KIND_WITH_DIAGNOSTICS[ref.kind](
+                group, inspect_artifact(root, ref).diagnostics
+            )
         else:
             summarize = _BY_KIND.get(ref.kind)
-            if summarize is None:
-                continue
-            summary = summarize(group)
+            summary = (
+                inspect_artifact(root, ref).diagnostics
+                if summarize is None
+                else summarize(group)
+            )
         if summary:
             summaries[key] = summary
     if not summaries:

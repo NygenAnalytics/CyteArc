@@ -1160,6 +1160,35 @@ def test_an_import_after_qc_filtering_warns_only_about_unknown_barcodes(
     assert _stages(run)["guide_calling"]["warnings"] == []
 
 
+def test_the_run_report_shows_the_diagnostics_that_the_calls_saved(
+    runs, tmp_path
+) -> None:
+    from cytearc.storage.artifacts import artifact_group
+
+    store = _copy(runs.location, tmp_path)
+    path = _call_file(tmp_path / "protospacer_calls_per_cell.csv")
+    settings = {"efficiency": False, "edistance": False, **HEAD}
+    run = store.pipeline.perturbation(
+        labels=LABELS, guide_calling={"path": path}, **settings
+    )
+    keys = ("fileBarcodes", "unmatchedBarcodes", "unselectedBarcodes")
+    saved = store.artifacts.inspect(run["guide_calls"]).diagnostics
+    summary = _stages(run)["guide_calling"]["summary"]
+    assert {key: summary[key] for key in keys} == {key: saved[key] for key in keys}
+    # Diagnostics that the calls saved with other numbers are what a reused
+    # stage reports, so the summary reads them rather than counting again.
+    artifact_group(store.zw, run["guide_calls"]).attrs["diagnostics"] = {
+        **saved,
+        "fileBarcodes": 12345,
+    }
+    again = store.pipeline.perturbation(
+        labels=LABELS, guide_calling={"path": path}, **settings
+    )
+    assert _reused(again)["guide_calls"]
+    assert _stages(again)["guide_calling"]["summary"]["fileBarcodes"] == 12345
+    assert '"fileBarcodes": 12345' in again.report(format="markdown")
+
+
 def test_one_call_file_reaches_the_cells_of_one_sample(screen, tmp_path) -> None:
     location = tmp_path / "merged.zarr"
     shutil.copytree(screen, location)

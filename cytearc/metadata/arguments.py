@@ -11,6 +11,29 @@ from ..graph.arguments import (
 )
 from ..storage.artifacts import ArtifactRef
 
+#: The diagnostics of joining a file's barcodes to the selected cells, which
+#: every importer of barcodes saves: the distinct barcodes, counted by the
+#: cell ID they name; those that name no cell of the store; those that name a
+#: cell of the store outside the selection; and up to five examples of each.
+JOIN_DIAGNOSTICS: tuple[str, ...] = (
+    "fileBarcodes",
+    "unmatchedBarcodes",
+    "unselectedBarcodes",
+    "unmatchedBarcodeExamples",
+    "unselectedBarcodeExamples",
+)
+#: The diagnostics that the clone writer saves with the clones of every
+#: clone source: the cells given a clone, and the share of them that the
+#: largest clone holds.
+CLONE_DIAGNOSTICS: tuple[str, ...] = ("cellsWithClone", "largestCloneShare")
+#: The diagnostics of grouping cells for a summary: the measured cells
+#: without a clone, the cells with a clone but no group, and the groups.
+GROUPING_DIAGNOSTICS: tuple[str, ...] = (
+    "cellsWithoutClone",
+    "cellsWithoutGroup",
+    "groups",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class UmapArguments(OperationArguments):
@@ -452,6 +475,8 @@ class CellCallingArguments(OperationArguments):
 class GuideCallImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_guide_calls"
     artifact_kind: ClassVar[str] = "guide_calls"
+    diagnostics: ClassVar[tuple[str, ...]] = JOIN_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.perturbation.import_guide_calls"
 
     cell_selection: ArtifactRef = artifact_input()
     # The guide counts give each cell's top guide and guide UMIs.
@@ -470,6 +495,8 @@ class GuideCallImportArguments(OperationArguments):
 class CloneImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_clones"
     artifact_kind: ClassVar[str] = "clones"
+    diagnostics: ClassVar[tuple[str, ...]] = (*JOIN_DIAGNOSTICS, *CLONE_DIAGNOSTICS)
+    call: ClassVar[str | None] = "ds.clones.import_clones"
 
     cell_selection: ArtifactRef = artifact_input()
     # Each clone file's format, the SHA-256 of its bytes and of the files it
@@ -485,6 +512,8 @@ class CloneImportArguments(OperationArguments):
 class CloneColumnArguments(OperationArguments):
     operation: ClassVar[str] = "import_clones_from_column"
     artifact_kind: ClassVar[str] = "clones"
+    diagnostics: ClassVar[tuple[str, ...]] = CLONE_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.clones.from_column"
 
     cell_selection: ArtifactRef = artifact_input()
     # The fingerprint of each selected cell's label in the column.
@@ -497,6 +526,8 @@ class CloneColumnArguments(OperationArguments):
 class ClonalExpansionArguments(OperationArguments):
     operation: ClassVar[str] = "measure_clonal_expansion"
     artifact_kind: ClassVar[str] = "clonal_expansion"
+    diagnostics: ClassVar[tuple[str, ...]] = GROUPING_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.clones.expansion"
 
     clones: ArtifactRef = artifact_input()
     groups: ArtifactRef | None = artifact_input()
@@ -533,6 +564,8 @@ class CloneFateBiasArguments(OperationArguments):
 class ImmuneReceptorImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_immune_receptors"
     artifact_kind: ClassVar[str] = "immune_receptors"
+    diagnostics: ClassVar[tuple[str, ...]] = JOIN_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.repertoire.import_receptors"
 
     cell_selection: ArtifactRef = artifact_input()
     # Each contig file's format, the SHA-256 of its bytes and how its barcodes
@@ -568,6 +601,8 @@ class ClonotypeArguments(OperationArguments):
 class LineageBarcodeImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_lineage_barcodes"
     artifact_kind: ClassVar[str] = "lineage_barcodes"
+    diagnostics: ClassVar[tuple[str, ...]] = JOIN_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.clones.import_barcodes"
 
     cell_selection: ArtifactRef = artifact_input()
     # Each barcode file's format, columns and library, the SHA-256 of its
@@ -582,6 +617,13 @@ class LineageBarcodeImportArguments(OperationArguments):
 class BarcodeCloneArguments(OperationArguments):
     operation: ClassVar[str] = "call_barcode_clones"
     artifact_kind: ClassVar[str] = "clones"
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        *CLONE_DIAGNOSTICS,
+        "distinctBarcodes",
+        "expectedChanceMatches",
+        "mergedBarcodes",
+    )
+    call: ClassVar[str | None] = "ds.clones.barcode_clones"
 
     barcodes: ArtifactRef = artifact_input()
     # The fingerprint of each barcoded cell's labels in the within columns, or
@@ -616,6 +658,8 @@ class BarcodeCloneArguments(OperationArguments):
 class VariantCountImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_variant_counts"
     artifact_kind: ClassVar[str] = "variant_counts"
+    diagnostics: ClassVar[tuple[str, ...]] = JOIN_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.variants.import_counts"
 
     cell_selection: ArtifactRef = artifact_input()
     # Each source's format, the SHA-256 of each file it reads by role, and
@@ -656,6 +700,8 @@ class VariantSelectionArguments(OperationArguments):
 class FrequencyCloneArguments(OperationArguments):
     operation: ClassVar[str] = "call_frequency_clones"
     artifact_kind: ClassVar[str] = "clones"
+    diagnostics: ClassVar[tuple[str, ...]] = CLONE_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.variants.frequency_clones"
 
     # The cells of the selection's counts, which the clones label.
     cell_selection: ArtifactRef = artifact_input()
@@ -705,6 +751,8 @@ class VariantGenotypeArguments(OperationArguments):
 class GenotypeCloneArguments(OperationArguments):
     operation: ClassVar[str] = "call_genotype_clones"
     artifact_kind: ClassVar[str] = "clones"
+    diagnostics: ClassVar[tuple[str, ...]] = CLONE_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.variants.genotype_clones"
 
     # The genotypes' cells, which the clones label.
     cell_selection: ArtifactRef = artifact_input()
@@ -729,6 +777,8 @@ class GenotypeCloneArguments(OperationArguments):
 class RecorderAlleleImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_recorder_alleles"
     artifact_kind: ClassVar[str] = "lineage_alleles"
+    diagnostics: ClassVar[tuple[str, ...]] = JOIN_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.clones.import_alleles"
 
     cell_selection: ArtifactRef = artifact_input()
     # Each allele file's format, its one integration or the slots of its
@@ -743,6 +793,8 @@ class RecorderAlleleImportArguments(OperationArguments):
 class AlleleCloneArguments(OperationArguments):
     operation: ClassVar[str] = "call_allele_clones"
     artifact_kind: ClassVar[str] = "clones"
+    diagnostics: ClassVar[tuple[str, ...]] = CLONE_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.clones.allele_clones"
 
     alleles: ArtifactRef = artifact_input()
     # The fingerprint of each edited cell's labels in the within columns, or
@@ -766,6 +818,8 @@ class AlleleCloneArguments(OperationArguments):
 class PhylogenyImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_phylogeny"
     artifact_kind: ClassVar[str] = "cell_phylogeny"
+    diagnostics: ClassVar[tuple[str, ...]] = JOIN_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.clones.import_phylogeny"
 
     cell_selection: ArtifactRef = artifact_input()
     # Each tree file's format, the SHA-256 of its bytes, how its leaves name
@@ -780,6 +834,8 @@ class PhylogenyImportArguments(OperationArguments):
 class PhylogenyCloneArguments(OperationArguments):
     operation: ClassVar[str] = "cut_phylogeny_clones"
     artifact_kind: ClassVar[str] = "clones"
+    diagnostics: ClassVar[tuple[str, ...]] = CLONE_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.clones.phylogeny_clones"
 
     phylogeny: ArtifactRef = artifact_input()
     # The phylogeny's cells, which the clones label.

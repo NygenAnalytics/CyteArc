@@ -19,6 +19,7 @@ import zarr
 
 from ...clones.assignments import CloneAssignment
 from ...graph.arguments import ArgumentRecord
+from ...metadata.arguments import CLONE_DIAGNOSTICS
 from ...metadata.artifacts import (
     cell_data_write_bytes,
     headroom_bytes,
@@ -35,6 +36,7 @@ __all__ = [
     "CLONE_PROBABILITY",
     "SOURCE_ARRAYS",
     "CloneArguments",
+    "clone_diagnostics",
     "clone_write_bytes",
     "log_clones",
     "plan_clones",
@@ -178,6 +180,21 @@ def clone_write_bytes(
     )
 
 
+def clone_diagnostics(assignment: CloneAssignment) -> dict[str, int | float]:
+    """Return the diagnostics that the writer saves with every source's clones.
+
+    ``cellsWithClone`` counts the cells given a clone, and
+    ``largestCloneShare`` is the share of them that the largest clone holds,
+    0 when no cell is given one.
+    """
+    n_with_clone = int(np.count_nonzero(np.asarray(assignment.codes) >= 0))
+    largest = int(np.max(assignment.clone_sizes)) if len(assignment.clone_sizes) else 0
+    return {
+        "cellsWithClone": n_with_clone,
+        "largestCloneShare": largest / n_with_clone if n_with_clone else 0.0,
+    }
+
+
 def write_clones(
     root: zarr.Group,
     planned: PlannedArtifact,
@@ -186,19 +203,32 @@ def write_clones(
     source_arrays: Mapping[str, np.ndarray] | None = None,
     *,
     ledger: MemoryLedger,
+    diagnostics: Mapping[str, Any] | None = None,
 ) -> None:
     """Write planned clones with their attributes and the arrays their source adds.
 
-    What saving holds, as :func:`clone_write_bytes` states, is charged to
-    ``ledger`` beside what the caller holds there, such as its labels' text,
-    before anything is written.
+    The clones save the diagnostics that their operation declares: those of
+    :func:`clone_diagnostics`, which the writer adds, beside the source's own
+    ``diagnostics``, such as the join's counts of an import. What saving
+    holds, as :func:`clone_write_bytes` states, is charged to ``ledger``
+    beside what the caller holds there, such as its labels' text, before
+    anything is written.
 
     Raises:
         ValueError: If ``source_arrays`` names an array that is not one of
-            ``SOURCE_ARRAYS``, or the assignment's probabilities already.
+            ``SOURCE_ARRAYS``, or the assignment's probabilities already;
+            ``diagnostics`` names one that the writer saves; or the
+            diagnostics are not those that the operation declares.
         MemoryBudgetError: If saving the clones would pass the ledger's
             budget.
     """
+    given = dict(diagnostics or {})
+    written = [name for name in CLONE_DIAGNOSTICS if name in given]
+    if written:
+        raise ValueError(
+            f"The clone writer saves {', '.join(written)} for every source; leave "
+            "them out of the source's diagnostics"
+        )
     sources = dict(source_arrays or {})
     for name in sources:
         if name not in SOURCE_ARRAYS:
@@ -237,7 +267,13 @@ def write_clones(
     if assignment.probabilities is not None:
         arrays[CLONE_PROBABILITY] = assignment.probabilities.astype(np.float64)
     arrays.update(sources)
-    write_cell_data_artifact(root, planned, arrays, attributes=dict(attributes))
+    write_cell_data_artifact(
+        root,
+        planned,
+        arrays,
+        attributes=dict(attributes),
+        diagnostics={**clone_diagnostics(assignment), **given},
+    )
 
 
 def log_clones(assignment: CloneAssignment, n_cells: int) -> None:

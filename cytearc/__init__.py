@@ -134,6 +134,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "DataStore": ".datastore.datastore",
     "DataStoreSummary": ".datastore.summary",
     "DataStoreMerge": ".merge",
+    "DiagnosticWarning": ".utils.warnings",
     "EnrichmentResult": ".features.enrichment",
     "FateMappingResult": ".trajectory.results",
     "H5adInspectResult": ".readers",
