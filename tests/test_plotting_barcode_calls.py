@@ -141,7 +141,11 @@ def test_a_library_of_pairs_alone_has_no_reads_panel(tmp_path) -> None:
         ]
         texts = [text.get_text() for text in result.axes["reads_per_molecule"].texts]
         assert texts == ["No library counts reads per molecule"]
-        assert result.legends == ()
+        # The hidden legend of the libraries is still reported, beside the
+        # panel that draws them.
+        assert [legend.label for legend in result.legends] == ["Library"]
+        assert result.scales[0].order == ("d4",)
+        assert all(ax.get_legend() is None for ax in result.axes.values())
     finally:
         plt.close(result.figure)
 

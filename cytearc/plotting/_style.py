@@ -46,6 +46,77 @@ RECEPTOR_TYPE_SCALE = CategoricalScale(
         "no IR": "#bdbdbd",
     },
 )
+# A vocabulary's value for no value, such as a cell without a receptor chain
+# or a recorder site without a read, takes the missing colour of every scale,
+# the receptor types' grey, and a value that carries nothing, such as an
+# unedited site, one muted colour.
+NO_VALUE_COLOR = "#bdbdbd"
+MUTED_COLOR = "#e2e2e2"
+# The colours of the chain pairings of cells, in the order of
+# cytearc.repertoire.chains.CHAIN_PAIRINGS, sharing the receptor types'
+# colours of the pairings they name.
+CHAIN_PAIRING_SCALE = CategoricalScale(
+    order=(
+        "single pair",
+        "orphan VJ",
+        "orphan VDJ",
+        "extra VJ",
+        "extra VDJ",
+        "two full chains",
+        "ambiguous",
+        "multichain",
+        "no IR",
+    ),
+    palette={
+        "single pair": "#2f855a",
+        "orphan VJ": "#9ae6b4",
+        "orphan VDJ": "#68d391",
+        "extra VJ": "#4299e1",
+        "extra VDJ": "#2b6cb0",
+        "two full chains": "#1a365d",
+        "ambiguous": "#805ad5",
+        "multichain": "#c53030",
+        "no IR": NO_VALUE_COLOR,
+    },
+)
+# The colours of the two arms of a receptor, VJ chains (TRA, TRG, IGK, IGL)
+# and VDJ chains (TRB, TRD, IGH).
+CHAIN_ARM_SCALE = CategoricalScale(
+    order=("VJ", "VDJ"), palette={"VJ": "#2b6cb0", "VDJ": "#dd6b20"}
+)
+# The colours of the loci of receptor chains, in the order of
+# cytearc.repertoire.chains.LOCI: T cell loci in blues and teals, B cell
+# loci in oranges.
+LOCUS_SCALE = CategoricalScale(
+    order=("TRA", "TRG", "IGK", "IGL", "TRB", "TRD", "IGH"),
+    palette={
+        "TRA": "#4299e1",
+        "TRG": "#38b2ac",
+        "IGK": "#d69e2e",
+        "IGL": "#975a16",
+        "TRB": "#2b6cb0",
+        "TRD": "#2c7a7b",
+        "IGH": "#dd6b20",
+    },
+)
+# The colours and words of the states of a recorder site that figures draw,
+# of cytearc.clones.recorders.STATES, in the order of their stacks: a site
+# that does not apply to a cell is drawn in no state.
+RECORDER_STATE_SCALE = CategoricalScale(
+    order=("mark", "unknown_mark", "unedited", "missing"),
+    palette={
+        "mark": "#0072b2",
+        "unknown_mark": "#e69f00",
+        "unedited": MUTED_COLOR,
+        "missing": NO_VALUE_COLOR,
+    },
+    labels={
+        "mark": "Mark",
+        "unknown_mark": "Unknown mark",
+        "unedited": "Unedited",
+        "missing": "Missing",
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)

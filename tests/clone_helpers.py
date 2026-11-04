@@ -18,10 +18,14 @@ from tests.clone_truth import (
     CallingTruth,
     CloneTruth,
     ReceptorTruth,
+    barcode_truth,
+    recorder_truth,
+    write_bartab_counts,
     write_carlin_pair,
     write_cellranger_contigs,
     write_celltag_reads,
     write_cospar,
+    write_petracer_characters,
     write_pycashier,
     write_trex_molecules,
 )
@@ -171,6 +175,86 @@ def clone_figure_calls(
         "clone_tracking": lambda **options: plots.clone_tracking(tracking, **options),
         "clone_coupling": lambda **options: plots.clone_coupling(coupling, **options),
         "clone_fate_bias": lambda **options: plots.clone_fate_bias(bias, **options),
+    }
+
+
+#: The figures of receptors, lineage barcodes and recorder alleles, by the
+#: name of the plot that draws each.
+REPERTOIRE_FIGURES = (
+    "receptor_qc",
+    "gene_usage",
+    "gene_pairing",
+    "spectratype",
+    "barcode_calls",
+    "recorder_states",
+)
+
+
+def import_truth_lineage(
+    store: "DataStore", truth: CloneTruth, folder: Path
+) -> tuple["ArtifactRef", "ArtifactRef"]:
+    """Import the truth's lineage barcodes and recorder alleles into its store.
+
+    The barcodes are TREX's molecules and BARtab's pairs of both samples, as
+    the libraries ``trex`` and ``bartab``, and the alleles PEtracer's
+    characters in the Zenodo layout, whose second embryo lacks an
+    integration.
+    """
+    import warnings
+
+    barcodes = barcode_truth(truth)
+    molecules = [
+        write_trex_molecules(
+            barcodes, folder / f"{sample}_molecules.txt", sample=sample
+        )
+        for sample in SAMPLES
+    ]
+    counts = [
+        write_bartab_counts(barcodes, folder / f"{sample}.counts.tsv", sample=sample)
+        for sample in SAMPLES
+    ]
+    with warnings.catch_warnings():
+        # Some of the truth's barcodes are of droplets outside the store.
+        warnings.simplefilter("ignore")
+        lineage = store.clones.import_barcodes(
+            [*molecules, *counts],
+            cell_selection=every_cell(store),
+            barcode_prefix=[f"{sample}__" for sample in SAMPLES] * 2,
+            barcode_suffix="-1",
+            library=["trex", "trex", "bartab", "bartab"],
+        )
+    characters = write_petracer_characters(
+        recorder_truth(truth), truth, folder / "characters.csv.gz", layout="zenodo"
+    )
+    alleles = store.clones.import_alleles(characters, cell_selection=every_cell(store))
+    return lineage, alleles
+
+
+def repertoire_figure_calls(
+    store: "DataStore",
+    receptors: "ArtifactRef",
+    barcodes: "ArtifactRef",
+    alleles: "ArtifactRef",
+) -> dict[str, Callable[..., object]]:
+    """Each repertoire and lineage figure of the truth's store, as a call of display options.
+
+    Receptors, gene usage and junction lengths are grouped by sample, and
+    the V and J gene pairs counted over every cell. Each summary is
+    computed once, here.
+    """
+    plots = store.plots
+    usage = store.repertoire.gene_usage(receptors, group_by="sample")
+    pairs = store.repertoire.gene_usage(receptors, genes=("v_call", "j_call"))
+    lengths = store.repertoire.spectratype(receptors, group_by="sample")
+    return {
+        "receptor_qc": lambda **options: plots.receptor_qc(
+            receptors, group_by="sample", **options
+        ),
+        "gene_usage": lambda **options: plots.gene_usage(usage, **options),
+        "gene_pairing": lambda **options: plots.gene_pairing(pairs, **options),
+        "spectratype": lambda **options: plots.spectratype(lengths, **options),
+        "barcode_calls": lambda **options: plots.barcode_calls(barcodes, **options),
+        "recorder_states": lambda **options: plots.recorder_states(alleles, **options),
     }
 
 

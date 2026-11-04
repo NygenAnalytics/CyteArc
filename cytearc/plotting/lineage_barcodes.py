@@ -7,26 +7,28 @@ import pandas as pd
 
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import bool_argument, integer_argument
-from ._contracts import PlotProvenance
-from ._deps import require_matplotlib
+from ._charts import capped_counts, draw_bars, draw_lines
+from ._data import store_method
 from ._figure import (
-    LegendSpec,
+    Drawn,
     PlotResult,
     close_figures_on_error,
+    finish_plot,
     normalize_axes_target,
 )
-from ._style import apply_figure_chrome, theme_context
+from ._style import (
+    MAX_FIGURE_WIDTH_INCHES,
+    figure_size,
+    foreground_color,
+    resolve_category_scale,
+    theme_context,
+)
 
 __all__ = ["barcode_calls"]
 
 _PANELS = ("barcodes_per_cell", "umis_per_barcode", "reads_per_molecule")
-
-
-def _load_barcodes(store: Any, barcodes: ArtifactRef) -> Any:
-    method = getattr(getattr(store, "clones", None), "load_barcodes", None)
-    if not callable(method):
-        raise TypeError("store does not provide clones.load_barcodes")
-    return method(barcodes)
+# The three panels fill one row at the page width, each this many inches tall.
+_PANEL_HEIGHT = 2.6
 
 
 def _distribution(
@@ -52,30 +54,6 @@ def _distribution(
     return counted.rename(count).reset_index().astype({count: np.int64})
 
 
-def _draw_lines(
-    ax: Any, table: pd.DataFrame, value: str, count: str, *, show_legend: bool
-) -> None:
-    from matplotlib.ticker import LogFormatter
-
-    for library, rows in table.groupby("library", sort=True):
-        ax.plot(
-            rows[value],
-            rows[count],
-            marker="o",
-            markersize=3,
-            linewidth=1.2,
-            label=str(library),
-        )
-    if not table.empty:
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        for axis in (ax.xaxis, ax.yaxis):
-            axis.set_major_formatter(LogFormatter())
-            axis.set_minor_formatter(LogFormatter())
-        if show_legend:
-            ax.legend(frameon=False, fontsize="small")
-
-
 @close_figures_on_error
 def barcode_calls(
     store: Any,
@@ -98,16 +76,20 @@ def barcode_calls(
     library's molecules by their reads, on log scales, so molecules of 0
     reads appear in the table only. Barcodes of one or two UMIs and
     molecules of one read are mostly errors and ambient molecules. A library
-    that counts no UMIs or no reads is left out of its panel.
+    that counts no UMIs or no reads is left out of its panel, and a panel
+    that no library fills says so. The libraries take colours over every
+    library of the artifact, under one legend beside the last panel that
+    draws them.
 
     Tables: ``barcodes_per_cell`` (``n_barcodes``, ``n_cells``),
     ``umis_per_barcode`` (``library``, ``umis``, ``n_pairs``) and
     ``reads_per_molecule`` (``library``, ``reads``, ``n_molecules``).
 
     Raises:
-        TypeError: If an argument has the wrong type.
+        TypeError: If an argument has the wrong type, or the store does not
+            load lineage barcodes.
         ValueError: If ``barcodes`` is not a ``lineage_barcodes``
-            artifact.
+            artifact, or holds no cell.
         KeyError: If the store holds no such artifact.
         RuntimeError: If an artifact is incomplete, as a call that stopped
             before it finished leaves it.
@@ -118,8 +100,10 @@ def barcode_calls(
     max_barcodes_per_cell = integer_argument(
         max_barcodes_per_cell, "max_barcodes_per_cell", minimum=1
     )
-    loaded = _load_barcodes(store, barcodes)
+    loaded = store_method(store, "clones.load_barcodes")(barcodes)
     per_cell = loaded.cells["n_barcodes"].to_numpy(dtype=np.int64)
+    if not len(per_cell):
+        raise ValueError("The barcodes hold no cell, so there is nothing to plot")
     values, counts = np.unique(per_cell, return_counts=True)
     per_cell_table = pd.DataFrame(
         {"n_barcodes": values.astype(np.int64), "n_cells": counts.astype(np.int64)}
@@ -134,73 +118,118 @@ def barcode_calls(
         "reads",
         "n_molecules",
     )
+    libraries = loaded.libraries["library"].astype(str).tolist()
+    drawn_libraries = set(umis_table["library"]) | set(reads_table["library"])
+    colors = resolve_category_scale(
+        [library for library in libraries if library in drawn_libraries],
+        None,
+        universe=libraries,
+    )
+    capped = capped_counts(per_cell, max_barcodes_per_cell)
+    lines = [
+        (
+            "umis_per_barcode",
+            umis_table,
+            "umis",
+            "n_pairs",
+            "UMIs of the barcode in the cell",
+            "Barcodes of cells",
+            "UMIs per barcode",
+            "No library counts UMIs",
+        ),
+        (
+            "reads_per_molecule",
+            reads_table,
+            "reads",
+            "n_molecules",
+            "Reads of the molecule",
+            "Molecules",
+            "Reads per molecule",
+            "No library counts reads per molecule",
+        ),
+    ]
+    legend_panel = next(
+        (line[0] for line in reversed(lines) if not line[1].empty), None
+    )
     if figsize is None and target is None:
-        figsize = (14.0, 4.0)
-    require_matplotlib()
+        figsize, _ = figure_size(
+            len(_PANELS),
+            panel=(MAX_FIGURE_WIDTH_INCHES / len(_PANELS), _PANEL_HEIGHT),
+            columns=len(_PANELS),
+        )
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
-            target, panel_keys=list(_PANELS), figsize=figsize, n_columns=3
+            target, panel_keys=list(_PANELS), figsize=figsize, n_columns=len(_PANELS)
         )
-        ax = axes["barcodes_per_cell"]
-        capped = np.minimum(per_cell, max_barcodes_per_cell)
-        bars = np.bincount(capped, minlength=max_barcodes_per_cell + 1)
-        labels = [str(position) for position in range(max_barcodes_per_cell)] + [
-            f"{max_barcodes_per_cell}+"
-        ]
-        ax.bar(np.arange(max_barcodes_per_cell + 1), bars)
-        ax.set_xticks(np.arange(max_barcodes_per_cell + 1), labels)
-        ax.set_xlabel("Barcodes of the cell")
-        ax.set_ylabel("Cells")
-        ax.set_title("Barcodes per cell")
-        ax = axes["umis_per_barcode"]
-        _draw_lines(ax, umis_table, "umis", "n_pairs", show_legend=show_legend)
-        ax.set_xlabel("UMIs of the barcode in the cell")
-        ax.set_ylabel("Barcodes of cells")
-        ax.set_title("UMIs per barcode")
-        if umis_table.empty:
-            ax.text(0.5, 0.5, "No library counts UMIs", ha="center", va="center")
-        ax = axes["reads_per_molecule"]
-        _draw_lines(ax, reads_table, "reads", "n_molecules", show_legend=show_legend)
-        ax.set_xlabel("Reads of the molecule")
-        ax.set_ylabel("Molecules")
-        ax.set_title("Reads per molecule")
-        if reads_table.empty:
-            ax.text(
-                0.5,
-                0.5,
-                "No library counts reads per molecule",
-                ha="center",
-                va="center",
+        draw_bars(
+            axes["barcodes_per_cell"],
+            pd.DataFrame(
+                {
+                    "n_barcodes": capped.index.to_numpy(dtype=object),
+                    "n_cells": capped.to_numpy(dtype=np.int64),
+                }
+            ),
+            item="n_barcodes",
+            value="n_cells",
+            colors=foreground_color(theme),
+            horizontal=False,
+            value_label="Cells",
+            title="Barcodes per cell",
+        )
+        axes["barcodes_per_cell"].set_xlabel("Barcodes of the cell")
+        drawn: Drawn | None = None
+        for key, table, value, count, x_label, y_label, title, empty in lines:
+            ax = axes[key]
+            if table.empty:
+                ax.text(
+                    0.5,
+                    0.5,
+                    empty,
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize="small",
+                    color=foreground_color(theme),
+                )
+                ax.set_xlabel(x_label)
+                ax.set_ylabel(y_label)
+                ax.set_title(title)
+                continue
+            found = draw_lines(
+                ax,
+                table,
+                x=value,
+                y=count,
+                series="library",
+                colors=colors,
+                markers=True,
+                log_x=True,
+                log_y=True,
+                x_label=x_label,
+                y_label=y_label,
+                title=title,
+                legend_title="Library" if key == legend_panel else None,
+                show_legend=show_legend,
             )
-        apply_figure_chrome(figure, theme)
-    libraries = loaded.libraries["library"].astype(str).tolist()
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
+            if key == legend_panel:
+                drawn = found
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="barcode_calls",
+        theme=theme,
         tables={
             "barcodes_per_cell": per_cell_table,
             "umis_per_barcode": umis_table,
             "reads_per_molecule": reads_table,
         },
-        legends=(LegendSpec(kind="categorical", label="library"),)
-        if len(libraries) and show_legend
-        else (),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(len(per_cell)),
-            renderer="matplotlib",
-            notes=("lineage_barcodes",),
-            extras={
-                "barcodes": barcodes.to_dict(),
-                "libraries": libraries,
-                "max_barcodes_per_cell": max_barcodes_per_cell,
-            },
-        ),
-        owns_figure=owns,
-        theme=theme,
+        drawn=[drawn],
+        inputs={"barcodes": barcodes},
+        settings={
+            "libraries": libraries,
+            "max_barcodes_per_cell": max_barcodes_per_cell,
+        },
+        n_cells=int(len(per_cell)),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result

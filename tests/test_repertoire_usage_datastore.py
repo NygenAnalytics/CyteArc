@@ -419,8 +419,12 @@ def test_spectratype_plot_draws_lines_per_group(tmp_path) -> None:
     try:
         ax = result.axes["TRB"]
         assert len(ax.get_lines()) == 2
-        legend = result.axes["TRB"].get_legend()
+        # One legend of the groups, titled by the grouping, stands beside the
+        # last panel of the first row of three.
+        legend = result.axes["TRA"].get_legend()
+        assert legend.get_title().get_text() == "sample"
         assert [text.get_text() for text in legend.get_texts()] == ["s1", "s2"]
+        assert ax.get_legend() is None
         assert ax.get_xlabel() == "Junction length (residues)"
     finally:
         result.close()
@@ -720,7 +724,7 @@ def test_figures_name_what_they_count(tmp_path) -> None:
         finally:
             usage.close()
             lengths.close()
-    # Four loci stand two to a row, within the width of a page.
+    # Four loci stand three to a row, within the width of a page.
     figure = store.plots.gene_usage(store.repertoire.gene_usage(receptors), show=False)
     try:
         rows = {round(ax.get_position().y0, 3) for ax in figure.axes.values()}
@@ -880,8 +884,8 @@ def test_the_lengths_legend_names_at_most_80_groups(tmp_path) -> None:
         store.repertoire.spectratype(receptors, group_by="own"), show=False
     )
     try:
-        legend = result.axes["TRB"].get_legend()
-        assert legend.get_title().get_text() == "Group (80 of 100)"
+        legend = result.axes["TRA"].get_legend()
+        assert legend.get_title().get_text() == "own (80 of 100)"
         names = [text.get_text() for text in legend.get_texts()]
         assert names[:2] == ["g000", "g001"] and len(names) == 80
     finally:
@@ -1099,13 +1103,14 @@ def test_two_rows_of_panels_make_the_figure_twice_as_tall(tmp_path) -> None:
         store.repertoire.spectratype(receptors), show=False
     )
     try:
-        # Four loci stand in two rows of two panels.
-        for result, height in (
-            (usage, 0.22 * 30 + 1.5),
-            (pairing, 4.0),
-            (lengths, 3.8),
-        ):
-            assert result.figure.get_size_inches()[1] == pytest.approx(2 * height)
+        # Four loci stand in two rows, of three panels of bars or lines and of
+        # two heatmaps, each row as tall as a panel of the two or three genes
+        # drawn, at least 2.4 inches.
+        for result, columns in ((usage, 3), (pairing, 2), (lengths, 3)):
+            rows = [round(ax.get_position().y0, 3) for ax in result.axes.values()]
+            assert len(set(rows)) == 2
+            assert rows.count(max(rows)) == columns
+            assert tuple(result.figure.get_size_inches()) == pytest.approx((7.5, 4.8))
     finally:
         for result in (usage, pairing, lengths):
             result.close()

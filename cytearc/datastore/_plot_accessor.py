@@ -837,7 +837,7 @@ class DataStorePlotAccessor:
         show_legend: bool = True,
         show: bool = True,
     ) -> PlotResult:
-        """Plot the share of cells that each recorder site reads as each state."""
+        """Plot the fraction of cells that each recorder site reads as each state."""
         return self._forward(PlotResult, "recorder_states", locals())
 
     def guide_calls(

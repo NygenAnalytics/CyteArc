@@ -10,7 +10,13 @@ import pandas as pd
 import pytest
 from matplotlib.colors import to_hex, to_rgba
 
-from cytearc.plotting._charts import draw_bars, draw_lines, draw_matrix, pair_matrix
+from cytearc.plotting._charts import (
+    capped_counts,
+    draw_bars,
+    draw_lines,
+    draw_matrix,
+    pair_matrix,
+)
 from cytearc.plotting._contracts import CategoricalScale, ColorScale
 from cytearc.plotting._figure import side_legend_title
 from cytearc.plotting._groups import PlotGroups
@@ -744,3 +750,166 @@ def test_plot_groups_keep_each_groups_colour_in_every_subset() -> None:
 def test_receptor_types_keep_one_palette_in_their_vocabularys_order() -> None:
     assert RECEPTOR_TYPE_SCALE.order == RECEPTOR_TYPES
     assert set(RECEPTOR_TYPE_SCALE.palette) == set(RECEPTOR_TYPES)
+
+
+def test_bars_side_by_side_stand_in_their_items_slot_in_the_legends_order(
+    ax,
+) -> None:
+    drawn = draw_bars(
+        ax,
+        _stacked(),
+        item="item",
+        value="value",
+        segment="segment",
+        colors=SEGMENTS,
+        horizontal=False,
+        side_by_side=True,
+        value_label="Cells",
+        legend_title="Segment",
+    )
+    # Three parts share each slot of 0.8, a third each, from 0, the first
+    # at the left: centred at -0.8/3, 0 and +0.8/3 of the item's position.
+    third = 0.8 / 3
+    found = {
+        (
+            round(patch.get_x() + patch.get_width() / 2, 6),
+            to_hex(patch.get_facecolor()),
+        ): (
+            patch.get_y(),
+            patch.get_height(),
+            round(patch.get_width(), 6),
+        )
+        for patch in ax.patches
+    }
+    width = round(third, 6)
+    assert found[(round(-third, 6), RED)] == (0.0, 1.0, width)
+    assert found[(0.0, GREEN)] == (0.0, 2.0, width)
+    assert found[(round(third, 6), BLUE)] == (0.0, 3.0, width)
+    assert found[(round(1 - third, 6), RED)] == (0.0, 4.0, width)
+    assert found[(1.0, GREEN)] == (0.0, 6.0, width)
+    assert found[(round(1 + third, 6), BLUE)] == (0.0, 0.0, width)
+    assert [tick.get_text() for tick in ax.get_xticklabels()] == ["a", "b"]
+    assert _legend(ax) == ("Segment", ["s1", "s2", "s3"], [RED, GREEN, BLUE])
+    assert drawn.scale.order == ("s1", "s2", "s3")
+
+
+def test_horizontal_bars_side_by_side_put_their_first_part_on_top(ax) -> None:
+    draw_bars(
+        ax,
+        _stacked(),
+        item="item",
+        value="value",
+        segment="segment",
+        colors=SEGMENTS,
+        side_by_side=True,
+        value_label="Cells",
+    )
+    # Item a stands at 1, above b at 0, and its first part at the top.
+    third = 0.8 / 3
+    centres = {
+        to_hex(patch.get_facecolor()): patch.get_y() + patch.get_height() / 2
+        for patch in ax.patches
+        if patch.get_width() and patch.get_y() > 0.5
+    }
+    assert centres == pytest.approx({RED: 1 + third, GREEN: 1.0, BLUE: 1 - third})
+    assert all(patch.get_x() == 0.0 for patch in ax.patches)
+
+
+def test_bars_at_numeric_items_keep_their_axis(ax) -> None:
+    table = pd.DataFrame({"length": [9, 13, 10], "fraction": [0.25, 0.5, 0.25]})
+    draw_bars(
+        ax,
+        table,
+        item="length",
+        value="fraction",
+        colors=RED,
+        horizontal=False,
+        numeric_items=True,
+        value_label="Fraction",
+    )
+    # Each bar stands at its length, the gaps between them kept, and the
+    # axis keeps a numeric locator rather than naming each bar.
+    centres = [patch.get_x() + patch.get_width() / 2 for patch in ax.patches]
+    assert centres == pytest.approx([9.0, 13.0, 10.0])
+    assert [patch.get_height() for patch in ax.patches] == [0.25, 0.5, 0.25]
+    assert type(ax.xaxis.get_major_locator()).__name__ == "AutoLocator"
+    with pytest.raises(ValueError, match="take numbers as their length"):
+        draw_bars(
+            ax,
+            table.assign(length=["a", "b", "c"]),
+            item="length",
+            value="fraction",
+            colors=RED,
+            numeric_items=True,
+            value_label="",
+        )
+    with pytest.raises(ValueError, match="side by side take a segment column"):
+        draw_bars(
+            ax,
+            table,
+            item="length",
+            value="fraction",
+            colors=RED,
+            side_by_side=True,
+            value_label="",
+        )
+
+
+def test_heatmaps_of_one_scale_share_one_colour_bar() -> None:
+    figure, axes = plt.subplots(1, 2, layout="constrained")
+    try:
+        scale = ColorScale(cmap="viridis", vmin=0.0, vmax=0.8)
+        first = pd.DataFrame([[0.1, 0.2]], index=["v1"], columns=["j1", "j2"])
+        second = pd.DataFrame([[0.8]], index=["v2"], columns=["j3"])
+        draw_matrix(
+            axes[0],
+            first,
+            color_scale=scale,
+            value_label="Fraction",
+            show_legend=False,
+            colorbar_beside=list(axes),
+        )
+        drawn = draw_matrix(
+            axes[1],
+            second,
+            color_scale=scale,
+            value_label="Fraction",
+            colorbar_beside=list(axes),
+        )
+        (colorbar,) = [ax for ax in figure.axes if ax not in set(axes)]
+        # The one colour bar stands beside both heatmaps, with their limits.
+        assert set(colorbar._colorbar_info["parents"]) == set(axes)
+        assert colorbar.get_ylim() == (0.0, 0.8)
+        assert drawn.legend.extras == {"vmin": 0.0, "vmax": 0.8}
+        for ax in axes:
+            (image,) = ax.images
+            assert (image.norm.vmin, image.norm.vmax) == (0.0, 0.8)
+    finally:
+        plt.close(figure)
+
+
+@pytest.mark.parametrize(
+    ("values", "cap", "expected"),
+    [
+        # Values below the cap count in their own bins, the rest in the last.
+        ([0, 1, 1, 2, 3, 7], 3, {"0": 1, "1": 2, "2": 1, "3+": 2}),
+        # Bins without values count 0, and the cap's own value is in its bin.
+        ([3], 3, {"0": 0, "1": 0, "2": 0, "3+": 1}),
+        ([], 2, {"0": 0, "1": 0, "2+": 0}),
+        ([5, 0], 1, {"0": 1, "1+": 1}),
+    ],
+)
+def test_capped_counts_gather_the_values_of_the_cap_or_more(
+    values, cap, expected
+) -> None:
+    counts = capped_counts(np.asarray(values, dtype=np.int64), cap)
+    assert counts.to_dict() == expected
+    assert list(counts.index) == list(expected)
+    assert counts.dtype == np.int64
+
+
+def test_capped_counts_refuse_what_they_cannot_count() -> None:
+    with pytest.raises(ValueError, match="cap of at least 1"):
+        capped_counts([1, 2], 0)
+    with pytest.raises(ValueError, match="counts of at least 0"):
+        capped_counts([1, -1], 3)
