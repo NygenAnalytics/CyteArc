@@ -22,6 +22,7 @@ from cytearc.metadata.selection import (
     category_codes,
     plan_cell_selection_read,
     read_cell_selection,
+    sample_codes,
 )
 from cytearc.storage.arrays import zarr_write_buffer_bytes
 from cytearc.storage.async_execution import zarr_io_concurrency
@@ -481,6 +482,60 @@ def test_coding_labels_refuses_before_it_hashes_them() -> None:
     expected_codes, expected_names = category_codes(values[::-1])
     assert names == expected_names
     assert codes.tolist() == expected_codes.tolist()
+
+
+@pytest.mark.parametrize(
+    ("n_cells", "width", "n_samples", "columns"),
+    [
+        (100_000, 1, 2, ("lane",)),
+        (100_000, 30, 2, ("lane",)),
+        (100_000, 30, 50_000, ("lane",)),
+        (100_000, 2, 2, ("a_very_long_sample_column_name",)),
+        (100_000, 60, 1_000, ("lane",)),
+        (100_000, 4, 30, ("lane", "batch")),
+    ],
+)
+def test_numbering_samples_holds_what_its_charges_plan(
+    n_cells, width, n_samples, columns
+) -> None:
+    # Labels of ``width`` characters, ``n_samples`` of them in each column.
+    labels = [
+        np.asarray(
+            [f"{(index + shift) % n_samples:0{width}d}" for index in range(n_cells)],
+            dtype=object,
+        )
+        for shift in range(len(columns))
+    ]
+
+    def numbered(ledger=None):
+        return sample_codes(columns, labels, n_cells, reason="x", ledger=ledger)
+
+    sample_codes(columns, [values[:10] for values in labels], 10, reason="x")
+    planned = _charged(lambda: numbered(MemoryLedger(None, "Numbering samples")))
+    cost_bound(planned, numbered, slack=1.5, allowance=64 * 1024)
+    # The codes, samples and fingerprint are the same with a ledger as
+    # without one, and the ledger keeps the codes and the samples charged.
+    ledger = MemoryLedger(None, "Numbering samples")
+    codes, samples, fingerprint = numbered(ledger)
+    expected = numbered()
+    assert (codes.tolist(), samples, fingerprint) == (
+        expected[0].tolist(),
+        expected[1],
+        expected[2],
+    )
+    assert codes.nbytes < ledger.charged < codes.nbytes + 1_024 * len(samples)
+
+
+def test_numbering_samples_refuses_before_it_sorts_the_labels() -> None:
+    labels = np.asarray([f"lane{index % 3}" for index in range(1_000)], dtype=object)
+    ledger = MemoryLedger(10_000, "Numbering samples")
+    with pytest.raises(MemoryBudgetError) as refused:
+        sample_codes(("lane",), [labels], 1_000, reason="x", ledger=ledger)
+    assert refused.value.item == "numbering the cells' labels in 'lane'"
+    # Five characters of each of four copies of the text, beside 40 bytes of
+    # each label's flags, order and code.
+    assert refused.value.needed_bytes == 4 * 4 * 5 * 1_000 + 40 * 1_000
+    assert ledger.charged == 0
 
 
 @pytest.mark.parametrize("n_cells", [20_000, 200_000])

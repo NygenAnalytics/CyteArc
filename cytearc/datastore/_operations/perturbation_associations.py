@@ -38,6 +38,7 @@ from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryLedger
 from ...utils.numba import numba_threads
 from ...utils.warnings import warn
 from .perturbation_store import (
@@ -51,6 +52,7 @@ from .perturbation_store import (
     _label_rows,
     _pairs_fingerprint,
     _require_budget,
+    _resident_ledger,
     _require_cell_column,
     _require_ref,
     _row_features,
@@ -561,6 +563,9 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         tested_cells = cell_index[tested]
         cell_samples = _cell_samples(
             self,
+            MemoryLedger(
+                None, "Numbering the cells' samples", codec_threads=self.nthreads
+            ),
             sample_column,
             tested_cells,
             reason=f"Each sample gets an indicator, so {needing}",
@@ -1050,10 +1055,10 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         def counts_of(band: np.ndarray, out: np.ndarray) -> np.ndarray:
             _, blocks = _count_blocks(
                 self,
+                _resident_ledger(self, held_bytes + per_feature * len(band)),
                 expression,
                 band,
                 sorted_cells,
-                resident_bytes=held_bytes + per_feature * len(band),
                 scratch_bytes_per_row=8 * len(band),
             )
             offset = 0
@@ -1064,11 +1069,10 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
 
         def bands_of(features: np.ndarray, most: int) -> list[tuple[int, int]]:
             return _count_bands(
+                _resident_ledger(self, held_bytes),
                 expression,
                 features,
                 (sorted_cells,),
-                budget=self.memoryBytes,
-                held_bytes=held_bytes,
                 per_feature=per_feature,
                 scratch_per_feature=8,
                 most=most,

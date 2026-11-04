@@ -22,8 +22,7 @@ from typing import Any
 import numpy as np
 
 from cytearc.perturbation.guide_calls import checked_count_blocks
-from cytearc.utils.arguments import integer_argument
-from cytearc.utils.memory_budget import MemoryBudgetError
+from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 from cytearc.utils.numba import njit
 
 __all__ = [
@@ -312,13 +311,17 @@ def _assemble(
 
 
 class HistogramMemoryError(MemoryBudgetError):
-    """The guide count histograms need more memory than they may hold.
+    """The guide count histograms would pass the memory budget of the ledger that they charge.
+
+    The ledger's refusal names what the call holds with the histograms at the
+    point where they stopped, and its item the distinct counts that they held
+    then and the rows of counts that remained to be read.
 
     Attributes:
-        needed_bytes: The bytes that the histograms need at the point where
-            they stopped, within their memory limit.
-        budget_bytes: The bytes that the histograms may hold.
-        item: ``"the guide count histograms"``.
+        needed_bytes: The bytes that the call holds with the histograms at the
+            point where they stopped.
+        budget_bytes: The ledger's budget.
+        item: The histograms, their distinct counts and the rows that remain.
         n_distinct: The distinct counts that they held then.
         rows_read: The rows of counts read when they stopped.
         n_rows: The rows of counts, one per cell.
@@ -326,30 +329,21 @@ class HistogramMemoryError(MemoryBudgetError):
 
     def __init__(
         self,
+        message: str,
+        *,
         needed_bytes: int,
         budget_bytes: int,
+        item: str,
         n_distinct: int,
-        *,
         rows_read: int,
         n_rows: int,
     ) -> None:
-        self.n_distinct = n_distinct
-        self.rows_read = rows_read
-        self.n_rows = n_rows
-        remain = (
-            f", and {n_rows - rows_read} of {n_rows} rows of counts remain to be "
-            "read, so they may need more"
-            if rows_read < n_rows
-            else ""
-        )
         super().__init__(
-            f"The guide count histograms need about {needed_bytes} bytes for "
-            f"{n_distinct} distinct counts, more than the {budget_bytes} bytes "
-            f"they may hold{remain}",
-            needed_bytes=needed_bytes,
-            budget_bytes=budget_bytes,
-            item="the guide count histograms",
+            message, needed_bytes=needed_bytes, budget_bytes=budget_bytes, item=item
         )
+        self.n_distinct = int(n_distinct)
+        self.rows_read = int(rows_read)
+        self.n_rows = int(n_rows)
 
     @property
     def counts_remain(self) -> bool:
@@ -361,8 +355,10 @@ class HistogramMemoryError(MemoryBudgetError):
             _restore_histogram_memory_error,
             (
                 type(self),
+                str(self.args[0]),
                 self.needed_bytes,
                 self.budget_bytes,
+                self.item,
                 self.n_distinct,
                 self.rows_read,
                 self.n_rows,
@@ -373,31 +369,65 @@ class HistogramMemoryError(MemoryBudgetError):
 
 def _restore_histogram_memory_error(
     error_type: type[HistogramMemoryError],
+    message: str,
     needed_bytes: int,
     budget_bytes: int,
+    item: str,
     n_distinct: int,
     rows_read: int,
     n_rows: int,
 ) -> HistogramMemoryError:
-    """Rebuild a pickled HistogramMemoryError, whose row counts are keywords."""
+    """Rebuild a pickled HistogramMemoryError, whose fields are keywords."""
     return error_type(
-        needed_bytes, budget_bytes, n_distinct, rows_read=rows_read, n_rows=n_rows
+        message,
+        needed_bytes=needed_bytes,
+        budget_bytes=budget_bytes,
+        item=item,
+        n_distinct=n_distinct,
+        rows_read=rows_read,
+        n_rows=n_rows,
     )
+
+
+def _histogram_item(n_distinct: int, *, rows_read: int, n_rows: int) -> str:
+    """The item that the histograms charge a ledger for: their distinct counts, and the rows of counts that remain to be read."""
+    remain = (
+        f", while {n_rows - rows_read} of {n_rows} rows of counts remain to be read"
+        if rows_read < n_rows
+        else ""
+    )
+    return f"the guide count histograms of {n_distinct} distinct counts{remain}"
 
 
 def _require_memory(
     needed: int,
-    memory_bytes: int | None,
+    ledger: MemoryLedger | None,
     n_distinct: int,
     *,
     rows_read: int,
     n_rows: int,
 ) -> None:
-    """Raise HistogramMemoryError when the histograms need more than ``memory_bytes``."""
-    if memory_bytes is not None and needed > memory_bytes:
-        raise HistogramMemoryError(
-            needed, memory_bytes, n_distinct, rows_read=rows_read, n_rows=n_rows
+    """Charge the ``needed`` bytes of the histograms to ``ledger`` as a peak beside what it holds.
+
+    Raises:
+        HistogramMemoryError: If the ledger refuses them.
+    """
+    if ledger is None:
+        return
+    try:
+        ledger.peak(
+            _histogram_item(n_distinct, rows_read=rows_read, n_rows=n_rows), needed
         )
+    except MemoryBudgetError as refusal:
+        raise HistogramMemoryError(
+            str(refusal),
+            needed_bytes=refusal.needed_bytes,
+            budget_bytes=refusal.budget_bytes,
+            item=refusal.item,
+            n_distinct=n_distinct,
+            rows_read=rows_read,
+            n_rows=n_rows,
+        ) from refusal
 
 
 def _assembly_bytes(held: int, dense: np.ndarray, n_larger: int) -> int:
@@ -424,14 +454,15 @@ def _larger_counts(
     n_guides: int,
     dense: np.ndarray,
     held: int,
-    memory_bytes: int | None,
+    ledger: MemoryLedger | None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Add every row block of counts to the histograms, and merge the larger counts.
 
     Counts up to the dense width are added to ``dense``. Returns the distinct
     keys of the larger counts, sorted, and the number of cells that hold
-    each. ``held`` counts the bytes that the caller holds beside them; the
-    buffer is released when this returns.
+    each. ``held`` counts the bytes of the histograms held beside them, which
+    each merge charges to ``ledger`` with what it holds; the buffer is
+    released when this returns.
     """
     buffer = np.empty(_buffer_keys(len(codes), n_guides), dtype=np.uint64)
     keys = np.zeros(0, dtype=np.uint64)
@@ -448,7 +479,7 @@ def _larger_counts(
             # The last merge also checks the assembly that follows, so that
             # one refusal names what both need.
             needed = max(needed, _assembly_bytes(held, dense, size))
-        _require_memory(needed, memory_bytes, size, rows_read=rows_read, n_rows=n_rows)
+        _require_memory(needed, ledger, size, rows_read=rows_read, n_rows=n_rows)
         merged_keys = np.empty(size, dtype=np.uint64)
         merged_cells = np.empty(size, dtype=np.int64)
         _merge_run(keys, cells, run, merged_keys, merged_cells)
@@ -504,13 +535,14 @@ def guide_count_histograms(
     *,
     n_samples: int,
     n_guides: int,
-    memory_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> GuideCountHistograms:
     """Count the cells that hold each UMI count of each guide, per sample.
 
     The memory grows with the distinct counts that the histograms hold, as
     :func:`histogram_bytes` counts it, and what the histograms would hold is
-    checked against ``memory_bytes`` before each array is allocated.
+    charged to ``ledger`` as a peak, beside what it holds, before each array
+    is allocated.
 
     Args:
         blocks: Consecutive row blocks of the cells x guides counts, which
@@ -519,22 +551,20 @@ def guide_count_histograms(
             ``n_samples - 1``. Without samples, every cell has code 0.
         n_samples: The number of samples.
         n_guides: The number of guides, the width of every block.
-        memory_bytes: The most bytes that the histograms may hold besides the
-            blocks and the caller's sample codes, or None for no limit.
+        ledger: The caller's memory ledger, which holds the blocks and the
+            caller's sample codes, or None for no limit.
 
     Returns:
         The exact histogram of every guide in every sample.
 
     Raises:
-        TypeError: If a block holds counts that are not unsigned integers, or
-            ``memory_bytes`` is not an integer.
+        TypeError: If a block holds counts that are not unsigned integers.
         ValueError: If there is no sample or no guide, a sample code is out of
             range, a block has the wrong width, the blocks hold more or fewer
-            rows than there are cells, a count exceeds the uint32 range, or
-            ``memory_bytes`` is negative.
-        HistogramMemoryError: If the histograms need more than
-            ``memory_bytes``, a MemoryError that holds the bytes they need at
-            that point and the rows of counts read by then.
+            rows than there are cells, or a count exceeds the uint32 range.
+        HistogramMemoryError: If the histograms would pass the ledger's
+            budget, a MemoryBudgetError that holds the bytes that the call
+            needs at that point and the rows of counts read by then.
     """
     if n_samples < 1 or n_guides < 1:
         raise ValueError("Histograms need at least one sample and one guide")
@@ -542,15 +572,13 @@ def guide_count_histograms(
         raise ValueError(
             f"{n_samples} samples of {n_guides} guides exceed 2**31 histograms"
         )
-    if memory_bytes is not None:
-        memory_bytes = integer_argument(memory_bytes, "memory_bytes", minimum=0)
     codes = checked_sample_codes(sample_codes, n_samples)
     # Codes that are not int64 already are held as an int64 copy.
     copied = 0 if codes is sample_codes else codes.nbytes
     n_entries = n_samples * n_guides
     _require_memory(
         copied + histogram_bytes(n_samples, n_guides, len(codes), n_distinct=0),
-        memory_bytes,
+        ledger,
         0,
         rows_read=0,
         n_rows=len(codes),
@@ -558,14 +586,14 @@ def guide_count_histograms(
     held = copied + _CALL_BYTES
     dense = np.zeros((n_samples, n_guides, DENSE_COUNTS), dtype=np.uint32)
     keys, key_cells = _larger_counts(
-        blocks, codes, n_guides, dense, held + dense.nbytes, memory_bytes
+        blocks, codes, n_guides, dense, held + dense.nbytes, ledger
     )
 
     flat = dense.reshape(n_entries, DENSE_COUNTS)
     total = int(np.count_nonzero(flat)) + len(keys)
     _require_memory(
         _assembly_bytes(held + dense.nbytes, dense, len(keys)),
-        memory_bytes,
+        ledger,
         total,
         rows_read=len(codes),
         n_rows=len(codes),

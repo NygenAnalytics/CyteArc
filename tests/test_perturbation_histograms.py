@@ -1,4 +1,3 @@
-import re
 import tracemalloc
 from collections.abc import Callable
 
@@ -14,8 +13,14 @@ from cytearc.perturbation.histograms import (
     guide_count_histograms,
     histogram_bytes,
 )
-from cytearc.utils.memory_budget import MemoryBudgetError
+from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
+from tests.memory_helpers import named_budget
 from tests.perturbation_helpers import histogram_of, screen_counts, use_python_kernels
+
+
+def _ledger(budget: int) -> MemoryLedger:
+    """A ledger of ``budget`` bytes that holds nothing, which the histograms charge."""
+    return MemoryLedger(int(budget), "Counting guide UMIs")
 
 
 def _blocks(counts: np.ndarray, *sizes: int) -> list[np.ndarray]:
@@ -141,9 +146,6 @@ def test_histograms_refuse_counts_beyond_uint32(value) -> None:
         ({"blocks": [np.zeros((2, 2), dtype=np.int32)]}, TypeError, "unsigned"),
         ({"blocks": [np.zeros((3, 2), dtype=np.uint8)]}, ValueError, "more than 2"),
         ({"blocks": [np.zeros((1, 2), dtype=np.uint8)]}, ValueError, "hold 1 rows"),
-        ({"memory_bytes": 1e9}, TypeError, "memory_bytes must be an integer"),
-        ({"memory_bytes": True}, TypeError, "memory_bytes must be an integer"),
-        ({"memory_bytes": -1}, ValueError, "memory_bytes must be at least 0"),
     ],
 )
 def test_histograms_refuse_inputs_they_cannot_count(arguments, error, message) -> None:
@@ -152,7 +154,7 @@ def test_histograms_refuse_inputs_they_cannot_count(arguments, error, message) -
         "sample_codes": [0, 0],
         "n_samples": 1,
         "n_guides": 2,
-        "memory_bytes": None,
+        "ledger": None,
     }
     call.update(arguments)
     with pytest.raises(error, match=message):
@@ -161,7 +163,7 @@ def test_histograms_refuse_inputs_they_cannot_count(arguments, error, message) -
             call["sample_codes"],
             n_samples=call["n_samples"],
             n_guides=call["n_guides"],
-            memory_bytes=call["memory_bytes"],
+            ledger=call["ledger"],
         )
 
 
@@ -234,7 +236,7 @@ def test_histograms_hold_no_more_than_the_bytes_of_their_distinct_counts(
             samples,
             n_samples=n_samples,
             n_guides=n_guides,
-            memory_bytes=planned,
+            ledger=_ledger(planned),
         )
         peak = tracemalloc.get_traced_memory()[1]
     finally:
@@ -277,9 +279,7 @@ def _refusal(count: Callable[[], object]) -> tuple[str, int, int]:
         count()
     except MemoryError as error:
         peak = tracemalloc.get_traced_memory()[1]
-        found = re.search(r"need about (\d+) bytes", str(error))
-        assert found is not None, str(error)
-        return str(error), int(found[1]), peak
+        return str(error), named_budget(error), peak
     finally:
         tracemalloc.stop()
     raise AssertionError("The count was not refused")
@@ -300,10 +300,14 @@ def test_histograms_raise_before_they_outgrow_their_memory() -> None:
     )
     message, needed, peak = _refusal(
         lambda: guide_count_histograms(
-            blocks, samples, n_samples=1, n_guides=n_guides, memory_bytes=planned // 2
+            blocks,
+            samples,
+            n_samples=1,
+            n_guides=n_guides,
+            ledger=_ledger(planned // 2),
         )
     )
-    assert "they may hold" in message
+    assert "rows of counts remain to be read" in message
     # The message names what the next step needs, more than the limit and at
     # most what the whole count needs.
     assert planned // 2 < needed <= planned
@@ -322,11 +326,11 @@ def test_histograms_raise_before_assembling_more_than_their_memory() -> None:
     least = histogram_bytes(1, 200, 2_000, n_distinct=0)
     message, needed, peak = _refusal(
         lambda: guide_count_histograms(
-            [counts], samples, n_samples=1, n_guides=200, memory_bytes=least
+            [counts], samples, n_samples=1, n_guides=200, ledger=_ledger(least)
         )
     )
     # The assembly of every distinct count is refused.
-    assert f"for {n_distinct} distinct counts" in message
+    assert f"histograms of {n_distinct} distinct counts," in message
     assert least < needed <= histogram_bytes(1, 200, 2_000, n_distinct=n_distinct)
     assert peak <= least
 
@@ -338,22 +342,27 @@ def test_histograms_refuse_memory_below_their_least_before_reading() -> None:
 
     samples = np.asarray([0, 1, 0, 1], dtype=np.int64)
     least = histogram_bytes(2, 3, 4, n_distinct=0)
-    with pytest.raises(MemoryError, match=f"need about {least} bytes for 0 "):
+    with pytest.raises(MemoryError) as refused:
         guide_count_histograms(
-            unread(), samples, n_samples=2, n_guides=3, memory_bytes=least - 1
+            unread(), samples, n_samples=2, n_guides=3, ledger=_ledger(least - 1)
         )
+    assert named_budget(refused.value) == least
+    assert "for the guide count histograms of 0 distinct counts, while 4 of 4" in str(
+        refused.value
+    )
     # Codes that are not int64 are held as an int64 copy, 8 bytes per cell.
-    with pytest.raises(MemoryError, match=f"need about {least + 32} bytes for 0 "):
+    with pytest.raises(MemoryError) as refused:
         guide_count_histograms(
             unread(),
             samples.astype(np.uint8),
             n_samples=2,
             n_guides=3,
-            memory_bytes=least,
+            ledger=_ledger(least),
         )
+    assert named_budget(refused.value) == least + 32
     counts = np.zeros((4, 3), dtype=np.uint8)
     found = guide_count_histograms(
-        [counts], samples, n_samples=2, n_guides=3, memory_bytes=least
+        [counts], samples, n_samples=2, n_guides=3, ledger=_ledger(least)
     )
     assert found.zero_cells().tolist() == [[2, 2, 2], [2, 2, 2]]
 
@@ -365,7 +374,7 @@ def test_a_refusal_says_how_many_rows_remain_to_be_read() -> None:
     least = histogram_bytes(1, n_guides, n_cells, n_distinct=0)
     with pytest.raises(HistogramMemoryError) as refused:
         guide_count_histograms(
-            [counts], samples, n_samples=1, n_guides=n_guides, memory_bytes=least + 1
+            [counts], samples, n_samples=1, n_guides=n_guides, ledger=_ledger(least + 1)
         )
     error = refused.value
     # The buffer of larger counts filled within the block, so rows remain.
@@ -376,9 +385,11 @@ def test_a_refusal_says_how_many_rows_remain_to_be_read() -> None:
     )
     assert error.needed_bytes > least + 1
     # It refuses as every memory budget refusal does, naming the histograms
-    # and the bytes they could hold.
+    # and the budget of the ledger that they charge.
     assert isinstance(error, MemoryBudgetError)
-    assert (error.item, error.budget_bytes) == ("the guide count histograms", least + 1)
+    assert error.item.startswith("the guide count histograms of ")
+    assert error.budget_bytes == least + 1
+    assert named_budget(error) == error.needed_bytes
 
 
 def test_a_refusal_after_every_row_names_memory_that_finishes() -> None:
@@ -394,7 +405,7 @@ def test_a_refusal_after_every_row_names_memory_that_finishes() -> None:
     for limit in np.linspace(least, full, 40).astype(int):
         try:
             guide_count_histograms(
-                [counts], samples, n_samples=1, n_guides=n_guides, memory_bytes=limit
+                [counts], samples, n_samples=1, n_guides=n_guides, ledger=_ledger(limit)
             )
         except HistogramMemoryError as error:
             if error.counts_remain:
@@ -406,7 +417,7 @@ def test_a_refusal_after_every_row_names_memory_that_finishes() -> None:
                 samples,
                 n_samples=1,
                 n_guides=n_guides,
-                memory_bytes=error.needed_bytes,
+                ledger=_ledger(error.needed_bytes),
             )
             assert int(found.cells.sum()) == int(np.count_nonzero(counts))
             finished += 1

@@ -807,14 +807,10 @@ def test_guide_calls_with_every_option_run_within_the_budget_that_their_refusal_
     assert int((reference.cells["n_guides"] > 0).sum()) == 2_400
 
 
-# The importers that charge every step to one ledger. The guide calls'
-# import charges its join to a ledger beside the estimate that it checks once,
-# so its other steps hold what no ledger plans; the variant import reads a GoT
-# table whole before its ledger exists, so its audit reads mgatk files, in
-# tests/test_variant_import.py.
-LEDGER_IMPORTERS = sorted(
-    name for name in IMPORTERS if name not in ("import_guide_calls", "import_counts")
-)
+# The importers that charge every step to one ledger. The variant import
+# reads a GoT table whole before its ledger exists, so its audit reads mgatk
+# files, in tests/test_variant_import.py.
+LEDGER_IMPORTERS = sorted(name for name in IMPORTERS if name != "import_counts")
 
 
 def _unmatched_file(importer: Importer, folder: Path, n_unmatched: int) -> Path:
@@ -833,12 +829,19 @@ def test_every_import_holds_no_more_than_its_ledger_plans(
     store, selection = joined
     importer = IMPORTERS[name]
     path = _unmatched_file(importer, tmp_path, 20_000)
+    # A call file holds the barcodes of one sample, which its prefix names.
+    options = (
+        {
+            "cell_selection": store.snapshot_cell_selection("s1"),
+            "barcode_prefix": "s1__",
+        }
+        if name == "import_guide_calls"
+        else {"cell_selection": selection}
+    )
 
     def run() -> object:
         with collect_warnings():
-            return importer.run(
-                store, [path], cell_selection=selection, invalidate_cache=True
-            )
+            return importer.run(store, [path], invalidate_cache=True, **options)
 
     # From each charge of the import's ledger to the next, what is traced
     # stays within what the ledger planned, with every read's work held until
@@ -1014,12 +1017,17 @@ def test_guide_calls_run_within_the_budget_that_their_refusal_names_beside_the_s
                 calls, cell_selection=kept, invalidate_cache=True
             )
 
-    # The estimate that the import checks before it parses the file holds
-    # the join's pass over the store's 60,000 cell IDs, so its one refusal
-    # names a budget at which the join's ledger refuses nothing.
+    # The import charges each step to the ledger that the join charges, its
+    # pass over the store's 60,000 cell IDs among them, so each refusal names
+    # the step that it refused.
     budget, refusals, ref = check_budget(path, call)
-    assert len(refusals) == 1
-    assert refusals[0].startswith("Importing the guide calls of 10 cells holds about")
+    assert all(
+        refusal.startswith("Importing the guide calls of 10 cells holds about")
+        for refusal in refusals
+    )
+    assert any(
+        " for the pass over the store's cell IDs, " in refusal for refusal in refusals
+    )
     diagnostics = open_store(path).artifacts.inspect(ref).diagnostics
     assert (diagnostics["unmatchedBarcodes"], diagnostics["unselectedBarcodes"]) == (
         1_000,

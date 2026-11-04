@@ -603,6 +603,12 @@ _MAX_UMIS = int(np.iinfo(np.uint32).max)
 # The decompressed bytes that the size scan reads at a time, a small share of
 # what parsing the file holds.
 _SCAN_BYTES = 1 << 18
+#: The most bytes that :func:`protospacer_calls_size` holds while it counts a
+#: file: a chunk as read and its flags, and the positions of its line ends
+#: and separators, their lines and their count by line, each 8 bytes, while
+#: at most one byte in 16 is a line end and one in 16 a separator, as in a
+#: file whose rows name a barcode, a guide and its UMIs.
+PROTOSPACER_SCAN_BYTES = 4 * _SCAN_BYTES
 # The bytes that read_protospacer_calls holds while it parses, by the size of
 # the file, measured with Python 3.13 and pandas 3.0 and rounded up: for
 # each row, its four fields as Python text, pandas' copies of them, and its

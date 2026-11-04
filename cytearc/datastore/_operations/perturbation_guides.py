@@ -13,15 +13,13 @@ from ...metadata.arguments import (
     GuideThresholdArguments,
     PerturbationLabelArguments,
 )
-from ...metadata.artifacts import write_cell_data_artifact
-from ...metadata.rows import (
-    array_row_selection_parts,
-    read_array_rows_chunkwise,
-    read_metadata_rows_chunkwise,
-)
+from ...metadata.artifacts import cell_data_write_bytes, write_cell_data_artifact
+from ...metadata.rows import read_rows, read_text_rows, read_whole
 from ...metadata.selection import (
-    cell_selection_indices,
+    CellSelectionRead,
     cell_value_array,
+    plan_cell_selection_read,
+    read_cell_selection,
     resolve_cell_aligned_artifact,
 )
 from ...perturbation.calling import threshold_calls, top_guide_calls
@@ -47,10 +45,8 @@ from ...perturbation.guide_thresholds import (
     guide_threshold_frames,
 )
 from ...perturbation.labels import (
-    GuideTargets,
     PerturbationLabels,
     guide_targets,
-    label_memory_bytes,
     label_settings,
     longest_label,
     perturbation_label_arrays,
@@ -85,14 +81,19 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
-from ...storage.geometry import ArrayGeometry, array_geometry
-from ...storage.layout import PROFILE_METADATA_CHUNK
 from ...storage.diagnostics import DiagnosticRule, warn_diagnostics
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.logging import logger
-from ...utils.memory_budget import MemoryLedger
+from ...utils.memory_budget import (
+    MemoryLedger,
+    fixed_text_bytes,
+    hash_table_bytes,
+    memory_refusal,
+    object_array_bytes,
+    python_text_bytes,
+)
 from ...utils.numba import numba_threads
 from ...utils.warnings import warn
 from .cell_barcodes import (
@@ -100,15 +101,12 @@ from .cell_barcodes import (
     CellBarcodeJoin,
     barcode_files,
     join_bytes,
-    store_pass_bytes,
 )
 from .cell_barcodes import barcode_pattern as checked_barcode_pattern
 from .perturbation_store import (
     _cell_samples,
-    _column_read_bytes,
+    _count_stream,
     _plan_cells,
-    _read_chunkwise,
-    _require_budget,
     _require_cell_column,
     _require_ref,
     _require_status_names,
@@ -131,61 +129,54 @@ _GUIDE_CALL_ARRAYS = (
     "guide_codes",
     "guide_umis",
 )
-# The bytes of the Python objects that a call holds beside its arrays: the
-# guide IDs, the plans of its artifacts, and the store's metadata it opens.
+# The bytes of the Python objects that a guide operation holds beside its
+# arrays: the plans of its artifacts and the store's metadata it opens.
 _CALL_FIXED_BYTES = 1 << 18
-# The bytes that reading a cell selection holds: a stored chunk, and for each
-# cell of the store its flag and position.
-_SELECTION_READ_BYTES = 1 << 18
-_SELECTION_BYTES_PER_CELL = 32
-# The bytes of each guide ID as a Python text, beside its characters.
-_GUIDE_ID_BYTES = 64
-# Checking the guide IDs holds, beside them as Python text, four copies at
-# their fixed width: the IDs as read, their text as an array, and the sorted
-# copy and distinct values that find a repeated ID.
+# Checking the guide IDs holds, beside them as Python text, a list and an
+# array of their references and four copies at their fixed width: their text
+# as an array, and the copies and distinct values of the sort that finds a
+# repeated ID.
 _GUIDE_CHECK_COPIES = 4
-# The bytes of each selected cell's sample label while the labels are read
-# and numbered, beside the label's stored bytes.
-_SAMPLE_BYTES_PER_CELL = 160
-# The bytes that each selected cell holds while its calls are made and saved,
-# beside its padded calls and the text of its labels: its position and sample
-# code, its top guide, top UMIs and total UMIs, its number of calls and their
-# count while they are placed, its label and top guide as Python objects, its
-# top fraction, and the masks and gathers that label it.
-_BYTES_PER_CELL = 120
-# The bytes of each call: its cell, guide and UMIs, and their copies when the
-# calls of the blocks are joined.
-_BYTES_PER_CALL = 40
-# The bytes that saving each label array holds per character of its width
-# and cell: NumPy's two fixed-width text copies, at 4 bytes per character.
-_TEXT_BYTES_PER_CHARACTER = 8
-# Zarr encodes an artifact array a chunk of this many cells at a time.
-_WRITE_CHUNK_CELLS = 100_000
+_GUIDE_CHECK_BYTES_PER_GUIDE = 16
+# Checking the cells' IDs against the call file's options holds, for each
+# cell, whether it is outside the options and where its ID holds the
+# separator of a merged store's samples, beside a copy of the IDs that hold
+# it.
+_CELL_CHECK_BYTES_PER_CELL = 18
+# Summarising a cell's guide counts holds its top guide, its top UMIs and its
+# total UMIs.
+_SUMMARY_BYTES_PER_CELL = 4 + 4 + 8
 # The bytes that summarising the guide counts makes of each row of a block:
 # its total, its top guide and its top UMIs, and their masked copies.
 _SUMMARY_BYTES_PER_ROW = 48
-# The bytes that each selected cell holds while the counts stream to
-# summarise its guides: its position, number of calls, label and summary.
-_STREAMED_BYTES_PER_CELL = 40
-# The bytes that each cell holds while the counts stream to call its guides:
-# its position, sample code and summary; and the bytes of each call made: its
-# cell, guide and UMIs.
-_STREAMED_CALL_BYTES_PER_CELL = 40
-_STREAMED_BYTES_PER_CALL = 20
-# The bytes of each selected cell's ID beside its fixed-width text, while the
-# file's barcodes are matched to the cells: its Python text and the index
-# that finds it.
-_ID_BYTES_PER_CELL = 120
-# The bytes of each barcode of the file while the barcodes are matched: its
-# position among the cells and the lookup's copies.
-_MATCH_BYTES_PER_BARCODE = 40
-# The bytes of each barcode with its prefix as Python text, beside its
-# characters, and its pointers.
-_PREFIXED_BYTES_PER_BARCODE = 80
-# The bytes of each call of the file while its cells are matched and its calls
-# gathered for padding: its cell, whether it matched, and the gathered cell,
-# guide, UMIs and uint32 UMIs.
-_CALL_INPUT_BYTES_PER_CALL = 48
+# Each call holds its cell, its guide and its UMIs.
+_BYTES_PER_CALL = 8 + 8 + 4
+# Matching each call of the file to its cell holds, beside its cell and
+# whether it matched, its cell, guide and UMIs gathered for padding.
+_MATCHED_BYTES_PER_CALL = 8 + 1
+# Padding the calls holds, for each cell, its number of calls as counted and
+# the labels' choice among the guides, and for each guide the cell that
+# last called it and its label's reference.
+_PADDING_BYTES_PER_CELL = 16
+_PADDING_BYTES_PER_GUIDE = 16
+# Each row of a table of calls or targets holds, beside its cell's ID, its
+# cell and slot as found, ordered and gathered, its value's reference and its
+# UMIs, and their copies in the table.
+_FRAME_BYTES_PER_ENTRY = 128
+# Reading saved fits as tables holds, for each count of a histogram, its
+# entry, UMIs and cells as gathered, ordered and copied into a row with its
+# sample's and guide's references, and for each fit its row, beside the
+# arrays read.
+_TABLE_BYTES_PER_COUNT = 128
+_TABLE_BYTES_PER_FIT = 160
+# Fitting a guide in a sample holds its cells with UMIs, its most UMIs, the
+# fit's parameters, status and threshold as computed and as kept; the fits
+# keep the status, the threshold, the parameters and the iterations.
+_FIT_BYTES_PER_ENTRY = 160
+_FITTED_BYTES_PER_ENTRY = 80
+# Saving the calls holds, for each cell, its top guide's reference, whether
+# it has one, the gather of its ID, and its top fraction with its mask.
+_SAVING_BYTES_PER_CELL = 8 + 1 + 8 + 9
 
 
 def _report_barcodes(
@@ -214,257 +205,44 @@ def _report_barcodes(
         logger.info(message)
 
 
-def _import_step_bytes(
-    size: Any,
-    *,
-    n_cells: int,
-    guide_ids: np.ndarray,
-    id_array: Any,
-    stream_least: int,
-    prefix_length: int = 0,
-    call_file: BarcodeFile | None = None,
-    codec_threads: int = 1,
-) -> dict[str, int]:
-    """Return the bytes that each step of importing Cell Ranger's calls holds.
+def _padded_bytes(n_cells: int, width: int) -> int:
+    """Return the bytes of the per-cell arrays that :func:`guide_call_arrays` makes for calls ``width`` wide.
 
-    The import reads the selected cells' IDs and parses the call file
-    (``"parsing"``), matches its barcodes to the cells, reading the store's
-    cell IDs to tell the barcodes of cells outside the selection from those
-    of no cell (``"matching"``), pads the calls (``"padding"``), streams the
-    counts to summarise each cell's guides (``"streaming"``), and saves the
-    calls (``"saving"``). Each step's bytes include what the earlier steps keep,
-    but not the cells' positions and the fixed bytes that every step holds.
-
-    Args:
-        size: The :class:`~cytearc.readers.cellranger.ProtospacerCallsSize`
-            of the call file.
-        n_cells: The selected cells.
-        guide_ids: The guide IDs of the assay.
-        id_array: The store's array of cell IDs.
-        stream_least: What the count stream holds with one-row blocks.
-        prefix_length: The characters of the barcode prefix that the
-            perturbation recipe's check adds to each barcode itself.
-        call_file: The import's call file, whose barcodes join the cells
-            through ``CellBarcodeJoin``; matching then counts what the join
-            holds, its pass over the store's cell IDs included, and the cell
-            IDs that the file's prefix, suffix and pattern derive, in place of
-            ``prefix_length``.
-        codec_threads: The threads that the import's reads decode on, which
-            the join's read of the store's cell IDs counts.
+    Each cell's label reference and number of calls, and its padded guide
+    positions and UMIs.
     """
-    n_rows = size.n_rows
-    n_calls = size.n_calls
-    width = max(1, min(size.most_calls, len(guide_ids)))
-    fixed, per_id = array_row_selection_parts(id_array)
-    id_text = n_cells * np.dtype(id_array.dtype).itemsize
-    id_width = max(1, np.dtype(id_array.dtype).itemsize // 4)
-    # The selected cells' IDs as fixed-width text, and their read.
-    ids = id_text + fixed + per_id * n_cells
-    if call_file is None:
-        # The barcodes with their prefix, as Python text, when there is one.
-        derived = (
-            n_rows * (_PREFIXED_BYTES_PER_BARCODE + prefix_length) + size.n_bytes
-            if prefix_length
-            else 0
-        )
-        matched = derived + _MATCH_BYTES_PER_BARCODE * n_rows
-    else:
-        # What the join holds while it matches the barcodes, the cell IDs
-        # that the file's options derive included, whose characters the
-        # file's bytes bound, and its pass over the store's cell IDs, which
-        # tells the barcodes of cells outside the selection from those of no
-        # cell.
-        matched = join_bytes(call_file, n_rows, size.n_bytes) + store_pass_bytes(
-            id_array, n_cells, codec_threads=codec_threads
-        )
-    parsed = size.parsed_bytes() + 8 * n_calls + 8 * n_rows
-    parsing = ids + size.parse_bytes()
-    matching = ids + parsed + matched + n_cells * (_ID_BYTES_PER_CELL + id_width)
-    padding = (
-        parsed
-        + _CALL_INPUT_BYTES_PER_CALL * n_calls
-        + _call_bytes(n_cells, 0, width, 0)
-    )
-    streaming = _STREAMED_BYTES_PER_CELL * n_cells + 8 * width * n_cells + stream_least
-    saving = _call_bytes(n_cells, 0, width, _label_width(guide_ids))
-    return {
-        "parsing": parsing,
-        "matching": matching,
-        "padding": padding,
-        "streaming": streaming,
-        "saving": saving,
-    }
+    return n_cells * (8 + 4 + 8 * width)
 
 
-def _import_bytes(
-    size: Any,
-    *,
-    n_cells: int,
-    guide_ids: np.ndarray,
-    id_array: Any,
-    call_file: BarcodeFile,
-    stream_least: int,
-    reading: int,
-    codec_threads: int = 1,
-) -> int:
-    """Return the most bytes that importing Cell Ranger's calls holds.
-
-    These are the most that one step of :func:`_import_step_bytes` holds
-    beside the cells' positions and the fixed bytes, or ``reading``, what the
-    reads before the plan hold, from ``_guide_read_bytes``, if more. The other
-    arguments are those of :func:`_import_step_bytes`.
-    """
-    steps = _import_step_bytes(
-        size,
-        n_cells=n_cells,
-        guide_ids=guide_ids,
-        id_array=id_array,
-        stream_least=stream_least,
-        call_file=call_file,
-        codec_threads=codec_threads,
-    )
-    return int(max(reading, _CALL_FIXED_BYTES + 8 * n_cells + max(steps.values())))
-
-
-def _guide_id_read_bytes(geometry: ArrayGeometry) -> tuple[int, int]:
-    """Return what reading and checking the guide IDs hold at their peak, and what stays held after.
-
-    The IDs are read whole, which decodes up to Zarr's async concurrency of
-    whole stored chunks at once, as ``read_whole`` charges, however few IDs a
-    chunk holds. Each codec thread that decoded a chunk can still hold it
-    beside the steps after the read, as ``ArrayGeometry.heldReadBytes``
-    counts, while the IDs are checked and kept as Python text.
-
-    Returns:
-        The bytes at the peak, and the bytes held after it: the IDs as text
-        and the chunks that the read can leave.
-    """
-    n_guides = geometry.shape[0]
-    n_chunks = max(1, -(-n_guides // geometry.axisChunk(0)))
-    left = (
-        geometry.heldReadBytes(n_chunks)
-        if geometry.shards is None
-        else geometry.bandHeldBytes(n_chunks)
-    )
-    kept = n_guides * (_GUIDE_ID_BYTES + geometry.itemsize)
-    reading = geometry.wholeReadBytes(max(1, int(zarr.config.get("async.concurrency"))))
-    checking = left + kept + _GUIDE_CHECK_COPIES * n_guides * geometry.itemsize
-    return max(reading, checking), kept + left
-
-
-def _guide_id_check_bytes(guide_id_array: Any, *, n_cells: int, id_array: Any) -> int:
-    """Return what reading the guide assay's IDs holds beside the cells' IDs, from the stored IDs' chunks.
-
-    The perturbation recipe checks this before it reads the IDs, which
-    :func:`_call_file_check_bytes` needs.
-
-    Args:
-        guide_id_array: The guide assay's stored array of IDs.
-        n_cells: The cells whose IDs the recipe holds as text.
-        id_array: The store's array of cell IDs.
-
-    Raises:
-        ValueError: If the guide IDs are not stored in chunks.
-    """
-    geometry = array_geometry(guide_id_array)
-    if geometry is None:
-        raise ValueError("The guide assay's IDs are not stored in chunks")
-    reading, _kept = _guide_id_read_bytes(geometry)
-    cell_text = n_cells * np.dtype(id_array.dtype).itemsize
-    return int(_CALL_FIXED_BYTES + 8 * n_cells + cell_text + reading)
-
-
-def _call_file_check_bytes(
-    size: Any,
-    *,
-    n_cells: int,
-    guide_ids: np.ndarray,
-    id_array: Any,
-    prefix_length: int,
-) -> int:
-    """Return the most bytes that reading the guide IDs and the call file, and matching its barcodes, hold.
-
-    These are the import's first two steps, which the perturbation recipe
-    runs to check the file against its cells before its run, after it reads
-    the guide assay's IDs. The IDs are counted as the store keeps a feature
-    column of them, in chunks of ``PROFILE_METADATA_CHUNK`` rows at the width
-    of the longest ID, which a read decodes whole however few guides there
-    are; :func:`_guide_id_check_bytes` counts the read from the stored IDs'
-    own chunks before the recipe reads them. The arguments are those of
-    :func:`_import_step_bytes`.
-    """
-    steps = _import_step_bytes(
-        size,
-        n_cells=n_cells,
-        guide_ids=guide_ids,
-        id_array=id_array,
-        stream_least=0,
-        prefix_length=prefix_length,
-    )
-    width = max((len(str(guide)) for guide in guide_ids), default=1)
-    reading, kept = _guide_id_read_bytes(
-        ArrayGeometry(
-            shape=(len(guide_ids),),
-            chunks=(PROFILE_METADATA_CHUNK,),
-            shards=None,
-            itemsize=4 * max(1, width),
-        )
-    )
-    cell_text = n_cells * np.dtype(id_array.dtype).itemsize
-    return int(
-        _CALL_FIXED_BYTES
-        + 8 * n_cells
-        + max(cell_text + reading, kept + steps["parsing"], kept + steps["matching"])
-    )
-
-
-def _calling_bytes(
-    n_cells: int, n_calls: int, width: int, text_width: int, stream_least: int
-) -> int:
-    """Return the most bytes that ``call_guides`` holds from its calling pass on.
-
-    The calling pass streams the counts beside each cell's position, sample
-    code and summary and the calls made so far; the calls are then padded and
-    saved, as :func:`_call_bytes` counts.
-
-    Args:
-        n_cells: The cells to call.
-        n_calls: The calls, or their bound.
-        width: The most calls of one cell, or its bound.
-        text_width: The most characters of a label.
-        stream_least: What the count stream holds with one-row blocks.
-    """
-    streaming = (
-        _CALL_FIXED_BYTES
-        + _STREAMED_CALL_BYTES_PER_CELL * n_cells
-        + _STREAMED_BYTES_PER_CALL * n_calls
-        + stream_least
-    )
-    return max(streaming, _call_bytes(n_cells, n_calls, width, text_width))
-
-
-def _call_bytes(n_cells: int, n_calls: int, width: int, text_width: int) -> int:
-    """Return the most bytes that making, padding and saving guide calls holds.
-
-    The count stream is not counted, since it ends before the calls are
-    padded.
-
-    Args:
-        n_cells: The cells that the calls label.
-        n_calls: The calls, or their bound.
-        width: The padded width, the most calls of one cell.
-        text_width: The most characters of a label: a guide ID, ``"Negative"``
-            or ``"Multiple"``.
-    """
-    chunk = min(n_cells, _WRITE_CHUNK_CELLS)
+def _padding_bytes(n_cells: int, width: int, n_guides: int) -> int:
+    """Return the most bytes that :func:`guide_call_arrays` holds beside the calls that it pads, its result included."""
     return (
-        _CALL_FIXED_BYTES
-        + _BYTES_PER_CELL * n_cells
-        + _BYTES_PER_CALL * n_calls
-        # The padded guide positions and UMIs, and Zarr's encoding of a chunk
-        # of them.
-        + 8 * width * (n_cells + chunk)
-        + _TEXT_BYTES_PER_CHARACTER * text_width * (n_cells + chunk)
+        _padded_bytes(n_cells, width)
+        + _PADDING_BYTES_PER_CELL * n_cells
+        + _PADDING_BYTES_PER_GUIDE * n_guides
+    )
+
+
+def _guide_call_write_bytes(n_cells: int, width: int, guide_ids: np.ndarray) -> int:
+    """Return the most bytes that saving guide calls ``width`` wide holds beside the padded calls and the summary.
+
+    Saving names each cell's top guide and its top fraction, and writes the
+    artifact's arrays as :func:`cell_data_write_bytes` states, each label at
+    the width of the longest: a guide ID, ``"Negative"`` or ``"Multiple"``.
+    """
+    id_width = max(1, *(len(str(guide)) for guide in guide_ids))
+    return _SAVING_BYTES_PER_CELL * n_cells + cell_data_write_bytes(
+        {
+            "values": ((n_cells,), f"U{_label_width(guide_ids)}"),
+            "n_guides": ((n_cells,), np.int32),
+            "top_guide": ((n_cells,), f"U{id_width}"),
+            "top_umi": ((n_cells,), np.uint32),
+            "top_fraction": ((n_cells,), np.float64),
+            "total_umi": ((n_cells,), np.uint64),
+            "guide_codes": ((n_cells, width), np.int32),
+            "guide_umis": ((n_cells, width), np.uint32),
+            "guides": ((len(guide_ids),), f"U{id_width}"),
+        }
     )
 
 
@@ -714,59 +492,122 @@ def _unfitted_warning(
     )
 
 
-def _labelling_bytes(
-    assay: Any,
-    target_column: str | None,
-    codes: zarr.Array,
-    call_labels: zarr.Array,
-    targets: GuideTargets,
-    guide_ids: np.ndarray,
-    *,
-    policy: str,
-) -> int:
-    """Return the most bytes that labelling the cells of guide calls holds.
+def _strings_bytes(values: np.ndarray) -> int:
+    """Return the bytes of fixed-width text ``values`` as Python strings and their references.
 
-    Labelling reads the guide assay's target column, then the calls' guide
-    codes one chunk at a time, checks that each called guide has a target,
-    labels the cells, releases the codes, reads the calls' labels and writes
-    the labels' arrays one at a time.
-
-    Args:
-        assay: The guide assay.
-        target_column: Its feature column of targets, or None.
-        codes: The calls' ``guide_codes``.
-        call_labels: The calls' labels, their ``values``.
-        targets: The target of every guide.
-        guide_ids: The guide IDs.
-        policy: ``"single"`` or ``"combinations"``.
+    Each string is counted at the stored width, which bounds its characters,
+    and at the kind of the widest character stored.
     """
-    n_cells, width = (int(size) for size in codes.shape)
-    label_length = longest_label(targets, width, policy=policy)
-    # The labels, from the codes' entries to each cell's label and targets.
-    labelled = label_memory_bytes(
-        n_cells, width, label_length=label_length, joined=policy == "combinations"
+    n_values = len(values)
+    width = max(1, values.dtype.itemsize // 4)
+    widest = int(values.view(np.uint32).max()) if values.size else 0
+    return object_array_bytes(n_values) + python_text_bytes(
+        n_values, n_values * width, widest=widest
     )
-    # The int32 codes, beside the chunk that a read decodes or the flags that
-    # check the guides' targets.
-    held_codes = 4 * n_cells * width
-    reading = held_codes + max(array_row_selection_parts(codes)[0], 3 * n_cells * width)
-    # The calls' labels, each a guide ID, "Negative" or "Multiple", beside the
-    # chunk that their read decodes, or what saving the longest text array or
-    # a chunk of the target codes holds, as saving guide calls counts it.
-    guide_length = _label_width(guide_ids)
-    chunk = min(n_cells, _WRITE_CHUNK_CELLS)
-    n_genes = int(np.count_nonzero(~targets.is_control))
-    writing = max(
-        array_row_selection_parts(call_labels)[0],
-        _TEXT_BYTES_PER_CHARACTER * max(label_length, guide_length) * (n_cells + chunk),
-        4 * max(1, min(width, n_genes)) * chunk,
+
+
+def _frame_bytes(cell_ids: np.ndarray, arrays: Mapping[str, np.ndarray]) -> int:
+    """Return the most bytes that the tables of stored per-cell ``arrays`` hold beside them.
+
+    Each table holds the cells' IDs and each text array as Python strings,
+    as pandas makes them, and a copy of each array of numbers; each entry of
+    a padded two-dimensional array that holds a value becomes a row of its
+    own, which holds its cell's ID, as fixed-width text and as a Python
+    string, and the entry's values, their gathers and their copies.
+    """
+    total = _strings_bytes(cell_ids)
+    id_width = max(1, cell_ids.dtype.itemsize // 4)
+    for values in arrays.values():
+        if values.ndim == 1 and values.dtype.kind == "U":
+            total += object_array_bytes(len(values)) + _strings_bytes(values)
+        elif values.ndim == 1:
+            total += 2 * values.nbytes
+        else:
+            entries = int(np.count_nonzero(values >= 0))
+            total += (
+                entries * _FRAME_BYTES_PER_ENTRY
+                + fixed_text_bytes(entries, id_width)
+                + _strings_bytes(cell_ids[:1]) * entries
+            )
+    return total
+
+
+def _read_guide_ids(ledger: MemoryLedger, array: Any) -> np.ndarray:
+    """Read a stored array of guide IDs as Python text and check them, keeping them charged.
+
+    The IDs are read through ``read_text_rows``; checking them holds what
+    :func:`~cytearc.perturbation.guide_calls.validated_guide_ids` copies of
+    them.
+
+    Raises:
+        MemoryBudgetError: If the read or the check would pass the budget.
+        ValueError: If there is no guide, or an ID is empty, repeated, or
+            reserved.
+    """
+    n_guides = int(array.shape[0])
+    ids = read_text_rows(
+        ledger, array, np.arange(n_guides, dtype=np.int64), item="the guide IDs"
     )
-    return max(
-        _column_read_bytes(assay.feats, target_column),
-        reading,
-        held_codes + labelled,
-        labelled + 4 * guide_length * n_cells + writing,
+    width = max((len(value) for value in ids), default=1)
+    ledger.peak(
+        "checking the guide IDs",
+        _GUIDE_CHECK_BYTES_PER_GUIDE * n_guides
+        + _GUIDE_CHECK_COPIES * fixed_text_bytes(n_guides, max(1, width)),
     )
+    return validated_guide_ids(ids)
+
+
+def _check_cell_ids(
+    ledger: MemoryLedger, cell_ids: np.ndarray, call_file: BarcodeFile, **words: str
+) -> None:
+    """Refuse cells that the call file's barcodes cannot reach, after charging the check.
+
+    ``cell_ids`` are the cells' IDs as fixed-width text, and ``words`` the
+    messages' words of :func:`_require_call_file_cells`.
+    """
+    ledger.peak(
+        "checking the cells' IDs against the call file",
+        _CELL_CHECK_BYTES_PER_CELL * len(cell_ids) + cell_ids.nbytes,
+    )
+    _require_call_file_cells(
+        cell_ids,
+        call_file.barcode_prefix,
+        barcode_suffix=call_file.barcode_suffix,
+        **words,
+    )
+
+
+def _parse_call_file(
+    ledger: MemoryLedger, path: str | os.PathLike[str], size: Any
+) -> Any:
+    """Parse Cell Ranger's call file within the ledger, and keep what it parsed charged.
+
+    ``size`` is the file's :class:`~cytearc.readers.cellranger.ProtospacerCallsSize`,
+    whose bounds the parse and its result are charged by.
+    """
+    from ...readers.cellranger import read_protospacer_calls
+
+    ledger.peak("parsing the call file", size.parse_bytes())
+    calls = read_protospacer_calls(path)
+    ledger.hold("the parsed call file", size.parsed_bytes())
+    return calls
+
+
+def _guide_positions(
+    ledger: MemoryLedger, features: np.ndarray, guide_ids: np.ndarray, assay: Any
+) -> np.ndarray:
+    """Find each call's guide among the assay's guides, keeping the positions charged.
+
+    The lookup is pandas' hash table of the guide IDs, beside each call's
+    position.
+    """
+    ledger.peak(
+        "finding the called guides",
+        hash_table_bytes(len(guide_ids)) + 8 * len(features),
+    )
+    positions = _called_guide_positions(features, guide_ids, assay)
+    ledger.hold("the called guides' positions", positions.nbytes)
+    return positions
 
 
 class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
@@ -868,17 +709,21 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         return assay
 
     def _guide_feature_column(
-        self, assay: Any, column: str | None, name: str
+        self, assay: Any, column: str | None, name: str, *, ledger: MemoryLedger
     ) -> np.ndarray | None:
-        """Read a feature column of the guide assay, or return None without one.
+        """Read a feature column of the guide assay as Python objects, or return None without one.
+
+        The column is read through ``ledger``, which keeps it charged.
 
         Args:
             assay: The guide assay.
             column: The feature column, such as each guide's target, or None.
             name: The argument that names the column, for the error message.
+            ledger: The call's memory ledger.
 
         Raises:
             ValueError: If ``column`` is not a feature column of the assay.
+            MemoryBudgetError: If the column does not fit the memory budget.
         """
         if column is None:
             return None
@@ -886,27 +731,59 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             raise ValueError(
                 f"{name} {column!r} is not a feature column of assay {assay.name!r}"
             )
-        values: np.ndarray = np.asarray(assay.feats.fetch_all(column), dtype=object)
-        return values
+        array = assay.feats._get_array(column)
+        rows = np.arange(int(array.shape[0]), dtype=np.int64)
+        item = f"the guides' {column!r}"
+        if np.dtype(array.dtype).kind == "U":
+            text: np.ndarray = read_text_rows(ledger, array, rows, item=item)
+            return text
+        values = read_rows(ledger, array, rows, item=item)
+        # The values as Python objects beside their references.
+        ledger.hold(item, object_array_bytes(len(values)) + 32 * len(values))
+        stored = values.nbytes
+        objects: np.ndarray = values.astype(object)
+        del values
+        ledger.release(stored)
+        return objects
 
     def _guide_call_cells(
-        self, from_assay: str | None, cell_selection: ArtifactRef, operation: str
-    ) -> tuple[Any, np.ndarray, np.ndarray]:
-        """Return the guide assay, its guide IDs and the cells that calls label.
+        self,
+        from_assay: str | None,
+        cell_selection: ArtifactRef,
+        operation: str,
+        *,
+        doing: str,
+    ) -> tuple[Any, MemoryLedger, np.ndarray, CellSelectionRead]:
+        """Return the guide assay, the call's ledger, its guide IDs and the planned read of the cells that calls label.
+
+        The ledger refuses the store's budget as ``doing``, a text of
+        ``n_cells``, the selected cells, such as ``"Calling guides for
+        {n_cells} cells"``, and first holds the call's Python objects and
+        then the guide IDs, which it reads and checks.
 
         Raises:
             ValueError: If ``cell_selection`` selects no cell, or a guide ID
                 is empty, repeated, or a reserved label.
             UnmeasuredCellsError: If the guide assay did not measure a selected
                 cell.
+            MemoryBudgetError: If the guide IDs do not fit the memory budget.
         """
         assay = self._guide_assay(from_assay)
-        guide_ids = validated_guide_ids(assay.feats.fetch_all("ids"))
-        cell_index = cell_selection_indices(self.zw, cell_selection)
-        if not len(cell_index):
+        selection = plan_cell_selection_read(self.zw, cell_selection)
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            doing.format(n_cells=selection.cells),
+            remedy="pass a smaller cell_selection",
+            codec_threads=self.nthreads,
+        )
+        ledger.hold(
+            "the call's plans and the store's metadata it opens", _CALL_FIXED_BYTES
+        )
+        guide_ids = _read_guide_ids(ledger, assay.feats._get_array("ids"))
+        if not selection.cells:
             raise ValueError("cell_selection selects no cell")
         self._require_measured_cells(assay.name, cell_selection, operation=operation)
-        return assay, guide_ids, cell_index
+        return assay, ledger, guide_ids, selection
 
     def _plan_guide_calls(
         self,
@@ -946,32 +823,9 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             reuse_validator=has_guides,
         )
 
-    def _guide_read_bytes(
-        self, assay: Any, n_cells: int, sample_column: str | None = None
-    ) -> int:
-        """Return the most bytes that a guide operation's reads before its plan hold.
-
-        An operation reads the guide IDs, the selected cells and, with
-        ``sample_column``, their samples before it can plan; Zarr decodes a
-        whole stored chunk for any of its rows.
-        """
-        ids = assay.feats._get_array("ids")
-        fixed, per_row = array_row_selection_parts(ids)
-        n_guides = int(ids.shape[0])
-        reads = [
-            fixed
-            + (per_row + _GUIDE_ID_BYTES + np.dtype(ids.dtype).itemsize) * n_guides,
-            _SELECTION_READ_BYTES + _SELECTION_BYTES_PER_CELL * int(self.cells.N),
-        ]
-        if sample_column is not None:
-            fixed, per_row = array_row_selection_parts(
-                self.cells._get_array(sample_column)
-            )
-            reads.append(fixed + (per_row + _SAMPLE_BYTES_PER_CELL) * n_cells)
-        return int(_CALL_FIXED_BYTES + 16 * n_cells + max(reads))
-
     def _write_guide_calls(
         self,
+        ledger: MemoryLedger,
         planned: PlannedArtifact,
         arrays: GuideCallArrays,
         summary: GuideCountSummary,
@@ -981,8 +835,14 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         """Save each cell's calls and its top guide, top UMIs and guide UMIs.
 
         A cell without guide UMIs has an empty top guide. Imported calls save
-        the join's ``diagnostics``; called ones save none.
+        the join's ``diagnostics``; called ones save none. What saving holds
+        beside the calls and the summary, as :func:`_guide_call_write_bytes`
+        states it, is charged to ``ledger`` first.
         """
+        n_cells, width = arrays.guide_codes.shape
+        ledger.peak(
+            "saving the guide calls", _guide_call_write_bytes(n_cells, width, guide_ids)
+        )
         top_guide = np.full(len(arrays.values), "", dtype=object)
         counted = summary.top_code >= 0
         top_guide[counted] = guide_ids[summary.top_code[counted]]
@@ -1002,6 +862,35 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             },
             diagnostics=diagnostics,
         )
+
+    def _pad_calls(
+        self,
+        ledger: MemoryLedger,
+        cells: np.ndarray,
+        codes: np.ndarray,
+        umis: np.ndarray,
+        *,
+        n_cells: int,
+        width: int,
+        guide_ids: np.ndarray,
+    ) -> GuideCallArrays:
+        """Pad calls into the per-cell arrays of a ``guide_calls`` artifact, keeping them charged.
+
+        ``width`` bounds the most calls of one cell, which padding is
+        charged by before the arrays are made.
+        """
+        ledger.peak(
+            f"padding the calls of {n_cells} cells, up to {width} in one cell",
+            _padding_bytes(n_cells, width, len(guide_ids)),
+        )
+        arrays = guide_call_arrays(
+            cells, codes, umis, n_cells=n_cells, guide_ids=guide_ids
+        )
+        ledger.hold(
+            "the padded calls",
+            _padded_bytes(n_cells, int(arrays.guide_codes.shape[1])),
+        )
+        return arrays
 
     @validation_scoped
     def _perturbation_import_guide_calls(
@@ -1112,17 +1001,20 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 message names a budget that runs it.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
-        from ...readers.cellranger import protospacer_calls_size, read_protospacer_calls
+        from ...readers.cellranger import PROTOSPACER_SCAN_BYTES, protospacer_calls_size
 
         import_settings(path, barcode_prefix)
         if barcode_suffix is not None and not isinstance(barcode_suffix, str):
             raise TypeError("barcode_suffix must be text or None")
         barcode_pattern = checked_barcode_pattern(barcode_pattern)
         _require_ref(cell_selection, "cell_selection")
-        assay, guide_ids, cell_index = self._guide_call_cells(
-            from_assay, cell_selection, GuideCallImportArguments.operation
+        assay, ledger, guide_ids, selection = self._guide_call_cells(
+            from_assay,
+            cell_selection,
+            GuideCallImportArguments.operation,
+            doing="Importing the guide calls of {n_cells} cells",
         )
-        n_cells = len(cell_index)
+        n_cells = selection.cells
         # An empty prefix or suffix adds nothing, as None does, and the file
         # records it as None so that the two imports reuse each other.
         (call_file,) = barcode_files(
@@ -1155,99 +1047,87 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             )
             return planned.ref
 
-        counts = assay.rawData[cell_index, :]
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the selected cells' positions"
+        )
+        ledger.peak("counting the call file's rows", PROTOSPACER_SCAN_BYTES)
         size = protospacer_calls_size(path)
-        needed = _import_bytes(
-            size,
-            n_cells=n_cells,
-            guide_ids=guide_ids,
-            id_array=self.cells._get_array("ids"),
-            call_file=call_file,
-            stream_least=_stream_bytes(counts, _SUMMARY_BYTES_PER_ROW)[0],
-            reading=self._guide_read_bytes(assay, n_cells),
-            codec_threads=self.nthreads,
-        )
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            f"Importing the guide calls of {n_cells} cells holds about",
-            beside=" with the parsed call file and one row of counts read at a time",
-            remedy=f"Raise mem_budget to at least {needed} bytes, or pass a smaller "
-            "cell_selection.",
-        )
         # Only the selected cells' IDs are read, a sample's in a merged store.
-        cell_ids = np.asarray(
-            read_metadata_rows_chunkwise(self.cells, "ids", cell_index)
-        ).astype(str)
-        _require_call_file_cells(
+        id_array = self.cells._get_array("ids")
+        cell_ids = read_rows(
+            ledger, id_array, cell_index, item="the selected cells' IDs"
+        )
+        _check_cell_ids(
+            ledger,
             cell_ids,
-            call_file.barcode_prefix,
+            call_file,
             cells="the cells of cell_selection",
             restrict="select only",
             remedy="or call the guides from their counts with perturbation.call_guides",
-            barcode_suffix=call_file.barcode_suffix,
         )
-        file_calls = read_protospacer_calls(path)
-        guide_positions = _called_guide_positions(file_calls.features, guide_ids, assay)
+        file_calls = _parse_call_file(ledger, path, size)
+        guide_positions = _guide_positions(
+            ledger, file_calls.features, guide_ids, assay
+        )
         self._require_writable(arguments.operation)
-        # The join's lookup of the cells' IDs is held beside the cells'
-        # positions, their IDs as text, the parsed file and the called guides.
-        ledger = MemoryLedger(
-            self.memoryBytes,
-            f"Importing the guide calls of {n_cells} cells",
-            remedy="pass a smaller cell_selection",
-            codec_threads=self.nthreads,
-        )
-        ledger.hold(
-            "the cells' positions, their IDs as text, the parsed call file and the "
-            "called guides",
-            _CALL_FIXED_BYTES
-            + 8 * n_cells
-            + cell_ids.nbytes
-            + size.parsed_bytes()
-            + guide_positions.nbytes,
-        )
         # A barcode that matches no selected cell may be a cell of the store
         # outside the selection, such as one that QC filtering removed, which
         # the join tells from a barcode of no cell by the store's cell IDs.
-        join = CellBarcodeJoin(
-            cell_ids, ledger=ledger, store_ids=self.cells._get_array("ids")
+        # What the join and the cells' IDs hold is let go once it is done.
+        joining = ledger.charged
+        join = CellBarcodeJoin(cell_ids, ledger=ledger, store_ids=id_array)
+        # What matching the barcodes holds stays charged while the join reads
+        # the store's cell IDs to tell the barcodes of no cell apart.
+        matching = ledger.hold(
+            "matching the call file's barcodes",
+            join_bytes(call_file, size.n_rows, size.n_bytes),
         )
         row_cells = join.cells(call_file, file_calls.barcodes)
+        ledger.release(matching)
+        ledger.peak("checking that no two barcodes name one cell", 32 * len(row_cells))
         _refuse_shared_cells(row_cells, file_calls.barcodes, cell_ids)
         # The diagnostics hold what the messages name, so that saved calls
         # report their barcodes again as they did.
         diagnostics = join.diagnostics()
+        ids_bytes = cell_ids.nbytes
         del join, cell_ids
+        ledger.release(ledger.charged - joining + ids_bytes)
+        n_calls = len(file_calls.rows)
+        # Each call's cell, whether it matched, and the matched calls'
+        # cells, guides and UMIs, which padding takes.
+        gathering = ledger.hold(
+            "each call's cell",
+            8 * len(row_cells) + (_MATCHED_BYTES_PER_CALL + _BYTES_PER_CALL) * n_calls,
+        )
         call_cells = row_cells[file_calls.rows]
         matched_calls = call_cells >= 0
-        arrays = guide_call_arrays(
+        arrays = self._pad_calls(
+            ledger,
             call_cells[matched_calls],
             guide_positions[matched_calls],
             file_calls.umis[matched_calls],
             n_cells=n_cells,
+            width=max(1, min(size.most_calls, len(guide_ids))),
             guide_ids=guide_ids,
         )
+        parsed = size.parsed_bytes() + guide_positions.nbytes
         del file_calls, guide_positions, row_cells, call_cells, matched_calls
-        # The cells' positions, calls and labels stay beside the summaries
-        # while the counts stream.
-        resident = (
-            _CALL_FIXED_BYTES
-            + _STREAMED_BYTES_PER_CELL * n_cells
-            + arrays.guide_codes.nbytes
-            + arrays.guide_umis.nbytes
-        )
-        blocks = counts._stream_blocks(
+        ledger.release(gathering + parsed)
+        # The cells' summaries stay beside the calls while the counts stream.
+        ledger.hold("each cell's summary", _SUMMARY_BYTES_PER_CELL * n_cells)
+        counts = assay.rawData[cell_index, :]
+        blocks = _count_stream(
+            ledger,
+            counts,
             nthreads=self.nthreads,
             msg=f"({assay.name}) Summarising guide counts",
-            prefetch=None,
-            row_mask=None,
-            resident_bytes=resident,
-            memory_bytes=self.memoryBytes,
+            item="the guide counts read to summarise each cell's guides",
             scratch_bytes_per_row=_SUMMARY_BYTES_PER_ROW,
         )
         summary = summarize_guide_counts(blocks, n_cells, len(guide_ids))
-        self._write_guide_calls(planned, arrays, summary, guide_ids, diagnostics)
+        self._write_guide_calls(
+            ledger, planned, arrays, summary, guide_ids, diagnostics
+        )
         _report_barcodes(
             arguments, inspect_artifact(self.zw, planned.ref).diagnostics, call_file
         )
@@ -1280,8 +1160,10 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         _require_ref(calls, "calls", GuideCallImportArguments.artifact_kind)
         status = require_complete_artifact(self.zw, calls)
         group = artifact_group(self.zw, calls)
-        guide_ids = read_array(group, "guides").astype(str)
-        cell_ids, arrays = self._cell_arrays(calls, _GUIDE_CALL_ARRAYS)
+        ledger = self._artifact_ledger(calls)
+        guide_ids = read_whole(ledger, group, "guides", item="the guide IDs")
+        cell_ids, arrays = self._cell_arrays(ledger, calls, _GUIDE_CALL_ARRAYS)
+        ledger.peak("the tables of cells and calls", _frame_bytes(cell_ids, arrays))
         cells, call_table = guide_calls_frames(cell_ids, **arrays, guide_ids=guide_ids)
         return GuideCalls(
             cells=cells,
@@ -1290,35 +1172,47 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             source=str(status.operation),
         )
 
-    def _cell_arrays(
-        self, ref: ArtifactRef, names: Sequence[str]
-    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        """Read per-cell arrays of a cell-aligned artifact and the cells' IDs.
+    def _artifact_ledger(
+        self, ref: ArtifactRef, *, remedy: str | None = None
+    ) -> MemoryLedger:
+        """The ledger of a call that reads the artifact ``ref`` within the store's budget, whose refusals name ``remedy``."""
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Reading the {ref.kind} artifact",
+            remedy=remedy,
+            codec_threads=self.nthreads,
+        )
+        ledger.hold(
+            "the call's plans and the store's metadata it opens", _CALL_FIXED_BYTES
+        )
+        return ledger
 
-        One check of the memory budget covers every array and the IDs, and
-        the IDs are read once.
+    def _cell_arrays(
+        self, ledger: MemoryLedger, ref: ArtifactRef, names: Sequence[str]
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        """Read per-cell arrays of a cell-aligned artifact and the cells' IDs, keeping them charged.
+
+        One check of the memory budget covers every array and the IDs before
+        any is read, and the IDs are read once.
 
         Raises:
             ValueError: If a name is not a per-cell array of the artifact's
                 kind, or an array does not hold one row per cell.
-            MemoryError: If the arrays and the IDs do not fit the budget.
+            MemoryBudgetError: If the arrays and the IDs do not fit the budget.
         """
         for name in names[1:]:
             cell_value_array(ref.kind, name)
         group = artifact_group(self.zw, ref)
         others = {name: as_zarr_array(group[name], name=name) for name in names[1:]}
+        id_array = self.cells._get_array("ids")
         resolved = resolve_cell_aligned_artifact(
             self.zw,
             ref,
             value_name=names[0],
             ndim=None,
-            ledger=MemoryLedger(
-                self.memoryBytes,
-                f"Reading the {ref.kind} artifact",
-                codec_threads=self.nthreads,
-            ),
+            ledger=ledger,
             # The other arrays and the IDs are read at the same rows.
-            caller_reads=(self.cells._get_array("ids"), *others.values()),
+            caller_reads=(id_array, *others.values()),
         )
         n_cells = len(resolved.cell_idx)
         rows = np.arange(n_cells, dtype=np.int64)
@@ -1330,10 +1224,10 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                     f"per cell of its cell selection, {n_cells} rows, not "
                     f"{array.shape[0] if array.shape else 0}"
                 )
-            arrays[name] = np.asarray(read_array_rows_chunkwise(array, rows))
-        cell_ids = np.asarray(
-            read_metadata_rows_chunkwise(self.cells, "ids", resolved.cell_idx)
-        )
+            arrays[name] = read_rows(
+                ledger, array, rows, item=f"{name!r} of the {ref.kind} artifact"
+            )
+        cell_ids = read_rows(ledger, id_array, resolved.cell_idx, item="the cells' IDs")
         return cell_ids, arrays
 
     def _plan_guide_thresholds(
@@ -1410,101 +1304,147 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
 
     def _fit_guide_thresholds(
         self,
+        ledger: MemoryLedger,
         assay: Any,
-        planned: PlannedArtifact,
         *,
         counts: Any,
         codes: np.ndarray,
-        samples: list[str | None],
+        n_samples: int,
         method: str,
-        guide_ids: np.ndarray,
+        n_guides: int,
         operation: str,
-        calling_least: int,
-    ) -> tuple[np.ndarray, np.ndarray, GuideCountHistograms]:
-        """Count the UMIs of each guide, fit it in every sample, and save the fits.
+    ) -> tuple[Any, GuideCountHistograms]:
+        """Count the UMIs of each guide and fit it in every sample, keeping the fits and histograms charged.
 
         ``counts`` are the selected cells' guide counts, as
         ``assay.rawData[cell_index, :]``. The budget must hold the least that
-        the fits hold and ``calling_least``, the least that the calls made
-        from them hold, so that a budget too small for either is refused
-        before the counts are read. The store must then be writable for
-        ``operation``. Returns the fitted thresholds, the statuses and the
-        histograms.
+        the histograms hold beside one row of counts before the counts are
+        read; the store must then be writable for ``operation``. The counts
+        stream in full blocks when the budget holds them beside the
+        histograms' least, and in smaller ones otherwise, and the histograms
+        take the rest, which they charge as they grow. Returns the fits and
+        the histograms, which the caller saves.
         """
         n_cells = len(codes)
-        n_samples = len(samples)
-        n_guides = len(guide_ids)
-        # Each cell's position and sample code stay beside the histograms,
-        # with the Python objects of the call.
-        held = 16 * n_cells + _CALL_FIXED_BYTES
         histogram_least = histogram_bytes(n_samples, n_guides, n_cells, n_distinct=0)
         stream_least, stream_full = _stream_bytes(counts)
-        least = max(held + histogram_least + stream_least, calling_least)
-        _require_budget(
-            least,
-            self.memoryBytes,
-            f"Fitting guide thresholds for {n_cells} cells in {n_samples} samples "
-            f"and {n_guides} guides, and calling their guides, holds at least",
-            beside=", with one row of counts read at a time",
-            remedy=f"Raise mem_budget to at least {least} bytes, or pass a smaller "
-            "cell_selection or fewer samples.",
+        ledger.peak(
+            "the guide count histograms' least beside one row of counts",
+            stream_least + histogram_least,
         )
         self._require_writable(operation)
-        # The histograms grow with the distinct counts that the cells hold,
-        # which only reading the counts tells. The counts stream in full
-        # blocks when the budget holds them beside the histograms' least, and
-        # in smaller ones otherwise; the histograms take the rest, and raise
-        # MemoryError before they need more.
-        stream_memory = min(stream_full, self.memoryBytes - held - histogram_least)
-        histogram_memory = self.memoryBytes - held - stream_memory
+        room = ledger.room
+        stream_memory = (
+            stream_full if room is None else min(stream_full, room - histogram_least)
+        )
+        streaming = ledger.hold(
+            "the guide counts read for the histograms", stream_memory
+        )
         blocks = counts._stream_blocks(
             nthreads=self.nthreads,
             msg=f"({assay.name}) Counting guide UMIs",
             prefetch=None,
             row_mask=None,
-            resident_bytes=held + histogram_memory,
-            memory_bytes=self.memoryBytes,
+            resident_bytes=(
+                ledger.held_bytes
+                if ledger.budget is None
+                else ledger.budget - stream_memory
+            ),
+            memory_bytes=ledger.budget,
         )
         try:
             histograms = guide_count_histograms(
-                blocks,
-                codes,
-                n_samples=n_samples,
-                n_guides=n_guides,
-                memory_bytes=histogram_memory,
+                blocks, codes, n_samples=n_samples, n_guides=n_guides, ledger=ledger
             )
         except HistogramMemoryError as error:
-            # Distinct counts grow about as fast as the rows read, or slower,
-            # so while rows remain the histograms of every row are estimated
-            # from those read; with the budget named, the counts stream in
-            # full blocks and the histograms get at least what they needed
-            # where they stopped.
-            estimate = error.needed_bytes
-            remain = ""
+            # What the histograms needed where they stopped, beside what the
+            # call holds with the streamed counts. Distinct counts grow about
+            # as fast as the rows read, or slower, so while rows remain the
+            # histograms of every row are estimated from those read; with the
+            # budget named, the counts stream in full blocks and the
+            # histograms get at least what they needed where they stopped.
+            needed = error.needed_bytes - ledger.held_bytes
+            item = error.item
             if error.counts_remain:
-                estimate = max(
-                    error.needed_bytes,
-                    -(-error.needed_bytes * error.n_rows // max(error.rows_read, 1)),
+                needed = max(
+                    needed, -(-needed * error.n_rows // max(error.rows_read, 1))
                 )
-                remain = (
-                    f"; {error.n_rows - error.rows_read} of {error.n_rows} rows of "
-                    "counts remain to be read, and at the rate of the rows read the "
-                    f"histograms of every row need about {estimate} bytes"
+                item += (
+                    ", and at the rate of the rows read the histograms of every "
+                    f"row need about {needed} bytes"
                 )
-            raise MemoryError(
-                f"The guide count histograms of {n_cells} cells need about "
-                f"{error.needed_bytes} bytes for {error.n_distinct} distinct counts, more "
-                f"than the {histogram_memory} bytes that the memory budget of "
-                f"{self.memoryBytes} bytes leaves them beside the streamed counts"
-                f"{remain}. Raise mem_budget to at least "
-                f"{held + stream_full + estimate} bytes."
+            raise memory_refusal(
+                ledger.doing,
+                item,
+                ledger.held_bytes - stream_memory + stream_full + needed,
+                int(error.budget_bytes),
+                remedy="pass a smaller cell_selection or fewer samples",
             ) from error
+        # The reader that decoded the last chunk of counts can keep it.
+        ledger.leave(counts._held_read_bytes())
+        ledger.release(streaming)
+        ledger.hold(
+            "the guide count histograms",
+            histograms.offsets.nbytes
+            + histograms.counts.nbytes
+            + histograms.cells.nbytes,
+        )
+        n_entries = n_samples * n_guides
+        ledger.peak("fitting the guides", _FIT_BYTES_PER_ENTRY * n_entries)
         with numba_threads(self.nthreads):
             fits = (
                 fit_poisson_gaussian(histograms)
                 if method == "poisson_gaussian"
                 else fit_gaussian(histograms)
             )
+        ledger.hold("the fits", _FITTED_BYTES_PER_ENTRY * n_entries)
+        stopped = int(np.count_nonzero(fits.iterations >= MAX_ITERATIONS))
+        if stopped:
+            logger.info(
+                f"{stopped} guide fits stopped at {MAX_ITERATIONS} iterations "
+                "before their loss settled"
+            )
+        return fits, histograms
+
+    def _write_guide_thresholds(
+        self,
+        ledger: MemoryLedger,
+        planned: PlannedArtifact,
+        *,
+        fits: Any,
+        histograms: GuideCountHistograms,
+        method: str,
+        samples: list[str | None],
+        guide_ids: np.ndarray,
+    ) -> None:
+        """Save the fits and the histograms that they were fitted to."""
+        n_samples, n_guides = histograms.n_samples, histograms.n_guides
+        grid = (n_samples, n_guides)
+        n_counts = len(histograms.counts)
+        width = max(1, *(len(str(guide)) for guide in guide_ids))
+        # The thresholds and maximum UMIs as uint32, the cells with UMIs and
+        # the maximum UMIs as computed, and the counts as uint32, beside the
+        # write of the arrays.
+        ledger.peak(
+            "saving the guide thresholds",
+            (4 + 8 + 8 + 4) * n_samples * n_guides
+            + 4 * n_counts
+            + cell_data_write_bytes(
+                {
+                    "guides": ((n_guides,), f"U{width}"),
+                    "n_cells": ((n_samples,), np.int64),
+                    "status": (grid, np.int8),
+                    "threshold": (grid, np.uint32),
+                    "n_umi_cells": (grid, np.int64),
+                    "max_umi": (grid, np.uint32),
+                    "iterations": (grid, np.int32),
+                    **{name: (grid, np.float64) for name in METHOD_PARAMETERS[method]},
+                    "histogram_offsets": ((n_samples * n_guides + 1,), np.int64),
+                    "histogram_counts": ((n_counts,), np.uint32),
+                    "histogram_cells": ((n_counts,), np.int64),
+                }
+            ),
+        )
         write_cell_data_artifact(
             self.zw,
             planned,
@@ -1523,57 +1463,35 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             },
             attributes={"samples": samples, "status_names": list(FIT_STATUSES)},
         )
-        stopped = int(np.count_nonzero(fits.iterations >= MAX_ITERATIONS))
-        if stopped:
-            logger.info(
-                f"{stopped} guide fits stopped at {MAX_ITERATIONS} iterations "
-                "before their loss settled"
-            )
-        return fits.threshold, fits.status, histograms
 
     def _stored_guide_fits(
-        self, thresholds: ArtifactRef, *, n_cells: int, calling_least: int
+        self, ledger: MemoryLedger, thresholds: ArtifactRef
     ) -> tuple[np.ndarray, np.ndarray, GuideCountHistograms, list[str | None]]:
-        """Read the thresholds, statuses, histograms and samples of saved fits.
-
-        The budget must hold the read beside each of the ``n_cells`` cells'
-        position and sample code, and ``calling_least``, the least that the
-        calls made from the fits hold.
-        """
+        """Read the thresholds, statuses, histograms and samples of saved fits, keeping them charged."""
         group = artifact_group(self.zw, thresholds)
 
-        def array(name: str) -> zarr.Array:
-            return as_zarr_array(group[name], name=name)
+        def read(name: str, dtype: Any) -> np.ndarray:
+            values = read_whole(ledger, group, name, item=f"the saved fits' {name}")
+            if values.dtype == np.dtype(dtype):
+                return values
+            # The values as int64, which replace those read.
+            ledger.hold(f"the saved fits' {name}", 8 * values.size)
+            stored = values.nbytes
+            values = values.astype(dtype)
+            ledger.release(stored)
+            return values
 
-        # The thresholds, statuses and offsets as int64; each count as stored,
-        # as int64, and its cells as int64; and the decode of a stored chunk.
-        decoded, _ = array_row_selection_parts(array("histogram_counts"))
-        needed = max(
-            calling_least,
-            _CALL_FIXED_BYTES
-            + 16 * n_cells
-            + decoded
-            + 24 * int(np.prod(array("threshold").shape))
-            + 20 * int(array("histogram_counts").shape[0]),
-        )
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            "Reading the saved guide fits and calling guides from them holds at least",
-            remedy=f"Raise mem_budget to at least {needed} bytes.",
-        )
-
-        threshold = read_array(group, "threshold").astype(np.int64)
+        threshold = read("threshold", np.int64)
         histograms = GuideCountHistograms(
-            n_cells=read_array(group, "n_cells").astype(np.int64),
+            n_cells=read("n_cells", np.int64),
             n_guides=threshold.shape[1],
-            offsets=read_array(group, "histogram_offsets").astype(np.int64),
-            counts=read_array(group, "histogram_counts").astype(np.int64),
-            cells=read_array(group, "histogram_cells").astype(np.int64, copy=False),
+            offsets=read("histogram_offsets", np.int64),
+            counts=read("histogram_counts", np.int64),
+            cells=read("histogram_cells", np.int64),
         )
         return (
             threshold,
-            read_array(group, "status"),
+            read_whole(ledger, group, "status", item="the saved fits' statuses"),
             histograms,
             _stored_samples(group),
         )
@@ -1716,12 +1634,23 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         )
         fitted = method in FITTED_METHODS
         _require_cell_column(self, sample_column, "sample_column")
-        assay, guide_ids, cell_index = self._guide_call_cells(
-            from_assay, cell_selection, GuideCallArguments.operation
+        assay, ledger, guide_ids, selection = self._guide_call_cells(
+            from_assay,
+            cell_selection,
+            GuideCallArguments.operation,
+            doing=(
+                "Fitting guide thresholds for {n_cells} cells and calling their guides"
+                if fitted
+                else "Calling guides for {n_cells} cells"
+            ),
         )
-        n_cells = len(cell_index)
+        n_cells = selection.cells
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the selected cells' positions"
+        )
         cell_samples = _cell_samples(
             self,
+            ledger,
             sample_column,
             cell_index,
             reason="Guide thresholds are fitted within each sample, so every "
@@ -1761,41 +1690,39 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         status: np.ndarray | None = None
         if planned.reused:
             if thresholds is not None:
-                fits = artifact_group(self.zw, thresholds.ref)
-                status, samples = read_array(fits, "status"), _stored_samples(fits)
+                fits_group = artifact_group(self.zw, thresholds.ref)
+                status = read_whole(
+                    ledger, fits_group, "status", item="the saved fits' statuses"
+                )
+                samples = _stored_samples(fits_group)
             stored = artifact_group(self.zw, planned.ref)
             self._warn_about_guide_calls(
                 method,
                 status,
                 samples,
                 guide_ids,
-                read_array(stored, "n_guides"),
+                read_whole(ledger, stored, "n_guides", item="each cell's calls"),
             )
             return planned.ref
-        counts = assay.rawData[cell_index, :]
-        stream_least = _stream_bytes(counts)[0]
-        label_width = _label_width(guide_ids)
-        # The reads before the plan: the guide IDs, the cells and their samples.
-        reading = self._guide_read_bytes(assay, n_cells, sample_column)
         # A threshold of at least 1 UMI calls at most a cell's detected guides,
         # which bound its calls; top_guide calls at most one guide per cell.
         if method == "top_guide":
             detected_calls, detected_width = n_cells, 1
         else:
-            detected_array = self.cells._get_array(f"{assay.name}_nFeatures")
-            fixed, per_row = array_row_selection_parts(detected_array)
-            reading = max(
-                reading,
-                _CALL_FIXED_BYTES + 16 * n_cells + fixed + per_row * n_cells,
-            )
-            detected = np.asarray(
-                read_metadata_rows_chunkwise(
-                    self.cells, f"{assay.name}_nFeatures", cell_index
-                )
+            detected = read_rows(
+                ledger,
+                self.cells._get_array(f"{assay.name}_nFeatures"),
+                cell_index,
+                item="each cell's detected guides",
             )
             detected_calls = int(detected.sum())
             detected_width = max(1, int(detected.max(initial=0)))
+            detected_bytes = detected.nbytes
             del detected
+            ledger.release(detected_bytes)
+        fits: Any = None
+        histograms: GuideCountHistograms | None = None
+        counts = assay.rawData[cell_index, :]
         if thresholds is None:
             table = np.full(
                 (1, n_guide_ids),
@@ -1804,67 +1731,104 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             )
             n_calls, width = detected_calls, detected_width
         else:
-            # The calls need at least their cells' arrays and the reads above.
-            calling_least = max(
-                reading, _calling_bytes(n_cells, 0, 1, label_width, stream_least)
-            )
             if thresholds.reused:
                 threshold, status, histograms, samples = self._stored_guide_fits(
-                    thresholds.ref, n_cells=n_cells, calling_least=calling_least
+                    ledger, thresholds.ref
                 )
             else:
-                threshold, status, histograms = self._fit_guide_thresholds(
+                fitting = ledger.charged
+                fits, histograms = self._fit_guide_thresholds(
+                    ledger,
                     assay,
-                    thresholds,
                     counts=counts,
                     codes=codes,
-                    samples=samples,
+                    n_samples=len(samples),
                     method=method,
-                    guide_ids=guide_ids,
+                    n_guides=n_guide_ids,
                     operation=arguments.operation,
-                    calling_least=calling_least,
                 )
+                threshold, status = fits.threshold, fits.status
+                fitted_bytes = ledger.charged - fitting
             table = call_thresholds(threshold, resolved_min_umi)
             n_calls = histograms.n_calls(table)
-            # The histograms are saved; the second pass does not need them.
-            del histograms
             # Only the guides that some sample calls can be called.
             callable_guides = int(np.count_nonzero((table > 0).any(axis=0)))
             width = max(1, min(detected_width, callable_guides))
-        needed = max(
-            reading,
-            _calling_bytes(n_cells, n_calls, width, label_width, stream_least),
-        )
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            f"Calling guides makes up to {n_calls} calls for {n_cells} cells, up to "
-            f"{width} in one cell, and holds about",
-            beside=", with one row of counts read at a time",
-            remedy=f"Raise mem_budget to at least {needed} bytes, or pass a smaller "
-            "cell_selection.",
+            if thresholds.reused:
+                # Saved histograms are not saved again; the calls do not need
+                # them.
+                held = (
+                    threshold.nbytes
+                    + histograms.n_cells.nbytes
+                    + histograms.offsets.nbytes
+                    + histograms.counts.nbytes
+                    + histograms.cells.nbytes
+                )
+                del threshold, histograms
+                ledger.release(held)
+        ledger.doing = (
+            f"Calling guides for {n_cells} cells, up to {n_calls} calls and up to "
+            f"{width} in one cell"
         )
         self._require_writable(arguments.operation)
-        blocks = counts._stream_blocks(
+        # The cells' summaries and the calls made stay beside the streamed
+        # counts, and the calls of the blocks are then joined.
+        calling = ledger.hold(
+            "each cell's summary and the calls made",
+            _SUMMARY_BYTES_PER_CELL * n_cells + _BYTES_PER_CALL * n_calls,
+        )
+        ledger.peak("joining the calls of the blocks", _BYTES_PER_CALL * n_calls)
+        blocks = _count_stream(
+            ledger,
+            counts,
             nthreads=self.nthreads,
             msg=f"({assay.name}) Calling guides",
-            prefetch=None,
-            row_mask=None,
-            resident_bytes=_CALL_FIXED_BYTES
-            + _STREAMED_CALL_BYTES_PER_CELL * n_cells
-            + _STREAMED_BYTES_PER_CALL * n_calls,
-            memory_bytes=self.memoryBytes,
+            item="the guide counts read to call the guides",
         )
         calls, summary = threshold_calls(blocks, codes, table)
         if method == "top_guide":
+            # Whether each cell's top guide is called, its share of the UMIs,
+            # and the calls' cells.
+            ledger.peak("calling each cell's top guide", 26 * n_cells)
             calls = top_guide_calls(
                 summary, min_umi=resolved_min_umi, fraction_threshold=fraction
             )
-        arrays = guide_call_arrays(
-            calls.cells, calls.codes, calls.umis, n_cells=n_cells, guide_ids=guide_ids
+        arrays = self._pad_calls(
+            ledger,
+            calls.cells,
+            calls.codes,
+            calls.umis,
+            n_cells=n_cells,
+            width=width,
+            guide_ids=guide_ids,
         )
         del calls
-        self._write_guide_calls(planned, arrays, summary, guide_ids)
+        ledger.release(calling - _SUMMARY_BYTES_PER_CELL * n_cells)
+        if fits is not None:
+            assert thresholds is not None and histograms is not None
+            # The fits are saved once the calls that they make are known to
+            # fit the budget, saving them included once the fits are let go,
+            # so that a refused call writes nothing.
+            ledger.refuse_beyond(
+                "saving the guide calls",
+                ledger.held_bytes
+                - fitted_bytes
+                + _guide_call_write_bytes(
+                    n_cells, int(arrays.guide_codes.shape[1]), guide_ids
+                ),
+            )
+            self._write_guide_thresholds(
+                ledger,
+                thresholds,
+                fits=fits,
+                histograms=histograms,
+                method=method,
+                samples=samples,
+                guide_ids=guide_ids,
+            )
+            del fits, histograms
+            ledger.release(fitted_bytes)
+        self._write_guide_calls(ledger, planned, arrays, summary, guide_ids)
         self._warn_about_guide_calls(
             method, status, samples, guide_ids, arrays.n_guides
         )
@@ -1962,7 +1926,10 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         method = str(fit_parameters["method"])
         sample_columns = list(fit_parameters.get("sample_columns") or [])
         group = artifact_group(self.zw, source)
-        guide_ids = read_array(group, "guides").astype(str)
+        ledger = self._artifact_ledger(source, remedy="pass guides to read fewer")
+        guide_ids = read_whole(ledger, group, "guides", item="the guide IDs").astype(
+            str
+        )
         if guides is None:
             positions = np.arange(len(guide_ids))
         else:
@@ -1975,46 +1942,56 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                     f"{len(unknown)} guides are not guides of the fits, for example "
                     + ", ".join(repr(guide) for guide in unknown[:5])
                 )
-        offsets = read_array(group, "histogram_offsets").astype(np.int64)
+        offsets = read_whole(
+            ledger, group, "histogram_offsets", item="the histograms' offsets"
+        ).astype(np.int64)
         samples = _stored_samples(group)
         n_samples = len(samples)
         entries = (
             np.arange(n_samples)[:, None] * len(guide_ids) + positions[None, :]
         ).reshape(-1)
         sizes = offsets[entries + 1] - offsets[entries]
-        needed = 40 * int(sizes.sum()) + 160 * len(entries)
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            f"Reading the thresholds of {len(positions)} guides in {n_samples} "
-            "samples holds about",
-            remedy="Pass guides to read fewer.",
+        n_counts = int(sizes.sum())
+        ledger.doing = (
+            f"Reading the thresholds of {len(positions)} guides in {n_samples} samples"
         )
         if guides is None:
-            counts = read_array(group, "histogram_counts")
-            cells = read_array(group, "histogram_cells")
+            counts = read_whole(
+                ledger, group, "histogram_counts", item="the histograms' counts"
+            )
+            cells = read_whole(
+                ledger, group, "histogram_cells", item="the histograms' cells"
+            )
         else:
-            counts_array = as_zarr_array(
-                group["histogram_counts"], name="histogram_counts"
-            )
-            cells_array = as_zarr_array(
-                group["histogram_cells"], name="histogram_cells"
-            )
-            starts = offsets[entries]
-            counts = np.concatenate(
+            # The rows of the guides' histograms, in the order of their
+            # entries, which hold distinct rows.
+            ledger.peak("the rows of the guides' histograms", 16 * n_counts)
+            rows = np.concatenate(
                 [
-                    np.asarray(counts_array[start : start + size])
-                    for start, size in zip(starts, sizes, strict=True)
-                ]
-                or [np.zeros(0, dtype=np.uint32)]
-            )
-            cells = np.concatenate(
-                [
-                    np.asarray(cells_array[start : start + size])
-                    for start, size in zip(starts, sizes, strict=True)
+                    np.arange(start, start + size, dtype=np.int64)
+                    for start, size in zip(offsets[entries], sizes, strict=True)
                 ]
                 or [np.zeros(0, dtype=np.int64)]
             )
+            ledger.hold("the rows of the guides' histograms", rows.nbytes)
+            counts = read_rows(
+                ledger,
+                as_zarr_array(group["histogram_counts"], name="histogram_counts"),
+                rows,
+                item="the histograms' counts",
+            )
+            cells = read_rows(
+                ledger,
+                as_zarr_array(group["histogram_cells"], name="histogram_cells"),
+                rows,
+                item="the histograms' cells",
+            )
+        # The tables hold each count and each fit as a row of their own,
+        # beside the counts and cells read.
+        ledger.peak(
+            "the tables of thresholds and histograms",
+            _TABLE_BYTES_PER_COUNT * n_counts + _TABLE_BYTES_PER_FIT * len(entries),
+        )
         selected_offsets = np.zeros(len(entries) + 1, dtype=np.int64)
         np.cumsum(sizes, out=selected_offsets[1:])
         # The frames decode the status codes by the names of FIT_STATUSES,
@@ -2121,8 +2098,20 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         status = require_complete_artifact(self.zw, calls)
         assay = self._get_assay(str(calls.assay))
         group = artifact_group(self.zw, calls)
-        guide_ids = read_array(group, "guides").astype(str)
-        column = self._guide_feature_column(assay, target_column, "target_column")
+        codes = as_zarr_array(group["guide_codes"], name="guide_codes")
+        n_cells, width = (int(size) for size in codes.shape)
+        ledger = MemoryLedger(
+            self.memoryBytes, f"Labelling {n_cells} cells", codec_threads=self.nthreads
+        )
+        ledger.hold(
+            "the call's plans and the store's metadata it opens", _CALL_FIXED_BYTES
+        )
+        guide_ids = read_whole(ledger, group, "guides", item="the guide IDs").astype(
+            str
+        )
+        column = self._guide_feature_column(
+            assay, target_column, "target_column", ledger=ledger
+        )
         resolved = guide_targets(
             guide_ids, column, targets, control_names, policy=policy
         )
@@ -2133,8 +2122,6 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             policy=policy,
             invalidate_cache=invalidate_cache,
         )
-        codes = as_zarr_array(group["guide_codes"], name="guide_codes")
-        n_cells, width = (int(size) for size in codes.shape)
         n_names = len(resolved.names)
         n_guide_ids = len(guide_ids)
 
@@ -2165,19 +2152,12 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         )
         if planned.reused:
             return planned.ref
-        call_labels = as_zarr_array(group["values"], name="values")
-        needed = _labelling_bytes(
-            assay, target_column, codes, call_labels, resolved, guide_ids, policy=policy
-        )
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            f"Labelling {n_cells} cells holds about",
-            remedy=f"Raise mem_budget to at least {needed} bytes.",
-        )
-        guide_codes = _read_chunkwise(codes)
+        guide_codes = read_whole(ledger, group, "guide_codes", item="the calls' guides")
         # Each called guide must have a target; a padded entry reads the last
         # guide's flag, which the call flags drop.
+        ledger.peak(
+            "checking that each called guide has a target", 2 * guide_codes.size
+        )
         called = guide_codes >= 0
         lacking = (resolved.guide_codes < 0)[guide_codes]
         lacking &= called
@@ -2191,10 +2171,33 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 + "; pass targets or choose a target_column that names them"
             )
         self._require_writable(arguments.operation)
-        arrays = perturbation_label_arrays(guide_codes, resolved, policy=policy)
+        arrays = perturbation_label_arrays(
+            guide_codes, resolved, policy=policy, ledger=ledger
+        )
+        codes_bytes = guide_codes.nbytes
         del guide_codes
+        ledger.release(codes_bytes)
         # The labels of the calls, which hold one label per cell of the calls.
-        guide_label = _read_chunkwise(call_labels)
+        guide_label = read_whole(ledger, group, "values", item="the calls' labels")
+        label_length = longest_label(resolved, width, policy=policy)
+        ledger.peak(
+            "saving the labels",
+            cell_data_write_bytes(
+                {
+                    "values": ((n_cells,), f"U{label_length}"),
+                    "guide_label": ((n_cells,), guide_label.dtype),
+                    "is_control": ((n_cells,), bool),
+                    "n_targets": ((n_cells,), np.int32),
+                    "target_codes": (arrays.target_codes.shape, np.int32),
+                    "targets": (
+                        (n_names,),
+                        f"U{max(1, *(len(str(name)) for name in resolved.names))}",
+                    ),
+                    "target_is_control": ((n_names,), bool),
+                    "guide_target_codes": ((n_guide_ids,), np.int32),
+                }
+            ),
+        )
         write_cell_data_artifact(
             self.zw,
             planned,
@@ -2242,15 +2245,27 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         group = artifact_group(self.zw, labels)
         calls = artifact_group(self.zw, status.input_ref("guide_calls"))
 
+        ledger = self._artifact_ledger(labels)
+        target_names = read_whole(ledger, group, "targets", item="the targets").astype(
+            str
+        )
+        guide_ids = read_whole(ledger, calls, "guides", item="the guide IDs").astype(
+            str
+        )
         cell_ids, loaded = self._cell_arrays(
-            labels, ("values", "guide_label", "is_control", "n_targets", "target_codes")
+            ledger,
+            labels,
+            ("values", "guide_label", "is_control", "n_targets", "target_codes"),
+        )
+        ledger.peak(
+            "the tables of cells, targets and guides", _frame_bytes(cell_ids, loaded)
         )
         cells, targets, guides = perturbation_label_frames(
             cell_ids,
             **loaded,
-            target_names=read_array(group, "targets").astype(str),
+            target_names=target_names,
             target_is_control=read_array(group, "target_is_control"),
-            guide_ids=read_array(calls, "guides").astype(str),
+            guide_ids=guide_ids,
             guide_target_codes=read_array(group, "guide_target_codes"),
         )
         parameters = status.parameters or {}

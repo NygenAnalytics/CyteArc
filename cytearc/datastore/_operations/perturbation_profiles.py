@@ -27,6 +27,7 @@ from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.compute import process_thread_limit
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryLedger
 from ...utils.numba import numba_threads
 from ...utils.warnings import warn
 from .perturbation_store import (
@@ -42,6 +43,7 @@ from .perturbation_store import (
     _pairs_fingerprint,
     _positions_in,
     _require_budget,
+    _resident_ledger,
     _require_cell_column,
     _require_ref,
     _row_features,
@@ -149,9 +151,16 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             aligned[positions[present]] = groups[present]
             control_flags = np.zeros(len(classified), dtype=bool)
             control_flags[positions[present]] = control[present]
-            knocked_out = _cell_values(self, labels, "global_class").astype(str) == str(
-                (classes.parameters or {})["perturbation_type"]
-            )
+            knocked_out = _cell_values(
+                self,
+                MemoryLedger(
+                    self.memoryBytes,
+                    f"Reading the {labels.kind} artifact",
+                    codec_threads=self.nthreads,
+                ),
+                labels,
+                "global_class",
+            ).astype(str) == str((classes.parameters or {})["perturbation_type"])
             kept = aligned >= 0
             kept[kept] = knocked_out[kept] | row_control[aligned[kept]]
             cell_index, groups, control = (
@@ -348,6 +357,9 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         is_control = cells.control[used]
         cell_samples = _cell_samples(
             self,
+            MemoryLedger(
+                None, "Numbering the cells' samples", codec_threads=self.nthreads
+            ),
             sample_column,
             used_cells,
             reason="Each sample's control cells z-normalize its cells, so every "
@@ -451,10 +463,10 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         members = np.flatnonzero(groups[used] >= 0)
         read_cells = (used_cells[controls], used_cells[members])
         needed = _band_bytes(
+            _resident_ledger(self, held),
             expression,
             feature_index[:1],
             read_cells,
-            held_bytes=held,
             per_feature=per_feature,
             scratch_per_feature=16,
         )
@@ -467,11 +479,10 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             "features.",
         )
         bands = _count_bands(
+            _resident_ledger(self, held),
             expression,
             feature_index,
             read_cells,
-            budget=self.memoryBytes,
-            held_bytes=held,
             per_feature=per_feature,
             scratch_per_feature=16,
             most=n_features,
@@ -494,10 +505,10 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             """Stream the counts of a band of features over some read cells."""
             _, blocks = _count_blocks(
                 self,
+                _resident_ledger(self, held + per_feature * len(band)),
                 expression,
                 band,
                 used_cells[positions],
-                resident_bytes=held + per_feature * len(band),
                 scratch_bytes_per_row=16 * len(band),
             )
             yield from blocks
