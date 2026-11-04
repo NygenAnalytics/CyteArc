@@ -5,9 +5,11 @@ of cells: the combinations of the labels of cell metadata columns, such as
 the sample, of a cell-label artifact, such as a clustering, and of labels that
 the measured artifact keeps apart. ``cell_groups`` codes each column's labels
 once, in the natural order of their texts, and numbers the combinations that
-the cells hold, so every summary groups and names its groups alike.
+the cells hold, so every summary groups and names its groups alike. It charges
+what it reads and builds to the caller's memory ledger.
 """
 
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -20,13 +22,15 @@ from ...clones.groups import group_names
 from ...metadata.rows import (
     array_row_selection_parts,
     metadata_missing_mask,
-    previous_read_bytes,
-    read_metadata_missing_rows_chunkwise,
-    read_metadata_rows_chunkwise,
+    read_rows,
+    read_text_rows,
 )
 from ...metadata.selection import (
     category_codes,
     grouping_value_name,
+    hashed_text_bytes,
+    plan_cell_selection_read,
+    read_cell_selection,
     resolve_grouping,
 )
 from ...metadata.table import MetaData
@@ -37,48 +41,57 @@ from ...storage.artifacts import (
     open_artifact,
 )
 from ...storage.refs import ArtifactRef
-from ...storage.selections import read_stored_selection_indices, validate_cell_selection
 from ...storage.types import as_zarr_array
+from ...storage.validation_scope import validation_scope
 from ...utils.arrays import unique_rows
 from ...utils.arguments import quoted_value
+from ...utils.memory_budget import (
+    MemoryLedger,
+    hash_table_bytes,
+    object_array_bytes,
+    sort_bytes,
+)
 
 __all__ = [
-    "GROUPING_BYTES_PER_CELL",
-    "GROUPING_BYTES_PER_COLUMN",
-    "GROUPING_BYTES_PER_DISTINCT_LABEL",
     "GROUPING_BYTES_PER_GROUP",
-    "GROUPING_BYTES_PER_LABEL_BYTE",
+    "GROUPING_BYTES_PER_GROUP_COLUMN",
     "GROUPING_BYTES_PER_LABELLED_CELL",
-    "GROUPING_BYTES_PER_SELECTED_CELL",
     "CellGroups",
     "cell_groups",
     "group_columns",
+    "selection_chunk_bytes",
     "within_groups",
 ]
 
-#: Grouping cells holds, at its peak, about ``GROUPING_BYTES_PER_CELL`` for
-#: each cell of the artifact: its position, code and group. Each key column
-#: adds ``GROUPING_BYTES_PER_COLUMN`` per cell for the cell's code, and a cell
-#: metadata column also ``GROUPING_BYTES_PER_LABEL_BYTE`` times the stored
-#: width of its labels, which are read and coded as text; one column of
-#: 20-character labels took 181 bytes per cell in ASCII and 288 in emoji, as
-#: traced on 200,000 cells.
-GROUPING_BYTES_PER_CELL = 100
-GROUPING_BYTES_PER_COLUMN = 70
-GROUPING_BYTES_PER_LABEL_BYTE = 3
-#: Each cell of a ``cell_selection`` costs this, its row and its place in the
-#: match with the artifact's cells; 25 bytes as traced.
-GROUPING_BYTES_PER_SELECTED_CELL = 32
-#: Each cell of a label artifact costs this, its row, position and code, and
-#: ``GROUPING_BYTES_PER_LABEL_BYTE`` times the stored width of its labels,
-#: whatever cells the artifact being grouped holds.
+#: Each cell of a label artifact costs this while the artifact is read, its
+#: row, position and code, and three bytes for each byte of the stored width
+#: of its labels, whatever cells the artifact being grouped holds.
 GROUPING_BYTES_PER_LABELLED_CELL = 130
-#: Each distinct label of a key column costs this while it is named and
-#: ordered, 420 bytes as traced on 200,000 distinct labels, and each group this
-#: for its labels and name, 400 bytes as traced on 180,057 groups; a grouping
-#: with a label per cell holds far more than its cells.
-GROUPING_BYTES_PER_DISTINCT_LABEL = 500
-GROUPING_BYTES_PER_GROUP = 500
+_LABELLED_BYTES_PER_LABEL_BYTE = 3
+#: Each group's labels, a dictionary of its labels by key column, cost this
+#: and this for each key column beside the labels' text, which the codes of
+#: each column name, while they are built from the groups' codes as lists of
+#: numbers and while the groups are named by their labels joined: 288, 368
+#: and 1,048 bytes for groups of one, three and thirteen key columns, as
+#: traced on 20,000 and 200,000 groups.
+GROUPING_BYTES_PER_GROUP = 250
+GROUPING_BYTES_PER_GROUP_COLUMN = 70
+
+
+def _combining_bytes(n_cells: int, n_columns: int) -> int:
+    """What numbering the combinations of ``n_columns`` key columns holds for ``n_cells`` grouped cells, beside the columns' codes.
+
+    While a column is combined: the stacked codes and their copy of the cells
+    with every label, 16 bytes a cell for each column, the flags of the
+    labels, a byte for each, and 70 a cell for the column's offsets, its
+    combined codes, their order, sorted copy and distinct values, and each
+    cell's position among them. Once the last is combined: the stacked codes,
+    their copy and the distinct rows, 24 bytes a cell for each column when
+    each cell is a group of its own, and 56 a cell for the codes and the
+    rows' representatives. Traced on 20,000 and 200,000 cells of a label of
+    their own, 82, 122 and 345 bytes a cell for one, three and 13 columns.
+    """
+    return int(n_cells) * max(17 * n_columns + 70, 24 * n_columns + 56)
 
 
 def group_columns(value: Any, name: str = "group_by") -> tuple[str, ...]:
@@ -125,6 +138,34 @@ class CellGroups:
     keys: list[dict[str, str]]
     codes: np.ndarray
 
+    def fingerprint_bytes(self) -> int:
+        """Return the most bytes that :meth:`fingerprint` holds, beside the codes, which it reads in place.
+
+        Each group's keys become a tree of lists, about 180 bytes and 176 for
+        each key column, and then JSON text and its UTF-8 bytes: 14
+        characters a group and, for each key column, its name, its label and
+        17 more. Python keeps the whole text at the width of its widest
+        character, so each character takes 2 bytes for ASCII text, 3 to
+        U+00FF, 5 to U+FFFF and 8 beyond. Traced on 2,000 to 200,000 groups of
+        one to 13 key columns of 7 to 40 characters: 364 to 2,560 bytes a
+        group.
+        """
+        texts = [text for key in self.keys for item in key.items() for text in item]
+        characters = len(self.keys) * (14 + 17 * len(self.key_columns)) + sum(
+            map(len, texts)
+        )
+        widest = max((ord(max(text)) for text in texts if text), default=0)
+        width = next(
+            width
+            for limit, width in ((0x7F, 2), (0xFF, 3), (0xFFFF, 5), (0x10FFFF, 8))
+            if widest <= limit
+        )
+        return (
+            len(self.keys) * (180 + 176 * len(self.key_columns))
+            + width * (characters)
+            + 4096
+        )
+
     def fingerprint(self) -> str:
         """Fingerprint each cell's group by its labels.
 
@@ -139,17 +180,6 @@ class CellGroups:
         return builder.hexdigest()
 
 
-def _selection_indices(zw: zarr.Group, selection: ArtifactRef) -> np.ndarray:
-    return read_stored_selection_indices(
-        zw,
-        selection,
-        kind="cell_selection",
-        scope="datastore",
-        assay=None,
-        table_path="cellData",
-    ).astype(np.int64, copy=False)
-
-
 def selection_chunk_bytes(zw: zarr.Group, selection: ArtifactRef) -> int:
     """The bytes of one stored chunk of a cell selection, which reading it holds.
 
@@ -160,19 +190,33 @@ def selection_chunk_bytes(zw: zarr.Group, selection: ArtifactRef) -> int:
     return array_row_selection_parts(values)[0]
 
 
-def _column_chunk_bytes(cells: MetaData, column: str) -> int:
-    """The bytes of one chunk of a column and its missing mask, which a read holds."""
-    chunk, _per_row = array_row_selection_parts(cells._get_array(column))
-    mask = metadata_missing_mask(cells, column)
-    if mask is not None:
-        chunk += array_row_selection_parts(mask)[0]
-    return chunk
+def _column_values(
+    ledger: MemoryLedger, cells: MetaData, column: str, cell_index: np.ndarray
+) -> tuple[np.ndarray, np.ndarray | None, int]:
+    """Read a column's rows of the cells, text as Python strings, and its missing mask.
 
+    Each string beyond ASCII is charged beside it the UTF-8 form that coding
+    the labels leaves in it, as
+    :func:`~cytearc.metadata.selection.hashed_text_bytes` counts it.
 
-def _stored_in_chunks(cells: MetaData, column: str) -> bool:
-    """Whether a column holds more than one stored chunk, which its rows can span."""
+    Returns:
+        The values, the mask or None, and the bytes that both keep charged.
+    """
     array = cells._get_array(column)
-    return int(array.shape[0]) > int(array.chunks[0])
+    item = f"the labels of {quoted_value(column)}"
+    charged = ledger.charged
+    if np.dtype(array.dtype).kind == "U":
+        values = read_text_rows(ledger, array, cell_index, item=item)
+        ledger.hold(item, hashed_text_bytes(values))
+    else:
+        values = read_rows(ledger, array, cell_index, item=item)
+    mask = metadata_missing_mask(cells, column)
+    missing = (
+        None
+        if mask is None
+        else np.asarray(read_rows(ledger, mask, cell_index, item=item), dtype=bool)
+    )
+    return values, missing, ledger.charged - charged
 
 
 def _label_extent(zw: zarr.Group, groups: ArtifactRef) -> tuple[int, int, int]:
@@ -192,6 +236,21 @@ def _label_extent(zw: zarr.Group, groups: ArtifactRef) -> tuple[int, int, int]:
     return n_labelled, int(values.dtype.itemsize), chunk
 
 
+def _hold_names(ledger: MemoryLedger, names: list[str]) -> None:
+    """Charge the distinct labels of a key column, which the groups' labels keep as they are."""
+    ledger.hold(
+        "the distinct labels of a key column",
+        object_array_bytes(len(names)) + sum(map(sys.getsizeof, names)),
+    )
+
+
+def _keys_bytes(n_groups: int, n_columns: int) -> int:
+    """The bytes of the labels and names of ``n_groups`` groups of ``n_columns`` key columns."""
+    return n_groups * (
+        GROUPING_BYTES_PER_GROUP + GROUPING_BYTES_PER_GROUP_COLUMN * n_columns
+    )
+
+
 def cell_groups(
     zw: zarr.Group,
     cells: MetaData,
@@ -201,9 +260,8 @@ def cell_groups(
     group_by: str | Sequence[str] | None,
     groups: ArtifactRef | None,
     cell_selection: ArtifactRef | None,
-    memory_bytes: int,
+    ledger: MemoryLedger,
     kept_apart: Sequence[tuple[str, np.ndarray]] = (),
-    held_bytes: int = 0,
 ) -> CellGroups:
     """Group the cells of a cell-aligned artifact by their labels.
 
@@ -212,6 +270,17 @@ def cell_groups(
     ``rows`` or ``cell_selection``, or without a label, is in no group. A
     label artifact may hold fewer cells than the artifact: the cells it lacks
     have no group.
+
+    What grouping reads and builds is charged to ``ledger`` before each step,
+    beside what the caller holds there: the cells of the artifact's
+    selection, read whatever the grouping; the cells of ``cell_selection``
+    and their match; each column's labels, read as
+    :func:`~cytearc.metadata.rows.read_text_rows` and
+    :func:`~cytearc.metadata.rows.read_rows` charge them and coded as
+    :func:`~cytearc.metadata.selection.category_codes` charges it; the label
+    artifact's labels and their alignment; the combinations of the cells'
+    codes; and the groups' labels and names. Each cell's group and the
+    groups' labels stay charged when the call returns, as the caller's.
 
     Args:
         zw: The store's root group.
@@ -222,11 +291,9 @@ def cell_groups(
         group_by: Cell metadata columns.
         groups: A cell-label artifact.
         cell_selection: Only these cells, or None.
-        memory_bytes: The memory budget.
+        ledger: The memory ledger of the caller.
         kept_apart: Key columns whose labels the artifact keeps apart, each
             with every artifact cell's label, such as a receptor type.
-        held_bytes: What the caller holds beside the grouping, which counts
-            against the budget with it.
 
     Returns:
         The groups' key columns and labels, and each cell's group. A key
@@ -238,7 +305,8 @@ def cell_groups(
         ValueError: If a ``group_by`` column is missing, named twice or kept
             apart already, two key columns share a name, or two groups get
             one name.
-        MemoryError: If grouping the cells does not fit the memory budget.
+        MemoryBudgetError: If grouping the cells does not fit the ledger's
+            budget.
     """
     columns = group_columns(group_by, "group_by")
     if groups is not None and not isinstance(groups, ArtifactRef):
@@ -253,7 +321,7 @@ def cell_groups(
                 "already; leave it out, or copy the cell metadata column under "
                 "another name"
             )
-        if column not in cells.columns:
+        if not cells._has_column(column):
             raise ValueError(
                 f"group_by names {quoted_value(column)}, which is not a cell metadata column"
             )
@@ -268,130 +336,160 @@ def cell_groups(
             f"The groups' key columns {list(key_columns)} name {quoted_value(repeated[0])} "
             "twice; copy the cell metadata column under another name"
         )
-    has = np.asarray(rows, dtype=bool).copy()
-    n_cells = len(has)
-    n_columns = len(key_columns)
-    label_bytes = sum(cells.get_dtype(column).itemsize for column in columns)
-    resident = int(held_bytes) + n_cells * (
-        GROUPING_BYTES_PER_CELL
-        + GROUPING_BYTES_PER_COLUMN * n_columns
-        + GROUPING_BYTES_PER_LABEL_BYTE * label_bytes
-    )
-    # Reading a column, or the label artifact, also holds the rest of its
-    # last chunk; they are read one at a time, a column a stored chunk at a
-    # time.
-    chunks = [_column_chunk_bytes(cells, column) for column in columns]
-    # A cell selection and a label artifact are read whole, whatever cells
-    # the artifact holds.
-    if cell_selection is not None:
-        n_selected = validate_cell_selection(zw, cell_selection).selected_count
-        resident += GROUPING_BYTES_PER_SELECTED_CELL * int(n_selected)
-        # The selection is read right after the artifact's cells, whose read
-        # can still hold its stored chunk, a flag for each cell of the store.
-        resident += previous_read_bytes(
-            selection_chunk_bytes(zw, artifact_cells),
-            selection_chunk_bytes(zw, cell_selection),
-        )
-    if groups is not None:
-        n_labelled, width, label_chunk = _label_extent(zw, groups)
-        resident += n_labelled * (
-            GROUPING_BYTES_PER_LABELLED_CELL + GROUPING_BYTES_PER_LABEL_BYTE * width
-        )
-        chunks.append(label_chunk)
-    resident += max(chunks, default=0)
-    # The read of a chunk can still hold the chunk read before it, of the same
-    # column or of the column or labels before, so a column stored in several
-    # chunks, or several columns and labels, count the largest chunk again.
-    if len(chunks) > 1 or any(_stored_in_chunks(cells, column) for column in columns):
-        resident += previous_read_bytes(*chunks)
-
-    def held(total: int) -> int:
-        """Return the bytes that grouping holds, refused beyond the budget."""
-        if total > memory_bytes:
-            raise MemoryError(
-                f"Grouping {n_cells} cells by {n_columns} columns holds about "
-                f"{total} bytes, more than the memory budget of {memory_bytes} "
-                "bytes. Raise mem_budget."
-            )
-        return total
-
-    def coded_labels(
-        values: np.ndarray, missing: np.ndarray | None = None
-    ) -> tuple[np.ndarray, list[str]]:
-        """Code labels as ``category_codes`` does, once their distinct labels fit.
-
-        Naming and ordering a distinct label costs far more than coding a
-        cell, so the cells are factorized first and only the distinct labels
-        are named, after the budget is checked with their number.
-        """
-        nonlocal resident
-        factorized, distinct = pd.factorize(values, use_na_sentinel=True)
-        resident = held(resident + GROUPING_BYTES_PER_DISTINCT_LABEL * len(distinct))
-        distinct_codes, names = category_codes(np.asarray(distinct, dtype=object))
-        present = factorized >= 0
-        if missing is not None:
-            present &= ~np.asarray(missing, dtype=bool)
-        codes = np.full(len(factorized), -1, dtype=np.int64)
-        codes[present] = distinct_codes[factorized[present]]
-        return codes, names
-
-    resident = held(resident)
-    cell_index = _selection_indices(zw, artifact_cells)
-    if len(cell_index) != n_cells:
-        raise ValueError("rows must hold one entry per cell of the artifact")
-    if cell_selection is not None:
-        has &= np.isin(cell_index, _selection_indices(zw, cell_selection))
-    cell_index = cell_index[has]
-    # Each column's labels are coded once, in the natural order of their
-    # texts, and only the distinct labels are checked and named.
-    coded: list[tuple[np.ndarray, list[str]]] = [
-        coded_labels(
-            np.asarray(read_metadata_rows_chunkwise(cells, column, cell_index)),
-            read_metadata_missing_rows_chunkwise(cells, column, cell_index),
-        )
-        for column in columns
-    ]
-    if groups is not None:
-        resolved = resolve_grouping(zw, cells, groups)
-        codes, names = coded_labels(np.asarray(resolved.labels), resolved.missing_mask)
-        at = pd.Index(np.asarray(resolved.cell_idx, dtype=np.int64)).get_indexer(
-            cell_index
-        )
-        aligned = np.full(len(cell_index), -1, dtype=np.int64)
-        aligned[at >= 0] = codes[at[at >= 0]]
-        coded.append((aligned, names))
     for name, labels in kept_apart:
-        values = np.asarray(labels)
-        if values.shape != (n_cells,):
+        if np.shape(labels) != np.shape(rows):
             raise ValueError(
                 f"The labels of {quoted_value(name)} must hold one per artifact cell"
             )
-        coded.append(coded_labels(values[has]))
-    cell_codes = np.full(n_cells, -1, dtype=np.int64)
-    if not coded:
-        cell_codes[has] = 0
-        return CellGroups(key_columns, [{}] if has.any() else [], cell_codes)
-    stacked = np.column_stack([codes for codes, _names in coded])
-    keep = (stacked >= 0).all(axis=1)
-    combinations, group_codes = unique_rows(stacked[keep])
-    # Each group's labels and name are Python objects, built once the groups
-    # are counted.
-    held(resident + GROUPING_BYTES_PER_GROUP * len(combinations))
-    keys = [
-        {
-            column: names[code]
-            for column, (_codes, names), code in zip(
-                key_columns, coded, row, strict=True
+    # The selections' identity checks, which read their row identifiers
+    # outside the budget, run once, before anything is charged.
+    with validation_scope():
+        artifact_read = plan_cell_selection_read(zw, artifact_cells)
+        selection_read = (
+            None
+            if cell_selection is None
+            else plan_cell_selection_read(zw, cell_selection)
+        )
+        n_cells = len(rows)
+        n_columns = len(key_columns)
+        # Whether each cell may join a group, and each cell's group, are held
+        # until the call returns.
+        ledger.hold("the cells that may join a group", n_cells)
+        has = np.asarray(rows, dtype=bool).copy()
+        cell_index = read_cell_selection(
+            ledger, zw, artifact_read, item="the cells of the artifact's selection"
+        )
+        if len(cell_index) != n_cells:
+            raise ValueError("rows must hold one entry per cell of the artifact")
+        if selection_read is not None:
+            selected = read_cell_selection(
+                ledger, zw, selection_read, item="the cells of cell_selection"
             )
-        }
-        for row in combinations.tolist()
-    ]
-    selected = np.flatnonzero(has)
-    cell_codes[selected[keep]] = group_codes
-    # Groups are named by their labels joined by commas, and need one name
-    # each.
-    group_names(keys)
-    return CellGroups(key_columns, keys, cell_codes)
+            # NumPy matches the two sorted sets of positions by a stable argsort
+            # of both together: their copy, its order, the sorted positions and
+            # the flags that mark the matches.
+            both = n_cells + len(selected)
+            ledger.peak(
+                "the cells of cell_selection",
+                16 * both + sort_bytes(both, 8, stable=True, order=True) + 4 * both,
+            )
+            has &= np.isin(cell_index, selected)
+            ledger.release(selected.nbytes)
+            del selected
+        ledger.peak("the grouped cells", 8 * int(np.count_nonzero(has)))
+        grouped_index = cell_index[has]
+        ledger.hold("the grouped cells", grouped_index.nbytes)
+        index_bytes = cell_index.nbytes
+        del cell_index
+        ledger.release(index_bytes)
+        n_grouped = len(grouped_index)
+        # Each column's labels are coded once, in the natural order of their
+        # texts, and only the codes are kept.
+        coded: list[tuple[np.ndarray, list[str]]] = []
+        for column in columns:
+            values, missing, read = _column_values(ledger, cells, column, grouped_index)
+            codes, names = category_codes(values, missing, ledger=ledger)
+            ledger.hold(f"each cell's code of {quoted_value(column)}", codes.nbytes)
+            # The distinct labels share their strings with the cells' labels,
+            # so they are held before the cells' labels go.
+            _hold_names(ledger, names)
+            del values, missing
+            ledger.release(read)
+            coded.append((codes, names))
+        if groups is not None:
+            # The label artifact is read whole, whatever cells the artifact being
+            # grouped holds, and aligned to them through an index of its cells.
+            n_labelled, width, label_chunk = _label_extent(zw, groups)
+            labelled = (
+                n_labelled
+                * (
+                    GROUPING_BYTES_PER_LABELLED_CELL
+                    + _LABELLED_BYTES_PER_LABEL_BYTE * width
+                )
+                + label_chunk
+            )
+            ledger.hold("the labels of the groups artifact", labelled)
+            resolved = resolve_grouping(zw, cells, groups)
+            # A codec thread may still hold the chunk of labels it decoded.
+            ledger.leave(label_chunk)
+            codes, names = category_codes(
+                np.asarray(resolved.labels), resolved.missing_mask, ledger=ledger
+            )
+            ledger.hold("each labelled cell's code", codes.nbytes)
+            ledger.peak(
+                "the groups artifact's cells",
+                hash_table_bytes(n_labelled) + 8 * n_labelled + 16 * n_grouped,
+            )
+            at = pd.Index(np.asarray(resolved.cell_idx, dtype=np.int64)).get_indexer(
+                grouped_index
+            )
+            aligned = np.full(n_grouped, -1, dtype=np.int64)
+            aligned[at >= 0] = codes[at[at >= 0]]
+            ledger.hold("each cell's code of the groups artifact", aligned.nbytes)
+            labelled_codes = codes.nbytes
+            _hold_names(ledger, names)
+            del resolved, at, codes
+            ledger.release(labelled + labelled_codes)
+            coded.append((aligned, names))
+        for name, labels in kept_apart:
+            # The labels kept apart are the caller's; their grouped cells' are
+            # picked out to be coded.
+            picking = ledger.hold(
+                f"the labels of {quoted_value(name)}", object_array_bytes(n_grouped)
+            )
+            picked = np.asarray(labels)[has]
+            codes, names = category_codes(picked, ledger=ledger)
+            ledger.hold(f"each cell's code of {quoted_value(name)}", codes.nbytes)
+            _hold_names(ledger, names)
+            del picked
+            ledger.release(picking)
+            coded.append((codes, names))
+        ledger.hold("each cell's group", 8 * n_cells)
+        cell_codes = np.full(n_cells, -1, dtype=np.int64)
+        kept_codes = sum(codes.nbytes for codes, _names in coded)
+        if not coded:
+            cell_codes[has] = 0
+            keys: list[dict[str, str]] = [{}] if has.any() else []
+            index_bytes = grouped_index.nbytes
+            del has, grouped_index
+            ledger.release(n_cells + index_bytes)
+            return CellGroups(key_columns, keys, cell_codes)
+        # The codes are stacked, the cells with a label in every column kept,
+        # and their combinations numbered a column at a time.
+        ledger.peak(
+            "the combinations of the cells' labels",
+            _combining_bytes(n_grouped, n_columns),
+        )
+        stacked = np.column_stack([codes for codes, _names in coded])
+        keep = (stacked >= 0).all(axis=1)
+        combinations, group_codes = unique_rows(stacked[keep])
+        del stacked
+        combined = keep.nbytes + combinations.nbytes + group_codes.nbytes
+        ledger.hold("the combinations of the cells' labels", combined)
+        # Each group's labels and name are Python objects, built once the groups
+        # are counted from the combinations as lists, and named once.
+        keys_bytes = _keys_bytes(len(combinations), n_columns)
+        ledger.hold("each group's labels and name", keys_bytes)
+        keys = [
+            {
+                column: names[code]
+                for column, (_codes, names), code in zip(
+                    key_columns, coded, row, strict=True
+                )
+            }
+            for row in combinations.tolist()
+        ]
+        # The grouped cells' positions, and those with a label in every column.
+        ledger.peak("each cell's group", 16 * n_grouped)
+        selected_cells = np.flatnonzero(has)
+        cell_codes[selected_cells[keep]] = group_codes
+        index_bytes = grouped_index.nbytes
+        del coded, keep, combinations, group_codes, selected_cells, has, grouped_index
+        ledger.release(n_cells + index_bytes + kept_codes + combined)
+        # Groups are named by their labels joined by commas, and need one name
+        # each.
+        group_names(keys)
+        return CellGroups(key_columns, keys, cell_codes)
 
 
 def within_groups(
@@ -401,14 +499,16 @@ def within_groups(
     columns: tuple[str, ...],
     members: np.ndarray,
     *,
-    memory_bytes: int,
+    ledger: MemoryLedger,
     what: str,
 ) -> tuple[np.ndarray, list[dict[str, str]], str | None]:
     """Group an artifact's member cells by their labels in the ``within`` columns.
 
     Clone-defining methods define clones within groups, such as each mouse:
     the groups are those of :func:`cell_groups`, in the natural order of
-    their labels, identified by its fingerprint of each cell's group.
+    their labels, identified by its fingerprint of each cell's group, and
+    are charged to ``ledger`` as :func:`cell_groups` charges them. Each
+    cell's group and the groups' labels stay charged, as the caller's.
 
     Args:
         zw: The store's root group.
@@ -417,7 +517,7 @@ def within_groups(
         columns: The within columns.
         members: The cells that need a group, as a mask aligned to the
             artifact's cells, such as the cells with a receptor.
-        memory_bytes: The memory budget.
+        ledger: The memory ledger of the caller.
         what: What the member cells hold, such as ``"a receptor"``, which
             the error names.
 
@@ -430,13 +530,15 @@ def within_groups(
     Raises:
         ValueError: If a column is not a cell metadata column, or a member
             cell has no label in one.
-        MemoryError: If grouping the cells does not fit the memory budget.
+        MemoryBudgetError: If grouping the cells does not fit the ledger's
+            budget.
     """
     n_cells = len(members)
     if not columns:
+        ledger.hold("each cell's group", 8 * n_cells)
         return np.zeros(n_cells, dtype=np.int64), [{}], None
     for column in columns:
-        if column not in cells.columns:
+        if not cells._has_column(column):
             raise ValueError(
                 f"within names {quoted_value(column)}, which is not a cell metadata column"
             )
@@ -448,7 +550,7 @@ def within_groups(
         group_by=columns,
         groups=None,
         cell_selection=None,
-        memory_bytes=memory_bytes,
+        ledger=ledger,
     )
     unlabelled = int(np.count_nonzero(members & (grouped.codes < 0)))
     if unlabelled:
@@ -456,4 +558,12 @@ def within_groups(
             f"The within columns have no label for {unlabelled} cells with {what}. "
             f"Every cell with {what} needs a label in the within columns."
         )
-    return np.maximum(grouped.codes, 0), grouped.keys, grouped.fingerprint()
+    # Each cell's group in place of its code, which is let go, and the
+    # fingerprint of the groups' labels beside it.
+    ledger.peak("each cell's group", 8 * n_cells)
+    codes = np.maximum(grouped.codes, 0)
+    ledger.peak(
+        "fingerprinting the groups' labels",
+        codes.nbytes + grouped.fingerprint_bytes(),
+    )
+    return codes, grouped.keys, grouped.fingerprint()

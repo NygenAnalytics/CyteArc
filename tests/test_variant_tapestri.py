@@ -1162,6 +1162,14 @@ def _import_at_smallest_budget(
     return budget, below, store.artifacts.load(ref)
 
 
+# The refusal of the bands' charge, for bands of at least ``rows`` rows.
+_BANDS_REFUSED = (
+    r"^Importing variant counts for \d+ selected cells holds about \d+ bytes for "
+    r"a band of at least {rows} sorted rows and the stored chunks that it "
+    r"rewrites, "
+)
+
+
 def test_bands_of_a_whole_chunk_write_each_stored_chunk_once(
     banded, tmp_path, monkeypatch
 ) -> None:
@@ -1184,8 +1192,8 @@ def test_bands_of_a_whole_chunk_write_each_stored_chunk_once(
         assert writes[name, 0] == int(np.any(values)), (name, writes)
         assert (name, 1) not in writes, name
     assert writes["depth", 0] == writes["counts", 0] == 1
-    # The check of the bands refuses one byte less, naming the budget.
-    assert re.match(r"Writing the variant counts in bands of \d+ rows ", str(below))
+    # The charge of the bands refuses one byte less, naming the budget.
+    assert re.search(_BANDS_REFUSED.format(rows=r"\d+"), str(below))
     assert stated_bytes(below) == budget
 
 
@@ -1198,17 +1206,59 @@ def test_a_band_holds_a_chunk_of_rows_when_the_rows_outnumber_a_chunk(
     # Chunks of at most 12,000 rows, fewer than the 300 cells hold, and a
     # band of a whole chunk at least: a band holds at least 12,000 rows, less
     # the 60 rows of one cell where a band ends, so two bands hold the at most
-    # 18,000 rows, and each writes a chunk at most once.
+    # 18,000 rows, and each writes a chunk at most once. The bands' charge,
+    # beside what the import holds once the rows are parsed, binds before the
+    # parse when the least chunk parsed is 100 rows, not 1,000.
     monkeypatch.setattr(operations, "_ROW_BAND", 12_000)
     monkeypatch.setattr(operations, "_BAND_CHUNK_PARTS", 1)
+    monkeypatch.setattr(operations, "_MIN_CHUNK_ROWS", 100)
     writes = _chunk_writes(monkeypatch)
     budget, below, group = _import_at_smallest_budget(banded, tmp_path, writes)
 
     assert max(group[name].chunks[0] for name in _LONG_ARRAYS) <= 12_000
     assert max(writes.values()) == 2, writes
     assert writes["depth", 0] == writes["counts", 0] == 2
-    assert str(below).startswith("Writing the variant counts in bands of 12000 rows ")
+    assert re.search(_BANDS_REFUSED.format(rows=12000), str(below))
     assert stated_bytes(below) == budget
+
+
+@pytest.mark.parametrize("parts", [1, 32])
+def test_the_bands_refusal_names_a_budget_that_runs(
+    banded, tmp_path, monkeypatch, parts
+) -> None:
+    from cytearc.datastore._operations import variants as operations
+    from tests.memory_helpers import stated_bytes
+
+    # The sort buffers grow with the budget, a tenth of it three times, so
+    # the bands' refusal names the budget at which the band fits beside the
+    # buffers it would then hold: following the refusals from one byte, the
+    # first that the bands make names a budget that runs.
+    monkeypatch.setattr(operations, "_BAND_CHUNK_PARTS", parts)
+    monkeypatch.setattr(operations, "_MIN_CHUNK_ROWS", 100)
+    file, location = banded
+    store = copy_store(location, tmp_path)
+    cells = every_cell(store)
+
+    def run() -> Any:
+        return store.variants.import_counts(
+            file, cell_selection=cells, invalidate_cache=True
+        )
+
+    budget = 1
+    for _attempt in range(200):
+        store.memoryBytes = budget
+        try:
+            run()
+        except MemoryError as refusal:
+            stated = stated_bytes(refusal)
+            if re.search(_BANDS_REFUSED.format(rows=r"\d+"), str(refusal)):
+                store.memoryBytes = stated
+                assert store.artifacts.load(run()).attrs["n_sorted_runs"] >= 0
+                return
+            budget = stated if stated > budget else budget + max(1, budget // 4)
+        else:
+            break
+    pytest.fail("The bands never refused")
 
 
 @pytest.mark.slow
@@ -1236,7 +1286,7 @@ def test_the_smallest_budget_accepted_writes_each_stored_chunk_a_few_times(
         assert 0 < group[name].shape[0] <= group[name].chunks[0], name
     assert max(writes.values()) <= 33, writes
     assert budget < 27_989_399, budget
-    assert str(below).startswith("Writing the variant counts in bands of 26218 rows ")
+    assert re.search(_BANDS_REFUSED.format(rows=26218), str(below))
     assert stated_bytes(below) == budget
 
 

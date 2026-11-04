@@ -71,6 +71,7 @@ from ._delimited import (
     first_lines,
     joined_columns,
     require_columns,
+    stripped_text,
     text_chunks,
     text_layout,
 )
@@ -586,7 +587,7 @@ def clone_layout(
 
 
 def _probabilities(values: pd.Series, lines: np.ndarray, path: str) -> np.ndarray:
-    text = values.str.strip()
+    text = stripped_text(values)
     missing = text.isin(MISSING_TEXT).to_numpy()
     numbers = pd.to_numeric(text.where(~missing, None), errors="coerce").to_numpy(
         dtype=np.float64
@@ -619,8 +620,8 @@ def _refuse_cellless(
 
 
 def _table_labels(values: pd.Series, format: str) -> np.ndarray:
-    text = values.str.strip()
-    labels = text.to_numpy(dtype=object)
+    text = stripped_text(values)
+    labels = text.to_numpy(dtype=object, copy=True)
     missing = text.isin(MISSING_TEXT).to_numpy()
     if format == "cassiopeia":
         # Cassiopeia writes lineage group 0 for a cell without a clone, as an
@@ -771,7 +772,7 @@ def matrix_clone_ids(layout: CloneLayout) -> np.ndarray:
     text = text_layout(layout.clones_path)
     labels = np.concatenate(
         [
-            chunk[0].str.strip().to_numpy(dtype=object)
+            stripped_text(chunk[0]).to_numpy(dtype=object)
             for _lines, chunk in text_chunks(text, 1 << 20)
         ]
         or [np.empty(0, dtype=object)]

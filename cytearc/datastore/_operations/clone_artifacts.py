@@ -6,8 +6,9 @@ artifact: per cell the clone label in ``values``, the clone's rank in
 ``codes`` and its size in ``clone_size``, and per clone ``clone_ids`` and
 ``clone_sizes``, beside the per-cell arrays that a source adds, such as each
 cell's probability of its clone. These helpers plan it, state what saving it
-holds, refuse a save that would not fit the memory budget, write it and log
-it, once for every operation mixin that saves clones.
+holds, charge the save to the operation's memory ledger before it writes
+anything, write it and log it, once for every operation mixin that saves
+clones.
 """
 
 from collections.abc import Mapping
@@ -28,6 +29,7 @@ from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import ArtifactRef
 from ...utils.logging import logger
 from ...utils.arguments import quoted_value
+from ...utils.memory_budget import MemoryLedger
 
 __all__ = [
     "CLONE_PROBABILITY",
@@ -183,20 +185,19 @@ def write_clones(
     attributes: Mapping[str, Any],
     source_arrays: Mapping[str, np.ndarray] | None = None,
     *,
-    memory_bytes: int,
-    held_bytes: int,
+    ledger: MemoryLedger,
 ) -> None:
     """Write planned clones with their attributes and the arrays their source adds.
 
-    The save is refused before it writes anything when ``held_bytes``, what
-    the caller holds beside the assignment, such as its labels' text, and
-    what saving holds, as :func:`clone_write_bytes` states, pass
-    ``memory_bytes``.
+    What saving holds, as :func:`clone_write_bytes` states, is charged to
+    ``ledger`` beside what the caller holds there, such as its labels' text,
+    before anything is written.
 
     Raises:
         ValueError: If ``source_arrays`` names an array that is not one of
             ``SOURCE_ARRAYS``, or the assignment's probabilities already.
-        MemoryError: If saving the clones would not fit ``memory_bytes``.
+        MemoryBudgetError: If saving the clones would pass the ledger's
+            budget.
     """
     sources = dict(source_arrays or {})
     for name in sources:
@@ -212,22 +213,20 @@ def write_clones(
             )
     n_cells = len(assignment.codes)
     width = max((len(str(label)) for label in assignment.clone_ids.tolist()), default=0)
-    needed = held_bytes + clone_write_bytes(
-        n_cells,
-        len(assignment.clone_ids),
-        width,
-        with_probability=assignment.probabilities is not None,
-        source_arrays={
-            name: np.asarray(values).dtype for name, values in sources.items()
-        },
+    # The store saves each cell's clone label at the width of the longest.
+    ledger.peak(
+        f"writing the clones of {n_cells} cells, each label {width} characters "
+        "wide as stored",
+        clone_write_bytes(
+            n_cells,
+            len(assignment.clone_ids),
+            width,
+            with_probability=assignment.probabilities is not None,
+            source_arrays={
+                name: np.asarray(values).dtype for name, values in sources.items()
+            },
+        ),
     )
-    if needed > memory_bytes:
-        raise MemoryError(
-            f"Saving the clones of {n_cells} cells holds about {needed} bytes, more "
-            f"than the memory budget of {memory_bytes} bytes, since the store saves "
-            "each cell's clone label at the width of the longest, "
-            f"{width} characters. Raise mem_budget."
-        )
     arrays: dict[str, np.ndarray] = {
         "values": assignment.values,
         "codes": assignment.codes.astype(np.int32),

@@ -33,7 +33,12 @@ from tests.clone_helpers import (
     write_truth_store,
 )
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.memory_helpers import budget_that_runs, charges, stated_bytes
+from tests.memory_helpers import (
+    budget_that_runs,
+    charges,
+    index_copies_references,
+    stated_bytes,
+)
 from tests.storage_helpers import copy_store, open_store
 from tests.clone_truth import (
     N_OUTSIDE,
@@ -490,6 +495,7 @@ def test_import_refuses_contigs_larger_than_the_memory_budget(
 def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
     tmp_path, monkeypatch
 ) -> None:
+    from cytearc.datastore._operations.cell_barcodes import lookup_bytes
     from cytearc.metadata import records
     from cytearc.metadata import rows as metadata_rows
     from cytearc.storage.geometry import array_geometry
@@ -521,11 +527,13 @@ def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
     )
     assert len(encoded) == 1
     # At its peak the import holds three times its encoded contigs, 100 bytes
-    # per selected cell, what writing each cell's labels and counts holds,
-    # its labels at the widest of their kinds, the join's lookup of 100 bytes
-    # per cell, each cell's ID as a Python string, 41 bytes and the five
-    # characters of cell0 to cell7, with its object's slot, and what the read
-    # of the IDs may still hold: a stored chunk of them and Zarr's objects.
+    # per selected cell and its position, 8, what writing each cell's labels
+    # and counts holds,
+    # its labels at the widest of their kinds, the join's lookup of the cells,
+    # pandas' table of 16 buckets and each cell's slot and flag, each cell's
+    # ID as a Python string, 41 bytes and the five characters of cell0 to
+    # cell7, with its object's slot, and what the read of the IDs may still
+    # hold: a stored chunk of them and Zarr's objects.
     n = N_RECEPTOR_CELLS
     writing = cell_data_write_bytes(
         {
@@ -541,23 +549,29 @@ def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
     )
     ids = store.cells._get_array("ids")
     left = array_geometry(ids).heldReadBytes()
-    estimate = 3 * encoded[0] + (100 + 100 + 8 + 41 + 5) * n + writing + left
-    peaks = [
-        planned for item, _nbytes, planned in taken if item.endswith("import's peak")
-    ]
-    assert peaks == [estimate]
-    # Within a budget this large, chunks hold the most rows, 50,000, and the
-    # parse of each counts its 18 fields of 64 bytes a row beside 1 MiB and
-    # the contigs encoded before it: none for the first chunk, and all of
-    # them for the read that finds the end of the file.
+    lookup = 16 * 16 + 16 // 8 + (1 + 8 * index_copies_references()) * n
+    assert lookup == lookup_bytes(n)
+    estimate = 3 * encoded[0] + (100 + 8 + 8 + 41 + 5) * n + lookup + writing + left
+    # Within a budget this large, chunks hold the most rows, 50,000, and a
+    # chunk's parse holds its 18 fields of 64 bytes a row beside 1 MiB, held
+    # once from before the first chunk to the end of the file, since the
+    # reader keeps each chunk's text until it parses the next. It is let go
+    # after the import's peak is checked, which plans the larger of that peak
+    # and what is held beside the parse.
     parse = (1 << 20) + 50_000 * 18 * 64
-    parses = [
-        (item, nbytes) for item, nbytes, _planned in taken if item.endswith("parsed")
+    order = [(item, nbytes) for item, nbytes, _planned in taken]
+    assert [entry for entry in order if entry[0].endswith("parsed")] == [
+        ("a chunk of 50000 contig rows as parsed", parse)
     ]
-    assert parses == [
-        ("a chunk of 50000 contig rows as parsed", parse),
-        ("a chunk of 50000 contig rows as parsed", parse + encoded[0]),
+    peaks = [
+        (position, planned)
+        for position, (item, _nbytes, planned) in enumerate(taken)
+        if item.endswith("import's peak")
     ]
+    assert [planned for _position, planned in peaks] == [
+        max(estimate, estimate - 2 * encoded[0] + parse)
+    ]
+    assert order.index(("a release", parse)) > peaks[0][0]
     monkeypatch.setattr(store, "memoryBytes", estimate - 1)
     with pytest.raises(
         MemoryBudgetError, match=f"holds about {estimate} bytes for the 1000 contigs"
@@ -576,17 +590,24 @@ def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
         != saved
     )
 
-    # Below the cells' share, the join's lookup and the read of the IDs, the
-    # import refuses before it reads a cell ID: the read holds the eight IDs
-    # at their stored width and their indices, one stored chunk of them and
-    # Zarr's objects.
+    # Below the cells' share, their positions and the stored chunk of the
+    # selection's flags that reading them may leave, and the read of the
+    # IDs, the import refuses before it reads a cell ID: the read holds the
+    # eight IDs at their stored width and their indices, one stored chunk of
+    # them and Zarr's objects. The join charges its lookup once the IDs are
+    # read.
+    from cytearc.storage.artifacts import artifact_group
+
     def unread(*_arguments, **_options):
         raise AssertionError("the cell IDs were read")
 
     monkeypatch.setattr(metadata_rows, "read_array_rows_chunkwise", unread)
+    flags = artifact_group(store.zw, cells)["values"]
     reading = (
-        (100 + 100) * n
+        100 * n
         + writing
+        + 8 * n
+        + array_geometry(flags).heldReadBytes()
         + metadata_rows.row_read_bytes(array_geometry(ids), np.arange(n))
     )
     monkeypatch.setattr(store, "memoryBytes", reading - 1)

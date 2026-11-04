@@ -29,6 +29,7 @@ from cytearc.clones.recorders import (
     site_state_counts,
 )
 from cytearc.metadata.records import RecordEncoder
+from cytearc.utils.memory_budget import MemoryLedger
 
 
 def test_states_and_fields_are_fixed():
@@ -211,7 +212,7 @@ def _table(records: list[tuple]) -> object:
             "row",
         ],
     )
-    encoder = RecordEncoder(FIELDS)
+    encoder = RecordEncoder(FIELDS, ledger=MemoryLedger(None, "encoding"))
     for source, part in frame.groupby("source", sort=True):
         encoder.add(
             part.drop(columns=["cell", "source"]).astype(

@@ -92,8 +92,9 @@ def _contigs(n_cells: int) -> pd.DataFrame:
 
 def _encode(frame: pd.DataFrame):
     from cytearc.repertoire.contigs import contig_encoder
+    from cytearc.utils.memory_budget import MemoryLedger
 
-    encoder = contig_encoder()
+    encoder = contig_encoder(MemoryLedger(None, "encoding"))
     for start in range(0, len(frame), _CHUNK_ROWS):
         chunk = frame.iloc[start : start + _CHUNK_ROWS]
         encoder.add(chunk.drop(columns="cell"), chunk["cell"].to_numpy(), source=0)

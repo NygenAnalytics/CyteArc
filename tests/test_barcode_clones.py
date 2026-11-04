@@ -685,24 +685,22 @@ def test_the_write_check_counts_a_buffer_for_each_write_zarr_runs_at_once(
     _calling, barcodes = _imported(store, tmp_path, "larry")
 
     def bytes_as_written(concurrency: int) -> int:
-        """The bytes of the check of writing, which refuses right after reading's."""
+        """The bytes of the check of writing, which refuses after grouping's and reading's."""
         with zarr.config.set({"async.concurrency": concurrency}):
             budget = 1
-            for _attempt in range(3):
+            for _attempt in range(4):
                 monkeypatch.setattr(store, "memoryBytes", budget)
                 try:
                     store.clones.barcode_clones(
                         barcodes, preset="larry", invalidate_cache=True
                     )
                 except MemoryError as error:
-                    found = re.search(
-                        r"about (\d+) bytes as they are (\w+)", str(error)
-                    )
+                    found = re.search(r"about (\d+) bytes", str(error))
                     assert found is not None, str(error)
-                    if found.group(2) == "written":
+                    if "bytes as they are written" in str(error):
                         return int(found.group(1))
                     budget = int(found.group(1))
-        raise AssertionError("writing was not refused right after reading")
+        raise AssertionError("writing was not refused after reading")
 
     assert bytes_as_written(20) - bytes_as_written(10) == 10 * io.DEFAULT_BUFFER_SIZE
     # Before reading, saving is checked as if every cell were a clone of its
@@ -813,3 +811,51 @@ def test_an_allowlist_too_large_for_the_budget_is_refused_before_it_is_copied(
         store.clones.barcode_clones(
             barcodes, preset="celltag", allowlist=iter(allowlist)
         )
+
+
+@pytest.mark.parametrize("n_columns", [1, 13])
+def test_clones_within_a_label_of_each_cell_fit_the_smallest_budget(
+    tmp_path, n_columns
+) -> None:
+    from tests.barcode_join_helpers import write_barcode_file
+    from tests.memory_helpers import budget_that_runs, stated_bytes
+
+    # 2,000 cells of a barcode each and a label of their own in each within
+    # column, so each clone is a group, and fingerprinting the groups' labels
+    # holds about as much as the groups: the clone call holds within the
+    # smallest budget that its refusals name.
+    n_cells = 2_000
+    ids = [f"cell{index:07d}-1" for index in range(n_cells)]
+    path = tmp_path / "store.zarr"
+    write_count_store(
+        str(path), {"RNA": np.ones((n_cells, 1), dtype=int)}, "uint16", cell_ids=ids
+    )
+    store = open_store(path)
+    store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))
+    names = [f"each_{k}" for k in range(n_columns)]
+    for name in names:
+        store.cells.insert(
+            name, np.asarray([f"c{index:06d}" for index in range(n_cells)])
+        )
+    with collect_warnings():
+        barcodes = store.clones.import_barcodes(
+            write_barcode_file(tmp_path / "counts.tsv", ids),
+            cell_selection=store.snapshot_cell_selection("every_cell"),
+        )
+
+    def run(opened) -> object:
+        with collect_warnings():
+            return opened.clones.barcode_clones(
+                barcodes,
+                preset="larry",
+                min_reads=0,
+                min_umis=1,
+                within=names,
+                invalidate_cache=True,
+            )
+
+    run(store)
+    budget, _refusals, _result, peak = budget_that_runs(
+        store, run, refusal_budget=stated_bytes, max_refusals=100
+    )
+    assert peak is not None and peak <= budget, (peak, budget)

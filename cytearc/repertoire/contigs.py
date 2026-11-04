@@ -18,6 +18,7 @@ contig has its own of, are ragged text.
 from collections.abc import Mapping
 from types import MappingProxyType
 
+from ..utils.memory_budget import MemoryLedger
 from ..metadata.records import (
     FLAG,
     INTEGER,
@@ -102,6 +103,6 @@ FIELDS: Mapping[str, FieldKind] = MappingProxyType(
 REQUIRED_FIELDS = ("sequence_id", "locus", "junction_aa", "productive")
 
 
-def contig_encoder() -> RecordEncoder:
-    """Return an encoder of contigs: the fields of ``FIELDS``, by ``sequence_id``."""
-    return RecordEncoder(FIELDS, id_field="sequence_id")
+def contig_encoder(ledger: MemoryLedger) -> RecordEncoder:
+    """Return an encoder of contigs, the fields of ``FIELDS`` by ``sequence_id``, which charges ``ledger``."""
+    return RecordEncoder(FIELDS, id_field="sequence_id", ledger=ledger)

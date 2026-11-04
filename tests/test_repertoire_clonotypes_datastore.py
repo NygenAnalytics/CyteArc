@@ -37,15 +37,16 @@ from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import logger
 from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 from tests.clone_helpers import (
-    clonal_receptors,
     CELLRANGER_HEADER,
     CLONAL_ROWS,
     N_RECEPTOR_CELLS,
+    clonal_receptors,
+    every_cell,
+    grouping_without_a_budget,
     ids_read_bytes,
     import_truth_receptors,
     loaded_partition,
     receptor_store,
-    every_cell,
     write_cells_store,
     write_clone_contigs,
     write_lines,
@@ -1194,7 +1195,11 @@ def test_defining_clonotypes_is_checked_against_the_memory_budget(
     # contig's stored junction code as int64 beside the codes of the 32 slots
     # with their mask and gathers.
     assert steps["the chains and clonotypes of each cell"] == 8 * 1_000
-    assert steps["each cell's group"] == 8 * 16
+    # Each cell's within group, which the grouping holds, and its group among
+    # the receptor types and the within groups.
+    assert [
+        nbytes for item, nbytes, _planned in taken if item == "each cell's group"
+    ] == [8 * 8, 8 * 8]
     assert steps["each contig's junction as int64"] == 14 * 8 + 32 * 25
     # Writing holds what writing its eight arrays holds, each as long as the
     # cells, with labels as wide as the label of an eighth clonotype.
@@ -1235,7 +1240,11 @@ def test_grouping_by_within_columns_is_checked_against_the_memory_budget(
     )
     monkeypatch.setattr(store, "memoryBytes", budget)
     assert store.repertoire.clonotypes(receptors)
-    with pytest.raises(MemoryError, match="Grouping 8 cells by 1 columns holds"):
+    with pytest.raises(
+        MemoryError,
+        match="Defining the clonotypes of 8 cells holds about .* for the labels of "
+        "'donor'",
+    ):
         store.repertoire.clonotypes(receptors, within="donor")
     assert len(store.artifacts.list(kind="clonotypes", scope="datastore")) == 1
 
@@ -1294,7 +1303,9 @@ def test_expansion_of_clonotypes_counts_each_cells_receptor_type(
     store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     # Measuring takes 300 bytes per cell and 8 for its receptor type, and
-    # 2,000 for each group, the T cells and the B cells.
+    # 2,000 for each group, the T cells and the B cells, beside a grouping
+    # that the test leaves without a budget.
+    grouping_without_a_budget(monkeypatch)
     needed = 8 * (300 + 8) + 2 * 2_000
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
     with pytest.raises(MemoryError, match=f"of 8 cells holds about {needed} bytes"):
@@ -1992,10 +2003,13 @@ def test_clusters_keep_whole_the_b_cell_clones_that_mutations_split(tmp_path) ->
 
 
 def _clonal_cells_store(folder: Path, n_cells: int):
-    """A store of ``n_cells`` cells in clones of up to 20, each with its two chains."""
+    """A store of ``n_cells`` cells in eight samples and clones of up to 20, each with its two chains."""
     ids = [f"c{index:06d}" for index in range(n_cells)]
     folder.mkdir()
     store = write_cells_store(folder / "store.zarr", ids)
+    store.cells.insert(
+        "sample", np.asarray([f"s{index % 8}" for index in range(n_cells)])
+    )
     clone_of = np.random.default_rng(7).integers(0, n_cells // 10, n_cells)
     clone_of[::50] = -1
     contigs = write_clone_contigs(folder, "contigs.csv", ids, clone_of)
@@ -2003,20 +2017,37 @@ def _clonal_cells_store(folder: Path, n_cells: int):
 
 
 _AUDITED_STEPS = {
-    "import": lambda store, contigs, receptors: store.repertoire.import_receptors(
-        contigs, cell_selection=every_cell(store), invalidate_cache=True
+    "import": lambda store, contigs, receptors, clonotypes: (
+        store.repertoire.import_receptors(
+            contigs, cell_selection=every_cell(store), invalidate_cache=True
+        )
     ),
-    "clonotypes": lambda store, contigs, receptors: store.repertoire.clonotypes(
-        receptors, invalidate_cache=True
+    "clonotypes": lambda store, contigs, receptors, clonotypes: (
+        store.repertoire.clonotypes(receptors, invalidate_cache=True)
     ),
-    "clusters": lambda store, contigs, receptors: store.repertoire.clonotypes(
-        receptors, metric="hamming", max_distance=1, invalidate_cache=True
+    "clusters": lambda store, contigs, receptors, clonotypes: (
+        store.repertoire.clonotypes(
+            receptors, metric="hamming", max_distance=1, invalidate_cache=True
+        )
     ),
-    "spectratype": lambda store, contigs, receptors: store.repertoire.spectratype(
-        receptors, sequence="nt"
+    "spectratype": lambda store, contigs, receptors, clonotypes: (
+        store.repertoire.spectratype(receptors, sequence="nt")
     ),
-    "export": lambda store, contigs, receptors: store.repertoire.export_airr(
-        receptors, Path(store.zw.store.root).parent / "export.tsv"
+    "gene usage by sample": lambda store, contigs, receptors, clonotypes: (
+        store.repertoire.gene_usage(receptors, group_by="sample")
+    ),
+    "gene usage of clonotypes": lambda store, contigs, receptors, clonotypes: (
+        store.repertoire.gene_usage(
+            clonotypes, genes=("v_call", "j_call"), count="clonotypes"
+        )
+    ),
+    "spectratype of clonotypes by sample": lambda store, contigs, receptors, clonotypes: (
+        store.repertoire.spectratype(clonotypes, count="clonotypes", group_by="sample")
+    ),
+    "export": lambda store, contigs, receptors, clonotypes: (
+        store.repertoire.export_airr(
+            receptors, Path(store.zw.store.root).parent / "export.tsv"
+        )
     ),
 }
 
@@ -2039,20 +2070,23 @@ def test_each_step_holds_no_more_than_its_ledger_planned(
     # interval between two charges of the operation's ledger traces more
     # than the ledger planned for it, and at the smallest budget that the
     # refusals name, the call holds within it and at least a part of it,
-    # beside 1 MiB: half for junction lengths; a third for the import, which
-    # counts three times its encoded contigs at its peak; a quarter for the
-    # export, whose read of the cells' IDs counts their one stored chunk of
-    # 100,000 rows at the bound of incompressible bytes; and a fifth for
-    # clonotypes, which reserve 1,000 bytes per cell for cells with more
-    # chains.
+    # beside 1 MiB: half for junction lengths, gene usage by sample and
+    # junction lengths of clonotypes by sample, traced at 0.64, 0.60 and 0.64
+    # of their budgets; 0.4 for gene usage of clonotypes, traced at 0.47; a
+    # third for the import, which counts three times its encoded contigs at
+    # its peak; a quarter for the export, whose read of the cells' IDs counts
+    # their one stored chunk of 100,000 rows at the bound of incompressible
+    # bytes; and a fifth for clonotypes, which reserve 1,000 bytes per cell
+    # for cells with more chains.
     store, contigs = _clonal_cells_store(tmp_path / "audited", 20_000)
     receptors = store.repertoire.import_receptors(
         contigs, cell_selection=every_cell(store)
     )
+    clonotype_ref = store.repertoire.clonotypes(receptors)
     run = _AUDITED_STEPS[step]
 
     def call(opened=store):
-        return run(opened, contigs, receptors)
+        return run(opened, contigs, receptors, clonotype_ref)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
@@ -2060,7 +2094,14 @@ def test_each_step_holds_no_more_than_its_ledger_planned(
         with hold_finished_reads(*ZARR_READS):
             _result, overruns = audited(call)
         assert overruns == []
-        at_most = {"import": 3.0, "export": 4.0, "spectratype": 2.0}.get(step, 5.0)
+        at_most = {
+            "import": 3.0,
+            "export": 4.0,
+            "spectratype": 2.0,
+            "gene usage by sample": 2.0,
+            "gene usage of clonotypes": 2.5,
+            "spectratype of clonotypes by sample": 2.0,
+        }.get(step, 5.0)
         if step != "import":
             check_budget(
                 store, call, at_most=at_most, allowance=1 << 20, max_refusals=100

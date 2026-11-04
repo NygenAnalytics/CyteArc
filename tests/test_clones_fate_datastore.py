@@ -27,6 +27,7 @@ from tests.clone_helpers import (
     benjamini_hochberg,
     coupling_reference,
     every_cell,
+    grouping_without_a_budget,
     ids_read_bytes,
     import_truth_clones,
     write_truth_store,
@@ -657,6 +658,8 @@ def test_coupling_refuses_a_budget_below_one_worker(copied, monkeypatch) -> None
     # A group of its own for each of the 32 cells with a clone, whose small
     # labels leave the coupling the largest step.
     own = _own_labels(store, TRUTH.clones >= 0)
+    # The grouping, which the test leaves without a budget, is checked first.
+    grouping_without_a_budget(monkeypatch)
     # 32 groups and 496 pairs: 250 bytes per pair, 40 per product of two
     # groups, 80 per count of a clone in a group and 12 per cell with a
     # clone; one worker's 4 bytes per cell, 8 per product and 32 per group;
@@ -691,6 +694,9 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
     store, clones = copied.store, copied.clones
     early, late = copied.early, copied.late
     n_early, n_late = int(EARLY.sum()), int(LATE.sum())
+    # The grouping of the late cells into fates, which the test leaves
+    # without a budget, is checked between the steps measured here.
+    grouping_without_a_budget(monkeypatch)
     # Checking that no cell is both early and late, before anything else:
     # 40 bytes per cell of the two selections, beside the clones read.
     checked = 40 * (n_early + n_late) + CODES_READ

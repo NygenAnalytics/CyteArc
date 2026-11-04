@@ -37,7 +37,12 @@ from ...metadata.rows import (
     row_read_bytes,
     text_read_bytes,
 )
-from ...metadata.selection import cell_selection_indices
+from ...metadata.selection import (
+    cell_selection_indices,
+    plan_cell_selection_read,
+    read_cell_selection,
+)
+from ...storage.selections import validate_cell_selection
 from ...repertoire.chains import (
     CHAIN_PAIRINGS,
     NO_RECEPTOR,
@@ -97,7 +102,6 @@ from ...utils.memory_budget import (
     python_text_bytes,
 )
 from .cell_barcodes import (
-    LOOKUP_BYTES_PER_CELL,
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
@@ -215,11 +219,12 @@ _CLONOTYPE_PARAMETERS = frozenset(
 # of two chains each, counting cells and clonotypes.
 _CHAIN_BYTES = 64
 _CHAIN_BYTES_PER_FIELD = 24
-# Each group's labels and name stay held beside its row of the groups' keys:
-# 304 bytes for a group of one key column and 587 for one of three, as traced
-# on 200,000 groups of labels of their own.
-_KEY_BYTES_PER_GROUP = 200
-_KEY_BYTES_PER_GROUP_COLUMN = 160
+# The table of the groups' labels holds each group's name and its label in
+# each key column, beside the groups' labels, which the grouping holds: 75,
+# 190 and 505 bytes at its peak for groups of one, three and thirteen key
+# columns, as traced on 20,000 and 200,000 groups.
+_KEY_BYTES_PER_GROUP = 100
+_KEY_BYTES_PER_GROUP_COLUMN = 40
 # Each row of the table, while it is built: its group, locus and values as
 # codes and as pointers to shared text, its count and fraction, and the
 # order of the rows, and 16 bytes for each column of the table; 114 to 130
@@ -326,10 +331,11 @@ def _encode_contigs(
     ``join``, which counts the contigs and barcodes of the files and those
     that match no selected cell. Each file is parsed in chunks of as many
     rows as half the ledger's room holds, from 1,000 to 50,000, so that the
-    encoded contigs keep the other half; each chunk's parse is charged beside
-    the contigs encoded so far before it is read, and after each chunk, the
-    peak that the encoded contigs reach while the import orders them, ranks
-    the chains and writes the artifact.
+    encoded contigs keep the other half; a chunk's parse is charged beside
+    the contigs encoded so far before the file is read and held until it is
+    read, since the reader keeps each chunk's text until it parses the next,
+    and after each chunk, the peak that the encoded contigs reach while the
+    import orders them, ranks the chains and writes the artifact.
 
     Raises:
         MemoryBudgetError: If a chunk's parse or the import's peak would pass
@@ -337,22 +343,24 @@ def _encode_contigs(
         ValueError: If a contig of a selected cell has no ID, or an ID repeats
             among the contigs of selected cells within one file.
     """
-    encoder = contig_encoder()
+    encoder = contig_encoder(ledger)
     for position, source in enumerate(sources):
         per_row = _PARSE_BYTES_PER_FIELD * source.n_columns
+        # The encoder holds the contigs encoded so far, which the room leaves
+        # out; a chunk takes half of what the room and they leave together.
         room = ledger.room
         fitting = (
             _MOST_PARSED_ROWS
             if room is None
-            else (room // 2 - _PARSE_FIXED_BYTES - encoder.nbytes) // per_row
+            else ((room - encoder.nbytes) // 2 - _PARSE_FIXED_BYTES) // per_row
         )
         chunk_rows = min(_MOST_PARSED_ROWS, max(_LEAST_PARSED_ROWS, fitting))
         chunks = _iter_source(source, chunk_rows)
+        # The reader keeps a chunk's text until it parses the next, so a
+        # chunk's parse stays charged until the file is read.
+        parsing = _PARSE_FIXED_BYTES + chunk_rows * per_row
+        ledger.hold(f"a chunk of {chunk_rows} contig rows as parsed", parsing)
         while True:
-            ledger.peak(
-                f"a chunk of {chunk_rows} contig rows as parsed",
-                _PARSE_FIXED_BYTES + chunk_rows * per_row + encoder.nbytes,
-            )
             parsed = next(chunks, None)
             if parsed is None:
                 break
@@ -362,12 +370,16 @@ def _encode_contigs(
             encoder.add(
                 chunk.loc[matched].drop(columns="cell_id"), rows[matched], position
             )
-            del chunk, parsed
+            del chunk, parsed, rows, matched
+            # Beside the contigs encoded, which the encoder holds; the parse is
+            # let go before the import's peak, so only what the copies of the
+            # contigs take beyond it counts beside what is held now.
             ledger.peak(
                 f"the {encoder.n_records} contigs of the selected cells at the "
                 "import's peak",
-                _PEAK_PER_ENCODED_BYTE * encoder.nbytes,
+                max(0, (_PEAK_PER_ENCODED_BYTE - 1) * encoder.nbytes - parsing),
             )
+        ledger.release(parsing)
     if encoder.missing_ids:
         raise ValueError(
             f"{encoder.missing_ids} contigs of the selected cells have no "
@@ -875,8 +887,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             barcode_pattern=barcode_pattern,
             format=format,
         )
-        cell_index = cell_selection_indices(self.zw, cell_selection)
-        n_cells = len(cell_index)
+        selection = plan_cell_selection_read(self.zw, cell_selection)
+        n_cells = selection.cells
         if not n_cells:
             raise ValueError("cell_selection selects no cell")
         arguments = ImmuneReceptorImportArguments(
@@ -944,9 +956,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         ledger.hold(
             "writing each cell's labels and counts", _receptor_write_bytes(n_cells)
         )
-        cell_bytes = ledger.held_bytes
-        ledger.hold(
-            "the join's lookup of the cells' IDs", LOOKUP_BYTES_PER_CELL * n_cells
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the selected cells' positions"
         )
         # Only the selected cells' IDs are read, a sample's in a merged store.
         cell_ids = read_text_rows(
@@ -955,12 +966,28 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             cell_index,
             item="the selected cells' IDs",
         )
-        # The join counts its lookup and the IDs as text itself, beside what
-        # the import holds for each cell.
-        join = CellBarcodeJoin(
-            cell_ids, memory_bytes=self.memoryBytes, held_bytes=cell_bytes
-        )
+        # The join charges its lookup of the IDs and the hashes of barcodes
+        # that match no cell as they grow.
+        join = CellBarcodeJoin(cell_ids, ledger=ledger)
         table = _encode_contigs(sources, join, ledger)
+        contigs = record_arrays(table, _CONTIGS)
+        # Ordering the contigs, ranking the chains and writing the artifact
+        # hold, beside the table that the ledger holds, the copies of the
+        # contigs that the import's peak counts, or what writing the contigs'
+        # arrays holds where that is more, as for a few contigs.
+        ledger.peak(
+            f"ordering and writing the {table.n_records} contigs",
+            max(
+                (_PEAK_PER_ENCODED_BYTE - 1) * table.nbytes,
+                cell_data_write_bytes(
+                    {
+                        name: (values.shape, values.dtype)
+                        for name, values in contigs.items()
+                    },
+                    chunk_lengths=record_chunk_lengths(contigs),
+                ),
+            ),
+        )
         # Files without a contig row give no locus field and no contig.
         locus = (
             table.text["locus"]
@@ -972,10 +999,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         quality = receptor_quality(index, locus)
         n_contigs = np.bincount(table.cells, minlength=n_cells).astype(np.int32)
-        contig_arrays = {
-            "contig_chain": index.eligible,
-            **record_arrays(table, _CONTIGS),
-        }
+        contig_arrays = {"contig_chain": index.eligible, **contigs}
         attributes = {
             "fields": list(table.fields),
             "n_file_contigs": join.n_rows,
@@ -1130,15 +1154,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         cell_selection: ArtifactRef,
         columns: tuple[str, ...],
         with_receptor: np.ndarray,
+        ledger: MemoryLedger,
     ) -> tuple[np.ndarray, list[dict[str, str]], str | None]:
-        """Group the cells with a receptor by their labels in the within columns."""
+        """Group the cells with a receptor by their labels in the within columns, charging ``ledger``."""
         return within_groups(
             self.zw,
             self.cells,
             cell_selection,
             columns,
             with_receptor,
-            memory_bytes=self.memoryBytes,
+            ledger=ledger,
             what="a receptor",
         )
 
@@ -1336,11 +1361,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         del receptor_type
         ledger.release(types_bytes)
         within_codes, within_labels, fingerprint = self._within_groups(
-            cell_selection, columns, with_receptor
+            cell_selection, columns, with_receptor, ledger
         )
-        # Each cell's within group, and its group among the receptor types and
-        # the within groups.
-        ledger.hold("each cell's group", 16 * n_cells)
+        # Each cell's group among the receptor types and the within groups,
+        # beside its within group, which the grouping holds.
+        ledger.hold("each cell's group", 8 * n_cells)
         groups = np.where(
             with_receptor, type_codes * max(1, len(within_labels)) + within_codes, -1
         )
@@ -1763,6 +1788,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         stored_slots = as_zarr_array(group["chain_slots"], name="chain_slots")
         n_cells = int(stored_slots.shape[0])
         kept = len(chosen) * stored_slots.dtype.itemsize
+        # The selections whose cells the grouping reads are checked once,
+        # outside the budget, before anything is charged.
+        receptor_cells = inspect_artifact(self.zw, receptors).input_ref(
+            "cell_selection"
+        )
+        validate_cell_selection(self.zw, receptor_cells)
+        if cell_selection is not None:
+            validate_cell_selection(self.zw, cell_selection)
         # Reading the slots and the codes of every contig is sized by every
         # cell and contig of the receptors; the chains and their counting by
         # the chains of the cells and slots counted.
@@ -1791,27 +1824,27 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             ledger.peak("each cell's clonotype as int64", 9 * n_cells)
             codes = stored_codes.astype(np.int64)
             rows &= codes >= 0
+            # The copy is held before the stored codes are let go.
+            ledger.hold("each cell's clonotype as int64", codes.nbytes)
             codes_bytes = stored_codes.nbytes
             del stored_codes
             ledger.release(codes_bytes)
-            ledger.hold("each cell's clonotype as int64", codes.nbytes)
         grouped = cell_groups(
             self.zw,
             self.cells,
-            inspect_artifact(self.zw, receptors).input_ref("cell_selection"),
+            receptor_cells,
             rows,
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
-            memory_bytes=self.memoryBytes,
-            held_bytes=ledger.held_bytes,
+            ledger=ledger,
         )
-        # Each cell's group, and each group's labels, name and row of the keys,
-        # beside the cells with a chain until they are let go.
+        # Each group's row of the keys, beside each cell's group and the
+        # groups' labels, which the grouping holds, and the cells with a
+        # chain until they are let go.
         ledger.hold(
-            "each cell's group and each group's labels and name",
-            int(grouped.codes.nbytes)
-            + len(grouped.keys)
+            "the table of the groups' labels",
+            len(grouped.keys)
             * (
                 _KEY_BYTES_PER_GROUP
                 + _KEY_BYTES_PER_GROUP_COLUMN * len(grouped.key_columns)
@@ -2386,23 +2419,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             The IDs, whose codes are unused, and the bytes of the longest.
         """
         selection = inspect_artifact(self.zw, receptors).input_ref("cell_selection")
-        # The selection's mask of the cell table is read a chunk at a time.
-        mask = as_zarr_array(
-            artifact_group(self.zw, selection)["values"], name="values"
+        # The receptors hold the selection's cells, so its identity check runs
+        # within the read that the ledger charges.
+        cell_index = read_cell_selection(
+            ledger,
+            self.zw,
+            plan_cell_selection_read(self.zw, selection, cells=n_cells),
+            item="the positions of the receptors' cells",
         )
-        geometry = array_geometry(mask)
-        chunk = 0 if geometry is None else geometry.storedChunkBytes()
-        ledger.peak(
-            "the positions of the receptors' cells",
-            _chunk_reads(ledger, chunk) + _SELECTION_BYTES_PER_CELL * n_cells,
-        )
-        cell_index = cell_selection_indices(self.zw, selection)
-        if geometry is not None:
-            n_chunks = -(-geometry.shape[0] // geometry.axisChunk(0))
-            ledger.leave(geometry.heldReadBytes(ledger.holding_threads(n_chunks)))
-        positions = ledger.hold(
-            "the positions of the receptors' cells", int(cell_index.nbytes)
-        )
+        positions = int(cell_index.nbytes)
         packed = _packed_text(
             ledger,
             self.cells._get_array("ids"),
@@ -2451,9 +2476,6 @@ _EXPORT_OBJECT_BYTES_PER_FIELD = 8 * 2**10
 # 270 KB as traced, and gzip's buffer of four of io's default buffers, 32 KiB
 # before Python 3.14 and 512 KiB since.
 _GZIP_BYTES = 352 * 2**10 + 4 * io.DEFAULT_BUFFER_SIZE
-# Reading a cell selection's positions holds 25 bytes per cell at its peak,
-# as traced on 200,000 cells, and keeps 8.
-_SELECTION_BYTES_PER_CELL = 32
 # Bytes per contig that measuring a span of contigs holds: a ragged field's
 # offsets, running ends and lengths, or a number field's values and flags.
 _MEASURE_BYTES_PER_ROW = 64

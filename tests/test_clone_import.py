@@ -614,16 +614,16 @@ def test_import_refuses_a_budget_too_small_and_writes_nothing(store, tmp_path) -
 def test_import_refuses_more_clone_labels_than_the_budget_holds(
     store, tmp_path, monkeypatch
 ) -> None:
-    import cytearc.datastore._operations.clones as clone_operations
+    import cytearc.clones.assignments as assignments
 
     # Each label is taken to hold a terabyte, so the first chunk's labels
     # outgrow the budget.
-    monkeypatch.setattr(clone_operations, "_BYTES_PER_LABEL", 2**40)
+    monkeypatch.setattr(assignments, "_LABEL_ENTRY_BYTES", 2**40)
     for path in (
         write_trex(TRUTH, tmp_path / "clones.txt"),
         write_larry(TRUTH, _folder(tmp_path, "larry")),
     ):
-        with pytest.raises(MemoryError, match="clone labels holds about"):
+        with pytest.raises(MemoryError, match=r"bytes for \d+ clone labels"):
             store.clones.import_clones(
                 path,
                 cell_selection=every_cell(store),
@@ -1134,7 +1134,9 @@ def test_a_table_whose_first_rows_are_long_needs_room_for_a_chunk(tmp_path) -> N
     first.write_text("\n".join([header, rows[-1], *rows[:-1]]) + "\n")
     long.store.memoryBytes = _BUDGET
 
-    with pytest.raises(MemoryError, match="leaves too little of the memory budget"):
+    with pytest.raises(
+        MemoryError, match="bytes for a chunk of 1000 rows of a clone file"
+    ):
         long.store.clones.import_clones(first, cell_selection=long.cells)
 
 

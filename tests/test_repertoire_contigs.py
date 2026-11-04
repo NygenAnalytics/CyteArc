@@ -7,6 +7,7 @@ import pytest
 from cytearc.metadata import records as records_module
 from cytearc.metadata.records import FLAG, INTEGER, NUMBER, RAGGED, TEXT
 from cytearc.repertoire.contigs import FIELDS, REQUIRED_FIELDS, contig_encoder
+from cytearc.utils.memory_budget import MemoryLedger
 from tests.perturbation_helpers import use_python_kernels
 
 
@@ -36,7 +37,7 @@ def test_encoder_orders_contigs_by_cell_source_and_row(
 ) -> None:
     if python_kernels:
         use_python_kernels(monkeypatch, records_module)
-    encoder = contig_encoder()
+    encoder = contig_encoder(MemoryLedger(None, "encoding"))
     encoder.add(
         _chunk(
             {
@@ -97,19 +98,19 @@ def test_encoder_orders_contigs_by_cell_source_and_row(
 
 
 def test_encoder_without_chunks_gives_an_empty_table() -> None:
-    table = contig_encoder().finish()
+    table = contig_encoder(MemoryLedger(None, "encoding")).finish()
     assert table.n_records == 0
     assert table.fields == ()
 
 
 def test_encoder_needs_one_cell_per_contig() -> None:
-    encoder = contig_encoder()
+    encoder = contig_encoder(MemoryLedger(None, "encoding"))
     with pytest.raises(ValueError, match="one cell per record"):
         encoder.add(_chunk({"sequence_id": ["a", "b"]}), np.asarray([0]), source=0)
 
 
 def test_encoder_reuses_codes_of_text_seen_in_earlier_chunks() -> None:
-    encoder = contig_encoder()
+    encoder = contig_encoder(MemoryLedger(None, "encoding"))
     for cells, values in (([0, 1], ["CAVF", "CASS"]), ([2, 3], ["CASS", "CAVF"])):
         encoder.add(
             _chunk({"junction_aa": values}),
@@ -122,7 +123,7 @@ def test_encoder_reuses_codes_of_text_seen_in_earlier_chunks() -> None:
 
 
 def test_repeated_and_missing_ids_are_found_within_each_source() -> None:
-    encoder = contig_encoder()
+    encoder = contig_encoder(MemoryLedger(None, "encoding"))
     assert encoder.repeated_ids() == []
     encoder.add(
         _chunk({"sequence_id": ["a", "b", None]}), np.asarray([0, 1, 2]), source=0
@@ -131,7 +132,7 @@ def test_repeated_and_missing_ids_are_found_within_each_source() -> None:
     encoder.add(_chunk({"sequence_id": ["a", "d"]}), np.asarray([0, 1]), source=1)
     assert encoder.missing_ids == 1
     assert encoder.repeated_ids() == [(0, "a")]
-    clean = contig_encoder()
+    clean = contig_encoder(MemoryLedger(None, "encoding"))
     clean.add(_chunk({"sequence_id": ["a", "b"]}), np.asarray([0, 1]), source=0)
     clean.add(_chunk({"sequence_id": ["a"]}), np.asarray([2]), source=1)
     assert clean.repeated_ids() == []
@@ -144,16 +145,16 @@ def test_hash_collisions_are_not_reported_as_repeats(monkeypatch) -> None:
         "hash_array",
         lambda values, **options: np.zeros(len(values), dtype=np.uint64),
     )
-    encoder = contig_encoder()
+    encoder = contig_encoder(MemoryLedger(None, "encoding"))
     encoder.add(_chunk({"sequence_id": ["a", "b", "c", "b"]}), np.arange(4), source=0)
     assert encoder.repeated_ids() == [(0, "b")]
-    other = contig_encoder()
+    other = contig_encoder(MemoryLedger(None, "encoding"))
     other.add(_chunk({"sequence_id": ["a", "b"]}), np.arange(2), source=0)
     assert other.repeated_ids() == []
 
 
 def test_text_of_every_missing_value_merges_to_no_categories() -> None:
-    encoder = contig_encoder()
+    encoder = contig_encoder(MemoryLedger(None, "encoding"))
     encoder.add(_chunk({"c_call": [None, None]}), np.asarray([0, 1]), source=0)
     encoder.add(_chunk({"c_call": ["IGHM"]}), np.asarray([2]), source=0)
     table = encoder.finish()
@@ -162,7 +163,7 @@ def test_text_of_every_missing_value_merges_to_no_categories() -> None:
 
 
 def test_a_text_field_missing_everywhere_has_no_categories() -> None:
-    encoder = contig_encoder()
+    encoder = contig_encoder(MemoryLedger(None, "encoding"))
     encoder.add(_chunk({"d_call": [None, None]}), np.asarray([0, 1]), source=0)
     table = encoder.finish()
     assert table.fields == ("d_call",)
@@ -171,7 +172,7 @@ def test_a_text_field_missing_everywhere_has_no_categories() -> None:
 
 
 def test_an_encoder_finishes_once() -> None:
-    encoder = contig_encoder()
+    encoder = contig_encoder(MemoryLedger(None, "encoding"))
     encoder.add(_chunk({"junction_aa": ["CASS"]}), np.asarray([0]), source=0)
     encoder.finish()
     with pytest.raises(RuntimeError, match="has finished"):
@@ -181,7 +182,7 @@ def test_an_encoder_finishes_once() -> None:
 
 
 def test_fields_of_some_sources_are_missing_for_the_others() -> None:
-    encoder = contig_encoder()
+    encoder = contig_encoder(MemoryLedger(None, "encoding"))
     encoder.add(
         _chunk(
             {

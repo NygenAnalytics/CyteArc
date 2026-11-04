@@ -148,7 +148,7 @@ def read_array_rows_chunkwise(array: Any, rows: np.ndarray) -> np.ndarray:
     return output
 
 
-def _operation_concurrency() -> int:
+def operation_concurrency() -> int:
     """The chunks that Zarr decodes at once for the operation under way."""
     return max(1, int(zarr.config.get("async.concurrency")))
 
@@ -213,7 +213,7 @@ def read_whole(
 
 def _fitting_concurrency(ledger: MemoryLedger, cost: Any) -> int:
     """The highest concurrency, up to the operation's, whose read ``cost(c)`` fits the room; 1 when none does."""
-    limit = _operation_concurrency()
+    limit = operation_concurrency()
     room = ledger.room
     if room is None:
         return limit
@@ -249,7 +249,7 @@ def _band_rows_read_bytes(geometry: ArrayGeometry, n_rows: int, bands: int) -> i
     reading = n_rows * (
         geometry.rowBytes() + ROW_KEPT_INDEX_BYTES
     ) + geometry.bandReadBytes(
-        min(n_rows, geometry.axisChunk(0)), _operation_concurrency(), bands=bands
+        min(n_rows, geometry.axisChunk(0)), operation_concurrency(), bands=bands
     )
     return max(ordering, reading)
 

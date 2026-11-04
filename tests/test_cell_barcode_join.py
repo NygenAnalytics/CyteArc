@@ -26,9 +26,15 @@ from cytearc.datastore._operations.cell_barcodes import (
     barcode_pattern,
     derived_id_bytes,
     join_bytes,
+    lookup_bytes,
     unmatched_barcodes_warning,
 )
 from cytearc.utils.logging import collect_warnings, logger
+from cytearc.utils.memory_budget import (
+    MemoryLedger,
+    object_array_bytes,
+    python_text_bytes,
+)
 from tests.barcode_join_helpers import (
     CASES,
     build_guide_store,
@@ -44,7 +50,7 @@ from tests.barcode_join_helpers import (
     write_tree_file,
     write_variant_file,
 )
-from tests.memory_helpers import traced_peak
+from tests.memory_helpers import charges, traced_peak
 
 _REFERENCE = Path(__file__).parent / "guide_calls_import_reference.json"
 # Attributes that differ between two writes of one artifact.
@@ -751,6 +757,55 @@ def test_guide_calls_with_every_option_run_within_the_budget_that_their_refusal_
     assert int((reference.cells["n_guides"] > 0).sum()) == 2_400
 
 
+# The importers that charge every step to one ledger. The guide calls'
+# import charges its join to a ledger beside the estimate that it checks once,
+# so its other steps hold what no ledger plans; the variant import reads a GoT
+# table whole before its ledger exists, so its audit reads mgatk files, in
+# tests/test_variant_import.py.
+LEDGER_IMPORTERS = sorted(
+    name for name in IMPORTERS if name not in ("import_guide_calls", "import_counts")
+)
+
+
+def _unmatched_file(importer: Importer, folder: Path, n_unmatched: int) -> Path:
+    """A file whose rows name two cells of the join store and barcodes of no cell."""
+    outside = [f"x{index:07d}" for index in range(n_unmatched)]
+    return importer.write(folder / "file.txt", ["s2__GGGT-1", "s1__AAAC-1", *outside])
+
+
+@pytest.mark.parametrize("name", LEDGER_IMPORTERS)
+def test_every_import_holds_no_more_than_its_ledger_plans(
+    joined, tmp_path, name
+) -> None:
+    from cytearc.storage.validation_scope import validation_scope
+    from tests.memory_helpers import ZARR_READS, audited, hold_finished_reads
+
+    store, selection = joined
+    importer = IMPORTERS[name]
+    path = _unmatched_file(importer, tmp_path, 20_000)
+
+    def run() -> object:
+        with collect_warnings():
+            return importer.run(
+                store, [path], cell_selection=selection, invalidate_cache=True
+            )
+
+    # From each charge of the import's ledger to the next, what is traced
+    # stays within what the ledger planned, with every read's work held until
+    # the next read ends, as a busy machine can, and without. The selection's
+    # identity check, outside the budget, runs once in the operation's scope
+    # before the import.
+    for held in (False, True):
+        with validation_scope():
+            run()
+            if held:
+                with hold_finished_reads(*ZARR_READS):
+                    _ref, overruns = audited(run)
+            else:
+                _ref, overruns = audited(run)
+        assert overruns == [], (held, overruns)
+
+
 def _file(tmp_path: Path, name: str, text: str) -> Path:
     path = tmp_path / name
     path.write_text(text)
@@ -879,7 +934,7 @@ def test_the_join_holds_no_more_than_its_estimate(name, matched) -> None:
         dtype=object,
     )
     file = _plain(**options)
-    join = CellBarcodeJoin(cell_ids, memory_bytes=10**12)
+    join = CellBarcodeJoin(cell_ids, ledger=MemoryLedger(None, "Joining"))
     # The lookup's table, which held_bytes counts, is built on the first use.
     join.cells(file, barcodes[:1])
     n_chars = sum(map(len, barcodes))
@@ -895,7 +950,9 @@ def test_the_join_holds_no_more_than_its_estimate(name, matched) -> None:
 
 
 def test_the_join_counts_distinct_barcodes_and_rows() -> None:
-    join = CellBarcodeJoin(np.asarray(["a-1", "b-1", "c-1"]), memory_bytes=10**6)
+    join = CellBarcodeJoin(
+        np.asarray(["a-1", "b-1", "c-1"]), ledger=MemoryLedger(None, "Joining")
+    )
 
     first = join.cells(
         _plain(suffix="-1"), np.asarray(["a", "b", "z", "z", "a"], dtype=object)
@@ -918,7 +975,7 @@ def test_the_join_counts_distinct_barcodes_and_rows() -> None:
 
 
 def test_one_barcode_under_two_prefixes_counts_as_two() -> None:
-    join = CellBarcodeJoin(np.asarray(["s1__a"]), memory_bytes=10**6)
+    join = CellBarcodeJoin(np.asarray(["s1__a"]), ledger=MemoryLedger(None, "Joining"))
     join.cells(_plain(prefix="s1__"), np.asarray(["a", "b"], dtype=object))
     join.cells(_plain(prefix="s2__"), np.asarray(["a", "b"], dtype=object))
     assert (join.n_file_barcodes, join.n_unmatched_barcodes) == (4, 3)
@@ -927,7 +984,7 @@ def test_one_barcode_under_two_prefixes_counts_as_two() -> None:
 
 
 def test_no_barcode_gives_no_count() -> None:
-    join = CellBarcodeJoin(np.asarray(["a"]), memory_bytes=10**6)
+    join = CellBarcodeJoin(np.asarray(["a"]), ledger=MemoryLedger(None, "Joining"))
     assert (
         join.cells(
             _plain(pattern="(?P<barcode>.)"), np.asarray([], dtype=object)
@@ -938,17 +995,44 @@ def test_no_barcode_gives_no_count() -> None:
     assert unmatched_barcodes_warning(join.attributes(), "the file") is None
 
 
+def _join_ledger(budget: int | None, held: int = 0) -> MemoryLedger:
+    """A ledger of ``budget`` bytes that holds ``held`` of them for the caller."""
+    ledger = MemoryLedger(budget, "Joining file barcodes")
+    ledger.hold("what the caller holds", held)
+    return ledger
+
+
 def test_the_join_refuses_repeated_cell_ids_and_budgets_too_small() -> None:
     with pytest.raises(ValueError, match="cells' IDs repeat"):
-        CellBarcodeJoin(np.asarray(["a", "a"]), memory_bytes=10**6)
-    with pytest.raises(MemoryError, match="memory budget of 500 bytes"):
-        CellBarcodeJoin(
-            np.asarray(["a"] * 0 + ["a", "b", "c"]), memory_bytes=500, held_bytes=300
-        )
-    join = CellBarcodeJoin(np.asarray(["a"]), memory_bytes=200)
+        CellBarcodeJoin(np.asarray(["a", "a"]), ledger=_join_ledger(None))
+    # Three IDs of one character as fixed-width text become Python strings
+    # beside the lookup, by hand: 8 bytes for each reference and 41 and one
+    # byte for each ASCII string, then pandas' table of four buckets of 16
+    # bytes, the index's references where pandas copies them, and a flag
+    # for each cell.
+    from tests.memory_helpers import index_copies_references
+
+    ids = np.asarray(["a", "b", "c"])
+    text = 3 * 8 + 3 * (41 + 1)
+    assert text == object_array_bytes(3) + python_text_bytes(3, 3)
+    lookup = 4 * 16 + 3 * 8 * index_copies_references() + 3
+    assert lookup == lookup_bytes(3)
+    needed = 300 + text + lookup
+    with pytest.raises(MemoryError, match=f"holds about {needed} bytes for the join"):
+        CellBarcodeJoin(ids, ledger=_join_ledger(needed - 1, 300))
+    ledger = _join_ledger(needed, 300)
+    CellBarcodeJoin(ids, ledger=ledger)
+    assert ledger.held_bytes == needed
+    # As an object array, the IDs' strings are the caller's.
+    held = _join_ledger(None)
+    CellBarcodeJoin(ids.astype(object), ledger=held)
+    assert held.held_bytes == lookup
+    with pytest.raises(TypeError, match="IDs must be text"):
+        CellBarcodeJoin(np.arange(3), ledger=_join_ledger(None))
+    join = CellBarcodeJoin(np.asarray(["a"]), ledger=_join_ledger(200))
     with pytest.raises(
         MemoryError,
-        match="Check barcode_prefix, barcode_suffix, barcode_pattern and cell_selection",
+        match="check barcode_prefix, barcode_suffix, barcode_pattern and cell_selection",
     ):
         join.cells(
             _plain(), np.asarray([f"x{index}" for index in range(20)], dtype=object)
@@ -962,56 +1046,104 @@ def test_the_join_counts_each_chunks_new_hashes_beside_those_it_holds() -> None:
     # 24 bytes while it is merged.
     first = np.asarray([f"x{k}" for k in range(5)], dtype=object)
     second = np.asarray([f"y{k}" for k in range(6)] + ["x0"], dtype=object)
-    held = CellBarcodeJoin(np.asarray(["a"]), memory_bytes=10**6).held_bytes
+    base = _join_ledger(None)
+    CellBarcodeJoin(np.asarray(["a"]), ledger=base)
+    held = base.held_bytes
     needed = held + 16 * 5 + 24 * 7
-    short = CellBarcodeJoin(np.asarray(["a"]), memory_bytes=needed - 1)
+    short = CellBarcodeJoin(np.asarray(["a"]), ledger=_join_ledger(needed - 1))
     short.cells(_plain(), first)
     with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
         short.cells(_plain(), second)
-    join = CellBarcodeJoin(np.asarray(["a"]), memory_bytes=needed)
+    ledger = _join_ledger(needed)
+    join = CellBarcodeJoin(np.asarray(["a"]), ledger=ledger)
     join.cells(_plain(), first)
     join.cells(_plain(), second)
     assert join.n_unmatched_barcodes == 11
-    assert join.unmatched_bytes == 16 * 11
+    # The hashes stay charged once merged.
+    assert ledger.held_bytes == held + 16 * 11
 
 
-@pytest.mark.slow
-def test_the_hashes_of_barcodes_that_match_no_cell_fit_the_smallest_budget() -> None:
+@pytest.mark.parametrize(
+    ("n_barcodes", "chunk_rows"),
+    [
+        (100_000, 5_000),
+        pytest.param(1_000_000, 50_000, marks=pytest.mark.slow),
+    ],
+)
+def test_the_hashes_of_barcodes_that_match_no_cell_fit_the_smallest_budget(
+    n_barcodes, chunk_rows
+) -> None:
     from tests.memory_helpers import smallest_budget
 
-    # 50,000 barcodes outside the selection, in 100 chunks, set the budget:
-    # the join holds their hashes and merges each chunk's into them. Each
-    # chunk's rows take about 300 bytes each while they are joined, which the
-    # importer counts with its chunk.
-    cell_ids = np.asarray([f"c{index}" for index in range(10)])
+    # Barcodes outside the selection, in chunks, set the budget: the join
+    # charges its lookup and the hashes it holds, and merges each chunk's into
+    # them. What matching a chunk's rows holds, as join_bytes states it, is
+    # the importer's chunk to charge.
+    cell_ids = np.asarray([f"c{index}" for index in range(10)], dtype=object)
     chunks = [
-        np.asarray([f"out{chunk}_{row}" for row in range(500)], dtype=object)
-        for chunk in range(100)
+        np.asarray(
+            [f"out{index:08d}" for index in range(start, start + chunk_rows)],
+            dtype=object,
+        )
+        for start in range(0, n_barcodes, chunk_rows)
     ]
 
-    def run(budget: int) -> None:
-        join = CellBarcodeJoin(cell_ids, memory_bytes=budget)
+    def run(budget: int) -> CellBarcodeJoin:
+        join = CellBarcodeJoin(cell_ids, ledger=_join_ledger(budget))
         for chunk in chunks:
             join.cells(_plain(), chunk)
+        return join
 
-    budget = smallest_budget(run, 1 << 22)
-    # Merging by sorting every hash with each chunk's held 1.9 times as much.
-    allowed = budget + 300 * 500
-    _, peak = traced_peak(lambda: run(budget), allowed)
-    assert peak <= allowed, (peak, budget)
+    budget = smallest_budget(run, 64 * n_barcodes)
+    # The hashes, 16 bytes each with their copy in the next merge, set it.
+    assert 16 * n_barcodes <= budget <= 16 * n_barcodes + 24 * chunk_rows + 2**16
+    matching = join_bytes(_plain(), chunk_rows, 11 * chunk_rows)
+    join, peak = traced_peak(lambda: run(budget), budget + matching)
+    assert peak <= budget + matching, (peak, budget, matching)
+    assert join.n_unmatched_barcodes == n_barcodes
 
 
 def test_the_join_counts_the_text_of_long_cell_ids() -> None:
     # One ID of 10,000 characters holds more than the budget by itself.
     with pytest.raises(MemoryError, match="memory budget of 5000 bytes"):
-        CellBarcodeJoin(np.asarray(["x" * 10_000]), memory_bytes=5_000)
-    join = CellBarcodeJoin(np.asarray(["x" * 10_000]), memory_bytes=20_000)
-    assert join.held_bytes >= 10_000
+        CellBarcodeJoin(np.asarray(["x" * 10_000]), ledger=_join_ledger(5_000))
+    ledger = _join_ledger(20_000)
+    CellBarcodeJoin(np.asarray(["x" * 10_000]), ledger=ledger)
+    assert ledger.held_bytes >= 10_000
+
+
+@pytest.mark.parametrize(
+    ("ids", "widest"),
+    [
+        (["café-1", "ab-2"], 0xE9),
+        (["κύτταρο-1", "x-2"], 0x3CD),
+        (["\U0001f600-1", "y-2"], 0x1F600),
+    ],
+    ids=["Latin-1", "two-byte", "four-byte"],
+)
+def test_the_join_charges_fixed_width_ids_as_strings_of_their_widest_character(
+    ids, widest
+) -> None:
+    # Fixed-width IDs become Python strings at the kind of their widest
+    # character: 57, 58 or 60 bytes and one, two or four a character, by hand.
+    header, width = {0xE9: (57, 1), 0x3CD: (58, 2), 0x1F600: (60, 4)}[widest]
+    characters = sum(map(len, ids))
+    _join, taken = charges(
+        lambda: CellBarcodeJoin(np.asarray(ids), ledger=MemoryLedger(None, "Joining"))
+    )
+    texts = [
+        nbytes
+        for item, nbytes, _planned in taken
+        if item == "the selected cells' IDs as text"
+    ]
+    assert texts[-1] == 2 * 8 + 2 * header + width * characters
 
 
 def test_very_long_and_unicode_cell_ids_join_exactly() -> None:
     long_id = "s1__" + "ACGT" * 2500 + "-1"
-    join = CellBarcodeJoin(np.asarray([long_id, "s1__κύτταρο-1"]), memory_bytes=10**6)
+    join = CellBarcodeJoin(
+        np.asarray([long_id, "s1__κύτταρο-1"]), ledger=MemoryLedger(None, "Joining")
+    )
     positions = join.cells(
         _plain(prefix="s1__", suffix="-1"),
         np.asarray(["ACGT" * 2500, "κύτταρο", "ACGT" * 2499], dtype=object),

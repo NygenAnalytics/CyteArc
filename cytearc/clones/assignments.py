@@ -7,7 +7,8 @@ one clone or none. ``CloneAssigner`` gathers those labels chunk by chunk,
 refuses or drops a cell given two clones, and ranks the clones by size, so
 every source saves clones alike: a ``clones`` artifact whose canonical
 ``values`` hold each cell's clone label and whose ``codes`` number the clones
-by rank. These functions never touch storage.
+by rank. The assigner charges what it holds to the caller's memory ledger.
+These functions never touch storage.
 """
 
 import sys
@@ -18,8 +19,9 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from ..utils.arrays import sort_categories
+from ..utils.arrays import sort_categories, sort_categories_bytes
 from ..utils.arguments import quoted_value
+from ..utils.memory_budget import MemoryLedger
 
 __all__ = [
     "MULTIPLE_POLICIES",
@@ -41,6 +43,32 @@ _CONFLICT_EXAMPLES = 5
 # Labels of at most this many ASCII digits sort as integers at once; floats
 # hold them exactly, so ``sort_categories`` orders them alike.
 _INTEGER_DIGITS = 15
+# Bytes that the assigner holds for each cell: its clone's code and whether
+# it was given several clones; and, once a source gives probabilities, its
+# probability of its clone.
+_CELL_BYTES = 9
+_PROBABILITY_BYTES = 8
+# Bytes of each distinct clone label beside its text: its entry in the table
+# that finds its code, its code and its slots in the lists of labels and of
+# their sources. Traced at 90 bytes, and 111 while the table grows, on up to
+# 400,000 labels.
+_LABEL_ENTRY_BYTES = 120
+# Ranking the clones holds, while it orders their labels, each label's cells,
+# its place among the labels held and its slot in their list; then, for each
+# label, its rank by label and by size, the order of both and its slot in the
+# list and the array of the labels ranked, and for each cell its code by
+# rank, whether it has a clone and the codes gathered to rank them, beside
+# 32 KiB of NumPy's objects, which a few clones of many cells trace at up to
+# 19 KB. Traced within 23% above on 5,000 to 100,000 labels of one to 20
+# cells, and within 1% below on 10 and 100 labels of 200,000 to 1,000,000.
+_ORDER_BYTES_PER_LABEL = 48
+_RANK_BYTES_PER_LABEL = 104
+_RANK_BYTES_PER_CELL = 25
+_RANK_FIXED_BYTES = 32 * 1024
+# Ordering labels of digits as integers holds each label's value, its order
+# and the values in order, and, when two labels are the same number, the
+# labels' order as text: traced at 32 bytes, and 56 with equal numbers.
+_INTEGER_ORDER_BYTES = 56
 
 
 def clone_label_texts(values: Any, missing: Any | None = None) -> np.ndarray:
@@ -116,6 +144,21 @@ def _label_text(value: Any) -> str | None:
     raise TypeError(f"clone labels must be text or numbers, not {type(value).__name__}")
 
 
+def _digit_labels(labels: list[str]) -> bool:
+    """Whether every label is at most 15 ASCII digits, which sort as integers."""
+    return all(
+        len(label) <= _INTEGER_DIGITS and label.isascii() and label.isdigit()
+        for label in labels
+    )
+
+
+def _label_order_bytes(labels: list[str]) -> int:
+    """Return the bytes that :func:`_label_order` holds to rank ``labels``."""
+    if _digit_labels(labels):
+        return _INTEGER_ORDER_BYTES * len(labels)
+    return sort_categories_bytes(labels)
+
+
 def _label_order(labels: list[str]) -> np.ndarray:
     """Rank labels in natural order: integers by value, then other text.
 
@@ -126,10 +169,7 @@ def _label_order(labels: list[str]) -> np.ndarray:
     """
     if not labels:
         return np.empty(0, dtype=np.int64)
-    if all(
-        len(label) <= _INTEGER_DIGITS and label.isascii() and label.isdigit()
-        for label in labels
-    ):
+    if _digit_labels(labels):
         values = np.fromiter(map(int, labels), dtype=np.int64, count=len(labels))
         order = np.argsort(values, kind="stable")
         ordered = values[order]
@@ -229,12 +269,25 @@ class CloneAssigner:
     such as one file, so equal labels of two sources raise ``ValueError``
     rather than merge two clones.
 
+    The assigner charges to ``ledger`` what it keeps as it grows: each cell's
+    clone when it starts, each cell's probability once a source gives one,
+    and each new label, its text and its entries, before it is kept; and
+    what ranking the clones holds before :meth:`finish` ranks them. What
+    each chunk of rows holds is the caller's to charge.
+
     Args:
         cell_ids: The IDs of the cells, which errors name.
         multiple: ``"error"`` or ``"drop"``.
+        ledger: The memory ledger of the caller.
+
+    Raises:
+        MemoryBudgetError: If what the assigner keeps would pass the ledger's
+            budget.
     """
 
-    def __init__(self, cell_ids: np.ndarray, *, multiple: MultiplePolicy) -> None:
+    def __init__(
+        self, cell_ids: np.ndarray, *, multiple: MultiplePolicy, ledger: MemoryLedger
+    ) -> None:
         if multiple not in MULTIPLE_POLICIES:
             raise ValueError(
                 f"multiple must be one of {', '.join(MULTIPLE_POLICIES)}, not "
@@ -242,7 +295,9 @@ class CloneAssigner:
             )
         self._cell_ids = np.asarray(cell_ids)
         self._multiple = multiple
+        self._ledger = ledger
         n_cells = len(self._cell_ids)
+        ledger.hold("each cell's clone", _CELL_BYTES * n_cells)
         self._codes = np.full(n_cells, -1, dtype=np.int64)
         self._several = np.zeros(n_cells, dtype=bool)
         self._probabilities: np.ndarray | None = None
@@ -262,17 +317,29 @@ class CloneAssigner:
         return self._label_bytes
 
     def _label_codes(self, labels: np.ndarray, source: int) -> np.ndarray:
-        """Return each label's code, numbering labels not seen before."""
+        """Return each label's code, numbering labels not seen before.
+
+        The labels not seen before are charged, each as its string and its
+        entries, before any is kept.
+        """
         positions, distinct = pd.factorize(labels)
-        mapped = np.empty(len(distinct), dtype=np.int64)
-        for index, label in enumerate(distinct.tolist()):
+        listed = distinct.tolist()
+        new = [label for label in listed if label not in self._labels]
+        if new:
+            text = sum(map(sys.getsizeof, new))
+            self._ledger.hold(
+                f"{len(self._label_list) + len(new)} clone labels",
+                text + _LABEL_ENTRY_BYTES * len(new),
+            )
+            self._label_bytes += text
+        mapped = np.empty(len(listed), dtype=np.int64)
+        for index, label in enumerate(listed):
             code = self._labels.get(label)
             if code is None:
                 code = len(self._label_list)
                 self._labels[label] = code
                 self._label_list.append(label)
                 self._label_sources.append(source)
-                self._label_bytes += sys.getsizeof(label)
             elif self._label_sources[code] != source:
                 raise ValueError(
                     f"The clone label {quoted_value(label)} comes from two sources, so two "
@@ -378,6 +445,10 @@ class CloneAssigner:
         only two different numbers for one cell conflict.
         """
         if self._probabilities is None:
+            self._ledger.hold(
+                "each cell's probability of its clone",
+                _PROBABILITY_BYTES * len(self._codes),
+            )
             self._probabilities = np.full(len(self._codes), np.nan)
         low = np.fmin.reduceat(values, starts)
         high = np.fmax.reduceat(values, starts)
@@ -401,7 +472,25 @@ class CloneAssigner:
         self._probabilities[cells[fill]] = new[fill]
 
     def finish(self) -> CloneAssignment:
-        """Rank the clones and return each cell's clone."""
+        """Rank the clones and return each cell's clone.
+
+        Ranking is charged before it runs, at the larger of what ordering
+        the labels holds, as
+        :func:`~cytearc.utils.arrays.sort_categories_bytes` counts it for
+        labels other than numbers, and what numbering the clones by rank
+        holds.
+        """
+        n_labels, n_cells = len(self._label_list), len(self._codes)
+        self._ledger.peak(
+            f"ranking {n_labels} clones",
+            max(
+                _label_order_bytes(self._label_list)
+                + _ORDER_BYTES_PER_LABEL * n_labels,
+                _RANK_BYTES_PER_LABEL * n_labels
+                + _RANK_BYTES_PER_CELL * n_cells
+                + _RANK_FIXED_BYTES,
+            ),
+        )
         ranked, clone_ids, clone_sizes = ranked_clones(self._codes, self._label_list)
         probabilities = None
         if self._probabilities is not None:

@@ -21,6 +21,7 @@ from cytearc.storage.geometry import READ_OBJECT_BYTES
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
     every_cell,
+    grouping_without_a_budget,
     ids_read_bytes,
     import_truth_clones,
     write_truth_store,
@@ -546,7 +547,8 @@ def test_expansion_refuses_more_cells_than_the_memory_budget(
     assert artifact_group(store.zw, clones)["clone_ids"].dtype == np.dtype("<U1")
     saved = store.clones.expansion(clones)
     # Measuring 48 cells in one group takes 48 * 300 bytes and 2,000 for the
-    # group.
+    # group, beside a grouping that the test leaves without a budget.
+    grouping_without_a_budget(monkeypatch)
     monkeypatch.setattr(store, "memoryBytes", 16_399)
     with pytest.raises(MemoryError, match="of 48 cells holds about 16400 bytes"):
         store.clones.expansion(clones, breakpoints=(1,))

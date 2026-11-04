@@ -6,12 +6,13 @@ is the file's prefix, then the barcode, then the file's suffix; a pattern can
 first keep the part of the barcode that its ``barcode`` group matches. Every
 importer joins its files through ``CellBarcodeJoin`` and orders and identifies
 them through ``barcode_files``, so they share the rules, the counts of
-barcodes that match no selected cell, and the warning about them.
+barcodes that match no selected cell, and the warning about them. The join
+charges what it holds to the importer's memory ledger.
 """
 
+import functools
 import os
 import re
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +22,12 @@ import pandas as pd
 
 from ...utils.arrays import union_sorted
 from ...utils.digest import file_sha256
+from ...utils.memory_budget import (
+    MemoryLedger,
+    hash_table_bytes,
+    object_array_bytes,
+    python_text_bytes,
+)
 from ...utils.warnings import warn
 from ...utils.arguments import quoted_value
 
@@ -33,6 +40,7 @@ __all__ = [
     "barcode_pattern",
     "derived_id_bytes",
     "join_bytes",
+    "lookup_bytes",
     "texts_per_file",
     "unmatched_barcodes_warning",
     "warn_unmatched_barcodes",
@@ -41,8 +49,9 @@ __all__ = [
 #: The barcodes that match no selected cell named in an artifact's attributes
 #: and in the warning.
 UNMATCHED_EXAMPLES = 5
-#: Bytes that the join holds for each selected cell beside the text of its ID:
-#: the ID's slot and hash in the lookup, and whether a file named it.
+#: Bytes of each ID of a pandas index of text IDs that finds some of them:
+#: the ID's slot and hash in the index. Clone figures and loaded variant
+#: counts count their lookups so; the join counts its own by ``lookup_bytes``.
 LOOKUP_BYTES_PER_CELL = 100
 # Bytes held for each distinct barcode that matches no selected cell: its
 # 64-bit hash and its copy in the hashes that a merge of new ones makes.
@@ -66,6 +75,10 @@ _MATCH_BYTES_PER_BARCODE = 128
 # Bytes of each new hash of a chunk while it is merged: the hash, its sorted
 # copy and its place in the merged hashes.
 _NEW_HASH_BYTES = 24
+# What a refusal of the hashes of barcodes that match no cell suggests.
+_UNMATCHED_REMEDY = (
+    "check barcode_prefix, barcode_suffix, barcode_pattern and cell_selection"
+)
 # The named group of a barcode pattern that holds the barcode.
 _BARCODE_GROUP = "barcode"
 # What the options of an import may be, for their errors.
@@ -194,10 +207,10 @@ def derived_id_bytes(file: BarcodeFile, n_rows: int, n_chars: int) -> int:
 def join_bytes(file: BarcodeFile, n_rows: int, n_chars: int) -> int:
     """Return the most bytes that :meth:`CellBarcodeJoin.cells` holds for a file's barcodes.
 
-    These are the bytes beside the barcodes themselves and the join's
-    lookup, which :attr:`CellBarcodeJoin.held_bytes` counts: the IDs that
-    the file's options derive, as :func:`derived_id_bytes` counts them, and
-    what matching each barcode holds, its encoded text included.
+    These are the bytes beside the barcodes themselves and what the join
+    charges to its ledger: the IDs that the file's options derive, as
+    :func:`derived_id_bytes` counts them, and what matching each barcode
+    holds, its encoded text included.
 
     Args:
         file: The file, whose options derive the IDs.
@@ -209,6 +222,29 @@ def join_bytes(file: BarcodeFile, n_rows: int, n_chars: int) -> int:
         + _MATCH_BYTES_PER_BARCODE * int(n_rows)
         + int(n_chars)
     )
+
+
+@functools.cache
+def _index_copies_references() -> bool:
+    """Whether pandas copies an object array's references into an index built on it.
+
+    pandas 3 copies them; pandas 2 keeps the array that it is given.
+    """
+    values = np.asarray(["a"], dtype=object)
+    return not np.shares_memory(pd.Index(values, dtype=object).to_numpy(), values)
+
+
+def lookup_bytes(n_cells: int) -> int:
+    """Return the bytes of the join's lookup of ``n_cells`` cell IDs, beside the IDs' text.
+
+    The lookup is a pandas index of the IDs, which hashes every ID into a
+    table on its first use, as
+    :func:`~cytearc.utils.memory_budget.hash_table_bytes` counts, and copies
+    their references where pandas copies an array into an index, and a flag
+    for each cell, whether a file named it.
+    """
+    copied = object_array_bytes(n_cells) if _index_copies_references() else 0
+    return hash_table_bytes(n_cells) + copied + int(n_cells)
 
 
 def _listed(value: Any, n_files: int, name: str, what: str, expected: str) -> list[Any]:
@@ -351,41 +387,51 @@ class CellBarcodeJoin:
 
     The join holds a lookup of the selected cells' IDs, whether each cell was
     named, and the 64-bit hashes of the distinct barcodes that matched no
-    cell, which it checks against the memory budget as they grow. The IDs
-    count as the Python strings that the lookup holds, so long IDs cost more.
-    Barcodes are counted by the cell ID they name, so a barcode that two
-    files name with different prefixes counts twice. A barcode that a file's
-    pattern does not match names no cell.
+    cell, and charges them to the caller's ledger as they grow: the lookup,
+    as :func:`lookup_bytes` counts it, when the join starts, and each chunk's
+    new hashes before they merge into those held. IDs given as an object
+    array of text are the caller's to charge; IDs given as fixed-width text
+    become the Python strings that the lookup keeps, which the join charges.
+    What matching a chunk's barcodes holds for a moment, as
+    :func:`join_bytes` states it, is the caller's chunk to charge. Barcodes
+    are counted by the cell ID they name, so a barcode that two files name
+    with different prefixes counts twice. A barcode that a file's pattern
+    does not match names no cell.
 
     Args:
         cell_ids: The IDs of the selected cells, in selection order.
-        memory_bytes: The memory budget.
-        held_bytes: Bytes that the caller holds beside the join and the
-            cells' IDs, which the join counts.
+        ledger: The memory ledger of the import.
 
     Raises:
-        MemoryError: If the lookup does not fit the memory budget.
+        MemoryBudgetError: If the lookup does not fit the ledger's budget.
+        TypeError: If the IDs are neither fixed-width text nor an object array.
         ValueError: If a cell ID repeats.
     """
 
-    def __init__(
-        self, cell_ids: np.ndarray, *, memory_bytes: int, held_bytes: int = 0
-    ) -> None:
-        ids = np.asarray(cell_ids, dtype=object)
-        n_cells = len(ids)
-        self._memory_bytes = int(memory_bytes)
-        self._held_bytes = (
-            int(held_bytes)
-            + LOOKUP_BYTES_PER_CELL * n_cells
-            + sum(map(sys.getsizeof, ids))
-        )
-        if self._held_bytes > self._memory_bytes:
-            raise MemoryError(
-                f"Joining file barcodes to {n_cells} selected cells holds about "
-                f"{self._held_bytes} bytes, more than the memory budget of "
-                f"{self._memory_bytes} bytes. Raise mem_budget, or pass a smaller "
-                "cell_selection."
+    def __init__(self, cell_ids: np.ndarray, *, ledger: MemoryLedger) -> None:
+        given = np.asarray(cell_ids)
+        n_cells = len(given)
+        self._ledger = ledger
+        if given.dtype.kind == "U":
+            # The lookup keeps each ID as the Python string it becomes, which
+            # is measured from each ID's length.
+            ledger.peak("the selected cells' IDs as text", 8 * n_cells)
+            characters = int(np.char.str_len(given).sum()) if n_cells else 0
+            widest = int(given.view(np.uint32).max()) if given.size else 0
+            ledger.hold(
+                "the selected cells' IDs as text",
+                object_array_bytes(n_cells)
+                + python_text_bytes(n_cells, characters, widest=widest),
+                remedy="pass a smaller cell_selection",
             )
+        elif given.dtype != object:
+            raise TypeError(f"The selected cells' IDs must be text, not {given.dtype}")
+        ids = np.asarray(given, dtype=object)
+        ledger.hold(
+            "the join's lookup of the selected cells' IDs",
+            lookup_bytes(n_cells),
+            remedy="pass a smaller cell_selection",
+        )
         # An object index keeps the IDs as the Python strings counted above;
         # with pyarrow installed, pandas would otherwise copy them to Arrow.
         self._lookup = pd.Index(ids, dtype=object)
@@ -400,11 +446,6 @@ class CellBarcodeJoin:
         self.n_unmatched_rows = 0
 
     @property
-    def held_bytes(self) -> int:
-        """The bytes of the lookup and the caller's, before unmatched barcodes."""
-        return self._held_bytes
-
-    @property
     def n_file_barcodes(self) -> int:
         """The distinct barcodes of the files, counted by the cell ID they name."""
         return int(np.count_nonzero(self._named)) + len(self._unmatched)
@@ -413,11 +454,6 @@ class CellBarcodeJoin:
     def n_unmatched_barcodes(self) -> int:
         """The distinct barcodes that matched no selected cell."""
         return len(self._unmatched)
-
-    @property
-    def unmatched_bytes(self) -> int:
-        """The bytes of the hashes of the barcodes that matched no selected cell."""
-        return _UNMATCHED_BYTES_PER_BARCODE * len(self._unmatched)
 
     @property
     def examples(self) -> list[str]:
@@ -435,8 +471,8 @@ class CellBarcodeJoin:
             Each row's cell, as its position in the selection, as int64.
 
         Raises:
-            MemoryError: If the hashes of the barcodes that matched no cell
-                outgrow the memory budget.
+            MemoryBudgetError: If the hashes of the barcodes that matched no
+                cell outgrow the ledger's budget.
         """
         texts = np.asarray(barcodes, dtype=object)
         identifiers_array, named = file.cell_ids(texts)
@@ -452,24 +488,24 @@ class CellBarcodeJoin:
             unmatched = ~matched
             self.n_unmatched_rows += int(np.count_nonzero(unmatched))
             missing = pd.unique(identifiers_array[unmatched])
+            # The new hashes merge into those held, which keep room for their
+            # copy in the next merge, before they are made.
+            self._ledger.peak(
+                "the hashes of the barcodes that match no selected cell",
+                _NEW_HASH_BYTES * len(missing),
+                remedy=_UNMATCHED_REMEDY,
+            )
             # The barcodes are distinct already, so they are hashed as they are.
             hashes = np.asarray(
                 pd.util.hash_array(missing, categorize=False), dtype=np.uint64
             )
-            held = (
-                self._held_bytes
-                + _UNMATCHED_BYTES_PER_BARCODE * len(self._unmatched)
-                + _NEW_HASH_BYTES * len(hashes)
-            )
-            if held > self._memory_bytes:
-                raise MemoryError(
-                    "Counting the distinct barcodes that match no selected cell "
-                    f"holds about {held} bytes, more than the memory budget of "
-                    f"{self._memory_bytes} bytes. Check barcode_prefix, "
-                    "barcode_suffix, barcode_pattern and cell_selection, or raise "
-                    "mem_budget."
-                )
+            held = len(self._unmatched)
             self._unmatched = union_sorted(self._unmatched, hashes)
+            self._ledger.hold(
+                "the hashes of the barcodes that match no selected cell",
+                _UNMATCHED_BYTES_PER_BARCODE * (len(self._unmatched) - held),
+                remedy=_UNMATCHED_REMEDY,
+            )
             if len(self._examples) < UNMATCHED_EXAMPLES:
                 for barcode in pd.unique(texts[unmatched]):
                     if len(self._examples) == UNMATCHED_EXAMPLES:

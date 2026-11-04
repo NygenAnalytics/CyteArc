@@ -35,7 +35,13 @@ from cytearc.metadata.records import (
     take_text,
     unpack_text,
 )
-from tests.memory_helpers import traced_peak
+from cytearc.utils.memory_budget import (
+    MemoryBudgetError,
+    MemoryLedger,
+    object_array_bytes,
+    python_text_bytes,
+)
+from tests.memory_helpers import charges, traced_peak
 from tests.perturbation_helpers import use_python_kernels
 
 # Molecules of a lineage barcode library: a molecule ID, the library and the
@@ -255,7 +261,9 @@ def test_an_encoder_of_any_fields_orders_records_by_cell_source_and_row(
 ) -> None:
     if python_kernels:
         use_python_kernels(monkeypatch, records_module)
-    encoder = RecordEncoder(MOLECULE_FIELDS, id_field="molecule")
+    encoder = RecordEncoder(
+        MOLECULE_FIELDS, id_field="molecule", ledger=MemoryLedger(None, "encoding")
+    )
     encoder.add(
         _molecules(
             {
@@ -319,7 +327,10 @@ def test_many_chunks_merge_to_the_order_a_stable_sort_gives() -> None:
     # An invariant independent of the encoder: the records sorted stably by
     # cell and source, with text equal to what each chunk held.
     rng = np.random.default_rng(11)
-    encoder = RecordEncoder({"barcode": TEXT, "umi": RAGGED, "reads": INTEGER})
+    encoder = RecordEncoder(
+        {"barcode": TEXT, "umi": RAGGED, "reads": INTEGER},
+        ledger=MemoryLedger(None, "encoding"),
+    )
     pieces = []
     for chunk_index in range(12):
         n_rows = int(rng.integers(0, 30))
@@ -355,7 +366,9 @@ def test_many_chunks_merge_to_the_order_a_stable_sort_gives() -> None:
 
 
 def test_a_chunk_without_the_id_field_holds_records_without_ids() -> None:
-    encoder = RecordEncoder(MOLECULE_FIELDS, id_field="molecule")
+    encoder = RecordEncoder(
+        MOLECULE_FIELDS, id_field="molecule", ledger=MemoryLedger(None, "encoding")
+    )
     encoder.add(_molecules({"barcode": ["AC", "GT"]}), np.asarray([0, 1]), source=0)
     encoder.add(_molecules({"molecule": ["m1"]}), np.asarray([2]), source=0)
     assert encoder.missing_ids == 2
@@ -363,7 +376,7 @@ def test_a_chunk_without_the_id_field_holds_records_without_ids() -> None:
 
 
 def test_empty_chunks_still_name_their_fields() -> None:
-    encoder = RecordEncoder(MOLECULE_FIELDS)
+    encoder = RecordEncoder(MOLECULE_FIELDS, ledger=MemoryLedger(None, "encoding"))
     encoder.add(
         _molecules({"barcode": [], "reads": []}), np.empty(0, np.int64), source=0
     )
@@ -374,7 +387,7 @@ def test_empty_chunks_still_name_their_fields() -> None:
 
 
 def test_an_encoder_without_an_id_field_has_no_ids_to_check() -> None:
-    encoder = RecordEncoder(MOLECULE_FIELDS)
+    encoder = RecordEncoder(MOLECULE_FIELDS, ledger=MemoryLedger(None, "encoding"))
     encoder.add(_molecules({"molecule": ["m1", "m1"]}), np.asarray([0, 0]), source=0)
     with pytest.raises(ValueError, match="has no id_field"):
         encoder.repeated_ids()
@@ -410,7 +423,7 @@ def test_an_encoder_refuses_fields_it_cannot_encode(
     fields, id_field, error, message
 ) -> None:
     with pytest.raises(error, match=message):
-        RecordEncoder(fields, id_field=id_field)
+        RecordEncoder(fields, id_field=id_field, ledger=MemoryLedger(None, "encoding"))
 
 
 def test_encoded_text_keeps_categories_in_the_order_given() -> None:
@@ -456,7 +469,9 @@ def test_text_parsing_reads_pandas_missing_tokens_as_missing() -> None:
 def test_an_encoder_refuses_values_of_the_wrong_kind_and_stays_unchanged(
     rows, cells, source, error, message
 ) -> None:
-    encoder = RecordEncoder(MOLECULE_FIELDS, id_field="molecule")
+    encoder = RecordEncoder(
+        MOLECULE_FIELDS, id_field="molecule", ledger=MemoryLedger(None, "encoding")
+    )
     encoder.add(_molecules({"molecule": ["m0"], "barcode": ["TT"]}), [0], source=0)
     before = (encoder.n_records, encoder.nbytes, encoder.missing_ids)
     # Each bad chunk also holds valid fields, which a refusal must not keep.
@@ -468,7 +483,7 @@ def test_an_encoder_refuses_values_of_the_wrong_kind_and_stays_unchanged(
 
 
 def test_an_encoder_takes_integers_of_any_width_and_boolean_flags() -> None:
-    encoder = RecordEncoder(MOLECULE_FIELDS)
+    encoder = RecordEncoder(MOLECULE_FIELDS, ledger=MemoryLedger(None, "encoding"))
     encoder.add(
         pd.DataFrame(
             {
@@ -552,9 +567,9 @@ def test_ids_and_text_are_encoded_without_a_copy_padded_to_the_longest_value() -
     frame = pd.DataFrame({"molecule": pd.Series(values, dtype=object)})
 
     def encode() -> None:
-        RecordEncoder(MOLECULE_FIELDS, id_field="molecule").add(
-            frame, np.arange(len(values)), source=0
-        )
+        RecordEncoder(
+            MOLECULE_FIELDS, id_field="molecule", ledger=MemoryLedger(None, "encoding")
+        ).add(frame, np.arange(len(values)), source=0)
         encode_text(values)
 
     _, peak = traced_peak(encode, 20 * 2**20 - 1)
@@ -562,7 +577,9 @@ def test_ids_and_text_are_encoded_without_a_copy_padded_to_the_longest_value() -
 
 
 def test_an_encoder_counts_the_bytes_of_every_array_it_holds() -> None:
-    encoder = RecordEncoder(MOLECULE_FIELDS, id_field="molecule")
+    encoder = RecordEncoder(
+        MOLECULE_FIELDS, id_field="molecule", ledger=MemoryLedger(None, "encoding")
+    )
     encoder.add(
         _molecules(
             {
@@ -624,3 +641,95 @@ def test_parsers_read_only_the_missing_tokens_they_are_given():
     )
     assert parsed["site"].tolist() == ["None", "AC"]
     assert parsed["umis"].tolist() == [-1, 4]
+
+
+def _encoded_chunk() -> pd.DataFrame:
+    return _molecules(
+        {
+            "molecule": ["m1", "m2", "m3"],
+            "library": ["L1", "L2", "L1"],
+            "barcode": ["AC", "AC", "GT"],
+            "reads": [3, 1, 2],
+            "kept": [1, 0, 1],
+            "quality": [0.5, 1.0, np.nan],
+        }
+    )
+
+
+def test_the_encoder_holds_each_chunk_it_keeps_and_then_its_table() -> None:
+    ledger = MemoryLedger(None, "Encoding records")
+    encoder = RecordEncoder(MOLECULE_FIELDS, id_field="molecule", ledger=ledger)
+    encoder.add(_encoded_chunk(), np.asarray([0, 1, 1]), 0)
+    # Each chunk's encoded arrays are charged as kept, and nothing else.
+    assert ledger.charged == encoder.nbytes > 0
+    encoder.add(_encoded_chunk(), np.asarray([2, 2, 0]), 1)
+    assert ledger.charged == encoder.nbytes
+    chunks = encoder.nbytes
+    table, taken = charges(encoder.finish)
+    # The table is held before the chunks that it consumed are let go, and
+    # stays charged in place of them, by its arrays' bytes.
+    assert [(item, nbytes) for item, nbytes, _planned in taken] == [
+        ("the 6 records", table.nbytes),
+        ("a release", chunks),
+    ]
+    by_hand = (
+        table.cells.nbytes
+        + table.sources.nbytes
+        + sum(
+            part.nbytes
+            for encoded in table.text.values()
+            for part in (encoded.codes, encoded.data, encoded.offsets)
+        )
+        + sum(part.nbytes for parts in table.ragged.values() for part in parts)
+        + sum(column.nbytes for column in table.values.values())
+    )
+    assert table.nbytes == by_hand
+    assert ledger.charged == by_hand
+
+
+def test_a_chunk_beyond_the_budget_leaves_the_encoder_as_it_was() -> None:
+    sizing = RecordEncoder(MOLECULE_FIELDS, ledger=MemoryLedger(None, "Sizing"))
+    sizing.add(_encoded_chunk(), np.asarray([0, 1, 1]), 0)
+    first = sizing.nbytes
+    ledger = MemoryLedger(2 * first - 1, "Encoding records")
+    encoder = RecordEncoder(MOLECULE_FIELDS, ledger=ledger)
+    encoder.add(_encoded_chunk(), np.asarray([0, 1, 1]), 0)
+    with pytest.raises(MemoryBudgetError) as refused:
+        encoder.add(_encoded_chunk(), np.asarray([2, 2, 0]), 0)
+    assert refused.value.needed_bytes == 2 * first
+    assert refused.value.item == "the 6 records encoded"
+    assert encoder.n_records == 3 and encoder.nbytes == first
+    # Finishing holds the table beside the chunks until they go, which the
+    # caller plans; without a budget, the three records come back alone.
+    ledger.budget = None
+    assert encoder.finish().cells.tolist() == [0, 1, 1]
+
+
+@pytest.mark.parametrize("kind", ["ASCII", "four-byte"])
+def test_unpacking_text_holds_its_values_and_no_copy_of_the_whole_text(kind) -> None:
+    # 20,000 values of about 100 characters: their bytes, the offsets as
+    # Python lists and the values as strings, beside which a decode of the
+    # whole text beyond ASCII would hold 4 bytes a character, 8 MB more.
+    lead = "a" if kind == "ASCII" else "\U0001f600"
+    values = [lead * 96 + f"{index:04d}" for index in range(20_000)]
+    data, offsets = pack_text(values)
+    widest = 0x7F if kind == "ASCII" else 0x1F600
+    unpack_text(data[: offsets[1]], offsets[:2])
+    strings = object_array_bytes(len(values)) + python_text_bytes(
+        len(values), sum(map(len, values)), widest=widest
+    )
+    # The bytes as one buffer, each offset as a Python integer in a list, the
+    # values as a list, which holds up to twice its references while it
+    # grows, and for ASCII the text once, as it is cut at the offsets.
+    held = (
+        data.nbytes
+        + 2 * 36 * len(values)
+        + 2 * object_array_bytes(len(values))
+        + strings
+    )
+    if kind == "ASCII":
+        held += 41 + len(data)
+    _result, peak = traced_peak(lambda: unpack_text(data, offsets), held)
+    assert peak <= 1.15 * held, (peak, held)
+    assert held <= 1.15 * peak, (peak, held)
+    assert unpack_text(data, offsets).tolist() == values

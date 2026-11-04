@@ -35,9 +35,14 @@ from ...metadata.arguments import PhylogenyCloneArguments, PhylogenyImportArgume
 from ...metadata.rows import (
     read_array_rows_chunkwise,
     read_metadata_rows_chunkwise,
+    read_text_rows,
     text_width,
 )
-from ...metadata.selection import cell_selection_indices
+from ...metadata.selection import (
+    CellSelectionRead,
+    cell_selection_indices,
+    read_cell_selection,
+)
 from ...storage.artifact_writer import ArrayRequirement, artifact_transaction
 from ...storage.arrays import (
     MetadataBlock,
@@ -58,10 +63,9 @@ from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sort_categories, sorted_unique
 from ...utils.digest import path_sha256
 from ...utils.logging import logger
-from ...utils.memory_budget import fixed_text_bytes
+from ...utils.memory_budget import MemoryLedger, fixed_text_bytes
 from ...utils.warnings import warn
 from .cell_barcodes import (
-    LOOKUP_BYTES_PER_CELL,
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
@@ -290,25 +294,26 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         file: BarcodeFile,
         trees: "FileTrees",
         *,
-        held: int,
+        ledger: MemoryLedger,
     ) -> np.ndarray:
         """Each node's cell, as a position among the cells, -1 for none.
 
         Leaves without a name name no cell; other leaves are joined
-        ``_JOIN_BATCH`` at a time.
+        ``_JOIN_BATCH`` at a time, each batch held while it joins.
         """
         cells = np.full(trees.n_nodes, -1, dtype=np.int64)
         leaves = np.flatnonzero(trees.leaf & (trees.names != ""))
         for start in range(0, len(leaves), _JOIN_BATCH):
             batch = leaves[start : start + _JOIN_BATCH]
             barcodes = trees.names[batch]
-            self._check_phylogeny_budget(
-                f"Joining {len(batch)} leaves to cells",
-                held
-                + _JOIN_BYTES_PER_LEAF * len(batch)
+            joining = ledger.hold(
+                f"joining {len(batch)} leaves to cells",
+                _JOIN_BYTES_PER_LEAF * len(batch)
                 + 2 * sum(map(sys.getsizeof, barcodes.tolist())),
             )
             cells[batch] = join.cells(file, barcodes)
+            del barcodes
+            ledger.release(joining)
         return cells
 
     def _imported_forest(
@@ -316,52 +321,62 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         files: Sequence[BarcodeFile],
         stems: Sequence[str],
         layouts: Sequence["TreeFileLayout"],
-        join_cells: np.ndarray,
-    ) -> tuple[_ImportedForest, CellBarcodeJoin, int]:
-        """Read every file's trees and join their leaves to the cells.
+        selection: CellSelectionRead,
+    ) -> tuple[_ImportedForest, CellBarcodeJoin, MemoryLedger]:
+        """Read every file's trees and join their leaves to the selected cells.
 
         Returns:
-            The forest, the join, and the bytes that both hold.
+            The forest, the join, and the import's ledger, which holds both.
         """
         from ...readers.phylogeny import read_trees
 
-        held = _FIXED_BYTES
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Importing the trees of {len(layouts)} files for {selection.cells} cells",
+            remedy="pass a smaller cell_selection",
+            codec_threads=self.nthreads,
+        )
+        ledger.hold("the objects that open files, stores and trees", _FIXED_BYTES)
         # Every file's trees are held until the forest is built, so the bound
         # of all of them and the largest peak of one are checked before any is
         # read; the reader checks each file again as it reads.
-        self._check_phylogeny_budget(
-            f"Reading the trees of {len(layouts)} files",
-            held
-            + sum(layout.trees_bytes for layout in layouts)
+        ledger.peak(
+            f"reading the trees of {len(layouts)} files",
+            sum(layout.trees_bytes for layout in layouts)
             + max(layout.peak_bytes - layout.trees_bytes for layout in layouts),
         )
         read: list[FileTrees] = []
         for layout in layouts:
-            trees = read_trees(layout, memory_bytes=self.memoryBytes, held_bytes=held)
-            held += trees.held_bytes
+            trees = read_trees(
+                layout, memory_bytes=self.memoryBytes, held_bytes=ledger.held_bytes
+            )
+            ledger.hold("the trees read", trees.held_bytes)
             read.append(trees)
         n_nodes = sum(trees.n_nodes for trees in read)
         n_trees = sum(len(trees.tree_keys) for trees in read)
-        held += _FOREST_BYTES_PER_NODE * n_nodes + _BYTES_PER_TREE * n_trees
-        # Reading the cells' IDs holds them at their stored width and decodes
-        # a stored chunk of them; the join then holds its lookup and the IDs
-        # as text, which it counts, beside what the trees hold.
-        self._check_phylogeny_budget(
-            f"Joining {n_nodes} nodes of {n_trees} trees to {len(join_cells)} cells",
-            held
-            + LOOKUP_BYTES_PER_CELL * len(join_cells)
-            + self._phylogeny_id_bytes(len(join_cells)),
+        ledger.hold(
+            f"the forest of {n_nodes} nodes of {n_trees} trees",
+            _FOREST_BYTES_PER_NODE * n_nodes + _BYTES_PER_TREE * n_trees,
         )
-        cell_ids = self._phylogeny_cell_ids(join_cells)
-        join = CellBarcodeJoin(cell_ids, memory_bytes=self.memoryBytes, held_bytes=held)
-        held = join.held_bytes
+        # The selected cells' IDs are read as text, and the join charges its
+        # lookup of them and the hashes of the leaves that name no cell.
+        join_cells = read_cell_selection(
+            ledger, self.zw, selection, item="the selected cells' positions"
+        )
+        cell_ids = read_text_rows(
+            ledger,
+            self.cells._get_array("ids"),
+            join_cells,
+            item="the selected cells' IDs",
+        )
+        join = CellBarcodeJoin(cell_ids, ledger=ledger)
         # Each file's leaves are joined to cells, and its trees named.
         file_cells = []
         listed: list[tuple[str, int, int, int]] = []
         for position, (file, stem, trees) in enumerate(
             zip(files, stems, read, strict=True)
         ):
-            file_cells.append(self._join_leaves(join, file, trees, held=held))
+            file_cells.append(self._join_leaves(join, file, trees, ledger=ledger))
             for name, tree_start, tree_stop in zip(
                 _tree_names(file, stem, trees),
                 trees.tree_offsets[:-1].tolist(),
@@ -412,7 +427,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             n_leaves_without_a_cell=int(np.count_nonzero(leaf & (cells < 0))),
             n_unnamed_leaves=int(np.count_nonzero(leaf & ~named_leaves)),
         )
-        return forest, join, held
+        return forest, join, ledger
 
     @staticmethod
     def _refuse_repeated_names(
@@ -595,9 +610,9 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             return planned.ref
         self._require_writable(arguments.operation)
         # The cells are read only when the trees are imported, not reused.
-        cell_index = self._clone_selection_indices(cell_selection)
-        forest, join, held = self._imported_forest(files, stems, layouts, cell_index)
-        n_cells = len(cell_index)
+        selection = self._clone_selection_read(cell_selection)
+        forest, join, ledger = self._imported_forest(files, stems, layouts, selection)
+        n_cells = selection.cells
         in_tree = np.zeros(n_cells, dtype=bool)
         in_tree[forest.cells[forest.cells >= 0]] = True
         n_cells_in_trees = int(np.count_nonzero(in_tree))
@@ -635,9 +650,9 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         width = _names_width(forest.names)
         # The arrays are written beside what Zarr's writes hold in file
         # buffers.
-        self._check_phylogeny_budget(
-            f"Writing the names of {len(forest.names)} nodes",
-            held + _write_bytes(width, len(forest.names)) + zarr_write_buffer_bytes(),
+        ledger.peak(
+            f"writing the names of {len(forest.names)} nodes",
+            _write_bytes(width, len(forest.names)) + zarr_write_buffer_bytes(),
         )
         with artifact_transaction(self.zw, planned) as group:
             group.attrs.update(attributes)
@@ -897,6 +912,12 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             "time_unit": None if unit is None else str(unit),
             "leaf_time_spread": group.attrs.get("leaf_time_spread"),
         }
+        saving = MemoryLedger(
+            self.memoryBytes,
+            f"Cutting the phylogeny into the clones of {n_cells} cells",
+            codec_threads=self.nthreads,
+        )
+        saving.hold("the cut, its clones' labels and each cell's clone", held)
         write_clones(
             self.zw,
             planned,
@@ -908,8 +929,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
                 n_cells_in_several_clones=0,
             ),
             attributes,
-            memory_bytes=self.memoryBytes,
-            held_bytes=held,
+            ledger=saving,
         )
         if n_before:
             warn(

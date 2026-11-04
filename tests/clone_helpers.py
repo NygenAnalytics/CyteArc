@@ -61,6 +61,27 @@ def every_cell(store: "DataStore") -> "ArtifactRef":
     return store.snapshot_cell_selection("every_cell")
 
 
+def grouping_without_a_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Group the cells of the clone summaries within no budget, so that a summary's own steps meet the budget first.
+
+    The grouping charges its reads and what it builds to the summary's
+    ledger, as ``tests/test_cell_groups.py`` checks; on a store of a few
+    cells its read of the selection's stored chunk of 100,000 flags
+    outweighs the steps that a test of a summary's own checks measures.
+    """
+    from cytearc.datastore._operations import clones as operations
+    from cytearc.utils.memory_budget import MemoryLedger
+
+    grouped = operations.cell_groups
+
+    def unbudgeted(*arguments, ledger, **options):
+        return grouped(
+            *arguments, ledger=MemoryLedger(None, "Grouping cells"), **options
+        )
+
+    monkeypatch.setattr(operations, "cell_groups", unbudgeted)
+
+
 def ids_read_bytes(store: "DataStore", n_cells: int) -> int:
     """The bytes of reading the IDs of ``n_cells`` cells of ``store`` as text."""
     from cytearc.metadata.rows import text_read_bytes
