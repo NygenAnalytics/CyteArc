@@ -606,9 +606,6 @@ def sample_codes(
 #: width of the widest, whether it is valid, its position in the sorted order,
 #: the flags of the distinct values and their running count, and its code.
 _NUMBERING_BYTES_PER_LABEL = 40
-#: The most characters of the text of a label that is not text, such as a
-#: number.
-_NUMBER_TEXT_CHARACTERS = 32
 #: Numbering the samples holds, for each cell, its codes stacked by column
 #: and their copies while they are sorted, its position in the sorted order,
 #: the flags of the distinct samples and their running count, and its code.
@@ -622,16 +619,15 @@ _KEPT_BYTES_PER_SAMPLE = 640
 def label_numbering_bytes(labels: np.ndarray) -> int:
     """Return the most bytes that :func:`sample_codes` holds to number one column's ``labels``, beside them.
 
-    The labels become text at the width of the widest, which a sort copies
-    twice, as NumPy's ``np.unique`` sorts them, beside the distinct labels,
-    as many as the labels at most.
+    The labels become text at the width of the widest, a number as its text,
+    which a sort copies twice, as NumPy's ``np.unique`` sorts them, beside
+    the distinct labels, as many as the labels at most.
     """
     array = np.asarray(labels, dtype=object)
+    # The labels' text, as numbering makes it: a number's text is measured
+    # one at a time, as it is made and let go.
     width = max(
-        (
-            len(value) if isinstance(value, str) else _NUMBER_TEXT_CHARACTERS
-            for value in array
-        ),
+        (len(value) if isinstance(value, str) else len(str(value)) for value in array),
         default=1,
     )
     n_values = len(array)
@@ -652,8 +648,9 @@ def sample_fingerprint_bytes(
     """
     n_samples = min(int(n_cells), int(np.prod([max(1, len(each)) for each in names])))
     # The widest JSON text of a sample: each column's name and its widest
-    # label, quoted and escaped, between braces and separators.
-    width = 2 * len(columns) + sum(
+    # label, quoted and escaped, and the ": " between them, separated by ", "
+    # between braces.
+    width = 4 * len(columns) + sum(
         len(json.dumps(column))
         + max((len(json.dumps(str(name))) for name in each), default=2)
         for column, each in zip(columns, names, strict=True)

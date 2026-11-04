@@ -1404,7 +1404,7 @@ def test_the_call_file_is_read_before_the_run_within_the_memory_budget(
     # Each refusal names the step that it refused, and the budget bounds what
     # the check holds, by no more than a few times beside the fixed bound of
     # the scan that counts the file's rows.
-    assert len(refusals) >= 2
+    assert 2 <= len(refusals) <= 7
     assert all(refusal.startswith("Checking the call file") for refusal in refusals)
     assert peak is not None
     assert peak <= budget <= 3 * peak + (1 << 20) + PROTOSPACER_SCAN_BYTES

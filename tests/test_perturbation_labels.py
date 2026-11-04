@@ -27,6 +27,7 @@ from cytearc.perturbation.labels import (
 from cytearc.storage.artifacts import inspect_artifact
 from cytearc.storage.selections import read_stored_selection_indices
 from tests.perturbation_helpers import record_cell_reads, write_screen
+from cytearc.storage.validation_scope import validation_scope
 from tests.memory_helpers import ZARR_READS, audited, check_budget, hold_finished_reads
 from tests.storage_helpers import (
     copy_store,
@@ -562,10 +563,10 @@ def test_labelling_holds_no_more_than_the_budget_it_names(
 
     # Each refusal names the step that it refused, and the budget that runs
     # holds the whole call, by no more than a few times its traced peak.
-    _, refusals, ref = check_budget(
+    budget, refusals, ref = check_budget(
         path, label, at_most=_LABEL_AT_MOST, allowance=1 << 20, max_refusals=100
     )
-    assert refusals
+    assert 1 <= len(refusals) <= 9
     assert all(
         refusal.startswith("Labelling 4000 cells holds about") for refusal in refusals
     )
@@ -573,8 +574,9 @@ def test_labelling_holds_no_more_than_the_budget_it_names(
     assert loaded.cells["n_targets"].max() > 20
     # From each charge to the next, labelling holds no more than its ledger
     # planned, with each read's work held until the next read ends.
-    store = open_store(path)
-    label(store)
-    with hold_finished_reads(*ZARR_READS):
-        _ref, overruns = audited(lambda: label(store))
+    store = open_store(path, mem_budget=budget)
+    with validation_scope():
+        label(store)
+        with hold_finished_reads(*ZARR_READS):
+            _ref, overruns = audited(lambda: label(store))
     assert overruns == []

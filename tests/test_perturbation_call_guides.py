@@ -693,7 +693,8 @@ def test_call_guides_runs_within_the_budget_that_its_refusals_name(
     # calls' steps then call guides.
     fitting = options["method"].endswith("gaussian")
     first = "Fitting guide" if fitting else "Calling guides"
-    assert refusals and refusals[0].startswith(first)
+    assert 1 <= len(refusals) <= 12
+    assert refusals[0].startswith(first)
     assert all(
         refusal.startswith(("Fitting guide", "Calling guides")) for refusal in refusals
     )
@@ -759,6 +760,7 @@ def test_histogram_refusals_name_a_budget_past_where_they_stopped(tmp_path) -> N
     # all, and a few refusals reach the budget that runs.
     assert distinct == sorted(set(distinct))
     assert len(stopped) <= 5
+    assert len(refusals) <= 12
     # The budget holds the counts beside histograms of every count.
     assert budget > 16 * 60_000
     _audited_at(path, call, budget)

@@ -253,14 +253,17 @@ def _status_labels(
 
 
 def _stream_bytes(counts: Any, scratch_bytes_per_row: int = 0) -> tuple[int, int]:
-    """Return what a budgeted row stream of ``counts`` holds: its least, and with full blocks.
+    """Return what a budgeted row stream of ``counts`` holds: its least, and with blocks of a stored chunk's rows.
 
     ``ChunkedArray._stream_blocks`` with a memory budget holds the matrix's
     own arrays, the decode of one stored chunk beside the chunk that the
     previous read can still hold, and the rows of each block with
     ``scratch_bytes_per_row`` for each, beside the caller's resident bytes.
     It shrinks its blocks to fit, down to one row, and refuses a budget
-    without room for that row; this follows its arithmetic.
+    without room for that row; this follows its arithmetic. A block of the
+    rows of one stored chunk, an inner chunk of a sharded array, decodes each
+    chunk once, where a smaller block decodes the same chunk again for each
+    block.
 
     Args:
         counts: A chunked matrix of counts, such as ``assay.rawData[cells, :]``.
@@ -268,13 +271,15 @@ def _stream_bytes(counts: Any, scratch_bytes_per_row: int = 0) -> tuple[int, int
             a block.
 
     Returns:
-        The bytes of a stream of one-row blocks, and of a stream of full
-        blocks, each beside the caller's resident bytes.
+        The bytes of a stream of one-row blocks, and of a stream of blocks of
+        a stored chunk's rows, each beside the caller's resident bytes.
     """
     rows = min(counts._block_size, max(1, counts.shape[0]))
     per_row = max(1, counts._block_owned_bytes() // rows + scratch_bytes_per_row)
     fixed = counts._resident_bytes() + counts._max_decode_bytes()
-    return fixed + per_row, fixed + rows * per_row
+    geometry = counts._geometry()
+    chunk_rows = rows if geometry is None else min(rows, geometry.axisChunk(0))
+    return fixed + per_row, fixed + chunk_rows * per_row
 
 
 def _count_stream(
@@ -286,7 +291,7 @@ def _count_stream(
     item: str,
     scratch_bytes_per_row: int = 0,
 ) -> Iterable[np.ndarray]:
-    """Stream the row blocks of ``counts`` within the ledger's room, after charging a whole block of them as ``item``.
+    """Stream the row blocks of ``counts`` within the ledger's room, after charging a block of a stored chunk's rows as ``item``.
 
     The stream holds a block of the rows of a stored chunk beside what the
     ledger holds, as :func:`_stream_bytes` counts it, which the ledger
@@ -296,10 +301,10 @@ def _count_stream(
     ``ledger.held_bytes``. Once the blocks are read, the ledger counts the
     chunk that the last read can still hold.
     """
-    _least, full = _stream_bytes(counts, scratch_bytes_per_row)
-    ledger.peak(item, full)
+    _least, block = _stream_bytes(counts, scratch_bytes_per_row)
+    ledger.peak(item, block)
     room = ledger.room
-    ledger.peak(item, full if room is None else max(full, room))
+    ledger.peak(item, block if room is None else max(block, room))
     blocks: Iterator[np.ndarray] = counts._stream_blocks(
         nthreads=nthreads,
         msg=msg,

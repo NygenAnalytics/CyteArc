@@ -501,7 +501,7 @@ def test_an_import_runs_within_the_budget_that_its_refusal_names(tmp_path) -> No
     # Each refusal comes before anything is written and names the step that
     # it refused. The budget holds the 80 padded slots of every cell and the
     # labels' text.
-    assert refusals
+    assert 1 <= len(refusals) <= 9
     assert all(
         refusal.startswith("Importing the guide calls of 4000 cells holds about")
         for refusal in refusals

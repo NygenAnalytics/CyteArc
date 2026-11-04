@@ -1144,6 +1144,7 @@ def test_reader_implementations_are_runtime_isolated():
         "cellranger.py": {
             "readers._assay_names",
             "readers._contigs",
+            "readers._delimited",
             "readers._sparse",
             "readers._text",
         },
