@@ -1,3 +1,4 @@
+import io
 import os
 import re
 from abc import ABC, abstractmethod
@@ -605,13 +606,14 @@ _MAX_UMIS = int(np.iinfo(np.uint32).max)
 # what parsing the file holds.
 _SCAN_BYTES = 1 << 15
 #: The most bytes that :func:`protospacer_calls_size` holds while it counts a
-#: file, whatever the file holds: a chunk as read and the flags of one of its
+#: file, whatever the file holds: a chunk as read and the flags of its
 #: characters, and the positions of its line ends and its separators, the
 #: line of each separator and the separators of each line, 8 bytes each,
-#: which reach 16 bytes for each byte of a chunk of nothing but line ends and
-#: separators; and the decompression of a chunk of a gzip file, two chunks,
-#: and the scan's own objects besides.
-PROTOSPACER_SCAN_BYTES = 20 * _SCAN_BYTES + (64 << 10)
+#: which reach 22 bytes for each byte of a chunk of nothing but line ends and
+#: separators, as traced; the gzip reader's two buffers of compressed and
+#: decompressed bytes, ``io.DEFAULT_BUFFER_SIZE`` each, 128 KiB since Python
+#: 3.14; and the scan's own objects.
+PROTOSPACER_SCAN_BYTES = 24 * _SCAN_BYTES + 2 * io.DEFAULT_BUFFER_SIZE + (64 << 10)
 # The bytes that read_protospacer_calls holds while it parses, by the size of
 # the file, measured with Python 3.13 and pandas 3.0 and rounded up: for
 # each row, its four fields as Python text, pandas' copies of them, and its

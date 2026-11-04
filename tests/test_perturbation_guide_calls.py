@@ -617,6 +617,12 @@ def test_the_tables_of_saved_fits_hold_what_their_charge_plans(
     )
 
 
+def _text_slack() -> float:
+    """How far the tables' charge may pass their peak: pandas keeps their text as Python strings, as charged, without pyarrow, and in Arrow's buffers, about half as large, with it."""
+    storage = getattr(pd.Series(["ab"]).dtype, "storage", "python")
+    return 1.4 if storage == "python" else 2.3
+
+
 @pytest.mark.parametrize(
     ("n_cells", "width", "n_guides"),
     [(4_000, 80, 80), (100_000, 3, 2_000), (50_000, 20, 200)],
@@ -650,7 +656,7 @@ def test_the_tables_of_saved_calls_and_labels_hold_what_their_charge_plans(
     cost_bound(
         _frame_bytes(ids, stored, entries="guide_codes"),
         lambda: guide_calls_frames(ids, **stored, guide_ids=guide_ids),
-        slack=1.4,
+        slack=_text_slack(),
         allowance=64 * 1024,
     )
     labels = {
@@ -672,7 +678,7 @@ def test_the_tables_of_saved_calls_and_labels_hold_what_their_charge_plans(
     cost_bound(
         _frame_bytes(ids, labels, entries="target_codes"),
         lambda: perturbation_label_frames(ids, **labels, **targets),
-        slack=1.4,
+        slack=_text_slack(),
         allowance=64 * 1024,
     )
 
@@ -730,8 +736,9 @@ def test_the_size_scan_holds_no_more_than_its_bound(tmp_path, rows, gzipped) -> 
         lambda: protospacer_calls_size(path), PROTOSPACER_SCAN_BYTES
     )
     assert peak <= PROTOSPACER_SCAN_BYTES
-    if rows == "separators only":
-        # The bound is not loose for the worst file.
+    if rows == "separators only" and gzipped:
+        # The bound is not loose for the worst file, whose decompression
+        # fills the gzip reader's buffers.
         assert PROTOSPACER_SCAN_BYTES <= 1.6 * peak
 
 
