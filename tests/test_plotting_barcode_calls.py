@@ -215,3 +215,39 @@ def test_pairs_counted_by_reads_are_no_molecules_of_the_reads_panel(tmp_path) ->
         assert result.tables["umis_per_barcode"].empty
     finally:
         plt.close(result.figure)
+
+
+def test_bins_of_barcodes_stand_on_a_ticked_axis_of_counts(imported) -> None:
+    store, ref = imported
+    per_cell = store.clones.load_barcodes(ref).cells["n_barcodes"]
+    for cap in (10, 50):
+        result = plotting.barcode_calls(
+            store, ref, max_barcodes_per_cell=cap, show=False
+        )
+        try:
+            ax = result.axes["barcodes_per_cell"]
+            # One bar per count up to the cap, at that count, the last
+            # holding the cells of the cap or more.
+            bars = sorted(
+                (patch.get_x() + patch.get_width() / 2, patch.get_height())
+                for patch in ax.patches
+            )
+            assert [centre for centre, _height in bars] == pytest.approx(
+                list(range(cap + 1))
+            )
+            assert bars[-1][1] == float((per_cell >= cap).sum())
+            ticks = ax.get_xticks().tolist()
+            labels = [label.get_text() for label in ax.get_xticklabels()]
+            assert ticks[-1] == cap and labels[-1] == f"{cap}+"
+            assert labels[:-1] == [str(int(tick)) for tick in ticks[:-1]]
+            if cap == 10:
+                # Every count up to 10 is named.
+                assert labels == [*map(str, range(10)), "10+"]
+            else:
+                # Past 40 bins the axis still ticks, at equal steps.
+                steps = set(np.diff(ticks[:-1]))
+                assert len(steps) == 1 and len(ticks) > 5
+                assert cap - ticks[-2] >= steps.pop() / 2
+            assert all(float(tick).is_integer() for tick in ax.get_yticks())
+        finally:
+            result.close()

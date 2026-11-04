@@ -80,9 +80,10 @@ CHAIN_PAIRING_SCALE = CategoricalScale(
     },
 )
 # The colours of the two arms of a receptor, VJ chains (TRA, TRG, IGK, IGL)
-# and VDJ chains (TRB, TRD, IGH).
+# and VDJ chains (TRB, TRD, IGH), which no receptor type or chain pairing
+# takes, so that a colour of receptor_qc means one thing.
 CHAIN_ARM_SCALE = CategoricalScale(
-    order=("VJ", "VDJ"), palette={"VJ": "#2b6cb0", "VDJ": "#dd6b20"}
+    order=("VJ", "VDJ"), palette={"VJ": "#cc79a7", "VDJ": "#b7791f"}
 )
 # The colours of the loci of receptor chains, in the order of
 # cytearc.repertoire.chains.LOCI: T cell loci in blues and teals, B cell

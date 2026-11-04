@@ -49,7 +49,7 @@ def recorder_states(
     store: Any,
     alleles: ArtifactRef,
     *,
-    max_sites: int = 60,
+    max_sites: int = 40,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -66,9 +66,10 @@ def recorder_states(
     with an allele record, the cells the recorder reached, of which those
     whose integration lacks the site are left out; a cell that holds several
     alleles at a site counts once, in its first state in the order above.
-    Sites in natural order; with more than ``max_sites``, the ``max_sites``
-    sites read in the most cells are drawn, the title says how many of how
-    many, and the table keeps every site. Sites that are mostly missing were
+    Sites in natural order; with more than ``max_sites``, 40 by default,
+    the most sites an axis names, the ``max_sites`` sites read in the most
+    cells are drawn, the title says how many of how many, and the table
+    keeps every site. Sites that are mostly missing were
     rarely captured, and sites that are mostly unedited carry little
     lineage.
 

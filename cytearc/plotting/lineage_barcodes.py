@@ -54,6 +54,24 @@ def _distribution(
     return counted.rename(count).reset_index().astype({count: np.int64})
 
 
+def _capped_ticks(cap: int) -> tuple[list[int], list[str]]:
+    """Ticks of an axis of counts from 0 to a last bin of ``cap`` or more, ``"{cap}+"``.
+
+    Whole numbers at Matplotlib's steps, every count up to 10, and the last
+    bin, without a step closer to it than half a step.
+    """
+    from matplotlib.ticker import MaxNLocator
+
+    steps = [
+        int(tick)
+        for tick in MaxNLocator(integer=True).tick_values(0, cap)
+        if 0 <= tick < cap
+    ]
+    step = steps[1] - steps[0] if len(steps) > 1 else 1
+    ticks = [tick for tick in steps if cap - tick >= step / 2] + [cap]
+    return ticks, [str(tick) for tick in ticks[:-1]] + [f"{cap}+"]
+
+
 @close_figures_on_error
 def barcode_calls(
     store: Any,
@@ -161,11 +179,14 @@ def barcode_calls(
         figure, axes, owns = normalize_axes_target(
             target, panel_keys=list(_PANELS), figsize=figsize, n_columns=len(_PANELS)
         )
+        ax = axes["barcodes_per_cell"]
+        # The bins stand at their counts, the last at the cap, so an axis of
+        # many bins keeps its ticks.
         draw_bars(
-            axes["barcodes_per_cell"],
+            ax,
             pd.DataFrame(
                 {
-                    "n_barcodes": capped.index.to_numpy(dtype=object),
+                    "n_barcodes": np.arange(max_barcodes_per_cell + 1),
                     "n_cells": capped.to_numpy(dtype=np.int64),
                 }
             ),
@@ -173,10 +194,13 @@ def barcode_calls(
             value="n_cells",
             colors=foreground_color(theme),
             horizontal=False,
+            numeric_items=True,
             value_label="Cells",
             title="Barcodes per cell",
         )
-        axes["barcodes_per_cell"].set_xlabel("Barcodes of the cell")
+        ax.set_xticks(*_capped_ticks(max_barcodes_per_cell))
+        ax.yaxis.get_major_locator().set_params(integer=True)
+        ax.set_xlabel("Barcodes of the cell")
         drawn: Drawn | None = None
         for key, table, value, count, x_label, y_label, title, empty in lines:
             ax = axes[key]

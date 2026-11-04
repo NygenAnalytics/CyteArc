@@ -49,6 +49,10 @@ _MANY_CHAINS = 3
 _LOCUS_PANELS_PER_ROW = 3
 _LOCUS_HEATMAPS_PER_ROW = 2
 _LOCUS_PANEL_HEIGHT = 2.4
+# A locus panel grows by this many inches for each gene it draws, as a bar
+# or as a row of a heatmap.
+_BAR_ROW_INCHES = 0.22
+_HEATMAP_ROW_INCHES = 0.18
 # What the gene fields and levels of gene usage are called on an axis.
 _SEGMENTS = {"v_call": "V", "d_call": "D", "j_call": "J", "c_call": "C"}
 
@@ -294,6 +298,7 @@ def receptor_qc(
             )
         )
         axes["chains_per_cell"].set_xlabel("Chains of the arm")
+        axes["chains_per_cell"].yaxis.get_major_locator().set_params(integer=True)
     return finish_plot(
         figure,
         axes,
@@ -447,7 +452,10 @@ def gene_usage(
             panel=(
                 MAX_FIGURE_WIDTH_INCHES / columns,
                 item_inches(
-                    tallest, per_item=0.22, base=1.2, minimum=_LOCUS_PANEL_HEIGHT
+                    tallest,
+                    per_item=_HEATMAP_ROW_INCHES if grouped else _BAR_ROW_INCHES,
+                    base=1.2,
+                    minimum=_LOCUS_PANEL_HEIGHT,
                 ),
             ),
             columns=columns,
@@ -587,7 +595,10 @@ def gene_pairing(
             panel=(
                 MAX_FIGURE_WIDTH_INCHES / _LOCUS_HEATMAPS_PER_ROW,
                 item_inches(
-                    tallest, per_item=0.22, base=1.6, minimum=_LOCUS_PANEL_HEIGHT
+                    tallest,
+                    per_item=_HEATMAP_ROW_INCHES,
+                    base=1.6,
+                    minimum=_LOCUS_PANEL_HEIGHT,
                 ),
             ),
             columns=_LOCUS_HEATMAPS_PER_ROW,

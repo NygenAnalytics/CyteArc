@@ -1118,6 +1118,311 @@ def test_repertoire_figure_tables_hold_their_records_values(repertoire) -> None:
         site_states = store.clones.load_alleles(repertoire.alleles).site_states()
         found_states = results["recorder_states"].tables["site_states"]
         assert found_states.drop(columns="share").equals(site_states)
+        # Each share is the state's cells over the site's cells but those of
+        # an integration without the site.
+        applicable = site_states[site_states["state"] != "not_applicable"]
+        totals = applicable.groupby(["integration", "site"])["n_cells"].sum()
+        for row in found_states.itertuples():
+            total = totals[(row.integration, row.site)]
+            if row.state == "not_applicable" or not total:
+                assert np.isnan(row.share)
+            else:
+                assert row.share == pytest.approx(row.n_cells / total)
     finally:
         for result in results.values():
+            result.close()
+
+
+def _patch_colors(ax) -> list[str]:
+    return [to_hex(patch.get_facecolor()) for patch in ax.patches]
+
+
+def test_receptor_qc_draws_the_categories_with_cells_in_their_vocabularys_colours(
+    repertoire,
+) -> None:
+    from cytearc.plotting._style import CHAIN_ARM_SCALE, CHAIN_PAIRING_SCALE
+
+    plain = repertoire.store.plots.receptor_qc(repertoire.receptors, show=False)
+    grouped = repertoire.calls["receptor_qc"](show=False)
+    try:
+        for panel, vocabulary in (
+            ("receptor_type", RECEPTOR_TYPE_SCALE),
+            ("chain_pairing", CHAIN_PAIRING_SCALE),
+        ):
+            # The truth's cells hold some of the vocabulary, such as no
+            # "two full chains"; the panels draw those, in its order.
+            counts = plain.tables[panel].set_index(panel)["n_cells"]
+            held = [value for value in vocabulary.order if counts[value] > 0]
+            assert len(held) < len(vocabulary.order) or panel == "receptor_type"
+            ax = plain.axes[panel]
+            assert [tick.get_text() for tick in ax.get_yticklabels()] == held
+            assert _patch_colors(ax) == [vocabulary.palette[value] for value in held]
+            assert [patch.get_width() for patch in ax.patches] == [
+                counts[value] for value in held
+            ]
+            # Grouped, the legend lists the same categories in the same colours.
+            legend = grouped.axes[panel].get_legend()
+            assert [text.get_text() for text in legend.get_texts()] == held
+            assert [
+                to_hex(handle.get_facecolor()) for handle in legend.legend_handles
+            ] == [vocabulary.palette[value] for value in held]
+        # The chains of each arm stand side by side in the arm's colour, the
+        # VJ chains at the left, at the counts of the table.
+        chains = plain.tables["chains_per_cell"]
+        ax = plain.axes["chains_per_cell"]
+        for arm in ("VJ", "VDJ"):
+            bars = sorted(
+                (patch.get_x(), patch.get_height())
+                for patch in ax.patches
+                if to_hex(patch.get_facecolor()) == CHAIN_ARM_SCALE.palette[arm]
+            )
+            assert [height for _x, height in bars] == chains[arm].tolist()
+        vj = min(
+            p.get_x()
+            for p in ax.patches
+            if to_hex(p.get_facecolor()) == CHAIN_ARM_SCALE.palette["VJ"]
+        )
+        vdj = min(
+            p.get_x()
+            for p in ax.patches
+            if to_hex(p.get_facecolor()) == CHAIN_ARM_SCALE.palette["VDJ"]
+        )
+        assert vj < vdj
+        # A colour of the figure means one thing: the arms take none of the
+        # receptor types' or pairings' colours.
+        assert not set(CHAIN_ARM_SCALE.palette.values()) & (
+            set(RECEPTOR_TYPE_SCALE.palette.values())
+            | set(CHAIN_PAIRING_SCALE.palette.values())
+        )
+        # The three panels stand in one column, the first on top.
+        boxes = [grouped.axes[panel].get_position() for panel in grouped.axes]
+        assert len({round(box.x0, 3) for box in boxes}) == 1
+        assert [box.y0 for box in boxes] == sorted(
+            (box.y0 for box in boxes), reverse=True
+        )
+    finally:
+        plain.close()
+        grouped.close()
+
+
+def test_bars_of_a_locus_take_the_locus_colour(repertoire) -> None:
+    from cytearc.plotting._style import LOCUS_SCALE
+
+    store, receptors = repertoire.store, repertoire.receptors
+    usage = store.plots.gene_usage(store.repertoire.gene_usage(receptors), show=False)
+    lengths = store.plots.spectratype(
+        store.repertoire.spectratype(receptors), show=False
+    )
+    try:
+        for result in (usage, lengths):
+            assert len(result.axes) == 5
+            for locus, ax in result.axes.items():
+                assert ax.patches, locus
+                assert set(_patch_colors(ax)) == {LOCUS_SCALE.palette[locus]}
+        # Bars of gene usage stand three panels to a row.
+        rows = [round(ax.get_position().y0, 3) for ax in usage.axes.values()]
+        assert rows.count(max(rows)) == 3
+    finally:
+        usage.close()
+        lengths.close()
+
+
+def test_a_spectratype_of_some_cells_keeps_each_groups_colour(repertoire) -> None:
+    store, receptors = repertoire.store, repertoire.receptors
+    store.cells.insert("not_monocyte", TRUTH.cell_types != "Monocyte", overwrite=True)
+    full = store.plots.spectratype(
+        store.repertoire.spectratype(receptors, group_by="cell_type"), show=False
+    )
+    rest = store.plots.spectratype(
+        store.repertoire.spectratype(
+            receptors,
+            group_by="cell_type",
+            cell_selection=store.snapshot_cell_selection("not_monocyte"),
+        ),
+        show=False,
+    )
+    try:
+        palette = full.scales[0].palette
+        assert list(palette) == ["Monocyte", "Neutrophil", "Undifferentiated"]
+        # Without the monocytes, the first label, the other two keep the
+        # colours they take beside it, which colours over the groups drawn
+        # would not give them.
+        assert rest.scales[0].order == ("Neutrophil", "Undifferentiated")
+        assert rest.scales[0].palette == {
+            "Neutrophil": palette["Neutrophil"],
+            "Undifferentiated": palette["Undifferentiated"],
+        }
+        assert palette["Neutrophil"] != palette["Monocyte"]
+        drawn = {
+            line.get_label(): to_hex(line.get_color())
+            for ax in rest.axes.values()
+            for line in ax.get_lines()
+        }
+        assert drawn == rest.scales[0].palette
+    finally:
+        full.close()
+        rest.close()
+
+
+def test_barcode_libraries_take_colours_over_every_library(repertoire) -> None:
+    loaded = repertoire.store.clones.load_barcodes(repertoire.barcodes)
+    # A library listed first that holds no record draws in neither panel,
+    # and keeps its colour from the others.
+    extra = loaded.libraries.iloc[:1].assign(library="aaa", n_records=0)
+    padded = replace(loaded, libraries=pd.concat([extra, loaded.libraries]))
+    store = SimpleNamespace(clones=SimpleNamespace(load_barcodes=lambda ref: padded))
+    every = repertoire.calls["barcode_calls"](show=False)
+    result = barcode_plots.barcode_calls(store, repertoire.barcodes, show=False)
+    try:
+        assert every.scales[0].palette == {"bartab": "#1f77b4", "trex": "#ff7f0e"}
+        assert result.scales[0].palette == {"bartab": "#ff7f0e", "trex": "#279e68"}
+        for panel in ("umis_per_barcode", "reads_per_molecule"):
+            for line in result.axes[panel].get_lines():
+                if line.get_xdata().size:
+                    assert (
+                        to_hex(line.get_color())
+                        == (result.scales[0].palette[line.get_label()])
+                    )
+        # The one legend stands beside the last panel that draws libraries.
+        (legend,) = _drawn_legends(every.figure)
+        assert legend.axes is every.axes["reads_per_molecule"]
+    finally:
+        every.close()
+        result.close()
+
+
+def _recorder_store(sites: list[tuple[str, str, dict[str, int]]]) -> SimpleNamespace:
+    """A store whose alleles hold each site's cells by state."""
+    rows = [
+        {"integration": integration, "site": site, "state": state, "n_cells": n}
+        for integration, site, cells in sites
+        for state, n in cells.items()
+    ]
+    loaded = SimpleNamespace(
+        site_states=lambda: pd.DataFrame(rows), cells=pd.DataFrame(index=range(10))
+    )
+    return SimpleNamespace(clones=SimpleNamespace(load_alleles=lambda ref: loaded))
+
+
+def test_recorder_states_name_every_site_drawn_and_rank_sites_by_reads(
+    repertoire,
+) -> None:
+    # 60 sites, site i read in 60 - i cells: the default draws the 40 read
+    # most, which its axis names.
+    many = _recorder_store(
+        [
+            ("int1", f"s{i:02d}", {"mark": 60 - i, "missing": 3, "unedited": 0})
+            for i in range(60)
+        ]
+    )
+    result = recorder_plots.recorder_states(many, repertoire.alleles, show=False)
+    try:
+        ax = result.axes["site_states"]
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == [
+            f"int1-s{i:02d}" for i in range(40)
+        ]
+        assert ax.get_title() == "The 40 of 60 sites read in the most cells"
+        assert result.provenance.extras["drawn_sites"] == 40
+    finally:
+        result.close()
+    # A site of many missing cells and few reads gives way to one read more.
+    ranked = _recorder_store(
+        [
+            ("int1", "a", {"mark": 1, "missing": 20}),
+            ("int1", "b", {"mark": 3, "missing": 0}),
+        ]
+    )
+    result = recorder_plots.recorder_states(
+        ranked, repertoire.alleles, max_sites=1, show=False
+    )
+    try:
+        ax = result.axes["site_states"]
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == ["int1-b"]
+        assert ax.get_title() == "The 1 of 2 sites read in the most cells"
+    finally:
+        result.close()
+    # A figure that draws every site keeps its title.
+    every = repertoire.calls["recorder_states"](show=False)
+    try:
+        assert every.axes["site_states"].get_title() == "Recorder states per site"
+    finally:
+        every.close()
+
+
+def _gene_usage(source, loci: dict[str, int], fractions: dict[str, float]):
+    """A gene usage record of two samples, ``loci[locus]`` genes in each locus.
+
+    Gene g of a locus holds the locus's fraction divided by g + 1 in each
+    sample, so the locus's largest fraction is ``fractions[locus]``.
+    """
+    from cytearc.repertoire import GeneUsage
+
+    rows = [
+        {
+            "group": group,
+            "locus": locus,
+            "v_call": f"{locus}V{gene + 1}",
+            "n_cells": n_genes - gene,
+            "fraction": fractions[locus] / (gene + 1),
+        }
+        for group in ("s1", "s2")
+        for locus, n_genes in loci.items()
+        for gene in range(n_genes)
+    ]
+    return GeneUsage(
+        table=pd.DataFrame(rows),
+        group_keys=pd.DataFrame(
+            {"sample": ["s1", "s2"]}, index=pd.Index(["s1", "s2"], name="group")
+        ),
+        source=source,
+        genes=("v_call",),
+        level="gene",
+        slots=("VJ_1", "VDJ_1"),
+        count="cells",
+        group_by=("sample",),
+        groups=None,
+        cell_selection=None,
+        n_cells=10,
+    )
+
+
+def test_locus_heatmaps_share_the_largest_fraction_of_any_locus(repertoire) -> None:
+    from cytearc import plotting
+
+    # The first locus, IGH, holds 0.4 at most, and the third, TRA, 0.9.
+    usage = _gene_usage(
+        repertoire.receptors,
+        {"IGH": 2, "IGK": 1, "TRA": 3, "TRB": 2, "TRG": 1},
+        {"IGH": 0.4, "IGK": 0.2, "TRA": 0.9, "TRB": 0.6, "TRG": 0.3},
+    )
+    # A figure of a record of cells reads nothing from the store.
+    result = plotting.gene_usage(object(), usage, show=False)
+    try:
+        for locus, ax in result.axes.items():
+            (image,) = ax.images
+            assert (image.norm.vmin, image.norm.vmax) == (0.0, 0.9), locus
+        # Heatmaps stand two to a row, in three rows.
+        rows = [ax.get_subplotspec().rowspan.start for ax in result.axes.values()]
+        assert rows == [0, 0, 1, 1, 2]
+    finally:
+        result.close()
+    # A row of heatmaps grows with the genes drawn and stops where an axis
+    # stops naming them, at 40: five loci of 60 genes stand in three rows.
+    tall = _gene_usage(
+        repertoire.receptors,
+        dict.fromkeys(("IGH", "IGK", "TRA", "TRB", "TRG"), 60),
+        dict.fromkeys(("IGH", "IGK", "TRA", "TRB", "TRG"), 0.5),
+    )
+    for max_genes, named, axis in (
+        (10, 10, "V gene (10 of 60)"),
+        (40, 40, "V gene (40 of 60)"),
+        (60, 40, "V gene"),
+    ):
+        result = plotting.gene_usage(object(), tall, max_genes=max_genes, show=False)
+        try:
+            width, height = result.figure.get_size_inches()
+            assert width == MAX_FIGURE_WIDTH_INCHES
+            assert height == pytest.approx(3 * (1.2 + 0.18 * named))
+            assert result.axes["TRA"].get_ylabel() == axis
+        finally:
             result.close()

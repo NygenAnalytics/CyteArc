@@ -830,7 +830,7 @@ class DataStorePlotAccessor:
         self,
         alleles: ArtifactRef,
         *,
-        max_sites: int = 60,
+        max_sites: int = 40,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",

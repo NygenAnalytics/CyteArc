@@ -909,7 +909,13 @@ def test_capped_counts_gather_the_values_of_the_cap_or_more(
 
 
 def test_capped_counts_refuse_what_they_cannot_count() -> None:
-    with pytest.raises(ValueError, match="cap of at least 1"):
+    with pytest.raises(ValueError, match="^cap must be at least 1$"):
         capped_counts([1, 2], 0)
+    with pytest.raises(TypeError, match="^cap must be an integer$"):
+        capped_counts([1, 2], 2.9)
     with pytest.raises(ValueError, match="counts of at least 0"):
         capped_counts([1, -1], 3)
+    # Counts are whole numbers, never truncated.
+    for values in ([1.9, 2.0], [1.0, np.nan]):
+        with pytest.raises(TypeError, match="take whole numbers"):
+            capped_counts(np.asarray(values), 3)

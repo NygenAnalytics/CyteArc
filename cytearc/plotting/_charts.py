@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..utils.arguments import quoted_value
+from ..utils.arguments import integer_argument, quoted_value
 from ..utils.arrays import has_duplicates
 from ._contracts import CategoricalScale, ColorScale
 from ._deps import require_matplotlib
@@ -530,15 +530,19 @@ def capped_counts(values: Any, cap: int) -> pd.Series:
         ``cap - 1``, then ``f"{cap}+"``.
 
     Raises:
+        TypeError: If ``cap`` is not an integer, or ``values`` are not whole
+            numbers.
         ValueError: If ``cap`` is below 1, or a value is below 0.
     """
-    if int(cap) < 1:
-        raise ValueError("Capped counts need a cap of at least 1")
-    numbers = np.asarray(values, dtype=np.int64).ravel()
+    cap = integer_argument(cap, "cap", minimum=1)
+    numbers = np.asarray(values).ravel()
+    if numbers.size and not np.issubdtype(numbers.dtype, np.integer):
+        raise TypeError("Capped counts take whole numbers")
+    numbers = numbers.astype(np.int64)
     if numbers.size and int(numbers.min()) < 0:
         raise ValueError("Capped counts take counts of at least 0")
-    counts = np.bincount(np.minimum(numbers, int(cap)), minlength=int(cap) + 1)
+    counts = np.bincount(np.minimum(numbers, cap), minlength=cap + 1)
     return pd.Series(
         counts.astype(np.int64),
-        index=pd.Index([*(str(count) for count in range(int(cap))), f"{int(cap)}+"]),
+        index=pd.Index([*(str(count) for count in range(cap)), f"{cap}+"]),
     )
