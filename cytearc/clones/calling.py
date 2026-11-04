@@ -67,9 +67,12 @@ type CallingMethod = Literal["sets", "jaccard", "shared"]
 #: The ways of grouping sets into clones: identical sets alone, a Jaccard
 #: graph over them, or links through any item two sets share.
 CALLING_METHODS: tuple[str, ...] = ("sets", "jaccard", "shared")
-# Bytes of each item of a set while sets are built from pairs: the cell and
-# item of the pair, their order and the copies sorted.
-_PAIR_BYTES = 48
+# Bytes of each item of a set while sets are built from pairs: the order of
+# the pairs, their sorted cells and items and the flags of new pairs, 19 as
+# traced on 60,000 to 1,200,000 pairs; and while a cell's items and unknown
+# items are joined, the pairs of both joined, their order and sorted copies.
+_PAIR_BYTES = 24
+_JOINED_PAIR_BYTES = 48
 # Bytes of each cell of the sets built: its pointer, and its count of items
 # while the pointers are summed.
 _SET_CELL_BYTES = 16
@@ -328,7 +331,7 @@ def _unknown_sets(sets: CellSets, unknown: CellSets, ledger: MemoryLedger) -> Ce
     _peak(
         ledger,
         "the cells' items and unknown items",
-        _PAIR_BYTES * (n_held + n_unknown) + _SET_CELL_BYTES * (n_cells + 1),
+        _JOINED_PAIR_BYTES * (n_held + n_unknown) + _SET_CELL_BYTES * (n_cells + 1),
     )
     cells = np.concatenate(
         [
@@ -1277,7 +1280,11 @@ def set_clones(
         _HELD_CELL_BYTES * n_cells
         + _NODE_BYTES * n_nodes
         + _HELD_ITEM_BYTES * len(nodes.sets.items)
-        + (0 if nodes.unknown is None else _HELD_ITEM_BYTES * len(nodes.unknown.items)),
+        + (
+            0
+            if nodes.unknown is None
+            else _HELD_ITEM_BYTES * (len(nodes.unknown.items) + n_nodes + 1)
+        ),
     )
     present = np.ones(n_nodes, dtype=bool)
     unclear = np.zeros(n_nodes, dtype=bool)
@@ -1307,13 +1314,18 @@ def set_clones(
         if ambiguous:
             unclear = ambiguous_nodes(nodes, edges, ledger=ledger)
             present &= ~unclear
-            edges, edge_bytes = _kept_edges(ledger, edges, edge_bytes, present)
+            edges, kept_bytes = _kept_edges(ledger, edges, present)
+            ledger.release(edge_bytes)
+            edge_bytes = kept_bytes
         rounds = 2 if doublets else 1
         for _round in range(rounds):
             if prune:
                 pruned, removed = pruned_edges(n_nodes, edges, ledger=ledger)
-                edges, edge_bytes = _replaced_edges(ledger, edges, edge_bytes, pruned)
+                kept_bytes = ledger.hold("the graph's edges", pruned.nbytes)
+                edges = pruned
                 del pruned
+                ledger.release(edge_bytes)
+                edge_bytes = kept_bytes
                 n_pruned += removed
             if doublets:
                 cut = local_cut_vertices(
@@ -1322,7 +1334,9 @@ def set_clones(
                 removed_rounds.append(len(cut))
                 present[cut] = False
                 del cut
-                edges, edge_bytes = _kept_edges(ledger, edges, edge_bytes, present)
+                edges, kept_bytes = _kept_edges(ledger, edges, present)
+                ledger.release(edge_bytes)
+                edge_bytes = kept_bytes
     components = connected_components(n_nodes, edges, present, ledger=ledger)
     component_bytes = ledger.hold("the nodes' components", components.nbytes)
     del edges
@@ -1377,23 +1391,13 @@ def set_clones(
 
 
 def _kept_edges(
-    ledger: MemoryLedger, edges: Edges, held: int, present: np.ndarray
+    ledger: MemoryLedger, edges: Edges, present: np.ndarray
 ) -> tuple[Edges, int]:
-    """The edges between nodes that remain, charged to ``ledger`` in place of ``edges``, which held ``held`` bytes."""
+    """The edges between nodes that remain, held on ``ledger`` beside ``edges``, which the caller lets go."""
     # Each edge's two flags and their conjunction, and the edges kept.
     ledger.peak("the edges kept", (_EDGE_BYTES + 3) * len(edges), remedy=_REMEDY)
     kept = edges.kept(present[edges.first] & present[edges.second])
-    return _replaced_edges(ledger, edges, held, kept)
-
-
-def _replaced_edges(
-    ledger: MemoryLedger, edges: Edges, held: int, kept: Edges
-) -> tuple[Edges, int]:
-    """Charge ``kept`` and let go of ``edges``, which held ``held`` bytes, once the caller drops them."""
-    kept_bytes = ledger.hold("the graph's edges", kept.nbytes)
-    del edges
-    ledger.release(held)
-    return kept, kept_bytes
+    return kept, ledger.hold("the graph's edges", kept.nbytes)
 
 
 def _node_modalities(

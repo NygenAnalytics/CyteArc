@@ -79,6 +79,7 @@ from ...metadata.rows import (
     read_text_rows,
     read_whole,
     read_whole_text,
+    text_width,
 )
 from ...metadata.selection import (
     CELL_VALUE_NAMES,
@@ -568,9 +569,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         join = CellBarcodeJoin(cell_ids, ledger=ledger, store_ids=ids)
         assigner = CloneAssigner(cell_ids, multiple=policy, ledger=ledger)
         # Rows are parsed in chunks sized by the widest file's fields and its
-        # longest sampled row, beside the cell IDs that a file's prefix, suffix
-        # or pattern derives from each barcode.
-        row_chars = max(layout.row_chars for layout in layouts)
+        # longest sampled row, whose barcodes are at least about as long as
+        # the cells' IDs, beside the cell IDs that a file's prefix, suffix or
+        # pattern derives from each barcode.
+        row_chars = max(text_width(ids), *(layout.row_chars for layout in layouts))
         row_bytes = (
             _PARSED_ROW_BYTES
             + _PARSED_FIELD_BYTES * max(layout.n_fields for layout in layouts)
