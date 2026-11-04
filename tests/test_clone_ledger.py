@@ -25,6 +25,7 @@ from cytearc.clones.sequences import neighbor_pairs
 from cytearc.datastore._operations import clones as clone_operations
 from cytearc.datastore._operations.clone_steps import text_file_write_bytes
 from cytearc.metadata.rows import metadata_column_stamp
+from cytearc.storage.arrays import MISSING_MASK_PREFIX, zarr_write_buffer_bytes
 from cytearc.storage.content_stamps import (
     stored_content_stamp,
     stored_content_stamp_bytes,
@@ -35,7 +36,6 @@ from cytearc.utils.memory_budget import (
     MemoryLedger,
 )
 from cytearc.writers.clone_tables import write_clone_matrix, write_clone_table
-from cytearc.storage.arrays import MISSING_MASK_PREFIX
 from tests.clone_helpers import every_cell, write_cells_store
 from tests.storage_helpers import insert_nullable_cell_column
 from tests.memory_helpers import (
@@ -535,9 +535,12 @@ def test_clones_of_a_column_run_at_the_budget_that_their_refusals_name(
     # Each block takes half of the room, so a larger budget reads larger
     # blocks: the call runs at every budget from the one its refusals name,
     # which a byte less may run too, and holds no more than it. Numbers in
-    # blocks of about 1,900 labels climb through 112 refusals.
+    # blocks of about 1,900 labels climb through 112 refusals to the budget
+    # that the save needs, which counts a buffer for each write that Zarr
+    # may run at once, 1.25 MiB from Python 3.14, beside the bound.
     budget, _refusals, ref, peak = budget_that_runs(store, save, max_refusals=200)
-    assert peak is not None and peak <= budget <= at_most * peak, (budget, peak)
+    assert peak is not None
+    assert peak <= budget <= at_most * peak + zarr_write_buffer_bytes(), (budget, peak)
     assert ref.kind == "clones"
     # The labels are read a block at a time, after the stamp of the column.
     _result, taken = charges(lambda: save(store))
