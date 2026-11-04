@@ -140,15 +140,18 @@ def _require_budget(
 
 
 def _resident_ledger(store: Any, resident_bytes: int) -> MemoryLedger:
-    """A ledger of the store's budget that holds ``resident_bytes``, for a step that checked its budget with :func:`_require_budget`.
+    """A ledger of the store's budget that holds ``resident_bytes``, for a step that checks its budget with :func:`_require_budget`.
 
     The count streams and bands plan within such a ledger's room as they plan
-    within any operation's ledger.
+    within any operation's ledger, and the step's check, not the ledger,
+    refuses a budget that does not hold them.
     """
     ledger = MemoryLedger(
         store.memoryBytes, "Streaming counts", codec_threads=store.nthreads
     )
-    ledger.hold("what the step holds beside its counts", resident_bytes)
+    # The step's own check refuses what does not fit, in its own words, so
+    # the ledger carries the bytes to the stream's plan without refusing them.
+    ledger.charged = int(resident_bytes)
     return ledger
 
 
@@ -283,18 +286,20 @@ def _count_stream(
     item: str,
     scratch_bytes_per_row: int = 0,
 ) -> Iterable[np.ndarray]:
-    """Stream the row blocks of ``counts`` within the ledger's room, after charging one row of them as ``item``.
+    """Stream the row blocks of ``counts`` within the ledger's room, after charging a whole block of them as ``item``.
 
-    The stream holds at least one row of counts beside what the ledger holds,
-    as :func:`_stream_bytes` counts it, which the ledger refuses beyond its
-    budget; it then reads blocks of up to a stored chunk of rows, and as many
-    ahead as the room holds, beside ``ledger.held_bytes``. Once the blocks
-    are read, the ledger counts the chunk that the last read can still hold.
+    The stream holds a block of the rows of a stored chunk beside what the
+    ledger holds, as :func:`_stream_bytes` counts it, which the ledger
+    refuses beyond its budget: a smaller block decodes the same chunk again
+    for each block, so it would save little memory for much time. The stream
+    then reads as many blocks ahead as the room holds, beside
+    ``ledger.held_bytes``. Once the blocks are read, the ledger counts the
+    chunk that the last read can still hold.
     """
-    least, full = _stream_bytes(counts, scratch_bytes_per_row)
-    ledger.peak(item, least)
+    _least, full = _stream_bytes(counts, scratch_bytes_per_row)
+    ledger.peak(item, full)
     room = ledger.room
-    ledger.peak(item, full if room is None else max(least, room))
+    ledger.peak(item, full if room is None else max(full, room))
     blocks: Iterator[np.ndarray] = counts._stream_blocks(
         nthreads=nthreads,
         msg=msg,

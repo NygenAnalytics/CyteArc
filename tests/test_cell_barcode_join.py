@@ -792,9 +792,12 @@ def test_guide_calls_with_every_option_run_within_the_budget_that_their_refusal_
         ),
     )
 
-    # One refusal, before the file is parsed, names the budget that runs.
-    assert len(refusals) == 1
-    assert refusals[0].startswith("Importing the guide calls of 2700 cells holds about")
+    # Each refusal names the step that it refused, before anything is written.
+    assert refusals
+    assert all(
+        refusal.startswith("Importing the guide calls of 2700 cells holds about")
+        for refusal in refusals
+    )
     reference = open_store(path).perturbation.load_guide_calls(
         open_store(path).perturbation.import_guide_calls(
             calls,

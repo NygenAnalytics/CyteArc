@@ -651,7 +651,7 @@ def _wide_screen(folder: Path) -> Path:
 
 
 # The most times its traced peak that the budget of guide calling may be.
-_CALLING_AT_MOST = 2.5
+_CALLING_AT_MOST = 3.0
 
 
 def _audited_at(path: Path, call: Callable[[DataStore], object], budget: int) -> None:

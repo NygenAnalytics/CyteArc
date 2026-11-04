@@ -13,6 +13,7 @@ from scipy.sparse import coo_matrix
 from ..utils.progress import iter_progress
 from ..utils.files import open_binary
 from ._contigs import contig_chunks, header_fields
+from ._delimited import stripped_text
 from ._assay_names import (
     AUTO_ASSAY_NAMES,
     auto_name_feat_table,
@@ -821,10 +822,13 @@ def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
             empty, or a row calls one feature twice.
     """
     frame = _read_call_table(path)
-    barcodes = frame["cell_barcode"].str.strip().to_numpy(dtype=object)
-    declared_text = frame["num_features"].str.strip()
-    feature_text = frame["feature_call"].str.strip()
-    umi_text = frame["num_umis"].str.strip()
+    # The fields are stripped and split one at a time, without pandas' .str
+    # accessor, which pandas 2 keeps in a reference cycle with its text.
+    barcodes = stripped_text(frame["cell_barcode"]).to_numpy(dtype=object)
+    declared_text = stripped_text(frame["num_features"])
+    feature_text = stripped_text(frame["feature_call"])
+    umi_text = stripped_text(frame["num_umis"])
+    del frame
     blank = (
         (barcodes == "")
         & (declared_text == "").to_numpy()
@@ -882,10 +886,12 @@ def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
             f"Rows with num_features 0 list calls on lines {_line_numbers(stray)}"
         )
     called = np.flatnonzero(~uncalled)
-    feature_lists = feature_text.iloc[called].str.split("|")
-    umi_lists = umi_text.iloc[called].str.split("|")
-    feature_lengths = feature_lists.str.len().to_numpy(dtype=np.int64)
-    umi_lengths = umi_lists.str.len().to_numpy(dtype=np.int64)
+    feature_lists = [text.split("|") for text in feature_text.iloc[called].tolist()]
+    umi_lists = [text.split("|") for text in umi_text.iloc[called].tolist()]
+    feature_lengths = np.fromiter(
+        map(len, feature_lists), dtype=np.int64, count=len(feature_lists)
+    )
+    umi_lengths = np.fromiter(map(len, umi_lists), dtype=np.int64, count=len(umi_lists))
     mismatched = called[
         (feature_lengths != counts[called]) | (umi_lengths != counts[called])
     ]
@@ -896,9 +902,16 @@ def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
         )
     rows = np.repeat(called, counts[called]).astype(np.int64)
     if len(rows):
-        features = feature_lists.explode().str.strip().to_numpy(dtype=object)
+        features = np.asarray(
+            [piece.strip() for pieces in feature_lists for piece in pieces],
+            dtype=object,
+        )
         umi_values = pd.to_numeric(
-            umi_lists.explode().str.strip(), errors="coerce"
+            pd.Series(
+                [piece.strip() for pieces in umi_lists for piece in pieces],
+                dtype=object,
+            ),
+            errors="coerce",
         ).to_numpy(dtype=np.float64)
     else:
         features = np.empty(0, dtype=object)

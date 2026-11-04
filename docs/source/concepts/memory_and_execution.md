@@ -99,7 +99,7 @@ The error holds the same numbers as `needed_bytes` and `budget_bytes`, and the s
 - what NumPy holds in a step whatever its size, the objects of the arrays it makes and the fixed buffers of its sorts and set operations: `NUMPY_STEP_BYTES`, 24 KiB, as traced at most 19 KB in each step of clone calling on 1 to 50 cells;
 - a stamp of an array's stored chunks, as `from_column` takes of its column: twice the stored bytes of the largest batch of chunks fetched at once, by their file sizes where the store reports them and decoded otherwise, beside 32 KiB and 6 KiB for each chunk fetched;
 - writing an artifact: what `cell_data_write_bytes` states, which counts the last chunk that the array written before left behind beside each array's first chunk;
-- a stream of counts, as guide calling streams the guide counts: one row of counts and the stream's decode beside what the call holds, which the refusal names, then blocks of up to a stored chunk of rows, as many ahead as the budget leaves room for, and once the stream ends, the chunk that its last read can still hold.
+- a stream of counts, as guide calling streams the guide counts: a block of the rows of a stored chunk and the stream's decode beside what the call holds, since a smaller block would decode the same chunk again for each block, then as many blocks ahead as the budget leaves room for, and once the stream ends, the chunk that its last read can still hold.
 
 Every other memory check raises a `MemoryBudgetError` with the same three fields and keeps its own message, which ends with the bytes the step needs where it named none:
 

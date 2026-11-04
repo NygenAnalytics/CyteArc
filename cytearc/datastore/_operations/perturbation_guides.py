@@ -934,12 +934,14 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         reports both again. Two barcodes that name one cell raise
         ``ValueError``.
 
-        The memory budget is checked before the call file is parsed, from its
-        rows, ``|`` separators and bytes, counted in one streamed pass: it
-        must hold the parsed file, the selected cells' IDs, the cell IDs that
-        the prefix, suffix and pattern derive and the join's matching of them,
-        the padded calls, as wide as the most calls of one row, and the text
-        of their labels, and the refusal names a budget that runs the import.
+        Each step is charged to one memory ledger before it allocates, from
+        the file's rows, ``|`` separators and bytes, counted in one streamed
+        pass before the file is parsed: the parsed file, the selected cells'
+        IDs, the cell IDs that the prefix, suffix and pattern derive and the
+        join's matching of them, the padded calls, as wide as the most calls
+        of one row, the guide counts that stream to summarise each cell, and
+        the text of the labels. A refusal names the step and the budget that
+        passes it, before anything is written.
 
         The artifact's ``values`` hold the called guide's ID for a cell with
         one call, ``"Negative"`` for a cell with none, and ``"Multiple"`` for a
@@ -997,8 +999,9 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 cell.
             PermissionError: If the store is read-only and the calls are not
                 saved yet.
-            MemoryError: If the import does not fit the memory budget; the
-                message names a budget that runs it.
+            MemoryBudgetError: If a step of the import does not fit the
+                memory budget; the refusal names the step and the budget that
+                passes it.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...readers.cellranger import PROTOSPACER_SCAN_BYTES, protospacer_calls_size
@@ -1318,28 +1321,23 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
 
         ``counts`` are the selected cells' guide counts, as
         ``assay.rawData[cell_index, :]``. The budget must hold the least that
-        the histograms hold beside one row of counts before the counts are
-        read; the store must then be writable for ``operation``. The counts
-        stream in full blocks when the budget holds them beside the
-        histograms' least, and in smaller ones otherwise, and the histograms
-        take the rest, which they charge as they grow. Returns the fits and
-        the histograms, which the caller saves.
+        the histograms hold beside a block of counts before the counts are
+        read, a block of the rows of a stored chunk; the store must then
+        be writable for ``operation``. The counts stream in such blocks, and
+        the histograms take the rest, which they charge as they grow. Returns
+        the fits and the histograms, which the caller saves.
         """
         n_cells = len(codes)
         histogram_least = histogram_bytes(n_samples, n_guides, n_cells, n_distinct=0)
-        stream_least, stream_full = _stream_bytes(counts)
+        # A block of the rows of a stored chunk of counts, since a smaller
+        # block decodes the same chunk again for each block.
+        _stream_least, stream_full = _stream_bytes(counts)
         ledger.peak(
-            "the guide count histograms' least beside one row of counts",
-            stream_least + histogram_least,
+            "the guide count histograms' least beside a block of counts",
+            stream_full + histogram_least,
         )
         self._require_writable(operation)
-        room = ledger.room
-        stream_memory = (
-            stream_full if room is None else min(stream_full, room - histogram_least)
-        )
-        streaming = ledger.hold(
-            "the guide counts read for the histograms", stream_memory
-        )
+        streaming = ledger.hold("the guide counts read for the histograms", stream_full)
         blocks = counts._stream_blocks(
             nthreads=self.nthreads,
             msg=f"({assay.name}) Counting guide UMIs",
@@ -1348,7 +1346,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             resident_bytes=(
                 ledger.held_bytes
                 if ledger.budget is None
-                else ledger.budget - stream_memory
+                else ledger.budget - stream_full
             ),
             memory_bytes=ledger.budget,
         )
@@ -1361,8 +1359,8 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             # call holds with the streamed counts. Distinct counts grow about
             # as fast as the rows read, or slower, so while rows remain the
             # histograms of every row are estimated from those read; with the
-            # budget named, the counts stream in full blocks and the
-            # histograms get at least what they needed where they stopped.
+            # budget named, the histograms get at least what they needed where
+            # they stopped.
             needed = error.needed_bytes - ledger.held_bytes
             item = error.item
             if error.counts_remain:
@@ -1376,7 +1374,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             raise memory_refusal(
                 ledger.doing,
                 item,
-                ledger.held_bytes - stream_memory + stream_full + needed,
+                ledger.held_bytes + needed,
                 int(error.budget_bytes),
                 remedy="pass a smaller cell_selection or fewer samples",
             ) from error
@@ -1567,13 +1565,16 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         memory budget: once to count each guide's UMIs and once to call. The
         histograms grow with the distinct UMI counts of each guide in each
         sample, many more in a screen whose cells carry many guides, and take
-        what the counts leave of the budget once they stream in full blocks.
-        The calls are planned before the calling pass reads a count: each
+        what the counts leave of the budget once they stream in blocks of the
+        rows of a stored chunk. Each step is charged to one memory ledger
+        before it allocates, the calling pass before it reads a count: each
         cell's detected guides bound its calls under ``fixed`` and the
         fitted methods, whose fits give the number of calls, and
-        ``top_guide`` makes at most one call per cell. A refusal names a
-        budget that gets past the point where it stopped, and says when more
-        counts remained to be read.
+        ``top_guide`` makes at most one call per cell. A refusal names the
+        step and the budget that passes it; the histograms' refusal names a
+        budget that gets past the point where they stopped, and says when
+        more counts remained to be read. The fits are saved once the calls
+        that they make have passed their steps.
 
         The calls are saved as a ``guide_calls`` artifact, as
         :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.import_guide_calls`
