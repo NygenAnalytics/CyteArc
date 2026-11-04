@@ -1157,31 +1157,44 @@ def test_legends_of_a_scale_list_its_first_80_entries() -> None:
 def test_log_axes_of_values_read_plain_numbers(ax) -> None:
     ax.plot([0.2, 3.0, 60.0], [1, 2, 3])
     ax.set_xscale("log")
+    ax.set_xlim(0.1, 100.0)
     log_values(ax.xaxis)
     major = ax.xaxis.get_major_formatter()
     assert major(0.1) == "0.1" and major(100) == "100" and major(1e6) == "1,000,000"
     ax.figure.canvas.draw()
+    # Matplotlib versions differ in the ticks they label beyond the limits.
     labels = [
         tick.get_text()
         for tick in [*ax.get_xticklabels(), *ax.get_xticklabels(minor=True)]
-        if tick.get_text()
+        if tick.get_text() and 0.1 <= tick.get_position()[0] <= 100.0
     ]
     # Every decade drawn reads as a plain number, never as a power of ten,
     # and the ticks between decades of an axis of several are not labelled.
-    assert sorted(labels, key=lambda label: float(label)) == ["0.1", "1", "10", "100"]
-    for low, high, expected in (
-        (1e-6, 0.9, {"0.000001", "0.0001", "0.01", "1"}),
-        (1e-3, 1e11, {"0.001", "1,000", "100,000,000,000"}),
-    ):
+    assert sorted(labels, key=lambda label: float(label.replace(",", ""))) == [
+        "0.1",
+        "1",
+        "10",
+        "100",
+    ]
+    # Axes down to a millionth and up to a hundred billion, whose labelled
+    # decades Matplotlib versions thin differently, write theirs out too.
+    for low, high in ((1e-6, 0.9), (1e-3, 1e11)):
         figure, axis = plt.subplots(figsize=(4, 3))
         try:
             axis.plot([1, 2], [low, high])
             axis.set_yscale("log")
+            axis.set_ylim(low, high)
             log_values(axis.yaxis)
             figure.canvas.draw()
-            drawn = {tick.get_text() for tick in axis.get_yticklabels()} - {""}
-            assert expected <= drawn
-            assert not [label for label in drawn if "e" in label]
+            drawn = [
+                tick.get_text()
+                for tick in axis.get_yticklabels()
+                if tick.get_text() and low <= tick.get_position()[1] <= high
+            ]
+            assert not [label for label in drawn if "e" in label], drawn
+            values = sorted(float(label.replace(",", "")) for label in drawn)
+            assert values[0] <= 100 * low and values[-1] >= high / 100, drawn
+            assert all(np.log10(value) == round(np.log10(value)) for value in values)
         finally:
             plt.close(figure)
 
