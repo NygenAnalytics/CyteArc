@@ -96,6 +96,63 @@ def import_truth_clones(
         return store.clones.import_clones(path, cell_selection=selection)
 
 
+#: The clone figures, by the name of the plot that draws each.
+CLONE_FIGURES = (
+    "clone_abundance",
+    "clonal_expansion",
+    "clonal_rarefaction",
+    "clonal_diversity",
+    "clone_overlap",
+    "clone_tracking",
+    "clone_coupling",
+    "clone_fate_bias",
+)
+
+
+def clone_figure_calls(
+    store: "DataStore", clones: "ArtifactRef"
+) -> dict[str, Callable[..., object]]:
+    """Each clone figure of some clones of the truth's store, as a call of display options.
+
+    Figures grouped by cells are grouped by sample, and the figures of
+    pairs of groups by cell type; fate bias follows the clones of d2's cells
+    to the cell types of d4's. Each summary is computed once, here.
+    """
+    store.cells.insert("is_d2", store.cells.fetch_all("sample") == "d2", overwrite=True)
+    store.cells.insert("is_d4", store.cells.fetch_all("sample") == "d4", overwrite=True)
+    plots = store.plots
+    expansion = store.clones.expansion(clones, group_by="sample")
+    rarefaction = store.clones.rarefaction(clones, group_by="sample")
+    diversity = store.clones.diversity(clones, group_by="sample")
+    overlap = store.clones.overlap(clones, group_by="cell_type")
+    tracking = store.clones.track(clones, group_by="sample", top_n=3)
+    coupling = store.clones.coupling(clones, group_by="cell_type", n_permutations=50)
+    bias = store.clones.fate_bias(
+        clones,
+        group_by="cell_type",
+        early=store.snapshot_cell_selection("is_d2"),
+        late=store.snapshot_cell_selection("is_d4"),
+    )
+    return {
+        "clone_abundance": lambda **options: plots.clone_abundance(
+            clones, group_by="sample", **options
+        ),
+        "clonal_expansion": lambda **options: plots.clonal_expansion(
+            expansion, **options
+        ),
+        "clonal_rarefaction": lambda **options: plots.clonal_rarefaction(
+            rarefaction, **options
+        ),
+        "clonal_diversity": lambda **options: plots.clonal_diversity(
+            diversity, **options
+        ),
+        "clone_overlap": lambda **options: plots.clone_overlap(overlap, **options),
+        "clone_tracking": lambda **options: plots.clone_tracking(tracking, **options),
+        "clone_coupling": lambda **options: plots.clone_coupling(coupling, **options),
+        "clone_fate_bias": lambda **options: plots.clone_fate_bias(bias, **options),
+    }
+
+
 def overlap_reference(x: Mapping[object, int], y: Mapping[object, int]) -> dict:
     """The overlap indices of two groups, from each one's cells of each clone.
 

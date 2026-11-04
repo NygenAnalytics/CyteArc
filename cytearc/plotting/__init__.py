@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         run_recipe as run_recipe,
     )
     from .clones import (
+        clonal_diversity as clonal_diversity,
         clonal_expansion as clonal_expansion,
         clonal_rarefaction as clonal_rarefaction,
         clone_abundance as clone_abundance,
@@ -121,6 +122,7 @@ __all__ = [
     "association_calibration",
     "association_volcano",
     "barcode_calls",
+    "clonal_diversity",
     "clonal_expansion",
     "clonal_rarefaction",
     "clone_abundance",
@@ -197,6 +199,7 @@ __getattr__, __dir__ = _lazy_facade(
         "association_calibration": ".perturbation",
         "association_volcano": ".perturbation",
         "barcode_calls": ".lineage_barcodes",
+        "clonal_diversity": ".clones",
         "clonal_expansion": ".clones",
         "clonal_rarefaction": ".clones",
         "clone_abundance": ".clones",

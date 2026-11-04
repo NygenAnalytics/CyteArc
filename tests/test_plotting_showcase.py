@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -175,6 +176,63 @@ def test_showcase_matches_visual_references(
             str(actual),
             tol=tolerance,
         )
+        if comparison is not None:
+            failures.append(str(comparison))
+    assert not failures, "\n\n".join(failures)
+
+
+_CLONE_REFERENCES = Path(__file__).parent / "visual" / "clones"
+
+
+@pytest.mark.slow
+@pytest.mark.visual
+def test_clone_figures_match_visual_references(tmp_path):
+    """Each clone figure of the truth's clones, and of its clonotypes' abundance.
+
+    A figure without a reference writes one into ``tests/visual/clones`` and
+    fails, so that a new figure's reference is reviewed before it is
+    committed; a figure whose drawing changes on purpose gets a new
+    reference once its old one is moved out of the folder.
+    """
+    if os.environ.get("CYTEARC_RUN_VISUAL_REGRESSION") != "1":
+        pytest.skip("Set CYTEARC_RUN_VISUAL_REGRESSION=1 to compare clone figures")
+    from matplotlib.testing.compare import compare_images
+
+    from tests.clone_helpers import (
+        clone_figure_calls,
+        import_truth_clones,
+        import_truth_receptors,
+        write_truth_store,
+    )
+    from tests.clone_truth import clone_truth, receptor_truth
+
+    truth = clone_truth()
+    store = write_truth_store(tmp_path / "store.zarr", truth)
+    clones = import_truth_clones(store, truth, tmp_path)
+    receptors = import_truth_receptors(store, receptor_truth(truth), tmp_path)
+    clonotypes = store.repertoire.clonotypes(receptors, receptor_arms="any")
+    figures = clone_figure_calls(store, clones)
+    figures["clone_abundance_clonotypes"] = lambda **options: (
+        store.plots.clone_abundance(clonotypes, group_by="sample", **options)
+    )
+    expected = {f"{name}.png" for name in figures}
+    assert {path.name for path in _CLONE_REFERENCES.glob("*.png")} <= expected
+    tolerance = float(os.environ.get("CYTEARC_VISUAL_TOLERANCE", "1.5"))
+    failures = []
+    for name, draw in figures.items():
+        actual = tmp_path / f"{name}.png"
+        result = draw(show=False)
+        try:
+            result.save(actual, dpi=100)
+        finally:
+            result.close()
+        reference = _CLONE_REFERENCES / actual.name
+        if not reference.exists():
+            _CLONE_REFERENCES.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(actual, reference)
+            failures.append(f"wrote the missing reference {reference}; review it")
+            continue
+        comparison = compare_images(str(reference), str(actual), tol=tolerance)
         if comparison is not None:
             failures.append(str(comparison))
     assert not failures, "\n\n".join(failures)

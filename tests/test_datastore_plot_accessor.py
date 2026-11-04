@@ -11,7 +11,13 @@ import zarr
 from zarr.storage import MemoryStore
 
 import cytearc.plotting as splt
-from cytearc.clones import CloneCoupling, CloneOverlap, CloneTracking, Rarefaction
+from cytearc.clones import (
+    ClonalDiversity,
+    CloneCoupling,
+    CloneOverlap,
+    CloneTracking,
+    Rarefaction,
+)
 from cytearc.datastore.datastore import DataStore
 from cytearc.datastore.plot_accessor import DataStorePlotAccessor
 from cytearc.repertoire import GeneUsage, Spectratype
@@ -23,6 +29,7 @@ _STORE_PLOT_METHODS = (
     "association_calibration",
     "association_volcano",
     "barcode_calls",
+    "clonal_diversity",
     "clonal_expansion",
     "clonal_rarefaction",
     "clone_abundance",
@@ -177,6 +184,17 @@ _COUPLING = CloneCoupling(
     group_by=(),
     groups=None,
     cell_selection=None,
+)
+_DIVERSITY = ClonalDiversity(
+    indices=None,  # type: ignore[arg-type]
+    hill=None,  # type: ignore[arg-type]
+    group_keys=None,  # type: ignore[arg-type]
+    clones=_CLONES_REF,
+    group_by=("sample",),
+    groups=None,
+    cell_selection=None,
+    size=10,
+    coverage=0.9,
 )
 _RAREFACTION = Rarefaction(
     curves=None,  # type: ignore[arg-type]
@@ -497,10 +515,23 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             (_EXPANSION_REF,),
             {"group_by": "cluster", "count": "clones"},
         ),
+        ("clonal_diversity", (_DIVERSITY,), {"indices": ["chao1", "gini"]}),
         ("clonal_rarefaction", (_RAREFACTION,), {"base": "coverage"}),
-        ("clone_overlap", (_OVERLAP,), {"index": "jaccard"}),
+        (
+            "clone_overlap",
+            (_OVERLAP,),
+            {"index": "jaccard", "color_scale": splt.ColorScale(vmax=1.0)},
+        ),
         ("clone_tracking", (_TRACKING,), {"order": ["d0", "d7"]}),
-        ("clone_coupling", (_COUPLING,), {"value": "coupling", "theme": "paper"}),
+        (
+            "clone_coupling",
+            (_COUPLING,),
+            {
+                "value": "coupling",
+                "theme": "paper",
+                "color_scale": splt.ColorScale(cmap="magma"),
+            },
+        ),
         ("clone_fate_bias", (_FATE_BIAS_REF,), {"max_clones": 12, "normalize": True}),
         (
             "receptor_qc",
@@ -571,6 +602,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("clusters"))
     elif name == "clone_abundance":
         expected_args.append(expected_kwargs.pop("clones"))
+    elif name == "clonal_diversity":
+        expected_args.append(expected_kwargs.pop("diversity"))
     elif name == "clonal_rarefaction":
         expected_args.append(expected_kwargs.pop("rarefaction"))
     elif name == "clone_overlap":

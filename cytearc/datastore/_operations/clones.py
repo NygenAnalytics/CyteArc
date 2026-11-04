@@ -87,7 +87,7 @@ from ...metadata.selection import (
     category_codes,
     cell_selection_indices,
 )
-from ...repertoire.clonotypes import clonotype_noun
+from ...repertoire.clonotypes import clonotype_nouns
 from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
@@ -1115,12 +1115,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             array_row_selection_parts(codes)[0],
         )
 
-    def _clone_figure_noun(self, clones: ArtifactRef) -> str:
-        """What figures call the clones of a clone artifact, in the plural.
+    def _clone_figure_nouns(self, clones: ArtifactRef) -> tuple[str, str]:
+        """What figures call the clones of a clone artifact, plural and singular.
 
-        Clones are ``"clones"``, and clonotypes ``"clonotypes"``, or
-        ``"clonotype clusters"`` when a distance metric linked their chains,
-        as their definition logs them.
+        Clones are ``"clones"``, one ``"clone"``, and clonotypes
+        ``"clonotypes"``, or ``"clonotype clusters"`` when a distance metric
+        linked their chains, as their definition logs them.
 
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
@@ -1130,9 +1130,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         """
         self._clone_group(clones)
         if clones.kind != ClonotypeArguments.artifact_kind:
-            return "clones"
+            return "clones", "clone"
         parameters = inspect_artifact(self.zw, clones).parameters or {}
-        return clonotype_noun(str(parameters["metric"]))
+        return clonotype_nouns(str(parameters["metric"]))
 
     def _clone_figure_labels(
         self, clones: ArtifactRef, ids: Sequence[str]

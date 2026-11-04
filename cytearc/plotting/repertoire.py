@@ -19,9 +19,11 @@ from ._figure import (
     close_figures_on_error,
     normalize_axes_target,
 )
-from ._groups import cell_groups
+from ._clone_names import clone_names
+from ._groups import plot_groups
 from ._style import (
     LEGEND_SIDE_MAX_ENTRIES,
+    RECEPTOR_TYPE_SCALE,
     apply_figure_chrome,
     capped_figsize,
     categorical_color_map,
@@ -33,13 +35,6 @@ from ._style import (
 __all__ = ["gene_pairing", "gene_usage", "receptor_qc", "spectratype"]
 
 _QC_PANELS = ("receptor_type", "chain_pairing", "chains_per_cell")
-_RECEPTOR_TYPE_COLORS = {
-    "TCR": "#2b6cb0",
-    "BCR": "#dd6b20",
-    "ambiguous": "#805ad5",
-    "multichain": "#c53030",
-    "no IR": "#bdbdbd",
-}
 _CHAIN_PAIRING_COLORS = {
     "single pair": "#2f855a",
     "orphan VJ": "#9ae6b4",
@@ -202,13 +197,12 @@ def receptor_qc(
         receptors, fields=()
     )
     cells = loaded.cells
-    labels, names, group_name = cell_groups(
-        store, receptors, group_by=group_by, groups=groups
+    plotted = plot_groups(
+        store, receptors, group_by=group_by, groups=groups, n_cells=len(cells)
     )
-    grouped = labels is not None
+    labels, names, group_name = plotted.codes, list(plotted.names), plotted.title
+    grouped = bool(plotted.columns)
     fractions = grouped if normalize is None else normalize
-    if labels is None:
-        labels, names = np.zeros(len(cells), dtype=np.int64), ["all cells"]
     keep = labels >= 0
     receptor_counts = _category_counts(
         cells["receptor_type"].to_numpy(dtype=object),
@@ -246,7 +240,7 @@ def receptor_qc(
             receptor_counts,
             names,
             RECEPTOR_TYPES,
-            _RECEPTOR_TYPE_COLORS,
+            dict(RECEPTOR_TYPE_SCALE.palette or {}),
             grouped=grouped,
             normalize=fractions,
             title="Receptor type",
@@ -341,10 +335,7 @@ def _counted(store: Any, source: ArtifactRef, count: str) -> str:
     """What the counts count, as figures name them: cells, clonotypes or clusters."""
     if count != "clonotypes":
         return "cells"
-    method = getattr(store, "_clone_figure_noun", None)
-    if not callable(method):
-        raise TypeError("store does not provide what figures call clonotypes")
-    return str(method(source))
+    return clone_names(store, source).plural
 
 
 def _heatmap(

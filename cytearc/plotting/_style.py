@@ -28,6 +28,24 @@ LEGEND_ON_DATA_MAX_CATEGORIES = 40
 LEGEND_SIDE_ENTRIES_PER_COLUMN = 20
 LEGEND_SIDE_MAX_COLUMNS = 4
 LEGEND_SIDE_MAX_ENTRIES = LEGEND_SIDE_ENTRIES_PER_COLUMN * LEGEND_SIDE_MAX_COLUMNS
+# The charts of clone figures name at most this many items on an axis, and
+# print a heatmap's values when it has at most this many rows and columns;
+# their tables hold every item.
+MAX_NAMED_ITEMS = 40
+MAX_PRINTED_VALUES = 12
+# The colours of immune receptor types, in the order of
+# cytearc.repertoire.chains.RECEPTOR_TYPES, for every figure whose bars or
+# groups are receptor types.
+RECEPTOR_TYPE_SCALE = CategoricalScale(
+    order=("TCR", "BCR", "ambiguous", "multichain", "no IR"),
+    palette={
+        "TCR": "#2b6cb0",
+        "BCR": "#dd6b20",
+        "ambiguous": "#805ad5",
+        "multichain": "#c53030",
+        "no IR": "#bdbdbd",
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -578,6 +596,35 @@ def size_legend_layout(
     areas = scale.areas(np.asarray(values, dtype=np.float64))
     largest = max(float(np.max(areas, initial=0.0)), float(max_area or 0.0))
     return areas, LegendMarkerBoxes(float(np.sqrt(largest)))
+
+
+def item_inches(n_items: int, *, per_item: float, base: float, minimum: float) -> float:
+    """Return a panel's extent along an axis of items, such as clones or groups.
+
+    The extent is ``base`` and ``per_item`` for each item up to the
+    ``MAX_NAMED_ITEMS`` that an axis names, and at least ``minimum``, so a
+    panel of many items stops growing where its names stop.
+    """
+    return max(float(minimum), base + per_item * min(int(n_items), MAX_NAMED_ITEMS))
+
+
+def figure_size(
+    n_panels: int, *, panel: tuple[float, float], columns: int = 1
+) -> tuple[tuple[float, float], int]:
+    """Return a figure's default size and the columns that its panels fill.
+
+    Panels of ``panel`` inches fill rows of at most ``columns``, and the
+    figure is at most a page wide, ``MAX_FIGURE_WIDTH_INCHES``. A row of
+    several panels that would be wider shrinks them to share the page,
+    keeping their shape, and one column of panels narrows to the page,
+    keeping its height.
+    """
+    n_columns = max(1, min(int(columns), int(n_panels)))
+    n_rows = -(-int(n_panels) // n_columns)
+    width = panel[0] * n_columns
+    shrink = min(1.0, MAX_FIGURE_WIDTH_INCHES / width)
+    height = panel[1] * (shrink if n_columns > 1 else 1.0)
+    return (width * shrink, height * n_rows), n_columns
 
 
 def capped_figsize(

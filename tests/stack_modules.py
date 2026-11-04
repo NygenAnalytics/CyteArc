@@ -18,6 +18,8 @@ STACK_MODULES = (
     "datastore/_operations/repertoire.py",
     "datastore/_operations/variants.py",
     "metadata/records.py",
+    "plotting/_charts.py",
+    "plotting/_clone_names.py",
     "plotting/_groups.py",
     "plotting/clones.py",
     "plotting/lineage_barcodes.py",
