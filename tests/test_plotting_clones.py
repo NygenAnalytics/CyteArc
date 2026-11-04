@@ -1744,8 +1744,8 @@ def test_default_figure_sizes_follow_the_clones_and_groups_drawn(
     result.close()
     assert len(result.tables["top"]) == 20 * 200
     assert size == pytest.approx((7.5, 6.8))
-    # receptor_qc widens with its groups, half an inch each: a label for each
-    # of the truth's 48 cells.
+    # receptor_qc stands its three panels in one column at the page width,
+    # however many groups it draws: a label for each of the truth's 48 cells.
     store = truth_plot.store
     store.cells.insert("own", TRUTH.cell_ids.astype(object), overwrite=True)
     receptors = store.artifacts.inspect(truth_clonotypes).input_ref("receptors")
@@ -1753,4 +1753,4 @@ def test_default_figure_sizes_follow_the_clones_and_groups_drawn(
     size = tuple(qc.figure.get_size_inches())
     qc.close()
     assert qc.tables["receptor_type"]["group"].nunique() == N_CELLS
-    assert size == pytest.approx((4.0 + 0.5 * N_CELLS, 4.4))
+    assert size == pytest.approx((7.5, 3 * 2.4))

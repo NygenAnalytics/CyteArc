@@ -187,7 +187,7 @@ _CLONE_REFERENCES = Path(__file__).parent / "visual" / "clones"
 @pytest.mark.slow
 @pytest.mark.visual
 def test_clone_figures_match_visual_references(tmp_path):
-    """Each clone figure of the truth's clones, and of its clonotypes' abundance.
+    """Each clone, repertoire and lineage figure of the truth, and its clonotypes' abundance.
 
     A figure without a reference writes one into ``tests/visual/clones`` and
     fails, so that a new figure's reference is reviewed before it is
@@ -201,7 +201,9 @@ def test_clone_figures_match_visual_references(tmp_path):
     from tests.clone_helpers import (
         clone_figure_calls,
         import_truth_clones,
+        import_truth_lineage,
         import_truth_receptors,
+        repertoire_figure_calls,
         write_truth_store,
     )
     from tests.clone_truth import clone_truth, receptor_truth
@@ -215,6 +217,10 @@ def test_clone_figures_match_visual_references(tmp_path):
     figures["clone_abundance_clonotypes"] = lambda **options: (
         store.plots.clone_abundance(clonotypes, group_by="sample", **options)
     )
+    lineage = tmp_path / "lineage"
+    lineage.mkdir()
+    barcodes, alleles = import_truth_lineage(store, truth, lineage)
+    figures.update(repertoire_figure_calls(store, receptors, barcodes, alleles))
     expected = {f"{name}.png" for name in figures}
     assert {path.name for path in _CLONE_REFERENCES.glob("*.png")} <= expected
     tolerance = float(os.environ.get("CYTEARC_VISUAL_TOLERANCE", "1.5"))

@@ -106,7 +106,8 @@ def test_the_store_accessor_forwards_and_checks_its_arguments(imported) -> None:
     store, ref = imported
     result = store.plots.recorder_states(ref, show=False, theme="paper")
     plt.close(result.figure)
-    assert result.provenance.notes == ("lineage_alleles",)
+    assert result.provenance.notes == ("recorder_states",)
+    assert result.provenance.extras["alleles"] == ref.to_dict()
     with pytest.raises(ValueError, match="max_sites"):
         plotting.recorder_states(store, ref, max_sites=0, show=False)
     with pytest.raises(TypeError, match="clones.load_alleles"):
@@ -116,12 +117,14 @@ def test_the_store_accessor_forwards_and_checks_its_arguments(imported) -> None:
         drawn = plotting.recorder_states(
             store, ref, target=ax, show=False, show_legend=False
         )
-        assert drawn.axes["site_states"] is ax and not drawn.legends
+        # A hidden legend is still reported.
+        assert drawn.axes["site_states"] is ax and ax.get_legend() is None
+        assert [legend.label for legend in drawn.legends] == ["State"]
     finally:
         plt.close(figure)
 
 
-def test_alleles_without_records_draw_a_note_and_show_on_request(tmp_path):
+def test_alleles_without_records_are_refused(tmp_path):
     from tests.storage_helpers import open_store, write_count_store
 
     write_count_store(
@@ -140,11 +143,11 @@ def test_alleles_without_records_draw_a_note_and_show_on_request(tmp_path):
         ref = store.clones.import_alleles(
             path, cell_selection=store.snapshot_cell_selection()
         )
-    result = plotting.recorder_states(store, ref, show=True)
-    try:
-        ax = result.axes["site_states"]
-        assert [text.get_text() for text in ax.texts] == ["No allele records"]
-        assert result.tables["site_states"].empty
-        assert not ax.patches and not result.legends
-    finally:
-        plt.close(result.figure)
+    assert store.clones.load_alleles(ref).site_states().empty
+    figures = set(plt.get_fignums())
+    with pytest.raises(
+        ValueError, match="^The alleles hold no record, so there is nothing to plot$"
+    ):
+        plotting.recorder_states(store, ref, show=True)
+    # A refused figure leaves no figure open.
+    assert set(plt.get_fignums()) == figures

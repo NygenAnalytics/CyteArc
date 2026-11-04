@@ -1,4 +1,4 @@
-"""Charts that the figures of clones draw from tidy tables: bars, lines and heatmaps.
+"""Charts that the figures of clones, receptors and lineages draw from tidy tables.
 
 Each chart draws one panel. It names at most ``MAX_NAMED_ITEMS`` items on an
 axis, draws a titled legend beside the panel when given a legend title, and
@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..utils.arguments import quoted_value
+from ..utils.arguments import integer_argument, quoted_value
 from ..utils.arrays import has_duplicates
 from ._contracts import CategoricalScale, ColorScale
 from ._deps import require_matplotlib
@@ -29,7 +29,7 @@ from ._style import (
     scalable_values,
 )
 
-__all__ = ["draw_bars", "draw_lines", "draw_matrix", "pair_matrix"]
+__all__ = ["capped_counts", "draw_bars", "draw_lines", "draw_matrix", "pair_matrix"]
 
 # Bars fill this share of each item's slot, lines are this wide, and the
 # points on them this large.
@@ -97,6 +97,8 @@ def draw_bars(
     segment: str | None = None,
     horizontal: bool = True,
     normalize: bool = False,
+    side_by_side: bool = False,
+    numeric_items: bool = False,
     value_label: str,
     title: str | None = None,
     legend_title: str | None = None,
@@ -108,10 +110,16 @@ def draw_bars(
     and segment, and a segment that an item lacks is 0. With ``segment``,
     ``colors`` gives each segment's colour and its order the order of each
     bar's parts: the first at the left of a horizontal bar and at the top of
-    a vertical one, as the legend lists them. Without it, ``colors`` is one
+    a vertical one, as the legend lists them. ``side_by_side`` draws the
+    parts beside each other in the item's slot instead, the first at the
+    left of a vertical slot and at the top of a horizontal one, for parts
+    that are no part of one whole. Without ``segment``, ``colors`` is one
     colour, or a scale of each item's colour whose legend lists the items.
     ``normalize`` draws each item's parts as fractions of its total, 0
     without one, and a value that is not a number draws no bar.
+    ``numeric_items`` stands each bar at its item's value on a numeric axis,
+    which keeps its own ticks, such as a junction length, rather than in a
+    named slot.
 
     Returns:
         The legend of the segments, or of the items' colours, drawn beside
@@ -121,11 +129,15 @@ def draw_bars(
 
     Raises:
         ValueError: If the table is empty, an item or segment has no colour,
-            or an item takes one segment twice.
+            an item takes one segment twice, ``side_by_side`` comes without
+            ``segment``, or ``numeric_items`` with an item that is not a
+            number.
     """
     _, mpl = require_matplotlib()
     if table.empty:
         raise ValueError("A bar chart needs a row to draw")
+    if side_by_side and segment is None:
+        raise ValueError("Bars side by side take a segment column")
     items = list(pd.unique(table[item].to_numpy(dtype=object)))
     rows = pd.Index(items).get_indexer(table[item].to_numpy(dtype=object))
     scaled = isinstance(colors, CategoricalScale)
@@ -164,17 +176,35 @@ def draw_bars(
     if normalize:
         totals = np.nansum(values, axis=1, keepdims=True)
         values = np.divide(values, totals, out=np.zeros_like(values), where=totals > 0)
-    positions = np.arange(len(items))[::-1] if horizontal else np.arange(len(items))
+    if numeric_items:
+        try:
+            positions = np.asarray(items, dtype=np.float64)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Bars at numeric positions take numbers as their {item}"
+            ) from None
+    else:
+        positions = np.arange(len(items))[::-1] if horizontal else np.arange(len(items))
+    extent = _BAR_EXTENT / len(segments) if side_by_side else _BAR_EXTENT
     start = np.zeros(len(items), dtype=np.float64)
     # A vertical stack starts from its last segment, so the first ends on top.
-    for at in range(len(segments)) if horizontal else reversed(range(len(segments))):
+    stacking = horizontal or side_by_side
+    for at in range(len(segments)) if stacking else reversed(range(len(segments))):
         lengths = values[:, at]
+        where, base = positions, start
+        if side_by_side:
+            # The first part stands at the left of a vertical slot, or at the
+            # top of a horizontal one.
+            shift = (at - (len(segments) - 1) / 2) * extent
+            where = positions - shift if horizontal else positions + shift
+            base = np.zeros(len(items), dtype=np.float64)
         if horizontal:
-            ax.barh(positions, lengths, left=start, color=fills[at], height=_BAR_EXTENT)
+            ax.barh(where, lengths, left=base, color=fills[at], height=extent)
         else:
-            ax.bar(positions, lengths, bottom=start, color=fills[at], width=_BAR_EXTENT)
+            ax.bar(where, lengths, bottom=base, color=fills[at], width=extent)
         start = start + np.nan_to_num(lengths)
-    _name_items(ax, positions, [str(name) for name in items], horizontal=horizontal)
+    if not numeric_items:
+        _name_items(ax, positions, [str(name) for name in items], horizontal=horizontal)
     if normalize:
         # Fractions span the whole axis, whichever parts are empty.
         (ax.set_xlim if horizontal else ax.set_ylim)(0.0, 1.0)
@@ -406,6 +436,7 @@ def draw_matrix(
     blank_diagonal: bool = False,
     value_format: str = ".3g",
     show_legend: bool = True,
+    colorbar_beside: Sequence[Any] | None = None,
 ) -> Drawn:
     """Draw a table as a heatmap through a colour scale, with a colour bar.
 
@@ -416,6 +447,9 @@ def draw_matrix(
     A table of at most ``MAX_PRINTED_VALUES`` rows and columns prints each
     coloured value, dark on light colours and light on dark ones, and one
     of at most ``MAX_NAMED_ITEMS`` names its rows and columns.
+    ``colorbar_beside`` names the panels whose heatmaps share this one's
+    scale and limits, beside all of which the colour bar stands; by
+    default it stands beside this panel alone.
 
     Returns:
         The colour bar's legend, with the limits drawn, and the scale; the
@@ -468,7 +502,12 @@ def draw_matrix(
                 fontsize="x-small",
             )
     if show_legend:
-        colorbar = ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+        colorbar = ax.figure.colorbar(
+            image,
+            ax=ax if colorbar_beside is None else list(colorbar_beside),
+            fraction=0.046,
+            pad=0.04,
+        )
         colorbar.set_label(value_label)
     return Drawn(
         LegendSpec(
@@ -477,4 +516,33 @@ def draw_matrix(
             extras={"vmin": float(vmin), "vmax": float(vmax)},
         ),
         color_scale,
+    )
+
+
+def capped_counts(values: Any, cap: int) -> pd.Series:
+    """Count whole numbers by value, those of ``cap`` or more in one last bin.
+
+    ``values`` are counts of at least 0, such as each cell's chains, and the
+    bins are each value below ``cap`` and the values of ``cap`` or more.
+
+    Returns:
+        The count of each bin, indexed by its name: ``"0"`` to the text of
+        ``cap - 1``, then ``f"{cap}+"``.
+
+    Raises:
+        TypeError: If ``cap`` is not an integer, or ``values`` are not whole
+            numbers.
+        ValueError: If ``cap`` is below 1, or a value is below 0.
+    """
+    cap = integer_argument(cap, "cap", minimum=1)
+    numbers = np.asarray(values).ravel()
+    if numbers.size and not np.issubdtype(numbers.dtype, np.integer):
+        raise TypeError("Capped counts take whole numbers")
+    numbers = numbers.astype(np.int64)
+    if numbers.size and int(numbers.min()) < 0:
+        raise ValueError("Capped counts take counts of at least 0")
+    counts = np.bincount(np.minimum(numbers, cap), minlength=cap + 1)
+    return pd.Series(
+        counts.astype(np.int64),
+        index=pd.Index([*(str(count) for count in range(cap)), f"{cap}+"]),
     )

@@ -11,55 +11,50 @@ from ..repertoire.usage import GeneUsage, Spectratype
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import bool_argument, integer_argument, optional_bool_argument
 from ..utils.arrays import sort_categories
-from ._contracts import PlotProvenance
-from ._deps import require_matplotlib
+from ._charts import capped_counts, draw_bars, draw_lines, draw_matrix
+from ._clone_names import clone_names
+from ._contracts import CategoricalScale, ColorScale
+from ._data import store_method
 from ._figure import (
-    LegendSpec,
+    Drawn,
     PlotResult,
     close_figures_on_error,
+    finish_plot,
     normalize_axes_target,
 )
-from ._clone_names import clone_names
-from ._groups import plot_groups
+from ._groups import plot_groups, table_groups
 from ._style import (
-    LEGEND_SIDE_MAX_ENTRIES,
+    CHAIN_ARM_SCALE,
+    CHAIN_PAIRING_SCALE,
+    LOCUS_SCALE,
+    MAX_FIGURE_WIDTH_INCHES,
     RECEPTOR_TYPE_SCALE,
-    apply_figure_chrome,
-    capped_figsize,
-    categorical_color_map,
-    legend_side_columns,
-    legend_side_rows,
+    figure_size,
+    item_inches,
+    resolve_category_scale,
+    resolve_color_limits,
     theme_context,
 )
 
 __all__ = ["gene_pairing", "gene_usage", "receptor_qc", "spectratype"]
 
 _QC_PANELS = ("receptor_type", "chain_pairing", "chains_per_cell")
-_CHAIN_PAIRING_COLORS = {
-    "single pair": "#2f855a",
-    "orphan VJ": "#9ae6b4",
-    "orphan VDJ": "#68d391",
-    "extra VJ": "#4299e1",
-    "extra VDJ": "#2b6cb0",
-    "two full chains": "#1a365d",
-    "ambiguous": "#805ad5",
-    "multichain": "#c53030",
-    "no IR": "#bdbdbd",
-}
-_ARM_COLORS = {"VJ": "#2b6cb0", "VDJ": "#dd6b20"}
+# The panels of receptor_qc stand in one column at the page width, each this
+# many inches tall.
+_QC_PANEL_HEIGHT = 2.4
 # Cells with this many chains of an arm or more share the last bar.
 _MANY_CHAINS = 3
-# The figures of gene usage and junction lengths draw one panel per locus, at
-# most this many side by side.
-_LOCUS_PANELS_PER_ROW = 2
-
-
-def _store_method(store: Any, name: str, description: str | None = None) -> Any:
-    """Return a method of the store's repertoire namespace, or raise."""
-    method = getattr(getattr(store, "repertoire", None), name, None)
-    if not callable(method):
-        raise TypeError(f"store does not provide {description or name}")
-    return method
+# Locus panels of bars and lines fill rows of three at the page width, and
+# heatmaps rows of two.
+_LOCUS_PANELS_PER_ROW = 3
+_LOCUS_HEATMAPS_PER_ROW = 2
+_LOCUS_PANEL_HEIGHT = 2.4
+# A locus panel grows by this many inches for each gene it draws, as a bar
+# or as a row of a heatmap.
+_BAR_ROW_INCHES = 0.22
+_HEATMAP_ROW_INCHES = 0.18
+# What the gene fields and levels of gene usage are called on an axis.
+_SEGMENTS = {"v_call": "V", "d_call": "D", "j_call": "J", "c_call": "C"}
 
 
 def _category_counts(
@@ -89,54 +84,57 @@ def _category_table(
 
 def _draw_categories(
     ax: Any,
-    counts: np.ndarray,
-    names: Sequence[str],
-    order: Sequence[str],
-    colors: dict[str, str],
+    table: pd.DataFrame,
+    column: str,
+    vocabulary: CategoricalScale,
     *,
     grouped: bool,
     normalize: bool,
     title: str,
     show_legend: bool,
-) -> None:
-    """Draw one bar per category, or with a grouping one stacked bar per group.
+) -> Drawn | None:
+    """Draw the cells of each category of a vocabulary that holds cells.
 
-    ``counts`` holds the cells of each group, a row, in each category, a
-    column; without a grouping, its one row holds every cell.
+    Without a grouping, each category draws one bar, named on its axis, of
+    its cells or their fraction of every cell; with one, each group draws
+    one vertical bar stacked by category, under a legend of the categories.
     """
+    held = table.groupby(column, sort=False)["n_cells"].sum()
+    present = [name for name, cells in held.items() if cells > 0]
+    colors = resolve_category_scale(present, vocabulary)
+    rows = table.loc[table[column].isin(present)]
+    value_label = "Fraction of cells" if normalize else "Cells"
     if not grouped:
-        found = counts[0]
-        shown = np.flatnonzero(found > 0)
-        positions = np.arange(len(shown))[::-1]
-        total = max(1, int(found.sum()))
-        values = found[shown].astype(np.float64)
-        if normalize:
-            values = values / total
-        categories = [order[at] for at in shown.tolist()]
-        ax.barh(positions, values, color=[colors[name] for name in categories])
-        ax.set_yticks(positions, categories)
-        ax.set_xlabel("Fraction of cells" if normalize else "Cells")
-    else:
-        totals = counts.sum(axis=1).astype(np.float64)
-        positions = np.arange(len(names))
-        bottom = np.zeros(len(names))
-        for at, name in enumerate(order):
-            heights = counts[:, at].astype(np.float64)
-            if normalize:
-                heights = np.divide(
-                    heights, totals, out=np.zeros_like(heights), where=totals > 0
-                )
-            if not heights.any():
-                continue
-            ax.bar(positions, heights, bottom=bottom, color=colors[name], label=name)
-            bottom += heights
-        ax.set_xticks(positions, [str(name) for name in names], rotation=90)
-        ax.set_ylabel("Fraction of cells" if normalize else "Cells")
-        if show_legend:
-            ax.legend(
-                frameon=False, fontsize="small", loc="upper left", bbox_to_anchor=(1, 1)
-            )
-    ax.set_title(title)
+        cells = rows["n_cells"].to_numpy(dtype=np.float64)
+        bars = pd.DataFrame(
+            {
+                column: rows[column].to_numpy(dtype=object),
+                "value": cells / cells.sum() if normalize else cells,
+            }
+        )
+        return draw_bars(
+            ax,
+            bars,
+            item=column,
+            value="value",
+            colors=colors,
+            value_label=value_label,
+            title=title,
+        )
+    return draw_bars(
+        ax,
+        rows,
+        item="group",
+        value="n_cells",
+        segment=column,
+        colors=colors,
+        horizontal=False,
+        normalize=normalize,
+        value_label=value_label,
+        title=title,
+        legend_title=title,
+        show_legend=show_legend,
+    )
 
 
 @close_figures_on_error
@@ -159,17 +157,19 @@ def receptor_qc(
     ``ds.repertoire.import_receptors``. The first panel counts cells by
     receptor type (TCR, BCR, ambiguous, multichain, no IR), the second by chain
     pairing, and the third counts cells by their number of chains of each arm,
-    VJ (TRA, TRG, IGK, IGL) and VDJ (TRB, TRD, IGH), with three or more in the
-    last bar. Many ``"orphan VDJ"`` or ``"orphan VJ"`` cells point to chains
-    lost in capture, and many ``"multichain"`` or ``"ambiguous"`` cells to
-    doublets.
+    VJ (TRA, TRG, IGK, IGL) and VDJ (TRB, TRD, IGH), side by side, with three
+    or more in the last bar. Many ``"orphan VDJ"`` or ``"orphan VJ"`` cells
+    point to chains lost in capture, and many ``"multichain"`` or
+    ``"ambiguous"`` cells to doublets. The panels stand in one column, the
+    categories that hold cells in the colours of their vocabulary.
 
     ``group_by`` names cell metadata columns, one or several, such as the
     sample, and ``groups`` a cell-label artifact, such as a clustering; the
     groups are the combinations of their labels, as the clone summaries group
     cells, named by their labels joined by commas. With a grouping, the first
-    two panels draw one stacked bar per group, of the fraction of its cells
-    by default (``normalize``), and cells without a group are left out. A
+    two panels draw one bar per group, stacked by category, the first on
+    top as its legend lists them, of the fraction of the group's cells by
+    default (``normalize``), and cells without a group are left out. A
     label artifact may hold fewer cells than the receptors.
 
     Tables: ``receptor_type`` and ``chain_pairing``, one row per group and
@@ -180,10 +180,12 @@ def receptor_qc(
     ``n_chains``).
 
     Raises:
-        TypeError: If an argument has the wrong type.
+        TypeError: If an argument has the wrong type, or the store does not
+            load immune receptors or group cells for figures.
         ValueError: If ``receptors`` is not an ``immune_receptors``
-            artifact, a ``group_by`` column is missing or named twice, or
-            two groups get one name.
+            artifact, a ``group_by`` column is missing or named twice, two
+            groups get one name, or no cell, or no cell with a group, is
+            left to draw.
         KeyError: If the store holds no such artifact.
         RuntimeError: If an artifact is incomplete, as a call that stopped
             before it finished leaves it.
@@ -193,123 +195,123 @@ def receptor_qc(
     normalize = optional_bool_argument(normalize, "normalize")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    loaded = _store_method(store, "load_receptors", "immune receptors")(
+    loaded = store_method(store, "repertoire.load_receptors", "immune receptors")(
         receptors, fields=()
     )
     cells = loaded.cells
     plotted = plot_groups(
         store, receptors, group_by=group_by, groups=groups, n_cells=len(cells)
     )
-    labels, names, group_name = plotted.codes, list(plotted.names), plotted.title
+    labels, names = plotted.codes, list(plotted.names)
     grouped = bool(plotted.columns)
     fractions = grouped if normalize is None else normalize
     keep = labels >= 0
-    receptor_counts = _category_counts(
-        cells["receptor_type"].to_numpy(dtype=object),
-        RECEPTOR_TYPES,
-        labels,
-        len(names),
-    )
-    pairing_counts = _category_counts(
-        cells["chain_pairing"].to_numpy(dtype=object),
-        CHAIN_PAIRINGS,
-        labels,
-        len(names),
-    )
-    bins = [str(count) for count in range(_MANY_CHAINS)] + [f"{_MANY_CHAINS}+"]
-    chains_per_cell = pd.DataFrame(
-        {
-            arm: np.bincount(
-                np.minimum(cells[column].to_numpy(dtype=np.int64)[keep], _MANY_CHAINS),
-                minlength=_MANY_CHAINS + 1,
-            )
-            for arm, column in (("VJ", "n_vj"), ("VDJ", "n_vdj"))
-        },
-        index=pd.Index(bins, name="n_chains"),
-    )
-    if figsize is None and target is None:
-        width = 13.0 if not grouped else max(13.0, 4.0 + 0.5 * len(names))
-        figsize = (width, 3.8 if not grouped else 4.4)
-    require_matplotlib()
-    with theme_context(theme):
-        figure, axes, owns = normalize_axes_target(
-            target, panel_keys=list(_QC_PANELS), figsize=figsize, n_columns=3
+    if not keep.any():
+        raise ValueError(
+            "No cell has a group, so there is nothing to plot"
+            if len(cells)
+            else "The receptors hold no cell, so there is nothing to plot"
         )
-        _draw_categories(
-            axes["receptor_type"],
-            receptor_counts,
+    tables = {
+        "receptor_type": _category_table(
+            _category_counts(
+                cells["receptor_type"].to_numpy(dtype=object),
+                RECEPTOR_TYPES,
+                labels,
+                len(names),
+            ),
             names,
             RECEPTOR_TYPES,
-            dict(RECEPTOR_TYPE_SCALE.palette or {}),
-            grouped=grouped,
-            normalize=fractions,
-            title="Receptor type",
-            show_legend=show_legend,
-        )
-        _draw_categories(
-            axes["chain_pairing"],
-            pairing_counts,
+            "receptor_type",
+        ),
+        "chain_pairing": _category_table(
+            _category_counts(
+                cells["chain_pairing"].to_numpy(dtype=object),
+                CHAIN_PAIRINGS,
+                labels,
+                len(names),
+            ),
             names,
             CHAIN_PAIRINGS,
-            _CHAIN_PAIRING_COLORS,
-            grouped=grouped,
-            normalize=fractions,
-            title="Chain pairing",
-            show_legend=show_legend,
-        )
-        ax = axes["chains_per_cell"]
-        positions = np.arange(len(bins))
-        width = 0.4
-        for offset, arm in ((-width / 2, "VJ"), (width / 2, "VDJ")):
-            ax.bar(
-                positions + offset,
-                chains_per_cell[arm],
-                width=width,
-                color=_ARM_COLORS[arm],
-                label=f"{arm} chains",
+            "chain_pairing",
+        ),
+    }
+    chains_per_cell = pd.DataFrame(
+        {
+            arm: capped_counts(
+                cells[column].to_numpy(dtype=np.int64)[keep], _MANY_CHAINS
             )
-        ax.set_xticks(positions, bins)
-        ax.set_xlabel("Chains of the arm")
-        ax.set_ylabel("Cells")
-        ax.set_title("Chains per cell")
-        if show_legend:
-            ax.legend(frameon=False)
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={
-            "receptor_type": _category_table(
-                receptor_counts, names, RECEPTOR_TYPES, "receptor_type"
-            ),
-            "chain_pairing": _category_table(
-                pairing_counts, names, CHAIN_PAIRINGS, "chain_pairing"
-            ),
-            "chains_per_cell": chains_per_cell,
-        },
-        legends=(
-            LegendSpec(kind="categorical", label="Receptor type"),
-            LegendSpec(kind="categorical", label="Chain pairing"),
-        ),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(keep.sum()),
-            renderer="matplotlib",
-            notes=("immune_receptors",),
-            extras={
-                "immune_receptors": receptors.to_dict(),
-                "grouping": group_name,
-                "normalize": fractions,
-            },
-        ),
-        owns_figure=owns,
-        theme=theme,
+            for arm, column in (("VJ", "n_vj"), ("VDJ", "n_vdj"))
+        }
     )
-    if show:
-        plot_result.show()
-    return plot_result
+    chains_per_cell.index.name = "n_chains"
+    tables["chains_per_cell"] = chains_per_cell
+    arms = pd.DataFrame(
+        {
+            "n_chains": np.tile(chains_per_cell.index.to_numpy(dtype=object), 2),
+            "arm": np.repeat(
+                np.asarray(["VJ", "VDJ"], dtype=object), len(chains_per_cell)
+            ),
+            "n_cells": chains_per_cell[["VJ", "VDJ"]]
+            .to_numpy(dtype=np.int64)
+            .T.reshape(-1),
+        }
+    )
+    if figsize is None and target is None:
+        figsize, _ = figure_size(
+            len(_QC_PANELS), panel=(MAX_FIGURE_WIDTH_INCHES, _QC_PANEL_HEIGHT)
+        )
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=list(_QC_PANELS), figsize=figsize, n_columns=1
+        )
+        drawn = [
+            _draw_categories(
+                axes[column],
+                tables[column],
+                column,
+                vocabulary,
+                grouped=grouped,
+                normalize=fractions,
+                title=title,
+                show_legend=show_legend,
+            )
+            for column, vocabulary, title in (
+                ("receptor_type", RECEPTOR_TYPE_SCALE, "Receptor type"),
+                ("chain_pairing", CHAIN_PAIRING_SCALE, "Chain pairing"),
+            )
+        ]
+        drawn.append(
+            draw_bars(
+                axes["chains_per_cell"],
+                arms,
+                item="n_chains",
+                value="n_cells",
+                segment="arm",
+                colors=CHAIN_ARM_SCALE,
+                horizontal=False,
+                side_by_side=True,
+                value_label="Cells",
+                title="Chains per cell",
+                legend_title="Arm",
+                show_legend=show_legend,
+            )
+        )
+        axes["chains_per_cell"].set_xlabel("Chains of the arm")
+        axes["chains_per_cell"].yaxis.get_major_locator().set_params(integer=True)
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="receptor_qc",
+        theme=theme,
+        tables=tables,
+        drawn=drawn,
+        inputs={"receptors": receptors},
+        settings={"grouping": plotted.title, "normalize": fractions},
+        n_cells=int(keep.sum()),
+        show=show,
+    )
 
 
 def _locus_panels(table: pd.DataFrame, what: str) -> list[str]:
@@ -322,15 +324,6 @@ def _locus_panels(table: pd.DataFrame, what: str) -> list[str]:
     return [str(locus) for locus in sort_categories(pd.unique(table["locus"]))]
 
 
-def _panel_grid(
-    loci: list[str], panel: tuple[float, float]
-) -> tuple[int, tuple[float, float]]:
-    """The columns of the panels of the loci and the figure's size, page-sized."""
-    n_columns = min(len(loci), _LOCUS_PANELS_PER_ROW)
-    n_rows = -(-len(loci) // n_columns)
-    return n_columns, capped_figsize(panel[0] * n_columns, panel[1] * n_rows)
-
-
 def _counted(store: Any, source: ArtifactRef, count: str) -> str:
     """What the counts count, as figures name them: cells, clonotypes or clusters."""
     if count != "clonotypes":
@@ -338,25 +331,55 @@ def _counted(store: Any, source: ArtifactRef, count: str) -> str:
     return clone_names(store, source).plural
 
 
-def _heatmap(
-    ax: Any, matrix: pd.DataFrame, *, title: str, show_legend: bool, figure: Any
-) -> None:
-    """Draw a matrix of fractions with labelled rows and columns."""
-    image = ax.imshow(
-        np.ma.masked_invalid(matrix.to_numpy(dtype=np.float64)),
-        cmap="viridis",
-        aspect="auto",
-        vmin=0,
+def _ranked(rows: pd.DataFrame, field: str, count: str) -> pd.Index:
+    """The values of ``field`` by their chains, most first, ties in name order."""
+    return (
+        rows.groupby(field)[f"n_{count}"]
+        .sum()
+        .sort_values(ascending=False, kind="stable")
+        .index
     )
-    ax.set_xticks(
-        np.arange(matrix.shape[1]), [str(c) for c in matrix.columns], rotation=90
+
+
+def _gene_axis(field: str, level: str, shown: int, held: int) -> str:
+    """Name an axis of genes, saying how many of how many it draws when capped."""
+    name = f"{_SEGMENTS[field]} {level}"
+    return name if shown == held else f"{name} ({shown} of {held})"
+
+
+def _shared_fractions(matrices: Sequence[pd.DataFrame]) -> ColorScale:
+    """One colour scale of fractions from 0 for every locus panel of a figure."""
+    values = np.concatenate(
+        [matrix.to_numpy(dtype=np.float64).ravel() for matrix in matrices]
     )
-    ax.set_yticks(
-        np.arange(matrix.shape[0]), [str(r) for r in matrix.index], fontsize="small"
-    )
-    ax.set_title(title)
-    if show_legend:
-        figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="Fraction")
+    low, high = resolve_color_limits(values, ColorScale(cmap="viridis", vmin=0.0))
+    return ColorScale(cmap="viridis", vmin=low, vmax=high)
+
+
+def _locus_heatmaps(
+    axes: dict[Any, Any],
+    matrices: dict[str, pd.DataFrame],
+    *,
+    value_label: str,
+    show_legend: bool,
+) -> Drawn:
+    """Draw a heatmap per locus under one colour scale, beside one colour bar."""
+    scale = _shared_fractions(list(matrices.values()))
+    loci = list(matrices)
+    drawn: Drawn | None = None
+    for locus in loci:
+        drawn = draw_matrix(
+            axes[locus],
+            matrices[locus],
+            color_scale=scale,
+            value_label=value_label,
+            value_format=".2f",
+            show_legend=show_legend and locus == loci[-1],
+            colorbar_beside=[axes[name] for name in loci],
+        )
+        axes[locus].set_title(locus)
+    assert drawn is not None
+    return drawn
 
 
 @close_figures_on_error
@@ -376,14 +399,17 @@ def gene_usage(
     ``usage`` is the result of ``ds.repertoire.gene_usage`` for one gene
     field, such as ``genes="j_call"``, which sets the groups, the level, the
     slots and what is counted. Each panel holds one locus, such as TRA or
-    TRB, and its ``max_genes`` genes with the most chains over all groups:
+    TRB, and its ``max_genes`` genes with the most chains over all groups,
+    its axis saying how many of how many it draws when it leaves some out:
     for groups of ``group_by`` columns or a ``groups`` artifact, a heatmap of
     each gene's fraction of each group's chains of that locus, which names
-    the group even where one group holds the locus; without, bars. Panels
-    stand two to a row. With ``count="clonotypes"`` the bars count
-    clonotypes, or clonotype clusters for clonotypes that a distance metric
-    linked. The plot raises ``ValueError`` when ``usage`` counts several gene
-    fields or no chain has a call of its field.
+    the group even where one group holds the locus, the panels of every
+    locus sharing one colour bar from 0 to the largest fraction drawn, two
+    panels to a row; without, bars in the locus's colour, three panels to a
+    row. With ``count="clonotypes"`` the fractions count clonotypes, or
+    clonotype clusters for clonotypes that a distance metric linked. The
+    plot raises ``ValueError`` when ``usage`` counts several gene fields or
+    no chain has a call of its field.
 
     Tables: ``usage``, the record's rows.
 
@@ -413,71 +439,83 @@ def gene_usage(
     table = usage.table
     loci = _locus_panels(table, f"a {gene}")
     counted = _counted(store, source, count)
+    grouping = table_groups(store, usage).title
     grouped = bool(usage.group_by) or usage.groups is not None
     by_locus = dict(tuple(table.groupby("locus", sort=False)))
-    n_columns, size = _panel_grid(
-        loci,
-        (
-            max(5.0, 3.0 + 0.4 * table["group"].nunique()),
-            max(4.0, 0.22 * max_genes + 1.5),
-        ),
-    )
+    ranked = {locus: _ranked(by_locus[locus], gene, count) for locus in loci}
+    shown = {locus: list(ranked[locus][:max_genes]) for locus in loci}
+    tallest = max(len(genes) for genes in shown.values())
+    columns = _LOCUS_HEATMAPS_PER_ROW if grouped else _LOCUS_PANELS_PER_ROW
     if figsize is None and target is None:
-        figsize = size
-    require_matplotlib()
+        figsize, _ = figure_size(
+            len(loci),
+            panel=(
+                MAX_FIGURE_WIDTH_INCHES / columns,
+                item_inches(
+                    tallest,
+                    per_item=_HEATMAP_ROW_INCHES if grouped else _BAR_ROW_INCHES,
+                    base=1.2,
+                    minimum=_LOCUS_PANEL_HEIGHT,
+                ),
+            ),
+            columns=columns,
+        )
+    value_label = f"Fraction of {counted}"
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
-            target, panel_keys=loci, figsize=figsize, n_columns=n_columns
+            target, panel_keys=loci, figsize=figsize, n_columns=columns
         )
+        drawn: Drawn | None = None
+        if grouped:
+            matrices = {}
+            for locus in loci:
+                wide = by_locus[locus].pivot_table(
+                    index=gene, columns="group", values="fraction", fill_value=0
+                )
+                matrices[locus] = wide.reindex(
+                    index=shown[locus], columns=sort_categories(wide.columns)
+                )
+            drawn = _locus_heatmaps(
+                axes, matrices, value_label=value_label, show_legend=show_legend
+            )
         for locus in loci:
             ax = axes[locus]
-            rows = by_locus[locus]
-            totals = (
-                rows.groupby(gene)[f"n_{count}"]
-                .sum()
-                .sort_values(ascending=False, kind="stable")
-            )
-            shown = list(totals.index[:max_genes])
-            wide = rows.pivot_table(
-                index=gene, columns="group", values="fraction", fill_value=0
-            ).reindex(index=shown)
-            wide = wide.reindex(columns=sort_categories(wide.columns))
             if not grouped:
-                positions = np.arange(len(shown))[::-1]
-                ax.barh(positions, wide.iloc[:, 0].to_numpy(), color="#2b6cb0")
-                ax.set_yticks(positions, shown, fontsize="small")
-                ax.set_xlabel(f"Fraction of {counted}")
-                ax.set_title(locus)
+                rows = by_locus[locus].set_index(gene).loc[shown[locus]]
+                draw_bars(
+                    ax,
+                    rows.reset_index(),
+                    item=gene,
+                    value="fraction",
+                    colors=(LOCUS_SCALE.palette or {})[locus],
+                    value_label=value_label,
+                    title=locus,
+                )
             else:
-                _heatmap(ax, wide, title=locus, show_legend=show_legend, figure=figure)
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={"usage": table},
-        legends=(LegendSpec(kind="continuous", label="Fraction"),),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(usage.n_cells),
-            renderer="matplotlib",
-            notes=(source.kind,),
-            extras={
-                "source": source.to_dict(),
-                "gene": gene,
-                "level": usage.level,
-                "slots": list(usage.slots),
-                "count": count,
-                "max_genes": max_genes,
-            },
-        ),
-        owns_figure=owns,
+                ax.set_xlabel(grouping or "")
+            ax.set_ylabel(
+                _gene_axis(gene, usage.level, len(shown[locus]), len(ranked[locus]))
+            )
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="gene_usage",
         theme=theme,
+        tables={"usage": table},
+        drawn=[drawn],
+        inputs={"source": source},
+        settings={
+            "grouping": grouping,
+            "gene": gene,
+            "level": usage.level,
+            "slots": list(usage.slots),
+            "count": count,
+            "max_genes": max_genes,
+        },
+        n_cells=int(usage.n_cells),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
 
 
 @close_figures_on_error
@@ -498,8 +536,10 @@ def gene_pairing(
     ``genes=("v_call", "j_call")`` without groups, which sets the level, the
     slots, the cells and what is counted. Each panel draws the fraction of
     the locus's chains with each pair of its ``max_genes`` V genes and
-    ``max_genes`` J genes with the most chains. Panels stand two to a row.
-    The plot raises ``ValueError`` when ``usage`` counts other gene fields or
+    ``max_genes`` J genes with the most chains, its axes saying how many of
+    how many they draw when they leave some out. The panels stand two to a
+    row and share one colour bar, from 0 to the largest fraction drawn. The
+    plot raises ``ValueError`` when ``usage`` counts other gene fields or
     groups of cells, or no chain has both calls.
 
     Tables: ``pairs``, the record's rows.
@@ -531,57 +571,77 @@ def gene_pairing(
     count = usage.count
     table = usage.table
     loci = _locus_panels(table, "a v_call and a j_call")
-    n_columns, size = _panel_grid(loci, (6.5, max(4.0, 0.25 * max_genes + 2.0)))
+    counted = _counted(store, usage.source, count)
+    by_locus = dict(tuple(table.groupby("locus", sort=False)))
+    matrices: dict[str, pd.DataFrame] = {}
+    held: dict[str, tuple[int, int]] = {}
+    for locus in loci:
+        rows = by_locus[locus]
+        v_ranked, j_ranked = (
+            _ranked(rows, field, count) for field in ("v_call", "j_call")
+        )
+        held[locus] = (len(v_ranked), len(j_ranked))
+        wide = rows.pivot_table(
+            index="v_call", columns="j_call", values="fraction", fill_value=0
+        )
+        matrices[locus] = wide.reindex(
+            index=list(v_ranked[:max_genes]),
+            columns=sort_categories(j_ranked[:max_genes]),
+        )
+    tallest = max(len(matrix) for matrix in matrices.values())
     if figsize is None and target is None:
-        figsize = size
-    require_matplotlib()
+        figsize, _ = figure_size(
+            len(loci),
+            panel=(
+                MAX_FIGURE_WIDTH_INCHES / _LOCUS_HEATMAPS_PER_ROW,
+                item_inches(
+                    tallest,
+                    per_item=_HEATMAP_ROW_INCHES,
+                    base=1.6,
+                    minimum=_LOCUS_PANEL_HEIGHT,
+                ),
+            ),
+            columns=_LOCUS_HEATMAPS_PER_ROW,
+        )
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
-            target, panel_keys=loci, figsize=figsize, n_columns=n_columns
+            target,
+            panel_keys=loci,
+            figsize=figsize,
+            n_columns=_LOCUS_HEATMAPS_PER_ROW,
         )
-        by_locus = dict(tuple(table.groupby("locus", sort=False)))
+        drawn = _locus_heatmaps(
+            axes,
+            matrices,
+            value_label=f"Fraction of {counted}",
+            show_legend=show_legend,
+        )
         for locus in loci:
-            rows = by_locus[locus]
-            v_genes, j_genes = (
-                rows.groupby(field)[f"n_{count}"]
-                .sum()
-                .sort_values(ascending=False, kind="stable")
-                .index[:max_genes]
-                for field in ("v_call", "j_call")
+            n_v, n_j = matrices[locus].shape
+            axes[locus].set_ylabel(
+                _gene_axis("v_call", usage.level, n_v, held[locus][0])
             )
-            wide = rows.pivot_table(
-                index="v_call", columns="j_call", values="fraction", fill_value=0
-            ).reindex(index=list(v_genes), columns=sort_categories(j_genes))
-            _heatmap(
-                axes[locus], wide, title=locus, show_legend=show_legend, figure=figure
+            axes[locus].set_xlabel(
+                _gene_axis("j_call", usage.level, n_j, held[locus][1])
             )
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={"pairs": table},
-        legends=(LegendSpec(kind="continuous", label="Fraction"),),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(usage.n_cells),
-            renderer="matplotlib",
-            notes=(usage.source.kind,),
-            extras={
-                "source": usage.source.to_dict(),
-                "level": usage.level,
-                "slots": list(usage.slots),
-                "count": count,
-                "max_genes": max_genes,
-            },
-        ),
-        owns_figure=owns,
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="gene_pairing",
         theme=theme,
+        tables={"pairs": table},
+        drawn=[drawn],
+        inputs={"source": usage.source},
+        settings={
+            "level": usage.level,
+            "slots": list(usage.slots),
+            "count": count,
+            "max_genes": max_genes,
+        },
+        n_cells=int(usage.n_cells),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
 
 
 @close_figures_on_error
@@ -600,22 +660,26 @@ def spectratype(
     ``spectratype`` is the result of ``ds.repertoire.spectratype``, which
     sets the groups, the sequence, the slots and what is counted. Each panel
     draws, for one locus, each group's fraction of chains at each junction
-    length, one line per group, or bars for one group; the legend names the
-    first 80 groups. Panels stand two to a row. With ``count="clonotypes"``
-    the fractions count clonotypes, or clonotype clusters for clonotypes that
-    a distance metric linked. The plot raises ``ValueError`` when no chain
-    has a junction.
+    length, one line per group in its colour, or bars in the locus's colour
+    for one group. The panels stand three to a row, with one legend of the
+    groups, titled by the grouping, beside the first row. With
+    ``count="clonotypes"`` the fractions count clonotypes, or clonotype
+    clusters for clonotypes that a distance metric linked. The plot raises
+    ``ValueError`` when no chain has a junction.
 
     Tables: ``spectratype``, the record's rows.
 
     Raises:
         TypeError: If ``spectratype`` is not a ``Spectratype`` record, or
-            another argument has the wrong type.
+            another argument has the wrong type, or the store does not give
+            the labels that the groups' colours range over.
         ValueError: If no chain has a junction.
         KeyError: If the store does not hold the clonotypes that
             ``spectratype`` counts.
         RuntimeError: If those clonotypes are incomplete, as a call that
             stopped before it finished leaves them.
+        MemoryError: If reading the labels that the groups' colours range
+            over does not fit the memory budget.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -631,84 +695,85 @@ def spectratype(
     table = spectratype.table
     loci = _locus_panels(table, "a junction")
     counted = _counted(store, source, count)
-    group_order = sort_categories(pd.unique(table["group"]))
-    colors = categorical_color_map(list(group_order))
-    by_line = dict(tuple(table.groupby(["locus", "group"], sort=False)))
-    n_columns, size = _panel_grid(loci, (4.5, 3.8))
+    plotted = table_groups(store, spectratype)
+    held = set(table["group"].astype(str))
+    group_order = [name for name in plotted.names if name in held]
+    by_locus = dict(tuple(table.groupby("locus", sort=False)))
+    legend_panel = loci[min(_LOCUS_PANELS_PER_ROW, len(loci)) - 1]
     if figsize is None and target is None:
-        figsize = size
-    require_matplotlib()
+        figsize, _ = figure_size(
+            len(loci),
+            panel=(
+                MAX_FIGURE_WIDTH_INCHES / _LOCUS_PANELS_PER_ROW,
+                _LOCUS_PANEL_HEIGHT,
+            ),
+            columns=_LOCUS_PANELS_PER_ROW,
+        )
+    x_label = (
+        "Junction length (residues)"
+        if sequence == "aa"
+        else "Junction length (nucleotides)"
+    )
+    y_label = f"Fraction of {counted}"
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
-            target, panel_keys=loci, figsize=figsize, n_columns=n_columns
+            target,
+            panel_keys=loci,
+            figsize=figsize,
+            n_columns=_LOCUS_PANELS_PER_ROW,
         )
+        drawn: Drawn | None = None
+        colors = plotted.scale(group_order) if len(group_order) > 1 else None
         for locus in loci:
             ax = axes[locus]
-            for name in group_order:
-                rows = by_line.get((locus, name), table.iloc[:0])
-                if len(group_order) == 1:
-                    ax.bar(rows["length"], rows["fraction"], color="#2b6cb0")
-                else:
-                    ax.plot(
-                        rows["length"],
-                        rows["fraction"],
-                        marker="o",
-                        markersize=3,
-                        linewidth=1.2,
-                        color=colors[name],
-                        label=name,
-                    )
-            ax.set_xlabel(
-                "Junction length (residues)"
-                if sequence == "aa"
-                else "Junction length (nucleotides)"
-            )
-            ax.xaxis.get_major_locator().set_params(integer=True)
-            ax.set_ylabel(f"Fraction of {counted}")
-            ax.set_title(locus)
-        if show_legend and len(group_order) > 1:
-            # The first groups, in columns that fit the figure's height.
-            ax = axes[loci[-1]]
-            lines = ax.get_lines()
-            shown = min(len(lines), LEGEND_SIDE_MAX_ENTRIES)
-            rows = legend_side_rows(float(figure.get_size_inches()[1]), title=True)
-            ax.legend(
-                handles=lines[:shown],
-                frameon=False,
-                fontsize="small",
-                title=(
-                    "Group"
-                    if shown == len(lines)
-                    else f"Group ({shown} of {len(lines)})"
-                ),
-                title_fontsize="small",
-                loc="upper left",
-                bbox_to_anchor=(1, 1),
-                ncols=legend_side_columns(shown, rows=rows),
-            )
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={"spectratype": table},
-        legends=(LegendSpec(kind="categorical", label="Group"),),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(spectratype.n_cells),
-            renderer="matplotlib",
-            notes=(source.kind,),
-            extras={
-                "source": source.to_dict(),
-                "sequence": sequence,
-                "slots": list(spectratype.slots),
-                "count": count,
-            },
-        ),
-        owns_figure=owns,
+            rows = by_locus[locus]
+            if colors is None:
+                draw_bars(
+                    ax,
+                    rows,
+                    item="length",
+                    value="fraction",
+                    colors=(LOCUS_SCALE.palette or {})[locus],
+                    horizontal=False,
+                    numeric_items=True,
+                    value_label=y_label,
+                    title=locus,
+                )
+                ax.set_xlabel(x_label)
+            else:
+                found = draw_lines(
+                    ax,
+                    rows,
+                    x="length",
+                    y="fraction",
+                    series="group",
+                    colors=colors,
+                    markers=True,
+                    x_label=x_label,
+                    y_label=y_label,
+                    title=locus,
+                    legend_title=plotted.title if locus == legend_panel else None,
+                    show_legend=show_legend,
+                )
+                if locus == legend_panel:
+                    drawn = found
+            # Lengths are whole numbers, and a locus of one length ticks it.
+            ax.xaxis.get_major_locator().set_params(integer=True, min_n_ticks=1)
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="spectratype",
         theme=theme,
+        tables={"spectratype": table},
+        drawn=[drawn],
+        inputs={"source": source},
+        settings={
+            "grouping": plotted.title,
+            "sequence": sequence,
+            "slots": list(spectratype.slots),
+            "count": count,
+        },
+        n_cells=int(spectratype.n_cells),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result

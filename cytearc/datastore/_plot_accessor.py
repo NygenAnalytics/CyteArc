@@ -830,14 +830,14 @@ class DataStorePlotAccessor:
         self,
         alleles: ArtifactRef,
         *,
-        max_sites: int = 60,
+        max_sites: int = 40,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
         show_legend: bool = True,
         show: bool = True,
     ) -> PlotResult:
-        """Plot the share of cells that each recorder site reads as each state."""
+        """Plot the fraction of cells that each recorder site reads as each state."""
         return self._forward(PlotResult, "recorder_states", locals())
 
     def guide_calls(
