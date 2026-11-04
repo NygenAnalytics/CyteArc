@@ -20,6 +20,7 @@ import pytest
 
 from cytearc.clones.barcodes import LineageBarcodes
 from cytearc.utils.logging import collect_warnings
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import every_cell, ids_read_bytes, write_truth_store
 from tests.clone_truth import (
     N_CELLS,
@@ -1638,18 +1639,29 @@ def test_the_load_counts_its_records_texts_and_cells_to_the_byte(
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
     with pytest.raises(MemoryError, match=f"hold about {needed} bytes"):
         store.clones.load_barcodes(ref)
-    # At the bound the tables fit, and so does reading the cells' IDs, which
-    # decodes the one chunk of their 48 rows.
+    # At the bound the tables fit, and the read of the cells' barcode counts,
+    # which counts Zarr's objects beside each array it reads, names the budget
+    # it needs.
     monkeypatch.setattr(store, "memoryBytes", needed)
+    with pytest.raises(MemoryBudgetError) as counted:
+        store.clones.load_barcodes(ref)
+    assert counted.value.item == "'n_barcodes' of the lineage_barcodes artifact"
+    reading = counted.value.needed_bytes
+    assert reading > needed
+    # There the load runs, and reading the cells' IDs decodes the one chunk of
+    # their 48 rows.
+    monkeypatch.setattr(store, "memoryBytes", reading)
     pd.testing.assert_frame_equal(store.clones.load_barcodes(ref).records, records)
     # The IDs in a chunk of 100,000 rows, as a store written before cell
     # columns were chunked by their rows keeps them, decode that whole chunk,
-    # which the read's own check refuses at the bound.
+    # which the read's own check refuses at that budget.
     rechunk_column(store.cells._group, "ids")
-    reopened = open_store(store.zarr_loc, mem_budget=needed)
-    with pytest.raises(MemoryError) as refused:
+    reopened = open_store(store.zarr_loc, mem_budget=reading)
+    with pytest.raises(MemoryBudgetError) as refused:
         reopened.clones.load_barcodes(ref)
     assert "The tables of" not in str(refused.value)
+    assert refused.value.item == counted.value.item
+    assert refused.value.needed_bytes > reading
 
 
 def test_selecting_cells_by_their_barcodes_follows_the_documented_bounds(
