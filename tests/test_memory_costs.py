@@ -1022,6 +1022,76 @@ def test_reading_a_label_artifact_holds_no_more_than_each_charge_plans(
     assert len(positions) >= (2 if cells is None else 3), taken
 
 
+@pytest.fixture(scope="module")
+def sparse_labels(tmp_path_factory):
+    """A store of 500,000 cells, with labels frozen for every cell, for the first 1,000 and for the first 100."""
+    from tests.storage_helpers import open_store, write_count_store
+
+    path = tmp_path_factory.mktemp("sparse_labels") / "store.zarr"
+    n_cells = 500_000
+    write_count_store(str(path), {"RNA": np.ones((n_cells, 1), dtype=int)}, "uint16")
+    store = open_store(path)
+    store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))
+    store.cells.insert("first", np.arange(n_cells) < 100)
+    store.cells.insert("first_thousand", np.arange(n_cells) < 1_000)
+    store.cells.insert(
+        "cluster", np.asarray([f"cluster_{i % 30:03d}" for i in range(n_cells)])
+    )
+    first = store.snapshot_cell_selection("first")
+    labels = {
+        selection: store.snapshot_cluster_labels(
+            "cluster", cell_selection=store.snapshot_cell_selection(selection)
+        )
+        for selection in ("every_cell", "first_thousand")
+    }
+    labels["first"] = store.snapshot_cluster_labels("cluster", cell_selection=first)
+    return store, first, labels
+
+
+@pytest.mark.parametrize(
+    ("source", "requested"),
+    [("first", False), ("every_cell", True), ("first_thousand", True)],
+    ids=[
+        "labels of a few cells",
+        "a few cells of every cell",
+        "a few cells of a thousand",
+    ],
+)
+def test_a_read_of_a_few_cells_of_many_names_its_budget_in_one_refusal(
+    sparse_labels, source, requested
+) -> None:
+    from cytearc.metadata.selection import resolve_cell_aligned_artifact
+    from cytearc.storage.validation_scope import validation_scope
+    from tests.memory_helpers import follow_refusals
+
+    # 100 of 500,000 cells: each selection's read of its positions holds
+    # its flags, a byte for each cell of the store, and the source's
+    # positions and what their read leaves are held beside the requested
+    # cells' read, which for a source of a thousand cells needs the most.
+    # The one check before anything is read covers each step, so the first
+    # refusal names the budget that reads them all, as the values' item.
+    store, first, labels = sparse_labels
+    cells = first if requested else None
+
+    def read(budget: int | None) -> object:
+        return resolve_cell_aligned_artifact(
+            store.zw,
+            labels[source],
+            cell_selection=cells,
+            ledger=MemoryLedger(budget, "Reading labels"),
+        )
+
+    with validation_scope():
+        read(None)
+        budget, refusals = follow_refusals(read)
+        resolved, peak = traced_peak(lambda: read(budget), budget)
+    assert [refusal.item for refusal in refusals] == [
+        "'values' of the cluster_labels artifact"
+    ]
+    assert peak <= budget, (peak, budget)
+    assert len(resolved.cell_idx) == 100
+
+
 # Writes
 # Writes
 

@@ -331,7 +331,9 @@ class CloneAssigner:
     and each new label, its text and its entries, before it is kept; and
     what ranking the clones holds before :meth:`finish` ranks them. What
     each chunk of rows holds is the caller's to charge, and what
-    :meth:`add` works with too, as :func:`clone_assignment_bytes` states it.
+    :meth:`add` works with too: :func:`clone_assignment_bytes` states it, as
+    ``from_column`` charges it, and a clone file's parsed rows count it in
+    what each row holds.
 
     Args:
         cell_ids: The IDs of the cells, which errors name.

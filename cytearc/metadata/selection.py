@@ -1098,7 +1098,11 @@ def resolve_cell_aligned_artifact(
                 rows_read_charge(ledger, array, n_target)[0] for array in row_arrays
             )
             steps.append(2 * _INDEX_BYTES * n_target + left + fewest)
-            _refuse_cell_read(ledger, max(steps), item=item, n_cells=n_target)
+            # The first read replaces what the caller's last read left, so
+            # each later step counts only what the reads before it leave.
+            earlier = ledger.left
+            required = max(steps[0], *(step - earlier for step in steps[1:]))
+            _refuse_cell_read(ledger, required, item=item, n_cells=n_target)
 
         positions = f"the cell positions of {item}"
         source_idx = _read_positions(

@@ -375,7 +375,6 @@ def test_assigning_rows_holds_what_its_cost_states(n_rows, kind) -> None:
 
 
 # A stamp of stored chunks.
-# A stamp of stored chunks.
 
 
 @pytest.mark.parametrize(
@@ -509,16 +508,17 @@ def column_store(tmp_path_factory) -> Any:
 @pytest.mark.parametrize(
     ("column", "selection", "at_most"),
     [
-        # The budgets were 1.30 to 1.70 times the traced peaks: beside what
-        # the assigner works with, each block's read keeps charged the
-        # chunk of the column that a codec thread may still hold, up to the
-        # next read, 8 MB of four-byte labels.
-        ("short", "every_cell", 1.9),
-        ("long", "every_cell", 1.9),
-        ("four_byte", "every_cell", 1.9),
-        ("numbers", "every_cell", 1.9),
-        # Few cells of many: the stamp reads every stored chunk of the column.
-        ("long", "few", 2.6),
+        # The budgets were 1.47, 1.60, 1.70 and 1.30 times the traced peaks:
+        # beside what the assigner works with, each block's read keeps
+        # charged the chunk of the column that a codec thread may still hold,
+        # up to the next read, 8 MB of four-byte labels.
+        ("short", "every_cell", 1.7),
+        ("long", "every_cell", 1.85),
+        ("four_byte", "every_cell", 1.95),
+        ("numbers", "every_cell", 1.5),
+        # Few cells of many: the stamp reads every stored chunk of the
+        # column, 1.95 times the traced peak.
+        ("long", "few", 2.25),
     ],
 )
 def test_clones_of_a_column_run_at_the_budget_that_their_refusals_name(
@@ -568,7 +568,9 @@ def test_the_stamp_of_a_column_follows_its_stored_chunks(column_store) -> None:
     assert store.clones.from_column("short", cell_selection=cells) != first
 
 
-@pytest.mark.parametrize("budget", [None, 40_000_000], ids=["one block", "blocks"])
+# 48 MB reads four blocks; the save alone needs 39.2 MB on Python 3.13 and
+# 40.4 MB from 3.14, whose write buffers are larger.
+@pytest.mark.parametrize("budget", [None, 48_000_000], ids=["one block", "blocks"])
 def test_clones_of_a_column_of_many_cells_hold_each_step_within_its_plan(
     tmp_path, budget
 ) -> None:
@@ -657,8 +659,10 @@ def _write_long_table(folder: Path) -> tuple[Any, Path]:
     return store, table
 
 
-def _write_matrix(folder: Path, n_listed: int = 300_000) -> tuple[Any, Path]:
-    """A store of the first 2,000 of a clone matrix's ``n_listed`` listed cells, one clone of 50 each."""
+def _write_matrix(
+    folder: Path, n_listed: int = 300_000, n_cells: int = 2_000
+) -> tuple[Any, Path]:
+    """A store of the first ``n_cells`` of a clone matrix's ``n_listed`` listed cells, one clone of 50 each."""
     names = [f"c{i:07d}" for i in range(n_listed)]
     matrix = folder / "matrix"
     matrix.mkdir()
@@ -671,7 +675,7 @@ def _write_matrix(folder: Path, n_listed: int = 300_000) -> tuple[Any, Path]:
         + f"{n_listed} 50 {n_listed}\n"
         + "".join(f"{i + 1} {i % 50 + 1} 1\n" for i in range(n_listed))
     )
-    store = write_cells_store(folder / "store.zarr", names[:2_000])
+    store = write_cells_store(folder / "store.zarr", names[:n_cells])
     return store, matrix / "clones.mtx"
 
 
@@ -684,7 +688,7 @@ def _write_matrix(folder: Path, n_listed: int = 300_000) -> tuple[Any, Path]:
         # The matrix's cell list is parsed in chunks of one field, of ASCII
         # IDs that hold one byte a character where each character of the
         # longest sampled row is counted at four, the most that any holds.
-        ("matrix of many cells", 1.7),
+        ("matrix of many cells", 1.75),
     ],
 )
 def test_the_import_holds_its_parse_and_join_within_its_budget(
@@ -776,6 +780,66 @@ def test_a_matrix_lets_go_of_its_cells_and_labels_once_it_is_read(tmp_path) -> N
         at for at, item in enumerate(items[released:]) if item == "a release"
     )
     assert taken[released][1] == chunk + 8 * 5_000 + labels, taken[released]
+
+
+def test_a_matrix_of_selected_cells_holds_each_step_within_its_plan(
+    tmp_path,
+) -> None:
+    # 50,000 listed cells, every one selected, in 50 clones: the listed
+    # cells' positions and the clones' labels stay charged while the
+    # entries are assigned, 400 KB beyond the plan were they let go first.
+    store, path = _write_matrix(tmp_path, n_listed=50_000, n_cells=50_000)
+    cells = every_cell(store)
+
+    def run() -> object:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return store.clones.import_clones(
+                path, cell_selection=cells, invalidate_cache=True
+            )
+
+    from cytearc.storage.validation_scope import validation_scope
+
+    with validation_scope():
+        run()
+        _result, intervals = interval_peaks(run)
+    over = [entry for entry in intervals if entry[2] > entry[1] + 65_536]
+    assert over == [], over
+
+
+def test_each_block_of_a_column_takes_at_most_half_of_the_room(column_store) -> None:
+    # At a budget of a few blocks, each block's labels, their text and what
+    # assigning them holds take at most half of what the ledger leaves when
+    # the block is planned, beside what a step of NumPy calls holds and the
+    # hash table's growth to its next power of two.
+    store = column_store
+    cells = every_cell(store)
+    store.memoryBytes = 12_000_000
+    try:
+        _result, taken = charges(
+            lambda: store.clones.from_column(
+                "short", cell_selection=cells, invalidate_cache=True
+            )
+        )
+    finally:
+        store.memoryBytes = 1 << 34
+    starts = [
+        at for at, (item, _n, _p) in enumerate(taken) if item.startswith("a block of")
+    ]
+    blocks = 0
+    for at, (item, _nbytes, planned) in enumerate(taken):
+        if not item.startswith("assigning a block of"):
+            continue
+        n_rows = int(item.split()[4])
+        start = max(index for index in starts if index < at)
+        before = taken[start - 1][2]
+        assert planned - before <= (12_000_000 - before) / 2 + 128 * 1024, (
+            n_rows,
+            planned - before,
+            12_000_000 - before,
+        )
+        blocks += 1
+    assert blocks > 1, blocks
 
 
 def test_a_chunk_of_a_clone_table_charges_what_parsing_it_holds(tmp_path) -> None:
