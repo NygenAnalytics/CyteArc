@@ -254,6 +254,8 @@ class _DecodingPools(ThreadPoolExecutor):
         super().__init__(max_workers=workers, thread_name_prefix="zarr_pool")
         self._sized: dict[int, ThreadPoolExecutor] = {}
         self._sized_lock = threading.Lock()
+        # Set under the lock, so no pool of a new count starts once shutdown has begun.
+        self._closing = False
 
     def submit[**P, R](
         self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
@@ -264,7 +266,7 @@ class _DecodingPools(ThreadPoolExecutor):
         with self._sized_lock:
             pool = self._sized.get(threads)
             if pool is None:
-                if self._shutdown:
+                if self._closing:
                     raise RuntimeError("cannot schedule new futures after shutdown")
                 pool = ThreadPoolExecutor(
                     max_workers=threads, thread_name_prefix=f"zarr_pool_of_{threads}"
@@ -274,6 +276,7 @@ class _DecodingPools(ThreadPoolExecutor):
 
     def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
         with self._sized_lock:
+            self._closing = True
             sized = list(self._sized.values())
         for pool in sized:
             pool.shutdown(wait=wait, cancel_futures=cancel_futures)
@@ -283,8 +286,9 @@ class _DecodingPools(ThreadPoolExecutor):
 def _install_decoding_pools(workers: int) -> None:
     """Make CyteArc's decoding pools the default executor of Zarr's event loop.
 
-    Zarr makes its own pool only while it has none, so the pools also become
-    Zarr's when it has none yet. A pool that Zarr or asyncio made before is
+    Pools made here also become Zarr's own, which Zarr then makes no pool in
+    place of, and which a later install finds when another executor has
+    replaced them on the loop. A pool that Zarr or asyncio made before is
     left to finish what it runs, as Zarr leaves a pool that it replaces,
     since the loop may be submitting to it.
     """
@@ -295,6 +299,7 @@ def _install_decoding_pools(workers: int) -> None:
         pools = sync._executor
         if not isinstance(pools, _DecodingPools):
             pools = _DecodingPools(workers)
+            sync._executor = pools
         loop.set_default_executor(pools)
     if sync._executor is None:
         sync._executor = pools
@@ -321,7 +326,7 @@ def ensure_zarr_host_ceiling() -> int:
 
 @contextmanager
 def zarr_decoding_threads(threads: int) -> Iterator[None]:
-    """Decode the Zarr reads that the calling thread makes within on a pool of exactly ``threads`` threads.
+    """Decode the Zarr reads that the calling thread makes in this context on a pool of exactly ``threads`` threads.
 
     A thread of Zarr's codec pool can still hold the last chunk that it
     fetched or decoded after the read returns, so reads within leave at most

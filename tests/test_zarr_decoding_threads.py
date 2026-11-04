@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import threading
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -13,7 +14,7 @@ import numpy as np
 import pytest
 import zarr
 import zarr.core.sync as zarr_sync
-from zarr.codecs import ZstdCodec
+from zarr.codecs import BloscCodec, ZstdCodec
 
 from cytearc.metadata.rows import read_rows, read_whole
 from cytearc.storage import async_execution
@@ -29,9 +30,26 @@ _READER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "reader", default=None
 )
 
+#: The host threads of the pools that each test reads beside: a count that
+#: no test reads at, so that every count a test reads at has a pool of its
+#: own whatever the machine.
+_HOST_THREADS = 7
+
+
+@pytest.fixture(autouse=True)
+def _decoding_pools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[async_execution._DecodingPools]:
+    """Make fresh decoding pools of seven host threads Zarr's, and put the process's back after the test."""
+    pools = async_execution._DecodingPools(_HOST_THREADS)
+    monkeypatch.setattr(zarr_sync._get_loop(), "_default_executor", pools)
+    monkeypatch.setattr(zarr_sync, "_executor", pools)
+    yield pools
+    pools.shutdown(wait=False)
+
 
 class _Decodes:
-    """The thread that ran each zstd decode, by name, with the reader it decoded for.
+    """The thread that ran each zstd or Blosc decode, with the reader it decoded for.
 
     The first ``together`` decodes wait for each other, so that many threads
     decode at once, and with ``each_reader`` the first decode of each of
@@ -46,19 +64,18 @@ class _Decodes:
         together: int = 0,
         each_reader: tuple[str, ...] = (),
     ) -> None:
-        self.seen: list[tuple[str, str | None]] = []
+        self.seen: list[tuple[threading.Thread, str | None]] = []
         lock = threading.Lock()
         waiting = together or len(each_reader)
         barrier = threading.Barrier(waiting, timeout=20) if waiting else None
         started: set[str | None] = set()
         # Decodes since recording began, which clearing ``seen`` keeps.
         decoded = [0]
-        decode = ZstdCodec._decode_sync
 
-        def recording(codec, chunk_bytes, chunk_spec):
+        def record() -> None:
             reader = _READER.get()
             with lock:
-                self.seen.append((threading.current_thread().name, reader))
+                self.seen.append((threading.current_thread(), reader))
                 decoded[0] += 1
                 if each_reader:
                     wait = reader in each_reader and reader not in started
@@ -67,12 +84,19 @@ class _Decodes:
                     wait = decoded[0] <= together
             if barrier is not None and wait:
                 barrier.wait()
-            return decode(codec, chunk_bytes, chunk_spec)
 
-        monkeypatch.setattr(ZstdCodec, "_decode_sync", recording)
+        def recording(decode):
+            def run(codec, chunk_bytes, chunk_spec):
+                record()
+                return decode(codec, chunk_bytes, chunk_spec)
 
-    def threads(self, reader: str | None = None) -> set[str]:
-        return {name for name, of in self.seen if reader is None or of == reader}
+            return run
+
+        for codec in (ZstdCodec, BloscCodec):
+            monkeypatch.setattr(codec, "_decode_sync", recording(codec._decode_sync))
+
+    def threads(self, reader: str | None = None) -> set[threading.Thread]:
+        return {thread for thread, of in self.seen if reader is None or of == reader}
 
 
 def _values(root: zarr.Group, n_chunks: int = 48) -> np.ndarray:
@@ -112,7 +136,7 @@ def test_a_read_decodes_on_its_ledgers_threads_after_a_wider_read(
             decodes.seen.clear()
             np.testing.assert_array_equal(read(root, threads), expected)
             assert 1 <= len(decodes.threads()) <= threads, decodes.threads()
-            assert all(f"_of_{threads}_" in name for name in decodes.threads())
+            assert all(f"_of_{threads}_" in t.name for t in decodes.threads())
 
 
 def test_a_read_at_the_host_threads_decodes_on_zarrs_pool_as_any_other_read(
@@ -123,13 +147,14 @@ def test_a_read_at_the_host_threads_decodes_on_zarrs_pool_as_any_other_read(
     root = zarr.open_group(tmp_path / "store.zarr", mode="w")
     values = _values(root)
     host = ensure_zarr_host_ceiling()
+    assert host == _HOST_THREADS
     decodes = _Decodes(monkeypatch)
     with zarr_io_concurrency(10):
         np.testing.assert_array_equal(_read_whole(root, host), values)
         np.testing.assert_array_equal(root["values"][...], values)
     pool = zarr_sync._get_loop()._default_executor
-    assert decodes.threads() <= {thread.name for thread in pool._threads}
-    assert not any("_of_" in name for name in decodes.threads())
+    assert decodes.threads() <= set(pool._threads)
+    assert not any("_of_" in thread.name for thread in decodes.threads())
 
 
 @pytest.mark.parametrize(
@@ -166,18 +191,18 @@ def test_reads_in_flight_together_decode_on_the_pool_of_their_own_count(
     assert sorted(results) == sorted(readers)
     for reader in readers:
         np.testing.assert_array_equal(results[reader], values)
-    by_count: dict[int, set[str]] = {}
+    by_count: dict[int, set[threading.Thread]] = {}
     for reader, threads in zip(readers, counts, strict=True):
         assert 1 <= len(decodes.threads(reader)) <= threads
         by_count.setdefault(threads, set()).update(decodes.threads(reader))
-    for threads, names in by_count.items():
-        assert len(names) <= threads
+    for threads, decoding in by_count.items():
+        assert len(decoding) <= threads
     pools = list(by_count.values())
     assert all(a.isdisjoint(b) for i, a in enumerate(pools) for b in pools[i + 1 :])
 
 
 def test_a_pool_that_replaced_cytearcs_is_replaced_before_the_next_charged_read(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, _decoding_pools
 ) -> None:
     # A pool set on Zarr's loop after CyteArc's, as a library or Zarr itself
     # can set one, gives way to CyteArc's when a charged read begins.
@@ -192,8 +217,8 @@ def test_a_pool_that_replaced_cytearcs_is_replaced_before_the_next_charged_read(
         with zarr_io_concurrency(10):
             np.testing.assert_array_equal(_read_whole(root, 1), values)
         assert len(decodes.threads()) == 1
-        assert not any(name.startswith("foreign") for name in decodes.threads())
-        assert isinstance(loop._default_executor, async_execution._DecodingPools)
+        assert not any(t.name.startswith("foreign") for t in decodes.threads())
+        assert loop._default_executor is _decoding_pools
 
 
 def test_the_installed_pool_keeps_the_size_of_the_pool_zarr_ran_before(
@@ -216,6 +241,73 @@ def test_the_installed_pool_keeps_the_size_of_the_pool_zarr_ran_before(
         pools.shutdown()
 
 
+def test_a_reinstall_finds_the_pools_it_made_beside_zarrs_own(monkeypatch) -> None:
+    # Where Zarr made its own pool first, the pools that take its place on
+    # the loop become Zarr's too, so that once another executor replaces
+    # them, the next install finds the same pools instead of making more.
+    loop = zarr_sync._get_loop()
+    with (
+        ThreadPoolExecutor(3) as zarrs,
+        ThreadPoolExecutor(3) as foreign,
+        ThreadPoolExecutor(3) as later,
+    ):
+        monkeypatch.setattr(zarr_sync, "_executor", zarrs)
+        loop.set_default_executor(foreign)
+        assert ensure_zarr_host_ceiling() == 3
+        pools = loop._default_executor
+        assert isinstance(pools, async_execution._DecodingPools)
+        assert zarr_sync._executor is pools
+        loop.set_default_executor(later)
+        assert ensure_zarr_host_ceiling() == 3
+        assert loop._default_executor is pools
+        pools.shutdown()
+
+
+def test_the_repertoire_operations_decode_their_own_charged_reads_on_the_stores_threads(
+    tmp_path, monkeypatch
+) -> None:
+    # The reads that the repertoire operations charge to a ledger outside
+    # read_whole and read_rows, of the contigs' text and of the export's
+    # passes, decode on the two threads of a store of nthreads=2.
+    from cytearc.datastore._operations import repertoire
+    from tests.clone_helpers import (
+        CELLRANGER_HEADER,
+        CLONAL_ROWS,
+        receptor_store,
+        write_lines,
+    )
+
+    def labelled(function, label):
+        def run(*args, **kwargs):
+            token = _READER.set(label)
+            try:
+                return function(*args, **kwargs)
+            finally:
+                _READER.reset(token)
+
+        return run
+
+    for name in ("_decoded_values", "_value_lengths"):
+        monkeypatch.setattr(repertoire, name, labelled(getattr(repertoire, name), name))
+    for name in ("measure", "scan"):
+        method = getattr(repertoire._ExportContigs, name)
+        monkeypatch.setattr(repertoire._ExportContigs, name, labelled(method, name))
+    store = receptor_store(tmp_path, nthreads=2)
+    path = write_lines(tmp_path, "clonal.csv", CELLRANGER_HEADER, CLONAL_ROWS)
+    receptors = store.repertoire.import_receptors(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    decodes = _Decodes(monkeypatch)
+    clonotypes = store.repertoire.clonotypes(receptors, sequence="aa")
+    store.repertoire.clonotypes(receptors, metric="hamming", max_distance=1)
+    store.repertoire.spectratype(receptors)
+    store.repertoire.export_airr(clonotypes, tmp_path / "contigs.tsv")
+    for label in ("_decoded_values", "_value_lengths", "measure", "scan"):
+        decoding = {thread.name for thread in decodes.threads(label)}
+        assert decoding, label
+        assert all("_of_2_" in name for name in decoding), (label, decoding)
+
+
 def test_nested_scopes_decode_on_the_innermost_count_and_restore_the_outer(
     tmp_path, monkeypatch
 ) -> None:
@@ -228,7 +320,7 @@ def test_nested_scopes_decode_on_the_innermost_count_and_restore_the_outer(
     def decoded_on() -> set[str]:
         decodes.seen.clear()
         np.testing.assert_array_equal(root["values"][...], values)
-        return decodes.threads()
+        return {thread.name for thread in decodes.threads()}
 
     with zarr_io_concurrency(10), zarr_decoding_threads(3):
         with pytest.raises(KeyError), zarr_decoding_threads(1):
