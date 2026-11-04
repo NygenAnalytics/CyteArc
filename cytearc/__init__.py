@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     )
     from .mapping.reference import MappingReference as MappingReference
     from .storage.artifacts import ArtifactStatus as ArtifactStatus
+    from .storage.diagnostics import ExportSummary as ExportSummary
     from .storage.errors import ArtifactResolutionError as ArtifactResolutionError
     from .storage.refs import ArtifactRef as ArtifactRef
     from .utils.memory_budget import MemoryBudgetError as MemoryBudgetError
@@ -136,6 +137,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "DataStoreMerge": ".merge",
     "DiagnosticWarning": ".utils.warnings",
     "EnrichmentResult": ".features.enrichment",
+    "ExportSummary": ".storage.diagnostics",
     "FateMappingResult": ".trajectory.results",
     "H5adInspectResult": ".readers",
     "H5adImportResult": ".writers",

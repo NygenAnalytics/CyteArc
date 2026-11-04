@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc import DiagnosticWarning
+
 from cytearc.storage.artifacts import artifact_group
 from cytearc.utils.logging import collect_warnings
 from cytearc.variants.genotypes import CALLS, GENOTYPE_RULES
@@ -504,10 +506,21 @@ def test_sites_and_alleles_are_checked(store, tmp_path) -> None:
         store.variants.genotypes(
             gift, method="gift", alleles={"ASXL1 c.1772dup": ("GTGG", "GTAAG")}
         )
-    with pytest.warns(UserWarning, match="No cell shows the alternative 'GTTAG'"):
-        store.variants.genotypes(
+    unshown = "No cell shows the alternative that alleles gives 1 site"
+    with pytest.warns(DiagnosticWarning, match=unshown) as caught:
+        named = store.variants.genotypes(
             gift, method="gift", alleles={"ASXL1 c.1772dup": ("GTAG", "GTTAG")}
         )
+    assert [(w.message.diagnostic, w.message.value) for w in caught] == [
+        ("alternativesNotShown", 1)
+    ]
+    # Reused genotypes warn as they did when they were called.
+    with pytest.warns(DiagnosticWarning, match=unshown):
+        again = store.variants.genotypes(
+            gift, method="gift", alleles={"ASXL1 c.1772dup": ("GTAG", "GTTAG")}
+        )
+    assert again == named
+    assert store.artifacts.inspect(named).diagnostics["alternativesNotShown"] == 1
     # GoT's counts hold no gapfills to weigh.
     got = _got(store, tmp_path, "xv")
     with pytest.raises(ValueError, match="weighs the gapfills of giftwrap's probes"):

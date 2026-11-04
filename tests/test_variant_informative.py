@@ -132,8 +132,11 @@ def test_the_atac_preset_selects_exactly_the_clone_variants(store) -> None:
     assert (parameters["preset"], parameters["mask"]) == ("atac", [])
     attributes = store.artifacts.load(ref).attrs
     assert not {"preset", "thresholds", "masks"} & set(attributes)
-    assert attributes["n_informative"] == len(mito_variant_labels(TRUTH))
-    assert attributes["n_variants"] == len(selection.variants)
+    diagnostics = store.artifacts.inspect(ref).diagnostics
+    assert diagnostics["informativeVariants"] == len(mito_variant_labels(TRUTH))
+    assert diagnostics["variants"] == len(selection.variants)
+    assert diagnostics["maskedVariants"] == 0
+    assert diagnostics["cells"] == selection.n_cells
     assert attributes["stranded"] is True and attributes["qualities"] is False
     assert selection.stranded is True and selection.qualities is False
     # Errors sit on one strand, so none passes the strand test.

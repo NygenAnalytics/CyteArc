@@ -104,6 +104,18 @@ def test_gene_usage_counts_each_cells_primary_chains(tmp_path) -> None:
         "n_cells": [2, 2, 3, 1, 5],
         "fraction": [1.0, 1.0, 0.75, 0.25, 1.0],
     }
+    # cell0 to cell6 hold a chain in the primary slots, cell7 none; one
+    # group holds them, and each of their 13 chains has a V call.
+    assert usage.diagnostics == {
+        "cellsWithoutClone": 1,
+        "cellsWithoutGroup": 0,
+        "groups": 1,
+        "chainsWithoutValue": 0,
+    }
+    # The rows give no D call, so each of those chains lacks the gene counted.
+    without_d = store.repertoire.gene_usage(receptors, genes="d_call")
+    assert (without_d.n_cells, len(without_d.table)) == (0, 0)
+    assert without_d.diagnostics["chainsWithoutValue"] == 13
     second = store.repertoire.gene_usage(receptors, slots="VJ_2")
     assert second.table[["locus", "v_call", "n_cells"]].values.tolist() == [
         ["TRA", "TRAV3", 1]
@@ -494,6 +506,13 @@ def test_cells_outside_a_selection_or_without_a_label_are_left_out(tmp_path) -> 
         ("TRB", "TRBV1"): 4,
     }
     assert usage.n_cells == 4 and usage.cell_selection == first
+    # Each of the four cells has a clonotype, and every chain a V call.
+    assert usage.diagnostics == {
+        "cellsWithoutClone": 0,
+        "cellsWithoutGroup": 0,
+        "groups": 1,
+        "chainsWithoutValue": 0,
+    }
     # A label artifact of the first four cells leaves the others ungrouped.
     labels = store.snapshot_cluster_labels("sample", cell_selection=first)
     spectratype = store.repertoire.spectratype(receptors, groups=labels)
@@ -508,6 +527,13 @@ def test_cells_outside_a_selection_or_without_a_label_are_left_out(tmp_path) -> 
         ("s1", "TRB", 5): 2,
         ("s2", "TRA", 4): 1,
         ("s2", "TRB", 5): 2,
+    }
+    # cell4 to cell6 hold chains but no label, and cell7 no chain.
+    assert spectratype.diagnostics == {
+        "cellsWithoutClone": 1,
+        "cellsWithoutGroup": 3,
+        "groups": 2,
+        "chainsWithoutValue": 0,
     }
 
 
@@ -835,6 +861,24 @@ def test_gene_usage_recovers_the_truths_genes_in_each_sample(tmp_path) -> None:
                 locus = genes[junction][0]
                 expected_lengths[(str(truth.samples[cell]), locus, len(junction))] += 1
     assert _counts(lengths, "sample", "locus", "length") == dict(expected_lengths)
+    # The cells without a chain in the primary slots are left out; every
+    # chain of the truth has its genes and junction.
+    without_chain = sum(
+        all(pd.isna(getattr(row, f"{slot}_junction_aa")) for slot in ("VJ_1", "VDJ_1"))
+        for row in expected.itertuples()
+    )
+    for record in (
+        store.repertoire.gene_usage(
+            receptors, genes=("v_call", "j_call"), group_by="sample"
+        ),
+        store.repertoire.spectratype(receptors, group_by="sample"),
+    ):
+        assert record.diagnostics == {
+            "cellsWithoutClone": without_chain,
+            "cellsWithoutGroup": 0,
+            "groups": len(set(truth.samples.tolist())),
+            "chainsWithoutValue": 0,
+        }
 
 
 def test_figures_of_clonotypes_need_the_store_to_name_them(tmp_path) -> None:

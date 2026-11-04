@@ -366,6 +366,10 @@ class CloneOverlap:
         group_by: The cell metadata columns of the groups.
         groups: The label artifact of the groups, or None.
         cell_selection: The cells kept, or None for every cell.
+        diagnostics: The cells that the summary leaves out, by name:
+            ``cellsWithoutClone``, the cells without a clone among those
+            kept, ``cellsWithoutGroup``, those with a clone but no group,
+            and the ``groups``.
     """
 
     group_sizes: pd.DataFrame = field(repr=False)
@@ -375,6 +379,7 @@ class CloneOverlap:
     group_by: tuple[str, ...]
     groups: ArtifactRef | None
     cell_selection: ArtifactRef | None
+    diagnostics: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,6 +401,10 @@ class CloneTracking:
         group_by: The cell metadata columns of the groups.
         groups: The label artifact of the groups, or None.
         cell_selection: The cells kept, or None for every cell.
+        diagnostics: The cells that the summary leaves out, by name:
+            ``cellsWithoutClone``, the cells without a clone among those
+            kept, ``cellsWithoutGroup``, those with a clone but no group,
+            and the ``groups``, and ``trackedClones``, the clones tracked.
     """
 
     table: pd.DataFrame = field(repr=False)
@@ -405,3 +414,4 @@ class CloneTracking:
     group_by: tuple[str, ...]
     groups: ArtifactRef | None
     cell_selection: ArtifactRef | None
+    diagnostics: dict[str, Any]

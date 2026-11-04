@@ -304,6 +304,12 @@ class GeneUsage:
         groups: The label artifact of the groups, or None.
         cell_selection: The cells kept, or None for every cell.
         n_cells: The cells with a counted chain.
+        diagnostics: The cells and chains that the summary leaves out, by
+            name: ``cellsWithoutClone``, the cells kept without a chain in
+            the counted slots, or without a clonotype when the source is
+            clonotypes, ``cellsWithoutGroup``, those counted but in no
+            group, the ``groups``, and ``chainsWithoutValue``, the counted chains without the gene
+            fields counted.
     """
 
     table: pd.DataFrame = field(repr=False)
@@ -317,6 +323,7 @@ class GeneUsage:
     groups: ArtifactRef | None
     cell_selection: ArtifactRef | None
     n_cells: int
+    diagnostics: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +351,12 @@ class Spectratype:
         groups: The label artifact of the groups, or None.
         cell_selection: The cells kept, or None for every cell.
         n_cells: The cells with a counted chain.
+        diagnostics: The cells and chains that the summary leaves out, by
+            name: ``cellsWithoutClone``, the cells kept without a chain in
+            the counted slots, or without a clonotype when the source is
+            clonotypes, ``cellsWithoutGroup``, those counted but in no
+            group, the ``groups``, and ``chainsWithoutValue``, the counted chains without a
+            junction.
     """
 
     table: pd.DataFrame = field(repr=False)
@@ -356,3 +369,4 @@ class Spectratype:
     groups: ArtifactRef | None
     cell_selection: ArtifactRef | None
     n_cells: int
+    diagnostics: dict[str, Any]

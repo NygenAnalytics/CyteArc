@@ -1368,6 +1368,10 @@ class ClonalDiversity:
         cell_selection: The cells kept, or None for every cell.
         size: The common size in cells.
         coverage: The common coverage.
+        diagnostics: The cells that the summary leaves out, by name:
+            ``cellsWithoutClone``, the cells without a clone among those
+            kept, ``cellsWithoutGroup``, those with a clone but no group,
+            and the ``groups``.
     """
 
     indices: pd.DataFrame = field(repr=False)
@@ -1379,6 +1383,7 @@ class ClonalDiversity:
     cell_selection: ArtifactRef | None
     size: int
     coverage: float
+    diagnostics: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1401,6 +1406,10 @@ class Rarefaction:
         groups: The label artifact of the groups, or None.
         cell_selection: The cells kept, or None for every cell.
         orders: The orders of the curves.
+        diagnostics: The cells that the summary leaves out, by name:
+            ``cellsWithoutClone``, the cells without a clone among those
+            kept, ``cellsWithoutGroup``, those with a clone but no group,
+            and the ``groups``.
     """
 
     curves: pd.DataFrame = field(repr=False)
@@ -1410,6 +1419,7 @@ class Rarefaction:
     groups: ArtifactRef | None
     cell_selection: ArtifactRef | None
     orders: tuple[int, ...]
+    diagnostics: dict[str, Any]
 
 
 def common_size(groups: GroupedCloneSizes) -> int:

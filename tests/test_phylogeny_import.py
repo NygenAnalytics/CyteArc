@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc import DiagnosticWarning
 from cytearc.clones import CellPhylogeny
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
@@ -125,21 +126,27 @@ def test_each_format_recovers_the_truths_clones(shared, tmp_path, name) -> None:
     assert {
         key: attributes[key] for key in sorted(attributes) if key.startswith("n_")
     } == {
-        "n_cells_in_no_tree": N_CELLS - N_IN_TREES,
-        "n_cells_in_trees": N_IN_TREES,
         "n_leaves": N_IN_TREES + N_OUTSIDE,
-        "n_leaves_without_a_cell": N_OUTSIDE,
         "n_nodes": len(TREE.names),
         "n_trees": 1,
-        "n_unnamed_leaves": 0,
     }
+    diagnostics = shared.store.artifacts.inspect(phylogeny).diagnostics
     assert_joined(
-        shared.store.artifacts.inspect(phylogeny).diagnostics,
+        diagnostics,
         n_file=N_IN_TREES + N_OUTSIDE,
         unmatched=[f"d2__{barcode}-1" for barcode in TRUTH.outside],
     )
+    # The truth's tree names every cell with a clone, and its leaves all
+    # end at one time.
+    assert {
+        key: diagnostics[key]
+        for key in ("cellsInNoTree", "unnamedLeaves", "leafTimeSpread")
+    } == {
+        "cellsInNoTree": N_CELLS - N_IN_TREES,
+        "unnamedLeaves": 0,
+        "leafTimeSpread": 0.0,
+    }
     assert attributes["time_unit"] == "days"
-    assert attributes["leaf_time_spread"] == 0.0
     clones, messages = _cut(shared.store, phylogeny, time=PHYLOGENY_CUT_TIME)
     assert messages == []
     assert loaded_partition(shared.store, clones) == TRUTH.partition()
@@ -260,7 +267,12 @@ def test_depth_two_splits_each_polytomy_and_leaves_out_a_single_child_clade(
         "so they are in no clone"
     ]
     attributes = shared.store.artifacts.load(clones).attrs
-    assert (attributes["n_clones"], attributes["n_cells_before_cut"]) == (19, 1)
+    assert attributes["n_clones"] == 19
+    diagnostics = shared.store.artifacts.inspect(clones).diagnostics
+    assert (diagnostics["cellsBeforeCut"], diagnostics["cellsWithClone"]) == (
+        1,
+        N_IN_TREES - 1,
+    )
 
 
 def test_cutting_at_the_leaves_makes_each_cell_a_clone_named_by_its_leaf(
@@ -295,16 +307,30 @@ def test_cells_that_end_before_the_cut_are_counted_and_warned(store, tmp_path) -
         + [(c, 4, 3.0), (d, 4, 3.0)],
     )
     phylogeny, _messages = _import(store, write_newick([tree], tmp_path / "u.nwk"))
-    assert store.artifacts.load(phylogeny).attrs["leaf_time_spread"] == 1.0
+    assert store.artifacts.inspect(phylogeny).diagnostics["leafTimeSpread"] == 1.0
     clones, messages = _cut(store, phylogeny, time=3.5)
     assert _clone_sets(store, clones) == {a: frozenset([a]), b: frozenset([b])}
-    assert messages == [
+    expected = [
         "2 of the 4 cells in the trees end before the cut at time 3.5 days, so they "
         "are in no clone"
     ]
+    assert messages == expected
+    # A reused cut warns as the cut did, from its saved diagnostics.
+    reused, again = _cut(store, phylogeny, time=3.5)
+    assert (reused, again) == (clones, expected)
+    with pytest.warns(DiagnosticWarning) as caught:
+        store.clones.phylogeny_clones(phylogeny, time=3.5)
+    (warning,) = caught
+    assert isinstance(warning.message, DiagnosticWarning)
+    assert (
+        warning.message.operation,
+        warning.message.diagnostic,
+        warning.message.value,
+    ) == ("cut_phylogeny_clones", "cellsBeforeCut", 2)
     attributes = store.artifacts.load(clones).attrs
-    assert attributes["n_cells_before_cut"] == 2
-    assert attributes["leaf_time_spread"] == 1.0
+    assert store.artifacts.inspect(clones).diagnostics["cellsBeforeCut"] == 2
+    # The spread stays on the phylogeny alone.
+    assert "leaf_time_spread" not in attributes
     assert attributes["time_unit"] == "days"
 
 
@@ -325,7 +351,7 @@ def test_trees_without_lengths_are_cut_at_depths_only(store, tmp_path) -> None:
     path = tmp_path / "topology.nwk"
     path.write_text(f"(({a},{b})x,{c})r;")
     phylogeny, _messages = _import(store, path)
-    assert store.artifacts.load(phylogeny).attrs["leaf_time_spread"] is None
+    assert store.artifacts.inspect(phylogeny).diagnostics["leafTimeSpread"] is None
     with pytest.raises(ValueError, match="5 nodes of the phylogeny have no time"):
         store.clones.phylogeny_clones(phylogeny, time=1.0)
     clones, _messages = _cut(store, phylogeny, depth=1)
@@ -749,7 +775,7 @@ def _golden_cuts(store, phylogeny, case: str, leaves: list[str]) -> None:
             assert {str(size): int(n) for size, n in sizes.items()} == expected[
                 "clades_by_size"
             ]
-            n_before = store.artifacts.load(clones).attrs["n_cells_before_cut"]
+            n_before = store.artifacts.inspect(clones).diagnostics["cellsBeforeCut"]
             assert n_before == expected["n_outside"]
 
 
@@ -769,14 +795,13 @@ def test_petracer_trees_cut_as_pycea_cuts_them(tmp_path) -> None:
     phylogeny, messages = _import(store, files)
     assert messages == []
     attributes = store.artifacts.load(phylogeny).attrs
+    diagnostics = store.artifacts.inspect(phylogeny).diagnostics
     # 310 of the embryo's 1,342 cells are in neither clone's tree.
-    assert (attributes["n_cells_in_trees"], attributes["n_cells_in_no_tree"]) == (
-        1032,
-        310,
-    )
+    assert diagnostics["cellsInNoTree"] == 310
+    assert len(ids) - diagnostics["cellsInNoTree"] == 1032
     assert attributes["n_trees"] == 2
     # The lengths' six digits leave the leaves 16 millionths of a day apart.
-    assert attributes["leaf_time_spread"] == pytest.approx(1.6e-5, abs=1e-6)
+    assert diagnostics["leafTimeSpread"] == pytest.approx(1.6e-5, abs=1e-6)
     loaded = store.clones.load_phylogeny(phylogeny)
     leaves = loaded.nodes.loc[loaded.nodes["is_leaf"], "name"].tolist()
     _golden_cuts(store, phylogeny, "petracer", leaves)
@@ -802,7 +827,7 @@ def test_convexml_tree_cuts_as_pycea_cuts_it(tmp_path) -> None:
     # Ten cells that no leaf names, and every leaf a cell.
     store = _cells_store(tmp_path, [*leaves, *(f"other{i}" for i in range(10))])
     phylogeny, _messages = _import(store, path)
-    assert store.artifacts.load(phylogeny).attrs["n_cells_in_no_tree"] == 10
+    assert store.artifacts.inspect(phylogeny).diagnostics["cellsInNoTree"] == 10
     _golden_cuts(store, phylogeny, "convexml", leaves)
 
 
@@ -961,9 +986,18 @@ def test_saved_phylogenies_that_lost_an_array_or_a_count_are_not_used(
 
     phylogeny, _messages = _import(store, path)
     group = artifact_group(store.zw, phylogeny)
-    group.attrs["n_cells_in_trees"] = "many"
-    with pytest.raises(ValueError, match="'n_cells_in_trees' attribute is not a count"):
-        store.clones.load_phylogeny(phylogeny)
+    saved = dict(group.attrs["diagnostics"])
+    # A value that no diagnostic holds is refused as the reader reads it, and
+    # text where the loader needs a count as the loader reads it.
+    for damaged, refusal in (
+        (True, "holds other diagnostics than import_phylogeny saves"),
+        ("many", "cellsInNoTree diagnostic is not a count, but 'many'"),
+    ):
+        group.attrs["diagnostics"] = {**saved, "cellsInNoTree": damaged}
+        with pytest.raises(ValueError, match=refusal) as refused:
+            store.clones.load_phylogeny(phylogeny)
+        assert "call ds.clones.import_phylogeny again" in str(refused.value)
+    group.attrs["diagnostics"] = saved
     # Arrays whose lengths disagree are not reused; the import runs again.
     del group["tree_unique_names"]
     group.create_array("tree_unique_names", data=np.zeros(3, dtype=bool))
@@ -992,10 +1026,10 @@ def test_saved_clones_of_a_cut_that_lost_its_count_are_cut_again(
     assert _cut(store, phylogeny, time=3.5)[0] == clones
     # Saved clones without the count of cells that end before the cut are cut
     # again, as a new artifact, rather than reused without it.
-    del artifact_group(store.zw, clones).attrs["n_cells_before_cut"]
+    del artifact_group(store.zw, clones).attrs["diagnostics"]
     again, messages = _cut(store, phylogeny, time=3.5)
     assert again != clones
-    assert store.artifacts.load(again).attrs["n_cells_before_cut"] == 2
+    assert store.artifacts.inspect(again).diagnostics["cellsBeforeCut"] == 2
     assert len(messages) == 1
     assert _clone_sets(store, again) == {a: frozenset([a]), b: frozenset([b])}
 
@@ -1081,10 +1115,9 @@ def test_unnamed_leaves_count_as_leaves_without_a_cell_and_not_as_barcodes(
     phylogeny, messages = _import(store, path, time_unit=None)
     attributes = store.artifacts.load(phylogeny).attrs
     assert messages == []
-    assert {
-        name: attributes[name]
-        for name in ("n_unnamed_leaves", "n_leaves_without_a_cell", "n_leaves")
-    } == {"n_unnamed_leaves": 2, "n_leaves_without_a_cell": 2, "n_leaves": 4}
+    # Two of the four leaves have no name, so two name no cell.
+    assert store.artifacts.inspect(phylogeny).diagnostics["unnamedLeaves"] == 2
+    assert attributes["n_leaves"] == 4
     assert_joined(store.artifacts.inspect(phylogeny).diagnostics, n_file=2)
 
 

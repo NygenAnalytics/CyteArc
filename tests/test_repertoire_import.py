@@ -187,13 +187,10 @@ def test_import_classifies_each_cells_chains(tmp_path) -> None:
     assert by_id.loc["cell6_contig_1", "v_identity"] == 0.95
     assert np.isnan(by_id.loc["cell6_contig_2", "v_identity"])
 
-    group = store.artifacts.load(ref)
-    assert group.attrs["n_file_contigs"] == 17
-    assert group.attrs["n_unmatched_contigs"] == 1
+    diagnostics = store.artifacts.inspect(ref).diagnostics
+    assert (diagnostics["fileContigs"], diagnostics["unmatchedContigs"]) == (17, 1)
     # cell0 to cell6 and outside-1, each counted once across the files.
-    assert_joined(
-        store.artifacts.inspect(ref).diagnostics, n_file=8, unmatched=["outside-1"]
-    )
+    assert_joined(diagnostics, n_file=8, unmatched=["outside-1"])
 
 
 def test_unmatched_barcodes_are_named_in_a_warning(tmp_path) -> None:
@@ -208,8 +205,8 @@ def test_unmatched_barcodes_are_named_in_a_warning(tmp_path) -> None:
         "'outside-1'. Check barcode_prefix, barcode_suffix and barcode_pattern "
         "against the store's cell IDs."
     ]
-    attributes = store.artifacts.load(ref).attrs
-    assert (attributes["n_file_contigs"], attributes["n_unmatched_contigs"]) == (12, 1)
+    diagnostics = store.artifacts.inspect(ref).diagnostics
+    assert (diagnostics["fileContigs"], diagnostics["unmatchedContigs"]) == (12, 1)
 
 
 def test_unmatched_barcodes_count_once_per_sample(tmp_path) -> None:
@@ -222,13 +219,10 @@ def test_unmatched_barcodes_count_once_per_sample(tmp_path) -> None:
         cell_selection=store.snapshot_cell_selection(),
         barcode_prefix=["", "s2__"],
     )
-    attributes = store.artifacts.load(ref).attrs
+    diagnostics = store.artifacts.inspect(ref).diagnostics
     barcodes = {row.split(",")[0] for row in TCR_ROWS}
-    assert (
-        store.artifacts.inspect(ref).diagnostics["unmatchedBarcodes"]
-        == len(barcodes) + 1
-    )
-    assert attributes["n_unmatched_contigs"] == len(TCR_ROWS) + 1
+    assert diagnostics["unmatchedBarcodes"] == len(barcodes) + 1
+    assert diagnostics["unmatchedContigs"] == len(TCR_ROWS) + 1
 
 
 def test_import_is_reused_by_file_contents_in_any_order(tmp_path) -> None:
@@ -348,7 +342,7 @@ def test_a_cell_selection_limits_the_imported_cells(tmp_path) -> None:
     )
     loaded = store.repertoire.load_receptors(ref)
     assert loaded.cells.index.tolist() == ["cell0", "cell4"]
-    assert store.artifacts.load(ref).attrs["n_unmatched_contigs"] == 10
+    assert store.artifacts.inspect(ref).diagnostics["unmatchedContigs"] == 10
     values = store.artifacts.load_values(ref, value="chain_pairing")
     assert values.to_pandas().tolist() == ["ambiguous", "single pair"]
 
@@ -468,9 +462,9 @@ def test_a_file_without_contig_rows_leaves_every_cell_without_a_receptor(
         assert loaded.cells["receptor_type"].tolist() == ["no IR"] * N_CELLS
         assert loaded.cells["n_contigs"].tolist() == [0] * N_CELLS
         assert len(loaded.chains) == 0
-        attributes = store.artifacts.load(ref).attrs
-        assert attributes["n_file_contigs"] == 0
-        assert_joined(store.artifacts.inspect(ref).diagnostics, n_file=0)
+        diagnostics = store.artifacts.inspect(ref).diagnostics
+        assert (diagnostics["fileContigs"], diagnostics["cellsWithChain"]) == (0, 0)
+        assert_joined(diagnostics, n_file=0)
         assert list(messages) == []
 
 
@@ -959,12 +953,15 @@ def test_every_encoding_recovers_the_receptors_of_the_truth(
     assert table["n_contigs"].tolist() == [
         int(counts.get(cell, 0)) for cell in range(len(expected))
     ]
-    attributes = truth_store.store.artifacts.load(ref).attrs
     diagnostics = truth_store.store.artifacts.inspect(ref).diagnostics
     assert diagnostics["unmatchedBarcodes"] == N_OUTSIDE
     assert diagnostics["unselectedBarcodes"] == 0
-    assert attributes["n_unmatched_contigs"] == N_OUTSIDE
-    assert attributes["n_file_contigs"] == len(listed)
+    assert diagnostics["unmatchedContigs"] == N_OUTSIDE
+    assert diagnostics["fileContigs"] == len(listed)
+    # The truth's cells with a receptor, counted from the cells it expects.
+    assert diagnostics["cellsWithChain"] == int(
+        (expected["receptor_type"] != "no IR").sum()
+    )
     assert len(messages) == 1 and messages[0].startswith(
         f"{N_OUTSIDE} of {diagnostics['fileBarcodes']} barcodes of the contig "
         "files match no cell of the store"

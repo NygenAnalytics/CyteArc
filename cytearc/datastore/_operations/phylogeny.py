@@ -63,6 +63,7 @@ from ...storage.artifacts import (
 from ...storage.diagnostics import (
     DIAGNOSTICS_ATTRIBUTE,
     EXAMPLES,
+    DiagnosticRule,
     warn_diagnostics,
 )
 from ...storage.layout import column_chunk_rows
@@ -73,7 +74,6 @@ from ...utils.arrays import sort_categories, sorted_unique
 from ...utils.digest import path_sha256
 from ...utils.logging import logger
 from ...utils.memory_budget import MemoryLedger, fixed_text_bytes
-from ...utils.warnings import warn
 from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
@@ -523,8 +523,13 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         of the name that its ``barcode`` group matches first. Leaves that name
         no selected cell are counted in the join's diagnostics, apart from
         those of cells outside the selection, and those that name no cell of
-        the store are named in a warning, which a reused import gives again;
-        the selected cells in no tree are counted in ``n_cells_in_no_tree``. Two
+        the store are named in a warning, which a reused import gives again.
+        Beside the join's counts, the diagnostics that
+        ``ds.artifacts.inspect(ref).diagnostics`` returns hold
+        ``cellsInNoTree``, the selected cells that no leaf names,
+        ``unnamedLeaves``, the leaves without a name, and
+        ``leafTimeSpread``, the largest gap between a tree's earliest and
+        latest leaf in ``time_unit``, None when a leaf has no time. Two
         leaves that name one cell raise ``ValueError``.
 
         Each tree is named by its file's ``barcode_prefix`` and the file's
@@ -603,10 +608,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
                 "tree_names",
                 ArrayRequirement("tree_unique_names", dtype_kind="b"),
             ),
-            required_attributes=(
-                "time_unit",
-                "n_cells_in_no_tree",
-            ),
+            required_attributes=("time_unit",),
             reuse_validator=_has_forest,
         )
         files_text = _files_text(len(files))
@@ -642,21 +644,24 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         is_leaf[forest.parent[forest.parent >= 0]] = False
         earliest, latest = leaf_time_ranges(forest.times, is_leaf, forest.tree_offsets)
         spread = latest - earliest
-        diagnostics = planned_diagnostics(planned, join.diagnostics())
+        diagnostics = planned_diagnostics(
+            planned,
+            {
+                **join.diagnostics(),
+                "cellsInNoTree": n_cells - n_cells_in_trees,
+                "unnamedLeaves": forest.n_unnamed_leaves,
+                # How far the trees are from ultrametric, in time_unit.
+                "leafTimeSpread": (
+                    float(np.max(spread)) if np.all(np.isfinite(spread)) else None
+                ),
+            },
+        )
         attributes = {
             DIAGNOSTICS_ATTRIBUTE: diagnostics,
             "time_unit": unit,
             "n_trees": len(forest.tree_names),
             "n_nodes": len(forest.parent),
             "n_leaves": int(np.count_nonzero(is_leaf)),
-            "n_cells_in_trees": n_cells_in_trees,
-            "n_cells_in_no_tree": n_cells - n_cells_in_trees,
-            "n_leaves_without_a_cell": forest.n_leaves_without_a_cell,
-            "n_unnamed_leaves": forest.n_unnamed_leaves,
-            # How far the trees are from ultrametric, in time_unit.
-            "leaf_time_spread": (
-                float(np.max(spread)) if np.all(np.isfinite(spread)) else None
-            ),
         }
         width = _names_width(forest.names)
         # The arrays are written beside what Zarr's writes hold in file
@@ -726,7 +731,14 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         width = text_width(names_array)
         selection = self._phylogeny_cells(phylogeny)
         cell_index = cell_selection_indices(self.zw, selection)
-        n_named = _count(group, "n_cells_in_trees")
+        in_no_tree = inspect_artifact(self.zw, phylogeny).diagnostics["cellsInNoTree"]
+        if isinstance(in_no_tree, bool) or not isinstance(in_no_tree, int):
+            raise ValueError(
+                f"The phylogeny's cellsInNoTree diagnostic is not a count, but "
+                f"{quoted_value(in_no_tree)}; call ds.clones.import_phylogeny again "
+                "with the same arguments, which imports the trees anew"
+            )
+        n_named = len(cell_index) - in_no_tree
         # Names are read a stored chunk at a time: its bytes and their copy.
         rows = max(1, int(names_array.chunks[0]))
         held = (
@@ -788,11 +800,12 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
 
         A cell whose leaf ends before the cut, earlier than ``time`` or fewer
         than ``depth`` branchings below its root, is in no clone; the
-        artifact counts such cells in ``n_cells_before_cut``, and a warning
-        names how many. Leaves of a tree that is not ultrametric end at
-        different times, and the ``leaf_time_spread`` attribute holds the
-        largest gap between a tree's earliest and latest leaf. Selected cells
-        in no tree have no clone either.
+        artifact's diagnostics count such cells in ``cellsBeforeCut``, and a
+        warning names how many, again when the cut is reused. Leaves of a
+        tree that is not ultrametric end at different times, and the
+        phylogeny's ``leafTimeSpread`` diagnostic holds the largest gap
+        between a tree's earliest and latest leaf. Selected cells in no tree
+        have no clone either.
 
         A clone is named by its root's name when every node of its tree has a
         name of its own, as PEtracer's and Cassiopeia's trees do, and
@@ -852,9 +865,14 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             selection,
             n_cells,
             with_probability=False,
-            required_attributes=("n_clones", "n_cells_before_cut"),
+            required_attributes=("n_clones",),
         )
+        warnings = _cut_rules(cut, unit)
         if planned.reused:
+            # A saved cut warns as it did when it was made.
+            warn_diagnostics(
+                arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
+            )
             return planned.ref
         names_array = as_zarr_array(group["names"], name="names")
         n_nodes = int(names_array.shape[0])
@@ -921,9 +939,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         ranked, clone_ids, clone_sizes = ranked_clones(codes, labels.tolist())
         attributes: dict[str, Any] = {
             "n_clones": len(clone_ids),
-            "n_cells_before_cut": n_before,
             "time_unit": None if unit is None else str(unit),
-            "leaf_time_spread": group.attrs.get("leaf_time_spread"),
         }
         saving = MemoryLedger(
             self.memoryBytes,
@@ -943,17 +959,33 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             ),
             attributes,
             ledger=saving,
+            diagnostics={"cellsBeforeCut": n_before},
         )
-        if n_before:
-            warn(
-                f"{n_before} of the {len(leaf_cells)} cells in the trees end before "
-                f"the cut at {_cut_text(cut, unit)}, so they are in no clone"
-            )
+        warn_diagnostics(
+            arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
+        )
         logger.info(
             f"Cut {n_clones} clones of {len(leaf_cells) - n_before} cells at "
             f"{_cut_text(cut, unit)}"
         )
         return planned.ref
+
+
+def _cut_rules(cut: PhylogenyCut, unit: Any) -> tuple[DiagnosticRule, ...]:
+    """The warning that a cut gives from its saved diagnostics: the cells in the trees that end before it."""
+    return (
+        DiagnosticRule(
+            "cellsBeforeCut",
+            lambda saved: saved["cellsBeforeCut"] > 0,
+            # The trees' cells are those before the cut and those given a clone.
+            lambda saved: (
+                f"{saved['cellsBeforeCut']} of the "
+                f"{saved['cellsBeforeCut'] + saved['cellsWithClone']} cells in the "
+                f"trees end before the cut at {_cut_text(cut, unit)}, so they are in "
+                "no clone"
+            ),
+        ),
+    )
 
 
 def _cut_text(cut: PhylogenyCut, unit: Any) -> str:
@@ -973,16 +1005,6 @@ def _write_names_column(group: zarr.Group, name: str, values: np.ndarray) -> Non
         chunkSize=max(len(values), 1),
         blocks=[MetadataBlock(0, values.astype(f"U{width}"))],
     )
-
-
-def _count(group: zarr.Group, name: str) -> int:
-    """A count that a saved phylogeny records as an attribute."""
-    value = group.attrs.get(name)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(
-            f"The phylogeny's {quoted_value(name)} attribute is not a count"
-        )
-    return value
 
 
 def _has_forest(_ref: ArtifactRef, group: zarr.Group) -> bool:

@@ -16,13 +16,17 @@ list of at most five texts. Diagnostics never enter an artifact's identity
 and hold nothing that varies between runs on the same inputs, such as
 timings. Operations warn from them through :func:`warn_diagnostics` after
 they compute or reuse an artifact, so a reused artifact warns as a computed
-one does.
+one does. An export saves no artifact: it returns its diagnostics in an
+:class:`ExportSummary`, checked against the keys it declares, and warns from
+them as an operation does.
 """
 
 import math
+import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
@@ -33,9 +37,11 @@ __all__ = [
     "DIAGNOSTICS_ATTRIBUTE",
     "EXAMPLES",
     "DiagnosticRule",
+    "ExportSummary",
     "checked_diagnostics",
     "declare_diagnostics",
     "declared_diagnostics",
+    "export_summary",
     "read_diagnostics",
     "warn_diagnostics",
 ]
@@ -273,3 +279,52 @@ def warn_diagnostics(
                     diagnostics[rule.name],
                 )
             )
+
+
+@dataclass(frozen=True, slots=True)
+class ExportSummary:
+    """What an export wrote: its file, its rows and its diagnostics.
+
+    Attributes:
+        path: The file or folder that the export wrote.
+        rows: The rows written: the cells of a clone or character table, the
+            contigs of an AIRR table.
+        diagnostics: The export's diagnostics, by name, in the order that it
+            declares them.
+    """
+
+    path: Path
+    rows: int
+    diagnostics: dict[str, DiagnosticValue]
+
+
+@dataclass(frozen=True, slots=True)
+class _Export:
+    operation: str
+
+
+def export_summary(
+    export: str,
+    path: str | os.PathLike[str],
+    rows: int,
+    diagnostics: Mapping[str, Any],
+    keys: Sequence[str],
+    rules: Sequence[DiagnosticRule] = (),
+) -> ExportSummary:
+    """Check an export's diagnostics, give the warnings that its rules derive, and summarize it.
+
+    Args:
+        export: The export, such as ``"export_airr"``, which its warnings name.
+        path: The file or folder written.
+        rows: The rows written.
+        diagnostics: The export's diagnostics.
+        keys: The keys that the export declares, in order.
+        rules: The warnings that the export gives from its diagnostics.
+
+    Raises:
+        ValueError: If ``diagnostics`` holds other keys than ``keys``, or a
+            value that a diagnostic does not hold.
+    """
+    checked = checked_diagnostics(diagnostics, keys, operation=export)
+    warn_diagnostics(_Export(export), checked, rules)
+    return ExportSummary(path=Path(path), rows=int(rows), diagnostics=checked)

@@ -23,13 +23,15 @@ barcodes. :func:`barcode_clone_calls` applies the rules in this order:
    barcodes, by identical sets or a Jaccard graph, with TREX's pruning and
    doublets, and clones of at least ``min_size`` cells.
 
-Beside the clones, calling gives three numbers, named in
-``BARCODE_DIAGNOSTICS``, that show when correction merges barcodes that are
+Beside the clones, calling gives the diagnostics named in
+``BARCODE_DIAGNOSTICS``. Three show when correction merges barcodes that are
 unrelated, which happens more often the more barcodes it compares: the
 distinct barcodes of each group and library that correction compares, the
 pairs of them expected within ``max_distance`` by chance, and the distinct
-barcodes that it merged into another. The clone writer adds the share of the
-cells given a clone that the largest clone holds, which chaining raises.
+barcodes that it merged into another. The others count what each rule
+removed or found, None for a rule that did not run. The clone writer adds
+the share of the cells given a clone that the largest clone holds, which
+chaining raises.
 
 ``BARCODE_PRESETS`` holds the published rules of LARRY, TREX, CellTagR and
 CellTag-multi; every value a preset sets can be given instead.
@@ -88,12 +90,39 @@ type Unit = Literal["umis", "reads"]
 
 #: The metrics of barcode correction.
 BARCODE_METRICS: tuple[str, ...] = ("hamming", "levenshtein")
-#: The numbers that barcode clone calling records about its correction and its
-#: clones, in the order the artifact records them.
+#: The numbers that barcode clone calling records about its correction, its
+#: rules and its clones, in the order the artifact records them: the
+#: distinct barcodes that correction compares, the pairs of them expected
+#: within ``max_distance`` by chance and the barcodes it merged; the
+#: molecules below ``min_reads``, of low complexity under TREX's rules, the
+#: records whose barcode correction changed and those outside the
+#: allowlist, the molecules of fewer bases than TREX compares; the pairs of
+#: a cell and a barcode, those of TREX's one-UMI filters, those below
+#: ``min_umis`` and below ``min_fraction``; the cells with barcodes and
+#: those outside ``barcodes_per_cell``; the distinct sets of barcodes, the
+#: edges of their Jaccard graph and those pruned, the doublets, and the
+#: cells whose clone held fewer than ``min_size`` cells.
 BARCODE_DIAGNOSTICS: tuple[str, ...] = (
     "distinctBarcodes",
     "expectedChanceMatches",
     "mergedBarcodes",
+    "moleculesBelowMinReads",
+    "moleculesOfLowComplexity",
+    "recordsCorrected",
+    "recordsOutsideAllowlist",
+    "moleculesOfFewBases",
+    "pairs",
+    "pairsOfOneUmiShared",
+    "pairsOfOneRead",
+    "pairsBelowMinUmis",
+    "pairsBelowMinFraction",
+    "cellsWithBarcodes",
+    "cellsOutsideBarcodesPerCell",
+    "nodes",
+    "edges",
+    "edgesPruned",
+    "doublets",
+    "cellsInSmallClones",
 )
 # A value of BARCODE_PRESETS that the user must give, such as a library's
 # allowlist.
@@ -468,15 +497,6 @@ def barcode_call_settings(
         )
     elif metric_value not in BARCODE_METRICS:
         raise ValueError(f"metric must be one of {', '.join(BARCODE_METRICS)}")
-    elif metric_value == "levenshtein" and distance_value > MAX_CHANCE_EDITS:
-        raise ValueError(
-            f"metric='levenshtein' takes a max_distance of at most "
-            f"{MAX_CHANCE_EDITS}, since the barcode matches expected by chance "
-            "within more edits take too long to count: their cost grows about "
-            "eightfold with every two edits. Pass a smaller max_distance, or "
-            "metric='hamming', which counts them within any distance but matches "
-            "only barcodes of one length"
-        )
     trex = (
         preset == "trex"
         if trex_rules is None
@@ -574,22 +594,22 @@ class BarcodeClones:
         calls: The clones of :func:`~cytearc.clones.calling.set_clones`.
         n_barcodes: Each cell's barcodes after the pair filters.
         units: Each library's unit, ``"umis"``, ``"reads"`` or None.
-        counts: What each rule removed or changed, by name.
-        diagnostics: The numbers that show when correction merges unrelated
-            barcodes, named in ``BARCODE_DIAGNOSTICS``: ``distinctBarcodes``,
-            the distinct barcodes of each group and library that correction
-            compares, after the molecule filters, added up;
-            ``expectedChanceMatches``, the pairs of them expected within the
-            ``max_distance`` by chance; and ``mergedBarcodes``, those that
-            correction merged into another. Without correction, the expectation and the
-            merged barcodes are 0.
+        diagnostics: The numbers named in ``BARCODE_DIAGNOSTICS``:
+            ``distinctBarcodes``, the distinct barcodes of each group and
+            library that correction compares, after the molecule filters,
+            added up; ``expectedChanceMatches``, the pairs of them expected
+            within the ``max_distance`` by chance, None under
+            ``levenshtein`` beyond ``MAX_CHANCE_EDITS`` edits, which take too
+            long to count; ``mergedBarcodes``, those that correction merged
+            into another; and what each rule removed or found, None for a
+            rule that did not run. Without correction, the expectation and
+            the merged barcodes are 0.
     """
 
     calls: SetClones
     n_barcodes: np.ndarray
     units: tuple[str | None, ...]
-    counts: dict[str, int]
-    diagnostics: dict[str, int | float]
+    diagnostics: dict[str, int | float | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -601,13 +621,13 @@ class _Correction:
         distinct: The distinct barcodes of the blocks that it compared.
         merged: Those that it merged into another.
         expected: The pairs of them expected within ``max_distance`` by
-            chance.
+            chance, None under ``levenshtein`` beyond ``MAX_CHANCE_EDITS``.
     """
 
     codes: np.ndarray
     distinct: int
     merged: int
-    expected: float
+    expected: float | None
 
 
 def _library_units(
@@ -799,16 +819,22 @@ def _corrected(
     # representative holds the highest place of its entries.
     rank = np.empty(n_entries, dtype=np.int64)
     rank[by_rank] = np.arange(n_entries)
-    expected = expected_chance_pairs(
-        texts,
-        str(settings.metric),
-        settings.max_distance,
-        entry_blocks,
-        components=components,
-        priority=rank,
-        max_bytes=room.left(),
-        unknown=unknown,
-        min_compared=min_compared,
+    # Pairs within more edits than MAX_CHANCE_EDITS take too long to count,
+    # so their expectation is not measured.
+    expected = (
+        None
+        if settings.metric == "levenshtein" and settings.max_distance > MAX_CHANCE_EDITS
+        else expected_chance_pairs(
+            texts,
+            str(settings.metric),
+            settings.max_distance,
+            entry_blocks,
+            components=components,
+            priority=rank,
+            max_bytes=room.left(),
+            unknown=unknown,
+            min_compared=min_compared,
+        )
     )
     del texts, rank
     room.held -= entries
@@ -887,7 +913,8 @@ def barcode_clone_calls(
     if group_codes.shape != (n_cells,):
         raise ValueError("groups must hold one code per cell")
     units, details = _library_units(records)
-    counted: dict[str, int] = {}
+    # Each rule's count, None until the rule runs.
+    counted: dict[str, int | float | None] = dict.fromkeys(BARCODE_DIAGNOSTICS)
     room = _Room(max_bytes)
     room.check(
         _CELL_BYTES * n_cells + _HELD_RECORD_BYTES * n_records,
@@ -953,7 +980,7 @@ def barcode_clone_calls(
         del distinct, texts
         dropped = low[barcodes]
         keep &= ~dropped
-        counted["molecules_of_low_complexity"] = int(np.count_nonzero(dropped))
+        counted["moleculesOfLowComplexity"] = int(np.count_nonzero(dropped))
         del low, dropped
         room.held += _FLAG_BYTES * n_stored
     if settings.min_reads:
@@ -973,12 +1000,11 @@ def barcode_clone_calls(
             )
         dropped = tested & (reads < settings.min_reads)
         keep &= ~dropped
-        counted["molecules_below_min_reads"] = int(np.count_nonzero(dropped))
+        counted["moleculesBelowMinReads"] = int(np.count_nonzero(dropped))
         del tested, unknown, dropped
     blocks = group_codes[cells] * max(n_libraries, 1) + sources
     corrected = barcodes.copy()
     n_kept = int(np.count_nonzero(keep))
-    diagnostics: dict[str, int | float] = {}
     if settings.max_distance:
         room.check(
             _CORRECTION_RECORD_BYTES * n_kept,
@@ -1000,15 +1026,12 @@ def barcode_clone_calls(
             records, keep, blocks, counts, settings, room, uncompared
         )
         corrected[kept_index] = correction.codes
-        counted["barcodes_corrected"] = correction.merged
-        counted["records_corrected"] = int(
+        counted["recordsCorrected"] = int(
             np.count_nonzero(corrected[keep] != barcodes[keep])
         )
-        diagnostics = {
-            "distinctBarcodes": correction.distinct,
-            "expectedChanceMatches": correction.expected,
-            "mergedBarcodes": correction.merged,
-        }
+        counted["distinctBarcodes"] = correction.distinct
+        counted["expectedChanceMatches"] = correction.expected
+        counted["mergedBarcodes"] = correction.merged
         del counts, kept_index, correction
         room.held -= _CORRECTION_RECORD_BYTES * n_kept
     else:
@@ -1016,13 +1039,11 @@ def barcode_clone_calls(
             _DISTINCT_RECORD_BYTES * n_kept,
             f"counting the distinct barcodes of {n_kept} molecules and pairs",
         )
-        diagnostics = {
-            "distinctBarcodes": _distinct_barcodes(
-                blocks[keep], barcodes[keep], n_stored, uncompared
-            ),
-            "expectedChanceMatches": 0.0,
-            "mergedBarcodes": 0,
-        }
+        counted["distinctBarcodes"] = _distinct_barcodes(
+            blocks[keep], barcodes[keep], n_stored, uncompared
+        )
+        counted["expectedChanceMatches"] = 0.0
+        counted["mergedBarcodes"] = 0
     if uncompared is not None:
         del uncompared
         room.held -= _FLAG_BYTES * n_stored
@@ -1041,7 +1062,7 @@ def barcode_clone_calls(
             allowed[distinct] = pd.Index(allowlist).get_indexer(texts) >= 0
             dropped = keep & ~allowed[corrected]
             keep &= ~dropped
-            counted["records_outside_allowlist"] = int(np.count_nonzero(dropped))
+            counted["recordsOutsideAllowlist"] = int(np.count_nonzero(dropped))
             del allowed, dropped
         if settings.trex_rules:
             short = np.zeros(n_stored, dtype=bool)
@@ -1052,7 +1073,7 @@ def barcode_clone_calls(
             )
             dropped = keep & short[corrected]
             keep &= ~dropped
-            counted["molecules_of_few_bases"] = int(np.count_nonzero(dropped))
+            counted["moleculesOfFewBases"] = int(np.count_nonzero(dropped))
             del short, dropped
         del texts, distinct
     n_kept = int(np.count_nonzero(keep))
@@ -1086,8 +1107,8 @@ def barcode_clone_calls(
         shared = single & (totals > 1)
         lone_read = single & (totals == 1) & (pairs["reads"] == 1)
         keep_pair &= ~(shared | lone_read)
-        counted["pairs_of_one_umi_shared"] = int(np.count_nonzero(shared))
-        counted["pairs_of_one_read"] = int(np.count_nonzero(lone_read))
+        counted["pairsOfOneUmiShared"] = int(np.count_nonzero(shared))
+        counted["pairsOfOneRead"] = int(np.count_nonzero(lone_read))
         del totals, single, shared, lone_read
     if settings.min_umis or settings.min_fraction:
         rule = "min_umis" if settings.min_umis else "min_fraction"
@@ -1106,11 +1127,11 @@ def barcode_clone_calls(
         if settings.min_umis:
             dropped = keep_pair & (pair_counts < settings.min_umis)
             keep_pair &= ~dropped
-            counted["pairs_below_min_umis"] = int(np.count_nonzero(dropped))
+            counted["pairsBelowMinUmis"] = int(np.count_nonzero(dropped))
         if settings.min_fraction:
             dropped = keep_pair & (pair_counts / settings.min_fraction < top)
             keep_pair &= ~dropped
-            counted["pairs_below_min_fraction"] = int(np.count_nonzero(dropped))
+            counted["pairsBelowMinFraction"] = int(np.count_nonzero(dropped))
             del top
         del pair_counts
     room.check(_SET_ARGUMENT_BYTES * n_pairs, "the cells' sets of barcodes")
@@ -1122,13 +1143,13 @@ def barcode_clone_calls(
         max_bytes=room.left(),
     )
     n_barcodes = sets.sizes
-    counted["cells_with_barcodes"] = int(np.count_nonzero(n_barcodes))
+    counted["cellsWithBarcodes"] = int(np.count_nonzero(n_barcodes))
     if settings.barcodes_per_cell is not None:
         low_bound, high_bound = settings.barcodes_per_cell
         called = (n_barcodes >= low_bound) & (
             True if high_bound is None else n_barcodes <= high_bound
         )
-        counted["cells_outside_barcodes_per_cell"] = int(
+        counted["cellsOutsideBarcodesPerCell"] = int(
             np.count_nonzero((n_barcodes > 0) & ~called)
         )
         chosen = keep_pair & called[pairs["cells"]]
@@ -1162,12 +1183,20 @@ def barcode_clone_calls(
         min_size=settings.min_size,
         max_bytes=room.left(),
     )
+    counted["nodes"] = calls.n_nodes
+    counted["cellsInSmallClones"] = calls.n_small_cells
+    # The Jaccard graph, its pruning and its doublets run only by its method.
+    if settings.method == "jaccard":
+        counted["edges"] = calls.n_edges
+        if settings.prune:
+            counted["edgesPruned"] = calls.n_pruned
+        if settings.doublets:
+            counted["doublets"] = int(sum(calls.n_doublet_nodes))
     return BarcodeClones(
         calls=calls,
         n_barcodes=n_barcodes.astype(np.int32),
         units=units,
-        counts=counted,
-        diagnostics=diagnostics,
+        diagnostics=counted,
     )
 
 

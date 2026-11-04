@@ -949,6 +949,12 @@ class CloneCoupling:
         group_by: The cell metadata columns of the groups.
         groups: The label artifact of the groups, or None.
         cell_selection: The cells kept, or None for every cell.
+        diagnostics: The cells that the summary leaves out, by name:
+            ``cellsWithoutClone``, the cells without a clone among those
+            kept, ``cellsWithoutGroup``, those with a clone but no group,
+            and the ``groups``, and ``pairsWithoutNullSpread``, the pairs whose permutations
+            give no spread, so that their ``z_score`` is NaN or infinite,
+            None without permutations.
     """
 
     group_sizes: pd.DataFrame = field(repr=False)
@@ -963,6 +969,7 @@ class CloneCoupling:
     group_by: tuple[str, ...]
     groups: ArtifactRef | None
     cell_selection: ArtifactRef | None
+    diagnostics: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -998,6 +1005,13 @@ class CloneFateBias:
         late: The selection of the late cells.
         group_by: The cell metadata columns of the fates.
         groups: The label artifact of the fates, or None.
+        diagnostics: What the fate bias leaves out, by name, as the artifact
+            saved it: ``cellsWithoutClone``, the late cells without a clone,
+            ``cellsWithoutGroup``, those with a clone but no fate, the fates
+            in ``groups``, ``earlyCellsWithoutLateCells``, the early cells
+            with a clone whose clone has no late cell with a fate,
+            ``earlyCellsWithTiedFates``, those whose clone's late cells tie
+            between fates, and ``testedClones``, the clones tested.
     """
 
     cells: pd.DataFrame = field(repr=False)
@@ -1010,3 +1024,4 @@ class CloneFateBias:
     late: ArtifactRef
     group_by: tuple[str, ...]
     groups: ArtifactRef | None
+    diagnostics: dict[str, Any]

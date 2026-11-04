@@ -324,6 +324,10 @@ class ClonalExpansion:
         groups: The label artifact of the groups, or None.
         cell_selection: The cells measured, which the artifact labels: the
             selection given, or the clones' cells.
+        diagnostics: The cells that the expansion leaves out, by name, as
+            the artifact saved them: ``cellsWithoutClone``, the measured
+            cells without a clone, ``cellsWithoutGroup``, those with a clone
+            but no group, and the ``groups``.
     """
 
     cells: pd.DataFrame = field(repr=False)
@@ -338,6 +342,7 @@ class ClonalExpansion:
     group_by: tuple[str, ...]
     groups: ArtifactRef | None
     cell_selection: ArtifactRef
+    diagnostics: dict[str, Any]
 
 
 def _shares(counts: np.ndarray) -> np.ndarray:

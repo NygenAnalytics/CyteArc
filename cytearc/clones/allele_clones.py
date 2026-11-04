@@ -55,6 +55,7 @@ from ..utils.arrays import sorted_unique, unique_inverse
 from .calling import cell_sets, set_clones
 
 __all__ = [
+    "ALLELE_DIAGNOSTICS",
     "ALLELE_METHODS",
     "BANK_COLUMNS",
     "AlleleBank",
@@ -70,6 +71,28 @@ __all__ = [
 
 #: The methods that decide which alleles are rare.
 ALLELE_METHODS: tuple[str, ...] = ("graph", "p_clonal")
+#: The numbers that allele clone calling records, in the order the artifact
+#: records them: the alleles tested, one per group, character and allele;
+#: those above ``max_frequency``, not significant under ``p_clonal``, and in
+#: more than ``max_samples`` of their bank's samples; the rare alleles and
+#: the cells that hold one; the clones of more than ``max_alleles`` rare
+#: alleles and their cells; and, over the characters with a bank, their
+#: alleles and those the banks list, and their observations, the pairs of a
+#: cell and an allele, and those of listed alleles. A rule that did not run,
+#: and a bank total without banks, is None.
+ALLELE_DIAGNOSTICS: tuple[str, ...] = (
+    "alleles",
+    "allelesTooFrequent",
+    "allelesNotSignificant",
+    "allelesInTooManySamples",
+    "rareAlleles",
+    "cellsWithRareAlleles",
+    "clonesWithTooManyAlleles",
+    "cellsInClonesWithTooManyAlleles",
+    "allelesInBank",
+    "observations",
+    "observationsInBank",
+)
 #: The columns of an allele bank that calling reads: each allele's text, its
 #: frequency among the bank's edited observations and, where the bank counts
 #: them, the samples that hold it, as DARLIN's banks name them.
@@ -535,7 +558,8 @@ class AlleleClones:
         sizes: The cells of each clone.
         n_alleles: Each cell's distinct rare alleles.
         clone_alleles: The distinct rare alleles of each clone.
-        counts: What each rule found, by name.
+        diagnostics: What each rule found, by the names of
+            ``ALLELE_DIAGNOSTICS``, None for a rule that did not run.
         coverage: For each character with a bank, in the order of the
             characters: ``character``, its ``alleles`` and the
             ``alleles_in_bank``, and its ``observations``, the cells and
@@ -546,7 +570,7 @@ class AlleleClones:
     sizes: np.ndarray
     n_alleles: np.ndarray
     clone_alleles: np.ndarray
-    counts: dict[str, int]
+    diagnostics: dict[str, int | None]
     coverage: list[dict[str, Any]]
 
     @property
@@ -711,30 +735,33 @@ def allele_clone_calls(
     )
     if banks is None:
         rates = test_cells / test_observations
-    counts = {
-        "alleles": n_tests,
-        "alleles_too_frequent": 0,
-        "alleles_not_significant": 0,
-        "alleles_in_too_many_samples": 0,
-    }
+    # Each rule's count, None until the rule runs.
+    counts: dict[str, int | None] = dict.fromkeys(ALLELE_DIAGNOSTICS)
+    counts["alleles"] = n_tests
+    if banks is not None:
+        counts["allelesInBank"] = sum(entry["alleles_in_bank"] for entry in coverage)
+        counts["observations"] = sum(entry["observations"] for entry in coverage)
+        counts["observationsInBank"] = sum(
+            entry["observations_in_bank"] for entry in coverage
+        )
     if settings.method == "graph":
         rare = np.ones(n_tests, dtype=bool)
         if settings.max_frequency is not None:
             rare = rates <= settings.max_frequency
-            counts["alleles_too_frequent"] = int(np.count_nonzero(~rare))
+            counts["allelesTooFrequent"] = int(np.count_nonzero(~rare))
     else:
         assert settings.fdr is not None
         p_values = clonal_p_values(rates, test_observations)
         rare = benjamini_hochberg(p_values, test_groups, settings.fdr)
         del p_values
-        counts["alleles_not_significant"] = int(np.count_nonzero(~rare))
+        counts["allelesNotSignificant"] = int(np.count_nonzero(~rare))
     if settings.max_samples is not None:
         assert samples is not None
         common = rare & (samples > settings.max_samples)
-        counts["alleles_in_too_many_samples"] = int(np.count_nonzero(common))
+        counts["allelesInTooManySamples"] = int(np.count_nonzero(common))
         rare &= ~common
         del common
-    counts["rare_alleles"] = int(np.count_nonzero(rare))
+    counts["rareAlleles"] = int(np.count_nonzero(rare))
     del rates, samples, test_cells, test_observations
     del test_groups, test_characters, test_alleles
 
@@ -758,7 +785,7 @@ def allele_clone_calls(
     # The calls hold each cell's clone and its doublet and ambiguous flags and
     # each clone's size, beside each cell's rare alleles.
     room.held += 18 * n_cells + 8 * calls.n_clones + 8 * n_cells
-    counts["cells_with_rare_alleles"] = int(np.count_nonzero(n_alleles > 0))
+    counts["cellsWithRareAlleles"] = int(np.count_nonzero(n_alleles > 0))
 
     # A clone's alleles are the distinct rare alleles of its cells.
     room.check(
@@ -785,8 +812,8 @@ def allele_clone_calls(
     keep = np.ones(calls.n_clones, dtype=bool)
     if settings.max_alleles is not None:
         keep = clone_alleles <= settings.max_alleles
-    counts["clones_with_too_many_alleles"] = int(np.count_nonzero(~keep))
-    counts["cells_in_clones_with_too_many_alleles"] = int(calls.sizes[~keep].sum())
+        counts["clonesWithTooManyAlleles"] = int(np.count_nonzero(~keep))
+        counts["cellsInClonesWithTooManyAlleles"] = int(calls.sizes[~keep].sum())
     # Clones keep their order, by size and then first cell, as they are
     # renumbered without those left out.
     rank = np.full(calls.n_clones, -1, dtype=np.int64)
@@ -798,7 +825,7 @@ def allele_clone_calls(
         sizes=calls.sizes[keep].astype(np.int64),
         n_alleles=n_alleles.astype(np.int64),
         clone_alleles=clone_alleles[keep],
-        counts=counts,
+        diagnostics=counts,
         coverage=coverage,
     )
 

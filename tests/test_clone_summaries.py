@@ -39,6 +39,9 @@ from cytearc.repertoire import GeneUsage, Spectratype
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import collect_warnings
+from cytearc.clones.allele_clones import ALLELE_DIAGNOSTICS
+from cytearc.clones.barcode_clones import BARCODE_DIAGNOSTICS
+from cytearc.metadata.arguments import JOIN_DIAGNOSTICS
 from tests.clone_helpers import (
     coupling_reference,
     every_cell,
@@ -347,40 +350,59 @@ def _source_clones(source) -> tuple[dict[tuple, str], dict[tuple, int]]:
     return labels, {key: ranks[label] for key, label in labels.items()}
 
 
+def _grouping(source, labels: np.ndarray) -> dict[str, int]:
+    """The grouping's diagnostics of a summary of every cell by labels that each holds, from the truth.
+
+    The cells without a clone are left out, none lacks a label, and the
+    groups are those that a cell with a clone holds.
+    """
+    return {
+        "cellsWithoutClone": sum(key is None for key in _keys(source)),
+        "cellsWithoutGroup": 0,
+        "groups": len(_by_group(source, labels)),
+    }
+
+
 def test_every_source_records_the_clone_writers_diagnostics(source) -> None:
     # The clone writer counts the cells given a clone and the share of them
     # that the largest clone holds, counted here cell by cell from the
-    # truth's clones as the source saves them; clonotypes record none.
+    # truth's clones as the source saves them, for clonotypes too.
     status = inspect_artifact(source.store.zw, source.clones)
     loaded = source.store.clones.load_clones(source.clones)
     assert dict(loaded.diagnostics) == status.diagnostics
-    if source.clones.kind == "clonotypes":
-        assert status.diagnostics == {}
-        return
     keys = [key for key in _keys(source) if key is not None]
     largest = max(Counter(keys).values())
     assert status.diagnostics["cellsWithClone"] == len(keys)
     assert status.diagnostics["largestCloneShare"] == largest / len(keys)
+    # Each source's own keys follow the writer's, the join's before them.
+    joined = ["import_clones"]
     own = {
-        "import_clones": [
-            "fileBarcodes",
-            "unmatchedBarcodes",
-            "unselectedBarcodes",
-            "unmatchedBarcodeExamples",
-            "unselectedBarcodeExamples",
+        "import_clones": ["fileRows", "cellsInSeveralClones"],
+        "call_barcode_clones": list(BARCODE_DIAGNOSTICS),
+        "call_allele_clones": list(ALLELE_DIAGNOSTICS),
+        "call_frequency_clones": [
+            "variants",
+            "cellsScored",
+            "cellsWithoutCoverage",
+            "cellsWithoutAlternative",
+            "cellsWithoutNeighbors",
+            "edges",
         ],
-        "call_barcode_clones": [
-            "distinctBarcodes",
-            "expectedChanceMatches",
-            "mergedBarcodes",
-        ],
+        "call_genotype_clones": ["sites", "mutantCells", "ambiguousCells"],
+        "cut_phylogeny_clones": ["cellsBeforeCut"],
     }.get(str(status.operation), [])
     assert list(status.diagnostics) == [
-        *(own if status.operation == "import_clones" else []),
+        *(JOIN_DIAGNOSTICS if status.operation in joined else ()),
         "cellsWithClone",
         "largestCloneShare",
-        *(own if status.operation != "import_clones" else []),
+        *own,
     ]
+    # Every cell of the truth's tree ends after the cut, and every cell of
+    # the file is listed once, in one clone.
+    if status.operation == "cut_phylogeny_clones":
+        assert status.diagnostics["cellsBeforeCut"] == 0
+    if status.operation == "import_clones":
+        assert status.diagnostics["cellsInSeveralClones"] == 0
 
 
 def test_clone_abundance_counts_the_clones_of_each_size(source) -> None:
@@ -400,9 +422,10 @@ def test_clone_abundance_counts_the_clones_of_each_size(source) -> None:
 
 def test_expansion_counts_each_clone_within_each_sample(source) -> None:
     store = source.store
-    loaded = store.clones.load_expansion(
-        store.clones.expansion(source.clones, group_by="sample")
-    )
+    expansion = store.clones.expansion(source.clones, group_by="sample")
+    loaded = store.clones.load_expansion(expansion)
+    assert loaded.diagnostics == _grouping(source, TRUTH.samples)
+    assert store.artifacts.inspect(expansion).diagnostics == loaded.diagnostics
     cells = loaded.cells.loc[TRUTH.cell_ids]
     np.testing.assert_array_equal(
         cells["group_clone_size"],
@@ -417,6 +440,7 @@ def test_expansion_counts_each_clone_within_each_sample(source) -> None:
 
 def test_diversity_measures_the_clone_sizes_of_each_sample(source) -> None:
     result = source.store.clones.diversity(source.clones, group_by="sample")
+    assert result.diagnostics == _grouping(source, TRUTH.samples)
     indices = result.indices.set_index("group")
     expected = _by_group(source, TRUTH.samples)
     assert sorted(indices.index) == sorted(expected)
@@ -440,6 +464,7 @@ def test_rarefaction_reaches_each_samples_observed_diversity(source) -> None:
     result = source.store.clones.rarefaction(
         source.clones, group_by="sample", orders=(0, 2)
     )
+    assert result.diagnostics == _grouping(source, TRUTH.samples)
     observed = result.curves[result.curves["method"] == "observed"]
     expected = _by_group(source, TRUTH.samples)
     assert set(observed["group"]) == set(expected)
@@ -454,6 +479,7 @@ def test_rarefaction_reaches_each_samples_observed_diversity(source) -> None:
 
 def test_overlap_compares_the_clones_that_samples_share(source) -> None:
     result = source.store.clones.overlap(source.clones, group_by="sample")
+    assert result.diagnostics == _grouping(source, TRUTH.samples)
     by_group = _group_cells(source, TRUTH.samples)
     kept = _kept_labels(source, TRUTH.samples)
     assert result.group_sizes.columns.tolist() == ["group", "n_cells", "n_clones"]
@@ -493,6 +519,10 @@ def test_track_follows_each_samples_largest_clones(source) -> None:
         chosen |= set(ranked[:2])
     order = sorted(chosen, key=ranks.__getitem__)
     assert tracked.tracked == tuple(labels[key] for key in order)
+    assert tracked.diagnostics == {
+        **_grouping(source, TRUTH.samples),
+        "trackedClones": len(order),
+    }
     # Each clone is followed through the groups of its own labels kept apart,
     # zeros included.
     assert tracked.table.columns.tolist() == ["clone", "group", "n_cells", "fraction"]
@@ -527,6 +557,11 @@ def test_coupling_couples_the_cell_types_that_share_clones(source) -> None:
         )
     assert np.isfinite(result.pairs["z_score"]).all()
     assert sorted(result.order) == sorted(by_group)
+    # Every pair's null spreads, so each z-score is finite.
+    assert result.diagnostics == {
+        **_grouping(source, TRUTH.cell_types),
+        "pairsWithoutNullSpread": 0,
+    }
 
 
 def test_fate_bias_follows_early_cells_to_their_clones_late_cells(source) -> None:
@@ -597,6 +632,27 @@ def test_fate_bias_follows_early_cells_to_their_clones_late_cells(source) -> Non
     for name, (cells, p_value) in tests.items():
         assert cells == expected[name][0], name
         assert p_value == pytest.approx(expected[name][1], rel=1e-9), name
+    # What the fate bias leaves out, counted from the truth: the late cells
+    # without a clone, the early cells with a clone whose clone has no late
+    # cell, and those whose clone's late cells tie between fates.
+    early_found = [
+        clone_fates.get(keys[cell], Counter())
+        for cell in np.flatnonzero(early)
+        if keys[cell] is not None
+    ]
+    tied = [
+        found
+        for found in early_found
+        if found and list(found.values()).count(max(found.values())) > 1
+    ]
+    assert loaded.diagnostics == {
+        "cellsWithoutClone": sum(keys[cell] is None for cell in np.flatnonzero(late)),
+        "cellsWithoutGroup": 0,
+        "groups": len(names),
+        "earlyCellsWithoutLateCells": sum(not found for found in early_found),
+        "earlyCellsWithTiedFates": len(tied),
+        "testedClones": len(clone_fates),
+    }
 
 
 def _keyed_rows(table: pd.DataFrame, keys: pd.DataFrame, on: str = "group") -> set:

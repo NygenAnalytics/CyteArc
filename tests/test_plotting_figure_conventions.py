@@ -1383,6 +1383,7 @@ def _gene_usage(source, loci: dict[str, int], fractions: dict[str, float]):
         groups=None,
         cell_selection=None,
         n_cells=10,
+        diagnostics={},
     )
 
 

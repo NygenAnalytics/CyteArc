@@ -495,7 +495,12 @@ class GuideCallImportArguments(OperationArguments):
 class CloneImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_clones"
     artifact_kind: ClassVar[str] = "clones"
-    diagnostics: ClassVar[tuple[str, ...]] = (*JOIN_DIAGNOSTICS, *CLONE_DIAGNOSTICS)
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        *JOIN_DIAGNOSTICS,
+        *CLONE_DIAGNOSTICS,
+        "fileRows",
+        "cellsInSeveralClones",
+    )
     call: ClassVar[str | None] = "ds.clones.import_clones"
 
     cell_selection: ArtifactRef = artifact_input()
@@ -547,6 +552,13 @@ class ClonalExpansionArguments(OperationArguments):
 class CloneFateBiasArguments(OperationArguments):
     operation: ClassVar[str] = "measure_clone_fate_bias"
     artifact_kind: ClassVar[str] = "clone_fate_bias"
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        *GROUPING_DIAGNOSTICS,
+        "earlyCellsWithoutLateCells",
+        "earlyCellsWithTiedFates",
+        "testedClones",
+    )
+    call: ClassVar[str | None] = "ds.clones.fate_bias"
 
     clones: ArtifactRef = artifact_input()
     groups: ArtifactRef | None = artifact_input()
@@ -564,7 +576,12 @@ class CloneFateBiasArguments(OperationArguments):
 class ImmuneReceptorImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_immune_receptors"
     artifact_kind: ClassVar[str] = "immune_receptors"
-    diagnostics: ClassVar[tuple[str, ...]] = JOIN_DIAGNOSTICS
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        *JOIN_DIAGNOSTICS,
+        "fileContigs",
+        "unmatchedContigs",
+        "cellsWithChain",
+    )
     call: ClassVar[str | None] = "ds.repertoire.import_receptors"
 
     cell_selection: ArtifactRef = artifact_input()
@@ -579,6 +596,8 @@ class ImmuneReceptorImportArguments(OperationArguments):
 class ClonotypeArguments(OperationArguments):
     operation: ClassVar[str] = "define_clonotypes"
     artifact_kind: ClassVar[str] = "clonotypes"
+    diagnostics: ClassVar[tuple[str, ...]] = CLONE_DIAGNOSTICS
+    call: ClassVar[str | None] = "ds.repertoire.clonotypes"
 
     receptors: ArtifactRef = artifact_input()
     # The fingerprint of each receptor cell's labels in the within columns, or
@@ -601,7 +620,12 @@ class ClonotypeArguments(OperationArguments):
 class LineageBarcodeImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_lineage_barcodes"
     artifact_kind: ClassVar[str] = "lineage_barcodes"
-    diagnostics: ClassVar[tuple[str, ...]] = JOIN_DIAGNOSTICS
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        *JOIN_DIAGNOSTICS,
+        "fileRows",
+        "unmatchedRows",
+        "emptyRows",
+    )
     call: ClassVar[str | None] = "ds.clones.import_barcodes"
 
     cell_selection: ArtifactRef = artifact_input()
@@ -622,6 +646,23 @@ class BarcodeCloneArguments(OperationArguments):
         "distinctBarcodes",
         "expectedChanceMatches",
         "mergedBarcodes",
+        "moleculesBelowMinReads",
+        "moleculesOfLowComplexity",
+        "recordsCorrected",
+        "recordsOutsideAllowlist",
+        "moleculesOfFewBases",
+        "pairs",
+        "pairsOfOneUmiShared",
+        "pairsOfOneRead",
+        "pairsBelowMinUmis",
+        "pairsBelowMinFraction",
+        "cellsWithBarcodes",
+        "cellsOutsideBarcodesPerCell",
+        "nodes",
+        "edges",
+        "edgesPruned",
+        "doublets",
+        "cellsInSmallClones",
     )
     call: ClassVar[str | None] = "ds.clones.barcode_clones"
 
@@ -658,7 +699,15 @@ class BarcodeCloneArguments(OperationArguments):
 class VariantCountImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_variant_counts"
     artifact_kind: ClassVar[str] = "variant_counts"
-    diagnostics: ClassVar[tuple[str, ...]] = JOIN_DIAGNOSTICS
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        *JOIN_DIAGNOSTICS,
+        "listedCells",
+        "sortedRuns",
+        "repeatedCalls",
+        "skippedEmptyAlternatives",
+        "skippedOtherAlleles",
+        "skippedVariantExamples",
+    )
     call: ClassVar[str | None] = "ds.variants.import_counts"
 
     cell_selection: ArtifactRef = artifact_input()
@@ -678,6 +727,13 @@ class VariantCountImportArguments(OperationArguments):
 class VariantSelectionArguments(OperationArguments):
     operation: ClassVar[str] = "select_informative_variants"
     artifact_kind: ClassVar[str] = "variant_selection"
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        "cells",
+        "variants",
+        "informativeVariants",
+        "maskedVariants",
+    )
+    call: ClassVar[str | None] = "ds.variants.informative"
 
     counts: ArtifactRef = artifact_input()
     # The cells whose evidence the statistics use, or None for every cell
@@ -700,7 +756,15 @@ class VariantSelectionArguments(OperationArguments):
 class FrequencyCloneArguments(OperationArguments):
     operation: ClassVar[str] = "call_frequency_clones"
     artifact_kind: ClassVar[str] = "clones"
-    diagnostics: ClassVar[tuple[str, ...]] = CLONE_DIAGNOSTICS
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        *CLONE_DIAGNOSTICS,
+        "variants",
+        "cellsScored",
+        "cellsWithoutCoverage",
+        "cellsWithoutAlternative",
+        "cellsWithoutNeighbors",
+        "edges",
+    )
     call: ClassVar[str | None] = "ds.variants.frequency_clones"
 
     # The cells of the selection's counts, which the clones label.
@@ -723,6 +787,16 @@ class FrequencyCloneArguments(OperationArguments):
 class VariantGenotypeArguments(OperationArguments):
     operation: ClassVar[str] = "call_variant_genotypes"
     artifact_kind: ClassVar[str] = "variant_genotypes"
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        "wildTypeCalls",
+        "heterozygousCalls",
+        "homozygousAlternativeCalls",
+        "alternativePresentCalls",
+        "missingCalls",
+        "filteredCalls",
+        "alternativesNotShown",
+    )
+    call: ClassVar[str | None] = "ds.variants.genotypes"
 
     # The counts' cells, which the genotypes cover.
     cell_selection: ArtifactRef = artifact_input()
@@ -751,7 +825,12 @@ class VariantGenotypeArguments(OperationArguments):
 class GenotypeCloneArguments(OperationArguments):
     operation: ClassVar[str] = "call_genotype_clones"
     artifact_kind: ClassVar[str] = "clones"
-    diagnostics: ClassVar[tuple[str, ...]] = CLONE_DIAGNOSTICS
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        *CLONE_DIAGNOSTICS,
+        "sites",
+        "mutantCells",
+        "ambiguousCells",
+    )
     call: ClassVar[str | None] = "ds.variants.genotype_clones"
 
     # The genotypes' cells, which the clones label.
@@ -777,7 +856,13 @@ class GenotypeCloneArguments(OperationArguments):
 class RecorderAlleleImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_recorder_alleles"
     artifact_kind: ClassVar[str] = "lineage_alleles"
-    diagnostics: ClassVar[tuple[str, ...]] = JOIN_DIAGNOSTICS
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        *JOIN_DIAGNOSTICS,
+        "fileRows",
+        "unmatchedRows",
+        "slotsBeyondLength",
+        "rowsWithoutIntegration",
+    )
     call: ClassVar[str | None] = "ds.clones.import_alleles"
 
     cell_selection: ArtifactRef = artifact_input()
@@ -793,7 +878,20 @@ class RecorderAlleleImportArguments(OperationArguments):
 class AlleleCloneArguments(OperationArguments):
     operation: ClassVar[str] = "call_allele_clones"
     artifact_kind: ClassVar[str] = "clones"
-    diagnostics: ClassVar[tuple[str, ...]] = CLONE_DIAGNOSTICS
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        *CLONE_DIAGNOSTICS,
+        "alleles",
+        "allelesTooFrequent",
+        "allelesNotSignificant",
+        "allelesInTooManySamples",
+        "rareAlleles",
+        "cellsWithRareAlleles",
+        "clonesWithTooManyAlleles",
+        "cellsInClonesWithTooManyAlleles",
+        "allelesInBank",
+        "observations",
+        "observationsInBank",
+    )
     call: ClassVar[str | None] = "ds.clones.allele_clones"
 
     alleles: ArtifactRef = artifact_input()
@@ -818,7 +916,12 @@ class AlleleCloneArguments(OperationArguments):
 class PhylogenyImportArguments(OperationArguments):
     operation: ClassVar[str] = "import_phylogeny"
     artifact_kind: ClassVar[str] = "cell_phylogeny"
-    diagnostics: ClassVar[tuple[str, ...]] = JOIN_DIAGNOSTICS
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        *JOIN_DIAGNOSTICS,
+        "cellsInNoTree",
+        "unnamedLeaves",
+        "leafTimeSpread",
+    )
     call: ClassVar[str | None] = "ds.clones.import_phylogeny"
 
     cell_selection: ArtifactRef = artifact_input()
@@ -834,7 +937,7 @@ class PhylogenyImportArguments(OperationArguments):
 class PhylogenyCloneArguments(OperationArguments):
     operation: ClassVar[str] = "cut_phylogeny_clones"
     artifact_kind: ClassVar[str] = "clones"
-    diagnostics: ClassVar[tuple[str, ...]] = CLONE_DIAGNOSTICS
+    diagnostics: ClassVar[tuple[str, ...]] = (*CLONE_DIAGNOSTICS, "cellsBeforeCut")
     call: ClassVar[str | None] = "ds.clones.phylogeny_clones"
 
     phylogeny: ArtifactRef = artifact_input()

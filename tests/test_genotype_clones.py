@@ -88,10 +88,14 @@ def test_cells_link_where_they_agree_and_ambiguous_cells_join_none(
     # and B, which disagree at S2, where X was not read, so it is ambiguous.
     assert _clones(store, clones) == {"clone_1": [2, 3, 8], "clone_2": [0, 1]}
     assert _ambiguous(store, clones) == [4]
-    attributes = dict(artifact_group(store.zw, clones).attrs)
-    assert attributes["n_ambiguous"] == 1
-    assert attributes["n_cells_mutant"] == 6
-    assert attributes["n_sites"] == 2
+    diagnostics = store.artifacts.inspect(clones).diagnostics
+    assert diagnostics["ambiguousCells"] == 1
+    assert diagnostics["mutantCells"] == 6
+    assert diagnostics["sites"] == 2
+    # Five of the six mutant cells are in a clone, three of them in the
+    # largest.
+    assert diagnostics["cellsWithClone"] == 5
+    assert diagnostics["largestCloneShare"] == 3 / 5
     record = store.artifacts.inspect(clones)
     assert record.operation == "call_genotype_clones"
     assert record.parameters["similarity"] == 1.0

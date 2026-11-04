@@ -302,6 +302,14 @@ def test_every_format_recovers_the_truth(shared, tmp_path, case) -> None:
     assert len(shown) == min(5, len(TRUTH.outside))
     assert all(any(drop in cell for drop in TRUTH.outside) for cell in shown)
     assert len(list(messages)) == 1
+    # QuiCAT's per-sample files hold a row without a barcode for each cell
+    # without one, and the truth's other files no empty row; each droplet
+    # holds a row at least, beside the rows of the cells.
+    assert diagnostics["emptyRows"] == (
+        len(BARCODES.unlabelled) if case == "quicat" else 0
+    )
+    assert diagnostics["unmatchedRows"] >= diagnostics["unmatchedBarcodes"]
+    assert diagnostics["fileRows"] - diagnostics["unmatchedRows"] >= len(loaded.records)
 
 
 def _wide_options(prefix_pattern: str) -> dict:
@@ -852,7 +860,7 @@ def test_rows_without_a_barcode_or_counted_zero_hold_none(shared, tmp_path) -> N
         ["GGGG", -1, 0],
         ["TTTT", -1, 2],
     ]
-    assert shared.store.artifacts.load(ref).attrs["n_empty_rows"] == 2
+    assert shared.store.artifacts.inspect(ref).diagnostics["emptyRows"] == 2
 
 
 def test_import_refuses_a_budget_too_small_and_writes_nothing(
@@ -1167,9 +1175,9 @@ def test_rows_of_unselected_cells_are_unmatched_rather_than_empty(
             format="pairs",
             columns={"cell": "cell", "barcode": "barcode", "umis": "umis"},
         )
-    attributes = shared.store.artifacts.load(ref).attrs
-    assert (attributes["n_file_rows"], attributes["n_unmatched_rows"]) == (4, 2)
-    assert attributes["n_empty_rows"] == 1
+    diagnostics = shared.store.artifacts.inspect(ref).diagnostics
+    assert (diagnostics["fileRows"], diagnostics["unmatchedRows"]) == (4, 2)
+    assert diagnostics["emptyRows"] == 1
 
 
 def test_pairs_counted_by_reads_alone_hold_no_barcode_at_zero(shared, tmp_path) -> None:
@@ -1184,7 +1192,7 @@ def test_pairs_counted_by_reads_alone_hold_no_barcode_at_zero(shared, tmp_path) 
     )
     records = _records(shared.store.clones.load_barcodes(ref))
     assert records[["barcode", "umis", "reads"]].values.tolist() == [["AAAA", -1, 5]]
-    assert shared.store.artifacts.load(ref).attrs["n_empty_rows"] == 1
+    assert shared.store.artifacts.inspect(ref).diagnostics["emptyRows"] == 1
 
 
 def test_the_budget_check_counts_the_lookup_and_a_chunk_beside_the_records(

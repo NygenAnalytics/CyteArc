@@ -90,21 +90,21 @@ def test_clones_recover_the_truths_clones(store) -> None:
 def test_cells_without_evidence_get_no_clone_and_are_counted(store) -> None:
     counts, selection = _inputs(store)
     clones = store.variants.frequency_clones(selection)
-    attributes = store.artifacts.load(clones).attrs
+    diagnostics = store.artifacts.inspect(clones).diagnostics
     called = _called(store, clones)
-    assert attributes["n_cells_scored"] == TRUTH.n_cells
-    assert attributes["n_variants"] == 12
+    assert diagnostics["cellsScored"] == TRUTH.n_cells
+    assert diagnostics["variants"] == 12
     assert (
-        attributes["n_cells_clustered"]
-        + attributes["n_cells_without_coverage"]
-        + attributes["n_cells_without_alternative"]
-        + attributes["n_cells_without_neighbors"]
+        diagnostics["cellsWithClone"]
+        + diagnostics["cellsWithoutCoverage"]
+        + diagnostics["cellsWithoutAlternative"]
+        + diagnostics["cellsWithoutNeighbors"]
         == TRUTH.n_cells
     )
     # Cells without a label in the within columns are refused, so no cell is
     # left without a group.
-    assert "n_cells_without_group" not in attributes
-    assert attributes["n_cells_clustered"] == int((called != "").sum())
+    assert "cellsWithoutGroup" not in diagnostics
+    assert diagnostics["cellsWithClone"] == int((called != "").sum())
     # A cell without a clone of its own reads no variant allele, or reads
     # one by error and joins the clone that carries it.
     loaded = store.variants.load_counts(counts)
@@ -124,11 +124,11 @@ def test_cells_without_evidence_get_no_clone_and_are_counted(store) -> None:
     }
     # Every cell that shows an informative variant shares it with a clone,
     # so none lacks neighbours, and a cell without a clone shows none.
-    assert attributes["n_cells_without_neighbors"] == 0
+    assert diagnostics["cellsWithoutNeighbors"] == 0
     for cell, label in zip(TRUTH.clones.cell_ids, called, strict=True):
         if label == "":
             assert str(cell) not in shown
-    assert attributes["n_clones"] == len(set(called) - {""})
+    assert store.artifacts.load(clones).attrs["n_clones"] == len(set(called) - {""})
 
 
 def test_within_keeps_groups_apart_and_numbers_clones_over_every_group(store) -> None:

@@ -3,9 +3,11 @@ import csv
 import dataclasses
 import gc
 import gzip
+import hashlib
 import io
 import re
 import weakref
+import warnings
 import zlib
 
 import numpy as np
@@ -18,10 +20,11 @@ import cytearc.datastore._operations.repertoire as repertoire_operations
 import cytearc.metadata.rows as metadata_rows
 import cytearc.metadata.selection as metadata_selection
 import cytearc.writers.airr as airr_writer
+from cytearc import DiagnosticWarning
 from cytearc.metadata.records import EncodedText, encode_text
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.storage.refs import ArtifactRef
-from cytearc.utils.logging import collect_warnings, logger
+from cytearc.utils.logging import collect_warnings
 from cytearc.writers import write_airr_rearrangements
 from cytearc.writers.airr import (
     AIRR_REQUIRED_FIELDS,
@@ -225,7 +228,7 @@ def test_the_writer_puts_required_fields_first_and_renders_values(tmp_path) -> N
         }
     )
     path = tmp_path / "out.tsv"
-    assert write_airr_rearrangements(table, path) == 2
+    assert write_airr_rearrangements(table, path).rows == 2
     written = _read(path)
     assert written.columns.tolist() == [
         *AIRR_REQUIRED_FIELDS,
@@ -312,7 +315,7 @@ def test_export_writes_each_contig_with_its_cell_and_clonotype(tmp_path) -> None
     store, receptors = clonal_receptors(tmp_path, CLONAL_ROWS)
     clonotypes = store.repertoire.clonotypes(receptors)
     path = tmp_path / "export.tsv"
-    assert store.repertoire.export_airr(clonotypes, path) == len(CLONAL_ROWS)
+    assert store.repertoire.export_airr(clonotypes, path).rows == len(CLONAL_ROWS)
     written = _read(path)
     assert written.columns[: len(AIRR_REQUIRED_FIELDS)].tolist() == list(
         AIRR_REQUIRED_FIELDS
@@ -335,7 +338,7 @@ def test_export_writes_each_contig_with_its_cell_and_clonotype(tmp_path) -> None
     plain = store.repertoire.export_airr(
         receptors, tmp_path / "plain.tsv", fields=["junction_aa", "v_call"]
     )
-    assert plain == len(CLONAL_ROWS)
+    assert plain.rows == len(CLONAL_ROWS)
     columns = _read(tmp_path / "plain.tsv").columns.tolist()
     assert "clone_id" not in columns and "umi_count" not in columns
     assert columns[len(AIRR_REQUIRED_FIELDS) :] == ["cell_id"]
@@ -353,7 +356,8 @@ def test_export_repeats_round_trip_through_an_import(tmp_path) -> None:
     path = tmp_path / "both.tsv.gz"
     written = store.repertoire.export_airr(receptors, path)
     exported = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
-    assert written == len(exported)
+    assert written.rows == len(exported)
+    assert written.path == path
     # Contig IDs that the TCR and BCR files share get a suffix, so every
     # sequence_id is unique.
     assert exported["sequence_id"].is_unique
@@ -394,7 +398,7 @@ def test_export_suffixes_never_repeat_an_id(tmp_path) -> None:
         [tcr, bcr], cell_selection=store.snapshot_cell_selection()
     )
     path = tmp_path / "ids.tsv"
-    assert store.repertoire.export_airr(receptors, path) == 3
+    assert store.repertoire.export_airr(receptors, path).rows == 3
     assert sorted(_read(path)["sequence_id"]) == ["X", "X_2", "X_3"]
 
 
@@ -407,7 +411,7 @@ def test_export_keeps_only_chains_on_request(tmp_path) -> None:
     chains = store.repertoire.export_airr(
         receptors, tmp_path / "chains.tsv", chains_only=True
     )
-    assert everything == chains + 1
+    assert everything.rows == chains.rows + 1
     assert "cell7_contig_1" not in set(_read(tmp_path / "chains.tsv")["sequence_id"])
 
 
@@ -545,26 +549,44 @@ def test_values_the_format_advises_against_warn_outside_phred_scores(
             "quality_alignment": ["#'\"@", "", "IIII"],
         }
     )
-    messages: list[str] = []
-    sink = logger.add(
-        lambda message: messages.append(message.record["message"]), level="WARNING"
-    )
-    try:
-        assert write_airr_rearrangements(table, tmp_path / "phred.tsv") == 3
-        # Each count adds up over the blocks of a file.
+    with pytest.warns(DiagnosticWarning) as caught:
+        summary = write_airr_rearrangements(table, tmp_path / "phred.tsv")
+    assert summary.rows == 3
+    assert [str(warning.message) for warning in caught] == [
+        "1 value of quality starts" + LEADING_QUOTES,
+        "4 values of v_call and junction_aa hold" + DISCOURAGED,
+    ]
+    assert [
+        (warning.message.operation, warning.message.diagnostic, warning.message.value)
+        for warning in caught
+    ] == [
+        ("write_airr_rearrangements", "leadingQuoteValues", 1),
+        ("write_airr_rearrangements", "discouragedValues", 4),
+    ]
+    assert summary.diagnostics == {
+        "contigs": 3,
+        "renamedContigIds": 0,
+        "leadingQuoteValues": 1,
+        "discouragedValues": 4,
+        "leadingQuoteFields": "quality",
+        "discouragedFields": "v_call and junction_aa",
+    }
+    # Each count adds up over the blocks of a file, which the writer counts
+    # without a warning of its own.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         with AirrRearrangementWriter(tmp_path / "scores.tsv", ["quality"]) as writer:
             writer.write({"sequence_id": ["s9"], "quality": ['@"#'], "d_call": ["D#1"]})
             writer.write({"sequence_id": ["t9"], "quality": ['"I'], "d_call": ["D'1"]})
             writer.write({"sequence_id": ["u9"], "quality": ['"J']})
-    finally:
-        logger.remove(sink)
-    assert messages == [
-        "1 value of quality starts" + LEADING_QUOTES,
-        "4 values of v_call and junction_aa hold" + DISCOURAGED,
-        "2 values of quality start" + LEADING_QUOTES,
-        "2 values of d_call hold" + DISCOURAGED,
-    ]
     assert (writer.n_discouraged, writer.n_leading_quotes) == (2, 2)
+    assert writer.diagnostics == {
+        "contigs": 3,
+        "leadingQuoteValues": 2,
+        "discouragedValues": 2,
+        "leadingQuoteFields": "quality",
+        "discouragedFields": "d_call",
+    }
     written = _read(tmp_path / "phred.tsv")
     for name in table.columns:
         assert written[name].tolist() == table[name].tolist()
@@ -779,7 +801,7 @@ def test_streamed_exports_match_the_exports_of_one_table(
     ]
     for name, source, options, expected, n_contigs in cases:
         path = tmp_path / name
-        assert store.repertoire.export_airr(source, path, **options) == n_contigs
+        assert store.repertoire.export_airr(source, path, **options).rows == n_contigs
         assert _text(path) == expected
 
 
@@ -1085,7 +1107,7 @@ def test_categorical_logical_values_are_written_as_flags(tmp_path) -> None:
             "rev_comp": pd.Categorical(["T", "f", None]),
         }
     )
-    assert write_airr_rearrangements(table, path) == 3
+    assert write_airr_rearrangements(table, path).rows == 3
     written = _read(path)
     assert written["productive"].tolist() == ["T", "", "F"]
     assert written["rev_comp"].tolist() == ["T", "F", ""]
@@ -1169,7 +1191,8 @@ def test_receptors_without_contigs_export_their_header(tmp_path) -> None:
     clonotypes = store.repertoire.clonotypes(receptors)
     for source, name in ((receptors, "none.tsv.gz"), (clonotypes, "none.tsv")):
         assert (
-            store.repertoire.export_airr(source, tmp_path / name, chains_only=True) == 0
+            store.repertoire.export_airr(source, tmp_path / name, chains_only=True).rows
+            == 0
         )
         header = _text(tmp_path / name)
         assert header.endswith("\n") and header.count("\n") == 1
@@ -1567,7 +1590,7 @@ def test_a_block_is_let_go_before_the_next_is_read(tmp_path, monkeypatch) -> Non
 
     monkeypatch.setattr(airr_writer.AirrRearrangementWriter, "write", recorded_write)
     monkeypatch.setattr(repertoire_operations._Window, "read", recorded_read)
-    assert store.repertoire.export_airr(receptors, tmp_path / "blocks.tsv") == 10
+    assert store.repertoire.export_airr(receptors, tmp_path / "blocks.tsv").rows == 10
     # Ten blocks were written, and no block was held while the next was read.
     assert len(written) == 10 and len(alive) > 10 and not any(alive)
 
@@ -1700,26 +1723,42 @@ def test_the_export_warns_of_discouraged_characters_and_repeated_ids(
     tmp_path, monkeypatch
 ) -> None:
     store, receptors = _edge_receptors(tmp_path)
-    messages: list[str] = []
-    sink = logger.add(
-        lambda message: messages.append(message.record["message"]), level="WARNING"
-    )
-    try:
-        store.repertoire.export_airr(receptors, tmp_path / "all.tsv")
+    with collect_warnings() as messages:
+        whole = store.repertoire.export_airr(receptors, tmp_path / "all.tsv")
         # One contig per block names the same fields in the file's order.
         monkeypatch.setattr(repertoire_operations, "_EXPORT_BLOCK_BYTES", 1)
-        store.repertoire.export_airr(receptors, tmp_path / "blocks.tsv")
-    finally:
-        logger.remove(sink)
+        blocks = store.repertoire.export_airr(receptors, tmp_path / "blocks.tsv")
     # The second and third X and the second Z take suffixes; a V call holds
     # @, a constant gene call starts with a double quote and holds ' and #,
     # and a clonotype ID holds a double quote past its first character.
-    assert messages == 2 * [
+    assert list(messages) == 2 * [
         "3 contig IDs repeat; their later occurrences are written with a suffix "
         "such as _2",
         "1 value of c_call starts" + LEADING_QUOTES,
         "3 values of v_call, c_call and raw_clonotype_id hold" + DISCOURAGED,
     ]
+    assert (
+        whole.diagnostics
+        == blocks.diagnostics
+        == {
+            "contigs": whole.rows,
+            "renamedContigIds": 3,
+            "leadingQuoteValues": 1,
+            "discouragedValues": 3,
+            "leadingQuoteFields": "c_call",
+            "discouragedFields": "v_call, c_call and raw_clonotype_id",
+        }
+    )
+    # The warnings are DiagnosticWarnings of the export, which a reader can
+    # filter and whose numbers the summary holds.
+    with pytest.warns(DiagnosticWarning) as caught:
+        store.repertoire.export_airr(receptors, tmp_path / "again.tsv")
+    assert [warning.message.diagnostic for warning in caught] == [
+        "renamedContigIds",
+        "leadingQuoteValues",
+        "discouragedValues",
+    ]
+    assert {warning.message.operation for warning in caught} == {"export_airr"}
 
 
 # T cell rows with tabs in three V calls, two of one value and one of two
@@ -1838,21 +1877,15 @@ def test_ragged_values_of_discouraged_characters_are_written_and_counted(
         write_lines(tmp_path, "airr.tsv", header, rows),
         cell_selection=store.snapshot_cell_selection(),
     )
-    messages: list[str] = []
-    sink = logger.add(
-        lambda message: messages.append(message.record["message"]), level="WARNING"
-    )
-    try:
+    with collect_warnings() as messages:
         written = store.repertoire.export_airr(receptors, tmp_path / "ragged.tsv")
-    finally:
-        logger.remove(sink)
-    assert written == 3
+    assert written.rows == 3
     exported = _read(tmp_path / "ragged.tsv")
     assert exported["sequence_id"].tolist() == ["c0#1", "c1_1", "\"c2'1"]
     assert exported["sequence"].tolist() == ["AC@GT", "ACGT", "GG"]
     # One ID starts with a double quote; it and another hold ' and #, and a
     # sequence @.
-    assert messages == [
+    assert list(messages) == [
         "1 value of sequence_id starts" + LEADING_QUOTES,
         "3 values of sequence_id and sequence hold" + DISCOURAGED,
     ]
@@ -2077,7 +2110,7 @@ def test_a_selection_of_some_cells_exports_their_ids(tmp_path) -> None:
         )
     assert list(messages) == []
     assert store.artifacts.inspect(receptors).diagnostics["unselectedBarcodes"] == 1
-    assert store.repertoire.export_airr(receptors, tmp_path / "some.tsv") == 4
+    assert store.repertoire.export_airr(receptors, tmp_path / "some.tsv").rows == 4
     written = _read(tmp_path / "some.tsv")
     assert written["cell_id"].tolist() == ["cell2", "cell4", "cell5", "cell7"]
     assert written["sequence_id"].tolist() == [
@@ -2162,7 +2195,7 @@ def test_fields_may_name_the_columns_that_are_always_written(tmp_path) -> None:
     labelled = store.repertoire.export_airr(
         clonotypes, tmp_path / "clones.tsv", fields=["clone_id", "cell_id"]
     )
-    assert plain == labelled == len(CLONAL_ROWS)
+    assert plain.rows == labelled.rows == len(CLONAL_ROWS)
     columns = _read(tmp_path / "cells.tsv").columns.tolist()
     assert columns.count("cell_id") == 1 and "clone_id" not in columns
     columns = _read(tmp_path / "clones.tsv").columns.tolist()
@@ -2170,3 +2203,51 @@ def test_fields_may_name_the_columns_that_are_always_written(tmp_path) -> None:
     # Receptors from Cell Ranger CSVs store no clone_id.
     with pytest.raises(ValueError, match="store no field 'clone_id'"):
         store.repertoire.export_airr(receptors, tmp_path / "x.tsv", fields=["clone_id"])
+
+
+#: The SHA-256 of each export's bytes, which a summary of what it wrote leaves
+#: as they were: the clonal receptors whole, compressed and as chains, their
+#: clonotypes, and the receptors whose IDs repeat and whose values hold quotes.
+_EXPORT_DIGESTS = {
+    "receptors.tsv": "18df411b769e686d7b8480ac6837a0c46185e2c58130cf91ccdd7247566df51a",
+    "receptors.tsv.gz": "b84ce8fd2ad12ff6ef9f9985176d7dda71620fe54863e6b2d0a62fe58a24fa2a",
+    "chains.tsv": "18df411b769e686d7b8480ac6837a0c46185e2c58130cf91ccdd7247566df51a",
+    "clonotypes.tsv": "033fe55454ce89d91af0406c871dc26d8e59cd5f4aa1917c803260c24da0b116",
+    "edge.tsv": "e9626d64f9e2a7a3dc506452a21a3a0242099e40efd3354504a678e4e05be4f6",
+}
+
+
+def test_exports_write_the_same_bytes_and_summarize_them(tmp_path) -> None:
+    (tmp_path / "clonal").mkdir()
+    store, receptors = clonal_receptors(tmp_path / "clonal")
+    clonotypes = store.repertoire.clonotypes(receptors)
+    summaries = {
+        name: store.repertoire.export_airr(source, tmp_path / name, **options)
+        for name, source, options in (
+            ("receptors.tsv", receptors, {}),
+            ("receptors.tsv.gz", receptors, {}),
+            ("chains.tsv", receptors, {"chains_only": True}),
+            ("clonotypes.tsv", clonotypes, {}),
+        )
+    }
+    (tmp_path / "edge").mkdir()
+    edge_store, edge = _edge_receptors(tmp_path / "edge")
+    with pytest.warns(DiagnosticWarning):
+        summaries["edge.tsv"] = edge_store.repertoire.export_airr(
+            edge, tmp_path / "edge.tsv"
+        )
+    for name, summary in summaries.items():
+        data = (tmp_path / name).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == _EXPORT_DIGESTS[name], name
+        assert summary.path == tmp_path / name
+        # The rows are the file's contigs, its lines after the header.
+        text = gzip.decompress(data) if name.endswith(".gz") else data
+        assert summary.rows == text.count(b"\n") - 1 == summary.diagnostics["contigs"]
+    assert summaries["receptors.tsv"].diagnostics == {
+        "contigs": len(CLONAL_ROWS),
+        "renamedContigIds": 0,
+        "leadingQuoteValues": 0,
+        "discouragedValues": 0,
+        "leadingQuoteFields": "",
+        "discouragedFields": "",
+    }

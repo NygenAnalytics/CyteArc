@@ -1344,7 +1344,7 @@ def test_got_multi_example_outputs_import_together(tmp_path) -> None:
     # The refined table repeats two cells' calls at a target, which count once.
     called = final_table.dropna(subset=["genotype_final"])
     assert len(finals) == len(called.drop_duplicates(["BC", "target"]))
-    assert _group.attrs["n_repeated_calls"] == int(
+    assert _group.attrs["diagnostics"]["repeatedCalls"] == int(
         called.duplicated(["BC", "target"]).sum()
     )
 

@@ -516,9 +516,11 @@ class Clones:
             of its clone, NaN without one), for clones called from lineage
             barcodes ``n_barcodes`` (its barcodes after the pair filters) and
             ``doublet`` (whether TREX's rule removed it), for clones called
-            from recorder alleles ``n_alleles`` (its distinct rare alleles),
-            and each column of
-            ``kept_apart``, a categorical of the cell's labels.
+            from genotypes ``ambiguous`` (whether its calls agree with two
+            clones that disagree, which left it without one), for clones
+            called from recorder alleles ``n_alleles`` (its distinct rare
+            alleles), and each column of ``kept_apart``, a categorical of the
+            cell's labels.
         clones: One row per clone, largest first: ``clone`` and ``n_cells``.
         source: The operation that saved the clones, such as
             ``"import_clones"``, ``"call_barcode_clones"``,
@@ -529,13 +531,13 @@ class Clones:
         diagnostics: The diagnostics that the operation saved about how it
             defined the clones, by name, as
             ``ds.artifacts.inspect(ref).diagnostics`` returns them, which
-            callers can turn into warnings. Every source's clones record
-            ``cellsWithClone``, the cells given a clone, and
-            ``largestCloneShare``, the share of them that the largest clone
-            holds, 0 without one; an import adds the join's counts of the
-            files' barcodes, and clones called from lineage barcodes add
-            ``distinctBarcodes``, ``expectedChanceMatches`` and
-            ``mergedBarcodes``. Clonotypes record none.
+            callers can turn into warnings. Every source's clones, clonotypes
+            among them, record ``cellsWithClone``, the cells given a clone,
+            and ``largestCloneShare``, the share of them that the largest
+            clone holds, 0 without one; each source adds its own, such as an
+            import's counts of the files' barcodes and rows, or what each
+            rule of barcode and allele clones removed. The clones API
+            reference lists each source's diagnostics.
     """
 
     cells: pd.DataFrame = field(repr=False)

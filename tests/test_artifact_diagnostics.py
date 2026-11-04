@@ -15,12 +15,15 @@ from typing import Any
 import numpy as np
 import pytest
 
-from cytearc import DiagnosticWarning
+import cytearc.metadata.arguments as arguments_module
+from cytearc import DiagnosticWarning, ExportSummary
+from cytearc.clones.allele_clones import ALLELE_DIAGNOSTICS
 from cytearc.clones.barcode_clones import BARCODE_DIAGNOSTICS
 from cytearc.metadata.arguments import (
     CLONE_DIAGNOSTICS,
     GROUPING_DIAGNOSTICS,
     JOIN_DIAGNOSTICS,
+    AlleleCloneArguments,
     BarcodeCloneArguments,
     ClonalExpansionArguments,
     CloneImportArguments,
@@ -34,6 +37,7 @@ from cytearc.storage.diagnostics import (
     checked_diagnostics,
     declare_diagnostics,
     declared_diagnostics,
+    export_summary,
     warn_diagnostics,
 )
 from cytearc.utils.logging import collect_warnings
@@ -199,16 +203,104 @@ def test_an_operation_declares_camel_case_keys_once() -> None:
     assert declared_diagnostics(None) == ()
 
 
+#: The keys that each operation of the clone stack, repertoire and variants
+#: saves, beside the shared ones, as the API's table of diagnostics gives them.
+_OWN_KEYS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "CloneImportArguments": (
+        (*JOIN_DIAGNOSTICS, *CLONE_DIAGNOSTICS),
+        ("fileRows", "cellsInSeveralClones"),
+    ),
+    "CloneColumnArguments": (CLONE_DIAGNOSTICS, ()),
+    "ImmuneReceptorImportArguments": (
+        JOIN_DIAGNOSTICS,
+        ("fileContigs", "unmatchedContigs", "cellsWithChain"),
+    ),
+    "ClonotypeArguments": (CLONE_DIAGNOSTICS, ()),
+    "LineageBarcodeImportArguments": (
+        JOIN_DIAGNOSTICS,
+        ("fileRows", "unmatchedRows", "emptyRows"),
+    ),
+    "BarcodeCloneArguments": (CLONE_DIAGNOSTICS, BARCODE_DIAGNOSTICS),
+    "RecorderAlleleImportArguments": (
+        JOIN_DIAGNOSTICS,
+        ("fileRows", "unmatchedRows", "slotsBeyondLength", "rowsWithoutIntegration"),
+    ),
+    "AlleleCloneArguments": (CLONE_DIAGNOSTICS, ALLELE_DIAGNOSTICS),
+    "PhylogenyImportArguments": (
+        JOIN_DIAGNOSTICS,
+        ("cellsInNoTree", "unnamedLeaves", "leafTimeSpread"),
+    ),
+    "PhylogenyCloneArguments": (CLONE_DIAGNOSTICS, ("cellsBeforeCut",)),
+    "VariantCountImportArguments": (
+        JOIN_DIAGNOSTICS,
+        (
+            "listedCells",
+            "sortedRuns",
+            "repeatedCalls",
+            "skippedEmptyAlternatives",
+            "skippedOtherAlleles",
+            "skippedVariantExamples",
+        ),
+    ),
+    "VariantSelectionArguments": (
+        (),
+        ("cells", "variants", "informativeVariants", "maskedVariants"),
+    ),
+    "FrequencyCloneArguments": (
+        CLONE_DIAGNOSTICS,
+        (
+            "variants",
+            "cellsScored",
+            "cellsWithoutCoverage",
+            "cellsWithoutAlternative",
+            "cellsWithoutNeighbors",
+            "edges",
+        ),
+    ),
+    "VariantGenotypeArguments": (
+        (),
+        (
+            "wildTypeCalls",
+            "heterozygousCalls",
+            "homozygousAlternativeCalls",
+            "alternativePresentCalls",
+            "missingCalls",
+            "filteredCalls",
+            "alternativesNotShown",
+        ),
+    ),
+    "GenotypeCloneArguments": (
+        CLONE_DIAGNOSTICS,
+        ("sites", "mutantCells", "ambiguousCells"),
+    ),
+    "ClonalExpansionArguments": (GROUPING_DIAGNOSTICS, ()),
+    "CloneFateBiasArguments": (
+        GROUPING_DIAGNOSTICS,
+        ("earlyCellsWithoutLateCells", "earlyCellsWithTiedFates", "testedClones"),
+    ),
+    "GuideCallImportArguments": (JOIN_DIAGNOSTICS, ()),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_OWN_KEYS))
+def test_each_operation_declares_the_keys_of_the_table(name) -> None:
+    arguments = getattr(arguments_module, name)
+    shared, own = _OWN_KEYS[name]
+    assert arguments.diagnostics == (*shared, *own)
+    assert declared_diagnostics(arguments.operation) == arguments.diagnostics
+    assert arguments.call is not None and arguments.call.startswith("ds.")
+
+
 def test_the_arguments_classes_declare_their_shared_keys() -> None:
-    assert CloneImportArguments.diagnostics == (*JOIN_DIAGNOSTICS, *CLONE_DIAGNOSTICS)
     assert GuideCallImportArguments.diagnostics == JOIN_DIAGNOSTICS
     assert ClonalExpansionArguments.diagnostics == GROUPING_DIAGNOSTICS
-    # Barcode clones save the writer's keys and the numbers their calling
-    # gives, which the calling code names.
+    # Barcode and allele clones save the writer's keys and the numbers their
+    # calling gives, which the calling code names.
     assert BarcodeCloneArguments.diagnostics == (
         *CLONE_DIAGNOSTICS,
         *BARCODE_DIAGNOSTICS,
     )
+    assert AlleleCloneArguments.diagnostics == (*CLONE_DIAGNOSTICS, *ALLELE_DIAGNOSTICS)
     assert declared_diagnostics(CloneImportArguments.operation) == (
         CloneImportArguments.diagnostics
     )
@@ -460,7 +552,7 @@ def test_the_clone_writer_refuses_a_source_that_passes_its_own_keys(store) -> No
         n_cells_in_several_clones=0,
     )
     # Three cells given a clone, two of them in the largest, by hand.
-    assert clone_diagnostics(assignment) == {
+    assert clone_diagnostics(assignment.codes, assignment.clone_sizes) == {
         "cellsWithClone": 3,
         "largestCloneShare": 2 / 3,
     }
@@ -476,3 +568,51 @@ def test_the_clone_writer_refuses_a_source_that_passes_its_own_keys(store) -> No
             diagnostics={"cellsWithClone": 3},
         )
     assert written(store) == before
+
+
+def test_an_export_summary_checks_its_keys_and_warns_by_its_rules(tmp_path) -> None:
+    rules = (
+        DiagnosticRule(
+            "renamed",
+            lambda saved: saved["renamed"] > 0,
+            lambda saved: f"{saved['renamed']} renamed",
+        ),
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        summary = export_summary(
+            "export_test",
+            tmp_path / "out.tsv",
+            np.int64(4),
+            {"renamed": 2},
+            ("renamed",),
+            rules,
+        )
+    assert summary == ExportSummary(
+        path=tmp_path / "out.tsv", rows=4, diagnostics={"renamed": 2}
+    )
+    assert type(summary.rows) is int
+    (warning,) = caught
+    assert isinstance(warning.message, DiagnosticWarning)
+    assert (
+        warning.message.operation,
+        warning.message.diagnostic,
+        warning.message.value,
+    ) == (
+        "export_test",
+        "renamed",
+        2,
+    )
+    assert str(warning.message) == "2 renamed"
+    # Nothing to warn of warns nothing, and keys other than those declared,
+    # or a value that no diagnostic holds, are refused before any warning.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        export_summary("export_test", "out.tsv", 0, {"renamed": 0}, ("renamed",), rules)
+    assert caught == []
+    with pytest.raises(ValueError, match="missing renamed; not declared other"):
+        export_summary("export_test", "out.tsv", 0, {"other": 1}, ("renamed",), rules)
+    with pytest.raises(ValueError, match="must be finite"):
+        export_summary(
+            "export_test", "out.tsv", 0, {"renamed": float("nan")}, ("renamed",), rules
+        )

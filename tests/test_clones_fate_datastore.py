@@ -144,6 +144,35 @@ def test_the_null_is_seeded_and_does_not_depend_on_threads(copied, monkeypatch) 
     none = store.clones.coupling(clones, group_by="cell_type", n_permutations=0)
     assert none.pairs["coupling"].equals(first.pairs["coupling"])
     assert none.pairs[["null_mean", "null_sd", "z_score"]].isna().all(axis=None)
+    # Without permutations there is no null to spread, so its count of pairs
+    # without a spread is not measured; with them it counts the pairs whose
+    # permutations agree.
+    assert none.diagnostics["pairsWithoutNullSpread"] is None
+    assert first.diagnostics["pairsWithoutNullSpread"] == int(
+        (first.pairs["null_sd"] == 0).sum()
+    )
+
+
+def test_pairs_whose_null_has_no_spread_are_counted(tmp_path) -> None:
+    from tests.clone_helpers import write_cells_store
+
+    store = write_cells_store(tmp_path / "store.zarr", [f"c{i}" for i in range(6)])
+    store.cells.insert("clone", np.asarray(["a"] * 6, dtype=object))
+    store.cells.insert("cell_type", np.asarray(["x"] * 3 + ["y"] * 3, dtype=object))
+    clones = store.clones.from_column(
+        "clone", cell_selection=store.snapshot_cell_selection("every_cell")
+    )
+    result = store.clones.coupling(clones, group_by="cell_type", n_permutations=20)
+    # One clone holds every cell, so each shuffle of the labels gives the
+    # coupling it gives: the null has no spread and the z-score no value.
+    assert result.pairs["null_sd"].tolist() == [0.0]
+    assert not np.isfinite(result.pairs["z_score"]).any()
+    assert result.diagnostics == {
+        "cellsWithoutClone": 0,
+        "cellsWithoutGroup": 0,
+        "groups": 2,
+        "pairsWithoutNullSpread": 1,
+    }
 
 
 def test_coupling_keeps_to_a_cell_selection_and_takes_label_artifacts(shared) -> None:

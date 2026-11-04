@@ -90,7 +90,7 @@ from ...storage.artifacts import (
     require_complete_artifact,
 )
 from ...storage.async_execution import zarr_decoding_threads, zarr_io_concurrency
-from ...storage.diagnostics import warn_diagnostics
+from ...storage.diagnostics import ExportSummary, export_summary, warn_diagnostics
 from ...storage.geometry import ROW_INDEX_BYTES, array_geometry
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
@@ -109,6 +109,7 @@ from .cell_barcodes import (
     unmatched_barcode_rules,
 )
 from .cell_groups import cell_groups, group_columns, within_groups
+from .clone_artifacts import clone_diagnostics
 from .record_tables import (
     record_arrays,
     record_chunk_lengths,
@@ -131,9 +132,8 @@ _CELL_ARRAYS = (
     "n_contigs",
 )
 # The attributes that an import saves and that reusing it requires: the
-# stored fields, and the contigs of the files and those that match no
-# selected cell.
-_IMPORT_ATTRIBUTES = ("fields", "n_file_contigs", "n_unmatched_contigs")
+# stored fields.
+_IMPORT_ATTRIBUTES = ("fields",)
 # At its peak, while it orders the contigs, ranks the chains and writes the
 # artifact, an import holds up to three times the bytes of its encoded
 # contigs beside what it holds for each selected cell, as measured on
@@ -815,12 +815,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         part of each barcode that its ``barcode`` group matches first. A
         merged store prefixes each sample's barcodes with its name and two
         underscores, so pass each sample's files with that sample's prefix.
-        Contigs that match no selected cell are counted in the artifact's
-        ``n_unmatched_contigs`` attribute beside ``n_file_contigs``. The
-        join's diagnostics count the files' barcodes, those that match no cell
-        of the store and those of cells outside the selection, with examples
-        of each; barcodes that match no cell of the store are named in a
-        warning, which a reused import gives again. A file is identified by the
+        The artifact's diagnostics, which
+        ``ds.artifacts.inspect(ref).diagnostics`` returns, hold the join's
+        counts of the files' barcodes, those that match no cell of the store
+        and those of cells outside the selection, with examples of each,
+        then ``fileContigs``, the files' contigs, ``unmatchedContigs``, those
+        that match no selected cell, and ``cellsWithChain``, the selected
+        cells with a chain. Barcodes that match no cell of the store are
+        named in a warning, which a reused import gives again. A file is identified by the
         SHA-256 of its bytes, so a moved file reuses the saved receptors and
         an edited file gives new ones, and the order of the files does not
         matter.
@@ -997,11 +999,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         quality = receptor_quality(index, locus)
         n_contigs = np.bincount(table.cells, minlength=n_cells).astype(np.int32)
         contig_arrays = {"contig_chain": index.eligible, **contigs}
-        attributes = {
-            "fields": list(table.fields),
-            "n_file_contigs": join.n_rows,
-            "n_unmatched_contigs": join.n_unmatched_rows,
-        }
+        attributes = {"fields": list(table.fields)}
         write_cell_data_artifact(
             self.zw,
             planned,
@@ -1018,7 +1016,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             },
             chunk_lengths=record_chunk_lengths(contig_arrays),
             attributes=attributes,
-            diagnostics=join.diagnostics(),
+            diagnostics={
+                **join.diagnostics(),
+                "fileContigs": join.n_rows,
+                "unmatchedContigs": join.n_unmatched_rows,
+                "cellsWithChain": int(np.count_nonzero(index.has_receptor)),
+            },
         )
         warn_diagnostics(
             arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
@@ -1229,7 +1232,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         cell's clonotype. The clone summaries of ``ds.clones``, such as
         :meth:`~cytearc.datastore.namespaces.ClonesAccessor.diversity`, read
         the artifact as they read clones, and measure the cells of each
-        receptor type apart.
+        receptor type apart. Its diagnostics, which
+        ``ds.artifacts.inspect(clonotypes).diagnostics`` returns, are those
+        of every source's clones: ``cellsWithClone``, the cells given a
+        clonotype, and ``largestCloneShare``, the share of them that the
+        largest holds.
 
         Args:
             receptors: An ``immune_receptors`` artifact.
@@ -1486,6 +1493,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             planned,
             arrays,
             attributes={"n_clonotypes": assignment.n_clonotypes},
+            # Clonotypes are clones, so they save what every source's clones do.
+            diagnostics=clone_diagnostics(assignment.codes, assignment.sizes),
         )
         defined = clonotype_nouns(metric)[0]
         logger.info(
@@ -1731,7 +1740,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         what: str,
         chosen_by: str,
     ) -> tuple[
-        pd.DataFrame, dict[str, np.ndarray], tuple[str, ...], zarr.Group, MemoryLedger
+        pd.DataFrame,
+        dict[str, np.ndarray],
+        tuple[str, ...],
+        zarr.Group,
+        MemoryLedger,
+        dict[str, int],
     ]:
         """Each counted chain of the chosen slots, with its fields' stored codes.
 
@@ -1748,8 +1762,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             ``cell``, the cell's
             row, the stored codes of ``locus`` and of each field, and
             ``clonotype``, the clonotype code, with a clonotypes source; the
-            slots; the ``immune_receptors`` artifact's group; and the ledger
-            of what the step holds.
+            slots; the ``immune_receptors`` artifact's group; the ledger
+            of what the step holds; and the grouping's diagnostics, whose
+            ``cellsWithoutClone`` counts the cells kept without a chain in
+            the slots, or without a clonotype.
         """
         if isinstance(slots, str):
             slots = (slots,)
@@ -1876,7 +1892,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             units[name] = _slot_codes(ledger, group, name, contigs)
         if codes is not None:
             units["clonotype"] = codes[cells]
-        return keys, units, chosen, group, ledger
+        return keys, units, chosen, group, ledger, grouped.diagnostics
 
     def _value_names(
         self, ledger: MemoryLedger, group: zarr.Group, name: str, codes: np.ndarray
@@ -2021,7 +2037,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 f"genes must hold distinct fields from {', '.join(GENE_FIELDS)}"
             )
         gene_names(np.asarray([], dtype=object), level)
-        keys, units, chosen, group, ledger = self._slot_units(
+        keys, units, chosen, group, ledger, grouping = self._slot_units(
             source,
             fields,
             slots=slots,
@@ -2039,6 +2055,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             )
             for name in fields
         }
+        # The chains without a counted call, a flag per chain and its
+        # comparison, which count_chains leaves out.
+        ledger.peak("finding the chains without a call", 2 * len(units["cell"]))
+        without_value = np.zeros(len(units["cell"]), dtype=bool)
+        for gene_codes_of_chains, _names in named.values():
+            without_value |= np.asarray(gene_codes_of_chains) < 0
+        n_without_value = int(np.count_nonzero(without_value))
+        del without_value
         loci = self._value_names(ledger, group, "locus", units.pop("locus"))
         once_per_cell = count == "cells" and _shares_an_arm(chosen)
         self._check_count_budget(
@@ -2070,6 +2094,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             groups=groups,
             cell_selection=cell_selection,
             n_cells=n_cells,
+            diagnostics={**grouping, "chainsWithoutValue": n_without_value},
         )
 
     @validation_scoped
@@ -2128,7 +2153,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if sequence not in SEQUENCES:
             raise ValueError(f"sequence must be one of {', '.join(SEQUENCES)}")
         field_name = "junction_aa" if sequence == "aa" else "junction"
-        keys, units, chosen, group, ledger = self._slot_units(
+        keys, units, chosen, group, ledger, grouping = self._slot_units(
             source,
             (field_name,),
             slots=slots,
@@ -2144,6 +2169,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         measured, names = self._value_measures(
             ledger, group, field_name, units.pop(field_name)
         )
+        # A chain without a junction, which count_chains leaves out, is
+        # counted from a comparison of each chain's length.
+        ledger.peak("finding the chains without a junction", len(measured))
+        n_without_value = int(np.count_nonzero(measured < 0))
         loci = self._value_names(ledger, group, "locus", units.pop("locus"))
         once_per_cell = count == "cells" and _shares_an_arm(chosen)
         self._check_count_budget(
@@ -2177,6 +2206,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             groups=groups,
             cell_selection=cell_selection,
             n_cells=n_cells,
+            diagnostics={**grouping, "chainsWithoutValue": n_without_value},
         )
 
     @validation_scoped
@@ -2187,7 +2217,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         *,
         fields: Sequence[str] | None = None,
         chains_only: bool = False,
-    ) -> int:
+    ) -> ExportSummary:
         """Write imported contigs as an AIRR Rearrangement file.
 
         The AIRR Community's Rearrangement TSV is what Immcantation
@@ -2233,7 +2263,13 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             chains_only: Write only the contigs that count as chains.
 
         Returns:
-            The number of contigs written.
+            The file written, its ``rows``, the contigs written, and its
+            ``diagnostics``: ``contigs``, ``renamedContigIds``, the repeated
+            contig IDs written with a suffix, ``leadingQuoteValues`` and
+            ``discouragedValues``, the values that start with a double quote
+            and those that hold a character that the format advises against,
+            and ``leadingQuoteFields`` and ``discouragedFields``, their
+            fields. Each count above 0 gives a warning.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -2250,6 +2286,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         """
         chains_only = bool_argument(chains_only, "chains_only")
         from ...writers.airr import (
+            AIRR_EXPORT_DIAGNOSTICS,
+            AIRR_EXPORT_RULES,
             AIRR_REQUIRED_FIELDS,
             AirrRearrangementWriter,
             suffix_repeated_ids,
@@ -2387,11 +2425,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 block_bytes=block_bytes,
                 compressed=os.fspath(path).endswith(".gz"),
             )
-            if len(renamed[0]):
-                logger.warning(
-                    f"{len(renamed[0])} contig IDs repeat; their later occurrences "
-                    "are written with a suffix such as _2"
-                )
             with AirrRearrangementWriter(path, order, whole=contigs.whole) as writer:
                 for block in contigs.blocks(block_rows, cells, clones, renamed):
                     writer.write(block)
@@ -2399,7 +2432,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                     del block
         written = writer.n_rows
         logger.info(f"Wrote {written} contigs to {os.fspath(path)}")
-        return written
+        return export_summary(
+            "export_airr",
+            path,
+            written,
+            {**writer.diagnostics, "renamedContigIds": len(renamed[0])},
+            AIRR_EXPORT_DIAGNOSTICS,
+            AIRR_EXPORT_RULES,
+        )
 
     def _export_cell_ids(
         self,
