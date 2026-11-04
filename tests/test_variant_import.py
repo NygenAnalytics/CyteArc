@@ -275,11 +275,11 @@ def test_cell_order_and_spills_to_disk_do_not_change_the_counts(
 
     # Cells in another order than the store's, and a budget so small that
     # the rows spill to sorted runs on disk, give the same artifact. A band
-    # holds at least a stored chunk's rows, so the stored arrays take chunks
-    # of 32,768 rows, fewer than the 536,536 rows: the budget holds such a
-    # band and the chunks that appending it rewrites, and the rows outgrow
-    # the sort buffer that the rest leaves. In one chunk of every row, a band
-    # would hold them all, and a budget that held it would not spill them.
+    # holds at least a share of a stored chunk's rows beside the chunks that
+    # appending it rewrites, so the stored arrays take chunks of 32,768 rows,
+    # fewer than the 536,536 rows: the budget holds such a band and those
+    # chunks, and the rows outgrow the sort buffer that the rest leaves. In
+    # one chunk of every row, the band and the chunks need 26,502,436 bytes.
     monkeypatch.setattr(operations, "_ROW_BAND", 1 << 15)
     roomy = copy_store(template, tmp_path / "roomy")
     tight = copy_store(template, tmp_path / "tight")

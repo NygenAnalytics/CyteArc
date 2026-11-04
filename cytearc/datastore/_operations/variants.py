@@ -140,6 +140,13 @@ _THREADED_PARSE_BYTES = 1 << 30
 # at once, as measured on chunks of 1,048,576 rows.
 _STORED_BYTES = 4
 _REWRITTEN_CHUNKS = 4
+# A band holds at least this share of a stored chunk's rows, or of every
+# row where fewer, so appending bands writes each chunk about 33 times at
+# most, where bands of a few cells would rewrite every chunk once a band.
+# 8,000 Tapestri cells of 40 variants, 838,970 rows in one chunk of each
+# array, then need 27,589,320 bytes, hold 11,977,833 and run in 1.7 s; with
+# a whole chunk to a band they need 173,884,680 bytes.
+_BAND_CHUNK_PARTS = 32
 # The rows parsed at once lie in [_MIN_CHUNK_ROWS, _MAX_CHUNK_ROWS].
 _MIN_CHUNK_ROWS = 1_000
 _MAX_CHUNK_ROWS = 2_000_000
@@ -1007,9 +1014,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             )
             band_bytes = int(room / _BAND_SHARE) - rewritten
             # Appending a band rewrites the stored chunks that it ends in, so a
-            # band holds at least a chunk's rows, or every row if fewer: bands
-            # of a few cells each would rewrite every chunk once a band.
-            least_rows = min(_ROW_BAND, max(1, n_entry_rows + n_call_rows))
+            # band holds at least a share of a chunk's rows, _BAND_CHUNK_PARTS.
+            least_rows = math.ceil(
+                min(_ROW_BAND, max(1, n_entry_rows + n_call_rows)) / _BAND_CHUNK_PARTS
+            )
             least_bytes = least_rows * _BAND_COPIES * counts_dtype.itemsize
             if band_bytes < least_bytes:
                 needed = held + math.ceil(_BAND_SHARE * (rewritten + least_bytes))

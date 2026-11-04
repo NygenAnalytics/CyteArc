@@ -1131,6 +1131,9 @@ def _import_at_smallest_budget(
     cells = every_cell(store)
 
     def run() -> Any:
+        # traced_peak runs the import again when its first trace exceeds the
+        # budget, so each run counts its own writes.
+        writes.clear()
         return store.variants.import_counts(
             file, cell_selection=cells, invalidate_cache=True
         )
@@ -1138,7 +1141,6 @@ def _import_at_smallest_budget(
     budget = 1
     while True:
         store.memoryBytes = budget
-        writes.clear()
         try:
             ref, peak = traced_peak(run, budget)
         except MemoryError as refusal:
@@ -1160,15 +1162,19 @@ def _import_at_smallest_budget(
     return budget, below, store.artifacts.load(ref)
 
 
-def test_the_smallest_budget_accepted_writes_each_stored_chunk_once(
+def test_bands_of_a_whole_chunk_write_each_stored_chunk_once(
     banded, tmp_path, monkeypatch
 ) -> None:
+    from cytearc.datastore._operations import variants as operations
     from tests.memory_helpers import stated_bytes
 
     # Appending a band rewrites the stored chunks that it ends in, so a band
-    # holds a stored chunk's rows at least. The 300 cells' rows fit one chunk
-    # of each array, so one band holds them all and writes each chunk once,
-    # or not at all where Zarr skips a chunk of zeros, its fill value.
+    # holds a share of a stored chunk's rows at least; with that share a whole
+    # chunk, the bands bind before the parse does on so few rows. The 300
+    # cells' rows fit one chunk of each array, so one band holds them all and
+    # writes each chunk once, or not at all where Zarr skips a chunk of zeros,
+    # its fill value.
+    monkeypatch.setattr(operations, "_BAND_CHUNK_PARTS", 1)
     writes = _chunk_writes(monkeypatch)
     budget, below, group = _import_at_smallest_budget(banded, tmp_path, writes)
 
@@ -1189,11 +1195,12 @@ def test_a_band_holds_a_chunk_of_rows_when_the_rows_outnumber_a_chunk(
     from cytearc.datastore._operations import variants as operations
     from tests.memory_helpers import stated_bytes
 
-    # Chunks of at most 12,000 rows, fewer than the 300 cells hold: a band
-    # holds at least 12,000 rows, less the 60 rows of one cell where a band
-    # ends, so two bands hold the at most 18,000 rows, and each writes a
-    # chunk at most once.
+    # Chunks of at most 12,000 rows, fewer than the 300 cells hold, and a
+    # band of a whole chunk at least: a band holds at least 12,000 rows, less
+    # the 60 rows of one cell where a band ends, so two bands hold the at most
+    # 18,000 rows, and each writes a chunk at most once.
     monkeypatch.setattr(operations, "_ROW_BAND", 12_000)
+    monkeypatch.setattr(operations, "_BAND_CHUNK_PARTS", 1)
     writes = _chunk_writes(monkeypatch)
     budget, below, group = _import_at_smallest_budget(banded, tmp_path, writes)
 
@@ -1201,6 +1208,35 @@ def test_a_band_holds_a_chunk_of_rows_when_the_rows_outnumber_a_chunk(
     assert max(writes.values()) == 2, writes
     assert writes["depth", 0] == writes["counts", 0] == 2
     assert str(below).startswith("Writing the variant counts in bands of 12000 rows ")
+    assert stated_bytes(below) == budget
+
+
+@pytest.mark.slow
+def test_the_smallest_budget_accepted_writes_each_stored_chunk_a_few_times(
+    tmp_path, monkeypatch
+) -> None:
+    from tests.memory_helpers import stated_bytes
+    from tests.variant_truth import write_large_tapestri
+
+    # 8,000 cells of 40 variants hold 838,970 rows, one chunk of each array.
+    # A band holds at least a thirty-second of them, less the rows of one cell
+    # where a band ends, so at the smallest budget that the refusals lead to,
+    # the bands write each chunk at most 33 times, where bands of what the
+    # budget leaves wrote each chunk once for every few cells. That budget is
+    # below the 27,989,399 bytes that the import needed with the cells' IDs
+    # stored in chunks of 100,000 rows, where it wrote each chunk 30 times.
+    file = write_large_tapestri(tmp_path / "large.h5", n_cells=8_000, n_variants=40)
+    _large_store(tmp_path, file)
+    writes = _chunk_writes(monkeypatch)
+    budget, below, group = _import_at_smallest_budget(
+        (file, tmp_path / "large.zarr"), tmp_path / "copy", writes
+    )
+
+    for name in _LONG_ARRAYS:
+        assert 0 < group[name].shape[0] <= group[name].chunks[0], name
+    assert max(writes.values()) <= 33, writes
+    assert budget < 27_989_399, budget
+    assert str(below).startswith("Writing the variant counts in bands of 26218 rows ")
     assert stated_bytes(below) == budget
 
 
