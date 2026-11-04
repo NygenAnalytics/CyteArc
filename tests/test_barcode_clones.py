@@ -226,11 +226,13 @@ def test_the_artifact_holds_barcodes_doublets_and_what_each_rule_removed(
     diagnostics = attributes["diagnostics"]
     assert dict(loaded.diagnostics) == diagnostics
     assert list(diagnostics) == [
+        "cellsWithClone",
+        "largestCloneShare",
         "distinctBarcodes",
         "expectedChanceMatches",
         "mergedBarcodes",
-        "largestCloneShare",
     ]
+    assert diagnostics["cellsWithClone"] == loaded.clones["n_cells"].sum()
     assert diagnostics["mergedBarcodes"] == counts["barcodes_corrected"]
     assert 0 < diagnostics["expectedChanceMatches"] < diagnostics["mergedBarcodes"]
     assert diagnostics["largestCloneShare"] == (
@@ -340,9 +342,9 @@ def test_clones_within_groups_are_those_of_each_group_alone(store, tmp_path) -> 
     assert loaded_partition(store, within) == expected
     for sample in SAMPLES:
         store.cells.insert(f"is_{sample}", TRUTH.samples == sample)
-        # The other sample's cells are not selected, so their barcodes match
-        # no cell.
-        with pytest.warns(UserWarning, match="match no selected cell"):
+        # The other sample's cells are cells of the store outside the
+        # selection, which give no warning.
+        with collect_warnings() as messages:
             alone = import_calling_truth(
                 store,
                 calling,
@@ -350,6 +352,16 @@ def test_clones_within_groups_are_those_of_each_group_alone(store, tmp_path) -> 
                 "pycashier",
                 cell_selection=store.snapshot_cell_selection(f"is_{sample}"),
             )
+        assert list(messages) == []
+        listed = {
+            barcode
+            for other in SAMPLES
+            if other != sample
+            for barcode in calling.barcodes.sample_molecules(other)["cell_barcode"]
+        }
+        joined = store.artifacts.inspect(alone).diagnostics
+        assert joined["unselectedBarcodes"] == len(listed) > 0
+        assert joined["unmatchedBarcodes"] == 0
         clones = store.clones.barcode_clones(alone, preset="larry")
         assert loaded_partition(store, clones) == {
             clone for clone in expected if next(iter(clone)).startswith(sample)
@@ -472,7 +484,7 @@ def test_reused_and_recomputed_clones_give_the_same_diagnostics(
     assert dict(store.clones.load_clones(called).diagnostics) == diagnostics
 
 
-def test_diagnostics_other_than_the_four_numbers_are_refused_on_loading(
+def test_diagnostics_other_than_those_declared_are_refused_on_loading(
     store, tmp_path
 ) -> None:
     _calling, barcodes = _imported(store, tmp_path, "larry")
@@ -480,27 +492,27 @@ def test_diagnostics_other_than_the_four_numbers_are_refused_on_loading(
     attributes = artifact_group(store.zw, clones).attrs
     recorded = dict(attributes["diagnostics"])
     for wrong, message in (
-        ({**recorded, "mergedBarcodes": "3"}, "must be a number"),
-        ({**recorded, "mergedBarcodes": True}, "must be a number"),
-        ({**recorded, "rate": 0.5}, "exactly the diagnostics"),
+        ({**recorded, "expectedChanceMatches": float("inf")}, "must be finite"),
+        ({**recorded, "mergedBarcodes": True}, "not the boolean True"),
+        ({**recorded, "rate": 0.5}, "not declared rate"),
         (
             {name: recorded[name] for name in list(recorded)[:3]},
-            "exactly the diagnostics",
+            "missing expectedChanceMatches, mergedBarcodes",
         ),
-        ([1, 2], "exactly the diagnostics"),
+        ([1, 2], "must be a mapping"),
     ):
         attributes["diagnostics"] = wrong
         with pytest.raises(ValueError, match=message):
             store.clones.load_clones(clones)
     # Clones called from barcodes without them were saved before they were
-    # recorded, and loading them fails as reuse refuses them.
+    # recorded, and loading them names the call that saves them anew.
     del attributes["diagnostics"]
-    with pytest.raises(ValueError, match="exactly the diagnostics"):
+    with pytest.raises(ValueError, match="call ds.clones.barcode_clones again"):
         store.clones.load_clones(clones)
-    # Other clones record none.
+    # Clones from a column record the clone writer's alone.
     imported = store.clones.from_column("sample", cell_selection=every_cell(store))
     artifact_group(store.zw, imported).attrs["diagnostics"] = recorded
-    with pytest.raises(ValueError, match="record no diagnostics"):
+    with pytest.raises(ValueError, match="not declared distinctBarcodes"):
         store.clones.load_clones(imported)
 
 

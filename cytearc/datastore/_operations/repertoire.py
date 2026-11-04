@@ -90,6 +90,7 @@ from ...storage.artifacts import (
     require_complete_artifact,
 )
 from ...storage.async_execution import zarr_decoding_threads, zarr_io_concurrency
+from ...storage.diagnostics import warn_diagnostics
 from ...storage.geometry import ROW_INDEX_BYTES, array_geometry
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
@@ -105,7 +106,7 @@ from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
-    warn_unmatched_barcodes,
+    unmatched_barcode_rules,
 )
 from .cell_groups import cell_groups, group_columns, within_groups
 from .record_tables import (
@@ -130,16 +131,9 @@ _CELL_ARRAYS = (
     "n_contigs",
 )
 # The attributes that an import saves and that reusing it requires: the
-# stored fields, the contigs of the files and those that match no selected
-# cell, and what the warning about unmatched barcodes names.
-_IMPORT_ATTRIBUTES = (
-    "fields",
-    "n_file_contigs",
-    "n_unmatched_contigs",
-    "n_file_barcodes",
-    "n_unmatched_barcodes",
-    "unmatched_barcode_examples",
-)
+# stored fields, and the contigs of the files and those that match no
+# selected cell.
+_IMPORT_ATTRIBUTES = ("fields", "n_file_contigs", "n_unmatched_contigs")
 # At its peak, while it orders the contigs, ranks the chains and writes the
 # artifact, an import holds up to three times the bytes of its encoded
 # contigs beside what it holds for each selected cell, as measured on
@@ -821,11 +815,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         part of each barcode that its ``barcode`` group matches first. A
         merged store prefixes each sample's barcodes with its name and two
         underscores, so pass each sample's files with that sample's prefix.
-        Contigs and barcodes that match no selected cell are counted, saved
-        in the artifact's ``n_unmatched_contigs``, ``n_unmatched_barcodes``
-        and ``unmatched_barcode_examples`` attributes beside
-        ``n_file_contigs`` and ``n_file_barcodes``, and named in a warning,
-        which a reused import gives again. A file is identified by the
+        Contigs that match no selected cell are counted in the artifact's
+        ``n_unmatched_contigs`` attribute beside ``n_file_contigs``. The
+        join's diagnostics count the files' barcodes, those that match no cell
+        of the store and those of cells outside the selection, with examples
+        of each; barcodes that match no cell of the store are named in a
+        warning, which a reused import gives again. A file is identified by the
         SHA-256 of its bytes, so a moved file reuses the saved receptors and
         an edited file gives new ones, and the order of the files does not
         matter.
@@ -932,11 +927,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             required_attributes=_IMPORT_ATTRIBUTES,
             reuse_validator=has_contigs,
         )
-        files_text = _files_text(len(sources))
+        warnings = unmatched_barcode_rules(_files_text(len(sources)))
         if planned.reused:
             # Saved receptors warn as they did when they were imported.
-            warn_unmatched_barcodes(
-                artifact_group(self.zw, planned.ref).attrs, files_text
+            warn_diagnostics(
+                arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
             )
             return planned.ref
         self._require_writable(arguments.operation)
@@ -968,7 +963,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         # The join charges its lookup of the IDs and the hashes of barcodes
         # that match no cell as they grow.
-        join = CellBarcodeJoin(cell_ids, ledger=ledger)
+        join = CellBarcodeJoin(
+            cell_ids, ledger=ledger, store_ids=self.cells._get_array("ids")
+        )
         table = _encode_contigs(sources, join, ledger)
         contigs = record_arrays(table, _CONTIGS)
         # Ordering the contigs, ranking the chains and writing the artifact
@@ -1004,7 +1001,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             "fields": list(table.fields),
             "n_file_contigs": join.n_rows,
             "n_unmatched_contigs": join.n_unmatched_rows,
-            **join.attributes(),
         }
         write_cell_data_artifact(
             self.zw,
@@ -1022,8 +1018,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             },
             chunk_lengths=record_chunk_lengths(contig_arrays),
             attributes=attributes,
+            diagnostics=join.diagnostics(),
         )
-        warn_unmatched_barcodes(attributes, files_text)
+        warn_diagnostics(
+            arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
+        )
         counts = pd.Series(quality.receptor_type).value_counts()
         logger.info(
             f"Imported {table.n_records} contigs of {n_cells} cells: "

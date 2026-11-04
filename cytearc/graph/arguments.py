@@ -13,6 +13,7 @@ from ..storage.artifact_writer import (
     plan_artifact,
 )
 from ..utils.arguments import bool_argument
+from ..storage.diagnostics import declare_diagnostics
 from ..storage.artifacts import (
     ArtifactRef,
     ArtifactScope,
@@ -101,8 +102,31 @@ class ArgumentRecord:
 
 @dataclass(frozen=True, slots=True)
 class OperationArguments:
+    """The arguments of an operation that saves an artifact.
+
+    Each subclass names its ``operation`` and the ``artifact_kind`` it saves.
+    An operation that saves diagnostics declares their keys in
+    ``diagnostics`` and names in ``call`` the public call that computes its
+    artifact, such as ``"ds.clones.import_clones"``, which the refusal of an
+    artifact saved without them names.
+    """
+
     operation: ClassVar[str]
     artifact_kind: ClassVar[str]
+    diagnostics: ClassVar[tuple[str, ...]] = ()
+    call: ClassVar[str | None] = None
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # The dataclass rebuilds the class for its slots, which a bare super()
+        # would not find.
+        super(OperationArguments, cls).__init_subclass__(**kwargs)
+        if cls.diagnostics:
+            if cls.call is None:
+                raise TypeError(
+                    f"{cls.__name__} declares diagnostics, so it must name the call "
+                    "that computes its artifacts"
+                )
+            declare_diagnostics(cls.operation, cls.diagnostics, call=cls.call)
 
     def to_record(self) -> ArgumentRecord:
         partitions: dict[ArgumentRole, dict[str, Any]] = {

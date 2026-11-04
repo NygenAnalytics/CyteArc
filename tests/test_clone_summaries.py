@@ -116,7 +116,7 @@ def _variant_clones(store: DataStore, folder: Path) -> ArtifactRef:
     # and no other cell does, so the variants that two cells or more show join
     # exactly the cells of each clone of two cells or more.
     path = write_mgatk(clone_variant_truth(TRUTH), folder / "mgatk")
-    with pytest.warns(UserWarning, match="match no selected cell"):
+    with pytest.warns(UserWarning, match="match no cell of the store"):
         counts = store.variants.import_counts(path, cell_selection=every_cell(store))
     variants = store.variants.informative(counts, min_cells=2, min_vmr=0.01)
     return store.variants.frequency_clones(variants)
@@ -156,7 +156,7 @@ def _phylogeny_clones(store: DataStore, folder: Path) -> ArtifactRef:
     # The truth's phylogeny splits into one clade per clone, whose root carries
     # the clone's label, so its cut at time 1 gives the truth's clones.
     path = write_newick([truth_phylogeny(TRUTH)], folder / "truth_tree.nwk")
-    with pytest.warns(UserWarning, match="match no selected cell"):
+    with pytest.warns(UserWarning, match="match no cell of the store"):
         phylogeny = store.clones.import_phylogeny(
             path, cell_selection=every_cell(store), time_unit="days"
         )
@@ -347,21 +347,40 @@ def _source_clones(source) -> tuple[dict[tuple, str], dict[tuple, int]]:
     return labels, {key: ranks[label] for key, label in labels.items()}
 
 
-def test_only_barcode_clones_record_diagnostics(source) -> None:
-    # The record of every source holds the field, which only the clones
-    # called from barcodes fill.
+def test_every_source_records_the_clone_writers_diagnostics(source) -> None:
+    # The clone writer counts the cells given a clone and the share of them
+    # that the largest clone holds, counted here cell by cell from the
+    # truth's clones as the source saves them; clonotypes record none.
+    status = inspect_artifact(source.store.zw, source.clones)
     loaded = source.store.clones.load_clones(source.clones)
-    if inspect_artifact(source.store.zw, source.clones).operation == (
-        "call_barcode_clones"
-    ):
-        assert list(loaded.diagnostics) == [
+    assert dict(loaded.diagnostics) == status.diagnostics
+    if source.clones.kind == "clonotypes":
+        assert status.diagnostics == {}
+        return
+    keys = [key for key in _keys(source) if key is not None]
+    largest = max(Counter(keys).values())
+    assert status.diagnostics["cellsWithClone"] == len(keys)
+    assert status.diagnostics["largestCloneShare"] == largest / len(keys)
+    own = {
+        "import_clones": [
+            "fileBarcodes",
+            "unmatchedBarcodes",
+            "unselectedBarcodes",
+            "unmatchedBarcodeExamples",
+            "unselectedBarcodeExamples",
+        ],
+        "call_barcode_clones": [
             "distinctBarcodes",
             "expectedChanceMatches",
             "mergedBarcodes",
-            "largestCloneShare",
-        ]
-    else:
-        assert dict(loaded.diagnostics) == {}
+        ],
+    }.get(str(status.operation), [])
+    assert list(status.diagnostics) == [
+        *(own if status.operation == "import_clones" else []),
+        "cellsWithClone",
+        "largestCloneShare",
+        *(own if status.operation != "import_clones" else []),
+    ]
 
 
 def test_clone_abundance_counts_the_clones_of_each_size(source) -> None:

@@ -167,6 +167,34 @@ def test_a_cell_selection_keeps_its_cells(store) -> None:
     assert first.keys == [{}]
 
 
+def test_the_grouping_counts_the_cells_it_leaves_out(store) -> None:
+    rows = np.ones(N_CELLS, dtype=bool)
+    rows[[2, 3]] = False
+    # cell2 and cell3 are not rows; of the others, cell0 and cell5 have no
+    # label; the rest fall in two groups.
+    grouped = _group(store, rows, group_by="partial")
+    assert grouped.diagnostics == {
+        "cellsWithoutClone": 2,
+        "cellsWithoutGroup": 2,
+        "groups": 2,
+    }
+    # Within the odd cells, cell3 is no row, cell5 has no label, and cell1
+    # and cell7 are both of s10.
+    odd = store.snapshot_cell_selection("odd")
+    within = _group(store, rows, group_by="partial", cell_selection=odd)
+    assert within.diagnostics == {
+        "cellsWithoutClone": 1,
+        "cellsWithoutGroup": 1,
+        "groups": 1,
+    }
+    # Without a column, every row is in the one group.
+    assert _group(store, rows, cell_selection=odd).diagnostics == {
+        "cellsWithoutClone": 1,
+        "cellsWithoutGroup": 0,
+        "groups": 1,
+    }
+
+
 def test_without_a_grouping_the_rows_form_one_group(store) -> None:
     rows = np.arange(N_CELLS) % 3 == 0
     grouped = _group(store, rows)

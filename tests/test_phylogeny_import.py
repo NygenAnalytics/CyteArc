@@ -21,7 +21,12 @@ import pytest
 
 from cytearc.clones import CellPhylogeny
 from cytearc.utils.logging import collect_warnings
-from tests.clone_helpers import every_cell, loaded_partition, write_truth_store
+from tests.clone_helpers import (
+    assert_joined,
+    every_cell,
+    loaded_partition,
+    write_truth_store,
+)
 from tests.clone_truth import (
     LEAF_TIME,
     N_CELLS,
@@ -112,23 +117,27 @@ def test_each_format_recovers_the_truths_clones(shared, tmp_path, name) -> None:
     # The three barcodes outside the store are leaves of clone 1's clade.
     assert messages == [
         f"{N_OUTSIDE} of {N_IN_TREES + N_OUTSIDE} barcodes of the tree file match "
-        "no selected cell, for example "
+        "no cell of the store, for example "
         + ", ".join(repr(f"d2__{barcode}-1") for barcode in TRUTH.outside)
-        + ". Check barcode_prefix and cell_selection."
+        + ". Check barcode_prefix, barcode_suffix and barcode_pattern against the "
+        "store's cell IDs."
     ]
     assert {
         key: attributes[key] for key in sorted(attributes) if key.startswith("n_")
     } == {
         "n_cells_in_no_tree": N_CELLS - N_IN_TREES,
         "n_cells_in_trees": N_IN_TREES,
-        "n_file_barcodes": N_IN_TREES + N_OUTSIDE,
         "n_leaves": N_IN_TREES + N_OUTSIDE,
         "n_leaves_without_a_cell": N_OUTSIDE,
         "n_nodes": len(TREE.names),
         "n_trees": 1,
-        "n_unmatched_barcodes": N_OUTSIDE,
         "n_unnamed_leaves": 0,
     }
+    assert_joined(
+        shared.store.artifacts.inspect(phylogeny).diagnostics,
+        n_file=N_IN_TREES + N_OUTSIDE,
+        unmatched=[f"d2__{barcode}-1" for barcode in TRUTH.outside],
+    )
     assert attributes["time_unit"] == "days"
     assert attributes["leaf_time_spread"] == 0.0
     clones, messages = _cut(shared.store, phylogeny, time=PHYLOGENY_CUT_TIME)
@@ -625,11 +634,21 @@ def test_writing_the_names_counts_what_the_join_holds(tmp_path) -> None:
 
     slot = 1 + 8 * index_copies_references()
     assert lookup_bytes(n_cells) - lookup_bytes(n_leaves) == slot * len(beyond)
+    # The selection of the trees' cells leaves cells of the store out, so its
+    # join also holds what its pass over the store's IDs would hold, which a
+    # selection of every cell needs no room for.
+    from cytearc.datastore._operations.cell_barcodes import store_pass_bytes
+
+    pass_bytes = store_pass_bytes(
+        store.cells._get_array("ids"), n_leaves, codec_threads=store.nthreads
+    )
+    assert pass_bytes > 8 * n_cells
     assert every_cell_of_the_store - in_tree == (
         8 * len(beyond)
         + object_array_bytes(len(beyond))
         + python_text_bytes(len(beyond), sum(map(len, beyond)))
         + slot * len(beyond)
+        - pass_bytes
     )
 
 
@@ -1064,20 +1083,9 @@ def test_unnamed_leaves_count_as_leaves_without_a_cell_and_not_as_barcodes(
     assert messages == []
     assert {
         name: attributes[name]
-        for name in (
-            "n_file_barcodes",
-            "n_unmatched_barcodes",
-            "n_unnamed_leaves",
-            "n_leaves_without_a_cell",
-            "n_leaves",
-        )
-    } == {
-        "n_file_barcodes": 2,
-        "n_unmatched_barcodes": 0,
-        "n_unnamed_leaves": 2,
-        "n_leaves_without_a_cell": 2,
-        "n_leaves": 4,
-    }
+        for name in ("n_unnamed_leaves", "n_leaves_without_a_cell", "n_leaves")
+    } == {"n_unnamed_leaves": 2, "n_leaves_without_a_cell": 2, "n_leaves": 4}
+    assert_joined(store.artifacts.inspect(phylogeny).diagnostics, n_file=2)
 
 
 def test_trees_of_unnamed_leaves_are_refused_without_examples(store, tmp_path) -> None:

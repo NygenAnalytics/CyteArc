@@ -27,6 +27,7 @@ from ..storage.artifacts import (
     fingerprint_stored_arrays,
     inspect_artifact,
 )
+from ..storage.diagnostics import declare_diagnostics
 from ..storage.errors import ArtifactResolutionError
 from ..storage.feature_selection import resolve_feature_selection
 from ..storage.geometry import array_geometry
@@ -74,6 +75,8 @@ _DIAGNOSTIC_NAMES = frozenset(
         "queryScaledDispersion",
     }
 )
+# A projection's diagnostics, which ArtifactStatus.diagnostics reads.
+declare_diagnostics("map_query", sorted(_DIAGNOSTIC_NAMES), call="ds.mapping.run")
 _ATTRIBUTE_NAMES = frozenset(
     {
         "artifact_id",

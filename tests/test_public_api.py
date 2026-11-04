@@ -24,6 +24,7 @@ _EXPECTED_EXPORTS = {
     "DataStore": "cytearc.datastore.datastore",
     "DataStoreSummary": "cytearc.datastore.summary",
     "DataStoreMerge": "cytearc.merge",
+    "DiagnosticWarning": "cytearc.utils.warnings",
     "EnrichmentResult": "cytearc.features.enrichment.results",
     "FateMappingResult": "cytearc.trajectory.results",
     "H5adInspectResult": "cytearc.readers",

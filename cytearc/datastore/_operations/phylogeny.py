@@ -43,7 +43,11 @@ from ...metadata.selection import (
     cell_selection_indices,
     read_cell_selection,
 )
-from ...storage.artifact_writer import ArrayRequirement, artifact_transaction
+from ...storage.artifact_writer import (
+    ArrayRequirement,
+    artifact_transaction,
+    planned_diagnostics,
+)
 from ...storage.arrays import (
     MetadataBlock,
     create_streamed_metadata_column,
@@ -55,6 +59,11 @@ from ...storage.artifacts import (
     artifact_group,
     inspect_artifact,
     require_complete_artifact,
+)
+from ...storage.diagnostics import (
+    DIAGNOSTICS_ATTRIBUTE,
+    EXAMPLES,
+    warn_diagnostics,
 )
 from ...storage.layout import column_chunk_rows
 from ...storage.types import as_zarr_array
@@ -69,7 +78,7 @@ from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
-    warn_unmatched_barcodes,
+    unmatched_barcode_rules,
 )
 from .clone_artifacts import clone_write_bytes, plan_clones, write_clones
 
@@ -369,7 +378,9 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             join_cells,
             item="the selected cells' IDs",
         )
-        join = CellBarcodeJoin(cell_ids, ledger=ledger)
+        join = CellBarcodeJoin(
+            cell_ids, ledger=ledger, store_ids=self.cells._get_array("ids")
+        )
         # Each file's leaves are joined to cells, and its trees named.
         file_cells = []
         listed: list[tuple[str, int, int, int]] = []
@@ -510,10 +521,10 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         A leaf names the cell whose ID is its file's ``barcode_prefix``, the
         leaf's name and ``barcode_suffix``; ``barcode_pattern`` keeps the part
         of the name that its ``barcode`` group matches first. Leaves that name
-        no selected cell are counted, saved in the ``n_file_barcodes``,
-        ``n_unmatched_barcodes`` and ``unmatched_barcode_examples`` attributes
-        and named in a warning, which a reused import gives again; the
-        selected cells in no tree are counted in ``n_cells_in_no_tree``. Two
+        no selected cell are counted in the join's diagnostics, apart from
+        those of cells outside the selection, and those that name no cell of
+        the store are named in a warning, which a reused import gives again;
+        the selected cells in no tree are counted in ``n_cells_in_no_tree``. Two
         leaves that name one cell raise ``ValueError``.
 
         Each tree is named by its file's ``barcode_prefix`` and the file's
@@ -594,18 +605,16 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             ),
             required_attributes=(
                 "time_unit",
-                "n_file_barcodes",
-                "n_unmatched_barcodes",
-                "unmatched_barcode_examples",
                 "n_cells_in_no_tree",
             ),
             reuse_validator=_has_forest,
         )
         files_text = _files_text(len(files))
+        warnings = unmatched_barcode_rules(files_text)
         if planned.reused:
             # Saved trees warn as they did when they were imported.
-            warn_unmatched_barcodes(
-                artifact_group(self.zw, planned.ref).attrs, files_text
+            warn_diagnostics(
+                arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
             )
             return planned.ref
         self._require_writable(arguments.operation)
@@ -617,14 +626,15 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         in_tree[forest.cells[forest.cells >= 0]] = True
         n_cells_in_trees = int(np.count_nonzero(in_tree))
         if not n_cells_in_trees:
-            if not join.examples:
+            examples = [*join.unmatched_examples, *join.unselected_examples]
+            if not examples:
                 raise ValueError(
                     f"No leaf of {files_text} names a selected cell, since no "
                     "leaf has a name; name the leaves by their cells' barcodes"
                 )
             raise ValueError(
                 f"No leaf of {files_text} names a selected cell, for example "
-                + ", ".join(quoted_value(value) for value in join.examples)
+                + ", ".join(quoted_value(value) for value in examples[:EXAMPLES])
                 + ". Check barcode_prefix, barcode_suffix, barcode_pattern and "
                 "cell_selection."
             )
@@ -632,8 +642,9 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         is_leaf[forest.parent[forest.parent >= 0]] = False
         earliest, latest = leaf_time_ranges(forest.times, is_leaf, forest.tree_offsets)
         spread = latest - earliest
+        diagnostics = planned_diagnostics(planned, join.diagnostics())
         attributes = {
-            **join.attributes(),
+            DIAGNOSTICS_ATTRIBUTE: diagnostics,
             "time_unit": unit,
             "n_trees": len(forest.tree_names),
             "n_nodes": len(forest.parent),
@@ -665,7 +676,9 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             _write_numbers(group, "tree_unique_names", forest.unique_names)
             _write_numbers(group, "tree_earliest_leaf_time", earliest)
             _write_numbers(group, "tree_latest_leaf_time", latest)
-        warn_unmatched_barcodes(attributes, files_text)
+        warn_diagnostics(
+            arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
+        )
         logger.info(
             f"Saved {len(forest.tree_names)} trees of {len(forest.parent)} nodes; "
             f"{n_cells_in_trees} of {n_cells} selected cells are leaves, and "

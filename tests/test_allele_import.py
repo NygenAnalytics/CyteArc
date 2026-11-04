@@ -17,7 +17,7 @@ import pytest
 from cytearc.datastore._operations.cell_barcodes import lookup_bytes
 from cytearc.datastore._operations.recorder_alleles import _CELL_BYTES, _FIXED_BYTES
 from cytearc.utils.memory_budget import object_array_bytes, python_text_bytes
-from tests.clone_helpers import every_cell, write_truth_store
+from tests.clone_helpers import assert_joined, every_cell, write_truth_store
 from tests.memory_helpers import charges
 from tests.storage_helpers import copy_store
 from tests.clone_truth import (
@@ -135,6 +135,28 @@ def test_petracer_long_tables_recover_the_truth(store, truth, recorders, tmp_pat
     assert files["format"].tolist() == ["petracer", "petracer"]
     assert files["pipeline"].tolist() == ["PEtracer 2025"] * 2
     assert files["kind"].tolist() == ["independent"] * 2
+    # Every cell of the truth is listed beside one droplet outside the store.
+    droplet = [f"{SAMPLES[0]}__{truth.outside[0]}-1"]
+    assert_joined(
+        store.artifacts.inspect(ref).diagnostics, n_file=49, unmatched=droplet
+    )
+    # With one sample's cells selected, the other's are cells of the store
+    # outside the selection, which give no warning of their own.
+    store.cells.insert(
+        "petracer_first_sample", truth.samples == SAMPLES[0], overwrite=True
+    )
+    with pytest.warns(UserWarning, match="1 of 49 barcodes of the allele files"):
+        first = store.clones.import_alleles(
+            paths,
+            cell_selection=store.snapshot_cell_selection("petracer_first_sample"),
+            barcode_prefix=[f"{sample}__" for sample in SAMPLES],
+        )
+    assert_joined(
+        store.artifacts.inspect(first).diagnostics,
+        n_file=49,
+        unmatched=droplet,
+        unselected=truth.cell_ids[truth.samples != SAMPLES[0]].tolist(),
+    )
 
 
 @pytest.mark.parametrize("layout", ["geo", "zenodo"])
@@ -601,8 +623,8 @@ def test_the_selected_cells_ids_count_once_as_the_join_holds_them(
     charged: list[int] = []
 
     class Join(operations.CellBarcodeJoin):
-        def __init__(self, cell_ids, *, ledger):
-            super().__init__(cell_ids, ledger=ledger)
+        def __init__(self, cell_ids, *, ledger, store_ids):
+            super().__init__(cell_ids, ledger=ledger, store_ids=store_ids)
             charged.append(ledger.charged)
 
     monkeypatch.setattr(operations, "CellBarcodeJoin", Join)

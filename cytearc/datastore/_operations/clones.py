@@ -59,7 +59,6 @@ from ...clones.overlap import (
     tracking_reach,
 )
 from ...metadata.arguments import (
-    BarcodeCloneArguments,
     ClonalExpansionArguments,
     CloneColumnArguments,
     CloneFateBiasArguments,
@@ -98,6 +97,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.diagnostics import warn_diagnostics
 from ...storage.selections import validate_cell_selection
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
@@ -115,7 +115,7 @@ from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
-    warn_unmatched_barcodes,
+    unmatched_barcode_rules,
 )
 from .cell_groups import CellGroups, cell_groups, group_columns, selection_chunk_bytes
 from .clone_artifacts import (
@@ -133,44 +133,6 @@ else:
 
 #: The values of ``export_clones``'s ``format``.
 EXPORT_FORMATS = ("cospar", "matrix")
-
-
-def _stored_diagnostics(group: zarr.Group, operation: str) -> dict[str, int | float]:
-    """Read the numbers that a clone artifact's operation records about its calling.
-
-    Clones called from lineage barcodes record exactly ``BARCODE_DIAGNOSTICS``;
-    other operations record none.
-
-    Raises:
-        ValueError: If the artifact records other names, a value that is not
-            a number, or diagnostics that its operation does not record.
-    """
-    # The clone operations load no calling code until barcode clones are read.
-    from ...clones.barcode_clones import BARCODE_DIAGNOSTICS
-
-    names = BARCODE_DIAGNOSTICS if operation == BarcodeCloneArguments.operation else ()
-    recorded = group.attrs.get("diagnostics")
-    if not names:
-        if recorded is not None:
-            raise ValueError(
-                f"Clones saved by {quoted_value(operation)} record no diagnostics, and this "
-                f"artifact records {quoted_value(recorded)}"
-            )
-        return {}
-    if not isinstance(recorded, Mapping) or set(recorded) != set(names):
-        raise ValueError(
-            f"Clones saved by {quoted_value(operation)} must record exactly the diagnostics "
-            f"{', '.join(names)}, and this artifact records {quoted_value(recorded)}"
-        )
-    numbers: dict[str, int | float] = {}
-    for name in names:
-        value = recorded[name]
-        if not isinstance(value, int | float) or isinstance(value, bool):
-            raise ValueError(
-                f"The diagnostic {quoted_value(name)} must be a number, not {quoted_value(value)}"
-            )
-        numbers[name] = value
-    return numbers
 
 
 # Bytes of one parsed row of a clone file at its peak, beside its fields: the
@@ -467,10 +429,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         A cell's ID is its file's ``barcode_prefix``, the barcode and
         ``barcode_suffix``, matched exactly; ``barcode_pattern`` keeps the
         part of each barcode that its ``barcode`` group matches first.
-        Barcodes that match no selected cell are counted, saved in the
-        artifact's ``n_file_barcodes``, ``n_unmatched_barcodes`` and
-        ``unmatched_barcode_examples`` attributes, and named in a warning,
-        which a reused import gives again. A file is identified by the SHA-256
+        Barcodes that match no selected cell are counted by the cell ID they
+        name in the artifact's diagnostics, which
+        ``ds.artifacts.inspect(ref).diagnostics`` returns: ``fileBarcodes``,
+        ``unmatchedBarcodes``, those that name no cell of the store,
+        ``unselectedBarcodes``, those of cells of the store outside the
+        selection, and up to five examples of each, which show the barcode
+        beside the cell ID it derives. Barcodes of no cell are named in a
+        warning, which a reused import gives again. A file is identified by the SHA-256
         of its bytes, and of a matrix's cell and clone lists, so a moved file
         reuses the saved clones, an edited one gives new clones, and the
         order of the files does not matter.
@@ -585,19 +551,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection,
             n_cells,
             with_probability=with_probability,
-            required_attributes=(
-                "n_file_barcodes",
-                "n_unmatched_barcodes",
-                "unmatched_barcode_examples",
-                "n_clones",
-                "n_cells_in_several_clones",
-            ),
+            required_attributes=("n_clones", "n_cells_in_several_clones"),
         )
-        files_text = _files_text(len(files))
+        warnings = unmatched_barcode_rules(_files_text(len(files)))
         if planned.reused:
             # Saved clones warn as they did when they were imported.
-            warn_unmatched_barcodes(
-                artifact_group(self.zw, planned.ref).attrs, files_text
+            warn_diagnostics(
+                arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
             )
             return planned.ref
         ids = self.cells._get_array("ids")
@@ -615,7 +575,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         cell_ids = read_text_rows(
             ledger, ids, cell_index, item="the selected cells' IDs"
         )
-        join = CellBarcodeJoin(cell_ids, ledger=ledger)
+        join = CellBarcodeJoin(cell_ids, ledger=ledger, store_ids=ids)
         assigner = CloneAssigner(cell_ids, multiple=policy, ledger=ledger)
         # Rows are parsed in chunks sized by the widest file's fields and its
         # longest sampled rows, whose barcodes are about as long as cell IDs.
@@ -640,12 +600,20 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
         assignment = assigner.finish()
         attributes = {
-            **join.attributes(),
             "n_clones": len(assignment.clone_ids),
             "n_cells_in_several_clones": assignment.n_cells_in_several_clones,
         }
-        write_clones(self.zw, planned, assignment, attributes, ledger=ledger)
-        warn_unmatched_barcodes(attributes, files_text)
+        write_clones(
+            self.zw,
+            planned,
+            assignment,
+            attributes,
+            ledger=ledger,
+            diagnostics=join.diagnostics(),
+        )
+        warn_diagnostics(
+            arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
+        )
         log_clones(assignment, n_cells)
         return planned.ref
 
@@ -917,13 +885,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             extra=extra,
             kept_apart=dict(source.kept_apart),
         )
-        operation = str(inspect_artifact(self.zw, clones).operation)
+        status = inspect_artifact(self.zw, clones)
         return Clones(
             cells=cells,
             clones=table,
-            source=operation,
+            source=str(status.operation),
             kept_apart=tuple(name for name, _labels in source.kept_apart),
-            diagnostics=_stored_diagnostics(group, operation),
+            diagnostics=status.diagnostics,
         )
 
     @validation_scoped
@@ -1533,7 +1501,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         ``ds.select_cells(expansion, include=["more than 100 cells"])`` keeps
         the cells of the largest clones. ``group_clone_size``,
         ``group_clone_frequency`` and ``group_codes`` are its other per-cell
-        arrays.
+        arrays. Its diagnostics, which ``ds.artifacts.inspect(expansion)``
+        returns, count the cells that it leaves out: ``cellsWithoutClone``,
+        ``cellsWithoutGroup``, the cells with a clone that no group holds, and
+        the ``groups``.
 
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
@@ -1687,6 +1658,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "group_keys": grouped.keys,
                 "key_columns": list(grouped.key_columns),
             },
+            diagnostics=grouped.diagnostics,
         )
         n_counted = int(counted.sum())
         n_ungrouped = int(np.count_nonzero(codes >= 0)) - n_counted

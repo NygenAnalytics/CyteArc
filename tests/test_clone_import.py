@@ -22,6 +22,7 @@ from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
+    assert_joined,
     every_cell,
     loaded_partition,
     write_cells_store,
@@ -50,6 +51,8 @@ from tests.clone_truth import (
 
 TRUTH = clone_truth()
 N_IN_CLONES = sum(CLONE_SIZES)
+# The IDs that the files' droplets outside the store name.
+_OUTSIDE_IDS = [f"d2__{barcode}-1" for barcode in TRUTH.outside]
 # Clone labels as each writer numbers the truth's clones from 0.
 NUMBERED = [str(clone + 1) for clone in range(len(CLONE_SIZES))]
 
@@ -232,7 +235,7 @@ def test_every_format_recovers_the_truth(shared, tmp_path, case) -> None:
     path = write(_folder(tmp_path, case))
 
     with (
-        pytest.warns(UserWarning, match="match no selected cell")
+        pytest.warns(UserWarning, match="match no cell of the store")
         if (n_listed > N_CELLS)
         else collect_warnings() as messages
     ):
@@ -251,10 +254,11 @@ def test_every_format_recovers_the_truth(shared, tmp_path, case) -> None:
     assert loaded.clones["n_cells"].tolist() == list(CLONE_SIZES)
     assert loaded.clones["clone"].tolist() == labels
     attributes = shared.store.artifacts.load(ref).attrs
-    assert attributes["n_file_barcodes"] == n_listed
     # Every file but Numbat's lists the barcodes outside the store.
-    assert attributes["n_unmatched_barcodes"] == (
-        0 if n_listed == N_CELLS else N_OUTSIDE
+    assert_joined(
+        shared.store.artifacts.inspect(ref).diagnostics,
+        n_file=n_listed,
+        unmatched=_OUTSIDE_IDS if n_listed != N_CELLS else (),
     )
     assert attributes["n_clones"] == len(CLONE_SIZES)
     assert attributes["n_cells_in_several_clones"] == 0
@@ -288,7 +292,7 @@ def test_cell_names_that_anndata_writes_as_nullable_strings_are_read(
         assert isinstance(handle["obs/_index"], h5py.Group)
         assert isinstance(handle["obs/clone"], h5py.Group)
 
-    with pytest.warns(UserWarning, match="match no selected cell"):
+    with pytest.warns(UserWarning, match="match no cell of the store"):
         ref = shared.store.clones.import_clones(
             path,
             cell_selection=shared.cells,
@@ -384,7 +388,7 @@ def test_files_of_each_sample_join_by_prefix_and_keep_their_clones_apart(
 def test_files_without_prefixes_are_namespaced_by_their_names(shared, tmp_path) -> None:
     paths = _per_sample_files(tmp_path, bare=False)
 
-    with pytest.warns(UserWarning, match="match no selected cell"):
+    with pytest.warns(UserWarning, match="match no cell of the store"):
         ref = shared.store.clones.import_clones(paths, cell_selection=shared.cells)
 
     labels = shared.store.clones.load_clones(ref).clones["clone"].tolist()
@@ -441,7 +445,7 @@ def test_clone_ids_that_are_numbers_in_one_file_and_text_in_another(
     ]
     text.write_text("Cell_ID,Clone_ID\n" + "\n".join(rows) + "\n")
 
-    with pytest.warns(UserWarning, match="match no selected cell"):
+    with pytest.warns(UserWarning, match="match no cell of the store"):
         ref = shared.store.clones.import_clones(
             [numbers, text], cell_selection=shared.cells
         )
@@ -517,15 +521,21 @@ def test_a_subset_of_cells_holds_only_its_clones(shared, tmp_path) -> None:
     day_two = shared.store.snapshot_cell_selection("day_two")
     path = write_trex(TRUTH, tmp_path / "clones.txt")
 
-    with pytest.warns(UserWarning, match="match no selected cell"):
+    with pytest.warns(UserWarning, match="match no cell of the store"):
         ref = shared.store.clones.import_clones(path, cell_selection=day_two)
 
     cells = shared.store.clones.load_clones(ref).cells
     assert cells.index.tolist() == TRUTH.cell_ids[TRUTH.samples == "d2"].tolist()
     assert loaded_partition(shared.store, ref) == TRUTH.partition(TRUTH.samples == "d2")
-    attributes = shared.store.artifacts.load(ref).attrs
-    n_day_two = int(np.count_nonzero((TRUTH.samples == "d2") & (TRUTH.clones >= 0)))
-    assert attributes["n_unmatched_barcodes"] == N_IN_CLONES - n_day_two + N_OUTSIDE
+    # The day-four cells of the file's clones are cells of the store outside
+    # the selection, and the droplets outside the store match no cell.
+    in_clones = TRUTH.clones >= 0
+    assert_joined(
+        shared.store.artifacts.inspect(ref).diagnostics,
+        n_file=N_IN_CLONES + N_OUTSIDE,
+        unmatched=_OUTSIDE_IDS,
+        unselected=TRUTH.cell_ids[(TRUTH.samples == "d4") & in_clones].tolist(),
+    )
 
 
 def test_import_is_reused_by_contents_in_any_file_order(store, tmp_path) -> None:
@@ -588,9 +598,10 @@ def test_a_reused_import_warns_again_and_a_read_only_store_reads_it(
     assert list(first_messages) == list(reused_messages)
     assert list(first_messages) == [
         f"{N_OUTSIDE} of {N_IN_CLONES + N_OUTSIDE} barcodes of the clone file match "
-        "no selected cell, for example "
+        "no cell of the store, for example "
         + ", ".join(repr(f"d2__{barcode}-1") for barcode in TRUTH.outside)
-        + ". Check barcode_prefix and cell_selection."
+        + ". Check barcode_prefix, barcode_suffix and barcode_pattern against the "
+        "store's cell IDs."
     ]
     reader = open_store(Path(store.zarr_loc), zarr_mode="r")
     with collect_warnings() as reader_messages:
@@ -703,7 +714,7 @@ def test_a_header_without_rows_saves_no_clone(shared, tmp_path) -> None:
     loaded = shared.store.clones.load_clones(ref)
     assert loaded.clones.empty
     assert loaded.cells["clone"].isna().all()
-    assert shared.store.artifacts.load(ref).attrs["n_file_barcodes"] == 0
+    assert_joined(shared.store.artifacts.inspect(ref).diagnostics, n_file=0)
 
 
 def test_unicode_and_very_long_labels_survive_the_round_trip(store, tmp_path) -> None:

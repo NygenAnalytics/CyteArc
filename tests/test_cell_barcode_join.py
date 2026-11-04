@@ -19,16 +19,19 @@ import numpy as np
 import pytest
 
 from cytearc.datastore._operations.cell_barcodes import (
-    UNMATCHED_EXAMPLES,
     BarcodeFile,
     CellBarcodeJoin,
+    barcode_example,
     barcode_files,
     barcode_pattern,
     derived_id_bytes,
     join_bytes,
     lookup_bytes,
-    unmatched_barcodes_warning,
+    unmatched_barcode_rules,
 )
+from cytearc.metadata.arguments import JOIN_DIAGNOSTICS
+from cytearc.storage.diagnostics import EXAMPLES
+from cytearc import DiagnosticWarning
 from cytearc.utils.logging import collect_warnings, logger
 from cytearc.utils.memory_budget import (
     MemoryLedger,
@@ -78,7 +81,8 @@ def test_imported_guide_calls_match_those_saved_before_the_shared_join(
 ) -> None:
     # The reference was written by import_guide_calls before it joined
     # barcodes through the shared helper; every array and attribute must
-    # come out the same.
+    # come out the same, the join's counts and examples moved into the
+    # diagnostics, each example beside the cell ID it derives.
     reference = json.loads(_REFERENCE.read_text())
     store, selection = build_guide_store(tmp_path / "store.zarr")
     assert set(reference) == set(CASES)
@@ -103,12 +107,13 @@ def test_imported_guide_calls_match_those_saved_before_the_shared_join(
 def _shared_warning(
     files: str, n_unmatched: int, n_barcodes: int, examples: list[str], options: bool
 ) -> str:
-    """The shared join's warning about barcodes that match no selected cell."""
+    """The shared join's warning about barcodes that match no cell of the store."""
     return (
-        f"{n_unmatched} of {n_barcodes} barcodes of {files} match no selected "
-        "cell, for example "
+        f"{n_unmatched} of {n_barcodes} barcodes of {files} match no cell of the "
+        "store, for example "
         + ", ".join(repr(value) for value in examples)
-        + ". Check barcode_prefix and cell_selection."
+        + ". Check barcode_prefix, barcode_suffix and barcode_pattern against the "
+        "store's cell IDs."
     )
 
 
@@ -307,15 +312,31 @@ def joined(join_template, tmp_path):
     return store, store.snapshot_cell_selection("joined")
 
 
-def _attributes(store, ref) -> dict:
-    attributes = store.artifacts.load(ref).attrs
+def _joined(store, ref) -> dict:
+    """The join's diagnostics that an import saved."""
+    diagnostics = store.artifacts.inspect(ref).diagnostics
+    return {name: diagnostics[name] for name in JOIN_DIAGNOSTICS}
+
+
+def _counts(
+    n_file: int,
+    unmatched: list[str] | int = 0,
+    unselected: list[str] | int = 0,
+    *,
+    n_unmatched: int | None = None,
+    n_unselected: int | None = None,
+) -> dict:
+    """The join's diagnostics of ``n_file`` barcodes with these examples of each kind."""
+    unmatched = [] if isinstance(unmatched, int) else unmatched
+    unselected = [] if isinstance(unselected, int) else unselected
     return {
-        name: attributes[name]
-        for name in (
-            "n_file_barcodes",
-            "n_unmatched_barcodes",
-            "unmatched_barcode_examples",
-        )
+        "fileBarcodes": n_file,
+        "unmatchedBarcodes": len(unmatched) if n_unmatched is None else n_unmatched,
+        "unselectedBarcodes": (
+            len(unselected) if n_unselected is None else n_unselected
+        ),
+        "unmatchedBarcodeExamples": unmatched,
+        "unselectedBarcodeExamples": unselected,
     }
 
 
@@ -338,11 +359,7 @@ def test_a_prefix_and_a_suffix_name_cells_by_bare_barcodes(
         )
 
     assert importer.joined(store, ref) == {"s1__AAAC-1", "s1__CCCG-1", "s1__TTTA-1"}
-    assert _attributes(store, ref) == {
-        "n_file_barcodes": 3,
-        "n_unmatched_barcodes": 0,
-        "unmatched_barcode_examples": [],
-    }
+    assert _joined(store, ref) == _counts(3)
     assert list(messages) == []
     parameters = store.artifacts.inspect(ref).parameters
     recorded = (
@@ -373,16 +390,15 @@ def test_a_pattern_keeps_the_barcode_group_and_others_match_no_cell(
             barcode_pattern=r"^lane1:(?P<barcode>[ACGT]+):",
         )
 
-    # "AAAC" and "lane1::z" do not match the pattern and name no cell.
+    # "AAAC" and "lane1::z" do not match the pattern and name no cell, which
+    # their examples say.
     assert importer.joined(store, ref) == {"s2__AAAC-1", "s2__GGGT-1"}
-    assert _attributes(store, ref) == {
-        "n_file_barcodes": 4,
-        "n_unmatched_barcodes": 2,
-        "unmatched_barcode_examples": ["AAAC", "lane1::z"],
-    }
-    assert list(messages) == [
-        importer.warning(importer.files[0], 2, 4, ["AAAC", "lane1::z"], True)
+    examples = [
+        "AAAC -> (barcode_pattern does not match)",
+        "lane1::z -> (barcode_pattern does not match)",
     ]
+    assert _joined(store, ref) == _counts(4, examples)
+    assert list(messages) == [importer.warning(importer.files[0], 2, 4, examples, True)]
 
 
 @pytest.mark.parametrize("name", sorted(IMPORTERS))
@@ -455,15 +471,65 @@ def test_unmatched_barcodes_are_counted_and_warned_again_on_reuse(
     with collect_warnings() as read_only:
         assert importer.run(reader, [path], cell_selection=cells) == ref
 
-    assert _attributes(store, ref) == {
-        "n_file_barcodes": 8,
-        "n_unmatched_barcodes": 7,
-        "unmatched_barcode_examples": outside[:UNMATCHED_EXAMPLES],
-    }
-    expected = [
-        importer.warning(importer.files[0], 7, 8, outside[:UNMATCHED_EXAMPLES], False)
-    ]
+    # Each barcode is the ID of the cell it names, which its example shows
+    # once.
+    assert _joined(store, ref) == _counts(8, outside[:EXAMPLES], n_unmatched=7)
+    expected = [importer.warning(importer.files[0], 7, 8, outside[:EXAMPLES], False)]
     assert list(first) == list(reused) == list(read_only) == expected
+
+
+@pytest.mark.parametrize("name", sorted(IMPORTERS))
+def test_barcodes_of_cells_outside_the_selection_are_unselected_and_give_no_warning(
+    joined, tmp_path, name
+) -> None:
+    # The second sample's cells are selected; the file names one of them,
+    # the first sample's three cells, which QC filtering could have left out,
+    # and two barcodes of no cell of the store.
+    store, _ = joined
+    cells = store.snapshot_cell_selection("s2")
+    importer = IMPORTERS[name]
+    path = importer.write(
+        tmp_path / "file.txt",
+        ["s2__GGGT", "s1__TTTA", "nowhere", "s1__AAAC", "s1__CCCG", "s9__AAAC"],
+    )
+
+    def run(store: Any) -> tuple[Any, list[str], list[Warning]]:
+        with pytest.warns() as caught, collect_warnings() as messages:
+            ref = importer.run(store, [path], cell_selection=cells, barcode_suffix="-1")
+        return ref, list(messages), [record.message for record in caught]
+
+    ref, first, _issued = run(store)
+    from tests.storage_helpers import open_store
+
+    # The examples show each barcode beside the cell ID it derives, in the
+    # order in which the importer joins them, which the variant import sorts.
+    unmatched = ["nowhere -> nowhere-1", "s9__AAAC -> s9__AAAC-1"]
+    unselected = [
+        "s1__AAAC -> s1__AAAC-1",
+        "s1__CCCG -> s1__CCCG-1",
+        "s1__TTTA -> s1__TTTA-1",
+    ]
+    assert importer.joined(store, ref) == {"s2__GGGT-1"}
+    saved = _joined(store, ref)
+    for kind in ("unmatchedBarcodeExamples", "unselectedBarcodeExamples"):
+        saved[kind] = sorted(saved[kind])
+    assert saved == _counts(6, unmatched, unselected)
+    # Only the barcodes of no cell warn, and a reused import, writable or
+    # read-only, warns alike.
+    assert first == [importer.warning(importer.files[0], 2, 6, unmatched, True)]
+    reader = open_store(Path(store.zarr_loc), zarr_mode="r")
+    for again in (store, reader):
+        reused, messages, warnings = run(again)
+        assert reused == ref
+        assert messages == first
+        assert [str(warning) for warning in warnings] == first
+    (warning,) = warnings
+    assert isinstance(warning, DiagnosticWarning)
+    assert (warning.operation, warning.diagnostic, warning.value) == (
+        store.artifacts.inspect(ref).operation,
+        "unmatchedBarcodes",
+        2,
+    )
 
 
 @pytest.mark.parametrize("name", sorted(IMPORTERS))
@@ -508,7 +574,7 @@ def test_each_file_takes_its_own_prefix(joined, tmp_path, name) -> None:
         "s2__AAAC-1",
         "s2__GGGT-1",
     }
-    assert _attributes(store, ref)["n_file_barcodes"] == 4
+    assert _joined(store, ref)["fileBarcodes"] == 4
     assert list(messages) == []
 
 
@@ -624,32 +690,16 @@ def test_guide_calls_find_cells_outside_the_selection_through_the_options(
     calls, messages, notes = _logged_guide_calls(store, path, **options)
 
     # Two barcodes name s1__TTTA-1 through the pattern, which is no error for
-    # a cell outside the selection; AAAC does not match the pattern, and no
-    # cell is named s1__GGGG-1.
+    # a cell outside the selection, and count once, as every importer counts
+    # barcodes by the cell ID they name; AAAC does not match the pattern, and
+    # no cell is named s1__GGGG-1.
     assert _called_cells(store, calls) == {"s1__AAAC-1"}
-    attributes = store.artifacts.load(calls).attrs
-    assert {
-        name: attributes[name]
-        for name in (
-            "n_file_barcodes",
-            "n_unmatched_barcodes",
-            "unmatched_barcode_examples",
-            "n_unselected_barcodes",
-            "unselected_barcode_examples",
-        )
-    } == {
-        "n_file_barcodes": 5,
-        "n_unmatched_barcodes": 2,
-        "unmatched_barcode_examples": ["AAAC", "d:GGGG:1"],
-        "n_unselected_barcodes": 2,
-        "unselected_barcode_examples": ["b:TTTA:1", "c:TTTA:2"],
-    }
-    assert messages == [
-        _guide_call_warning("the call file", 2, 5, ["AAAC", "d:GGGG:1"], True)
-    ]
+    unmatched = ["AAAC -> (barcode_pattern does not match)", "d:GGGG:1 -> s1__GGGG-1"]
+    assert _joined(store, calls) == _counts(4, unmatched, ["b:TTTA:1 -> s1__TTTA-1"])
+    assert messages == [_guide_call_warning("the call file", 2, 4, unmatched, True)]
     assert notes == [
-        "2 of 5 barcodes of the call file are cells of the store outside the "
-        "selected cells, for example 'b:TTTA:1', 'c:TTTA:2'; the import labels "
+        "1 of 4 barcodes of the call file are cells of the store outside the "
+        "selected cells, for example 'b:TTTA:1 -> s1__TTTA-1'; the import labels "
         "the selected cells only"
     ]
     # A reused import reports both again.
@@ -806,6 +856,434 @@ def test_every_import_holds_no_more_than_its_ledger_plans(
         assert overruns == [], (held, overruns)
 
 
+# A store of many cells, ten of them selected, whose files name cells outside
+# the selection, so that the join reads every one of the store's cell IDs.
+_WIDE_CELLS = 60_000
+_WIDE_SELECTED = 10
+
+
+@pytest.fixture(scope="module")
+def wide_template(tmp_path_factory) -> Path:
+    from tests.storage_helpers import open_store, write_count_store
+
+    path = tmp_path_factory.mktemp("wide") / "store.zarr"
+    rng = np.random.default_rng(3)
+    write_count_store(
+        str(path),
+        {
+            "RNA": rng.poisson(2.0, size=(_WIDE_CELLS, 3)),
+            "CRISPR": rng.poisson(3.0, size=(_WIDE_CELLS, 2)),
+        },
+        "uint16",
+        cell_ids=[f"s1__{index:016d}-1" for index in range(_WIDE_CELLS)],
+    )
+    store = open_store(path)
+    store.cells.insert("kept", np.arange(_WIDE_CELLS) < _WIDE_SELECTED)
+    return path
+
+
+@pytest.mark.parametrize("name", LEDGER_IMPORTERS)
+def test_the_pass_over_the_stores_cell_ids_holds_no_more_than_its_ledger_plans(
+    wide_template, tmp_path, name
+) -> None:
+    import shutil
+
+    from cytearc.storage.validation_scope import validation_scope
+    from tests.memory_helpers import ZARR_READS, audited, hold_finished_reads
+    from tests.storage_helpers import open_store
+
+    shutil.copytree(wide_template, tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
+    selection = store.snapshot_cell_selection("kept")
+    importer = IMPORTERS[name]
+    # Two selected cells, 20,000 cells outside the selection and 2,000
+    # barcodes of no cell.
+    path = importer.write(
+        tmp_path / "file.txt",
+        [f"{index:016d}" for index in range(_WIDE_SELECTED - 2, 20_010)]
+        + [f"x{index:015d}" for index in range(2_000)],
+    )
+
+    def run() -> object:
+        with collect_warnings():
+            return importer.run(
+                store,
+                [path],
+                cell_selection=selection,
+                barcode_prefix="s1__",
+                barcode_suffix="-1",
+                invalidate_cache=True,
+            )
+
+    # The join hashes each of the store's 60,000 cell IDs, which its ledger
+    # plans a band of chunks at a time, with every read's work held until the
+    # next read ends, as a busy machine can, and without.
+    for held in (False, True):
+        with validation_scope():
+            run()
+            if held:
+                with hold_finished_reads(*ZARR_READS):
+                    ref, overruns = audited(run)
+            else:
+                ref, overruns = audited(run)
+        assert overruns == [], (held, overruns)
+    diagnostics = store.artifacts.inspect(ref).diagnostics
+    assert (
+        diagnostics["fileBarcodes"],
+        diagnostics["unmatchedBarcodes"],
+        diagnostics["unselectedBarcodes"],
+    ) == (22_002, 2_000, 20_000)
+
+
+def _wide_file(importer: Importer, folder: Path) -> Path:
+    """A file of two selected cells of the wide store, 5,000 cells outside the selection and 1,000 barcodes of no cell."""
+    return importer.write(
+        folder / "file.txt",
+        [f"{index:016d}" for index in range(_WIDE_SELECTED - 2, 5_010)]
+        + [f"x{index:015d}" for index in range(1_000)],
+    )
+
+
+@pytest.mark.parametrize("name", LEDGER_IMPORTERS)
+def test_every_import_runs_at_the_budgets_that_its_refusals_name_beside_the_stores_ids(
+    wide_template, tmp_path, name
+) -> None:
+    import shutil
+
+    from tests.memory_helpers import at_budget, follow_refusals
+    from tests.storage_helpers import open_store
+
+    shutil.copytree(wide_template, tmp_path / "store.zarr")
+    store = open_store(tmp_path / "store.zarr")
+    selection = store.snapshot_cell_selection("kept")
+    importer = IMPORTERS[name]
+    path = _wide_file(importer, tmp_path)
+
+    def run() -> object:
+        with collect_warnings():
+            return importer.run(
+                store,
+                [path],
+                cell_selection=selection,
+                barcode_prefix="s1__",
+                barcode_suffix="-1",
+                invalidate_cache=True,
+            )
+
+    # From one byte, each refusal names a budget that passes its step, so no
+    # step is refused twice. What the pass over the store's IDs holds is
+    # charged when the join starts, so the pass's own steps, which come once
+    # the chunks are sized, are never refused.
+    budget, refusals = follow_refusals(at_budget(store, run))
+    items = [refusal.item for refusal in refusals]
+    assert len(set(items)) == len(items), items
+    assert "the pass over the store's cell IDs" in items
+    assert not {
+        "the hashes of the store's cell IDs",
+        "a block of the store's cell IDs",
+    } & set(items), items
+    store.memoryBytes = budget
+    diagnostics = store.artifacts.inspect(run()).diagnostics
+    assert (diagnostics["unmatchedBarcodes"], diagnostics["unselectedBarcodes"]) == (
+        1_000,
+        5_000,
+    )
+
+
+def test_guide_calls_run_within_the_budget_that_their_refusal_names_beside_the_stores_ids(
+    wide_template, tmp_path
+) -> None:
+    import shutil
+
+    from tests.memory_helpers import check_budget
+
+    path = tmp_path / "store.zarr"
+    shutil.copytree(wide_template, path)
+    from tests.storage_helpers import open_store
+
+    kept = open_store(path).snapshot_cell_selection("kept")
+    calls = write_guide_call_file(
+        tmp_path / "calls.csv",
+        [f"s1__{index:016d}-1" for index in range(_WIDE_SELECTED - 2, 5_010)]
+        + [f"x{index:015d}" for index in range(1_000)],
+    )
+
+    def call(opened: Any) -> Any:
+        with collect_warnings():
+            return opened.perturbation.import_guide_calls(
+                calls, cell_selection=kept, invalidate_cache=True
+            )
+
+    # The estimate that the import checks before it parses the file holds
+    # the join's pass over the store's 60,000 cell IDs, so its one refusal
+    # names a budget at which the join's ledger refuses nothing.
+    budget, refusals, ref = check_budget(path, call)
+    assert len(refusals) == 1
+    assert refusals[0].startswith("Importing the guide calls of 10 cells holds about")
+    diagnostics = open_store(path).artifacts.inspect(ref).diagnostics
+    assert (diagnostics["unmatchedBarcodes"], diagnostics["unselectedBarcodes"]) == (
+        1_000,
+        5_000,
+    )
+
+
+@pytest.mark.parametrize("letter", ["a", "κ", "\U0001f600"])
+def test_the_join_charges_the_stores_cell_ids_within_their_bound(
+    tmp_path, letter
+) -> None:
+    import zarr
+
+    from cytearc.datastore._operations.cell_barcodes import store_pass_bytes
+    from tests.memory_helpers import ZARR_READS, audited, hold_finished_reads
+
+    # 200,000 cells of the store in chunks of 100,000, each hashed in two
+    # parts, ten selected; the barcodes name 5,000 cells outside the selection
+    # and 5,000 of no cell.
+    ids = np.asarray([f"s1__{letter}{index:09d}-1" for index in range(200_000)])
+    group = zarr.open_group(tmp_path / "ids.zarr", mode="w")
+    array = group.create_array(
+        "ids", shape=ids.shape, dtype=ids.dtype, chunks=(100_000,)
+    )
+    array[:] = ids
+    selected = ids[:10].astype(object)
+    barcodes = np.asarray(
+        [f"{letter}{index:09d}" for index in range(10, 5_010)]
+        + [f"none{index}" for index in range(5_000)],
+        dtype=object,
+    )
+    file = _plain(prefix="s1__", suffix="-1")
+    matching = join_bytes(file, len(barcodes), sum(map(len, barcodes)))
+
+    def run() -> tuple[CellBarcodeJoin, MemoryLedger]:
+        ledger = MemoryLedger(None, "Joining")
+        join = CellBarcodeJoin(selected, ledger=ledger, store_ids=array)
+        # What matching the chunk holds is the importer's to charge.
+        ledger.hold("a chunk of barcodes", matching)
+        join.cells(file, barcodes)
+        return join, ledger
+
+    run()
+    for held in (False, True):
+        if held:
+            with hold_finished_reads(*ZARR_READS):
+                (join, ledger), overruns = audited(run)
+        else:
+            (join, ledger), overruns = audited(run)
+        assert overruns == [], (held, overruns)
+    assert (join.n_unselected_barcodes, join.n_unmatched_barcodes) == (5_000, 5_000)
+    # The pass's charges stay within the bound that an import plans for it.
+    _, taken = charges(lambda: run())
+    passing = [
+        planned
+        for item, _nbytes, planned in taken
+        if item
+        in ("the hashes of the store's cell IDs", "a block of the store's cell IDs")
+    ]
+    before = next(
+        planned
+        for item, _nbytes, planned in taken
+        if item == "the hashes of the store's cell IDs"
+    ) - 8 * len(ids)
+    assert max(passing) - before <= store_pass_bytes(array, len(selected))
+
+
+@pytest.mark.parametrize(
+    ("letter", "widest"),
+    [("a", 0x61), ("é", 0xE9), ("κ", 0x3BA), ("\U0001f600", 0x1F600)],
+)
+def test_hashing_the_stores_cell_ids_holds_what_the_join_charges(
+    letter, widest
+) -> None:
+    from cytearc.datastore._operations.cell_barcodes import _hashes, id_hashing_bytes
+
+    # 65,536 IDs of 20 characters, hashed at once as the join hashes them.
+    part = np.asarray([f"s1__{letter}{index:013d}-1" for index in range(1 << 16)])
+    characters = 20 * len(part)
+    charge = id_hashing_bytes(len(part), characters, widest)
+
+    _, peak = traced_peak(lambda: _hashes(part.astype(object)), charge)
+
+    # The charge holds the traced peak, and for ASCII IDs, the common case,
+    # with less than a quarter to spare; one wider character widens the
+    # bound of every character's UTF-8 bytes.
+    assert peak <= charge
+    if widest < 0x80:
+        assert charge < 1.25 * peak, (charge, peak)
+
+
+def test_the_join_reads_the_stores_cell_ids_once_and_only_when_it_needs_them() -> None:
+    class Counted(np.ndarray):
+        reads = 0
+
+        def __getitem__(self, key):  # type: ignore[no-untyped-def]
+            if isinstance(key, slice):
+                Counted.reads += 1
+            return np.asarray(super().__getitem__(key))
+
+    store = np.asarray(["a-1", "b-1", "c-1", "d-1"]).view(Counted)
+    file = _plain(suffix="-1")
+    # Barcodes of selected cells need no store's IDs; the first barcode
+    # outside the selection reads them, and later chunks reuse their hashes.
+    join = CellBarcodeJoin(
+        np.asarray(["a-1", "b-1"]), ledger=MemoryLedger(None, "J"), store_ids=store
+    )
+    join.cells(file, np.asarray(["a", "b"], dtype=object))
+    assert Counted.reads == 0
+    join.cells(file, np.asarray(["c", "z"], dtype=object))
+    join.cells(file, np.asarray(["d", "y", "c"], dtype=object))
+    assert Counted.reads == 1
+    assert join.diagnostics() == _counts(
+        6, ["z -> z-1", "y -> y-1"], ["c -> c-1", "d -> d-1"]
+    )
+    # A selection of every cell of the store leaves none outside it.
+    Counted.reads = 0
+    every = CellBarcodeJoin(
+        np.asarray(store), ledger=MemoryLedger(None, "J"), store_ids=store
+    )
+    every.cells(file, np.asarray(["z", "a"], dtype=object))
+    assert Counted.reads == 0
+    assert every.n_unmatched_barcodes == 1
+
+
+def test_the_pass_keeps_eight_bytes_for_each_of_the_stores_ids(tmp_path) -> None:
+    import zarr
+
+    from cytearc.datastore._operations.cell_barcodes import store_pass_bytes
+
+    group = zarr.open_group(tmp_path / "ids.zarr", mode="w")
+    arrays = {}
+    for n_ids in (100_000, 100_010):
+        ids = np.asarray([f"s1__{index:09d}-1" for index in range(n_ids)])
+        arrays[n_ids] = group.create_array(
+            f"ids{n_ids}", shape=ids.shape, dtype=ids.dtype, chunks=(50_000,)
+        )
+        arrays[n_ids][:] = ids
+    # Ten more IDs in a band of the same rows add their ten hashes alone.
+    assert (
+        store_pass_bytes(arrays[100_010], 10) - store_pass_bytes(arrays[100_000], 10)
+        == 80
+    )
+    # A read on more threads can leave more chunks behind.
+    assert store_pass_bytes(arrays[100_000], 10, codec_threads=4) >= (
+        store_pass_bytes(arrays[100_000], 10)
+    )
+    # A selection of every cell of the store reads none of them.
+    assert store_pass_bytes(arrays[100_000], 100_000) == 0
+
+
+@pytest.mark.parametrize("order", ["named first", "unnamed first", "two chunks"])
+def test_a_barcode_that_the_pattern_does_not_match_counts_apart_whatever_the_order(
+    order,
+) -> None:
+    # "AAAC" names no cell, as the pattern does not match it, and "AAAC-1"
+    # names AAAC, a cell of the store outside the selection: both count,
+    # each as its kind, in any order of the rows and over chunks alike.
+    file = _plain(pattern=r"^(?P<barcode>[ACGT]+)-1$")
+    rows = {
+        "named first": [["AAAC-1", "AAAC", "TTTT"]],
+        "unnamed first": [["AAAC", "TTTT", "AAAC-1"]],
+        "two chunks": [["AAAC", "TTTT"], ["AAAC-1"]],
+    }[order]
+    join = CellBarcodeJoin(
+        np.asarray(["CCCG"]),
+        ledger=MemoryLedger(None, "J"),
+        store_ids=np.asarray(["AAAC", "CCCG"]),
+    )
+    for chunk in rows:
+        join.cells(file, np.asarray(chunk, dtype=object))
+    saved = join.diagnostics()
+    saved["unmatchedBarcodeExamples"] = sorted(saved["unmatchedBarcodeExamples"])
+    assert saved == _counts(
+        3,
+        [
+            "AAAC -> (barcode_pattern does not match)",
+            "TTTT -> (barcode_pattern does not match)",
+        ],
+        ["AAAC-1 -> AAAC"],
+    )
+
+
+def test_a_barcode_of_no_cell_and_one_that_the_pattern_does_not_match_count_once() -> (
+    None
+):
+    # "GGGG-1" names GGGG, no cell of the store, and "GGGG", which the
+    # pattern does not match, counts by the same ID: one barcode of no cell,
+    # with one example.
+    file = _plain(pattern=r"^(?P<barcode>[ACGT]+)-1$")
+    join = CellBarcodeJoin(
+        np.asarray(["CCCG"]),
+        ledger=MemoryLedger(None, "J"),
+        store_ids=np.asarray(["AAAC", "CCCG"]),
+    )
+    join.cells(file, np.asarray(["GGGG-1", "GGGG", "CCCG-1"], dtype=object))
+    assert join.diagnostics() == _counts(2, ["GGGG-1 -> GGGG"])
+
+
+def test_a_barcode_that_the_pattern_does_not_match_names_no_cell_of_the_store() -> None:
+    # The pattern does not match "AAAC", whose whole barcode with the
+    # prefix and suffix is the ID of a cell outside the selection; it names
+    # no cell, so it is unmatched.
+    join = CellBarcodeJoin(
+        np.asarray(["s1__CCCG-1"]),
+        ledger=MemoryLedger(None, "J"),
+        store_ids=np.asarray(["s1__AAAC-1", "s1__CCCG-1"]),
+    )
+    join.cells(
+        _plain(prefix="s1__", suffix="-1", pattern=r"^x:(?P<barcode>[ACGT]+)$"),
+        np.asarray(["x:CCCG", "AAAC"], dtype=object),
+    )
+    assert join.diagnostics() == _counts(
+        2, ["AAAC -> (barcode_pattern does not match)"]
+    )
+
+
+def test_an_example_shows_the_barcode_beside_the_id_it_derives() -> None:
+    assert barcode_example("AAAC", "s1__AAAC-1") == "AAAC -> s1__AAAC-1"
+    assert barcode_example("s1__AAAC-1", "s1__AAAC-1") == "s1__AAAC-1"
+    assert (
+        barcode_example("x", "s1__x-1", named=False)
+        == "x -> (barcode_pattern does not match)"
+    )
+
+
+def test_the_join_refuses_store_ids_that_are_not_text_and_a_pass_beyond_the_budget() -> (
+    None
+):
+    with pytest.raises(TypeError, match="store's cell IDs must be one-dimensional"):
+        CellBarcodeJoin(
+            np.asarray(["a"]), ledger=MemoryLedger(None, "J"), store_ids=np.arange(3)
+        )
+    from cytearc.datastore._operations.cell_barcodes import store_pass_bytes
+
+    store = np.asarray([f"cell{index}" for index in range(1_000)])
+
+    def joined() -> None:
+        join = CellBarcodeJoin(
+            store[:1], ledger=MemoryLedger(None, "J"), store_ids=store
+        )
+        join.cells(_plain(), np.asarray(["cell5"], dtype=object))
+
+    _result, taken = charges(joined)
+    items = [item for item, _nbytes, _planned in taken]
+    # The join starts with what its pass over the store's 1,000 IDs will
+    # hold, which the pass's own charges replace once a barcode needs them:
+    # first 8 bytes for each ID's hash.
+    at = items.index("the pass over the store's cell IDs")
+    reserved = taken[at]
+    assert reserved[1] == store_pass_bytes(store, 1)
+    released = items.index("a release", at)
+    assert taken[released][:2] == ("a release", reserved[1])
+    assert taken[released + 1][:2] == ("the hashes of the store's cell IDs", 8_000)
+    ledger = MemoryLedger(reserved[2] - 1, "Joining file barcodes")
+    with pytest.raises(
+        MemoryError,
+        match=r"holds about \d+ bytes for the pass over the store's cell IDs, more "
+        r"than the memory budget of \d+ bytes\. Raise mem_budget to at least \d+ "
+        r"bytes\.$",
+    ):
+        CellBarcodeJoin(store[:1], ledger=ledger, store_ids=store)
+
+
 def _file(tmp_path: Path, name: str, text: str) -> Path:
     path = tmp_path / name
     path.write_text(text)
@@ -867,6 +1345,17 @@ def test_barcode_files_refuse_arguments_they_cannot_use(
         barcode_files(call.pop("paths"), **call)
     with pytest.raises(FileNotFoundError):
         barcode_files(tmp_path / "absent.txt")
+
+
+def _join(
+    cell_ids: Any, ledger: MemoryLedger, store_ids: Any = None
+) -> CellBarcodeJoin:
+    """A join of ``cell_ids`` in a store of ``store_ids``, by default those cells alone."""
+    return CellBarcodeJoin(
+        cell_ids,
+        ledger=ledger,
+        store_ids=np.asarray(cell_ids if store_ids is None else store_ids, dtype=str),
+    )
 
 
 def _plain(path: str = "f", **options) -> BarcodeFile:
@@ -934,7 +1423,7 @@ def test_the_join_holds_no_more_than_its_estimate(name, matched) -> None:
         dtype=object,
     )
     file = _plain(**options)
-    join = CellBarcodeJoin(cell_ids, ledger=MemoryLedger(None, "Joining"))
+    join = _join(cell_ids, MemoryLedger(None, "Joining"))
     # The lookup's table, which held_bytes counts, is built on the first use.
     join.cells(file, barcodes[:1])
     n_chars = sum(map(len, barcodes))
@@ -950,9 +1439,7 @@ def test_the_join_holds_no_more_than_its_estimate(name, matched) -> None:
 
 
 def test_the_join_counts_distinct_barcodes_and_rows() -> None:
-    join = CellBarcodeJoin(
-        np.asarray(["a-1", "b-1", "c-1"]), ledger=MemoryLedger(None, "Joining")
-    )
+    join = _join(np.asarray(["a-1", "b-1", "c-1"]), MemoryLedger(None, "Joining"))
 
     first = join.cells(
         _plain(suffix="-1"), np.asarray(["a", "b", "z", "z", "a"], dtype=object)
@@ -964,27 +1451,26 @@ def test_the_join_counts_distinct_barcodes_and_rows() -> None:
     assert first.tolist() == [0, 1, -1, -1, 0]
     assert second.tolist() == [-1] * 6
     assert (join.n_rows, join.n_unmatched_rows) == (11, 8)
-    # a and b, and z, y, x, w, v, u by their cell IDs.
+    # a and b, and z, y, x, w, v, u by their cell IDs; the store holds the
+    # selected cells alone, so no barcode names a cell outside the selection.
     assert (join.n_file_barcodes, join.n_unmatched_barcodes) == (8, 6)
-    assert join.examples == ["z", "y", "x", "w", "v"]
-    assert join.attributes() == {
-        "n_file_barcodes": 8,
-        "n_unmatched_barcodes": 6,
-        "unmatched_barcode_examples": ["z", "y", "x", "w", "v"],
-    }
+    assert join.diagnostics() == _counts(
+        8, ["z -> z-1", "y -> y-1", "x -> x-1", "w -> w-1", "v -> v-1"], n_unmatched=6
+    )
 
 
 def test_one_barcode_under_two_prefixes_counts_as_two() -> None:
-    join = CellBarcodeJoin(np.asarray(["s1__a"]), ledger=MemoryLedger(None, "Joining"))
+    join = _join(np.asarray(["s1__a"]), MemoryLedger(None, "Joining"))
     join.cells(_plain(prefix="s1__"), np.asarray(["a", "b"], dtype=object))
     join.cells(_plain(prefix="s2__"), np.asarray(["a", "b"], dtype=object))
     assert (join.n_file_barcodes, join.n_unmatched_barcodes) == (4, 3)
-    # The examples are barcodes as the files hold them, each once.
-    assert join.examples == ["b", "a"]
+    # The examples show the barcodes as the files hold them beside the IDs
+    # they derive, each once.
+    assert join.unmatched_examples == ["b -> s1__b", "a -> s2__a", "b -> s2__b"]
 
 
 def test_no_barcode_gives_no_count() -> None:
-    join = CellBarcodeJoin(np.asarray(["a"]), ledger=MemoryLedger(None, "Joining"))
+    join = _join(np.asarray(["a"]), MemoryLedger(None, "Joining"))
     assert (
         join.cells(
             _plain(pattern="(?P<barcode>.)"), np.asarray([], dtype=object)
@@ -992,7 +1478,8 @@ def test_no_barcode_gives_no_count() -> None:
         == []
     )
     assert (join.n_file_barcodes, join.n_rows) == (0, 0)
-    assert unmatched_barcodes_warning(join.attributes(), "the file") is None
+    (rule,) = unmatched_barcode_rules("the file")
+    assert not rule.applies(join.diagnostics())
 
 
 def _join_ledger(budget: int | None, held: int = 0) -> MemoryLedger:
@@ -1004,7 +1491,7 @@ def _join_ledger(budget: int | None, held: int = 0) -> MemoryLedger:
 
 def test_the_join_refuses_repeated_cell_ids_and_budgets_too_small() -> None:
     with pytest.raises(ValueError, match="cells' IDs repeat"):
-        CellBarcodeJoin(np.asarray(["a", "a"]), ledger=_join_ledger(None))
+        _join(np.asarray(["a", "a"]), _join_ledger(None))
     # Three IDs of one character as fixed-width text become Python strings
     # beside the lookup, by hand: 8 bytes for each reference and 41 and one
     # byte for each ASCII string, then pandas' table of four buckets of 16
@@ -1019,17 +1506,17 @@ def test_the_join_refuses_repeated_cell_ids_and_budgets_too_small() -> None:
     assert lookup == lookup_bytes(3)
     needed = 300 + text + lookup
     with pytest.raises(MemoryError, match=f"holds about {needed} bytes for the join"):
-        CellBarcodeJoin(ids, ledger=_join_ledger(needed - 1, 300))
+        _join(ids, _join_ledger(needed - 1, 300))
     ledger = _join_ledger(needed, 300)
-    CellBarcodeJoin(ids, ledger=ledger)
+    _join(ids, ledger)
     assert ledger.held_bytes == needed
     # As an object array, the IDs' strings are the caller's.
     held = _join_ledger(None)
-    CellBarcodeJoin(ids.astype(object), ledger=held)
+    _join(ids.astype(object), held)
     assert held.held_bytes == lookup
     with pytest.raises(TypeError, match="IDs must be text"):
-        CellBarcodeJoin(np.arange(3), ledger=_join_ledger(None))
-    join = CellBarcodeJoin(np.asarray(["a"]), ledger=_join_ledger(200))
+        _join(np.arange(3), _join_ledger(None))
+    join = _join(np.asarray(["a"]), _join_ledger(200))
     with pytest.raises(
         MemoryError,
         match="check barcode_prefix, barcode_suffix, barcode_pattern and cell_selection",
@@ -1043,19 +1530,19 @@ def test_the_join_counts_each_chunks_new_hashes_beside_those_it_holds() -> None:
     # Five barcodes that name no cell, then a chunk of six others and one of
     # the five: the join holds five hashes, 16 bytes each with their copy in
     # the merged hashes, and each of the chunk's seven distinct hashes takes
-    # 24 bytes while it is merged.
+    # 40 bytes while it is merged and looked up among the store's.
     first = np.asarray([f"x{k}" for k in range(5)], dtype=object)
     second = np.asarray([f"y{k}" for k in range(6)] + ["x0"], dtype=object)
     base = _join_ledger(None)
-    CellBarcodeJoin(np.asarray(["a"]), ledger=base)
+    _join(np.asarray(["a"]), base)
     held = base.held_bytes
-    needed = held + 16 * 5 + 24 * 7
-    short = CellBarcodeJoin(np.asarray(["a"]), ledger=_join_ledger(needed - 1))
+    needed = held + 16 * 5 + 40 * 7
+    short = _join(np.asarray(["a"]), _join_ledger(needed - 1))
     short.cells(_plain(), first)
     with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
         short.cells(_plain(), second)
     ledger = _join_ledger(needed)
-    join = CellBarcodeJoin(np.asarray(["a"]), ledger=ledger)
+    join = _join(np.asarray(["a"]), ledger)
     join.cells(_plain(), first)
     join.cells(_plain(), second)
     assert join.n_unmatched_barcodes == 11
@@ -1089,14 +1576,14 @@ def test_the_hashes_of_barcodes_that_match_no_cell_fit_the_smallest_budget(
     ]
 
     def run(budget: int) -> CellBarcodeJoin:
-        join = CellBarcodeJoin(cell_ids, ledger=_join_ledger(budget))
+        join = _join(cell_ids, _join_ledger(budget))
         for chunk in chunks:
             join.cells(_plain(), chunk)
         return join
 
     budget = smallest_budget(run, 64 * n_barcodes)
     # The hashes, 16 bytes each with their copy in the next merge, set it.
-    assert 16 * n_barcodes <= budget <= 16 * n_barcodes + 24 * chunk_rows + 2**16
+    assert 16 * n_barcodes <= budget <= 16 * n_barcodes + 40 * chunk_rows + 2**16
     matching = join_bytes(_plain(), chunk_rows, 11 * chunk_rows)
     join, peak = traced_peak(lambda: run(budget), budget + matching)
     assert peak <= budget + matching, (peak, budget, matching)
@@ -1106,9 +1593,9 @@ def test_the_hashes_of_barcodes_that_match_no_cell_fit_the_smallest_budget(
 def test_the_join_counts_the_text_of_long_cell_ids() -> None:
     # One ID of 10,000 characters holds more than the budget by itself.
     with pytest.raises(MemoryError, match="memory budget of 5000 bytes"):
-        CellBarcodeJoin(np.asarray(["x" * 10_000]), ledger=_join_ledger(5_000))
+        _join(np.asarray(["x" * 10_000]), _join_ledger(5_000))
     ledger = _join_ledger(20_000)
-    CellBarcodeJoin(np.asarray(["x" * 10_000]), ledger=ledger)
+    _join(np.asarray(["x" * 10_000]), ledger)
     assert ledger.held_bytes >= 10_000
 
 
@@ -1128,8 +1615,8 @@ def test_the_join_charges_fixed_width_ids_as_strings_of_their_widest_character(
     # character: 57, 58 or 60 bytes and one, two or four a character, by hand.
     header, width = {0xE9: (57, 1), 0x3CD: (58, 2), 0x1F600: (60, 4)}[widest]
     characters = sum(map(len, ids))
-    _join, taken = charges(
-        lambda: CellBarcodeJoin(np.asarray(ids), ledger=MemoryLedger(None, "Joining"))
+    _joined_ids, taken = charges(
+        lambda: _join(np.asarray(ids), MemoryLedger(None, "Joining"))
     )
     texts = [
         nbytes
@@ -1141,15 +1628,13 @@ def test_the_join_charges_fixed_width_ids_as_strings_of_their_widest_character(
 
 def test_very_long_and_unicode_cell_ids_join_exactly() -> None:
     long_id = "s1__" + "ACGT" * 2500 + "-1"
-    join = CellBarcodeJoin(
-        np.asarray([long_id, "s1__κύτταρο-1"]), ledger=MemoryLedger(None, "Joining")
-    )
+    join = _join(np.asarray([long_id, "s1__κύτταρο-1"]), MemoryLedger(None, "Joining"))
     positions = join.cells(
         _plain(prefix="s1__", suffix="-1"),
         np.asarray(["ACGT" * 2500, "κύτταρο", "ACGT" * 2499], dtype=object),
     )
     assert positions.tolist() == [0, 1, -1]
-    assert join.examples == ["ACGT" * 2499]
+    assert join.unmatched_examples == [f"{'ACGT' * 2499} -> s1__{'ACGT' * 2499}-1"]
 
 
 # The importers whose cell barcode may join several columns, with a writer of

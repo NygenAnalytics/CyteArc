@@ -526,19 +526,23 @@ class Clones:
         kept_apart: The columns of ``cells`` whose labels the clones keep
             apart, such as ``("receptor_type",)`` for clonotypes: every clone
             summary measures the cells of each label apart. Clones keep none.
-        diagnostics: Numbers that the operation recorded about how it
-            defined the clones, by name, which callers can turn into
-            warnings. Clones called from lineage barcodes record
-            ``distinctBarcodes``, ``expectedChanceMatches``,
-            ``mergedBarcodes`` and ``largestCloneShare``; other sources
-            record none.
+        diagnostics: The diagnostics that the operation saved about how it
+            defined the clones, by name, as
+            ``ds.artifacts.inspect(ref).diagnostics`` returns them, which
+            callers can turn into warnings. Every source's clones record
+            ``cellsWithClone``, the cells given a clone, and
+            ``largestCloneShare``, the share of them that the largest clone
+            holds, 0 without one; an import adds the join's counts of the
+            files' barcodes, and clones called from lineage barcodes add
+            ``distinctBarcodes``, ``expectedChanceMatches`` and
+            ``mergedBarcodes``. Clonotypes record none.
     """
 
     cells: pd.DataFrame = field(repr=False)
     clones: pd.DataFrame = field(repr=False)
     source: str
     kept_apart: tuple[str, ...] = ()
-    diagnostics: dict[str, int | float] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 def clone_frames(

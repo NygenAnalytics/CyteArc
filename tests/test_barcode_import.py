@@ -21,7 +21,12 @@ import pytest
 from cytearc.clones.barcodes import LineageBarcodes
 from cytearc.utils.logging import collect_warnings
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.clone_helpers import every_cell, write_truth_store
+from tests.clone_helpers import (
+    assert_joined,
+    every_cell,
+    example_ids,
+    write_truth_store,
+)
 from tests.clone_truth import (
     N_CELLS,
     SAMPLES,
@@ -288,9 +293,14 @@ def test_every_format_recovers_the_truth(shared, tmp_path, case) -> None:
     pd.testing.assert_frame_equal(_sorted(_records(loaded)), _sorted(expected()))
     sources = shared.store.artifacts.inspect(ref).inputs["sources"]
     assert {source["format"] for source in sources} == {detected}
-    attributes = shared.store.artifacts.load(ref).attrs
-    # The droplets outside the store are d2's file's only unmatched cells.
-    assert attributes["n_unmatched_barcodes"] == len(TRUTH.outside)
+    # The droplets outside the store are d2's file's only unmatched cells, and
+    # every cell of the store is selected.
+    diagnostics = shared.store.artifacts.inspect(ref).diagnostics
+    assert diagnostics["unmatchedBarcodes"] == len(TRUTH.outside)
+    assert diagnostics["unselectedBarcodes"] == 0
+    shown = example_ids(diagnostics["unmatchedBarcodeExamples"])
+    assert len(shown) == min(5, len(TRUTH.outside))
+    assert all(any(drop in cell for drop in TRUTH.outside) for cell in shown)
     assert len(list(messages)) == 1
 
 
@@ -776,11 +786,23 @@ def test_a_subset_of_cells_holds_only_its_barcodes(shared, tmp_path) -> None:
     expected = _molecules()
     expected = expected[expected["cell"].str.startswith("d4__")].reset_index(drop=True)
     pd.testing.assert_frame_equal(_sorted(_records(loaded)), _sorted(expected))
-    attributes = shared.store.artifacts.load(ref).attrs
+    # The d2 file's cells are cells of the store outside the selection, and
+    # its droplets outside the store match no cell.
     n_d2 = int(np.count_nonzero(samples == "d2"))
-    d2_cells = BARCODES.sample_molecules("d2")["cell_barcode"].nunique()
-    assert attributes["n_unmatched_barcodes"] == d2_cells
-    assert d2_cells >= n_d2 // 2
+    listed = {
+        f"{sample}__{barcode}-1"
+        for sample in SAMPLES
+        for barcode in BARCODES.sample_molecules(sample)["cell_barcode"]
+    }
+    stored = set(TRUTH.cell_ids.tolist())
+    unselected = sorted(cell for cell in listed & stored if cell.startswith("d2__"))
+    assert len(unselected) >= n_d2 // 2
+    assert_joined(
+        shared.store.artifacts.inspect(ref).diagnostics,
+        n_file=len(listed),
+        unmatched=sorted(listed - stored),
+        unselected=unselected,
+    )
     assert list(messages)
 
 

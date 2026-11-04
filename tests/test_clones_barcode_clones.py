@@ -21,6 +21,24 @@ from cytearc.metadata.records import pack_text
 from tests.clone_helpers import clone_partition, link_count_variance
 from tests.memory_helpers import smallest_budget, traced_peak
 
+
+def _largest_share(called: "barcode_clones.BarcodeClones") -> float:
+    """The share of the cells given a clone that the largest clone holds, as the clone writer saves it."""
+    from cytearc.clones.assignments import CloneAssignment
+    from cytearc.datastore._operations.clone_artifacts import clone_diagnostics
+
+    sizes = called.calls.sizes
+    return clone_diagnostics(
+        CloneAssignment(
+            codes=called.calls.codes,
+            clone_ids=np.asarray([f"clone_{rank + 1}" for rank in range(len(sizes))]),
+            clone_sizes=sizes,
+            probabilities=None,
+            n_cells_in_several_clones=0,
+        )
+    )["largestCloneShare"]
+
+
 A = "ACGTACGTACGTACGTACGTACGTACGT"
 # One substitution from A, and one more.
 A1 = "ACGTACGTACGTACGTACGTACGTACGA"
@@ -474,7 +492,7 @@ def test_a_doublet_is_not_among_the_cells_given_a_clone() -> None:
         doublets=True,
     )
     assert calls.calls.doublets.tolist() == [False] * 6 + [True]
-    assert calls.diagnostics["largestCloneShare"] == 3 / 6
+    assert _largest_share(calls) == 3 / 6
 
 
 def test_the_largest_clone_shares_the_cells_given_a_clone() -> None:
@@ -489,15 +507,14 @@ def test_the_largest_clone_shares_the_cells_given_a_clone() -> None:
     # A's clone holds 3 of the 5 cells given a clone; C's cell is in a clone
     # too small to keep, and cell 6 holds no barcode.
     calls = _call(_records(rows), 7, method="sets", min_size=2)
-    assert calls.diagnostics["largestCloneShare"] == 3 / 5
+    assert _largest_share(calls) == 3 / 5
     # With no cell given a clone, the share is 0.
     none = _call(_records(rows), 7, method="sets", min_size=4)
-    assert none.diagnostics["largestCloneShare"] == 0.0
+    assert _largest_share(none) == 0.0
     assert _call(_records([]), 2, method="sets").diagnostics == {
         "distinctBarcodes": 0,
         "expectedChanceMatches": 0.0,
         "mergedBarcodes": 0,
-        "largestCloneShare": 0.0,
     }
 
 
@@ -790,7 +807,7 @@ def test_barcodes_that_correction_chains_into_one_component_expect_nothing() -> 
     )
     assert calls.diagnostics["mergedBarcodes"] == len(texts) - 1
     assert calls.diagnostics["expectedChanceMatches"] == 0
-    assert calls.diagnostics["largestCloneShare"] == 1.0
+    assert _largest_share(calls) == 1.0
 
 
 def test_counting_the_distinct_barcodes_without_correction_checks_the_budget() -> None:

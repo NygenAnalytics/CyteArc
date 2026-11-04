@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import every_cell, write_cells_store
 from tests.network_helpers import download_or_skip
 
@@ -63,7 +62,7 @@ def test_xv_seq_calls_give_the_published_genotyping_stats(tmp_path, table) -> No
     counts = _counts(store, path)
     # The table also names cells that the allowlist leaves out.
     n_rows = len(path.read_text().splitlines()) - 1
-    unmatched = artifact_group(store.zw, counts).attrs["n_unmatched_barcodes"]
+    unmatched = store.artifacts.inspect(counts).diagnostics["unmatchedBarcodes"]
     assert unmatched == n_rows - len(named)
     loaded = store.variants.load_genotypes(
         store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)

@@ -132,11 +132,33 @@ class CellGroups:
             the labels. Only the combinations that some cell holds are
             groups.
         codes: Each cell's group, a position in ``keys``, -1 for none.
+        n_outside_rows: The cells of ``cell_selection``, or of the artifact
+            without one, that are not among the rows that may join a group,
+            such as the cells without a clone.
+        n_without_group: The cells among those rows that have no group,
+            since a column or the label artifact gives them no label.
     """
 
     key_columns: tuple[str, ...]
     keys: list[dict[str, str]]
     codes: np.ndarray
+    n_outside_rows: int = 0
+    n_without_group: int = 0
+
+    @property
+    def diagnostics(self) -> dict[str, int]:
+        """The grouping's diagnostics, as a summary of clones saves them.
+
+        A clone summary groups the cells with a clone, so
+        ``cellsWithoutClone`` counts the measured cells outside the rows,
+        ``cellsWithoutGroup`` the cells with a clone but no group, and
+        ``groups`` the groups.
+        """
+        return {
+            "cellsWithoutClone": int(self.n_outside_rows),
+            "cellsWithoutGroup": int(self.n_without_group),
+            "groups": len(self.keys),
+        }
 
     def fingerprint_bytes(self) -> int:
         """Return the most bytes that :meth:`fingerprint` holds, beside the codes, which it reads in place.
@@ -373,9 +395,13 @@ def cell_groups(
                 "the cells of cell_selection",
                 16 * both + sort_bytes(both, 8, stable=True, order=True) + 4 * both,
             )
-            has &= np.isin(cell_index, selected)
+            in_selection = np.isin(cell_index, selected)
+            n_measured = int(np.count_nonzero(in_selection))
+            has &= in_selection
             ledger.release(selected.nbytes)
-            del selected
+            del selected, in_selection
+        else:
+            n_measured = n_cells
         ledger.peak("the grouped cells", 8 * int(np.count_nonzero(has)))
         grouped_index = cell_index[has]
         ledger.hold("the grouped cells", grouped_index.nbytes)
@@ -383,6 +409,7 @@ def cell_groups(
         del cell_index
         ledger.release(index_bytes)
         n_grouped = len(grouped_index)
+        n_outside_rows = n_measured - n_grouped
         # Each column's labels are coded once, in the natural order of their
         # texts, and only the codes are kept.
         coded: list[tuple[np.ndarray, list[str]]] = []
@@ -453,7 +480,7 @@ def cell_groups(
             index_bytes = grouped_index.nbytes
             del has, grouped_index
             ledger.release(n_cells + index_bytes)
-            return CellGroups(key_columns, keys, cell_codes)
+            return CellGroups(key_columns, keys, cell_codes, n_outside_rows, 0)
         # The codes are stacked, the cells with a label in every column kept,
         # and their combinations numbered a column at a time.
         ledger.peak(
@@ -462,6 +489,8 @@ def cell_groups(
         )
         stacked = np.column_stack([codes for codes, _names in coded])
         keep = (stacked >= 0).all(axis=1)
+        # The grouped cells without a label in some column have no group.
+        n_without_group = n_grouped - int(np.count_nonzero(keep))
         combinations, group_codes = unique_rows(stacked[keep])
         del stacked
         combined = keep.nbytes + combinations.nbytes + group_codes.nbytes
@@ -489,7 +518,9 @@ def cell_groups(
         # Groups are named by their labels joined by commas, and need one name
         # each.
         group_names(keys)
-        return CellGroups(key_columns, keys, cell_codes)
+        return CellGroups(
+            key_columns, keys, cell_codes, n_outside_rows, n_without_group
+        )
 
 
 def within_groups(

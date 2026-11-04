@@ -46,7 +46,7 @@ def imported(tmp_path_factory):
         write_bartab_counts(BARCODES, folder / f"{sample}.counts.tsv", sample=sample)
         for sample in SAMPLES
     ]
-    with pytest.warns(UserWarning, match="match no selected cell"):
+    with pytest.warns(UserWarning, match="match no cell of the store"):
         ref = store.clones.import_barcodes(
             [*molecules, *counts],
             cell_selection=cells,

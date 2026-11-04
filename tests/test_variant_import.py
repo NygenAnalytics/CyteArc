@@ -16,7 +16,7 @@ import pytest
 from cytearc.metadata.rows import text_read_bytes
 from cytearc.utils.logging import collect_warnings
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.clone_helpers import every_cell
+from tests.clone_helpers import assert_joined, every_cell
 from tests.memory_helpers import (
     at_budget,
     budget_that_runs,
@@ -57,7 +57,7 @@ from tests.variant_truth import (
 )
 
 TRUTH = variant_truth()
-_UNMATCHED = "3 of 51 barcodes of the variant file match no selected cell"
+_UNMATCHED = "3 of 51 barcodes of the variant file match no cell of the store"
 
 
 @pytest.fixture(scope="module")
@@ -178,8 +178,16 @@ def test_mgatk_counts_every_base_and_strand_of_every_cell(store, tmp_path) -> No
         _UNMATCHED
         + ", for example "
         + ", ".join(repr(f"d2__{barcode}-1") for barcode in TRUTH.clones.outside)
-        + ". Check barcode_prefix and cell_selection."
+        + ". Check barcode_prefix, barcode_suffix and barcode_pattern against the "
+        "store's cell IDs."
     ]
+    # The file lists every cell of the store, each selected, and the droplets
+    # outside it.
+    assert_joined(
+        store.artifacts.inspect(ref).diagnostics,
+        n_file=51,
+        unmatched=[f"d2__{barcode}-1" for barcode in TRUTH.clones.outside],
+    )
 
 
 def test_mean_depth_covered_sites_and_listed_cells_come_from_the_truth(
@@ -850,6 +858,68 @@ def test_an_import_of_mgatk_files_holds_no_more_than_its_ledger_plans(
         assert overruns == [], (held, overruns)
 
 
+def test_the_pass_over_the_stores_cell_ids_holds_no_more_than_the_ledger_plans(
+    tmp_path,
+) -> None:
+    from cytearc.storage.validation_scope import validation_scope
+    from tests.memory_helpers import ZARR_READS, audited, hold_finished_reads
+    from tests.storage_helpers import write_count_store
+
+    # 60,000 cells, ten selected; mgatk's base files name two selected cells,
+    # 5,000 cells outside the selection and 1,000 barcodes of no cell, so the
+    # join hashes every one of the store's cell IDs.
+    n_cells, selected = 60_000, 10
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.random.default_rng(3).poisson(2.0, size=(n_cells, 3))},
+        "uint16",
+        cell_ids=[f"s1__{index:016d}-1" for index in range(n_cells)],
+    )
+    store = open_store(tmp_path / "store.zarr")
+    store.cells.insert("kept", np.arange(n_cells) < selected)
+    cells = store.snapshot_cell_selection("kept")
+    barcodes = [f"{index:016d}" for index in range(selected - 2, 5_010)] + [
+        f"x{index:015d}" for index in range(1_000)
+    ]
+    folder = tmp_path / "final"
+    folder.mkdir()
+    text = "".join(
+        f"{position},{barcode},1,1\n" for barcode in barcodes for position in (1, 2)
+    )
+    for base in "ACGT":
+        (folder / f"big.{base}.txt.gz").write_bytes(
+            gzip.compress(text.encode(), mtime=0)
+        )
+    (folder / "chrM_refAllele.txt").write_text("1\tA\n2\tA\n")
+
+    def run() -> object:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return store.variants.import_counts(
+                folder,
+                cell_selection=cells,
+                barcode_prefix="s1__",
+                barcode_suffix="-1",
+                invalidate_cache=True,
+            )
+
+    for held in (False, True):
+        with validation_scope():
+            run()
+            if held:
+                with hold_finished_reads(*ZARR_READS):
+                    ref, overruns = audited(run)
+            else:
+                ref, overruns = audited(run)
+        assert overruns == [], (held, overruns)
+    assert_joined(
+        store.artifacts.inspect(ref).diagnostics,
+        n_file=len(barcodes),
+        unmatched=[f"s1__x{index:015d}-1" for index in range(1_000)],
+        unselected=[f"s1__{index:016d}-1" for index in range(selected, 5_010)],
+    )
+
+
 def test_the_import_counts_the_read_of_cell_ids_before_it_reads_them(
     store, tmp_path, monkeypatch
 ) -> None:
@@ -1323,10 +1393,7 @@ def test_threads_parse_the_base_files_into_the_same_artifact(
         groups.append(store.artifacts.load(ref))
         warned.append(messages)
     assert warned[0] == warned[1]
-    assert (
-        groups[0].attrs["unmatched_barcode_examples"]
-        == groups[1].attrs["unmatched_barcode_examples"]
-    )
+    assert groups[0].attrs["diagnostics"] == groups[1].attrs["diagnostics"]
     for name in ("depth_offsets", "depth", "count_alleles", "counts", "counts_forward"):
         np.testing.assert_array_equal(groups[0][name][:], groups[1][name][:])
     # A malformed file stops the threads with its error.

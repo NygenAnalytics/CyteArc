@@ -41,6 +41,7 @@ from cytearc.perturbation.histograms import HistogramMemoryError
 from cytearc.storage.sharding import CountLayoutMemoryError
 from cytearc.utils.memory_budget import MemoryBudgetError, memory_refusal
 from cytearc.utils.shutdown import ShutdownRequest, ShutdownRequested
+from cytearc.utils.warnings import DiagnosticWarning
 
 RUN_ID = "a" * 64
 
@@ -91,6 +92,12 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
         4096,
         1024,
         remedy="pass a smaller cell_selection",
+    ),
+    DiagnosticWarning: lambda: DiagnosticWarning(
+        "3 of 8 barcodes of the clone file match no cell of the store",
+        "import_clones",
+        "unmatchedBarcodes",
+        3,
     ),
     ShutdownRequested: lambda: ShutdownRequested(
         ShutdownRequest(

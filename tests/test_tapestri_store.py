@@ -342,7 +342,7 @@ def test_a_store_imports_its_variants_and_calls_their_clones(tmp_path) -> None:
         counts = ds.variants.import_counts(file, cell_selection=cells)
     # The store names its cells as the import names the file's.
     attributes = ds.artifacts.load(counts).attrs
-    assert attributes["n_unmatched_barcodes"] == 0
+    assert ds.artifacts.inspect(counts).diagnostics["unmatchedBarcodes"] == 0
     assert attributes["n_listed_cells"] == TRUTH.n_rows
     genotypes = ds.variants.genotypes(counts, method="source")
     clones = ds.variants.genotype_clones(genotypes, within="sample_name")
