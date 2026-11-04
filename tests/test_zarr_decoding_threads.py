@@ -352,18 +352,18 @@ print(json.dumps({"estimate": estimate, "peaks": peaks, "overruns": overruns}))
 def test_reads_one_chunk_at_a_time_stay_within_their_charge_on_busy_cpus() -> None:
     # The reads of test_memory_costs's four-chunk whole read and of its read
     # one chunk at a time, on two CPUs that four other processes keep busy.
-    # With the four chunks spread over Zarr's whole pool, about a third of
-    # such reads held one chunk more than their charge, 5.7 MB against
-    # 4.9 MB; each read decodes on the one thread or four that its ledger
-    # counts, so none passes its charge.
+    # With the four chunks spread over Zarr's whole pool, from one in twenty
+    # such reads on Python 3.13 to a half on 3.14 held up to a chunk more
+    # than their charge, 5.7 MB against 4.9 MB; each read decodes on the one
+    # thread or four that its ledger counts, so none passes its charge.
     traced = subprocess.run(
         [sys.executable, "-c", _LOADED_READS_SCRIPT, "40", "10"],
         capture_output=True,
         text=True,
-        check=True,
         timeout=300,
         cwd=Path(__file__).resolve().parents[1],
     )
+    assert traced.returncode == 0, traced.stderr
     result = json.loads(traced.stdout.strip().splitlines()[-1])
     estimate = result["estimate"]
     over = [peak for peak in result["peaks"] if peak > estimate]
