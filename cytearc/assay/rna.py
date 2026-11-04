@@ -19,6 +19,7 @@ from ..storage.types import as_zarr_group
 from ..utils.arguments import bool_argument, integer_argument
 from ..utils.compute import compute_with_progress
 from ..utils.logging import logger
+from ..utils.memory_budget import MemoryBudgetError
 from ..utils.moments import ColumnMoments, add_implicit_zeros, welford_add
 from ..utils.numba import njit
 from .base import Assay
@@ -330,12 +331,22 @@ class RNAassay(Assay):
         else:
             width = max(1, int(batch_size))
         if width < 1 or width > affordable:
-            raise MemoryError(
+            # The stream's floor and the batches beside what the caller keeps.
+            needed = (
+                self.resources.memoryBytes
+                - available
+                + max(1, width) * max(1, n_cells * item_bytes)
+            )
+            raise MemoryBudgetError(
                 f"Normalized feature batches of {max(1, width)} features over "
                 f"{n_cells} cells do not fit the memory budget of "
                 f"{self.resources.memoryBytes} bytes; the affordable width is "
                 f"{affordable}. Increase the memory budget"
                 + ("." if batch_size is None else " or reduce the batch size.")
+                + f" They need at least {needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=int(self.resources.memoryBytes),
+                item=f"normalized feature batches of {max(1, width)} features",
             )
         loaded_groups = map_feature_read_groups(
             counts_t,

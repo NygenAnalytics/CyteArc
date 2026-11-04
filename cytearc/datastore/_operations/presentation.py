@@ -435,6 +435,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                     obs=obs,
                     graph=graph,
                     max_bytes=self.memoryBytes,
+                    codec_threads=self.nthreads,
                 )
             return _anndata_from_plan(
                 AnnData, with_count_dtype(plan, dtype, raw_x=matrix == "raw")
@@ -544,6 +545,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 obs=obs,
                 graph=graph,
                 max_bytes=self.memoryBytes,
+                codec_threads=self.nthreads,
             )
         return _anndata_from_plan(
             AnnData, with_count_dtype(plan, dtype, raw_x=matrix == "raw")
@@ -805,6 +807,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             cell_rows=cell_idx,
             obsm=coordinates,
             max_bytes=self.memoryBytes,
+            codec_threads=self.nthreads,
         )
 
     def _run_normalized_values(

@@ -139,7 +139,7 @@ def test_write_counts_t_accounts_for_process_resident_memory(tmp_path, monkeypat
     # The resident process memory alone exceeds the 1 MiB budget.
     assert result.error is not None
     assert re.fullmatch(
-        r"MemoryError: countsT write needs at least \d+ bytes, "
+        r"MemoryBudgetError: countsT write needs at least \d+ bytes, "
         r"but the operation limit is 1048576 bytes",
         result.error,
     )

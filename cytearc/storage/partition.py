@@ -263,6 +263,11 @@ def partition_indices(
     order. With ``fits`` adjacent chunks are packed while the predicate accepts
     the combined width, and a chunk too wide on its own is split. With neither,
     every chunk becomes one block.
+
+    Raises:
+        ValueError: If ``fits`` accepts no block of one index. The predicate
+            hides what a block holds, so a caller whose predicate is a memory
+            budget checks one index first and names the bytes it needs.
     """
     if maxWidth is not None and fits is not None:
         raise ValueError("Pass either maxWidth or fits, not both")
@@ -321,8 +326,9 @@ def partition_indices(
             flush()
             width = affordable_width(fits, member.size)
             if width < 1:
-                raise MemoryError(
-                    "One index of the selection does not fit the operation budget"
+                raise ValueError(
+                    "One index of the selection does not fit the operation budget: "
+                    "fits accepts no block of one index"
                 )
             for start in range(0, member.size, width):
                 piece = member[start : start + width]

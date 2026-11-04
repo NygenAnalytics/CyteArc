@@ -56,35 +56,49 @@ class _EnrichmentScorer:
 
 
 class _RowBandWriter:
-    """Write streamed rows of a cells-by-sources array in whole chunk bands."""
+    """Write streamed rows of an array in whole chunk bands.
+
+    Rows are copied into one band of the array's rows, the rows of a shard or
+    a chunk and at most the array's, which is written once it fills, so no
+    write rewrites part of a chunk. The writer holds that band, from the first
+    rows it is given until it finishes.
+    """
 
     def __init__(self, array: zarr.Array) -> None:
         from ...storage.layout import array_shard_rows
 
         self.array = array
-        self.band = array_shard_rows(array)
-        self.buffer: list[np.ndarray] = []
-        self.buffered = 0
+        self.band = min(array_shard_rows(array), max(1, int(array.shape[0])))
+        self.buffer: np.ndarray | None = None
+        self.filled = 0
         self.start = 0
 
     def add(self, rows: np.ndarray) -> None:
-        self.buffer.append(rows)
-        self.buffered += rows.shape[0]
-        while self.buffered >= self.band:
-            stacked = np.vstack(self.buffer)
-            self.array[self.start : self.start + self.band] = stacked[: self.band]
-            self.start += self.band
-            rest = stacked[self.band :]
-            self.buffer = [rest] if rest.shape[0] else []
-            self.buffered = rest.shape[0]
+        if self.buffer is None:
+            self.buffer = np.empty(
+                (self.band, *self.array.shape[1:]), dtype=self.array.dtype
+            )
+        offset = 0
+        while offset < rows.shape[0]:
+            taken = min(self.band - self.filled, rows.shape[0] - offset)
+            self.buffer[self.filled : self.filled + taken] = rows[
+                offset : offset + taken
+            ]
+            self.filled += taken
+            offset += taken
+            if self.filled == self.band:
+                self._write()
 
     def finish(self) -> None:
-        if self.buffered:
-            stacked = np.vstack(self.buffer)
-            self.array[self.start : self.start + self.buffered] = stacked
-            self.start += self.buffered
-        self.buffer = []
-        self.buffered = 0
+        if self.filled:
+            self._write()
+        self.buffer = None
+
+    def _write(self) -> None:
+        assert self.buffer is not None
+        self.array[self.start : self.start + self.filled] = self.buffer[: self.filled]
+        self.start += self.filled
+        self.filled = 0
 
 
 def _write_enrichment_slot(

@@ -89,6 +89,7 @@ from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryLedger
 from ...utils.numba import numba_threads
 from ...utils.warnings import warn
 from .cell_barcodes import (
@@ -1286,7 +1287,11 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             ref,
             value_name=names[0],
             ndim=None,
-            max_bytes=self.memoryBytes,
+            ledger=MemoryLedger(
+                self.memoryBytes,
+                f"Reading the {ref.kind} artifact",
+                codec_threads=self.nthreads,
+            ),
             # The other arrays and the IDs are read at the same rows.
             caller_reads=(self.cells._get_array("ids"), *others.values()),
         )

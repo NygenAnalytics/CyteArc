@@ -14,6 +14,7 @@ from ..utils.count_values import (
     dense_count_ranges,
 )
 from ..utils.logging import logger
+from ..utils.memory_budget import MemoryBudgetError, refusal_words
 from ..utils.progress import iter_progress
 from ._assay_names import auto_name_feat_table, make_feat_table_from_types
 from ._h5ad_columns import (
@@ -1039,7 +1040,15 @@ class H5adReader:
         data_node = group["data"]
         metadata = (self.nCells + 1) * 32 + (self.nFeatures + 1) * 8
         if maxBytes < metadata + 384:
-            raise MemoryError("CSC row conversion exceeds the memory limit")
+            # The pointers and one entry of 384 bytes in a read chunk.
+            needed = metadata + 384
+            raise MemoryBudgetError(
+                "CSC row conversion exceeds the memory limit. It needs at least "
+                f"{needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=int(maxBytes),
+                item="the pointers and one entry of the CSC row conversion",
+            )
         chunk_nnz = min(1024 * 1024, (maxBytes - metadata) // 384)
         indptr = np.asarray(group["indptr"][:], dtype=np.int64)
         shape = (self.nCells, self.nFeatures)
@@ -1062,18 +1071,31 @@ class H5adReader:
                 )
 
         source = np.dtype(self.sourceMatrixDtype)
-        self._convertedCsr = SparseRowStore(
-            chunks,
-            shape,
-            (
-                np.dtype(np.uint64 if source.kind in "bu" else np.int64)
-                if source.kind in "biu"
-                else source
-            ),
-            max_bytes=maxBytes - indptr.nbytes,
-            source_dtype=source,
-            temp_dir=self._tempDir,
-        )
+        try:
+            self._convertedCsr = SparseRowStore(
+                chunks,
+                shape,
+                (
+                    np.dtype(np.uint64 if source.kind in "bu" else np.int64)
+                    if source.kind in "biu"
+                    else source
+                ),
+                max_bytes=maxBytes - indptr.nbytes,
+                source_dtype=source,
+                temp_dir=self._tempDir,
+            )
+        except MemoryBudgetError as error:
+            # The row store converts beside the source's pointers, so the
+            # budget it needs holds both.
+            needed = indptr.nbytes + error.needed_bytes
+            raise MemoryBudgetError(
+                f"{refusal_words(error)} Beside the {indptr.nbytes} bytes of the "
+                "matrix's column pointers, the CSC row conversion needs at least "
+                f"{needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=int(maxBytes),
+                item=error.item,
+            ) from error
         logger.debug("Prepared H5AD row storage for the CSC conversion")
 
     def consume_group(

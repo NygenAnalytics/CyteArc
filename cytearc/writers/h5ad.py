@@ -23,6 +23,7 @@ from ..storage.profiles import (
 )
 from ..utils.digest import file_sha256
 from ..utils.logging import logger
+from ..utils.memory_budget import MemoryBudgetError
 from ..utils.progress import iter_progress
 from ..utils.arguments import bool_argument
 
@@ -1380,7 +1381,7 @@ class H5adToZarr:
                         producerStagingBytes=self.h5ad.producer_batch_staging_bytes,
                         extraProducerBytes=extra_producer_bytes,
                     )
-            except MemoryError:
+            except MemoryBudgetError:
                 continue
             n_producers = candidate
             process_resources = candidate_resources if direct_candidate else None

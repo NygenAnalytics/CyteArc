@@ -8,6 +8,7 @@ import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
 
 from ..utils.arrays import canonicalize_sparse, checked_sparse_cast, cumulative_nnz
+from ..utils.memory_budget import MemoryBudgetError
 
 
 def _sorted_rows(records: np.ndarray, shape: tuple[int, int], dtype: Any) -> csr_matrix:
@@ -28,7 +29,10 @@ class SparseRowStore:
 
     Rows hold ``dtype``. With ``sum_duplicates`` the duplicate coordinates of
     a row are summed; otherwise they are kept, sorted by column, for a reader
-    that sums them later.
+    that sums them later. The conversion refuses with ``MemoryBudgetError``
+    when its row pointers and one bucket of entries pass ``max_bytes``, and
+    with ``nnz_error``, ``ValueError`` unless a reader gives its own, when the
+    rows hold more than ``max_nnz`` entries.
     """
 
     def __init__(
@@ -39,6 +43,7 @@ class SparseRowStore:
         *,
         max_bytes: int,
         max_nnz: int = np.iinfo(np.int64).max,
+        nnz_error: type[ValueError] = ValueError,
         source_dtype: Any | None = None,
         sum_duplicates: bool = True,
         temp_dir: str | Path | None = None,
@@ -48,7 +53,15 @@ class SparseRowStore:
         metadata_bytes = (shape[0] + 1) * 32
         available = int(max_bytes) - metadata_bytes
         if available < 192:
-            raise MemoryError("Sparse row conversion exceeds the memory limit")
+            # The row pointers and one entry of 192 bytes in a bucket.
+            needed = metadata_bytes + 192
+            raise MemoryBudgetError(
+                "Sparse row conversion exceeds the memory limit. It needs at "
+                f"least {needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=int(max_bytes),
+                item="the row pointers and one entry of the sparse row conversion",
+            )
         entries_per_bucket = max(1, available // 192)
         counts = np.zeros(shape[0], dtype=np.int64)
         for chunk in chunks():
@@ -58,7 +71,15 @@ class SparseRowStore:
             del chunk
         nnz = int(counts.sum())
         if counts.size and int(counts.max()) > entries_per_bucket:
-            raise MemoryError("One sparse row exceeds the conversion memory limit")
+            # A bucket holds whole rows, 192 bytes an entry, beside the pointers.
+            needed = metadata_bytes + 192 * int(counts.max())
+            raise MemoryBudgetError(
+                "One sparse row exceeds the conversion memory limit. It needs at "
+                f"least {needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=int(max_bytes),
+                item="one sparse row of the conversion",
+            )
         cumulative = cumulative_nnz(counts)
         boundaries = np.empty(shape[0] + 1, dtype=np.int64)
         boundaries[0] = 0
@@ -161,7 +182,7 @@ class SparseRowStore:
                         )
                         offset += int(matrix.nnz)
                         if offset > max_nnz:
-                            raise MemoryError(
+                            raise nnz_error(
                                 f"Sparse row conversion exceeds maxNnz={max_nnz}"
                             )
                         path.unlink()

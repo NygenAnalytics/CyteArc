@@ -13,6 +13,7 @@ from typing import Any, TypeVar, cast
 
 import zarr
 
+from ..utils.memory_budget import MemoryBudgetError
 from ..utils.numba import numba_threads
 from ..utils.shutdown import ShutdownRequested, shutdown_checkpoint
 
@@ -351,12 +352,18 @@ def zarr_decoding_threads(threads: int) -> Iterator[None]:
 
 
 class ByteLedger:
-    """Admit CyteArc-owned buffers before async tasks are created."""
+    """Admit CyteArc-owned buffers before async tasks are created.
 
-    def __init__(self, limitBytes: int):
+    ``reservedBytes`` is what the memory budget holds beside the ledger's
+    ``limitBytes``, such as an operation's resident data, which a refusal
+    adds back to name the whole budget.
+    """
+
+    def __init__(self, limitBytes: int, *, reservedBytes: int = 0):
         if limitBytes < 1:
             raise ValueError("byte ledger limit must be positive")
         self.limitBytes = int(limitBytes)
+        self.reservedBytes = max(0, int(reservedBytes))
         self._held = 0
         self._peak = 0
         self._condition = asyncio.Condition()
@@ -366,9 +373,12 @@ class ByteLedger:
         if size < 1:
             return
         if size > self.limitBytes:
-            raise MemoryError(
+            raise MemoryBudgetError(
                 f"One buffer needs {size} bytes, but the operation limit is "
-                f"{self.limitBytes} bytes"
+                f"{self.limitBytes} bytes",
+                needed_bytes=self.reservedBytes + size,
+                budget_bytes=self.reservedBytes + self.limitBytes,
+                item="one buffer",
             )
         async with self._condition:
             while self._held + size > self.limitBytes:
@@ -414,7 +424,8 @@ class AsyncStorageRunner:
     ):
         self.plan = operation
         self.ledger = ByteLedger(
-            operation.requestedMemoryBytes - operation.residentBytes
+            operation.requestedMemoryBytes - operation.residentBytes,
+            reservedBytes=operation.residentBytes,
         )
         self.readerWaitSeconds = 0.0
         self._compute_pool: ThreadPoolExecutor | None = None

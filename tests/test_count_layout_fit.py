@@ -18,7 +18,18 @@ from cytearc.storage.count_matrix import (
     policy_from_payload,
 )
 from cytearc.storage.sharding import CountLayoutMemoryError, fit_count_layout
+from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers import H5adToZarr
+
+
+def _refusal(message: str, resources: ResourceBudget) -> MemoryBudgetError:
+    """A planner's refusal of the counts write, one byte beyond the budget."""
+    return MemoryBudgetError(
+        message,
+        needed_bytes=resources.memoryBytes + 1,
+        budget_bytes=resources.memoryBytes,
+        item="the counts write",
+    )
 
 
 def _fit(admitCounts, *, transposed=(), memoryBytes=1 << 40, requested=None):
@@ -44,14 +55,14 @@ def test_fit_uses_an_explicit_policy_exactly():
     assert seen == [32]
 
     def refuse(specs, resources: ResourceBudget) -> None:
-        raise MemoryError("does not fit")
+        raise _refusal("does not fit", resources)
 
     with pytest.raises(
         CountLayoutMemoryError, match="requested count-matrix policy"
     ) as refused:
         _fit(refuse, requested=explicit)
     assert isinstance(refused.value, MemoryError)
-    assert type(refused.value.__cause__) is MemoryError
+    assert type(refused.value.__cause__) is MemoryBudgetError
     assert str(refused.value.__cause__) == "does not fit"
 
 
@@ -64,7 +75,7 @@ def test_fit_halves_the_default_policy_until_the_counts_write_fits():
         rows = specs[0].shards[0]
         seen.append(rows)
         if rows > 100_000:
-            raise MemoryError("band too tall")
+            raise _refusal("band too tall", resources)
 
     fitted = _fit(admit)
     assert fitted == CountMatrixPolicy(
@@ -80,14 +91,14 @@ def test_fit_halves_the_default_policy_until_the_counts_write_fits():
 def test_fit_names_the_largest_halving_of_a_requested_policy_that_fits():
     def admit(specs, resources: ResourceBudget) -> None:
         if specs[0].shards[0] > 100_000:
-            raise MemoryError("band too tall")
+            raise _refusal("band too tall", resources)
 
     with pytest.raises(
         CountLayoutMemoryError, match="default count-matrix policy"
     ) as refused:
         _fit(admit, requested=DEFAULT_COUNT_MATRIX_POLICY)
     assert isinstance(refused.value, MemoryError)
-    assert type(refused.value.__cause__) is MemoryError
+    assert type(refused.value.__cause__) is MemoryBudgetError
     assert str(refused.value.__cause__) == "band too tall"
     # The same halving that a fit without a policy chooses.
     assert _named_policy(refused.value) == _fit(admit)
@@ -115,11 +126,11 @@ def test_fit_stops_at_count_shards_of_one_row():
 
     def refuse(specs, resources: ResourceBudget) -> None:
         seen.append(specs[0].shards[0])
-        raise MemoryError("does not fit")
+        raise _refusal("does not fit", resources)
 
     with pytest.raises(MemoryError, match="count shards of one row") as refused:
         _fit(refuse)
-    assert type(refused.value) is MemoryError
+    assert type(refused.value) is MemoryBudgetError
     assert seen[-1] == 1
     assert seen.count(1) == 1
 

@@ -93,18 +93,18 @@ def test_sparse_row_store_round_trips_empty_axes_and_rows(tmp_path, shape):
 
 
 @pytest.mark.parametrize(
-    ("max_bytes", "max_nnz", "message"),
+    ("max_bytes", "max_nnz", "error", "message"),
     [
-        (100, 10, "conversion exceeds the memory limit"),
-        (300, 10, "One sparse row"),
-        (1024, 1, "exceeds maxNnz"),
+        (100, 10, MemoryError, "conversion exceeds the memory limit"),
+        (300, 10, MemoryError, "One sparse row"),
+        (1024, 1, ValueError, "exceeds maxNnz"),
     ],
 )
 def test_sparse_row_store_enforces_limits_and_removes_partial_files(
-    tmp_path, max_bytes, max_nnz, message
+    tmp_path, max_bytes, max_nnz, error, message
 ):
     matrix = coo_matrix([[1, 2], [0, 0]])
-    with pytest.raises(MemoryError, match=message):
+    with pytest.raises(error, match=message):
         SparseRowStore(
             lambda: iter((matrix,)),
             matrix.shape,

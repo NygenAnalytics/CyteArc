@@ -900,6 +900,44 @@ def test_composite_compares_distinct_ids_whose_hashes_collide(tmp_path, monkeypa
     assert sorted(joint.cells.fetch_all("ids")) == sorted(f"a__{id}" for id in ids)
 
 
+def test_composite_count_preparation_names_the_budget_of_one_row(tmp_path):
+    from tests.memory_helpers import named_budget_passes
+
+    source = _write_source(
+        tmp_path / "source.zarr",
+        np.ones((4, 256), dtype=np.uint8),
+        [f"g{index}" for index in range(256)],
+        policy=CountMatrixPolicy(1024, 256),
+    )
+    # Tables of one chunk, so that the metadata plans fit well below the
+    # preparation of the counts.
+    for table in (source.cells, source.RNA.feats):
+        for name, array in list(table._group.arrays()):
+            values, attributes = array[:], dict(array.attrs)
+            del table._group[name]
+            table._group.create_array(
+                name,
+                data=values,
+                chunks=(min(table.N, 256),),
+                attributes=attributes,
+            )
+    attempts = iter(range(1_000))
+
+    def create(budget: int) -> None:
+        create_composite(
+            {"source": source},
+            at=tmp_path / f"joint-{next(attempts)}.zarr",
+            features="union",
+            mem_budget=budget,
+            nthreads=1,
+        )
+
+    # One row of every source is read beside what the preparation keeps.
+    named_budget_passes(
+        create, 71_000, item="one row of the composite count preparation"
+    )
+
+
 @pytest.mark.parametrize("phase", ("metadata", "counts"))
 def test_composite_creation_rejects_unaffordable_work_before_count_reads(
     tmp_path, monkeypatch, phase

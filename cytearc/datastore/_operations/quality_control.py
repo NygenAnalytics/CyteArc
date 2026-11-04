@@ -93,6 +93,7 @@ from ...storage.types import as_zarr_array, as_zarr_group
 from ...utils.arguments import bool_argument, integer_argument, optional_bool_argument
 from ...utils.arrays import within_bounds
 from ...utils.compute import controlled_compute
+from ...utils.memory_budget import MemoryBudgetError, MemoryLedger
 from ...utils.logging import logger
 
 if TYPE_CHECKING:
@@ -580,7 +581,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             values,
             cell_selection=cell_selection,
             value_name=value_name,
-            max_bytes=self.memoryBytes,
+            ledger=MemoryLedger(
+                self.memoryBytes, "Selecting cells", codec_threads=self.nthreads
+            ),
         )
         source_selection = aligned.source_cell_selection
         prior_selection = aligned.cell_selection
@@ -1491,12 +1494,16 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         # Per cell: the cluster label, the identity, and the three diagnostics.
         estimated_peak_bytes = 6 * matrix_bytes + 40 * n_cells
         if estimated_peak_bytes > self.memoryBytes:
-            raise MemoryError(
+            raise MemoryBudgetError(
                 "HTO demultiplexing needs an estimated "
                 f"{estimated_peak_bytes / (1024**2):.1f} MiB for its exact "
                 "whole-matrix clustering algorithm, which exceeds the datastore "
                 f"memory budget of {self.memoryBytes / (1024**2):.1f} MiB. "
-                "Use a smaller explicit cell selection or a larger memory budget."
+                "Use a smaller explicit cell selection or a larger memory budget. "
+                f"It needs at least {estimated_peak_bytes} bytes.",
+                needed_bytes=estimated_peak_bytes,
+                budget_bytes=int(self.memoryBytes),
+                item="the whole-matrix clustering of HTO demultiplexing",
             )
         counts = pd.DataFrame(
             controlled_compute(assay.rawData[cell_index, :], self.nthreads),

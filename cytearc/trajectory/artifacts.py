@@ -23,6 +23,7 @@ from .parameters import (
     AGGREGATION_ANN_STATIC_PARAMETER_NAMES,
 )
 from ..utils.arguments import bool_argument, integer_argument
+from ..utils.memory_budget import MemoryBudgetError
 
 PSEUDOTIME_INPUTS = frozenset({"connectivity_map", "source_sink", "cell_selection"})
 PSEUDOTIME_PARAMETERS = frozenset(
@@ -538,11 +539,16 @@ def load_diffusion_payload(
 ) -> coo_matrix:
     arrays = _diffusion_payload_arrays(group, n_cells=n_cells)
     nnz = int(arrays[0].size)
-    if diffusion_load_bytes(nnz, n_cells, imputed_features) >= memory_bytes:
-        raise MemoryError(
+    load_bytes = diffusion_load_bytes(nnz, n_cells, imputed_features)
+    if load_bytes >= memory_bytes:
+        raise MemoryBudgetError(
             "Diffusion operator and imputed output exceed the memory budget "
             "during loading or sparse conversion; increase the memory budget "
-            "or request fewer features per call."
+            "or request fewer features per call. They need at least "
+            f"{load_bytes + 1} bytes.",
+            needed_bytes=load_bytes + 1,
+            budget_bytes=int(memory_bytes),
+            item="loading the diffusion operator beside the imputed output",
         )
     loaded = [np.asarray(array[:]) for array in arrays]
     builder = ValueFingerprintBuilder()

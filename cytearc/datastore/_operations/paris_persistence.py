@@ -18,6 +18,7 @@ from ...storage.artifacts import ArtifactRef
 from ...storage.arrays import create_zarr_dataset
 from ...storage.budget import ResourceBudget
 from ...storage.types import as_zarr_array, as_zarr_group, read_array
+from ...utils.memory_budget import MemoryBudgetError
 
 _PARIS_HIERARCHY_ARRAYS = (
     "children",
@@ -253,10 +254,14 @@ def _raise_if_over_budget(
         return
     required_gib = estimate / 1024**3
     budget_gib = budget.memoryBytes / 1024**3
-    raise MemoryError(
+    raise MemoryBudgetError(
         f"{operation} is estimated to require "
         f"{required_gib:.2f} GiB including headroom, but the active "
-        f"resource budget is {budget_gib:.2f} GiB"
+        f"resource budget is {budget_gib:.2f} GiB. It needs at least "
+        f"{estimate} bytes.",
+        needed_bytes=estimate,
+        budget_bytes=int(budget.memoryBytes),
+        item=operation,
     )
 
 

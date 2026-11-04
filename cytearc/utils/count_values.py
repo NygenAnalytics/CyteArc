@@ -16,6 +16,7 @@ import numpy as np
 from numpy.typing import DTypeLike
 
 from .arrays import canonicalize_sparse
+from .memory_budget import MemoryBudgetError
 
 # A scan window holds its values and indices, a 64-bit copy of narrow integers,
 # the sort and sum buffers of its canonical values, the values of one group,
@@ -176,11 +177,17 @@ def compressed_count_ranges(
                 # A vector longer than a window is read whole when it fits.
                 length = int(pointers[position + 1] - pointers[position])
                 if length > limit:
-                    raise MemoryError(
+                    # The longest vector whose pointers are read names the
+                    # budget that scans them all, not this one alone.
+                    length = int(np.diff(pointers[position:]).max())
+                    raise MemoryBudgetError(
                         f"One compressed vector holds {length} values; scanning "
                         f"it needs about {length * _SCAN_BYTES_PER_VALUE} bytes, "
                         f"more than the {max(0, int(maxBytes))}-byte limit. "
-                        "Increase mem_budget."
+                        "Increase mem_budget.",
+                        needed_bytes=length * _SCAN_BYTES_PER_VALUE,
+                        budget_bytes=max(0, int(maxBytes)),
+                        item="scanning one compressed vector",
                     )
                 end = position + 1
             first, last = int(pointers[position]), int(pointers[end])
@@ -245,10 +252,13 @@ def dense_count_ranges(
     )
     value_ranges = new_count_ranges(groups)
     if int(nRows) and rows < 1:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"One dense row holds {row_values} values; scanning it needs about "
             f"{row_values * _SCAN_BYTES_PER_VALUE} bytes, more than the "
-            f"{max(0, int(maxBytes))}-byte limit. Increase mem_budget."
+            f"{max(0, int(maxBytes))}-byte limit. Increase mem_budget.",
+            needed_bytes=row_values * _SCAN_BYTES_PER_VALUE,
+            budget_bytes=max(0, int(maxBytes)),
+            item="scanning one dense row",
         )
     columns = (
         None

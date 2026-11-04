@@ -139,6 +139,7 @@ from ...utils.arrays import (
     sort_categories,
 )
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryBudgetError
 from ...utils.numba import numba_threads
 from ...utils.warnings import warn
 from .enrichment_store import (
@@ -1664,11 +1665,16 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 len(network.edge_feature_index), len(feature_index), n_backgrounds
             )
             if needed > self.resources.memoryBytes // 2:
-                raise MemoryError(
+                # The model may take half of the budget, so the budget that
+                # holds it is twice the model.
+                raise MemoryBudgetError(
                     f"The chromVAR background model needs about {needed} bytes, "
                     f"more than half the memory budget of "
                     f"{self.resources.memoryBytes} bytes; score fewer sources or "
-                    "peaks per call"
+                    "peaks per call",
+                    needed_bytes=2 * needed,
+                    budget_bytes=int(self.resources.memoryBytes),
+                    item="the chromVAR background model",
                 )
             counts = assay.rawData[:, feature_index][cell_index, :]
             fragments = np.asarray(

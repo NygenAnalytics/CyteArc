@@ -69,6 +69,7 @@ from ..storage.stores import (
     prefetch_metadata_listing,
 )
 from ..storage.types import as_zarr_array, as_zarr_group
+from ..utils.memory_budget import MemoryBudgetError
 from .source_cache import CachedSourceStore, SourceCache, new_source_cache
 
 if TYPE_CHECKING:
@@ -408,6 +409,9 @@ def _fit_count_layout(
             geometries[name] = geometry
     itemsize = np.dtype(dtype).itemsize
     policy = DEFAULT_COUNT_MATRIX_POLICY
+    # The least that any layout tried reads, which a budget must hold for one
+    # of them to fit.
+    smallest = None
     while True:
         pair = plan_count_matrix_pair(
             n_cells, n_features, dtype, policy=policy, profile="fast_local"
@@ -455,8 +459,15 @@ def _fit_count_layout(
             peak = max(peak, cost)
         if peak <= memory_bytes:
             return pair
+        smallest = peak if smallest is None else min(smallest, peak)
         if policy.unitBytes == 1:
-            raise MemoryError("Composite count reads cannot fit within mem_budget")
+            raise MemoryBudgetError(
+                "Composite count reads cannot fit within mem_budget. It needs at "
+                f"least {smallest} bytes.",
+                needed_bytes=smallest,
+                budget_bytes=int(memory_bytes),
+                item="the composite count reads of one layout",
+            )
         policy = CountMatrixPolicy(
             max(1, policy.unitBytes // 2), max(1, policy.chunkBytes // 2)
         )
@@ -499,7 +510,13 @@ def _require_unique_cell_ids(
         + block_rows * (int(ids.dtype.itemsize) + 2 * hash_bytes)
     )
     if needed > resources.memoryBytes:
-        raise MemoryError("Composite cell identity validation exceeds mem_budget")
+        raise MemoryBudgetError(
+            "Composite cell identity validation exceeds mem_budget. It needs at "
+            f"least {needed} bytes.",
+            needed_bytes=needed,
+            budget_bytes=int(resources.memoryBytes),
+            item="the composite cell identity validation",
+        )
     hashes = np.empty(n_cells, dtype=np.uint64)
     for start in range(0, n_cells, block_rows):
         stop = min(n_cells, start + block_rows)
@@ -636,7 +653,13 @@ def create_composite(
         row_plan.resident_bytes() + alignment.resident_bytes() + feature_columns.nbytes
     )
     if resident >= resources.memoryBytes:
-        raise MemoryError("Composite row and feature mappings exceed mem_budget")
+        raise MemoryBudgetError(
+            "Composite row and feature mappings exceed mem_budget. They need at "
+            f"least {resident + 1} bytes.",
+            needed_bytes=resident + 1,
+            budget_bytes=int(resources.memoryBytes),
+            item="the composite row and feature mappings",
+        )
     cell_tables = [_CachedMetadataTable(source.cells) for source in datasets]
     scan_rows = resolve_metadata_schema_scan_rows(
         cell_tables,
@@ -828,8 +851,14 @@ def create_composite(
             max_row_plan_block_rows(row_plan), (available - read_bytes) // row_bytes
         )
         if block_rows < 1:
-            raise MemoryError(
-                "Composite count preparation cannot fit one row within mem_budget"
+            # One row of every source read beside what the preparation keeps.
+            needed = resources.memoryBytes - available + read_bytes + row_bytes
+            raise MemoryBudgetError(
+                "Composite count preparation cannot fit one row within mem_budget. "
+                f"It needs at least {needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=int(resources.memoryBytes),
+                item="one row of the composite count preparation",
             )
         read_workers = min(
             resources.workers,

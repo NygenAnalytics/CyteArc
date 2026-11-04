@@ -27,6 +27,7 @@ from ..storage.types import as_zarr_array, as_zarr_group
 from ..utils.arrays import canonicalize_sparse, checked_sparse_cast, max_window_nnz
 from ..utils.compute import controlled_compute
 from ..utils.logging import logger
+from ..utils.memory_budget import MemoryBudgetError
 from ..utils.progress import iter_progress
 from .features import FeatureAlignment
 from .row_plan import RowPlan, iter_row_plan_segments, max_row_plan_block_rows
@@ -180,9 +181,12 @@ def _cumulative_row_nnz(
         )
     )
     if needed > int(resources.memoryBytes):
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"Merged assay NNZ profile needs about {needed} bytes, but the "
-            f"operation limit is {int(resources.memoryBytes)} bytes"
+            f"operation limit is {int(resources.memoryBytes)} bytes",
+            needed_bytes=needed,
+            budget_bytes=int(resources.memoryBytes),
+            item="the merged assay's nonzero counts per row",
         )
     cumulative = np.zeros(row_plan.nCells + 1, dtype=np.int64)
     row_nnz = cumulative[1:]
@@ -444,7 +448,7 @@ def write_assay_counts(
                     + held_bytes
                     + dense_reserve,
                 )
-            except MemoryError:
+            except MemoryBudgetError:
                 continue
             counter = write_dense_from_row_batches(
                 destination,
@@ -474,7 +478,7 @@ def write_assay_counts(
                 extraProducerBytes=requirements.extraProducerBytes,
             )
             held_bytes = block_bytes
-        except MemoryError:
+        except MemoryBudgetError:
             pass
 
     def block_stream() -> Iterator[coo_matrix]:

@@ -249,15 +249,15 @@ def test_cell_aligned_artifact_resolver_validates_lineage_and_reads_subset(
         source_column="artifact",
     )[0]
     read_positions: list[np.ndarray] = []
-    read_rows = metadata_selection_module.read_array_rows_chunkwise
+    read_rows = metadata_selection_module.read_rows
 
-    def capture_rows(array, rows):
+    def capture_rows(ledger, array, rows, *, item):
         read_positions.append(np.asarray(rows).copy())
-        return read_rows(array, rows)
+        return read_rows(ledger, array, rows, item=item)
 
     monkeypatch.setattr(
         metadata_selection_module,
-        "read_array_rows_chunkwise",
+        "read_rows",
         capture_rows,
     )
 
@@ -942,3 +942,34 @@ def test_display_metadata_builders_are_deterministic() -> None:
     }
     categorical = categorical_display(np.asarray([2, 1, 2]))
     assert [item["value"] for item in categorical["categories"]] == [1, 2]
+
+
+def test_hto_demultiplexing_names_the_budget_of_its_clustering(
+    datastore_ephemeral,
+) -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    datastore = datastore_ephemeral
+    selection = datastore.snapshot_cell_selection()
+    datastore = _declare_hto(datastore)
+    item = "the whole-matrix clustering of HTO demultiplexing"
+
+    def demultiplex(budget: int) -> MemoryBudgetError | None:
+        datastore.memoryBytes = budget
+        try:
+            datastore.qc.hto_demultiplexing(selection, from_assay="assay2")
+        except MemoryBudgetError as refusal:
+            return refusal
+        return None
+
+    refusal = demultiplex(1)
+    assert refusal is not None
+    assert (refusal.budget_bytes, refusal.item) == (1, item)
+    assert str(refusal).endswith(f"It needs at least {refusal.needed_bytes} bytes.")
+    below = demultiplex(refusal.needed_bytes - 1)
+    assert below is not None
+    assert (below.needed_bytes, below.item) == (refusal.needed_bytes, item)
+    later = demultiplex(refusal.needed_bytes)
+    assert later is None or (
+        later.item != item and later.needed_bytes > refusal.needed_bytes
+    )

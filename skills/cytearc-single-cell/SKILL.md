@@ -272,7 +272,8 @@ any changes you make after seeing the comparison as such.
 | Plot raises with `run=` and a gene or live column | run mode reads only frozen run fields and run outputs, and genes need an explicit normalization | gene: add `normalization=cytearc.plotting.NormalizationSpec()`; live column: freeze it with `snapshot_columns=` or use `layout=run["umap"]` |
 | `TypeError` from `distribution(grouping="col")` | grouping needs a ref or `CellField` | `grouping=cytearc.plotting.CellField("col")` |
 | Very slow steps on a mount | each count pass is a network read | fewer passes; repack locally (rule 8) |
-| `CountLayoutMemoryError` (a `MemoryError` subclass) from a converter | default count layout does not fit `mem_budget` | larger `mem_budget`; else the `policy=` the message names (`references/data-access.md`) |
+| `MemoryBudgetError` (a `MemoryError`) from any call | a step needs more than `mem_budget` | `mem_budget` of at least the error's `needed_bytes`, which passes that step (a later step can name more); or the smaller request the message names |
+| `CountLayoutMemoryError` (a `MemoryBudgetError`) from a converter | default count layout does not fit `mem_budget` | `mem_budget` of at least `needed_bytes`; else the `policy=` the message names (`references/data-access.md`) |
 | `ValueError` plotting after reopening the store | a `PipelineRun` is bound to the store object that opened it | reopen the run from the new `ds` |
 | `artifacts.list(kind="cell_selection")` is empty | cell selections are datastore-scoped | add `scope="datastore"` |
 | `KeyError` for a grouping column of a dot or matrix plot table | summary tables name grouping columns by role: `group`, `subgroup`, `sample` | `res.tables["aggregate"]["group"]`; `res.provenance.extras["group_by"]` names the source columns |

@@ -44,6 +44,7 @@ from ..storage.feature_stream import (
 )
 from ..storage.geometry import array_geometry
 from ..storage.io_policy import DEFAULT_STORAGE_IO_POLICY, StorageIoPolicy
+from ..utils.memory_budget import MemoryBudgetError
 from ..utils.progress import tqdmbar
 
 if TYPE_CHECKING:
@@ -57,17 +58,24 @@ type _Group = tuple[int, int, int, np.ndarray | None]
 def _group_batches(
     groups: list[tuple[int, int]],
     rows: dict[tuple[int, int], np.ndarray],
-    fits: Callable[[int], bool],
+    cost: Callable[[int], int],
+    budget: int,
 ) -> list[list[_Group]]:
-    """Batch consecutive groups while the features of one read fit."""
+    """Batch consecutive groups while the ``cost`` of one read of their features fits ``budget``."""
     batches: list[list[_Group]] = []
     width = 0
     for index, (start, end) in enumerate(groups):
         selected = rows.get((start, end))
         size = end - start if selected is None else len(selected)
-        if not fits(size):
-            raise MemoryError("One composite feature group exceeds the memory budget")
-        if not batches or not fits(width + size):
+        if cost(size) > budget:
+            raise MemoryBudgetError(
+                "One composite feature group exceeds the memory budget. It needs "
+                f"at least {cost(size)} bytes.",
+                needed_bytes=cost(size),
+                budget_bytes=int(budget),
+                item=f"one composite feature group of {size} features",
+            )
+        if not batches or cost(width + size) > budget:
             batches.append([])
             width = 0
         batches[-1].append((index, start, end, selected))
@@ -152,7 +160,8 @@ def map_cell_bands[T](
     batches = _group_batches(
         groups,
         sparse,
-        lambda width: held(width) + resident <= budget.memoryBytes,
+        lambda width: held(width) + resident,
+        budget.memoryBytes,
     )
     if not coalesce:
         batches = [[group] for batch in batches for group in batch]
@@ -317,22 +326,24 @@ def map_read_groups[T](
     ):
         compute_width -= 1
 
-    def fits(width: int) -> bool:
+    def cost(width: int) -> int:
         return (
             resident
             + compute_width * group_bytes
             + width * len(cells) * reader.dtype.itemsize
             + reader.read_scratch_bytes(width, len(cells), read_workers=read_workers)
-            <= budget.memoryBytes
         )
+
+    def fits(width: int) -> bool:
+        return cost(width) <= budget.memoryBytes
 
     while read_workers > 1 and not fits(widest):
         read_workers -= 1
-    batches = _group_batches(layout.groups, {}, fits)
+    batches = _group_batches(layout.groups, {}, cost, budget.memoryBytes)
     usable_compute_width = max(len(batch) for batch in batches)
     if compute_width > usable_compute_width:
         compute_width = usable_compute_width
-        batches = _group_batches(layout.groups, {}, fits)
+        batches = _group_batches(layout.groups, {}, cost, budget.memoryBytes)
     feature_batches = [_batch_features(batch) for batch in batches]
     max_width = max(len(features) for features in feature_batches)
     fixed = (

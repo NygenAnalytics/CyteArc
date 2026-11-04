@@ -24,6 +24,7 @@ from ..storage.partition import (
 )
 from ..utils.arrays import read_only_copy
 from ..utils.count_values import is_real_count_dtype
+from ..utils.memory_budget import MemoryBudgetError
 from ..utils.warnings import warn
 
 if TYPE_CHECKING:
@@ -400,9 +401,12 @@ class AlignedFeatureStream:
         block_rows = affordable_width(fits, preferred)
         if block_rows < 1:
             minimum = resident + max(1, int(bytes_per_row)) + self._decode_bytes
-            raise MemoryError(
+            raise MemoryBudgetError(
                 f"One aligned row needs about {minimum} bytes, but the operation "
-                f"limit is {self._resources.memoryBytes} bytes"
+                f"limit is {self._resources.memoryBytes} bytes",
+                needed_bytes=minimum,
+                budget_bytes=int(self._resources.memoryBytes),
+                item="one aligned row beside the resident data",
             )
         boundaries = tuple(contiguous_ranges(n_rows, block_rows))
         admission = admit_stream(

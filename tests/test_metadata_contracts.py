@@ -591,8 +591,8 @@ def test_cell_aligned_artifact_validation_reports_each_broken_contract(monkeypat
     )
     monkeypatch.setattr(
         selection,
-        "read_array_rows_chunkwise",
-        lambda *_: np.array([1]),
+        "read_rows",
+        lambda *_args, **_kwargs: np.array([1]),
     )
     with pytest.raises(ValueError, match="values do not match"):
         resolve_cell_aligned_artifact(None, artifact)

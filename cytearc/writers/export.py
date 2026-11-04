@@ -32,6 +32,7 @@ from ..metadata.rows import apply_missing_mask, metadata_missing_mask
 from ..storage.refs import ArtifactRef
 from ..utils.compute import compute_with_progress
 from ..utils.logging import logger
+from ..utils.memory_budget import MemoryBudgetError, MemoryLedger
 from ..utils.arguments import bool_argument
 
 if TYPE_CHECKING:
@@ -1114,9 +1115,10 @@ def _read_cell_array(
     value: str,
     positions: np.ndarray,
     max_bytes: int | None,
+    codec_threads: int,
 ) -> np.ndarray:
     """Read an artifact's per-cell array at the rows of the exported cells."""
-    return _read_cell_values(root, ref, value, positions, max_bytes)[0]
+    return _read_cell_values(root, ref, value, positions, max_bytes, codec_threads)[0]
 
 
 def _read_cell_values(
@@ -1125,8 +1127,13 @@ def _read_cell_values(
     value: str,
     positions: np.ndarray,
     max_bytes: int | None,
+    codec_threads: int,
 ) -> tuple[np.ndarray, np.ndarray | None]:
-    """Read an artifact's per-cell array at the rows of the exported cells."""
+    """Read an artifact's per-cell array at the rows of the exported cells.
+
+    The read is checked against ``max_bytes``, with a chunk that each of the
+    ``codec_threads`` that decode it can still hold after it.
+    """
     from ..metadata.rows import read_array_rows_chunkwise
     from ..metadata.selection import resolve_cell_aligned_artifact
     from ..storage.artifacts import artifact_group
@@ -1136,7 +1143,15 @@ def _read_cell_values(
         data = as_zarr_array(artifact_group(root, ref)["data"], name="data")
         return np.asarray(read_array_rows_chunkwise(data, positions)), None
     resolved = resolve_cell_aligned_artifact(
-        root, ref, value_name=value, ndim=None, max_bytes=max_bytes
+        root,
+        ref,
+        value_name=value,
+        ndim=None,
+        ledger=None
+        if max_bytes is None
+        else MemoryLedger(
+            max_bytes, "Exporting cell values", codec_threads=codec_threads
+        ),
     )
     missing = (
         None if resolved.missing_mask is None else resolved.missing_mask[positions]
@@ -1193,9 +1208,12 @@ def _require_graph_memory(
     n_edges = int(edges.shape[0])
     required = n_edges * _GRAPH_EDGE_BYTES
     if max_bytes is not None and required > max_bytes:
-        raise MemoryError(
+        raise MemoryBudgetError(
             f"Exporting the graph's {n_edges} edges needs about {required} bytes, "
-            f"but the memory budget is {max_bytes} bytes. Raise mem_budget."
+            f"but the memory budget is {max_bytes} bytes. Raise mem_budget.",
+            needed_bytes=required,
+            budget_bytes=int(max_bytes),
+            item=f"the graph's {n_edges} edges",
         )
 
 
@@ -1329,6 +1347,7 @@ def artifact_entries(
     obs: Mapping[str, H5adSource] | None = None,
     graph: ArtifactRef | None = None,
     max_bytes: int | None = None,
+    codec_threads: int = 1,
     exported: Mapping[str, ArtifactRef] | None = None,
 ) -> H5adArtifactEntries:
     """Plan the export of artifacts beside the cells at store rows ``cell_rows``.
@@ -1358,7 +1377,8 @@ def artifact_entries(
 
     Every reference is resolved and aligned here, and a graph's memory need
     is checked, so a mismatch raises before anything is written; values are
-    read while the export writes them.
+    read while the export writes them, each read checked against
+    ``max_bytes`` with the ``codec_threads`` of the store's reads.
     """
     sources = _sources(obsm, "obsm")
     labels = _sources(obs, "obs")
@@ -1387,7 +1407,7 @@ def artifact_entries(
             )
         positions = rows.positions(label, ref, selection)
         obsm_entries[name] = partial(
-            _read_cell_array, root, ref, array, positions, max_bytes
+            _read_cell_array, root, ref, array, positions, max_bytes, codec_threads
         )
         lineage.setdefault("obsm", {})[name] = _lineage_record(ref, value)
     obs_columns: list[H5adColumn] = []
@@ -1406,7 +1426,15 @@ def artifact_entries(
         obs_columns.append(
             H5adColumn(
                 name,
-                partial(_read_cell_values, root, ref, array, positions, max_bytes),
+                partial(
+                    _read_cell_values,
+                    root,
+                    ref,
+                    array,
+                    positions,
+                    max_bytes,
+                    codec_threads,
+                ),
                 categorical=(_stored_labels(root, ref, array) if categorical else None),
             )
         )
@@ -1557,6 +1585,7 @@ def with_artifacts(
     obs: Mapping[str, H5adSource] | None = None,
     graph: ArtifactRef | None = None,
     max_bytes: int | None = None,
+    codec_threads: int = 1,
 ) -> H5adExportPlan:
     """Return ``plan`` with the entries of :func:`artifact_entries` added.
 
@@ -1574,6 +1603,7 @@ def with_artifacts(
         obs=obs,
         graph=graph,
         max_bytes=max_bytes,
+        codec_threads=codec_threads,
         exported=_exported_obsm(plan),
     )
     planned = {plan.obs_index.name, *(column.name for column in plan.obs)}
@@ -1897,6 +1927,7 @@ def to_h5ad(
                 obs=obs,
                 graph=graph,
                 max_bytes=int(assay.resources.memoryBytes),
+                codec_threads=int(assay.resources.workers),
             )
         write_h5ad_plan(with_count_dtype(plan, dtype, raw_x=True), h5ad_filename)
         logger.info(
@@ -1950,6 +1981,7 @@ def to_h5ad(
             obs=obs,
             graph=graph,
             max_bytes=int(assay.resources.memoryBytes),
+            codec_threads=int(assay.resources.workers),
         )
     write_h5ad_plan(with_count_dtype(plan, dtype, raw_x=matrix == "raw"), h5ad_filename)
     n_cells, n_features = plan.x.shape

@@ -1374,3 +1374,40 @@ def test_assess_counts_t_reuse_returns_reason_when_missing() -> None:
     )
     assert missing_array.outcome == "incomplete"
     assert missing_array.reason == "countsT is missing for 'RNA'"
+
+
+def test_normalized_feature_batches_name_the_budget_of_the_requested_width():
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    root = _memory_root()
+    values = (np.arange(40 * 24, dtype=np.uint32) % 11).reshape(40, 24)
+    _write_small_assay(root, workspace=None, values=values)
+    cells = MetaData(root["cellData"])
+    cells.insert("RNA_nCounts", values.sum(axis=1).astype(np.float64), overwrite=True)
+    assay = RNAassay(root, "RNA", cells, workspace=None, nthreads=1)
+    assay.sf = 1000.0
+    cell_idx = np.arange(values.shape[0], dtype=np.int64)
+    feat_idx = np.arange(1, values.shape[1], 2, dtype=np.int64)
+
+    def batches(budget: int, width: int) -> list:
+        assay.resources = ResourceBudget(memoryBytes=budget, workers=1)
+        return list(
+            assay.iter_normed_feature_wise(
+                cell_idx, feat_idx, width, None, as_dataframe=False, scratch_itemsize=64
+            )
+        )
+
+    with pytest.raises(MemoryBudgetError) as refused:
+        batches(4096, 4)
+    refusal = refused.value
+    assert (refusal.budget_bytes, refusal.item) == (
+        4096,
+        "normalized feature batches of 4 features",
+    )
+    assert str(refusal).endswith(f"They need at least {refusal.needed_bytes} bytes.")
+    # The named budget streams batches of the four features requested.
+    blocks = batches(refusal.needed_bytes, 4)
+    assert [block.shape[0] for block, _labels in blocks] == [4, 4, 4]
+    with pytest.raises(MemoryBudgetError) as below:
+        batches(refusal.needed_bytes - 1, 4)
+    assert below.value.needed_bytes == refusal.needed_bytes

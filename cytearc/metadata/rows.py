@@ -236,17 +236,52 @@ def row_read_bytes(geometry: ArrayGeometry | None, rows: np.ndarray) -> int:
     """
     indices = np.asarray(rows)
     n_rows = int(indices.size)
-    ordering = n_rows * ROW_INDEX_BYTES
     if geometry is None:
-        return ordering
+        return n_rows * ROW_INDEX_BYTES
     step = geometry.axisChunk(0)
-    first_band = int(indices.min()) // step if n_rows else 0
-    last_band = int(indices.max()) // step if n_rows else 0
-    bands = 1 if first_band == last_band else 2
+    bands = int(indices.max()) // step - int(indices.min()) // step + 1 if n_rows else 1
+    return _band_rows_read_bytes(geometry, n_rows, bands)
+
+
+def _band_rows_read_bytes(geometry: ArrayGeometry, n_rows: int, bands: int) -> int:
+    """:func:`row_read_bytes` of ``n_rows`` rows that span ``bands`` bands of chunks."""
+    ordering = n_rows * ROW_INDEX_BYTES
     reading = n_rows * (
         geometry.rowBytes() + ROW_KEPT_INDEX_BYTES
-    ) + geometry.bandReadBytes(min(n_rows, step), _operation_concurrency(), bands=bands)
+    ) + geometry.bandReadBytes(
+        min(n_rows, geometry.axisChunk(0)), _operation_concurrency(), bands=bands
+    )
     return max(ordering, reading)
+
+
+def rows_read_charge(
+    ledger: MemoryLedger,
+    array: Any,
+    n_rows: int,
+    *,
+    span: tuple[int, int] | None = None,
+) -> tuple[int, int]:
+    """What :func:`read_rows` charges ``ledger`` to read ``n_rows`` distinct rows of ``array``, and what that read leaves behind.
+
+    ``span`` gives the first and last of the rows, which set the bands of
+    chunks the rows span. Without it, the rows span the fewest bands that
+    ``n_rows`` rows can, which no rows of that count are charged less than.
+    """
+    geometry = array_geometry(array)
+    n_rows = int(n_rows)
+    if geometry is None:
+        return n_rows * ROW_INDEX_BYTES, 0
+    step = geometry.axisChunk(0)
+    if span is None:
+        bands = max(1, -(-n_rows // step))
+    else:
+        bands = int(span[1]) // step - int(span[0]) // step + 1
+    reading = _band_rows_read_bytes(geometry, n_rows, bands)
+    if not n_rows:
+        return reading, 0
+    chunks = min(n_rows, bands) * geometry.bandChunks()
+    held = geometry.bandHeldBytes(ledger.holding_threads(chunks))
+    return max(reading, n_rows * geometry.rowBytes() + held), held
 
 
 def read_rows(
@@ -258,22 +293,16 @@ def read_rows(
     order given. The ledger counts what the read holds, as
     :func:`row_read_bytes` states, or the rows beside what the read leaves
     behind where that is more: a chunk on each of the ledger's codec threads,
-    which the read decodes on, up to the chunks of the bands the rows span.
-    It keeps the rows charged and records what the read leaves behind.
+    which the read decodes on, up to the chunks of the bands the rows span, as
+    :func:`rows_read_charge` states. It keeps the rows charged and records what
+    the read leaves behind.
 
     Raises:
         MemoryBudgetError: If the read would pass the budget.
     """
-    geometry = array_geometry(array)
     indices = np.asarray(rows)
-    reading = row_read_bytes(geometry, indices)
-    held = 0
-    if geometry is not None and indices.size:
-        step = geometry.axisChunk(0)
-        bands = int(indices.max()) // step - int(indices.min()) // step + 1
-        chunks = min(int(indices.size), bands) * geometry.bandChunks()
-        held = geometry.bandHeldBytes(ledger.holding_threads(chunks))
-        reading = max(reading, int(indices.size) * geometry.rowBytes() + held)
+    span = (int(indices.min()), int(indices.max())) if indices.size else None
+    reading, held = rows_read_charge(ledger, array, int(indices.size), span=span)
     ledger.peak(item, reading)
     with zarr_decoding_threads(ledger.codec_threads):
         values = read_array_rows_chunkwise(array, indices)

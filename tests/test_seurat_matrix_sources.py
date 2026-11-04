@@ -63,6 +63,7 @@ from cytearc.readers._seurat.paths import (
     require_hdf5_datasets,
     require_hdf5_group,
 )
+from cytearc.utils.memory_budget import MemoryBudgetError
 
 
 def test_bpcells_numeric_read_detects_truncation_after_size_check(
@@ -2943,6 +2944,113 @@ def test_source_preparation_fits_a_smaller_import_budget(tmp_path, sparse):
             )
     finally:
         release_temporary_storage(source)
+
+
+def _feature_major_sources(tmp_path: Path, values: NDArray[Any]) -> dict[str, Any]:
+    """Sources of ``values`` that convert to cell rows: dense and sparse transposes, and a sparse group compressed by feature."""
+    path = tmp_path / "counts.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("dense", data=values)
+        _write_h5_sparse_group(handle, "sparse", values, "csr")
+    matrix = csc_matrix(values)
+    return {
+        "dense": lambda **options: TransposeMatrixSource(
+            HDF5DenseMatrixSource(path, "dense"), **options
+        ),
+        "sparse transpose": lambda **options: TransposeMatrixSource(
+            CscMatrixSource(matrix.data, matrix.indices, matrix.indptr, matrix.shape),
+            **options,
+        ),
+        "sparse": lambda **options: HDF5CompressedMatrixSource(
+            path,
+            "sparse",
+            physical_shape=values.shape,
+            physical_layout="csr",
+            physical_order="feature_by_cell",
+            **options,
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "item"),
+    [
+        ("dense", "a tile of one source column of the transpose"),
+        ("sparse transpose", "a tile of one source column of the transpose"),
+        ("sparse", "one sparse row of the conversion"),
+    ],
+)
+def test_source_preparation_follows_its_refusals_to_the_budget_that_prepares_it(
+    tmp_path, kind, item
+):
+    from cytearc.readers._seurat.sources import (
+        prepare_matrix_sources,
+        release_temporary_storage,
+    )
+    from tests.memory_helpers import follow_refusals
+
+    values = np.arange(40 * 30, dtype=np.float64).reshape(40, 30) % 5 + 1
+    make = _feature_major_sources(tmp_path, values)[kind]
+
+    def prepare_at(budget: int) -> None:
+        source = make()
+        try:
+            prepare_matrix_sources(source, max_bytes=budget)
+        finally:
+            release_temporary_storage(source)
+
+    # The budget sets the block limit, so the block that it refuses, a
+    # transpose's tile or a cell row of the conversion, names the budget.
+    _budget, refusals = follow_refusals(prepare_at)
+    assert item in {error.item for error in refusals}
+
+
+@pytest.mark.parametrize(
+    ("kind", "block_bytes", "words"),
+    [
+        ("dense", 1_000, "Transpose source tile exceeds maxBlockBytes"),
+        (
+            "sparse",
+            5_000,
+            "One sparse row exceeds the conversion memory limit; maxBlockBytes={}",
+        ),
+    ],
+)
+def test_a_block_limit_of_the_source_limits_refuses_as_that_limit(
+    tmp_path, kind, block_bytes, words
+):
+    from cytearc.readers._seurat.sources import (
+        prepare_matrix_sources,
+        release_temporary_storage,
+    )
+
+    values = np.arange(40 * 30, dtype=np.float64).reshape(40, 30) % 5 + 1
+    make = _feature_major_sources(tmp_path, values)[kind]
+
+    def limit_error(
+        block_bytes: int, max_bytes: int | None, applied: int
+    ) -> ResourceLimitError:
+        source = make(limits=SourceLimits(maxBlockBytes=block_bytes))
+        try:
+            with pytest.raises(ResourceLimitError) as raised:
+                prepare_matrix_sources(source, max_bytes=max_bytes)
+        finally:
+            release_temporary_storage(source)
+        assert not isinstance(raised.value, MemoryError), raised.value
+        # The limit's own words, without bytes of another limit's terms.
+        assert str(raised.value) == words.format(applied), raised.value
+        return raised.value
+
+    # A limit that the source's limits set refuses as that limit, without a
+    # budget or with one that leaves more.
+    limit_error(block_bytes, None, block_bytes)
+    cause = limit_error(block_bytes, 1_000_000, block_bytes).__cause__
+    assert isinstance(cause, MemoryBudgetError)
+    limit = cause.needed_bytes
+    # A budget that sets the limit below the source's one still refuses as a
+    # limit when the block that passes it would pass the source's one.
+    resident = make().resident_bytes
+    limit_error(limit - 1, resident + limit - 2, limit - 2)
 
 
 @pytest.mark.parametrize("backend", ["directory", "hdf5"])

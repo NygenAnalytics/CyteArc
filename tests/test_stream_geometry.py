@@ -418,7 +418,7 @@ def test_partition_indices_cuts_fixed_width_blocks_in_request_order() -> None:
 def test_partition_indices_rejects_an_index_that_never_fits() -> None:
     geometry = _geometry(shape=(12, 10), chunks=(5, 5))
 
-    with pytest.raises(MemoryError, match="does not fit the operation budget"):
+    with pytest.raises(ValueError, match="does not fit the operation budget"):
         partition_indices(geometry, 1, np.arange(10), fits=lambda _width: False)
 
 

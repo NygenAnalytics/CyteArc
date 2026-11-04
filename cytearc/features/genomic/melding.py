@@ -21,6 +21,7 @@ from ...storage.layout import array_shard_rows
 from ...storage.schema import DerivedAssayTransaction
 from ...storage.sharding import write_dense_from_row_batches
 from ...utils.arrays import array_digest, sparse_matrix_bytes
+from ...utils.memory_budget import MemoryBudgetError
 from .intervals import create_bed_from_coord_ids, get_feature_mappings
 
 __all__ = ["create_counts_mat", "write_melded_counts"]
@@ -108,10 +109,13 @@ def _max_meld_band_rows(
         )
 
     if available < cost(1):
-        raise MemoryError(
+        raise MemoryBudgetError(
             "Gene-score melding needs about "
             f"{resident + cost(1)} bytes, but the operation limit is "
-            f"{memoryBytes} bytes"
+            f"{memoryBytes} bytes",
+            needed_bytes=resident + cost(1),
+            budget_bytes=int(memoryBytes),
+            item="one band of melded cells beside the mapping",
         )
     preferred = max(1, min(int(preferredRows), limit))
     if cost(preferred) <= available:

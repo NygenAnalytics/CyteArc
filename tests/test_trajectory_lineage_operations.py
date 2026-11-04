@@ -651,28 +651,32 @@ def test_curves_accept_explicit_coordinates_and_lineage_subsets(
     assert datastore.trajectory.curves(lineage_fate, n_points=40) == lineage_curves
 
 
-def test_curve_placements_are_written_one_chunk_at_a_time(
+def test_curve_placements_are_written_a_whole_chunk_band_at_a_time(
     datastore, lineage_fate, monkeypatch
 ):
-    # A block of placements across a chunk boundary rewrites two chunks of up
-    # to 100,000 rows, which Zarr's default concurrency would rewrite at once.
+    # Blocks of placements fill a chunk band of each array before it is
+    # written, so no block rewrites a chunk of up to 100,000 rows.
     before = zarr.config.get("async.concurrency")
     setitem = zarr.Array.__setitem__
-    limits = []
+    writes: dict[str, list[tuple[int, int]]] = {"progress": [], "distance": []}
+    layout: dict[str, tuple[int, int]] = {}
 
     def recorded(array, selection, value):
-        limits.append(
-            (array.path.rsplit("/", 1)[-1], zarr.config.get("async.concurrency"))
-        )
+        name = array.path.rsplit("/", 1)[-1]
+        if name in writes:
+            writes[name].append((selection.start, selection.stop))
+            layout[name] = (int(array.shape[0]), int(array.chunks[0]))
         return setitem(array, selection, value)
 
     monkeypatch.setattr(zarr.Array, "__setitem__", recorded)
     datastore.trajectory.curves(lineage_fate, lineages=[2], n_points=24, batch_size=97)
     monkeypatch.undo()
-    placements = [limit for name, limit in limits if name in ("progress", "distance")]
-    # Batches of 97 cells write several blocks of each array.
-    assert len(placements) > 2
-    assert set(placements) == {1}
+    for name, spans in writes.items():
+        n_cells, chunk_rows = layout[name]
+        bands = list(range(0, n_cells, chunk_rows))
+        assert spans == [(start, min(start + chunk_rows, n_cells)) for start in bands]
+        # Batches of 97 cells place many more blocks than the bands written.
+        assert -(-n_cells // 97) > len(spans)
     assert zarr.config.get("async.concurrency") == before
 
 
