@@ -765,20 +765,22 @@ def _search_ledger(ledger: MemoryLedger | None) -> MemoryLedger | None:
 
     It holds what the caller holds less ``CLUSTER_SEARCH_BYTES``, which the
     caller holds for the search, so that the search may use them beside the
-    caller's room and a refusal names the caller's whole budget.
+    caller's room and a refusal names the caller's whole budget. A caller
+    that holds less than the reservation gives the search the reservation
+    beside its room, a budget of their sum.
     """
     if ledger is None or ledger.budget is None:
         return None
+    beside = ledger.held_bytes - CLUSTER_SEARCH_BYTES
+    budget = ledger.budget if beside >= 0 else CLUSTER_SEARCH_BYTES + (ledger.room or 0)
     search = MemoryLedger(
-        ledger.budget,
+        budget,
         ledger.doing,
         remedy=ledger.remedy,
         codec_threads=ledger.codec_threads,
     )
-    search.hold(
-        "what clustering holds beside the search",
-        max(0, ledger.held_bytes - CLUSTER_SEARCH_BYTES),
-    )
+    if beside > 0:
+        search.hold("what clustering holds beside the search", beside)
     return search
 
 

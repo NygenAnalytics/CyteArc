@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from ..storage.arrays import linked_missing_mask
+from ..storage.async_execution import zarr_decoding_threads
 from ..storage.artifacts import (
     ArtifactRef,
     ArtifactStatus,
@@ -867,7 +868,11 @@ def read_cell_selection(
             _INDEX_BYTES * planned.cells + held,
         ) + (0 if planned.checked else held)
     ledger.peak(item, reading)
-    indices = cell_selection_indices(root, planned.selection)
+    # The flags decode on the ledger's codec threads, as every read that a
+    # ledger charges does, so what this read leaves replaces what the read
+    # before it left.
+    with zarr_decoding_threads(ledger.codec_threads):
+        indices = cell_selection_indices(root, planned.selection)
     if held:
         ledger.leave(held)
     ledger.hold(item, indices.nbytes)

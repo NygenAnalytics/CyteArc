@@ -81,9 +81,10 @@ _SET_CELL_BYTES = 16
 _IDENTITY_CELL_BYTES = 180
 _NODE_ITEM_BYTES = 16
 # Bytes that the nodes hold once found: each cell's node, each node's first
-# cell, size, group, pointer and presence, and each of its items.
+# cell, size, group and pointer and its flags of whether it remains and
+# whether it is ambiguous, and each of its items.
 _HELD_CELL_BYTES = 8
-_NODE_BYTES = 41
+_NODE_BYTES = 42
 _HELD_ITEM_BYTES = 8
 # Bytes of each item of a node while the Jaccard graph is built: the group of
 # its entry, its code within the group, the transposed lists and their order;

@@ -103,6 +103,7 @@ from ...utils.arrays import sorted_unique
 from ...utils.digest import file_sha256
 from ...utils.logging import logger
 from ...utils.memory_budget import (
+    NUMPY_STEP_BYTES,
     MemoryLedger,
     hash_table_bytes,
     object_array_bytes,
@@ -154,8 +155,13 @@ _MAX_CHUNK_ROWS = 1_000_000
 # with the ID, about 220 bytes per cell, and 230 with the receptor types of
 # clonotypes, as traced on 200,000 cells.
 _TABLE_BYTES_PER_CELL = 250
-# Bytes per cell of an export beside its ID: its label and its code.
+# Bytes per cell of an export beside its ID: its label and its code, and the
+# text of its row. Writing a file holds the text writer's buffers, 138 to
+# 143 KB as traced for a few cells, and for a gzip-compressed file zlib's
+# state of compression too, 341 to 472 KB.
 _EXPORT_BYTES_PER_CELL = 200
+_EXPORT_TEXT_BYTES = 160 * 1024
+_EXPORT_GZIP_BYTES = 512 * 1024
 # Bytes of each clone that a figure labels: its ID as given and as text, its
 # code, and its label, a string of up to four bytes per character, beside the
 # junction that the repertoire operations read.
@@ -948,9 +954,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         cell_ids = artifact_cell_ids(
             ledger, self.zw, self.cells._get_array("ids"), clones
         )
-        # Each cell's label and code as written, and its flag.
+        # Each cell's label and code as written, and its flag, beside the
+        # writer's buffers.
         ledger.peak(
-            f"writing the clones of {n_cells} cells", _EXPORT_BYTES_PER_CELL * n_cells
+            f"writing the clones of {n_cells} cells",
+            _EXPORT_BYTES_PER_CELL * n_cells
+            + (
+                _EXPORT_GZIP_BYTES
+                if os.fspath(path).endswith(".gz")
+                else _EXPORT_TEXT_BYTES
+            ),
         )
         assigned = codes >= 0
         cell_ids = cell_ids[assigned]
@@ -975,6 +988,25 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         receptors = inspect_artifact(self.zw, clonotypes).input_ref("receptors")
         require_complete_artifact(self.zw, receptors)
         return artifact_group(self.zw, receptors)
+
+    def _plan_measured_cells(
+        self, clones: ArtifactRef, *selections: ArtifactRef | None
+    ) -> None:
+        """Check the clones' cell selection and each other selection given before the summary charges anything.
+
+        A selection's identity check reads its flags outside the budget, so
+        it runs once in the operation's scope, before the first charge; the
+        reads of the cells that :meth:`_measured_clone_cells` charges reuse
+        it.
+        """
+        clone_cells = inspect_artifact(self.zw, clones).input_ref("cell_selection")
+        plan_cell_selection_read(self.zw, clone_cells)
+        for selection in selections:
+            if (
+                isinstance(selection, ArtifactRef)
+                and selection.kind == "cell_selection"
+            ):
+                plan_cell_selection_read(self.zw, selection)
 
     def _clone_ledger(self, clones: ArtifactRef, doing: str) -> MemoryLedger:
         """The ledger of a summary of a clone artifact's cells, which ``doing`` names with their number."""
@@ -1266,14 +1298,19 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         )
         n_measured = len(measured)
         # Each measured cell's place among the clones' cells, found through
-        # pandas' hash table of their positions, and its clone and labels.
+        # pandas' hash table of their positions and its copy of them, as
+        # traced on 48 to 1,000,000 positions, beside the objects of its
+        # index; and each measured cell's clone and labels.
         ledger.hold(
             "each measured cell's clone and the labels its clone keeps apart",
             (9 + 8 * len(source.kept_apart)) * n_measured,
         )
         ledger.peak(
             "matching the clones' cells to the measured cells",
-            hash_table_bytes(len(held)) + 8 * n_measured,
+            hash_table_bytes(len(held))
+            + 8 * len(held)
+            + 8 * n_measured
+            + NUMPY_STEP_BYTES,
         )
         at = pd.Index(held).get_indexer(measured)
         found = at >= 0
@@ -1498,6 +1535,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
             # Naming the bins checks that the last bound is 1.
             frequency_labels(frequencies)
+        self._clone_group(clones)
+        self._plan_measured_cells(clones, cell_selection)
         ledger = self._clone_ledger(clones, "Measuring the clonal expansion")
         source = self._read_clone_input(clones, ledger)
         measured, codes, kept_apart = self._measured_clone_cells(
@@ -1690,6 +1729,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         measured = status.input_ref("cell_selection")
         n_cells = int(as_zarr_array(group["group_codes"], name="group_codes").shape[0])
         n_groups = int(cast(int, group.attrs["n_groups"]))
+        self._plan_measured_cells(clones, measured)
         ledger = MemoryLedger(
             self.memoryBytes,
             f"Loading the clonal expansion of {n_cells} cells",
@@ -2528,6 +2568,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         for name, count in (("early", n_early), ("late", n_late)):
             if count == 0:
                 raise ValueError(f"{name} selects no cell")
+        self._clone_group(clones)
+        self._plan_measured_cells(clones)
         ledger = self._clone_ledger(clones, "Measuring the fate bias of the clones")
         source = self._read_clone_input(clones, ledger)
         early_cells = read_cell_selection(

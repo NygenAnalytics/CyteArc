@@ -26,7 +26,6 @@ from cytearc.datastore._operations.record_tables import stored_text
 from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.artifacts import cell_data_write_bytes
 from cytearc.metadata.rows import (
-    array_row_selection_parts,
     text_read_bytes,
 )
 from cytearc.repertoire import SLOTS, Clonotypes
@@ -42,7 +41,6 @@ from tests.clone_helpers import (
     N_RECEPTOR_CELLS,
     clonal_receptors,
     every_cell,
-    grouping_without_a_budget,
     ids_read_bytes,
     import_truth_receptors,
     loaded_partition,
@@ -60,7 +58,7 @@ from tests.memory_helpers import (
     charges,
     check_budget,
     hold_finished_reads,
-    named_budget,
+    step_charge,
 )
 from tests.storage_helpers import (
     insert_nullable_cell_column,
@@ -595,53 +593,32 @@ def test_figure_labels_read_the_clonotype_ids_within_the_budget(
 ) -> None:
     store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
-    # Four IDs of 11 characters, stored in one chunk as fixed-width text of 4
-    # bytes per character, read as Python strings and then indexed: the chunk
-    # decoded, 176 bytes, and its compressed bound, 176 + 1 + 1,024 bytes;
-    # each ID three times with the buffers of the read, 44 bytes each, 16
-    # index arrays of 8 bytes, a Python string of 64 bytes and 4 per
-    # character, and 100 bytes in the index; and 400 bytes for the clonotype
-    # labelled.
-    per_id = 3 * 44 + 16 * 8 + (64 + 4 * 11) + 100
-    ids_bytes = 176 + (176 + 1 + 1_024) + 4 * per_id + 400
-    monkeypatch.setattr(store, "memoryBytes", ids_bytes - 1)
-    with pytest.raises(MemoryError, match="Labelling clonotypes reads the IDs of 4"):
-        store._clone_figure_labels(ref, ["clonotype_1"])
-    # Reading the junction that names it then decodes a chunk of each array
-    # of the receptors that it reads, which may refuse a budget of its own.
-    budget = ids_bytes
-    for _attempt in range(10):
-        monkeypatch.setattr(store, "memoryBytes", budget)
-        try:
-            labels = store._clone_figure_labels(ref, ["clonotype_1"])
-            break
-        except MemoryError as error:
-            found = re.search(r"by their junctions holds about (\d+) bytes", str(error))
-            assert found is not None, str(error)
-            assert int(found.group(1)) > budget
-            budget = int(found.group(1))
+
+    def label() -> np.ndarray:
+        return store._clone_figure_labels(ref, ["clonotype_1"])
+
+    # The clonotype labelled is held at 400 bytes throughout, and the four
+    # IDs of 11 characters are read as Python strings, then hashed into
+    # pandas' table, eight buckets of 16 bytes and a bit, since four keys
+    # would fill four buckets past 77%, beside a slot for the clonotype
+    # given.
+    _result, taken = charges(label)
+    stated = {item: nbytes for item, nbytes, _planned in taken}
+    assert stated["the 1 clonotypes labelled"] == 400
+    assert stated["the index of the IDs of 4 clonotypes"] == 16 * 8 + 8 // 8 + 8
+    assert taken[-1][0] == "a release"
+    # Every read is charged on the one ledger, the junctions' reads beside
+    # the IDs that labelling holds, and the labels run at the budget that
+    # their refusals name.
+    _budget, refusals, labels = check_budget(store, lambda _reopened: label())
     assert labels.tolist() == ["CASSA"]
-    # The junction's reads are each charged before they read, beside what
-    # the caller holds and what the read before may still hold, Zarr's
-    # objects among it, and each refusal names the budget that passes it.
-    budget = 1
-    refusals = []
-    for _attempt in range(10):
-        monkeypatch.setattr(store, "memoryBytes", budget)
-        try:
-            junctions = store._representative_junctions(
-                ref, np.asarray([0]), held_bytes=400
-            )
-            break
-        except MemoryBudgetError as error:
-            assert str(error).startswith(
-                "Labelling clonotypes by their junctions holds about"
-            )
-            refusals.append(named_budget(error))
-            assert refusals[-1] > budget
-            budget = refusals[-1]
-    assert len(refusals) > 1 and junctions.tolist() == ["CASSA"]
-    assert budget > 400 + READ_OBJECT_BYTES
+    assert any("for the IDs of 4 clonotypes" in refusal for refusal in refusals)
+    # The junctions of the representatives are charged to the caller's
+    # ledger, beside what it holds, and leave what they keep charged to it.
+    ledger = MemoryLedger(None, "Labelling clonotypes by their junctions")
+    ledger.hold("the clonotypes labelled", 400)
+    junctions = store._representative_junctions(ref, np.asarray([0]), ledger=ledger)
+    assert junctions.tolist() == ["CASSA"] and ledger.charged >= 400
 
 
 def test_a_representative_without_a_junction_is_refused(tmp_path) -> None:
@@ -1150,15 +1127,6 @@ def test_group_by_may_not_name_the_receptor_type_again(tmp_path) -> None:
         store.clones.diversity(receptors)
 
 
-# Reading the eight cells' clonotypes holds each cell's stored int32 code and
-# its int64 copy, its receptor type, stored in 20 bytes as "no IR" is five
-# characters, and 100 more while the types are coded, and an 8-byte label; and
-# with their labels, each of the four clonotypes' 44 stored bytes, eleven
-# characters, three times and 100 more.
-CLONOTYPES_READ = 8 * (4 + 8) + 8 * (20 + 100) + 8 * 8
-CLONOTYPE_LABELS_READ = 4 * (100 + 3 * 44)
-
-
 def _assert_stored_widths(store, receptors, ref) -> None:
     receptor_group = artifact_group(store.zw, receptors)
     assert receptor_group["values"].dtype == np.dtype("<U5")
@@ -1249,73 +1217,75 @@ def test_grouping_by_within_columns_is_checked_against_the_memory_budget(
     assert len(store.artifacts.list(kind="clonotypes", scope="datastore")) == 1
 
 
-def test_reading_clonotypes_as_clones_counts_their_receptor_types(
-    tmp_path, monkeypatch
-) -> None:
+def test_reading_clonotypes_as_clones_counts_their_receptor_types(tmp_path) -> None:
     store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     _assert_stored_widths(store, receptors, ref)
-    for with_ids, needed in (
-        (False, CLONOTYPES_READ),
-        (True, CLONOTYPES_READ + CLONOTYPE_LABELS_READ),
+    # Each cell keeps its clonotype as int64 and a reference to its receptor
+    # type's shared label; with the labels, each of the four clonotypes'
+    # labels keeps a reference and an ASCII string of 41 bytes and one a
+    # character, eleven characters each.
+    for with_ids, held in (
+        (False, 8 * (8 + 8)),
+        (True, 8 * (8 + 8) + 4 * (8 + 41 + 11)),
     ):
-        monkeypatch.setattr(store, "memoryBytes", needed - 1)
-        with pytest.raises(MemoryError, match=f"8 cells holds about {needed} bytes"):
-            store._read_clone_input(ref, with_ids=with_ids)
-        monkeypatch.setattr(store, "memoryBytes", needed)
-        source = store._read_clone_input(ref, with_ids=with_ids)
+        ledger = MemoryLedger(None, "Reading clonotypes")
+        source = store._read_clone_input(ref, ledger, with_ids=with_ids)
+        assert source.nbytes == ledger.charged == held
     assert source.clone_ids is not None
     assert source.clone_ids.tolist() == [f"clonotype_{rank}" for rank in range(1, 5)]
     ((name, labels),) = source.kept_apart
     assert name == "receptor_type"
     assert labels.tolist() == ["TCR"] * 5 + ["BCR"] * 2 + ["no IR"]
+    # Coding the receptor types is charged to the same ledger, as
+    # category_codes charges it.
+    _result, taken = charges(
+        lambda: store._read_clone_input(ref, MemoryLedger(None, "Reading clonotypes"))
+    )
+    assert "each cell's receptor type" in {item for item, _nbytes, _planned in taken}
 
 
 def test_clonotypes_load_and_export_as_clones_within_the_memory_budget(
-    tmp_path, monkeypatch
+    tmp_path,
 ) -> None:
     store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
-    # Beside 250 bytes per cell for the tables, or 200 for the file, both read
-    # the clonotypes and count their labels and the cells' IDs as text, the
-    # four labels once each, as their stored chunk is read.
-    labels = artifact_group(store.zw, ref)["clonotype_ids"]
-    assert labels.shape == (4,)
-    read = CLONOTYPES_READ + text_read_bytes(labels, 4) + ids_read_bytes(store, 8)
-    assert text_read_bytes(labels, 4) > CLONOTYPE_LABELS_READ
-    for verb, per_cell, run in (
-        ("Loading", 250, lambda: store.clones.load_clones(ref)),
-        ("Exporting", 200, lambda: store.clones.export_clones(ref, tmp_path / "x.csv")),
+    # Beside the clonotypes, their labels and the cells' IDs that both read,
+    # the tables are charged 250 bytes a cell and the file 200, and each runs
+    # at the budget that its refusals name, without writing to the store.
+    for item, per_cell, run in (
+        ("the tables of 8 cells", 250, lambda: store.clones.load_clones(ref)),
+        (
+            "writing the clones of 8 cells",
+            200,
+            lambda: store.clones.export_clones(ref, tmp_path / "x.csv"),
+        ),
     ):
-        needed = 8 * per_cell + read
-        monkeypatch.setattr(store, "memoryBytes", needed - 1)
-        with pytest.raises(MemoryError, match=f"{verb} the clones of 8 cells holds"):
-            run()
-        with pytest.raises(MemoryError, match=f"about {needed} bytes"):
-            run()
-        monkeypatch.setattr(store, "memoryBytes", needed)
-        run()
+        nbytes, _planned = step_charge(run, item)
+        # Writing a plain file holds the text writer's buffers too.
+        assert nbytes == 8 * per_cell + (160 * 1024 if per_cell == 200 else 0)
+        check_budget(store, lambda _reopened: run(), check_writes=False)
 
 
-def test_expansion_of_clonotypes_counts_each_cells_receptor_type(
-    tmp_path, monkeypatch
-) -> None:
+def test_expansion_of_clonotypes_counts_each_cells_receptor_type(tmp_path) -> None:
     store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
-    # Measuring takes 300 bytes per cell and 8 for its receptor type, and
-    # 2,000 for each group, the T cells and the B cells, beside a grouping
-    # that the test leaves without a budget.
-    grouping_without_a_budget(monkeypatch)
-    needed = 8 * (300 + 8) + 2 * 2_000
-    monkeypatch.setattr(store, "memoryBytes", needed - 1)
-    with pytest.raises(MemoryError, match=f"of 8 cells holds about {needed} bytes"):
-        store.clones.expansion(ref)
-    monkeypatch.setattr(store, "memoryBytes", needed)
-    assert store.clones.expansion(ref).kind == "clonal_expansion"
+    # Measuring takes 300 bytes per cell and 2,000 for each group, the T
+    # cells and the B cells, beside each cell's receptor type, which the
+    # clonotypes read holds.
+    nbytes, _planned = step_charge(
+        lambda: store.clones.expansion(ref, invalidate_cache=True),
+        "measuring the clonal expansion of 8 cells",
+    )
+    assert nbytes == 8 * 300 + 2 * 2_000
+    _budget, _refusals, measured = check_budget(
+        store, lambda reopened: reopened.clones.expansion(ref, invalidate_cache=True)
+    )
+    assert measured.kind == "clonal_expansion"
 
 
 def test_loaded_expansion_of_other_cells_matches_their_receptor_types(
-    tmp_path, monkeypatch
+    tmp_path,
 ) -> None:
     store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
@@ -1323,35 +1293,22 @@ def test_loaded_expansion_of_other_cells_matches_their_receptor_types(
     measured = store.snapshot_cell_selection("first_half")
     saved = store.clones.expansion(ref, cell_selection=measured)
     # The four measured cells are T cells of one group: 500 bytes each and
-    # 2,000 for the group, their IDs as text, the clonotypes with their
-    # labels, and the clonotypes' eight cells matched to the measured ones,
-    # 56 bytes each, and 32 for each measured cell and 8 for its receptor type,
-    # with the read before: the largest stored chunk of the two selections and
-    # the clonotypes' codes, and Zarr's objects.
-    before = max(
-        array_row_selection_parts(artifact_group(store.zw, artifact)[name])[0]
-        for artifact, name in (
-            (measured, "values"),
-            (store.artifacts.inspect(ref).input_ref("cell_selection"), "values"),
-            (ref, "codes"),
-        )
+    # 2,000 for the group, beside the clonotypes with their labels, matched
+    # to the measured cells with their receptor types, and their IDs.
+    nbytes, _planned = step_charge(
+        lambda: store.clones.load_expansion(saved),
+        "the tables of the clonal expansion of 4 cells",
     )
-    needed = (
-        4 * 500
-        + 2_000
-        + ids_read_bytes(store, 4)
-        + CLONOTYPES_READ
-        + CLONOTYPE_LABELS_READ
-        + 8 * 56
-        + 4 * (32 + 8)
-        + before
-        + READ_OBJECT_BYTES
+    assert nbytes == 4 * 500 + 2_000
+    nbytes, _planned = step_charge(
+        lambda: store.clones.load_expansion(saved),
+        "each measured cell's clone and the labels its clone keeps apart",
     )
-    monkeypatch.setattr(store, "memoryBytes", needed - 1)
-    with pytest.raises(MemoryError, match=f"of 4 cells holds about {needed} bytes"):
-        store.clones.load_expansion(saved)
-    monkeypatch.setattr(store, "memoryBytes", needed)
-    assert store.clones.load_expansion(saved).cells.shape[0] == 4
+    assert nbytes == 4 * (9 + 8)
+    _budget, _refusals, loaded = check_budget(
+        store, lambda reopened: reopened.clones.load_expansion(saved)
+    )
+    assert loaded.cells.shape[0] == 4
 
 
 def test_loaded_clonotypes_are_checked_against_the_memory_budget(

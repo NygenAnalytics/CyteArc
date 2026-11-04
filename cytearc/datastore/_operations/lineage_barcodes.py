@@ -902,6 +902,11 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         group = self._barcode_group(barcodes)
         stored_counts = as_zarr_array(group["n_barcodes"], name="n_barcodes")
         n_cells = int(stored_counts.shape[0])
+        # The cells' selection is checked once, outside the budget, before
+        # anything is charged; the grouping and saving reuse the check.
+        plan_cell_selection_read(
+            self.zw, inspect_artifact(self.zw, barcodes).input_ref("cell_selection")
+        )
         ledger = MemoryLedger(
             self.memoryBytes,
             f"Calling clones from the barcodes of {n_cells} cells",

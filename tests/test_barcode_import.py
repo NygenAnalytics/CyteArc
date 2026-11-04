@@ -947,7 +947,7 @@ def test_load_refuses_other_artifacts_and_tables_larger_than_the_budget(
     with pytest.raises(TypeError, match="barcodes must be an ArtifactRef"):
         store.clones.load_barcodes("barcodes")
     monkeypatch.setattr(store, "memoryBytes", 2_000)
-    with pytest.raises(MemoryError, match="The tables of 48 cells"):
+    with pytest.raises(MemoryError, match="for the tables of 48 cells"):
         store.clones.load_barcodes(ref)
 
 
@@ -1776,7 +1776,7 @@ def test_the_load_counts_its_records_texts_and_cells_to_the_byte(
         + 64 * N_CELLS
     )
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
-    with pytest.raises(MemoryError, match=f"hold about {needed} bytes"):
+    with pytest.raises(MemoryError, match=f"holds about {needed} bytes for the tables"):
         store.clones.load_barcodes(ref)
     # At the bound the tables fit, and the read of the cells' barcode counts,
     # which counts Zarr's objects beside each array it reads, names the budget

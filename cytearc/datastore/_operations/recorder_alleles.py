@@ -181,11 +181,13 @@ _STORE_BYTES_PER_ALLELE_BYTE = 2
 _BANK_ROW_BYTES = 128
 _BANK_HELD_ROW_BYTES = 80
 _BANK_CHARACTER_BYTES = 4
-# Calling clones codes each edit's character from its integration and site:
-# for each edit, their int32 copies, their key as int64 and the sort that
-# numbers the keys, beside the edits' alleles held; and for each record of a
-# block of _KEY_BLOCK, its key, its int64 copy of the integration and its
-# sorted copy. It then holds each edit's cell, character and allele.
+# Calling clones codes each edit's character from its integration and site,
+# as one int64 key, which it numbers by sorting: the keys' order and sorted
+# copy, the flags of runs and their numbering, about 41 bytes an edit as
+# traced on 3.5 million edits, beside the key and the character kept; and for
+# each record of a block of _KEY_BLOCK, its key, its int64 copy of the
+# integration and its sorted copy. It then holds each edit's cell, character
+# and allele.
 _CHARACTER_EDIT_BYTES = 48
 _KEY_BLOCK_BYTES = 32
 _HELD_EDIT_BYTES = 24
@@ -1118,6 +1120,11 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         group = self._allele_group(alleles)
         counts = self._allele_counts(group)
         n_cells = counts["cells"]
+        # The cells' selection is checked once, outside the budget, before
+        # anything is charged; the grouping and saving reuse the check.
+        plan_cell_selection_read(
+            self.zw, inspect_artifact(self.zw, alleles).input_ref("cell_selection")
+        )
         ledger = MemoryLedger(
             self.memoryBytes,
             f"Calling clones from the alleles of {n_cells} cells",
@@ -1193,14 +1200,15 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         # before the records are read, and held while the clones are called,
         # each character at the width of the widest.
         n_texts = counts["alleles"] + counts["integrations"] + counts["sites"]
-        ledger.peak(
-            f"the text of {counts['alleles']} distinct alleles as it is decoded",
-            _DECODE_TEXT_BYTES * n_texts + counts["decoded_bytes"],
-        )
-        texts = _record_texts(ledger, group)
+        # The decoded text is held before it is made, beside the stored text
+        # that each read keeps until it is decoded, and decoding each field is
+        # charged beside its stored text.
         text_bytes = ledger.hold(
             f"the text of {counts['alleles']} distinct alleles",
             _HELD_TEXT_BYTES * n_texts + counts["text_width"] * counts["text_bytes"],
+        )
+        texts = _record_texts(
+            ledger, group, _DECODE_TEXT_BYTES * n_texts + counts["decoded_bytes"]
         )
         # The states are read first, so that only the records of edited sites
         # are read on.
@@ -1219,8 +1227,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         n_edited = int(np.count_nonzero(edited))
         observations = _allele_observations(ledger, group, edited, texts)
         observation_bytes = _HELD_EDIT_BYTES * n_edited
+        # The observations keep the alleles' text.
         del edited, texts
-        ledger.release(edited_bytes + text_bytes)
+        ledger.release(edited_bytes)
         # The calls are charged beside what the operation holds, and the
         # clones stay charged as the calls leave them.
         called = allele_clone_calls(
@@ -1232,7 +1241,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             ledger=ledger,
         )
         del observations, banks
-        ledger.release(observation_bytes + bank_bytes)
+        ledger.release(observation_bytes + bank_bytes + text_bytes)
         labels = hold_ranked_clone_labels(ledger, called.n_clones)
         ledger.hold("each cell's rare alleles as written", 4 * n_cells)
         written_alleles = called.n_alleles.astype(np.int32)
@@ -1311,12 +1320,13 @@ def _banks_fingerprint(banks: Mapping[str, AlleleBank]) -> str:
 
 
 def _record_texts(
-    ledger: MemoryLedger, group: zarr.Group
+    ledger: MemoryLedger, group: zarr.Group, decoding: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """The distinct integrations, sites and alleles of saved records, as text.
 
     Each field's packed text is read whole within ``ledger`` and decoded,
-    and its stored arrays are let go once it is.
+    which is charged ``decoding`` bytes beside it, the most that decoding
+    any of them holds, and its stored arrays are let go once it is.
     """
 
     def texts(name: str) -> np.ndarray:
@@ -1326,6 +1336,7 @@ def _record_texts(
         offsets = read_whole(
             ledger, group, f"{_RECORDS}_{name}_offsets", item=f"the {name}s' text"
         )
+        ledger.peak(f"decoding the {name}s' text", decoding)
         decoded = unpack_text(values, offsets)
         stored = values.nbytes + offsets.nbytes
         del values, offsets
@@ -1341,9 +1352,10 @@ def _edited_codes(
     """The values of the record array ``name`` at the edited records, as int64, kept charged as ``item``."""
     stored = read_whole(ledger, group, f"{_RECORDS}_{name}", item=item)
     n_edited = int(np.count_nonzero(edited))
-    # The edited values as stored, and their int64 copy.
-    ledger.peak(item, stored.dtype.itemsize * n_edited)
+    # The int64 copy of the edited values is kept, beside them as stored
+    # while they are copied.
     ledger.hold(item, 8 * n_edited)
+    ledger.peak(item, stored.dtype.itemsize * n_edited)
     codes = np.asarray(stored[edited], dtype=np.int64)
     stored_bytes = stored.nbytes
     del stored
@@ -1385,7 +1397,13 @@ def _allele_observations(
         )
         for start in range(0, len(integrations), _KEY_BLOCK)
     ]
-    ledger.peak("the characters of the edits", _CHARACTER_EDIT_BYTES * n_edited)
+    # Each edit's key, its integration and site as one int64, is built from
+    # their stored values at the edits, beside both full columns.
+    key_bytes = ledger.hold("the edits' keys", 8 * n_edited)
+    ledger.peak(
+        "the edits' keys",
+        (integrations.dtype.itemsize + sites.dtype.itemsize) * n_edited,
+    )
     columns = integrations.nbytes + sites.nbytes
     integrations = integrations[edited]
     sites = sites[edited]
@@ -1395,9 +1413,12 @@ def _allele_observations(
     keys += sites
     del sites
     ledger.release(columns)
+    # Numbering the keys sorts them, and keeps each edit's character.
     ledger.hold("each edit's character", 8 * n_edited)
+    ledger.peak("the characters of the edits", _CHARACTER_EDIT_BYTES * n_edited)
     distinct, characters = unique_inverse(keys)
     del keys
+    ledger.release(key_bytes)
     cells = _edited_codes(ledger, group, "cells", edited, item="each edit's cell")
 
     def name(key: int) -> str:

@@ -342,7 +342,7 @@ def test_a_59_megabyte_tree_on_one_line_parses_within_its_budget(tmp_path) -> No
     # The budget climbs from one byte to the bytes that each refusal states.
     budget, _refusals, trees, peak = budget_that_runs(
         lambda budget: budget,
-        lambda budget: read_trees(layout, memory_bytes=budget),
+        lambda budget: read_trees(layout, ledger=budgeted(budget)),
         refusal_budget=stated_bytes,
     )
     print(f"59 MB tree: peak {peak} budget {budget} ratio {peak / budget:.2f}")

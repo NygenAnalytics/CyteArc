@@ -474,6 +474,19 @@ def charges(call: Callable[[], Any]) -> tuple[Any, list[tuple[str, int, int]]]:
 AUDIT_ALLOWANCE = 64 * 1024
 
 
+def step_charge(call: Callable[[], Any], item: str) -> tuple[int, int]:
+    """The bytes of the first charge of ``item`` that ``call`` takes, and what its ledger then plans.
+
+    A test pins a step's own cost by its bytes, and the smallest budget at
+    which the step runs by the plan, as :func:`charges` reports them.
+    """
+    _result, taken = charges(call)
+    for charged, nbytes, planned in taken:
+        if charged == item:
+            return nbytes, planned
+    raise AssertionError(f"No charge of {item!r} among {[entry[0] for entry in taken]}")
+
+
 def audited(
     call: Callable[[], Any], *, allowance: int = AUDIT_ALLOWANCE
 ) -> tuple[Any, list[tuple[str, int, int]]]:

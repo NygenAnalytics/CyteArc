@@ -45,7 +45,7 @@ from tests.clone_truth import (
 )
 from cytearc.datastore._operations.cell_barcodes import lookup_bytes
 from cytearc.utils.memory_budget import object_array_bytes, python_text_bytes
-from tests.memory_helpers import budget_that_runs, charges
+from tests.memory_helpers import budget_that_runs, budgeted, charges
 from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
@@ -372,39 +372,32 @@ def test_writes_count_a_buffer_for_each_write_zarr_runs_at_once(
 
     import zarr
 
-    from cytearc.datastore._operations.phylogeny import _PhylogenyOperationsMixin
-
-    check = _PhylogenyOperationsMixin._check_phylogeny_budget
     path = _write_newick(tmp_path / "truth_tree.nwk")
 
     def stated(concurrency: int) -> list[tuple[str, int]]:
-        found: list[tuple[str, int]] = []
-
-        def recorded(self, what: str, held: int) -> None:
-            found.append((what, held))
-            check(self, what, held)
-
         def run() -> None:
             phylogeny, _ = _import(store, path, invalidate_cache=True)
             _cut(store, phylogeny, time=1.0, invalidate_cache=True)
 
-        with monkeypatch.context() as patched:
-            patched.setattr(
-                _PhylogenyOperationsMixin, "_check_phylogeny_budget", recorded
-            )
-            with zarr.config.set({"async.concurrency": concurrency}):
-                _result, taken = charges(run)
-        return found + [(item, nbytes) for item, nbytes, _planned in taken]
+        with zarr.config.set({"async.concurrency": concurrency}):
+            _result, taken = charges(run)
+        return [(item, nbytes) for item, nbytes, _planned in taken]
 
     ten, twenty = stated(10), stated(20)
     assert [what for what, _ in ten] == [what for what, _ in twenty]
-    writes = ("writing the names of", "Labelling", "writing the clones of")
-    grown = {what: more - fewer for (what, fewer), (_, more) in zip(ten, twenty)}
-    assert grown == {
-        what: 10 * io.DEFAULT_BUFFER_SIZE if what.startswith(writes) else 0
-        for what in grown
+    writes = ("writing the names of", "writing the clones of")
+    grown = {
+        what: more - fewer
+        for (what, fewer), (_, more) in zip(ten, twenty, strict=True)
+        if more != fewer
     }
-    assert sum(what.startswith(writes) for what in grown) == 3
+    # Only the writes grow, by a buffer for each of the ten writes more.
+    assert grown == {what: 10 * io.DEFAULT_BUFFER_SIZE for what in grown}
+    assert grown and all(what.startswith(writes) for what in grown)
+    assert {what.split(" of ")[0] for what in grown} == {
+        "writing the names",
+        "writing the clones",
+    }
 
 
 def test_the_time_unit_is_declared_never_inferred(store, tmp_path) -> None:
@@ -822,7 +815,7 @@ def test_convexml_tree_cuts_as_pycea_cuts_it(tmp_path) -> None:
     )
     from cytearc.readers.phylogeny import read_trees, tree_file_layout
 
-    trees = read_trees(tree_file_layout(path), memory_bytes=10**9)
+    trees = read_trees(tree_file_layout(path), ledger=budgeted(10**9))
     leaves = trees.names[trees.leaf].tolist()
     # Ten cells that no leaf names, and every leaf a cell.
     store = _cells_store(tmp_path, [*leaves, *(f"other{i}" for i in range(10))])
@@ -1046,7 +1039,7 @@ def test_a_reused_import_reads_neither_cells_nor_trees(
     def refuse(*_args, **_kwargs):
         raise AssertionError("a reused import read what it saved")
 
-    monkeypatch.setattr(type(store), "_clone_selection_indices", refuse)
+    monkeypatch.setattr(operations, "read_cell_selection", refuse)
     monkeypatch.setattr(reader, "read_trees", refuse)
     monkeypatch.setattr(
         operations._PhylogenyOperationsMixin, "_imported_forest", refuse

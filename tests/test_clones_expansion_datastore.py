@@ -15,19 +15,19 @@ import pytest
 
 from cytearc.clones import ClonalExpansion
 from cytearc.clones.expansion import DEFAULT_RANK_SPLITS
-from cytearc.metadata.rows import array_row_selection_parts
-from cytearc.utils.memory_budget import MemoryLedger
-from cytearc.storage.artifacts import artifact_group
-from cytearc.storage.geometry import READ_OBJECT_BYTES
+from cytearc.utils.memory_budget import (
+    NUMPY_STEP_BYTES,
+    MemoryBudgetError,
+    MemoryLedger,
+)
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
     every_cell,
-    grouping_without_a_budget,
-    ids_read_bytes,
     import_truth_clones,
     write_truth_store,
 )
 from tests.clone_truth import CLONE_SIZES, N_CELLS, clone_truth
+from tests.memory_helpers import check_budget, step_charge
 from tests.storage_helpers import copy_store, insert_nullable_cell_column, open_store
 
 TRUTH = clone_truth()
@@ -535,92 +535,109 @@ def test_a_read_only_store_reuses_saved_expansion(copied) -> None:
         reader.clones.expansion(clones, breakpoints=(1,))
 
 
-# CoSpar's table labels the truth's eight clones 1 to 8, stored one character
-# wide; reading them holds each cell's stored int32 code and its int64 copy,
-# and each label's 4 stored bytes three times and 100 more.
-CLONES_READ = N_CELLS * (4 + 8) + 8 * (100 + 3 * 4)
-
-
-def test_expansion_refuses_more_cells_than_the_memory_budget(
+def test_expansion_charges_each_cell_and_group_before_it_writes(
     copied, monkeypatch
 ) -> None:
     store, clones = copied.store, copied.clones
-    assert artifact_group(store.zw, clones)["clone_ids"].dtype == np.dtype("<U1")
     saved = store.clones.expansion(clones)
-    # Measuring 48 cells in one group takes 48 * 300 bytes and 2,000 for the
-    # group, beside a grouping that the test leaves without a budget.
-    grouping_without_a_budget(monkeypatch)
-    monkeypatch.setattr(store, "memoryBytes", 16_399)
-    with pytest.raises(MemoryError, match="of 48 cells holds about 16400 bytes"):
-        store.clones.expansion(clones, breakpoints=(1,))
-    assert store.artifacts.list(kind="clonal_expansion", scope="datastore") == [saved]
-    monkeypatch.setattr(store, "memoryBytes", 16_400)
-    assert store.clones.expansion(clones, breakpoints=(1,)) != saved
-    # Loading takes 48 * 500 bytes for the tables, 2,000 for the group, the
-    # clones read and the cells' IDs read as text.
-    needed = N_CELLS * 500 + 2_000 + CLONES_READ + ids_read_bytes(store, N_CELLS)
-    assert needed - ids_read_bytes(store, N_CELLS) == 27_472
-    monkeypatch.setattr(store, "memoryBytes", needed - 1)
-    with pytest.raises(MemoryError, match=f"48 cells holds about {needed} bytes"):
-        store.clones.load_expansion(saved)
-    monkeypatch.setattr(store, "memoryBytes", needed)
-    assert store.clones.load_expansion(saved).categories["n_cells"].sum() == 32
+
+    def measure() -> ArtifactRef:
+        return store.clones.expansion(clones, breakpoints=(1,), invalidate_cache=True)
+
+    # Measuring 48 cells in one group is charged 300 bytes a cell and 2,000
+    # for the group, beside what the ledger holds of the clones and the
+    # grouping; one byte less than the plan is refused, and nothing is
+    # written.
+    item = "measuring the clonal expansion of 48 cells"
+    nbytes, planned = step_charge(measure, item)
+    assert nbytes == N_CELLS * 300 + 2_000
+    listed = store.artifacts.list(kind="clonal_expansion", scope="datastore")
+    monkeypatch.setattr(store, "memoryBytes", planned - 1)
+    with pytest.raises(MemoryBudgetError):
+        measure()
+    assert store.artifacts.list(kind="clonal_expansion", scope="datastore") == listed
+    monkeypatch.setattr(store, "memoryBytes", 2**30)
+    budget, _refusals, measured = check_budget(store, lambda reopened: measure())
+    assert budget >= planned and measured != saved
+    # Loading charges 500 bytes a cell for the tables and 2,000 for the group.
+    nbytes, _planned = step_charge(
+        lambda: store.clones.load_expansion(saved),
+        "the tables of the clonal expansion of 48 cells",
+    )
+    assert nbytes == N_CELLS * 500 + 2_000
 
 
-def test_reading_the_clones_is_checked_against_the_memory_budget(
-    copied, monkeypatch
-) -> None:
+def test_reading_the_clones_charges_their_codes_and_labels(copied) -> None:
     store, clones = copied.store, copied.clones
-    monkeypatch.setattr(store, "memoryBytes", CLONES_READ - 1)
-    with pytest.raises(MemoryError, match=f"48 cells holds about {CLONES_READ} bytes"):
-        store._read_clone_input(clones, with_ids=True)
-    monkeypatch.setattr(store, "memoryBytes", CLONES_READ)
-    source = store._read_clone_input(clones, with_ids=True)
+    # Each cell's clone as int64, and with the labels a reference and an
+    # ASCII string of 41 bytes and one a character for each of the eight
+    # labels 1 to 8, stay charged.
+    for with_ids, held in (
+        (False, 8 * N_CELLS),
+        (True, 8 * N_CELLS + 8 * (8 + 41 + 1)),
+    ):
+        ledger = MemoryLedger(None, "Reading clones")
+        source = store._read_clone_input(clones, ledger, with_ids=with_ids)
+        assert source.nbytes == ledger.charged == held
+        assert source.codes.dtype == np.int64
     assert source.clone_ids is not None
     assert source.clone_ids.tolist() == [str(label) for label in range(1, 9)]
-    # Without labels, only the codes.
-    monkeypatch.setattr(store, "memoryBytes", N_CELLS * 12 - 1)
-    with pytest.raises(MemoryError, match="48 cells holds about 576 bytes"):
-        store._read_clone_input(clones)
-    monkeypatch.setattr(store, "memoryBytes", N_CELLS * 12)
-    assert store._read_clone_input(clones).clone_ids is None
+    # The reads refuse a budget below what they plan, naming it.
+    _budget, refusals, read = check_budget(
+        store,
+        lambda reopened: reopened._read_clone_input(
+            clones,
+            MemoryLedger(reopened.memoryBytes, "Reading clones"),
+            with_ids=True,
+        ),
+        check_writes=False,
+    )
+    assert read.clone_ids.tolist() == source.clone_ids.tolist()
+    assert any("for each cell's clone" in refusal for refusal in refusals)
 
 
-def test_expansion_of_some_cells_counts_every_clone_cell_it_reads(
-    copied, monkeypatch
-) -> None:
+def test_expansion_of_some_cells_charges_matching_them(copied, monkeypatch) -> None:
     store, clones = copied.store, copied.clones
     in_d2 = TRUTH.samples == "d2"
     n_d2 = int(in_d2.sum())
     store.cells.insert("is_d2", in_d2, overwrite=True)
     d2 = store.snapshot_cell_selection("is_d2")
     saved = store.clones.expansion(clones, cell_selection=d2)
-    # Matching the clones' 48 cells to the cells of d2 takes 56 bytes for each
-    # clone cell and 32 for each measured cell, and the largest stored chunk of
-    # the reads before, of the two selections and the clones' codes, with
-    # Zarr's objects.
-    before = max(
-        array_row_selection_parts(artifact_group(store.zw, ref)[name])[0]
-        for ref, name in (
-            (d2, "values"),
-            (store.artifacts.inspect(clones).input_ref("cell_selection"), "values"),
-            (clones, "codes"),
+
+    def measure() -> ArtifactRef:
+        return store.clones.expansion(
+            clones, cell_selection=d2, breakpoints=(1,), invalidate_cache=True
         )
+
+    # Matching the clones' 48 cells to the cells of d2 holds pandas' hash
+    # table of the 48 positions, 64 buckets of 16 bytes and a bit, at most
+    # 77% full, and its copy of them, beside each measured cell's place among
+    # them and the objects of the index.
+    nbytes, planned = step_charge(
+        measure, "matching the clones' cells to the measured cells"
     )
-    matched = N_CELLS * 56 + n_d2 * 32 + before + READ_OBJECT_BYTES
-    monkeypatch.setattr(store, "memoryBytes", matched - 1)
-    with pytest.raises(
-        MemoryError, match=f"48 cells to {n_d2} measured cells holds about {matched}"
-    ):
-        store.clones.expansion(clones, cell_selection=d2, breakpoints=(1,))
-    # Loading their tables also reads and matches every clone cell, and reads
-    # the IDs of the cells of d2.
-    needed = n_d2 * 500 + 2_000 + CLONES_READ + matched + ids_read_bytes(store, n_d2)
-    monkeypatch.setattr(store, "memoryBytes", needed - 1)
-    with pytest.raises(MemoryError, match=f"{n_d2} cells holds about {needed} bytes"):
-        store.clones.load_expansion(saved)
-    monkeypatch.setattr(store, "memoryBytes", needed)
-    assert store.clones.load_expansion(saved).cells.shape[0] == n_d2
+    assert nbytes == 16 * 64 + 64 // 8 + 8 * N_CELLS + 8 * n_d2 + NUMPY_STEP_BYTES
+    # Each measured cell keeps its clone, and its flag while it is matched.
+    nbytes, _planned = step_charge(
+        measure, "each measured cell's clone and the labels its clone keeps apart"
+    )
+    assert nbytes == 9 * n_d2
+    listed = store.artifacts.list(kind="clonal_expansion", scope="datastore")
+    monkeypatch.setattr(store, "memoryBytes", planned - 1)
+    with pytest.raises(MemoryBudgetError):
+        measure()
+    assert store.artifacts.list(kind="clonal_expansion", scope="datastore") == listed
+    # The expansion and its load run at the smallest budgets they name. On
+    # 48 cells the read objects that each read leaves, 64 KiB, and the
+    # write's chunk terms, which the shared read and write costs count,
+    # outweigh the summary's own steps: the budgets are about twice the
+    # traced peaks, 2.02 and 1.91 times as traced.
+    monkeypatch.setattr(store, "memoryBytes", 2**30)
+    check_budget(store, lambda reopened: measure(), at_most=2.5)
+    _budget, _refusals, tables = check_budget(
+        store, lambda reopened: reopened.clones.load_expansion(saved), at_most=2.5
+    )
+    assert tables.cells.shape[0] == n_d2
 
 
 def test_expansion_refuses_cells_without_a_clone_and_a_group(copied) -> None:

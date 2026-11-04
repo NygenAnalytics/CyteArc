@@ -334,7 +334,11 @@ def read_text_rows(
     if np.dtype(array.dtype).kind != "U":
         raise TypeError(f"{item} must be stored as text, not as {array.dtype}")
     stored = read_rows(ledger, array, rows, item=item)
-    return _strings_of(ledger, stored, item)
+    values = _strings_of(ledger, stored, item)
+    stored_bytes = stored.nbytes
+    del stored
+    ledger.release(stored_bytes)
+    return values
 
 
 def read_whole_text(
@@ -357,11 +361,19 @@ def read_whole_text(
     if np.dtype(array.dtype).kind != "U":
         raise TypeError(f"{item} must be stored as text, not as {array.dtype}")
     stored = read_whole(ledger, group, name, item=item)
-    return _strings_of(ledger, stored, item)
+    values = _strings_of(ledger, stored, item)
+    stored_bytes = stored.nbytes
+    del stored
+    ledger.release(stored_bytes)
+    return values
 
 
 def _strings_of(ledger: MemoryLedger, stored: np.ndarray, item: str) -> np.ndarray:
-    """``stored``, fixed-width text that the ledger holds, as Python strings charged in its place."""
+    """``stored``, fixed-width text that the ledger holds, as Python strings charged beside it.
+
+    The caller lets go of the stored text, and releases its charge, once it
+    drops its own reference to it.
+    """
     # Each value's length, while the characters are counted.
     ledger.peak(item, 8 * len(stored))
     characters = int(np.char.str_len(stored).sum()) if len(stored) else 0
@@ -371,11 +383,7 @@ def _strings_of(ledger: MemoryLedger, stored: np.ndarray, item: str) -> np.ndarr
         object_array_bytes(len(stored))
         + python_text_bytes(len(stored), characters, widest=widest),
     )
-    values = stored.astype(object)
-    stored_bytes = stored.nbytes
-    del stored
-    ledger.release(stored_bytes)
-    return values
+    return stored.astype(object)
 
 
 def read_metadata_rows(

@@ -18,21 +18,18 @@ from scipy.cluster.hierarchy import leaves_list
 from scipy.stats import fisher_exact
 
 from cytearc.clones import COUPLING_METHODS, CloneCoupling, CloneFateBias
-from cytearc.datastore._operations import clones as clone_operations
 from cytearc.metadata.artifacts import cell_data_write_bytes
-from cytearc.metadata.rows import array_row_selection_parts
 from cytearc.storage.artifacts import artifact_group
-from cytearc.storage.geometry import READ_OBJECT_BYTES
 from tests.clone_helpers import (
     benjamini_hochberg,
     coupling_reference,
     every_cell,
-    grouping_without_a_budget,
-    ids_read_bytes,
     import_truth_clones,
     write_truth_store,
 )
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_truth import CELL_TYPES, N_CELLS, clone_truth, number_label
+from tests.memory_helpers import check_budget, step_charge
 from tests.storage_helpers import copy_store, insert_nullable_cell_column, open_store
 
 TRUTH = clone_truth()
@@ -668,11 +665,6 @@ def test_fate_bias_tests_clones_within_the_labels_kept_apart(kept_apart) -> None
         assert row.p_value == pytest.approx(expected, rel=1e-9)
 
 
-# Reading the truth's clones without labels holds each of its 48 cells'
-# stored int32 code and its int64 copy.
-CODES_READ = N_CELLS * (4 + 8)
-
-
 def _own_labels(store, mask: np.ndarray):
     """A label artifact of a label of its own, three characters wide, for each cell of ``mask``."""
     store.cells.insert("chosen", mask, overwrite=True)
@@ -688,31 +680,37 @@ def test_coupling_refuses_a_budget_below_one_worker(copied, monkeypatch) -> None
     # A group of its own for each of the 32 cells with a clone, whose small
     # labels leave the coupling the largest step.
     own = _own_labels(store, TRUTH.clones >= 0)
-    # The grouping, which the test leaves without a budget, is checked first.
-    grouping_without_a_budget(monkeypatch)
     # 32 groups and 496 pairs: 250 bytes per pair, 40 per product of two
     # groups, 80 per count of a clone in a group and 12 per cell with a
     # clone; one worker's 4 bytes per cell, 8 per product and 32 per group;
-    # one permutation's 8 bytes per pair; and beside them the clones read, 40
-    # bytes per count and 2,000 per group.
-    needed = (
+    # one permutation's 8 bytes per pair; and beside them the counts' entries
+    # in the matrices, 40 bytes each, and 2,000 per group, charged beside the
+    # clones and counts that the ledger holds.
+    item = "measuring the coupling of 32 groups, 496 pairs"
+    budget, _refusals, tight = check_budget(
+        store,
+        lambda reopened: reopened.clones.coupling(
+            clones, groups=own, n_permutations=50
+        ),
+    )
+    assert len(tight.pairs) == 496
+    # At the smallest budget that it accepts, the coupling runs one worker,
+    # one permutation at a time, and its plan is that budget.
+    monkeypatch.setattr(store, "memoryBytes", budget)
+    nbytes, planned = step_charge(
+        lambda: store.clones.coupling(clones, groups=own, n_permutations=50), item
+    )
+    assert nbytes == (
         250 * 496
         + 40 * 32**2
         + 80 * 32
         + 12 * 32
         + (4 * 32 + 8 * 32**2 + 32 * 32)
         + 8 * 496
-        + CODES_READ
         + 40 * 32
         + 2_000 * 32
     )
-    assert needed == 247_072
-    monkeypatch.setattr(store, "memoryBytes", needed - 1)
-    with pytest.raises(MemoryError, match=f"496 pairs, holds about {needed} bytes"):
-        store.clones.coupling(clones, groups=own)
-    monkeypatch.setattr(store, "memoryBytes", needed)
-    tight = store.clones.coupling(clones, groups=own, n_permutations=50)
-    assert len(tight.pairs) == 496
+    assert planned == budget
     # More threads and more memory measure the same permutations.
     monkeypatch.setattr(store, "nthreads", 4)
     monkeypatch.setattr(store, "memoryBytes", 10**9)
@@ -724,44 +722,24 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
     store, clones = copied.store, copied.clones
     early, late = copied.early, copied.late
     n_early, n_late = int(EARLY.sum()), int(LATE.sum())
-    # The grouping of the late cells into fates, which the test leaves
-    # without a budget, is checked between the steps measured here.
-    grouping_without_a_budget(monkeypatch)
-    # Checking that no cell is both early and late, before anything else:
-    # 40 bytes per cell of the two selections, beside the clones read.
-    checked = 40 * (n_early + n_late) + CODES_READ
-    assert checked == 2_496
-    monkeypatch.setattr(store, "memoryBytes", checked - 1)
-    with pytest.raises(MemoryError, match=f"late cells holds about {checked} bytes"):
-        store.clones.fate_bias(clones, group_by="cell_type", early=early, late=late)
-    # Matching the clones' 48 cells to the late cells comes next: 56 bytes per
-    # clone cell, 32 per late cell, and the read before, the largest stored
-    # chunk of the two selections and the clones' codes, with Zarr's objects.
-    # A selection stores a flag for each cell of the store, so its chunk
-    # outweighs this store's cells.
+    roomy = store.memoryBytes
+    # Checking that no cell is both early and late joins and sorts the
+    # positions of the two selections, 8 bytes a cell and a flag of each.
+    nbytes, _planned = step_charge(
+        lambda: store.clones.fate_bias(
+            clones, group_by="cell_type", early=early, late=late, invalidate_cache=True
+        ),
+        f"checking that none of {n_early} early cells is among {n_late} late cells",
+    )
+    assert nbytes == 9 * (n_early + n_late)
+    # A fate of its own for each late cell, named by three characters, makes
+    # the measurement the largest step: per early cell 64 bytes, 16 per
+    # fraction and 40 to write; per clone with late cells and fate 80 bytes;
+    # 1,000 per fate; 24 per count of a clone in a fate, here one per late
+    # cell with a clone; and what the writer states for the arrays, each
+    # early cell's fate at the three characters of its name.
     fates = _own_labels(store, LATE)
     options = {"groups": fates, "early": early, "late": late}
-    before = max(
-        array_row_selection_parts(artifact_group(store.zw, ref)[name])[0]
-        for ref, name in (
-            (late, "values"),
-            (store.artifacts.inspect(clones).input_ref("cell_selection"), "values"),
-            (clones, "codes"),
-        )
-    )
-    matched = N_CELLS * 56 + n_late * 32 + before + READ_OBJECT_BYTES
-    monkeypatch.setattr(store, "memoryBytes", matched - 1)
-    with pytest.raises(
-        MemoryError, match=f"48 cells to {n_late} measured cells holds about {matched}"
-    ):
-        store.clones.fate_bias(clones, **options)
-    # Without the read before, a fate of its own for each late cell, named by
-    # three characters, makes the measurement the largest step: per early cell
-    # 64 bytes, 16 per fraction and 40 to write; per clone with late cells and
-    # fate 80 bytes; 1,000 per fate; 24 per count of a clone in a fate, here
-    # one per late cell with a clone; and what the writer states for the
-    # arrays, each early cell's fate at the three characters of its name.
-    monkeypatch.setattr(clone_operations, "previous_read_bytes", lambda *chunks: 0)
     tested = len({int(c) for c in TRUTH.clones[LATE] if c >= 0})
     with_clone = int(np.count_nonzero(TRUTH.clones[LATE] >= 0))
     writing = cell_data_write_bytes(
@@ -779,43 +757,41 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
             "fate_cells": ((n_late,), np.int64),
         }
     )
-    measured = (
+    item = f"measuring the fate bias of {n_early} early cells and 8 clones in {n_late} fates"
+    nbytes, planned = step_charge(
+        lambda: store.clones.fate_bias(clones, invalidate_cache=True, **options), item
+    )
+    assert (tested, with_clone) == (8, 19)
+    assert nbytes == (
         n_early * (64 + 16 * n_late + 40)
         + 80 * tested * n_late
         + 1_000 * n_late
         + 24 * with_clone
-        + CODES_READ
         + writing
     )
-    assert (tested, with_clone, measured - writing) == (8, 19, 56_568)
-    monkeypatch.setattr(store, "memoryBytes", measured - 1)
-    with pytest.raises(
-        MemoryError, match=f"8 clones in {n_late} fates holds about {measured}"
-    ):
-        store.clones.fate_bias(clones, **options)
-    assert store.artifacts.list(kind="clone_fate_bias", scope="datastore") == []
-    monkeypatch.setattr(store, "memoryBytes", measured)
+    listed = store.artifacts.list(kind="clone_fate_bias", scope="datastore")
+    monkeypatch.setattr(store, "memoryBytes", planned - 1)
+    with pytest.raises(MemoryBudgetError, match="into fewer fates") as refused:
+        store.clones.fate_bias(clones, invalidate_cache=True, **options)
+    assert refused.value.item == item and refused.value.needed_bytes == planned
+    assert store.artifacts.list(kind="clone_fate_bias", scope="datastore") == listed
+    monkeypatch.setattr(store, "memoryBytes", planned)
     saved = store.clones.fate_bias(clones, **options)
     # Loading: per early cell 200 bytes and 24 per fraction, per row of clone
-    # and fate 160 bytes, which leave the fates' labels to the keys, 2,000 per
-    # fate, the clones read with their labels, eight of one stored character,
-    # and the early cells' IDs read as text.
-    loaded = (
-        n_early * (200 + 24 * n_late)
-        + tested * n_late * 160
-        + 2_000 * n_late
-        + CODES_READ
-        + 8 * (100 + 3 * 4)
+    # and fate 160 bytes, which leave the fates' labels to the keys, and
+    # 2,000 per fate, beside the clones read with their labels and the early
+    # cells' IDs.
+    monkeypatch.setattr(store, "memoryBytes", roomy)
+    nbytes, _planned = step_charge(
+        lambda: store.clones.load_fate_bias(saved),
+        f"the tables of the fate bias of {n_early} early cells",
     )
-    assert loaded == 107_840
-    loaded += ids_read_bytes(store, n_early)
-    monkeypatch.setattr(store, "memoryBytes", loaded - 1)
-    with pytest.raises(
-        MemoryError, match=f"fate bias of {n_early} cells holds about {loaded}"
-    ):
-        store.clones.load_fate_bias(saved)
-    monkeypatch.setattr(store, "memoryBytes", loaded)
-    bias = store.clones.load_fate_bias(saved)
+    assert nbytes == (
+        n_early * (200 + 24 * n_late) + tested * n_late * 160 + 2_000 * n_late
+    )
+    _budget, _refusals, bias = check_budget(
+        store, lambda reopened: reopened.clones.load_fate_bias(saved), at_most=2.5
+    )
     assert bias.cells.shape == (n_early, 3)
     assert bias.fractions.shape == (n_early, n_late)
 

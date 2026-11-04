@@ -16,12 +16,18 @@ from cytearc.clones import ClonalDiversity, Rarefaction
 from cytearc.clones import diversity as dv
 from tests.clone_helpers import (
     every_cell,
-    grouping_without_a_budget,
     import_truth_clones,
     write_truth_store,
 )
 from tests.clone_truth import CLONE_SIZES, N_CELLS, clone_truth
-from tests.memory_helpers import budget_that_runs, traced_peak
+from cytearc.utils.memory_budget import MemoryBudgetError
+from tests.memory_helpers import (
+    budget_that_runs,
+    charges,
+    check_budget,
+    step_charge,
+    traced_peak,
+)
 from tests.storage_helpers import copy_store, insert_nullable_cell_column
 
 TRUTH = clone_truth()
@@ -253,15 +259,27 @@ def test_each_group_counts_beside_its_cells(copied, monkeypatch) -> None:
     own = store.snapshot_cluster_labels(
         "own", cell_selection=store.snapshot_cell_selection("has_clone")
     )
-    needed = 32 * 2_000 + 32 * 56
-    # The grouping, which the test leaves without a budget, is checked first.
-    grouping_without_a_budget(monkeypatch)
-    monkeypatch.setattr(store, "memoryBytes", needed - 1)
-    with pytest.raises(MemoryError, match=f"32 groups holds about {needed} bytes"):
-        store.clones.diversity(clones, groups=own)
-    with pytest.raises(MemoryError, match=f"32 groups holds about {needed} bytes"):
-        store.clones.rarefaction(clones, groups=own, orders=(0,), knots=2)
-    monkeypatch.setattr(store, "memoryBytes", needed)
+    item = "summarizing the clones of 32 groups"
+    nbytes, planned = step_charge(
+        lambda: store.clones.diversity(clones, groups=own), item
+    )
+    assert nbytes == 32 * 2_000 + 32 * 56
+    # The step is charged beside what the ledger holds: a budget below its
+    # plan is refused by it or by a step before it, in both summaries, and
+    # the summaries run at the budgets that their refusals name.
+    monkeypatch.setattr(store, "memoryBytes", planned - 1)
+    for summarize in (
+        lambda: store.clones.diversity(clones, groups=own),
+        lambda: store.clones.rarefaction(clones, groups=own, orders=(0,), knots=2),
+    ):
+        with pytest.raises(MemoryBudgetError):
+            summarize()
+    monkeypatch.setattr(store, "memoryBytes", 2**30)
+    budget, _refusals, _result = check_budget(
+        store, lambda reopened: reopened.clones.diversity(clones, groups=own)
+    )
+    assert budget >= planned
+    monkeypatch.setattr(store, "memoryBytes", budget)
     result = store.clones.diversity(clones, groups=own)
     assert result.indices["n_cells"].tolist() == [1] * 32
 
@@ -335,9 +353,13 @@ def test_summarizing_counts_each_row_of_a_group_beyond_its_first(
         {"cellsWithoutClone": 0, "cellsWithoutGroup": 0, "groups": 2},
     )
     monkeypatch.setattr(store, "_clone_pair_counts", lambda *args, **kwargs: counts)
-    needed = 2 * 2_000 + 6 * 56 + 2 * 128
+    item = "summarizing the clones of 2 groups"
+    _result, taken = charges(lambda: store.clones.diversity(clones))
+    stated = [nbytes for charged, nbytes, _planned in taken if charged == item]
+    assert stated == [2 * 2_000 + 6 * 56, 2 * 2_000 + 6 * 56 + 2 * 128]
+    needed = max(planned for _charged, _nbytes, planned in taken)
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
-    with pytest.raises(MemoryError, match=f"2 groups holds about {needed} bytes"):
+    with pytest.raises(MemoryBudgetError):
         store.clones.diversity(clones)
     monkeypatch.setattr(store, "memoryBytes", needed)
     indices = store.clones.diversity(clones).indices
@@ -349,14 +371,21 @@ def test_rarefaction_counts_the_rows_of_each_group(copied, monkeypatch) -> None:
     # Two samples at 10,000 sizes, more than grouping the cells holds: each
     # size reached in 192 bytes, and 20,000 rows of 128 bytes, which hold the
     # group's name and leave the sample's label to the keys.
-    needed = 10_000 * 192 + 20_000 * 128
     sizes = np.arange(1, 10_001)
+    item = "rarefying 2 groups to 10000 sizes"
+    nbytes, needed = step_charge(
+        lambda: store.clones.rarefaction(
+            clones, group_by="sample", orders=(0,), sizes=sizes
+        ),
+        item,
+    )
+    assert nbytes == 10_000 * 192 + 20_000 * 128
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
     with pytest.raises(
-        MemoryError,
-        match=f"Rarefying 2 groups to 10000 sizes holds about {needed} bytes",
-    ):
+        MemoryBudgetError, match="or pass fewer sizes or knots"
+    ) as refused:
         store.clones.rarefaction(clones, group_by="sample", orders=(0,), sizes=sizes)
+    assert refused.value.item == item and refused.value.needed_bytes == needed
     monkeypatch.setattr(store, "memoryBytes", needed)
     curves = store.clones.rarefaction(
         clones, group_by="sample", orders=(0,), sizes=sizes
@@ -368,17 +397,23 @@ def test_rarefaction_counts_the_sizes_it_reaches(copied, monkeypatch) -> None:
     store, clones = copied.store, copied.clones
     # 1,000 sizes for the one group, each reached in 192 bytes, and 1,000
     # rows of 128 bytes, with no key column beside the group's name.
-    needed = 1_000 * 192 + 1_000 * 128
     sizes = np.arange(1, 1_001)
+    nbytes, needed = step_charge(
+        lambda: store.clones.rarefaction(clones, orders=(0,), sizes=sizes),
+        "rarefying 1 groups to 1000 sizes",
+    )
+    assert nbytes == 1_000 * 192 + 1_000 * 128
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
-    with pytest.raises(MemoryError, match=f"to 1000 sizes holds about {needed} bytes"):
+    with pytest.raises(MemoryBudgetError, match="to 1000 sizes, more than"):
         store.clones.rarefaction(clones, orders=(0,), sizes=sizes)
     monkeypatch.setattr(store, "memoryBytes", needed)
     curves = store.clones.rarefaction(clones, orders=(0,), sizes=sizes).curves
     assert curves["size"].tolist() == sizes.tolist()
     # Knots are counted before any size is made, however many are asked for.
     monkeypatch.undo()
-    with pytest.raises(MemoryError, match="to 1000000000000 sizes holds about"):
+    with pytest.raises(
+        MemoryBudgetError, match="for rarefying 1 groups to 1000000000000 sizes"
+    ):
         store.clones.rarefaction(clones, knots=10**12)
 
 

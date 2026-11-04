@@ -123,8 +123,11 @@ def _mgatk(path: Path) -> Any:
 
 def _trees(path: Path) -> Any:
     from cytearc.readers.phylogeny import read_trees, tree_file_layout
+    from cytearc.utils.memory_budget import MemoryLedger
 
-    trees = read_trees(tree_file_layout(path), memory_bytes=1 << 30)
+    trees = read_trees(
+        tree_file_layout(path), ledger=MemoryLedger(1 << 30, "Reading trees")
+    )
     return trees.names.tolist(), trees.parent.tolist()
 
 

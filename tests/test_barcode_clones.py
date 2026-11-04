@@ -11,9 +11,7 @@ import copy
 import gzip
 import io
 import json
-import re
 import pickle
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +19,6 @@ import pandas as pd
 import pytest
 import zarr
 
-from cytearc.datastore._operations.clone_artifacts import clone_write_bytes
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
@@ -734,46 +731,40 @@ def test_calling_refuses_a_budget_too_small_before_writing(
     assert len(store.artifacts.list(kind="clones", scope="datastore")) == before
 
 
-def test_the_write_check_counts_a_buffer_for_each_write_zarr_runs_at_once(
-    store, tmp_path, monkeypatch
+def test_the_write_charge_counts_a_buffer_for_each_write_zarr_runs_at_once(
+    store, tmp_path
 ) -> None:
     # Zarr writes each chunk and each array's metadata through a buffered
     # file, as many at once as its async concurrency allows, and Python 3.14
-    # made each buffer 128 KiB, where it was the file system's block.
+    # made each buffer 128 KiB, where it was the file system's block. The
+    # charge of writing the clones counts them, and no other charge does.
+    from tests.memory_helpers import charges
+
     _calling, barcodes = _imported(store, tmp_path, "larry")
 
-    def bytes_as_written(concurrency: int) -> int:
-        """The bytes of the check of writing, which refuses after grouping's and reading's."""
+    def stated(concurrency: int) -> list[tuple[str, int]]:
         with zarr.config.set({"async.concurrency": concurrency}):
-            budget = 1
-            for _attempt in range(4):
-                monkeypatch.setattr(store, "memoryBytes", budget)
-                try:
-                    store.clones.barcode_clones(
-                        barcodes, preset="larry", invalidate_cache=True
-                    )
-                except MemoryError as error:
-                    found = re.search(r"about (\d+) bytes", str(error))
-                    assert found is not None, str(error)
-                    if "bytes as they are written" in str(error):
-                        return int(found.group(1))
-                    budget = int(found.group(1))
-        raise AssertionError("writing was not refused after reading")
+            _result, taken = charges(
+                lambda: store.clones.barcode_clones(
+                    barcodes, preset="larry", invalidate_cache=True
+                )
+            )
+        return [(item, nbytes) for item, nbytes, _planned in taken]
 
-    assert bytes_as_written(20) - bytes_as_written(10) == 10 * io.DEFAULT_BUFFER_SIZE
-    # Before reading, saving is checked as if every cell were a clone of its
-    # own: 24 bytes per cell for its group and the calls' flags and barcodes,
-    # each clone's label as a Python string at the size of the longest, and
-    # what saving that many clones holds.
-    longest = f"clone_{N_CELLS}"
-    with zarr.config.set({"async.concurrency": 10}):
-        saving = clone_write_bytes(
-            N_CELLS,
-            N_CELLS,
-            len(longest),
-            source_arrays={"n_barcodes": np.int32, "doublet": bool},
-        )
-    assert bytes_as_written(10) == (24 + sys.getsizeof(longest)) * N_CELLS + saving
+    ten, twenty = stated(10), stated(20)
+    assert [item for item, _ in ten] == [item for item, _ in twenty]
+    grown = {
+        item: more - fewer
+        for (item, fewer), (_, more) in zip(ten, twenty, strict=True)
+        if more != fewer
+    }
+    assert grown == {item: 10 * io.DEFAULT_BUFFER_SIZE for item in grown}
+    assert len(grown) == 1
+    assert next(iter(grown)).startswith(f"writing the clones of {N_CELLS} cells")
+    # The clones are saved with their labels held as the strings they are,
+    # beside each cell's group, which the grouping leaves charged.
+    items = [item for item, _ in ten]
+    assert "the clones' labels" in items and "each cell's group" in items
 
 
 @pytest.mark.slow

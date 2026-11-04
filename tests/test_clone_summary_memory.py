@@ -658,10 +658,11 @@ def test_following_named_clones_holds_no_more_than_its_ledger_plans(
     monkeypatch.setattr(data.store, "memoryBytes", budget)
     _result, taken = charges(run)
     labels = set(data.store.cells.fetch_all("clone").tolist()) - {""}
-    assert taken[0][:2] == (
-        "each cell's clone, the clones' labels and the labels its clones keep apart",
-        8 * N_CELLS + 49 * len(labels) + sum(map(len, labels)),
-    )
+    held = {item: nbytes for item, nbytes, _planned in taken if item != "a release"}
+    # The codes are read as stored and widened to int64, and the labels read
+    # whole and made strings, each charged in turn.
+    assert held["each cell's clone"] == 8 * N_CELLS
+    assert held["the clones' labels"] == 49 * len(labels) + sum(map(len, labels))
     # From each charge to the next, what is traced at that budget stays
     # within what the ledger planned, through counting each pair of group and
     # clone after the grouping. The selection's identity check, outside the
