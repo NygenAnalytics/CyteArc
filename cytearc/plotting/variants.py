@@ -9,61 +9,86 @@ import pandas as pd
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import bool_argument, integer_argument, quoted_value
 from ..utils.arrays import sorted_unique
-from ._contracts import PlotProvenance
+from ._charts import (
+    draw_bars,
+    draw_histograms,
+    draw_lines,
+    draw_matrix,
+    legend_of,
+    log_values,
+)
+from ._clone_names import clone_names
+from ._contracts import CategoricalScale, ColorScale
+from ._data import store_method
 from ._deps import require_matplotlib
 from ._figure import (
-    LegendSpec,
+    Drawn,
     PlotResult,
     close_figures_on_error,
+    finish_plot,
     normalize_axes_target,
+    side_legend,
 )
 from ._groups import plot_groups
-from ._style import apply_figure_chrome, palette_for_n, theme_context
+from ._style import (
+    DEFAULT_RASTERIZE_THRESHOLD,
+    GENOTYPE_CALL_SCALE,
+    MAX_FIGURE_WIDTH_INCHES,
+    MAX_NAMED_ITEMS,
+    MUTED_COLOR,
+    NO_VALUE_COLOR,
+    category_label,
+    default_point_edgewidth,
+    default_point_size,
+    figure_size,
+    finish_embedding_axes,
+    foreground_color,
+    item_inches,
+    padded_square_limits,
+    palette_for_n,
+    panel_area_inches,
+    refresh_layout_point_sizes,
+    register_layout_point_size,
+    scatter_edgecolor,
+    theme_context,
+)
 
 __all__ = ["allele_frequencies", "genotypes", "variant_depth", "variant_statistics"]
 
 # Bins of the histogram of the cells' mean depth, on a log scale.
 _DEPTH_BINS = 40
+# The two panels of variant_depth stand in one column at the page width, each
+# this many inches tall.
+_DEPTH_PANEL_HEIGHT = 2.6
 # The smallest VMR drawn on the log scale; variants that no covered cell
 # varies in sit there.
 _VMR_FLOOR = 1e-6
-# The colour of uncovered entries of the allele frequency heatmap.
-_UNCOVERED_COLOR = "#d9d9d9"
+# The colour of the selection's thresholds.
+_THRESHOLD_COLOR = "#c0392b"
+# What the legend of variant_statistics calls each kind of variant, and its
+# marker and area.
+_VARIANT_KINDS = {
+    "informative": ("Informative", "o", 14.0),
+    "masked": ("Masked", "x", 18.0),
+    "other": ("Not informative", "o", 6.0),
+}
 # The height of the bar of clone colours above the heatmap.
 _CLONE_BAR_INCHES = 0.25
-# The tallest figure of genotype bars that the plot draws by default, in
-# inches, which keeps a panel of many sites and groups within matplotlib's
-# pixel limits.
-_MAX_BARS_INCHES = 40.0
-# The colour of each genotype call.
-_CALL_COLORS = {
-    "wild_type": "#4c78a8",
-    "heterozygous": "#f58518",
-    "homozygous_alternative": "#e45756",
-    "alternative_present": "#b279a2",
-    "missing": "#e5e5e5",
-    "filtered": "#9d9d9d",
-}
-
-
-def _load_counts(store: Any, counts: ArtifactRef, **options: Any) -> Any:
-    loader = getattr(getattr(store, "variants", None), "load_counts", None)
-    if not callable(loader):
-        raise TypeError("store does not provide variants.load_counts")
-    return loader(counts, **options)
-
-
-def _load_genotypes(store: Any, genotypes: ArtifactRef, **options: Any) -> Any:
-    loader = getattr(getattr(store, "variants", None), "load_genotypes", None)
-    if not callable(loader):
-        raise TypeError("store does not provide variants.load_genotypes")
-    return loader(genotypes, **options)
+# The calls panel of genotypes is this wide alone, and grows by this many
+# inches for each bar it names; beside a layout, the two panels share the
+# page, at least this tall.
+_CALLS_PANEL_WIDTH = 6.0
+_CALL_BAR_INCHES = 0.22
+_LAYOUT_PANEL_HEIGHT = 3.6
+# Genotype calls that carry no call of the site: drawn first on a layout, so
+# the cells called sit on top of them.
+_NO_CALL = ("missing", "filtered")
+# The seed of the shuffle that layout points draw in, as embedding draws them.
+_LAYOUT_SEED = 0
 
 
 def _load_selection(store: Any, variants: ArtifactRef) -> Any:
-    loader = getattr(getattr(store, "variants", None), "load_informative", None)
-    if not callable(loader):
-        raise TypeError("store does not provide variants.load_informative")
+    loader = store_method(store, "variants.load_informative")
     # The loader names its own argument, so the plot checks its argument first.
     if not isinstance(variants, ArtifactRef):
         raise TypeError("variants must be an ArtifactRef")
@@ -73,6 +98,62 @@ def _load_selection(store: Any, variants: ArtifactRef) -> Any:
             f"ds.variants.informative, not {quoted_value(variants.kind)}"
         )
     return loader(variants)
+
+
+def _draw_site_depth(
+    ax: Any, sites: pd.DataFrame, unit: str, theme: str, show_legend: bool
+) -> Drawn | None:
+    """Draw each site's mean depth: along its contig, or as a bar of a named site."""
+    coordinates = sites["position"].to_numpy() >= 0
+    if coordinates.any() and not coordinates.all():
+        raise ValueError(
+            "The counts hold sites with coordinates and named sites, which one "
+            "panel cannot draw together"
+        )
+    # A site that no cell covers is left out of the log scale.
+    shown = sites.assign(mean_depth=sites["mean_depth"].where(sites["mean_depth"] > 0))
+    drawn = None
+    if coordinates.all():
+        contigs = list(dict.fromkeys(sites["contig"].tolist()))
+        several = len(contigs) > 1
+        drawn = draw_lines(
+            ax,
+            shown,
+            x="position",
+            y="mean_depth",
+            series="contig",
+            colors=CategoricalScale(
+                order=tuple(contigs),
+                palette=dict(
+                    zip(
+                        contigs,
+                        palette_for_n(len(contigs))
+                        if several
+                        else [foreground_color(theme)],
+                        strict=True,
+                    )
+                ),
+            ),
+            x_label="Position" if several else f"Position on {contigs[0]}",
+            y_label=f"Mean depth ({unit})",
+            title="Depth per site",
+            legend_title="Contig" if several else None,
+            show_legend=show_legend,
+        )
+    else:
+        draw_bars(
+            ax,
+            shown,
+            item="site",
+            value="mean_depth",
+            colors=foreground_color(theme),
+            horizontal=False,
+            value_label=f"Mean depth ({unit})",
+            title="Depth per site",
+        )
+    ax.set_yscale("log")
+    log_values(ax.yaxis)
+    return drawn
 
 
 @close_figures_on_error
@@ -93,28 +174,32 @@ def variant_depth(
     ``counts`` is a ``variant_counts`` artifact, such as one from
     ``ds.variants.import_counts``. The first panel draws each site's mean
     depth over the cells that the files name, along the contig for sites with
-    coordinates, such as the mitochondrial genome, and as bars for named
-    sites, such as GoT targets or GIFT probes; a site that no cell covers is
-    left out of the log scale. The second panel draws how many cells have
-    each mean depth over the sites, on log scales: cells with little depth
-    give little evidence about their variants.
+    coordinates, such as the mitochondrial genome, one line per contig, and
+    as bars for named sites, such as GoT targets or GIFT probes; a site that
+    no cell covers is left out of the log scale. The second panel draws how
+    many cells have each mean depth over the sites, on log bins, leaving out
+    cells of no depth: cells with little depth give little evidence about
+    their variants. The panels stand in one column at the page width.
 
     ``group_by`` names cell metadata columns, one or several, such as the
     sample, and ``groups`` a cell-label artifact; the groups are the
     combinations of their labels, as the clone summaries group cells, named
     by their labels joined by commas. With a grouping, the second panel draws
-    one histogram per group. Cells without a group, and cells that no file
-    names, are left out of it.
+    one histogram per group in the group's colour, under a legend titled by
+    the grouping, and says so when no cell of a group has depth. Cells
+    without a group, and cells that no file names, are left out of it.
 
     Tables: ``sites`` (``site``, ``contig``, ``position``, ``mean_depth``,
     ``covered_fraction``) and ``cells`` (``ids``, ``group``, ``mean_depth``,
     ``n_covered_sites``).
 
     Raises:
-        TypeError: If an argument has the wrong type.
-        ValueError: If no file names a cell, no named cell has a group, a
-            ``group_by`` column is missing or named twice, or two groups get
-            one name.
+        TypeError: If an argument has the wrong type, or the store does not
+            load variant counts or group cells for figures.
+        ValueError: If no file names a cell, no site has depth, no named cell
+            has a group, a ``group_by`` column is missing or named twice, two
+            groups get one name, or the counts hold both sites with
+            coordinates and named sites.
         KeyError: If the store holds no such artifact.
         RuntimeError: If an artifact is incomplete, as a call that stopped
             before it finished leaves it.
@@ -123,8 +208,9 @@ def variant_depth(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    by_site = _load_counts(store, counts, cell_selection=[])
-    by_cell = _load_counts(store, counts, sites=[])
+    load = store_method(store, "variants.load_counts")
+    by_site = load(counts, cell_selection=[])
+    by_cell = load(counts, sites=[])
     cells = by_cell.cells
     listed = cells["listed"].to_numpy(dtype=bool)
     n_listed = int(listed.sum())
@@ -143,10 +229,12 @@ def variant_depth(
             "covered_fraction": sites["n_cells"].to_numpy(dtype=np.float64) / n_listed,
         }
     )
+    if not np.any(mean_site > 0):
+        raise ValueError("No site of the counts has depth, so there is nothing to plot")
     plotted = plot_groups(
         store, counts, group_by=group_by, groups=groups, n_cells=len(cells)
     )
-    cell_group, names, group_name = plotted.codes, list(plotted.names), plotted.title
+    cell_group, names = plotted.codes, list(plotted.names)
     keep = listed & (cell_group >= 0)
     if not keep.any():
         raise ValueError(
@@ -160,94 +248,64 @@ def variant_depth(
             "n_covered_sites": cells["n_covered_sites"].to_numpy(dtype=np.int64)[keep],
         }
     )
+    unit = str(by_site.count_unit)
     if figsize is None and target is None:
-        figsize = (12.0, 4.2)
-    require_matplotlib()
+        figsize, _ = figure_size(
+            2, panel=(MAX_FIGURE_WIDTH_INCHES, _DEPTH_PANEL_HEIGHT)
+        )
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
-            target, panel_keys=["sites", "cells"], figsize=figsize, n_columns=2
+            target, panel_keys=["sites", "cells"], figsize=figsize, n_columns=1
         )
-        ax = axes["sites"]
-        coordinates = sites_table["position"].to_numpy() >= 0
-        shown = np.where(mean_site > 0, mean_site, np.nan)
-        if coordinates.any():
-            contigs = list(dict.fromkeys(sites_table["contig"][coordinates].tolist()))
-            for contig in contigs:
-                chosen = coordinates & (sites_table["contig"] == contig).to_numpy()
-                ax.plot(
-                    sites_table["position"].to_numpy()[chosen],
-                    shown[chosen],
-                    linewidth=0.8,
-                    label=str(contig) if contig else "positions",
-                )
-            ax.set_xlabel("Position")
-            if len(contigs) > 1 and show_legend:
-                ax.legend(frameon=False, fontsize="small")
-        if (~coordinates).any():
-            named = np.flatnonzero(~coordinates)
-            ax.bar(np.arange(len(named)), shown[named])
-            ax.set_xticks(
-                np.arange(len(named)),
-                [str(label) for label in sites_table["site"].to_numpy()[named]],
-                rotation=60,
-                ha="right",
-                fontsize="small",
-            )
-        if np.any(mean_site > 0):
-            ax.set_yscale("log")
-        ax.set_ylabel(f"Mean depth ({by_site.count_unit})")
-        ax.set_title("Depth per site")
+        drawn = [_draw_site_depth(axes["sites"], sites_table, unit, theme, show_legend)]
         ax = axes["cells"]
-        positive = cells_table["mean_depth"].to_numpy() > 0
-        low = (
-            float(cells_table["mean_depth"][positive].min()) if positive.any() else 1.0
-        )
-        high = float(cells_table["mean_depth"].max()) if positive.any() else 10.0
-        bins = np.geomspace(low, max(high, low * 10), _DEPTH_BINS)
-        # The groups in their natural order, as the grouping names them.
-        held = set(cells_table["group"].tolist())
-        for group in [name for name in names if name in held]:
-            values = cells_table["mean_depth"][cells_table["group"] == group].to_numpy()
-            ax.hist(
-                values[values > 0],
-                bins=bins,
-                histtype="step",
-                linewidth=1.2,
-                label=str(group),
+        x_label = f"Mean depth per site ({unit})"
+        if (cells_table["mean_depth"] > 0).any():
+            # The groups with a cell, in their colours' order.
+            held = set(cells_table["group"].tolist())
+            drawn.append(
+                draw_histograms(
+                    ax,
+                    cells_table,
+                    value="mean_depth",
+                    series="group",
+                    colors=plotted.scale([name for name in names if name in held]),
+                    bins=_DEPTH_BINS,
+                    log_x=True,
+                    x_label=x_label,
+                    y_label="Cells",
+                    title="Depth per cell",
+                    legend_title=plotted.title,
+                    show_legend=show_legend,
+                )
             )
-        ax.set_xscale("log")
-        ax.set_xlabel(f"Mean depth per site ({by_site.count_unit})")
-        ax.set_ylabel("Cells")
-        ax.set_title("Depth per cell")
-        if show_legend and plotted.columns:
-            ax.legend(frameon=False, fontsize="small")
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={"sites": sites_table, "cells": cells_table},
-        legends=(LegendSpec(kind="categorical", label=group_name),)
-        if plotted.columns
-        else (),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(keep.sum()),
-            renderer="matplotlib",
-            notes=("variant_counts",),
-            extras={
-                "counts": counts.to_dict(),
-                "grouping": group_name,
-                "count_unit": by_site.count_unit,
-            },
-        ),
-        owns_figure=owns,
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No cell of a group has depth",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+                fontsize="small",
+                color=foreground_color(theme),
+            )
+            ax.set_xlabel(x_label)
+            ax.set_ylabel("Cells")
+            ax.set_title("Depth per cell")
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="variant_depth",
         theme=theme,
+        tables={"sites": sites_table, "cells": cells_table},
+        drawn=drawn,
+        inputs={"counts": counts},
+        settings={"grouping": plotted.title, "count_unit": unit},
+        n_cells=int(keep.sum()),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
 
 
 @close_figures_on_error
@@ -269,17 +327,21 @@ def variant_statistics(
     cells, against the ratio of the variance of its allele frequency to its
     mean, on a log scale, as mgatk draws it. Sequencing errors sit on one
     strand and spread evenly across cells, so informative variants sit at
-    the top right. Informative variants are marked, masked ones drawn as
-    crosses, and the selection's VMR and strand correlation thresholds drawn
-    as lines. A variant without a strand correlation, such as one that a
-    single cell shows, is left out; for counts without strands, the x axis is
-    the mean depth at the site instead.
+    the top right. Informative variants take a colour, the others the muted
+    grey, masked ones drawn as crosses, under a legend of the kinds drawn,
+    and the selection's VMR and strand correlation thresholds are drawn as
+    dotted lines. A variant without a strand correlation, such as one that a
+    single cell shows, is left out; for counts without strands, the x axis
+    is the mean depth at the site instead.
 
     Tables: ``variants`` (``variant``, ``vmr``, ``strand_correlation``,
     ``mean_coverage``, ``masked``, ``informative``).
 
     Raises:
-        ValueError: If no variant has a value on the x axis.
+        TypeError: If an argument has the wrong type, or the store does not
+            load variant selections.
+        ValueError: If ``variants`` is not a ``variant_selection`` artifact,
+            or no variant has a value on the x axis.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -291,9 +353,9 @@ def variant_statistics(
     shown = np.isfinite(x_values)
     if not shown.any():
         raise ValueError(
-            "No variant has a strand correlation to plot"
+            "No variant has a strand correlation, so there is nothing to plot"
             if stranded
-            else "No variant has a mean depth to plot"
+            else "No variant has a mean depth, so there is nothing to plot"
         )
     vmr = frame["vmr"].to_numpy(dtype=np.float64)
     table = pd.DataFrame(
@@ -306,82 +368,101 @@ def variant_statistics(
             "informative": frame["informative"].to_numpy(dtype=bool),
         }
     )
+    y_values = np.where(np.isfinite(vmr) & (vmr > _VMR_FLOOR), vmr, _VMR_FLOOR)
+    informative = table["informative"].to_numpy() & shown
+    masked = table["masked"].to_numpy() & shown
+    kinds = {
+        "informative": informative,
+        "masked": masked,
+        "other": shown & ~informative & ~masked,
+    }
+    held = [kind for kind in kinds if kinds[kind].any()]
+    scale = CategoricalScale(
+        order=tuple(held),
+        palette={
+            kind: palette_for_n(1)[0] if kind == "informative" else MUTED_COLOR
+            for kind in held
+        },
+        labels={kind: _VARIANT_KINDS[kind][0] for kind in held},
+    )
+    assert scale.palette is not None
     if figsize is None and target is None:
         figsize = (6.0, 4.8)
-    require_matplotlib()
+    _, mpl = require_matplotlib()
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
             target, panel_keys=["variants"], figsize=figsize
         )
         ax = axes["variants"]
-        y_values = np.where(np.isfinite(vmr) & (vmr > _VMR_FLOOR), vmr, _VMR_FLOOR)
-        informative = table["informative"].to_numpy() & shown
-        masked = table["masked"].to_numpy() & shown
-        other = shown & ~informative & ~masked
-        colors = palette_for_n(2)
-        ax.scatter(
-            x_values[other], y_values[other], s=6, color="#9e9e9e", label="other"
-        )
-        ax.scatter(
-            x_values[informative],
-            y_values[informative],
-            s=14,
-            color=colors[0],
-            label="informative",
-        )
-        if masked.any():
+        # The variants that are not informative first, so the others sit on top.
+        for kind in sorted(held, key=("other", "informative", "masked").index):
+            _label, marker, area = _VARIANT_KINDS[kind]
             ax.scatter(
-                x_values[masked],
-                y_values[masked],
-                s=18,
-                marker="x",
-                color=colors[1],
-                label="masked",
+                x_values[kinds[kind]],
+                y_values[kinds[kind]],
+                s=area,
+                marker=marker,
+                color=scale.palette[kind],
+                label=kind,
             )
         thresholds = selection.thresholds
         if thresholds.get("min_vmr") is not None:
-            ax.axhline(float(thresholds["min_vmr"]), color="#c0392b", linestyle=":")
+            ax.axhline(
+                float(thresholds["min_vmr"]), color=_THRESHOLD_COLOR, linestyle=":"
+            )
         if stranded and thresholds.get("min_strand_correlation") is not None:
             ax.axvline(
                 float(thresholds["min_strand_correlation"]),
-                color="#c0392b",
+                color=_THRESHOLD_COLOR,
                 linestyle=":",
             )
         if not stranded and thresholds.get("min_depth") is not None:
-            ax.axvline(float(thresholds["min_depth"]), color="#c0392b", linestyle=":")
+            ax.axvline(
+                float(thresholds["min_depth"]), color=_THRESHOLD_COLOR, linestyle=":"
+            )
         ax.set_yscale("log")
+        log_values(ax.yaxis)
         if not stranded:
             ax.set_xscale("log")
+            log_values(ax.xaxis)
         ax.set_xlabel("Strand correlation" if stranded else "Mean depth at the site")
         ax.set_ylabel("Variance-mean ratio")
-        ax.set_title(f"{int(informative.sum())} informative of {int(shown.sum())}")
+        ax.set_title(
+            f"{int(informative.sum())} of {int(shown.sum())} variants informative"
+        )
         if show_legend:
-            ax.legend(frameon=False, fontsize="small")
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={"variants": table},
-        legends=(LegendSpec(kind="categorical", label="variants"),),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(selection.n_cells),
-            renderer="matplotlib",
-            notes=("variant_selection",),
-            extras={
-                "variants": variants.to_dict(),
-                "x": "strand_correlation" if stranded else "mean_coverage",
-                "thresholds": dict(selection.thresholds),
-            },
-        ),
-        owns_figure=owns,
+            side_legend(
+                ax,
+                [
+                    mpl.lines.Line2D(
+                        [],
+                        [],
+                        marker=_VARIANT_KINDS[kind][1],
+                        linestyle="",
+                        color=scale.palette[kind],
+                        markersize=5,
+                    )
+                    for kind in held
+                ],
+                [category_label(scale, kind) for kind in held],
+                title="Variant",
+            )
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="variant_statistics",
         theme=theme,
+        tables={"variants": table},
+        drawn=[legend_of(scale, held, "Variant")],
+        inputs={"variants": variants},
+        settings={
+            "x": "strand_correlation" if stranded else "mean_coverage",
+            "thresholds": dict(selection.thresholds),
+        },
+        n_cells=int(selection.n_cells),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
 
 
 @close_figures_on_error
@@ -401,22 +482,26 @@ def allele_frequencies(
 
     ``variants`` is a ``variant_selection`` artifact from
     ``ds.variants.informative``; its informative variants are the rows, in
-    their order along the genome, and cells are the columns. With ``clones``,
-    such as one from ``ds.variants.frequency_clones``, the cells with a clone
-    are drawn ordered by clone, largest first, under a bar of clone colours;
-    without it, the cells that the statistics covered are drawn in their
-    order. A cell that was not covered at a variant's site has no allele
-    frequency and is drawn grey, apart from a frequency of 0. At most
-    ``max_cells`` cells are drawn, chosen evenly along the order so that each
-    clone keeps its share.
+    their order along the genome, and cells are the columns, coloured from
+    0 to 1. With ``clones``, such as one from ``ds.variants.frequency_clones``,
+    the cells with a clone are drawn ordered by clone, largest first, under
+    a bar of clone colours whose legend names the clones as their artifact
+    does; without it, the cells that the statistics covered are drawn in
+    their order. A cell that was not covered at a variant's site has no
+    allele frequency and is drawn in the grey of no value, apart from a
+    frequency of 0. At most ``max_cells`` cells are drawn, chosen evenly
+    along the order so that each clone keeps its share, and the axis says
+    how many of how many it draws.
 
     Tables: ``frequencies`` (``ids``, ``variant``, ``frequency``, NaN where
     the cell was not covered) and ``cells`` (``ids``, ``clone``, NA without
     clones).
 
     Raises:
-        ValueError: If the selection has no informative variant, or no cell
-            has a clone.
+        TypeError: If an argument has the wrong type, or the store does not
+            load variant selections, counts or clones.
+        ValueError: If ``variants`` is not a ``variant_selection`` artifact,
+            the selection has no informative variant, or no cell has a clone.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -424,35 +509,38 @@ def allele_frequencies(
     selection = _load_selection(store, variants)
     chosen = selection.variants[selection.variants["informative"]]
     if chosen.empty:
-        raise ValueError("The selection has no informative variant to plot")
+        raise ValueError(
+            "The selection has no informative variant, so there is nothing to plot"
+        )
+    load_counts = store_method(store, "variants.load_counts")
+    names = None
     if clones is not None:
-        loader = getattr(getattr(store, "clones", None), "load_clones", None)
-        if not callable(loader):
-            raise TypeError("store does not provide clones.load_clones")
-        clone_cells = loader(clones).cells
+        clone_cells = store_method(store, "clones.load_clones")(clones).cells
         codes = np.asarray(clone_cells["clone"].cat.codes, dtype=np.int64)
         held = codes >= 0
         if not held.any():
             raise ValueError("No cell has a clone, so there is nothing to plot")
+        names = clone_names(store, clones)
         order = np.flatnonzero(held)[np.argsort(codes[held], kind="stable")]
         cell_ids = clone_cells.index.to_numpy(dtype=object)[order]
         cell_clones = clone_cells["clone"].astype(object).to_numpy(dtype=object)[order]
     else:
-        listed = _load_counts(
-            store, selection.counts, sites=[], cell_selection=selection.cell_selection
+        listed = load_counts(
+            selection.counts, sites=[], cell_selection=selection.cell_selection
         ).cells
         listed = listed[listed["listed"].to_numpy(dtype=bool)]
         cell_ids = listed.index.to_numpy(dtype=object)
         cell_clones = np.full(len(cell_ids), None, dtype=object)
-    if len(cell_ids) > max_cells:
+    n_ordered = len(cell_ids)
+    if n_ordered > max_cells:
         picked = sorted_unique(
-            np.linspace(0, len(cell_ids) - 1, max_cells).round().astype(np.int64)
+            np.linspace(0, n_ordered - 1, max_cells).round().astype(np.int64)
         )
         cell_ids = cell_ids[picked]
         cell_clones = cell_clones[picked]
     site_labels = list(dict.fromkeys(chosen["site"].tolist()))
-    loaded = _load_counts(
-        store, selection.counts, sites=site_labels, cell_selection=list(cell_ids)
+    loaded = load_counts(
+        selection.counts, sites=site_labels, cell_selection=list(cell_ids)
     )
     column = {cell: position for position, cell in enumerate(cell_ids.tolist())}
     depth = np.zeros((len(site_labels), len(cell_ids)), dtype=np.float64)
@@ -494,78 +582,97 @@ def allele_frequencies(
         {"ids": cell_ids, "clone": pd.array(cell_clones, dtype="string")}
     )
     if figsize is None and target is None:
-        figsize = (10.0, max(3.0, 0.25 * len(chosen) + 1.5))
-    plt, _ = require_matplotlib()
+        figsize, _ = figure_size(
+            1,
+            panel=(
+                MAX_FIGURE_WIDTH_INCHES,
+                item_inches(len(chosen), per_item=0.18, base=2.0, minimum=3.0),
+            ),
+        )
+    _, mpl = require_matplotlib()
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
             target, panel_keys=["frequencies"], figsize=figsize
         )
-        colormap = plt.get_cmap("viridis").with_extremes(bad=_UNCOVERED_COLOR)
         ax = axes["frequencies"]
-        image = ax.imshow(
-            np.ma.masked_invalid(matrix),
-            aspect="auto",
-            interpolation="nearest",
-            cmap=colormap,
-            vmin=0.0,
-            vmax=1.0,
-        )
-        ax.set_yticks(
-            np.arange(len(chosen)),
-            [str(label) for label in chosen.index.tolist()],
-            fontsize="small",
-        )
+        drawn: list[Drawn | None] = [
+            draw_matrix(
+                ax,
+                pd.DataFrame(matrix, index=chosen.index, columns=cell_ids),
+                color_scale=ColorScale(
+                    cmap="viridis", vmin=0.0, vmax=1.0, missing_color=NO_VALUE_COLOR
+                ),
+                value_label="Allele frequency (grey: not covered)",
+                show_legend=show_legend,
+            )
+        ]
+        # Many cells share the panel's width, and only the variants are named.
+        ax.set_aspect("auto")
         ax.set_xticks([])
-        ax.set_xlabel(f"Cells ({len(cell_ids)}; grey: not covered)")
-        if show_legend:
-            figure.colorbar(image, ax=ax, label="Allele frequency", fraction=0.03)
-        if clones is not None:
+        if len(chosen) <= MAX_NAMED_ITEMS:
+            ax.set_yticks(
+                np.arange(len(chosen)), [str(label) for label in chosen.index]
+            )
+        else:
+            ax.set_yticks([])
+        ax.set_xlabel(
+            "Cells"
+            if len(cell_ids) == n_ordered
+            else f"Cells ({len(cell_ids):,} of {n_ordered:,})"
+        )
+        if names is not None:
             # A bar of clone colours, a quarter inch high, above the cells.
             height = _CLONE_BAR_INCHES / max(
                 figure.get_figheight() * ax.get_position().height, 1e-6
             )
             strip = ax.inset_axes((0.0, 1.0 + height / 4, 1.0, height))
             axes["clones"] = strip
-            names = list(dict.fromkeys(cell_clones.tolist()))
-            colors = palette_for_n(len(names))
-            lookup = {name: position for position, name in enumerate(names)}
-            from matplotlib.colors import ListedColormap
-
+            ids = list(dict.fromkeys(cell_clones.tolist()))
+            labels = names.labels(ids)
+            colors = palette_for_n(len(labels))
+            scale = CategoricalScale(
+                order=tuple(labels), palette=dict(zip(labels, colors, strict=True))
+            )
+            lookup = {clone: position for position, clone in enumerate(ids)}
             strip.imshow(
-                np.asarray([[lookup[name] for name in cell_clones.tolist()]]),
+                np.asarray([[lookup[clone] for clone in cell_clones.tolist()]]),
                 aspect="auto",
                 interpolation="nearest",
-                cmap=ListedColormap(colors),
+                cmap=mpl.colors.ListedColormap(colors),
                 vmin=-0.5,
-                vmax=len(names) - 0.5,
+                vmax=len(labels) - 0.5,
             )
             strip.set_xticks([])
-            strip.set_yticks([0], ["clone"])
-        apply_figure_chrome(figure, theme)
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables={"frequencies": frequencies, "cells": cells_table},
-        legends=(LegendSpec(kind="continuous", label="Allele frequency"),),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=len(cell_ids),
-            renderer="matplotlib",
-            notes=("variant_selection",),
-            extras={
-                "variants": variants.to_dict(),
-                "clones": None if clones is None else clones.to_dict(),
-                "n_variants": len(chosen),
-            },
-        ),
-        owns_figure=owns,
+            strip.set_yticks([0], [names.singular.capitalize()])
+            title = names.singular.capitalize()
+            if show_legend:
+                side_legend(
+                    strip,
+                    [
+                        mpl.patches.Patch(facecolor=color, edgecolor="none")
+                        for color in colors
+                    ],
+                    labels,
+                    title=title,
+                )
+            drawn.append(legend_of(scale, labels, title))
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="allele_frequencies",
         theme=theme,
+        tables={"frequencies": frequencies, "cells": cells_table},
+        drawn=drawn,
+        inputs={"variants": variants},
+        settings={
+            "clones": None if clones is None else clones.to_dict(),
+            "n_variants": len(chosen),
+            "max_cells": max_cells,
+        },
+        n_cells=len(cell_ids),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
 
 
 @close_figures_on_error
@@ -577,42 +684,47 @@ def genotypes(
     group_by: str | Sequence[str] | None = None,
     groups: ArtifactRef | None = None,
     layout: ArtifactRef | None = None,
-    site: str | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
     show_legend: bool = True,
     show: bool = True,
 ) -> PlotResult:
-    """Plot the cells' genotype calls by group and on a two-dimensional layout.
+    """Plot the cells' genotype calls by group and on an embedding.
 
     ``genotypes`` is a ``variant_genotypes`` artifact, such as one from
-    ``ds.variants.genotypes``. The first panel draws, for each site, one bar
-    per group whose segments are the shares of the group's cells with each
-    call; a cell that the calls do not list at a site is ``missing`` there.
-    ``group_by`` names cell metadata columns, one or several, such as the
-    cell type, and ``groups`` a cell-label artifact; the groups are the
-    combinations of their labels, as the clone summaries group cells, named
-    by their labels joined by commas. Without either, each site has one bar
-    of all cells. Cells without a group are left out.
+    ``ds.variants.genotypes``, and ``sites`` the sites to draw, by label or
+    position as ``ds.variants.load_genotypes`` takes them, every site by
+    default. The first panel draws, for each site, one bar per group of the
+    fractions of the group's cells with each call, the first call of the
+    legend at the left; a cell that the calls do not list at a site is
+    ``missing`` there. ``group_by`` names cell metadata columns, one or
+    several, such as the cell type, and ``groups`` a cell-label artifact;
+    the groups are the combinations of their labels, as the clone summaries
+    group cells, named by their labels joined by commas. Without either,
+    each site has one bar of all cells. Cells without a group are left out.
 
     With ``layout``, an embedding artifact of the genotypes' cells, such as a
     UMAP whose cell selection is the genotypes' own, the second panel draws
-    the cells at the embedding's coordinates, coloured by their call at
-    ``site``, which may be left out when one site is drawn.
+    the cells at the embedding's coordinates, as ``embedding(layout=...)``
+    draws them, coloured by their call at the one site that ``sites`` names
+    or the genotypes hold; cells without a call there are drawn under the
+    others. The calls take one palette, named in words under one legend
+    beside the last panel, missing in the grey of no value and filtered in
+    the muted grey.
 
     Tables: ``calls`` (``site``, ``group``, ``call``, ``n_cells``,
     ``share``) and, with a layout, ``cells`` (``ids``, ``x``, ``y``,
     ``call``).
 
     Raises:
-        TypeError: If ``layout`` is not an ArtifactRef, or another argument
-            has the wrong type.
+        TypeError: If ``layout`` is not an ArtifactRef, another argument
+            has the wrong type, or the store does not load genotypes or
+            group cells for figures.
         ValueError: If no cell has a group, a ``group_by`` column is missing
-            or named twice, two groups get one name, ``site`` names a site
-            that is not drawn, several sites are drawn on a layout without
-            ``site``, or ``layout`` is not an embedding of the genotypes'
-            cells.
+            or named twice, two groups get one name, ``sites`` names a site
+            the genotypes do not hold, a layout is drawn for several sites,
+            or ``layout`` is not an embedding of the genotypes' cells.
         KeyError: If the store holds no such artifact.
         RuntimeError: If an artifact is incomplete, as a call that stopped
             before it finished leaves it.
@@ -623,10 +735,13 @@ def genotypes(
     show = bool_argument(show, "show")
     if layout is not None and not isinstance(layout, ArtifactRef):
         raise TypeError("layout must be an ArtifactRef or None")
-    from ._data import _resolve_layout
-
-    loaded = _load_genotypes(store, genotypes, sites=sites)
+    loaded = store_method(store, "variants.load_genotypes")(genotypes, sites=sites)
     site_names = [str(name) for name in loaded.sites.index]
+    if layout is not None and len(site_names) != 1:
+        raise ValueError(
+            f"A layout draws the calls of one site, and the plot draws "
+            f"{len(site_names)}; name one with sites"
+        )
     # The calls in the vocabulary's order, which their codes follow.
     calls = [str(call) for call in loaded.calls["call"].cat.categories]
     n_cells = len(loaded.cells)
@@ -672,17 +787,10 @@ def genotypes(
         records, columns=["site", "group", "call", "n_cells", "share"]
     )
     cells_table = None
+    coordinates = np.empty((0, 2), dtype=np.float64)
     if layout is not None:
-        if site is None:
-            if len(site_names) != 1:
-                raise ValueError(
-                    f"The plot draws {len(site_names)} sites; name the one to colour "
-                    "the layout by with site"
-                )
-            site = site_names[0]
-        if site not in site_names:
-            raise ValueError(f"site {quoted_value(site)} is not among the drawn sites")
         from ..storage.artifacts import inspect_artifact
+        from ._data import _resolve_layout
 
         coordinates, _layout_cells, layout_selection = _resolve_layout(store, layout)
         selection = inspect_artifact(store.zw, genotypes).input_ref("cell_selection")
@@ -691,9 +799,8 @@ def genotypes(
                 "layout must be an embedding of the genotypes' cells: its cell "
                 "selection must be the genotypes' own"
             )
-        at_site = row_sites == site_names.index(site)
         chosen = np.full(n_cells, missing, dtype=np.int64)
-        chosen[row_cells[at_site]] = row_calls[at_site]
+        chosen[row_cells] = row_calls
         cells_table = pd.DataFrame(
             {
                 "ids": loaded.cells.index.to_numpy(dtype=object),
@@ -702,97 +809,148 @@ def genotypes(
                 "call": np.asarray(calls, dtype=object)[chosen],
             }
         )
-    # One bar for each site and group, from the calls counted.
-    bar_sites, bar_groups = (
-        grid.reshape(-1) for grid in np.indices((len(site_names), len(names)))
+    # One bar for each site and group, labelled by both when grouped.
+    bars = calls_table.assign(
+        bar=calls_table["site"]
+        if not plotted.columns
+        else calls_table["site"] + ", " + calls_table["group"]
     )
-    bar_shares = counted[bar_sites, bar_groups] / totals[bar_groups][:, None]
+    present = set(calls_table.loc[calls_table["n_cells"] > 0, "call"])
+    if cells_table is not None:
+        present |= set(cells_table["call"])
+    scale = _call_scale(present)
+    assert scale.order is not None and scale.palette is not None
+    bars = bars.loc[bars["call"].isin(present)]
+    n_bars = len(site_names) * len(names)
     panel_keys = ["calls"] + (["layout"] if cells_table is not None else [])
     if figsize is None and target is None:
-        figsize = (
-            6.0 * len(panel_keys),
-            min(_MAX_BARS_INCHES, max(3.0, 0.45 * len(bar_sites) + 1.5)),
+        height = item_inches(n_bars, per_item=_CALL_BAR_INCHES, base=1.2, minimum=2.4)
+        figsize, _ = (
+            figure_size(1, panel=(_CALLS_PANEL_WIDTH, height))
+            if cells_table is None
+            else figure_size(
+                2,
+                panel=(
+                    MAX_FIGURE_WIDTH_INCHES / 2,
+                    max(height, _LAYOUT_PANEL_HEIGHT),
+                ),
+                columns=2,
+            )
         )
-    require_matplotlib()
+    _, mpl = require_matplotlib()
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
             target, panel_keys=panel_keys, figsize=figsize, n_columns=len(panel_keys)
         )
-        ax = axes["calls"]
-        positions = np.arange(len(bar_sites))
-        left = np.zeros(len(bar_sites))
-        for code, call in enumerate(calls):
-            ax.barh(
-                positions,
-                bar_shares[:, code],
-                left=left,
-                color=_CALL_COLORS[call],
-                label=call,
-            )
-            left += bar_shares[:, code]
-        ax.set_yticks(
-            positions,
-            [
-                site_names[site]
-                if not plotted.columns
-                else f"{site_names[site]}, {names[group]}"
-                for site, group in zip(
-                    bar_sites.tolist(), bar_groups.tolist(), strict=True
-                )
-            ],
-            fontsize="small",
+        draw_bars(
+            axes["calls"],
+            bars,
+            item="bar",
+            value="n_cells",
+            segment="call",
+            colors=scale,
+            normalize=True,
+            value_label="Fraction of cells",
+            title="Calls by group" if plotted.columns else "Calls",
         )
-        ax.invert_yaxis()
-        ax.set_xlim(0, 1)
-        ax.set_xlabel("Share of cells")
-        ax.set_title("Calls by group" if plotted.columns else "Calls")
-        if show_legend:
-            ax.legend(frameon=False, fontsize="small", loc="lower right")
         if cells_table is not None:
-            ax = axes["layout"]
-            for call in calls:
-                chosen_rows = (cells_table["call"] == call).to_numpy()
-                if chosen_rows.any():
-                    ax.scatter(
-                        cells_table["x"].to_numpy()[chosen_rows],
-                        cells_table["y"].to_numpy()[chosen_rows],
-                        s=6,
-                        color=_CALL_COLORS[call],
-                        label=call,
-                        rasterized=True,
-                    )
-            ax.set_xlabel("Embedding1")
-            ax.set_ylabel("Embedding2")
-            ax.set_title(str(site))
-            if show_legend:
-                ax.legend(frameon=False, fontsize="small", markerscale=2)
-        apply_figure_chrome(figure, theme)
+            _draw_layout_calls(
+                axes["layout"],
+                coordinates,
+                cells_table["call"].to_numpy(dtype=object),
+                scale=scale,
+                theme=theme,
+                title=f"Calls at {site_names[0]}",
+            )
+        if show_legend:
+            side_legend(
+                axes[panel_keys[-1]],
+                [
+                    mpl.patches.Patch(facecolor=scale.palette[call], edgecolor="none")
+                    for call in scale.order
+                ],
+                [category_label(scale, call) for call in scale.order],
+                title="Call",
+            )
+        if cells_table is not None:
+            # Point areas follow the layout panel's final size.
+            refresh_layout_point_sizes(figure)
     tables = {"calls": calls_table}
     if cells_table is not None:
         tables["cells"] = cells_table
-    plot_result = PlotResult(
-        figure=figure,
-        axes=axes,
-        tables=tables,
-        legends=(LegendSpec(kind="categorical", label="call"),),
-        scales=(),
-        provenance=PlotProvenance(
-            assay=None,
-            cell_key=None,
-            n_cells=int(np.count_nonzero(cell_group >= 0)),
-            renderer="matplotlib",
-            notes=("variant_genotypes",),
-            extras={
-                "genotypes": genotypes.to_dict(),
-                "grouping": group_name,
-                "method": loaded.method,
-                "layout": None if layout is None else layout.to_dict(),
-                "site": site,
-            },
-        ),
-        owns_figure=owns,
+    return finish_plot(
+        figure,
+        axes,
+        owns,
+        name="genotypes",
         theme=theme,
+        tables=tables,
+        drawn=[legend_of(scale, list(scale.order), "Call")],
+        inputs={"genotypes": genotypes},
+        settings={
+            "grouping": group_name,
+            "method": loaded.method,
+            "layout": None if layout is None else layout.to_dict(),
+            "site": None if layout is None else site_names[0],
+        },
+        n_cells=int(np.count_nonzero(cell_group >= 0)),
+        show=show,
     )
-    if show:
-        plot_result.show()
-    return plot_result
+
+
+def _call_scale(present: set[str]) -> CategoricalScale:
+    """The calls' palette and words, of the calls that a figure draws."""
+    assert GENOTYPE_CALL_SCALE.order is not None
+    assert GENOTYPE_CALL_SCALE.palette is not None
+    assert GENOTYPE_CALL_SCALE.labels is not None
+    order = tuple(call for call in GENOTYPE_CALL_SCALE.order if call in present)
+    return CategoricalScale(
+        order=order,
+        palette={call: GENOTYPE_CALL_SCALE.palette[call] for call in order},
+        labels={call: GENOTYPE_CALL_SCALE.labels[call] for call in order},
+    )
+
+
+def _draw_layout_calls(
+    ax: Any,
+    coordinates: np.ndarray,
+    cell_calls: np.ndarray,
+    *,
+    scale: CategoricalScale,
+    theme: str,
+    title: str,
+) -> None:
+    """Draw each cell at its embedding coordinates in its call's colour, as embeddings draw cells.
+
+    The cells draw in the seeded shuffle of ``embedding``, those without a
+    call first, at the point sizes, square limits and rasterization of
+    embeddings.
+    """
+    from .embedding import _draw_categorical, _panel_draw_order
+
+    _, mpl = require_matplotlib()
+    n_cells = len(coordinates)
+    x, y = coordinates[:, 0], coordinates[:, 1]
+    rank = np.random.default_rng(_LAYOUT_SEED).permutation(n_cells)
+    order = _panel_draw_order(rank, (~np.isin(cell_calls, _NO_CALL)).astype(np.int64))
+    assert order is not None
+    size = default_point_size(n_cells, panel_area=panel_area_inches(ax))
+    edgecolor = scatter_edgecolor(theme)
+    artist = _draw_categorical(
+        ax,
+        x[order],
+        y[order],
+        cell_calls[order],
+        np.full(n_cells, size, dtype=np.float64),
+        scale=scale,
+        edgecolor=edgecolor,
+        edgewidth=default_point_edgewidth(n_cells, point_size=size),
+        alpha=1.0,
+        rasterized=n_cells >= DEFAULT_RASTERIZE_THRESHOLD,
+        mpl=mpl,
+    )
+    register_layout_point_size(
+        artist, n_points=n_cells, size_min=1.0, size_max=28.0, edgecolor=edgecolor
+    )
+    xlim, ylim = padded_square_limits(x, y)
+    finish_embedding_axes(ax, xlim=xlim, ylim=ylim, title=title)

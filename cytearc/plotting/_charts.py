@@ -1,4 +1,4 @@
-"""Charts that the figures of clones, receptors and lineages draw from tidy tables.
+"""Charts that the figures of clones, receptors, lineages and variants draw from tidy tables.
 
 Each chart draws one panel. It names at most ``MAX_NAMED_ITEMS`` items on an
 axis, draws a titled legend beside the panel when given a legend title, and
@@ -29,7 +29,16 @@ from ._style import (
     scalable_values,
 )
 
-__all__ = ["capped_counts", "draw_bars", "draw_lines", "draw_matrix", "pair_matrix"]
+__all__ = [
+    "capped_counts",
+    "draw_bars",
+    "draw_histograms",
+    "draw_lines",
+    "draw_matrix",
+    "legend_of",
+    "log_values",
+    "pair_matrix",
+]
 
 # Bars fill this share of each item's slot, lines are this wide, and the
 # points on them this large.
@@ -51,8 +60,13 @@ def _ordered(scale: CategoricalScale, what: str) -> tuple[list[Any], dict[Any, s
     return list(scale.order), dict(scale.palette)
 
 
-def _legend_of(scale: CategoricalScale, entries: Sequence[Any], title: str) -> Drawn:
-    """The categorical legend of a chart's first entries, as a side legend lists them."""
+def legend_of(scale: CategoricalScale, entries: Sequence[Any], title: str) -> Drawn:
+    """Return the categorical legend of a scale's first entries, as :func:`side_legend` lists them.
+
+    The legend is titled as :func:`side_legend_title` titles it, and its scale
+    holds the entries that the side legend lists, so a figure that draws a
+    side legend itself, such as one beside a scatter, reports what it shows.
+    """
     shown = list(entries[:LEGEND_SIDE_MAX_ENTRIES])
     palette = scale.palette or {}
     return Drawn(
@@ -223,7 +237,7 @@ def draw_bars(
             [category_label(colors, name) for name in entries],
             title=legend_title,
         )
-    return _legend_of(colors, entries, legend_title)
+    return legend_of(colors, entries, legend_title)
 
 
 @functools.cache
@@ -244,6 +258,32 @@ def _count_formatter_type() -> type:
 def _log_counts(axis: Any) -> None:
     """Put an axis of counts on a log scale labelled with whole numbers."""
     formatter = _count_formatter_type()
+    axis.set_major_formatter(formatter())
+    axis.set_minor_formatter(formatter())
+
+
+@functools.cache
+def _value_formatter_type() -> type:
+    """A log formatter that labels values as plain numbers, fractions included."""
+    from matplotlib.ticker import LogFormatter
+
+    class ValueLogFormatter(LogFormatter):
+        """Label the ticks that ``LogFormatter`` labels, as plain numbers."""
+
+        def __call__(self, x: float, pos: int | None = None) -> str:
+            label = super().__call__(x, pos)
+            return f"{x:,.10g}" if label else ""
+
+    return ValueLogFormatter
+
+
+def log_values(axis: Any) -> None:
+    """Label a log axis of values that need not be whole, such as mean depths, as plain numbers.
+
+    The ticks that Matplotlib labels read as numbers such as 0.5, 60 and
+    1,000 rather than powers of ten.
+    """
+    formatter = _value_formatter_type()
     axis.set_major_formatter(formatter())
     axis.set_minor_formatter(formatter())
 
@@ -390,7 +430,95 @@ def draw_lines(
             [category_label(colors, name) for name in names],
             title=legend_title,
         )
-    return _legend_of(colors, names, legend_title)
+    return legend_of(colors, names, legend_title)
+
+
+def draw_histograms(
+    ax: Any,
+    table: pd.DataFrame,
+    *,
+    value: str,
+    series: str,
+    colors: CategoricalScale,
+    bins: int,
+    log_x: bool = False,
+    x_label: str,
+    y_label: str,
+    title: str | None = None,
+    legend_title: str | None = None,
+    show_legend: bool = True,
+) -> Drawn | None:
+    """Draw one step histogram per series in the order of ``colors``, in its colour.
+
+    The series share ``bins`` bins, which span the values of every series
+    evenly, or with ``log_x`` evenly on a log axis labelled with plain
+    numbers, which leaves out values at or below 0; values that are all
+    equal take bins around them. A value that is not finite is left out, and
+    a series without a value draws a flat line.
+
+    Returns:
+        The legend of the series, drawn beside the panel when
+        ``show_legend`` is true, and their scale; or None without
+        ``legend_title``, which draws no legend.
+
+    Raises:
+        TypeError: If ``bins`` is not an integer.
+        ValueError: If ``bins`` is below 1, a series has no colour, or no
+            value can be drawn.
+    """
+    _, mpl = require_matplotlib()
+    bins = integer_argument(bins, "bins", minimum=1)
+    names, palette = _ordered(colors, "histograms")
+    labels = table[series].to_numpy(dtype=object)
+    unknown = [name for name in pd.unique(labels) if name not in palette]
+    if unknown:
+        raise ValueError(
+            f"The colours of the histograms give no colour to {quoted_value(unknown[0])}"
+        )
+    values = table[value].to_numpy(dtype=np.float64)
+    placed = np.isfinite(values) & ((values > 0) if log_x else True)
+    if not placed.any():
+        raise ValueError(
+            "A histogram on a log axis needs a value above 0"
+            if log_x
+            else "A histogram needs a finite value"
+        )
+    low, high = float(values[placed].min()), float(values[placed].max())
+    if high == low:
+        low, high = (low / 2, low * 2) if log_x else (low - 0.5, low + 0.5)
+    edges = (
+        np.geomspace(low, high, bins + 1) if log_x else np.linspace(low, high, bins + 1)
+    )
+    handles = []
+    for name in names:
+        ax.hist(
+            values[placed & (labels == name)],
+            bins=edges,
+            histtype="step",
+            color=palette[name],
+            linewidth=_LINE_WIDTH,
+        )
+        handles.append(
+            mpl.lines.Line2D([], [], color=palette[name], linewidth=_LINE_WIDTH)
+        )
+    if log_x:
+        ax.set_xscale("log")
+        log_values(ax.xaxis)
+    ax.yaxis.get_major_locator().set_params(integer=True)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    if title is not None:
+        ax.set_title(title)
+    if legend_title is None:
+        return None
+    if show_legend:
+        side_legend(
+            ax,
+            handles,
+            [category_label(colors, name) for name in names],
+            title=legend_title,
+        )
+    return legend_of(colors, names, legend_title)
 
 
 def pair_matrix(

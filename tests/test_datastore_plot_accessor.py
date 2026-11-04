@@ -560,7 +560,7 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
         (
             "genotypes",
             (_VARIANT_GENOTYPES_REF,),
-            {"group_by": "cell_type", "layout": _EMBEDDING_REF, "site": "CALR"},
+            {"group_by": "cell_type", "layout": _EMBEDDING_REF, "sites": ["CALR"]},
         ),
         ("recorder_states", (_ALLELES_REF,), {"max_sites": 12}),
     ],

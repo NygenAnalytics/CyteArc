@@ -816,14 +816,13 @@ class DataStorePlotAccessor:
         group_by: str | Sequence[str] | None = None,
         groups: ArtifactRef | None = None,
         layout: ArtifactRef | None = None,
-        site: str | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
         show_legend: bool = True,
         show: bool = True,
     ) -> PlotResult:
-        """Plot the cells' genotype calls by group and on a two-dimensional layout."""
+        """Plot the cells' genotype calls by group and on an embedding."""
         return self._forward(PlotResult, "genotypes", locals())
 
     def recorder_states(

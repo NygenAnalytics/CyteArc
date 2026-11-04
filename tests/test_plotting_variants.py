@@ -1,13 +1,18 @@
 """The variant plots, on counts whose depths and calls are known by hand."""
 
-import hashlib
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
+from matplotlib.colors import to_hex
+
 from cytearc.plotting import genotypes, variant_depth
-from cytearc.storage.refs import ArtifactRef
+from cytearc.plotting._style import (
+    GENOTYPE_CALL_SCALE,
+    MUTED_COLOR,
+    NO_VALUE_COLOR,
+)
+from tests.clone_helpers import write_embedding
 from tests.storage_helpers import open_store, write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
@@ -53,28 +58,6 @@ def plotted(tmp_path_factory):
     (mito / "s.depthTable.txt").write_text("c0\t2.25\nc1\t5\nc2\t0.5\nc3\t0\n")
     positions = store.variants.import_counts(mito, cell_selection=cells)
     return store, targets, positions
-
-
-def _embedding(store, column: str, coordinates) -> ArtifactRef:
-    """An imported embedding at these coordinates of the cells a column selects."""
-    from cytearc.embeddings.imported import write_imported_embedding
-    from cytearc.storage.artifacts import fingerprint_array
-
-    values = np.asarray(coordinates, dtype=np.float32)
-    ids = np.asarray(store.cells.fetch_all("ids")).astype(str)
-    rows = np.asarray(store.cells.fetch_all(column), dtype=bool)
-    return write_imported_embedding(
-        store.zw,
-        assay="RNA",
-        dimreduc_key="umap",
-        role="umap",
-        coordinates=values,
-        source_digest=hashlib.sha256(values.tobytes()).digest(),
-        payload_fingerprints={"values": fingerprint_array(values)},
-        source_cell_ids=ids[rows],
-        cell_selection=store.snapshot_cell_selection(column),
-        block_rows=4,
-    )
 
 
 def test_the_plot_draws_each_sites_mean_depth_over_named_cells(plotted) -> None:
@@ -255,8 +238,8 @@ def test_variant_statistics_marks_informative_variants_and_thresholds(scored) ->
     assert (0.0, 0.01) in lines and (0.65, 0.0) in lines
     shown = np.isfinite(loaded["strand_correlation"].to_numpy(dtype=float))
     assert ax.get_title() == (
-        f"{int((loaded['informative'].to_numpy() & shown).sum())} informative of "
-        f"{int(shown.sum())}"
+        f"{int((loaded['informative'].to_numpy() & shown).sum())} of "
+        f"{int(shown.sum())} variants informative"
     )
     assert result.provenance.extras["x"] == "strand_correlation"
     plt.close(result.figure)
@@ -396,10 +379,17 @@ def test_variant_statistics_mark_masked_variants_apart(tmp_path) -> None:
         for collection in result.axes["variants"].collections
     }
     # 310 is the one artifact-prone position, and each cell reads as many
-    # alternative reads on each strand, a strand correlation of 1.
+    # alternative reads on each strand, a strand correlation of 1; every
+    # variant is informative or masked, so no other kind is drawn or listed.
     assert len(drawn["masked"]) == 1 and len(drawn["informative"]) == 5
-    assert len(drawn["other"]) == 0
+    assert "other" not in drawn
     assert drawn["masked"][0, 0] == pytest.approx(1.0)
+    legend = result.axes["variants"].get_legend()
+    assert [text.get_text() for text in legend.get_texts()] == [
+        "Informative",
+        "Masked",
+    ]
+    assert result.scales[0].order == ("informative", "masked")
     table = result.tables["variants"]
     assert table.loc[table["masked"], "variant"].tolist() == ["chrM:310T>C"]
     plt.close(result.figure)
@@ -423,7 +413,9 @@ def test_variant_statistics_of_stranded_counts_never_draw_depth_instead(
     assert loaded.stranded and not loaded.variants.empty
     assert loaded.variants["strand_correlation"].isna().all()
     assert loaded.variants["mean_coverage"].notna().all()
-    with pytest.raises(ValueError, match="No variant has a strand correlation to plot"):
+    with pytest.raises(
+        ValueError, match="^No variant has a strand correlation, so there is nothing"
+    ):
         variant_statistics(store, selection, show=False)
 
 
@@ -487,16 +479,15 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     assert calls.groupby(["site", "group"])["n_cells"].sum().tolist() == [5, 5]
     ax = result.axes["calls"]
     assert [label.get_text() for label in ax.get_yticklabels()] == ["CALR", "SF3B1"]
-    # One segment per bar and call, in the vocabulary's order.
-    assert len(ax.patches) == 2 * 6
+    # One segment per bar and call that some cell holds, named in words in
+    # the vocabulary's order; the table keeps every call's token.
+    assert len(ax.patches) == 2 * 3
     assert [text.get_text() for text in ax.get_legend().get_texts()] == [
-        "wild_type",
-        "heterozygous",
-        "homozygous_alternative",
-        "alternative_present",
-        "missing",
-        "filtered",
+        "Wild type",
+        "Alternative present",
+        "Missing",
     ]
+    assert set(calls["call"]) == set(GENOTYPE_CALL_SCALE.order)
     # c4 has no group and is left out.
     grouped = genotypes(store, called, group_by="group", show=False)
     assert _shares(grouped) == {
@@ -535,10 +526,10 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
 def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
     store, targets, _positions = plotted
     called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
-    layout = _embedding(
+    layout = write_embedding(
         store, "every_cell", np.column_stack([np.arange(5), np.arange(5, 10)])
     )
-    result = genotypes(store, called, layout=layout, site="CALR", show=False)
+    result = genotypes(store, called, layout=layout, sites=["CALR"], show=False)
     cells = result.tables["cells"]
     assert cells["ids"].tolist() == CELLS
     assert cells["x"].tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]
@@ -551,18 +542,31 @@ def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
         "missing",
     ]
     panel = result.axes["layout"]
-    assert panel.get_title() == "CALR"
-    assert (panel.get_xlabel(), panel.get_ylabel()) == ("Embedding1", "Embedding2")
+    assert panel.get_title() == "Calls at CALR"
     assert result.provenance.extras["layout"] == layout.to_dict()
-    # One point set per call that a cell holds.
-    offsets = sorted(
-        tuple(map(tuple, collection.get_offsets())) for collection in panel.collections
-    )
-    assert offsets == [
-        ((0.0, 5.0), (2.0, 7.0)),
-        ((1.0, 6.0),),
-        ((3.0, 8.0), (4.0, 9.0)),
+    assert result.provenance.extras["site"] == "CALR"
+    # One scatter of every cell in its call's colour, the cells without a
+    # call, c3 and c4, drawn first so the others sit on top of them.
+    (points,) = panel.collections
+    drawn = [
+        (tuple(offset), to_hex(color))
+        for offset, color in zip(
+            points.get_offsets(), points.get_facecolors(), strict=True
+        )
     ]
+    palette = GENOTYPE_CALL_SCALE.palette
+    assert sorted(drawn[:2]) == [
+        ((3.0, 8.0), palette["missing"]),
+        ((4.0, 9.0), palette["missing"]),
+    ]
+    assert sorted(drawn[2:]) == [
+        ((0.0, 5.0), palette["alternative_present"]),
+        ((1.0, 6.0), palette["wild_type"]),
+        ((2.0, 7.0), palette["alternative_present"]),
+    ]
+    # The one legend of the calls stands beside the layout, the last panel.
+    assert result.axes["calls"].get_legend() is None
+    assert panel.get_legend().get_title().get_text() == "Call"
     # With one site drawn, the layout takes its calls.
     alone = genotypes(store, called, sites=["SF3B1"], layout=layout, show=False)
     assert alone.tables["cells"]["call"].tolist() == [
@@ -589,10 +593,10 @@ def test_genotypes_refuse_an_embedding_of_as_many_other_cells(
     )
     called = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
     # Four cells of an embedding are not the genotypes' four cells.
-    others = _embedding(store, "last_four", np.zeros((4, 2)))
+    others = write_embedding(store, "last_four", np.zeros((4, 2)))
     with pytest.raises(ValueError, match="embedding of the genotypes' cells"):
         genotypes(store, called, layout=others, show=False)
-    own = _embedding(store, "first_four", np.arange(8).reshape(4, 2))
+    own = write_embedding(store, "first_four", np.arange(8).reshape(4, 2))
     drawn = genotypes(store, called, layout=own, show=False)
     cells = drawn.tables["cells"]
     assert cells["ids"].tolist() == ["c0", "c1", "c2", "c3"]
@@ -620,14 +624,17 @@ def test_genotypes_refuse_what_they_cannot_draw(plotted) -> None:
     store.cells.insert("nobody", np.asarray([None] * 5, dtype=object))
     with pytest.raises(ValueError, match="No cell of the genotypes has a group"):
         genotypes(store, called, group_by="nobody", show=False)
-    flat = _embedding(store, "every_cell", np.zeros((5, 2)))
-    with pytest.raises(ValueError, match="draws 2 sites; name the one"):
+    flat = write_embedding(store, "every_cell", np.zeros((5, 2)))
+    with pytest.raises(ValueError, match="one site, and the plot draws 2; name one"):
         genotypes(store, called, layout=flat, show=False)
-    with pytest.raises(ValueError, match="site 'SF3B1' is not among the drawn"):
+    # Sites are named one way, by sites.
+    with pytest.raises(TypeError, match="unexpected keyword argument 'site'"):
         genotypes(store, called, sites=["CALR"], layout=flat, site="SF3B1", show=False)
+    with pytest.raises(ValueError, match="have no site 'TP53'"):
+        genotypes(store, called, sites=["TP53"], layout=flat, show=False)
     # The layout is an embedding of the genotypes' own cells.
     store.cells.insert("first_four", np.arange(5) < 4, overwrite=True)
-    fewer = _embedding(store, "first_four", np.zeros((4, 2)))
+    fewer = write_embedding(store, "first_four", np.zeros((4, 2)))
     with pytest.raises(ValueError, match="embedding of the genotypes' cells"):
         genotypes(store, called, sites=["CALR"], layout=fewer, show=False)
     with pytest.raises(ValueError, match="must identify an embedding artifact"):
@@ -684,6 +691,241 @@ def test_genotypes_of_many_sites_and_groups_keep_a_drawable_height(tmp_path) -> 
     shares = result.tables["calls"].groupby(["site", "group"])["share"].sum()
     assert len(shares) == 960
     np.testing.assert_allclose(shares.to_numpy(), 1.0)
-    assert len(result.axes["calls"].get_yticks()) == 960
-    assert result.figure.get_size_inches()[1] == 40.0
+    # Each bar is drawn; an axis names at most 40, and the panel stops
+    # growing where its names stop: 1.2 inches and 0.22 for each of 40.
+    ax = result.axes["calls"]
+    assert len({round(patch.get_y(), 6) for patch in ax.patches}) == 960
+    assert not ax.get_yticks().size
+    assert result.figure.get_size_inches() == pytest.approx((6.0, 1.2 + 0.22 * 40))
     plt.close(result.figure)
+
+
+def test_variant_depth_refuses_counts_without_depth_or_with_both_kinds_of_site(
+    plotted, tmp_path
+) -> None:
+    from types import SimpleNamespace
+
+    store, targets, _positions = plotted
+    # Both cells are named at CALR without a UMI, so no site has depth.
+    unread = tmp_path / "CALR.tsv"
+    unread.write_text("BC\twtUMIs\tmutUMIs\nc0\t0\t0\nc1\t0\t0\n")
+    counts = store.variants.import_counts(
+        unread, cell_selection=store.snapshot_cell_selection("every_cell")
+    )
+    with pytest.raises(
+        ValueError, match="^No site of the counts has depth, so there is nothing"
+    ):
+        variant_depth(store, counts, show=False)
+    # One panel draws positions along a contig or bars of named sites, never
+    # both: counts of a site with a position beside a named one are refused.
+    real = store.variants.load_counts
+
+    def mixed(artifact, **options):
+        loaded = real(artifact, **options)
+        sites = loaded.sites.assign(position=[7, -1], contig=["chr1", ""])
+        return SimpleNamespace(
+            sites=sites, cells=loaded.cells, count_unit=loaded.count_unit
+        )
+
+    both = SimpleNamespace(variants=SimpleNamespace(load_counts=mixed))
+    figures = set(plt.get_fignums())
+    with pytest.raises(ValueError, match="sites with coordinates and named sites"):
+        variant_depth(both, targets, show=False)
+    assert set(plt.get_fignums()) == figures
+
+
+def test_a_depth_panel_of_groups_without_depth_says_so(plotted) -> None:
+    store, targets, _positions = plotted
+    # c3 is named at CALR without a UMI, so the one grouped cell has no depth,
+    # while the sites hold the depth of every named cell.
+    store.cells.insert(
+        "only_c3", np.asarray([None, None, None, "z", None], dtype=object)
+    )
+    result = variant_depth(store, targets, group_by="only_c3", show=False)
+    try:
+        cells = result.axes["cells"]
+        assert [text.get_text() for text in cells.texts] == [
+            "No cell of a group has depth"
+        ]
+        assert not cells.patches and cells.get_legend() is None
+        assert result.legends == () and result.scales == ()
+        assert result.tables["cells"]["ids"].tolist() == ["c3"]
+        assert len(result.axes["sites"].patches) == 2
+    finally:
+        result.close()
+
+
+def test_variant_depth_stands_in_one_column_with_plain_log_labels(plotted) -> None:
+    store, _targets, positions = plotted
+    result = variant_depth(store, positions, group_by="group", show=False)
+    try:
+        assert tuple(result.figure.get_size_inches()) == (7.5, 5.2)
+        sites, cells = result.axes["sites"], result.axes["cells"]
+        assert sites.get_subplotspec().colspan == cells.get_subplotspec().colspan
+        assert sites.get_xlabel() == "Position on chrM"
+        # One contig draws one line in the theme's foreground, without a
+        # legend; the groups' histograms stand under a legend of the grouping.
+        (line,) = sites.get_lines()
+        assert to_hex(line.get_color()) == "#333333"
+        assert sites.get_legend() is None
+        assert cells.get_legend().get_title().get_text() == "group"
+        assert [legend.label for legend in result.legends] == ["group"]
+        result.figure.canvas.draw()
+        for axis in (sites.yaxis, cells.xaxis):
+            labels = [
+                tick.get_text()
+                for tick in [*axis.get_ticklabels(), *axis.get_ticklabels(minor=True)]
+                if tick.get_text()
+            ]
+            assert labels and all(float(label.replace(",", "")) > 0 for label in labels)
+        assert result.provenance.notes == ("variant_depth",)
+        assert result.provenance.extras["counts"] == positions.to_dict()
+    finally:
+        result.close()
+
+
+def test_variant_statistics_mute_the_variants_that_carry_no_lineage(tmp_path) -> None:
+    from cytearc.plotting import variant_statistics
+    from tests.variant_helpers import rcrs_store
+
+    store = rcrs_store(tmp_path / "store.zarr")
+    counts = _rcrs_counts(store, tmp_path / "final", (2, 4, 6))
+    # A threshold no variant passes leaves the variants not informative.
+    for options, kinds in (
+        ({"min_vmr": 0.0, "mask": "artifact_prone"}, {"informative", "masked"}),
+        ({"min_vmr": 1e9}, {"other"}),
+    ):
+        selection = store.variants.informative(counts, **options)
+        result = variant_statistics(store, selection, show=False)
+        try:
+            colors = {
+                collection.get_label(): {
+                    to_hex(color) for color in collection.get_facecolors()
+                }
+                for collection in result.axes["variants"].collections
+            }
+            assert set(colors) == kinds
+            for kind in kinds - {"informative"}:
+                assert colors[kind] == {MUTED_COLOR}
+            if "informative" in kinds:
+                assert MUTED_COLOR not in colors["informative"]
+            scale = result.scales[0]
+            assert set(scale.order) == kinds
+            assert result.legends[0].label == "Variant"
+        finally:
+            result.close()
+
+
+def test_allele_frequencies_say_how_many_cells_they_draw_and_name_their_clones(
+    scored,
+) -> None:
+    from matplotlib.colors import to_rgba
+
+    from cytearc.plotting import allele_frequencies
+
+    store, _truth, _counts, selection, clones = scored
+    loaded = store.clones.load_clones(clones)
+    with_clone = int(loaded.cells["clone"].notna().sum())
+    capped = allele_frequencies(
+        store, selection, clones=clones, max_cells=30, show=False
+    )
+    whole = allele_frequencies(store, selection, clones=clones, show=False)
+    try:
+        assert capped.axes["frequencies"].get_xlabel() == f"Cells (30 of {with_clone})"
+        assert whole.axes["frequencies"].get_xlabel() == "Cells"
+        # The clones drawn, largest first, named under the clones' noun.
+        strip = whole.axes["clones"]
+        legend = strip.get_legend()
+        assert legend.get_title().get_text() == "Clone"
+        drawn = list(dict.fromkeys(whole.tables["cells"]["clone"]))
+        assert [text.get_text() for text in legend.get_texts()] == drawn
+        assert drawn == [
+            clone for clone in loaded.clones["clone"] if clone in set(drawn)
+        ]
+        assert [tick.get_text() for tick in strip.get_yticklabels()] == ["Clone"]
+        assert [legend.label for legend in whole.legends] == [
+            "Allele frequency (grey: not covered)",
+            "Clone",
+        ]
+        assert whole.legends[0].extras == {"vmin": 0.0, "vmax": 1.0}
+        informative = store.variants.load_informative(selection).variants
+        named = informative.index[informative["informative"]].tolist()
+        ax = whole.axes["frequencies"]
+        assert [tick.get_text() for tick in ax.get_yticklabels()] == named
+        assert not ax.get_xticklabels()
+        # Uncovered entries take the grey of no value, in a layer over the
+        # frequencies.
+        frequencies = whole.tables["frequencies"].pivot(
+            index="variant", columns="ids", values="frequency"
+        )
+        frequencies = frequencies.loc[named, whole.tables["cells"]["ids"]]
+        uncovered = frequencies.isna().to_numpy()
+        assert uncovered.any()
+        _image, layer = ax.images
+        pixels = np.asarray(layer.get_array())
+        assert np.allclose(pixels[uncovered], to_rgba(NO_VALUE_COLOR))
+        assert np.allclose(pixels[~uncovered], 0.0)
+    finally:
+        capped.close()
+        whole.close()
+
+
+def test_genotype_calls_take_one_palette_with_greys_for_no_call(plotted) -> None:
+    store, targets, _positions = plotted
+    # Of the four UMIs or fewer that c0 to c3 read at CALR, c1's two and
+    # c3's none fall short of three, so a rule does not call them; c4 is
+    # not read, so it is missing.
+    called = store.variants.genotypes(
+        targets, method="threshold", min_umis=3, min_mutant_umis=1
+    )
+    result = genotypes(store, called, sites=["CALR"], show=False)
+    try:
+        table = result.tables["calls"].set_index("call")["n_cells"]
+        held = [call for call in GENOTYPE_CALL_SCALE.order if table[call] > 0]
+        assert {"missing", "filtered"} <= set(held)
+        ax = result.axes["calls"]
+        colors = [to_hex(patch.get_facecolor()) for patch in ax.patches]
+        assert colors == [GENOTYPE_CALL_SCALE.palette[call] for call in held]
+        assert GENOTYPE_CALL_SCALE.palette["missing"] == NO_VALUE_COLOR
+        assert GENOTYPE_CALL_SCALE.palette["filtered"] == MUTED_COLOR
+        # From the left, the calls in the legend's order at their fractions.
+        widths = [patch.get_width() for patch in ax.patches]
+        assert widths == pytest.approx([table[call] / 5 for call in held])
+        lefts = [patch.get_x() for patch in ax.patches]
+        assert lefts == pytest.approx(np.cumsum([0.0, *widths[:-1]]))
+        assert ax.get_xlabel() == "Fraction of cells"
+        assert result.scales[0].order == tuple(held)
+    finally:
+        result.close()
+
+
+def test_allele_frequencies_of_many_variants_name_none(scored) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from cytearc.plotting import allele_frequencies
+
+    store, _truth, _counts, selection, _clones = scored
+    loaders = store.variants
+
+    def every_informative(ref):
+        # Each of the 159 variants that a cell shows, as informative.
+        loaded = loaders.load_informative(ref)
+        return replace(loaded, variants=loaded.variants.assign(informative=True))
+
+    every = SimpleNamespace(
+        variants=SimpleNamespace(
+            load_informative=every_informative, load_counts=loaders.load_counts
+        )
+    )
+    result = allele_frequencies(every, selection, max_cells=50, show=False)
+    try:
+        ax = result.axes["frequencies"]
+        n_variants = len(loaders.load_informative(selection).variants)
+        assert n_variants > 40
+        assert result.tables["frequencies"]["variant"].nunique() == n_variants
+        assert result.provenance.extras["n_variants"] == n_variants
+        # An axis names at most 40 items, and cells never.
+        assert not ax.get_yticklabels() and not ax.get_xticklabels()
+    finally:
+        result.close()
