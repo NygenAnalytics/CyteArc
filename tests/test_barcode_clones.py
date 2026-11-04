@@ -353,9 +353,14 @@ def test_clones_within_groups_are_those_of_each_group_alone(store, tmp_path) -> 
                 cell_selection=store.snapshot_cell_selection(f"is_{sample}"),
             )
         assert list(messages) == []
-        other = int(np.count_nonzero(TRUTH.samples != sample))
+        listed = {
+            barcode
+            for other in SAMPLES
+            if other != sample
+            for barcode in calling.barcodes.sample_molecules(other)["cell_barcode"]
+        }
         joined = store.artifacts.inspect(alone).diagnostics
-        assert 0 < joined["unselectedBarcodes"] <= other
+        assert joined["unselectedBarcodes"] == len(listed) > 0
         assert joined["unmatchedBarcodes"] == 0
         clones = store.clones.barcode_clones(alone, preset="larry")
         assert loaded_partition(store, clones) == {

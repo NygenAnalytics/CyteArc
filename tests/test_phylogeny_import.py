@@ -634,11 +634,21 @@ def test_writing_the_names_counts_what_the_join_holds(tmp_path) -> None:
 
     slot = 1 + 8 * index_copies_references()
     assert lookup_bytes(n_cells) - lookup_bytes(n_leaves) == slot * len(beyond)
+    # The selection of the trees' cells leaves cells of the store out, so its
+    # join also holds what its pass over the store's IDs would hold, which a
+    # selection of every cell needs no room for.
+    from cytearc.datastore._operations.cell_barcodes import store_pass_bytes
+
+    pass_bytes = store_pass_bytes(
+        store.cells._get_array("ids"), n_leaves, codec_threads=store.nthreads
+    )
+    assert pass_bytes > 8 * n_cells
     assert every_cell_of_the_store - in_tree == (
         8 * len(beyond)
         + object_array_bytes(len(beyond))
         + python_text_bytes(len(beyond), sum(map(len, beyond)))
         + slot * len(beyond)
+        - pass_bytes
     )
 
 

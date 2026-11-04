@@ -223,6 +223,7 @@ def _import_step_bytes(
     stream_least: int,
     prefix_length: int = 0,
     call_file: BarcodeFile | None = None,
+    codec_threads: int = 1,
 ) -> dict[str, int]:
     """Return the bytes that each step of importing Cell Ranger's calls holds.
 
@@ -248,6 +249,8 @@ def _import_step_bytes(
             holds, its pass over the store's cell IDs included, and the cell
             IDs that the file's prefix, suffix and pattern derive, in place of
             ``prefix_length``.
+        codec_threads: The threads that the import's reads decode on, which
+            the join's read of the store's cell IDs counts.
     """
     n_rows = size.n_rows
     n_calls = size.n_calls
@@ -272,7 +275,7 @@ def _import_step_bytes(
         # tells the barcodes of cells outside the selection from those of no
         # cell.
         matched = join_bytes(call_file, n_rows, size.n_bytes) + store_pass_bytes(
-            id_array
+            id_array, n_cells, codec_threads=codec_threads
         )
     parsed = size.parsed_bytes() + 8 * n_calls + 8 * n_rows
     parsing = ids + size.parse_bytes()
@@ -302,6 +305,7 @@ def _import_bytes(
     call_file: BarcodeFile,
     stream_least: int,
     reading: int,
+    codec_threads: int = 1,
 ) -> int:
     """Return the most bytes that importing Cell Ranger's calls holds.
 
@@ -317,6 +321,7 @@ def _import_bytes(
         id_array=id_array,
         stream_least=stream_least,
         call_file=call_file,
+        codec_threads=codec_threads,
     )
     return int(max(reading, _CALL_FIXED_BYTES + 8 * n_cells + max(steps.values())))
 
@@ -1160,6 +1165,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             call_file=call_file,
             stream_least=_stream_bytes(counts, _SUMMARY_BYTES_PER_ROW)[0],
             reading=self._guide_read_bytes(assay, n_cells),
+            codec_threads=self.nthreads,
         )
         _require_budget(
             needed,

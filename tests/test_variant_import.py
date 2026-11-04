@@ -858,6 +858,68 @@ def test_an_import_of_mgatk_files_holds_no_more_than_its_ledger_plans(
         assert overruns == [], (held, overruns)
 
 
+def test_the_pass_over_the_stores_cell_ids_holds_no_more_than_the_ledger_plans(
+    tmp_path,
+) -> None:
+    from cytearc.storage.validation_scope import validation_scope
+    from tests.memory_helpers import ZARR_READS, audited, hold_finished_reads
+    from tests.storage_helpers import write_count_store
+
+    # 60,000 cells, ten selected; mgatk's base files name two selected cells,
+    # 5,000 cells outside the selection and 1,000 barcodes of no cell, so the
+    # join hashes every one of the store's cell IDs.
+    n_cells, selected = 60_000, 10
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.random.default_rng(3).poisson(2.0, size=(n_cells, 3))},
+        "uint16",
+        cell_ids=[f"s1__{index:016d}-1" for index in range(n_cells)],
+    )
+    store = open_store(tmp_path / "store.zarr")
+    store.cells.insert("kept", np.arange(n_cells) < selected)
+    cells = store.snapshot_cell_selection("kept")
+    barcodes = [f"{index:016d}" for index in range(selected - 2, 5_010)] + [
+        f"x{index:015d}" for index in range(1_000)
+    ]
+    folder = tmp_path / "final"
+    folder.mkdir()
+    text = "".join(
+        f"{position},{barcode},1,1\n" for barcode in barcodes for position in (1, 2)
+    )
+    for base in "ACGT":
+        (folder / f"big.{base}.txt.gz").write_bytes(
+            gzip.compress(text.encode(), mtime=0)
+        )
+    (folder / "chrM_refAllele.txt").write_text("1\tA\n2\tA\n")
+
+    def run() -> object:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return store.variants.import_counts(
+                folder,
+                cell_selection=cells,
+                barcode_prefix="s1__",
+                barcode_suffix="-1",
+                invalidate_cache=True,
+            )
+
+    for held in (False, True):
+        with validation_scope():
+            run()
+            if held:
+                with hold_finished_reads(*ZARR_READS):
+                    ref, overruns = audited(run)
+            else:
+                ref, overruns = audited(run)
+        assert overruns == [], (held, overruns)
+    assert_joined(
+        store.artifacts.inspect(ref).diagnostics,
+        n_file=len(barcodes),
+        unmatched=[f"s1__x{index:015d}-1" for index in range(1_000)],
+        unselected=[f"s1__{index:016d}-1" for index in range(selected, 5_010)],
+    )
+
+
 def test_the_import_counts_the_read_of_cell_ids_before_it_reads_them(
     store, tmp_path, monkeypatch
 ) -> None:

@@ -21,7 +21,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ...metadata.rows import operation_concurrency
+from ...metadata.rows import rows_read_charge
+from ...storage.async_execution import zarr_decoding_threads
 from ...storage.diagnostics import EXAMPLES, DiagnosticRule
 from ...storage.geometry import array_geometry
 from ...utils.arrays import union_sorted
@@ -419,13 +420,18 @@ def _store_block_rows(store_ids: Any) -> int:
     return _HASHED_IDS if geometry is None else geometry.axisChunk(0)
 
 
-def _store_read_bytes(store_ids: Any, n_rows: int) -> int:
-    """What reading a block of ``n_rows`` of the store's cell IDs holds, with them."""
-    geometry = array_geometry(store_ids)
-    rows_bytes = n_rows * int(np.dtype(store_ids.dtype).itemsize)
-    if geometry is None:
-        return rows_bytes
-    return rows_bytes + geometry.bandReadBytes(n_rows, operation_concurrency())
+def _store_read_charge(
+    ledger: MemoryLedger, store_ids: Any, start: int, stop: int
+) -> tuple[int, int]:
+    """What reading the store's cell IDs from ``start`` to ``stop`` holds, and what the read leaves behind.
+
+    A stored array is read as :func:`~cytearc.metadata.rows.read_rows` reads
+    a band of chunks; an array without chunks, such as one given in memory,
+    holds the rows alone.
+    """
+    if array_geometry(store_ids) is None:
+        return (stop - start) * int(np.dtype(store_ids.dtype).itemsize), 0
+    return rows_read_charge(ledger, store_ids, stop - start, span=(start, stop - 1))
 
 
 def id_hashing_bytes(n_ids: int, characters: int, widest: int) -> int:
@@ -455,26 +461,41 @@ def id_hashing_bytes(n_ids: int, characters: int, widest: int) -> int:
     )
 
 
-def store_pass_bytes(store_ids: Any) -> int:
+def store_pass_bytes(store_ids: Any, n_selected: int, *, codec_threads: int = 1) -> int:
     """Return the most bytes that the join's pass over the store's cell IDs holds.
 
-    The pass keeps the 64-bit hash of each of the store's cell IDs and reads
-    them a band of chunks at a time, as Zarr returns them, then hashes
-    65,536 of them at a time, each as a Python string of up to four bytes a
-    character, with what hashing it holds.
+    The join charges this when it starts, unless the selection holds every
+    cell of the store, and runs the pass once a barcode needs it. It keeps the 64-bit hash of each of the store's cell IDs
+    and reads them a band of chunks at a time, as
+    :func:`~cytearc.metadata.rows.read_rows` charges a read decoded on
+    ``codec_threads`` threads, then hashes 65,536 of them at a time beside the
+    band, each as a Python string of up to four bytes a character, with what
+    hashing it holds; what a band's read leaves behind stays beside the next
+    band's read.
 
     Args:
         store_ids: The store's array of cell IDs, as fixed-width text.
+        n_selected: The selected cells.
+        codec_threads: The threads that the import's reads decode on.
     """
     n_ids = int(store_ids.shape[0])
+    if n_selected == n_ids:
+        return 0
     rows = min(n_ids, _store_block_rows(store_ids))
     hashed = min(rows, _HASHED_IDS)
-    width = int(np.dtype(store_ids.dtype).itemsize) // 4
-    return (
-        8 * n_ids
-        + _store_read_bytes(store_ids, rows)
-        + hashed * (_HASHED_BYTES_PER_STORE_ID + _STRING_HEADER_BYTES + 8 * width)
+    itemsize = int(np.dtype(store_ids.dtype).itemsize)
+    reading, left = _store_read_charge(
+        MemoryLedger(None, "Reading the store's cell IDs", codec_threads=codec_threads),
+        store_ids,
+        0,
+        rows,
     )
+    # A character takes up to four bytes in a Python string and four in UTF-8.
+    hashing = hashed * (
+        _HASHED_BYTES_PER_STORE_ID + _STRING_HEADER_BYTES + 2 * itemsize
+    )
+    # What a band's read leaves behind stays beside the next band's read.
+    return 8 * n_ids + left + max(reading, rows * itemsize + hashing)
 
 
 def _hashes(values: np.ndarray) -> np.ndarray:
@@ -483,6 +504,13 @@ def _hashes(values: np.ndarray) -> np.ndarray:
         pd.util.hash_array(values, categorize=False), dtype=np.uint64
     )
     return hashed
+
+
+def _first_rows(identifiers: np.ndarray, rows: np.ndarray) -> np.ndarray:
+    """The rows of ``rows`` that hold the first of each distinct ID, in their order."""
+    repeated = pd.Index(identifiers[rows], dtype=object).duplicated()
+    first: np.ndarray = rows[~np.asarray(repeated)]
+    return first
 
 
 def _members(hashes: np.ndarray, held: np.ndarray) -> np.ndarray:
@@ -502,16 +530,21 @@ class CellBarcodeJoin:
     selection, such as one that QC filtering removed. The join tells them
     apart by the 64-bit hashes of the store's cell IDs, which it reads once,
     the first time a barcode that its file's options name matches no selected
-    cell; a selection of every cell of the store leaves no cell outside it,
-    so it reads none. A barcode that a file's pattern does not match names no
-    cell, and is unmatched.
+    cell, and charges what that pass holds when it starts, so that what an
+    import sizes from its ledger's room afterwards leaves room for it; a
+    selection of every cell of the store leaves no cell outside it, so it
+    reads none and charges nothing for them. A barcode that a file's
+    pattern does not match names no cell, and is unmatched; it is counted
+    apart from a barcode that names the same ID, so the counts do not depend
+    on the order or the chunks of the rows.
 
     The join holds a lookup of the selected cells' IDs, whether each cell was
     named, the hashes of the store's cell IDs once read, and the hashes of
     the distinct barcodes of each kind, and charges them to the caller's
     ledger as they grow: the lookup, as :func:`lookup_bytes` counts it, when
-    the join starts; the store's hashes and a block of their IDs at a time,
-    as :func:`store_pass_bytes` bounds them, when it reads them; and each
+    the join starts, with what its pass over the store's IDs will hold, as
+    :func:`store_pass_bytes` bounds it, which the pass's own charges of the
+    store's hashes and a block of their IDs at a time replace; and each
     chunk's new hashes before they merge into those held. IDs given as an
     object array of text are the caller's to charge; IDs given as fixed-width
     text become the Python strings that the lookup keeps, which the join
@@ -545,10 +578,6 @@ class CellBarcodeJoin:
                 f"{store_ids.dtype}"
             )
         self._store_ids = store_ids
-        # A selection of every cell of the store leaves none outside it.
-        self._store_hashes: np.ndarray | None = (
-            np.empty(0, dtype=np.uint64) if n_cells == int(store_ids.shape[0]) else None
-        )
         if given.dtype.kind == "U":
             # The lookup keeps each ID as the Python string it becomes, which
             # is measured from each ID's length.
@@ -575,6 +604,22 @@ class CellBarcodeJoin:
         if not self._lookup.is_unique:
             raise ValueError(
                 "The selected cells' IDs repeat, so barcodes cannot name them"
+            )
+        # A selection of every cell of the store leaves none outside it.
+        # Otherwise what the pass over the store's IDs will hold is charged
+        # now, so that what the import sizes from the ledger's room leaves
+        # room for it, and the pass runs once a barcode needs it.
+        self._store_hashes: np.ndarray | None = None
+        self._reserved = 0
+        if n_cells == int(store_ids.shape[0]):
+            self._store_hashes = np.empty(0, dtype=np.uint64)
+        else:
+            self._reserved = ledger.hold(
+                "the pass over the store's cell IDs",
+                store_pass_bytes(
+                    store_ids, n_cells, codec_threads=ledger.codec_threads
+                ),
+                remedy=_STORE_REMEDY,
             )
         self._named = np.zeros(n_cells, dtype=bool)
         self._unmatched = np.empty(0, dtype=np.uint64)
@@ -614,30 +659,28 @@ class CellBarcodeJoin:
         return list(self._unselected_examples)
 
     def _read_store_hashes(self) -> np.ndarray:
-        """Read the store's cell IDs a block at a time and keep their hashes, ascending."""
-        if self._store_hashes is not None:
-            return self._store_hashes
+        """Read the store's cell IDs a block at a time and return their hashes, ascending."""
         store_ids = self._store_ids
         n_ids = int(store_ids.shape[0])
+        # The pass's own charges replace what the join charged for it.
+        self._ledger.release(self._reserved)
+        self._reserved = 0
         item = "the hashes of the store's cell IDs"
         self._ledger.hold(item, 8 * n_ids, remedy=_STORE_REMEDY)
         hashes = np.empty(n_ids, dtype=np.uint64)
         step = _store_block_rows(store_ids)
-        geometry = array_geometry(store_ids)
         for start in range(0, n_ids, step):
             stop = min(n_ids, start + step)
+            reading, left = _store_read_charge(self._ledger, store_ids, start, stop)
             self._ledger.peak(
-                "a block of the store's cell IDs",
-                _store_read_bytes(store_ids, stop - start),
-                remedy=_STORE_REMEDY,
+                "a block of the store's cell IDs", reading, remedy=_STORE_REMEDY
             )
-            block = np.asarray(store_ids[start:stop])
-            if geometry is not None:
-                self._ledger.leave(
-                    geometry.bandHeldBytes(
-                        self._ledger.holding_threads(geometry.bandChunks())
-                    )
-                )
+            # The read decodes on the ledger's codec threads, which may each
+            # still hold a chunk of it afterwards.
+            with zarr_decoding_threads(self._ledger.codec_threads):
+                block = np.asarray(store_ids[start:stop])
+            if left:
+                self._ledger.leave(left)
             for first in range(0, len(block), _HASHED_IDS):
                 part = block[first : first + _HASHED_IDS]
                 # Each ID becomes a Python string, which hashing encodes as
@@ -659,7 +702,6 @@ class CellBarcodeJoin:
                 del part
             del block
         hashes.sort()
-        self._store_hashes = hashes
         return hashes
 
     def _note_examples(
@@ -670,13 +712,23 @@ class CellBarcodeJoin:
         hashes: np.ndarray,
         shown: Callable[[int], str],
     ) -> None:
-        """Add examples of one kind from a chunk's new barcodes, in file order."""
+        """Add examples of one kind from a chunk's new barcodes, in file order.
+
+        Each counted barcode gives one example: one counted by an earlier
+        chunk has given its own, and a barcode that the pattern does not
+        match counts once with a barcode that names its ID among the barcodes
+        of no cell.
+        """
         if len(examples) == EXAMPLES or not kind.any():
             return
-        # Barcodes counted by an earlier chunk have given their example.
-        fresh = np.flatnonzero(kind & ~_members(hashes, held))
-        for position in fresh[: EXAMPLES - len(examples)].tolist():
-            examples.append(shown(position))
+        shown_hashes: set[int] = set()
+        for position in np.flatnonzero(kind & ~_members(hashes, held)).tolist():
+            if len(examples) == EXAMPLES:
+                break
+            value = int(hashes[position])
+            if value not in shown_hashes:
+                shown_hashes.add(value)
+                examples.append(shown(position))
 
     def cells(self, file: BarcodeFile, barcodes: np.ndarray) -> np.ndarray:
         """Return the selected cell that each barcode names, -1 for none.
@@ -707,10 +759,20 @@ class CellBarcodeJoin:
             return positions
         rows = np.flatnonzero(~matched)
         self.n_unmatched_rows += len(rows)
-        # The first row of each distinct ID, in file order.
-        first = rows[
-            ~np.asarray(pd.Index(identifiers_array[rows], dtype=object).duplicated())
-        ]
+        # The first row of each distinct ID, in file order, the barcodes that
+        # the pattern does not match apart from those that name a cell.
+        if file.barcode_pattern is None:
+            first = _first_rows(identifiers_array, rows)
+        else:
+            kinds = named[rows]
+            first = np.sort(
+                np.concatenate(
+                    [
+                        _first_rows(identifiers_array, rows[kinds]),
+                        _first_rows(identifiers_array, rows[~kinds]),
+                    ]
+                )
+            )
         del rows
         missing = identifiers_array[first]
         # The new hashes merge into those held, which keep room for their
@@ -726,8 +788,10 @@ class CellBarcodeJoin:
         missing_named = named[first]
         unselected = np.zeros(len(missing), dtype=bool)
         if missing_named.any():
+            if self._store_hashes is None:
+                self._store_hashes = self._read_store_hashes()
             unselected[missing_named] = _members(
-                hashes[missing_named], self._read_store_hashes()
+                hashes[missing_named], self._store_hashes
             )
         unmatched = ~unselected
 

@@ -21,14 +21,19 @@ class DiagnosticWarning(UserWarning):
 
     Attributes:
         operation: The operation that saved the artifact, such as
-            ``"import_clones"``.
+            ``"import_clones"``, or None for a warning that Python's
+            ``warnings.warn`` makes from text alone.
         diagnostic: The diagnostic that the warning reports, such as
-            ``"unmatchedBarcodes"``.
-        value: The diagnostic's saved value.
+            ``"unmatchedBarcodes"``, or None.
+        value: The diagnostic's saved value, or None.
     """
 
     def __init__(
-        self, message: str, operation: str, diagnostic: str, value: Any
+        self,
+        message: str,
+        operation: str | None = None,
+        diagnostic: str | None = None,
+        value: Any = None,
     ) -> None:
         super().__init__(message)
         self.operation = operation

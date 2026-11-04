@@ -394,6 +394,19 @@ def test_rules_warn_from_saved_diagnostics_in_their_own_category() -> None:
         warn_diagnostics(_Arguments(), {}, _RULES)
 
 
+def test_a_diagnostic_warning_can_be_issued_from_text_alone() -> None:
+    # Python's warnings make a warning of a category from its text.
+    with pytest.warns(DiagnosticWarning) as caught:
+        warnings.warn("a study's own threshold", DiagnosticWarning, stacklevel=1)
+    (record,) = caught
+    assert str(record.message) == "a study's own threshold"
+    assert (
+        record.message.operation,
+        record.message.diagnostic,
+        record.message.value,
+    ) == (None, None, None)
+
+
 def test_text_warnings_keep_their_category() -> None:
     with pytest.warns(UserWarning) as caught, collect_warnings() as messages:
         warn("plain text")
