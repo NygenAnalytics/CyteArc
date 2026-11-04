@@ -64,6 +64,7 @@ from tests.memory_helpers import (
 from tests.storage_helpers import (
     insert_nullable_cell_column,
     open_store,
+    rechunk_column,
     write_count_store,
 )
 
@@ -1224,8 +1225,11 @@ def test_grouping_by_within_columns_is_checked_against_the_memory_budget(
 ) -> None:
     store, receptors = clonal_receptors(tmp_path)
     store.cells.insert("donor", np.asarray(["d1", "d2"] * 4))
-    # The definition alone fits, but grouping the cells by donor reads a chunk
-    # of 100,000 rows of the column, which does not.
+    # The donors in a chunk of 100,000 rows, as a store written before cell
+    # columns were chunked by their rows keeps them: the definition alone
+    # fits, but grouping the cells by donor reads that chunk, which does not.
+    rechunk_column(store.cells._group, "donor")
+    store = receptor_store(tmp_path)
     budget, _refusals, _result, _peak = budget_that_runs(
         store, lambda opened: opened.repertoire.clonotypes(receptors)
     )

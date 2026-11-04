@@ -27,6 +27,12 @@ Analytical outputs are artifacts only. Feature selection, embedding, clustering,
 operations leave metadata tables unchanged. Consumers validate exact refs,
 artifact completion, lineage, and ordered-axis identity.
 
+(cell_column_chunks)=
+
+## Cell column chunks
+
+A metadata column stores text as fixed-width unicode at the width of its widest value, four bytes a character, and a read of any of its rows decodes the whole stored chunk that holds them. Every writer of a cell table, `cellData` or a workspace's, therefore chunks a new column by `storage.layout.column_chunk_rows`: a chunk holds at most 100,000 rows, no more rows than the store has cells, and no more than 16 MiB of values, and always one row at least. A store of 48 cells keeps each column in one chunk of 48 rows, a text column wider than 41 characters takes fewer than 100,000 rows to a chunk, 20,971 at 200 characters, and a value wider than 16 MiB is a chunk of its own. A missing-value mask takes the chunks of its column. The imports, `cells.insert`, `update_key` and `reset_key`, the membership columns of imports and derived assays, subset, merge, repack, mount, and composites write cell columns this way; the Seurat import caps its metadata and membership columns at 65,536 rows, the rows of one of its blocks. Writers that a feature table shares take their chunk rows from their caller, and a column replaced through `MetaData` is chunked by the rule when its table is a cell table, so feature tables keep the chunks that their writers give them, 100,000 rows in most. Stores written before keep their chunks. They are read as stored, and every read is costed by the stored chunks of the array it reads, so a read of 48 rows of a column stored in 100,000-row chunks is charged that chunk. A column written into such a store, or written again, takes the new chunks.
+
 ## Composite sources and virtual counts
 
 A composite has ordinary local cell and feature metadata, preparation summaries, and analysis

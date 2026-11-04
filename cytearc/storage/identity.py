@@ -15,7 +15,7 @@ from .arrays import (
 )
 from .artifacts import ValueFingerprintBuilder, canonical_bytes
 from .geometry import array_geometry
-from .layout import PROFILE_METADATA_CHUNK
+from .layout import PROFILE_METADATA_CHUNK, column_chunk_rows
 from .metadata_keys import (
     ASSAY_MEMBERSHIP_ROLE,
     assay_membership_column,
@@ -487,6 +487,12 @@ def publish_preparation(
     return fingerprint
 
 
+def _is_cell_table(group: zarr.Group) -> bool:
+    """Whether ``group`` is a store's cell table, ``cellData`` or a workspace's."""
+    path = group.path.strip("/")
+    return path == "cellData" or path.endswith("/cellData")
+
+
 def protect_metadata_column(
     group: zarr.Group,
     column: str,
@@ -504,7 +510,7 @@ def protect_metadata_column(
         root = _stored_root(group)
         assay = as_zarr_group(root[path.rsplit("/", 1)[0]], name="assay")
         protected = assay.attrs.get("prepared") is True
-    elif path == "cellData" or path.endswith("/cellData"):
+    elif _is_cell_table(group):
         root = _stored_root(group)
         parent_path = path.rpartition("/")[0]
         parent = (
@@ -653,12 +659,20 @@ def replace_metadata_column(
         mask = linked_missing_mask(group, name, label=f"Column {name!r}", values=array)
         previous = (_held(array), None if mask is None else _held(mask))
     link = {} if flagged is None else {"missing_mask": f"{MISSING_MASK_PREFIX}{name}"}
+    # The column and its mask are chunked as a cell table's writers chunk a
+    # new column, and as before in other tables; the column it replaces is
+    # restored with its own chunks.
+    rows = (
+        column_chunk_rows(len(stored), max(1, stored.dtype.itemsize))
+        if _is_cell_table(group)
+        else PROFILE_METADATA_CHUNK
+    )
     try:
         _write_column(
             group,
             name,
-            (stored, link, PROFILE_METADATA_CHUNK),
-            None if flagged is None else (flagged, {}, PROFILE_METADATA_CHUNK),
+            (stored, link, rows),
+            None if flagged is None else (flagged, {}, rows),
         )
     except BaseException as error:
         try:

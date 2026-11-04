@@ -1,5 +1,6 @@
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast, overload
 
@@ -30,6 +31,7 @@ from ..storage.artifact_writer import (
     plan_artifact,
 )
 from ..storage.io_policy import StorageIoPolicy
+from ..storage.layout import ChunkRows, column_chunk_rows
 from ..storage.metadata_keys import (
     RESERVED_METADATA_COLUMNS,
     assay_membership_column,
@@ -55,6 +57,10 @@ from ..utils.arguments import bool_argument
 
 if TYPE_CHECKING:
     from ..storage.identity import CountSummary
+
+# Cell columns are chunked by the rows of the store and their stored width,
+# in at most the import's blocks of rows.
+_CELL_CHUNK_ROWS = partial(column_chunk_rows, max_rows=DEFAULT_IMPORT_BLOCK_ROWS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -650,7 +656,13 @@ class SeuratToZarr:
             self._cellMetadataKeys,
             "cell",
         ):
-            self._write_metadata_column(self.cellData, column, block_rows, name=key)
+            self._write_metadata_column(
+                self.cellData,
+                column,
+                block_rows,
+                name=key,
+                chunk_rows=_CELL_CHUNK_ROWS,
+            )
         for assay in self._assays:
             if assay.cellMembership.allIncluded:
                 continue
@@ -760,7 +772,14 @@ class SeuratToZarr:
         block_rows: int,
         *,
         name: str | None = None,
+        chunk_rows: ChunkRows | None = None,
     ) -> zarr.Array:
+        """Write one metadata column of the source.
+
+        ``chunk_rows`` gives its chunks from its rows and stored width, as the
+        cell table's writer passes it; without it, a chunk holds the rows of
+        one of the import's blocks.
+        """
         from ..storage.arrays import create_streamed_metadata_column
 
         dtype = self._metadata_dtype(column, block_rows)
@@ -771,7 +790,11 @@ class SeuratToZarr:
             dtype=dtype,
             blocks=self._metadata_blocks(column, dtype, block_rows),
             overwrite=True,
-            chunkSize=min(DEFAULT_IMPORT_BLOCK_ROWS, max(1, column.length)),
+            chunkSize=(
+                min(DEFAULT_IMPORT_BLOCK_ROWS, max(1, column.length))
+                if chunk_rows is None
+                else chunk_rows(column.length, max(1, dtype.itemsize))
+            ),
             hasMissing=True,
             profile=self.profile,
         )
@@ -851,7 +874,7 @@ class SeuratToZarr:
                 for start in range(0, len(values), block_rows)
             ),
             overwrite=True,
-            chunkSize=min(DEFAULT_IMPORT_BLOCK_ROWS, max(1, len(values))),
+            chunkSize=_CELL_CHUNK_ROWS(len(values), np.dtype(bool).itemsize),
             profile=self.profile,
             attributes=attributes,
         )

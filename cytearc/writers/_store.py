@@ -14,6 +14,7 @@ from ..storage.schema import (
     create_zarr_count_assay as _create_zarr_count_assay,
 )
 from ..storage.count_matrix import CountMatrixPolicy
+from ..storage.layout import PROFILE_METADATA_CHUNK, ChunkRows, column_chunk_rows
 from ..storage.metadata_keys import (
     is_reserved_metadata_name,
     metadata_column_key,
@@ -119,6 +120,7 @@ def write_metadata_column(
     missing: Any = None,
     *,
     profile: StorageProfile | None = None,
+    chunk_rows: ChunkRows | None = None,
 ) -> None:
     """Write one metadata column and link a missing-value mask when needed.
 
@@ -129,13 +131,22 @@ def write_metadata_column(
         missing: Rows to flag as missing. When None, ``None``, NaN, ``pd.NA``,
             and NaT entries of an object array are missing.
         profile: Zarr encoding profile. When None, chosen from the store.
+        chunk_rows: The rows of each stored chunk, from the column's rows and
+            the bytes of each value as stored, such as
+            :func:`~cytearc.storage.layout.column_chunk_rows` for a cell
+            column. When None, chunks hold 100,000 rows, and a column with
+            missing values no more than its rows.
 
     Raises:
         TypeError: If ``name`` is not a string.
         ValueError: If ``name`` cannot name one Zarr array, or the values are
             not one-dimensional or the mask does not align with them.
     """
-    from ..storage.arrays import MetadataBlock, create_streamed_metadata_column
+    from ..storage.arrays import (
+        MetadataBlock,
+        create_streamed_metadata_column,
+        encode_metadata_values,
+    )
 
     validate_metadata_column_name(name)
     array = np.asarray(values)
@@ -153,8 +164,19 @@ def write_metadata_column(
         if has_missing or array.dtype.kind == "O"
         else array
     )
+    if chunk_rows is None:
+        rows = PROFILE_METADATA_CHUNK
+        if has_missing:
+            rows = min(rows, max(1, int(array.size)))
+    else:
+        # The stored width sets the chunk, so byte strings are decoded first;
+        # the write then copies them no further.
+        stored = encode_metadata_values(stored, stored.dtype, name=name)
+        rows = chunk_rows(int(array.size), max(1, stored.dtype.itemsize))
     if not has_missing:
-        _create_zarr_obj_array(group, name, stored, stored.dtype, profile=profile)
+        _create_zarr_obj_array(
+            group, name, stored, stored.dtype, chunk_size=rows, profile=profile
+        )
         return
     create_streamed_metadata_column(
         group,
@@ -162,7 +184,7 @@ def write_metadata_column(
         shape=int(array.size),
         dtype=stored.dtype,
         blocks=(MetadataBlock(0, stored, mask),),
-        chunkSize=min(100_000, max(1, int(array.size))),
+        chunkSize=rows,
         hasMissing=True,
         profile=profile,
     )
@@ -193,7 +215,7 @@ def write_membership_column(
         name,
         data=members,
         dtype=bool,
-        chunkSize=100_000,
+        chunkSize=column_chunk_rows(len(members), members.dtype.itemsize),
         profile=profile,
         attributes=membership_attributes(assay),
     )

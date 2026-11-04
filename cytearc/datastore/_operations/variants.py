@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import warnings
@@ -139,6 +140,13 @@ _THREADED_PARSE_BYTES = 1 << 30
 # at once, as measured on chunks of 1,048,576 rows.
 _STORED_BYTES = 4
 _REWRITTEN_CHUNKS = 4
+# A band holds at least this share of a stored chunk's rows, or of every
+# row where fewer, so appending bands writes each chunk about 33 times at
+# most, where bands of a few cells would rewrite every chunk once a band.
+# 8,000 Tapestri cells of 40 variants, 838,970 rows in one chunk of each
+# array, then need 27,589,320 bytes, hold 11,977,833 and run in 1.7 s; with
+# a whole chunk to a band they need 173,884,680 bytes.
+_BAND_CHUNK_PARTS = 32
 # The rows parsed at once lie in [_MIN_CHUNK_ROWS, _MAX_CHUNK_ROWS].
 _MIN_CHUNK_ROWS = 1_000
 _MAX_CHUNK_ROWS = 2_000_000
@@ -1000,17 +1008,24 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     f"No row of counts, depth, calls or cells is in {files_text}"
                 )
             # A band's rows sit beside the chunks that appending them rewrites.
-            n_entry_rows, _n_call_rows = _stored_row_bounds(sorter)
+            n_entry_rows, n_call_rows = _stored_row_bounds(sorter)
             rewritten = (
                 _REWRITTEN_CHUNKS * min(_ROW_BAND, max(1, n_entry_rows)) * _STORED_BYTES
             )
             band_bytes = int(room / _BAND_SHARE) - rewritten
-            if band_bytes < _BAND_COPIES * counts_dtype.itemsize:
+            # Appending a band rewrites the stored chunks that it ends in, so a
+            # band holds at least a share of a chunk's rows, _BAND_CHUNK_PARTS.
+            least_rows = math.ceil(
+                min(_ROW_BAND, max(1, n_entry_rows + n_call_rows)) / _BAND_CHUNK_PARTS
+            )
+            least_bytes = least_rows * _BAND_COPIES * counts_dtype.itemsize
+            if band_bytes < least_bytes:
+                needed = held + math.ceil(_BAND_SHARE * (rewritten + least_bytes))
                 raise MemoryError(
-                    f"Writing the variant counts rewrites stored chunks of about "
-                    f"{rewritten} bytes, more than the memory budget of "
-                    f"{self.memoryBytes} bytes leaves beside the sorted rows. Raise "
-                    "mem_budget."
+                    f"Writing the variant counts in bands of {least_rows} rows "
+                    f"holds about {needed} bytes, more than the memory budget of "
+                    f"{self.memoryBytes} bytes, as each band rewrites stored "
+                    f"chunks of about {rewritten} bytes. Raise mem_budget."
                 )
             band_rows = band_bytes // (_BAND_COPIES * counts_dtype.itemsize)
             attributes = {

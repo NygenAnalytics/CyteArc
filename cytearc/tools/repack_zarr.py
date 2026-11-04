@@ -32,6 +32,7 @@ from cytearc.storage.destinations import refuse_pending_assays
 from cytearc.storage.layout import (
     ZarrArraySpec,
     array_info,
+    column_chunk_rows,
     get_compressors,
     normalize_chunks,
 )
@@ -256,8 +257,14 @@ def _copy_group(
                     for member in node.keys()
                     if f"{child_path}/{member}" in skipPaths
                 }
+                # A cell table's columns take a new store's chunks; feature
+                # tables keep theirs.
                 copy_zarr_group_tree(
-                    node, new_group, exclude_members=excluded, profile=profile
+                    node,
+                    new_group,
+                    exclude_members=excluded,
+                    profile=profile,
+                    chunk_rows=column_chunk_rows if key == "cellData" else None,
                 )
                 continue
             _copy_group(

@@ -273,9 +273,13 @@ _OVERLAP_BYTES_PER_PRODUCT = 24
 # cells, and its entries in the matrices that compare or follow the groups.
 _BYTES_PER_CLONE_COUNT = 40
 # Following clones holds, for each row of the table, its clone, group, cells
-# and fraction, about 82 bytes as traced on 3 million rows, and a byte per
-# chosen clone and group. The groups' labels stay in their own table.
-_TRACK_BYTES_PER_ROW = 100
+# and fraction, and a byte for its chosen clone and group. Pandas 2 copies
+# the four columns into one block of each dtype as it builds the table:
+# traced on pandas 2.2.3, 9,020 and 18,040 rows held 1,523,958 and 2,480,836
+# bytes by 13 key columns and 1,103,557 and 2,060,527 by one, 106.1 bytes a
+# row with that byte, against 80.1 on pandas 3. The groups' labels stay in
+# their own table.
+_TRACK_BYTES_PER_ROW = 106
 # Checking that no cell is both early and late holds, for each cell of the
 # two selections, its row and its place in their sorted union.
 _SELECTION_BYTES_PER_CELL = 40

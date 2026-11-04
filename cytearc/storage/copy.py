@@ -17,7 +17,7 @@ from .arrays import (
 )
 from .budget import ResourceBudget
 from .geometry import array_geometry
-from .layout import PROFILE_METADATA_CHUNK, normed_array_spec
+from .layout import PROFILE_METADATA_CHUNK, ChunkRows, normed_array_spec
 from .partition import affordable_width, row_band, scan_band
 from .profiles import StorageProfile
 from .sharding import write_dense_in_shard_rows
@@ -63,16 +63,28 @@ def _metadata_block_rows(array: zarr.Array) -> int:
     )
 
 
+def _copy_chunk_rows(n_rows: int, itemsize: int, chunk_rows: ChunkRows | None) -> int:
+    """The rows of each stored chunk of a copied column: the caller's rule, or 100,000."""
+    if chunk_rows is None:
+        return PROFILE_METADATA_CHUNK
+    return chunk_rows(n_rows, max(1, itemsize))
+
+
 def _metadata_copy_bytes(
-    array: zarr.Array, rows: int, missing: zarr.Array | None
+    array: zarr.Array,
+    rows: int,
+    missing: zarr.Array | None,
+    chunk_rows: ChunkRows | None = None,
 ) -> int:
     rows = min(rows, int(array.shape[0]))
     if rows == 0:
         return 0
     dtype = stored_metadata_dtype(array.dtype, lambda: ())
+    # The copy and its missing mask share the chunks of the copied values.
+    destination_rows = _copy_chunk_rows(int(array.shape[0]), dtype.itemsize, chunk_rows)
     destination_chunks = min(
-        -(-int(array.shape[0]) // PROFILE_METADATA_CHUNK),
-        -(-rows // PROFILE_METADATA_CHUNK) + 1,
+        -(-int(array.shape[0]) // destination_rows),
+        -(-rows // destination_rows) + 1,
     )
     total = 0
     sources = [(array, dtype.itemsize)]
@@ -89,7 +101,7 @@ def _metadata_copy_bytes(
         # chunk buffers while Zarr decodes or encodes the current block.
         total += geometry.readBytes(rows * geometry.itemsize, chunks)
         total += 2 * rows * output_size
-        total += 2 * destination_chunks * PROFILE_METADATA_CHUNK * output_size
+        total += 2 * destination_chunks * destination_rows * output_size
     return total
 
 
@@ -104,12 +116,16 @@ def _copy_metadata_array(
     missing: zarr.Array | None = None,
     copy_attributes: bool = True,
     block_rows: int | None = None,
+    chunk_rows: ChunkRows | None = None,
 ) -> None:
     """Stream-copy one metadata column, its rows ``row_indices`` or all.
 
     With ``copy_attributes``, the attributes in ``COLUMN_METADATA_ATTRIBUTES``
     that ``src`` carries, such as the role and assay of a membership column,
-    are part of the copy's first metadata write.
+    are part of the copy's first metadata write. ``chunk_rows`` gives the
+    copy's chunks from its rows and the bytes of each value as stored, such
+    as :func:`~cytearc.storage.layout.column_chunk_rows` for a cell column;
+    without it, chunks hold 100,000 rows.
     """
     if src.ndim != 1:
         raise ValueError(
@@ -165,7 +181,7 @@ def _copy_metadata_array(
         name,
         dtype=dtype,
         overwrite=overwrite,
-        chunkSize=PROFILE_METADATA_CHUNK,
+        chunkSize=_copy_chunk_rows(n_rows, dtype.itemsize, chunk_rows),
         shape=n_rows,
         profile=profile,
         blocks=blocks(),
@@ -203,11 +219,14 @@ def copy_zarr_group_tree(
     row_indices: np.ndarray | None = None,
     profile: StorageProfile | None = None,
     resources: ResourceBudget | None = None,
+    chunk_rows: ChunkRows | None = None,
 ) -> None:
     """Recursively copy a Zarr group tree.
 
     ``exclude_members`` applies only to immediate members of ``src``. Child
     groups are copied recursively without inheriting the parent exclusions.
+    ``chunk_rows`` gives each copied column's chunks, as
+    :func:`_copy_metadata_array` takes it, and child groups take it too.
     """
     if row_indices is None:
         from .stores import prefetch_metadata_listing
@@ -241,7 +260,7 @@ def copy_zarr_group_tree(
         ]
         chunk_bytes = {
             name: _metadata_copy_bytes(
-                array, _metadata_block_rows(array), masks.get(name)
+                array, _metadata_block_rows(array), masks.get(name), chunk_rows
             )
             for name, array in fixed
         }
@@ -268,16 +287,18 @@ def copy_zarr_group_tree(
             ),
         )
         for name, array in fixed:
-            chunk_rows = _metadata_block_rows(array)
-            preferred = scan_band(array_geometry(array), fallback=chunk_rows)
+            block = _metadata_block_rows(array)
+            preferred = scan_band(array_geometry(array), fallback=block)
             chunks = affordable_width(
                 lambda width: (
-                    _metadata_copy_bytes(array, width * chunk_rows, masks.get(name))
+                    _metadata_copy_bytes(
+                        array, width * block, masks.get(name), chunk_rows
+                    )
                     <= resources.memoryBytes // workers
                 ),
-                max(1, preferred // chunk_rows),
+                max(1, preferred // block),
             )
-            planned_rows[name] = max(1, chunks) * chunk_rows
+            planned_rows[name] = max(1, chunks) * block
 
     def copy_column(name: str, array: zarr.Array) -> None:
         _copy_metadata_array(
@@ -289,6 +310,7 @@ def copy_zarr_group_tree(
             missing=masks.get(name),
             profile=profile,
             block_rows=planned_rows.get(name),
+            chunk_rows=chunk_rows,
         )
 
     run_concurrently(
@@ -311,6 +333,7 @@ def copy_zarr_group_tree(
             row_indices=row_indices,
             profile=profile,
             resources=resources,
+            chunk_rows=chunk_rows,
         )
 
 

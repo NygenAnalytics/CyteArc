@@ -20,6 +20,7 @@ import pytest
 
 from cytearc.clones.barcodes import LineageBarcodes
 from cytearc.utils.logging import collect_warnings
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import every_cell, ids_read_bytes, write_truth_store
 from tests.clone_truth import (
     N_CELLS,
@@ -37,7 +38,13 @@ from tests.clone_truth import (
     write_quicat_wide,
     write_trex_molecules,
 )
-from tests.storage_helpers import copy_store, open_store, write_count_store
+from tests.memory_helpers import stated_bytes
+from tests.storage_helpers import (
+    copy_store,
+    open_store,
+    rechunk_column,
+    write_count_store,
+)
 
 TRUTH = clone_truth()
 BARCODES = barcode_truth(TRUTH)
@@ -1476,17 +1483,24 @@ def test_the_selected_cells_and_the_read_of_their_ids_are_checked_first(
         f"{reading} bytes before the first barcode is read",
     ):
         store.clones.import_barcodes(path, cell_selection=every_cell(store), **options)
-    # Refused before a cell ID is read, and nothing is written; at the bound
-    # the IDs are read, and the reading of a chunk of them leaves room for
-    # the rest of this small import.
+    # Refused before a cell ID is read, and nothing is written. At the bound
+    # the IDs are read once, and the import's peak, which the read of the 48
+    # IDs in the one chunk of their 48 rows no longer covers, refuses next,
+    # still before anything is written.
     assert read == []
     assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []
     monkeypatch.setattr(store, "memoryBytes", reading)
+    with pytest.raises(MemoryError) as peak:
+        store.clones.import_barcodes(path, cell_selection=every_cell(store), **options)
+    assert stated_bytes(peak.value, r"holds about (\d+) bytes at its peak") > reading
+    assert len(read) == 1
+    assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []
+    monkeypatch.setattr(store, "memoryBytes", 1 << 30)
     with collect_warnings():
         ref = store.clones.import_barcodes(
             path, cell_selection=every_cell(store), **options
         )
-    assert len(read) == 1
+    assert len(read) == 2
     assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == [ref]
 
 
@@ -1625,12 +1639,29 @@ def test_the_load_counts_its_records_texts_and_cells_to_the_byte(
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
     with pytest.raises(MemoryError, match=f"hold about {needed} bytes"):
         store.clones.load_barcodes(ref)
-    # At the bound the tables fit, and reading the cells' IDs, which decodes a
-    # stored chunk of them, is refused by the read's own check.
+    # At the bound the tables fit, and the read of the cells' barcode counts,
+    # which counts Zarr's objects beside each array it reads, names the budget
+    # it needs.
     monkeypatch.setattr(store, "memoryBytes", needed)
-    with pytest.raises(MemoryError) as refused:
+    with pytest.raises(MemoryBudgetError) as counted:
         store.clones.load_barcodes(ref)
+    assert counted.value.item == "'n_barcodes' of the lineage_barcodes artifact"
+    reading = counted.value.needed_bytes
+    assert reading > needed
+    # There the load runs, and reading the cells' IDs decodes the one chunk of
+    # their 48 rows.
+    monkeypatch.setattr(store, "memoryBytes", reading)
+    pd.testing.assert_frame_equal(store.clones.load_barcodes(ref).records, records)
+    # The IDs in a chunk of 100,000 rows, as a store written before cell
+    # columns were chunked by their rows keeps them, decode that whole chunk,
+    # which the read's own check refuses at that budget.
+    rechunk_column(store.cells._group, "ids")
+    reopened = open_store(store.zarr_loc, mem_budget=reading)
+    with pytest.raises(MemoryBudgetError) as refused:
+        reopened.clones.load_barcodes(ref)
     assert "The tables of" not in str(refused.value)
+    assert refused.value.item == counted.value.item
+    assert refused.value.needed_bytes > reading
 
 
 def test_selecting_cells_by_their_barcodes_follows_the_documented_bounds(

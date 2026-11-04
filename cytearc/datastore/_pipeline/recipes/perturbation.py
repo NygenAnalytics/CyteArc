@@ -29,6 +29,7 @@ from ..._operations.perturbation_guides import (
     _barcode_ids,
     _call_file_check_bytes,
     _called_guide_positions,
+    _guide_id_check_bytes,
     _require_call_file_cells,
 )
 from ..._operations.perturbation_store import _require_budget, _require_cell_column
@@ -498,11 +499,27 @@ def _check_call_file(
     no control cell.
 
     Raises:
-        MemoryError: If reading the file beside the cells' IDs does not fit
-            the memory budget.
+        MemoryError: If reading the guide IDs, or the file, beside the cells'
+            IDs does not fit the memory budget.
         ValueError: If the import would refuse the file, or it labels no
             input cell.
     """
+    holding = (
+        f"Checking the call file against the run's {len(cell_ids)} cells holds about"
+    )
+    # Reading the guide IDs decodes whole stored chunks of them, which the
+    # budget must hold before they are read.
+    reading = _guide_id_check_bytes(
+        guide.feats._get_array("ids"),
+        n_cells=len(cell_ids),
+        id_array=store.cells._get_array("ids"),
+    )
+    _require_budget(
+        reading,
+        store.memoryBytes,
+        holding,
+        remedy=f"Raise mem_budget to at least {reading} bytes.",
+    )
     guide_ids = validated_guide_ids(guide.feats.fetch_all("ids"))
     needed = _call_file_check_bytes(
         protospacer_calls_size(path),
@@ -514,7 +531,7 @@ def _check_call_file(
     _require_budget(
         needed,
         store.memoryBytes,
-        f"Checking the call file against the run's {len(cell_ids)} cells holds about",
+        holding,
         remedy=f"Raise mem_budget to at least {needed} bytes.",
     )
     calls = read_protospacer_calls(path)

@@ -22,7 +22,7 @@ from ..storage.identity import (
     generated_cell_columns,
 )
 from ..storage.io_policy import StorageIoPolicy
-from ..storage.layout import array_shard_rows
+from ..storage.layout import array_shard_rows, column_chunk_rows
 from ..storage.metadata_keys import assay_membership_column
 from ..storage.partition import checked_indices
 from ..storage.profiles import (
@@ -463,10 +463,17 @@ class SubsetZarr:
             row_indices=self.cellIdx,
             exclude_members=excluded,
             profile=self.profile,
+            chunk_rows=column_chunk_rows,
         )
         if self.resetCells:
             create_zarr_obj_array(
-                cell_group, "I", np.ones(len(self.cellIdx), dtype=bool), "bool"
+                cell_group,
+                "I",
+                np.ones(len(self.cellIdx), dtype=bool),
+                "bool",
+                chunk_size=column_chunk_rows(
+                    len(self.cellIdx), np.dtype(bool).itemsize
+                ),
             )
 
     def _prep_counts(self) -> None:

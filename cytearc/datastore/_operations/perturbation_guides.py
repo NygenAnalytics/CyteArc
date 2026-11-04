@@ -85,6 +85,8 @@ from ...storage.artifacts import (
     fingerprint_strings,
     require_complete_artifact,
 )
+from ...storage.geometry import ArrayGeometry, array_geometry
+from ...storage.layout import PROFILE_METADATA_CHUNK
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
@@ -140,6 +142,10 @@ _SELECTION_READ_BYTES = 1 << 18
 _SELECTION_BYTES_PER_CELL = 32
 # The bytes of each guide ID as a Python text, beside its characters.
 _GUIDE_ID_BYTES = 64
+# Checking the guide IDs holds, beside them as Python text, four copies at
+# their fixed width: the IDs as read, their text as an array, and the sorted
+# copy and distinct values that find a repeated ID.
+_GUIDE_CHECK_COPIES = 4
 # The bytes of each selected cell's sample label while the labels are read
 # and numbered, beside the label's stored bytes.
 _SAMPLE_BYTES_PER_CELL = 160
@@ -323,6 +329,54 @@ def _import_bytes(
     return int(max(reading, _CALL_FIXED_BYTES + 8 * n_cells + max(steps.values())))
 
 
+def _guide_id_read_bytes(geometry: ArrayGeometry) -> tuple[int, int]:
+    """Return what reading and checking the guide IDs hold at their peak, and what stays held after.
+
+    The IDs are read whole, which decodes up to Zarr's async concurrency of
+    whole stored chunks at once, as ``read_whole`` charges, however few IDs a
+    chunk holds. Each codec thread that decoded a chunk can still hold it
+    beside the steps after the read, as ``ArrayGeometry.heldReadBytes``
+    counts, while the IDs are checked and kept as Python text.
+
+    Returns:
+        The bytes at the peak, and the bytes held after it: the IDs as text
+        and the chunks that the read can leave.
+    """
+    n_guides = geometry.shape[0]
+    n_chunks = max(1, -(-n_guides // geometry.axisChunk(0)))
+    left = (
+        geometry.heldReadBytes(n_chunks)
+        if geometry.shards is None
+        else geometry.bandHeldBytes(n_chunks)
+    )
+    kept = n_guides * (_GUIDE_ID_BYTES + geometry.itemsize)
+    reading = geometry.wholeReadBytes(max(1, int(zarr.config.get("async.concurrency"))))
+    checking = left + kept + _GUIDE_CHECK_COPIES * n_guides * geometry.itemsize
+    return max(reading, checking), kept + left
+
+
+def _guide_id_check_bytes(guide_id_array: Any, *, n_cells: int, id_array: Any) -> int:
+    """Return what reading the guide assay's IDs holds beside the cells' IDs, from the stored IDs' chunks.
+
+    The perturbation recipe checks this before it reads the IDs, which
+    :func:`_call_file_check_bytes` needs.
+
+    Args:
+        guide_id_array: The guide assay's stored array of IDs.
+        n_cells: The cells whose IDs the recipe holds as text.
+        id_array: The store's array of cell IDs.
+
+    Raises:
+        ValueError: If the guide IDs are not stored in chunks.
+    """
+    geometry = array_geometry(guide_id_array)
+    if geometry is None:
+        raise ValueError("The guide assay's IDs are not stored in chunks")
+    reading, _kept = _guide_id_read_bytes(geometry)
+    cell_text = n_cells * np.dtype(id_array.dtype).itemsize
+    return int(_CALL_FIXED_BYTES + 8 * n_cells + cell_text + reading)
+
+
 def _call_file_check_bytes(
     size: Any,
     *,
@@ -331,11 +385,16 @@ def _call_file_check_bytes(
     id_array: Any,
     prefix_length: int,
 ) -> int:
-    """Return the most bytes that reading the call file and matching its barcodes hold.
+    """Return the most bytes that reading the guide IDs and the call file, and matching its barcodes, hold.
 
     These are the import's first two steps, which the perturbation recipe
-    runs to check the file against its cells before its run. The arguments
-    are those of :func:`_import_step_bytes`.
+    runs to check the file against its cells before its run, after it reads
+    the guide assay's IDs. The IDs are counted as the store keeps a feature
+    column of them, in chunks of ``PROFILE_METADATA_CHUNK`` rows at the width
+    of the longest ID, which a read decodes whole however few guides there
+    are; :func:`_guide_id_check_bytes` counts the read from the stored IDs'
+    own chunks before the recipe reads them. The arguments are those of
+    :func:`_import_step_bytes`.
     """
     steps = _import_step_bytes(
         size,
@@ -345,8 +404,20 @@ def _call_file_check_bytes(
         stream_least=0,
         prefix_length=prefix_length,
     )
+    width = max((len(str(guide)) for guide in guide_ids), default=1)
+    reading, kept = _guide_id_read_bytes(
+        ArrayGeometry(
+            shape=(len(guide_ids),),
+            chunks=(PROFILE_METADATA_CHUNK,),
+            shards=None,
+            itemsize=4 * max(1, width),
+        )
+    )
+    cell_text = n_cells * np.dtype(id_array.dtype).itemsize
     return int(
-        _CALL_FIXED_BYTES + 8 * n_cells + max(steps["parsing"], steps["matching"])
+        _CALL_FIXED_BYTES
+        + 8 * n_cells
+        + max(cell_text + reading, kept + steps["parsing"], kept + steps["matching"])
     )
 
 

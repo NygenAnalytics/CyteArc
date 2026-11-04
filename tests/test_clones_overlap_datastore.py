@@ -406,11 +406,11 @@ def test_overlap_and_track_refuse_tables_beyond_the_budget(copied, monkeypatch) 
     monkeypatch.setattr(store, "memoryBytes", pairs)
     assert len(store.clones.overlap(clones, groups=own).pairs) == 496
     # The 8 clones that are each group's largest, followed through the 32
-    # groups, give 256 rows of 100 bytes, which leave the groups' labels to
+    # groups, give 256 rows of 106 bytes, which leave the groups' labels to
     # the keys, a byte for each clone and group, and the counts, groups and
     # clones read as for overlap, with the clones' labels.
-    rows = 256 * 100 + 8 * 32 + 40 * 32 + 32 * 2_000 + READ_WITH_LABELS
-    assert rows == 92_608
+    rows = 256 * 106 + 8 * 32 + 40 * 32 + 32 * 2_000 + READ_WITH_LABELS
+    assert rows == 94_144
     monkeypatch.setattr(store, "memoryBytes", rows - 1)
     with pytest.raises(
         MemoryError, match=f"gives 256 rows and holds about {rows} bytes.*smaller"
@@ -558,9 +558,9 @@ def test_the_budget_counts_only_the_pairs_and_rows_of_one_lineage(
     # Clones 1 to 4 are followed through the 24 groups of A and clones 5 to
     # 8 through the 8 of B, in rows that leave the two key columns to the
     # keys.
-    rows = (4 * 24 + 4 * 8) * 100 + 8 * 32 + 40 * 32 + 32 * 2_000
+    rows = (4 * 24 + 4 * 8) * 106 + 8 * 32 + 40 * 32 + 32 * 2_000
     rows += READ_WITH_LABELS
-    assert rows == 79_808
+    assert rows == 80_576
     monkeypatch.setattr(store, "memoryBytes", rows - 1)
     with pytest.raises(
         MemoryError, match=f"gives 128 rows and holds about {rows} bytes"

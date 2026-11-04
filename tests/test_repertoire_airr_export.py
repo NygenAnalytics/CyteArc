@@ -1191,18 +1191,22 @@ def test_the_cells_ids_are_checked_before_each_read(tmp_path) -> None:
     refusals = _walk(read)
     packed, longest = read(10**9)
     # The selection's positions, 32 bytes a cell as read, with two chunks of
-    # its mask, one read and one held from a read before; then the offsets of
-    # the eight IDs, 72 bytes, and each slice of one ID beside the positions
-    # kept, 8 bytes a cell, the IDs packed before it, 5 bytes each, and what
+    # its mask, one read and one held from a read before; then, beside what
+    # that read may still hold, the positions kept, 8 bytes a cell, and the
+    # offsets of the eight IDs, 72 bytes; and each slice of one ID beside the
+    # positions and offsets, the IDs packed before it, 5 bytes each, and what
     # the read before may still hold: the mask's chunk before the first, and
-    # a chunk of the IDs after it.
+    # a chunk of the IDs after it. The mask and the IDs are each one chunk
+    # of the 8 cells, so the positions and the offsets refuse on their own.
     one_id = metadata_rows.row_read_bytes(array_geometry(ids), np.asarray([0]))
     held_before = [array_geometry(mask).heldReadBytes()] + [
         array_geometry(ids).heldReadBytes()
     ] * 7
-    assert refusals == [32 * 8 + 2 * _chunk(mask)] + [
-        held_before[k] + 64 + 72 + 5 * k + one_id for k in range(8)
-    ]
+    assert refusals == [
+        32 * 8 + 2 * _chunk(mask),
+        held_before[0] + 64,
+        held_before[0] + 64 + 72,
+    ] + [held_before[k] + 64 + 72 + 5 * k + one_id for k in range(8)]
     assert bytes(packed.data) == b"".join(f"cell{k}".encode() for k in range(8))
     assert packed.offsets.tolist() == list(range(0, 45, 5)) and longest == 5
     # The packed IDs and their offsets stay charged; the positions do not.
