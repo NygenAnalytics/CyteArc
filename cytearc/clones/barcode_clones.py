@@ -71,6 +71,7 @@ import pandas as pd
 from ..metadata.records import take_text
 from ..utils.arguments import bool_argument, integer_argument, quoted_value
 from ..utils.arrays import sorted_unique
+from ..utils.memory_budget import MemoryLedger
 from .calling import SetClones, cell_sets, set_clones
 from .sequences import MAX_CHANCE_EDITS, expected_chance_pairs, neighbor_pairs
 
@@ -83,7 +84,6 @@ __all__ = [
     "BarcodeRecords",
     "barcode_clone_calls",
     "barcode_call_settings",
-    "clone_labels",
 ]
 
 type Unit = Literal["umis", "reads"]
@@ -245,31 +245,6 @@ _DISTINCT_RECORD_BYTES = 48
 _PAIR_BYTES = 48
 _FILTER_PAIR_BYTES = 80
 _SET_ARGUMENT_BYTES = 16
-
-
-@dataclass(slots=True)
-class _Room:
-    """The bytes that calling holds beside its inputs, and the most it may hold."""
-
-    limit: int | None
-    held: int = 0
-
-    def check(self, needed: int, what: str) -> None:
-        """Raise MemoryError if ``needed`` more bytes would pass the limit."""
-        _check(self.held + needed, self.limit, what)
-
-    def left(self) -> int | None:
-        """The bytes a step that checks its own peak may hold."""
-        return None if self.limit is None else max(0, self.limit - self.held)
-
-
-def _check(needed: int, max_bytes: int | None, what: str) -> None:
-    if max_bytes is not None and needed > max_bytes:
-        raise MemoryError(
-            f"Calling clones from lineage barcodes holds about {needed} bytes for "
-            f"{what}, more than the memory budget of {max_bytes} bytes. Raise "
-            "mem_budget."
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,6 +560,25 @@ class BarcodeRecords:
         """Decode the barcodes of some codes."""
         return take_text(self.barcode_data, self.barcode_offsets, codes)
 
+    @property
+    def nbytes(self) -> int:
+        """The bytes of the records' arrays and of their barcodes' text."""
+        return int(
+            sum(
+                np.asarray(values).nbytes
+                for values in (
+                    self.cells,
+                    self.sources,
+                    self.barcodes,
+                    self.umi_codes,
+                    self.umis,
+                    self.reads,
+                    self.barcode_data,
+                    self.barcode_offsets,
+                )
+            )
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class BarcodeClones:
@@ -610,6 +604,11 @@ class BarcodeClones:
     n_barcodes: np.ndarray
     units: tuple[str | None, ...]
     diagnostics: dict[str, int | float | None]
+
+    @property
+    def nbytes(self) -> int:
+        """The bytes of the calls' arrays, which :func:`barcode_clone_calls` leaves charged to its ledger."""
+        return self.calls.nbytes + int(self.n_barcodes.nbytes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -710,13 +709,6 @@ def allowlist_texts(allowlist: Any) -> np.ndarray:
     return np.asarray(sorted(set(values.tolist())), dtype=object)
 
 
-def clone_labels(n_clones: int) -> np.ndarray:
-    """Name clones by rank: ``clone_1`` is the largest."""
-    return np.asarray(
-        [f"clone_{rank}" for rank in range(1, n_clones + 1)], dtype=object
-    )
-
-
 def _first_of_runs(*keys: np.ndarray) -> np.ndarray:
     """Whether each row of sorted keys starts a run of equal keys."""
     n_rows = len(keys[0])
@@ -753,7 +745,7 @@ def _corrected(
     blocks: np.ndarray,
     counts: np.ndarray,
     settings: BarcodeCallSettings,
-    room: _Room,
+    ledger: MemoryLedger,
     uncompared: np.ndarray | None,
 ) -> _Correction:
     """Merge each kept record's barcode into its component's most abundant one.
@@ -789,8 +781,7 @@ def _corrected(
     entries = (
         _ENTRY_BYTES * n_entries + _TEXT_BYTES * len(distinct) + 4 * int(lengths.sum())
     )
-    room.check(entries, f"correcting {n_entries} barcodes of their blocks")
-    room.held += entries
+    entries = ledger.hold(f"correcting {n_entries} barcodes of their blocks", entries)
     texts = records.texts(distinct)[positions.reshape(-1)]
     unknown = _TREX_UNKNOWN if settings.trex_rules else ""
     min_compared = _TREX_MIN_BASES if settings.trex_rules else 0
@@ -799,19 +790,18 @@ def _corrected(
         str(settings.metric),
         settings.max_distance,
         entry_blocks,
-        max_bytes=room.left(),
+        ledger=ledger,
         unknown=unknown,
         min_compared=min_compared,
     )
-    # The entries, their texts and the pairs found are held while the
-    # components are found, which get what is left.
-    pair_bytes = 16 * len(first)
-    room.held += pair_bytes
+    # The entries, their texts and the pairs found, which the search leaves
+    # charged, are held while the components are found.
+    pair_bytes = int(first.nbytes + second.nbytes)
     components = connected_components(
-        n_entries, Edges(first=first, second=second), max_bytes=room.left()
+        n_entries, Edges(first=first, second=second), ledger=ledger
     )
     del first, second
-    room.held -= pair_bytes
+    ledger.release(pair_bytes)
     # The last entry of each component, ordered by abundance and then code,
     # is its representative: the most abundant barcode, sorting last on ties.
     by_rank = np.lexsort((entry_codes, abundance, components))
@@ -831,13 +821,12 @@ def _corrected(
             entry_blocks,
             components=components,
             priority=rank,
-            max_bytes=room.left(),
+            ledger=ledger,
             unknown=unknown,
             min_compared=min_compared,
         )
     )
     del texts, rank
-    room.held -= entries
     last = np.ones(n_entries, dtype=bool)
     if n_entries > 1:
         last[:-1] = components[by_rank][1:] != components[by_rank][:-1]
@@ -849,12 +838,17 @@ def _corrected(
         if uncompared is None
         else int(np.count_nonzero(~uncompared[entry_codes]))
     )
-    return _Correction(
+    correction = _Correction(
         codes=merged[entry_of],
         distinct=compared,
         merged=int(np.count_nonzero(merged != entry_codes)),
         expected=expected,
     )
+    # The entries are let go once the codes of the records are made.
+    del components, by_rank, last, representative, merged, entry_of
+    del entry_codes, entry_blocks, abundance, starts, distinct, positions, lengths
+    ledger.release(entries)
+    return correction
 
 
 def _distinct_barcodes(
@@ -886,7 +880,7 @@ def barcode_clone_calls(
     groups: np.ndarray,
     settings: BarcodeCallSettings,
     allowlist: np.ndarray | None = None,
-    max_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> BarcodeClones:
     """Call clones from the records of lineage barcodes by ``settings``.
 
@@ -898,13 +892,18 @@ def barcode_clone_calls(
         settings: The rules, from :func:`barcode_call_settings`.
         allowlist: The sorted distinct barcodes of :func:`allowlist_texts`
             when ``settings.allowlist`` is set, else None.
-        max_bytes: The most bytes the calling may hold beside its inputs.
+        ledger: The caller's memory ledger, which holds the records and the
+            allowlist and is charged each step beside them; None for no
+            limit. The calls returned stay charged to it, their ``nbytes``,
+            for the caller to release.
 
     Raises:
         ValueError: If a rule needs a count that a library does not hold, or
             TREX's rules meet pairs.
-        MemoryError: If a step does not fit ``max_bytes``.
+        MemoryBudgetError: If a step does not fit the ledger's budget.
     """
+    if ledger is None:
+        ledger = MemoryLedger(None, "Calling clones from lineage barcodes")
     if settings.allowlist != (allowlist is not None):
         raise ValueError("Pass the allowlist exactly when the settings use one")
     n_records = records.n_records
@@ -915,12 +914,13 @@ def barcode_clone_calls(
     units, details = _library_units(records)
     # Each rule's count, None until the rule runs.
     counted: dict[str, int | float | None] = dict.fromkeys(BARCODE_DIAGNOSTICS)
-    room = _Room(max_bytes)
-    room.check(
-        _CELL_BYTES * n_cells + _HELD_RECORD_BYTES * n_records,
-        f"the {n_records} molecules and pairs",
+    cell_bytes = ledger.hold(
+        "each cell's group, barcodes and set", _CELL_BYTES * n_cells
     )
-    room.held = _CELL_BYTES * n_cells + _HELD_RECORD_BYTES * n_records
+    record_bytes = ledger.hold(
+        f"the flags of the {n_records} molecules and pairs",
+        _HELD_RECORD_BYTES * n_records,
+    )
     cells = np.asarray(records.cells, dtype=np.int64)
     sources = np.asarray(records.sources, dtype=np.int64)
     barcodes = np.asarray(records.barcodes, dtype=np.int64)
@@ -955,11 +955,11 @@ def barcode_clone_calls(
                 "'barcode': 'clone_id'}"
             )
         del missing
-        room.check(
+        ledger.peak(
+            "the cloneIDs' complexity",
             _LOOKUP_RECORD_BYTES * n_records
             + _texts_bytes(records, n_stored)
             + 2 * _FLAG_BYTES * n_stored,
-            "the cloneIDs' complexity",
         )
         distinct = sorted_unique(barcodes)
         texts = records.texts(distinct)
@@ -982,7 +982,9 @@ def barcode_clone_calls(
         keep &= ~dropped
         counted["moleculesOfLowComplexity"] = int(np.count_nonzero(dropped))
         del low, dropped
-        room.held += _FLAG_BYTES * n_stored
+        flag_bytes = ledger.hold(
+            "the cloneIDs of too few bases", _FLAG_BYTES * n_stored
+        )
     if settings.min_reads:
         if not np.any(levels):
             raise ValueError(
@@ -1006,11 +1008,10 @@ def barcode_clone_calls(
     corrected = barcodes.copy()
     n_kept = int(np.count_nonzero(keep))
     if settings.max_distance:
-        room.check(
-            _CORRECTION_RECORD_BYTES * n_kept,
+        correcting = ledger.hold(
             f"correcting {n_kept} molecules and pairs",
+            _CORRECTION_RECORD_BYTES * n_kept,
         )
-        room.held += _CORRECTION_RECORD_BYTES * n_kept
         kept_index = np.flatnonzero(keep)
         # Each kept record's count in its library's unit ranks the barcodes.
         counts = _record_counts(
@@ -1023,7 +1024,7 @@ def barcode_clone_calls(
             "Barcode correction",
         )
         correction = _corrected(
-            records, keep, blocks, counts, settings, room, uncompared
+            records, keep, blocks, counts, settings, ledger, uncompared
         )
         corrected[kept_index] = correction.codes
         counted["recordsCorrected"] = int(
@@ -1033,11 +1034,11 @@ def barcode_clone_calls(
         counted["expectedChanceMatches"] = correction.expected
         counted["mergedBarcodes"] = correction.merged
         del counts, kept_index, correction
-        room.held -= _CORRECTION_RECORD_BYTES * n_kept
+        ledger.release(correcting)
     else:
-        room.check(
-            _DISTINCT_RECORD_BYTES * n_kept,
+        ledger.peak(
             f"counting the distinct barcodes of {n_kept} molecules and pairs",
+            _DISTINCT_RECORD_BYTES * n_kept,
         )
         counted["distinctBarcodes"] = _distinct_barcodes(
             blocks[keep], barcodes[keep], n_stored, uncompared
@@ -1046,14 +1047,14 @@ def barcode_clone_calls(
         counted["mergedBarcodes"] = 0
     if uncompared is not None:
         del uncompared
-        room.held -= _FLAG_BYTES * n_stored
+        ledger.release(flag_bytes)
     if allowlist is not None or settings.trex_rules:
-        room.check(
+        ledger.peak(
+            "the barcodes looked up",
             _LOOKUP_RECORD_BYTES * n_records
             + _texts_bytes(records, n_stored)
             + _FLAG_BYTES * n_stored
             + (0 if allowlist is None else _ALLOWED_BYTES * len(allowlist)),
-            "the barcodes looked up",
         )
         distinct = sorted_unique(corrected[keep])
         texts = records.texts(distinct)
@@ -1077,8 +1078,8 @@ def barcode_clone_calls(
             del short, dropped
         del texts, distinct
     n_kept = int(np.count_nonzero(keep))
-    room.check(
-        _PAIRING_RECORD_BYTES * n_kept, f"collapsing {n_kept} molecules and pairs"
+    ledger.peak(
+        f"collapsing {n_kept} molecules and pairs", _PAIRING_RECORD_BYTES * n_kept
     )
     pairs = _cell_pairs(
         cells[keep],
@@ -1092,12 +1093,14 @@ def barcode_clone_calls(
     del keep, corrected, blocks, is_molecule
     n_pairs = len(pairs["cells"])
     counted["pairs"] = n_pairs
-    # The records' flags are released, and the pairs held instead.
-    room.held = _CELL_BYTES * n_cells + _PAIR_BYTES * n_pairs
-    room.check(0, f"the {n_pairs} barcodes of the cells")
+    # The pairs are held in place of the records' flags.
+    pair_bytes = ledger.hold(
+        f"the {n_pairs} barcodes of the cells", _PAIR_BYTES * n_pairs
+    )
+    ledger.release(record_bytes)
     keep_pair = np.ones(n_pairs, dtype=bool)
     if settings.trex_rules:
-        room.check(_FILTER_PAIR_BYTES * n_pairs, "TREX's filters of the barcodes")
+        ledger.peak("TREX's filters of the barcodes", _FILTER_PAIR_BYTES * n_pairs)
         pair_blocks = (
             group_codes[pairs["cells"]] * max(n_libraries, 1) + pairs["sources"]
         )
@@ -1112,7 +1115,7 @@ def barcode_clone_calls(
         del totals, single, shared, lone_read
     if settings.min_umis or settings.min_fraction:
         rule = "min_umis" if settings.min_umis else "min_fraction"
-        room.check(_FILTER_PAIR_BYTES * n_pairs, f"the barcodes that {rule} tests")
+        ledger.peak(f"the barcodes that {rule} tests", _FILTER_PAIR_BYTES * n_pairs)
         pair_counts = _record_counts(
             pairs["sources"],
             np.zeros(n_pairs, dtype=bool),
@@ -1134,14 +1137,16 @@ def barcode_clone_calls(
             counted["pairsBelowMinFraction"] = int(np.count_nonzero(dropped))
             del top
         del pair_counts
-    room.check(_SET_ARGUMENT_BYTES * n_pairs, "the cells' sets of barcodes")
-    room.held += _SET_ARGUMENT_BYTES * n_pairs
+    arguments = ledger.hold(
+        "the cells' sets of barcodes", _SET_ARGUMENT_BYTES * n_pairs
+    )
     sets = cell_sets(
         pairs["cells"][keep_pair],
         pairs["barcodes"][keep_pair],
         n_cells,
-        max_bytes=room.left(),
+        ledger=ledger,
     )
+    set_bytes = ledger.hold("the cells' sets of barcodes", sets.nbytes)
     n_barcodes = sets.sizes
     counted["cellsWithBarcodes"] = int(np.count_nonzero(n_barcodes))
     if settings.barcodes_per_cell is not None:
@@ -1155,12 +1160,14 @@ def barcode_clone_calls(
         chosen = keep_pair & called[pairs["cells"]]
         # The sets of the called cells replace those of every cell.
         del sets
+        ledger.release(set_bytes)
         sets = cell_sets(
             pairs["cells"][chosen],
             pairs["barcodes"][chosen],
             n_cells,
-            max_bytes=room.left(),
+            ledger=ledger,
         )
+        set_bytes = ledger.hold("the cells' sets of barcodes", sets.nbytes)
         del chosen, called
     modalities = None
     if settings.across is not None:
@@ -1168,8 +1175,8 @@ def barcode_clone_calls(
             pairs["cells"][keep_pair], pairs["sources"][keep_pair], n_cells, n_libraries
         )
     del pairs, keep_pair
-    # The sets are held while the clones are called, which get what is left.
-    room.held = _CELL_BYTES * n_cells + 8 * (len(sets.items) + n_cells + 1)
+    ledger.release(arguments)
+    ledger.release(pair_bytes)
     calls = set_clones(
         sets,
         groups=group_codes,
@@ -1181,8 +1188,10 @@ def barcode_clone_calls(
         prune=settings.prune,
         doublets=settings.doublets,
         min_size=settings.min_size,
-        max_bytes=room.left(),
+        ledger=ledger,
     )
+    del sets, modalities
+    ledger.release(set_bytes)
     counted["nodes"] = calls.n_nodes
     counted["cellsInSmallClones"] = calls.n_small_cells
     # The Jaccard graph, its pruning and its doublets run only by its method.
@@ -1192,9 +1201,13 @@ def barcode_clone_calls(
             counted["edgesPruned"] = calls.n_pruned
         if settings.doublets:
             counted["doublets"] = int(sum(calls.n_doublet_nodes))
+    called_barcodes = n_barcodes.astype(np.int32)
+    ledger.hold("each cell's barcodes", called_barcodes.nbytes)
+    del n_barcodes, group_codes
+    ledger.release(cell_bytes)
     return BarcodeClones(
         calls=calls,
-        n_barcodes=n_barcodes.astype(np.int32),
+        n_barcodes=called_barcodes,
         units=units,
         diagnostics=counted,
     )

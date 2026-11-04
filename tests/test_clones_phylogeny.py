@@ -11,7 +11,7 @@ import pytest
 
 from cytearc.clones.phylogeny import (
     clade_roots,
-    clone_labels,
+    clade_labels,
     collapsed_depths,
     leaf_time_ranges,
     node_times,
@@ -117,7 +117,7 @@ def test_nodes_without_a_time_are_never_past_a_cut() -> None:
 
 def test_clones_are_named_by_their_roots_or_their_positions() -> None:
     offsets = np.asarray([0, 3, 6])
-    named = clone_labels(
+    named = clade_labels(
         np.asarray([1, 4]),
         tree_offsets=offsets,
         tree_names=np.asarray(["first", "second"], dtype=object),
@@ -127,7 +127,7 @@ def test_clones_are_named_by_their_roots_or_their_positions() -> None:
     # The first tree names its nodes; the second does not, so its clone is
     # named by its root's position in that tree.
     assert named.tolist() == ["first/X", "second/node1"]
-    alone = clone_labels(
+    alone = clade_labels(
         np.asarray([0, 2]),
         tree_offsets=np.asarray([0, 3]),
         tree_names=np.asarray(["only"], dtype=object),

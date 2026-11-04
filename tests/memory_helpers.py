@@ -75,6 +75,17 @@ def index_copies_references() -> bool:
     return not np.shares_memory(pd.Index(values, dtype=object).to_numpy(), values)
 
 
+def budgeted(budget: int | None, doing: str = "Calling clones") -> Any:
+    """A memory ledger of ``budget`` bytes that holds nothing yet, or None for no budget.
+
+    Domain functions that a test calls alone charge it as they would an
+    operation's ledger that held nothing beside them.
+    """
+    from cytearc.utils.memory_budget import MemoryLedger
+
+    return None if budget is None else MemoryLedger(budget, doing)
+
+
 def traced_peak(call: Callable[[], Any], budget: int) -> tuple[Any, int]:
     """Return the result of ``call()`` and the most bytes it held beside what was held before it.
 
@@ -457,8 +468,14 @@ def charges(call: Callable[[], Any]) -> tuple[Any, list[tuple[str, int, int]]]:
     return result, taken
 
 
+#: The Python objects of a call's frames and of its ledgers and of the
+#: observer that follows their charges, which no ledger plans: what an
+#: interval may hold beyond its plan in an audit.
+AUDIT_ALLOWANCE = 64 * 1024
+
+
 def audited(
-    call: Callable[[], Any], *, allowance: int = 64 * 1024
+    call: Callable[[], Any], *, allowance: int = AUDIT_ALLOWANCE
 ) -> tuple[Any, list[tuple[str, int, int]]]:
     """Run ``call`` and return its result with each charge whose traced interval passed what its ledger planned.
 
@@ -496,6 +513,42 @@ def audited(
     finally:
         tracemalloc.stop()
     return result, overruns
+
+
+def interval_peaks(
+    call: Callable[[], Any],
+) -> tuple[Any, list[tuple[str, int, int]]]:
+    """Run ``call`` and return its result with every charge's item, plan and traced interval, in order.
+
+    Each entry is a charge or release of a memory ledger, ``"a release"`` for
+    a release, what its ledger planned from then until the next charge, and
+    the most bytes traced in that interval beside what the process held when
+    the call began, as :func:`audited` traces them. A test bounds a step's
+    charge from below by comparing the plan of its interval with what was
+    traced there, beside the bound from above that :func:`audited` checks.
+    Run ``call`` once before, as for :func:`audited`.
+    """
+    from cytearc.utils.memory_budget import observed_charges
+
+    intervals: list[tuple[str, int, int]] = []
+    pending: list[tuple[str, int]] = []
+
+    def observe(item: str, _nbytes: int, planned: int) -> None:
+        traced = tracemalloc.get_traced_memory()[1] - start
+        if pending:
+            intervals.append((pending[0][0], pending[0][1], traced))
+        tracemalloc.reset_peak()
+        pending[:] = [(item, planned)]
+
+    tracemalloc.start()
+    try:
+        start = tracemalloc.get_traced_memory()[0]
+        with observed_charges(observe):
+            result = call()
+        observe("the end of the call", 0, 0)
+    finally:
+        tracemalloc.stop()
+    return result, intervals
 
 
 #: The methods through which a read of a stored Zarr array's values goes, by

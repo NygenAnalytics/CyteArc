@@ -52,6 +52,7 @@ from scipy.special import pdtrc
 
 from ..utils.arguments import float_argument, integer_argument, quoted_value
 from ..utils.arrays import sorted_unique, unique_inverse
+from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
 from .calling import cell_sets, set_clones
 
 __all__ = [
@@ -127,35 +128,15 @@ _GROUP_COPY_BYTES = 16
 _GROUP_BYTES = 8
 _NUMBERING_CELL_BYTES = 9
 _NUMBERING_CLONE_BYTES = 24
-# Bytes that each step holds whatever its size.
-_FIXED_BYTES = 1 << 16
 # Below this mean, p_clonal is its series x / 2 - x² / 12, exact to the
 # float's precision there, since the Poisson tails underflow near the
 # smallest floats.
 _SERIES_BELOW = 1e-8
 
 
-def _check(needed: int, max_bytes: int | None, what: str) -> None:
-    if max_bytes is not None and needed > max_bytes:
-        raise MemoryError(
-            f"Calling clones from recorder alleles holds about {needed} bytes for "
-            f"{what}, more than the {max_bytes} bytes that the memory budget leaves "
-            "it. Raise mem_budget."
-        )
-
-
-@dataclass(slots=True)
-class _Room:
-    """The bytes that calling holds beside its inputs, and the most it may hold."""
-
-    limit: int | None
-    held: int = 0
-
-    def check(self, needed: int, what: str) -> None:
-        _check(self.held + needed, self.limit, what)
-
-    def left(self) -> int | None:
-        return None if self.limit is None else max(0, self.limit - self.held)
+def _peak(ledger: MemoryLedger, item: str, nbytes: int) -> None:
+    """Check that a step's ``nbytes``, and NumPy's objects and sort buffers, fit beside what the ledger holds."""
+    ledger.peak(item, nbytes + NUMPY_STEP_BYTES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -577,6 +558,16 @@ class AlleleClones:
     def n_clones(self) -> int:
         return len(self.sizes)
 
+    @property
+    def nbytes(self) -> int:
+        """The bytes of the clones' arrays, which :func:`allele_clone_calls` leaves charged to its ledger."""
+        return int(
+            self.codes.nbytes
+            + self.sizes.nbytes
+            + self.n_alleles.nbytes
+            + self.clone_alleles.nbytes
+        )
+
 
 def _runs(*keys: np.ndarray) -> np.ndarray:
     """Whether each row of sorted keys starts a run of equal keys."""
@@ -629,7 +620,7 @@ def allele_clone_calls(
     groups: np.ndarray | None,
     settings: AlleleCallSettings,
     banks: Mapping[str, AlleleBank] | None = None,
-    max_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> AlleleClones:
     """Call clones from each cell's rare alleles, within each group.
 
@@ -641,19 +632,22 @@ def allele_clone_calls(
         settings: The rules, from :func:`allele_call_settings`.
         banks: The bank of each character by name, from
             :func:`allele_banks`, or None to take frequencies from the cells.
-        max_bytes: The most bytes calling may hold beside its inputs, or
-            None.
+        ledger: The caller's memory ledger, which holds the observations and
+            is charged each step beside them; None for no limit. The clones
+            returned stay charged to it, their ``nbytes``, for the caller to
+            release.
 
     Raises:
         ValueError: If the inputs are inconsistent, a bank names no
             character of the alleles, or two characters share a name that a
             bank names.
-        MemoryError: If a step does not fit ``max_bytes``.
+        MemoryBudgetError: If a step does not fit the ledger's budget.
     """
-    room = _Room(None if max_bytes is None else int(max_bytes))
-    room.check(_GROUP_COPY_BYTES * n_cells + _FIXED_BYTES, "the cells")
+    if ledger is None:
+        ledger = MemoryLedger(None, "Calling clones from recorder alleles")
+    _peak(ledger, "the cells", _GROUP_COPY_BYTES * n_cells)
     group_codes = _group_codes(groups, n_cells)
-    room.held += _GROUP_BYTES * n_cells
+    group_bytes = ledger.hold("each cell's group", _GROUP_BYTES * n_cells)
     _check_observations(observations, n_cells)
     names = observations.character_names
     if banks is not None:
@@ -678,9 +672,7 @@ def allele_clone_calls(
     # cells of each group with an edit at each character, the M of CARLIN's
     # test, a placeholder's cells among them; then the edits that name an
     # allele.
-    room.check(
-        _OBSERVATION_BYTES * len(observations) + _FIXED_BYTES, "the cells' edits"
-    )
+    _peak(ledger, "the cells' edits", _OBSERVATION_BYTES * len(observations))
     order = np.lexsort(
         (observations.alleles, observations.characters, observations.cells)
     )
@@ -705,11 +697,12 @@ def allele_clone_calls(
     cells, characters, alleles = cells[named], characters[named], alleles[named]
     del named
     n_named = len(cells)
-    held_edits = 24 * n_named + 16 * len(group_characters)
-    room.held += held_edits
+    held_edits = ledger.hold(
+        "the edits that name an allele", 24 * n_named + 16 * len(group_characters)
+    )
 
     # Each test is an allele of a group at a character.
-    room.check(_NAMED_BYTES * n_named + _FIXED_BYTES, "the alleles' tests")
+    _peak(ledger, "the alleles' tests", _NAMED_BYTES * n_named)
     cell_groups = group_codes[cells]
     order = np.lexsort((alleles, characters, cell_groups))
     starts = _runs(cell_groups[order], characters[order], alleles[order])
@@ -722,16 +715,15 @@ def allele_clone_calls(
     test_alleles = alleles[heads]
     del heads, cell_groups
     n_tests = len(test_groups)
-    held_tests = 8 * n_named + 24 * n_tests
-    room.held += held_tests
-    room.check(_TEST_BYTES * n_tests + _FIXED_BYTES, "the alleles' tests")
+    held_tests = ledger.hold("the alleles' tests", 8 * n_named + 24 * n_tests)
+    _peak(ledger, "the alleles' tests", _TEST_BYTES * n_tests)
     test_cells = np.bincount(tests, minlength=n_tests).astype(np.int64)
     test_observations = edited_cells[
         np.searchsorted(group_characters, test_groups * n_characters + test_characters)
     ].astype(np.int64)
     del group_characters, edited_cells
     rates, samples, coverage = _bank_rates(
-        observations, banks, test_characters, test_alleles, tests, room
+        observations, banks, test_characters, test_alleles, tests, ledger
     )
     if banks is None:
         rates = test_cells / test_observations
@@ -766,34 +758,37 @@ def allele_clone_calls(
     del test_groups, test_characters, test_alleles
 
     # Cells that share a rare allele link; the components are the clones.
-    room.check(_ITEM_BYTES * n_named + _FIXED_BYTES, "the cells' rare alleles")
+    _peak(ledger, "the cells' rare alleles", _ITEM_BYTES * n_named)
     linked = rare[tests]
     del tests, rare
     linked_cells = cells[linked]
     items = characters[linked]
     items *= n_allele_codes
     items += alleles[linked]
-    del linked, cells, characters, alleles
-    room.held -= held_edits + held_tests
     n_linked = len(items)
-    room.held += 16 * n_linked
-    sets = cell_sets(linked_cells, items, n_cells, max_bytes=room.left())
+    linked_bytes = ledger.hold("the cells' rare alleles", 16 * n_linked)
+    del linked, cells, characters, alleles
+    ledger.release(held_edits + held_tests)
+    sets = cell_sets(linked_cells, items, n_cells, ledger=ledger)
+    set_bytes = ledger.hold("the cells' sets of rare alleles", sets.nbytes)
     del linked_cells, items
-    room.held += 8 * (n_cells + 1 + len(sets.items)) - 16 * n_linked
-    calls = set_clones(sets, groups=group_codes, method="shared", max_bytes=room.left())
+    ledger.release(linked_bytes)
+    # The calls stay charged as set_clones leaves them.
+    calls = set_clones(sets, groups=group_codes, method="shared", ledger=ledger)
+    # Each cell's count of rare alleles, which the clones returned keep.
+    ledger.hold("each cell's rare alleles", 8 * n_cells)
     n_alleles = sets.sizes
-    # The calls hold each cell's clone and its doublet and ambiguous flags and
-    # each clone's size, beside each cell's rare alleles.
-    room.held += 18 * n_cells + 8 * calls.n_clones + 8 * n_cells
+    # Each cell's flag of an allele, while they are counted.
+    ledger.peak("each cell's rare alleles", n_cells)
     counts["cellsWithRareAlleles"] = int(np.count_nonzero(n_alleles > 0))
 
     # A clone's alleles are the distinct rare alleles of its cells.
-    room.check(
+    _peak(
+        ledger,
+        "the clones",
         _CLONE_ALLELE_BYTES * len(sets.items)
         + _NUMBERING_CELL_BYTES * n_cells
-        + _NUMBERING_CLONE_BYTES * calls.n_clones
-        + _FIXED_BYTES,
-        "the clones",
+        + _NUMBERING_CLONE_BYTES * calls.n_clones,
     )
     in_clone = calls.codes >= 0
     pair_clones = np.repeat(calls.codes, n_alleles)
@@ -820,14 +815,22 @@ def allele_clone_calls(
     rank[keep] = np.arange(int(np.count_nonzero(keep)))
     codes = np.full(n_cells, -1, dtype=np.int64)
     codes[in_clone] = rank[calls.codes[in_clone]]
-    return AlleleClones(
+    called = AlleleClones(
         codes=codes,
         sizes=calls.sizes[keep].astype(np.int64),
-        n_alleles=n_alleles.astype(np.int64),
+        n_alleles=n_alleles,
         clone_alleles=clone_alleles[keep],
         diagnostics=counts,
         coverage=coverage,
     )
+    # The clones returned are held in place of the calls they were numbered
+    # from, once what numbering them built is let go.
+    del codes, rank, keep, clone_alleles, in_clone
+    ledger.hold("the clones", called.nbytes - n_alleles.nbytes)
+    calls_bytes = calls.nbytes
+    del calls, n_alleles, group_codes
+    ledger.release(calls_bytes + set_bytes + group_bytes)
+    return called
 
 
 def _bank_rates(
@@ -836,7 +839,7 @@ def _bank_rates(
     test_characters: np.ndarray,
     test_alleles: np.ndarray,
     tests: np.ndarray,
-    room: _Room,
+    ledger: MemoryLedger,
 ) -> tuple[np.ndarray, np.ndarray | None, list[dict[str, Any]]]:
     """Each test's bank rate and samples, and each bank's coverage.
 
@@ -869,12 +872,12 @@ def _bank_rates(
         chosen = np.flatnonzero(test_characters == character)
         codes, inverse = unique_inverse(test_alleles[chosen])
         texts = observations.allele_texts[codes]
-        room.check(
+        _peak(
+            ledger,
+            f"the alleles of {quoted_value(name)} in its bank",
             _LOOKUP_BYTES * len(codes)
             + sum(len(text) for text in texts.tolist())
-            + _LOOKUP_BYTES * len(bank)
-            + _FIXED_BYTES,
-            f"the alleles of {quoted_value(name)} in its bank",
+            + _LOOKUP_BYTES * len(bank),
         )
         found = bank.positions(texts)
         positions = found[inverse]

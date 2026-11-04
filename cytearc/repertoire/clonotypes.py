@@ -469,11 +469,7 @@ def assign_clonotype_clusters(
         metric,
         int(max_distance),
         blocks=blocks,
-        max_bytes=(
-            None
-            if ledger is None or ledger.room is None
-            else CLUSTER_SEARCH_BYTES + ledger.room
-        ),
+        ledger=_search_ledger(ledger),
     )
     n_pairs = len(low)
     reserve(
@@ -762,6 +758,28 @@ _LINK_BYTES = 32
 # Candidate pairs checked at once: two arrays of this many int64 values and
 # the checks' temporaries, about 150 MB together.
 _PAIRS_PER_CHUNK = 1 << 21
+
+
+def _search_ledger(ledger: MemoryLedger | None) -> MemoryLedger | None:
+    """A ledger for the search for near chains: the caller's, with the search's reservation free to use.
+
+    It holds what the caller holds less ``CLUSTER_SEARCH_BYTES``, which the
+    caller holds for the search, so that the search may use them beside the
+    caller's room and a refusal names the caller's whole budget.
+    """
+    if ledger is None or ledger.budget is None:
+        return None
+    search = MemoryLedger(
+        ledger.budget,
+        ledger.doing,
+        remedy=ledger.remedy,
+        codec_threads=ledger.codec_threads,
+    )
+    search.hold(
+        "what clustering holds beside the search",
+        max(0, ledger.held_bytes - CLUSTER_SEARCH_BYTES),
+    )
+    return search
 
 
 @njit(cache=True)

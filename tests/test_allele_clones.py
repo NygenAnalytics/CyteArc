@@ -32,7 +32,7 @@ from tests.clone_truth import (
     allele_calling_truth,
     clone_truth,
 )
-from tests.memory_helpers import smallest_budget, traced_peak
+from tests.memory_helpers import AUDIT_ALLOWANCE, smallest_budget, traced_peak
 from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
@@ -1104,7 +1104,7 @@ def _assert_steps_within(traced: tuple[list[tuple[str, int]], int]) -> None:
     step's shortfall from the largest check beside it, stays within the largest."""
     checks, peak = traced
     ceiling = max(stated for _what, stated in checks)
-    assert peak <= ceiling, (peak - ceiling, checks)
+    assert peak <= ceiling + AUDIT_ALLOWANCE, (peak - ceiling, checks)
     assert len(checks) > 10
 
 

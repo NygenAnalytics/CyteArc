@@ -447,9 +447,10 @@ def kept_apart(copied, monkeypatch) -> SimpleNamespace:
     store = copied.store
     read = store._read_clone_input
 
-    def with_lineages(clones, *, with_ids=False):
+    def with_lineages(clones, ledger, *, with_ids=False):
         return replace(
-            read(clones, with_ids=with_ids), kept_apart=(("lineage", LINEAGES),)
+            read(clones, ledger, with_ids=with_ids),
+            kept_apart=(("lineage", LINEAGES),),
         )
 
     monkeypatch.setattr(store, "_read_clone_input", with_lineages)

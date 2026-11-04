@@ -1,5 +1,4 @@
 import os
-import sys
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +22,6 @@ from ...clones.barcode_clones import (
     allowlist_texts,
     barcode_call_settings,
     barcode_clone_calls,
-    clone_labels,
 )
 from ...clones.assignments import CloneAssignment
 from ...metadata.arguments import BarcodeCloneArguments, LineageBarcodeImportArguments
@@ -33,7 +31,7 @@ from ...metadata.artifacts import (
     write_cell_data_artifact,
 )
 from ...metadata.records import pack_text
-from ...metadata.rows import read_text_rows
+from ...metadata.rows import read_text_rows, read_whole
 from ...metadata.selection import (
     CellSelectionRead,
     plan_cell_selection_read,
@@ -49,7 +47,7 @@ from ...storage.artifacts import (
     require_complete_artifact,
 )
 from ...storage.diagnostics import warn_diagnostics
-from ...storage.types import as_zarr_array
+from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument, optional_bool_argument, quoted_value
 from ...utils.logging import logger
@@ -62,9 +60,9 @@ from .cell_barcodes import (
     texts_per_file,
     unmatched_barcode_rules,
 )
-from .clone_artifacts import clone_write_bytes, plan_clones, write_clones
+from .clone_artifacts import plan_clones, write_clones
+from .clone_steps import files_text, hold_ranked_clone_labels, read_codes
 from .record_tables import (
-    read_array,
     record_arrays,
     record_chunk_lengths,
     stored_records,
@@ -109,27 +107,21 @@ _TABLE_BYTES_PER_TEXT = 160
 # Waiting rows merge into the records once they hold about a thousandth of
 # the budget in rows, within 1,000 and 250,000 rows.
 _MERGE_BUDGET_SHARE = 1_000
-# Calling clones reads, for each record, its cell, library, barcode, UMI, UMIs
-# and reads as int64, with the stored copy of one while it is converted; for
-# each distinct barcode, its offset beside its bytes; and for each cell, its
-# group and the canonical array read to find the cells with a barcode.
-_CALL_RECORD_BYTES = 48
-_CONVERTED_RECORD_BYTES = 8
-_CALL_TEXT_OFFSET_BYTES = 8
-_CALL_CELL_BYTES = 16
-# Saving the clones holds, for each cell beside what saving them holds, its
-# group and the doublet and ambiguous flags and barcodes of the calls; each
-# clone's label as a Python string is counted at its size.
-_CALLED_CELL_BYTES = 24
+# The record arrays that calling clones reads as int64: each field of the
+# records, the array it is stored in and what a refusal calls it.
+_CALLED_RECORD_ARRAYS = (
+    ("cells", "cells", "each record's cell"),
+    ("sources", "sources", "each record's library"),
+    ("barcodes", "barcode", "each record's barcode"),
+    ("umi_codes", "umi", "each record's UMI"),
+    ("umis", "umis", "each record's UMIs"),
+    ("reads", "reads", "each record's reads"),
+)
 # Bytes of each allowlisted barcode while its distinct values are sorted and
 # fingerprinted: the references to its Python string in the lists and the set
 # of distinct barcodes, its packed bytes, and the string itself when a
 # fixed-width array gave it, 294 for barcodes of 28 bases as traced.
 _ALLOWLIST_BYTES = 300
-
-
-def _files_text(n_files: int) -> str:
-    return "the barcode file" if n_files == 1 else "the barcode files"
 
 
 def _kept_rows(rows: "BarcodeRows", cells: np.ndarray, level: str) -> np.ndarray:
@@ -313,7 +305,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             self._require_measured_cells(
                 assay.name, cell_selection, operation=arguments.operation
             )
-        warnings = unmatched_barcode_rules(_files_text(len(files)))
+        warnings = unmatched_barcode_rules(files_text("barcode", len(files)))
         planned = self._plan_barcodes(arguments, cell_selection, n_cells)
         if planned.reused:
             # Saved barcodes warn as they did when they were imported.
@@ -751,17 +743,16 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             int(as_zarr_array(group[f"{_RECORDS}_{name}_offsets"], name=name).shape[0])
             for name in ("barcode", "umi")
         )
-        resident = (
+        MemoryLedger(
+            self.memoryBytes,
+            f"Loading the barcodes of {n_cells} cells",
+            codec_threads=self.nthreads,
+        ).peak(
+            f"the tables of {n_cells} cells and {n_records} molecules and pairs",
             _TABLE_BYTES_PER_RECORD * n_records
             + _TABLE_BYTES_PER_TEXT * (n_text + n_cells)
-            + _CELL_BYTES * n_cells
+            + _CELL_BYTES * n_cells,
         )
-        if resident > self.memoryBytes:
-            raise MemoryError(
-                f"The tables of {n_cells} cells and {n_records} molecules and pairs "
-                f"hold about {resident} bytes, more than the memory budget of "
-                f"{self.memoryBytes} bytes. Raise mem_budget."
-            )
         loaded = self._artifacts_load_values(barcodes)
         table = stored_records(group, _RECORDS, FIELDS)
         summaries = {
@@ -909,7 +900,15 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         trex_rules = optional_bool_argument(trex_rules, "trex_rules")
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         group = self._barcode_group(barcodes)
+        stored_counts = as_zarr_array(group["n_barcodes"], name="n_barcodes")
+        n_cells = int(stored_counts.shape[0])
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Calling clones from the barcodes of {n_cells} cells",
+            codec_threads=self.nthreads,
+        )
         listed = None
+        allowlist_bytes = 0
         if allowlist is not None and not isinstance(allowlist, bool | np.bool_):
             if isinstance(allowlist, str | bytes) or not hasattr(allowlist, "__len__"):
                 raise TypeError(
@@ -922,14 +921,14 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 if isinstance(allowlist, np.ndarray) and allowlist.dtype.kind == "U"
                 else 0
             )
-            needed = _ALLOWLIST_BYTES * len(allowlist) + characters
-            if needed > self.memoryBytes:
-                raise MemoryError(
-                    f"Reading an allowlist of {len(allowlist)} barcodes holds about "
-                    f"{needed} bytes, more than the memory budget of "
-                    f"{self.memoryBytes} bytes. Raise mem_budget."
-                )
+            ledger.peak(
+                f"an allowlist of {len(allowlist)} barcodes",
+                _ALLOWLIST_BYTES * len(allowlist) + characters,
+            )
             listed = allowlist_texts(allowlist)
+            allowlist_bytes = ledger.hold(
+                "the allowlist", _ALLOWLIST_BYTES * len(listed)
+            )
         settings = barcode_call_settings(
             preset,
             min_reads=min_reads,
@@ -949,8 +948,6 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         )
         columns = group_columns(within, "within")
         cell_selection = inspect_artifact(self.zw, barcodes).input_ref("cell_selection")
-        stored_counts = as_zarr_array(group["n_barcodes"], name="n_barcodes")
-        n_cells = int(stored_counts.shape[0])
         allowed = None
         allowlist_fingerprint = None
         if settings.allowlist:
@@ -961,25 +958,25 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             builder.update_array("data", data)
             builder.update_array("offsets", offsets)
             allowlist_fingerprint = builder.hexdigest()
-        allowlist_bytes = 0 if allowed is None else _ALLOWLIST_BYTES * len(allowed)
         # Every cell with a barcode needs a label in the within columns.
-        with_barcodes = np.asarray(stored_counts[:]) > 0
-        grouping = MemoryLedger(
-            self.memoryBytes,
-            f"Grouping the {n_cells} cells of the barcodes",
-            codec_threads=self.nthreads,
-        )
-        grouping.hold("the allowlist", allowlist_bytes)
+        counts = read_whole(ledger, group, "n_barcodes", item="each cell's barcodes")
+        flags = ledger.hold("the cells with a barcode", n_cells)
+        with_barcodes = counts > 0
+        del counts
+        ledger.release(n_cells * stored_counts.dtype.itemsize)
+        # Each cell's group and the groups' keys stay held until the clones
+        # are saved.
         group_codes, _keys, within_fingerprint = within_groups(
             self.zw,
             self.cells,
             cell_selection,
             columns,
             with_barcodes,
-            ledger=grouping,
+            ledger=ledger,
             what="a barcode",
         )
         del with_barcodes
+        ledger.release(flags)
         record = settings.record()
         arguments = BarcodeCloneArguments(
             barcodes=barcodes,
@@ -1018,56 +1015,23 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable(arguments.operation)
-        n_records = int(
-            as_zarr_array(group[f"{_RECORDS}_cells"], name="record_cells").shape[0]
-        )
-        barcode_offsets = as_zarr_array(
-            group[f"{_RECORDS}_barcode_offsets"], name="record_barcode_offsets"
-        )
-        barcode_values = as_zarr_array(
-            group[f"{_RECORDS}_barcode_values"], name="record_barcode_values"
-        )
-        # The records, as read, are held while the clones are called, which
-        # get what is left.
-        held = (
-            allowlist_bytes
-            + _CALL_CELL_BYTES * n_cells
-            + _CALL_RECORD_BYTES * n_records
-            + _CALL_TEXT_OFFSET_BYTES * int(barcode_offsets.shape[0])
-            + int(barcode_values.shape[0])
-        )
-        # Saving them is checked first, as if every cell were a clone of its
-        # own, the most clones there can be.
-        writing = (
-            _CALLED_CELL_BYTES * n_cells
-            + sys.getsizeof(f"clone_{n_cells}") * n_cells
-            + clone_write_bytes(
-                n_cells,
-                n_cells,
-                len(f"clone_{n_cells}"),
-                source_arrays={"n_barcodes": np.int32, "doublet": bool},
-            )
-        )
-        for needed, what in (
-            (held + _CONVERTED_RECORD_BYTES * n_records, "as they are read"),
-            (writing, "as they are written"),
-        ):
-            if needed > self.memoryBytes:
-                raise MemoryError(
-                    f"Calling clones from the {n_records} molecules and pairs of "
-                    f"{n_cells} cells holds about {needed} bytes {what}, more than "
-                    f"the memory budget of {self.memoryBytes} bytes. Raise "
-                    "mem_budget."
-                )
         records = BarcodeRecords(
-            cells=read_array(group, f"{_RECORDS}_cells").astype(np.int64),
-            sources=read_array(group, f"{_RECORDS}_sources").astype(np.int64),
-            barcodes=read_array(group, f"{_RECORDS}_barcode").astype(np.int64),
-            umi_codes=read_array(group, f"{_RECORDS}_umi").astype(np.int64),
-            umis=read_array(group, f"{_RECORDS}_umis").astype(np.int64),
-            reads=read_array(group, f"{_RECORDS}_reads").astype(np.int64),
-            barcode_data=np.asarray(barcode_values[:], dtype=np.uint8),
-            barcode_offsets=np.asarray(barcode_offsets[:], dtype=np.int64),
+            **{
+                field: read_codes(ledger, group, f"{_RECORDS}_{name}", item=item)
+                for field, name, item in _CALLED_RECORD_ARRAYS
+            },
+            barcode_data=read_whole(
+                ledger,
+                group,
+                f"{_RECORDS}_barcode_values",
+                item="the bytes of the distinct barcodes",
+            ).astype(np.uint8, copy=False),
+            barcode_offsets=read_codes(
+                ledger,
+                group,
+                f"{_RECORDS}_barcode_offsets",
+                item="the offsets of the distinct barcodes",
+            ),
             libraries=tuple(
                 (str(entry["library"]), str(entry["level"]))
                 for entry in _stored_libraries(group)
@@ -1079,26 +1043,19 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             groups=group_codes,
             settings=settings,
             allowlist=allowed,
-            max_bytes=self.memoryBytes - held,
+            ledger=ledger,
         )
+        record_bytes = records.nbytes
         del records, allowed, listed
+        ledger.release(record_bytes + allowlist_bytes)
         calls = called.calls
-        labels = clone_labels(calls.n_clones)
+        labels = hold_ranked_clone_labels(ledger, calls.n_clones)
         assignment = CloneAssignment(
             codes=calls.codes,
             clone_ids=labels,
             clone_sizes=calls.sizes,
             probabilities=None,
             n_cells_in_several_clones=0,
-        )
-        saving = MemoryLedger(
-            self.memoryBytes,
-            f"Calling clones from the barcodes of {n_cells} cells",
-            codec_threads=self.nthreads,
-        )
-        saving.hold(
-            "each cell's group and calls and the clones' labels",
-            _CALLED_CELL_BYTES * n_cells + sum(map(sys.getsizeof, labels.tolist())),
         )
         write_clones(
             self.zw,
@@ -1122,7 +1079,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 "n_barcodes": called.n_barcodes.astype(np.int32),
                 "doublet": calls.doublets.astype(bool),
             },
-            ledger=saving,
+            ledger=ledger,
             diagnostics=called.diagnostics,
         )
         n_assigned = int(np.count_nonzero(calls.codes >= 0))

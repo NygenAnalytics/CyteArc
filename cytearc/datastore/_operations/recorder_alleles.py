@@ -1,5 +1,4 @@
 import os
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -16,7 +15,6 @@ from ...clones.allele_clones import (
     allele_clone_calls,
 )
 from ...clones.assignments import CloneAssignment
-from ...clones.barcode_clones import clone_labels
 from ...clones.recorders import (
     FIELDS,
     MARK,
@@ -36,6 +34,7 @@ from ...metadata.arguments import AlleleCloneArguments, RecorderAlleleImportArgu
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from ...metadata.records import RecordEncoder, RecordTable, pack_text, unpack_text
 from ...metadata.rows import (
+    read_whole,
     read_metadata_rows_chunkwise,
     read_text_rows,
     text_read_bytes,
@@ -61,14 +60,13 @@ from ...storage.diagnostics import (
     export_summary,
     warn_diagnostics,
 )
-from ...storage.geometry import array_geometry
-from ...storage.types import as_zarr_array
+from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sorted_unique, unique_inverse
 from ...utils.digest import file_sha256, path_sha256
 from ...utils.logging import logger
-from ...utils.memory_budget import MemoryLedger
+from ...utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
 from .cell_groups import group_columns, within_groups
 from .cell_barcodes import (
     BarcodeFile,
@@ -76,9 +74,9 @@ from .cell_barcodes import (
     barcode_files,
     unmatched_barcode_rules,
 )
-from .clone_artifacts import clone_write_bytes, plan_clones, write_clones
+from .clone_artifacts import plan_clones, write_clones
+from .clone_steps import files_text, hold_ranked_clone_labels
 from .record_tables import (
-    read_array,
     record_arrays,
     record_chunk_lengths,
     stored_records,
@@ -183,18 +181,13 @@ _STORE_BYTES_PER_ALLELE_BYTE = 2
 _BANK_ROW_BYTES = 128
 _BANK_HELD_ROW_BYTES = 80
 _BANK_CHARACTER_BYTES = 4
-# Calling clones holds, for each cell, its group and whether it has an edit;
-# while the states are read, each record's state, whether it is an edit and
-# the comparison that adds unknown marks, 3 as traced; while the integrations
-# and sites are read, both full int32 columns and each record's edit flag;
-# and for each edit, its allele as int64, its integration and site as int32,
-# their key as int64 and the sort that numbers the keys, 57 at their peak, or
-# its cell as it is read beside the allele and character. It then holds each
-# edit's cell, character and allele.
-_CALL_CELL_BYTES = 16
-_STATE_READ_BYTES = 4
-_COLUMN_READ_BYTES = 8
-_CALL_EDIT_BYTES = 80
+# Calling clones codes each edit's character from its integration and site:
+# for each edit, their int32 copies, their key as int64 and the sort that
+# numbers the keys, beside the edits' alleles held; and for each record of a
+# block of _KEY_BLOCK, its key, its int64 copy of the integration and its
+# sorted copy. It then holds each edit's cell, character and allele.
+_CHARACTER_EDIT_BYTES = 48
+_KEY_BLOCK_BYTES = 32
 _HELD_EDIT_BYTES = 24
 # Bytes of each distinct allele, integration or site while its packed text is
 # read and decoded, beside the copies of its bytes that decoding holds: its
@@ -208,14 +201,6 @@ _HELD_TEXT_BYTES = 68
 # The records whose characters are keyed at a time, while both full columns
 # of integrations and sites are held.
 _KEY_BLOCK = 1 << 16
-# Saving the clones holds, for each cell beside what saving them holds, its
-# rare alleles from the calls as int64; each clone's label as a Python
-# string is counted at its size.
-_CALLED_CELL_BYTES = 8
-
-
-def _files_text(n_files: int) -> str:
-    return "the allele file" if n_files == 1 else "the allele files"
 
 
 def _per_file(integrations: Any, n_files: int) -> list[Any]:
@@ -418,7 +403,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             sources=sources,
             invalidate_cache=invalidate_cache,
         )
-        warnings = _allele_import_rules(_files_text(len(files)))
+        warnings = _allele_import_rules(files_text("allele", len(files)))
         planned = self._plan_alleles(arguments, cell_selection, n_cells)
         if planned.reused:
             # Saved alleles warn as they did when they were imported.
@@ -809,12 +794,13 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             + _CELL_BYTES * n_cells
             + text_read_bytes(self.cells._get_array("ids"), n_cells)
         )
-        if resident > self.memoryBytes:
-            raise MemoryError(
-                f"The tables of {n_cells} cells and {n_records} allele records hold "
-                f"about {resident} bytes, more than the memory budget of "
-                f"{self.memoryBytes} bytes. Raise mem_budget."
-            )
+        MemoryLedger(
+            self.memoryBytes,
+            f"Loading the alleles of {n_cells} cells",
+            codec_threads=self.nthreads,
+        ).peak(
+            f"the tables of {n_cells} cells and {n_records} allele records", resident
+        )
         loaded = self._artifacts_load_values(alleles)
         table = stored_records(group, _RECORDS, FIELDS)
         summaries = {
@@ -945,20 +931,17 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 else 0
             )
         )
-        if resident > self.memoryBytes:
-            raise MemoryError(
-                f"Exporting the characters of {n_records} allele records holds about "
-                f"{resident} bytes, more than the memory budget of "
-                f"{self.memoryBytes} bytes. Raise mem_budget."
-            )
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Exporting the characters of {n_records} allele records",
+            codec_threads=self.nthreads,
+        )
+        ledger.hold(
+            "the records and what the character matrix builds from them", resident
+        )
         table = stored_records(group, _RECORDS, FIELDS)
         _merge_site_rows(table, _stored_files(group))
-        matrix = character_matrix(
-            table,
-            unknown=unknown,
-            memory_bytes=self.memoryBytes,
-            held_bytes=resident,
-        )
+        matrix = character_matrix(table, unknown=unknown, ledger=ledger)
         del table
         if not len(matrix.cells) or not len(matrix.characters):
             raise ValueError(
@@ -983,20 +966,16 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             # the budget holds, or as the rest of it leaves room for, at least
             # one.
             row_bytes = laml_row_bytes(len(matrix.characters))
-            held = resident + int(matrix.codes.nbytes)
-            if held + row_bytes > self.memoryBytes:
-                raise MemoryError(
-                    f"Writing LAML's text of {len(matrix.characters)} characters "
-                    f"holds about {held + row_bytes} bytes, more than the memory "
-                    f"budget of {self.memoryBytes} bytes. Raise mem_budget."
-                )
+            ledger.peak(
+                f"writing LAML's text of {len(matrix.characters)} characters", row_bytes
+            )
+            room = ledger.room
+            assert room is not None
             write_laml_characters(
                 target,
                 cell_ids,
                 matrix,
-                block_cells=max(
-                    1, min(self.memoryBytes // 20, self.memoryBytes - held) // row_bytes
-                ),
+                block_cells=max(1, min(self.memoryBytes // 20, room) // row_bytes),
             )
         logger.info(
             f"Exported {len(matrix.cells)} cells by {len(matrix.characters)} "
@@ -1137,14 +1116,20 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         group = self._allele_group(alleles)
+        counts = self._allele_counts(group)
+        n_cells = counts["cells"]
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Calling clones from the alleles of {n_cells} cells",
+            codec_threads=self.nthreads,
+        )
         banks = None
         bank_bytes = 0
         if frequencies is not None:
             checking, bank_bytes = _bank_bytes(frequencies)
-            _check_calling(
-                checking + _FIXED_BYTES, self.memoryBytes, "the banks of frequencies"
-            )
+            ledger.peak("the banks of frequencies", checking + NUMPY_STEP_BYTES)
             banks = allele_banks(frequencies)
+            ledger.hold("the banks of frequencies", bank_bytes)
         settings = allele_call_settings(
             method,
             max_frequency=max_frequency,
@@ -1155,33 +1140,27 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         )
         columns = group_columns(within, "within")
         cell_selection = inspect_artifact(self.zw, alleles).input_ref("cell_selection")
-        counts = self._allele_counts(group)
-        n_cells = counts["cells"]
         # Every cell with an edit needs a label in the within columns: each
-        # cell's edits are read, beside the chunks that Zarr decodes at once,
-        # then held as a mask while the cells group.
-        _check_calling(
-            bank_bytes + _edits_read_bytes(group) + n_cells + _FIXED_BYTES,
-            self.memoryBytes,
-            f"the edits of {n_cells} cells",
-        )
-        with_edits = read_array(group, "n_edits") > 0
-        grouping = MemoryLedger(
-            self.memoryBytes,
-            f"Grouping the {n_cells} cells of the alleles",
-            codec_threads=self.nthreads,
-        )
-        grouping.hold("the banks and each cell's edit", bank_bytes + n_cells)
+        # cell's edits are read, then held as a mask while the cells group.
+        edits = read_whole(ledger, group, "n_edits", item="each cell's edits")
+        flags = ledger.hold("the cells with an edit", n_cells)
+        with_edits = edits > 0
+        edit_bytes = edits.nbytes
+        del edits
+        ledger.release(edit_bytes)
+        # Each cell's group and the groups' keys stay held until the clones
+        # are saved.
         group_codes, _keys, within_fingerprint = within_groups(
             self.zw,
             self.cells,
             cell_selection,
             columns,
             with_edits,
-            ledger=grouping,
+            ledger=ledger,
             what="an edit",
         )
         del with_edits
+        ledger.release(flags)
         record = settings.record()
         arguments = AlleleCloneArguments(
             alleles=alleles,
@@ -1210,74 +1189,53 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             return planned.ref
         self._require_writable(arguments.operation)
         n_records = counts["records"]
-        # Saving the clones is checked first, as if every cell were a clone of
-        # its own, the most clones there can be.
-        writing = _saved_clone_bytes(n_cells, n_cells)
-        held = bank_bytes + _CALL_CELL_BYTES * n_cells
-        _check_calling(
-            held + writing + _FIXED_BYTES,
-            self.memoryBytes,
-            f"the clones of {n_cells} cells as they are written",
-        )
         # The distinct alleles, integrations and sites are decoded as text
         # before the records are read, and held while the clones are called,
         # each character at the width of the widest.
         n_texts = counts["alleles"] + counts["integrations"] + counts["sites"]
-        _check_calling(
-            held
-            + _DECODE_TEXT_BYTES * n_texts
-            + counts["decoded_bytes"]
-            + _FIXED_BYTES,
-            self.memoryBytes,
+        ledger.peak(
             f"the text of {counts['alleles']} distinct alleles as it is decoded",
+            _DECODE_TEXT_BYTES * n_texts + counts["decoded_bytes"],
         )
-        texts = _record_texts(group)
-        held += _HELD_TEXT_BYTES * n_texts + counts["text_width"] * counts["text_bytes"]
+        texts = _record_texts(ledger, group)
+        text_bytes = ledger.hold(
+            f"the text of {counts['alleles']} distinct alleles",
+            _HELD_TEXT_BYTES * n_texts + counts["text_width"] * counts["text_bytes"],
+        )
         # The states are read first, so that only the records of edited sites
         # are read on.
-        _check_calling(
-            held + _STATE_READ_BYTES * n_records + _FIXED_BYTES,
-            self.memoryBytes,
-            f"the states of {n_records} allele records",
+        states = read_whole(
+            ledger,
+            group,
+            f"{_RECORDS}_state",
+            item=f"the states of {n_records} allele records",
         )
-        states = read_array(group, f"{_RECORDS}_state")
+        edited_bytes = ledger.hold("the records of edited sites", n_records)
         edited = states == MARK
         edited |= states == UNKNOWN_MARK
+        state_bytes = states.nbytes
         del states
+        ledger.release(state_bytes)
         n_edited = int(np.count_nonzero(edited))
-        _check_calling(
-            held
-            + n_records
-            + _COLUMN_READ_BYTES * n_records
-            + _CALL_EDIT_BYTES * n_edited
-            + _FIXED_BYTES,
-            self.memoryBytes,
-            f"the {n_edited} edited sites of {n_cells} cells as they are read",
-        )
-        observations = _allele_observations(group, edited, texts)
+        observations = _allele_observations(ledger, group, edited, texts)
+        observation_bytes = _HELD_EDIT_BYTES * n_edited
         del edited, texts
-        held += _HELD_EDIT_BYTES * n_edited
-        # The calls get what the budget leaves beside what the operation holds
-        # and its fixed bytes, which every check of the operation counts.
+        ledger.release(edited_bytes + text_bytes)
+        # The calls are charged beside what the operation holds, and the
+        # clones stay charged as the calls leave them.
         called = allele_clone_calls(
             observations,
             n_cells,
             groups=group_codes,
             settings=settings,
             banks=banks,
-            max_bytes=self.memoryBytes - held - _FIXED_BYTES,
+            ledger=ledger,
         )
         del observations, banks
-        # The clones are saved beside each cell's group and calls, now that
-        # their number is known.
-        _check_calling(
-            _CALL_CELL_BYTES * n_cells
-            + _saved_clone_bytes(n_cells, called.n_clones)
-            + _FIXED_BYTES,
-            self.memoryBytes,
-            f"the {called.n_clones} clones of {n_cells} cells as they are written",
-        )
-        labels = clone_labels(called.n_clones)
+        ledger.release(observation_bytes + bank_bytes)
+        labels = hold_ranked_clone_labels(ledger, called.n_clones)
+        ledger.hold("each cell's rare alleles as written", 4 * n_cells)
+        written_alleles = called.n_alleles.astype(np.int32)
         assignment = CloneAssignment(
             codes=called.codes,
             clone_ids=labels,
@@ -1285,25 +1243,13 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             probabilities=None,
             n_cells_in_several_clones=0,
         )
-        saving = MemoryLedger(
-            self.memoryBytes,
-            f"Calling clones from the alleles of {n_cells} cells",
-            codec_threads=self.nthreads,
-        )
-        saving.hold(
-            "each cell's group and calls, the clones' labels and the objects "
-            "that writing holds",
-            (_CALL_CELL_BYTES + _CALLED_CELL_BYTES) * n_cells
-            + sum(map(sys.getsizeof, labels.tolist()))
-            + _FIXED_BYTES,
-        )
         write_clones(
             self.zw,
             planned,
             assignment,
             {"n_clones": called.n_clones, "bank_coverage": called.coverage},
-            source_arrays={"n_alleles": called.n_alleles.astype(np.int32)},
-            ledger=saving,
+            source_arrays={"n_alleles": written_alleles},
+            ledger=ledger,
             diagnostics=called.diagnostics,
         )
         for entry in called.coverage:
@@ -1324,46 +1270,6 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             f"{largest} cells"
         )
         return planned.ref
-
-
-def _saved_clone_bytes(n_cells: int, n_clones: int) -> int:
-    """What saving the clones of ``n_cells`` holds beside each cell's group and calls.
-
-    The calls' rare alleles of each cell, each clone's label as a Python
-    string at the size of the longest, and what saving the clones holds.
-    """
-    longest = f"clone_{n_clones}"
-    return (
-        _CALLED_CELL_BYTES * n_cells
-        + sys.getsizeof(longest) * n_clones
-        + clone_write_bytes(
-            n_cells, n_clones, len(longest), source_arrays={"n_alleles": np.int32}
-        )
-    )
-
-
-def _edits_read_bytes(group: zarr.Group) -> int:
-    """What reading each cell's edits whole holds: the counts and the chunks Zarr decodes at once.
-
-    Zarr decodes up to its async concurrency of chunks at a time, each into a
-    buffer of its own, before it copies them into the counts it returns.
-    """
-    edits = as_zarr_array(group["n_edits"], name="n_edits")
-    geometry = array_geometry(edits)
-    assert geometry is not None
-    n_chunks = -(-int(edits.shape[0]) // geometry.axisChunk(0))
-    return geometry.readBytes(
-        int(edits.nbytes), n_chunks, decodes=int(zarr.config.get("async.concurrency"))
-    )
-
-
-def _check_calling(needed: int, budget: int, what: str) -> None:
-    """Raise MemoryError before calling clones holds more than the budget."""
-    if needed > budget:
-        raise MemoryError(
-            f"Calling clones from recorder alleles holds about {needed} bytes for "
-            f"{what}, more than the memory budget of {budget} bytes. Raise mem_budget."
-        )
 
 
 def _bank_bytes(frequencies: Any) -> tuple[int, int]:
@@ -1404,19 +1310,49 @@ def _banks_fingerprint(banks: Mapping[str, AlleleBank]) -> str:
     return builder.hexdigest()
 
 
-def _record_texts(group: zarr.Group) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The distinct integrations, sites and alleles of saved records, as text."""
+def _record_texts(
+    ledger: MemoryLedger, group: zarr.Group
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The distinct integrations, sites and alleles of saved records, as text.
+
+    Each field's packed text is read whole within ``ledger`` and decoded,
+    and its stored arrays are let go once it is.
+    """
 
     def texts(name: str) -> np.ndarray:
-        return unpack_text(
-            read_array(group, f"{_RECORDS}_{name}_values"),
-            read_array(group, f"{_RECORDS}_{name}_offsets"),
+        values = read_whole(
+            ledger, group, f"{_RECORDS}_{name}_values", item=f"the {name}s' text"
         )
+        offsets = read_whole(
+            ledger, group, f"{_RECORDS}_{name}_offsets", item=f"the {name}s' text"
+        )
+        decoded = unpack_text(values, offsets)
+        stored = values.nbytes + offsets.nbytes
+        del values, offsets
+        ledger.release(stored)
+        return decoded
 
     return texts("integration"), texts("site"), texts("allele")
 
 
+def _edited_codes(
+    ledger: MemoryLedger, group: zarr.Group, name: str, edited: np.ndarray, *, item: str
+) -> np.ndarray:
+    """The values of the record array ``name`` at the edited records, as int64, kept charged as ``item``."""
+    stored = read_whole(ledger, group, f"{_RECORDS}_{name}", item=item)
+    n_edited = int(np.count_nonzero(edited))
+    # The edited values as stored, and their int64 copy.
+    ledger.peak(item, stored.dtype.itemsize * n_edited)
+    ledger.hold(item, 8 * n_edited)
+    codes = np.asarray(stored[edited], dtype=np.int64)
+    stored_bytes = stored.nbytes
+    del stored
+    ledger.release(stored_bytes)
+    return codes
+
+
 def _allele_observations(
+    ledger: MemoryLedger,
     group: zarr.Group,
     edited: np.ndarray,
     texts: tuple[np.ndarray, np.ndarray, np.ndarray],
@@ -1427,12 +1363,21 @@ def _allele_observations(
     key, so the characters need one sort of the edits' keys. The characters
     that hold no edit are found from both full columns a block at a time.
     ``texts`` holds the distinct integrations, sites and alleles as text.
+    Each read is charged to ``ledger``, and each edit's cell, character and
+    allele stay charged, ``_HELD_EDIT_BYTES`` an edit.
     """
     integration_names, site_names, allele_texts = texts
     n_sites = max(1, len(site_names))
-    alleles = read_array(group, f"{_RECORDS}_allele")[edited].astype(np.int64)
-    integrations = read_array(group, f"{_RECORDS}_integration")
-    sites = read_array(group, f"{_RECORDS}_site")
+    n_edited = int(np.count_nonzero(edited))
+    alleles = _edited_codes(ledger, group, "allele", edited, item="each edit's allele")
+    integrations = read_whole(
+        ledger, group, f"{_RECORDS}_integration", item="each record's integration"
+    )
+    sites = read_whole(ledger, group, f"{_RECORDS}_site", item="each record's site")
+    ledger.peak(
+        "the characters of the records",
+        _KEY_BLOCK_BYTES * min(_KEY_BLOCK, len(integrations)),
+    )
     every = [
         sorted_unique(
             integrations[start : start + _KEY_BLOCK].astype(np.int64) * n_sites
@@ -1440,6 +1385,8 @@ def _allele_observations(
         )
         for start in range(0, len(integrations), _KEY_BLOCK)
     ]
+    ledger.peak("the characters of the edits", _CHARACTER_EDIT_BYTES * n_edited)
+    columns = integrations.nbytes + sites.nbytes
     integrations = integrations[edited]
     sites = sites[edited]
     keys = integrations.astype(np.int64)
@@ -1447,9 +1394,11 @@ def _allele_observations(
     keys *= n_sites
     keys += sites
     del sites
+    ledger.release(columns)
+    ledger.hold("each edit's character", 8 * n_edited)
     distinct, characters = unique_inverse(keys)
     del keys
-    cells = read_array(group, f"{_RECORDS}_cells")[edited].astype(np.int64)
+    cells = _edited_codes(ledger, group, "cells", edited, item="each edit's cell")
 
     def name(key: int) -> str:
         return character_name(

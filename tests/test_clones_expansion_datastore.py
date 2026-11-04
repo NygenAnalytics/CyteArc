@@ -16,6 +16,7 @@ import pytest
 from cytearc.clones import ClonalExpansion
 from cytearc.clones.expansion import DEFAULT_RANK_SPLITS
 from cytearc.metadata.rows import array_row_selection_parts
+from cytearc.utils.memory_budget import MemoryLedger
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.geometry import READ_OBJECT_BYTES
 from cytearc.storage.refs import ArtifactRef
@@ -651,17 +652,18 @@ def test_labels_that_a_source_keeps_apart_follow_the_measured_cells(shared) -> N
     from dataclasses import replace
 
     store = shared.store
-    source = store._read_clone_input(shared.clones)
+    ledger = MemoryLedger(None, "Reading clones")
+    source = store._read_clone_input(shared.clones, ledger)
     assert source.kept_apart == () and source.clone_ids is None
     kinds = np.asarray([f"kind{cell % 3}" for cell in range(N_CELLS)], dtype=object)
     labelled = replace(source, kept_apart=(("kind", kinds),))
     # The clones' own cells keep the labels as they are.
-    cells, codes, kept = store._measured_clone_cells(labelled, None)
+    cells, codes, kept = store._measured_clone_cells(labelled, None, ledger)
     assert cells == shared.cells and kept[0][1] is kinds
     d2 = TRUTH.samples == "d2"
     store.cells.insert("is_d2", d2, overwrite=True)
     selection = store.snapshot_cell_selection("is_d2")
-    cells, codes, kept = store._measured_clone_cells(labelled, selection)
+    cells, codes, kept = store._measured_clone_cells(labelled, selection, ledger)
     assert cells == selection
     np.testing.assert_array_equal(codes, source.codes[d2])
     ((name, labels),) = kept
@@ -675,10 +677,10 @@ def test_labels_that_a_source_keeps_apart_follow_the_measured_cells(shared) -> N
         cell_selection=store.snapshot_cell_selection("is_d4"),
     )
     d4_source = replace(
-        store._read_clone_input(d4_clones),
+        store._read_clone_input(d4_clones, ledger),
         kept_apart=(("kind", kinds[~d2]),),
     )
-    _cells, codes, kept = store._measured_clone_cells(d4_source, shared.cells)
+    _cells, codes, kept = store._measured_clone_cells(d4_source, shared.cells, ledger)
     assert (codes[d2] == -1).all()
     assert all(label is None for label in kept[0][1][d2])
     assert kept[0][1][~d2].tolist() == kinds[~d2].tolist()

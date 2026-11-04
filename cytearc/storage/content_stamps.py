@@ -27,6 +27,13 @@ from .partition import SCAN_BAND_BYTES
 # Objects fetched at once: whole objects of up to SCAN_BAND_BYTES decoded,
 # and at most this many.
 _STAMP_BATCH_OBJECTS = 32
+# A stamp's Python and Zarr objects: the array's documents and the digest,
+# and for each stored object fetched at once its key, its task and its
+# buffer's object. Traced on local stores of 1 to 100 objects, a stamp held
+# 18 to 32 KB beside twice its stored bytes, and 5.5 KB more an object at 32
+# objects at once.
+_STAMP_FIXED_BYTES = 32 * 1024
+_STAMP_OBJECT_BYTES = 6 * 1024
 # Cached values; each is a short digest.
 _CACHE_ENTRIES = 1024
 
@@ -42,6 +49,60 @@ def _object_keys(array: zarr.Array) -> list[str]:
         array.metadata.encode_chunk_key(coordinates)
         for coordinates in product(*(range(count) for count in counts))
     ]
+
+
+def _batch_size(array: zarr.Array) -> int:
+    """The objects that a stamp fetches at once: those that decode to one scan band, at most 32."""
+    grid = array.shards or array.chunks
+    object_bytes = (
+        math.prod(int(size) for size in grid) * np.dtype(array.dtype).itemsize
+    )
+    return max(1, min(_STAMP_BATCH_OBJECTS, SCAN_BAND_BYTES // max(1, object_bytes)))
+
+
+def stored_content_stamp_bytes(array: zarr.Array) -> int:
+    """The most bytes that :func:`stored_content_stamp` holds while it reads ``array``.
+
+    A stamp fetches a batch of stored objects at once and copies each one as
+    bytes before it hashes it, so it holds twice the stored bytes of its
+    largest batch, beside Python and Zarr objects of its own and of each
+    object fetched at once. Each object counts its stored size where
+    the store reports sizes without reading the objects, as a local file
+    system does, and otherwise its decoded size and a sixty-fourth more,
+    which bounds an object whose compression could not shrink it.
+    """
+    from zarr.abc.store import Store
+    from zarr.core.sync import sync
+
+    keys = _object_keys(array)
+    batch_size = _batch_size(array)
+    grid = array.shards or array.chunks
+    decoded = math.prod(int(size) for size in grid) * np.dtype(array.dtype).itemsize
+    store = array.store_path.store
+    prefix = array.store_path.path
+    sized = type(store).getsize is not Store.getsize
+
+    async def sizes(batch: list[str]) -> list[int]:
+        async def size(key: str) -> int:
+            try:
+                return int(await store.getsize(f"{prefix}/{key}" if prefix else key))
+            except FileNotFoundError:
+                return 0
+
+        return list(await asyncio.gather(*(size(key) for key in batch)))
+
+    largest = 0
+    for start in range(0, len(keys), batch_size):
+        batch = keys[start : start + batch_size]
+        stored = (
+            sum(sync(sizes(batch))) if sized else len(batch) * (decoded + decoded // 64)
+        )
+        largest = max(largest, stored)
+    return (
+        2 * largest
+        + _STAMP_FIXED_BYTES
+        + _STAMP_OBJECT_BYTES * min(batch_size, max(1, len(keys)))
+    )
 
 
 def stored_content_stamp(array: zarr.Array) -> bytes:
@@ -65,13 +126,7 @@ def stored_content_stamp(array: zarr.Array) -> bytes:
         add(name.encode("utf-8"))
         add(documents[name].to_bytes())
     add(repr(array.config).encode("utf-8"))
-    grid = array.shards or array.chunks
-    object_bytes = (
-        math.prod(int(size) for size in grid) * np.dtype(array.dtype).itemsize
-    )
-    batch_size = max(
-        1, min(_STAMP_BATCH_OBJECTS, SCAN_BAND_BYTES // max(1, object_bytes))
-    )
+    batch_size = _batch_size(array)
 
     async def fetch(batch: list[str]) -> list[bytes | None]:
         buffers = await asyncio.gather(

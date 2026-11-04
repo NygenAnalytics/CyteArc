@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 
 __all__ = [
+    "NUMPY_STEP_BYTES",
     "MemoryBudgetError",
     "MemoryLedger",
     "fixed_text_bytes",
@@ -298,6 +299,12 @@ class MemoryLedger:
     def _observe(self, item: str, nbytes: int, planned: int) -> None:
         if _observer is not None:
             _observer(item, nbytes, planned)
+
+
+#: What a step of NumPy calls holds whatever its size: the objects of the
+#: arrays it makes and the fixed buffers of its sorts and set operations, at
+#: most 19 KB as traced on 1 to 50 cells in each step of clone calling.
+NUMPY_STEP_BYTES = 24 * 1024
 
 
 def _bytes(nbytes: int) -> int:

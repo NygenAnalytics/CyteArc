@@ -29,7 +29,7 @@ from cytearc.clones.recorders import (
     site_state_counts,
 )
 from cytearc.metadata.records import RecordEncoder
-from cytearc.utils.memory_budget import MemoryLedger
+from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 
 
 def test_states_and_fields_are_fixed():
@@ -414,11 +414,19 @@ def test_cells_and_characters_without_a_read_site_are_left_out():
 
 def test_the_matrix_refuses_codes_beyond_the_budget():
     table = _table([(0, 0, "A", "1", "x", MARK, -1, -1, 2)])
-    with pytest.raises(MemoryError, match="holds about 104 bytes"):
-        character_matrix(table, memory_bytes=103, held_bytes=100)
-    assert character_matrix(table, memory_bytes=104, held_bytes=100).codes.tolist() == [
-        [1]
-    ]
+
+    def holding(budget: int):
+        ledger = MemoryLedger(budget, "Exporting characters")
+        ledger.hold("what the export holds", 100)
+        return ledger
+
+    with pytest.raises(MemoryBudgetError, match="holds about 104 bytes") as refused:
+        character_matrix(table, ledger=holding(103))
+    assert refused.value.needed_bytes == 104
+    ledger = holding(104)
+    assert character_matrix(table, ledger=ledger).codes.tolist() == [[1]]
+    # The codes stay charged, four bytes a cell and character.
+    assert ledger.charged == 104
 
 
 def test_priors_are_each_states_share_of_its_characters_edited_cells():

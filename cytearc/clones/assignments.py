@@ -21,7 +21,7 @@ import pandas as pd
 
 from ..utils.arrays import sort_categories, sort_categories_bytes
 from ..utils.arguments import quoted_value
-from ..utils.memory_budget import MemoryLedger
+from ..utils.memory_budget import MemoryLedger, object_array_bytes, python_text_bytes
 
 __all__ = [
     "MULTIPLE_POLICIES",
@@ -31,10 +31,36 @@ __all__ = [
     "Clones",
     "clone_frames",
     "clone_label_texts",
+    "ranked_clone_label_bytes",
+    "ranked_clone_labels",
     "ranked_clones",
 ]
 
 type MultiplePolicy = Literal["error", "drop"]
+
+#: The text before each rank of :func:`ranked_clone_labels`.
+_RANKED_PREFIX = "clone_"
+
+
+def ranked_clone_labels(n_clones: int) -> np.ndarray:
+    """Name clones by rank, as an object array: ``clone_1`` is the largest."""
+    return np.asarray(
+        [f"{_RANKED_PREFIX}{rank}" for rank in range(1, n_clones + 1)], dtype=object
+    )
+
+
+def ranked_clone_label_bytes(n_clones: int) -> int:
+    """The bytes of :func:`ranked_clone_labels`: an ASCII string and a reference for each clone."""
+    n_clones = int(n_clones)
+    digits = 0
+    width, start = 1, 1
+    while start <= n_clones:
+        end = min(n_clones, 10 * start - 1)
+        digits += width * (end - start + 1)
+        width, start = width + 1, 10 * start
+    characters = len(_RANKED_PREFIX) * n_clones + digits
+    return object_array_bytes(n_clones) + python_text_bytes(n_clones, characters)
+
 
 #: The values of ``multiple``: what to do with a cell given two clones.
 MULTIPLE_POLICIES: tuple[str, ...] = ("error", "drop")

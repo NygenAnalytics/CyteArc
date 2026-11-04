@@ -10,7 +10,7 @@ import pandas as pd
 import zarr
 
 from ...clones.assignments import CloneAssignment
-from ...clones.barcode_clones import clone_labels
+from ...clones.assignments import ranked_clone_labels
 from ...clones.calling import cell_sets, set_clones
 from ...metadata.arguments import (
     FrequencyCloneArguments,
@@ -3502,9 +3502,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             similarity=1.0,
             inclusive=True,
             ambiguous=True,
-            max_bytes=self.memoryBytes - held - 64 * n_rows,
+            ledger=MemoryLedger(
+                self.memoryBytes - held - 64 * n_rows,
+                f"Calling clones from the genotypes of {n_cells} cells",
+            ),
         )
-        labels = clone_labels(len(called.sizes))
+        labels = ranked_clone_labels(len(called.sizes))
         assignment = CloneAssignment(
             codes=called.codes,
             clone_ids=labels,
@@ -3596,7 +3599,7 @@ def _clone_assignment(
     codes[cells] = rank[inverse.reshape(-1)]
     return CloneAssignment(
         codes=codes,
-        clone_ids=clone_labels(len(order)),
+        clone_ids=ranked_clone_labels(len(order)),
         clone_sizes=sizes[order],
         probabilities=None,
         n_cells_in_several_clones=0,

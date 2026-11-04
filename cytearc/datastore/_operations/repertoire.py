@@ -110,6 +110,7 @@ from .cell_barcodes import (
 )
 from .cell_groups import cell_groups, group_columns, within_groups
 from .clone_artifacts import clone_diagnostics
+from .clone_steps import files_text
 from .record_tables import (
     record_arrays,
     record_chunk_lengths,
@@ -769,10 +770,6 @@ def _sorted_codes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(distinct), np.asarray(codes, dtype=np.int64)
 
 
-def _files_text(n_files: int) -> str:
-    return "the contig file" if n_files == 1 else "the contig files"
-
-
 class _RepertoireOperationsMixin(_RepertoireOperationsBase):
     @validation_scoped
     def _repertoire_import_receptors(
@@ -929,7 +926,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             required_attributes=_IMPORT_ATTRIBUTES,
             reuse_validator=has_contigs,
         )
-        warnings = unmatched_barcode_rules(_files_text(len(sources)))
+        warnings = unmatched_barcode_rules(files_text("contig", len(sources)))
         if planned.reused:
             # Saved receptors warn as they did when they were imported.
             warn_diagnostics(
@@ -1522,7 +1519,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         return artifact_group(self.zw, clonotypes)
 
     def _representative_junctions(
-        self, clonotypes: ArtifactRef, codes: np.ndarray, *, held_bytes: int = 0
+        self, clonotypes: ArtifactRef, codes: np.ndarray, *, ledger: MemoryLedger
     ) -> np.ndarray:
         """The junction amino acids that name some clonotypes in figures.
 
@@ -1533,14 +1530,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         junction codes, the bounds of the junctions they name, a chunk at a
         time or whole where that holds less, and those junctions' bytes are
         read, each array a physical chunk at a time. Each read, and the
-        decoding, is charged to a memory ledger beside ``held_bytes`` and what
-        earlier reads keep.
+        decoding, is charged to the caller's ``ledger`` beside what it holds
+        and what earlier reads keep, which the junctions returned leave
+        charged.
 
         Args:
             clonotypes: A complete ``clonotypes`` artifact.
             codes: The positions of some of its clonotypes, such as 0 for
                 ``clonotype_1``.
-            held_bytes: What the caller holds beside the reads.
+            ledger: The caller's memory ledger.
 
         Returns:
             Each clonotype's junction, None where the chain that names it
@@ -1555,13 +1553,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         naming = ("VJ_1", "VDJ_1")
         if (status.parameters or {}).get("receptor_arms") != "VJ":
             naming = ("VDJ_1", "VJ_1")
-        ledger = MemoryLedger(
-            self.memoryBytes,
-            "Labelling clonotypes by their junctions",
-            remedy="label fewer clonotypes",
-            codec_threads=self.nthreads,
-        )
-        ledger.hold("what labelling them sits beside", int(held_bytes))
         wanted, back = np.unique(np.asarray(codes, dtype=np.int64), return_inverse=True)
         cells = read_rows(
             ledger,
