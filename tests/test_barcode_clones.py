@@ -535,7 +535,9 @@ def test_diagnostics_other_than_those_declared_are_refused_on_loading(
     # Clones from a column record the clone writer's alone.
     imported = store.clones.from_column("sample", cell_selection=every_cell(store))
     artifact_group(store.zw, imported).attrs["diagnostics"] = recorded
-    with pytest.raises(ValueError, match="not declared distinctBarcodes"):
+    with pytest.raises(
+        ValueError, match="not declared cellsInSmallClones, .*distinctBarcodes"
+    ):
         store.clones.load_clones(imported)
 
 
@@ -836,7 +838,10 @@ def test_the_trex_preset_matches_trexs_clones_and_doublets(
     cells = store.clones.load_clones(clones).cells
     assert sorted(cells.index[cells["doublet"]]) == run["doublets"]
     counts = store.artifacts.inspect(clones).diagnostics
-    assert counts["doublets"] == sum(run["counts"].get("doublets", [0]))
+    # A run that keeps its doublets removes none, which is not counted.
+    assert counts["doublets"] == (
+        None if run["keep_doublets"] else sum(run["counts"].get("doublets", [0]))
+    )
     assert counts["edgesPruned"] == sum(run["counts"]["bridges"])
 
 

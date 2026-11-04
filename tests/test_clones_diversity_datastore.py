@@ -332,6 +332,7 @@ def test_summarizing_counts_each_row_of_a_group_beyond_its_first(
         np.array([0, 0, 0, 0, 1, 1]),
         np.arange(6),
         np.array([1, 2, 2, 5, 3, 3]),
+        {"cellsWithoutClone": 0, "cellsWithoutGroup": 0, "groups": 2},
     )
     monkeypatch.setattr(store, "_clone_pair_counts", lambda *args, **kwargs: counts)
     needed = 2 * 2_000 + 6 * 56 + 2 * 128

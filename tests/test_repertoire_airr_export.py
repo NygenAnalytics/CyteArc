@@ -243,7 +243,9 @@ def test_the_writer_puts_required_fields_first_and_renders_values(tmp_path) -> N
     assert written["sequence"].tolist() == ["", ""]
     chosen = tmp_path / "chosen.tsv.gz"
     assert (
-        write_airr_rearrangements(table, chosen, columns=["umi_count", "junction_aa"])
+        write_airr_rearrangements(
+            table, chosen, columns=["umi_count", "junction_aa"]
+        ).rows
         == 2
     )
     with gzip.open(chosen, "rt") as handle:
@@ -1834,7 +1836,7 @@ def test_export_refuses_values_the_format_forbids_before_the_file(
     assert (
         store.repertoire.export_airr(
             ref, path, chains_only=True, fields=["umi_count", "j_call"]
-        )
+        ).rows
         == 5
     )
 

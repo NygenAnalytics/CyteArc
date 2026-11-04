@@ -528,10 +528,30 @@ def test_the_largest_clone_shares_the_cells_given_a_clone() -> None:
     # With no cell given a clone, the share is 0.
     none = _call(_records(rows), 7, method="sets", min_size=4)
     assert _largest_share(none) == 0.0
+    # Without records, the counts of the rules that run are 0, and those of
+    # the rules that do not, the minimum reads, TREX's filters, correction,
+    # the allowlist, the pair filters and the Jaccard graph, are None.
     assert _call(_records([]), 2, method="sets").diagnostics == {
         "distinctBarcodes": 0,
         "expectedChanceMatches": 0.0,
         "mergedBarcodes": 0,
+        "moleculesBelowMinReads": None,
+        "moleculesOfLowComplexity": None,
+        "recordsCorrected": None,
+        "recordsOutsideAllowlist": None,
+        "moleculesOfFewBases": None,
+        "pairs": 0,
+        "pairsOfOneUmiShared": None,
+        "pairsOfOneRead": None,
+        "pairsBelowMinUmis": None,
+        "pairsBelowMinFraction": None,
+        "cellsWithBarcodes": 0,
+        "cellsOutsideBarcodesPerCell": None,
+        "nodes": 0,
+        "edges": None,
+        "edgesPruned": None,
+        "doublets": None,
+        "cellsInSmallClones": 0,
     }
 
 
@@ -1128,7 +1148,8 @@ def test_trex_rules_turn_on_and_off_whatever_the_preset() -> None:
     assert without.n_barcodes.tolist() == [1, 1, 1, 1]
     # A rule that does not run counts nothing, and says so with None.
     assert without.diagnostics["moleculesOfLowComplexity"] is None
-    assert with_rules.diagnostics["moleculesOfLowComplexity"] == 1
+    # Cell 1's three molecules of the low-complexity cloneID.
+    assert with_rules.diagnostics["moleculesOfLowComplexity"] == 3
     # The rules alone, beside LARRY's other rules, drop the same barcodes.
     larry = _call(
         _records(rows),
