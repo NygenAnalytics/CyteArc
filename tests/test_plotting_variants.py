@@ -242,6 +242,11 @@ def test_variant_statistics_marks_informative_variants_and_thresholds(scored) ->
         f"{int(shown.sum())} variants informative"
     )
     assert result.provenance.extras["x"] == "strand_correlation"
+    # The variants that are not informative are drawn first, under the others.
+    assert [collection.get_label() for collection in ax.collections] == [
+        "other",
+        "informative",
+    ]
     plt.close(result.figure)
 
 
@@ -390,6 +395,17 @@ def test_variant_statistics_mark_masked_variants_apart(tmp_path) -> None:
         "Masked",
     ]
     assert result.scales[0].order == ("informative", "masked")
+    # Masked variants are crosses, drawn over the informative dots.
+    from matplotlib.markers import MarkerStyle
+
+    def marker(name):
+        style = MarkerStyle(name)
+        return style.get_path().transformed(style.get_transform()).vertices
+
+    informative, masked = result.axes["variants"].collections
+    assert (informative.get_label(), masked.get_label()) == ("informative", "masked")
+    np.testing.assert_allclose(masked.get_paths()[0].vertices, marker("x"))
+    np.testing.assert_allclose(informative.get_paths()[0].vertices, marker("o"))
     table = result.tables["variants"]
     assert table.loc[table["masked"], "variant"].tolist() == ["chrM:310T>C"]
     plt.close(result.figure)
@@ -567,6 +583,10 @@ def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
     # The one legend of the calls stands beside the layout, the last panel.
     assert result.axes["calls"].get_legend() is None
     assert panel.get_legend().get_title().get_text() == "Call"
+    # The two panels share the page, as tall as the layout's square needs,
+    # and five cells are not rasterized.
+    assert tuple(result.figure.get_size_inches()) == (7.5, 3.6)
+    assert not points.get_rasterized()
     # With one site drawn, the layout takes its calls.
     alone = genotypes(store, called, sites=["SF3B1"], layout=layout, show=False)
     assert alone.tables["cells"]["call"].tolist() == [
@@ -897,6 +917,109 @@ def test_genotype_calls_take_one_palette_with_greys_for_no_call(plotted) -> None
         assert result.scales[0].order == tuple(held)
     finally:
         result.close()
+    # On a layout, the cells without a call, filtered c1 and missing c3 and
+    # c4, are drawn first, under the called c0 and c2.
+    layout = write_embedding(
+        store, "every_cell", np.column_stack([np.arange(5), np.arange(5)])
+    )
+    drawn = genotypes(store, called, sites=["CALR"], layout=layout, show=False)
+    try:
+        (points,) = drawn.axes["layout"].collections
+        order = [int(x) for x, _y in points.get_offsets()]
+        assert sorted(order[:3]) == [1, 3, 4] and sorted(order[3:]) == [0, 2]
+        colors = dict(
+            zip(
+                order, (to_hex(color) for color in points.get_facecolors()), strict=True
+            )
+        )
+        assert (colors[1], colors[3], colors[4]) == (
+            MUTED_COLOR,
+            NO_VALUE_COLOR,
+            NO_VALUE_COLOR,
+        )
+    finally:
+        drawn.close()
+
+
+def test_a_layout_colours_the_calls_of_cells_without_a_group(plotted) -> None:
+    store, targets, _positions = plotted
+    called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
+    # Only c1, wild type at CALR, and c3, missing there, have a group, while
+    # the layout draws c0 and c2, whose mutant UMIs call them alternative
+    # present, too.
+    store.cells.insert(
+        "c1_and_c3", np.asarray([None, "a", None, "b", None], dtype=object)
+    )
+    layout = write_embedding(
+        store, "every_cell", np.column_stack([np.arange(5), np.zeros(5)])
+    )
+    result = genotypes(
+        store, called, sites=["CALR"], group_by="c1_and_c3", layout=layout, show=False
+    )
+    try:
+        bars = result.tables["calls"]
+        assert set(bars.loc[bars["n_cells"] > 0, "call"]) == {"wild_type", "missing"}
+        legend = result.axes["layout"].get_legend()
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "Wild type",
+            "Alternative present",
+            "Missing",
+        ]
+        (points,) = result.axes["layout"].collections
+        colors = {
+            int(x): to_hex(color)
+            for (x, _y), color in zip(
+                points.get_offsets(), points.get_facecolors(), strict=True
+            )
+        }
+        palette = GENOTYPE_CALL_SCALE.palette
+        assert colors[0] == colors[2] == palette["alternative_present"]
+        assert colors[1] == palette["wild_type"]
+    finally:
+        result.close()
+
+
+def test_layout_points_take_the_size_of_their_panel_after_layout(tmp_path) -> None:
+    import warnings
+
+    from cytearc.plotting._style import (
+        default_point_edgewidth,
+        default_point_size,
+        panel_area_inches,
+    )
+    from tests.clone_helpers import every_cell, write_cells_store
+    from tests.variant_truth import write_genotype_tables
+
+    # 2,000 cells, more than the largest point's 28 square points fit, so a
+    # point's area follows its panel's.
+    n_cells = 2000
+    ids = [f"cell{cell:04d}" for cell in range(n_cells)]
+    store = write_cells_store(tmp_path / "store.zarr", ids)
+    umis = np.random.default_rng(5).integers(0, 3, size=(n_cells, 1, 2))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        counts = store.variants.import_counts(
+            write_genotype_tables(umis, ids, tmp_path / "got"),
+            cell_selection=every_cell(store),
+        )
+    called = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
+    layout = write_embedding(
+        store, "every_cell", np.random.default_rng(6).normal(size=(n_cells, 2))
+    )
+    result = genotypes(store, called, layout=layout, show=False)
+    try:
+        panel = result.axes["layout"]
+        (points,) = panel.collections
+        before = default_point_size(n_cells, panel_area=panel_area_inches(panel))
+        result.figure.draw_without_rendering()
+        size = default_point_size(n_cells, panel_area=panel_area_inches(panel))
+        assert size < 28.0 and abs(size - before) < 1e-9
+        np.testing.assert_allclose(points.get_sizes(), size)
+        np.testing.assert_allclose(
+            points.get_linewidths(), default_point_edgewidth(n_cells, point_size=size)
+        )
+    finally:
+        result.close()
 
 
 def test_allele_frequencies_of_many_variants_name_none(scored) -> None:
@@ -927,5 +1050,45 @@ def test_allele_frequencies_of_many_variants_name_none(scored) -> None:
         assert result.provenance.extras["n_variants"] == n_variants
         # An axis names at most 40 items, and cells never.
         assert not ax.get_yticklabels() and not ax.get_xticklabels()
+    finally:
+        result.close()
+
+
+def test_depth_legends_list_the_groups_with_named_cells(plotted) -> None:
+    store, targets, _positions = plotted
+    # c4, alone in group w, is named by no file, so w draws no histogram.
+    store.cells.insert(
+        "with_unnamed", np.asarray(["x", "x", "y", "y", "w"], dtype=object)
+    )
+    result = variant_depth(store, targets, group_by="with_unnamed", show=False)
+    try:
+        legend = result.axes["cells"].get_legend()
+        assert [text.get_text() for text in legend.get_texts()] == ["x", "y"]
+        assert result.scales[0].order == ("x", "y")
+        assert len(result.axes["cells"].patches) == 2
+    finally:
+        result.close()
+
+
+def test_depth_along_an_unnamed_contig_reads_position(tmp_path) -> None:
+    import warnings
+
+    from tests.clone_helpers import every_cell
+    from tests.variant_helpers import write_variant_store
+    from tests.variant_truth import variant_truth, write_mito_afm
+
+    truth = variant_truth()
+    store = write_variant_store(tmp_path / "store.zarr", truth)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        counts = store.variants.import_counts(
+            write_mito_afm(truth, tmp_path / "afm.h5ad"),
+            cell_selection=every_cell(store),
+        )
+    result = variant_depth(store, counts, show=False)
+    try:
+        # An allele frequency matrix names no contig.
+        assert set(result.tables["sites"]["contig"]) == {""}
+        assert result.axes["sites"].get_xlabel() == "Position"
     finally:
         result.close()

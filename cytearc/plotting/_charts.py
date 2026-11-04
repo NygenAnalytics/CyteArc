@@ -271,8 +271,15 @@ def _value_formatter_type() -> type:
         """Label the ticks that ``LogFormatter`` labels, as plain numbers."""
 
         def __call__(self, x: float, pos: int | None = None) -> str:
-            label = super().__call__(x, pos)
-            return f"{x:,.10g}" if label else ""
+            if not super().__call__(x, pos):
+                return ""
+            # Ten significant digits written out, never in powers of ten,
+            # with thousands apart.
+            text = np.format_float_positional(
+                x, precision=10, unique=False, fractional=False, trim="-"
+            )
+            whole, _, fraction = text.partition(".")
+            return f"{int(whole):,}" + (f".{fraction}" if fraction else "")
 
     return ValueLogFormatter
 
@@ -280,8 +287,8 @@ def _value_formatter_type() -> type:
 def log_values(axis: Any) -> None:
     """Label a log axis of values that need not be whole, such as mean depths, as plain numbers.
 
-    The ticks that Matplotlib labels read as numbers such as 0.5, 60 and
-    1,000 rather than powers of ten.
+    The ticks that Matplotlib labels read as numbers such as 0.000001, 0.5,
+    60 and 1,000 rather than powers of ten.
     """
     formatter = _value_formatter_type()
     axis.set_major_formatter(formatter())
@@ -433,6 +440,13 @@ def draw_lines(
     return legend_of(colors, names, legend_title)
 
 
+def _bin_edges(low: float, high: float, bins: int, *, log_x: bool) -> np.ndarray:
+    """The edges of ``bins`` bins from ``low`` to ``high``, even on a linear or log axis."""
+    return (
+        np.geomspace(low, high, bins + 1) if log_x else np.linspace(low, high, bins + 1)
+    )
+
+
 def draw_histograms(
     ax: Any,
     table: pd.DataFrame,
@@ -453,8 +467,9 @@ def draw_histograms(
     The series share ``bins`` bins, which span the values of every series
     evenly, or with ``log_x`` evenly on a log axis labelled with plain
     numbers, which leaves out values at or below 0; values that are all
-    equal take bins around them. A value that is not finite is left out, and
-    a series without a value draws a flat line.
+    equal, or too close to split into bins, take bins around them. A value
+    that is not finite is left out, and a series without a value draws a
+    flat line.
 
     Returns:
         The legend of the series, drawn beside the panel when
@@ -484,11 +499,11 @@ def draw_histograms(
             else "A histogram needs a finite value"
         )
     low, high = float(values[placed].min()), float(values[placed].max())
-    if high == low:
+    edges = _bin_edges(low, high, bins, log_x=log_x)
+    if not np.all(np.diff(edges) > 0):
+        # Values too close to tell apart take bins around them.
         low, high = (low / 2, low * 2) if log_x else (low - 0.5, low + 0.5)
-    edges = (
-        np.geomspace(low, high, bins + 1) if log_x else np.linspace(low, high, bins + 1)
-    )
+        edges = _bin_edges(low, high, bins, log_x=log_x)
     handles = []
     for name in names:
         ax.hist(

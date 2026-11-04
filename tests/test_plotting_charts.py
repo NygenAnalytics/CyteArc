@@ -972,6 +972,8 @@ def test_histograms_count_each_series_over_bins_they_share(ax) -> None:
     assert _step_heights(first) == [1.0, 2.0, 1.0]
     assert _step_heights(second) == [0.0, 1.0, 3.0]
     assert ax.get_xscale() == "linear"
+    # Counts of cells tick at whole numbers.
+    assert all(float(tick).is_integer() for tick in ax.get_yticks())
     assert (ax.get_xlabel(), ax.get_ylabel(), ax.get_title()) == (
         "Depth",
         "Cells",
@@ -1021,8 +1023,11 @@ def test_log_histograms_leave_out_values_they_cannot_place(ax) -> None:
 @pytest.mark.parametrize(
     ("log_x", "edges"), [(False, [4.5, 5.0, 5.5]), (True, [2.5, 5.0, 10.0])]
 )
-def test_histograms_of_one_value_take_bins_around_it(ax, log_x, edges) -> None:
-    table = pd.DataFrame({"series": "a", "value": [5.0, 5.0]})
+@pytest.mark.parametrize("second", [5.0, float(np.nextafter(5.0, 6.0))])
+def test_histograms_of_one_value_take_bins_around_it(ax, log_x, edges, second) -> None:
+    # Two equal values, or two a step of the last digit apart, which no
+    # bins between them can split.
+    table = pd.DataFrame({"series": "a", "value": [5.0, second]})
     draw_histograms(
         ax,
         table,
@@ -1161,6 +1166,58 @@ def test_log_axes_of_values_read_plain_numbers(ax) -> None:
         for tick in [*ax.get_xticklabels(), *ax.get_xticklabels(minor=True)]
         if tick.get_text()
     ]
-    # Every decade drawn reads as a plain number, never as a power of ten.
-    assert {"0.1", "1", "10", "100"} <= set(labels)
-    assert all(float(label.replace(",", "")) > 0 for label in labels)
+    # Every decade drawn reads as a plain number, never as a power of ten,
+    # and the ticks between decades of an axis of several are not labelled.
+    assert sorted(labels, key=lambda label: float(label)) == ["0.1", "1", "10", "100"]
+    for low, high, expected in (
+        (1e-6, 0.9, {"0.000001", "0.0001", "0.01", "1"}),
+        (1e-3, 1e11, {"0.001", "1,000", "100,000,000,000"}),
+    ):
+        figure, axis = plt.subplots(figsize=(4, 3))
+        try:
+            axis.plot([1, 2], [low, high])
+            axis.set_yscale("log")
+            log_values(axis.yaxis)
+            figure.canvas.draw()
+            drawn = {tick.get_text() for tick in axis.get_yticklabels()} - {""}
+            assert expected <= drawn
+            assert not [label for label in drawn if "e" in label]
+        finally:
+            plt.close(figure)
+
+
+def test_side_legends_fit_the_row_of_their_panel() -> None:
+    from matplotlib.patches import Patch
+
+    from cytearc.plotting._figure import side_legend
+    from cytearc.plotting._style import LEGEND_SIDE_MAX_COLUMNS, legend_side_rows
+
+    handles = [Patch(facecolor=RED) for _ in range(20)]
+    labels = [f"g{at:02d}" for at in range(20)]
+
+    def columns(height: float) -> int:
+        rows = legend_side_rows(height, title=True)
+        return min(-(-20 // rows), LEGEND_SIDE_MAX_COLUMNS)
+
+    # A figure of one row gives its panels the figure's height, a grid of
+    # rows each panel its row's, by the rows' ratios, and an inset the
+    # figure's height.
+    for ratios, panel, height in (
+        ([1], 0, 5.2),
+        ([1, 1], 1, 2.6),
+        ([1, 3], 1, 3.9),
+        ([1, 3], 0, 1.3),
+    ):
+        figure, axes = plt.subplots(
+            len(ratios), 1, figsize=(6, 5.2), height_ratios=ratios, squeeze=False
+        )
+        try:
+            legend = side_legend(axes[panel][0], handles, labels, title="Group")
+            assert legend._ncols == columns(height), (ratios, panel)
+            inset = axes[0][0].inset_axes((0.0, 1.0, 1.0, 0.1))
+            assert side_legend(inset, handles, labels, title="Group")._ncols == (
+                columns(5.2)
+            )
+        finally:
+            plt.close(figure)
+    assert columns(5.2) == 1 and columns(2.6) > 1

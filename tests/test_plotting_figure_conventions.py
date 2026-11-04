@@ -1738,6 +1738,58 @@ def test_variant_figures_of_many_groups_stop_at_the_page_width(
             result.close()
 
 
+@pytest.mark.parametrize("n_groups", [20, 200])
+def test_depth_legends_of_many_groups_fit_beside_their_panel(
+    many_variant_groups, n_groups
+) -> None:
+    store = many_variant_groups.store
+    column = f"every_{n_groups}"
+    if column not in store.cells.columns:
+        store.cells.insert(
+            column,
+            np.asarray(
+                [f"g{cell % n_groups:03d}" for cell in range(N_VARIANT_GROUPS)],
+                dtype=object,
+            ),
+        )
+    result = store.plots.variant_depth(
+        many_variant_groups.counts, group_by=column, show=False
+    )
+    try:
+        figure = result.figure
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        legend = result.axes["cells"].get_legend()
+        box = legend.get_window_extent(renderer)
+        # The legend stands within the figure, in at most four columns, and
+        # leaves both panels room to draw.
+        assert box.y0 >= 0 and box.y1 <= figure.bbox.height
+        assert box.x1 <= figure.bbox.width
+        assert legend._ncols <= 4
+        for ax in result.axes.values():
+            assert ax.get_position().height * figure.get_figheight() >= 1.5
+        assert figure.get_size_inches()[0] == MAX_FIGURE_WIDTH_INCHES
+    finally:
+        result.close()
+
+
+def test_variant_statistics_count_the_variants_they_draw(variants) -> None:
+    result = variants.calls["variant_statistics"](show=False)
+    try:
+        table = result.tables["variants"]
+        shown = table["strand_correlation"].notna()
+        # Variants without a strand correlation are scored but not drawn.
+        assert shown.sum() < len(table)
+        assert result.axes["variants"].get_title() == (
+            f"{int((table['informative'] & shown).sum())} of {int(shown.sum())} "
+            "variants informative"
+        )
+        drawn = sum(len(c.get_offsets()) for c in result.axes["variants"].collections)
+        assert drawn == shown.sum()
+    finally:
+        result.close()
+
+
 def test_variant_figures_with_nothing_to_draw_raise(variants, tmp_path) -> None:
     import warnings
 
@@ -1942,6 +1994,23 @@ def test_the_layout_panel_draws_the_cells_where_embedding_draws_them(
         # Each cell at the embedding's coordinates, in its window, square and
         # without ticks, as embedding draws it.
         np.testing.assert_array_equal(rows(points), rows(embedded))
+        # The cells draw in embedding's seeded shuffle, those without a call
+        # first: each of the two runs keeps embedding's order of its cells.
+        call_of = {
+            (float(x), float(y)): call
+            for x, y, call in figure.tables["cells"][["x", "y", "call"]].itertuples(
+                index=False
+            )
+        }
+        drawn_order = [tuple(map(float, xy)) for xy in points.get_offsets()]
+        embedded_order = [tuple(map(float, xy)) for xy in embedded.get_offsets()]
+        uncalled = [
+            xy for xy in embedded_order if call_of[xy] in ("missing", "filtered")
+        ]
+        called = [xy for xy in embedded_order if xy not in set(uncalled)]
+        assert uncalled and called
+        assert drawn_order == uncalled + called
+        assert not points.get_rasterized()
         cells = figure.tables["cells"][["x", "y"]].to_numpy(dtype=np.float64)
         np.testing.assert_allclose(
             rows(points), cells[np.lexsort(cells.T[::-1])], rtol=1e-6

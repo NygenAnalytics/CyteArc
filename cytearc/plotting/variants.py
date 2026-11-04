@@ -33,6 +33,8 @@ from ._groups import plot_groups
 from ._style import (
     DEFAULT_RASTERIZE_THRESHOLD,
     GENOTYPE_CALL_SCALE,
+    LEGEND_SIDE_MAX_COLUMNS,
+    LEGEND_SIDE_MAX_ENTRIES,
     MAX_FIGURE_WIDTH_INCHES,
     MAX_NAMED_ITEMS,
     MUTED_COLOR,
@@ -44,6 +46,7 @@ from ._style import (
     finish_embedding_axes,
     foreground_color,
     item_inches,
+    legend_side_height,
     padded_square_limits,
     palette_for_n,
     panel_area_inches,
@@ -60,6 +63,9 @@ _DEPTH_BINS = 40
 # The two panels of variant_depth stand in one column at the page width, each
 # this many inches tall.
 _DEPTH_PANEL_HEIGHT = 2.6
+# The room a panel's title takes above a side legend, which starts at the
+# panel's top.
+_PANEL_TITLE_INCHES = 0.35
 # The smallest VMR drawn on the log scale; variants that no covered cell
 # varies in sit there.
 _VMR_FLOOR = 1e-6
@@ -134,7 +140,9 @@ def _draw_site_depth(
                     )
                 ),
             ),
-            x_label="Position" if several else f"Position on {contigs[0]}",
+            x_label=f"Position on {contigs[0]}"
+            if not several and contigs[0]
+            else "Position",
             y_label=f"Mean depth ({unit})",
             title="Depth per site",
             legend_title="Contig" if several else None,
@@ -250,8 +258,22 @@ def variant_depth(
     )
     unit = str(by_site.count_unit)
     if figsize is None and target is None:
+        # Each panel grows so that a legend of many groups or contigs fits
+        # beside it in four columns.
+        entries = max(
+            len(set(cells_table["group"].tolist())) if plotted.columns else 0,
+            len(set(sites_table["contig"].tolist())),
+        )
+        rows = -(-min(entries, LEGEND_SIDE_MAX_ENTRIES) // LEGEND_SIDE_MAX_COLUMNS)
         figsize, _ = figure_size(
-            2, panel=(MAX_FIGURE_WIDTH_INCHES, _DEPTH_PANEL_HEIGHT)
+            2,
+            panel=(
+                MAX_FIGURE_WIDTH_INCHES,
+                max(
+                    _DEPTH_PANEL_HEIGHT,
+                    legend_side_height(rows, title=True) + _PANEL_TITLE_INCHES,
+                ),
+            ),
         )
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(

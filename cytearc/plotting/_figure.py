@@ -992,6 +992,24 @@ def side_legend_title(title: str, n_entries: int) -> str:
     return title if shown == n_entries else f"{title} ({shown} of {n_entries})"
 
 
+def _row_inches(ax: Any) -> float:
+    """The height in inches of the row of a figure's grid that a panel stands in.
+
+    A panel of a grid of one row, or outside a figure's own grid, such as an
+    inset, takes the figure's height.
+    """
+    from matplotlib.gridspec import GridSpec
+
+    height = float(ax.figure.get_size_inches()[1])
+    spec = ax.get_subplotspec()
+    # A grid within a grid's cell, as a composite nests, keeps the figure's.
+    if spec is None or not isinstance(spec.get_gridspec(), GridSpec):
+        return height
+    grid = spec.get_gridspec()
+    ratios = list(grid.get_height_ratios() or [1.0] * grid.nrows)
+    return height * float(sum(ratios[row] for row in spec.rowspan) / sum(ratios))
+
+
 def side_legend(
     ax: Any, handles: Sequence[Any], labels: Sequence[str], *, title: str
 ) -> Any:
@@ -999,10 +1017,11 @@ def side_legend(
 
     The legend lists at most ``LEGEND_SIDE_MAX_ENTRIES`` entries, titled as
     :func:`side_legend_title` titles them, in columns that hold the rows that
-    fit the figure's height.
+    fit the height of the panel's row of the figure, the figure's height for
+    a figure of one row.
     """
     shown = min(len(handles), LEGEND_SIDE_MAX_ENTRIES)
-    rows = legend_side_rows(float(ax.figure.get_size_inches()[1]), title=True)
+    rows = legend_side_rows(_row_inches(ax), title=True)
     return ax.legend(
         handles=list(handles[:shown]),
         labels=list(labels[:shown]),
