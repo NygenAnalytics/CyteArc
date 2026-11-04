@@ -792,9 +792,10 @@ def _keyed_pairs(
         keys = keys[:written]
         keys.sort()
         n_candidates = _run_pairs(keys, bits, n_rows, no_counts, split)
+        # The slice of the keys written keeps the whole buffer of the pass.
         _check(
             ledger,
-            _KEY_BYTES * written + _CANDIDATE_BYTES * n_candidates,
+            _KEY_BYTES * size + _CANDIDATE_BYTES * n_candidates,
             "the candidate pairs of texts that share variant keys",
         )
         pairs = np.empty(n_candidates, dtype=np.int64)
@@ -1682,6 +1683,10 @@ def neighbor_pairs(
         first, second = np.concatenate(found.firsts), np.concatenate(found.seconds)
     del found, matrix, lengths, coding, table, order, starts, ends
     del group_lengths, ranks, unknown_codes, block_codes
+    # The texts and the members of the last length or block, a view that
+    # keeps the order alive, go before what the search held is let go.
+    values = []
+    members = texts_of = partners = empty
     # The pairs returned stay charged, for the caller to keep or let go.
     _charge_to(ledger, entry + first.nbytes + second.nbytes, "the pairs found")
     return first, second

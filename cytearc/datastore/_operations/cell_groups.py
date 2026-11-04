@@ -44,8 +44,10 @@ from ...storage.validation_scope import validation_scope
 from ...utils.arrays import unique_rows
 from ...utils.arguments import quoted_value
 from ...utils.memory_budget import (
+    MemoryBudgetError,
     MemoryLedger,
     hash_table_bytes,
+    memory_refusal,
     object_array_bytes,
     python_text_bytes,
     sort_bytes,
@@ -405,7 +407,19 @@ def cell_groups(
             # missing mask and cells' positions charged, and aligned to the
             # grouped cells through an index of its cells.
             entry = ledger.charged
-            resolved = resolve_grouping(zw, cells, groups, ledger=ledger)
+            try:
+                resolved = resolve_grouping(zw, cells, groups, ledger=ledger)
+            except MemoryBudgetError as refused:
+                # The read of a label artifact's values words its refusal as
+                # every read of cell values does; the grouping names the same
+                # bytes and the budget that passes them in the ledger's words.
+                raise memory_refusal(
+                    ledger.doing,
+                    refused.item,
+                    refused.needed_bytes,
+                    refused.budget_bytes,
+                    remedy=ledger.remedy,
+                ) from refused
             n_labelled = len(resolved.cell_idx)
             labels = np.asarray(resolved.labels)
             if labels.dtype.kind == "U":

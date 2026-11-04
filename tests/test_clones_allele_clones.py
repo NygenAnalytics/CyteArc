@@ -973,7 +973,7 @@ def test_each_step_on_two_million_edits_holds_no_more_than_its_check_states(
             ledger=budgeted(budget),
         )
 
-    checks, peak = traced_steps(monkeypatch, call, budget)
+    checks, peak = traced_steps(call)
     # Each step holds its shortfall from the largest check beside it.
     ceiling = max(stated for _what, stated in checks)
     assert peak <= ceiling + AUDIT_ALLOWANCE, (peak - ceiling, checks)

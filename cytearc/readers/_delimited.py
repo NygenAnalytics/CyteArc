@@ -350,9 +350,19 @@ class _Rows:
     another number of fields than the layout names, a quote that never
     closes, or text that cannot be read ends the text, and ``error`` says
     why, so the rows before it are handed on whatever chunks pandas reads.
+    With ``chunk_chars``, the text pauses once it has handed on that many
+    characters, past the line it ends in, and ``resume`` hands on the rest
+    to another parse.
     """
 
-    def __init__(self, handle: Any, text: TextLayout, first_line: int) -> None:
+    def __init__(
+        self,
+        handle: Any,
+        text: TextLayout,
+        first_line: int,
+        *,
+        chunk_chars: int | None = None,
+    ) -> None:
         self._handle = handle
         self._text = text
         self._n_fields = len(text.names)
@@ -361,22 +371,40 @@ class _Rows:
         self._lines = array("q")
         self.error: ValueError | None = None
         self._ended = False
+        self._chunk_chars = chunk_chars
+        # The characters handed on since the text last resumed.
+        self._handed = 0
 
     def read(self, size: int = -1) -> str:
         # Text without rows would end pandas' reading, so lines are read
         # until some hold a row or the file ends. A read holds at most about
-        # _READ_CHARACTERS of lines however much pandas asks for.
+        # _READ_CHARACTERS of lines however much pandas asks for, and no
+        # more than the characters left before the text pauses, past the
+        # line they end in.
         while not self._ended:
+            wanted = _READ_CHARACTERS
+            if self._chunk_chars is not None:
+                if self._handed >= self._chunk_chars:
+                    return ""
+                wanted = min(wanted, self._chunk_chars - self._handed)
             try:
-                text = self._read(_READ_CHARACTERS)
+                text = self._read(wanted)
             except UnicodeDecodeError:
                 self._end(_text_error(self._text.path))
             except _CORRUPT as error:
                 self._end(_corrupt_error(self._text.path, error))
             else:
                 if text:
+                    self._handed += len(text)
                     return text
         return ""
+
+    def resume(self) -> bool:
+        """Hand on the rows after a pause to another parse; False once the text has ended."""
+        if self._ended:
+            return False
+        self._handed = 0
+        return True
 
     def take(self, n_rows: int) -> np.ndarray:
         """Return the file lines of the next ``n_rows`` rows handed on."""
@@ -888,7 +916,11 @@ def joined_columns(
 
 
 def text_chunks(
-    text: TextLayout, chunk_rows: int, *, columns: Sequence[int] | None = None
+    text: TextLayout,
+    chunk_rows: int,
+    *,
+    columns: Sequence[int] | None = None,
+    chunk_chars: int | None = None,
 ) -> Iterator[tuple[np.ndarray, pd.DataFrame]]:
     """Yield chunks of a table's rows as text, with each row's file line.
 
@@ -902,6 +934,9 @@ def text_chunks(
         chunk_rows: The most rows of a chunk.
         columns: The positions of the columns that the chunks hold, or None
             for every column; every field is counted either way.
+        chunk_chars: The most characters of a chunk's rows, past the row
+            they end in, or None for chunks bounded by their rows alone. A
+            chunk of rows longer than the first rows holds fewer of them.
 
     Yields:
         The file line of each row of the chunk, as int64, and the chunk.
@@ -911,16 +946,21 @@ def text_chunks(
             or corrupt, a quote never closes, or a row holds another number
             of fields than the header names.
     """
+    if chunk_chars is not None and chunk_chars < 1:
+        raise ValueError(f"chunk_chars must be at least 1, not {chunk_chars}")
     with text_errors(text.path), open_text(text.path) as handle:
         if text.header:
             handle.readline()
-        rows = _Rows(handle, text, 2 if text.header else 1)
+        rows = _Rows(handle, text, 2 if text.header else 1, chunk_chars=chunk_chars)
         options: dict[str, Any] = {
             "sep": r"\s+" if text.delimiter == " " else text.delimiter,
             "header": None,
             "names": list(range(len(text.names))),
             "index_col": False,
-            "dtype": str,
+            # An explicit object dtype keeps the rows as Python strings,
+            # which the importers charge, whether or not pandas stores text
+            # with pyarrow: pandas would otherwise copy each chunk to Arrow.
+            "dtype": object,
             "keep_default_na": False,
             "na_filter": False,
             "skip_blank_lines": False,
@@ -932,9 +972,13 @@ def text_chunks(
             options["quotechar"] = '"'
         else:
             options["quoting"] = csv.QUOTE_NONE
-        for chunk in parsed_chunks(text.path, rows, **options):
-            if len(chunk):
-                yield rows.take(len(chunk)), chunk
+        # Each parse reads rows until the text pauses or ends.
+        while True:
+            for chunk in parsed_chunks(text.path, rows, **options):
+                if len(chunk):
+                    yield rows.take(len(chunk)), chunk
+            if not rows.resume():
+                break
     if rows.error is not None:
         raise rows.error
 

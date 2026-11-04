@@ -22,6 +22,7 @@ import zarr
 
 import cytearc.datastore._operations.repertoire as repertoire_operations
 from cytearc import plotting
+from cytearc.datastore._operations.clone_steps import text_file_write_bytes
 from cytearc.datastore._operations.record_tables import stored_text
 from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.artifacts import cell_data_write_bytes
@@ -1263,7 +1264,9 @@ def test_clonotypes_load_and_export_as_clones_within_the_memory_budget(
     ):
         nbytes, _planned = step_charge(run, item)
         # Writing a plain file holds the text writer's buffers too.
-        assert nbytes == 8 * per_cell + (160 * 1024 if per_cell == 200 else 0)
+        assert nbytes == 8 * per_cell + (
+            text_file_write_bytes(False) if per_cell == 200 else 0
+        )
         check_budget(store, lambda _reopened: run(), check_writes=False)
 
 

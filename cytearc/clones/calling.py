@@ -68,10 +68,11 @@ type CallingMethod = Literal["sets", "jaccard", "shared"]
 #: graph over them, or links through any item two sets share.
 CALLING_METHODS: tuple[str, ...] = ("sets", "jaccard", "shared")
 # Bytes of each item of a set while sets are built from pairs: the order of
-# the pairs, their sorted cells and items and the flags of new pairs, 19 as
-# traced on 60,000 to 1,200,000 pairs; and while a cell's items and unknown
-# items are joined, the pairs of both joined, their order and sorted copies.
-_PAIR_BYTES = 24
+# the pairs, their sorted cells and items and the flags of new pairs, 19 to
+# 25 as traced on 60,000 to 2,000,000 pairs; and while a cell's items and
+# unknown items are joined, the pairs of both joined, their order and sorted
+# copies.
+_PAIR_BYTES = 28
 _JOINED_PAIR_BYTES = 48
 # Bytes of each cell of the sets built: its pointer, and its count of items
 # while the pointers are summed.
@@ -688,6 +689,8 @@ def jaccard_edges(
     within = _similarity(similarity, "similarity")
     inclusive = bool_argument(inclusive, "inclusive")
     n_nodes = nodes.n_nodes
+    # Each node's modality as int64, held while the graph is built.
+    _peak(ledger, "the nodes' modalities", 8 * n_nodes)
     if across is None:
         if modalities is not None:
             raise ValueError("modalities apply only with a similarity across them")
@@ -715,7 +718,7 @@ def jaccard_edges(
     graph_bytes = (
         _GRAPH_ITEM_BYTES * n_items
         + _GRAPH_UNKNOWN_BYTES * n_unknown
-        + _GRAPH_NODE_BYTES * n_nodes
+        + (_GRAPH_NODE_BYTES + 8) * n_nodes
     )
     _peak(ledger, "the lists of each item's nodes", graph_bytes)
     item_indptr, item_nodes, codes = _items_by_group(nodes, n_unknown)
@@ -1224,7 +1227,7 @@ def set_clones(
         TypeError: If an option has the wrong type.
         ValueError: If an option is unknown, missing for the method or given
             to a method that does not use it.
-        MemoryError: If a step does not fit the ledger's budget.
+        MemoryBudgetError: If a step does not fit the ledger's budget.
     """
     ledger = _ledger(ledger)
     if method not in CALLING_METHODS:
@@ -1299,7 +1302,11 @@ def set_clones(
         assert similarity is not None and inclusive is not None
         node_modalities = None
         if across is not None:
+            # Each cell's node and modality, and each node's lowest and
+            # highest, while the nodes' modalities are found.
+            _peak(ledger, "the nodes' modalities", 17 * n_cells + 24 * n_nodes)
             node_modalities = _node_modalities(nodes, modalities, n_cells)
+            ledger.hold("the nodes' modalities", node_modalities.nbytes)
         edges = jaccard_edges(
             nodes,
             similarity,
@@ -1308,7 +1315,12 @@ def set_clones(
             modalities=node_modalities,
             ledger=ledger,
         )
-        del node_modalities
+        if node_modalities is not None:
+            modality_bytes = node_modalities.nbytes
+            del node_modalities
+            ledger.release(modality_bytes)
+        else:
+            del node_modalities
         n_edges = len(edges)
         edge_bytes = ledger.hold("the graph's edges", edges.nbytes)
         if ambiguous:

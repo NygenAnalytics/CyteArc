@@ -963,6 +963,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             builder.update_array("data", data)
             builder.update_array("offsets", offsets)
             allowlist_fingerprint = builder.hexdigest()
+            del data, offsets, builder
         # Every cell with a barcode needs a label in the within columns.
         counts = read_whole(ledger, group, "n_barcodes", item="each cell's barcodes")
         flags = ledger.hold("the cells with a barcode", n_cells)
@@ -1081,8 +1082,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 ],
             },
             source_arrays={
-                "n_barcodes": called.n_barcodes.astype(np.int32),
-                "doublet": calls.doublets.astype(bool),
+                "n_barcodes": called.n_barcodes,
+                "doublet": calls.doublets,
             },
             ledger=ledger,
             diagnostics=called.diagnostics,

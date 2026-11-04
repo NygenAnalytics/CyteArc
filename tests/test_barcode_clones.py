@@ -767,6 +767,28 @@ def test_the_write_charge_counts_a_buffer_for_each_write_zarr_runs_at_once(
     assert "the clones' labels" in items and "each cell's group" in items
 
 
+def test_the_records_are_let_go_before_the_clones_are_saved(store, tmp_path) -> None:
+    # Calling reads six arrays of the records whole as int64, beside the
+    # distinct barcodes' bytes and their offsets; once the clones are called
+    # they are let go, so saving the clones plans without them.
+    from tests.memory_helpers import charges
+
+    _calling, barcodes = _imported(store, tmp_path, "larry")
+    group = artifact_group(store.zw, barcodes)
+    records_bytes = (
+        6 * 8 * group["record_cells"].shape[0]
+        + group["record_barcode_values"].shape[0]
+        + 8 * group["record_barcode_offsets"].shape[0]
+    )
+    _result, taken = charges(
+        lambda: store.clones.barcode_clones(
+            barcodes, preset="larry", invalidate_cache=True
+        )
+    )
+    labels = [item for item, _nbytes, _planned in taken].index("the clones' labels")
+    assert taken[labels - 1][:2] == ("a release", records_bytes), taken[labels - 1]
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("preset", ["trex", "celltag_multi"])
 def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(

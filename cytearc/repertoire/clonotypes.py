@@ -429,11 +429,10 @@ def assign_clonotype_clusters(
 
     Raises:
         ValueError: If an option is unknown or the arrays do not align.
-        MemoryError: If the search for the pairs of chains within ``max_distance``
-            would hold more than ``CLUSTER_SEARCH_BYTES`` and the ledger's room
-            together.
-        MemoryBudgetError: If the pairs and links would pass the ledger's
-            budget.
+        MemoryBudgetError: If the search for the pairs of chains within
+            ``max_distance`` would hold more than ``CLUSTER_SEARCH_BYTES`` and
+            the ledger's room together, or the pairs and links would pass the
+            ledger's budget.
     """
     if metric not in DISTANCE_METRICS:
         raise ValueError(f"metric must be one of {', '.join(DISTANCE_METRICS)}")

@@ -116,20 +116,16 @@ _JOIN_BYTES_PER_LEAF = 300
 # length, given time, cell and whether it is a leaf, its file's cell beside
 # it, and while times resolve each node's tree and whether it has a time.
 _FOREST_BYTES_PER_NODE = 88
-# Reading a cell's ID holds it at its stored width, four bytes a character,
-# and as a Python string of at most 80 bytes and four a character; and the
-# read decodes a whole stored chunk of the column, and its compressed copy.
-_ID_BYTES_PER_CELL = 88
-_ID_CHUNK_COPIES = 2
 # A node name is written at the width of the longest, four bytes a character,
 # in the chunks of a new store's columns; writing a chunk holds the block of
 # names, Zarr's chunk and its compressed copy.
 _NAME_WRITE_COPIES = 3
 # Reading a chunk of names holds its compressed and its decoded bytes.
 _NAME_READ_COPIES = 2
-# Reading a phylogeny for a cut holds, for each node, its parent, time, cell,
-# clade root, depth, the count of its children and the masks of the cut.
-_CUT_BYTES_PER_NODE = 64
+# Cutting a phylogeny holds, for each node beside its parent, cell and time,
+# which their reads charge, its clade root, depth, the count of its children
+# and the masks of the cut.
+_CUT_BYTES_PER_NODE = 40
 # Each clone holds its root, its label as a Python string beside its stored
 # name, and its place in ranking the clones by size and label.
 _CUT_BYTES_PER_CLONE = 600

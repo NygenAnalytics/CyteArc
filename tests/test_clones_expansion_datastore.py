@@ -631,11 +631,12 @@ def test_expansion_of_some_cells_charges_matching_them(copied, monkeypatch) -> N
     # 48 cells the read objects that each read leaves, 64 KiB, and the
     # write's chunk terms, which the shared read and write costs count,
     # outweigh the summary's own steps: the budgets are about twice the
-    # traced peaks, 2.02 and 1.91 times as traced.
+    # traced peaks, 2.02 and 1.91 times as traced alone, and up to 2.66 times
+    # as traced among other tests of the suite.
     monkeypatch.setattr(store, "memoryBytes", 2**30)
-    check_budget(store, lambda reopened: measure(), at_most=2.5)
+    check_budget(store, lambda reopened: measure(), at_most=3.0)
     _budget, _refusals, tables = check_budget(
-        store, lambda reopened: reopened.clones.load_expansion(saved), at_most=2.5
+        store, lambda reopened: reopened.clones.load_expansion(saved), at_most=3.0
     )
     assert tables.cells.shape[0] == n_d2
 

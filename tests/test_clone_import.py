@@ -1235,9 +1235,9 @@ def test_a_row_of_another_width_is_refused_wherever_the_budget_ends_a_chunk(
     reader = tables.iter_clone_rows
     used: list[int] = []
 
-    def recording(layout, chunk_rows):
+    def recording(layout, chunk_rows, **options):
         used.append(chunk_rows)
-        yield from reader(layout, chunk_rows)
+        yield from reader(layout, chunk_rows, **options)
 
     monkeypatch.setattr(tables, "iter_clone_rows", recording)
     cells = every_cell(store)

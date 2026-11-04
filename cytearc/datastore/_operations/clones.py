@@ -135,6 +135,7 @@ from .clone_steps import (
     files_text,
     plan_artifact_cells,
     read_codes,
+    text_file_write_bytes,
 )
 
 if TYPE_CHECKING:
@@ -168,12 +169,8 @@ _MAX_CHUNK_ROWS = 1_000_000
 # clonotypes, as traced on 200,000 cells.
 _TABLE_BYTES_PER_CELL = 250
 # Bytes per cell of an export beside its ID: its label and its code, and the
-# text of its row. Writing a file holds the text writer's buffers, 138 to
-# 143 KB as traced for a few cells, and for a gzip-compressed file zlib's
-# state of compression too, 341 to 472 KB.
+# text of its row, beside what the text writer holds whatever its rows.
 _EXPORT_BYTES_PER_CELL = 200
-_EXPORT_TEXT_BYTES = 160 * 1024
-_EXPORT_GZIP_BYTES = 512 * 1024
 # Bytes of each clone that a figure labels: its ID as given and as text, its
 # code, and its label, a string of up to four bytes per character, beside the
 # junction that the repertoire operations read.
@@ -591,6 +588,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 source=position,
                 ledger=ledger,
                 row_bytes=row_bytes,
+                row_chars=row_chars,
             )
         assignment = assigner.finish()
         write_clones(
@@ -622,14 +620,17 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         source: int,
         ledger: MemoryLedger,
         row_bytes: int,
+        row_chars: int,
     ) -> None:
         """Assign the cells of one clone file to its clones.
 
-        The file's chunks hold as many rows of ``row_bytes`` bytes as half
-        of the ledger's room when the file is planned, which leaves the other
-        half to the labels and hashes that grow. A chunk is held until the
-        file is read, since the reader keeps each chunk until it parses the
-        next.
+        The file's chunks hold as many rows of ``row_bytes`` bytes, each of
+        ``row_chars`` characters, as half of the ledger's room when the file
+        is planned, which leaves the other half to the labels and hashes that
+        grow. A chunk of a table's text holds at most its rows' characters,
+        so rows longer than those sampled make chunks of fewer rows. A chunk
+        is held until the file is read, since the reader keeps each chunk
+        until it parses the next.
         """
         from ...readers.clone_tables import (
             iter_clone_rows,
@@ -639,11 +640,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         )
 
         chunk_rows = _chunk_rows(ledger, row_bytes)
+        # A row's characters and its line end, which the sampled rows leave out.
+        chunk_chars = chunk_rows * (row_chars + 1)
         item = f"a chunk of {chunk_rows} rows of a clone file"
         chunk_bytes = chunk_rows * row_bytes
         ledger.hold(item, chunk_bytes)
         if not layout.is_matrix:
-            for rows in iter_clone_rows(layout, chunk_rows):
+            for rows in iter_clone_rows(layout, chunk_rows, chunk_chars=chunk_chars):
                 assigner.add(
                     join.cells(file, rows.barcodes),
                     _namespaced(rows.clones, namespace),
@@ -655,7 +658,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             return
         # A matrix lists its cells first; each entry names a listed cell.
         listed: list[np.ndarray] = []
-        for barcodes in matrix_cells(layout, chunk_rows):
+        for barcodes in matrix_cells(layout, chunk_rows, chunk_chars=chunk_chars):
             # Each listed cell's position among the selected cells.
             ledger.hold("the clone matrix's cells", 8 * len(barcodes))
             listed.append(join.cells(file, barcodes))
@@ -979,11 +982,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         ledger.peak(
             f"writing the clones of {n_cells} cells",
             _EXPORT_BYTES_PER_CELL * n_cells
-            + (
-                _EXPORT_GZIP_BYTES
-                if os.fspath(path).endswith(".gz")
-                else _EXPORT_TEXT_BYTES
-            ),
+            + text_file_write_bytes(os.fspath(path).endswith(".gz")),
         )
         assigned = codes >= 0
         cell_ids = cell_ids[assigned]
@@ -2756,11 +2755,20 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable(arguments.operation)
-        # Counting each clone's late cells in each fate holds a key per late
-        # cell, less than grouping them held.
+        # Counting each clone's late cells in each fate holds each counted
+        # cell's fate and clone and their count, and each fate's cells.
+        n_counted = int(np.count_nonzero(counted))
+        ledger.peak(
+            "counting each pair of fate and clone",
+            16 * n_counted
+            + pair_count_bytes(n_counted, n_counted)
+            + 9 * len(grouped.codes)
+            + 16 * n_fates,
+        )
         pair_fates, pair_codes, pair_cells = pair_counts(
             grouped.codes[counted], late_codes[counted]
         )
+        ledger.hold("each pair's fate, clone and cells", 24 * len(pair_cells))
         fate_cells = np.bincount(
             grouped.codes[grouped.codes >= 0], minlength=n_fates
         ).astype(np.int64)
@@ -3086,10 +3094,14 @@ def _refuse_clones_across_kept_labels(
             clone's late cells.
     """
     for column, early_labels in early_kept:
+        # An explicit object dtype keeps the labels as the Python strings
+        # charged, whether or not pandas stores text with pyarrow.
         late = pd.DataFrame(
             {
                 "clone": pair_codes,
-                "label": fates[column].to_numpy(dtype=object)[pair_fates],
+                "label": pd.Series(
+                    fates[column].to_numpy(dtype=object)[pair_fates], dtype=object
+                ),
             }
         ).drop_duplicates()
         across = set(late.loc[late["clone"].duplicated(keep=False), "clone"].tolist())

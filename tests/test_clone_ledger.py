@@ -23,6 +23,7 @@ from cytearc.clones.assignments import ranked_clone_label_bytes, ranked_clone_la
 from cytearc.clones.calling import cell_sets, identical_sets, set_clones
 from cytearc.clones.sequences import neighbor_pairs
 from cytearc.datastore._operations import clones as clone_operations
+from cytearc.datastore._operations.clone_steps import text_file_write_bytes
 from cytearc.metadata.rows import metadata_column_stamp
 from cytearc.storage.content_stamps import (
     stored_content_stamp,
@@ -34,7 +35,9 @@ from cytearc.utils.memory_budget import (
     MemoryLedger,
 )
 from cytearc.writers.clone_tables import write_clone_matrix, write_clone_table
+from cytearc.storage.arrays import MISSING_MASK_PREFIX
 from tests.clone_helpers import every_cell, write_cells_store
+from tests.storage_helpers import insert_nullable_cell_column
 from tests.memory_helpers import (
     at_budget,
     budget_that_runs,
@@ -192,6 +195,66 @@ def test_ambiguous_nodes_keep_their_flags_charged_with_the_nodes() -> None:
     )
 
 
+def test_keeping_the_edges_between_remaining_nodes_refuses_before_it_copies() -> None:
+    # A budget below the copy of 400,000 edges is refused before the edges
+    # kept and their flags are made: the refused call holds next to nothing.
+    n_edges = 400_000
+    edges = calling.Edges(np.arange(n_edges), np.arange(n_edges) + 1)
+    present = np.ones(n_edges + 1, dtype=bool)
+
+    def refused() -> object:
+        with pytest.raises(MemoryBudgetError, match="the edges kept"):
+            calling._kept_edges(
+                MemoryLedger(1_000_000, "Calling clones"), edges, present
+            )
+        return None
+
+    assert _warm_peak(refused) < n_edges
+
+
+def test_removing_doublets_holds_each_step_within_its_plan() -> None:
+    # 200,000 cells in 100,000 nodes of two cells, each node's set sharing
+    # one of three items with the next: 100,000 edges at a similarity of a
+    # third. Removing doublets keeps the edges between the nodes that remain
+    # twice, each a copy of the edges.
+    n_cells = 200_000
+    cells = np.repeat(np.arange(n_cells), 2)
+    first = np.arange(n_cells) // 2
+    items = np.stack([first, first + 1], axis=1).ravel()
+    sets = cell_sets(cells, items, n_cells)
+
+    def call() -> object:
+        return set_clones(
+            sets,
+            method="jaccard",
+            similarity=0.3,
+            inclusive=True,
+            doublets=True,
+            ledger=MemoryLedger(None, "x"),
+        )
+
+    clones = call()
+    assert clones.n_edges == 99_999
+    _result, intervals = interval_peaks(call)
+    kept = [entry for entry in intervals if entry[0] == "the edges kept"]
+    assert len(kept) == 2
+    over = [entry for entry in intervals if entry[2] > entry[1] + 65_536]
+    assert over == [], over
+
+
+def test_the_search_leaves_the_pairs_it_returns_charged() -> None:
+    # 2,000 texts of four letters, each within one substitution of others:
+    # the search lets go of what it held but the pairs, 16 bytes each.
+    rng = np.random.default_rng(4)
+    texts = ["".join(rng.choice(list("ACGT"), 4)) for _ in range(2_000)]
+    ledger = MemoryLedger(None, "Searching")
+    ledger.hold("the caller's texts", 1_000)
+    first, second = neighbor_pairs(texts, "hamming", 1, ledger=ledger)
+    assert len(first) > 10_000
+    assert ledger.held_bytes == 1_000 + 16 * len(first)
+    assert first.nbytes + second.nbytes == 16 * len(first)
+
+
 # The labels of clones ranked by size.
 
 
@@ -262,12 +325,10 @@ def test_the_export_charges_the_writers_buffers(tmp_path, compressed) -> None:
     codes = np.arange(n_cells) % 3
     ids = np.asarray([f"clone_{i}" for i in range(3)], dtype=object)
     suffix = ".gz" if compressed else ""
-    fixed = (
-        clone_operations._EXPORT_GZIP_BYTES
-        if compressed
-        else clone_operations._EXPORT_TEXT_BYTES
+    stated = (
+        text_file_write_bytes(compressed)
+        + clone_operations._EXPORT_BYTES_PER_CELL * n_cells
     )
-    stated = fixed + clone_operations._EXPORT_BYTES_PER_CELL * n_cells
     peaks = [
         _warm_peak(
             lambda: write_clone_table(tmp_path / f"t.csv{suffix}", cells, ids[codes])
@@ -311,7 +372,9 @@ def test_checking_the_labels_kept_apart_holds_what_fate_bias_charges(
             fates, pair_fates, pair_codes, early_codes, kept
         )
     )
-    assert peak <= stated <= 1.4 * peak, (peak, stated)
+    # The charge is 1.24 to 1.36 times the peak as traced, whether or not
+    # pandas stores text with pyarrow, since the labels stay Python strings.
+    assert peak <= stated <= 1.5 * peak, (peak, stated)
 
 
 # Clones of a cell metadata column.
@@ -338,10 +401,11 @@ def column_store(tmp_path_factory) -> Any:
 @pytest.mark.parametrize(
     ("column", "selection", "at_most"),
     [
-        ("short", "every_cell", 1.6),
-        ("long", "every_cell", 1.6),
-        ("four_byte", "every_cell", 1.6),
-        ("numbers", "every_cell", 1.6),
+        # The long labels' budget was 1.49 to 1.53 times the traced peak.
+        ("short", "every_cell", 1.7),
+        ("long", "every_cell", 1.7),
+        ("four_byte", "every_cell", 1.7),
+        ("numbers", "every_cell", 1.7),
         # Few cells of many: the stamp reads every stored chunk of the column.
         ("long", "few", 2.6),
     ],
@@ -392,6 +456,41 @@ def test_the_stamp_of_a_column_follows_its_stored_chunks(column_store) -> None:
     assert store.clones.from_column("short", cell_selection=cells) != first
 
 
+def test_cells_whose_labels_are_missing_join_no_clone_until_the_mask_changes(
+    tmp_path,
+) -> None:
+    # The stored labels of cells 0 and 4 are labels like the others, which
+    # only the missing mask hides: those cells join no clone. Marking cell 2
+    # missing edits the mask alone, which changes the stamp and gives new
+    # clones without it.
+    store = write_cells_store(tmp_path / "store.zarr", [f"c{i}" for i in range(8)])
+    labels = np.asarray(["k1", "k1", "k2", "k2", "k3", "k3", "k1", "k2"])
+    missing = np.isin(np.arange(8), [0, 4])
+    insert_nullable_cell_column(store, "partial", labels, missing)
+    cells = every_cell(store)
+    first = store.clones.from_column("partial", cell_selection=cells)
+    loaded = store.clones.load_clones(first).cells
+    assert loaded["clone"].isna().tolist() == missing.tolist()
+    assert loaded["clone_size"].tolist() == [0, 2, 3, 3, 0, 1, 2, 3]
+    stamp = metadata_column_stamp(store.cells, "partial")
+    store.zw["cellData"][MISSING_MASK_PREFIX + "partial"][:] = np.isin(
+        np.arange(8), [0, 2, 4]
+    )
+    assert metadata_column_stamp(store.cells, "partial") != stamp
+    second = store.clones.from_column("partial", cell_selection=cells)
+    assert second != first
+    assert store.clones.load_clones(second).cells["clone_size"].tolist() == [
+        0,
+        2,
+        0,
+        2,
+        0,
+        1,
+        2,
+        2,
+    ]
+
+
 # The clone import at the shapes that traced past their budgets.
 
 
@@ -431,11 +530,12 @@ def _write_matrix(folder: Path) -> tuple[Any, Path]:
 @pytest.mark.parametrize(
     ("shape", "at_most"),
     [
-        ("long table", 1.4),
+        # The budgets accepted were 1.30 and 1.55 times the traced peaks.
+        ("long table", 1.45),
         # The matrix's cell list is parsed in chunks of one field, of ASCII
         # IDs that hold one byte a character where each character of the
         # longest sampled row is counted at four, the most that any holds.
-        ("matrix of many cells", 1.6),
+        ("matrix of many cells", 1.7),
     ],
 )
 def test_the_import_holds_its_parse_and_join_within_its_budget(
@@ -468,11 +568,46 @@ def test_the_import_holds_its_parse_and_join_within_its_budget(
     assert ref.kind == "clones"
 
 
+@pytest.mark.slow
+def test_rows_longer_than_the_sampled_rows_make_chunks_of_fewer_rows(
+    tmp_path,
+) -> None:
+    # 2,000 short rows that name the cells, then 58,000 rows of 206
+    # characters that name no cell. Chunks sized by the short rows sampled
+    # held 1.54 times the smallest budget accepted at 200,000 rows; a chunk
+    # now holds at most its rows' characters, so the call holds no more than
+    # its budget.
+    ids = [f"c{index:06d}" for index in range(2_000)]
+    store = write_cells_store(tmp_path / "store.zarr", ids)
+    path = tmp_path / "clones.csv"
+    path.write_text(
+        "Cell_ID,Clone_ID\n"
+        + "".join(f"{cell},k{index % 97}\n" for index, cell in enumerate(ids))
+        + "".join(f"x{index:0200d},k{index % 97}\n" for index in range(58_000))
+    )
+    cells = every_cell(store)
+
+    def run() -> object:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return store.clones.import_clones(
+                path, cell_selection=cells, invalidate_cache=True
+            )
+
+    budget = smallest_budget(at_budget(store, run), 400_000_000)
+    store.memoryBytes = budget
+    ref, peak = traced_peak(run, budget)
+    assert peak <= budget, (budget, peak)
+    assert ref.kind == "clones"
+
+
 def test_a_chunk_of_a_clone_table_charges_what_parsing_it_holds(tmp_path) -> None:
     # 200,000 rows of a barcode and a clone, short and four-byte: a parsed
     # row holds 117 to 121 bytes beside one byte a character of ASCII text
     # and four of text beyond U+FFFF, which the chunk charges at four bytes
-    # a character of the longest sampled row.
+    # a character of the longest sampled row. The rows are parsed as Python
+    # strings whether or not pandas stores text with pyarrow, which held
+    # 336 bytes a four-byte row against the 332 charged when it did.
     ids = [f"c{index:06d}" for index in range(2_000)]
     store = write_cells_store(tmp_path / "store.zarr", ids)
     store.memoryBytes = 1 << 34

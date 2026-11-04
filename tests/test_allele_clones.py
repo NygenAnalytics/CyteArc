@@ -1132,7 +1132,7 @@ def test_each_step_on_millions_of_records_holds_no_more_than_its_check_states(
             alleles, method="graph", max_frequency=0.5, invalidate_cache=True
         )
 
-    _assert_steps_within(traced_steps(monkeypatch, call, budget))
+    _assert_steps_within(traced_steps(call))
 
 
 @pytest.mark.slow
@@ -1188,7 +1188,7 @@ def test_each_step_on_wide_alleles_holds_no_more_than_its_check_states(
     assert store.clones.load_clones(call()).clones["n_cells"].tolist() == [2] * (
         n_cells // 2
     )
-    _assert_steps_within(traced_steps(monkeypatch, call, budget))
+    _assert_steps_within(traced_steps(call))
 
 
 @pytest.mark.slow
@@ -1237,7 +1237,7 @@ def test_each_step_on_few_long_alleles_holds_no_more_than_its_check_states(
             alleles, method="graph", max_frequency=0.5, invalidate_cache=True
         )
 
-    _assert_steps_within(traced_steps(monkeypatch, call, budget))
+    _assert_steps_within(traced_steps(call))
 
 
 @pytest.mark.slow
@@ -1304,7 +1304,7 @@ def test_each_step_with_banks_and_groups_holds_no_more_than_its_check_states(
                 **rules,
             )
 
-        _assert_steps_within(traced_steps(monkeypatch, call, budget))
+        _assert_steps_within(traced_steps(call))
 
 
 @pytest.mark.slow
@@ -1333,7 +1333,7 @@ def test_each_step_on_many_alleles_and_clones_holds_no_more_than_its_check_state
             alleles, method="graph", max_frequency=0.5, invalidate_cache=True
         )
 
-    traced = traced_steps(monkeypatch, call, budget)
+    traced = traced_steps(call)
     # The last charge writes the clones called.
     assert traced[0][-1][0].startswith(f"writing the clones of {n_cells} cells")
     _assert_steps_within(traced)

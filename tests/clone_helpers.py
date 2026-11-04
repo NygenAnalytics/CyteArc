@@ -891,13 +891,11 @@ def import_allele_truth(
         )
 
 
-def traced_steps(
-    monkeypatch: pytest.MonkeyPatch, call: Callable[[], object], budget: int
-) -> tuple[list[tuple[str, int]], int]:
+def traced_steps(call: Callable[[], object]) -> tuple[list[tuple[str, int]], int]:
     """Each charge of allele clone calling with the bytes its ledger then plans, and the call's traced peak.
 
     The bytes that a charge states are what the operation's ledger plans from
-    it to the next charge under ``budget``: what it holds, beside what its
+    it to the next charge under the call's budget: what it holds, beside what its
     last read may still hold, and a transient peak's bytes; a release states
     what the ledger holds after it. A first call finds the charges and warms
     the compiled kernels. The traced call then holds, from each charge to
@@ -918,7 +916,6 @@ def traced_steps(
     from cytearc.utils.memory_budget import observed_charges
     from tests.memory_helpers import traced_peak
 
-    del monkeypatch, budget
     checks: list[tuple[str, int]] = []
     allowance: list[np.ndarray] = []
     ceiling = [0]
