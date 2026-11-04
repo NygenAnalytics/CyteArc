@@ -116,14 +116,25 @@ from .cell_barcodes import (
     derived_id_bytes,
     unmatched_barcode_rules,
 )
-from .cell_groups import CellGroups, cell_groups, group_columns
+from .cell_groups import (
+    GROUPING_BYTES_PER_GROUP,
+    GROUPING_BYTES_PER_GROUP_COLUMN,
+    CellGroups,
+    cell_groups,
+    group_columns,
+)
 from .clone_artifacts import (
     SOURCE_ARRAYS,
     log_clones,
     plan_clones,
     write_clones,
 )
-from .clone_steps import artifact_cell_ids, files_text, read_codes
+from .clone_steps import (
+    artifact_cell_ids,
+    files_text,
+    plan_artifact_cells,
+    read_codes,
+)
 
 if TYPE_CHECKING:
     from ...readers.clone_tables import CloneLayout
@@ -234,6 +245,11 @@ _BYTES_PER_CLONE_COUNT = 40
 _TRACK_BYTES_PER_ROW = 106
 # Each pair of a fate and a clone holds its fate, clone code and cells.
 _BYTES_PER_FATE_PAIR = 24
+# Checking that no clone spans the labels that the clones keep apart holds,
+# for each pair of a clone and a fate, its clone and label in a table and its
+# distinct rows, and for each early cell its place and label.
+_KEPT_LABEL_PAIR_BYTES = 48
+_KEPT_LABEL_EARLY_BYTES = 16
 # Writing the fate bias builds, for each early cell, a reference to its
 # dominant fate's name, its codes as int32, and the mask and arrays that pick
 # the names, beside what the writer holds.
@@ -825,6 +841,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         """
         group = self._clone_group(clones)
         n_cells = int(as_zarr_array(group["codes"], name="codes").shape[0])
+        planned_cells = plan_artifact_cells(self.zw, clones)
         ledger = MemoryLedger(
             self.memoryBytes,
             f"Loading the clones of {n_cells} cells",
@@ -835,7 +852,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         source = self._read_clone_input(clones, ledger, with_ids=True)
         assert source.clone_ids is not None
         cell_ids = artifact_cell_ids(
-            ledger, self.zw, self.cells._get_array("ids"), clones
+            ledger, self.zw, self.cells._get_array("ids"), planned_cells
         )
         extra = {
             name: read_whole(ledger, group, name, item=f"each cell's {name}").astype(
@@ -926,6 +943,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
         group = self._clone_group(clones)
         n_cells = int(as_zarr_array(group["codes"], name="codes").shape[0])
+        planned_cells = plan_artifact_cells(self.zw, clones)
         ledger = MemoryLedger(
             self.memoryBytes,
             f"Exporting the clones of {n_cells} cells",
@@ -952,7 +970,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                     "with format='matrix', whose clone list keeps them"
                 )
         cell_ids = artifact_cell_ids(
-            ledger, self.zw, self.cells._get_array("ids"), clones
+            ledger, self.zw, self.cells._get_array("ids"), planned_cells
         )
         # Each cell's label and code as written, and its flag, beside the
         # writer's buffers.
@@ -1041,28 +1059,37 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             MemoryBudgetError: If a read does not fit the ledger's budget.
         """
         group = self._clone_group(clones)
+        # The artifact's record is read before anything is charged.
+        cell_selection = inspect_artifact(self.zw, clones).input_ref("cell_selection")
+        receptor_group = (
+            self._clonotype_receptor_group(clones)
+            if clones.kind == ClonotypeArguments.artifact_kind
+            else None
+        )
         entry = ledger.charged
         kept_apart: tuple[tuple[str, np.ndarray], ...] = ()
-        if clones.kind == ClonotypeArguments.artifact_kind:
+        if receptor_group is not None:
             # Each of the few receptor types becomes one shared label, so the
             # summaries code the cells' labels without a string per cell.
-            receptor_types = read_whole(
-                ledger,
-                self._clonotype_receptor_group(clones),
-                "values",
-                item="each cell's receptor type",
+            receptor_types = read_whole_text(
+                ledger, receptor_group, "values", item="each cell's receptor type"
             )
             codes, names = category_codes(receptor_types, ledger=ledger)
-            ledger.hold(
-                "each cell's receptor type", object_array_bytes(len(receptor_types))
+            # Each cell's code, while its label is picked, and its label.
+            coded = ledger.hold(
+                "each cell's receptor type",
+                codes.nbytes + object_array_bytes(len(receptor_types)),
             )
             labels = np.asarray([*names, None], dtype=object)[codes]
-            stored = receptor_types.nbytes
+            read_bytes = ledger.charged - entry - coded
+            code_bytes = codes.nbytes
             del receptor_types, codes, names
-            ledger.release(stored)
+            ledger.release(read_bytes + code_bytes)
             kept_apart = ((_RECEPTOR_TYPE_COLUMN, labels),)
             del labels
-        clone_codes = read_codes(ledger, group, "codes", item="each cell's clone")
+        # The clones' few labels are read before each cell's code, whose
+        # larger chunk a codec thread may hold after the read: a read of
+        # small chunks need not replace it.
         clone_ids = (
             read_whole_text(
                 ledger, group, _CLONE_ID_ARRAYS[clones.kind], item="the clones' labels"
@@ -1070,11 +1097,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             if with_ids
             else None
         )
+        clone_codes = read_codes(ledger, group, "codes", item="each cell's clone")
         return _CloneInput(
             ref=clones,
-            cell_selection=inspect_artifact(self.zw, clones).input_ref(
-                "cell_selection"
-            ),
+            cell_selection=cell_selection,
             codes=clone_codes,
             clone_ids=clone_ids,
             kept_apart=kept_apart,
@@ -1379,9 +1405,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             pair_count_bytes(n_counted, n_pairs),
         )
         pair_groups, pair_codes, pair_cells = pair_counts(group_codes, clone_codes)
+        # The pairs are held before the codes they were counted from go.
+        ledger.hold("each pair's group, clone and cells", 24 * len(pair_cells))
         del group_codes, clone_codes
         ledger.release(codes)
-        ledger.hold("each pair's group, clone and cells", 24 * len(pair_cells))
         keys = group_key_table(grouped.key_columns, grouped.keys)
         return keys, pair_groups, pair_codes, pair_cells, grouped.diagnostics
 
@@ -1392,8 +1419,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         group_by: str | Sequence[str] | None,
         groups: ArtifactRef | None,
         cell_selection: ArtifactRef | None,
+        ledger: MemoryLedger | None = None,
     ) -> tuple[pd.DataFrame, GroupedCloneSizes, dict[str, int], MemoryLedger]:
         """Group the cells with a clone and summarize each group's clone sizes.
+
+        The summary is charged to ``ledger``, which may hold the caller's
+        arguments already, or to a ledger of its own.
 
         Returns:
             The groups' keys, as :meth:`_clone_pair_counts` gives them, each
@@ -1403,7 +1434,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             ValueError: If no cell has both a clone and a group.
         """
-        ledger = self._clone_ledger(clones, "Summarizing the clone sizes")
+        if ledger is None:
+            ledger = self._clone_ledger(clones, "Summarizing the clone sizes")
         source = self._read_clone_input(clones, ledger)
         keys, pair_groups, _codes, pair_cells, grouping = self._clone_pair_counts(
             source,
@@ -1632,6 +1664,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 [key[column] for key in grouped.keys for column in grouped.key_columns],
                 dtype=object,
             )
+        # The arrays written, and each cell's category and flag, are held
+        # while they are written.
+        ledger.hold(
+            f"the clonal expansion of {n_cells} cells as it is written",
+            sum(array.nbytes for array in arrays.values())
+            + categories.nbytes
+            + counted.nbytes,
+        )
         ledger.peak(
             "writing the clonal expansion",
             cell_data_write_bytes(
@@ -1729,7 +1769,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         measured = status.input_ref("cell_selection")
         n_cells = int(as_zarr_array(group["group_codes"], name="group_codes").shape[0])
         n_groups = int(cast(int, group.attrs["n_groups"]))
+        self._clone_group(clones)
         self._plan_measured_cells(clones, measured)
+        planned_cells = plan_artifact_cells(self.zw, expansion)
         ledger = MemoryLedger(
             self.memoryBytes,
             f"Loading the clonal expansion of {n_cells} cells",
@@ -1757,7 +1799,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         del stored_labels
         keys = group_key_table(key_columns, group_keys)
         cell_ids = artifact_cell_ids(
-            ledger, self.zw, self.cells._get_array("ids"), expansion
+            ledger, self.zw, self.cells._get_array("ids"), planned_cells
         )
         # The tables of the cells and each group's rows.
         ledger.peak(
@@ -1988,11 +2030,20 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 )
         # The defaults' arguments are checked once, before any group is read.
         endpoint, knots = checked_curve_arguments(endpoint, knots)
+        ledger = self._clone_ledger(clones, "Rarefying the clone sizes")
+        if listed_sizes is not None:
+            # The sizes asked for are held as the Python integers they are.
+            ledger.hold(
+                f"the {len(listed_sizes)} sizes asked for",
+                object_array_bytes(len(listed_sizes))
+                + sum(map(sys.getsizeof, listed_sizes)),
+            )
         keys, clone_sizes, grouping, ledger = self._grouped_clone_sizes(
             clones,
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
+            ledger=ledger,
         )
         # Each group is rarefied in turn to at most this many sizes, and the
         # curves hold a row per group, order and size, with the group's name.
@@ -2732,6 +2783,17 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         _early, early_codes, early_kept = self._measured_clone_cells(
             source, early, ledger
         )
+        if early_kept:
+            # Each pair's clone and label in a table, its distinct rows and
+            # each early cell's place among them, as traced on 1,000 to
+            # 400,000 pairs: 41 bytes a pair beside pandas' hash table.
+            ledger.peak(
+                "checking the labels that the clones keep apart",
+                hash_table_bytes(len(pair_codes))
+                + _KEPT_LABEL_PAIR_BYTES * len(pair_codes)
+                + _KEPT_LABEL_EARLY_BYTES * len(early_codes)
+                + NUMPY_STEP_BYTES,
+            )
         _refuse_clones_across_kept_labels(
             keys, pair_fates, pair_codes, early_codes, early_kept
         )
@@ -2853,16 +2915,34 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         n_early = int(as_zarr_array(group["codes"], name="codes").shape[0])
         n_tested = int(as_zarr_array(group["clone_codes"], name="clone_codes").shape[0])
         n_fates = len(group_keys)
+        self._clone_group(clones)
+        planned_cells = plan_artifact_cells(self.zw, bias)
         ledger = MemoryLedger(
             self.memoryBytes,
             f"Loading the fate bias of {n_early} early cells",
             codec_threads=self.nthreads,
         )
+        # The fates' labels, read with the artifact's attributes and copied as
+        # a dictionary for each fate, are held while the tables are built.
+        fate_labels = [label for key in group_keys for label in key.values()]
+        ledger.hold(
+            f"the labels of {n_fates} fates",
+            2 * n_fates * GROUPING_BYTES_PER_GROUP
+            + 2 * n_fates * len(key_columns) * GROUPING_BYTES_PER_GROUP_COLUMN
+            + python_text_bytes(
+                len(fate_labels),
+                sum(map(len, fate_labels)),
+                widest=max(
+                    (ord(max(label)) for label in fate_labels if label), default=0
+                ),
+            ),
+        )
+        del fate_labels
         source = self._read_clone_input(clones, ledger, with_ids=True)
         assert source.clone_ids is not None
         # The early cells' IDs, read as text for the index of their table.
         cell_ids = artifact_cell_ids(
-            ledger, self.zw, self.cells._get_array("ids"), bias
+            ledger, self.zw, self.cells._get_array("ids"), planned_cells
         )
         ledger.peak(
             f"the tables of the fate bias of {n_early} early cells",

@@ -27,7 +27,6 @@ from ...metadata.rows import (
 )
 from ...metadata.selection import (
     category_codes,
-    grouping_value_name,
     hashed_text_bytes,
     plan_cell_selection_read,
     read_cell_selection,
@@ -38,7 +37,6 @@ from ...storage.artifacts import (
     ValueFingerprintBuilder,
     artifact_group,
     canonical_bytes,
-    open_artifact,
 )
 from ...storage.refs import ArtifactRef
 from ...storage.types import as_zarr_array
@@ -49,13 +47,13 @@ from ...utils.memory_budget import (
     MemoryLedger,
     hash_table_bytes,
     object_array_bytes,
+    python_text_bytes,
     sort_bytes,
 )
 
 __all__ = [
     "GROUPING_BYTES_PER_GROUP",
     "GROUPING_BYTES_PER_GROUP_COLUMN",
-    "GROUPING_BYTES_PER_LABELLED_CELL",
     "CellGroups",
     "cell_groups",
     "group_columns",
@@ -63,11 +61,6 @@ __all__ = [
     "within_groups",
 ]
 
-#: Each cell of a label artifact costs this while the artifact is read, its
-#: row, position and code, and three bytes for each byte of the stored width
-#: of its labels, whatever cells the artifact being grouped holds.
-GROUPING_BYTES_PER_LABELLED_CELL = 130
-_LABELLED_BYTES_PER_LABEL_BYTE = 3
 #: Each group's labels, a dictionary of its labels by key column, cost this
 #: and this for each key column beside the labels' text, which the codes of
 #: each column name, while they are built from the groups' codes as lists of
@@ -241,23 +234,6 @@ def _column_values(
     return values, missing, ledger.charged - charged
 
 
-def _label_extent(zw: zarr.Group, groups: ArtifactRef) -> tuple[int, int, int]:
-    """The cells of a label artifact, the stored width of its labels, and a chunk's bytes.
-
-    Only the array's metadata is read. An artifact that is missing or
-    incomplete counts nothing here, since ``resolve_grouping`` refuses it
-    before reading anything.
-    """
-    value_name = grouping_value_name(groups.kind)
-    status, group = open_artifact(zw, groups)
-    if group is None or not status.complete or value_name not in group:
-        return 0, 0, 0
-    values = as_zarr_array(group[value_name], name=value_name)
-    chunk, _per_row = array_row_selection_parts(values)
-    n_labelled = int(values.shape[0]) if values.shape else 0
-    return n_labelled, int(values.dtype.itemsize), chunk
-
-
 def _hold_names(ledger: MemoryLedger, names: list[str]) -> None:
     """Charge the distinct labels of a key column, which the groups' labels keep as they are."""
     ledger.hold(
@@ -424,24 +400,27 @@ def cell_groups(
             ledger.release(read)
             coded.append((codes, names))
         if groups is not None:
-            # The label artifact is read whole, whatever cells the artifact being
-            # grouped holds, and aligned to them through an index of its cells.
-            n_labelled, width, label_chunk = _label_extent(zw, groups)
-            labelled = (
-                n_labelled
-                * (
-                    GROUPING_BYTES_PER_LABELLED_CELL
-                    + _LABELLED_BYTES_PER_LABEL_BYTE * width
+            # The label artifact is read whole, whatever cells the artifact
+            # being grouped holds, within the ledger, which keeps its labels,
+            # missing mask and cells' positions charged, and aligned to the
+            # grouped cells through an index of its cells.
+            entry = ledger.charged
+            resolved = resolve_grouping(zw, cells, groups, ledger=ledger)
+            n_labelled = len(resolved.cell_idx)
+            labels = np.asarray(resolved.labels)
+            if labels.dtype.kind == "U":
+                # Stored text becomes the Python strings that coding hashes,
+                # each measured by its characters and the widest of them.
+                characters = int(np.char.str_len(labels).sum()) if labels.size else 0
+                widest = int(labels.view(np.uint32).max()) if labels.size else 0
+                ledger.hold(
+                    "the labels of the groups artifact",
+                    object_array_bytes(len(labels))
+                    + python_text_bytes(len(labels), characters, widest=widest),
                 )
-                + label_chunk
-            )
-            ledger.hold("the labels of the groups artifact", labelled)
-            resolved = resolve_grouping(zw, cells, groups)
-            # A codec thread may still hold the chunk of labels it decoded.
-            ledger.leave(label_chunk)
-            codes, names = category_codes(
-                np.asarray(resolved.labels), resolved.missing_mask, ledger=ledger
-            )
+                labels = labels.astype(object)
+            labelled = ledger.charged - entry
+            codes, names = category_codes(labels, resolved.missing_mask, ledger=ledger)
             ledger.hold("each labelled cell's code", codes.nbytes)
             ledger.peak(
                 "the groups artifact's cells",
@@ -455,7 +434,7 @@ def cell_groups(
             ledger.hold("each cell's code of the groups artifact", aligned.nbytes)
             labelled_codes = codes.nbytes
             _hold_names(ledger, names)
-            del resolved, at, codes
+            del resolved, labels, at, codes
             ledger.release(labelled + labelled_codes)
             coded.append((aligned, names))
         for name, labels in kept_apart:
@@ -512,12 +491,12 @@ def cell_groups(
         ledger.peak("each cell's group", 16 * n_grouped)
         selected_cells = np.flatnonzero(has)
         cell_codes[selected_cells[keep]] = group_codes
+        # Groups are named by their labels joined by commas, and need one name
+        # each, which is checked beside what the grouping still holds.
+        group_names(keys)
         index_bytes = grouped_index.nbytes
         del coded, keep, combinations, group_codes, selected_cells, has, grouped_index
         ledger.release(n_cells + index_bytes + kept_codes + combined)
-        # Groups are named by their labels joined by commas, and need one name
-        # each.
-        group_names(keys)
         return CellGroups(
             key_columns, keys, cell_codes, n_outside_rows, n_without_group
         )

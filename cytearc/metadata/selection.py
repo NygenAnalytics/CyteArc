@@ -1148,8 +1148,14 @@ def resolve_grouping(
     grouping: ArtifactRef | CellField,
     *,
     cell_selection: ArtifactRef | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> ResolvedGrouping:
-    """Resolve categorical labels from an artifact or an explicit metadata field."""
+    """Resolve categorical labels from an artifact or an explicit metadata field.
+
+    With ``ledger``, an artifact's labels are read within it, as
+    :func:`resolve_cell_aligned_artifact` charges them; a metadata field is
+    read without one.
+    """
     if isinstance(grouping, CellField):
         if grouping.kind == "continuous":
             raise ValueError("Grouping CellField must be categorical")
@@ -1182,6 +1188,7 @@ def resolve_grouping(
         cell_selection=cell_selection,
         value_name=value_name,
         expected_kind=grouping.kind,
+        ledger=ledger,
     )
 
     return ResolvedGrouping(

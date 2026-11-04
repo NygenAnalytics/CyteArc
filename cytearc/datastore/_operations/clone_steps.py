@@ -15,7 +15,11 @@ import zarr
 
 from ...clones.assignments import ranked_clone_label_bytes, ranked_clone_labels
 from ...metadata.rows import read_text_rows, read_whole
-from ...metadata.selection import plan_cell_selection_read, read_cell_selection
+from ...metadata.selection import (
+    CellSelectionRead,
+    plan_cell_selection_read,
+    read_cell_selection,
+)
 from ...storage.artifacts import ArtifactRef, inspect_artifact
 from ...utils.memory_budget import MemoryLedger
 
@@ -23,6 +27,7 @@ __all__ = [
     "artifact_cell_ids",
     "files_text",
     "hold_ranked_clone_labels",
+    "plan_artifact_cells",
     "read_codes",
 ]
 
@@ -60,23 +65,32 @@ def hold_ranked_clone_labels(ledger: MemoryLedger, n_clones: int) -> np.ndarray:
     return ranked_clone_labels(n_clones)
 
 
+def plan_artifact_cells(root: Any, artifact: ArtifactRef) -> CellSelectionRead:
+    """Check a cell-aligned artifact's cell selection, for :func:`artifact_cell_ids`, before anything is charged.
+
+    The artifact's record and the selection's identity check are read
+    outside the budget, once in the operation's scope.
+    """
+    selection = inspect_artifact(root, artifact).input_ref("cell_selection")
+    return plan_cell_selection_read(root, selection)
+
+
 def artifact_cell_ids(
     ledger: MemoryLedger,
     root: Any,
     cell_ids: Any,
-    artifact: ArtifactRef,
+    planned: CellSelectionRead,
     *,
     item: str = "the cells' IDs",
 ) -> np.ndarray:
     """The IDs of a cell-aligned artifact's cells, in the order of its arrays, kept charged as ``item``.
 
-    The artifact's cell selection is read through
+    The artifact's cell selection, as :func:`plan_artifact_cells` planned
+    it, is read through
     :func:`~cytearc.metadata.selection.read_cell_selection` and the IDs of
     its cells from ``cell_ids``, the store's stored IDs, through
     :func:`~cytearc.metadata.rows.read_text_rows`, as Python strings.
     """
-    selection = inspect_artifact(root, artifact).input_ref("cell_selection")
-    planned = plan_cell_selection_read(root, selection)
     cell_index = read_cell_selection(
         ledger, root, planned, item="the positions of the artifact's cells"
     )

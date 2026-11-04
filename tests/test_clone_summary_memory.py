@@ -583,6 +583,93 @@ def test_the_traced_peak_fits_the_smallest_budget_accepted(data, case) -> None:
     assert peak <= budget, (case, peak, budget)
 
 
+# The cases of the repertoire's own operations, which their own audits follow.
+_REPERTOIRE_CASES = (
+    "clonotypes",
+    "loaded clonotypes",
+    "gene usage",
+    "three genes",
+    "junction lengths",
+)
+CLONE_CASES = [case for case in CASES if not case.startswith(_REPERTOIRE_CASES)]
+# The cases that save a summary and then load it run two operations in one
+# call, whose second ledger cannot plan what the first leaves behind; their
+# loads are audited alone below.
+AUDITED_CASES = [case for case in CLONE_CASES if not case.startswith("loaded")]
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["as run", "reads held"])
+@pytest.mark.parametrize("case", AUDITED_CASES)
+def test_each_charge_of_a_clone_operation_plans_what_it_holds(data, case, held) -> None:
+    from cytearc.storage.validation_scope import validation_scope
+    from tests.memory_helpers import ZARR_READS, audited, hold_finished_reads
+
+    # From each charge of the operation's ledger to the next, what is traced
+    # stays within what the ledger planned, with every read's work held until
+    # the next read ends, as a busy machine can, and without. The selections'
+    # identity checks, outside the budget, run once in the operation's scope.
+    def run() -> object:
+        return CASES[case](data)
+
+    def audit() -> list[tuple[str, int, int]]:
+        if held:
+            with hold_finished_reads(*ZARR_READS):
+                return audited(run)[1]
+        return audited(run)[1]
+
+    with validation_scope():
+        run()
+        overruns = audit()
+        if overruns:
+            # A one-off allocation of the interpreter, such as its table of
+            # interned strings growing, falls in one run; an interval that
+            # holds more than its plan does so again.
+            overruns = audit()
+    assert overruns == [], overruns
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["as run", "reads held"])
+@pytest.mark.parametrize(
+    "load",
+    ["clones", "clonal expansion", "fate bias", "export", "matrix export"],
+)
+def test_each_charge_of_a_load_plans_what_it_holds(data, tmp_path, load, held) -> None:
+    from cytearc.storage.validation_scope import validation_scope
+    from tests.memory_helpers import ZARR_READS, audited, hold_finished_reads
+
+    # Each load reads a saved artifact alone, so its ledger plans every read
+    # from the first, with every read's work held until the next read ends
+    # and without.
+    store = data.store
+    calls: dict[str, Callable[[], object]] = {
+        "clones": lambda: store.clones.load_clones(data.long),
+        "clonal expansion": lambda: store.clones.load_expansion(expansion),
+        "fate bias": lambda: store.clones.load_fate_bias(bias),
+        "export": lambda: store.clones.export_clones(data.emoji, tmp_path / "c.csv"),
+        "matrix export": lambda: store.clones.export_clones(
+            data.long, tmp_path / "m.mtx.gz", format="matrix"
+        ),
+    }
+    expansion = store.clones.expansion(data.long, cell_selection=data.first)
+    bias = store.clones.fate_bias(
+        data.emoji, group_by="donor", early=data.first, late=data.after_first
+    )
+
+    def audit() -> list[tuple[str, int, int]]:
+        if held:
+            with hold_finished_reads(*ZARR_READS):
+                return audited(calls[load])[1]
+        return audited(calls[load])[1]
+
+    with validation_scope():
+        calls[load]()
+        overruns = audit()
+        if overruns:
+            # A one-off allocation of the interpreter falls in one run.
+            overruns = audit()
+    assert overruns == [], overruns
+
+
 # The two summaries are run, each at the smallest budget it accepts, in a fresh
 # process whose Zarr reads no earlier test left running. While they match the
 # clones' cells to the measured cells and group the cells, the steps whose

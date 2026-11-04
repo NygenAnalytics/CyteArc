@@ -30,7 +30,6 @@ from ...metadata.records import (
     unpack_text,
 )
 from ...metadata.rows import (
-    read_metadata_rows_chunkwise,
     read_rows,
     read_text_rows,
     read_whole,
@@ -38,7 +37,6 @@ from ...metadata.rows import (
     text_read_bytes,
 )
 from ...metadata.selection import (
-    cell_selection_indices,
     plan_cell_selection_read,
     read_cell_selection,
 )
@@ -110,7 +108,7 @@ from .cell_barcodes import (
 )
 from .cell_groups import cell_groups, group_columns, within_groups
 from .clone_artifacts import clone_diagnostics
-from .clone_steps import files_text
+from .clone_steps import artifact_cell_ids, files_text, plan_artifact_cells
 from .record_tables import (
     record_arrays,
     record_chunk_lengths,
@@ -1166,12 +1164,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             what="a receptor",
         )
 
-    def _artifact_cell_ids(self, artifact: ArtifactRef) -> np.ndarray:
-        """The IDs of a cell-aligned artifact's cells, in the order of its arrays."""
-        selection = inspect_artifact(self.zw, artifact).input_ref("cell_selection")
-        cell_index = cell_selection_indices(self.zw, selection)
-        return np.asarray(read_metadata_rows_chunkwise(self.cells, "ids", cell_index))
-
     @validation_scoped
     def _repertoire_clonotypes(
         self,
@@ -1691,7 +1683,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             names[within_codes] if within else np.repeat(names, len(within_codes))
         )
         cells, table = clonotype_frames(
-            self._artifact_cell_ids(clonotypes),
+            # The estimate above counts the IDs' read, which no budget limits
+            # here.
+            artifact_cell_ids(
+                MemoryLedger(None, f"Loading the clonotypes of {n_cells} cells"),
+                self.zw,
+                self.cells._get_array("ids"),
+                plan_artifact_cells(self.zw, clonotypes),
+            ),
             codes=read_array(group, "codes"),
             clone_size=read_array(group, "clone_size"),
             clonotype_ids=read_array(group, "clonotype_ids"),

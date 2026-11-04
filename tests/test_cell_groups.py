@@ -288,13 +288,16 @@ def _smallest(store, **options) -> tuple[int, int, list[str]]:
     """The smallest budget that a grouping's refusals name, its traced peak there, and the refusals.
 
     Each refusal must name a budget above the one it refused, and one byte
-    below the budget that runs is refused naming it.
+    below the budget that runs is refused naming it. A refusal names its
+    budget as the bytes it needs, in the ledger's words or in those of the
+    read of a label artifact's values.
     """
     budget, refusals, _grouped, peak = budget_that_runs(
         lambda budget: budget,
         lambda budget: _group(
             store, ledger=MemoryLedger(budget, "Grouping cells"), **options
         ),
+        refusal_budget=lambda refusal: refusal.needed_bytes,
     )
     with pytest.raises(MemoryBudgetError) as refused:
         _group(store, ledger=MemoryLedger(budget - 1, "Grouping cells"), **options)
