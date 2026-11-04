@@ -1268,7 +1268,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             "the labels that the clones keep apart",
             sum(np.asarray(labels).nbytes for _name, labels in kept_apart),
         )
-        return cell_groups(
+        # Every cell may join a group, a flag each while they are grouped.
+        rows = ledger.hold("the cells to group", n_cells)
+        grouped = cell_groups(
             self.zw,
             self.cells,
             selection,
@@ -1279,6 +1281,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ledger=ledger,
             kept_apart=tuple(kept_apart),
         )
+        ledger.release(rows)
+        return grouped
 
     def _measured_clone_cells(
         self,
@@ -1375,6 +1379,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group and clone code, its group, its clone code and its cells;
             and the grouping's diagnostics.
         """
+        # The cells with a clone may join a group, a flag each while they
+        # are grouped.
+        rows = ledger.hold("the cells with a clone", len(source.codes))
         grouped = cell_groups(
             self.zw,
             self.cells,
@@ -1386,6 +1393,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ledger=ledger,
             kept_apart=source.kept_apart,
         )
+        ledger.release(rows)
         # Each counted cell's group and clone, then their pairs: at most one
         # a cell, and at most one for each group and clone.
         flags = ledger.hold("the cells with a group", len(grouped.codes))
@@ -1583,6 +1591,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ledger.release(input_bytes)
         else:
             del source
+        # The cells with a clone may join a group, a flag each while they
+        # are grouped.
+        rows = ledger.hold("the cells with a clone", len(codes))
         grouped = cell_groups(
             self.zw,
             self.cells,
@@ -1594,6 +1605,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ledger=ledger,
             kept_apart=kept_apart,
         )
+        ledger.release(rows)
         if not grouped.keys:
             raise ValueError("No cell has both a clone and a group")
         columns = group_columns(group_by)
@@ -2666,6 +2678,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "the labels that the late cells' clones keep apart",
                 8 * len(late_codes) * len(late_kept),
             )
+        # Every late cell may join a fate, a flag each while they are grouped.
+        rows = ledger.hold("the late cells to group", len(late_codes))
         grouped = cell_groups(
             self.zw,
             self.cells,
@@ -2677,6 +2691,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ledger=ledger,
             kept_apart=late_kept,
         )
+        ledger.release(rows)
         counted = (late_codes >= 0) & (grouped.codes >= 0)
         if not (late_codes >= 0).any():
             raise ValueError(

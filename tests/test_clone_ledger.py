@@ -104,6 +104,28 @@ def test_building_sets_counts_each_cells_pointer_and_count() -> None:
     assert peak <= stated <= 1.5 * peak + NUMPY_STEP_BYTES, (peak, stated)
 
 
+def test_building_sets_of_many_distinct_pairs_holds_no_more_than_it_plans() -> None:
+    # 2,000,000 distinct pairs of 10 cells: the pairs, their sorted cells and
+    # items and the flags of new pairs held 25 bytes a pair, against the 24
+    # charged, 2 MB beyond the plan.
+    rng = np.random.default_rng(1)
+    n_pairs = 2_000_000
+    cells = rng.integers(0, 10, n_pairs)
+    items = np.arange(n_pairs)
+
+    def call() -> object:
+        return cell_sets(cells, items, 10, ledger=MemoryLedger(None, "x"))
+
+    call()
+    _result, intervals = interval_peaks(call)
+    ((planned, traced),) = [
+        (planned, traced)
+        for item, planned, traced in intervals
+        if item == "the sets of the cells"
+    ]
+    assert traced <= planned + 65_536, (planned, traced)
+
+
 def test_identical_sets_refuse_before_they_allocate_the_cells_sizes() -> None:
     # A budget below the sets' hashes is refused before the step makes its
     # two arrays of each cell's size: the refused call holds next to nothing.
@@ -156,6 +178,34 @@ def test_each_step_of_set_clones_holds_no_more_than_it_plans(
         if item == "the cells' clones" and planned > traced
     ][:1]
     assert planned <= 1.5 * traced + NUMPY_STEP_BYTES, (planned, traced)
+
+
+def test_a_similarity_across_modalities_charges_the_nodes_modalities_first() -> None:
+    # 400,000 cells of one to three items each, of two modalities: finding
+    # each node's modality and its flags among the edges held 13.6 MB beyond
+    # the plan when they were charged after they were made.
+    rng = np.random.default_rng(0)
+    n_cells = 400_000
+    cells = np.repeat(np.arange(n_cells), rng.integers(1, 4, size=n_cells))
+    sets = cell_sets(cells, np.arange(len(cells)), n_cells)
+    modalities = rng.integers(0, 2, size=n_cells)
+
+    def call() -> object:
+        return set_clones(
+            sets,
+            method="jaccard",
+            similarity=0.3,
+            inclusive=False,
+            across=0.5,
+            modalities=modalities,
+            ledger=MemoryLedger(None, "x"),
+        )
+
+    call()
+    _result, intervals = interval_peaks(call)
+    assert any(item == "the nodes' modalities" for item, _p, _t in intervals)
+    over = [entry for entry in intervals if entry[2] > entry[1] + 65_536]
+    assert over == [], over
 
 
 def test_ambiguous_nodes_keep_their_flags_charged_with_the_nodes() -> None:
@@ -253,6 +303,24 @@ def test_the_search_leaves_the_pairs_it_returns_charged() -> None:
     assert len(first) > 10_000
     assert ledger.held_bytes == 1_000 + 16 * len(first)
     assert first.nbytes + second.nbytes == 16 * len(first)
+
+
+def test_the_search_lets_go_of_its_charges_once_the_memory_goes() -> None:
+    # 20,000 texts of 12 bases: the texts and the last length's members, 16
+    # bytes a text, outlived the release of what the search held, 322 KB
+    # beyond the plan as the search returned.
+    rng = np.random.default_rng(8)
+    texts = ["".join(rng.choice(list("ACGT"), 12)) for _ in range(20_000)]
+
+    def call() -> object:
+        return neighbor_pairs(
+            texts, "hamming", 1, ledger=MemoryLedger(None, "Searching")
+        )
+
+    call()
+    _result, intervals = interval_peaks(call)
+    over = [entry for entry in intervals if entry[2] > entry[1] + 65_536]
+    assert over == [], over
 
 
 # The labels of clones ranked by size.

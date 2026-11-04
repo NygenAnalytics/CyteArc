@@ -461,6 +461,29 @@ def test_the_search_holds_no_more_than_the_smallest_budget_it_accepts(
 
 
 @pytest.mark.slow
+def test_a_buffer_of_keys_larger_than_those_written_is_charged_whole(
+    monkeypatch,
+) -> None:
+    # 20,000 random texts of 8 to 10 bases within two edits: the keys that
+    # delete up to two positions fill 70% of their buffer, which stays alive
+    # while the candidates are checked. Charged by the keys written, the
+    # search traced 1.05 times the smallest budget it accepted.
+    rng = np.random.default_rng(7)
+    texts = [
+        "".join(rng.choice(list("ACGT"), rng.integers(8, 11))) for _ in range(20_000)
+    ]
+    _force(monkeypatch, "keyed")
+
+    def search(budget: int | None) -> tuple[np.ndarray, np.ndarray]:
+        return neighbor_pairs(texts, "levenshtein", 2, ledger=budgeted(budget))
+
+    assert len(search(None)[0]) == 324_273
+    budget = smallest_budget(search, 1 << 27)
+    _, peak = traced_peak(lambda: search(budget), budget)
+    assert peak <= budget, (peak, budget)
+
+
+@pytest.mark.slow
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
 def test_keys_of_distinct_texts_hold_no_more_than_the_smallest_budget(
     monkeypatch, metric

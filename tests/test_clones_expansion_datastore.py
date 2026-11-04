@@ -20,6 +20,7 @@ from cytearc.utils.memory_budget import (
     MemoryBudgetError,
     MemoryLedger,
 )
+from cytearc.storage.arrays import zarr_write_buffer_bytes
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
     every_cell,
@@ -631,12 +632,19 @@ def test_expansion_of_some_cells_charges_matching_them(copied, monkeypatch) -> N
     # 48 cells the read objects that each read leaves, 64 KiB, and the
     # write's chunk terms, which the shared read and write costs count,
     # outweigh the summary's own steps: the budgets are about twice the
-    # traced peaks, 2.02 and 1.91 times as traced alone, and up to 2.66 times
-    # as traced among other tests of the suite.
+    # traced peaks, 2.02 and 1.91 times as traced alone, and the expansion's
+    # 2.66 times as traced among other tests of the suite. Its write counts
+    # a buffer for each write that Zarr may run at once, 1.25 MiB from
+    # Python 3.14, of which a few cells' write fills two or three.
     monkeypatch.setattr(store, "memoryBytes", 2**30)
-    check_budget(store, lambda reopened: measure(), at_most=3.0)
+    check_budget(
+        store,
+        lambda reopened: measure(),
+        at_most=2.5,
+        allowance=zarr_write_buffer_bytes(),
+    )
     _budget, _refusals, tables = check_budget(
-        store, lambda reopened: reopened.clones.load_expansion(saved), at_most=3.0
+        store, lambda reopened: reopened.clones.load_expansion(saved), at_most=2.5
     )
     assert tables.cells.shape[0] == n_d2
 
