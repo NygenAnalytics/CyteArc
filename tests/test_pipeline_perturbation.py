@@ -31,7 +31,10 @@ from cytearc import (
 from cytearc.datastore._pipeline import summaries
 from cytearc.datastore._pipeline.executor import RecipePlan
 from cytearc.datastore._pipeline.recipes.common import require_labeled_cells
-from cytearc.datastore._operations.perturbation_guides import _call_file_check_bytes
+from cytearc.datastore._operations.perturbation_guides import (
+    _call_file_check_bytes,
+    _guide_id_check_bytes,
+)
 from cytearc.datastore._pipeline.recipes.perturbation import (
     _check_call_file,
     _check_call_file_cells,
@@ -1364,6 +1367,15 @@ def test_the_call_file_is_read_before_the_run_within_the_memory_budget(
         needed,
     )
     assert peak <= needed
+
+
+def test_the_guide_id_check_refuses_ids_without_stored_chunks() -> None:
+    # The check counts the read from the stored array's chunks, so IDs held in
+    # memory, with no chunks, are refused rather than costed as nothing.
+    with pytest.raises(ValueError, match="guide assay's IDs are not stored in chunks"):
+        _guide_id_check_bytes(
+            np.asarray(["g1", "g2"]), n_cells=1, id_array=np.asarray(["c1"])
+        )
 
 
 def test_the_call_file_check_counts_the_read_of_the_guide_ids_before_it(

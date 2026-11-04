@@ -196,20 +196,26 @@ def test_each_writer_chunks_new_cell_columns_by_rows_and_bytes(
 def test_text_is_chunked_by_its_characters_whatever_its_utf8_bytes(
     tmp_path: Path, character: str, as_bytes: bool
 ) -> None:
+    from cytearc.storage.schema import create_cell_data
     from cytearc.writers._store import write_metadata_column
 
     # Every value is stored at four bytes a character, so 42 characters take
-    # 99,864 rows to a chunk whatever bytes they take as UTF-8.
+    # 99,864 rows to a chunk whatever bytes they take as UTF-8, also as the
+    # IDs and names that the importers pass to create_cell_data.
     n_rows = _WIDE_ROWS + 1
     texts = [character * _WIDE] * n_rows
     values = np.asarray([text.encode() for text in texts] if as_bytes else texts)
     cells = zarr.open_group(tmp_path / "store.zarr", mode="w").create_group("cellData")
     write_metadata_column(cells, "label", values, chunk_rows=column_chunk_rows)
     MetaData(cells).insert("inserted", values)
-    for name in ("label", "inserted"):
-        assert cells[name].dtype == np.dtype(f"U{_WIDE}")
-        assert cells[name].chunks == (_WIDE_ROWS,)
-        assert cells[name][-1] == character * _WIDE
+    created = create_cell_data(
+        zarr.open_group(tmp_path / "ids.zarr", mode="w"), None, ids=values, names=values
+    )
+    for group, name in ((cells, "label"), (cells, "inserted"), (created, "ids")):
+        assert group[name].dtype == np.dtype(f"U{_WIDE}")
+        assert group[name].chunks == (_WIDE_ROWS,)
+        assert group[name][-1] == character * _WIDE
+    assert created["names"].chunks == (_WIDE_ROWS,)
 
 
 def test_a_value_wider_than_16_mib_is_a_chunk_of_its_own(tmp_path: Path) -> None:
@@ -418,6 +424,13 @@ def test_store_imports_and_copies_chunk_cell_columns_by_rows_and_bytes(
     merger = DataStoreMerge(
         [source, other], str(tmp_path / "merged.zarr"), ["a", "b"], nthreads=1
     )
+    merger.plan()
+    # The plan costs a band of the wide column at the chunk that the write
+    # stores: at least its 41 values of 400,000 bytes and their encoding, and
+    # less than a band of all 96 cells' values and their encoding would hold.
+    assert merger._metadataPlan is not None
+    cost = merger._metadataPlan.peak_write_bytes_at(1, chunk_rows=96)
+    assert 2 * _LABEL_ROWS * 4 * _LABEL_WIDTH <= cost < 2 * 96 * 4 * _LABEL_WIDTH
     merger.dump()
     merged = _cell_chunks(tmp_path / "merged.zarr")
     wide = {name for name in merged if name.endswith("wide")}
