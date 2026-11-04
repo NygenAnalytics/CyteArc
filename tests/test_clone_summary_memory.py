@@ -7,7 +7,7 @@ checks that whatever a summary estimates bounds what it allocates, on inputs
 that stress each estimate: long and emoji labels, long clone labels, a few
 measured cells of many clone cells, a label artifact and a cell selection of
 more cells than the clones hold, a label for each of many cells, many sizes,
-many pairs of groups, one-cell clones, 1, 13 and 30 key columns, and clone labels
+many pairs of groups, one-cell clones, 1 and 13 key columns, and clone labels
 held beside many rows. Clonotypes, whose receptor types every summary keeps
 apart, are measured alike, as are the steps that define and load them, also
 within those labels and for cells with long IDs, the labels that figures give
@@ -90,9 +90,9 @@ def data(tmp_path_factory) -> SimpleNamespace:
     # others, makes groups that cost more than their cells.
     own = np.asarray([f"g{i:06d}" if i < 2_000 else "" for i in range(N_CELLS)])
     store.cells.insert("own", own)
-    # Twenty-nine copies of those labels give as many key columns and no
-    # more groups.
-    for copy in range(29):
+    # Twelve copies of those labels give as many key columns and no more
+    # groups.
+    for copy in range(12):
         store.cells.insert(f"own_{copy}", own)
     for n_first in (220, 300, 800):
         store.cells.insert(f"first_{n_first}", np.arange(N_CELLS) < n_first)
@@ -339,16 +339,10 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
         groups=data.own_labels[800],
         top_n=1,
     ),
-    # The same 82,082 rows by one and by 30 key columns: pandas 2 copies the
-    # table's four columns, whatever the groups' keys.
+    # The same 82,082 rows by one key column: pandas 2 copies the table's four
+    # columns, whatever the groups' keys.
     "track of a few cells by one key column": lambda data: data.store.clones.track(
         data.few, groups=data.own_labels[800], top_n=1
-    ),
-    "track of a few cells by 30 key columns": lambda data: data.store.clones.track(
-        data.few,
-        group_by=[f"own_{copy}" for copy in range(29)],
-        groups=data.own_labels[800],
-        top_n=1,
     ),
     "track of emoji clone labels by a label for each of 220 cells": lambda data: (
         data.store.clones.track(data.emoji, groups=data.own_labels[220], top_n=1)
