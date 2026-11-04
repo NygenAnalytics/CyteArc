@@ -174,10 +174,12 @@ class MemoryLedger:
         remedy: Another way to fit the budget that refusals name, or None;
             a charge can pass its own.
         codec_threads: The threads of Zarr's codec pool that the call's reads
-            decode on, as the operation plans them: the store's ``nthreads``,
-            whatever the machine. Zarr's pool spreads a read's chunks over
-            its threads even one chunk at a time, and each thread can still
-            hold the last chunk it decoded after the read returns.
+            decode on: the store's ``nthreads``, whatever the machine. The
+            reads that the ledger charges decode on a pool of exactly this
+            many threads, as ``storage.async_execution.zarr_decoding_threads``
+            gives them. The pool spreads a read's chunks over its threads
+            even one chunk at a time, and each thread can still hold the last
+            chunk it decoded after the read returns.
         charged: The bytes held by charges not released.
         left: What the last read or write may still hold.
     """

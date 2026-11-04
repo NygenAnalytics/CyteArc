@@ -84,7 +84,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
-from ...storage.async_execution import zarr_io_concurrency
+from ...storage.async_execution import zarr_decoding_threads, zarr_io_concurrency
 from ...storage.geometry import ROW_INDEX_BYTES, array_geometry
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
@@ -582,7 +582,8 @@ def _decoded_values(
     )
     lengths = np.zeros(len(codes) + 1, dtype=np.int64)
     np.cumsum(ends - starts, out=lengths[1:])
-    joined = _byte_ranges(values, starts, ends)
+    with zarr_decoding_threads(ledger.codec_threads):
+        joined = _byte_ranges(values, starts, ends)
     if geometry is not None and len(joined):
         # The chunks from the first range to the last, each read once, leave
         # one on each of the ledger's codec threads.
@@ -718,7 +719,8 @@ def _value_lengths(
         stop = int(np.searchsorted(starts, high, side="left"))
         if begin >= stop:
             continue
-        block = np.asarray(packed[low:high], dtype=np.uint8)
+        with zarr_decoding_threads(ledger.codec_threads):
+            block = np.asarray(packed[low:high], dtype=np.uint8)
         parts = np.empty(2 * (stop - begin), dtype=np.int64)
         parts[0::2] = np.clip(starts[begin:stop], low, high) - low
         parts[1::2] = np.clip(ends[begin:stop], low, high) - low
@@ -2294,7 +2296,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         block_bytes = max(1, min(_EXPORT_BLOCK_BYTES, self.memoryBytes // 16))
         # Every stored array is read a chunk at a time, as the blocks count.
-        with zarr_io_concurrency(1):
+        with zarr_io_concurrency(1), zarr_decoding_threads(ledger.codec_threads):
             contigs.hold_text()
             clones: EncodedText | None = None
             clone_width = 0

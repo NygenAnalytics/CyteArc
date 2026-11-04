@@ -7,7 +7,7 @@ from typing import Any, Protocol
 import numpy as np
 import zarr
 
-from ..storage.async_execution import zarr_io_concurrency
+from ..storage.async_execution import zarr_decoding_threads, zarr_io_concurrency
 from ..storage.geometry import (
     READ_OBJECT_BYTES,
     ROW_INDEX_BYTES,
@@ -165,9 +165,9 @@ def read_whole(
     no fetch takes more than one band of a shard. The ledger counts what the
     read holds while it runs, as ``ArrayGeometry.wholeReadBytes`` states, or
     the result beside what the read leaves behind where that is more: a
-    chunk on each of the ledger's codec threads, up to the chunks the read
-    decodes. It keeps the result charged and records what the read leaves
-    behind.
+    chunk on each of the ledger's codec threads, which the read decodes on,
+    up to the chunks it decodes. It keeps the result charged and records
+    what the read leaves behind.
 
     Raises:
         MemoryBudgetError: If even a read of one chunk at a time would pass
@@ -195,7 +195,10 @@ def read_whole(
 
     concurrency = _fitting_concurrency(ledger, reading)
     ledger.peak(item, reading(concurrency))
-    with zarr_io_concurrency(concurrency):
+    with (
+        zarr_io_concurrency(concurrency),
+        zarr_decoding_threads(ledger.codec_threads),
+    ):
         if geometry.shards is None:
             values = read_array(group, name)
         else:
@@ -255,8 +258,8 @@ def read_rows(
     order given. The ledger counts what the read holds, as
     :func:`row_read_bytes` states, or the rows beside what the read leaves
     behind where that is more: a chunk on each of the ledger's codec threads,
-    up to the chunks of the bands the rows span. It keeps the rows charged
-    and records what the read leaves behind.
+    which the read decodes on, up to the chunks of the bands the rows span.
+    It keeps the rows charged and records what the read leaves behind.
 
     Raises:
         MemoryBudgetError: If the read would pass the budget.
@@ -272,7 +275,8 @@ def read_rows(
         held = geometry.bandHeldBytes(ledger.holding_threads(chunks))
         reading = max(reading, int(indices.size) * geometry.rowBytes() + held)
     ledger.peak(item, reading)
-    values = read_array_rows_chunkwise(array, indices)
+    with zarr_decoding_threads(ledger.codec_threads):
+        values = read_array_rows_chunkwise(array, indices)
     if held:
         ledger.leave(held)
     ledger.hold(item, values.nbytes)

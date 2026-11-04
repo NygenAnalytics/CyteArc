@@ -21,12 +21,18 @@ from .execution import OperationPlan
 
 T = TypeVar("T")
 
-# Zarr's sync ThreadPoolExecutor is created on first use and never resized.
+# The host threads of Zarr's codec pool, fixed when the pool is installed.
 # This is the process thread ceiling, not an operation plan.
 _HOST_THREAD_CEILING: int | None = None
 _ZARR_CONFIG_LOCK = threading.RLock()
 _ACTIVE_IO_LIMITS: dict[object, int] = {}
 _IDLE_IO_LIMIT: int | None = None
+
+# The threads that the Zarr reads of the calling context decode on, or None
+# for the host threads of Zarr's codec pool.
+_DECODING_THREADS: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "zarr_decoding_threads", default=None
+)
 
 
 _IO_TASKS: contextvars.ContextVar[set[asyncio.Future[Any]] | None] = (
@@ -234,8 +240,72 @@ def _active_zarr_workers() -> int | None:
     return None if pool is None else int(pool._max_workers)
 
 
+class _DecodingPools(ThreadPoolExecutor):
+    """Zarr's codec pool: the host's threads, and a pool of each other count of threads that reads decode on.
+
+    Zarr's event loop runs each fetch and decode of a read on its default
+    executor, in the context of the call that made the read. A call within
+    :func:`zarr_decoding_threads` runs them on a pool of exactly that many
+    threads, which the reads of every call of that count share; any other
+    call runs them on the host's threads.
+    """
+
+    def __init__(self, workers: int) -> None:
+        super().__init__(max_workers=workers, thread_name_prefix="zarr_pool")
+        self._sized: dict[int, ThreadPoolExecutor] = {}
+        self._sized_lock = threading.Lock()
+
+    def submit[**P, R](
+        self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
+    ) -> "Future[R]":
+        threads = _DECODING_THREADS.get()
+        if threads is None or threads == self._max_workers:
+            return super().submit(fn, *args, **kwargs)
+        with self._sized_lock:
+            pool = self._sized.get(threads)
+            if pool is None:
+                if self._shutdown:
+                    raise RuntimeError("cannot schedule new futures after shutdown")
+                pool = ThreadPoolExecutor(
+                    max_workers=threads, thread_name_prefix=f"zarr_pool_of_{threads}"
+                )
+                self._sized[threads] = pool
+        return pool.submit(fn, *args, **kwargs)
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        with self._sized_lock:
+            sized = list(self._sized.values())
+        for pool in sized:
+            pool.shutdown(wait=wait, cancel_futures=cancel_futures)
+        super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+
+def _install_decoding_pools(workers: int) -> None:
+    """Make CyteArc's decoding pools the default executor of Zarr's event loop.
+
+    Zarr makes its own pool only while it has none, so the pools also become
+    Zarr's when it has none yet. A pool that Zarr or asyncio made before is
+    left to finish what it runs, as Zarr leaves a pool that it replaces,
+    since the loop may be submitting to it.
+    """
+    sync: Any = importlib.import_module("zarr.core.sync")
+    loop = sync._get_loop()
+    pools = loop._default_executor
+    if not isinstance(pools, _DecodingPools):
+        pools = sync._executor
+        if not isinstance(pools, _DecodingPools):
+            pools = _DecodingPools(workers)
+        loop.set_default_executor(pools)
+    if sync._executor is None:
+        sync._executor = pools
+
+
 def ensure_zarr_host_ceiling() -> int:
-    """Keep the existing process pool, or configure it before its first use."""
+    """Install CyteArc's decoding pools as Zarr's codec pool, and return their host threads.
+
+    The host threads are those of a pool that Zarr already runs, or Zarr's
+    ``threading.max_workers``, or the host's workers, fixed by the first use.
+    """
     global _HOST_THREAD_CEILING
     with _ZARR_CONFIG_LOCK:
         active = _active_zarr_workers()
@@ -245,7 +315,34 @@ def ensure_zarr_host_ceiling() -> int:
             configured = zarr.config.get("threading.max_workers", None)
             _HOST_THREAD_CEILING = int(configured or max(1, detect_workers()))
             zarr.config.set({"threading.max_workers": _HOST_THREAD_CEILING})
+        _install_decoding_pools(_HOST_THREAD_CEILING)
     return _HOST_THREAD_CEILING
+
+
+@contextmanager
+def zarr_decoding_threads(threads: int) -> Iterator[None]:
+    """Decode the Zarr reads that the calling thread makes within on a pool of exactly ``threads`` threads.
+
+    A thread of Zarr's codec pool can still hold the last chunk that it
+    fetched or decoded after the read returns, so reads within leave at most
+    ``threads`` such chunks, on any machine. Reads of the same count in
+    flight together, from any thread, share one pool of that many threads;
+    reads of another count, or outside this context, decode on their own.
+    Reads through :class:`AsyncStorageRunner` decode on the runner's pool.
+
+    Raises:
+        ValueError: If ``threads`` is not a whole number of at least 1.
+    """
+    if isinstance(threads, bool) or not isinstance(threads, int) or threads < 1:
+        raise ValueError(
+            f"Reads decode on a whole number of threads of at least 1, not {threads!r}"
+        )
+    ensure_zarr_host_ceiling()
+    token = _DECODING_THREADS.set(threads)
+    try:
+        yield
+    finally:
+        _DECODING_THREADS.reset(token)
 
 
 class ByteLedger:
