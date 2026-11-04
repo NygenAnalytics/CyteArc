@@ -33,6 +33,7 @@ from ..metadata.selection import (
 )
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import quoted_value
+from ..utils.memory_budget import MemoryLedger
 from ._contracts import CategoricalScale
 from ._data import store_method
 from ._display import stored_categorical_scale
@@ -197,7 +198,11 @@ def _artifact_labels(store: Any, groups: ArtifactRef) -> list[str]:
         groups,
         value_name=cell_value_spec(groups.kind).name,
         expected_kind=groups.kind,
-        max_bytes=int(store.memoryBytes),
+        ledger=MemoryLedger(
+            int(store.memoryBytes),
+            f"Reading the labels of the {groups.kind} artifact",
+            codec_threads=store.nthreads,
+        ),
     )
     return _texts(
         apply_missing_mask(resolved.values, resolved.missing_mask, labels=True)
