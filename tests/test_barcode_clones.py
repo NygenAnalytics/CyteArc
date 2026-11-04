@@ -172,11 +172,10 @@ def test_the_trex_preset_gives_trexs_own_clones(tmp_path, run, doublets) -> None
     if run == "10x":
         # TREX's log: 3,639 of its 3,800 molecules remain after the
         # low-complexity filter.
-        counts = dict(store.artifacts.load(clones).attrs)["rule_counts"]
-        assert counts["molecules_of_low_complexity"] == 3_800 - 3_639
+        diagnostics = store.clones.load_clones(clones).diagnostics
+        assert diagnostics["moleculesOfLowComplexity"] == 3_800 - 3_639
         # Most of its cloneIDs are errors of one, which correction merges, and
         # chance alone explains none of the merges.
-        diagnostics = store.clones.load_clones(clones).diagnostics
         assert diagnostics["mergedBarcodes"] == 89
         assert diagnostics["expectedChanceMatches"] < 1
     # TREX's clones.txt lists the cells of cells_filtered.txt, one cloneID or
@@ -193,18 +192,7 @@ def test_the_artifact_holds_barcodes_doublets_and_what_each_rule_removed(
     group = store.artifacts.load(clones)
     attributes = dict(group.attrs)
     assert attributes["library_units"] == [{"library": "trex", "unit": "umis"}]
-    counts = attributes["rule_counts"]
-    for name in (
-        "barcodes_corrected",
-        "pairs_of_one_umi_shared",
-        "molecules_of_low_complexity",
-        "nodes",
-        "edges",
-        "doublets",
-    ):
-        assert name in counts
-    # Every clonal cell carries an error; the ambient molecules are shared.
-    assert counts["barcodes_corrected"] > 0 and counts["pairs_of_one_umi_shared"] > 0
+    assert "rule_counts" not in attributes
     loaded = store.clones.load_clones(clones)
     assert loaded.source == "call_barcode_clones"
     assert list(loaded.cells.columns) == [
@@ -222,7 +210,8 @@ def test_the_artifact_holds_barcodes_doublets_and_what_each_rule_removed(
     assert record.parameters["trex_rules"] is True
     assert record.operation == "call_barcode_clones"
     # The diagnostics are one flat mapping of numbers, which load_clones
-    # returns as the artifact records them.
+    # returns as the artifact records them: a count per rule, None for a rule
+    # that TREX's preset does not run.
     diagnostics = attributes["diagnostics"]
     assert dict(loaded.diagnostics) == diagnostics
     assert list(diagnostics) == [
@@ -231,9 +220,42 @@ def test_the_artifact_holds_barcodes_doublets_and_what_each_rule_removed(
         "distinctBarcodes",
         "expectedChanceMatches",
         "mergedBarcodes",
+        "moleculesBelowMinReads",
+        "moleculesOfLowComplexity",
+        "recordsCorrected",
+        "recordsOutsideAllowlist",
+        "moleculesOfFewBases",
+        "pairs",
+        "pairsOfOneUmiShared",
+        "pairsOfOneRead",
+        "pairsBelowMinUmis",
+        "pairsBelowMinFraction",
+        "cellsWithBarcodes",
+        "cellsOutsideBarcodesPerCell",
+        "nodes",
+        "edges",
+        "edgesPruned",
+        "doublets",
+        "cellsInSmallClones",
     ]
+    assert [name for name, value in diagnostics.items() if value is None] == [
+        "moleculesBelowMinReads",
+        "recordsOutsideAllowlist",
+        "pairsBelowMinUmis",
+        "pairsBelowMinFraction",
+        "cellsOutsideBarcodesPerCell",
+    ]
+    # Every clonal cell carries an error; the ambient molecules are shared.
+    assert diagnostics["mergedBarcodes"] > 0
+    assert diagnostics["recordsCorrected"] >= diagnostics["mergedBarcodes"]
+    assert diagnostics["pairsOfOneUmiShared"] > 0
     assert diagnostics["cellsWithClone"] == loaded.clones["n_cells"].sum()
-    assert diagnostics["mergedBarcodes"] == counts["barcodes_corrected"]
+    # Every cell with a barcode after the pair filters is counted, and those
+    # in no clone are its doublets and the cells of clones below min_size.
+    assert diagnostics["cellsWithBarcodes"] == int(
+        (loaded.cells["n_barcodes"] > 0).sum()
+    )
+    assert diagnostics["doublets"] == int(loaded.cells["doublet"].sum())
     assert 0 < diagnostics["expectedChanceMatches"] < diagnostics["mergedBarcodes"]
     assert diagnostics["largestCloneShare"] == (
         loaded.clones["n_cells"].max() / loaded.clones["n_cells"].sum()
@@ -255,9 +277,10 @@ def test_trex_rules_follow_the_preset_and_turn_on_or_off_in_any_call(
         **store.artifacts.inspect(trex).parameters,
         "trex_rules": False,
     }
-    counts = dict(store.artifacts.load(without).attrs["rule_counts"])
-    assert "molecules_of_low_complexity" not in counts
-    assert "pairs_of_one_umi_shared" not in counts
+    counts = store.artifacts.inspect(without).diagnostics
+    assert counts["moleculesOfLowComplexity"] is None
+    assert counts["pairsOfOneUmiShared"] is None
+    assert store.artifacts.inspect(trex).diagnostics["moleculesOfLowComplexity"] >= 0
     # TREX's settings given one by one, with its rules, call TREX's clones.
     spelled = store.clones.barcode_clones(
         barcodes,
@@ -512,7 +535,9 @@ def test_diagnostics_other_than_those_declared_are_refused_on_loading(
     # Clones from a column record the clone writer's alone.
     imported = store.clones.from_column("sample", cell_selection=every_cell(store))
     artifact_group(store.zw, imported).attrs["diagnostics"] = recorded
-    with pytest.raises(ValueError, match="not declared distinctBarcodes"):
+    with pytest.raises(
+        ValueError, match="not declared cellsInSmallClones, .*distinctBarcodes"
+    ):
         store.clones.load_clones(imported)
 
 
@@ -591,18 +616,39 @@ def test_calls_follow_neither_file_order_nor_chunks_nor_threads(
                 for name in ("values", "codes", "n_barcodes", "doublet", "clone_sizes")
             }
         )
-        stored[-1]["rule_counts"] = dict(group.attrs)["rule_counts"]
         stored[-1]["diagnostics"] = dict(group.attrs)["diagnostics"]
     # The files of about 400 reads or molecules came in chunks of 7 rows.
     assert chunks[0] > 40
     assert stored[0]["diagnostics"]["expectedChanceMatches"] > 0
     for other in stored[1:]:
         for name, values in stored[0].items():
-            if name in ("rule_counts", "diagnostics"):
+            if name == "diagnostics":
                 # Equal to the last bit, the expectation's sum included.
                 assert other[name] == values
             else:
                 np.testing.assert_array_equal(other[name], values)
+
+
+def test_edits_beyond_eight_correct_barcodes_with_no_expectation_saved(
+    store, tmp_path
+) -> None:
+    # A diagnostic never refuses a call: correction within nine edits runs,
+    # and the pairs expected by chance within them, which take too long to
+    # count, are saved as not measured.
+    _calling, barcodes = _imported(store, tmp_path, "larry")
+    eight, nine = (
+        store.artifacts.inspect(
+            store.clones.barcode_clones(
+                barcodes, preset="larry", metric="levenshtein", max_distance=distance
+            )
+        ).diagnostics
+        for distance in (8, 9)
+    )
+    assert nine["expectedChanceMatches"] is None
+    assert eight["expectedChanceMatches"] is not None
+    # A wider distance merges every barcode that a narrower one merges.
+    assert nine["mergedBarcodes"] >= eight["mergedBarcodes"] > 0
+    assert nine["distinctBarcodes"] == eight["distinctBarcodes"]
 
 
 def test_barcode_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -> None:
@@ -791,9 +837,12 @@ def test_the_trex_preset_matches_trexs_clones_and_doublets(
     }
     cells = store.clones.load_clones(clones).cells
     assert sorted(cells.index[cells["doublet"]]) == run["doublets"]
-    counts = dict(store.artifacts.load(clones).attrs)["rule_counts"]
-    assert counts["doublets"] == sum(run["counts"].get("doublets", [0]))
-    assert counts["edges_pruned"] == sum(run["counts"]["bridges"])
+    counts = store.artifacts.inspect(clones).diagnostics
+    # A run that keeps its doublets removes none, which is not counted.
+    assert counts["doublets"] == (
+        None if run["keep_doublets"] else sum(run["counts"].get("doublets", [0]))
+    )
+    assert counts["edgesPruned"] == sum(run["counts"]["bridges"])
 
 
 def test_the_golden_holds_doublets_that_trex_removed() -> None:

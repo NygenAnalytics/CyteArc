@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc import DiagnosticWarning
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import every_cell, loaded_partition, write_cells_store
 from tests.memory_helpers import traced_peak
@@ -26,6 +27,7 @@ from tests.variant_helpers import (
     TAPESTRI_ALLELES,
     TAPESTRI_PASSING,
     TAPESTRI_REFERENCES,
+    assert_call_counts,
     assert_tables,
     dab_seq_ids,
     expected_dab_seq,
@@ -122,9 +124,6 @@ def test_tapestri_counts_are_the_passing_variants_read_from_af_and_dp(
             "n_variants",
             "n_passing_variants",
             "n_imported_variants",
-            "n_skipped_empty_alternative",
-            "n_skipped_other_alleles",
-            "skipped_examples",
             "samples",
             "panel_name",
             "genome_version",
@@ -137,9 +136,6 @@ def test_tapestri_counts_are_the_passing_variants_read_from_af_and_dp(
         "n_variants": 10,
         "n_passing_variants": 7,
         "n_imported_variants": 6,
-        "n_skipped_empty_alternative": 1,
-        "n_skipped_other_alleles": 0,
-        "skipped_examples": ["chr7:300:A/"],
         "samples": ["d2", "d4"],
         "panel_name": "AML",
         "genome_version": "hg19",
@@ -148,7 +144,79 @@ def test_tapestri_counts_are_the_passing_variants_read_from_af_and_dp(
         "dp_cutoff": 10,
         "af_cutoff": 20,
     }
-    assert any(re.search(_SKIPPED, message) for message in messages)
+    # The skipped variants leave the source record, which identifies the
+    # source, for the import's diagnostics, and warn once.
+    assert not {key for key in record if "skipped" in key}
+    diagnostics = store.artifacts.inspect(ref).diagnostics
+    assert {
+        key: diagnostics[key]
+        for key in (
+            "skippedEmptyAlternatives",
+            "skippedOtherAlleles",
+            "skippedVariantExamples",
+            "listedCells",
+            "sortedRuns",
+            "repeatedCalls",
+        )
+    } == {
+        "skippedEmptyAlternatives": 1,
+        "skippedOtherAlleles": 0,
+        "skippedVariantExamples": ["chr7:300:A/"],
+        "listedCells": TRUTH.n_rows,
+        "sortedRuns": 0,
+        "repeatedCalls": 0,
+    }
+    assert [message for message in messages if re.search(_SKIPPED, message)] == [
+        "The variant file has 1 chosen variants with an empty ALT and 0 whose "
+        "alleles are not bases, which no documentation explains, so they are "
+        "skipped, such as 'chr7:300:A/'"
+    ]
+
+
+def test_the_tapestri_reader_is_silent_about_the_variants_it_skips(tmp_path) -> None:
+    from cytearc.readers.tapestri import SkippedVariants, tapestri_source
+
+    path = write_tapestri(TRUTH, tmp_path / "run.h5")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        source = tapestri_source(str(path), (), 1 << 30)
+        again = tapestri_source(str(path), ["chr2:800"], 1 << 30)
+    # The passing variants hold one with an empty ALT; the position chr2:800
+    # adds one whose alleles are not bases.
+    assert source.skipped == SkippedVariants(
+        names=("chr7:300:A/",), empty_alternatives=frozenset({"chr7:300:A/"})
+    )
+    assert again.skipped == SkippedVariants(
+        names=("chr2:800:*/C+T", "chr7:300:A/"),
+        empty_alternatives=frozenset({"chr7:300:A/"}),
+    )
+
+
+def test_files_of_one_panel_count_each_skipped_variant_once(store, tmp_path) -> None:
+    # Two files of disjoint cells skip the same two variants of the panel,
+    # which are two variants, not four, and each is named once.
+    half = TRUTH.n_rows // 2
+    paths = [
+        write_tapestri(TRUTH, tmp_path / "a.h5", rows=range(half)),
+        write_tapestri(TRUTH, tmp_path / "b.h5", rows=range(half, TRUTH.n_rows)),
+    ]
+    message = (
+        "The variant files have 1 chosen variants with an empty ALT and 1 whose "
+        "alleles are not bases, which no documentation explains, so they are "
+        "skipped, such as 'chr2:800:*/C+T', 'chr7:300:A/'"
+    )
+    for _attempt in ("computed", "reused"):
+        with collect_warnings() as messages:
+            ref = store.variants.import_counts(
+                paths, cell_selection=every_cell(store), include_variants=["chr2:800"]
+            )
+        assert [found for found in messages if "chosen variants" in found] == [message]
+        diagnostics = store.artifacts.inspect(ref).diagnostics
+        assert (
+            diagnostics["skippedEmptyAlternatives"],
+            diagnostics["skippedOtherAlleles"],
+            diagnostics["skippedVariantExamples"],
+        ) == (1, 1, ["chr2:800:*/C+T", "chr7:300:A/"])
 
 
 def test_the_cells_of_two_samples_with_one_barcode_stay_apart(store, tmp_path) -> None:
@@ -231,9 +299,9 @@ def test_variants_that_cannot_be_read_are_skipped_or_refused(store, tmp_path) ->
         ref = store.variants.import_counts(
             path, cell_selection=every_cell(store), include_variants=["chr2:800"]
         )
-    record = _source_record(store, ref)
-    assert record["n_skipped_other_alleles"] == 1
-    assert record["skipped_examples"] == ["chr2:800:*/C+T", "chr7:300:A/"]
+    diagnostics = store.artifacts.inspect(ref).diagnostics
+    assert diagnostics["skippedOtherAlleles"] == 1
+    assert diagnostics["skippedVariantExamples"] == ["chr2:800:*/C+T", "chr7:300:A/"]
     # Named exactly, they are refused.
     for name, reason in (
         ("chr2:800:*/C+T", "alleles that are not bases"),
@@ -269,12 +337,21 @@ def test_variants_are_refused_for_other_formats(store, tmp_path) -> None:
 def test_a_tapestri_import_is_reused_and_warns_again(store, tmp_path) -> None:
     path = write_tapestri(TRUTH, tmp_path / "run.h5")
     first, _ = _import(store, path)
-    # The format is recognised from the file, so naming it reuses the import.
-    with pytest.warns(UserWarning, match=_SKIPPED):
+    # The format is recognised from the file, so naming it reuses the import,
+    # which warns once, from its saved diagnostics.
+    with pytest.warns(DiagnosticWarning, match=_SKIPPED) as caught:
         again = store.variants.import_counts(
             path, cell_selection=every_cell(store), format="tapestri"
         )
     assert again == first
+    skipped = [
+        warning.message
+        for warning in caught
+        if re.search(_SKIPPED, str(warning.message))
+    ]
+    assert [
+        (warning.operation, warning.diagnostic, warning.value) for warning in skipped
+    ] == [("import_variant_counts", "skippedVariantExamples", ["chr7:300:A/"])]
     assert _import(store, path, invalidate_cache=True)[0] != first
 
 
@@ -304,11 +381,12 @@ def test_dab_seq_counts_are_its_reads_and_calls(dab_seq_store, tmp_path) -> None
     # every variant is read already, so it adds none and reuses the import.
     assert _import(dab_seq_store, path, include_variants=["chr1:1000:G/A"])[0] == ref
     record = _source_record(dab_seq_store, ref)
+    diagnostics = dab_seq_store.artifacts.inspect(ref).diagnostics
     assert (
         record["n_variants"],
         record["n_imported_variants"],
-        record["n_skipped_empty_alternative"],
-        record["n_skipped_other_alleles"],
+        diagnostics["skippedEmptyAlternatives"],
+        diagnostics["skippedOtherAlleles"],
     ) == (11, 8, 2, 1)
 
 
@@ -809,10 +887,9 @@ def test_source_genotypes_of_tapestri_counts_follow_ngt(store, tmp_path) -> None
     assert loaded.sites["alternative"].tolist() == ["A", "T", "GC", "T", "G", "A"]
     assert set(loaded.sites["source"]) == {"NGT"}
     ids = TRUTH.row_ids
-    assert_tables(
-        loaded.calls.astype({"call": str, "label": str}),
-        _expected_calls(_TAPESTRI_UNITS),
-    )
+    expected = _expected_calls(_TAPESTRI_UNITS)
+    assert_tables(loaded.calls.astype({"call": str, "label": str}), expected)
+    assert_call_counts(store.artifacts.inspect(genotypes).diagnostics, expected["call"])
     calls = loaded.calls.set_index(["ids", "site"])
     # No call with reads is filtered, and without reads missing, as is the
     # wild-type call that Tapestri writes without reads.
@@ -1253,7 +1330,7 @@ def test_the_bands_refusal_names_a_budget_that_runs(
             stated = stated_bytes(refusal)
             if re.search(_BANDS_REFUSED.format(rows=r"\d+"), str(refusal)):
                 store.memoryBytes = stated
-                assert store.artifacts.load(run()).attrs["n_sorted_runs"] >= 0
+                assert store.artifacts.inspect(run()).diagnostics["sortedRuns"] >= 0
                 return
             budget = stated if stated > budget else budget + max(1, budget // 4)
         else:

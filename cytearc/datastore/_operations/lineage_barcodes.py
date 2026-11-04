@@ -81,13 +81,7 @@ _RECORDS = "record"
 # The per-cell arrays of a lineage_barcodes artifact; n_barcodes is canonical.
 _CELL_ARRAYS = ("n_barcodes", "n_umis", "n_reads", "n_records")
 # The attributes that an import saves and that reusing it requires.
-_IMPORT_ATTRIBUTES = (
-    "fields",
-    "libraries",
-    "n_file_rows",
-    "n_unmatched_rows",
-    "n_empty_rows",
-)
+_IMPORT_ATTRIBUTES = ("fields", "libraries")
 # A chunk of a file may take a twentieth of what the budget leaves.
 _CHUNK_SHARE = 20
 # Bytes that the key of each row of a TREX molecule table takes at the peak
@@ -196,17 +190,19 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         rows, or, without UMIs, into pairs of a cell and a barcode. Rows that
         name one molecule or pair of a library merge, summing their reads. A
         pair counted 0 and a row without a barcode hold none, and are counted
-        in the ``n_empty_rows`` attribute.
+        in the ``emptyRows`` diagnostic.
 
         A cell's ID is its file's ``barcode_prefix``, the cell barcode and
         ``barcode_suffix``, matched exactly; ``barcode_pattern`` keeps the
         part of each cell barcode that its ``barcode`` group matches first.
         Cell barcodes that match no selected cell are counted in the join's
-        diagnostics, apart from those of cells outside the selection, beside
-        the ``n_file_rows`` and ``n_unmatched_rows`` attributes, and those of
-        no cell of the store, such as droplets that cell calling rejected,
-        are named in a warning, which a reused import gives again; the rows count each item of a list field and each
-        nonzero count of a merged table or a matrix. A file is identified by
+        diagnostics, which ``ds.artifacts.inspect(ref).diagnostics`` returns,
+        apart from those of cells outside the selection, beside
+        ``fileRows``, the files' rows, and ``unmatchedRows``, those of no
+        selected cell, which count each item of a list field and each nonzero
+        count of a merged table or a matrix. Barcodes of no cell of the
+        store, such as droplets that cell calling rejected, are named in a
+        warning, which a reused import gives again. A file is identified by
         the SHA-256 of its bytes and by its library, the file's name unless
         ``library`` names it, so a file moved to another folder reuses the
         saved barcodes, as does a renamed one whose library is named, an
@@ -327,16 +323,12 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             return planned.ref
         self._require_writable(arguments.operation)
         if assay is None:
-            counted, attributes, diagnostics, ledger = self._count_files(
-                files, layouts, selection
-            )
+            counted, diagnostics, ledger = self._count_files(files, layouts, selection)
         else:
-            counted, attributes, diagnostics, ledger = self._count_assay(
+            counted, diagnostics, ledger = self._count_assay(
                 assay, str(sources[0]["library"]), selection
             )
-        self._write_barcodes(
-            planned, counted, n_cells, attributes, diagnostics, ledger=ledger
-        )
+        self._write_barcodes(planned, counted, n_cells, diagnostics, ledger=ledger)
         warn_diagnostics(
             arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
         )
@@ -393,7 +385,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         files: Sequence[BarcodeFile],
         layouts: Sequence["BarcodeLayout"],
         selection: CellSelectionRead,
-    ) -> tuple[CountedBarcodes, dict[str, Any], dict[str, Any], MemoryLedger]:
+    ) -> tuple[CountedBarcodes, dict[str, Any], MemoryLedger]:
         """Count the barcodes of the files' rows that name selected cells.
 
         One ledger holds what the import keeps for the selected cells, their
@@ -436,11 +428,11 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         return (
             records,
             {
-                "n_file_rows": join.n_rows,
-                "n_unmatched_rows": join.n_unmatched_rows,
-                "n_empty_rows": n_empty,
+                **join.diagnostics(),
+                "fileRows": join.n_rows,
+                "unmatchedRows": join.n_unmatched_rows,
+                "emptyRows": n_empty,
             },
-            join.diagnostics(),
             ledger,
         )
 
@@ -616,7 +608,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
 
     def _count_assay(
         self, assay: Any, library: str, selection: CellSelectionRead
-    ) -> tuple[CountedBarcodes, dict[str, Any], dict[str, Any], MemoryLedger]:
+    ) -> tuple[CountedBarcodes, dict[str, Any], MemoryLedger]:
         """Count the barcodes that an assay counts as its features, as pairs, and return the ledger for the save."""
         feature_ids = np.asarray(assay.feats.fetch_all("ids"), dtype=object)
         counter = BarcodeCounter(merge_rows=self._merge_rows())
@@ -660,7 +652,6 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         ledger.release(counted)
         return (
             records,
-            {"n_file_rows": n_rows, "n_unmatched_rows": 0, "n_empty_rows": 0},
             # An assay counts the barcodes of the store's own cells.
             {
                 "fileBarcodes": 0,
@@ -668,6 +659,9 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 "unselectedBarcodes": 0,
                 "unmatchedBarcodeExamples": [],
                 "unselectedBarcodeExamples": [],
+                "fileRows": n_rows,
+                "unmatchedRows": 0,
+                "emptyRows": 0,
             },
             ledger,
         )
@@ -677,7 +671,6 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         planned: PlannedArtifact,
         counted: CountedBarcodes,
         n_cells: int,
-        attributes: Mapping[str, Any],
         diagnostics: Mapping[str, Any],
         *,
         ledger: MemoryLedger,
@@ -718,11 +711,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             planned,
             arrays,
             chunk_lengths=chunk_lengths,
-            attributes={
-                "fields": list(FIELDS),
-                "libraries": libraries,
-                **attributes,
-            },
+            attributes={"fields": list(FIELDS), "libraries": libraries},
             diagnostics=diagnostics,
         )
         n_with = int(np.count_nonzero(summaries["n_barcodes"]))
@@ -849,16 +838,18 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         Clones are numbered by size, so ``clone_1`` is the largest, and ties
         follow their first cell. The ``clones`` artifact also holds each
         cell's ``n_barcodes``, its barcodes after the pair filters, and
-        ``doublet``, whether TREX's rule removed it as a doublet; its
-        attributes record what each rule removed, and its parameters the
-        resolved rules. Its diagnostics, which
+        ``doublet``, whether TREX's rule removed it as a doublet, and its
+        parameters the resolved rules. Its diagnostics, which
         :meth:`~cytearc.datastore.namespaces.ClonesAccessor.load_clones` and
         ``ds.artifacts.inspect(clones).diagnostics`` return, show when
         correction merges unrelated barcodes: ``distinctBarcodes``, the
         distinct barcodes of each group and library that correction
         compares; ``expectedChanceMatches``, the pairs of them expected
-        within ``max_distance`` by chance; ``mergedBarcodes``, those that
-        correction merged into another; and, as every source's clones,
+        within ``max_distance`` by chance, None under ``levenshtein``
+        beyond 8 edits, whose count takes too long; ``mergedBarcodes``,
+        those that correction merged into another; then what each rule
+        removed or found, None for a rule that did not run, which the clones
+        API reference lists; and, as every source's clones,
         ``cellsWithClone``, the cells given a clone, and
         ``largestCloneShare``, the share of them that the largest clone
         holds.
@@ -902,8 +893,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``barcodes`` is not a ``lineage_barcodes`` artifact,
                 the preset is unknown, a required rule is missing, a value is
-                out of range, ``metric="levenshtein"`` has a ``max_distance``
-                above 8, TREX's rules meet another metric than Hamming's, an
+                out of range, TREX's rules meet another metric than Hamming's, an
                 argument does not apply to the method, a rule needs counts
                 that a library does not hold, or a within column is missing,
                 is named twice or has no label for a cell with a barcode.
@@ -1022,7 +1012,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             cell_selection,
             n_cells,
             with_probability=False,
-            required_attributes=("n_clones", "rule_counts", "library_units"),
+            required_attributes=("n_clones", "library_units"),
             source_arrays={"n_barcodes": "i", "doublet": "b"},
         )
         if planned.reused:
@@ -1101,14 +1091,6 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             probabilities=None,
             n_cells_in_several_clones=0,
         )
-        rule_counts = {
-            **called.counts,
-            "nodes": calls.n_nodes,
-            "edges": calls.n_edges,
-            "edges_pruned": calls.n_pruned,
-            "doublets": int(sum(calls.n_doublet_nodes)),
-            "cells_in_small_clones": calls.n_small_cells,
-        }
         saving = MemoryLedger(
             self.memoryBytes,
             f"Calling clones from the barcodes of {n_cells} cells",
@@ -1124,7 +1106,6 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             assignment,
             {
                 "n_clones": calls.n_clones,
-                "rule_counts": rule_counts,
                 "library_units": [
                     {"library": name, "unit": unit}
                     for (name, _level), unit in zip(

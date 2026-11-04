@@ -183,11 +183,22 @@ def test_mgatk_counts_every_base_and_strand_of_every_cell(store, tmp_path) -> No
     ]
     # The file lists every cell of the store, each selected, and the droplets
     # outside it.
+    diagnostics = store.artifacts.inspect(ref).diagnostics
     assert_joined(
-        store.artifacts.inspect(ref).diagnostics,
+        diagnostics,
         n_file=51,
         unmatched=[f"d2__{barcode}-1" for barcode in TRUTH.clones.outside],
     )
+    # Every cell of the store is listed, the rows fit the budget at once, mgatk
+    # gives no calls, and it chooses no variants, so nothing is skipped.
+    assert {key: diagnostics[key] for key in list(diagnostics)[5:]} == {
+        "listedCells": TRUTH.n_cells,
+        "sortedRuns": 0,
+        "repeatedCalls": 0,
+        "skippedEmptyAlternatives": None,
+        "skippedOtherAlleles": None,
+        "skippedVariantExamples": [],
+    }
 
 
 def test_mean_depth_covered_sites_and_listed_cells_come_from_the_truth(
@@ -222,6 +233,8 @@ def test_without_a_depth_table_cells_with_reads_are_the_listed_ones(
     assert not cells["listed"].iloc[UNCOVERED_CELL]
     assert np.isnan(cells["mean_depth"].iloc[UNCOVERED_CELL])
     assert cells["listed"].sum() == TRUTH.n_cells - 1
+    # The cell without reads is the one selected cell that no file lists.
+    assert store.artifacts.inspect(ref).diagnostics["listedCells"] == TRUTH.n_cells - 1
 
 
 def test_six_column_files_keep_qualities_and_need_a_format(store, tmp_path) -> None:
@@ -324,8 +337,8 @@ def test_cell_order_and_spills_to_disk_do_not_change_the_counts(
     for store in (roomy, tight):
         ref, _ = _import(store, folder, invalidate_cache=True)
         groups.append(store.artifacts.load(ref))
-    assert groups[0].attrs["n_sorted_runs"] == 0
-    assert groups[1].attrs["n_sorted_runs"] > 3
+    assert groups[0].attrs["diagnostics"]["sortedRuns"] == 0
+    assert groups[1].attrs["diagnostics"]["sortedRuns"] > 3
     for name in (
         "depth_offsets",
         "depth_sites",
@@ -1281,7 +1294,7 @@ def test_two_files_that_give_one_cell_two_depths_or_calls_are_refused(
         expected_got_calls(TRUTH, site="GSM3_CALR", source="Genotype"),
     )
     called = sum(TRUTH.got_call(row, 0) != "NA" for row in range(TRUTH.n_cells))
-    assert store.artifacts.load(ref).attrs["n_repeated_calls"] == called
+    assert store.artifacts.inspect(ref).diagnostics["repeatedCalls"] == called
     flipped = (
         calls[1]
         .read_text()
@@ -1493,7 +1506,7 @@ def test_got_multi_stage_tables_keep_reads_and_calls_in_either_order(
     # keep their text whatever order the tables come in.
     assert_tables(loaded.calls, calls)
     # The refined table's genotype_final is read, not its genotype_merged.
-    assert group.attrs["n_repeated_calls"] == 0
+    assert group.attrs["diagnostics"]["repeatedCalls"] == 0
 
 
 @pytest.mark.parametrize("six_first", [True, False])

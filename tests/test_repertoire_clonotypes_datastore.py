@@ -967,7 +967,7 @@ def test_clonotypes_load_and_export_as_clones(tmp_path) -> None:
         "n_cells": [3, 2, 1, 1],
     }
     path = tmp_path / "clonotypes.csv"
-    assert store.clones.export_clones(ref, path) == 7
+    assert store.clones.export_clones(ref, path).rows == 7
     assert path.read_text().splitlines() == [
         "Cell_ID,Clone_ID",
         "cell0,clonotype_1",

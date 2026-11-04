@@ -137,9 +137,31 @@ def test_petracer_long_tables_recover_the_truth(store, truth, recorders, tmp_pat
     assert files["kind"].tolist() == ["independent"] * 2
     # Every cell of the truth is listed beside one droplet outside the store.
     droplet = [f"{SAMPLES[0]}__{truth.outside[0]}-1"]
-    assert_joined(
-        store.artifacts.inspect(ref).diagnostics, n_file=49, unmatched=droplet
-    )
+    diagnostics = store.artifacts.inspect(ref).diagnostics
+    assert_joined(diagnostics, n_file=49, unmatched=droplet)
+    # The files' rows, read as tables, and those of the droplet, whose
+    # prefixed barcode names no cell; every row names its integration and
+    # every slot fits its integration's length.
+    tables = [pd.read_csv(path, dtype=str) for path in paths]
+    named = [
+        (sample + "__" + table["cellBC"]).isin(truth.cell_ids.tolist())
+        for sample, table in zip(SAMPLES, tables, strict=True)
+    ]
+    assert {
+        key: diagnostics[key]
+        for key in (
+            "fileRows",
+            "unmatchedRows",
+            "slotsBeyondLength",
+            "rowsWithoutIntegration",
+        )
+    } == {
+        "fileRows": sum(map(len, tables)),
+        "unmatchedRows": sum(int((~found).sum()) for found in named),
+        "slotsBeyondLength": 0,
+        "rowsWithoutIntegration": 0,
+    }
+    assert diagnostics["unmatchedRows"] > 0
     # With one sample's cells selected, the other's are cells of the store
     # outside the selection, which give no warning of their own.
     store.cells.insert(
@@ -200,7 +222,7 @@ def test_typewriter_tables_follow_the_prefix_rule_and_contracted_tapes(
     ).sort_values(_COLUMNS[:5], na_position="first")
     assert_records(store, ref, expected.reset_index(drop=True))
     group = store.artifacts.load(ref)
-    assert group.attrs["n_beyond_length"] == beyond
+    assert store.artifacts.inspect(ref).diagnostics["slotsBeyondLength"] == beyond
     assert [entry["lengths"] for entry in group.attrs["files"]] == [
         dict(sorted(_SHORTER_TAPES.items()))
     ] * 2
@@ -461,7 +483,7 @@ def test_a_saved_import_is_reused_and_warns_again(store, truth, recorders, tmp_p
             },
         )
     assert again == first
-    beyond = store.artifacts.load(first).attrs["n_beyond_length"]
+    beyond = store.artifacts.inspect(first).diagnostics["slotsBeyondLength"]
     assert any("slots beyond" in str(warning.message) for warning in caught) == bool(
         beyond
     )
@@ -793,13 +815,13 @@ def test_artifacts_without_their_counts_or_files_are_refused(
         warnings.simplefilter("ignore")
         ref = store.clones.import_alleles(path, cell_selection=cells)
     attributes = artifact_group(store.zw, ref).attrs
-    saved = attributes["n_beyond_length"]
-    attributes["n_beyond_length"] = True
+    saved = dict(attributes["diagnostics"])
+    attributes["diagnostics"] = {**saved, "slotsBeyondLength": True}
     try:
-        with pytest.raises(ValueError, match="records no count 'n_beyond_length'"):
-            store.clones.import_alleles(path, cell_selection=cells)
+        with pytest.raises(ValueError, match="call ds.clones.import_alleles again"):
+            store.clones.load_alleles(ref)
     finally:
-        attributes["n_beyond_length"] = saved
+        attributes["diagnostics"] = saved
     files = attributes["files"]
     attributes["files"] = "d2.csv"
     try:
@@ -856,7 +878,7 @@ def test_rows_without_an_integration_are_left_out_counted_and_warned(tmp_path):
         assert store.clones.import_alleles(path, cell_selection=selection) == ref
     records = store.clones.load_alleles(ref).records
     assert len(records) == 3 * (len(raw) - lacking)
-    assert store.artifacts.load(ref).attrs["n_rows_without_integration"] == lacking
+    assert store.artifacts.inspect(ref).diagnostics["rowsWithoutIntegration"] == lacking
 
 
 @pytest.mark.parametrize(

@@ -447,11 +447,11 @@ def test_an_allele_listed_twice_for_a_cell_counts_once() -> None:
     # without a bank, a's frequency is the share of the 2 edited cells that
     # hold it, 1/2, not 2/3.
     rows = [(0, 0, 0), (0, 0, 0), (1, 0, 1)]
-    assert _call(rows, 2, max_frequency=0.5).counts["alleles_too_frequent"] == 0
+    assert _call(rows, 2, max_frequency=0.5).diagnostics["allelesTooFrequent"] == 0
     below = float(np.nextafter(0.5, 0.0))
-    assert _call(rows, 2, max_frequency=below).counts["alleles_too_frequent"] == 2
+    assert _call(rows, 2, max_frequency=below).diagnostics["allelesTooFrequent"] == 2
     # At 2/3, a would be too frequent for any bound below it.
-    assert _call(rows, 2, max_frequency=0.6).counts["alleles_too_frequent"] == 0
+    assert _call(rows, 2, max_frequency=0.6).diagnostics["allelesTooFrequent"] == 0
 
 
 def test_a_frequency_at_max_frequency_is_rare() -> None:
@@ -460,13 +460,13 @@ def test_a_frequency_at_max_frequency_is_rare() -> None:
     called = _call(rows, 4, banks=banks, max_frequency=2e-5)
     # a at exactly 2e-5 reaches the bound, as b, one step below, does.
     assert _partition(called.codes) == {frozenset({0, 1}), frozenset({2, 3})}
-    assert called.counts["alleles_too_frequent"] == 0
-    assert called.counts["rare_alleles"] == 2
+    assert called.diagnostics["allelesTooFrequent"] == 0
+    assert called.diagnostics["rareAlleles"] == 2
     # DARLIN's rule, a frequency below 2e-5, is the bound one step below it.
     darlin = _call(rows, 4, banks=banks, max_frequency=float(np.nextafter(2e-5, 0.0)))
     assert _partition(darlin.codes) == {frozenset({2, 3})}
-    assert darlin.counts["alleles_too_frequent"] == 1
-    assert darlin.counts["rare_alleles"] == 1
+    assert darlin.diagnostics["allelesTooFrequent"] == 1
+    assert darlin.diagnostics["rareAlleles"] == 1
 
 
 def test_max_samples_keeps_alleles_of_at_most_that_many_bank_samples() -> None:
@@ -475,7 +475,7 @@ def test_max_samples_keeps_alleles_of_at_most_that_many_bank_samples() -> None:
     # c is missing from the bank, so it counts as found in no sample.
     one = _call(rows, 6, banks=banks, max_samples=1)
     assert _partition(one.codes) == {frozenset({0, 1}), frozenset({4, 5})}
-    assert one.counts["alleles_in_too_many_samples"] == 1
+    assert one.diagnostics["allelesInTooManySamples"] == 1
     two = _call(rows, 6, banks=banks, max_samples=2)
     assert len(_partition(two.codes)) == 3
     # max_samples=0 keeps only alleles that the bank lacks, as DARLIN's de novo
@@ -525,8 +525,8 @@ def test_max_alleles_leaves_clones_of_more_rare_alleles_without_one() -> None:
     assert two.codes.tolist() == [-1, -1, -1, 0, 0, 1]
     assert two.sizes.tolist() == [2, 1]
     assert two.clone_alleles.tolist() == [2, 1]
-    assert two.counts["clones_with_too_many_alleles"] == 1
-    assert two.counts["cells_in_clones_with_too_many_alleles"] == 3
+    assert two.diagnostics["clonesWithTooManyAlleles"] == 1
+    assert two.diagnostics["cellsInClonesWithTooManyAlleles"] == 3
     # Cells left without a clone keep their rare alleles.
     assert two.n_alleles.tolist() == [1, 2, 2, 1, 2, 1]
 
@@ -545,8 +545,8 @@ def test_frequencies_from_the_cells_are_shares_of_each_groups_edited_cells() -> 
     # with cell 2's b turned into one, a holds 2 of 4 cells, still 1/2.
     rows[2] = (2, 0, -1)
     assert (
-        _call(rows, 6, max_frequency=0.51, groups=[0, 0, 0, 0, 1, 1]).counts[
-            "alleles_too_frequent"
+        _call(rows, 6, max_frequency=0.51, groups=[0, 0, 0, 0, 1, 1]).diagnostics[
+            "allelesTooFrequent"
         ]
         == 1
     )
@@ -571,7 +571,7 @@ def test_p_clonal_counts_every_edited_cell_of_the_character_among_its_observatio
         [(0, 0, 0), (1, 0, 0), (2, 0, -1)], 3, method="p_clonal", banks=banks
     )
     assert crowded.n_clones == 0
-    assert crowded.counts["alleles_not_significant"] == 1
+    assert crowded.diagnostics["allelesNotSignificant"] == 1
     # The same edits within two groups: the placeholder's group is cell 2's
     # own, so a's group keeps M = 2.
     split = _call(
@@ -596,7 +596,7 @@ def test_p_clonal_corrects_for_the_alleles_of_each_group_apart() -> None:
     groups = [0] * 9 + [1, 1]
     called = _call(rows, 11, method="p_clonal", banks=banks, groups=groups)
     assert _partition(called.codes) == {frozenset({9, 10})}
-    assert called.counts["alleles_not_significant"] == 2
+    assert called.diagnostics["allelesNotSignificant"] == 2
     expected = clonal_p_values([0.006], [9])[0]
     assert expected == pytest.approx(0.0268, abs=1e-4)
     # Without b's cells, a alone in its group survives.
@@ -677,7 +677,23 @@ def test_no_edits_call_no_clone() -> None:
     called = _call([], 4, max_frequency=0.5)
     assert called.codes.tolist() == [-1] * 4
     assert called.n_clones == 0
-    assert called.counts["alleles"] == 0
+    assert called.diagnostics["alleles"] == 0
+    # Without max_alleles, max_samples, p_clonal or banks, those rules count
+    # nothing and say so with None; max_frequency ran and found none.
+    assert {
+        name: value for name, value in called.diagnostics.items() if value is None
+    } == dict.fromkeys(
+        (
+            "allelesNotSignificant",
+            "allelesInTooManySamples",
+            "clonesWithTooManyAlleles",
+            "cellsInClonesWithTooManyAlleles",
+            "allelesInBank",
+            "observations",
+            "observationsInBank",
+        )
+    )
+    assert called.diagnostics["allelesTooFrequent"] == 0
 
 
 def _random_case(rng: np.random.Generator):
@@ -825,7 +841,7 @@ def test_clones_do_not_follow_the_order_of_the_edits() -> None:
         )
         np.testing.assert_array_equal(first.codes, second.codes)
         np.testing.assert_array_equal(first.n_alleles, second.n_alleles)
-        assert first.counts == second.counts
+        assert first.diagnostics == second.diagnostics
         assert first.coverage == second.coverage
 
 

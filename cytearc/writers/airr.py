@@ -17,13 +17,15 @@ Values are written as they are, unquoted, as the AIRR format's dialect asks.
 It forbids tabs and newlines in values, which would end a field or a row, and
 readers take a carriage return for a row's end too, so a value that holds any
 of the three is refused. The format advises against ``@``, ``#``, ``"`` and
-``'``, which readers may take differently, so a file whose values hold them
-warns with their number and fields when it is closed; ``quality`` and
+``'``, which readers may take differently, so the values that hold them are
+counted with their fields, and a file that holds them warns; ``quality`` and
 ``quality_alignment`` hold them by the format's own Phred encoding, and are
 not counted. A value that starts with a double quote is counted apart, in
 every field: airr's ``read_rearrangement``, scirpy's ``read_airr`` and
 pandas' default reader take it for an opening quote, and can join or drop
-rows without an error, so it has a warning of its own.
+rows without an error, so it has a warning of its own. An export returns
+these counts as the diagnostics of its ``ExportSummary``, named in
+``AIRR_EXPORT_DIAGNOSTICS``, and warns from them by ``AIRR_EXPORT_RULES``.
 
 The schema requires unique ``sequence_id`` values. ``suffix_repeated_ids``
 names the later occurrences of a repeated ID from 64-bit hashes of every ID,
@@ -40,12 +42,14 @@ import numpy as np
 import pandas as pd
 
 from ..metadata.records import EncodedText, decode_text
+from ..storage.diagnostics import DiagnosticRule, ExportSummary, export_summary
 from ..utils.arrays import sorted_unique
-from ..utils.logging import logger
 from ..utils.numba import njit
 from ..utils.arguments import quoted_value
 
 __all__ = [
+    "AIRR_EXPORT_DIAGNOSTICS",
+    "AIRR_EXPORT_RULES",
     "AIRR_LOGICAL_FIELDS",
     "AIRR_REQUIRED_FIELDS",
     "AirrRearrangementWriter",
@@ -53,6 +57,73 @@ __all__ = [
     "suffix_repeated_ids",
     "write_airr_rearrangements",
 ]
+
+#: The diagnostics of an AIRR export: the contigs written; the repeated
+#: contig IDs written with a suffix; the values that start with a double
+#: quote and those that hold ``@``, ``#``, ``'`` or a double quote past their
+#: first character; and the fields of each, in the file's order, as the
+#: warnings name them, such as ``"v_call and c_call"``, empty for none.
+AIRR_EXPORT_DIAGNOSTICS = (
+    "contigs",
+    "renamedContigIds",
+    "leadingQuoteValues",
+    "discouragedValues",
+    "leadingQuoteFields",
+    "discouragedFields",
+)
+
+
+def _counted_values(count: int, fields: str, verb: str, verb_one: str) -> str:
+    """Name how many values of which fields, and the verb that agrees with them."""
+    return (
+        f"{count} value{'s' if count > 1 else ''} of {fields} "
+        f"{verb if count > 1 else verb_one}"
+    )
+
+
+#: The warnings of an AIRR export, from its diagnostics: repeated contig IDs,
+#: values that start with a double quote, and values that hold characters
+#: that the format advises against.
+AIRR_EXPORT_RULES = (
+    DiagnosticRule(
+        "renamedContigIds",
+        lambda saved: saved["renamedContigIds"] > 0,
+        lambda saved: (
+            f"{saved['renamedContigIds']} contig IDs repeat; their later "
+            "occurrences are written with a suffix such as _2"
+        ),
+    ),
+    DiagnosticRule(
+        "leadingQuoteValues",
+        lambda saved: saved["leadingQuoteValues"] > 0,
+        lambda saved: (
+            _counted_values(
+                saved["leadingQuoteValues"],
+                saved["leadingQuoteFields"],
+                "start",
+                "starts",
+            )
+            + " with a double quote, which airr's read_rearrangement, "
+            "scirpy's read_airr and pandas' default reader take for an "
+            "opening quote, so they can join or drop rows without an "
+            "error; pandas reads every value as written with "
+            "sep='\\t', dtype=str, keep_default_na=False and "
+            "quoting=csv.QUOTE_NONE"
+        ),
+    ),
+    DiagnosticRule(
+        "discouragedValues",
+        lambda saved: saved["discouragedValues"] > 0,
+        lambda saved: (
+            _counted_values(
+                saved["discouragedValues"], saved["discouragedFields"], "hold", "holds"
+            )
+            + " @, #, ' or a double quote past the first character, which "
+            "the AIRR format advises against since readers may take them "
+            "differently; they are written as they are"
+        ),
+    ),
+)
 
 #: The fields that every AIRR Rearrangement file holds, in order.
 AIRR_REQUIRED_FIELDS = (
@@ -613,8 +684,8 @@ class AirrRearrangementWriter:
     first character, which the format advises against, are written as they
     are and counted, outside ``quality`` and ``quality_alignment``; values
     that start with a double quote, which readers that take quotes read as an
-    opening quote, are counted apart, in every field. Closing the writer warns
-    with each count and its fields.
+    opening quote, are counted apart, in every field. ``diagnostics`` holds
+    each count and its fields, from which an export warns.
 
     The schema requires unique ``sequence_id`` values, and the writer writes
     each block as given, so a caller whose contigs' IDs may repeat gives the
@@ -697,6 +768,24 @@ class AirrRearrangementWriter:
         return sum(self._leading_quotes.values())
 
     @property
+    def diagnostics(self) -> dict[str, int | str]:
+        """What the file holds, by the names of ``AIRR_EXPORT_DIAGNOSTICS`` but ``renamedContigIds``.
+
+        ``contigs`` counts the rows written, ``leadingQuoteValues`` and
+        ``discouragedValues`` the values that :attr:`n_leading_quotes` and
+        :attr:`n_discouraged` count, and ``leadingQuoteFields`` and
+        ``discouragedFields`` name their fields in the file's order, such as
+        ``"v_call, c_call and junction_aa"``, empty for none.
+        """
+        return {
+            "contigs": self._n_rows,
+            "leadingQuoteValues": self.n_leading_quotes,
+            "discouragedValues": self.n_discouraged,
+            "leadingQuoteFields": self._fields(self._leading_quotes),
+            "discouragedFields": self._fields(self._discouraged),
+        }
+
+    @property
     def closed(self) -> bool:
         """Whether the file is closed."""
         return self._handle is None
@@ -776,48 +865,18 @@ class AirrRearrangementWriter:
         return n_rows
 
     def close(self) -> None:
-        """Close the file; closing again does nothing.
-
-        A file whose values start with a double quote warns with their number
-        and fields, and so does one whose values hold ``@``, ``#``, ``'`` or a
-        double quote past their first character, which the AIRR format advises
-        against.
-        """
+        """Close the file; closing again does nothing."""
         if self._handle is not None:
             handle, self._handle = self._handle, None
             handle.close()
             self._file.close()
-            if self._leading_quotes:
-                logger.warning(
-                    self._counted(self._leading_quotes, "start", "starts")
-                    + " with a double quote, which airr's read_rearrangement, "
-                    "scirpy's read_airr and pandas' default reader take for an "
-                    "opening quote, so they can join or drop rows without an "
-                    "error; pandas reads every value as written with "
-                    "sep='\\t', dtype=str, keep_default_na=False and "
-                    "quoting=csv.QUOTE_NONE"
-                )
-            if self._discouraged:
-                logger.warning(
-                    self._counted(self._discouraged, "hold", "holds")
-                    + " @, #, ' or a double quote past the first character, which "
-                    "the AIRR format advises against since readers may take them "
-                    "differently; they are written as they are"
-                )
 
-    def _counted(self, counts: dict[str, int], verb: str, verb_one: str) -> str:
-        """Name how many values of which fields, in the file's order, and the verb."""
+    def _fields(self, counts: dict[str, int]) -> str:
+        """Name the fields of some counts in the file's order, as a warning names them."""
         fields = [name for name in self.columns if name in counts]
-        named = (
-            fields[0]
-            if len(fields) == 1
-            else ", ".join(fields[:-1]) + " and " + fields[-1]
-        )
-        count = sum(counts.values())
-        return (
-            f"{count} value{'s' if count > 1 else ''} of {named} "
-            f"{verb if count > 1 else verb_one}"
-        )
+        if len(fields) < 2:
+            return "".join(fields)
+        return ", ".join(fields[:-1]) + " and " + fields[-1]
 
     def __enter__(self) -> Self:
         return self
@@ -836,7 +895,7 @@ def write_airr_rearrangements(
     path: str | os.PathLike[str],
     *,
     columns: Sequence[str] | None = None,
-) -> int:
+) -> ExportSummary:
     """Write a table of contigs as an AIRR Rearrangement TSV file.
 
     The required fields come first, in the schema's order, empty when the
@@ -854,7 +913,10 @@ def write_airr_rearrangements(
             table's other columns.
 
     Returns:
-        The number of rows written.
+        The file written, its ``rows``, the contigs written, and its
+        ``diagnostics``, named in ``AIRR_EXPORT_DIAGNOSTICS``, from which it
+        warns of values that start with a double quote or hold characters
+        that the format advises against.
 
     Raises:
         TypeError: If ``table`` is not a DataFrame, ``path`` is not a path, or
@@ -903,7 +965,15 @@ def write_airr_rearrangements(
     with AirrRearrangementWriter(path, rest, whole=whole) as writer:
         for start in range(0, len(table), _CHUNK_ROWS):
             writer.write(table.iloc[start : start + _CHUNK_ROWS])
-    return len(table)
+    # The table's IDs are unique, so none is renamed.
+    return export_summary(
+        "write_airr_rearrangements",
+        path,
+        writer.n_rows,
+        {**writer.diagnostics, "renamedContigIds": 0},
+        AIRR_EXPORT_DIAGNOSTICS,
+        AIRR_EXPORT_RULES,
+    )
 
 
 def _checked_columns(

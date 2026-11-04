@@ -131,16 +131,18 @@ def test_the_artifact_records_its_rules_what_they_removed_and_the_banks_coverage
     homoplasic = int(
         ((tested["normalized_count"] < 2e-5) & (tested["sample_count"] > 1)).sum()
     )
-    counts = attributes["rule_counts"]
+    assert "rule_counts" not in attributes
+    counts = record.diagnostics
     assert counts["alleles"] == len(tests)
-    assert counts["alleles_too_frequent"] == frequent > 0
-    assert counts["alleles_in_too_many_samples"] == homoplasic == 1
-    assert counts["rare_alleles"] == len(tests) - frequent - homoplasic
-    assert counts["alleles_not_significant"] == 0
+    assert counts["allelesTooFrequent"] == frequent > 0
+    assert counts["allelesInTooManySamples"] == homoplasic == 1
+    assert counts["rareAlleles"] == len(tests) - frequent - homoplasic
+    # The graph's rules test no significance, so that count is not measured.
+    assert counts["allelesNotSignificant"] is None
     # The two clones that the missing allele joins hold five rare alleles.
     joined = int(np.isin(TRUTH.clones, (2, 5)).sum())
-    assert counts["clones_with_too_many_alleles"] == 1
-    assert counts["cells_in_clones_with_too_many_alleles"] == joined
+    assert counts["clonesWithTooManyAlleles"] == 1
+    assert counts["cellsInClonesWithTooManyAlleles"] == joined
     coverage = attributes["bank_coverage"]
     assert [entry["character"] for entry in coverage] == sorted(DARLIN_ARRAYS)
     for entry in coverage:
@@ -154,6 +156,20 @@ def test_the_artifact_records_its_rules_what_they_removed_and_the_banks_coverage
             "observations": len(cells),
             "observations_in_bank": int(cells["allele"].isin(listed).sum()),
         }
+    # The diagnostics add the banks' coverage up over the arrays, counted here
+    # from the truth's tables.
+    listed_alleles = tested["normalized_count"].notna()
+    assert (counts["allelesInBank"], counts["observations"]) == (
+        int(listed_alleles.sum()),
+        len(edited),
+    )
+    banked = pd.concat(
+        [
+            edited[edited["integration"] == name]["allele"].isin(bank["allele"])
+            for name, bank in calling.banks.items()
+        ]
+    )
+    assert counts["observationsInBank"] == int(banked.sum())
     assert attributes["n_clones"] == len(
         calling.expected_partition(
             TRUTH,
@@ -512,7 +528,7 @@ def test_calls_follow_neither_file_order_nor_chunks_nor_threads(
             }
             found["attributes"] = {
                 name: dict(group.attrs)[name]
-                for name in ("rule_counts", "bank_coverage")
+                for name in ("diagnostics", "bank_coverage")
             }
             stored.append((method, found))
     for method in ("graph", "p_clonal"):
@@ -995,12 +1011,7 @@ def test_p_clonal_counts_placeholders_and_not_missing_sites_among_the_edited_cel
         frozenset({"c2", "c3"}),
         frozenset({"c5"}),
     }
-    assert (
-        dict(store.artifacts.load(clones).attrs)["rule_counts"][
-            "alleles_not_significant"
-        ]
-        == 0
-    )
+    assert store.artifacts.inspect(clones).diagnostics["allelesNotSignificant"] == 0
 
 
 def test_bank_coverage_counts_each_allele_once_across_groups(tmp_path) -> None:
@@ -1043,7 +1054,7 @@ def test_bank_coverage_counts_each_allele_once_across_groups(tmp_path) -> None:
     ]
     # Each group's tests are its own: 1 at EMX1 in m1, 2 at EMX1 in m2, 1 at
     # HEK3 in each, and 4 at RNF2 in each.
-    assert attributes["rule_counts"]["alleles"] == 6
+    assert store.artifacts.inspect(clones).diagnostics["alleles"] == 6
     # The groups split c0, c1 and c4, and c2 and c3.
     assert loaded_partition(store, clones) == {
         frozenset({"c0", "c1"}),

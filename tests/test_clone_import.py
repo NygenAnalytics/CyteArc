@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc import ExportSummary
 from cytearc.clones import Clones
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
@@ -254,14 +255,24 @@ def test_every_format_recovers_the_truth(shared, tmp_path, case) -> None:
     assert loaded.clones["n_cells"].tolist() == list(CLONE_SIZES)
     assert loaded.clones["clone"].tolist() == labels
     attributes = shared.store.artifacts.load(ref).attrs
-    # Every file but Numbat's lists the barcodes outside the store.
+    diagnostics = shared.store.artifacts.inspect(ref).diagnostics
+    # Every file but Numbat's lists the barcodes outside the store, each on a
+    # row of its own, or as a cell of a matrix.
     assert_joined(
-        shared.store.artifacts.inspect(ref).diagnostics,
+        diagnostics,
         n_file=n_listed,
         unmatched=_OUTSIDE_IDS if n_listed != N_CELLS else (),
     )
+    # Cassiopeia's table holds two or three rows per barcode, one per intBC,
+    # as its writer alternates them; every other format a row, or a
+    # matrix's cell, per barcode.
+    assert diagnostics["fileRows"] == (
+        sum(2 + position % 2 for position in range(n_listed))
+        if case == "cassiopeia"
+        else n_listed
+    )
     assert attributes["n_clones"] == len(CLONE_SIZES)
-    assert attributes["n_cells_in_several_clones"] == 0
+    assert diagnostics["cellsInSeveralClones"] == 0
     if n_listed == N_CELLS:
         assert list(messages) == []
 
@@ -500,7 +511,7 @@ def test_dropped_cells_have_no_clone_and_are_counted(shared, tmp_path) -> None:
         frozenset(group - dropped) for group in TRUTH.partition() if group - dropped
     }
     assert loaded_partition(shared.store, ref) == expected
-    assert shared.store.artifacts.load(ref).attrs["n_cells_in_several_clones"] == 2
+    assert shared.store.artifacts.inspect(ref).diagnostics["cellsInSeveralClones"] == 2
     assert shared.store.artifacts.inspect(ref).parameters == {"multiple": "drop"}
 
 
@@ -838,7 +849,9 @@ def test_the_exported_table_is_cospars_and_imports_back(shared, tmp_path, name) 
 
     written = shared.store.clones.export_clones(ref, path)
 
-    assert written == N_IN_CLONES
+    assert written == ExportSummary(
+        path=path, rows=N_IN_CLONES, diagnostics={"cells": N_IN_CLONES}
+    )
     opened = gzip.open(path, "rt") if name.endswith(".gz") else open(path)
     with opened as handle:
         table = pd.read_csv(handle, dtype=str)
@@ -869,7 +882,8 @@ def test_the_exported_matrix_lists_its_cells_and_clones_and_imports_back(
         ref, folder / "clones.mtx.gz", format="matrix"
     )
 
-    assert written == N_IN_CLONES
+    assert (written.path, written.rows) == (folder / "clones.mtx.gz", N_IN_CLONES)
+    assert written.diagnostics == {"cells": N_IN_CLONES}
     with gzip.open(folder / "clones.mtx.gz", "rt") as handle:
         lines = handle.read().splitlines()
     assert lines[0] == "%%MatrixMarket matrix coordinate integer general"

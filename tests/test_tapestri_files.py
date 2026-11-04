@@ -140,7 +140,10 @@ def test_the_tapestri_example_reads_into_a_store_and_its_variants(tmp_path) -> N
     share = mutant / (mutant + sites["wild_type"])
     chosen = share[share.between(0.15, 0.4)].index.tolist()
     clones = ds.variants.genotype_clones(filtered_ref, sites=chosen)
-    assert (len(chosen), ds.artifacts.load(clones).attrs["n_ambiguous"]) == (17, 809)
+    assert (
+        len(chosen),
+        ds.artifacts.inspect(clones).diagnostics["ambiguousCells"],
+    ) == (17, 809)
 
 
 @pytest.mark.slow

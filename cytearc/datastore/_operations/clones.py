@@ -97,7 +97,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
-from ...storage.diagnostics import warn_diagnostics
+from ...storage.diagnostics import ExportSummary, export_summary, warn_diagnostics
 from ...storage.selections import validate_cell_selection
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
@@ -133,6 +133,8 @@ else:
 
 #: The values of ``export_clones``'s ``format``.
 EXPORT_FORMATS = ("cospar", "matrix")
+#: The diagnostics of a clone export: the cells written.
+CLONE_EXPORT_DIAGNOSTICS = ("cells",)
 
 
 # Bytes of one parsed row of a clone file at its peak, beside its fields: the
@@ -435,9 +437,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         ``unmatchedBarcodes``, those that name no cell of the store,
         ``unselectedBarcodes``, those of cells of the store outside the
         selection, and up to five examples of each, which show the barcode
-        beside the cell ID it derives. Barcodes of no cell are named in a
-        warning, which a reused import gives again. A file is identified by the SHA-256
-        of its bytes, and of a matrix's cell and clone lists, so a moved file
+        beside the cell ID it derives, then ``fileRows``, the rows of the
+        files, a matrix's cells. The clone writer adds ``cellsWithClone``
+        and ``largestCloneShare``. Barcodes of no cell are named in a
+        warning, which a reused import gives again. A file is identified by
+        the SHA-256 of its bytes, and of a matrix's cell and clone lists, so a moved file
         reuses the saved clones, an edited one gives new clones, and the
         order of the files does not matter.
 
@@ -446,8 +450,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         its name without extensions and ``_``; two files with the same
         namespace raise ``ValueError``. A cell listed in two different clones
         raises ``ValueError``, and with ``multiple="drop"`` it is left
-        without a clone and counted in the ``n_cells_in_several_clones``
-        attribute. A selected cell that no file lists has no clone.
+        without a clone and counted in the ``cellsInSeveralClones``
+        diagnostic. A selected cell that no file lists has no clone.
 
         The artifact's canonical ``values`` hold each cell's clone label,
         empty for a cell without one, which groupings treat as missing.
@@ -551,7 +555,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection,
             n_cells,
             with_probability=with_probability,
-            required_attributes=("n_clones", "n_cells_in_several_clones"),
+            required_attributes=("n_clones",),
         )
         warnings = unmatched_barcode_rules(_files_text(len(files)))
         if planned.reused:
@@ -599,17 +603,17 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 row_bytes=row_bytes,
             )
         assignment = assigner.finish()
-        attributes = {
-            "n_clones": len(assignment.clone_ids),
-            "n_cells_in_several_clones": assignment.n_cells_in_several_clones,
-        }
         write_clones(
             self.zw,
             planned,
             assignment,
-            attributes,
+            {"n_clones": len(assignment.clone_ids)},
             ledger=ledger,
-            diagnostics=join.diagnostics(),
+            diagnostics={
+                **join.diagnostics(),
+                "fileRows": join.n_rows,
+                "cellsInSeveralClones": assignment.n_cells_in_several_clones,
+            },
         )
         warn_diagnostics(
             arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
@@ -901,7 +905,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         path: str | os.PathLike[str],
         *,
         format: str = "cospar",
-    ) -> int:
+    ) -> ExportSummary:
         """Write saved clones as a file that lineage tracing tools read.
 
         ``"cospar"`` writes CoSpar's clone table, a CSV of ``Cell_ID`` and
@@ -921,7 +925,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             format: ``"cospar"`` or ``"matrix"``.
 
         Returns:
-            The number of cells written.
+            The file written, its ``rows``, the cells written, and its
+            ``diagnostics``: ``cells``, the cells written.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -983,8 +988,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         assigned = codes >= 0
         cell_ids = np.asarray(self._clone_cell_ids(clones), dtype=object)[assigned]
         if format == "cospar":
-            return write_clone_table(path, cell_ids, clone_ids[codes[assigned]])
-        return write_clone_matrix(path, cell_ids, codes[assigned], clone_ids)
+            written = write_clone_table(path, cell_ids, clone_ids[codes[assigned]])
+        else:
+            written = write_clone_matrix(path, cell_ids, codes[assigned], clone_ids)
+        return export_summary(
+            "export_clones", path, written, {"cells": written}, CLONE_EXPORT_DIAGNOSTICS
+        )
 
     def _clone_input_bytes(self, clones: ArtifactRef, *, with_ids: bool) -> int:
         """The bytes that :meth:`_read_clone_input` holds for a clone artifact.
@@ -1337,7 +1346,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         groups: ArtifactRef | None,
         cell_selection: ArtifactRef | None,
         ledger: MemoryLedger,
-    ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
         """Group the cells with a clone and count each clone's cells in each group.
 
         The groups are those of :func:`cell_groups`, among the cells with a
@@ -1348,8 +1357,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Returns:
             The groups' keys, one row per group in the natural order of the
             labels, indexed by its name and with its labels in the key
-            columns, and for each distinct pair of group and clone, sorted by
-            group and clone code, its group, its clone code and its cells.
+            columns; for each distinct pair of group and clone, sorted by
+            group and clone code, its group, its clone code and its cells;
+            and the grouping's diagnostics.
         """
         _hold_kept_apart(ledger, source.codes, source.kept_apart, source.clone_ids)
         grouped = cell_groups(
@@ -1387,7 +1397,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         ledger.release(codes)
         ledger.hold("each pair's group, clone and cells", 24 * len(pair_cells))
         keys = group_key_table(grouped.key_columns, grouped.keys)
-        return keys, pair_groups, pair_codes, pair_cells
+        return keys, pair_groups, pair_codes, pair_cells, grouped.diagnostics
 
     def _grouped_clone_sizes(
         self,
@@ -1396,18 +1406,18 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         group_by: str | Sequence[str] | None,
         groups: ArtifactRef | None,
         cell_selection: ArtifactRef | None,
-    ) -> tuple[pd.DataFrame, GroupedCloneSizes]:
+    ) -> tuple[pd.DataFrame, GroupedCloneSizes, dict[str, int]]:
         """Group the cells with a clone and summarize each group's clone sizes.
 
         Returns:
-            The groups' keys, as :meth:`_clone_pair_counts` gives them, and
-            each group's clone sizes.
+            The groups' keys, as :meth:`_clone_pair_counts` gives them, each
+            group's clone sizes and the grouping's diagnostics.
 
         Raises:
             ValueError: If no cell has both a clone and a group.
         """
         source = self._read_clone_input(clones)
-        keys, pair_groups, _codes, pair_cells = self._clone_pair_counts(
+        keys, pair_groups, _codes, pair_cells, grouping = self._clone_pair_counts(
             source,
             group_by=group_by,
             groups=groups,
@@ -1440,7 +1450,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         check(len(clone_sizes.values))
         if not clone_sizes.n.any():
             raise ValueError("No cell has both a clone and a group")
-        return keys, clone_sizes
+        return keys, clone_sizes, grouping
 
     def _check_clone_table_budget(
         self, n_cells: int, per_cell: int, name: str, *, held: int = 0
@@ -1801,6 +1811,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=tuple(str(column) for column in parameters["group_by"]),
             groups=groups,
             cell_selection=measured,
+            diagnostics=status.diagnostics,
         )
 
     @validation_scoped
@@ -1874,7 +1885,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 raise TypeError("coverage must be a number between 0 and 1, or None")
             if not 0 < coverage < 1:
                 raise ValueError("coverage must be between 0 and 1, or None")
-        keys, clone_sizes = self._grouped_clone_sizes(
+        keys, clone_sizes, grouping = self._grouped_clone_sizes(
             clones,
             group_by=group_by,
             groups=groups,
@@ -1893,6 +1904,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection=cell_selection,
             size=common,
             coverage=level,
+            diagnostics=grouping,
         )
 
     @validation_scoped
@@ -1982,7 +1994,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 )
         # The defaults' arguments are checked once, before any group is read.
         endpoint, knots = checked_curve_arguments(endpoint, knots)
-        keys, clone_sizes = self._grouped_clone_sizes(
+        keys, clone_sizes, grouping = self._grouped_clone_sizes(
             clones,
             group_by=group_by,
             groups=groups,
@@ -2015,6 +2027,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             groups=groups,
             cell_selection=cell_selection,
             orders=chosen,
+            diagnostics=grouping,
         )
 
     @validation_scoped
@@ -2075,7 +2088,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 pairs of groups do not fit the memory budget.
         """
         source = self._read_clone_input(clones)
-        keys, pair_groups, pair_codes, pair_cells = self._clone_pair_counts(
+        keys, pair_groups, pair_codes, pair_cells, grouping = self._clone_pair_counts(
             source,
             group_by=group_by,
             groups=groups,
@@ -2128,6 +2141,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_columns(group_by),
             groups=groups,
             cell_selection=cell_selection,
+            diagnostics=grouping,
         )
 
     @validation_scoped
@@ -2196,7 +2210,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 raise ValueError("labels must name at least one clone, or be None")
             labels = listed
         source = self._read_clone_input(clones, with_ids=True)
-        keys, pair_groups, pair_codes, pair_cells = self._clone_pair_counts(
+        keys, pair_groups, pair_codes, pair_cells, grouping = self._clone_pair_counts(
             source,
             group_by=group_by,
             groups=groups,
@@ -2277,6 +2291,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_columns(group_by),
             groups=groups,
             cell_selection=cell_selection,
+            diagnostics={**grouping, "trackedClones": len(tracked)},
         )
 
     @validation_scoped
@@ -2384,7 +2399,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if not 0 <= random_seed < 2**64:
             raise ValueError("random_seed must be a non-negative integer below 2**64")
         source = self._read_clone_input(clones)
-        keys, pair_groups, pair_codes, pair_cells = self._clone_pair_counts(
+        keys, pair_groups, pair_codes, pair_cells, grouping = self._clone_pair_counts(
             source,
             group_by=group_by,
             groups=groups,
@@ -2473,6 +2488,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_columns(group_by),
             groups=groups,
             cell_selection=cell_selection,
+            diagnostics={
+                **grouping,
+                # Without permutations there is no null to spread.
+                "pairsWithoutNullSpread": (
+                    int(np.count_nonzero(pairs["null_sd"].to_numpy() == 0))
+                    if int(n_permutations)
+                    else None
+                ),
+            },
         )
 
     @validation_scoped
@@ -2520,8 +2544,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         keeps the early cells whose clones went mostly to neutrophils.
         ``codes``, each cell's clone, ``fate_codes``, its dominant fate's
         position, ``n_late_cells``, its clone's late cells, and ``fractions``,
-        one column per fate, are
-        its other per-cell arrays.
+        one column per fate, are its other per-cell arrays. Its diagnostics,
+        which ``ds.artifacts.inspect(bias).diagnostics`` returns, count the
+        cells that it leaves out: ``cellsWithoutClone``, the late cells
+        without a clone, ``cellsWithoutGroup``, those with a clone but no
+        fate, the fates in ``groups``, ``earlyCellsWithoutLateCells``, the
+        early cells with a clone whose clone has no late cell with a fate,
+        ``earlyCellsWithTiedFates``, those whose clone's late cells tie
+        between fates, and ``testedClones``, the clones tested.
 
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
@@ -2708,6 +2738,18 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             grouped.codes[grouped.codes >= 0], minlength=n_fates
         ).astype(np.int64)
         strata = _kept_apart_strata(source, keys)
+        # The late cells are grouped whether they have a clone or not, since
+        # the tests draw from every late cell with a fate, so the cells that
+        # the fates leave out are counted among those with a clone.
+        ledger.peak(
+            "counting the late cells that the fates leave out", 3 * len(late_codes)
+        )
+        late_with_clone = late_codes >= 0
+        n_late_without_clone = int(np.count_nonzero(~late_with_clone))
+        n_late_without_fate = int(
+            np.count_nonzero(late_with_clone & (grouped.codes < 0))
+        )
+        del late_with_clone
         # Nothing per late cell is held beyond the counts.
         group_keys, key_columns = grouped.keys, list(grouped.key_columns)
         del grouped, late_codes, late_kept, counted
@@ -2756,6 +2798,18 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "fate_cells": result.fate_cells,
             },
             attributes={"group_keys": group_keys, "key_columns": key_columns},
+            diagnostics={
+                "cellsWithoutClone": n_late_without_clone,
+                "cellsWithoutGroup": n_late_without_fate,
+                "groups": n_fates,
+                "earlyCellsWithoutLateCells": int(
+                    np.count_nonzero((early_codes >= 0) & (result.late_cells == 0))
+                ),
+                "earlyCellsWithTiedFates": int(
+                    np.count_nonzero((result.late_cells > 0) & (result.dominant < 0))
+                ),
+                "testedClones": n_tested,
+            },
         )
         logger.info(
             f"Measured the fate bias of {int(np.count_nonzero(result.late_cells))} "
@@ -2872,6 +2926,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             late=status.input_ref("late"),
             group_by=tuple(str(column) for column in parameters["group_by"]),
             groups=groups,
+            diagnostics=status.diagnostics,
         )
 
 

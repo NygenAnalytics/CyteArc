@@ -132,8 +132,11 @@ def test_the_atac_preset_selects_exactly_the_clone_variants(store) -> None:
     assert (parameters["preset"], parameters["mask"]) == ("atac", [])
     attributes = store.artifacts.load(ref).attrs
     assert not {"preset", "thresholds", "masks"} & set(attributes)
-    assert attributes["n_informative"] == len(mito_variant_labels(TRUTH))
-    assert attributes["n_variants"] == len(selection.variants)
+    diagnostics = store.artifacts.inspect(ref).diagnostics
+    assert diagnostics["informativeVariants"] == len(mito_variant_labels(TRUTH))
+    assert diagnostics["variants"] == len(selection.variants)
+    assert diagnostics["maskedVariants"] == 0
+    assert diagnostics["cells"] == selection.n_cells
     assert attributes["stranded"] is True and attributes["qualities"] is False
     assert selection.stranded is True and selection.qualities is False
     # Errors sit on one strand, so none passes the strand test.
@@ -393,11 +396,10 @@ def test_tests_the_counts_cannot_make_fail_before_scoring(
 def test_masks_keep_listed_variants_from_being_informative(tmp_path) -> None:
     store = rcrs_store(tmp_path / "store.zarr")
     counts = _import(store, write_rcrs_mgatk(tmp_path / "final", (2, 4, 6)))
-    selection = store.variants.load_informative(
-        store.variants.informative(
-            counts, min_vmr=0.0, mask=["numt", "artifact_prone", "rna_editing"]
-        )
+    ref = store.variants.informative(
+        counts, min_vmr=0.0, mask=["numt", "artifact_prone", "rna_editing"]
     )
+    selection = store.variants.load_informative(ref)
     frame = selection.variants
     masked = dict(zip(frame["position"], frame["masked"], strict=True))
     # 310 is artifact-prone; 16293A>C and 16218C>T are NUMT false positives,
@@ -413,6 +415,13 @@ def test_masks_keep_listed_variants_from_being_informative(tmp_path) -> None:
     }
     assert frame["informative"].tolist() == (~frame["masked"]).tolist()
     assert selection.mask == ("artifact_prone", "numt", "rna_editing")
+    # Four of the six variants are masked, and the other two informative.
+    diagnostics = store.artifacts.inspect(ref).diagnostics
+    assert (
+        diagnostics["variants"],
+        diagnostics["maskedVariants"],
+        diagnostics["informativeVariants"],
+    ) == (6, 4, 2)
     one = store.variants.load_informative(
         store.variants.informative(counts, min_vmr=0.0, mask="artifact_prone")
     )

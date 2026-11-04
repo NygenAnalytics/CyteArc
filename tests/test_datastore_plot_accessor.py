@@ -184,6 +184,7 @@ _COUPLING = CloneCoupling(
     group_by=(),
     groups=None,
     cell_selection=None,
+    diagnostics={},
 )
 _DIVERSITY = ClonalDiversity(
     indices=None,  # type: ignore[arg-type]
@@ -195,6 +196,7 @@ _DIVERSITY = ClonalDiversity(
     cell_selection=None,
     size=10,
     coverage=0.9,
+    diagnostics={},
 )
 _RAREFACTION = Rarefaction(
     curves=None,  # type: ignore[arg-type]
@@ -204,6 +206,7 @@ _RAREFACTION = Rarefaction(
     groups=None,
     cell_selection=None,
     orders=(0,),
+    diagnostics={},
 )
 _OVERLAP = CloneOverlap(
     group_sizes=None,  # type: ignore[arg-type]
@@ -213,6 +216,7 @@ _OVERLAP = CloneOverlap(
     group_by=("sample", "tissue"),
     groups=None,
     cell_selection=None,
+    diagnostics={},
 )
 _TRACKING = CloneTracking(
     table=None,  # type: ignore[arg-type]
@@ -222,6 +226,7 @@ _TRACKING = CloneTracking(
     group_by=("timepoint",),
     groups=None,
     cell_selection=None,
+    diagnostics={},
 )
 _RECEPTORS_REF = ArtifactRef(
     scope="datastore",
@@ -245,6 +250,7 @@ _GENE_USAGE = GeneUsage(
     groups=None,
     cell_selection=None,
     n_cells=0,
+    diagnostics={},
 )
 _GENE_PAIRS = GeneUsage(
     table=None,  # type: ignore[arg-type]
@@ -258,6 +264,7 @@ _GENE_PAIRS = GeneUsage(
     groups=None,
     cell_selection=None,
     n_cells=0,
+    diagnostics={},
 )
 _SPECTRATYPE = Spectratype(
     table=None,  # type: ignore[arg-type]
@@ -270,6 +277,7 @@ _SPECTRATYPE = Spectratype(
     groups=None,
     cell_selection=None,
     n_cells=0,
+    diagnostics={},
 )
 _BARCODES_REF = ArtifactRef(
     scope="datastore",

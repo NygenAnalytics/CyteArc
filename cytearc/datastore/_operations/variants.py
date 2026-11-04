@@ -1,7 +1,6 @@
 import math
 import os
 import sys
-import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -45,7 +44,12 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
-from ...storage.diagnostics import DIAGNOSTICS_ATTRIBUTE, warn_diagnostics
+from ...storage.diagnostics import (
+    DIAGNOSTICS_ATTRIBUTE,
+    EXAMPLES,
+    DiagnosticRule,
+    warn_diagnostics,
+)
 from ...storage.layout import get_compressors
 from ...storage.profiles import resolve_storage_profile
 from ...storage.types import as_zarr_array
@@ -204,16 +208,7 @@ _CLONE_CALL_BYTES_PER_CELL = 34
 # neighbour graph keeps.
 _SHARED_NEIGHBOR_PRUNE = 1 / 15
 # The attributes that saved variant clones need to be reused.
-_CLONE_ATTRIBUTES = (
-    "n_clones",
-    "n_variants",
-    "n_cells_scored",
-    "n_cells_clustered",
-    "n_cells_without_coverage",
-    "n_cells_without_alternative",
-    "n_cells_without_neighbors",
-    "n_edges",
-)
+_CLONE_ATTRIBUTES = ("n_clones",)
 # Bytes that calling genotypes, or the clones they define, holds whatever the
 # counts: zarr's objects for the arrays that planning, writing and validating
 # the artifact open, the chunk of the cell selection that planning validates,
@@ -250,18 +245,80 @@ _GENOTYPE_CLONE_BYTES_PER_ROW = 48
 # them holds: its ambiguous flag as called.
 _GENOTYPE_CLONE_CALL_BYTES_PER_CELL = 1
 # The attributes that saved genotype clones need to be reused.
-_GENOTYPE_CLONE_ATTRIBUTES = (
-    "n_clones",
-    "n_sites",
-    "n_cells_mutant",
-    "n_ambiguous",
-    "n_nodes",
-    "n_edges",
-)
+_GENOTYPE_CLONE_ATTRIBUTES = ("n_clones", "n_nodes", "n_edges")
 
 
 # The formats whose files hold a chosen subset of variants.
 _VARIANT_CHOICE_FORMATS = ("tapestri", "dab_seq")
+# The diagnostic of each call's count among a genotypes' calls.
+_CALL_DIAGNOSTICS = {
+    "wild_type": "wildTypeCalls",
+    "heterozygous": "heterozygousCalls",
+    "homozygous_alternative": "homozygousAlternativeCalls",
+    "alternative_present": "alternativePresentCalls",
+    "missing": "missingCalls",
+    "filtered": "filteredCalls",
+}
+# The warning of genotypes whose alleles name an alternative no cell shows.
+_GENOTYPE_RULES = (
+    DiagnosticRule(
+        "alternativesNotShown",
+        lambda saved: (saved["alternativesNotShown"] or 0) > 0,
+        lambda saved: (
+            f"No cell shows the alternative that alleles gives "
+            f"{saved['alternativesNotShown']} "
+            f"{'site' if saved['alternativesNotShown'] == 1 else 'sites'}, so no cell "
+            "is called mutant there; name each alternative in the orientation that "
+            "the files give, such as a GIFT probe's"
+        ),
+    ),
+)
+
+
+def _skipped_variants(sources: Sequence["_Source"]) -> dict[str, Any]:
+    """The diagnostics of the chosen variants that Tapestri and DAb-seq sources skip.
+
+    A variant is counted once however many files of its panel skip it, and
+    the examples are the first five in the order of the sources and their
+    files; sources of other formats choose no variants, so their counts are
+    None and they list no example.
+    """
+    from ...readers.tapestri import TapestriSource
+
+    skipped = [
+        source.reader.skipped
+        for source in sources
+        if isinstance(source.reader, TapestriSource)
+    ]
+    if not skipped:
+        return {
+            "skippedEmptyAlternatives": None,
+            "skippedOtherAlleles": None,
+            "skippedVariantExamples": [],
+        }
+    names = list(dict.fromkeys(name for entry in skipped for name in entry.names))
+    empty = frozenset().union(*(entry.empty_alternatives for entry in skipped))
+    n_empty = sum(name in empty for name in names)
+    return {
+        "skippedEmptyAlternatives": n_empty,
+        "skippedOtherAlleles": len(names) - n_empty,
+        "skippedVariantExamples": names[:EXAMPLES],
+    }
+
+
+def _skipped_variant_rule(files: str) -> DiagnosticRule:
+    """The warning about the chosen variants that a Tapestri or DAb-seq import skips."""
+    return DiagnosticRule(
+        "skippedVariantExamples",
+        lambda saved: bool(saved["skippedVariantExamples"]),
+        lambda saved: (
+            f"{files[0].upper()}{files[1:]} {'have' if files.endswith('s') else 'has'} "
+            f"{saved['skippedEmptyAlternatives']} chosen variants with an empty ALT "
+            f"and {saved['skippedOtherAlleles']} whose alleles are not bases, which "
+            "no documentation explains, so they are skipped, such as "
+            + ", ".join(map(repr, saved["skippedVariantExamples"]))
+        ),
+    )
 
 
 def _variant_names(variants: Any) -> tuple[str, ...]:
@@ -794,8 +851,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         variant's alternative reads as ``AF × DP / 100``, its depth ``DP`` and
         its genotype ``NGT`` as a call with the genotype quality ``GQ``, and
         DAb-seq its ``AD``, ``RD``, ``DP`` and ``GT`` with ``GQ``. Variants
-        with an empty ``ALT``, or alleles that are not bases, are skipped
-        with a warning and counted in the source record. A Tapestri file's
+        with an empty ``ALT``, or alleles that are not bases, are skipped,
+        counted in the ``skippedEmptyAlternatives`` and
+        ``skippedOtherAlleles`` diagnostics, each variant once however many
+        files of its panel skip it, with up to five
+        ``skippedVariantExamples``, and named in a warning, which a reused
+        import gives again; other formats choose no variants, so those
+        counts are None. A Tapestri file's
         cells are named ``<sample>__<barcode>``, as
         :class:`~cytearc.TapestriToZarr` names them.
 
@@ -811,7 +873,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         beside the cell ID it derives. Barcodes of no cell are named in a
         warning, which a reused import gives again. A source is identified by the
         SHA-256 of each file it reads, so moved files reuse the saved counts
-        and the order of the paths does not matter.
+        and the order of the paths does not matter. The diagnostics also
+        hold ``listedCells``, the selected cells that the files list,
+        ``sortedRuns``, the sorted runs of rows that the import wrote to
+        disk because the rows did not fit the memory budget at once, and
+        ``repeatedCalls``, the calls that a source repeats for a cell's
+        allele, which are kept once.
 
         Several paths must share a format, such as one mgatk folder per
         library with each library's prefix. Sites that they share are one
@@ -962,7 +1029,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         )
         planned = self._plan_variant_counts(arguments, cell_selection, n_cells)
         files_text = _FILES_TEXT[0] if len(sources) == 1 else _FILES_TEXT[1]
-        warnings = unmatched_barcode_rules(files_text)
+        warnings = (
+            *unmatched_barcode_rules(files_text),
+            _skipped_variant_rule(files_text),
+        )
         if planned.reused:
             warn_diagnostics(
                 arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
@@ -1089,7 +1159,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             ledger.peak(item, rewritten + band_bytes)
             band_rows = band_bytes // row_bytes
             attributes = {
-                DIAGNOSTICS_ATTRIBUTE: planned_diagnostics(planned, join.diagnostics()),
                 "format": formats[0],
                 "count_unit": rules.count_unit,
                 "depth_definition": rules.depth_definition,
@@ -1097,7 +1166,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "count_fields": list(rules.count_fields),
                 "call_fields": list(rules.call_fields),
                 "contigs": [contig.record() for contig in site_table.contigs],
-                "n_sorted_runs": 0,
             }
             self._write_variant_counts(
                 planned,
@@ -1111,6 +1179,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 call_sources=call_sources,
                 call_values=call_values,
                 attributes=attributes,
+                diagnostics={**join.diagnostics(), **_skipped_variants(sources)},
             )
         warn_diagnostics(
             arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
@@ -1388,7 +1457,14 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         call_sources: _Vocabulary,
         call_values: _Vocabulary,
         attributes: dict[str, Any],
+        diagnostics: dict[str, Any],
     ) -> None:
+        """Write the sorted rows of the counts in bands, then each cell's and site's arrays.
+
+        ``diagnostics`` holds the join's counts and the skipped variants; the
+        counts' own, the sorted runs, the repeated calls and the listed cells,
+        are known once every band is written and join them then.
+        """
         n_cells = len(cell_ids)
         source_names, source_remap = call_sources.sorted()
         value_names, value_remap = call_values.sorted()
@@ -1534,11 +1610,17 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             _write_array(
                 group, "call_value_names", np.asarray(value_names, dtype=object)
             )
-            attributes["n_sorted_runs"] = sorter.n_runs
-            attributes["n_repeated_calls"] = repeated_calls
             attributes["n_sites"] = sites.n_sites
             attributes["n_alleles"] = sites.n_alleles
-            attributes["n_listed_cells"] = int(listed.sum())
+            attributes[DIAGNOSTICS_ATTRIBUTE] = planned_diagnostics(
+                planned,
+                {
+                    **diagnostics,
+                    "listedCells": int(listed.sum()),
+                    "sortedRuns": sorter.n_runs,
+                    "repeatedCalls": repeated_calls,
+                },
+            )
             group.attrs.update(attributes)
 
     def _variant_group(self, counts: ArtifactRef) -> zarr.Group:
@@ -1920,6 +2002,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         here an uncovered cell has no frequency, as in mgatk, so variances
         and VMRs differ where coverage is sparse.
 
+        The artifact's diagnostics, which
+        ``ds.artifacts.inspect(ref).diagnostics`` returns, count the
+        ``cells`` whose evidence was scored, the ``variants`` scored, the
+        ``informativeVariants`` and the ``maskedVariants``.
+
         Args:
             counts: A ``variant_counts`` artifact, such as one from
                 :meth:`~cytearc.datastore.namespaces.VariantsAccessor.import_counts`.
@@ -2087,10 +2174,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             & ~masked
         )
         attributes = {
-            "n_cells": statistics.n_cells,
-            "n_variants": statistics.n_variants,
-            "n_informative": int(informative.sum()),
-            "n_masked": int(masked.sum()),
+            DIAGNOSTICS_ATTRIBUTE: planned_diagnostics(
+                planned,
+                {
+                    "cells": statistics.n_cells,
+                    "variants": statistics.n_variants,
+                    "informativeVariants": int(informative.sum()),
+                    "maskedVariants": int(masked.sum()),
+                },
+            ),
             "stranded": stranded,
             "qualities": qualities,
         }
@@ -2145,12 +2237,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             inputs=record.inputs,
             execution_options=record.execution_options,
             invalidate_cache=arguments.invalidate_cache,
-            required_attributes=(
-                "n_cells",
-                "n_variants",
-                "stranded",
-                "qualities",
-            ),
+            required_attributes=("stranded", "qualities"),
             reuse_validator=has_statistics,
         )
 
@@ -2197,7 +2284,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             preset=cast(str | None, parameters["preset"]),
             thresholds={name: parameters[name] for name in THRESHOLDS},
             mask=tuple(str(name) for name in cast(list[str], parameters["mask"])),
-            n_cells=int(cast(int, attributes["n_cells"])),
+            n_cells=int(cast(int, status.diagnostics["cells"])),
             stranded=bool(attributes["stranded"]),
             qualities=bool(attributes["qualities"]),
         )
@@ -2237,9 +2324,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         where Signac counts an uncovered variant as frequency 0. Cells with
         no coverage at any informative variant, cells that show none of
         them and cells similar to no other cell carry no evidence of a clone
-        and get none; the artifact counts them in its
-        ``n_cells_without_coverage``, ``n_cells_without_alternative`` and
-        ``n_cells_without_neighbors`` attributes. The clones cover the cells
+        and get none; the artifact's diagnostics, which
+        ``ds.artifacts.inspect(clones).diagnostics`` returns, count them in
+        ``cellsWithoutCoverage``, ``cellsWithoutAlternative`` and
+        ``cellsWithoutNeighbors``, beside the informative ``variants``, the
+        ``cellsScored`` and the ``edges`` of the shared-neighbour graph, and,
+        as every source's clones, ``cellsWithClone`` and
+        ``largestCloneShare``. The clones cover the cells
         of the counts that ``informative`` scored, and its statistics cover
         the cells that the clones are called from.
 
@@ -2415,16 +2506,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         del frequencies, group_codes
         assignment = _clone_assignment(n_cells, positions, called)
         counts_by_status = clone_status_counts(called.status)
-        attributes = {
-            "n_clones": len(assignment.clone_ids),
-            "n_variants": len(alleles),
-            "n_cells_scored": len(positions),
-            "n_cells_clustered": counts_by_status["clustered"],
-            "n_cells_without_coverage": counts_by_status["no_coverage"],
-            "n_cells_without_alternative": counts_by_status["no_alternative"],
-            "n_cells_without_neighbors": counts_by_status["no_neighbor"],
-            "n_edges": called.n_edges,
-        }
         saving = MemoryLedger(
             self.memoryBytes,
             f"Calling clones from the variant frequencies of {n_cells} cells",
@@ -2439,8 +2520,16 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             self.zw,
             planned,
             assignment,
-            attributes,
+            {"n_clones": len(assignment.clone_ids)},
             ledger=saving,
+            diagnostics={
+                "variants": len(alleles),
+                "cellsScored": len(positions),
+                "cellsWithoutCoverage": counts_by_status["no_coverage"],
+                "cellsWithoutAlternative": counts_by_status["no_alternative"],
+                "cellsWithoutNeighbors": counts_by_status["no_neighbor"],
+                "edges": called.n_edges,
+            },
         )
         log_clones(assignment, n_cells)
         return planned.ref
@@ -2536,6 +2625,16 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         "AAC")}``. Without ``sites``, every site that the method can call is
         genotyped: those with calls for ``"source"``, those with one wild
         type and one alternative otherwise.
+
+        The artifact's diagnostics, which
+        ``ds.artifacts.inspect(ref).diagnostics`` returns, count the calls of
+        each kind, ``wildTypeCalls``, ``heterozygousCalls``,
+        ``homozygousAlternativeCalls``, ``alternativePresentCalls``,
+        ``missingCalls`` and ``filteredCalls``, and
+        ``alternativesNotShown``, the sites whose alternative that
+        ``alleles`` names no cell shows, None for ``"source"``, which
+        compares no alleles; such sites give a warning, which reused
+        genotypes give again.
 
         Args:
             counts: A ``variant_counts`` artifact from
@@ -2690,6 +2789,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         )
         planned = self._plan_variant_genotypes(arguments, cell_selection, n_cells)
         if planned.reused:
+            # Saved genotypes warn as they did when they were called.
+            warn_diagnostics(
+                arguments,
+                inspect_artifact(self.zw, planned.ref).diagnostics,
+                _GENOTYPE_RULES,
+            )
             return planned.ref
         self._require_writable(arguments.operation)
         tables: dict[str, tuple[str, ...]]
@@ -2870,13 +2975,30 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             _write_array(out, "call_label_names", np.asarray(label_names, dtype=object))
             out.attrs.update(
                 {
+                    DIAGNOSTICS_ATTRIBUTE: planned_diagnostics(
+                        planned,
+                        {
+                            **{
+                                _CALL_DIAGNOSTICS[name]: int(call_counts[code])
+                                for code, name in enumerate(CALLS)
+                            },
+                            # Source calls compare no alleles of their own.
+                            "alternativesNotShown": (
+                                None
+                                if method == "source"
+                                else int(np.count_nonzero(alternative_alleles < 0))
+                            ),
+                        },
+                    ),
                     "n_sites": len(genotyped),
-                    "call_counts": {
-                        name: int(call_counts[code]) for code, name in enumerate(CALLS)
-                    },
                     "count_unit": str(group.attrs["count_unit"]),
                 }
             )
+        warn_diagnostics(
+            arguments,
+            inspect_artifact(self.zw, planned.ref).diagnostics,
+            _GENOTYPE_RULES,
+        )
         logger.info(
             f"Called the genotypes of {int(np.count_nonzero(n_called))} of {n_cells} "
             f"cells at {len(genotyped)} sites by method={quoted_value(method)}; "
@@ -3040,7 +3162,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "n_called_sites": ((n_cells,), "i"),
             },
             invalidate_cache=arguments.invalidate_cache,
-            required_attributes=("n_sites", "call_counts"),
+            required_attributes=("n_sites",),
             reuse_validator=has_calls,
         )
 
@@ -3237,7 +3359,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         out as ambiguous, however many there are. The linked groups are the
         clones, numbered by size as ``clone_1`` and on, and a cell without a
         mutant call gets no clone. ``within`` names cell metadata columns,
-        such as the donor: clones never join cells of two groups.
+        such as the donor: clones never join cells of two groups. The
+        artifact's diagnostics, which
+        ``ds.artifacts.inspect(clones).diagnostics`` returns, count the
+        ``sites`` compared, the ``mutantCells`` and the ``ambiguousCells``
+        beside every source's ``cellsWithClone`` and ``largestCloneShare``.
 
         Args:
             genotypes: A ``variant_genotypes`` artifact from
@@ -3386,11 +3512,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             probabilities=None,
             n_cells_in_several_clones=0,
         )
+        # The sizes of the graph stay attributes; they describe the method.
         attributes = {
             "n_clones": len(labels),
-            "n_sites": len(chosen),
-            "n_cells_mutant": int(len(member_cells)),
-            "n_ambiguous": int(np.count_nonzero(called.ambiguous)),
             "n_nodes": called.n_nodes,
             "n_edges": called.n_edges,
         }
@@ -3413,6 +3537,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             attributes,
             source_arrays={"ambiguous": called.ambiguous.astype(bool)},
             ledger=saving,
+            diagnostics={
+                "sites": len(chosen),
+                "mutantCells": int(len(member_cells)),
+                "ambiguousCells": int(np.count_nonzero(called.ambiguous)),
+            },
         )
         log_clones(assignment, n_cells)
         return planned.ref
@@ -3483,7 +3612,7 @@ def _compared_alleles(
     ``rules.alleles`` names for it, or its alleles of roles ``"reference"``
     and ``"alternative"``. Each allele's position among the counts' alleles
     is -1 where the counts hold no such allele at the site: an alternative
-    that no cell shows, of which a warning tells.
+    that no cell shows, which the genotypes count and warn of.
 
     Raises:
         ValueError: If a site that ``explicit`` sites name has no wild type
@@ -3523,14 +3652,6 @@ def _compared_alleles(
                     "which no cell shows there; its alleles are "
                     f"{', '.join(map(repr, positions)) or 'none'}, in the "
                     "orientation that the files give, such as a GIFT probe's"
-                )
-            if mutant not in positions:
-                warnings.warn(
-                    f"No cell shows the alternative {quoted_value(mutant)} that alleles gives "
-                    f"the site {quoted_value(label)}; its alleles are "
-                    f"{', '.join(map(repr, positions))}",
-                    UserWarning,
-                    stacklevel=4,
                 )
         kept.append(site)
         pairs.append((wild_type, mutant))

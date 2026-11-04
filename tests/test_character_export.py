@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc import DiagnosticWarning, ExportSummary
+
 from tests.clone_helpers import every_cell, write_truth_store
 from tests.clone_truth import (
     PETRACER_INTEGRATIONS,
@@ -105,7 +107,9 @@ def test_cassiopeia_stores_hold_the_truths_states(store, truth, recorders, tmp_p
     alleles = _petracer_alleles(store, truth, recorders, tmp_path)
     expected = expected_characters(recorders, truth)
     written = store.clones.export_characters(alleles, tmp_path / "characters.zarr")
-    assert written == len(expected)
+    assert written.rows == written.diagnostics["cells"] == len(expected)
+    assert written.diagnostics["characters"] == len(expected.columns)
+    assert written.diagnostics["cellsWithSeveralAlleleRows"] == 0
     elements = read_treedata(tmp_path / "characters.zarr")
     characters = elements["obsm"]["characters"]
     pd.testing.assert_frame_equal(
@@ -559,3 +563,43 @@ def test_tables_of_one_site_per_row_export_as_their_wide_form(
     table = recorders.independent
     read = table["read"] & (table["state"] != "missing")
     assert int((found.drop(columns="cell") != "?").to_numpy().sum()) == int(read.sum())
+
+
+def test_cells_of_several_allele_rows_are_counted_and_warned(tmp_path) -> None:
+    from tests.storage_helpers import open_store, write_count_store
+
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((3, 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=["c1", "c2", "c3"],
+    )
+    store = open_store(tmp_path / "store.zarr")
+    path = tmp_path / "alleles.csv"
+    # c1 holds two rows of i1, c2 one row of each integration and c3 none.
+    path.write_text(
+        "intID,cellBC,RNF2,HEK3,EMX1\ni1,c1,None,None,None\ni1,c1,None,None,None\n"
+        "i1,c2,None,None,None\ni2,c2,None,None,None\n"
+    )
+    alleles = store.clones.import_alleles(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    message = (
+        "1 cells and integrations have several allele rows; the export keeps the "
+        "row of most UMIs, then most reads, then most sites read, of each"
+    )
+    target = tmp_path / "characters.csv"
+    with pytest.warns(DiagnosticWarning) as caught:
+        summary = store.clones.export_characters(alleles, target, format="laml")
+    assert [str(warning.message) for warning in caught] == [message]
+    assert [
+        (warning.message.operation, warning.message.diagnostic, warning.message.value)
+        for warning in caught
+    ] == [("export_characters", "cellsWithSeveralAlleleRows", 1)]
+    # Two cells by the three sites of each of the two integrations.
+    assert summary == ExportSummary(
+        path=target,
+        rows=2,
+        diagnostics={"cells": 2, "characters": 6, "cellsWithSeveralAlleleRows": 1},
+    )
+    assert len(pd.read_csv(target)) == summary.rows

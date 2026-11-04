@@ -180,15 +180,17 @@ def clone_write_bytes(
     )
 
 
-def clone_diagnostics(assignment: CloneAssignment) -> dict[str, int | float]:
-    """Return the diagnostics that the writer saves with every source's clones.
+def clone_diagnostics(codes: np.ndarray, sizes: np.ndarray) -> dict[str, int | float]:
+    """Return the diagnostics that every source's clones save, from each cell's clone and each clone's size.
 
-    ``cellsWithClone`` counts the cells given a clone, and
-    ``largestCloneShare`` is the share of them that the largest clone holds,
-    0 when no cell is given one.
+    ``cellsWithClone`` counts the cells given a clone, -1 marking a cell
+    without one in ``codes``, and ``largestCloneShare`` is the share of them
+    that the largest clone holds, 0 when no cell is given one. The clone
+    writer saves them with the clones of every source, and clonotypes, which
+    their own writer saves, save them too.
     """
-    n_with_clone = int(np.count_nonzero(np.asarray(assignment.codes) >= 0))
-    largest = int(np.max(assignment.clone_sizes)) if len(assignment.clone_sizes) else 0
+    n_with_clone = int(np.count_nonzero(np.asarray(codes) >= 0))
+    largest = int(np.max(sizes)) if len(sizes) else 0
     return {
         "cellsWithClone": n_with_clone,
         "largestCloneShare": largest / n_with_clone if n_with_clone else 0.0,
@@ -272,7 +274,10 @@ def write_clones(
         planned,
         arrays,
         attributes=dict(attributes),
-        diagnostics={**clone_diagnostics(assignment), **given},
+        diagnostics={
+            **clone_diagnostics(assignment.codes, assignment.clone_sizes),
+            **given,
+        },
     )
 
 

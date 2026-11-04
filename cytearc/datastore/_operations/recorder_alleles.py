@@ -55,7 +55,12 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
-from ...storage.diagnostics import warn_diagnostics
+from ...storage.diagnostics import (
+    DiagnosticRule,
+    ExportSummary,
+    export_summary,
+    warn_diagnostics,
+)
 from ...storage.geometry import array_geometry
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
@@ -64,7 +69,6 @@ from ...utils.arrays import sorted_unique, unique_inverse
 from ...utils.digest import file_sha256, path_sha256
 from ...utils.logging import logger
 from ...utils.memory_budget import MemoryLedger
-from ...utils.warnings import warn
 from .cell_groups import group_columns, within_groups
 from .cell_barcodes import (
     BarcodeFile,
@@ -91,17 +95,24 @@ _RECORDS = "record"
 # The per-cell arrays of a lineage_alleles artifact; n_edits is canonical.
 _CELL_ARRAYS = ("n_edits", "n_integrations", "n_records")
 # The attributes that an import saves and that reusing it requires.
-_IMPORT_ATTRIBUTES = (
-    "fields",
-    "states",
-    "files",
-    "n_file_rows",
-    "n_unmatched_rows",
-    "n_beyond_length",
-    "n_rows_without_integration",
-)
+_IMPORT_ATTRIBUTES = ("fields", "states", "files")
 #: The values of ``format`` of ``export_characters``.
 EXPORT_FORMATS = ("treedata", "laml")
+#: The diagnostics of a character export: the cells and characters written,
+#: and the cells and integrations of several allele rows, of which the
+#: export keeps one row each.
+CHARACTER_EXPORT_DIAGNOSTICS = ("cells", "characters", "cellsWithSeveralAlleleRows")
+_CHARACTER_EXPORT_RULES = (
+    DiagnosticRule(
+        "cellsWithSeveralAlleleRows",
+        lambda saved: saved["cellsWithSeveralAlleleRows"] > 0,
+        lambda saved: (
+            f"{saved['cellsWithSeveralAlleleRows']} cells and integrations have "
+            "several allele rows; the export keeps the row of most UMIs, then most "
+            "reads, then most sites read, of each"
+        ),
+    ),
+)
 # A chunk of a file may take a twentieth of what the budget leaves.
 _CHUNK_SHARE = 20
 # Bytes that the per-cell arrays and the arrays written take per selected cell.
@@ -231,49 +242,29 @@ def _per_file(integrations: Any, n_files: int) -> list[Any]:
     )
 
 
-def _saved_count(group: zarr.Group, name: str) -> int:
-    """A count that a saved import records in its attributes."""
-    value = group.attrs.get(name)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(
-            f"The lineage_alleles artifact records no count {quoted_value(name)}"
-        )
-    return value
-
-
-def _without_integration_warning(n_rows: int) -> str | None:
-    if not n_rows:
-        return None
+def _allele_import_rules(files: str) -> tuple[DiagnosticRule, ...]:
+    """The warnings that an allele import gives from its saved diagnostics."""
     return (
-        f"{n_rows} rows of the allele files name no integration, as PEtracer "
-        "leaves intID empty where an intBC is not on its whitelist; they are left "
-        "out."
-    )
-
-
-def _warn_import(
-    arguments: RecorderAlleleImportArguments,
-    diagnostics: Mapping[str, Any],
-    attributes: Any,
-    files_text: str,
-) -> None:
-    """Warn about what an import counted, as it does again when it is reused."""
-    warn_diagnostics(arguments, diagnostics, unmatched_barcode_rules(files_text))
-    for message in (
-        _beyond_length_warning(int(attributes["n_beyond_length"])),
-        _without_integration_warning(int(attributes["n_rows_without_integration"])),
-    ):
-        if message is not None:
-            warn(message)
-
-
-def _beyond_length_warning(n_beyond: int) -> str | None:
-    if not n_beyond:
-        return None
-    return (
-        f"{n_beyond} slots beyond the length that integrations gives their "
-        "integration hold an insertion; they are not applicable, as the contracted "
-        "array has no such slot. Check the slots that integrations names."
+        *unmatched_barcode_rules(files),
+        DiagnosticRule(
+            "slotsBeyondLength",
+            lambda saved: saved["slotsBeyondLength"] > 0,
+            lambda saved: (
+                f"{saved['slotsBeyondLength']} slots beyond the length that "
+                "integrations gives their integration hold an insertion; they are "
+                "not applicable, as the contracted array has no such slot. Check "
+                "the slots that integrations names."
+            ),
+        ),
+        DiagnosticRule(
+            "rowsWithoutIntegration",
+            lambda saved: saved["rowsWithoutIntegration"] > 0,
+            lambda saved: (
+                f"{saved['rowsWithoutIntegration']} rows of the allele files name "
+                "no integration, as PEtracer leaves intID empty where an intBC is "
+                "not on its whitelist; they are left out."
+            ),
+        ),
     )
 
 
@@ -335,9 +326,15 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         ``barcode`` group matches, and barcodes that match no selected cell
         are counted in the join's diagnostics, apart from those of cells
         outside the selection, and those that match no cell of the store are
-        named in a warning, which a reused import gives again. A file is identified by the
-        SHA-256 of its bytes and of the files read beside it, so the order
-        of the files does not matter.
+        named in a warning, which a reused import gives again. Beside the
+        join's counts, the diagnostics that
+        ``ds.artifacts.inspect(ref).diagnostics`` returns hold ``fileRows``,
+        the files' rows, ``unmatchedRows``, those of no selected cell,
+        ``slotsBeyondLength``, the slots beyond their integration's length
+        that hold an insertion, and ``rowsWithoutIntegration``, the rows
+        that name none; each of the last two above 0 gives a warning too. A
+        file is identified by the SHA-256 of its bytes and of the files read
+        beside it, so the order of the files does not matter.
 
         Args:
             paths: One allele file, or several, plain or gzip-compressed: a
@@ -421,21 +418,12 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             sources=sources,
             invalidate_cache=invalidate_cache,
         )
-        files_text = _files_text(len(files))
+        warnings = _allele_import_rules(_files_text(len(files)))
         planned = self._plan_alleles(arguments, cell_selection, n_cells)
         if planned.reused:
             # Saved alleles warn as they did when they were imported.
-            saved = artifact_group(self.zw, planned.ref)
-            _warn_import(
-                arguments,
-                inspect_artifact(self.zw, planned.ref).diagnostics,
-                {
-                    "n_beyond_length": _saved_count(saved, "n_beyond_length"),
-                    "n_rows_without_integration": _saved_count(
-                        saved, "n_rows_without_integration"
-                    ),
-                },
-                files_text,
+            warn_diagnostics(
+                arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
             )
             return planned.ref
         self._require_writable(arguments.operation)
@@ -453,11 +441,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             + zarr_write_buffer_bytes(),
         )
         self._write_alleles(planned, table, n_cells, attributes, diagnostics)
-        _warn_import(
-            arguments,
-            inspect_artifact(self.zw, planned.ref).diagnostics,
-            attributes,
-            files_text,
+        warn_diagnostics(
+            arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
         )
         return planned.ref
 
@@ -644,14 +629,17 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 }
                 for layout, counts in zip(layouts, counted, strict=True)
             ],
-            "n_file_rows": join.n_rows,
-            "n_unmatched_rows": join.n_unmatched_rows,
-            "n_beyond_length": sum(counts["beyond"] for counts in counted),
-            "n_rows_without_integration": sum(
+        }
+        diagnostics = {
+            **join.diagnostics(),
+            "fileRows": join.n_rows,
+            "unmatchedRows": join.n_unmatched_rows,
+            "slotsBeyondLength": sum(counts["beyond"] for counts in counted),
+            "rowsWithoutIntegration": sum(
                 counts["without_integration"] for counts in counted
             ),
         }
-        return table, ledger, attributes, join.diagnostics()
+        return table, ledger, attributes, diagnostics
 
     def _read_allele_file(
         self,
@@ -845,7 +833,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         *,
         format: str = "treedata",
         unknown: str = "state",
-    ) -> int:
+    ) -> ExportSummary:
         """Write saved recorder alleles as a character matrix for tree builders.
 
         A character is one site of one integration, named
@@ -864,7 +852,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         Where a cell holds several allele rows of one
         integration, the row of most UMIs, then most reads, then most sites
         read is exported, as Cassiopeia keeps each integration's most
-        abundant allele, and a warning counts them. Ordered slots export one
+        abundant allele, and the ``cellsWithSeveralAlleleRows`` diagnostic
+        and a warning count those cells and integrations. Ordered slots export one
         character per slot, so their prefix rule is left to the tree
         builder's model. Cells that read no character and characters that
         no cell reads are left out.
@@ -896,7 +885,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 unknown mark as missing.
 
         Returns:
-            The number of cells written.
+            The store or CSV written, its ``rows``, the cells written, and
+            its ``diagnostics``: ``cells``, ``characters`` and
+            ``cellsWithSeveralAlleleRows``.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -981,12 +972,6 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             read_metadata_rows_chunkwise(self.cells, "ids", cell_index[matrix.cells]),
             dtype=object,
         )
-        if matrix.n_resolved:
-            warn(
-                f"{matrix.n_resolved} cells and integrations have several allele rows; "
-                "the export keeps the row of most UMIs, then most reads, then most "
-                "sites read, of each"
-            )
         if format == "treedata":
             from ...writers.characters import write_treedata_characters
 
@@ -1017,7 +1002,18 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             f"Exported {len(matrix.cells)} cells by {len(matrix.characters)} "
             f"characters to {target}"
         )
-        return int(len(matrix.cells))
+        return export_summary(
+            "export_characters",
+            target,
+            len(matrix.cells),
+            {
+                "cells": len(matrix.cells),
+                "characters": len(matrix.characters),
+                "cellsWithSeveralAlleleRows": matrix.n_resolved,
+            },
+            CHARACTER_EXPORT_DIAGNOSTICS,
+            _CHARACTER_EXPORT_RULES,
+        )
 
     @validation_scoped
     def _clones_allele_clones(
@@ -1084,8 +1080,17 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
 
         Clones are numbered by size, so ``clone_1`` is the largest, and ties
         follow their first cell. The ``clones`` artifact also holds each
-        cell's ``n_alleles``, its distinct rare alleles; its attributes
-        record what each rule removed, and its parameters the rules.
+        cell's ``n_alleles``, its distinct rare alleles, and its parameters
+        the rules. Its diagnostics, which
+        ``ds.artifacts.inspect(clones).diagnostics`` returns, count what each
+        rule found, None for a rule that did not run: the ``alleles``
+        tested, those ``allelesTooFrequent``, ``allelesNotSignificant`` and
+        ``allelesInTooManySamples``, the ``rareAlleles`` and the
+        ``cellsWithRareAlleles``, the ``clonesWithTooManyAlleles`` and their
+        ``cellsInClonesWithTooManyAlleles``, and, with banks, the
+        ``allelesInBank`` and the ``observations`` and
+        ``observationsInBank`` that ``bank_coverage`` adds up; as every
+        source's clones, ``cellsWithClone`` and ``largestCloneShare``.
 
         Args:
             alleles: A ``lineage_alleles`` artifact, such as one from
@@ -1198,7 +1203,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             cell_selection,
             n_cells,
             with_probability=False,
-            required_attributes=("n_clones", "rule_counts", "bank_coverage"),
+            required_attributes=("n_clones", "bank_coverage"),
             source_arrays={"n_alleles": "i"},
         )
         if planned.reused:
@@ -1296,13 +1301,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             self.zw,
             planned,
             assignment,
-            {
-                "n_clones": called.n_clones,
-                "rule_counts": called.counts,
-                "bank_coverage": called.coverage,
-            },
+            {"n_clones": called.n_clones, "bank_coverage": called.coverage},
             source_arrays={"n_alleles": called.n_alleles.astype(np.int32)},
             ledger=saving,
+            diagnostics=called.diagnostics,
         )
         for entry in called.coverage:
             share = (
@@ -1318,7 +1320,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         largest = int(called.sizes[0]) if called.n_clones else 0
         logger.info(
             f"Called {called.n_clones} clones of {n_assigned} of {n_cells} cells from "
-            f"{called.counts['rare_alleles']} rare alleles; the largest holds "
+            f"{called.diagnostics['rareAlleles']} rare alleles; the largest holds "
             f"{largest} cells"
         )
         return planned.ref

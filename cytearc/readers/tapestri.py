@@ -63,6 +63,7 @@ __all__ = [
     "AMPLICON_FEATURE_TYPE",
     "CELL_ID_SEPARATOR",
     "PROTEIN_FEATURE_TYPE",
+    "SkippedVariants",
     "TapestriReader",
     "TapestriSource",
     "dab_seq_source",
@@ -106,8 +107,6 @@ _WHOLE_EPSILONS = 16
 # deletion that spans the position.
 _BASES = re.compile(r"[ACGTN]+")
 _ITD_PREFIX = "FLT3-ITD:"
-# Examples named in the warning about skipped variants.
-_EXAMPLES = 5
 # Bytes that describing a file holds for each candidate variant beside the
 # copies of its text: its name, alleles and contig as Python text, the parts
 # of its name, and its entries in the lookups of names and positions, as
@@ -556,6 +555,23 @@ class _Variants:
     passing: np.ndarray
 
 
+@dataclass(frozen=True, slots=True)
+class SkippedVariants:
+    """The chosen variants of a file that cannot be imported, by name.
+
+    The names identify the variants across files of one panel, so an import
+    of several files counts each skipped variant once.
+
+    Attributes:
+        names: Every skipped variant, in the file's order.
+        empty_alternatives: Those of them with an empty ``ALT``; the others'
+            alleles are not sequences of bases for another reason.
+    """
+
+    names: tuple[str, ...]
+    empty_alternatives: frozenset[str]
+
+
 def _chosen_columns(
     variants: _Variants,
     requested: Sequence[str],
@@ -563,7 +579,7 @@ def _chosen_columns(
     short_names: np.ndarray,
     path: str,
     what: str,
-) -> tuple[np.ndarray, dict[str, Any]]:
+) -> tuple[np.ndarray, dict[str, Any], SkippedVariants]:
     """The columns to import: the passing ones and those ``requested`` names.
 
     A requested item names a variant as the file does or as
@@ -573,10 +589,12 @@ def _chosen_columns(
     exactly.
 
     Returns:
-        The chosen columns, ascending, and what the source record keeps of
-        the choice: the variants added beside the passing ones are counted
-        and named by the SHA-256 of their names, one per line, so an import
-        is identified by what it reads rather than how ``requested`` names it.
+        The chosen columns, ascending; what the source record keeps of the
+        choice: the variants added beside the passing ones are counted and
+        named by the SHA-256 of their names, one per line, so an import is
+        identified by what it reads rather than how ``requested`` names it;
+        and the variants skipped, which the import counts in its
+        diagnostics.
 
     Raises:
         ValueError: If a requested item names no variant of the file, a
@@ -639,15 +657,12 @@ def _chosen_columns(
             f"The variant {quoted_value(name)} of {path} has {reason}, which no documentation "
             "explains, so it cannot be imported; leave it out of include_variants"
         )
-    n_empty = int(np.count_nonzero(skipped & empty))
-    n_other = int(np.count_nonzero(skipped & ~empty))
-    examples = variants.names[skipped][:_EXAMPLES].tolist()
-    if skipped.any():
-        warn(
-            f"{path} has {n_empty} chosen variants with an empty ALT and {n_other} "
-            "whose alleles are not bases, which no documentation explains, so they "
-            f"are skipped, such as {', '.join(map(repr, examples))}"
-        )
+    unreadable = SkippedVariants(
+        names=tuple(str(name) for name in variants.names[skipped]),
+        empty_alternatives=frozenset(
+            str(name) for name in variants.names[skipped & empty]
+        ),
+    )
     columns = np.flatnonzero(chosen & readable)
     if not len(columns):
         raise ValueError(
@@ -664,11 +679,8 @@ def _chosen_columns(
         "added_variants_sha256": hashlib.sha256(
             "\n".join(added).encode("utf-8")
         ).hexdigest(),
-        "n_skipped_empty_alternative": n_empty,
-        "n_skipped_other_alleles": n_other,
-        "skipped_examples": examples,
     }
-    return columns, record
+    return columns, record, unreadable
 
 
 def _sites(
@@ -799,6 +811,8 @@ class TapestriSource:
     position may add up to more than 100%, so their alleles overlap. DAb-seq
     gives ``AD`` and ``RD`` and its ``GT`` with ``GQ``. The cells' IDs are
     read with each block of cells, so the source holds none of them.
+    ``skipped`` counts the chosen variants that cannot be imported, which the
+    import records in its diagnostics.
     """
 
     path: str
@@ -813,6 +827,7 @@ class TapestriSource:
     alleles_overlap: bool
     open_alleles: bool
     notes: dict[str, Any]
+    skipped: SkippedVariants
     _columns: _Columns = field(repr=False)
     _n_cells: int = field(repr=False)
     _cell_arrays: tuple[str, ...] = field(repr=False)
@@ -1202,7 +1217,7 @@ def tapestri_source(
         passing=filtered == 0,
     )
     del chrom, ref, alt, contigs
-    chosen, record = _chosen_columns(
+    chosen, record, skipped = _chosen_columns(
         parsed, requested, short_names=ids, path=text, what="Tapestri"
     )
     columns = _sites(parsed, chosen, path=text, itd=None)
@@ -1228,6 +1243,7 @@ def tapestri_source(
         alleles_overlap=True,
         open_alleles=False,
         notes=notes,
+        skipped=skipped,
         _columns=columns,
         _n_cells=len(cells.ids),
         _cell_arrays=(f"{_VARIANTS}/ra/sample_name", f"{_VARIANTS}/ra/barcode"),
@@ -1308,7 +1324,7 @@ def dab_seq_source(
         passing=np.ones(len(names), dtype=bool),
     )
     del contigs, positions, references, alternatives
-    chosen, record = _chosen_columns(
+    chosen, record, skipped = _chosen_columns(
         parsed,
         requested,
         short_names=np.asarray(shorts, dtype=object),
@@ -1332,6 +1348,7 @@ def dab_seq_source(
         alleles_overlap=False,
         open_alleles=False,
         notes=record,
+        skipped=skipped,
         _columns=columns,
         _n_cells=n_cells,
         _cell_arrays=("CELL_BARCODES",),
