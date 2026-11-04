@@ -519,7 +519,7 @@ def test_figures_group_cells_within_the_memory_budget(plotted, monkeypatch) -> N
     assert _grouped(found) == ([0, 0, 1, 0, 1, -1], ("x", "y"), "group")
     # Figures group cells as the summaries do, within the store's budget.
     monkeypatch.setattr(store, "memoryBytes", 1_000)
-    with pytest.raises(MemoryError, match="^Grouping 6 cells by 1 columns holds"):
+    with pytest.raises(MemoryError, match="^Grouping the 6 cells of a figure holds"):
         plot_groups(store, clones, group_by="group", groups=None, n_cells=6)
     with pytest.raises(TypeError, match="store does not provide the groups of"):
         plot_groups(object(), clones, group_by="group", groups=None, n_cells=6)

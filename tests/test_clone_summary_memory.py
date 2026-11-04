@@ -639,6 +639,60 @@ print(json.dumps(results))
 """
 
 
+def test_following_named_clones_holds_no_more_than_its_ledger_plans(
+    data, monkeypatch
+) -> None:
+    from cytearc.storage.validation_scope import validation_scope
+    from tests.memory_helpers import audited, charges
+
+    def run() -> object:
+        return CASES["track of 1,000 named clones"](data)
+
+    # The track holds each cell's clone code and each clone's label beside
+    # the grouping, as an int64 a cell and an ASCII string of 41 bytes and one
+    # a character a clone, in an object array.
+    run()
+    budget, _refusals, _result, _peak = budget_that_runs(
+        data.store, lambda _store: run(), refusal_budget=stated_bytes, max_refusals=100
+    )
+    monkeypatch.setattr(data.store, "memoryBytes", budget)
+    _result, taken = charges(run)
+    labels = set(data.store.cells.fetch_all("clone").tolist()) - {""}
+    assert taken[0][:2] == (
+        "each cell's clone, the clones' labels and the labels its clones keep apart",
+        8 * N_CELLS + 49 * len(labels) + sum(map(len, labels)),
+    )
+    # From each charge to the next, what is traced at that budget stays
+    # within what the ledger planned, through counting each pair of group and
+    # clone after the grouping. The selection's identity check, outside the
+    # budget, runs once in the operation's scope.
+    with validation_scope():
+        run()
+        _result, overruns = audited(run)
+    assert overruns == [], overruns
+
+
+def test_grouping_by_a_label_artifact_holds_no_more_than_its_ledger_plans(
+    data,
+) -> None:
+    from cytearc.storage.validation_scope import validation_scope
+    from tests.memory_helpers import ZARR_READS, audited, hold_finished_reads
+
+    # The grouping reads a label artifact of every cell whole; with each
+    # read's work held until the next read ends, the codec thread that decoded
+    # its chunk of labels still holds it after the labels are coded, which
+    # the ledger plans. The selection's identity check, outside the budget,
+    # runs once in the operation's scope.
+    def run() -> object:
+        return CASES["track of a few cells by labels of every cell"](data)
+
+    with validation_scope():
+        run()
+        with hold_finished_reads(*ZARR_READS):
+            _result, overruns = audited(run)
+    assert overruns == [], overruns
+
+
 def test_the_budgets_count_the_read_that_zarr_still_holds(data) -> None:
     import json
     import subprocess

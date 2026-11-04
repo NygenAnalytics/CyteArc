@@ -27,10 +27,18 @@ from ...clones.barcode_clones import (
 )
 from ...clones.assignments import CloneAssignment
 from ...metadata.arguments import BarcodeCloneArguments, LineageBarcodeImportArguments
-from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
+from ...metadata.artifacts import (
+    cell_data_write_bytes,
+    plan_cell_data_artifact,
+    write_cell_data_artifact,
+)
 from ...metadata.records import pack_text
-from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
-from ...metadata.selection import cell_selection_indices
+from ...metadata.rows import read_text_rows
+from ...metadata.selection import (
+    CellSelectionRead,
+    plan_cell_selection_read,
+    read_cell_selection,
+)
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
@@ -44,9 +52,9 @@ from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument, optional_bool_argument, quoted_value
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryLedger
 from .cell_groups import group_columns, within_groups
 from .cell_barcodes import (
-    LOOKUP_BYTES_PER_CELL,
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
@@ -82,7 +90,7 @@ _IMPORT_ATTRIBUTES = (
     "n_unmatched_barcodes",
     "unmatched_barcode_examples",
 )
-# A chunk of a file may take a twentieth of the budget.
+# A chunk of a file may take a twentieth of what the budget leaves.
 _CHUNK_SHARE = 20
 # Bytes that the key of each row of a TREX molecule table takes at the peak
 # of finding a cell and UMI that it lists twice: the key, its sorted copy and
@@ -90,6 +98,15 @@ _CHUNK_SHARE = 20
 _KEY_BYTES = 40
 # Bytes that the per-cell arrays and the arrays written take per selected cell.
 _CELL_BYTES = 64
+# Each cell's summaries, its barcodes, UMIs, reads and records, as int32,
+# int64, int64 and int32, and what counting them holds beside: each record's
+# cell and pair as int64, their sorted distinct pairs and the counts' weights,
+# and for each cell its sums before they become int64. Traced on 20,000 to
+# 1,000,000 records of 1,000 to 200,000 cells: 33 bytes a record and up to
+# 31 a cell.
+_SUMMARY_BYTES_PER_CELL = 24
+_COUNTING_BYTES_PER_RECORD = 40
+_COUNTING_BYTES_PER_CELL = 8
 # Bytes that a loaded record takes at the peak of building the tables: its
 # stored arrays and its row of the table of records, as measured on 5,000,000
 # pairs and 2,000,000 molecules.
@@ -292,8 +309,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             )
             assay = self._barcode_assay(from_assay)
             sources = (self._assay_source(assay, library),)
-        cell_index = self._barcode_selection_indices(cell_selection)
-        n_cells = len(cell_index)
+        selection = self._barcode_selection_read(cell_selection)
+        n_cells = selection.cells
         arguments = LineageBarcodeImportArguments(
             cell_selection=cell_selection,
             sources=sources,
@@ -313,12 +330,12 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             return planned.ref
         self._require_writable(arguments.operation)
         if assay is None:
-            counted, attributes = self._count_files(files, layouts, cell_index)
+            counted, attributes, ledger = self._count_files(files, layouts, selection)
         else:
-            counted, attributes = self._count_assay(
-                assay, str(sources[0]["library"]), cell_index
+            counted, attributes, ledger = self._count_assay(
+                assay, str(sources[0]["library"]), selection
             )
-        self._write_barcodes(planned, counted, n_cells, attributes)
+        self._write_barcodes(planned, counted, n_cells, attributes, ledger=ledger)
         warn_unmatched_barcodes(attributes, files_text)
         return planned.ref
 
@@ -372,50 +389,62 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         self,
         files: Sequence[BarcodeFile],
         layouts: Sequence["BarcodeLayout"],
-        cell_index: np.ndarray,
-    ) -> tuple[CountedBarcodes, dict[str, Any]]:
-        """Count the barcodes of the files' rows that name selected cells."""
-        n_cells = len(cell_index)
-        # What the import holds for the selected cells, and the read of their
-        # IDs as text, are checked before the IDs are read.
-        reading = (LOOKUP_BYTES_PER_CELL + _CELL_BYTES) * n_cells + text_read_bytes(
-            self.cells._get_array("ids"), n_cells
+        selection: CellSelectionRead,
+    ) -> tuple[CountedBarcodes, dict[str, Any], MemoryLedger]:
+        """Count the barcodes of the files' rows that name selected cells.
+
+        One ledger holds what the import keeps for the selected cells, their
+        positions and IDs as text, the join, a chunk of each file and the
+        counter's records at their merge, and is returned for the save.
+        """
+        n_cells = selection.cells
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Importing barcodes for {n_cells} selected cells",
+            remedy="pass a smaller cell_selection",
+            codec_threads=self.nthreads,
         )
-        if reading > self.memoryBytes:
-            raise MemoryError(
-                f"Importing barcodes for {n_cells} selected cells holds about "
-                f"{reading} bytes before the first barcode is read, more than the "
-                f"memory budget of {self.memoryBytes} bytes. Raise mem_budget, or "
-                "pass a smaller cell_selection."
-            )
+        ledger.hold("each selected cell's arrays", _CELL_BYTES * n_cells)
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the selected cells' positions"
+        )
         # Only the selected cells' IDs are read, a sample's in a merged store.
-        cell_ids = np.asarray(
-            read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
+        cell_ids = read_text_rows(
+            ledger,
+            self.cells._get_array("ids"),
+            cell_index,
+            item="the selected cells' IDs",
         )
-        join = CellBarcodeJoin(
-            cell_ids, memory_bytes=self.memoryBytes, held_bytes=_CELL_BYTES * n_cells
-        )
-        # The join counts what it holds for the cells: its lookup, their IDs
-        # as text and the bytes given for each cell; the hashes of barcodes
-        # that match no cell grow apart, as join.unmatched_bytes.
-        held = join.held_bytes
+        join = CellBarcodeJoin(cell_ids, ledger=ledger)
         counter = BarcodeCounter(merge_rows=self._merge_rows())
         n_empty = 0
+        counted = 0
         for file, layout in zip(files, layouts, strict=True):
-            n_empty += self._count_file(counter, join, file, layout, held=held)
-        counted = counter.finish()
-        return counted, {
-            "n_file_rows": join.n_rows,
-            "n_unmatched_rows": join.n_unmatched_rows,
-            "n_empty_rows": n_empty,
-            **join.attributes(),
-        }
+            empty, counted = self._count_file(
+                counter, join, file, layout, ledger=ledger, counted=counted
+            )
+            n_empty += empty
+        records = counter.finish()
+        # The finished table replaces the records at their merge.
+        ledger.hold(f"the {records.table.n_records} records", records.table.nbytes)
+        ledger.release(counted)
+        return (
+            records,
+            {
+                "n_file_rows": join.n_rows,
+                "n_unmatched_rows": join.n_unmatched_rows,
+                "n_empty_rows": n_empty,
+                **join.attributes(),
+            },
+            ledger,
+        )
 
-    def _barcode_selection_indices(self, cell_selection: ArtifactRef) -> np.ndarray:
-        cell_index = cell_selection_indices(self.zw, cell_selection)
-        if not len(cell_index):
+    def _barcode_selection_read(self, cell_selection: ArtifactRef) -> CellSelectionRead:
+        """Check and count a cell selection, whose cells the import reads within its ledger."""
+        planned = plan_cell_selection_read(self.zw, cell_selection)
+        if not planned.cells:
             raise ValueError("cell_selection selects no cell")
-        return cell_index
+        return planned
 
     def _merge_rows(self) -> int:
         return int(min(250_000, max(1_000, self.memoryBytes // _MERGE_BUDGET_SHARE)))
@@ -453,29 +482,20 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             reuse_validator=has_records,
         )
 
-    def _check_barcode_budget(
-        self, counter: BarcodeCounter, *, cells: int, reading: int = 0
-    ) -> None:
-        """Refuse an import whose peak would pass the memory budget.
+    @staticmethod
+    def _held_records(
+        ledger: MemoryLedger, counter: BarcodeCounter, counted: int
+    ) -> int:
+        """Charge the counter's records at the peak of their merge in place of ``counted``.
 
-        Args:
-            counter: The records held so far.
-            cells: The bytes held for the selected cells, as the join counts
-                them: their lookup, their IDs as text and their arrays.
-            reading: The bytes held to read a file: its names, a chunk, the
-                keys of its molecules and the barcodes that match no cell.
+        Returns:
+            The bytes now charged for them.
         """
-        selected = cells + counter.peak_bytes
-        peak = selected + reading
-        if peak > self.memoryBytes:
-            # A smaller selection helps only where the selected cells take most.
-            fewer = ", or pass a smaller cell_selection" if selected >= reading else ""
-            raise MemoryError(
-                f"Importing barcodes holds about {peak} bytes at its peak, {selected} "
-                f"of them for the selected cells and their {counter.n_rows} molecules "
-                f"and pairs, more than the memory budget of {self.memoryBytes} bytes. "
-                f"Raise mem_budget{fewer}."
-            )
+        ledger.release(counted)
+        return ledger.hold(
+            f"the {counter.n_rows} molecules and pairs at their merge",
+            counter.peak_bytes,
+        )
 
     def _count_file(
         self,
@@ -484,21 +504,34 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         file: BarcodeFile,
         layout: "BarcodeLayout",
         *,
-        held: int,
-    ) -> int:
-        """Count the barcodes of one file and return its rows without a barcode.
+        ledger: MemoryLedger,
+        counted: int,
+    ) -> tuple[int, int]:
+        """Count the barcodes of one file.
 
-        A file that lists each molecule once, as TREX's molecule tables do,
-        is refused if a cell and UMI repeat on its rows.
+        The file's chunks take a twentieth of the ledger's room when the file
+        is planned. The file's names and a chunk are held while the file is
+        read, and the counter's records at their merge, ``counted`` bytes
+        when the file starts, are charged again after each chunk. A file that
+        lists each molecule once, as TREX's molecule tables do, is refused if
+        a cell and UMI repeat on its rows.
+
+        Returns:
+            The file's rows without a barcode, and the bytes then charged for
+            the counter's records.
         """
         from ...readers.lineage_barcodes import iter_barcode_rows
 
-        chunk_rows = layout.chunk_rows(self.memoryBytes // _CHUNK_SHARE)
-        reading = layout.held_bytes() + layout.chunk_bytes(chunk_rows)
-        # A budget too small for the lookup, the file's names and one chunk
-        # refuses before a row is read.
-        self._check_barcode_budget(
-            counter, cells=held, reading=reading + join.unmatched_bytes
+        # A chunk takes a twentieth of the room left when the file is planned.
+        room = ledger.room
+        chunk_rows = layout.chunk_rows(
+            self.memoryBytes // _CHUNK_SHARE if room is None else room // _CHUNK_SHARE
+        )
+        # A smaller selection holds the file's names and chunks all the same.
+        reading = ledger.hold(
+            f"the barcode file's names and a chunk of {chunk_rows} rows",
+            layout.held_bytes() + layout.chunk_bytes(chunk_rows),
+            remedy="",
         )
         if layout.library_column is None:
             # The file's library is listed even if it holds no row of a cell.
@@ -508,6 +541,11 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         n_empty = 0
         for rows in iter_barcode_rows(layout, chunk_rows):
             if keys is not None:
+                ledger.hold(
+                    "the keys of the file's molecules",
+                    _KEY_BYTES * len(rows.cells),
+                    remedy="",
+                )
                 keys.append(pair_keys(rows.cells, rows.umis))
                 n_keys += len(rows.cells)
             cells = join.cells(file, rows.cells)
@@ -528,11 +566,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 reads=None if rows.reads is None else rows.reads[keep],
                 rows_are_reads=layout.level == "reads",
             )
-            self._check_barcode_budget(
-                counter,
-                cells=held,
-                reading=reading + _KEY_BYTES * n_keys + join.unmatched_bytes,
-            )
+            del rows, cells, keep, libraries
+            counted = self._held_records(ledger, counter, counted)
         if keys is not None:
             repeated = repeated_keys(keys)
             if repeated:
@@ -542,7 +577,10 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                     "molecules.txt or molecules_corrected.txt, which list each "
                     "molecule once"
                 )
-        return n_empty
+            del keys
+            ledger.release(_KEY_BYTES * n_keys)
+        ledger.release(reading)
+        return n_empty, counted
 
     def _barcode_assay(self, from_assay: Any) -> Any:
         """Return the assay whose features are barcodes, after checking its counts."""
@@ -572,18 +610,28 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         }
 
     def _count_assay(
-        self, assay: Any, library: str, cell_index: np.ndarray
-    ) -> tuple[CountedBarcodes, dict[str, Any]]:
-        """Count the barcodes that an assay counts as its features, as pairs."""
+        self, assay: Any, library: str, selection: CellSelectionRead
+    ) -> tuple[CountedBarcodes, dict[str, Any], MemoryLedger]:
+        """Count the barcodes that an assay counts as its features, as pairs, and return the ledger for the save."""
         feature_ids = np.asarray(assay.feats.fetch_all("ids"), dtype=object)
         counter = BarcodeCounter(merge_rows=self._merge_rows())
-        held = _CELL_BYTES * len(cell_index)
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Importing the barcodes of {selection.cells} selected cells",
+            remedy="pass a smaller cell_selection",
+            codec_threads=self.nthreads,
+        )
+        ledger.hold("each selected cell's arrays", _CELL_BYTES * selection.cells)
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the selected cells' positions"
+        )
+        counted = 0
         blocks = assay.rawData[cell_index, :]._stream_blocks(
             nthreads=self.nthreads,
             msg=f"({assay.name}) Reading barcode counts",
             prefetch=None,
             row_mask=None,
-            resident_bytes=held,
+            resident_bytes=ledger.held_bytes,
             memory_bytes=self.memoryBytes,
         )
         counter.add_library(library, molecules=False)
@@ -599,16 +647,24 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 feature_ids[columns],
                 umi_counts=block[rows, columns].astype(np.int64),
             )
-            self._check_barcode_budget(counter, cells=held)
+            counted = self._held_records(ledger, counter, counted)
             start += block.shape[0]
-        return counter.finish(), {
-            "n_file_rows": n_rows,
-            "n_unmatched_rows": 0,
-            "n_empty_rows": 0,
-            "n_file_barcodes": 0,
-            "n_unmatched_barcodes": 0,
-            "unmatched_barcode_examples": [],
-        }
+        records = counter.finish()
+        # The finished table replaces the records at their merge.
+        ledger.hold(f"the {records.table.n_records} records", records.table.nbytes)
+        ledger.release(counted)
+        return (
+            records,
+            {
+                "n_file_rows": n_rows,
+                "n_unmatched_rows": 0,
+                "n_empty_rows": 0,
+                "n_file_barcodes": 0,
+                "n_unmatched_barcodes": 0,
+                "unmatched_barcode_examples": [],
+            },
+            ledger,
+        )
 
     def _write_barcodes(
         self,
@@ -616,22 +672,45 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         counted: CountedBarcodes,
         n_cells: int,
         attributes: Mapping[str, Any],
+        *,
+        ledger: MemoryLedger,
     ) -> None:
+        """Save the counted records and each cell's summaries, charging both and the write to ``ledger``."""
         table = counted.table
+        ledger.hold("each cell's summaries", _SUMMARY_BYTES_PER_CELL * n_cells)
+        ledger.peak(
+            f"counting each cell's summaries of {table.n_records} records",
+            _COUNTING_BYTES_PER_RECORD * table.n_records
+            + _COUNTING_BYTES_PER_CELL * n_cells,
+        )
         summaries = cell_summaries(table, n_cells)
         libraries = library_summaries(counted)
-        arrays = record_arrays(table, _RECORDS)
+        arrays = {
+            "n_barcodes": summaries["n_barcodes"],
+            "n_umis": summaries["n_umis"],
+            "n_reads": summaries["n_reads"],
+            "n_records": summaries["n_records"],
+            **record_arrays(table, _RECORDS),
+        }
+        chunk_lengths = record_chunk_lengths(
+            {
+                name: values
+                for name, values in arrays.items()
+                if name.startswith(_RECORDS)
+            }
+        )
+        ledger.peak(
+            f"writing {table.n_records} records and {n_cells} cells",
+            cell_data_write_bytes(
+                {name: (values.shape, values.dtype) for name, values in arrays.items()},
+                chunk_lengths=chunk_lengths,
+            ),
+        )
         write_cell_data_artifact(
             self.zw,
             planned,
-            {
-                "n_barcodes": summaries["n_barcodes"],
-                "n_umis": summaries["n_umis"],
-                "n_reads": summaries["n_reads"],
-                "n_records": summaries["n_records"],
-                **arrays,
-            },
-            chunk_lengths=record_chunk_lengths(arrays),
+            arrays,
+            chunk_lengths=chunk_lengths,
             attributes={
                 "fields": list(FIELDS),
                 "libraries": libraries,
@@ -885,13 +964,19 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         allowlist_bytes = 0 if allowed is None else _ALLOWLIST_BYTES * len(allowed)
         # Every cell with a barcode needs a label in the within columns.
         with_barcodes = np.asarray(stored_counts[:]) > 0
+        grouping = MemoryLedger(
+            self.memoryBytes,
+            f"Grouping the {n_cells} cells of the barcodes",
+            codec_threads=self.nthreads,
+        )
+        grouping.hold("the allowlist", allowlist_bytes)
         group_codes, _keys, within_fingerprint = within_groups(
             self.zw,
             self.cells,
             cell_selection,
             columns,
             with_barcodes,
-            memory_bytes=self.memoryBytes - allowlist_bytes,
+            ledger=grouping,
             what="a barcode",
         )
         del with_barcodes
@@ -1019,6 +1104,15 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             "doublets": int(sum(calls.n_doublet_nodes)),
             "cells_in_small_clones": calls.n_small_cells,
         }
+        saving = MemoryLedger(
+            self.memoryBytes,
+            f"Calling clones from the barcodes of {n_cells} cells",
+            codec_threads=self.nthreads,
+        )
+        saving.hold(
+            "each cell's group and calls and the clones' labels",
+            _CALLED_CELL_BYTES * n_cells + sum(map(sys.getsizeof, labels.tolist())),
+        )
         write_clones(
             self.zw,
             planned,
@@ -1043,9 +1137,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 "n_barcodes": called.n_barcodes.astype(np.int32),
                 "doublet": calls.doublets.astype(bool),
             },
-            memory_bytes=self.memoryBytes,
-            held_bytes=_CALLED_CELL_BYTES * n_cells
-            + sum(map(sys.getsizeof, labels.tolist())),
+            ledger=saving,
         )
         n_assigned = int(np.count_nonzero(calls.codes >= 0))
         largest = int(calls.sizes[0]) if calls.n_clones else 0

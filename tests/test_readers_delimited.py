@@ -566,3 +566,27 @@ def test_pandas_errors_of_a_parse_name_the_file(tmp_path) -> None:
         pytest.raises(ValueError, match=r"c\.csv\.gz is cut short or corrupt"),
     ):
         list(delimited.parsed_chunks(str(cut), handle, **options))
+
+
+def test_stripping_text_leaves_no_reference_cycle() -> None:
+    import gc
+    import weakref
+
+    from cytearc.readers._delimited import joined_columns, stripped_text
+
+    # pandas 2 keeps the .str accessor on its Series, which the accessor
+    # holds, so a chunk stripped through it would outlive its last reference
+    # until a collection; stripped one value at a time, it goes at once.
+    frame = pd.DataFrame({0: [" a ", "b\t", ""], 1: ["x", " y", "z"]}, dtype=object)
+    column = frame[0]
+    gone = (weakref.ref(frame), weakref.ref(column))
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        assert stripped_text(column).tolist() == ["a", "b", ""]
+        assert joined_columns(frame, [0, 1], "_").tolist() == ["a_x", "b_y", ""]
+        del frame, column
+        assert [reference() for reference in gone] == [None, None]
+    finally:
+        if collecting:
+            gc.enable()

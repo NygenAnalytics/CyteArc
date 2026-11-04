@@ -16,6 +16,7 @@ import zarr
 import cytearc.datastore._operations.record_tables as record_tables
 import cytearc.datastore._operations.repertoire as repertoire_operations
 import cytearc.metadata.rows as metadata_rows
+import cytearc.metadata.selection as metadata_selection
 import cytearc.writers.airr as airr_writer
 from cytearc.metadata.records import EncodedText, encode_text
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
@@ -1178,6 +1179,11 @@ def test_receptors_without_contigs_export_their_header(tmp_path) -> None:
 
 
 def test_the_cells_ids_are_checked_before_each_read(tmp_path) -> None:
+    from cytearc.metadata.selection import (
+        plan_cell_selection_read,
+        read_cell_selection,
+    )
+
     store, receptors = _edge_receptors(tmp_path)
     ids = store.cells._get_array("ids")
     selection = inspect_artifact(store.zw, receptors).input_ref("cell_selection")
@@ -1190,23 +1196,28 @@ def test_the_cells_ids_are_checked_before_each_read(tmp_path) -> None:
 
     refusals = _walk(read)
     packed, longest = read(10**9)
-    # The selection's positions, 32 bytes a cell as read, with two chunks of
-    # its mask, one read and one held from a read before; then, beside what
-    # that read may still hold, the positions kept, 8 bytes a cell, and the
-    # offsets of the eight IDs, 72 bytes; and each slice of one ID beside the
-    # positions and offsets, the IDs packed before it, 5 bytes each, and what
-    # the read before may still hold: the mask's chunk before the first, and
-    # a chunk of the IDs after it. The mask and the IDs are each one chunk
-    # of the 8 cells, so the positions and the offsets refuse on their own.
+    # The selection's positions, as a read of its mask holds them; then the
+    # offsets of the eight IDs, 72 bytes, and each slice of one ID beside the
+    # positions kept, 8 bytes a cell, the IDs packed before it, 5 bytes each,
+    # and what the read before may still hold: the mask's chunk before the
+    # first, and a chunk of the IDs after it. The mask and the IDs are each
+    # one chunk of the 8 cells, and the positions kept and the offsets, beside
+    # the mask's chunk, fit within what the read of the mask plans, so they
+    # refuse with it.
+    assert mask.chunks == ids.chunks == (8,)
+    planned = plan_cell_selection_read(store.zw, selection, cells=8)
+    reading = MemoryLedger(None, "Reading")
+    _positions, taken = charges(
+        lambda: read_cell_selection(reading, store.zw, planned, item="the cells")
+    )
     one_id = metadata_rows.row_read_bytes(array_geometry(ids), np.asarray([0]))
     held_before = [array_geometry(mask).heldReadBytes()] + [
         array_geometry(ids).heldReadBytes()
     ] * 7
-    assert refusals == [
-        32 * 8 + 2 * _chunk(mask),
-        held_before[0] + 64,
-        held_before[0] + 64 + 72,
-    ] + [held_before[k] + 64 + 72 + 5 * k + one_id for k in range(8)]
+    assert held_before[0] + 64 + 72 < taken[0][2]
+    assert refusals == [taken[0][2]] + [
+        held_before[k] + 64 + 72 + 5 * k + one_id for k in range(8)
+    ]
     assert bytes(packed.data) == b"".join(f"cell{k}".encode() for k in range(8))
     assert packed.offsets.tolist() == list(range(0, 45, 5)) and longest == 5
     # The packed IDs and their offsets stay charged; the positions do not.
@@ -1649,6 +1660,7 @@ def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
         )
 
     monkeypatch.setattr(metadata_rows, "array_geometry", geometry)
+    monkeypatch.setattr(metadata_selection, "array_geometry", geometry)
     monkeypatch.setattr(repertoire_operations, "array_geometry", geometry)
     held: list[np.ndarray] = []
     getitem = zarr.Array.__getitem__

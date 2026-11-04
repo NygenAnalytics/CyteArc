@@ -15,12 +15,13 @@ from cytearc.datastore._operations.record_tables import (
     stored_records,
 )
 from cytearc.metadata.records import INTEGER, RAGGED, TEXT, RecordEncoder
+from cytearc.utils.memory_budget import MemoryLedger
 
 _FIELDS = {"name": RAGGED, "barcode": TEXT, "reads": INTEGER}
 
 
 def _table():
-    encoder = RecordEncoder(_FIELDS)
+    encoder = RecordEncoder(_FIELDS, ledger=MemoryLedger(None, "encoding"))
     encoder.add(
         pd.DataFrame(
             {

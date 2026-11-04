@@ -17,6 +17,7 @@ from cytearc.repertoire.chains import (
 )
 from cytearc.metadata.records import EncodedText, encode_text
 from cytearc.repertoire.contigs import FIELDS, contig_encoder
+from cytearc.utils.memory_budget import MemoryLedger
 
 
 def _table(rows: list[dict], cells: list[int]):
@@ -36,7 +37,7 @@ def _table(rows: list[dict], cells: list[int]):
             frame[name] = np.asarray(
                 [-1 if value is None else value for value in values], dtype=np.int64
             )
-    encoder = contig_encoder()
+    encoder = contig_encoder(MemoryLedger(None, "encoding"))
     encoder.add(pd.DataFrame(frame), np.asarray(cells), source=0)
     return encoder.finish()
 
@@ -215,7 +216,7 @@ def test_contigs_that_are_not_chains_fill_no_slot() -> None:
 
 
 def test_without_a_productive_field_productive_only_is_refused() -> None:
-    encoder = contig_encoder()
+    encoder = contig_encoder(MemoryLedger(None, "encoding"))
     encoder.add(
         pd.DataFrame(
             {
@@ -238,7 +239,7 @@ def test_without_a_productive_field_productive_only_is_refused() -> None:
 
 
 def test_cells_without_contigs_have_empty_slots() -> None:
-    table = contig_encoder().finish()
+    table = contig_encoder(MemoryLedger(None, "encoding")).finish()
     locus = EncodedText.from_categories(np.empty(0, np.int32), [])
     index = index_chains(table, 3, locus=locus)
     assert index.slots.shape == (3, 4) and (index.slots == -1).all()

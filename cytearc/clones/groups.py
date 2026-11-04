@@ -123,3 +123,16 @@ def pair_counts(
     pairs = ordered[starts]
     cells = np.diff(starts, append=len(ordered)).astype(np.int64)
     return pairs // n_codes, pairs % n_codes, cells
+
+
+def pair_count_bytes(n_cells: int, n_pairs: int) -> int:
+    """Return the most bytes that :func:`pair_counts` holds beside its inputs, for ``n_cells`` cells and at most ``n_pairs`` pairs.
+
+    Sorting the cells' pairs holds three int64 values a cell at once: the
+    sorted values, those values beside a leading -1, and their differences.
+    Making each pair's group, clone and cells holds the sorted values beside
+    40 bytes a pair, of which the 24 bytes of the three results stay. Traced
+    on 100,000 cells, 400 pairs held 24.0 bytes a cell, 63,282 pairs 33.3
+    and 100,000 pairs 48.0, as this counts them.
+    """
+    return int(max(24 * n_cells, 8 * n_cells + 40 * n_pairs))

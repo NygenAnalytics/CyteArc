@@ -21,8 +21,17 @@ from ...metadata.arguments import (
     VariantSelectionArguments,
 )
 from ...metadata.artifacts import plan_cell_data_artifact
-from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
-from ...metadata.selection import cell_selection_indices
+from ...metadata.rows import (
+    read_metadata_rows_chunkwise,
+    read_text_rows,
+    text_read_bytes,
+)
+from ...metadata.selection import (
+    CellSelectionRead,
+    cell_selection_indices,
+    plan_cell_selection_read,
+    read_cell_selection,
+)
 from ...storage.arrays import create_metadata_column, zarr_write_buffer_bytes
 from ...storage.artifact_writer import (
     PlannedArtifact,
@@ -43,6 +52,7 @@ from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sorted_unique
 from ...utils.files import is_hdf5
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryLedger
 from ...variants.counts import (
     CALL_DTYPE,
     CALL_FIELDS,
@@ -130,6 +140,7 @@ _BAND_COPIES = 6
 # buffers; and the bands, read beside the last buffer, two fifths.
 _PARSE_SHARE = 5
 _BUFFER_SHARE = 10
+_SPILL_BUFFERS = 3
 _BAND_SHARE = 2.5
 # The smallest budget that parses mgatk's base files on several threads:
 # each thread's parser and allocator hold a few megabytes beyond its rows,
@@ -144,8 +155,8 @@ _REWRITTEN_CHUNKS = 4
 # row where fewer, so appending bands writes each chunk about 33 times at
 # most, where bands of a few cells would rewrite every chunk once a band.
 # 8,000 Tapestri cells of 40 variants, 838,970 rows in one chunk of each
-# array, then need 27,589,320 bytes, hold 11,977,833 and run in 1.7 s; with
-# a whole chunk to a band they need 173,884,680 bytes.
+# array, then need 18,026,255 bytes, hold 9,976,376 and run in 2 to 3 s;
+# with a whole chunk to a band they need 101,623,601 bytes.
 _BAND_CHUNK_PARTS = 32
 # The rows parsed at once lie in [_MIN_CHUNK_ROWS, _MAX_CHUNK_ROWS].
 _MIN_CHUNK_ROWS = 1_000
@@ -526,6 +537,30 @@ def _read(group: zarr.Group, name: str) -> np.ndarray:
     return np.asarray(as_zarr_array(group[name], name=name)[:])
 
 
+def _band_budget(budget: int, room: int, left: int, needed: int) -> int:
+    """The least budget above ``budget`` at which a band of ``needed`` bytes fits beside what the variant import holds.
+
+    The import held its sort buffers, ``_SPILL_BUFFERS`` of a
+    ``_BUFFER_SHARE``-th of the ``room`` that its budget left once the join
+    held its lookup, and ``left`` bytes are left now; every byte more of
+    budget adds a byte to the room, of which the buffers take their share.
+    """
+
+    def left_at(extra: int) -> int:
+        grown = (room + extra) // _BUFFER_SHARE - room // _BUFFER_SHARE
+        return left + extra - _SPILL_BUFFERS * grown
+
+    extra = max(1, math.ceil((needed - left) / (1 - _SPILL_BUFFERS / _BUFFER_SHARE)))
+    while left_at(extra) < needed:
+        extra += 1
+    # The buffers grow a step every _BUFFER_SHARE bytes, so a smaller budget
+    # just below may fit too.
+    for fewer in range(extra - 1, max(0, extra - 2 * _BUFFER_SHARE), -1):
+        if left_at(fewer) >= needed:
+            extra = fewer
+    return budget + extra
+
+
 def _stored_row_bounds(sorter: CellRowSorter) -> tuple[int, int]:
     """The most rows that the stored depth and counts, and the calls, hold.
 
@@ -703,11 +738,12 @@ def _variant_bands(
 
 
 class _VariantOperationsMixin(_VariantOperationsBase):
-    def _variant_selection_indices(self, cell_selection: ArtifactRef) -> np.ndarray:
-        cell_index = cell_selection_indices(self.zw, cell_selection)
-        if not len(cell_index):
+    def _variant_selection_read(self, cell_selection: ArtifactRef) -> CellSelectionRead:
+        """Check and count a cell selection, whose cells the import reads within its ledger."""
+        planned = plan_cell_selection_read(self.zw, cell_selection)
+        if not planned.cells:
             raise ValueError("cell_selection selects no cell")
-        return cell_index
+        return planned
 
     @validation_scoped
     def _variants_import_counts(
@@ -909,8 +945,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             [source.reader.sites() for source in sources],
             open_alleles=rules.open_alleles,
         )
-        cell_index = self._variant_selection_indices(cell_selection)
-        n_cells = len(cell_index)
+        selection = self._variant_selection_read(cell_selection)
+        n_cells = selection.cells
         arguments = VariantCountImportArguments(
             cell_selection=cell_selection,
             sources=tuple(source.record() for source in sources),
@@ -925,42 +961,39 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 artifact_group(self.zw, planned.ref).attrs, files_text
             )
             return planned.ref
-        # What the import holds for the selected cells, and the read of their
-        # IDs as text, which decodes a stored chunk of them, are checked before
-        # the IDs are read.
-        reading = (
-            LOOKUP_BYTES_PER_CELL + _IMPORT_BYTES_PER_CELL
-        ) * n_cells + text_read_bytes(self.cells._get_array("ids"), n_cells)
-        if reading > self.memoryBytes:
-            raise MemoryError(
-                f"Reading the IDs of {n_cells} selected cells holds about {reading} "
-                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
-                "Raise mem_budget, or pass a smaller cell_selection."
-            )
         self._require_writable(arguments.operation)
-        cell_ids = np.asarray(
-            read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Importing variant counts for {n_cells} selected cells",
+            remedy="pass a smaller cell_selection",
+            codec_threads=self.nthreads,
         )
-        join = CellBarcodeJoin(
-            cell_ids,
-            memory_bytes=self.memoryBytes,
-            held_bytes=_IMPORT_BYTES_PER_CELL * n_cells,
+        ledger.hold("each selected cell's state", _IMPORT_BYTES_PER_CELL * n_cells)
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the selected cells' positions"
         )
-        # The parsed chunks, the sort buffer and the bands share what the join
-        # leaves: it holds its lookup, the cells' IDs as text and the bytes
-        # held for each cell.
-        held = join.held_bytes
-        room = self.memoryBytes - held
+        cell_ids = read_text_rows(
+            ledger,
+            self.cells._get_array("ids"),
+            cell_index,
+            item="the selected cells' IDs",
+        )
+        join = CellBarcodeJoin(cell_ids, ledger=ledger)
+        # The parsed chunks, the sort buffer and the bands share what the
+        # ledger's room leaves once the join holds its lookup; the hashes of
+        # barcodes that match no cell grow in what the shares leave.
+        room = int(self.memoryBytes if ledger.room is None else ledger.room)
         chunk_rows = int(
             min(room // (_PARSE_SHARE * _PARSE_BYTES_PER_ROW), _MAX_CHUNK_ROWS)
         )
+        parsing = _PARSE_BYTES_PER_ROW * max(chunk_rows, _MIN_CHUNK_ROWS)
         if chunk_rows < _MIN_CHUNK_ROWS:
-            raise MemoryError(
-                f"Importing variant counts of {n_cells} cells holds about {held} "
-                f"bytes before it reads a row, which leaves too little of the memory "
-                f"budget of {self.memoryBytes} bytes to read the files. Raise "
-                "mem_budget, or pass a smaller cell_selection."
+            # The least chunk, at its share of the room.
+            ledger.peak(
+                f"a chunk of {_MIN_CHUNK_ROWS} parsed rows", _PARSE_SHARE * parsing
             )
+        buffer_bytes = room // _BUFFER_SHARE
+        ledger.hold("the sorted rows' buffers", _SPILL_BUFFERS * buffer_bytes)
         counts_dtype = count_dtype(rules.count_fields)
         sorter = CellRowSorter(
             {
@@ -969,7 +1002,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "calls": (CALL_DTYPE, ("cell", "key", "source")),
             },
             n_cells=n_cells,
-            buffer_bytes=room // _BUFFER_SHARE,
+            buffer_bytes=buffer_bytes,
         )
         call_sources = _Vocabulary()
         call_values = _Vocabulary()
@@ -982,7 +1015,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 # Matrix sources share one barcode array across their batches,
                 # which is joined once.
                 joined: tuple[np.ndarray | None, np.ndarray] = (None, np.empty(0))
-                for batch in source.reader.batches(chunk_rows):
+                batches = source.reader.batches(chunk_rows)
+                while True:
+                    ledger.hold(f"a chunk of {chunk_rows} parsed rows", parsing)
+                    batch = next(batches, None)
+                    if batch is None:
+                        ledger.release(parsing)
+                        break
                     n_rows += batch.n_rows
                     if batch.barcodes is not joined[0]:
                         joined = (
@@ -1003,6 +1042,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                         field_paths=rules.field_paths,
                         call_fields=rules.call_fields,
                     )
+                    del batch
+                    ledger.release(parsing)
             if not n_rows:
                 raise ValueError(
                     f"No row of counts, depth, calls or cells is in {files_text}"
@@ -1012,22 +1053,32 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             rewritten = (
                 _REWRITTEN_CHUNKS * min(_ROW_BAND, max(1, n_entry_rows)) * _STORED_BYTES
             )
-            band_bytes = int(room / _BAND_SHARE) - rewritten
-            # Appending a band rewrites the stored chunks that it ends in, so a
-            # band holds at least a share of a chunk's rows, _BAND_CHUNK_PARTS.
+            # The bands take their share of the room, or what the room leaves
+            # now that the rows are parsed, if less. Appending a band rewrites
+            # the stored chunks that it ends in, so a band holds at least a
+            # share of a chunk's rows, _BAND_CHUNK_PARTS.
+            left = room if ledger.room is None else ledger.room
+            band_bytes = int(min(room / _BAND_SHARE, left)) - rewritten
             least_rows = math.ceil(
                 min(_ROW_BAND, max(1, n_entry_rows + n_call_rows)) / _BAND_CHUNK_PARTS
             )
-            least_bytes = least_rows * _BAND_COPIES * counts_dtype.itemsize
-            if band_bytes < least_bytes:
-                needed = held + math.ceil(_BAND_SHARE * (rewritten + least_bytes))
-                raise MemoryError(
-                    f"Writing the variant counts in bands of {least_rows} rows "
-                    f"holds about {needed} bytes, more than the memory budget of "
-                    f"{self.memoryBytes} bytes, as each band rewrites stored "
-                    f"chunks of about {rewritten} bytes. Raise mem_budget."
+            row_bytes = _BAND_COPIES * counts_dtype.itemsize
+            band_bytes = max(least_rows * row_bytes, band_bytes)
+            item = (
+                f"a band of at least {least_rows} sorted rows and the stored chunks "
+                "that it rewrites"
+            )
+            if ledger.room is not None and rewritten + band_bytes > ledger.room:
+                # The sort buffers grow with the budget, so the refusal names
+                # the least budget at which the band fits beside them.
+                ledger.refuse_beyond(
+                    item,
+                    _band_budget(
+                        self.memoryBytes, room, ledger.room, rewritten + band_bytes
+                    ),
                 )
-            band_rows = band_bytes // (_BAND_COPIES * counts_dtype.itemsize)
+            ledger.peak(item, rewritten + band_bytes)
+            band_rows = band_bytes // row_bytes
             attributes = {
                 **join.attributes(),
                 "format": formats[0],
@@ -2268,7 +2319,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             cell_selection,
             columns,
             scored,
-            memory_bytes=self.memoryBytes,
+            ledger=MemoryLedger(
+                self.memoryBytes,
+                f"Grouping the {n_cells} cells of the variant counts",
+                codec_threads=self.nthreads,
+            ),
             what="counts that the statistics scored",
         )
         del scored
@@ -2362,14 +2417,22 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "n_cells_without_neighbors": counts_by_status["no_neighbor"],
             "n_edges": called.n_edges,
         }
+        saving = MemoryLedger(
+            self.memoryBytes,
+            f"Calling clones from the variant frequencies of {n_cells} cells",
+            codec_threads=self.nthreads,
+        )
+        saving.hold(
+            "each cell's call and the clones' labels",
+            _CLONE_CALL_BYTES_PER_CELL * n_cells
+            + sum(map(sys.getsizeof, assignment.clone_ids.tolist())),
+        )
         write_clones(
             self.zw,
             planned,
             assignment,
             attributes,
-            memory_bytes=self.memoryBytes,
-            held_bytes=_CLONE_CALL_BYTES_PER_CELL * n_cells
-            + sum(map(sys.getsizeof, assignment.clone_ids.tolist())),
+            ledger=saving,
         )
         log_clones(assignment, n_cells)
         return planned.ref
@@ -3233,13 +3296,19 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         known_rows = mutant_rows | (on_chosen & (calls == WILD_TYPE))
         members = np.zeros(n_cells, dtype=bool)
         members[cells_of_rows[mutant_rows]] = True
+        grouping = MemoryLedger(
+            self.memoryBytes,
+            f"Grouping the {n_cells} cells of the genotypes",
+            codec_threads=self.nthreads,
+        )
+        grouping.hold("the genotype calls", reading)
         group_codes, _keys, within_fingerprint = within_groups(
             self.zw,
             self.cells,
             cell_selection,
             columns,
             members,
-            memory_bytes=self.memoryBytes - reading,
+            ledger=grouping,
             what="a mutant call",
         )
         arguments = GenotypeCloneArguments(
@@ -3317,16 +3386,25 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "n_nodes": called.n_nodes,
             "n_edges": called.n_edges,
         }
+        saving = MemoryLedger(
+            self.memoryBytes,
+            f"Calling clones from the genotypes of {n_cells} cells",
+            codec_threads=self.nthreads,
+        )
+        saving.hold(
+            "each cell's calls, the clones' labels and what calling holds "
+            "whatever the counts",
+            _GENOTYPE_FIXED_BYTES
+            + _GENOTYPE_CLONE_CALL_BYTES_PER_CELL * n_cells
+            + sum(map(sys.getsizeof, labels.tolist())),
+        )
         write_clones(
             self.zw,
             planned,
             assignment,
             attributes,
             source_arrays={"ambiguous": called.ambiguous.astype(bool)},
-            memory_bytes=self.memoryBytes,
-            held_bytes=_GENOTYPE_FIXED_BYTES
-            + _GENOTYPE_CLONE_CALL_BYTES_PER_CELL * n_cells
-            + sum(map(sys.getsizeof, labels.tolist())),
+            ledger=saving,
         )
         log_clones(assignment, n_cells)
         return planned.ref

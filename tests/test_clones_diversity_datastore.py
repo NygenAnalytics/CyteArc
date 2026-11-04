@@ -14,9 +14,14 @@ import pytest
 import cytearc.datastore._operations.clones as operations
 from cytearc.clones import ClonalDiversity, Rarefaction
 from cytearc.clones import diversity as dv
-from tests.clone_helpers import every_cell, import_truth_clones, write_truth_store
+from tests.clone_helpers import (
+    every_cell,
+    grouping_without_a_budget,
+    import_truth_clones,
+    write_truth_store,
+)
 from tests.clone_truth import CLONE_SIZES, N_CELLS, clone_truth
-from tests.memory_helpers import traced_peak
+from tests.memory_helpers import budget_that_runs, traced_peak
 from tests.storage_helpers import copy_store, insert_nullable_cell_column
 
 TRUTH = clone_truth()
@@ -219,12 +224,21 @@ def test_diversity_refuses_other_artifacts_and_large_stores(
         store.clones.diversity(copied.cells)
     with pytest.raises(TypeError, match="clones must be an ArtifactRef"):
         store.clones.rarefaction("clones")
-    # Grouping 48 cells takes 4,800 bytes.
-    monkeypatch.setattr(store, "memoryBytes", 4_799)
-    with pytest.raises(MemoryError, match="by 0 columns holds about 4800 bytes"):
+    # Grouping 48 cells reads the clones' cell selection, a flag for each
+    # cell of the store in the one chunk of their 48 rows, and charges it
+    # before it reads it.
+    from cytearc.storage.artifacts import artifact_group, inspect_artifact
+
+    selection = inspect_artifact(store.zw, clones).input_ref("cell_selection")
+    assert artifact_group(store.zw, selection)["values"].chunks == (N_CELLS,)
+    budget, refusals, result, _peak = budget_that_runs(
+        store, lambda opened: opened.clones.diversity(clones), traced=False
+    )
+    assert any("for the cells of the artifact's selection" in text for text in refusals)
+    assert result.indices["n_cells"].tolist() == [32]
+    monkeypatch.setattr(store, "memoryBytes", budget - 1)
+    with pytest.raises(MemoryError, match=f"holds about {budget} bytes"):
         store.clones.diversity(clones)
-    monkeypatch.setattr(store, "memoryBytes", 4_800)
-    assert store.clones.diversity(clones).indices["n_cells"].tolist() == [32]
 
 
 def test_each_group_counts_beside_its_cells(copied, monkeypatch) -> None:
@@ -240,6 +254,8 @@ def test_each_group_counts_beside_its_cells(copied, monkeypatch) -> None:
         "own", cell_selection=store.snapshot_cell_selection("has_clone")
     )
     needed = 32 * 2_000 + 32 * 56
+    # The grouping, which the test leaves without a budget, is checked first.
+    grouping_without_a_budget(monkeypatch)
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
     with pytest.raises(MemoryError, match=f"32 groups holds about {needed} bytes"):
         store.clones.diversity(clones, groups=own)

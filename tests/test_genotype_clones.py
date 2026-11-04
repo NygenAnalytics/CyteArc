@@ -386,7 +386,8 @@ def test_genotype_clones_refuse_a_budget_too_small_before_writing(
     store.memoryBytes = 500
     with pytest.raises(MemoryError, match="Raise mem_budget"):
         store.variants.genotype_clones(genotypes)
-    # A budget that reads the calls but not the cells' sets and masks.
+    # A budget that reads the calls and groups the cells, each cell's group
+    # 8 bytes beside the calls, but not the cells' sets and masks.
     from cytearc.datastore._operations import variants
 
     n_cells = len(IDS)
@@ -395,6 +396,7 @@ def test_genotype_clones_refuse_a_budget_too_small_before_writing(
         variants._GENOTYPE_FIXED_BYTES
         + variants._GENOTYPE_CLONE_BYTES_PER_CELL * n_cells
         + variants._GENOTYPE_CLONE_BYTES_PER_ROW * n_rows
+        + 8 * n_cells
     )
     with pytest.raises(MemoryError, match="Building the sites of 6 mutant cells"):
         store.variants.genotype_clones(genotypes)

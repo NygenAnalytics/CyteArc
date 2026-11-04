@@ -6,9 +6,7 @@ quirks. Each import must give exactly the records that the truth fixes for
 the file, state by state.
 """
 
-import re
 import shutil
-import sys
 import warnings
 from pathlib import Path
 
@@ -16,9 +14,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
+from cytearc.datastore._operations.cell_barcodes import lookup_bytes
 from cytearc.datastore._operations.recorder_alleles import _CELL_BYTES, _FIXED_BYTES
+from cytearc.utils.memory_budget import object_array_bytes, python_text_bytes
 from tests.clone_helpers import every_cell, write_truth_store
+from tests.memory_helpers import charges
 from tests.storage_helpers import copy_store
 from tests.clone_truth import (
     CHAIN_TAPES,
@@ -588,28 +588,25 @@ def test_loads_name_missing_incomplete_and_other_artifacts(
 def test_the_selected_cells_ids_count_once_as_the_join_holds_them(
     tmp_path, monkeypatch
 ):
-    """The checks after the IDs are read count each ID as the string the join holds.
+    """The import charges each ID as the string that the join holds, once.
 
     Lengthening each of 200 IDs by 500 ASCII characters lengthens each of
-    their Python strings by 500 bytes, so the bytes counted for the selected
-    cells grow by 100,000, once, whatever the stored width of the IDs.
+    their Python strings by 500 bytes, so the bytes charged for the selected
+    cells once the join holds its lookup grow by 100,000, once, whatever the
+    stored width of the IDs.
     """
-    from cytearc.datastore._operations.recorder_alleles import (
-        _RecorderAlleleOperationsMixin,
-    )
+    from cytearc.datastore._operations import recorder_alleles as operations
     from tests.storage_helpers import open_store, write_count_store
 
-    checked: list[int] = []
-    check = _RecorderAlleleOperationsMixin._check_allele_budget
+    charged: list[int] = []
 
-    def counting(self, encoder, *, cells, **options):
-        checked.append(cells)
-        return check(self, encoder, cells=cells, **options)
+    class Join(operations.CellBarcodeJoin):
+        def __init__(self, cell_ids, *, ledger):
+            super().__init__(cell_ids, ledger=ledger)
+            charged.append(ledger.charged)
 
-    monkeypatch.setattr(
-        _RecorderAlleleOperationsMixin, "_check_allele_budget", counting
-    )
-    held: dict[int, set[int]] = {}
+    monkeypatch.setattr(operations, "CellBarcodeJoin", Join)
+    held: dict[int, int] = {}
     for extra in (0, 500):
         folder = tmp_path / f"ids_{extra}"
         folder.mkdir()
@@ -625,37 +622,27 @@ def test_the_selected_cells_ids_count_once_as_the_join_holds_them(
         path.write_text(
             "cell_barcode,intID1-RNF2\n" + "".join(f"{cell},1\n" for cell in ids)
         )
-        checked.clear()
+        charged.clear()
         store.clones.import_alleles(
             path, cell_selection=store.snapshot_cell_selection()
         )
-        # The first check comes before the IDs are read; the others hold them.
-        held[extra] = set(checked[1:])
-        # What the import holds for each cell, the join's lookup and each ID
-        # as the Python string that the lookup holds, each counted once.
-        assert held[extra] == {
-            (_CELL_BYTES + LOOKUP_BYTES_PER_CELL) * len(ids)
-            + sum(map(sys.getsizeof, ids))
-        }
-    assert held[500].pop() - held[0].pop() == 200 * 500
+        (held[extra],) = charged
+        # What the import holds whatever its size and for each cell, each
+        # ID as a reference and an ASCII string, and the join's lookup.
+        assert held[extra] >= (
+            _FIXED_BYTES
+            + _CELL_BYTES * len(ids)
+            + object_array_bytes(len(ids))
+            + python_text_bytes(len(ids), sum(map(len, ids)))
+            + lookup_bytes(len(ids))
+        )
+    assert held[500] - held[0] == 200 * 500
 
 
-def test_the_check_before_the_ids_are_read_counts_the_cells_and_their_read(
-    tmp_path, monkeypatch
-):
-    """A budget one byte short of the cells' share refuses before an ID is read.
-
-    The share is what the import and the join's lookup hold for each selected
-    cell and the read of the cells' IDs, which decodes a stored chunk of
-    them, beside the bytes that the import holds whatever its size and the
-    file buffers that writing its records through Zarr will hold.
-    """
-    from cytearc.datastore._operations import recorder_alleles as operations
-    from cytearc.storage.arrays import zarr_write_buffer_bytes
-    from tests.clone_helpers import ids_read_bytes
+def _allele_store(tmp_path, n_cells: int):
     from tests.storage_helpers import open_store, write_count_store
 
-    ids = [f"cell{index:04d}" for index in range(200)]
+    ids = [f"cell{index:04d}" for index in range(n_cells)]
     write_count_store(
         str(tmp_path / "store.zarr"),
         {"RNA": np.ones((len(ids), 2), dtype=np.uint16)},
@@ -667,34 +654,53 @@ def test_the_check_before_the_ids_are_read_counts_the_cells_and_their_read(
     path.write_text(
         "cell_barcode,intID1-RNF2\n" + "".join(f"{cell},1\n" for cell in ids)
     )
-    reads: list[int] = []
-    read_rows = operations.read_metadata_rows_chunkwise
+    return store, path
 
-    def reading(*args, **options):
+
+def _first_plan(run, item: str) -> int:
+    """What a run's ledger planned at its first charge of ``item``."""
+    _result, taken = charges(run)
+    return next(planned for name, _nbytes, planned in taken if name == item)
+
+
+def test_the_cells_ids_are_charged_before_they_are_read(tmp_path, monkeypatch):
+    """A budget one byte short of what reading the cells' IDs holds refuses before an ID is read.
+
+    That is what the import holds whatever its size and for each selected
+    cell, beside the read of the cells' IDs, which decodes a stored chunk of
+    them.
+    """
+    import cytearc.metadata.rows as rows
+
+    store, path = _allele_store(tmp_path, 200)
+
+    def run():
+        return store.clones.import_alleles(
+            path, cell_selection=store.snapshot_cell_selection(), invalidate_cache=True
+        )
+
+    reading = _first_plan(run, "the selected cells' IDs")
+    assert reading > _FIXED_BYTES + _CELL_BYTES * 200
+    reads: list[int] = []
+    read_rows = rows.read_array_rows_chunkwise
+
+    def counted(*args, **options):
         reads.append(1)
         return read_rows(*args, **options)
 
-    monkeypatch.setattr(operations, "read_metadata_rows_chunkwise", reading)
-    share = (
-        _FIXED_BYTES
-        + (_CELL_BYTES + LOOKUP_BYTES_PER_CELL) * len(ids)
-        + ids_read_bytes(store, len(ids))
-        + zarr_write_buffer_bytes()
-    )
-    store.memoryBytes = share - 1
-    with pytest.raises(MemoryError, match="Importing alleles holds about"):
-        store.clones.import_alleles(
-            path, cell_selection=store.snapshot_cell_selection()
-        )
+    monkeypatch.setattr(rows, "read_array_rows_chunkwise", counted)
+    store.memoryBytes = reading - 1
+    with pytest.raises(
+        MemoryError,
+        match=f"Importing alleles for 200 selected cells holds about {reading} bytes "
+        "for the selected cells' IDs",
+    ):
+        run()
     assert not reads
-    # The empty records that the import starts with take a few bytes more;
-    # beyond them the check passes and the IDs are read, whatever later
-    # checks refuse.
-    store.memoryBytes = share + 1_024
+    # At that budget the IDs are read, whatever later charges refuse.
+    store.memoryBytes = reading
     try:
-        store.clones.import_alleles(
-            path, cell_selection=store.snapshot_cell_selection()
-        )
+        run()
     except MemoryError:
         pass
     assert reads
@@ -704,38 +710,23 @@ def test_imports_count_a_buffer_for_each_write_zarr_runs_at_once(tmp_path):
     # Zarr writes each chunk and each array's metadata through a buffered
     # file, as many at once as its async concurrency allows, and Python 3.14
     # made each buffer 128 KiB, where it was the file system's block. The
-    # check counts them for writing the records, before an ID is read.
+    # charge of writing the records counts them.
     import io
 
     import zarr
 
-    from tests.storage_helpers import open_store, write_count_store
-
-    ids = [f"cell{index:04d}" for index in range(20)]
-    write_count_store(
-        str(tmp_path / "store.zarr"),
-        {"RNA": np.ones((len(ids), 2), dtype=np.uint16)},
-        "uint16",
-        cell_ids=ids,
-    )
-    store = open_store(tmp_path / "store.zarr")
-    path = tmp_path / "characters.csv"
-    path.write_text(
-        "cell_barcode,intID1-RNF2\n" + "".join(f"{cell},1\n" for cell in ids)
-    )
+    store, path = _allele_store(tmp_path, 20)
 
     def stated(concurrency: int) -> int:
-        store.memoryBytes = 1
-        try:
-            with zarr.config.set({"async.concurrency": concurrency}):
-                store.clones.import_alleles(
-                    path, cell_selection=store.snapshot_cell_selection()
-                )
-        except MemoryError as error:
-            found = re.search(r"holds about (\d+) bytes at its peak", str(error))
-            assert found is not None, str(error)
-            return int(found.group(1))
-        raise AssertionError("a budget of one byte imported the alleles")
+        with zarr.config.set({"async.concurrency": concurrency}):
+            return _first_plan(
+                lambda: store.clones.import_alleles(
+                    path,
+                    cell_selection=store.snapshot_cell_selection(),
+                    invalidate_cache=True,
+                ),
+                "writing the 20 records",
+            )
 
     assert stated(20) - stated(10) == 10 * io.DEFAULT_BUFFER_SIZE
 

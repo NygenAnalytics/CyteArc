@@ -10,8 +10,10 @@ from cytearc.clones.groups import (
     checked_group_names,
     group_key_table,
     group_names,
+    pair_count_bytes,
     pair_counts,
 )
+from tests.memory_helpers import traced_peak
 
 
 def _pairs(groups: np.ndarray, clones: np.ndarray):
@@ -47,6 +49,31 @@ def test_pairs_count_each_clones_cells_in_each_group() -> None:
     assert cells.dtype == np.int64
     empty = pair_counts(np.array([], dtype=np.int64), np.array([], dtype=np.int64))
     assert [len(part) for part in empty] == [0, 0, 0]
+
+
+@pytest.mark.parametrize(
+    ("n_groups", "n_clones"),
+    [(8, 50), (1, 100_000), (13, 4_000)],
+    ids=["few pairs", "a pair for each cell", "some pairs"],
+)
+def test_counting_pairs_holds_what_its_bytes_state(n_groups, n_clones) -> None:
+    # 100,000 cells beside their codes: sorting holds three int64 values a
+    # cell, 2,400,000 bytes, and making the pairs 8 bytes a cell and 40 a
+    # pair, 4,800,000 bytes when each cell is a pair of its own.
+    rng = np.random.default_rng(9)
+    n_cells = 100_000
+    groups = rng.integers(0, n_groups, size=n_cells).astype(np.int64)
+    if n_clones == n_cells:
+        clones = rng.permutation(n_cells).astype(np.int64)
+    else:
+        clones = rng.integers(0, n_clones, size=n_cells).astype(np.int64)
+    result, peak = traced_peak(lambda: pair_counts(groups, clones), 1 << 30)
+    n_pairs = len(result[2])
+    stated = pair_count_bytes(n_cells, n_pairs)
+    assert stated == max(2_400_000, 800_000 + 40 * n_pairs)
+    assert 0.95 * stated <= peak <= stated + 4096, (peak, stated)
+    # A bound on the pairs from above states at least as much.
+    assert pair_count_bytes(n_cells, n_cells) >= stated
 
 
 def test_pairs_of_one_group_and_one_clone() -> None:

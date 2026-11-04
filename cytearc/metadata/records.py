@@ -40,6 +40,7 @@ import numpy as np
 import pandas as pd
 
 from ..utils.arrays import sorted_unique
+from ..utils.memory_budget import MemoryLedger
 from ..utils.numba import njit
 from ..utils.arguments import quoted_value
 
@@ -414,14 +415,19 @@ def pack_text(values: Any) -> tuple[np.ndarray, np.ndarray]:
 
 
 def unpack_text(data: np.ndarray, offsets: np.ndarray) -> np.ndarray:
-    """Return packed text as an object array of strings."""
+    """Return packed text as an object array of strings.
+
+    ASCII bytes are decoded once and cut at the offsets; other text is
+    decoded value by value, so no copy of the whole text is made beside the
+    values.
+    """
     buffer = np.asarray(data, dtype=np.uint8).tobytes()
     bounds = np.asarray(offsets, dtype=np.int64)
     starts, ends = bounds[:-1].tolist(), bounds[1:].tolist()
-    text = buffer.decode("utf-8")
     values = np.empty(len(starts), dtype=object)
-    if len(text) == len(buffer):
+    if buffer.isascii():
         # ASCII text has one byte per character, so the offsets index the text.
+        text = buffer.decode("ascii")
         values[:] = [text[start:end] for start, end in zip(starts, ends, strict=True)]
     else:
         values[:] = [
@@ -695,6 +701,25 @@ class RecordTable:
     def n_records(self) -> int:
         return len(self.cells)
 
+    @property
+    def nbytes(self) -> int:
+        """The bytes of the table's arrays."""
+        return int(
+            np.asarray(self.cells).nbytes
+            + np.asarray(self.sources).nbytes
+            + sum(
+                np.asarray(part).nbytes
+                for encoded in self.text.values()
+                for part in (encoded.codes, encoded.data, encoded.offsets)
+            )
+            + sum(
+                np.asarray(part).nbytes
+                for parts in self.ragged.values()
+                for part in parts
+            )
+            + sum(np.asarray(column).nbytes for column in self.values.values())
+        )
+
     def _kind(self, name: str) -> FieldKind:
         kind = self.kinds.get(name)
         if kind is None:
@@ -760,12 +785,18 @@ class RecordEncoder:
     merges the distinct values of all chunks, one field at a time, and sorts
     them.
 
+    The encoder charges to ``ledger`` the encoded arrays of each chunk
+    before it keeps them, and once it finishes, the table it returns in
+    place of the chunks. What encoding a chunk and merging the chunks hold
+    for a moment is the caller's to charge.
+
     Args:
         fields: The kind of each field to keep, in storage order.
         id_field: A ragged field whose values identify each record within its
             source, such as a contig ID, or None. The encoder then counts the
             records without an ID and finds the IDs that repeat within a
             source.
+        ledger: The memory ledger of the caller.
 
     Raises:
         TypeError: If ``fields`` is not a mapping.
@@ -774,7 +805,11 @@ class RecordEncoder:
     """
 
     def __init__(
-        self, fields: Mapping[str, FieldKind], *, id_field: str | None = None
+        self,
+        fields: Mapping[str, FieldKind],
+        *,
+        id_field: str | None = None,
+        ledger: MemoryLedger,
     ) -> None:
         self._kinds = _checked_fields(fields)
         if id_field is not None and self._kinds.get(id_field) != RAGGED:
@@ -783,6 +818,7 @@ class RecordEncoder:
                 "values identify each record"
             )
         self._id_field = id_field
+        self._ledger = ledger
         self._chunks: list[_Chunk] = []
         self._fields: set[str] = set()
         self._nbytes = 0
@@ -832,6 +868,8 @@ class RecordEncoder:
                 cell, the source, an integer, a flag or a number is out of
                 range.
             RuntimeError: If the encoder has finished.
+            MemoryBudgetError: If the chunk's encoded arrays would pass the
+                ledger's budget.
         """
         if self._finished:
             raise RuntimeError("The encoder has finished; start a new one")
@@ -883,15 +921,17 @@ class RecordEncoder:
         if self._id_field is not None and encoded.id_hashes is None:
             # A chunk without the ID field holds no record with an ID.
             missing_ids += n_rows
-        self._fields.update(fields)
-        self._missing_ids += missing_ids
-        self._nbytes += (
+        nbytes = (
             cell_positions.nbytes
             + sum(array.nbytes for parts in encoded.text.values() for array in parts)
             + sum(array.nbytes for parts in encoded.ragged.values() for array in parts)
             + sum(array.nbytes for array in encoded.values.values())
             + (0 if encoded.id_hashes is None else encoded.id_hashes.nbytes)
         )
+        self._ledger.hold(f"the {self.n_records + n_rows} records encoded", nbytes)
+        self._fields.update(fields)
+        self._missing_ids += missing_ids
+        self._nbytes += nbytes
         self._chunks.append(encoded)
 
     def repeated_ids(self, limit: int = 5) -> list[tuple[int, str]]:
@@ -943,10 +983,12 @@ class RecordEncoder:
         """Return the records ordered by cell, then source, then file row.
 
         The chunks are consumed field by field, so the encoder holds no more
-        than the table it returns and one field in transit.
+        than the table it returns and one field in transit. The table stays
+        charged to the ledger in place of the chunks.
 
         Raises:
             RuntimeError: If the encoder has finished already.
+            MemoryBudgetError: If the table would pass the ledger's budget.
         """
         if self._finished:
             raise RuntimeError("The encoder has finished; start a new one")
@@ -998,8 +1040,7 @@ class RecordEncoder:
                         placed[rows] = chunk.values.pop(name)
                 values[name] = placed
         self._chunks = []
-        self._nbytes = 0
-        return RecordTable(
+        table = RecordTable(
             cells=cells[order],
             sources=sources[order],
             kinds=MappingProxyType(kinds),
@@ -1007,6 +1048,12 @@ class RecordEncoder:
             ragged=MappingProxyType(ragged),
             values=MappingProxyType(values),
         )
+        # The table stays charged in place of the chunks it consumed, which
+        # are let go once it is held.
+        self._ledger.hold(f"the {table.n_records} records", table.nbytes)
+        self._ledger.release(self._nbytes)
+        self._nbytes = 0
+        return table
 
 
 def _missing_ragged(n_rows: int) -> tuple[np.ndarray, np.ndarray]:

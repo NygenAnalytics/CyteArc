@@ -20,11 +20,6 @@ import zarr
 import cytearc.datastore._operations.record_tables as record_tables
 import cytearc.datastore._operations.repertoire as repertoire_operations
 from cytearc import plotting
-from cytearc.datastore._operations.cell_groups import (
-    GROUPING_BYTES_PER_CELL,
-    GROUPING_BYTES_PER_COLUMN,
-    GROUPING_BYTES_PER_LABEL_BYTE,
-)
 from cytearc.metadata.rows import array_row_selection_parts
 from cytearc.repertoire import SLOTS, GeneUsage, Spectratype
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
@@ -627,9 +622,12 @@ def test_each_step_is_checked_before_it_reads_or_allocates(tmp_path, source) -> 
         assert steps["the chosen slots"] == 8 * (2 * 4 + 2 + 1)
         if of_clonotypes:
             assert steps["each cell's clonotype as int64"] == 8 * (4 + 8 + 1) - 8 * 4
-        # Without a grouping, each cell's group and the one group's keys.
-        assert steps["each cell's group and each group's labels and name"] == (
-            8 * 8 + repertoire_operations._KEY_BYTES_PER_GROUP
+        # Without a grouping, each cell's group, which the grouping holds, and
+        # the one group's row of the keys.
+        assert steps["each cell's group"] == 8 * 8
+        assert (
+            steps["the table of the groups' labels"]
+            == repertoire_operations._KEY_BYTES_PER_GROUP
         )
         # The 13 chains of VJ_1 and VDJ_1, with their locus and V call or
         # junction, and the clonotype of each with clonotypes, and a mask of
@@ -646,13 +644,21 @@ def test_each_step_is_checked_before_it_reads_or_allocates(tmp_path, source) -> 
         counting = f"Counting the {what} of the chains of 8 cells"
         refusals = budget_refusals(store, lambda measure=measure: measure(ref))
         assert {step for step, _bytes in refusals} == {counting}
+        # The grouping charges the step's ledger, so its refusals name the
+        # step, and its first charge sits beside what the step holds: the
+        # chosen slots, whether each cell holds a chain, each cell's clonotype
+        # with clonotypes, and what the step's last read may still hold among
+        # them, as the summaries' grouping charges them.
         grouped = budget_refusals(
             store, lambda measure=measure: measure(ref, group_by="sample")
         )
-        assert "Grouping 8 cells by 1 columns" in {step for step, _ in grouped}
-        # The grouping counts what the step holds, what its last read may
-        # still hold among it, beside its cells and a stored chunk of the
-        # column, as the summaries' grouping counts them.
+        assert {step for step, _bytes in grouped} == {counting}
+        _result, taken = charges(
+            lambda measure=measure: measure(ref, group_by="sample")
+        )
+        items = [item for item, _nbytes, _planned in taken]
+        assert "the cells of the artifact's selection" in items
+        assert "the labels of 'sample'" in items
         last_read = (
             artifact_group(store.zw, clonotypes)["codes"]
             if of_clonotypes
@@ -660,10 +666,8 @@ def test_each_step_is_checked_before_it_reads_or_allocates(tmp_path, source) -> 
         )
         held = 8 * 2 * 4 + 8 + (8 * 8 if of_clonotypes else 0)
         held += array_geometry(last_read).heldReadBytes()
-        per_cell = GROUPING_BYTES_PER_CELL + GROUPING_BYTES_PER_COLUMN
-        per_cell += GROUPING_BYTES_PER_LABEL_BYTE * 8
-        grouping = held + 8 * per_cell + _chunk(store.cells._get_array("sample"))
-        assert ("Grouping 8 cells by 1 columns", grouping) in grouped
+        first = items.index("the cells that may join a group")
+        assert taken[first][2] == held + 8
 
 
 def test_every_slot_is_read_for_its_chains(tmp_path) -> None:
@@ -885,7 +889,11 @@ def test_the_lengths_legend_names_at_most_80_groups(tmp_path) -> None:
 
 
 @pytest.mark.slow
-def test_the_groups_keys_are_checked_before_their_frame_is_built(tmp_path) -> None:
+def test_the_groups_keys_are_checked_before_their_frame_is_built(
+    tmp_path, monkeypatch
+) -> None:
+    from cytearc.datastore._operations import cell_groups as grouping
+
     # 4,096 cells, each a group of its own by 24 key columns of two labels,
     # whose keys outweigh the grouping that names them.
     n_cells, n_columns = 4_096, 24
@@ -901,29 +909,44 @@ def test_the_groups_keys_are_checked_before_their_frame_is_built(tmp_path) -> No
         contigs, cell_selection=every_cell(store)
     )
     columns = [f"bit{column}" for column in range(n_columns)]
-    refusals = budget_refusals(
-        store, lambda: store.repertoire.spectratype(receptors, group_by=columns)
+
+    def run() -> object:
+        return store.repertoire.spectratype(receptors, group_by=columns)
+
+    # The grouping holds each group's labels and name, 250 bytes and 70 for
+    # each key column, and the count then each group's row of the keys,
+    # before the frame of the keys is built.
+    _result, taken = charges(run)
+    held = [(item, nbytes) for item, nbytes, _planned in taken]
+    names = ("each group's labels and name", n_cells * (250 + 70 * n_columns))
+    table = (
+        "the table of the groups' labels",
+        n_cells
+        * (
+            repertoire_operations._KEY_BYTES_PER_GROUP
+            + repertoire_operations._KEY_BYTES_PER_GROUP_COLUMN * n_columns
+        ),
     )
-    last_grouping = max(
-        at for at, (what, _bytes) in enumerate(refusals) if what.startswith("Grouping")
+    assert names[1] == grouping._keys_bytes(n_cells, n_columns)
+    assert held.index(names) < held.index(table)
+    _budget, refusals, _ref, _peak = budget_that_runs(
+        store, lambda _store: run(), max_refusals=100, traced=False
     )
-    # Beside the two chosen int32 slots of each cell: each cell's group and,
-    # for each of the 4,096 groups, its labels, name and row of the keys.
-    keys = 4_096 * (
-        repertoire_operations._KEY_BYTES_PER_GROUP
-        + repertoire_operations._KEY_BYTES_PER_GROUP_COLUMN * n_columns
-    )
-    counting = "Counting the junction lengths of the chains of 4096 cells"
-    # What the slots' read may still hold counts until the next read.
-    left = array_geometry(
-        artifact_group(store.zw, receptors)["chain_slots"]
-    ).heldReadBytes()
-    held = n_cells * 2 * 4 + n_cells * 8 + keys + left
-    # The mask of the cells with a chain is let go once the keys are charged.
-    assert refusals[last_grouping + 1] == (counting, held + n_cells)
-    # Then the mask of the chains of the grouped cells in the two slots:
-    # whether each cell has a group, whether each slot holds a chain, and both.
-    assert refusals[last_grouping + 2] == (counting, held + n_cells * (2 * 2 + 1))
+    refused = [
+        re.search(r"bytes for (.+?), more than", text).group(1) for text in refusals
+    ]
+    assert refused.index(names[0]) < refused.index(table[0])
+    # Below the budget that the table's refusal names, the count refuses
+    # before it builds the frame.
+    stated = named_budget(refusals[refused.index(table[0])])
+
+    def unbuilt(*_arguments, **_options):
+        raise AssertionError("the keys' frame was built")
+
+    monkeypatch.setattr(repertoire_operations, "group_key_table", unbuilt)
+    store.memoryBytes = stated - 1
+    with pytest.raises(MemoryBudgetError, match="for the table of the groups' labels"):
+        run()
 
 
 def test_counting_is_checked_with_its_table_before_it_runs(tmp_path) -> None:

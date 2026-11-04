@@ -1236,15 +1236,22 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         self._require_writable(arguments.operation)
         # The join's lookup of the cells' IDs is held beside the cells'
         # positions, their IDs as text, the parsed file and the called guides.
-        join = CellBarcodeJoin(
-            cell_ids,
-            memory_bytes=self.memoryBytes,
-            held_bytes=_CALL_FIXED_BYTES
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Importing the guide calls of {n_cells} cells",
+            remedy="pass a smaller cell_selection",
+            codec_threads=self.nthreads,
+        )
+        ledger.hold(
+            "the cells' positions, their IDs as text, the parsed call file and the "
+            "called guides",
+            _CALL_FIXED_BYTES
             + 8 * n_cells
             + cell_ids.nbytes
             + size.parsed_bytes()
             + guide_positions.nbytes,
         )
+        join = CellBarcodeJoin(cell_ids, ledger=ledger)
         row_cells = join.cells(call_file, file_calls.barcodes)
         _refuse_shared_cells(row_cells, file_calls.barcodes, cell_ids)
         del join, cell_ids

@@ -66,6 +66,15 @@ def stated_bytes(refusal: BaseException, pattern: str = r"about (\d+) bytes") ->
     return int(found.group(found.lastindex or 0))
 
 
+def index_copies_references() -> bool:
+    """Whether this pandas copies an object array's references into an index built on it, as pandas 3 does and pandas 2 does not."""
+    import numpy as np
+    import pandas as pd
+
+    values = np.asarray(["x", "y"], dtype=object)
+    return not np.shares_memory(pd.Index(values, dtype=object).to_numpy(), values)
+
+
 def traced_peak(call: Callable[[], Any], budget: int) -> tuple[Any, int]:
     """Return the result of ``call()`` and the most bytes it held beside what was held before it.
 

@@ -35,8 +35,17 @@ from ...clones.recorders import (
 from ...metadata.arguments import AlleleCloneArguments, RecorderAlleleImportArguments
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from ...metadata.records import RecordEncoder, RecordTable, pack_text, unpack_text
-from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
-from ...metadata.selection import cell_selection_indices
+from ...metadata.rows import (
+    read_metadata_rows_chunkwise,
+    read_text_rows,
+    text_read_bytes,
+)
+from ...metadata.selection import (
+    CellSelectionRead,
+    cell_selection_indices,
+    plan_cell_selection_read,
+    read_cell_selection,
+)
 from ...storage.arrays import zarr_write_buffer_bytes
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
@@ -53,10 +62,10 @@ from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sorted_unique, unique_inverse
 from ...utils.digest import file_sha256, path_sha256
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryLedger
 from ...utils.warnings import warn
 from .cell_groups import group_columns, within_groups
 from .cell_barcodes import (
-    LOOKUP_BYTES_PER_CELL,
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
@@ -95,7 +104,7 @@ _IMPORT_ATTRIBUTES = (
 )
 #: The values of ``format`` of ``export_characters``.
 EXPORT_FORMATS = ("treedata", "laml")
-# A chunk of a file may take a twentieth of the budget.
+# A chunk of a file may take a twentieth of what the budget leaves.
 _CHUNK_SHARE = 20
 # Bytes that the per-cell arrays and the arrays written take per selected cell.
 _CELL_BYTES = 64
@@ -402,8 +411,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             }
             for file, layout in zip(files, layouts, strict=True)
         )
-        cell_index = self._allele_selection_indices(cell_selection)
-        n_cells = len(cell_index)
+        selection = self._allele_selection_read(cell_selection)
+        n_cells = selection.cells
         arguments = RecorderAlleleImportArguments(
             cell_selection=cell_selection,
             sources=sources,
@@ -426,7 +435,17 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             )
             return planned.ref
         self._require_writable(arguments.operation)
-        table, attributes = self._read_alleles(files, layouts, cell_index)
+        table, ledger, attributes = self._read_alleles(files, layouts, selection)
+        # Writing holds a copy of the records and, for each, its cells' and
+        # files' int32 copies and its states' int8 copy and the keys that
+        # count each cell's integrations, beside the file buffers of Zarr's
+        # writes.
+        ledger.peak(
+            f"writing the {table.n_records} records",
+            table.nbytes
+            + _WRITE_BYTES_PER_RECORD * table.n_records
+            + zarr_write_buffer_bytes(),
+        )
         self._write_alleles(planned, table, n_cells, attributes)
         _warn_import(attributes, files_text)
         return planned.ref
@@ -478,11 +497,12 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         ]
         return files, layouts
 
-    def _allele_selection_indices(self, cell_selection: ArtifactRef) -> np.ndarray:
-        cell_index = cell_selection_indices(self.zw, cell_selection)
-        if not len(cell_index):
+    def _allele_selection_read(self, cell_selection: ArtifactRef) -> CellSelectionRead:
+        """Check and count a cell selection, whose cells the import reads within its ledger."""
+        planned = plan_cell_selection_read(self.zw, cell_selection)
+        if not planned.cells:
             raise ValueError("cell_selection selects no cell")
-        return cell_index
+        return planned
 
     def _plan_alleles(
         self,
@@ -517,77 +537,53 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             reuse_validator=has_records,
         )
 
-    def _check_allele_budget(
-        self,
-        encoder: RecordEncoder,
-        *,
-        cells: int,
-        reading: int = 0,
-        merge_text: int = 0,
-    ) -> None:
-        """Refuse an import whose peak would pass the memory budget.
-
-        The peak is the largest of reading a chunk beside the records held,
-        merging the records into one table and writing the table beside the
-        file buffers of Zarr's writes, beside what the import holds whatever
-        its size.
-
-        Args:
-            encoder: The records held so far.
-            cells: The bytes held for the selected cells, such as their lookup.
-            reading: The bytes held to read a file: its chunk, what it holds
-                beside and the barcodes that match no cell.
-            merge_text: The bytes that merging takes for the distinct text
-                values of the chunks held.
-        """
-        held = encoder.nbytes
-        merging = _MERGE_FACTOR * held + max(
-            merge_text,
-            _WRITE_BYTES_PER_RECORD * encoder.n_records + zarr_write_buffer_bytes(),
-        )
-        peak = cells + _FIXED_BYTES + max(held + reading, merging)
-        if peak > self.memoryBytes:
-            selected = cells + merging
-            fewer = ", or pass a smaller cell_selection" if selected >= reading else ""
-            raise MemoryError(
-                f"Importing alleles holds about {peak} bytes at its peak, {cells} of "
-                f"them for the selected cells and {merging} to merge and write "
-                f"their {encoder.n_records} records, more than the memory budget of "
-                f"{self.memoryBytes} bytes. Raise mem_budget{fewer}."
-            )
-
     def _read_alleles(
         self,
         files: Sequence[BarcodeFile],
         layouts: Sequence["AlleleLayout"],
-        cell_index: np.ndarray,
-    ) -> tuple[RecordTable, dict[str, Any]]:
-        """Read the alleles of the files' rows that name selected cells."""
-        n_cells = len(cell_index)
+        selection: CellSelectionRead,
+    ) -> tuple[RecordTable, MemoryLedger, dict[str, Any]]:
+        """Read the alleles of the files' rows that name selected cells.
+
+        One ledger holds what the import keeps whatever its size, the
+        selected cells' arrays, positions and IDs, the join, a chunk of each
+        file and the records encoded, and is charged the merge of the records
+        before they merge.
+
+        Returns:
+            The records, the import's ledger, which holds them, and the
+            artifact's attributes.
+        """
+        n_cells = selection.cells
         single = sum(1 for layout in layouts if layout.integration is not None)
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Importing alleles for {n_cells} selected cells",
+            remedy="pass a smaller cell_selection",
+            codec_threads=self.nthreads,
+        )
+        ledger.hold(
+            "a block of a file as it is hashed, the parser's buffers and a chunk "
+            "as it is written",
+            _FIXED_BYTES,
+        )
         # The per-cell arrays and a mask of each file of one array's cells,
         # which find arrays that share no cell.
-        own = (_CELL_BYTES + single) * n_cells
-        encoder = RecordEncoder(FIELDS)
+        ledger.hold("each selected cell's arrays", (_CELL_BYTES + single) * n_cells)
+        encoder = RecordEncoder(FIELDS, ledger=ledger)
         # Files that hold no row, such as a header alone, give no records.
         encoder.add(*empty_allele_chunk(), 0)
-        # The selected cells' share, with the join's lookup and the read of
-        # their IDs, which decodes a stored chunk of them, is checked before
-        # a cell ID is read.
-        self._check_allele_budget(
-            encoder,
-            cells=own
-            + LOOKUP_BYTES_PER_CELL * n_cells
-            + text_read_bytes(self.cells._get_array("ids"), n_cells),
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the selected cells' positions"
         )
-        cell_ids = np.asarray(
-            read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
+        cell_ids = read_text_rows(
+            ledger,
+            self.cells._get_array("ids"),
+            cell_index,
+            item="the selected cells' IDs",
         )
-        join = CellBarcodeJoin(cell_ids, memory_bytes=self.memoryBytes, held_bytes=own)
+        join = CellBarcodeJoin(cell_ids, ledger=ledger)
         del cell_ids
-        # From here the import holds what the join counts: its lookup, the
-        # cells' IDs as text and the import's own bytes per cell.
-        held = join.held_bytes
         named: list[np.ndarray | None] = []
         counted: list[dict[str, int]] = []
         merged = _MergedText()
@@ -606,7 +602,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 layout,
                 position,
                 mask=mask,
-                held=held,
+                ledger=ledger,
                 merged=merged,
                 tapes=tapes,
             )
@@ -615,9 +611,15 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         _check_shared_cells(files, layouts, named)
         _check_named_tapes(files, layouts, tapes)
         del named
-        self._check_allele_budget(encoder, cells=held, merge_text=merged.nbytes)
+        # Merging holds the merged codes, their order and the table beside
+        # the chunks, which the encoder holds, and the chunks' distinct text.
+        ledger.peak(
+            f"merging the {encoder.n_records} records",
+            (_MERGE_FACTOR - 1) * encoder.nbytes + merged.nbytes,
+        )
         table = encoder.finish()
         if any(layout.rows_hold_sites for layout in layouts):
+            ledger.peak("the records in line order", table.nbytes)
             table = records_in_line_order(table)
         attributes = {
             "files": [
@@ -637,7 +639,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             ),
             **join.attributes(),
         }
-        return table, attributes
+        return table, ledger, attributes
 
     def _read_allele_file(
         self,
@@ -648,12 +650,14 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         position: int,
         *,
         mask: np.ndarray | None,
-        held: int,
+        ledger: MemoryLedger,
         merged: "_MergedText",
         tapes: set[str],
     ) -> dict[str, int]:
         """Read one file into the encoder.
 
+        The file's chunks take a twentieth of the ledger's room when the file
+        is planned, and its names and a chunk are held while it is read.
         ``merged`` gains the distinct text values of the file's chunks, and
         ``tapes`` the integrations of contracted tapes that its rows name.
 
@@ -663,15 +667,16 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         """
         from ...readers.recorder_alleles import classified_rows, iter_allele_rows
 
-        chunk_rows = layout.chunk_rows(self.memoryBytes // _CHUNK_SHARE)
-        reading = layout.held_bytes() + layout.chunk_bytes(chunk_rows)
-        # A budget too small for the lookup, the file's names and one chunk
-        # refuses before a row is read.
-        self._check_allele_budget(
-            encoder,
-            cells=held,
-            reading=reading + join.unmatched_bytes,
-            merge_text=merged.nbytes,
+        # A chunk takes a twentieth of the room left when the file is planned.
+        room = ledger.room
+        chunk_rows = layout.chunk_rows(
+            self.memoryBytes // _CHUNK_SHARE if room is None else room // _CHUNK_SHARE
+        )
+        # A smaller selection holds the file's names and chunks all the same.
+        reading = ledger.hold(
+            f"the allele file's names and a chunk of {chunk_rows} rows",
+            layout.held_bytes() + layout.chunk_bytes(chunk_rows),
+            remedy="",
         )
         counts = {"rows": 0, "records": 0, "beyond": 0, "without_integration": 0}
         for rows in iter_allele_rows(layout, chunk_rows):
@@ -693,12 +698,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                     tapes.update(
                         set(pd.unique(rows.integrations).tolist()) & set(layout.lengths)
                     )
-            self._check_allele_budget(
-                encoder,
-                cells=held,
-                reading=reading + join.unmatched_bytes,
-                merge_text=merged.nbytes,
-            )
+            del rows, classified, cells, frame, record_cells
+        ledger.release(reading)
         return counts
 
     def _write_alleles(
@@ -1146,13 +1147,19 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             f"the edits of {n_cells} cells",
         )
         with_edits = read_array(group, "n_edits") > 0
+        grouping = MemoryLedger(
+            self.memoryBytes,
+            f"Grouping the {n_cells} cells of the alleles",
+            codec_threads=self.nthreads,
+        )
+        grouping.hold("the banks and each cell's edit", bank_bytes + n_cells)
         group_codes, _keys, within_fingerprint = within_groups(
             self.zw,
             self.cells,
             cell_selection,
             columns,
             with_edits,
-            memory_bytes=self.memoryBytes - bank_bytes - n_cells,
+            ledger=grouping,
             what="an edit",
         )
         del with_edits
@@ -1259,6 +1266,18 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             probabilities=None,
             n_cells_in_several_clones=0,
         )
+        saving = MemoryLedger(
+            self.memoryBytes,
+            f"Calling clones from the alleles of {n_cells} cells",
+            codec_threads=self.nthreads,
+        )
+        saving.hold(
+            "each cell's group and calls, the clones' labels and the objects "
+            "that writing holds",
+            (_CALL_CELL_BYTES + _CALLED_CELL_BYTES) * n_cells
+            + sum(map(sys.getsizeof, labels.tolist()))
+            + _FIXED_BYTES,
+        )
         write_clones(
             self.zw,
             planned,
@@ -1269,10 +1288,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 "bank_coverage": called.coverage,
             },
             source_arrays={"n_alleles": called.n_alleles.astype(np.int32)},
-            memory_bytes=self.memoryBytes,
-            held_bytes=(_CALL_CELL_BYTES + _CALLED_CELL_BYTES) * n_cells
-            + sum(map(sys.getsizeof, labels.tolist()))
-            + _FIXED_BYTES,
+            ledger=saving,
         )
         for entry in called.coverage:
             share = (

@@ -36,23 +36,21 @@ CYTEARC_ROOT = Path(cytearc.__file__).parent
 #: leaves the list at none. Every other module refuses with MemoryBudgetError.
 PLAIN_MEMORY_ERRORS = {
     # Clone import, clone summaries, lineage barcodes, recorder alleles and
-    # phylogenies, with their shared join, grouping and clone writer.
+    # phylogenies. Their shared join, grouping and clone writer refuse through
+    # the caller's ledger.
     "clones/allele_clones.py": 1,
     "clones/barcode_clones.py": 1,
     "clones/calling.py": 1,
     "clones/recorders.py": 1,
     "clones/sequences.py": 1,
-    "datastore/_operations/cell_barcodes.py": 2,
-    "datastore/_operations/cell_groups.py": 1,
-    "datastore/_operations/clone_artifacts.py": 1,
-    "datastore/_operations/clones.py": 17,
-    "datastore/_operations/lineage_barcodes.py": 5,
+    "datastore/_operations/clones.py": 13,
+    "datastore/_operations/lineage_barcodes.py": 3,
     "datastore/_operations/phylogeny.py": 1,
-    "datastore/_operations/recorder_alleles.py": 5,
+    "datastore/_operations/recorder_alleles.py": 4,
     "readers/phylogeny.py": 1,
     # Variant counts, genotypes and frequency clones, with the shared-neighbour
     # graph that frequency clones build.
-    "datastore/_operations/variants.py": 13,
+    "datastore/_operations/variants.py": 10,
     "neighbors/graph.py": 2,
     "readers/tapestri.py": 1,
     "variants/frequencies.py": 5,

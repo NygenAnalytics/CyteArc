@@ -37,6 +37,9 @@ from tests.clone_truth import (
     write_newick,
     write_tree_zarr,
 )
+from cytearc.datastore._operations.cell_barcodes import lookup_bytes
+from cytearc.utils.memory_budget import object_array_bytes, python_text_bytes
+from tests.memory_helpers import budget_that_runs, charges
 from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
@@ -329,7 +332,7 @@ def test_writes_count_a_buffer_for_each_write_zarr_runs_at_once(
     # file, as many at once as its async concurrency allows, and Python 3.14
     # made each buffer 128 KiB, where it was the file system's block. The
     # import's write of its arrays and the cut's of its clones count them,
-    # and no other check does.
+    # and no other charge or check does.
     import io
 
     import zarr
@@ -346,24 +349,27 @@ def test_writes_count_a_buffer_for_each_write_zarr_runs_at_once(
             found.append((what, held))
             check(self, what, held)
 
+        def run() -> None:
+            phylogeny, _ = _import(store, path, invalidate_cache=True)
+            _cut(store, phylogeny, time=1.0, invalidate_cache=True)
+
         with monkeypatch.context() as patched:
             patched.setattr(
                 _PhylogenyOperationsMixin, "_check_phylogeny_budget", recorded
             )
             with zarr.config.set({"async.concurrency": concurrency}):
-                phylogeny, _ = _import(store, path, invalidate_cache=True)
-                _cut(store, phylogeny, time=1.0, invalidate_cache=True)
-        return found
+                _result, taken = charges(run)
+        return found + [(item, nbytes) for item, nbytes, _planned in taken]
 
     ten, twenty = stated(10), stated(20)
     assert [what for what, _ in ten] == [what for what, _ in twenty]
-    writes = ("Writing the names of", "Labelling")
+    writes = ("writing the names of", "Labelling", "writing the clones of")
     grown = {what: more - fewer for (what, fewer), (_, more) in zip(ten, twenty)}
     assert grown == {
         what: 10 * io.DEFAULT_BUFFER_SIZE if what.startswith(writes) else 0
         for what in grown
     }
-    assert sum(what.startswith(writes) for what in grown) == 2
+    assert sum(what.startswith(writes) for what in grown) == 3
 
 
 def test_the_time_unit_is_declared_never_inferred(store, tmp_path) -> None:
@@ -570,11 +576,7 @@ def test_writing_the_names_counts_what_the_join_holds(tmp_path) -> None:
     # Long node names make their writing the import's largest check, which
     # must count what the join holds beside the trees: its lookup and each
     # selected cell's ID as text, whether or not a leaf names the cell.
-    import re
-    import sys
     import warnings
-
-    from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
 
     n_cells, n_leaves = 25_000, 20_000
     ids = [f"cell{cell:06d}-1" for cell in range(n_cells)]
@@ -594,35 +596,41 @@ def test_writing_the_names_counts_what_the_join_holds(tmp_path) -> None:
     path.write_text(f"({pairs})root;")
 
     def names_estimate(selection) -> int:
-        """The bytes that writing the names holds, from its refusal."""
-        budget = 1
-        for _attempt in range(20):
-            store.memoryBytes = budget
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", UserWarning)
-                    store.clones.import_phylogeny(
-                        path,
-                        cell_selection=selection,
-                        time_unit="days",
-                        invalidate_cache=True,
-                    )
-            except MemoryError as error:
-                found = re.search(r"about (\d+) bytes", str(error))
-                assert found is not None, str(error)
-                if str(error).startswith("Writing the names"):
-                    return int(found.group(1))
-                budget = int(found.group(1))
-                continue
-            raise AssertionError("writing the names was never refused")
-        raise AssertionError("the budget did not settle")
+        """What the import's ledger plans as it writes the names."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            _result, taken = charges(
+                lambda: store.clones.import_phylogeny(
+                    path,
+                    cell_selection=selection,
+                    time_unit="days",
+                    invalidate_cache=True,
+                )
+            )
+        (planned,) = [
+            planned
+            for item, _nbytes, planned in taken
+            if item.startswith("writing the names of")
+        ]
+        return planned
 
     in_tree = names_estimate(store.snapshot_cell_selection("in_tree"))
     every_cell_of_the_store = names_estimate(store.snapshot_cell_selection())
     beyond = ids[n_leaves:]
-    assert every_cell_of_the_store - in_tree == LOOKUP_BYTES_PER_CELL * len(
-        beyond
-    ) + sum(map(sys.getsizeof, beyond))
+    # Each further cell's position, 8 bytes, its ID as a reference and an
+    # ASCII string, and its flag in the join's lookup, and its slot where
+    # pandas copies the IDs into the index, whose table holds 32,768 buckets
+    # for 20,000 cells and for 25,000.
+    from tests.memory_helpers import index_copies_references
+
+    slot = 1 + 8 * index_copies_references()
+    assert lookup_bytes(n_cells) - lookup_bytes(n_leaves) == slot * len(beyond)
+    assert every_cell_of_the_store - in_tree == (
+        8 * len(beyond)
+        + object_array_bytes(len(beyond))
+        + python_text_bytes(len(beyond), sum(map(len, beyond)))
+        + slot * len(beyond)
+    )
 
 
 def test_missing_and_incomplete_phylogenies_are_refused(store, tmp_path) -> None:
@@ -856,7 +864,6 @@ def test_the_join_counts_the_cells_ids_once(tmp_path) -> None:
     # The join counts the IDs that it holds as text, so an import runs within
     # the budget that its check before it reads the IDs names; counting them
     # again beside the join would refuse it.
-    import re
     import warnings
 
     n_cells = 3_000
@@ -874,36 +881,34 @@ def test_the_join_counts_the_cells_ids_once(tmp_path) -> None:
     path = tmp_path / "long.nwk"
     path.write_text(f"({pairs})root;")
     cells = store.snapshot_cell_selection()
-    refusals: list[str] = []
-    budget = 1
-    for _attempt in range(20):
-        store.memoryBytes = budget
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UserWarning)
-                store.clones.import_phylogeny(
-                    path, cell_selection=cells, time_unit="days", invalidate_cache=True
-                )
-            break
-        except MemoryError as error:
-            refusals.append(str(error))
-            found = re.search(r"about (\d+) bytes", str(error))
-            assert found is not None and int(found.group(1)) > budget, str(error)
-            budget = int(found.group(1))
-    # The join refuses once, so the budget it names passes it. The IDs are
-    # stored in the one chunk of their 3,000 rows, so where Zarr's file
-    # buffers are 128 KiB, from Python 3.14, writing the nodes' names holds
-    # more and refuses after it.
-    joined = [
+
+    def run(opened) -> object:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return opened.clones.import_phylogeny(
+                path, cell_selection=cells, time_unit="days", invalidate_cache=True
+            )
+
+    # The IDs are read as Python strings, which the join keeps without a
+    # charge of its own, so the import runs at the budget its refusals name.
+    # The IDs refuse once, so the budget they name passes them and the join.
+    # They are stored in the one chunk of their 3,000 rows, so writing the
+    # nodes' names, which holds more, is all that refuses after them.
+    _budget, refusals, _ref, _peak = budget_that_runs(store, run, traced=False)
+    read = [
         index
         for index, refusal in enumerate(refusals)
-        if refusal.startswith(f"Joining 3001 nodes of 1 trees to {n_cells} cells")
+        if "bytes for the selected cells' IDs," in refusal
     ]
-    assert len(joined) == 1
+    assert len(read) == 1, refusals
     assert all(
-        refusal.startswith("Writing the names of 3001 nodes")
-        for refusal in refusals[joined[0] + 1 :]
-    )
+        "bytes for writing the names of 3001 nodes," in refusal
+        for refusal in refusals[read[0] + 1 :]
+    ), refusals
+    _result, taken = charges(lambda: run(store))
+    items = [item for item, _nbytes, _planned in taken]
+    assert "the join's lookup of the selected cells' IDs" in items
+    assert "the selected cells' IDs as text" not in items
 
 
 def test_a_budget_too_small_is_refused_before_anything_is_saved(
@@ -913,7 +918,8 @@ def test_a_budget_too_small_is_refused_before_anything_is_saved(
     store.memoryBytes = 10_000
     with pytest.raises(
         MemoryError,
-        match=r"holds about \d+ bytes, more than the memory budget of 10000 bytes",
+        match=r"holds about \d+ bytes for .*, more than the memory budget of 10000 "
+        "bytes",
     ):
         _import(store, path)
     store.memoryBytes = 10**10

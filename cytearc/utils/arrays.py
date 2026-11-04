@@ -1,6 +1,7 @@
 import hashlib
 import math
 import re
+import sys
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -8,6 +9,7 @@ import numpy as np
 from numpy.typing import DTypeLike, NDArray
 
 from .arguments import float_argument
+from .memory_budget import python_text_bytes
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -260,6 +262,44 @@ def sort_categories(values: Iterable[Any]) -> list[Any]:
     ``"A10"``, ``"2_T"`` before ``"B"``), and missing values come last.
     """
     return sorted(values, key=_category_sort_key)
+
+
+# The tokens of a label's natural order: runs of digits and of other characters.
+_LABEL_TOKENS = re.compile(r"\d+|\D+")
+#: Sorting labels naturally holds, for each label, its sort key, a tuple of
+#: its kind, its tokens and its text, and the tuple of its tokens, beside 6
+#: bytes of the lists of labels, of their keys and of the result; and for
+#: each token, a run of digits or of other characters, its tuple of its kind
+#: and its value, its slot in the tokens' tuple and 26 bytes of its number.
+#: The tuples take this Python's sizes: Python 3.14 caches a tuple's hash in
+#: 8 more bytes. Traced in all at 238, 311 and 824 bytes a label on Python
+#: 3.13, and 262, 341 and 902 on 3.14, for 20,000 ASCII labels of one, two
+#: and eight tokens.
+_SORT_BYTES_PER_LABEL = sys.getsizeof((0, (), "")) + sys.getsizeof(()) + 6
+_SORT_BYTES_PER_TOKEN = sys.getsizeof((0, 0)) + 8 + 26
+
+
+def sort_categories_bytes(texts: Sequence[str]) -> int:
+    """Return the bytes that :func:`sort_categories` holds to order the labels ``texts``.
+
+    Each label's sort key holds its tokens, the runs of digits and of other
+    characters that its natural order compares, and a casefolded copy of its
+    text, at the kind of its widest character, as
+    :func:`~cytearc.utils.memory_budget.python_text_bytes` counts it.
+    """
+    characters = 0
+    widest = 0x7F
+    tokens = 0
+    for text in texts:
+        characters += len(text)
+        if not text.isascii():
+            widest = max(widest, max(map(ord, text)))
+        tokens += len(_LABEL_TOKENS.findall(text))
+    return (
+        _SORT_BYTES_PER_LABEL * len(texts)
+        + _SORT_BYTES_PER_TOKEN * tokens
+        + python_text_bytes(len(texts), characters, widest=widest)
+    )
 
 
 def checked_sparse_cast(values: np.ndarray, dtype: Any) -> np.ndarray:

@@ -48,7 +48,7 @@ from ...clones.fate import (
     fate_bias_bytes,
     fate_bias_tables,
 )
-from ...clones.groups import group_key_table, pair_counts
+from ...clones.groups import group_key_table, pair_count_bytes, pair_counts
 from ...clones.overlap import (
     CloneOverlap,
     CloneTracking,
@@ -78,14 +78,18 @@ from ...metadata.rows import (
     previous_read_bytes,
     read_metadata_missing_rows_chunkwise,
     read_metadata_rows_chunkwise,
+    read_text_rows,
     text_read_bytes,
     text_row_selection_parts,
     text_width,
 )
 from ...metadata.selection import (
     CELL_VALUE_NAMES,
+    CellSelectionRead,
     category_codes,
     cell_selection_indices,
+    plan_cell_selection_read,
+    read_cell_selection,
 )
 from ...repertoire.clonotypes import clonotype_nouns
 from ...storage.artifacts import (
@@ -101,6 +105,11 @@ from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sorted_unique
 from ...utils.digest import file_sha256
 from ...utils.logging import logger
+from ...utils.memory_budget import (
+    MemoryLedger,
+    object_array_bytes,
+    python_text_bytes,
+)
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
     BarcodeFile,
@@ -164,12 +173,6 @@ def _stored_diagnostics(group: zarr.Group, operation: str) -> dict[str, int | fl
     return numbers
 
 
-# Bytes held for each selected cell while clones are gathered: its clone code,
-# whether it was given several clones, and its probability.
-_ASSIGNER_BYTES_PER_CELL = 24
-# Bytes held for each distinct clone label beside its text: its entries in
-# the table of labels.
-_BYTES_PER_LABEL = 200
 # Bytes of one parsed row of a clone file at its peak, beside its fields: the
 # barcode, clone label and probability it yields, the cell ID it names and
 # the arrays that join and assign it.
@@ -372,6 +375,50 @@ def _files_text(n_files: int) -> str:
     return "the clone file" if n_files == 1 else "the clone files"
 
 
+def _hold_kept_apart(
+    ledger: MemoryLedger,
+    codes: np.ndarray,
+    kept_apart: Sequence[tuple[str, np.ndarray]],
+    clone_ids: np.ndarray | None = None,
+) -> None:
+    """Charge each cell's clone code, the labels its clones keep apart and the clones' labels, when read, which a summary holds."""
+    item = "each cell's clone and the labels its clones keep apart"
+    nbytes = np.asarray(codes).nbytes + sum(
+        np.asarray(labels).nbytes for _name, labels in kept_apart
+    )
+    if clone_ids is not None:
+        item = (
+            "each cell's clone, the clones' labels and the labels its clones keep apart"
+        )
+        nbytes += _clone_label_bytes(clone_ids)
+    ledger.hold(item, nbytes)
+
+
+def _clone_label_bytes(clone_ids: np.ndarray) -> int:
+    """The bytes of the clones' labels as a summary reads them: a Python string each, in an object array.
+
+    Every string is counted at the width of the widest character of any.
+    """
+    labels = clone_ids.tolist()
+    widest = max((ord(max(label)) for label in labels if label), default=0)
+    return object_array_bytes(len(labels)) + python_text_bytes(
+        len(labels), sum(map(len, labels)), widest=widest
+    )
+
+
+def _chunk_rows(ledger: MemoryLedger, row_bytes: int) -> int:
+    """Rows of a file to parse at once: as many as half of the ledger's room holds.
+
+    The other half is left to what grows as the rows are read, such as the
+    clone labels and the hashes of barcodes that match no cell; a chunk
+    holds 1,000 rows at least and 1,000,000 at most.
+    """
+    room = ledger.room
+    if room is None:
+        return _MAX_CHUNK_ROWS
+    return int(min(_MAX_CHUNK_ROWS, max(_MIN_CHUNK_ROWS, room // (2 * row_bytes))))
+
+
 class _CloneOperationsMixin(_CloneOperationsBase):
     def _clone_selection_indices(self, cell_selection: ArtifactRef) -> np.ndarray:
         cell_index = cell_selection_indices(self.zw, cell_selection)
@@ -379,28 +426,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise ValueError("cell_selection selects no cell")
         return cell_index
 
-    def _clone_chunk_rows(self, held: int, row_bytes: int) -> int:
-        """Rows of a clone file to parse at once beside ``held`` bytes."""
-        room = (self.memoryBytes - held) // (2 * row_bytes)
-        if room < _MIN_CHUNK_ROWS:
-            raise MemoryError(
-                f"Importing clones holds about {held} bytes before it reads a row, "
-                f"which leaves too little of the memory budget of "
-                f"{self.memoryBytes} bytes to read the files. Raise mem_budget, or "
-                "pass a smaller cell_selection."
-            )
-        return int(min(room, _MAX_CHUNK_ROWS))
-
-    def _check_clone_import_budget(
-        self, held: int, n_labels: int, label_bytes: int, chunk_bytes: int
-    ) -> None:
-        peak = held + _BYTES_PER_LABEL * n_labels + label_bytes + chunk_bytes
-        if peak > self.memoryBytes:
-            raise MemoryError(
-                f"Gathering {n_labels} clone labels holds about {peak} bytes, more "
-                f"than the memory budget of {self.memoryBytes} bytes. Raise "
-                "mem_budget."
-            )
+    def _clone_selection_read(self, cell_selection: ArtifactRef) -> CellSelectionRead:
+        """Check and count a cell selection, whose cells the caller reads within its ledger."""
+        planned = plan_cell_selection_read(self.zw, cell_selection)
+        if not planned.cells:
+            raise ValueError("cell_selection selects no cell")
+        return planned
 
     @validation_scoped
     def _clones_import_clones(
@@ -539,8 +570,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             }
             for file, layout, namespace in zip(files, layouts, namespaces, strict=True)
         )
-        cell_index = self._clone_selection_indices(cell_selection)
-        n_cells = len(cell_index)
+        selection = self._clone_selection_read(cell_selection)
+        n_cells = selection.cells
         arguments = CloneImportArguments(
             cell_selection=cell_selection,
             sources=sources,
@@ -570,26 +601,22 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
             return planned.ref
         ids = self.cells._get_array("ids")
-        reading = (
-            LOOKUP_BYTES_PER_CELL + _ASSIGNER_BYTES_PER_CELL
-        ) * n_cells + text_read_bytes(ids, n_cells)
-        if reading > self.memoryBytes:
-            raise MemoryError(
-                f"Reading the IDs of {n_cells} selected cells holds about {reading} "
-                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
-                "Raise mem_budget, or pass a smaller cell_selection."
-            )
         self._require_writable(arguments.operation)
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Importing clones for {n_cells} selected cells",
+            remedy="pass a smaller cell_selection",
+            codec_threads=self.nthreads,
+        )
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the selected cells' positions"
+        )
         # Only the selected cells' IDs are read, a sample's in a merged store.
-        cell_ids = np.asarray(
-            read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
+        cell_ids = read_text_rows(
+            ledger, ids, cell_index, item="the selected cells' IDs"
         )
-        join = CellBarcodeJoin(
-            cell_ids,
-            memory_bytes=self.memoryBytes,
-            held_bytes=_ASSIGNER_BYTES_PER_CELL * n_cells,
-        )
-        held = join.held_bytes
+        join = CellBarcodeJoin(cell_ids, ledger=ledger)
+        assigner = CloneAssigner(cell_ids, multiple=policy, ledger=ledger)
         # Rows are parsed in chunks sized by the widest file's fields and its
         # longest sampled rows, whose barcodes are about as long as cell IDs.
         row_bytes = (
@@ -598,8 +625,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             + _BYTES_PER_ROW_CHAR
             * max(text_width(ids), *(layout.row_chars for layout in layouts))
         )
-        chunk_rows = self._clone_chunk_rows(held, row_bytes)
-        assigner = CloneAssigner(cell_ids, multiple=policy)
         for position, (file, layout, namespace) in enumerate(
             zip(files, layouts, namespaces, strict=True)
         ):
@@ -610,9 +635,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 layout,
                 namespace,
                 source=position,
-                held=held,
-                chunk_rows=chunk_rows,
-                chunk_bytes=chunk_rows * row_bytes,
+                ledger=ledger,
+                row_bytes=row_bytes,
             )
         assignment = assigner.finish()
         attributes = {
@@ -620,16 +644,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             "n_clones": len(assignment.clone_ids),
             "n_cells_in_several_clones": assignment.n_cells_in_several_clones,
         }
-        write_clones(
-            self.zw,
-            planned,
-            assignment,
-            attributes,
-            memory_bytes=self.memoryBytes,
-            held_bytes=held
-            + _BYTES_PER_LABEL * assigner.n_labels
-            + assigner.label_bytes,
-        )
+        write_clones(self.zw, planned, assignment, attributes, ledger=ledger)
         warn_unmatched_barcodes(attributes, files_text)
         log_clones(assignment, n_cells)
         return planned.ref
@@ -643,14 +658,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         namespace: str | None,
         *,
         source: int,
-        held: int,
-        chunk_rows: int,
-        chunk_bytes: int,
+        ledger: MemoryLedger,
+        row_bytes: int,
     ) -> None:
         """Assign the cells of one clone file to its clones.
 
-        ``held`` bytes are held beside the file's chunks of ``chunk_rows``
-        rows, which hold up to ``chunk_bytes`` bytes.
+        The file's chunks hold as many rows of ``row_bytes`` bytes as half
+        of the ledger's room when the file is planned, which leaves the other
+        half to the labels and hashes that grow. A chunk is held until the
+        file is read, since the reader keeps each chunk until it parses the
+        next.
         """
         from ...readers.clone_tables import (
             iter_clone_rows,
@@ -659,6 +676,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             matrix_entries,
         )
 
+        chunk_rows = _chunk_rows(ledger, row_bytes)
+        item = f"a chunk of {chunk_rows} rows of a clone file"
+        chunk_bytes = chunk_rows * row_bytes
+        ledger.hold(item, chunk_bytes)
         if not layout.is_matrix:
             for rows in iter_clone_rows(layout, chunk_rows):
                 assigner.add(
@@ -667,33 +688,29 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                     probabilities=rows.probabilities,
                     source=source,
                 )
-                self._check_clone_import_budget(
-                    held, assigner.n_labels, assigner.label_bytes, chunk_bytes
-                )
+                del rows
+            ledger.release(chunk_bytes)
             return
         # A matrix lists its cells first; each entry names a listed cell.
         listed: list[np.ndarray] = []
-        n_listed = 0
         for barcodes in matrix_cells(layout, chunk_rows):
-            listed.append(join.cells(file, barcodes))
-            n_listed += len(barcodes)
-            self._check_clone_import_budget(
-                held + _BYTES_PER_LISTED_CELL * n_listed,
-                assigner.n_labels,
-                assigner.label_bytes,
-                chunk_bytes,
+            ledger.hold(
+                "the clone matrix's cells", _BYTES_PER_LISTED_CELL * len(barcodes)
             )
+            listed.append(join.cells(file, barcodes))
+            del barcodes
         cells = np.concatenate(listed) if listed else np.empty(0, dtype=np.int64)
+        del listed
         labels = _namespaced(matrix_clone_ids(layout), namespace)
         # The matrix's labels are held beside those of earlier files.
-        self._check_clone_import_budget(
-            held + _BYTES_PER_LISTED_CELL * n_listed,
-            assigner.n_labels + len(labels),
-            assigner.label_bytes + sum(map(sys.getsizeof, labels)),
-            chunk_bytes,
+        ledger.hold(
+            "the clone matrix's labels",
+            object_array_bytes(len(labels)) + sum(map(sys.getsizeof, labels)),
         )
         for entries in matrix_entries(layout, chunk_rows):
             assigner.add(cells[entries.cells], labels[entries.clones], source=source)
+            del entries
+        ledger.release(chunk_bytes)
 
     @validation_scoped
     def _clones_from_column(
@@ -740,21 +757,25 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise ValueError(f"{quoted_value(column)} is not a cell metadata column")
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        cell_index = self._clone_selection_indices(cell_selection)
-        n_cells = len(cell_index)
+        selection = self._clone_selection_read(cell_selection)
+        n_cells = selection.cells
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Saving the clones of {quoted_value(column)} for {n_cells} cells",
+            codec_threads=self.nthreads,
+        )
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the selected cells' positions"
+        )
+        # Each cell has one label, so no cell is given two clones.
+        assigner = CloneAssigner(cell_index, multiple="error", ledger=ledger)
         # Blocks of labels are read at their stored width, decoding whole
-        # chunks, and become Python strings beside each cell's code.
+        # chunks, and become Python strings beside each cell's code; the
+        # first is checked before the column is fingerprinted.
         fixed, row_bytes = text_row_selection_parts(self.cells._get_array(column))
-        held = _ASSIGNER_BYTES_PER_CELL * n_cells + fixed
-        first_block = held + row_bytes * min(n_cells, _MIN_CHUNK_ROWS)
-        if first_block > self.memoryBytes:
-            raise MemoryError(
-                f"Reading the clone labels of {n_cells} cells holds about "
-                f"{first_block} bytes, more than the memory budget of "
-                f"{self.memoryBytes} bytes. Raise mem_budget."
-            )
-        block_rows = int(
-            min(n_cells, _MAX_CHUNK_ROWS, (self.memoryBytes - held) // row_bytes)
+        ledger.peak(
+            "a block of clone labels",
+            fixed + row_bytes * min(n_cells, _MIN_CHUNK_ROWS),
         )
         arguments = CloneColumnArguments(
             cell_selection=cell_selection,
@@ -773,9 +794,17 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable(arguments.operation)
-        # Each cell has one label, so no cell is given two clones.
-        assigner = CloneAssigner(cell_index, multiple="error")
-        for start in range(0, n_cells, block_rows):
+        start = 0
+        while start < n_cells:
+            # Each block takes as many labels as the ledger's room holds when
+            # it is planned, beside what the labels before it left.
+            room = ledger.room
+            fitting = _MAX_CHUNK_ROWS if room is None else (room - fixed) // row_bytes
+            block_rows = int(
+                min(n_cells - start, _MAX_CHUNK_ROWS, max(_MIN_CHUNK_ROWS, fitting))
+            )
+            block_bytes = fixed + row_bytes * block_rows
+            ledger.hold(f"a block of {block_rows} clone labels", block_bytes)
             rows = cell_index[start : start + block_rows]
             assigner.add(
                 np.arange(start, start + len(rows)),
@@ -784,19 +813,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                     read_metadata_missing_rows_chunkwise(self.cells, column, rows),
                 ),
             )
-            self._check_clone_import_budget(
-                held, assigner.n_labels, assigner.label_bytes, block_rows * row_bytes
-            )
+            del rows
+            ledger.release(block_bytes)
+            start += block_rows
         assignment = assigner.finish()
         write_clones(
             self.zw,
             planned,
             assignment,
             {"n_clones": len(assignment.clone_ids)},
-            memory_bytes=self.memoryBytes,
-            held_bytes=_ASSIGNER_BYTES_PER_CELL * n_cells
-            + _BYTES_PER_LABEL * assigner.n_labels
-            + assigner.label_bytes,
+            ledger=ledger,
         )
         log_clones(assignment, n_cells)
         return planned.ref
@@ -1261,6 +1287,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise TypeError("artifact must be an ArtifactRef")
         selection = inspect_artifact(self.zw, artifact).input_ref("cell_selection")
         n_cells = int(validate_cell_selection(self.zw, selection).selected_count)
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Grouping the {n_cells} cells of a figure",
+            codec_threads=self.nthreads,
+        )
+        _hold_kept_apart(ledger, np.empty(0, dtype=np.int64), kept_apart)
         return cell_groups(
             self.zw,
             self.cells,
@@ -1269,7 +1301,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=None,
-            memory_bytes=self.memoryBytes,
+            ledger=ledger,
             kept_apart=tuple(kept_apart),
         )
 
@@ -1336,11 +1368,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         group_by: str | Sequence[str] | None,
         groups: ArtifactRef | None,
         cell_selection: ArtifactRef | None,
+        ledger: MemoryLedger,
     ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
         """Group the cells with a clone and count each clone's cells in each group.
 
         The groups are those of :func:`cell_groups`, among the cells with a
-        clone, with the labels that the clones keep apart.
+        clone, with the labels that the clones keep apart, grouped within
+        ``ledger`` beside the clones' codes and kept labels, and their labels
+        when ``source`` holds them, which it holds.
 
         Returns:
             The groups' keys, one row per group in the natural order of the
@@ -1348,6 +1383,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             columns, and for each distinct pair of group and clone, sorted by
             group and clone code, its group, its clone code and its cells.
         """
+        _hold_kept_apart(ledger, source.codes, source.kept_apart, source.clone_ids)
         grouped = cell_groups(
             self.zw,
             self.cells,
@@ -1356,13 +1392,32 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
-            memory_bytes=self.memoryBytes,
+            ledger=ledger,
             kept_apart=source.kept_apart,
         )
+        # Each counted cell's group and clone, then their pairs: at most one
+        # a cell, and at most one for each group and clone.
+        flags = ledger.hold("the cells with a group", len(grouped.codes))
         counted = grouped.codes >= 0
-        pair_groups, pair_codes, pair_cells = pair_counts(
-            grouped.codes[counted], source.codes[counted]
+        n_counted = int(np.count_nonzero(counted))
+        codes = ledger.hold("each counted cell's group and clone", 16 * n_counted)
+        group_codes = grouped.codes[counted]
+        clone_codes = source.codes[counted]
+        del counted
+        ledger.release(flags)
+        n_pairs = (
+            min(n_counted, (int(group_codes.max()) + 1) * (int(clone_codes.max()) + 1))
+            if n_counted
+            else 0
         )
+        ledger.peak(
+            "counting each pair of group and clone",
+            pair_count_bytes(n_counted, n_pairs),
+        )
+        pair_groups, pair_codes, pair_cells = pair_counts(group_codes, clone_codes)
+        del group_codes, clone_codes
+        ledger.release(codes)
+        ledger.hold("each pair's group, clone and cells", 24 * len(pair_cells))
         keys = group_key_table(grouped.key_columns, grouped.keys)
         return keys, pair_groups, pair_codes, pair_cells
 
@@ -1383,11 +1438,17 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             ValueError: If no cell has both a clone and a group.
         """
+        source = self._read_clone_input(clones)
         keys, pair_groups, _codes, pair_cells = self._clone_pair_counts(
-            self._read_clone_input(clones),
+            source,
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
+            ledger=MemoryLedger(
+                self.memoryBytes,
+                f"Summarizing the clone sizes of {len(source.codes)} cells",
+                codec_threads=self.nthreads,
+            ),
         )
 
         def check(rows: int) -> None:
@@ -1532,6 +1593,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         measured, codes, kept_apart = self._measured_clone_cells(
             self._read_clone_input(clones), cell_selection
         )
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Measuring the clonal expansion of {len(codes)} cells",
+            codec_threads=self.nthreads,
+        )
+        _hold_kept_apart(ledger, codes, kept_apart)
         grouped = cell_groups(
             self.zw,
             self.cells,
@@ -1540,12 +1607,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=None,
-            memory_bytes=self.memoryBytes,
+            ledger=ledger,
             kept_apart=kept_apart,
         )
         if not grouped.keys:
             raise ValueError("No cell has both a clone and a group")
         columns = group_columns(group_by)
+        if columns:
+            ledger.peak(
+                "fingerprinting the groups' labels", grouped.fingerprint_bytes()
+            )
         arguments = ClonalExpansionArguments(
             clones=clones,
             groups=groups,
@@ -2037,6 +2108,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
+            ledger=MemoryLedger(
+                self.memoryBytes,
+                f"Comparing the groups of the clones of {len(source.codes)} cells",
+                codec_threads=self.nthreads,
+            ),
         )
         if len(pair_cells) == 0:
             raise ValueError("No cell has both a clone and a group")
@@ -2153,6 +2229,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
+            ledger=MemoryLedger(
+                self.memoryBytes,
+                f"Following the clones of {len(source.codes)} cells",
+                codec_threads=self.nthreads,
+            ),
         )
         if len(pair_cells) == 0:
             raise ValueError("No cell has both a clone and a group")
@@ -2336,6 +2417,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=cell_selection,
+            ledger=MemoryLedger(
+                self.memoryBytes,
+                f"Measuring the fate coupling of the clones of {len(source.codes)} cells",
+                codec_threads=self.nthreads,
+            ),
         )
         if len(pair_cells) == 0:
             raise ValueError("No cell has both a clone and a group")
@@ -2543,6 +2629,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             kept_labels[without_clone] = None
             cleared.append((name, kept_labels))
         late_kept = tuple(cleared)
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Measuring the fate bias of the clones of {len(source.codes)} cells",
+            codec_threads=self.nthreads,
+        )
+        # The clones' codes and their late cells' are held while the late
+        # cells are grouped into fates.
+        _hold_kept_apart(ledger, source.codes, source.kept_apart)
+        _hold_kept_apart(ledger, late_codes, late_kept)
         grouped = cell_groups(
             self.zw,
             self.cells,
@@ -2551,7 +2646,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_by,
             groups=groups,
             cell_selection=None,
-            memory_bytes=self.memoryBytes,
+            ledger=ledger,
             kept_apart=late_kept,
         )
         counted = (late_codes >= 0) & (grouped.codes >= 0)
@@ -2570,6 +2665,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise ValueError("Fate bias needs at least two fates among the late cells")
         names = keys.index.to_numpy(dtype=object)
         columns = group_columns(group_by)
+        if columns:
+            ledger.peak(
+                "fingerprinting the groups' labels", grouped.fingerprint_bytes()
+            )
         n_fates = len(keys)
         arguments = CloneFateBiasArguments(
             clones=clones,

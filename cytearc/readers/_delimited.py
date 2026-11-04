@@ -855,6 +855,19 @@ def count_rows(text: TextLayout) -> int:
     return n_rows
 
 
+def stripped_text(values: pd.Series) -> pd.Series:
+    """Return each text of ``values`` without the whitespace around it.
+
+    pandas 2 keeps the ``.str`` accessor on the Series it was taken from, and
+    the accessor holds that Series, so a chunk stripped through it stays in a
+    reference cycle, with its text, until the garbage collector runs. The
+    values are stripped one at a time instead, which leaves no cycle.
+    """
+    return pd.Series(
+        [text.strip() for text in values.tolist()], index=values.index, dtype=object
+    )
+
+
 def joined_columns(
     frame: pd.DataFrame, positions: Sequence[int], separator: str
 ) -> np.ndarray:
@@ -863,7 +876,7 @@ def joined_columns(
     A row whose text in any of the columns is empty joins to ``""``, so a
     cell that lacks a part of its barcode has none.
     """
-    parts = [frame[position].str.strip() for position in positions]
+    parts = [stripped_text(frame[position]) for position in positions]
     joined = parts[0]
     lacking = (parts[0] == "").to_numpy(dtype=bool, copy=True)
     for part in parts[1:]:

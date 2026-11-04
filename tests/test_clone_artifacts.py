@@ -20,11 +20,19 @@ from cytearc.metadata.arguments import CloneColumnArguments
 from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import every_cell, write_cells_store, write_truth_store
 from tests.clone_truth import N_CELLS, clone_truth, number_label
+from cytearc.utils.memory_budget import MemoryLedger
 from tests.memory_helpers import cost_bound
 
 TRUTH = clone_truth()
-# A memory budget that every write of these tests fits, and nothing held.
-_ROOMY = {"memory_bytes": 1 << 34, "held_bytes": 0}
+# A ledger without a budget, which every write of these tests fits.
+_ROOMY = {"ledger": MemoryLedger(None, "Saving clones")}
+
+
+def _holding(budget: int, held: int) -> MemoryLedger:
+    """A ledger of ``budget`` bytes that holds ``held`` of them."""
+    ledger = MemoryLedger(budget, "Saving clones")
+    ledger.hold("what the caller holds", held)
+    return ledger
 
 
 def _assignment() -> CloneAssignment:
@@ -174,15 +182,14 @@ def test_the_save_check_counts_the_labels_width_and_a_buffer_for_each_write(
         assignment = _labelled(width)
         with zarr.config.set({"async.concurrency": concurrency}):
             with pytest.raises(
-                MemoryError, match=f"width of the longest, {width} characters"
+                MemoryError, match=f"each label {width} characters wide as stored"
             ) as refused:
                 write_clones(
                     store.zw,
                     planned,
                     assignment,
                     {"n_clones": len(assignment.clone_ids)},
-                    memory_bytes=1,
-                    held_bytes=1_000,
+                    ledger=_holding(1_000, 1_000),
                 )
         found = re.search(r"holds about (\d+) bytes", str(refused.value))
         assert found is not None
@@ -205,8 +212,7 @@ def test_the_save_check_counts_the_probabilities(store) -> None:
                 planned,
                 assignment,
                 {"n_clones": len(assignment.clone_ids)},
-                memory_bytes=1,
-                held_bytes=0,
+                ledger=_holding(1, 0),
             )
         found = re.search(r"holds about (\d+) bytes", str(refused.value))
         assert found is not None
@@ -226,8 +232,7 @@ def test_a_save_one_byte_over_its_budget_is_refused_before_it_writes(store) -> N
             planned,
             assignment,
             {"n_clones": len(assignment.clone_ids)},
-            memory_bytes=needed - 1,
-            held_bytes=5_000,
+            ledger=_holding(needed - 1, 5_000),
         )
     assert not store.artifacts.inspect(planned.ref).exists
     write_clones(
@@ -235,8 +240,7 @@ def test_a_save_one_byte_over_its_budget_is_refused_before_it_writes(store) -> N
         planned,
         assignment,
         {"n_clones": len(assignment.clone_ids)},
-        memory_bytes=needed,
-        held_bytes=5_000,
+        ledger=_holding(needed, 5_000),
     )
     assert store.clones.load_clones(planned.ref).clones["n_cells"].sum() == int(
         np.count_nonzero(assignment.codes >= 0)

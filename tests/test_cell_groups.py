@@ -1,27 +1,34 @@
 """Cells grouped by columns, label artifacts and kept-apart labels, checked by hand."""
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from cytearc.datastore._operations.cell_groups import (
-    GROUPING_BYTES_PER_CELL,
-    GROUPING_BYTES_PER_COLUMN,
-    GROUPING_BYTES_PER_DISTINCT_LABEL,
     GROUPING_BYTES_PER_GROUP,
-    GROUPING_BYTES_PER_LABEL_BYTE,
-    GROUPING_BYTES_PER_LABELLED_CELL,
-    GROUPING_BYTES_PER_SELECTED_CELL,
+    GROUPING_BYTES_PER_GROUP_COLUMN,
     cell_groups,
     group_columns,
+    within_groups,
 )
 from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.artifacts import plan_cell_data_artifact
-from cytearc.metadata.rows import array_row_selection_parts
 from cytearc.storage.arrays import MISSING_MASK_PREFIX
 from cytearc.storage.artifact_writer import artifact_transaction
 from cytearc.storage.artifacts import artifact_group
-from cytearc.storage.geometry import READ_OBJECT_BYTES
 from cytearc.storage.refs import ArtifactRef
+from cytearc.storage.validation_scope import validation_scope
+from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
+from tests.memory_helpers import (
+    ZARR_READS,
+    audited,
+    budget_that_runs,
+    charges,
+    hold_finished_reads,
+    traced_peak,
+)
 from tests.storage_helpers import (
     insert_nullable_cell_column,
     open_store,
@@ -59,7 +66,7 @@ def _group(store: DataStore, rows=None, *, selection: str = "every_cell", **opti
         "group_by": None,
         "groups": None,
         "cell_selection": None,
-        "memory_bytes": 10**9,
+        "ledger": MemoryLedger(None, "Grouping cells"),
         **options,
     }
     mask = np.ones(n_cells, dtype=bool) if rows is None else np.asarray(rows)
@@ -229,131 +236,331 @@ def test_key_columns_are_checked(store) -> None:
         _group(store, kept_apart=(("kind", np.asarray(["T"])),))
 
 
-def _chunk(array) -> int:
-    """The bytes of one chunk that reading an array holds, by the store's model."""
-    return array_row_selection_parts(array)[0]
+def _prepared(store, rows=None, *, selection: str = "every_cell", **options):
+    """A call of ``cell_groups`` whose selection and rows are found before it runs."""
+    cells = store.snapshot_cell_selection(selection)
+    n_cells = int(np.count_nonzero(np.asarray(store.cells.fetch_all(selection))))
+    mask = np.ones(n_cells, dtype=bool) if rows is None else np.asarray(rows)
+    arguments = {"group_by": None, "groups": None, "cell_selection": None, **options}
+
+    def call():
+        return cell_groups(
+            store.zw,
+            store.cells,
+            cells,
+            mask,
+            ledger=MemoryLedger(None, "Grouping cells"),
+            **arguments,
+        )
+
+    return call
 
 
-def _selection_chunk(store, name: str) -> int:
-    """The bytes of one chunk of a cell selection's flags, one per cell of the store."""
-    return _chunk(
-        artifact_group(store.zw, store.snapshot_cell_selection(name))["values"]
+def _smallest(store, **options) -> tuple[int, int, list[str]]:
+    """The smallest budget that a grouping's refusals name, its traced peak there, and the refusals.
+
+    Each refusal must name a budget above the one it refused, and one byte
+    below the budget that runs is refused naming it.
+    """
+    budget, refusals, _grouped, peak = budget_that_runs(
+        lambda budget: budget,
+        lambda budget: _group(
+            store, ledger=MemoryLedger(budget, "Grouping cells"), **options
+        ),
+    )
+    with pytest.raises(MemoryBudgetError) as refused:
+        _group(store, ledger=MemoryLedger(budget - 1, "Grouping cells"), **options)
+    assert refused.value.needed_bytes == budget
+    assert peak is not None and peak <= budget, (peak, budget)
+    return budget, peak, refusals
+
+
+@pytest.mark.parametrize(
+    ("n_groups", "n_columns", "label"),
+    [
+        (20_000, 1, "{:07d}"),
+        (20_000, 13, "{:07d}"),
+        (2_000, 3, "{:030d}"),
+        (2_000, 1, "\u00e9t\u00e9 {:06d}"),
+        (2_000, 2, "\U0001f600 {:06d}"),
+    ],
+    ids=["one column", "13 columns", "long labels", "Latin-1", "four-byte"],
+)
+def test_fingerprinting_groups_holds_what_its_bytes_state(
+    n_groups, n_columns, label
+) -> None:
+    from cytearc.datastore._operations.cell_groups import CellGroups
+
+    columns = tuple(f"column_{k}" for k in range(n_columns))
+    keys = [
+        {column: label.format(group) for column in columns} for group in range(n_groups)
+    ]
+    grouped = CellGroups(columns, keys, np.arange(100_000) % n_groups)
+    _result, peak = traced_peak(grouped.fingerprint, 1 << 30)
+    stated = grouped.fingerprint_bytes()
+    assert peak <= stated <= 1.6 * peak + 4096, (peak, stated)
+
+
+@pytest.mark.parametrize("n_columns", [1, 3, 13])
+@pytest.mark.parametrize("labels", ["own", "few"])
+def test_numbering_combinations_holds_what_its_charge_plans(n_columns, labels) -> None:
+    from cytearc.datastore._operations.cell_groups import _combining_bytes
+    from cytearc.utils.arrays import unique_rows
+
+    # The grouping's step, beside the key columns' codes: 20,000 cells of a
+    # label of their own in each column, every cell a group, or of eight.
+    rng = np.random.default_rng(n_columns)
+    n_cells = 20_000
+    coded = [
+        rng.permutation(n_cells) if labels == "own" else rng.integers(0, 8, n_cells)
+        for _ in range(n_columns)
+    ]
+
+    def combine() -> tuple[np.ndarray, np.ndarray]:
+        stacked = np.column_stack(coded)
+        keep = (stacked >= 0).all(axis=1)
+        return unique_rows(stacked[keep])
+
+    _result, peak = traced_peak(combine, 1 << 30)
+    charged = _combining_bytes(n_cells, n_columns)
+    assert peak <= charged, (peak, charged)
+    if labels == "own":
+        assert charged <= 1.15 * peak, (peak, charged)
+
+
+def test_grouping_without_columns_counts_the_chunk_of_the_selection_it_reads(
+    store, tmp_path
+) -> None:
+    from tests.storage_helpers import copy_store, rechunk_column
+
+    # The artifact's selection holds a flag for each cell of the store, in
+    # the one chunk of the store's 8 rows. In chunks of 100,000, as a store
+    # written before cell columns were chunked by their rows keeps them,
+    # reading which 8 cells it holds decodes 100,000 bytes, however few
+    # cells the store holds; the grouping charges that read whether or not
+    # it groups by anything.
+    selection = store.snapshot_cell_selection("every_cell")
+    assert artifact_group(store.zw, selection)["values"].chunks == (N_CELLS,)
+    older = copy_store(Path(store.zarr_loc), tmp_path)
+    rechunk_column(artifact_group(older.zw, selection), "values")
+    older = open_store(older.zarr_loc)
+    values = artifact_group(older.zw, older.snapshot_cell_selection("every_cell"))[
+        "values"
+    ]
+    assert values.chunks == (100_000,)
+    budget, peak, refusals = _smallest(older)
+    assert budget > 100_000
+    assert refusals[0].startswith(
+        "Grouping cells holds about"
+    ) and "the cells of the artifact's selection" in " ".join(refusals)
+    assert peak > 100_000
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"group_by": ["sample", "batch"]},
+        {"group_by": "partial"},
+        {"group_by": "batch", "cell_selection": "odd"},
+        {"groups": "first_four"},
+        {"group_by": "batch", "kept_apart": "kinds"},
+    ],
+    ids=["two columns", "a nullable column", "a selection", "labels", "kept apart"],
+)
+def test_grouping_runs_within_the_budget_that_its_refusals_name(store, options) -> None:
+    options = dict(options)
+    if "cell_selection" in options:
+        options["cell_selection"] = store.snapshot_cell_selection(
+            options["cell_selection"]
+        )
+    if "groups" in options:
+        options["groups"] = store.snapshot_cluster_labels(
+            "cluster",
+            cell_selection=store.snapshot_cell_selection(options["groups"]),
+        )
+    if "kept_apart" in options:
+        options["kept_apart"] = (("kind", np.asarray(["B", "T"] * 4, dtype=object)),)
+    _smallest(store, **options)
+
+
+def test_what_the_caller_holds_counts_beside_the_grouping(store) -> None:
+    alone, _peak, _refusals = _smallest(store, group_by=["sample", "batch"])
+    ledger = MemoryLedger(alone + 999, "Grouping cells")
+    ledger.hold("the chain slots", 1_000)
+    with pytest.raises(MemoryBudgetError) as refused:
+        _group(store, group_by=["sample", "batch"], ledger=ledger)
+    assert refused.value.needed_bytes == alone + 1_000
+
+
+def test_each_cells_group_and_the_groups_labels_stay_charged(store) -> None:
+    # Four groups of two key columns: each cell's code, 8 bytes, each group's
+    # labels and name, and the distinct labels that they keep, each a
+    # reference and a string.
+    ledger = MemoryLedger(None, "Grouping cells")
+    _group(store, group_by=["sample", "batch"], ledger=ledger)
+    labels = sum(8 + sys.getsizeof(label) for label in ("s2", "s10", "a", "b"))
+    assert ledger.charged == 8 * N_CELLS + labels + 4 * (
+        GROUPING_BYTES_PER_GROUP + 2 * GROUPING_BYTES_PER_GROUP_COLUMN
+    )
+    # Without a column, each cell's group alone.
+    ledger = MemoryLedger(None, "Grouping cells")
+    _group(store, ledger=ledger)
+    assert ledger.charged == 8 * N_CELLS
+    # Within groups keep each cell's group in place of its code.
+    within = MemoryLedger(None, "Grouping cells")
+    codes, keys, _fingerprint = within_groups(
+        store.zw,
+        store.cells,
+        store.snapshot_cell_selection("every_cell"),
+        ("batch",),
+        np.ones(N_CELLS, dtype=bool),
+        ledger=within,
+        what="a clone",
+    )
+    assert codes.tolist() == [0, 0, 1, 1, 0, 0, 1, 1] and len(keys) == 2
+    labels = sum(8 + sys.getsizeof(label) for label in ("a", "b"))
+    assert within.charged == 8 * N_CELLS + labels + 2 * (
+        GROUPING_BYTES_PER_GROUP + GROUPING_BYTES_PER_GROUP_COLUMN
     )
 
 
-def _assert_needs(store, needed: int, **options) -> None:
-    """Grouping runs within ``needed`` bytes and refuses one byte fewer."""
-    assert _group(store, memory_bytes=needed, **options).codes.shape == (N_CELLS,)
-    with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
-        _group(store, memory_bytes=needed - 1, **options)
-
-
-def test_grouping_is_checked_against_the_memory_budget(store) -> None:
-    # Eight cells by two columns, whose labels are stored 3 and 1 characters
-    # wide in 4 bytes each: 8 * (100 + 2 * 70 + 3 * (12 + 4)) bytes, and the
-    # larger column's chunk while it is read.
-    per_cell = GROUPING_BYTES_PER_CELL + 2 * GROUPING_BYTES_PER_COLUMN
-    per_cell += GROUPING_BYTES_PER_LABEL_BYTE * (12 + 4)
-    assert N_CELLS * per_cell == 2_304
-    chunk = max(_chunk(store.cells._get_array(name)) for name in ("sample", "batch"))
-    # The second column is read while the read of the first can still hold
-    # its chunk, with Zarr's objects.
-    before = chunk + READ_OBJECT_BYTES
-    # Each column holds two distinct labels, and they make four groups.
-    named = (2 + 2) * GROUPING_BYTES_PER_DISTINCT_LABEL + 4 * GROUPING_BYTES_PER_GROUP
-    _assert_needs(store, 2_304 + chunk + before + named, group_by=["sample", "batch"])
-
-
-def test_a_column_of_several_chunks_counts_the_chunk_read_before(tmp_path) -> None:
+def test_a_column_of_several_chunks_holds_the_chunk_read_before(tmp_path) -> None:
     path = tmp_path / "store.zarr"
     write_count_store(str(path), {"RNA": np.ones((N_CELLS, 3), dtype=int)}, "uint16")
     store = open_store(path)
     store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
     store.zw["cellData"].create_array("halves", data=SAMPLES, chunks=(4,))
     store = open_store(path)
-    halves = store.cells._get_array("halves")
-    assert halves.chunks == (4,)
-    # One column of labels stored 3 characters wide is read a chunk of four
-    # cells at a time, and each read can still hold the chunk read before it.
-    per_cell = GROUPING_BYTES_PER_CELL + GROUPING_BYTES_PER_COLUMN
-    per_cell += GROUPING_BYTES_PER_LABEL_BYTE * 12
-    before = _chunk(halves) + READ_OBJECT_BYTES
-    named = 2 * GROUPING_BYTES_PER_DISTINCT_LABEL + 2 * GROUPING_BYTES_PER_GROUP
-    _assert_needs(
-        store, N_CELLS * per_cell + _chunk(halves) + before + named, group_by="halves"
-    )
+    assert store.cells._get_array("halves").chunks == (4,)
+    # One column read a chunk of four cells at a time, each read holding the
+    # work of the read before, as a busy machine can, stays within every
+    # interval the ledger plans.
+    halves = _prepared(store, group_by="halves")
+    # The selection's identity check, outside the budget, runs once in the
+    # operation's scope before the grouping.
+    with validation_scope():
+        halves()
+        with hold_finished_reads(*ZARR_READS):
+            grouped, overruns = audited(halves)
+    assert overruns == []
+    assert grouped.keys == [{"halves": "s2"}, {"halves": "s10"}]
+    _smallest(store, group_by="halves")
 
 
-def test_what_the_caller_holds_counts_beside_the_grouping(store) -> None:
-    # The grouping by two columns of the first budget test, beside 1,000
-    # bytes that the caller holds, such as the chain slots that gene usage
-    # reads before it groups.
-    per_cell = GROUPING_BYTES_PER_CELL + 2 * GROUPING_BYTES_PER_COLUMN
-    per_cell += GROUPING_BYTES_PER_LABEL_BYTE * (12 + 4)
-    chunk = max(_chunk(store.cells._get_array(name)) for name in ("sample", "batch"))
-    before = chunk + READ_OBJECT_BYTES
-    named = (2 + 2) * GROUPING_BYTES_PER_DISTINCT_LABEL + 4 * GROUPING_BYTES_PER_GROUP
-    _assert_needs(
-        store,
-        1_000 + N_CELLS * per_cell + chunk + before + named,
-        group_by=["sample", "batch"],
-        held_bytes=1_000,
-    )
-    # Without a grouping, the rows form one group beside what is held.
-    _assert_needs(store, 1_000 + N_CELLS * GROUPING_BYTES_PER_CELL, held_bytes=1_000)
+@pytest.mark.parametrize("lead", ["\u00c9", "\U0001f600"], ids=["Latin-1", "four-byte"])
+def test_labels_beyond_ascii_read_as_a_string_each_hold_their_utf8_forms(
+    tmp_path, lead
+) -> None:
+    # 20,000 cells of 50 labels beyond ASCII, read in chunks of 2,000 rows as
+    # a string for each cell: pandas keeps in each string that it hashes its
+    # UTF-8 form, as long as the string lives, which the grouping charges
+    # with the labels it reads, with every read's work held until the next
+    # read ends and without.
+    path = tmp_path / "store.zarr"
+    n_cells = 20_000
+    write_count_store(str(path), {"RNA": np.ones((n_cells, 1), dtype=int)}, "uint16")
+    store = open_store(path)
+    store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))
+    labels = np.asarray([lead * 30 + f"{index % 50:02d}" for index in range(n_cells)])
+    store.zw["cellData"].create_array("label", data=labels, chunks=(2_000,))
+    store = open_store(path)
+    grouped = _prepared(store, group_by="label")
+    for held in (False, True):
+        with validation_scope():
+            grouped()
+            if held:
+                with hold_finished_reads(*ZARR_READS):
+                    result, overruns = audited(grouped)
+            else:
+                result, overruns = audited(grouped)
+        assert overruns == [], (held, overruns)
+    assert len(result.keys) == 50
 
 
-def test_a_selection_and_a_label_artifact_count_all_their_cells(store) -> None:
-    # The four odd cells of a selection are read whatever the artifact holds.
-    batch = _chunk(store.cells._get_array("batch"))
-    per_cell = (
-        GROUPING_BYTES_PER_CELL
-        + GROUPING_BYTES_PER_COLUMN
-        + GROUPING_BYTES_PER_LABEL_BYTE * 4
-    )
-    selected = 4 * GROUPING_BYTES_PER_SELECTED_CELL
-    # The selection is read right after the artifact's cells, whose stored
-    # chunk the read before can still hold, with Zarr's objects.
-    before = (
-        max(_selection_chunk(store, "every_cell"), _selection_chunk(store, "odd"))
-        + READ_OBJECT_BYTES
-    )
-    named = 2 * GROUPING_BYTES_PER_DISTINCT_LABEL + 2 * GROUPING_BYTES_PER_GROUP
-    _assert_needs(
-        store,
-        N_CELLS * per_cell + batch + selected + before + named,
-        group_by="batch",
-        cell_selection=store.snapshot_cell_selection("odd"),
-    )
-    # A label artifact of four cells, labelled one character wide.
-    labels = store.snapshot_cluster_labels(
-        "cluster", cell_selection=store.snapshot_cell_selection("first_four")
-    )
-    values = artifact_group(store.zw, labels)["values"]
-    assert values.dtype == np.dtype("<U1")
-    labelled = 4 * (
-        GROUPING_BYTES_PER_LABELLED_CELL + GROUPING_BYTES_PER_LABEL_BYTE * 4
-    )
-    per_cell = GROUPING_BYTES_PER_CELL + GROUPING_BYTES_PER_COLUMN
-    _assert_needs(
-        store,
-        N_CELLS * per_cell + labelled + _chunk(values) + named,
-        groups=labels,
-    )
+def test_one_group_of_many_cells_holds_no_more_than_each_charge_plans(
+    tmp_path,
+) -> None:
+    # 200,000 cells in one group, without a column: their positions, 1.6 MB,
+    # and whether each may join the group are let go only once they are
+    # freed, with every read's work held until the next read ends and without.
+    path = tmp_path / "store.zarr"
+    n_cells = 200_000
+    write_count_store(str(path), {"RNA": np.ones((n_cells, 1), dtype=int)}, "uint16")
+    store = open_store(path)
+    store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))
+    grouped = _prepared(store)
+    for held in (False, True):
+        with validation_scope():
+            grouped()
+            if held:
+                with hold_finished_reads(*ZARR_READS):
+                    result, overruns = audited(grouped)
+            else:
+                result, overruns = audited(grouped)
+        assert overruns == [], (held, overruns)
+    assert result.keys == [{}] and np.all(result.codes == 0)
 
 
-def test_distinct_labels_and_groups_count_beside_the_cells(store) -> None:
-    # A label for each cell names eight labels and makes eight groups, which
-    # cost more than the cells.
+@pytest.fixture(scope="module")
+def many(tmp_path_factory) -> DataStore:
+    """20,000 cells with a label of each, in 13 key columns, ASCII and four-byte."""
+    path = tmp_path_factory.mktemp("many_groups") / "store.zarr"
+    n_cells = 20_000
+    write_count_store(str(path), {"RNA": np.ones((n_cells, 2), dtype=int)}, "uint16")
+    store = open_store(path)
+    store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))
+    store.cells.insert("own", np.asarray([f"g{index:06d}" for index in range(n_cells)]))
+    for copy in range(12):
+        store.cells.insert(
+            f"own_{copy}", np.asarray([f"g{index:06d}" for index in range(n_cells)])
+        )
     store.cells.insert(
-        "own", np.asarray([f"cell{i}" for i in range(N_CELLS)]), overwrite=True
+        "emoji",
+        np.asarray(
+            ["\U0001f600" * 30 + f"{index % 500:03d}" for index in range(n_cells)]
+        ),
     )
-    own = store.cells._get_array("own")
-    per_cell = GROUPING_BYTES_PER_CELL + GROUPING_BYTES_PER_COLUMN
-    per_cell += GROUPING_BYTES_PER_LABEL_BYTE * own.dtype.itemsize
-    named = 8 * GROUPING_BYTES_PER_DISTINCT_LABEL + 8 * GROUPING_BYTES_PER_GROUP
-    assert named == 8_000
-    _assert_needs(store, N_CELLS * per_cell + _chunk(own) + named, group_by="own")
+    store.cells.insert("half", np.arange(n_cells) % 2 == 0)
+    return store
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"group_by": "own"},
+        {"group_by": ["own", *(f"own_{copy}" for copy in range(12))]},
+        {"group_by": "emoji"},
+        {"group_by": "emoji", "cell_selection": "half"},
+    ],
+    ids=["a label of each cell", "13 key columns", "four-byte labels", "a selection"],
+)
+def test_grouping_many_cells_holds_no_more_than_each_charge_plans(
+    many, options
+) -> None:
+    options = dict(options)
+    if "cell_selection" in options:
+        options["cell_selection"] = many.snapshot_cell_selection(
+            options["cell_selection"]
+        )
+
+    grouped = _prepared(many, **options)
+
+    for held in (False, True):
+        # The selections' identity checks, outside the budget, run once in
+        # the operation's scope before the grouping.
+        with validation_scope():
+            grouped()
+            if held:
+                with hold_finished_reads(*ZARR_READS):
+                    _result, overruns = audited(grouped)
+            else:
+                _result, overruns = audited(grouped)
+        assert overruns == [], (held, overruns)
+    # The plan counts no more than about twice what the grouping holds.
+    _result, taken = charges(grouped)
+    planned = max(planned for _item, _nbytes, planned in taken)
+    _result, peak = traced_peak(grouped, planned)
+    assert peak <= planned <= 2 * peak + 256 * 1024, (peak, planned)
 
 
 def test_kept_apart_labels_follow_the_rows_that_join_groups(store) -> None:

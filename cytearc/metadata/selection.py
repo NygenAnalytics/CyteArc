@@ -1,7 +1,7 @@
 """Value-selection contracts shared by analysis and presentation layers."""
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
@@ -18,16 +18,23 @@ from ..storage.artifacts import (
     inspect_artifact,
     parse_artifact_ref,
 )
-from ..storage.geometry import array_geometry
+from ..storage.geometry import ArrayGeometry, array_geometry
 from ..storage.partition import scan_band
 from ..storage.selections import read_stored_selection_indices, validate_cell_selection
 from ..storage.types import as_zarr_array
 from ..storage.validation_scope import validation_scope
 from ..utils.arguments import integer_argument
-from ..utils.arrays import sort_categories
-from ..utils.memory_budget import MemoryBudgetError, MemoryLedger
+from ..utils.arrays import sort_categories, sort_categories_bytes
+from ..utils.memory_budget import (
+    MemoryBudgetError,
+    MemoryLedger,
+    hash_table_bytes,
+    object_array_bytes,
+    python_text_bytes,
+)
 from .rows import (
     apply_missing_mask,
+    operation_concurrency,
     read_metadata_missing_rows,
     read_metadata_rows,
     read_rows,
@@ -45,6 +52,7 @@ __all__ = [
     "CELL_VALUE_NAMES",
     "CellField",
     "CellFieldKind",
+    "CellSelectionRead",
     "CellValueSpec",
     "CellValues",
     "FeatureReduction",
@@ -63,6 +71,9 @@ __all__ = [
     "cell_value_array",
     "cell_value_spec",
     "grouping_value_name",
+    "hashed_text_bytes",
+    "plan_cell_selection_read",
+    "read_cell_selection",
     "resolve_cell_aligned_artifact",
     "resolve_grouping",
     "sample_codes",
@@ -358,8 +369,49 @@ def valid_category_mask(
     return valid
 
 
+#: Naming the distinct labels holds, for each label beside its sort key, its
+#: slots in the lists of the distinct values, their texts and whether they
+#: name a category, and its entry in the table that keeps them in order.
+_NAMING_BYTES_PER_LABEL = 50
+# Coding values holds, beside pandas' hash table, each value's code from
+# pandas, the distinct values' references and, once they are named, whether
+# each value holds a label, the codes and their two gathers.
+_FACTORIZE_BYTES_PER_VALUE = 16
+_CODING_BYTES_PER_VALUE = 33
+
+
+def hashed_text_bytes(texts: Iterable[str]) -> int:
+    """Return the bytes of the UTF-8 forms that hashing leaves in the strings ``texts`` beyond ASCII.
+
+    pandas hashes a string by its UTF-8 form, which CPython keeps in the
+    string, with a terminating NUL, for as long as the string lives; an
+    ASCII string is its own UTF-8 form. Coding labels therefore leaves this
+    much in each label's string beyond ASCII, which the holder of the
+    strings charges with them.
+    """
+    return sum(len(text.encode()) + 1 for text in texts if not text.isascii())
+
+
+def _naming_bytes(texts: list[str]) -> int:
+    """The bytes that naming and ordering the distinct labels ``texts`` holds.
+
+    Beside each label's slots and :func:`~cytearc.utils.arrays.sort_categories_bytes`,
+    pandas keeps the UTF-8 form of each text beyond ASCII that it hashed, as
+    long as the text lives, which costs about as much as the text.
+    """
+    sorting = sort_categories_bytes(texts)
+    cached = 0
+    if not all(map(str.isascii, texts)):
+        characters = sum(map(len, texts))
+        cached = python_text_bytes(len(texts), characters, widest=0x10FFFF)
+    return _NAMING_BYTES_PER_LABEL * len(texts) + sorting + cached
+
+
 def category_codes(
-    values: Any, missing_mask: Any | None = None
+    values: Any,
+    missing_mask: Any | None = None,
+    *,
+    ledger: MemoryLedger | None = None,
 ) -> tuple[np.ndarray, list[str]]:
     """Code labels by their text, in the natural order of the texts.
 
@@ -369,6 +421,17 @@ def category_codes(
     ``missing_mask`` marks. Each distinct value is checked and named once, so
     a million labels of a few categories cost one factorization.
 
+    With ``ledger``, what coding holds is charged to it before each step:
+    pandas' hash table of the values, as
+    :func:`~cytearc.utils.memory_budget.hash_table_bytes` counts it for every
+    value, beside each value's code and the distinct values' references; and
+    then the codes beside naming and ordering the distinct labels, from their
+    texts' characters and widest character, as
+    :func:`~cytearc.utils.memory_budget.python_text_bytes` counts them, and
+    the tokens of their natural order. The codes and names returned are the
+    caller's to charge, and so are the UTF-8 forms that hashing leaves in the
+    values' strings beyond ASCII, as :func:`hashed_text_bytes` counts them.
+
     Returns:
         Each value's code, as int64, and the categories' texts in the order of
         :func:`~cytearc.utils.arrays.sort_categories`, so that code ``i`` names
@@ -377,21 +440,50 @@ def category_codes(
     Raises:
         ValueError: If the values are not one-dimensional or the mask does not
             align with them.
+        MemoryBudgetError: If coding the values would pass the ledger's
+            budget.
     """
     array = (
         values if isinstance(values, np.ndarray) else np.asarray(values, dtype=object)
     )
     if array.ndim != 1:
         raise ValueError("category values must be one-dimensional")
+    n_values = len(array)
+    if ledger is not None:
+        # Distinct values of an object array are gathered as references.
+        gathered = object_array_bytes(n_values) if array.dtype == object else 0
+        ledger.peak(
+            f"coding {n_values} labels",
+            hash_table_bytes(n_values)
+            + _FACTORIZE_BYTES_PER_VALUE * n_values
+            + gathered,
+        )
     try:
         factorized, distinct = pd.factorize(array, use_na_sentinel=True)
     except TypeError:
         # Unhashable labels, such as lists, are coded by their text.
         labelled = valid_category_mask(array)
         as_text = np.full(len(array), None, dtype=object)
+        if ledger is not None:
+            # Each value's text, measured one at a time, and its hashing.
+            characters = sum(len(str(value)) for value in array[labelled].tolist())
+            ledger.peak(
+                f"coding {n_values} labels by their text",
+                object_array_bytes(n_values)
+                + python_text_bytes(n_values, characters, widest=0x10FFFF)
+                + hash_table_bytes(n_values)
+                + (_FACTORIZE_BYTES_PER_VALUE * n_values)
+                + object_array_bytes(n_values),
+            )
         as_text[labelled] = [str(value) for value in array[labelled].tolist()]
         factorized, distinct = pd.factorize(as_text, use_na_sentinel=True)
     distinct_values = np.asarray(distinct, dtype=object)
+    texts = [str(value) for value in distinct_values.tolist()]
+    if ledger is not None:
+        ledger.peak(
+            f"naming {len(texts)} distinct labels",
+            _CODING_BYTES_PER_VALUE * n_values + _naming_bytes(texts),
+        )
     present = factorized >= 0
     if missing_mask is not None:
         missing = np.asarray(missing_mask, dtype=bool)
@@ -401,7 +493,6 @@ def category_codes(
     # Only the labels that some value holds name a category.
     held = np.bincount(factorized[present], minlength=len(distinct_values)) > 0
     valid = (held & valid_category_mask(distinct_values)).tolist()
-    texts = [str(value) for value in distinct_values.tolist()]
     names = sort_categories(
         dict.fromkeys(text for text, ok in zip(texts, valid, strict=True) if ok)
     )
@@ -696,13 +787,96 @@ def cell_selection_indices(root: Any, selection: ArtifactRef) -> np.ndarray:
     ).astype(np.int64, copy=False)
 
 
+# Bytes of one int64 cell row or position.
+_INDEX_BYTES = np.dtype(np.int64).itemsize
+
+
+@dataclass(frozen=True, slots=True)
+class CellSelectionRead:
+    """A cell selection checked and counted before its cells are read.
+
+    Attributes:
+        selection: The cell selection.
+        cells: The cells it selects.
+        geometry: The geometry of its stored flags, or None when they have
+            no chunks.
+        rows: The rows of its flags, one for each cell of the store.
+        checked: Whether its identity check ran as the read was planned;
+            otherwise the check runs as the cells are read.
+    """
+
+    selection: ArtifactRef
+    cells: int
+    geometry: ArrayGeometry | None
+    rows: int
+    checked: bool
+
+
+def plan_cell_selection_read(
+    root: Any, selection: ArtifactRef, *, cells: int | None = None
+) -> CellSelectionRead:
+    """Check a cell selection and count its cells, without reading their positions.
+
+    The selection's identity check reads its flags and the cell table's row
+    identifiers outside any budget, once in the operation's validation
+    scope, so an operation plans its reads before it charges anything. A
+    caller that knows the cells that the selection holds, as an artifact
+    aligned to it records them, passes them as ``cells``; the identity check
+    then runs as :func:`read_cell_selection` reads the positions.
+    """
+    n_selected = _selection_count(root, selection) if cells is None else int(cells)
+    values = as_zarr_array(artifact_group(root, selection)["values"], name="values")
+    return CellSelectionRead(
+        selection=selection,
+        cells=n_selected,
+        geometry=array_geometry(values),
+        rows=int(values.shape[0]),
+        checked=cells is None,
+    )
+
+
+def read_cell_selection(
+    ledger: MemoryLedger, root: Any, planned: CellSelectionRead, *, item: str
+) -> np.ndarray:
+    """Read the store positions of a planned cell selection's cells, keeping them charged as ``item``.
+
+    :func:`cell_selection_indices` reads the flags, one for each cell of the
+    store, in bands of whole chunks up to 64 MiB, so the read holds them as a
+    whole read at the operation's Zarr concurrency does, as
+    ``ArrayGeometry.wholeReadBytes`` counts it, beside each selected cell's
+    position as found, moved and returned; a stored chunk can outweigh the
+    cells it selects. The read is charged the positions beside what it
+    leaves on each of the ledger's codec threads where that is more, and
+    what it leaves stays charged until the next read. An identity check that
+    runs with the read reads the flags first, so what that read leaves is
+    held beside the read of the positions.
+
+    Raises:
+        MemoryBudgetError: If the read would pass the ledger's budget.
+    """
+    positions = 3 * _INDEX_BYTES * planned.cells
+    geometry = planned.geometry
+    held = 0
+    if geometry is None:
+        reading = planned.rows + positions
+    else:
+        chunks = -(-geometry.shape[0] // geometry.axisChunk(0))
+        held = geometry.heldReadBytes(ledger.holding_threads(chunks))
+        reading = max(
+            geometry.wholeReadBytes(operation_concurrency()) + positions,
+            _INDEX_BYTES * planned.cells + held,
+        ) + (0 if planned.checked else held)
+    ledger.peak(item, reading)
+    indices = cell_selection_indices(root, planned.selection)
+    if held:
+        ledger.leave(held)
+    ledger.hold(item, indices.nbytes)
+    return indices
+
+
 def _selection_count(root: Any, selection: ArtifactRef) -> int:
     """Validate a cell selection and count its cells without reading its rows."""
     return int(validate_cell_selection(root, selection).selected_count)
-
-
-# Bytes of one int64 cell row or position.
-_INDEX_BYTES = np.dtype(np.int64).itemsize
 
 
 def _refuse_cell_read(

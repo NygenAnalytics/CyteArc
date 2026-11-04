@@ -11,16 +11,23 @@ import pandas as pd
 import pytest
 import zarr
 
+from cytearc.datastore._operations.cell_barcodes import CellBarcodeJoin, lookup_bytes
 from cytearc.metadata.artifacts import (
     cell_data_write_bytes,
     plan_cell_data_artifact,
     write_cell_data_artifact,
 )
 from cytearc.metadata.rows import read_rows, read_text_rows, read_whole
+from cytearc.metadata.selection import (
+    category_codes,
+    plan_cell_selection_read,
+    read_cell_selection,
+)
 from cytearc.storage.arrays import zarr_write_buffer_bytes
 from cytearc.storage.async_execution import zarr_io_concurrency
 from cytearc.storage.geometry import READ_OBJECT_BYTES, array_geometry
 from cytearc.storage.selections import resolve_generated_selection_artifact
+from cytearc.utils.arrays import sort_categories, sort_categories_bytes
 from cytearc.utils.memory_budget import (
     MemoryBudgetError,
     MemoryLedger,
@@ -366,6 +373,140 @@ def test_text_is_hashed_as_the_strings_it_becomes() -> None:
     cost_bound(estimate + 64 * 1024, lambda: pd.factorize(values), slack=1.3)
 
 
+# Labels of one to eight tokens of the natural order, the runs of digits and
+# of other characters, in ASCII and beyond it.
+_LABELS = {
+    "ASCII of two tokens": lambda index: f"donor_{index:06d}",
+    "ASCII of one token": lambda index: "".join(
+        chr(97 + (index // 26**place) % 26) for place in range(5)
+    ),
+    "ASCII of eight tokens": lambda index: (
+        f"a{index % 7}b{index % 11}c{index % 13}d{index}"
+    ),
+    "two-byte": lambda index: "\u0100" * 10 + f"{index:05d}",
+    "four-byte": lambda index: "\U0001f600" * 40 + f"{index:06d}",
+}
+
+
+def _fresh_labels(kind: str, n_labels: int) -> list[str]:
+    """Labels made anew, so that no cache that an earlier call left in them counts."""
+    return [_LABELS[kind](index) for index in range(n_labels)]
+
+
+@pytest.mark.parametrize("kind", list(_LABELS))
+def test_sorting_labels_naturally_holds_their_keys(kind) -> None:
+    # Each label's sort key holds a tuple of its tokens and a casefolded copy
+    # of its text; Python reuses up to 2,000 freed tuples of each size, so
+    # 20,000 labels keep that out of the count.
+    sort_categories(_fresh_labels(kind, 10))
+    labels = _fresh_labels(kind, 20_000)
+    cost_bound(
+        sort_categories_bytes(labels),
+        lambda: sort_categories(labels),
+        slack=1.3,
+        allowance=64 * 1024,
+    )
+
+
+def test_the_natural_sort_counts_each_token_and_the_widest_character() -> None:
+    import sys
+
+    # By hand: a label's key and the tuple of its tokens beside 6 bytes, a
+    # token's tuple and its slot beside 26, at this Python's sizes of tuples,
+    # 110 and 90 bytes on Python 3.13 and 8 more a tuple since 3.14, and the
+    # text at its kind.
+    label = sys.getsizeof((0, (), "")) + sys.getsizeof(()) + 6
+    token = sys.getsizeof((0, 0)) + 8 + 26
+    tuple_growth = 8 if sys.version_info >= (3, 14) else 0
+    assert (label, token) == (110 + 2 * tuple_growth, 90 + tuple_growth)
+    assert sort_categories_bytes(["g12", "s2_rep10"]) == (
+        2 * label + (2 + 4) * token + python_text_bytes(2, 11)
+    )
+    assert sort_categories_bytes(["\U0001f600x"]) == (
+        label + token + python_text_bytes(1, 2, widest=0x1F600)
+    )
+    assert sort_categories_bytes([]) == 0
+
+
+def _charged(call) -> int:
+    """The most bytes that the charges of ``call`` planned on a ledger without a budget."""
+    _result, taken = charges(call)
+    return max(planned for _item, _nbytes, planned in taken)
+
+
+@pytest.mark.parametrize("kind", ["ASCII of two tokens", "four-byte"])
+@pytest.mark.parametrize(
+    ("n_values", "n_distinct"),
+    [
+        (20_000, 20_000),
+        (200_000, 50),
+        pytest.param(200_000, 200_000, marks=pytest.mark.slow),
+    ],
+)
+def test_coding_labels_holds_what_its_charges_plan(kind, n_values, n_distinct) -> None:
+    # The values of each call are made anew, since pandas keeps in each
+    # string beyond ASCII that it hashes the string's UTF-8 form.
+    def values() -> np.ndarray:
+        labels = np.asarray(_fresh_labels(kind, n_distinct), dtype=object)
+        return np.asarray(labels[np.arange(n_values) % n_distinct], dtype=object)
+
+    category_codes(values()[:10])
+    planned = _charged(
+        lambda: category_codes(values(), ledger=MemoryLedger(None, "Coding labels"))
+    )
+    given = iter([values(), values()])
+    cost_bound(
+        planned, lambda: category_codes(next(given)), slack=1.3, allowance=64 * 1024
+    )
+
+
+def test_coding_labels_refuses_before_it_hashes_them() -> None:
+    values = np.asarray([f"label{index}" for index in range(1_000)], dtype=object)
+    factorized = hash_table_bytes(1_000) + 16 * 1_000 + object_array_bytes(1_000)
+    ledger = MemoryLedger(factorized - 1, "Coding labels")
+    with pytest.raises(MemoryBudgetError) as refused:
+        category_codes(values, ledger=ledger)
+    assert refused.value.item == "coding 1000 labels"
+    assert refused.value.needed_bytes == factorized
+    # Numbers gather no references to their distinct values.
+    numbers = MemoryLedger(None, "Coding labels")
+    _result, taken = charges(lambda: category_codes(np.arange(1_000), ledger=numbers))
+    assert taken[0] == (
+        "coding 1000 labels",
+        hash_table_bytes(1_000) + 16 * 1_000,
+        hash_table_bytes(1_000) + 16 * 1_000,
+    )
+    # The codes and names are the same with a ledger as without one.
+    codes, names = category_codes(values[::-1], ledger=MemoryLedger(None, "Coding"))
+    expected_codes, expected_names = category_codes(values[::-1])
+    assert names == expected_names
+    assert codes.tolist() == expected_codes.tolist()
+
+
+@pytest.mark.parametrize("n_cells", [20_000, 200_000])
+def test_the_joins_lookup_holds_an_index_and_a_hash_table(n_cells) -> None:
+    # pandas hashes the IDs into a table on its first use, and pandas 3
+    # copies their references into the index, beside a flag for each cell;
+    # the IDs' strings are the caller's.
+    ids = np.asarray([f"cell{index:08d}-1" for index in range(n_cells)], dtype=object)
+    probe = np.asarray(ids[:1_000], dtype=object)
+
+    def join() -> CellBarcodeJoin:
+        joined = CellBarcodeJoin(ids, ledger=MemoryLedger(None, "Joining"))
+        joined._lookup.get_indexer(pd.Index(probe, dtype=object))
+        return joined
+
+    join()
+    # Beside the probe's index and positions, the index, its engine and the
+    # join are objects of a few kilobytes.
+    cost_bound(
+        lookup_bytes(n_cells) + 16 * len(probe) + 16 * 1024,
+        join,
+        slack=1.3,
+        allowance=64 * 1024,
+    )
+
+
 # Reads of stored arrays
 
 
@@ -702,6 +843,116 @@ def test_a_sharded_read_fetches_one_band_of_chunks_at_a_time(
     with zarr_io_concurrency(1), hold_finished_reads(*ZARR_READS):
         _result, overruns = audited(run)
     assert "the next array" in [item for item, _planned, _traced in overruns]
+
+
+def _selection_store(path: Path, flags: np.ndarray):
+    """A cell table of IDs and a cell selection of the cells that ``flags`` marks."""
+    root = zarr.open_group(path, mode="w")
+    n_cells = len(flags)
+    ids = np.asarray([f"cell-{index}" for index in range(n_cells)])
+    root.create_group("cellData").create_array(
+        "ids", data=ids, chunks=(min(n_cells, 100_000),)
+    )
+    ref = resolve_generated_selection_artifact(
+        root,
+        scope="datastore",
+        kind="cell_selection",
+        values=flags,
+        row_ids=ids,
+        operation="manual_selection",
+        parameters={},
+        inputs={},
+        source_column="I",
+    )[0]
+    return root, ref
+
+
+@pytest.mark.parametrize("every", [1, 3])
+@pytest.mark.parametrize("n_cells", [48, 250_000])
+def test_reading_a_cell_selection_holds_its_flags_and_its_cells_positions(
+    tmp_path, n_cells, every
+) -> None:
+    from cytearc.storage.validation_scope import validation_scope
+
+    flags = np.arange(n_cells) % every == 0
+    root, ref = _selection_store(tmp_path / "store.zarr", flags)
+
+    def read(ledger: MemoryLedger) -> np.ndarray:
+        return read_cell_selection(ledger, root, planned, item="the cells")
+
+    # The selection's identity check, outside the budget, runs once in the
+    # operation's scope, when the read is planned; the read then holds the
+    # flags a band of chunks at a time beside the cells' positions, with each
+    # read's work held until the next ends, as on a busy machine. A read of a
+    # few flags traces less than half of the READ_OBJECT_BYTES that its cost
+    # counts for Zarr's objects.
+    with validation_scope():
+        planned = plan_cell_selection_read(root, ref)
+        assert planned.cells == int(flags.sum())
+        read(MemoryLedger(None, "Warming"))
+        estimate = _planned(read)
+        with hold_finished_reads(*ZARR_READS):
+            positions, _peak = cost_bound(
+                estimate,
+                lambda: read(MemoryLedger(None, "Reading")),
+                slack=1.3,
+                allowance=READ_OBJECT_BYTES,
+            )
+        assert positions.tolist() == np.flatnonzero(flags).tolist()
+        # The positions stay charged, and the flags' last chunk on the codec
+        # thread counts until the next read.
+        ledger = MemoryLedger(None, "Reading")
+        read(ledger)
+        geometry = planned.geometry
+        assert geometry is not None
+        assert ledger.charged == 8 * planned.cells
+        assert ledger.left == geometry.heldReadBytes(1)
+
+
+def test_a_selection_checked_as_its_cells_are_read_counts_the_checks_chunk(
+    tmp_path,
+) -> None:
+    # A caller that knows the cells skips the check when the read is planned,
+    # so the check reads the flags within the read, and what that first read
+    # leaves on the codec thread is held beside the read of the positions.
+    flags = np.arange(250_000) % 3 == 0
+    root, ref = _selection_store(tmp_path / "store.zarr", flags)
+    checked = plan_cell_selection_read(root, ref)
+    unchecked = plan_cell_selection_read(root, ref, cells=int(flags.sum()))
+    assert (checked.checked, unchecked.checked) == (True, False)
+    assert unchecked.cells == checked.cells
+
+    def planned(plan) -> int:
+        return _planned(
+            lambda ledger: read_cell_selection(ledger, root, plan, item="the cells")
+        )
+
+    geometry = checked.geometry
+    assert geometry is not None
+    assert planned(unchecked) - planned(checked) == geometry.heldReadBytes(1)
+
+
+def test_a_cell_selection_beyond_the_budget_is_refused_before_it_is_read(
+    tmp_path, monkeypatch
+) -> None:
+    import cytearc.metadata.selection as selection
+
+    root, ref = _selection_store(tmp_path / "store.zarr", np.ones(1_000, dtype=bool))
+    planned = plan_cell_selection_read(root, ref)
+    estimate = _planned(
+        lambda ledger: read_cell_selection(ledger, root, planned, item="the cells")
+    )
+
+    def unread(*_arguments, **_options):
+        raise AssertionError("the selection was read")
+
+    monkeypatch.setattr(selection, "cell_selection_indices", unread)
+    with pytest.raises(
+        MemoryBudgetError, match=f"holds about {estimate} bytes for the cells"
+    ):
+        read_cell_selection(
+            MemoryLedger(estimate - 1, "Reading"), root, planned, item="the cells"
+        )
 
 
 # Writes

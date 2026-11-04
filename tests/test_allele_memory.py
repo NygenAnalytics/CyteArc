@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.memory_helpers import at_budget, budget_bounds, stated_bytes, traced_peak
 from tests.storage_helpers import open_store, write_count_store
 
@@ -298,7 +299,10 @@ def test_a_budget_too_small_refuses_before_anything_is_written(wide) -> None:
     before = set(store.artifacts.list(kind="lineage_alleles", scope="datastore"))
     try:
         store.memoryBytes = 30_000_000
-        with pytest.raises(MemoryError, match="Importing alleles holds about"):
+        with pytest.raises(
+            MemoryBudgetError,
+            match="Importing alleles for 1000 selected cells holds about",
+        ):
             _import(store, cells, path)
     finally:
         store.memoryBytes = full
