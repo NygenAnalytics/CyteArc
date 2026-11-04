@@ -18,7 +18,7 @@ import zarr
 from ..utils.logging import logger
 from .arrays import _decode_metadata_values, text_dtype
 from .content_stamps import cached_for_content
-from .diagnostics import DIAGNOSTICS_ATTRIBUTE, DiagnosticValue, read_diagnostics
+from .diagnostics import DIAGNOSTICS_ATTRIBUTE, read_diagnostics
 from .errors import ArtifactErrorContextValue, ArtifactResolutionError
 from .geometry import array_geometry
 from .operation_revisions import (
@@ -728,7 +728,7 @@ class ArtifactStatus:
         return dict(value) if isinstance(value, Mapping) else None
 
     @property
-    def diagnostics(self) -> dict[str, DiagnosticValue]:
+    def diagnostics(self) -> dict[str, Any]:
         """The diagnostics that the artifact's operation saved, by name.
 
         They are the numbers that the operation recorded about what it read,

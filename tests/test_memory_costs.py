@@ -490,9 +490,13 @@ def test_the_joins_lookup_holds_an_index_and_a_hash_table(n_cells) -> None:
     # the IDs' strings are the caller's.
     ids = np.asarray([f"cell{index:08d}-1" for index in range(n_cells)], dtype=object)
     probe = np.asarray(ids[:1_000], dtype=object)
+    # A store of the selected cells alone, which the join never reads.
+    stored = ids.astype(str)
 
     def join() -> CellBarcodeJoin:
-        joined = CellBarcodeJoin(ids, ledger=MemoryLedger(None, "Joining"))
+        joined = CellBarcodeJoin(
+            ids, ledger=MemoryLedger(None, "Joining"), store_ids=stored
+        )
         joined._lookup.get_indexer(pd.Index(probe, dtype=object))
         return joined
 

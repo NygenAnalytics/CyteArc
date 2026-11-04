@@ -38,10 +38,12 @@ class DiagnosticWarning(UserWarning):
     def __str__(self) -> str:
         return str(self.args[0])
 
-    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+        # The state keeps what was added later, such as notes.
         return (
             type(self),
             (self.args[0], self.operation, self.diagnostic, self.value),
+            dict(vars(self)),
         )
 
 

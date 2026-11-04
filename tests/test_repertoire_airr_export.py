@@ -21,7 +21,7 @@ import cytearc.writers.airr as airr_writer
 from cytearc.metadata.records import EncodedText, encode_text
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.storage.refs import ArtifactRef
-from cytearc.utils.logging import logger
+from cytearc.utils.logging import collect_warnings, logger
 from cytearc.writers import write_airr_rearrangements
 from cytearc.writers.airr import (
     AIRR_REQUIRED_FIELDS,
@@ -2068,11 +2068,15 @@ def test_a_selection_of_some_cells_exports_their_ids(tmp_path) -> None:
         f"CASS{k},TGTGCCAGCAGC,100,5,ct{k},ct{k}_1"
         for k in (0, 2, 4, 5, 7)
     ]
-    with pytest.warns(UserWarning, match="match no cell of the store"):
+    # cell0 is a cell of the store outside the selection, which gives no
+    # warning.
+    with collect_warnings() as messages:
         receptors = store.repertoire.import_receptors(
             write_lines(tmp_path, "some.csv", CELLRANGER_HEADER, rows),
             cell_selection=store.snapshot_cell_selection("chosen"),
         )
+    assert list(messages) == []
+    assert store.artifacts.inspect(receptors).diagnostics["unselectedBarcodes"] == 1
     assert store.repertoire.export_airr(receptors, tmp_path / "some.tsv") == 4
     written = _read(tmp_path / "some.tsv")
     assert written["cell_id"].tolist() == ["cell2", "cell4", "cell5", "cell7"]

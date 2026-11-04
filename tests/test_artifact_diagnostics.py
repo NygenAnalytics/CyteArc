@@ -429,3 +429,37 @@ def test_a_stage_reports_the_diagnostics_of_an_output_without_a_summary(store) -
     assert summarize_stage(
         store, "clones", [("clones", clones), ("other", planned.ref)]
     ) == {"cellsWithClone": 3, "largestCloneShare": 2 / 3}
+
+
+def test_the_clone_writer_refuses_a_source_that_passes_its_own_keys(store) -> None:
+    from cytearc.clones.assignments import CloneAssignment
+    from cytearc.datastore._operations.clone_artifacts import (
+        clone_diagnostics,
+        write_clones,
+    )
+    from cytearc.utils.memory_budget import MemoryLedger
+
+    assignment = CloneAssignment(
+        codes=np.asarray([0, 0, 1, -1]),
+        clone_ids=np.asarray(["a", "b"], dtype=object),
+        clone_sizes=np.asarray([2, 1]),
+        probabilities=None,
+        n_cells_in_several_clones=0,
+    )
+    # Three cells given a clone, two of them in the largest, by hand.
+    assert clone_diagnostics(assignment) == {
+        "cellsWithClone": 3,
+        "largestCloneShare": 2 / 3,
+    }
+    planned = _plan(store)
+    before = written(store)
+    with pytest.raises(ValueError, match="saves cellsWithClone for every source"):
+        write_clones(
+            store.zw,
+            planned,
+            assignment,
+            {},
+            ledger=MemoryLedger(None, "Saving clones"),
+            diagnostics={"cellsWithClone": 3},
+        )
+    assert written(store) == before

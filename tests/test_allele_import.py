@@ -601,8 +601,8 @@ def test_the_selected_cells_ids_count_once_as_the_join_holds_them(
     charged: list[int] = []
 
     class Join(operations.CellBarcodeJoin):
-        def __init__(self, cell_ids, *, ledger):
-            super().__init__(cell_ids, ledger=ledger)
+        def __init__(self, cell_ids, *, ledger, store_ids):
+            super().__init__(cell_ids, ledger=ledger, store_ids=store_ids)
             charged.append(ledger.charged)
 
     monkeypatch.setattr(operations, "CellBarcodeJoin", Join)
