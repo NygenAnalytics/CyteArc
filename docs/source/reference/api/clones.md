@@ -98,7 +98,7 @@ A cell listed in two different clones, in one file or in two, raises `ValueError
 clones = ds.clones.from_column("clone_id", cell_selection=cells)
 ```
 
-The column is stamped by its stored chunks before any label is read, so saved clones are reused without reading the column; values written again with other chunks or codecs give new clones. The labels are then read in blocks of as many cells as half of what the memory budget leaves, from 1,000 to 1,000,000, each charged with its labels as Python strings and, for numbers, their text.
+The column is stamped by its stored chunks before any label is read, so saved clones are reused without reading the column; values written again with other chunks or codecs give new clones. The labels are then read in blocks of as many cells as half of what the memory budget leaves, from 1,000 to 1,000,000, each charged with its labels as Python strings and, for numbers, their text, and with what assigning them to clones holds, 84 bytes a cell beside pandas' hash table of their labels.
 
 ## Import lineage barcodes
 

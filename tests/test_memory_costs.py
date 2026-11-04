@@ -959,6 +959,70 @@ def test_a_cell_selection_beyond_the_budget_is_refused_before_it_is_read(
         )
 
 
+@pytest.fixture(scope="module")
+def labelled_store(tmp_path_factory):
+    """A store of 50,000 cells with labels of 30 clusters, frozen for every cell."""
+    from tests.storage_helpers import open_store, write_count_store
+
+    path = tmp_path_factory.mktemp("labelled") / "store.zarr"
+    n_cells = 50_000
+    write_count_store(str(path), {"RNA": np.ones((n_cells, 1), dtype=int)}, "uint16")
+    store = open_store(path)
+    store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))
+    store.cells.insert("half", np.arange(n_cells) % 2 == 0)
+    store.cells.insert(
+        "cluster", np.asarray([f"cluster_{i % 30:03d}" for i in range(n_cells)])
+    )
+    every = store.snapshot_cell_selection("every_cell")
+    return store, store.snapshot_cluster_labels("cluster", cell_selection=every)
+
+
+@pytest.mark.parametrize("selection", ["every_cell", "half"])
+def test_reading_a_label_artifact_holds_no_more_than_each_charge_plans(
+    labelled_store, selection
+) -> None:
+    from cytearc.metadata.selection import resolve_cell_aligned_artifact
+    from cytearc.storage.validation_scope import validation_scope
+
+    # 50,000 labelled cells, read for each of them or for half: each
+    # selection's positions are read through read_cell_selection, which
+    # charges its flags and the 24 bytes a cell its read holds, where the
+    # read of a label artifact charged 16 bytes a cell and held its flags
+    # and positions uncharged, 464 KB past the plan at 50,000 cells.
+    store, labels = labelled_store
+    cells = (
+        None if selection == "every_cell" else store.snapshot_cell_selection(selection)
+    )
+
+    def read() -> object:
+        return resolve_cell_aligned_artifact(
+            store.zw,
+            labels,
+            cell_selection=cells,
+            ledger=MemoryLedger(None, "Reading labels"),
+        )
+
+    for held in (False, True):
+        with validation_scope():
+            read()
+            if held:
+                with hold_finished_reads(*ZARR_READS):
+                    resolved, overruns = audited(read)
+            else:
+                resolved, overruns = audited(read)
+        assert overruns == [], (held, overruns)
+    assert len(resolved.cell_idx) == (50_000 if cells is None else 25_000)
+    # The positions are read through the one charged read of a selection.
+    _result, taken = charges(read)
+    positions = [
+        nbytes
+        for item, nbytes, _planned in taken
+        if item.startswith("the cell positions")
+    ]
+    assert len(positions) >= (2 if cells is None else 3), taken
+
+
+# Writes
 # Writes
 
 

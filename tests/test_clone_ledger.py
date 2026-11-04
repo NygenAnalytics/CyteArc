@@ -335,6 +335,46 @@ def test_ranked_labels_cost_their_strings_and_references_exactly(n_clones) -> No
     )
 
 
+# What assigning rows to clones works with.
+
+
+@pytest.mark.parametrize("n_rows", [200_000, 1_000_000])
+@pytest.mark.parametrize("kind", ["one label", "6,000 labels", "half without a label"])
+def test_assigning_rows_holds_what_its_cost_states(n_rows, kind) -> None:
+    from cytearc.clones.assignments import CloneAssigner, clone_assignment_bytes
+
+    rng = np.random.default_rng(0)
+    if kind == "one label":
+        labels = np.full(n_rows, "k1", dtype=object)
+    else:
+        labels = np.asarray(
+            [f"k{c}" for c in rng.integers(0, 6_000, n_rows)], dtype=object
+        )
+        if kind == "half without a label":
+            labels[::2] = None
+    cells = np.arange(n_rows, dtype=np.int64)
+    ids = np.arange(n_rows).astype(str).astype(object)
+
+    def assigned() -> int:
+        # What add holds beside its arguments, less what it charges for the
+        # labels it keeps, which the strings given already hold.
+        ledger = MemoryLedger(None, "Assigning")
+        assigner = CloneAssigner(ids, multiple="error", ledger=ledger)
+        held = ledger.held_bytes
+        _result, peak = traced_peak(lambda: assigner.add(cells, labels), 1 << 40)
+        return peak - (ledger.held_bytes - held)
+
+    assigned()
+    traced = min(assigned() for _ in range(2))
+    stated = clone_assignment_bytes(n_rows)
+    # Rows of one label or of 6,000 hold 81 to 84 bytes a row with pandas'
+    # hash table, within its bound; half of them without a label hold less.
+    assert traced <= stated, (traced, stated)
+    if kind != "half without a label":
+        assert stated <= 1.5 * traced, (traced, stated)
+
+
+# A stamp of stored chunks.
 # A stamp of stored chunks.
 
 
@@ -469,11 +509,14 @@ def column_store(tmp_path_factory) -> Any:
 @pytest.mark.parametrize(
     ("column", "selection", "at_most"),
     [
-        # The long labels' budget was 1.49 to 1.53 times the traced peak.
-        ("short", "every_cell", 1.7),
-        ("long", "every_cell", 1.7),
-        ("four_byte", "every_cell", 1.7),
-        ("numbers", "every_cell", 1.7),
+        # The budgets were 1.30 to 1.70 times the traced peaks: beside what
+        # the assigner works with, each block's read keeps charged the
+        # chunk of the column that a codec thread may still hold, up to the
+        # next read, 8 MB of four-byte labels.
+        ("short", "every_cell", 1.9),
+        ("long", "every_cell", 1.9),
+        ("four_byte", "every_cell", 1.9),
+        ("numbers", "every_cell", 1.9),
         # Few cells of many: the stamp reads every stored chunk of the column.
         ("long", "few", 2.6),
     ],
@@ -491,8 +534,9 @@ def test_clones_of_a_column_run_at_the_budget_that_their_refusals_name(
 
     # Each block takes half of the room, so a larger budget reads larger
     # blocks: the call runs at every budget from the one its refusals name,
-    # which a byte less may run too, and holds no more than it.
-    budget, _refusals, ref, peak = budget_that_runs(store, save, max_refusals=100)
+    # which a byte less may run too, and holds no more than it. Numbers in
+    # blocks of about 1,900 labels climb through 112 refusals.
+    budget, _refusals, ref, peak = budget_that_runs(store, save, max_refusals=200)
     assert peak is not None and peak <= budget <= at_most * peak, (budget, peak)
     assert ref.kind == "clones"
     # The labels are read a block at a time, after the stamp of the column.
@@ -522,6 +566,44 @@ def test_the_stamp_of_a_column_follows_its_stored_chunks(column_store) -> None:
     store.cells.insert("short", labels, overwrite=True)
     assert metadata_column_stamp(store.cells, "short") != stamp
     assert store.clones.from_column("short", cell_selection=cells) != first
+
+
+@pytest.mark.parametrize("budget", [None, 40_000_000], ids=["one block", "blocks"])
+def test_clones_of_a_column_of_many_cells_hold_each_step_within_its_plan(
+    tmp_path, budget
+) -> None:
+    # 200,000 cells in 25,000 clones whose sizes follow a power law, saved
+    # whole or in blocks: from each charge to the next, what is traced stays
+    # within what the ledger planned, beside the audit's allowance. The
+    # assigner's work on a block, its masks, positions, codes and sorted
+    # copies, went uncharged, 6.6 MB past the plan in one block.
+    rng = np.random.default_rng(3)
+    n_cells = 200_000
+    store = write_cells_store(
+        tmp_path / "store.zarr", [f"cell{i:07d}-1" for i in range(n_cells)]
+    )
+    sizes = np.minimum(rng.zipf(1.8, size=n_cells), 300)
+    clone_of = np.repeat(np.arange(len(sizes)), sizes)[:n_cells]
+    rng.shuffle(clone_of)
+    store.cells.insert("clone", np.asarray([f"clone{c}" for c in clone_of]))
+    cells = every_cell(store)
+    if budget is not None:
+        store.memoryBytes = budget
+
+    def save() -> object:
+        return store.clones.from_column(
+            "clone", cell_selection=cells, invalidate_cache=True
+        )
+
+    from cytearc.storage.validation_scope import validation_scope
+
+    with validation_scope():
+        save()
+        _result, intervals = interval_peaks(save)
+    blocks = [item for item, _p, _t in intervals if item.startswith("assigning")]
+    assert (len(blocks) == 1) == (budget is None), blocks
+    over = [entry for entry in intervals if entry[2] > entry[1] + 65_536]
+    assert over == [], over
 
 
 def test_cells_whose_labels_are_missing_join_no_clone_until_the_mask_changes(
@@ -575,9 +657,8 @@ def _write_long_table(folder: Path) -> tuple[Any, Path]:
     return store, table
 
 
-def _write_matrix(folder: Path) -> tuple[Any, Path]:
-    """A store of the first 2,000 of a clone matrix's 300,000 listed cells, one clone of 50 each."""
-    n_listed = 300_000
+def _write_matrix(folder: Path, n_listed: int = 300_000) -> tuple[Any, Path]:
+    """A store of the first 2,000 of a clone matrix's ``n_listed`` listed cells, one clone of 50 each."""
     names = [f"c{i:07d}" for i in range(n_listed)]
     matrix = folder / "matrix"
     matrix.mkdir()
@@ -667,6 +748,34 @@ def test_rows_longer_than_the_sampled_rows_make_chunks_of_fewer_rows(
     ref, peak = traced_peak(run, budget)
     assert peak <= budget, (budget, peak)
     assert ref.kind == "clones"
+
+
+def test_a_matrix_lets_go_of_its_cells_and_labels_once_it_is_read(tmp_path) -> None:
+    # A matrix of 5,000 listed cells and 50 clones: each listed cell's
+    # position among the selected cells, 8 bytes a cell, and the clones'
+    # labels are held while its entries are assigned, and let go with its
+    # chunk once they are, so the steps after the file plan with the room
+    # that the file no longer takes.
+    store, path = _write_matrix(tmp_path, n_listed=5_000)
+    cells = every_cell(store)
+
+    def run() -> object:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return store.clones.import_clones(
+                path, cell_selection=cells, invalidate_cache=True
+            )
+
+    _result, taken = charges(run)
+    items = [item for item, _nbytes, _planned in taken]
+    chunk = next(n for item, n, _p in taken if item.startswith("a chunk of"))
+    (labels,) = [n for item, n, _p in taken if item == "the clone matrix's labels"]
+    assert labels >= sum(sys.getsizeof(f"k{i}") for i in range(50))
+    released = items.index("the clone matrix's labels") + 1
+    released += next(
+        at for at, item in enumerate(items[released:]) if item == "a release"
+    )
+    assert taken[released][1] == chunk + 8 * 5_000 + labels, taken[released]
 
 
 def test_a_chunk_of_a_clone_table_charges_what_parsing_it_holds(tmp_path) -> None:

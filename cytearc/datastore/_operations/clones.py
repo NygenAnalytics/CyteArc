@@ -11,8 +11,10 @@ import pandas as pd
 import zarr
 
 from ...clones.assignments import (
+    CLONE_ASSIGNMENT_ROW_BYTES,
     MULTIPLE_POLICIES,
     CloneAssigner,
+    clone_assignment_bytes,
     Clones,
     clone_frames,
     MultiplePolicy,
@@ -666,17 +668,23 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         n_listed = sum(map(len, listed))
         ledger.peak("the clone matrix's cells", 8 * n_listed)
         cells = np.concatenate(listed) if listed else np.empty(0, dtype=np.int64)
+        # The listed cells' positions, held as they were joined, are now
+        # those of the one array.
+        cell_bytes = 8 * n_listed
         del listed
         labels = _namespaced(matrix_clone_ids(layout), namespace)
         # The matrix's labels are held beside those of earlier files.
-        ledger.hold(
+        label_bytes = ledger.hold(
             "the clone matrix's labels",
             object_array_bytes(len(labels)) + sum(map(sys.getsizeof, labels)),
         )
         for entries in matrix_entries(layout, chunk_rows):
             assigner.add(cells[entries.cells], labels[entries.clones], source=source)
             del entries
-        ledger.release(chunk_bytes)
+        # The assigner keeps the labels it was given, charged as it keeps
+        # them, so the matrix's cells and labels go with the file.
+        del cells, labels
+        ledger.release(chunk_bytes + cell_bytes + label_bytes)
 
     @validation_scoped
     def _clones_from_column(
@@ -762,8 +770,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         labels_array = self.cells._get_array(column)
         missing_array = metadata_missing_mask(self.cells, column)
         text = np.dtype(labels_array.dtype).kind == "U"
-        row_bytes = _column_label_bytes(labels_array) + (
-            0 if missing_array is None else 1
+        # Each label's read and text, its missing flag, and its cell and what
+        # the assigner works with while the block is assigned.
+        row_bytes = (
+            _column_label_bytes(labels_array)
+            + (0 if missing_array is None else 1)
+            + 8
+            + CLONE_ASSIGNMENT_ROW_BYTES
         )
         start = 0
         while start < n_cells:
@@ -786,10 +799,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             block_bytes = ledger.charged - entry
             labels = clone_label_texts(stored, missing)
             del stored, missing
-            # The assigner charges what it keeps of the block itself.
+            # Each label's cell and what the assigner works with are held
+            # while the block is assigned; the assigner charges what it
+            # keeps of the block itself.
+            assigning = ledger.hold(
+                f"assigning a block of {len(rows)} clone labels",
+                8 * len(rows) + clone_assignment_bytes(len(rows)),
+            )
             assigner.add(np.arange(start, start + len(rows)), labels)
             del rows, labels
-            ledger.release(block_bytes)
+            ledger.release(block_bytes + assigning)
             start += block_rows
         assignment = assigner.finish()
         write_clones(
