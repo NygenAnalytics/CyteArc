@@ -27,6 +27,7 @@ from tests.variant_helpers import (
     TAPESTRI_ALLELES,
     TAPESTRI_PASSING,
     TAPESTRI_REFERENCES,
+    assert_call_counts,
     assert_tables,
     dab_seq_ids,
     expected_dab_seq,
@@ -182,8 +183,40 @@ def test_the_tapestri_reader_is_silent_about_the_variants_it_skips(tmp_path) -> 
         again = tapestri_source(str(path), ["chr2:800"], 1 << 30)
     # The passing variants hold one with an empty ALT; the position chr2:800
     # adds one whose alleles are not bases.
-    assert source.skipped == SkippedVariants(1, 0, ("chr7:300:A/",))
-    assert again.skipped == SkippedVariants(1, 1, ("chr2:800:*/C+T", "chr7:300:A/"))
+    assert source.skipped == SkippedVariants(
+        names=("chr7:300:A/",), empty_alternatives=frozenset({"chr7:300:A/"})
+    )
+    assert again.skipped == SkippedVariants(
+        names=("chr2:800:*/C+T", "chr7:300:A/"),
+        empty_alternatives=frozenset({"chr7:300:A/"}),
+    )
+
+
+def test_files_of_one_panel_count_each_skipped_variant_once(store, tmp_path) -> None:
+    # Two files of disjoint cells skip the same two variants of the panel,
+    # which are two variants, not four, and each is named once.
+    half = TRUTH.n_rows // 2
+    paths = [
+        write_tapestri(TRUTH, tmp_path / "a.h5", rows=range(half)),
+        write_tapestri(TRUTH, tmp_path / "b.h5", rows=range(half, TRUTH.n_rows)),
+    ]
+    message = (
+        "The variant files have 1 chosen variants with an empty ALT and 1 whose "
+        "alleles are not bases, which no documentation explains, so they are "
+        "skipped, such as 'chr2:800:*/C+T', 'chr7:300:A/'"
+    )
+    for _attempt in ("computed", "reused"):
+        with collect_warnings() as messages:
+            ref = store.variants.import_counts(
+                paths, cell_selection=every_cell(store), include_variants=["chr2:800"]
+            )
+        assert [found for found in messages if "chosen variants" in found] == [message]
+        diagnostics = store.artifacts.inspect(ref).diagnostics
+        assert (
+            diagnostics["skippedEmptyAlternatives"],
+            diagnostics["skippedOtherAlleles"],
+            diagnostics["skippedVariantExamples"],
+        ) == (1, 1, ["chr2:800:*/C+T", "chr7:300:A/"])
 
 
 def test_the_cells_of_two_samples_with_one_barcode_stay_apart(store, tmp_path) -> None:
@@ -854,10 +887,9 @@ def test_source_genotypes_of_tapestri_counts_follow_ngt(store, tmp_path) -> None
     assert loaded.sites["alternative"].tolist() == ["A", "T", "GC", "T", "G", "A"]
     assert set(loaded.sites["source"]) == {"NGT"}
     ids = TRUTH.row_ids
-    assert_tables(
-        loaded.calls.astype({"call": str, "label": str}),
-        _expected_calls(_TAPESTRI_UNITS),
-    )
+    expected = _expected_calls(_TAPESTRI_UNITS)
+    assert_tables(loaded.calls.astype({"call": str, "label": str}), expected)
+    assert_call_counts(store.artifacts.inspect(genotypes).diagnostics, expected["call"])
     calls = loaded.calls.set_index(["ids", "site"])
     # No call with reads is filtered, and without reads missing, as is the
     # wild-type call that Tapestri writes without reads.

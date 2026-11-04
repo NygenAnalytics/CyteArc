@@ -678,6 +678,22 @@ def test_no_edits_call_no_clone() -> None:
     assert called.codes.tolist() == [-1] * 4
     assert called.n_clones == 0
     assert called.diagnostics["alleles"] == 0
+    # Without max_alleles, max_samples, p_clonal or banks, those rules count
+    # nothing and say so with None; max_frequency ran and found none.
+    assert {
+        name: value for name, value in called.diagnostics.items() if value is None
+    } == dict.fromkeys(
+        (
+            "allelesNotSignificant",
+            "allelesInTooManySamples",
+            "clonesWithTooManyAlleles",
+            "cellsInClonesWithTooManyAlleles",
+            "allelesInBank",
+            "observations",
+            "observationsInBank",
+        )
+    )
+    assert called.diagnostics["allelesTooFrequent"] == 0
 
 
 def _random_case(rng: np.random.Generator):

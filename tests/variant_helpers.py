@@ -538,3 +538,22 @@ def expected_dab_seq(
             columns=["ids", "site", "allele", "source", "call", "quality"],
         ),
     )
+
+
+#: Each genotype call's diagnostic, which counts the saved calls of its kind.
+CALL_DIAGNOSTICS = {
+    "wild_type": "wildTypeCalls",
+    "heterozygous": "heterozygousCalls",
+    "homozygous_alternative": "homozygousAlternativeCalls",
+    "alternative_present": "alternativePresentCalls",
+    "missing": "missingCalls",
+    "filtered": "filteredCalls",
+}
+
+
+def assert_call_counts(diagnostics, calls) -> None:
+    """Check genotypes' diagnostics against the calls a test expects, each kind's count by hand."""
+    expected = {key: 0 for key in CALL_DIAGNOSTICS.values()}
+    for call in calls:
+        expected[CALL_DIAGNOSTICS[str(call)]] += 1
+    assert {key: diagnostics[key] for key in expected} == expected

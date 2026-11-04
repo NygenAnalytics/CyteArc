@@ -510,6 +510,23 @@ def test_a_doublet_is_not_among_the_cells_given_a_clone() -> None:
     )
     assert calls.calls.doublets.tolist() == [False] * 6 + [True]
     assert _largest_share(calls) == 3 / 6
+    # Three distinct sets, cell 6's joining the other two; the doublet rule
+    # ran and removed cell 6, and pruning did not run.
+    assert {
+        key: calls.diagnostics[key]
+        for key in ("nodes", "edges", "edgesPruned", "doublets")
+    } == {"nodes": 3, "edges": 2, "edgesPruned": None, "doublets": 1}
+    pruned = _call(
+        _records(rows),
+        7,
+        method="jaccard",
+        similarity=0.4,
+        inclusive=False,
+        prune=True,
+        doublets=False,
+    )
+    assert pruned.diagnostics["edgesPruned"] == pruned.calls.n_pruned
+    assert pruned.diagnostics["doublets"] is None
 
 
 def test_the_largest_clone_shares_the_cells_given_a_clone() -> None:

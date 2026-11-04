@@ -396,11 +396,10 @@ def test_tests_the_counts_cannot_make_fail_before_scoring(
 def test_masks_keep_listed_variants_from_being_informative(tmp_path) -> None:
     store = rcrs_store(tmp_path / "store.zarr")
     counts = _import(store, write_rcrs_mgatk(tmp_path / "final", (2, 4, 6)))
-    selection = store.variants.load_informative(
-        store.variants.informative(
-            counts, min_vmr=0.0, mask=["numt", "artifact_prone", "rna_editing"]
-        )
+    ref = store.variants.informative(
+        counts, min_vmr=0.0, mask=["numt", "artifact_prone", "rna_editing"]
     )
+    selection = store.variants.load_informative(ref)
     frame = selection.variants
     masked = dict(zip(frame["position"], frame["masked"], strict=True))
     # 310 is artifact-prone; 16293A>C and 16218C>T are NUMT false positives,
@@ -416,6 +415,13 @@ def test_masks_keep_listed_variants_from_being_informative(tmp_path) -> None:
     }
     assert frame["informative"].tolist() == (~frame["masked"]).tolist()
     assert selection.mask == ("artifact_prone", "numt", "rna_editing")
+    # Four of the six variants are masked, and the other two informative.
+    diagnostics = store.artifacts.inspect(ref).diagnostics
+    assert (
+        diagnostics["variants"],
+        diagnostics["maskedVariants"],
+        diagnostics["informativeVariants"],
+    ) == (6, 4, 2)
     one = store.variants.load_informative(
         store.variants.informative(counts, min_vmr=0.0, mask="artifact_prone")
     )

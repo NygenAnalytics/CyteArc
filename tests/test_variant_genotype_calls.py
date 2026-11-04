@@ -22,7 +22,7 @@ from cytearc.variants.genotypes import CALLS, GENOTYPE_RULES
 from tests.clone_helpers import every_cell, levenshtein_distance, write_cells_store
 from tests.storage_helpers import copy_store, open_store
 from tests.memory_helpers import smallest_budget, traced_peak
-from tests.variant_helpers import write_variant_store
+from tests.variant_helpers import assert_call_counts, write_variant_store
 from tests.variant_truth import (
     PROBES,
     TARGETS,
@@ -86,6 +86,11 @@ def test_source_calls_are_the_tools_own_with_their_labels(store, tmp_path) -> No
             if label != "NA":
                 expected[(cell, site)] = (named[label], label)
     assert found == expected
+    # The diagnostics count the truth's calls of each kind.
+    diagnostics = store.artifacts.inspect(genotypes).diagnostics
+    assert_call_counts(diagnostics, (call for call, _label in expected.values()))
+    # Source calls compare no alleles, so none is reported unshown.
+    assert diagnostics["alternativesNotShown"] is None
     loaded = store.variants.load_genotypes(genotypes)
     assert loaded.method == "source"
     assert loaded.sites["source"].tolist() == ["Genotype", "Genotype"]
@@ -323,7 +328,11 @@ def test_threshold_calls_follow_gots_rules(store, tmp_path, rules) -> None:
     # support no call.
     counts = _got(store, tmp_path, "ironthrone")
     genotypes = store.variants.genotypes(counts, method="threshold", **rules)
-    assert _calls(store, genotypes) == _expected_threshold(**rules)
+    expected = _expected_threshold(**rules)
+    assert _calls(store, genotypes) == expected
+    diagnostics = store.artifacts.inspect(genotypes).diagnostics
+    assert_call_counts(diagnostics, (call for call, _label in expected.values()))
+    assert diagnostics["alternativesNotShown"] == 0
     loaded = store.variants.load_genotypes(genotypes)
     calls = loaded.calls.set_index(["ids", "site"])
     for row, cell in enumerate(TRUTH.row_ids[: TRUTH.n_cells]):
@@ -445,6 +454,10 @@ def test_gift_calls_follow_the_posterior_of_each_cell(
         min_posterior=options.get("min_posterior"),
     )
     assert found.keys() == expected.keys()
+    assert_call_counts(
+        store.artifacts.inspect(genotypes).diagnostics,
+        (call for call, _posteriors in expected.values()),
+    )
     for key, (call, posteriors) in expected.items():
         assert found[key][0] == call, key
         np.testing.assert_allclose(found[key][1], posteriors, rtol=1e-6, atol=1e-7)

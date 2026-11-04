@@ -122,6 +122,24 @@ def test_cells_without_evidence_get_no_clone_and_are_counted(store) -> None:
         )
         if (str(site), str(allele)) in variants
     }
+    # A cell read at no informative variant's site has no coverage, and one
+    # read there that shows none of them no alternative, counted from the
+    # loaded depth and counts.
+    sites = {site for site, _alternative in variants}
+    covered = {
+        str(cell)
+        for cell, site, depth in zip(
+            loaded.depth["ids"],
+            loaded.depth["site"],
+            loaded.depth["depth"],
+            strict=True,
+        )
+        if str(site) in sites and depth > 0
+    }
+    scored = {str(cell) for cell in TRUTH.clones.cell_ids}
+    assert diagnostics["cellsWithoutCoverage"] == len(scored - covered)
+    assert diagnostics["cellsWithoutAlternative"] == len(covered - shown)
+    assert diagnostics["cellsWithoutCoverage"] != diagnostics["cellsWithoutAlternative"]
     # Every cell that shows an informative variant shares it with a clone,
     # so none lacks neighbours, and a cell without a clone shows none.
     assert diagnostics["cellsWithoutNeighbors"] == 0

@@ -2269,7 +2269,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             ``discouragedValues``, the values that start with a double quote
             and those that hold a character that the format advises against,
             and ``leadingQuoteFields`` and ``discouragedFields``, their
-            fields. Each count above 0 gives a warning.
+            fields. Each of the three counts of values and IDs above 0 gives a
+            warning.
 
         Raises:
             TypeError: If an argument has the wrong type.

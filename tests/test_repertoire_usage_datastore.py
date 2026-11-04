@@ -27,6 +27,7 @@ from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
     CELLRANGER_HEADER,
     CLONAL_ROWS,
+    clonal_receptors,
     airr_file,
     every_cell,
     import_truth_receptors,
@@ -1279,3 +1280,33 @@ def test_junctions_are_measured_within_one_chunk_beside_their_bounds(tmp_path) -
     assert steps[f"the bounds of the {n_values} junction_aa values"] == 16 * n_values
     # The lengths stay charged; the bounds are let go.
     assert ledger.charged == 8 * n_values
+
+
+def test_chains_without_a_junction_are_counted_apart(tmp_path) -> None:
+    # cell3's one chain, TRBV1, carries its junction's residues but not its
+    # nucleotides, so the spectratype of nucleotides leaves it out and counts
+    # it, while that of residues and gene usage count it.
+    rows = [
+        row.replace(",CASSA,TGTGCCAGCAGCGCC,30,", ",CASSA,,30,")
+        if row.startswith("cell3,")
+        else row
+        for row in CLONAL_ROWS
+    ]
+    assert rows != CLONAL_ROWS
+    folder = tmp_path / "without_junction"
+    folder.mkdir()
+    store, receptors = clonal_receptors(folder, rows)
+    nucleotides = store.repertoire.spectratype(receptors, sequence="nt")
+    assert nucleotides.diagnostics == {
+        "cellsWithoutClone": 1,
+        "cellsWithoutGroup": 0,
+        "groups": 1,
+        "chainsWithoutValue": 1,
+    }
+    # The other four TRB chains are counted, of 15 nucleotides each.
+    assert _counts(nucleotides.table, "locus", "length")[("TRB", 15)] == 4
+    residues = store.repertoire.spectratype(receptors)
+    assert residues.diagnostics["chainsWithoutValue"] == 0
+    assert _counts(residues.table, "locus", "length")[("TRB", 5)] == 5
+    usage = store.repertoire.gene_usage(receptors)
+    assert usage.diagnostics["chainsWithoutValue"] == 0

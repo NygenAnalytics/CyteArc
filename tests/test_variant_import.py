@@ -233,6 +233,8 @@ def test_without_a_depth_table_cells_with_reads_are_the_listed_ones(
     assert not cells["listed"].iloc[UNCOVERED_CELL]
     assert np.isnan(cells["mean_depth"].iloc[UNCOVERED_CELL])
     assert cells["listed"].sum() == TRUTH.n_cells - 1
+    # The cell without reads is the one selected cell that no file lists.
+    assert store.artifacts.inspect(ref).diagnostics["listedCells"] == TRUTH.n_cells - 1
 
 
 def test_six_column_files_keep_qualities_and_need_a_format(store, tmp_path) -> None:

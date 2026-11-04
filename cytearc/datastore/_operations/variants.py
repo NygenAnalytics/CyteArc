@@ -278,8 +278,9 @@ _GENOTYPE_RULES = (
 def _skipped_variants(sources: Sequence["_Source"]) -> dict[str, Any]:
     """The diagnostics of the chosen variants that Tapestri and DAb-seq sources skip.
 
-    The counts add up over the sources and the examples follow them, up to
-    five; sources of other formats choose no variants, so their counts are
+    A variant is counted once however many files of its panel skip it, and
+    the examples are the first five in the order of the sources and their
+    files; sources of other formats choose no variants, so their counts are
     None and they list no example.
     """
     from ...readers.tapestri import TapestriSource
@@ -289,16 +290,19 @@ def _skipped_variants(sources: Sequence["_Source"]) -> dict[str, Any]:
         for source in sources
         if isinstance(source.reader, TapestriSource)
     ]
+    if not skipped:
+        return {
+            "skippedEmptyAlternatives": None,
+            "skippedOtherAlleles": None,
+            "skippedVariantExamples": [],
+        }
+    names = list(dict.fromkeys(name for entry in skipped for name in entry.names))
+    empty = frozenset().union(*(entry.empty_alternatives for entry in skipped))
+    n_empty = sum(name in empty for name in names)
     return {
-        "skippedEmptyAlternatives": (
-            sum(entry.empty_alternatives for entry in skipped) if skipped else None
-        ),
-        "skippedOtherAlleles": (
-            sum(entry.other_alleles for entry in skipped) if skipped else None
-        ),
-        "skippedVariantExamples": [
-            name for entry in skipped for name in entry.examples
-        ][:EXAMPLES],
+        "skippedEmptyAlternatives": n_empty,
+        "skippedOtherAlleles": len(names) - n_empty,
+        "skippedVariantExamples": names[:EXAMPLES],
     }
 
 
@@ -849,7 +853,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         DAb-seq its ``AD``, ``RD``, ``DP`` and ``GT`` with ``GQ``. Variants
         with an empty ``ALT``, or alleles that are not bases, are skipped,
         counted in the ``skippedEmptyAlternatives`` and
-        ``skippedOtherAlleles`` diagnostics with up to five
+        ``skippedOtherAlleles`` diagnostics, each variant once however many
+        files of its panel skip it, with up to five
         ``skippedVariantExamples``, and named in a warning, which a reused
         import gives again; other formats choose no variants, so those
         counts are None. A Tapestri file's

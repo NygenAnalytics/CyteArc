@@ -2208,14 +2208,16 @@ def test_fields_may_name_the_columns_that_are_always_written(tmp_path) -> None:
 
 
 #: The SHA-256 of each export's bytes, which a summary of what it wrote leaves
-#: as they were: the clonal receptors whole, compressed and as chains, their
-#: clonotypes, and the receptors whose IDs repeat and whose values hold quotes.
+#: as they were: the clonal receptors whole, compressed and of two fields,
+#: their clonotypes, and the receptors whose IDs repeat and whose values hold
+#: quotes, whole and as chains.
 _EXPORT_DIGESTS = {
     "receptors.tsv": "18df411b769e686d7b8480ac6837a0c46185e2c58130cf91ccdd7247566df51a",
     "receptors.tsv.gz": "b84ce8fd2ad12ff6ef9f9985176d7dda71620fe54863e6b2d0a62fe58a24fa2a",
-    "chains.tsv": "18df411b769e686d7b8480ac6837a0c46185e2c58130cf91ccdd7247566df51a",
+    "fields.tsv": "6941faf48813d663597dc8a8d15023dac0f29055aaa918c5525aae4518c0fc48",
     "clonotypes.tsv": "033fe55454ce89d91af0406c871dc26d8e59cd5f4aa1917c803260c24da0b116",
     "edge.tsv": "e9626d64f9e2a7a3dc506452a21a3a0242099e40efd3354504a678e4e05be4f6",
+    "edge_chains.tsv": "c03fc2e5489c7b575f7fc0d7d991965ced7a4d4007bbcb799b0ac8b0ee7b55cc",
 }
 
 
@@ -2228,16 +2230,17 @@ def test_exports_write_the_same_bytes_and_summarize_them(tmp_path) -> None:
         for name, source, options in (
             ("receptors.tsv", receptors, {}),
             ("receptors.tsv.gz", receptors, {}),
-            ("chains.tsv", receptors, {"chains_only": True}),
+            ("fields.tsv", receptors, {"fields": ["v_call", "junction_aa"]}),
             ("clonotypes.tsv", clonotypes, {}),
         )
     }
     (tmp_path / "edge").mkdir()
     edge_store, edge = _edge_receptors(tmp_path / "edge")
-    with pytest.warns(DiagnosticWarning):
-        summaries["edge.tsv"] = edge_store.repertoire.export_airr(
-            edge, tmp_path / "edge.tsv"
-        )
+    for name, options in (("edge.tsv", {}), ("edge_chains.tsv", {"chains_only": True})):
+        with pytest.warns(DiagnosticWarning):
+            summaries[name] = edge_store.repertoire.export_airr(
+                edge, tmp_path / name, **options
+            )
     for name, summary in summaries.items():
         data = (tmp_path / name).read_bytes()
         assert hashlib.sha256(data).hexdigest() == _EXPORT_DIGESTS[name], name

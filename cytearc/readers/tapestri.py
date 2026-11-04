@@ -107,8 +107,6 @@ _WHOLE_EPSILONS = 16
 # deletion that spans the position.
 _BASES = re.compile(r"[ACGTN]+")
 _ITD_PREFIX = "FLT3-ITD:"
-# Examples of skipped variants that a source keeps.
-_EXAMPLES = 5
 # Bytes that describing a file holds for each candidate variant beside the
 # copies of its text: its name, alleles and contig as Python text, the parts
 # of its name, and its entries in the lookups of names and positions, as
@@ -559,18 +557,19 @@ class _Variants:
 
 @dataclass(frozen=True, slots=True)
 class SkippedVariants:
-    """The chosen variants of a file that cannot be imported.
+    """The chosen variants of a file that cannot be imported, by name.
+
+    The names identify the variants across files of one panel, so an import
+    of several files counts each skipped variant once.
 
     Attributes:
-        empty_alternatives: The variants with an empty ``ALT``.
-        other_alleles: Those whose alleles are not sequences of bases for
-            another reason.
-        examples: The names of up to five of them, in the file's order.
+        names: Every skipped variant, in the file's order.
+        empty_alternatives: Those of them with an empty ``ALT``; the others'
+            alleles are not sequences of bases for another reason.
     """
 
-    empty_alternatives: int
-    other_alleles: int
-    examples: tuple[str, ...]
+    names: tuple[str, ...]
+    empty_alternatives: frozenset[str]
 
 
 def _chosen_columns(
@@ -659,9 +658,10 @@ def _chosen_columns(
             "explains, so it cannot be imported; leave it out of include_variants"
         )
     unreadable = SkippedVariants(
-        empty_alternatives=int(np.count_nonzero(skipped & empty)),
-        other_alleles=int(np.count_nonzero(skipped & ~empty)),
-        examples=tuple(str(name) for name in variants.names[skipped][:_EXAMPLES]),
+        names=tuple(str(name) for name in variants.names[skipped]),
+        empty_alternatives=frozenset(
+            str(name) for name in variants.names[skipped & empty]
+        ),
     )
     columns = np.flatnonzero(chosen & readable)
     if not len(columns):
