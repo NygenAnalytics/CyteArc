@@ -981,10 +981,13 @@ def test_a_merge_follows_its_refusals_to_the_budget_that_plans_it(
     _budget, refusals = follow_refusals(plan_at)
     items = {refusal.item for refusal in refusals}
     # The metadata planners name the budget that admits one row each, and
-    # the schema scans the tables they read.
+    # the schema scans the tables they read. Cell columns of 20 and 16 cells
+    # are chunked by their cells, so the cell metadata fits a few kilobytes
+    # and the count shards of one row refuse before the feature metadata.
     assert items == {
         "one source row of merged cell metadata schema discovery",
         "one row of merged cell metadata",
+        "count shards of one row",
         "one source row of merged feature metadata schema discovery",
     }
 
