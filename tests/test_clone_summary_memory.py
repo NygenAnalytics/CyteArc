@@ -730,7 +730,7 @@ def test_following_named_clones_holds_no_more_than_its_ledger_plans(
     data, monkeypatch
 ) -> None:
     from cytearc.storage.validation_scope import validation_scope
-    from tests.memory_helpers import audited, charges
+    from tests.memory_helpers import ZARR_READS, audited, charges, hold_finished_reads
 
     def run() -> object:
         return CASES["track of 1,000 named clones"](data)
@@ -752,11 +752,15 @@ def test_following_named_clones_holds_no_more_than_its_ledger_plans(
     assert held["the clones' labels"] == 49 * len(labels) + sum(map(len, labels))
     # From each charge to the next, what is traced at that budget stays
     # within what the ledger planned, through counting each pair of group and
-    # clone after the grouping. The selection's identity check, outside the
-    # budget, runs once in the operation's scope.
+    # clone after the grouping. Each read's work is held until the next read
+    # ends, as a thread of Zarr's pool holds its chunk on a busy machine, so
+    # the audit traces what the ledger plans for it whatever the timing. The
+    # selection's identity check, outside the budget, runs once in the
+    # operation's scope.
     with validation_scope():
         run()
-        _result, overruns = audited(run)
+        with hold_finished_reads(*ZARR_READS):
+            _result, overruns = audited(run)
     assert overruns == [], overruns
 
 
