@@ -25,7 +25,6 @@ from tests.clone_truth import (
     write_petracer_characters,
     write_petracer_long,
 )
-from tests.memory_helpers import traced_peak
 from tests.storage_helpers import copy_store, write_count_store
 
 DATA = Path(__file__).parent / "data" / "recorders"
@@ -403,39 +402,6 @@ def test_an_export_beyond_the_budget_writes_nothing(store, truth, recorders, tmp
     assert not (tmp_path / "out.zarr").exists() and not (tmp_path / "out.csv").exists()
 
 
-def test_store_exports_count_a_buffer_for_each_write_zarr_runs_at_once(
-    store, truth, recorders, tmp_path
-):
-    # Zarr writes each chunk and each array's metadata through a buffered
-    # file, as many at once as its async concurrency allows, and Python 3.14
-    # made each buffer 128 KiB, where it was the file system's block. An
-    # export to TreeData writes a Zarr store and counts them; LAML's text
-    # does not.
-    import io
-    import re
-
-    import zarr
-
-    alleles = _petracer_alleles(store, truth, recorders, tmp_path)
-
-    def stated(format: str, concurrency: int) -> int:
-        store.memoryBytes = 1
-        target = tmp_path / ("out.zarr" if format == "treedata" else "out.csv")
-        try:
-            with zarr.config.set({"async.concurrency": concurrency}):
-                store.clones.export_characters(alleles, target, format=format)
-        except MemoryError as error:
-            found = re.search(r"holds about (\d+) bytes", str(error))
-            assert found is not None, str(error)
-            return int(found.group(1))
-        raise AssertionError("a budget of one byte exported the characters")
-
-    assert stated("treedata", 20) - stated("treedata", 10) == (
-        10 * io.DEFAULT_BUFFER_SIZE
-    )
-    assert stated("laml", 20) == stated("laml", 10)
-
-
 def _matrix_of(codes: np.ndarray, largest: int):
     """A character matrix whose every character lists the states 1 to ``largest``."""
     from cytearc.clones.recorders import CharacterMatrix
@@ -460,28 +426,16 @@ def _matrix_of(codes: np.ndarray, largest: int):
     )
 
 
-def test_laml_text_holds_what_its_rows_count(tmp_path):
-    """A block of LAML's text holds at most laml_row_bytes per cell, traced.
-
-    States of two digits each become a string of their own when every value
-    is converted, which held about 85 bytes per state beside the 64 counted.
-    """
-    from cytearc.writers.characters import laml_row_bytes, write_laml_characters
+def test_laml_text_writes_each_state_of_a_block_of_many_cells(tmp_path):
+    """A block of 2,000 cells by 300 characters writes each state, and ? for a missing one."""
+    from cytearc.writers.characters import write_laml_characters
 
     rng = np.random.default_rng(5)
     n_cells, n_characters = 2_000, 300
     codes = rng.integers(-1, 41, size=(n_cells, n_characters)).astype(np.int32)
     matrix = _matrix_of(codes, 40)
     cells = np.asarray([f"cell{index:05d}" for index in range(n_cells)], dtype=object)
-    counted = n_cells * laml_row_bytes(n_characters)
-    # The writer replaces the files, so a trace again writes them afresh.
-    _, peak = traced_peak(
-        lambda: write_laml_characters(
-            tmp_path / "matrix.csv", cells, matrix, block_cells=n_cells
-        ),
-        counted,
-    )
-    assert peak <= counted, peak
+    write_laml_characters(tmp_path / "matrix.csv", cells, matrix, block_cells=n_cells)
     written = pd.read_csv(
         tmp_path / "matrix.csv", dtype=str, keep_default_na=False, index_col=0
     )

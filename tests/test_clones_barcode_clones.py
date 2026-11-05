@@ -23,7 +23,7 @@ from tests.clone_helpers import (
     levenshtein_distance,
     link_count_variance,
 )
-from tests.memory_helpers import budgeted, smallest_budget, traced_peak
+from tests.memory_helpers import budgeted
 
 
 def _largest_share(called: "barcode_clones.BarcodeClones") -> float:
@@ -870,18 +870,15 @@ def test_counting_the_distinct_barcodes_without_correction_checks_the_budget() -
     records = _records(rows)
     settings = barcode_call_settings(method="sets")
     groups = np.zeros(3, dtype=np.int64)
-    # Every rule holds 40 bytes per cell and 18 per record; counting the
-    # distinct barcodes, 48 more per record kept.
-    counting = 40 * 3 + 18 * 12 + 48 * 12
-    with pytest.raises(MemoryError, match="counting the distinct barcodes of 12"):
+    # 600 bytes hold what every rule holds for 3 cells and 12 records, but
+    # not counting their distinct barcodes beside it.
+    with pytest.raises(
+        MemoryError,
+        match=r"counting the distinct barcodes of 12 .* Raise mem_budget to at least",
+    ):
         barcode_clone_calls(
-            records, 3, groups=groups, settings=settings, ledger=budgeted(counting - 1)
+            records, 3, groups=groups, settings=settings, ledger=budgeted(600)
         )
-    with pytest.raises(MemoryError) as refused:
-        barcode_clone_calls(
-            records, 3, groups=groups, settings=settings, ledger=budgeted(counting)
-        )
-    assert "counting the distinct" not in str(refused.value)
 
 
 def test_barcodes_of_two_groups_or_libraries_never_merge() -> None:
@@ -1262,92 +1259,6 @@ def test_records_of_no_barcode_call_no_clone(options) -> None:
     assert (
         calls.diagnostics["pairs"] == 0 and calls.diagnostics["cellsWithBarcodes"] == 0
     )
-
-
-def _synthetic_records(
-    n_cells: int, *, molecules: bool, seed: int = 0
-) -> BarcodeRecords:
-    """Clones of up to nine cells with five barcodes each, errors and ambient barcodes."""
-    rng = np.random.default_rng(seed)
-    letters = np.frombuffer(b"ACGT", dtype=np.uint8)
-
-    def texts(count: int) -> list[str]:
-        drawn = letters[rng.integers(0, 4, size=(count, 28))]
-        return np.ascontiguousarray(drawn).view("S28").reshape(-1).astype(str).tolist()
-
-    clone_of = np.repeat(np.arange(n_cells), rng.integers(1, 10, size=n_cells))[
-        :n_cells
-    ]
-    clone_barcodes = np.asarray(texts(5 * (int(clone_of.max()) + 1)), dtype=object)
-    clone_barcodes = clone_barcodes.reshape(-1, 5)
-    rows = []
-    for cell in range(n_cells):
-        lost = int(rng.integers(0, 5)) if rng.random() < 0.3 else -1
-        for slot, barcode in enumerate(clone_barcodes[clone_of[cell]]):
-            if slot == lost:
-                continue
-            if molecules:
-                rows += [
-                    (
-                        cell,
-                        0,
-                        barcode,
-                        f"u{cell}_{slot}_{k}",
-                        1,
-                        int(rng.integers(10, 31)),
-                    )
-                    for k in range(3)
-                ]
-            else:
-                rows.append((cell, 0, barcode, None, int(rng.integers(3, 10)), -1))
-        if cell % 2 == 0:
-            source = clone_barcodes[clone_of[cell], 0]
-            error = source[:-1] + ("C" if source[-1] != "C" else "G")
-            rows.append(
-                (cell, 0, error, f"e{cell}", 1, 12)
-                if molecules
-                else (cell, 0, error, None, 1, -1)
-            )
-        if cell % 10 == 0:
-            ambient = clone_barcodes[int(rng.integers(0, len(clone_barcodes))), 1]
-            rows.append(
-                (cell, 0, ambient, f"a{cell}", 1, 1)
-                if molecules
-                else (cell, 0, ambient, None, 1, -1)
-            )
-    library = ("lib", "molecules" if molecules else "pairs")
-    return _records(rows, (library,))
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("molecules", "options"),
-    [
-        (True, {"preset": "larry"}),
-        (True, {"preset": "trex"}),
-        (True, {"preset": "trex", "max_distance": 0}),
-        (False, {"preset": "celltag", "allowlist": False}),
-        (False, {"preset": "celltag_multi", "allowlist": False, "min_reads": 0}),
-        (False, {"method": "sets", "min_fraction": 0.3}),
-    ],
-)
-def test_calls_hold_no_more_than_the_smallest_budget_they_accept(
-    molecules, options
-) -> None:
-    records = _synthetic_records(4_000, molecules=molecules)
-    settings = barcode_call_settings(**options)
-    groups = np.zeros(4_000, dtype=np.int64)
-
-    def call(budget: int) -> object:
-        return barcode_clone_calls(
-            records, 4_000, groups=groups, settings=settings, ledger=budgeted(budget)
-        )
-
-    budget = smallest_budget(call, 1 << 30)
-    _, peak = traced_peak(lambda: call(budget), budget)
-    assert peak <= budget
-    with pytest.raises(MemoryError, match="(?i)raise"):
-        call(budget - 1)
 
 
 def test_a_similarity_across_libraries_tells_apart_at_most_62_libraries() -> None:

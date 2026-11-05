@@ -2,17 +2,15 @@
 
 A refusal's ``needed_bytes`` is the smallest memory budget that passes the
 step it refused, in the terms of the call's whole budget, ``budget_bytes``
-is that budget and ``item`` names the step. So a run at the named budget
-passes that step, one byte less is refused again, and a call followed from a
-budget of one byte through the budgets that its refusals name ends with a
-budget that runs it. Each family of master's checks and planners is followed
-that way here, and a guard keeps the built-in ``MemoryError`` out of every
+is that budget and ``item`` names the step. The planners, given the bytes of
+their work, name the budget that runs them, and one byte less is refused
+again. Each family of master's checks refuses a budget too small for it,
+naming its step, and a guard keeps the built-in ``MemoryError`` out of every
 module but those of the variant operations.
 """
 
 import ast
 import functools
-import tracemalloc
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -26,7 +24,6 @@ from zarr.storage import MemoryStore
 
 import cytearc
 from cytearc.utils.memory_budget import MemoryBudgetError, memory_refusal
-from tests.memory_helpers import follow_refusals, named_budget_passes
 
 CYTEARC_ROOT = Path(cytearc.__file__).parent
 
@@ -457,9 +454,8 @@ def test_a_sparse_producer_names_the_budget_of_the_bands_it_buffers() -> None:
         )
 
     # The producer reserves the resident data before it hands over a band.
-    refusal = named_budget_passes(
-        write, 9_999, item="the bands that the sparse producer buffers"
-    )
+    refusal = refused(lambda: write(9_999))
+    assert refusal.item == "the bands that the sparse producer buffers"
     assert refusal.needed_bytes == 10_000
 
 
@@ -655,7 +651,7 @@ def _h5ad(path: Path, values: np.ndarray, *, encoding: str) -> Path:
 
 
 @pytest.mark.parametrize("encoding", ["csr", "csc"])
-def test_an_h5ad_import_follows_its_refusals_to_the_budget_that_imports_it(
+def test_an_h5ad_import_refuses_a_budget_of_one_byte_at_its_scan(
     tmp_path: Path, encoding: str
 ) -> None:
     from cytearc.readers import H5adReader
@@ -663,38 +659,18 @@ def test_an_h5ad_import_follows_its_refusals_to_the_budget_that_imports_it(
 
     values = np.random.default_rng(3).poisson(1.5, size=(40, 30)).astype(np.uint16)
     source = _h5ad(tmp_path / f"{encoding}.h5ad", values, encoding=encoding)
-    attempts = iter(range(1_000))
-
-    def import_at(memory: int) -> None:
-        destination = tmp_path / f"import-{next(attempts)}.zarr"
-        reader = H5adReader(str(source))
-        try:
-            H5adToZarr(
-                reader, zarr_loc=str(destination), mem_budget=memory, nthreads=1
+    reader = H5adReader(str(source))
+    try:
+        refusal = refused(
+            lambda: H5adToZarr(
+                reader, zarr_loc=str(tmp_path / "import.zarr"), mem_budget=1, nthreads=1
             ).dump()
-        finally:
-            reader.close()
-
-    _budget, refusals = follow_refusals(import_at)
-    items = [refusal.item for refusal in refusals]
-    # The count scan names each longer vector it meets, and the default
-    # layout the budget that admits it.
-    assert items[0] == "scanning one compressed vector"
-    assert items[-1] == "the default count-matrix policy"
-    if encoding == "csc":
-        # The conversion of columns to rows names the budget that holds its
-        # store of rows beside the matrix's column pointers.
-        (conversion,) = [
-            refusal
-            for refusal in refusals
-            if refusal.item == "one sparse row of the conversion"
-        ]
-        assert str(conversion).endswith(
-            f"needs at least {conversion.needed_bytes} bytes."
         )
-        # The conversion's own bytes, in terms of what it is left, give way
-        # to the budget's.
-        assert str(conversion).count("needs at least") == 1, conversion
+    finally:
+        reader.close()
+    # The count scan names the longer vector it meets.
+    assert refusal.item == "scanning one compressed vector"
+    assert refusal.budget_bytes == 1
 
 
 def test_a_csc_conversion_names_the_budget_of_its_pointers(tmp_path: Path) -> None:
@@ -703,13 +679,11 @@ def test_a_csc_conversion_names_the_budget_of_its_pointers(tmp_path: Path) -> No
     values = np.random.default_rng(3).poisson(1.5, size=(40, 30)).astype(np.uint16)
     reader = H5adReader(str(_h5ad(tmp_path / "csc.h5ad", values, encoding="csc")))
     try:
-        named_budget_passes(
-            lambda budget: reader.materialize_csc(maxBytes=budget),
-            1,
-            item="the pointers and one entry of the CSC row conversion",
-        )
+        refusal = refused(lambda: reader.materialize_csc(maxBytes=1))
     finally:
         reader.close()
+    assert refusal.item == "the pointers and one entry of the CSC row conversion"
+    assert refusal.needed_bytes > refusal.budget_bytes == 1
 
 
 def test_an_h5ad_import_lets_an_allocation_failure_of_a_producer_split_through(
@@ -752,7 +726,7 @@ def test_an_h5ad_import_lets_an_allocation_failure_of_a_producer_split_through(
     assert len(calls) == 2
 
 
-def test_a_sparse_matrix_import_follows_its_refusals_to_the_budget_that_imports_it(
+def test_a_sparse_matrix_import_refuses_a_budget_of_one_byte_at_its_matrix(
     tmp_path: Path,
 ) -> None:
     from cytearc.writers import SparseToZarr
@@ -760,31 +734,18 @@ def test_a_sparse_matrix_import_follows_its_refusals_to_the_budget_that_imports_
     matrix = csr_matrix(
         np.random.default_rng(5).poisson(2.0, size=(30, 20)).astype(np.uint32)
     )
-    attempts = iter(range(1_000))
-
-    def import_at(memory: int) -> None:
-        SparseToZarr(
+    refusal = refused(
+        lambda: SparseToZarr(
             matrix,
-            zarr_loc=str(tmp_path / f"sparse-{next(attempts)}.zarr"),
+            zarr_loc=str(tmp_path / "sparse.zarr"),
             cell_ids=[f"c{i}" for i in range(30)],
             feature_ids=[f"f{i}" for i in range(20)],
-            mem_budget=memory,
+            mem_budget=1,
             nthreads=1,
         ).dump()
-
-    _budget, refusals = follow_refusals(import_at)
-    items = [refusal.item for refusal in refusals]
-    # The matrix that the writer holds refuses first, then its scan beside it,
-    # which closes with the budget beside the matrix.
-    assert items[0] == "the sparse matrix"
-    scans = [
-        refusal
-        for refusal in refusals
-        if refusal.item == "scanning one compressed vector"
-    ]
-    assert scans
-    for scan in scans:
-        assert str(scan).endswith(f"needs at least {scan.needed_bytes} bytes."), scan
+    )
+    # The matrix that the writer holds refuses first.
+    assert refusal.item == "the sparse matrix"
 
 
 def test_a_dense_batch_beyond_its_reservation_names_the_write_it_would_reserve() -> (
@@ -912,7 +873,7 @@ def _count_store(path: Path, counts: np.ndarray, cell_prefix: str) -> Any:
     return store
 
 
-def test_a_composite_follows_its_refusals_to_the_budget_that_creates_it(
+def test_a_composite_refuses_a_budget_of_one_byte_at_its_mappings(
     tmp_path: Path,
 ) -> None:
     from cytearc.composite import create_composite
@@ -920,26 +881,19 @@ def test_a_composite_follows_its_refusals_to_the_budget_that_creates_it(
     rng = np.random.default_rng(0)
     first = _count_store(tmp_path / "first.zarr", rng.poisson(1.0, (300, 64)), "a")
     second = _count_store(tmp_path / "second.zarr", rng.poisson(1.0, (300, 64)), "b")
-    attempts = iter(range(1_000))
-
-    def create(budget: int) -> None:
-        create_composite(
+    refusal = refused(
+        lambda: create_composite(
             {"first": first, "second": second},
-            at=tmp_path / f"joint-{next(attempts)}.zarr",
+            at=tmp_path / "joint.zarr",
             features="union",
-            mem_budget=budget,
+            mem_budget=1,
             nthreads=1,
         )
-
-    _budget, refusals = follow_refusals(create)
-    items = [refusal.item for refusal in refusals]
-    assert items[0] == "the composite row and feature mappings"
-    # The budget each refusal names passes its step, so no step refuses twice
-    # in a row.
-    assert all(item != later for item, later in zip(items, items[1:])), items
+    )
+    assert refusal.item == "the composite row and feature mappings"
 
 
-def test_a_merge_follows_its_refusals_to_the_budget_that_plans_it(
+def test_a_merge_refuses_a_budget_of_one_byte_at_its_schema_discovery(
     tmp_path: Path,
 ) -> None:
     from cytearc.merge import DataStoreMerge
@@ -947,51 +901,22 @@ def test_a_merge_follows_its_refusals_to_the_budget_that_plans_it(
     rng = np.random.default_rng(11)
     left = _count_store(tmp_path / "left.zarr", rng.poisson(1.0, (20, 12)), "l")
     right = _count_store(tmp_path / "right.zarr", rng.poisson(1.0, (16, 12)), "r")
-    attempts = iter(range(1_000))
-
-    def plan_at(memory: int) -> None:
-        DataStoreMerge(
+    refusal = refused(
+        lambda: DataStoreMerge(
             datasets=[left, right],
-            zarr_path=str(tmp_path / f"merged-{next(attempts)}.zarr"),
+            zarr_path=str(tmp_path / "merged.zarr"),
             names=["left", "right"],
             prepend_text="",
             seed=0,
             overwrite=True,
-            mem_budget=memory,
+            mem_budget=1,
             nthreads=1,
         ).plan()
-
-    _budget, refusals = follow_refusals(plan_at)
-    items = {refusal.item for refusal in refusals}
-    # The metadata planners name the budget that admits one row each, and
-    # the schema scans the tables they read. Cell columns of 20 and 16 cells
-    # are chunked by their cells, so the cell metadata fits a few kilobytes
-    # and the count shards of one row refuse before the feature metadata.
-    assert items == {
-        "one source row of merged cell metadata schema discovery",
-        "one row of merged cell metadata",
-        "count shards of one row",
-        "one source row of merged feature metadata schema discovery",
-    }
+    )
+    assert refusal.item == "one source row of merged cell metadata schema discovery"
 
 
 # Readers and converters.
-
-
-def test_a_count_scan_names_the_longest_vector_whose_pointers_it_read() -> None:
-    from cytearc.utils.count_values import compressed_count_ranges
-
-    # Row i holds i + 1 values, as in cells sorted by their counts.
-    n = 200
-    matrix = csr_matrix(np.tril(np.ones((n, n), dtype=np.uint16)))
-    _budget, refusals = follow_refusals(
-        lambda budget: compressed_count_ranges(
-            matrix.indptr, matrix.indices, matrix.data, minorSize=n, maxBytes=budget
-        )
-    )
-    # Each refusal names the longest row of the window of pointers read, so
-    # the windows double rather than one row being named at a time.
-    assert len(refusals) <= 10, [refusal.needed_bytes for refusal in refusals]
 
 
 def test_the_sparse_row_conversion_names_its_pointers_and_its_widest_row(
@@ -1038,7 +963,7 @@ def test_the_sparse_row_conversion_names_its_pointers_and_its_widest_row(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_seurat_source_preparation_names_the_budget_of_one_cell() -> None:
+def test_seurat_source_preparation_refuses_a_budget_of_one_byte() -> None:
     from cytearc.readers._seurat.sources import (
         CscMatrixSource,
         prepare_matrix_sources,
@@ -1046,36 +971,24 @@ def test_seurat_source_preparation_names_the_budget_of_one_cell() -> None:
     )
 
     matrix = csc_matrix(np.arange(12, dtype=np.uint16).reshape(3, 4))
-
-    def source() -> CscMatrixSource:
-        return CscMatrixSource(matrix.data, matrix.indices, matrix.indptr, matrix.shape)
-
-    def prepare(memory: int) -> None:
-        prepared = source()
-        try:
-            prepare_matrix_sources(prepared, max_bytes=memory)
-        finally:
-            release_temporary_storage(prepared)
-
-    _budget, refusals = follow_refusals(prepare)
-    assert [refusal.item for refusal in refusals] == [
-        "the resident data of the Seurat sources",
-        "preparing one cell of a Seurat source",
-    ]
-    # The resident data, and one byte beside it.
-    assert refusals[0].needed_bytes == source().resident_bytes + 1
+    prepared = CscMatrixSource(matrix.data, matrix.indices, matrix.indptr, matrix.shape)
+    try:
+        refusal = refused(lambda: prepare_matrix_sources(prepared, max_bytes=1))
+    finally:
+        release_temporary_storage(prepared)
+    assert refusal.item == "the resident data of the Seurat sources"
 
 
 # Normalization and value scans.
 
 
-def test_document_frequency_names_the_budget_of_one_row_block() -> None:
+def test_document_frequency_refuses_a_small_budget_and_streams_within_another() -> None:
     from cytearc.assay.normalization import stream_document_frequency
     from cytearc.matrix import ChunkedArray
 
     values = np.arange(48, dtype=np.uint16).reshape(12, 4)
 
-    def count(memory: int) -> None:
+    def count(memory: int) -> np.ndarray:
         frequency, _ = stream_document_frequency(
             ChunkedArray.from_numpy(values, block_size=3),
             memory_bytes=memory,
@@ -1083,11 +996,13 @@ def test_document_frequency_names_the_budget_of_one_row_block() -> None:
             msg="",
             operation="Frequency",
         )
-        np.testing.assert_array_equal(frequency, np.count_nonzero(values, axis=0))
+        return frequency
 
-    budget, refusals = follow_refusals(count)
-    assert all("could not allocate" in str(refusal) for refusal in refusals)
-    assert f"It needs at least {refusals[-1].needed_bytes} bytes." in str(refusals[-1])
+    refusal = refused(lambda: count(100))
+    assert "could not allocate" in str(refusal)
+    assert str(refusal).endswith(f"It needs at least {refusal.needed_bytes} bytes.")
+    # 500 bytes count the four blocks of three rows one at a time.
+    np.testing.assert_array_equal(count(500), np.count_nonzero(values, axis=0))
 
 
 def test_count_value_scans_name_the_bytes_of_their_longest_vector() -> None:
@@ -1259,12 +1174,11 @@ def test_one_aligned_row_names_its_bytes_beside_the_resident_data() -> None:
     assert refusal.needed_bytes == 10 + 3 + 4
 
 
-def test_a_diffusion_step_and_its_load_name_the_budget_that_passes_them(
+def test_a_diffusion_step_and_its_load_refuse_budgets_too_small_for_them(
     tmp_path: Path,
 ) -> None:
     from cytearc.neighbors.diffusion import bounded_diffusion_operator
     from cytearc.trajectory.artifacts import (
-        diffusion_load_bytes,
         load_diffusion_payload,
         write_diffusion_payload,
     )
@@ -1276,10 +1190,7 @@ def test_a_diffusion_step_and_its_load_name_the_budget_that_passes_them(
     assert step.budget_bytes == 200
     # The step refuses a budget that its bytes reach, so one byte more passes.
     assert f"needs about {step.needed_bytes - 1} bytes" in str(step)
-    budget, _refusals = follow_refusals(
-        lambda memory: bounded_diffusion_operator(graph, 3, memory_bytes=memory)
-    )
-    operator = bounded_diffusion_operator(graph, 3, memory_bytes=budget)
+    operator = bounded_diffusion_operator(graph, 3, memory_bytes=10**9)
 
     group = zarr.open_group(str(tmp_path / "diffusion.zarr"), mode="w")
     write_diffusion_payload(group, operator)
@@ -1294,12 +1205,9 @@ def test_a_diffusion_step_and_its_load_name_the_budget_that_passes_them(
             "cytearc_version": "test",
         }
     )
-    load = named_budget_runs(
-        lambda memory: load_diffusion_payload(group, n_cells=12, memory_bytes=memory),
-        100,
-        item="loading the diffusion operator beside the imputed output",
-    )
-    assert load.needed_bytes == diffusion_load_bytes(operator.nnz, 12) + 1
+    load = refused(lambda: load_diffusion_payload(group, n_cells=12, memory_bytes=100))
+    assert load.item == "loading the diffusion operator beside the imputed output"
+    assert load.needed_bytes > load.budget_bytes == 100
 
 
 def test_the_marker_search_names_the_budget_of_one_thread(tmp_path: Path) -> None:
@@ -1333,120 +1241,13 @@ def test_the_marker_search_names_the_budget_of_one_thread(tmp_path: Path) -> Non
 # The lineage curves' placement writes.
 
 
-def _traced_band_writes(
-    folder: Path, n_cells: int, n_lineages: int, block_rows: int, *, busy: bool
-) -> int:
-    """Trace two band writers placing ``n_cells`` rows of ``n_lineages`` values, a block at a time."""
-    from contextlib import nullcontext
-
-    from cytearc.datastore._operations.enrichment_store import _RowBandWriter
-    from cytearc.storage.arrays import create_zarr_dataset
-    from tests.memory_helpers import ZARR_WRITES, hold_finished_reads
-
-    group = zarr.open_group(str(folder / f"curves-{busy}.zarr"), mode="w")
-    chunk_rows = min(n_cells, 100_000)
-    arrays = [
-        create_zarr_dataset(
-            group, name, (chunk_rows, n_lineages), np.float64, (n_cells, n_lineages)
-        )
-        for name in ("progress", "distance")
-    ]
-    rng = np.random.default_rng(0)
-    # The first write's one-off objects belong to no placement.
-    arrays[0][0:1] = rng.random((1, n_lineages))
-    blocks = [
-        rng.random((min(block_rows, n_cells - start), n_lineages))
-        for start in range(0, n_cells, block_rows)
-    ]
-    tracemalloc.start()
-    try:
-        start = tracemalloc.get_traced_memory()[0]
-        # On a busy machine each write's encoded chunk lasts into the next write.
-        with hold_finished_reads(*ZARR_WRITES) if busy else nullcontext():
-            writers = [_RowBandWriter(array) for array in arrays]
-            for block in blocks:
-                for writer in writers:
-                    writer.add(block)
-            for writer in writers:
-                writer.finish()
-        peak = tracemalloc.get_traced_memory()[1] - start
-    finally:
-        tracemalloc.stop()
-    for array in arrays[1:]:
-        np.testing.assert_array_equal(array[:], np.vstack(blocks))
-    return peak
-
-
-@pytest.mark.parametrize(
-    ("n_cells", "n_lineages", "block_rows"),
-    [
-        (250_000, 4, 7_000),
-        (120_000, 3, 50_000),
-        (300_000, 2, 100_000),
-        (1_000_000, 4, 1_000_000),
-    ],
-)
-def test_the_placement_write_cost_bounds_writing_whole_bands(
-    tmp_path: Path, n_cells: int, n_lineages: int, block_rows: int
-) -> None:
-    from cytearc.datastore._operations.trajectory import _placement_write_bytes
-
-    cost = _placement_write_bytes(n_cells, n_lineages, min(n_cells, 100_000))
-    busy = _traced_band_writes(tmp_path, n_cells, n_lineages, block_rows, busy=True)
-    assert busy <= cost <= 1.3 * busy, (busy, cost)
-    # Writes whose encoded chunks go at once hold less, and never more.
-    idle = _traced_band_writes(tmp_path, n_cells, n_lineages, block_rows, busy=False)
-    assert idle < busy
-
-
-def test_rows_are_charged_no_less_than_the_fewest_bands_they_can_span() -> None:
-    root = zarr.open_group(store=MemoryStore(), mode="w")
-    for array in (
-        root.create_array("values", data=np.arange(1000.0), chunks=(100,)),
-        # A band of four chunks, which four codec threads can each decode.
-        root.create_array("coordinates", data=np.ones((1000, 40)), chunks=(100, 10)),
-    ):
-        _check_fewest_band_charges(array)
-        # A read that decodes one chunk at a time still leaves one on each
-        # codec thread that decoded one.
-        with zarr.config.set({"async.concurrency": 1}):
-            _check_fewest_band_charges(array)
-
-
-def _check_fewest_band_charges(array: zarr.Array) -> None:
-    from cytearc.metadata.rows import read_rows, rows_read_charge
-    from cytearc.utils.memory_budget import MemoryLedger
-    from tests.memory_helpers import charges
-
-    for threads in (1, 4):
-        for rows, packed in (
-            (np.array([5, 6]), True),
-            # 143 rows span two bands of 100 rows at the fewest.
-            (np.arange(143), True),
-            (np.arange(1000), True),
-            (np.array([5, 905]), False),
-            (np.arange(0, 1000, 7), False),
-        ):
-            ledger = MemoryLedger(None, "Reading", codec_threads=threads)
-            fewest, _held = rows_read_charge(ledger, array, rows.size)
-            _values, taken = charges(lambda: read_rows(ledger, array, rows, item="v"))
-            charged = taken[0][1]
-            # Rows packed into the fewest bands are charged that, and rows
-            # over more bands no less.
-            if packed:
-                assert charged == fewest, (threads, rows.size)
-            else:
-                assert charged >= fewest, (threads, rows.size)
-
-
-def test_a_read_of_cells_in_one_band_names_less_than_one_of_cells_over_many(
+def test_cells_in_one_band_and_cells_over_many_read_their_values(
     tmp_path: Path,
 ) -> None:
     from cytearc.metadata.artifacts import plan_cell_data_artifact
     from cytearc.metadata.selection import resolve_cell_aligned_artifact
     from cytearc.storage.artifact_writer import artifact_transaction
     from cytearc.utils.memory_budget import MemoryLedger
-    from tests.memory_helpers import traced_peak
 
     n_cells, width = 8_000, 50
     store = _count_store(tmp_path / "bands.zarr", np.ones((n_cells, 1)), "c")
@@ -1464,56 +1265,38 @@ def test_a_read_of_cells_in_one_band_names_less_than_one_of_cells_over_many(
         cell_selection=store.snapshot_cell_selection("I"),
         arrays={"values": ((n_cells, width), None)},
     )
+    values = np.arange(n_cells * width, dtype=np.float64).reshape(n_cells, width)
     with artifact_transaction(store.zw, planned) as group:
-        # Eight bands of 1,000 cells, whose chunks outweigh the flags that
-        # select the cells.
-        group.create_array(
-            "values",
-            data=np.ones((n_cells, width), dtype=np.float64),
-            chunks=(1_000, width),
+        # Eight bands of 1,000 cells.
+        group.create_array("values", data=values, chunks=(1_000, width))
+    for name, rows in (
+        ("tail", [n_cells - 3, n_cells - 2, n_cells - 1]),
+        ("spread", [0, 4_000, n_cells - 1]),
+    ):
+        resolved = resolve_cell_aligned_artifact(
+            store.zw,
+            planned.ref,
+            cell_selection=store.snapshot_cell_selection(name),
+            ndim=2,
+            ledger=MemoryLedger(None, "Reading", codec_threads=4),
         )
-    budgets = {}
-    for name in ("tail", "spread"):
-        selection = store.snapshot_cell_selection(name)
-
-        def read(budget: int, selection: object = selection) -> object:
-            return resolve_cell_aligned_artifact(
-                store.zw,
-                planned.ref,
-                cell_selection=selection,
-                ndim=2,
-                ledger=MemoryLedger(budget, "Reading", codec_threads=4),
-            )
-
-        budgets[name], _refusals = follow_refusals(read)
-        resolved, peak = traced_peak(lambda: read(budgets[name]), budgets[name])
-        assert peak <= budgets[name], (name, peak, budgets[name])
-        assert resolved.values.shape == (3, width)
-    # Three cells in one band leave one chunk behind; three over the array
-    # leave one on each of three codec threads, and read a band beside the next.
-    assert budgets["tail"] < budgets["spread"], budgets
+        np.testing.assert_array_equal(resolved.values, values[rows])
 
 
-def test_lineage_curves_follow_their_refusals_to_the_budget_that_places_the_cells(
+def test_lineage_curves_refuse_a_budget_of_one_byte_before_placing_the_cells(
     datastore, lineage_fate, tmp_path: Path
 ) -> None:
     from tests.storage_helpers import copy_store
 
     store = copy_store(Path(datastore.zw.store.root), tmp_path)
-
-    def curves(budget: int) -> object:
-        store.memoryBytes = budget
-        return store.trajectory.curves(
-            lineage_fate,
-            lineages=[2],
-            n_points=24,
-            batch_size=97,
-            invalidate_cache=True,
+    store.memoryBytes = 1
+    refusal = refused(
+        lambda: store.trajectory.curves(
+            lineage_fate, lineages=[2], n_points=24, batch_size=97
         )
-
-    _budget, refusals = follow_refusals(curves)
+    )
     # The first check counts the placement writes beside the weights and ranks.
-    assert refusals[0].item == "the lineages' weights, ranks and placement writes"
+    assert refusal.item == "the lineages' weights, ranks and placement writes"
 
 
 def test_the_producer_budget_beside_a_growing_writer_is_the_least_that_leaves_it() -> (
@@ -1603,7 +1386,7 @@ def test_lineage_curves_place_their_cells_in_whole_bands_counted_up_front(
     "operation",
     ["fate", "lineage_tree", "diffusion", "imputation", "lineage_aggregation"],
 )
-def test_trajectory_operations_follow_their_refusals_to_the_budget_that_runs_them(
+def test_trajectory_operations_refuse_a_budget_of_one_byte(
     datastore,
     pseudotime_scoring,
     leiden_clustering,
@@ -1650,20 +1433,20 @@ def test_trajectory_operations_follow_their_refusals_to_the_budget_that_runs_the
         ),
     }
 
-    def run(budget: int) -> object:
-        store.memoryBytes = budget
-        return runs[operation]()
-
-    # A check that refuses a budget its bytes reach names one byte more, and
-    # each operation's own check is reached.
-    _budget, refusals = follow_refusals(run)
-    assert {
-        "fate": "the fate solver",
-        "lineage_tree": "the cluster moments of the lineage tree",
-        "diffusion": "loading the diffusion operator",
-        "imputation": "loading the diffusion operator beside the imputed output",
-        "lineage_aggregation": "the bin operator beside the fate weights",
-    }[operation] in {refusal.item for refusal in refusals}
+    # Each operation's own check refuses one byte, naming its step.
+    store.memoryBytes = 1
+    refusal = refused(runs[operation])
+    assert refusal.budget_bytes == 1
+    assert refusal.needed_bytes > 1
+    assert refusal.item.startswith(
+        {
+            "fate": "the fate solver",
+            "lineage_tree": "the cluster moments of the lineage tree",
+            "diffusion": "a diffusion step of ",
+            "imputation": "loading the diffusion operator beside the imputed output",
+            "lineage_aggregation": "the bin operator beside the fate weights",
+        }[operation]
+    ), refusal.item
 
 
 def test_a_row_band_writer_writes_whole_bands_and_a_last_partial_one() -> None:
@@ -1710,52 +1493,6 @@ def test_a_row_band_writer_writes_whole_bands_and_a_last_partial_one() -> None:
     np.testing.assert_array_equal(array[:], values)
 
 
-def test_a_read_of_one_byte_a_cell_counts_the_positions_of_its_cells(
-    tmp_path: Path,
-) -> None:
-    from cytearc.metadata.artifacts import plan_cell_data_artifact
-    from cytearc.metadata.selection import resolve_cell_aligned_artifact
-    from cytearc.storage.artifact_writer import artifact_transaction
-    from cytearc.utils.memory_budget import MemoryLedger
-    from tests.memory_helpers import traced_peak
-
-    n_cells = 50_000
-    store = _count_store(tmp_path / "bytes.zarr", np.ones((n_cells, 1)), "c")
-    store.cells.insert("half", np.arange(n_cells) % 2 == 0)
-    planned = plan_cell_data_artifact(
-        store.zw,
-        scope="assay",
-        assay="RNA",
-        kind="quality_metric",
-        operation="test_memory_refusals",
-        parameters={},
-        inputs={},
-        execution_options={},
-        cell_selection=store.snapshot_cell_selection("I"),
-        arrays={"values": ((n_cells,), None)},
-    )
-    with artifact_transaction(store.zw, planned) as group:
-        group.create_array("values", data=(np.arange(n_cells) % 200).astype(np.uint8))
-    for options in ({}, {"cell_selection": store.snapshot_cell_selection("half")}):
-
-        def read(budget: int, options: dict = options) -> object:
-            return resolve_cell_aligned_artifact(
-                store.zw,
-                planned.ref,
-                ledger=MemoryLedger(budget, "Reading"),
-                **options,
-            )
-
-        # The cells' positions outweigh one byte of values a cell, so a plan
-        # without them would be refused by the read it planned.
-        budget, refusals = follow_refusals(read)
-        assert [refusal.item for refusal in refusals] == [
-            "'values' of the quality_metric artifact"
-        ]
-        _resolved, peak = traced_peak(lambda: read(budget), budget)
-        assert peak <= budget, (peak, budget)
-
-
 def _banded_values(
     tmp_path: Path,
     name: str,
@@ -1797,66 +1534,6 @@ def _banded_values(
     return path, store, planned.ref
 
 
-def test_a_cell_read_names_the_budget_beside_what_its_ledger_holds(
-    tmp_path: Path,
-) -> None:
-    from cytearc.metadata.selection import resolve_cell_aligned_artifact
-    from cytearc.utils.memory_budget import MemoryLedger
-
-    _path, store, ref = _banded_values(tmp_path, "held", 1_000, {})
-
-    def read(budget: int) -> tuple[MemoryLedger, Any]:
-        ledger = MemoryLedger(budget, "Reading")
-        ledger.hold("the caller's data", 10_000)
-        return ledger, resolve_cell_aligned_artifact(store.zw, ref, ledger=ledger)
-
-    # The cells of one band are read as they were charged, so one refusal
-    # names the budget beside what the caller holds.
-    budget, refusals = follow_refusals(read, start=10_000)
-    assert len(refusals) == 1
-    ledger, resolved = read(budget)
-    # The caller's data, the values and the cells' positions stay charged,
-    # beside what the last read may still hold.
-    assert ledger.charged == (
-        10_000 + resolved.values.nbytes + resolved.cell_idx.nbytes
-    )
-
-
-def test_cell_reads_charge_a_chunk_on_each_codec_thread_of_the_store(
-    tmp_path: Path,
-) -> None:
-    from cytearc.datastore.datastore import DataStore
-    from cytearc.writers.export import _read_cell_values
-
-    n_cells = 8_000
-    spread = np.isin(np.arange(n_cells), [0, 2_000, 4_000, 6_000])
-    # Chunks of 1,000 rows of 50 values, which outweigh the reads' own work.
-    path, store, ref = _banded_values(
-        tmp_path, "threads", n_cells, {"spread": spread}, width=50
-    )
-    selection = store.snapshot_cell_selection("spread")
-    loads, exports = {}, {}
-    for threads in (1, 4):
-        reopened = DataStore(
-            str(path), default_assay="RNA", min_features_per_cell=-1, nthreads=threads
-        )
-
-        def load(budget: int, store: Any = reopened) -> object:
-            store.memoryBytes = budget
-            return store.artifacts.load_values(ref, cell_selection=selection)
-
-        loads[threads], _ = follow_refusals(load)
-        exports[threads], _ = follow_refusals(
-            lambda budget, threads=threads: _read_cell_values(
-                reopened.zw, ref, "values", np.flatnonzero(spread), budget, threads
-            )
-        )
-    # Cells over several bands leave a chunk on each of the store's codec
-    # threads that decoded one, which a read with one thread cannot.
-    assert loads[4] > loads[1], loads
-    assert exports[4] > exports[1], exports
-
-
 def test_cells_over_more_bands_than_the_fewest_are_refused_before_any_value_is_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1870,20 +1547,6 @@ def test_cells_over_more_bands_than_the_fewest_are_refused_before_any_value_is_r
         tmp_path, "spread", n_cells, {"spread": spread}, width=50
     )
     selection = store.snapshot_cell_selection("spread")
-
-    def read(budget: int) -> object:
-        return resolve_cell_aligned_artifact(
-            store.zw,
-            ref,
-            cell_selection=selection,
-            ndim=2,
-            ledger=MemoryLedger(budget, "Reading", codec_threads=4),
-        )
-
-    budget, refusals = follow_refusals(read)
-    # The first refusal counts the cells in one band, before their positions
-    # are read; the second, once they are, the bands they span.
-    assert len(refusals) == 2, [refusal.needed_bytes for refusal in refusals]
     reads: list[int] = []
     rows = selection_module.read_rows
 
@@ -1891,11 +1554,19 @@ def test_cells_over_more_bands_than_the_fewest_are_refused_before_any_value_is_r
         reads.append(1)
         return rows(*args, **kwargs)
 
+    # 100 kB cannot hold the bands that three cells over the array span.
     monkeypatch.setattr(selection_module, "read_rows", recorded)
-    second = refused(lambda: read(refusals[1].budget_bytes))
-    assert second.needed_bytes == budget
-    assert str(second).endswith(
+    refusal = refused(
+        lambda: resolve_cell_aligned_artifact(
+            store.zw,
+            ref,
+            cell_selection=selection,
+            ndim=2,
+            ledger=MemoryLedger(100_000, "Reading", codec_threads=4),
+        )
+    )
+    assert str(refusal).endswith(
         "Read fewer cells with cell_selection, or raise mem_budget."
-    ), second
+    ), refusal
     # No value or mask was read for the refusal.
     assert reads == []

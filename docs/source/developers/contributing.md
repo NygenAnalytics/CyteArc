@@ -59,8 +59,7 @@ Python 3.13 or newer is required (`requires-python >=3.13`).
 uv 0.13.4 or newer is required (`required-version` in `pyproject.toml`), because older releases trust the eMudhra emSign ECC Root CA - G3, whose intermediate certificates were compromised.
 Update uv with `UV_SYSTEM_CERTS=true uv self update`, which checks the download against the operating system's certificates.
 
-Two markers select the expensive parts of the suite: `slow` for tests that build neighbourhood graphs or run iterative numerical workflows, and for the memory cases of an operation beyond the one smallest-budget case that the quick suite keeps, and `integration` for tests that need live network access.
-Memory tests trace a call's peak and find the smallest budget it accepts through `tests/memory_helpers.py`.
+Two markers select the expensive parts of the suite: `slow` for tests that build neighbourhood graphs or run iterative numerical workflows, and `integration` for tests that need live network access.
 An integration test downloads its files through `download_or_skip` of `tests/network_helpers.py`, which skips the test when a host cannot serve a file whole and fails it when a file is missing, and a run ends naming each test that skipped for the network.
 While iterating, skip both:
 
@@ -70,6 +69,9 @@ CI runs the whole suite, so run `uv run pytest` before opening a pull request.
 CI splits the suite into four jobs per configuration; `uv run pytest --shard 2/4` runs the second of those shards locally.
 pandas stores text with pyarrow whenever pyarrow is installed, which the lock file does not do, so four more jobs layer pyarrow on the locked environment and split the quick suite into shards.
 `uv run --with pyarrow pytest -m "not slow and not integration"` runs it locally without changing the project environment.
+
+A memory test checks behavior at a fixed budget derived from its data's size: a budget too small for the data raises `MemoryBudgetError` before anything is written, naming the step and what to change, and a small budget that streams in several blocks gives the result of a large one. A memory test traces no memory and searches for no smallest budget, since on toy data the runtime's own memory is as large as the data; memory at scale is checked with notebooks and benchmarks on large data.
+
 Several dependencies publish no Python 3.15 wheels, so the 3.15 jobs compile them from source. The test jobs cache the wheels uv builds, keyed by Python version, resolution, and runner image; a changed `uv.lock` restores the previous cache, so only new or changed packages compile. The 3.15 jobs also cache the Ubuntu packages they compile against, keyed by those packages' versions, because a slow Ubuntu mirror took up to 11 minutes to download them; a changed version downloads only the changed packages.
 `tests/shards.py` balances the shards by the seconds each test file took, recorded in `tests/shard_durations.json`.
 After adding slow test files or changing how long existing ones take, refresh the record with a cold Numba cache, as on a CI runner:

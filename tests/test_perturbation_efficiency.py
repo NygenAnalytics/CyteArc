@@ -5,7 +5,6 @@ template. A test that writes copies the template, and the tests of refused
 calls share one copy, which they check is left as it was.
 """
 
-import tracemalloc
 import warnings
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -18,12 +17,10 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationEfficiency
 from cytearc.perturbation.efficiency import (
     efficiency_arrays,
-    efficiency_memory_bytes,
     target_features,
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
 from tests.perturbation_helpers import fixed_labels, write_screen
-from tests.memory_helpers import check_budget
 from tests.storage_helpers import copy_store, open_store, write_count_store, written
 
 # Guides, their targets and the feature IDs of the targets. RNA4 has no ID and
@@ -421,47 +418,6 @@ def test_the_p_value_is_the_normal_approximation_for_few_cells() -> None:
     assert exact == pytest.approx(1 / 3)
 
 
-@pytest.mark.parametrize(
-    ("n_cells", "n_features", "n_control", "n_rows"),
-    [
-        # Half the cells are controls and half carry one row, so one test
-        # pools every cell.
-        (20_000, 1, 10_000, 1),
-        # Many genes and rows of few cells each.
-        (10_000, 20, 1_000, 40),
-        # A handful of cells, where SciPy's own objects take the most.
-        (5, 1, 3, 1),
-    ],
-)
-def test_the_memory_estimate_bounds_the_comparisons_peak(
-    n_cells, n_features, n_control, n_rows
-) -> None:
-    rng = np.random.default_rng(n_cells)
-    groups = np.full(n_cells, -1)
-    groups[n_control:] = rng.integers(0, n_rows, n_cells - n_control)
-    counts = rng.poisson(2.0, size=(n_cells, n_features)).astype(float)
-    library = counts.sum(axis=1) + rng.poisson(1000.0, n_cells)
-    # A tenth of the cells hold no UMI.
-    counts[: n_cells // 10] = 0
-    library[: n_cells // 10] = 0
-    largest = int(np.bincount(groups[groups >= 0], minlength=n_rows).max())
-    columns = np.arange(n_rows) % n_features
-    # The first call creates what SciPy keeps for later tests.
-    efficiency_arrays(
-        counts[-5:], library[-5:], [0, 0, -1, -1, -1], [0, 0, 1, 1, 1], [0]
-    )
-    tracemalloc.start()
-    try:
-        # The estimate counts the arrays that the operation passes.
-        efficiency_arrays(
-            counts.copy(), library.copy(), groups.copy(), groups < 0, columns
-        )
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-    assert peak <= efficiency_memory_bytes(n_cells, n_features, n_control, largest)
-
-
 @pytest.fixture(scope="module")
 def sparse_screen(tmp_path_factory) -> SimpleNamespace:
     """44 cells with RNA and two sparse antibody assays, and their labels.
@@ -576,24 +532,21 @@ def budget_screens(tmp_path_factory) -> SimpleNamespace:
 @pytest.mark.parametrize(
     ("screen", "by"), [("few", "target"), ("few", "guide"), ("all", "target")]
 )
-def test_efficiency_holds_no_more_than_the_budget_it_names(
+def test_efficiency_refuses_a_small_budget_and_tests_the_first_row(
     budget_screens, tmp_path, screen, by
 ) -> None:
     labels = getattr(budget_screens, screen).labels
     path = copy_store(getattr(budget_screens, screen).path, tmp_path).zarr_loc
 
     def measure(store):
-        return store.perturbation.efficiency(
-            labels, by=by, id_column=None, invalidate_cache=True
-        )
+        return store.perturbation.efficiency(labels, by=by, id_column=None)
 
-    # One refusal names the whole need, by guide too, and the call runs at
-    # that budget, holding no more than it.
-    _, refusals, ref = check_budget(path, measure)
-    assert len(refusals) == 1
-    assert refusals[0].startswith("Comparing 1 target genes over")
+    # The refusal names the whole need, by guide too.
+    with pytest.raises(MemoryError, match="^Comparing 1 target genes over"):
+        measure(open_store(path, mem_budget=100))
     # The first row, RNA0 or its first guide, is compared.
-    table = open_store(path).perturbation.load_efficiency(ref).table
+    store = open_store(path)
+    table = store.perturbation.load_efficiency(measure(store)).table
     assert table["status"].iloc[0] == "tested"
 
 

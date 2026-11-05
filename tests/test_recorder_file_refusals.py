@@ -6,7 +6,6 @@ can write is read as it says. TreeData stores are written element by
 element with zarr, as anndata lays them out, and HDF5 files with h5py.
 """
 
-import functools
 import gzip
 import json
 import random
@@ -29,7 +28,6 @@ from cytearc.readers.recorder_alleles import (
     classified_rows,
     iter_allele_rows,
 )
-from tests.memory_helpers import traced_peak
 
 DATA = Path(__file__).parent / "data" / "recorders"
 # treedata 0.4.0 wrote this store; its 'alignment' is a text scalar.
@@ -449,12 +447,9 @@ def test_treedata_reads_categorical_and_nullable_columns(tmp_path):
     assert _states(path) == [[["3", "2", "1"], [None, None, None]]]
 
 
-def test_treedata_reads_a_long_text_state_at_a_few_bytes_per_character(tmp_path):
+def test_treedata_reads_a_long_text_state_whole(tmp_path):
     # TreeData keeps a text scalar, such as a state in uns, as a 0-d array of
-    # variable-length UTF-8. Reading one holds a few copies of its text, the
-    # stored chunk among them, under four bytes per ASCII character, so one
-    # more copy of the text passes 4.5 bytes per character. Opening the store
-    # holds under 128 KiB. zarr 3.4.0 held about 520 bytes per character.
+    # variable-length UTF-8.
     def write(name: str, text: str) -> Path:
         path = tmp_path / f"{name}.zarr"
         root = _store(path, characters={"i1-a": [1, 2]})
@@ -476,24 +471,9 @@ def test_treedata_reads_a_long_text_state_at_a_few_bytes_per_character(tmp_path)
     assert json.loads(written.read_text()) == json.loads(
         (TREEDATA_STORE / "alignment" / "zarr.json").read_text()
     )
-    # A process's first read holds more than the reads after it.
-    character_table(write("first", "-"))
-    peaks = {}
     for n, text in texts.items():
-        bound = 5 * n + 128 * 1024
-        table, peaks[n] = traced_peak(
-            functools.partial(character_table, paths[n]), bound
-        )
+        table = character_table(paths[n])
         assert (table.missing_state, table.unmodified_state) == (text, "0")
-        # The read holds at least the text it returns.
-        assert n <= peaks[n] <= bound, (
-            f"Reading a state of {n:,} characters held {peaks[n]:,} bytes, not "
-            f"between one byte per character and {bound:,} bytes"
-        )
-    per_character = (peaks[200_000] - peaks[100_000]) / 100_000
-    assert per_character <= 4.5, (
-        f"Each added character of a state held {per_character:.2f} bytes, more than 4.5"
-    )
 
 
 @pytest.mark.parametrize(

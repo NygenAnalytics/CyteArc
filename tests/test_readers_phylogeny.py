@@ -817,3 +817,47 @@ def test_times_given_as_lists_or_long_text_are_refused_briefly(tmp_path) -> None
     assert str(refused.value).endswith(
         "not a number: '" + "x" * 37 + "..." + "x" * 38 + "'"
     )
+
+
+def _one_line_tree(path: Path, n_leaves: int, rng: np.random.Generator) -> None:
+    """A tree of ``n_leaves`` with DNA Typewriter's names, written on one line.
+
+    The leaves hang in polytomies of up to 67 below a backbone that is as
+    deep as there are polytomies, so the tree is wide and deep at once.
+    """
+    with open(path, "w", encoding="ascii") as handle:
+        n_groups = 0
+        written = 0
+        opened = 0
+        while written < n_leaves:
+            size = int(min(rng.integers(2, 68), n_leaves - written))
+            handle.write("(" if opened == 0 else ",(")
+            opened += 1
+            leaves = ",".join(
+                f"exp1_P{chr(65 + i % 26)}-{i % 100:02d}A.LIG-P3-B11_RT-P{i:07d}"
+                f":{rng.random():.8f}"
+                for i in range(written, written + size)
+            )
+            handle.write(f"({leaves})g{n_groups}:{rng.random():.6f}")
+            written += size
+            n_groups += 1
+        handle.write("):1.0" * (opened - 1) + ");")
+
+
+@pytest.mark.slow
+def test_a_59_megabyte_tree_on_one_line_parses_without_recursion(tmp_path) -> None:
+    path = tmp_path / "typewriter.nwk"
+    _one_line_tree(path, 1_280_000, np.random.default_rng(3))
+    text_bytes = path.stat().st_size
+    assert text_bytes > 59_000_000
+    with open(path, "rb") as handle:
+        assert handle.read().count(b"\n") == 0
+    layout = tree_file_layout(path)
+    # The backbone is about 38,000 groups deep, which recursion could not read.
+    trees = read_trees(layout, ledger=budgeted(10**11))
+    assert int(trees.leaf.sum()) == 1_280_000
+    depth = np.zeros(trees.n_nodes, dtype=np.int64)
+    for node in range(1, trees.n_nodes):
+        depth[node] = depth[trees.parent[node]] + 1
+    assert depth.max() > 30_000
+    assert trees.names[2].startswith("exp1_P")

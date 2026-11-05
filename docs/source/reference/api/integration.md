@@ -40,7 +40,7 @@ clusters, plus per-level regression sums of `levels x n_clusters x dims` floats,
 in `harmony_params` and the dimensions set its memory. Its admission also counts the batch
 labels, which it reads before it admits the fit and holds until the fit ends, at the size of their
 text objects: about 60 bytes per cell for each batch column of short labels. These estimates are
-near-exact counts of what each step allocates, as traced while it runs, plus stated allowances;
+counts of the arrays each step allocates, plus stated allowances;
 the budget compares them with its limit, and they are not a cap on the memory of the process (see
 [Memory and execution](../concepts/memory-and-execution)).
 

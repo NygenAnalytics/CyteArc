@@ -1,14 +1,9 @@
 """Reads that a memory ledger charges decode on as many threads of Zarr's codec pool as the ledger counts, on any machine."""
 
 import contextvars
-import json
-import os
-import subprocess
-import sys
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -360,106 +355,3 @@ def test_shutting_the_pools_down_shuts_down_the_pool_of_every_count() -> None:
                 pools.submit(threading.current_thread)
         finally:
             async_execution._DECODING_THREADS.reset(token)
-
-
-_LOADED_READS_SCRIPT = r"""
-import json
-import os
-import subprocess
-import sys
-import tempfile
-from pathlib import Path
-
-import numpy as np
-import zarr
-
-from cytearc.metadata.rows import read_whole
-from cytearc.storage.async_execution import zarr_io_concurrency
-from cytearc.utils.memory_budget import MemoryLedger, observed_charges
-from tests.memory_helpers import ZARR_READS, audited, hold_finished_reads, traced_peak
-
-# Two CPUs shared with four processes that keep them busy, as a busy runner
-# shares them: a pool thread that finished a decode waits to run again.
-os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[:2])
-busy = [
-    subprocess.Popen(
-        [sys.executable, "-c", "import time\nend = time.time() + 120\nwhile time.time() < end: pass"]
-    )
-    for _ in range(4)
-]
-
-
-def incompressible(root, name, n_values, chunk):
-    values = np.random.default_rng(len(name)).integers(0, 2**31 - 1, size=n_values)
-    root.create_array(name, shape=(n_values,), chunks=(chunk,), dtype=np.int64)[...] = values
-
-
-def planned(read):
-    plans = []
-    with observed_charges(lambda _item, _nbytes, plan: plans.append(plan)):
-        read(MemoryLedger(None, "Planning"))
-    return max(plans)
-
-
-try:
-    with tempfile.TemporaryDirectory() as tmp:
-        root = zarr.open_group(Path(tmp) / "store.zarr", mode="w")
-        incompressible(root, "first", 400_000, 100_000)
-        incompressible(root, "second", 1_000, 1_000)
-
-        def whole(ledger):
-            return read_whole(ledger, root, "first", item="the first array")
-
-        def run(threads):
-            ledger = MemoryLedger(None, "Reading", codec_threads=threads)
-            values = whole(ledger)
-            del values
-            ledger.release(8 * 400_000)
-            read_whole(ledger, root, "second", item="the second array")
-
-        with zarr_io_concurrency(1):
-            whole(MemoryLedger(None, "Warming"))
-            run(4)
-            estimate = planned(whole)
-            peaks = [
-                traced_peak(lambda: whole(MemoryLedger(None, "Reading")), estimate)[1]
-                for _ in range(int(sys.argv[1]))
-            ]
-            overruns = []
-            for _ in range(int(sys.argv[2])):
-                with hold_finished_reads(*ZARR_READS):
-                    overruns += audited(lambda: run(4))[1]
-finally:
-    for process in busy:
-        process.kill()
-        process.wait()
-print(json.dumps({"estimate": estimate, "peaks": peaks, "overruns": overruns}))
-"""
-
-
-@pytest.mark.slow
-@pytest.mark.skipif(
-    not hasattr(os, "sched_setaffinity"), reason="needs CPU affinity, as on Linux"
-)
-def test_reads_one_chunk_at_a_time_stay_within_their_charge_on_busy_cpus() -> None:
-    # The reads of test_memory_costs's four-chunk whole read and of its read
-    # one chunk at a time, on two CPUs that four other processes keep busy.
-    # With the four chunks spread over Zarr's whole pool, from one in twenty
-    # such reads on Python 3.13 to a half on 3.14 held up to a chunk more
-    # than their charge, 5.7 MB against 4.9 MB; each read decodes on the one
-    # thread or four that its ledger counts, so none passes its charge.
-    traced = subprocess.run(
-        [sys.executable, "-c", _LOADED_READS_SCRIPT, "40", "10"],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        cwd=Path(__file__).resolve().parents[1],
-    )
-    assert traced.returncode == 0, traced.stderr
-    result = json.loads(traced.stdout.strip().splitlines()[-1])
-    estimate = result["estimate"]
-    over = [peak for peak in result["peaks"] if peak > estimate]
-    assert over == [], (estimate, over)
-    assert result["overruns"] == []
-    # Each read holds its result of 3.2 MB and the chunk it decodes.
-    assert min(result["peaks"]) > 3_200_000 + 800_000

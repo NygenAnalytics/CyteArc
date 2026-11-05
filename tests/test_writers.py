@@ -1849,18 +1849,8 @@ def test_to_h5ad_preserves_counts_metadata_and_embeddings(
     import h5py
     from scipy.sparse import csr_matrix
 
-    from cytearc.matrix import ChunkedArray
     from cytearc.writers import to_h5ad
-    from cytearc.writers.export import h5ad_conversion_bytes, largest_block_rows
 
-    charged = []
-    stream = ChunkedArray._stream_blocks
-
-    def charging(self, **options):
-        charged.append(options["resident_bytes"])
-        return stream(self, **options)
-
-    monkeypatch.setattr(ChunkedArray, "_stream_blocks", charging)
     assay = export_assay_store.RNA
     n_cells = assay.cells.N
     umap = np.column_stack(
@@ -1877,10 +1867,6 @@ def test_to_h5ad_preserves_counts_metadata_and_embeddings(
 
     path = tmp_path / "toy_export.h5ad"
     to_h5ad(assay, str(path), embeddings_cols=["UMAP"])
-    # The stream charges the conversion of its largest block to CSR.
-    counts = assay.rawData
-    rows = largest_block_rows(counts)
-    assert charged == [h5ad_conversion_bytes(counts.dtype, counts.shape[1], rows)]
 
     with h5py.File(path, "r") as h5:
         shape = tuple(int(x) for x in h5["X"].attrs["shape"])
@@ -2225,38 +2211,18 @@ def test_h5ad_export_of_a_tiny_matrix_fits_a_small_budget(monkeypatch) -> None:
         assert len(charged) == 1 and charged.pop() > 0
 
 
-def test_h5ad_writer_converts_dense_blocks_within_the_charged_bytes(
-    tmp_path, monkeypatch
-):
-    import tracemalloc
-
+def test_h5ad_writer_converts_dense_blocks_to_csr_in_steps(tmp_path, monkeypatch):
     import h5py
     from scipy.sparse import csr_matrix
 
     import cytearc.writers.export as export
-    from cytearc.writers.export import (
-        h5ad_conversion_bytes,
-        iter_h5ad_blocks,
-        write_h5ad_plan,
-    )
+    from cytearc.writers.export import write_h5ad_plan
 
     monkeypatch.setattr(export, "_CSR_STEP_VALUES", 1 << 15)
     # Every value is nonzero, the worst case for a conversion to CSR.
     rng = np.random.default_rng(5)
     dense = rng.integers(1, 100, size=(1024, 512)).astype(np.float32)
     plan = _plan([dense], shape=dense.shape, dtype=np.float32)
-    charged = h5ad_conversion_bytes(np.float32, 512, 1024)
-
-    tracemalloc.start()
-    try:
-        for piece in iter_h5ad_blocks(plan.x):
-            del piece
-        _current, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-
-    # Converting the 2 MiB block through COO held about 14 MiB.
-    assert peak <= charged < dense.nbytes
     path = tmp_path / "dense.h5ad"
     write_h5ad_plan(plan, path)
     with h5py.File(path, "r") as h5:

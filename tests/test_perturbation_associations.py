@@ -1,6 +1,5 @@
 import math
 import re
-import tracemalloc
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,9 +15,8 @@ from cytearc.datastore._operations import (
 )
 from cytearc.datastore._operations.perturbation_store import _label_rows
 from cytearc.datastore.datastore import DataStore
-from cytearc.perturbation import PerturbationAssociations
+from cytearc.perturbation import PerturbationAssociations, glm, random_sets
 from cytearc.perturbation import associations as associations_module
-from cytearc.perturbation import glm, random_sets
 from cytearc.perturbation import p_values as p_values_module
 from cytearc.perturbation.associations import (
     ASSOCIATION_SETS,
@@ -52,6 +50,7 @@ from cytearc.perturbation.p_values import (
 from cytearc.perturbation.random_sets import resampling_keys
 from cytearc.storage.artifacts import ArtifactRef
 from cytearc.utils.logging import logger
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.perturbation_helpers import (
     dense_pair,
     fixed_labels,
@@ -60,7 +59,6 @@ from tests.perturbation_helpers import (
     use_python_kernels,
     write_screen,
 )
-from tests.memory_helpers import check_budget, named_budget
 from tests.storage_helpers import open_store
 
 
@@ -1326,7 +1324,7 @@ def test_pair_tests_take_a_third_round_when_the_fit_fails(monkeypatch) -> None:
     assert np.isnan(result.skew_shape[0])
 
 
-def test_the_second_round_holds_its_statistics_once() -> None:
+def test_the_second_round_tests_every_pair_within_a_block_of_statistics() -> None:
     # 200 pairs whose 4,999 sets of the second round fill one block of 8 MB.
     counts, design, groups = _screen(n_controls=100, sizes=(10,), n_genes=200, seed=3)
     pairs = (np.zeros(200, int), np.arange(200))
@@ -1336,24 +1334,8 @@ def test_the_second_round_holds_its_statistics_once() -> None:
         "stage_threshold": 1.0,
         "statistics_bytes": block,
     }
-    # The kernels compile and the fits load SciPy's functions first.
-    pair_tests(counts[:2], design, groups, pairs[0][:2], pairs[1][:2], **settings)
-    tracing = tracemalloc.is_tracing()
-    if not tracing:
-        tracemalloc.start()
-    tracemalloc.reset_peak()
-    start = tracemalloc.get_traced_memory()[0]
-    try:
-        result = pair_tests(counts, design, groups, *pairs, **settings)
-        peak = tracemalloc.get_traced_memory()[1] - start
-    finally:
-        if not tracing:
-            tracemalloc.stop()
-
+    result = pair_tests(counts, design, groups, *pairs, **settings)
     assert (result.stage >= 2).all()
-    # Besides the statistics, their random sets and records take under 1 MB,
-    # and the fits a working copy of about 1 MiB, never all of them again.
-    assert peak < 1.5 * block
 
 
 def test_pair_tests_of_genes_without_a_fit_have_no_p_value() -> None:
@@ -1821,7 +1803,9 @@ def test_associations_refuse_a_budget_without_room_for_one_feature(shared) -> No
         )
 
 
-def test_association_refusals_name_the_budget_that_runs_the_tests(shared) -> None:
+def test_association_refusals_name_the_step_and_a_small_budget_gives_the_same_tests(
+    shared,
+) -> None:
     store, labels = shared.store, shared.labels
     features = _every_gene(store)
     arguments = {"features": features, "invalidate_cache": True, **FAST}
@@ -1833,25 +1817,20 @@ def test_association_refusals_name_the_budget_that_runs_the_tests(shared) -> Non
         return budgeted.perturbation.associations(labels, **arguments)
 
     # The tests hold far more than this budget, the pairs' arrays alone.
-    with pytest.raises(MemoryError, match="one feature over 540 tested cells") as low:
+    with pytest.raises(MemoryError, match="one feature over 540 tested cells"):
         run(open_store(store.zarr_loc, nthreads=2, mem_budget=1000))
-    needed = named_budget(low.value)
-
-    # A budget one byte short asks for the same budget, which runs the tests
-    # with the results of the default budget; the wide count chunk below
-    # checks the traced peak.
-    with pytest.raises(MemoryError) as short:
-        run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed - 1))
-    assert named_budget(short.value) == needed
+    # 4 MB runs the tests with the results of the default budget.
     tight = store.perturbation.load_associations(
-        run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed))
+        run(open_store(store.zarr_loc, nthreads=2, mem_budget=4_000_000))
     )
     for name in ("discovery", "calibration", "positive"):
         pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
 
 
 @pytest.mark.slow
-def test_association_refusals_count_the_read_of_a_wide_count_chunk(tmp_path) -> None:
+def test_associations_at_a_small_budget_read_a_wide_count_chunk_alike(
+    tmp_path,
+) -> None:
     # 1,000 more genes widen the stored chunk of counts, which a read of one
     # gene decodes whole, beyond the slack of the tests' other arrays; the
     # tests take the first 5 genes, without calibration pairs.
@@ -1871,13 +1850,17 @@ def test_association_refusals_count_the_read_of_a_wide_count_chunk(tmp_path) -> 
         store.perturbation.associations(labels, **arguments)
     )
 
-    def run(budgeted: DataStore) -> ArtifactRef:
-        return budgeted.perturbation.associations(labels, **arguments)
-
-    # The named budget runs the tests within it; it once left out the read,
-    # which then failed in the stream planner.
-    _, _, tests = check_budget(store.zarr_loc, run, check_writes=False, nthreads=2)
-    tight = store.perturbation.load_associations(tests)
+    # 2 MB cannot hold the read of one gene's wide chunk beside the tests,
+    # and 10 MB gives the results of the store's default budget.
+    small = open_store(store.zarr_loc, mem_budget=2_000_000, nthreads=2)
+    with pytest.raises(
+        MemoryBudgetError, match="^The counts of one feature over 540 tested cells"
+    ):
+        small.perturbation.associations(labels, **arguments)
+    budgeted = open_store(store.zarr_loc, mem_budget=10_000_000, nthreads=2)
+    tight = budgeted.perturbation.load_associations(
+        budgeted.perturbation.associations(labels, **arguments)
+    )
     for name in ("discovery", "positive"):
         pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
 

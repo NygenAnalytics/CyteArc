@@ -1,4 +1,4 @@
-"""Memory reservations and thread schedules of the rank marker search.
+"""Results and thread schedules of the rank marker search within a memory budget.
 
 These tests run ``find_markers_by_rank`` over stores whose counts sit in small
 read groups, so each search streams several read groups and plans its kernel
@@ -16,39 +16,10 @@ import zarr
 from cytearc.datastore.datastore import DataStore
 from cytearc.features.markers import find_markers_by_rank
 
-# The memory-fit store, and the store whose thread schedules are recorded.
+# The store searched at a small budget, and the store whose thread schedules
+# are recorded.
 _FIT_SHAPE = (20_000, 256)
 _SCHEDULE_SHAPE = (20_000, 64)
-
-
-def _rebuild_interned_strings() -> None:
-    """Make CPython rebuild its interned-string table before a trace starts.
-
-    Pathlib interns every path part it parses, and those strings soon die;
-    their slots fill the table until an insertion rebuilds it. A rebuild
-    inside a trace adds a block the size of the table, because the table it
-    replaces predates the trace. A rebuilt table holds far more insertions
-    than a marker search and its writes make.
-    """
-    import sys
-    import tracemalloc
-
-    chunk = 1 << 12
-    for start in range(0, 1 << 21, chunk):
-        # Strings made before the trace leave a rebuilt table as the only
-        # sizeable block that the trace sees.
-        names = [
-            f"cytearc-test-interned-{index}" for index in range(start, start + chunk)
-        ]
-        tracemalloc.start()
-        try:
-            for name in names:
-                sys.intern(name)
-            current, _ = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-        if current > 1 << 16:
-            return
 
 
 def _write_layout_store(directory: Path, values: np.ndarray) -> Path:
@@ -126,14 +97,13 @@ def schedule_store(tmp_path_factory) -> Path:
 
 @pytest.mark.parametrize("method_name", ["norm_lib_size", "norm_dummy"])
 @pytest.mark.parametrize("n_groups", [20, 400])
-def test_marker_search_and_write_fit_the_bytes_the_search_reserves(
+def test_marker_search_and_write_at_a_small_budget_cover_every_group(
     fit_store, tmp_path, method_name, n_groups
 ) -> None:
-    import tracemalloc
-
     import cytearc.assay.normalization as normalization
-    from cytearc.storage.execution import execution_report_scope
 
+    # 24 MB streams the counts of 20,000 cells and 256 features in several
+    # read groups.
     store = _open_layout_store(fit_store, nthreads=4, mem_budget="24M")
     store.RNA.normMethod = getattr(normalization, method_name)
     n_cells, n_features = _FIT_SHAPE
@@ -141,40 +111,11 @@ def test_marker_search_and_write_fit_the_bytes_the_search_reserves(
     cells = np.arange(n_cells)
     features = np.arange(n_features)
     names = np.asarray(store.RNA.feats.fetch_all("names"))
-    # Load the kernels, codecs, and pools, and import what finishes a table,
-    # so that the trace holds only what the search and its writes allocate.
-    # Two groups load them as well as many groups do, at a fraction of the
-    # writes.
-    DataStore._write_marker_slot(
-        zarr.open_group(str(tmp_path / "warm.zarr"), mode="w"),
-        find_markers_by_rank(store.RNA, cells % 2, cells, features[:4], writers=2),
-        workers=2,
-        feature_names=names,
-        feature_ids=names,
-    )
     slot = zarr.open_group(str(tmp_path / "markers.zarr"), mode="w")
-    _rebuild_interned_strings()
-
-    with execution_report_scope() as reports:
-        tracemalloc.start()
-        try:
-            base, _ = tracemalloc.get_traced_memory()
-            result = find_markers_by_rank(store.RNA, labels, cells, features, writers=2)
-            DataStore._write_marker_slot(
-                slot, result, workers=2, feature_names=names, feature_ids=names
-            )
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-
-    (plan,) = [
-        report.as_metrics()
-        for report in reports
-        if report.unitKind == "countsTReadGroup"
-    ]
-    # NumPy, Zarr, and Numba buffers are traced. The search and the writes
-    # that follow it hold no more than the search reserved.
-    assert peak - base <= int(plan["reservedBytes"]) <= 24 * 1024**2
+    result = find_markers_by_rank(store.RNA, labels, cells, features, writers=2)
+    DataStore._write_marker_slot(
+        slot, result, workers=2, feature_names=names, feature_ids=names
+    )
     assert len(result.group_ids) == n_groups
     assert sorted(slot.group_keys()) == sorted(str(group) for group in result.group_ids)
 

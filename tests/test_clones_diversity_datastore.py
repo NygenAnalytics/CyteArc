@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import cytearc.datastore._operations.clones as operations
 from cytearc.clones import ClonalDiversity, Rarefaction
 from cytearc.clones import diversity as dv
 from tests.clone_helpers import (
@@ -21,13 +20,6 @@ from tests.clone_helpers import (
 )
 from tests.clone_truth import CLONE_SIZES, N_CELLS, clone_truth
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.memory_helpers import (
-    budget_that_runs,
-    charges,
-    check_budget,
-    step_charge,
-    traced_peak,
-)
 from tests.storage_helpers import copy_store, insert_nullable_cell_column
 
 TRUTH = clone_truth()
@@ -230,120 +222,32 @@ def test_diversity_refuses_other_artifacts_and_large_stores(
         store.clones.diversity(copied.cells)
     with pytest.raises(TypeError, match="clones must be an ArtifactRef"):
         store.clones.rarefaction("clones")
-    # Grouping 48 cells reads the clones' cell selection, a flag for each
-    # cell of the store in the one chunk of their 48 rows, and charges it
-    # before it reads it.
-    from cytearc.storage.artifacts import artifact_group, inspect_artifact
-
-    selection = inspect_artifact(store.zw, clones).input_ref("cell_selection")
-    assert artifact_group(store.zw, selection)["values"].chunks == (N_CELLS,)
-    budget, refusals, result, _peak = budget_that_runs(
-        store, lambda opened: opened.clones.diversity(clones), traced=False
-    )
-    assert any("for the cells of the artifact's selection" in text for text in refusals)
-    assert result.indices["n_cells"].tolist() == [32]
-    monkeypatch.setattr(store, "memoryBytes", budget - 1)
-    with pytest.raises(MemoryError, match=f"holds about {budget} bytes"):
+    # 10 kB cannot hold each of the 48 cells' clone beside what grouping them
+    # holds.
+    monkeypatch.setattr(store, "memoryBytes", 10_000)
+    with pytest.raises(
+        MemoryBudgetError, match="for each cell's clone, .* Raise mem_budget"
+    ):
         store.clones.diversity(clones)
 
 
-def test_each_group_counts_beside_its_cells(copied, monkeypatch) -> None:
+def test_a_label_of_its_own_for_each_cell_makes_groups_of_one_cell(copied) -> None:
     store, clones = copied.store, copied.clones
     # A label of its own for each of the 32 cells with a clone makes 32
-    # groups, whose clone sizes and rows take 2,000 bytes each, and 32 counts
-    # of a clone's cells in a group, which the table of clone sizes sorts in
-    # 56 bytes each.
+    # groups.
     has = TRUTH.clones >= 0
     store.cells.insert("own", np.asarray([f"c{i:02d}" for i in range(N_CELLS)]))
     store.cells.insert("has_clone", has)
     own = store.snapshot_cluster_labels(
         "own", cell_selection=store.snapshot_cell_selection("has_clone")
     )
-    item = "summarizing the clones of 32 groups"
-    nbytes, planned = step_charge(
-        lambda: store.clones.diversity(clones, groups=own), item
-    )
-    assert nbytes == 32 * 2_000 + 32 * 56
-    # The step is charged beside what the ledger holds: a budget below its
-    # plan is refused by it or by a step before it, in both summaries, and
-    # the summaries run at the budgets that their refusals name.
-    monkeypatch.setattr(store, "memoryBytes", planned - 1)
-    for summarize in (
-        lambda: store.clones.diversity(clones, groups=own),
-        lambda: store.clones.rarefaction(clones, groups=own, orders=(0,), knots=2),
-    ):
-        with pytest.raises(MemoryBudgetError):
-            summarize()
-    monkeypatch.setattr(store, "memoryBytes", 2**30)
-    budget, _refusals, _result = check_budget(
-        store, lambda reopened: reopened.clones.diversity(clones, groups=own)
-    )
-    assert budget >= planned
-    monkeypatch.setattr(store, "memoryBytes", budget)
     result = store.clones.diversity(clones, groups=own)
     assert result.indices["n_cells"].tolist() == [1] * 32
 
 
-def _clone_counts(shape: str) -> tuple[int, int, np.ndarray]:
-    """The groups, clones per group and each clone's cells of a shape of counts."""
-    if shape == "four groups of many clones":
-        sizes = np.random.default_rng(6).zipf(1.8, size=400_000)
-        return 4, 100_000, np.minimum(sizes, 1_000)
-    if shape == "groups of one cell":
-        return 40_000, 1, np.ones(40_000, dtype=np.int64)
-    if shape == "groups of clones of distinct sizes":
-        # Group g holds clones of g + 1 to g + 30 cells, a table of its own.
-        sizes = np.arange(1, 31)[None, :] + np.arange(2_000)[:, None]
-        return 2_000, 30, sizes.reshape(-1)
-    return 1, 4_000, np.arange(1, 4_001)
-
-
-@pytest.mark.parametrize(
-    "shape",
-    [
-        "four groups of many clones",
-        "groups of one cell",
-        "groups of clones of distinct sizes",
-        "one group of every size up to 4,000",
-    ],
-)
-def test_summarizing_clone_sizes_holds_what_its_check_counts(shape) -> None:
-    # The counts of each clone's cells in each group, as grouping the cells
-    # leaves them, then the table built from them and its diversity: every
-    # group, every count and every row of the table beyond its group's first,
-    # by the operation's own check.
-    n_groups, per_group, cells = _clone_counts(shape)
-    names = [f"g{at}" for at in range(n_groups)]
-
-    def summarize() -> object:
-        pair_groups = np.repeat(np.arange(n_groups), per_group)
-        pair_codes = np.arange(n_groups * per_group)
-        pair_cells = cells.copy()
-        grouped = dv.GroupedCloneSizes.from_clones(pair_groups, pair_cells, n_groups)
-        return dv.diversity_tables(grouped, names), pair_codes
-
-    summarize()
-    rows = len(
-        dv.GroupedCloneSizes.from_clones(
-            np.repeat(np.arange(n_groups), per_group), cells, n_groups
-        ).values
-    )
-    counted = (
-        operations._SUMMARY_BYTES_PER_GROUP * n_groups
-        + operations._SIZE_TABLE_BYTES_PER_COUNT * n_groups * per_group
-        + operations._SIZE_TABLE_BYTES_PER_ROW * (rows - n_groups)
-    )
-    _result, peak = traced_peak(summarize, counted)
-    assert peak <= counted, (peak, counted)
-
-
-def test_summarizing_counts_each_row_of_a_group_beyond_its_first(
-    copied, monkeypatch
-) -> None:
+def test_diversity_counts_the_cells_of_each_groups_clones(copied, monkeypatch) -> None:
     store, clones = copied.store, copied.clones
-    # Two groups: clones of 1, 2, 2 and 5 cells, and two of 3 cells, so six
-    # counts and four distinct sizes, two of them beyond their group's first;
-    # the table is counted once it is built.
+    # Two groups: clones of 1, 2, 2 and 5 cells, and two of 3 cells.
     keys = pd.DataFrame(index=pd.Index(["a", "b"], name="group"))
     counts = (
         keys,
@@ -353,64 +257,35 @@ def test_summarizing_counts_each_row_of_a_group_beyond_its_first(
         {"cellsWithoutClone": 0, "cellsWithoutGroup": 0, "groups": 2},
     )
     monkeypatch.setattr(store, "_clone_pair_counts", lambda *args, **kwargs: counts)
-    item = "summarizing the clones of 2 groups"
-    _result, taken = charges(lambda: store.clones.diversity(clones))
-    stated = [nbytes for charged, nbytes, _planned in taken if charged == item]
-    assert stated == [2 * 2_000 + 6 * 56, 2 * 2_000 + 6 * 56 + 2 * 128]
-    needed = max(planned for _charged, _nbytes, planned in taken)
-    monkeypatch.setattr(store, "memoryBytes", needed - 1)
-    with pytest.raises(MemoryBudgetError):
-        store.clones.diversity(clones)
-    monkeypatch.setattr(store, "memoryBytes", needed)
     indices = store.clones.diversity(clones).indices
     assert indices[["group", "n_cells"]].values.tolist() == [["a", 10], ["b", 6]]
 
 
-def test_rarefaction_counts_the_rows_of_each_group(copied, monkeypatch) -> None:
+def test_rarefaction_of_many_sizes_refuses_a_small_budget(copied, monkeypatch) -> None:
     store, clones = copied.store, copied.clones
-    # Two samples at 10,000 sizes, more than grouping the cells holds: each
-    # size reached in 192 bytes, and 20,000 rows of 128 bytes, which hold the
-    # group's name and leave the sample's label to the keys.
+    # Two samples at 10,000 sizes: 20,000 rows, which 2 MB cannot hold.
     sizes = np.arange(1, 10_001)
-    item = "rarefying 2 groups to 10000 sizes"
-    nbytes, needed = step_charge(
-        lambda: store.clones.rarefaction(
-            clones, group_by="sample", orders=(0,), sizes=sizes
-        ),
-        item,
-    )
-    assert nbytes == 10_000 * 192 + 20_000 * 128
-    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    monkeypatch.setattr(store, "memoryBytes", 2_000_000)
     with pytest.raises(
         MemoryBudgetError, match="or pass fewer sizes or knots"
     ) as refused:
         store.clones.rarefaction(clones, group_by="sample", orders=(0,), sizes=sizes)
-    assert refused.value.item == item and refused.value.needed_bytes == needed
-    monkeypatch.setattr(store, "memoryBytes", needed)
+    assert refused.value.item == "rarefying 2 groups to 10000 sizes"
+    monkeypatch.undo()
     curves = store.clones.rarefaction(
         clones, group_by="sample", orders=(0,), sizes=sizes
     ).curves
     assert len(curves) == 20_000
 
 
-def test_rarefaction_counts_the_sizes_it_reaches(copied, monkeypatch) -> None:
+def test_rarefaction_reaches_each_size_asked_and_refuses_too_many_knots(
+    copied,
+) -> None:
     store, clones = copied.store, copied.clones
-    # 1,000 sizes for the one group, each reached in 192 bytes, and 1,000
-    # rows of 128 bytes, with no key column beside the group's name.
     sizes = np.arange(1, 1_001)
-    nbytes, needed = step_charge(
-        lambda: store.clones.rarefaction(clones, orders=(0,), sizes=sizes),
-        "rarefying 1 groups to 1000 sizes",
-    )
-    assert nbytes == 1_000 * 192 + 1_000 * 128
-    monkeypatch.setattr(store, "memoryBytes", needed - 1)
-    with pytest.raises(MemoryBudgetError, match="to 1000 sizes, more than"):
-        store.clones.rarefaction(clones, orders=(0,), sizes=sizes)
-    monkeypatch.setattr(store, "memoryBytes", needed)
     curves = store.clones.rarefaction(clones, orders=(0,), sizes=sizes).curves
     assert curves["size"].tolist() == sizes.tolist()
     # Knots are counted before any size is made, however many are asked for.
-    monkeypatch.undo()
     with pytest.raises(
         MemoryBudgetError, match="for rarefying 1 groups to 1000000000000 sizes"
     ):

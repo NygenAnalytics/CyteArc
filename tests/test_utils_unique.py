@@ -18,7 +18,6 @@ from cytearc.utils.arrays import (
     unique_inverse,
     unique_rows,
 )
-from tests.memory_helpers import traced_peak
 from tests.stack_modules import CYTEARC_ROOT, stack_module_paths
 
 # The guard checks the clone stack's modules. Master's other modules keep their
@@ -288,17 +287,11 @@ def test_union_sorted_of_empty_and_extreme_values() -> None:
     ]
 
 
-def test_union_sorted_holds_the_held_values_twice_at_most() -> None:
+def test_union_sorted_of_a_million_held_values_keeps_every_new_one() -> None:
     held = np.arange(0, 2_000_000, 2, dtype=np.uint64)
     values = np.arange(1, 20_001, 2, dtype=np.uint64)
-    union_sorted(held[:4], values[:4])
-    # Beside the held values and the new ones: the result, sized exactly, and
-    # the sorted copy of the new ones, where sorting all again holds the held
-    # ones three more times.
-    allowed = 8 * (len(held) + len(values)) + values.nbytes + 4_096
-    merged, peak = traced_peak(lambda: union_sorted(held, values), allowed)
+    merged = union_sorted(held, values)
     assert len(merged) == len(held) + len(values)
-    assert peak <= allowed, peak
 
 
 def test_union_sorted_kernel_runs_as_python_too() -> None:

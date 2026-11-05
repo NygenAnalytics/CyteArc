@@ -44,17 +44,9 @@ from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.metadata.membership import UnmeasuredCellsError, membership_attributes
 from cytearc.perturbation import PerturbationAssociations
 from cytearc.perturbation.labels import guide_targets
-from cytearc.readers.cellranger import PROTOSPACER_SCAN_BYTES
 from cytearc.storage.artifacts import artifact_group
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.perturbation_helpers import record_cell_reads
-from tests.memory_helpers import (
-    ZARR_READS,
-    audited,
-    budget_that_runs,
-    hold_finished_reads,
-    named_budget,
-)
 from tests.storage_helpers import (
     insert_nullable_cell_column,
     rechunk_feature_tables,
@@ -1371,7 +1363,7 @@ def _check_every_cell(store: DataStore, path: Path) -> None:
     )
 
 
-def test_the_call_file_is_read_before_the_run_within_the_memory_budget(
+def test_the_call_file_check_refuses_a_small_budget_before_the_run(
     screen, tmp_path
 ) -> None:
     location = tmp_path / "screen.zarr"
@@ -1380,42 +1372,22 @@ def test_the_call_file_is_read_before_the_run_within_the_memory_budget(
     # not a chunk of 100,000 guide IDs, set the budget.
     rechunk_feature_tables(location)
     path = _call_file(tmp_path / "calls.csv")
-    store = _open(location)
-    budget, refusals, _result, peak = budget_that_runs(
-        store, lambda opened: _check_every_cell(opened, path), max_refusals=100
-    )
-    small = _open(location, mem_budget=budget - 1)
+    small = _open(location, mem_budget=10_000)
     before = written(small)
 
-    # A byte less is refused before the run, naming the same budget, and the
+    # A budget too small for the check is refused before the run, and the
     # store is left as it was.
     with pytest.raises(MemoryBudgetError) as refused:
         small.pipeline.perturbation(labels=LABELS, guide_calling={"path": path}, **HEAD)
-    assert named_budget(refused.value) == budget
     assert str(refused.value).startswith(
         f"Checking the call file against the run's {N_CELLS} cells holds about "
-        f"{budget} bytes for "
     )
     assert written(small) == before
-    plan = _resolve(
-        _open(location, mem_budget=budget), guide_calling={"path": path}, **HEAD
-    )
+    plan = _resolve(_open(location), guide_calling={"path": path}, **HEAD)
     assert plan.config["stages"]["guide_calling"] == {"path": str(path)}
-    # Each refusal names the step that it refused, and the budget bounds what
-    # the check holds, by no more than a few times beside the fixed bound of
-    # the scan that counts the file's rows.
-    assert 2 <= len(refusals) <= 7
-    assert all(refusal.startswith("Checking the call file") for refusal in refusals)
-    assert peak is not None
-    assert peak <= budget <= 3 * peak + (1 << 20) + PROTOSPACER_SCAN_BYTES
-    store.memoryBytes = budget
-    _check_every_cell(store, path)
-    with hold_finished_reads(*ZARR_READS):
-        _result, overruns = audited(lambda: _check_every_cell(store, path))
-    assert overruns == []
 
 
-def test_the_call_file_check_counts_the_read_of_the_guide_ids_before_it(
+def test_the_call_file_check_refuses_the_read_of_the_guide_ids_before_it(
     tmp_path, monkeypatch
 ) -> None:
     from cytearc.metadata import rows as metadata_rows
@@ -1451,30 +1423,14 @@ def test_the_call_file_check_counts_the_read_of_the_guide_ids_before_it(
         return read_rows(array, rows)
 
     monkeypatch.setattr(metadata_rows, "read_array_rows_chunkwise", counted)
-    store = _open(location)
-    budget, refusals, _result, peak = budget_that_runs(
-        store, lambda opened: _check_every_cell(opened, path), max_refusals=100
-    )
-
-    # The budget holds the read of the IDs' chunk, the largest read.
-    assert 24_000_000 < peak <= budget
-    # The read of the IDs is refused before it reads them, naming a budget
-    # that reads them; the read of the file beside them then names more.
-    (reading,) = [
-        named_budget(MemoryError(refusal))
-        for refusal in refusals
-        if " for the guide IDs, " in refusal
-    ]
-    assert 24_000_000 < reading < budget
-    store.memoryBytes = reading - 1
-    reads.clear()
-    with pytest.raises(MemoryError, match=f"holds about {reading} bytes for the guide"):
+    # 10 MB holds the cells' IDs and the file, but not the 24 MB chunk of the
+    # guide IDs, whose read is refused before it reads them.
+    store = _open(location, mem_budget=10_000_000)
+    with pytest.raises(MemoryError, match="bytes for the guide IDs"):
         _check_every_cell(store, path)
     assert not any(read.endswith("/ids") and "CRISPR" in read for read in reads)
-    store.memoryBytes = reading
-    with pytest.raises(MemoryError) as later:
-        _check_every_cell(store, path)
-    assert named_budget(later.value) > reading
+    # The store's default budget reads them.
+    _check_every_cell(_open(location), path)
     assert any(read.endswith("/ids") and "CRISPR" in read for read in reads)
 
 

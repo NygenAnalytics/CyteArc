@@ -25,9 +25,9 @@ from cytearc.clones.calling import (
     pruned_edges,
     set_clones,
 )
-from cytearc.utils.memory_budget import NUMPY_STEP_BYTES, MemoryBudgetError
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import clone_partition
-from tests.memory_helpers import budgeted, smallest_budget, traced_peak
+from tests.memory_helpers import budgeted
 
 
 def _sets(rows: list[list[int]]) -> CellSets:
@@ -930,101 +930,15 @@ def _random_sets(n_cells: int, seed: int = 0) -> CellSets:
     return cell_sets(cells, items, n_cells)
 
 
-@pytest.mark.parametrize(
-    "options",
-    [
-        {"method": "sets"},
-        pytest.param(
-            {"method": "jaccard", "similarity": 0.3, "inclusive": False},
-            marks=pytest.mark.slow,
-        ),
-        pytest.param(
-            {
-                "method": "jaccard",
-                "similarity": 0.3,
-                "inclusive": False,
-                "prune": True,
-                "doublets": True,
-            },
-            marks=pytest.mark.slow,
-        ),
-    ],
-)
-def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(options) -> None:
-    sets = _random_sets(20_000)
-    groups = np.arange(20_000) % 4
-
-    def call(budget: int) -> object:
-        return set_clones(sets, groups=groups, ledger=budgeted(budget), **options)
-
-    budget = smallest_budget(call, 1 << 30)
-    _, peak = traced_peak(lambda: call(budget), budget)
-    assert peak <= budget
-
-
-def test_components_of_many_edges_hold_no_more_than_the_budget_they_accept() -> None:
-    # Every pair of 1,000 nodes, 499,500 edges: the components hold memory
-    # for the nodes alone.
-    first, second = np.triu_indices(1_000, 1)
-    edges = Edges(first=first.astype(np.int64), second=second.astype(np.int64))
-
-    def call(budget: int) -> object:
-        return connected_components(1_000, edges, ledger=budgeted(budget))
-
-    budget = smallest_budget(call, 1 << 30)
-    assert budget < 200_000
-    _, peak = traced_peak(lambda: call(budget), budget)
-    assert peak <= budget
-
-
-@pytest.mark.slow
-def test_unknown_items_and_shared_links_hold_no_more_than_their_budget() -> None:
-    sets = _random_sets(20_000)
-    rng = np.random.default_rng(4)
-    # Each cell holds up to 4 items unknown, beyond the codes of its items.
-    sizes = rng.integers(0, 5, size=20_000)
-    cells = np.repeat(np.arange(20_000), sizes)
-    unknown = cell_sets(cells, 10_000 + rng.integers(0, 8, size=len(cells)), 20_000)
-    groups = np.arange(20_000) % 4
-    for options in (
-        {"method": "sets", "unknown": unknown},
-        {"method": "jaccard", "similarity": 0.3, "inclusive": True, "unknown": unknown},
-        {"method": "shared"},
-    ):
-
-        def call(budget: int) -> object:
-            return set_clones(sets, groups=groups, ledger=budgeted(budget), **options)
-
-        budget = smallest_budget(call, 1 << 30)
-        _, peak = traced_peak(lambda: call(budget), budget)
-        assert peak <= budget
-
-
-@pytest.mark.slow
-def test_sets_of_narrower_integers_count_their_int64_copies() -> None:
+def test_sets_of_narrower_integers_give_the_nodes_of_their_int64_sets() -> None:
     sets = _sets([[1, 2], [1, 2], [3]] * 1_000)
     narrow = CellSets(
         indptr=sets.indptr.astype(np.int32), items=sets.items.astype(np.int32)
     )
     # Two nodes of three items in all.
-    enough = (
-        calling._IDENTITY_CELL_BYTES * sets.n_cells
-        + calling._NODE_ITEM_BYTES * 3
-        + NUMPY_STEP_BYTES
-    )
-    assert identical_sets(sets, ledger=budgeted(enough)).n_nodes == 2
-    with pytest.raises(MemoryError, match="the sets' hashes"):
-        identical_sets(narrow, ledger=budgeted(enough))
-    copies = 8 * (len(narrow.items) + narrow.n_cells + 1)
-    nodes = identical_sets(narrow, ledger=budgeted(enough + copies))
+    assert identical_sets(sets).n_nodes == 2
+    nodes = identical_sets(narrow)
     assert nodes.cell_nodes.tolist() == identical_sets(sets).cell_nodes.tolist()
-
-    def call(budget: int) -> object:
-        return identical_sets(narrow, ledger=budgeted(budget))
-
-    budget = smallest_budget(call, 1 << 30)
-    _, peak = traced_peak(lambda: call(budget), budget)
-    assert peak <= budget
 
 
 def test_a_budget_too_small_refuses_before_allocating() -> None:

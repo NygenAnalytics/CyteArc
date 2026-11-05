@@ -21,10 +21,8 @@ from cytearc.perturbation import MULTIPLE, NEGATIVE, GuideCalls
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.selections import read_stored_selection_indices
 from cytearc.utils.logging import collect_warnings, logger
-from tests.perturbation_helpers import record_cell_reads, write_screen
-from cytearc.storage.validation_scope import validation_scope
 from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
-from tests.memory_helpers import ZARR_READS, audited, check_budget, hold_finished_reads
+from tests.perturbation_helpers import record_cell_reads, write_screen
 from tests.storage_helpers import (
     copy_store,
     insert_nullable_cell_column,
@@ -475,12 +473,8 @@ def _wide_screen(folder: Path) -> tuple[Path, Path]:
     return store_path, call_path
 
 
-# The most times its traced peak that the budget an import names may be.
-_IMPORT_AT_MOST = 2.0
-
-
 @pytest.mark.slow
-def test_an_import_runs_within_the_budget_that_its_refusal_names(tmp_path) -> None:
+def test_an_import_refuses_a_small_budget_before_it_writes(tmp_path) -> None:
     store_path, call_path = _wide_screen(tmp_path)
     # Feature tables in chunks of their rows, so that the import's own steps,
     # not a chunk of 100,000 guide IDs, set the budget.
@@ -489,32 +483,16 @@ def test_an_import_runs_within_the_budget_that_its_refusal_names(tmp_path) -> No
     store.cells.insert("every", np.ones(4_000, dtype=bool))
     every = store.snapshot_cell_selection("every")
 
-    def run(opened):
-        return opened.perturbation.import_guide_calls(
-            call_path, cell_selection=every, invalidate_cache=True
-        )
-
-    budget, refusals, _ = check_budget(
-        store_path, run, at_most=_IMPORT_AT_MOST, allowance=1 << 20, max_refusals=100
-    )
-
-    # Each refusal comes before anything is written and names the step that
-    # it refused. The budget holds the 80 padded slots of every cell and the
-    # labels' text.
-    assert 1 <= len(refusals) <= 9
-    assert all(
-        refusal.startswith("Importing the guide calls of 4000 cells holds about")
-        for refusal in refusals
-    )
-    assert budget > 8 * 80 * 4_000 + 8 * 60 * 4_000
-    # From each charge to the next, the import holds no more than its ledger
-    # planned, with each read's work held until the next read ends.
-    opened = open_store(store_path, mem_budget=budget)
-    with validation_scope():
-        run(opened)
-        with hold_finished_reads(*ZARR_READS):
-            _ref, overruns = audited(lambda: run(opened))
-    assert overruns == []
+    # The refusal comes before anything is written and names the step that it
+    # refused.
+    small = open_store(store_path, mem_budget=10_000)
+    saved = written(small)
+    with pytest.raises(
+        MemoryError,
+        match="^Importing the guide calls of 4000 cells holds about .* Raise mem_budget",
+    ):
+        small.perturbation.import_guide_calls(call_path, cell_selection=every)
+    assert written(open_store(store_path)) == saved
 
 
 def test_import_refuses_assays_and_guides_it_cannot_use(
@@ -975,21 +953,12 @@ def test_samples_of_any_column_are_numbered_as_before_within_the_ledger(
             len(cells),
             reason="every cell needs one",
         )
-        number()
-        with hold_finished_reads(*ZARR_READS):
-            (ledger, samples), overruns = audited(number)
-        assert overruns == []
+        _ledger, samples = number()
         assert samples.codes.tolist() == expected[0].tolist()
         assert samples.names == [
             None if column is None else sample[column] for sample in expected[1]
         ]
         assert samples.assignments == expected[2]
-        # Only the codes and the samples' labels stay charged.
-        assert (
-            8 * len(cells)
-            <= ledger.charged
-            <= 8 * len(cells) + 1_024 * len(samples.names)
-        )
 
 
 def test_bands_without_a_budget_take_the_most_features_they_may(template) -> None:

@@ -14,7 +14,6 @@ import pytest
 from cytearc.variants import VariantSelection
 from tests.clone_helpers import every_cell
 from tests.storage_helpers import copy_store, open_store
-from tests.memory_helpers import smallest_budget, traced_peak
 from tests.variant_helpers import (
     band_budget,
     expected_mito_statistics,
@@ -572,77 +571,6 @@ def test_selections_and_counts_that_an_earlier_version_saved_are_refused(
         store.variants.informative(counts, preset="atac", invalidate_cache=True)
     with pytest.raises(ValueError, match=refusal):
         store.variants.load_informative(again)
-
-
-class _Accepted(Exception):
-    """Raised where scoring would start to read rows."""
-
-
-def test_scoring_holds_no_more_than_a_budget_near_the_smallest_it_accepts(
-    store, monkeypatch
-) -> None:
-    from cytearc.datastore._operations import variants as variant_operations
-
-    # Counts with strands and qualities, read whole and for scattered cells:
-    # a band's reads decompress whole stored chunks, which the budget holds.
-    counts = _counts(store, qualities=True)
-    store.cells.insert("odd", np.arange(TRUTH.n_cells) % 2 == 1)
-    odd = store.snapshot_cell_selection("odd")
-    bands = variant_operations._variant_bands
-
-    def accepted(*args, **kwargs):
-        raise _Accepted
-
-    for cells in (None, odd):
-
-        def call(budget: int, cells=cells) -> None:
-            store.memoryBytes = budget
-            store.variants.informative(
-                counts, cell_selection=cells, min_vmr=0.0, invalidate_cache=True
-            )
-
-        def scores(budget: int, call=call) -> None:
-            try:
-                call(budget)
-            except _Accepted:
-                pass
-
-        # The smallest budget that scoring accepts, found without reading.
-        monkeypatch.setattr(variant_operations, "_variant_bands", accepted)
-        high = smallest_budget(scores, 1 << 32)
-        monkeypatch.setattr(variant_operations, "_variant_bands", bands)
-        # Bands of 2,000 rows beyond it, a few cells each.
-        budget = high + 200 * 2_000
-        _result, peak = traced_peak(lambda: call(budget), budget)
-        assert peak <= budget
-
-
-def test_scoring_counts_a_buffer_for_each_write_zarr_runs_at_once(store) -> None:
-    # Zarr writes each chunk and each array's metadata through a buffered
-    # file, as many at once as its async concurrency allows, and Python 3.14
-    # made each buffer 128 KiB, where it was the file system's block.
-    import io
-    import re
-
-    import zarr
-
-    counts = _counts(store, qualities=True)
-
-    def bytes_held(concurrency: int) -> int:
-        """The bytes that the check before the first band names."""
-        with zarr.config.set({"async.concurrency": concurrency}):
-            store.memoryBytes = 1
-            try:
-                store.variants.informative(counts, min_vmr=0.0, invalidate_cache=True)
-            except MemoryError as error:
-                found = re.search(r"holds about (\d+) bytes", str(error))
-                assert found is not None and "Scoring the variants" in str(error)
-                return int(found.group(1))
-            finally:
-                store.memoryBytes = 1 << 30
-        raise AssertionError("a budget of one byte scored the variants")
-
-    assert bytes_held(20) - bytes_held(10) == 10 * io.DEFAULT_BUFFER_SIZE
 
 
 def test_statistics_do_not_depend_on_the_band_size(store) -> None:

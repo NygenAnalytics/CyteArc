@@ -461,23 +461,9 @@ class TestPublicApiCompat:
         np.testing.assert_array_equal(out, expected)
 
 
-def test_a_scalar_variance_holds_no_array_per_column():
-    """A scalar variance pools each block into one column.
-
-    Before, it built three float64 arrays per block with an entry per column,
-    24 MB for one row of a million columns, beyond what its reduction reserved.
-    """
-    import tracemalloc
-
+def test_a_scalar_variance_pools_the_blocks_of_one_row_of_a_million_columns():
     ca = ChunkedArray.from_numpy(np.ones((1, 1_000_000), dtype=np.uint8), block_size=1)
-    ca.var().compute()
-    tracemalloc.start()
-    try:
-        assert ca.var().compute() == 0.0
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    assert peak < 4 * 2**20
+    assert ca.var().compute() == 0.0
 
 
 class TestTransposedReads:

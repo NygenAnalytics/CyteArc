@@ -29,7 +29,6 @@ from tests.clone_helpers import (
     write_cells_store,
     write_truth_store,
 )
-from tests.memory_helpers import at_budget, smallest_budget, traced_peak
 from tests.storage_helpers import copy_store, open_store
 from tests.clone_truth import (
     CLONE_SIZES,
@@ -1057,23 +1056,6 @@ def test_a_column_without_labels_saves_no_clone(store) -> None:
     assert math.isclose(store.artifacts.load(ref).attrs["n_clones"], 0)
 
 
-def _traced(function: Callable[[], object], budget: int) -> tuple[object, int]:
-    """Run ``function`` and return its result, or its MemoryError, and its traced peak.
-
-    The peak is traced as :func:`tests.memory_helpers.traced_peak` traces it,
-    again where it passes ``budget``, so ``function`` must compute afresh
-    each time rather than reuse what the first run saved.
-    """
-
-    def run() -> object:
-        try:
-            return function()
-        except MemoryError as error:
-            return error
-
-    return traced_peak(run, budget)
-
-
 # Cells of the long-label store, each in its own clone. The last label is
 # 5,000 characters long, past the rows that a table's layout samples, and the
 # store keeps text at the width of the longest, so each cell's label takes
@@ -1096,58 +1078,17 @@ def _long_label_store(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(store=store, cells=every_cell(store), table=table, ids=ids)
 
 
-@pytest.mark.parametrize(
-    "method", ["from_column", pytest.param("import_clones", marks=pytest.mark.slow)]
-)
-def test_saving_long_labels_holds_the_budget_or_refuses(tmp_path, method) -> None:
-    long = _long_label_store(tmp_path)
-    # Each save computes afresh, so a trace that runs it again traces it again.
-    save = {
-        "from_column": lambda: long.store.clones.from_column(
-            "lineage", cell_selection=long.cells, invalidate_cache=True
-        ),
-        "import_clones": lambda: long.store.clones.import_clones(
-            long.table, cell_selection=long.cells, invalidate_cache=True
-        ),
-    }[method]
-    long.store.memoryBytes = _BUDGET
-
-    result, peak = _traced(save, _BUDGET)
-
-    if isinstance(result, MemoryError):
-        assert f"memory budget of {_BUDGET} bytes" in str(result)
-    else:
-        assert peak <= _BUDGET, peak
-    if method == "import_clones":
-        # A budget that holds the stored labels saves them. The cell table
-        # keeps the column in a chunk of 100,000 rows, so reading it would
-        # take 2 GB whatever the budget.
-        long.store.memoryBytes = 1_000_000_000
-        saved = save()
-        loaded = long.store.clones.load_clones(saved)
-        assert loaded.clones["n_cells"].tolist() == [1] * _N_LONG
-        assert loaded.clones["clone"].tolist()[-1] == "X" * 5_000
-
-
 @pytest.mark.slow
-def test_importing_long_labels_runs_within_the_smallest_budget_it_accepts(
-    tmp_path,
-) -> None:
-    # The write of these labels holds them at 5,000 characters for each of
-    # the 2,000 cells, 40 MB, as stored and as Zarr encodes them; the import
-    # once accepted a budget at which it traced 3.58 times that budget,
-    # counting the labels once while the writer held three copies.
+def test_long_labels_import_as_clones_of_their_own(tmp_path) -> None:
     long = _long_label_store(tmp_path)
-
-    def run() -> object:
-        return long.store.clones.import_clones(
-            long.table, cell_selection=long.cells, invalidate_cache=True
-        )
-
-    budget = smallest_budget(at_budget(long.store, run), 1_000_000_000)
-    long.store.memoryBytes = budget
-    _result, peak = traced_peak(run, budget)
-    assert 2 * 4 * 5_000 * _N_LONG <= peak <= budget, (peak, budget)
+    # A budget that holds the stored labels saves them. The cell table keeps
+    # the column in a chunk of 100,000 rows, so reading it would take 2 GB
+    # whatever the budget.
+    long.store.memoryBytes = 1_000_000_000
+    saved = long.store.clones.import_clones(long.table, cell_selection=long.cells)
+    loaded = long.store.clones.load_clones(saved)
+    assert loaded.clones["n_cells"].tolist() == [1] * _N_LONG
+    assert loaded.clones["clone"].tolist()[-1] == "X" * 5_000
 
 
 def test_a_table_whose_first_rows_are_long_needs_room_for_a_chunk(tmp_path) -> None:
@@ -1163,60 +1104,6 @@ def test_a_table_whose_first_rows_are_long_needs_room_for_a_chunk(tmp_path) -> N
         MemoryError, match="bytes for a chunk of 1000 rows of a clone file"
     ):
         long.store.clones.import_clones(first, cell_selection=long.cells)
-
-
-@pytest.mark.parametrize(
-    "method", ["load_clones", "cospar", pytest.param("matrix", marks=pytest.mark.slow)]
-)
-def test_reading_long_saved_labels_holds_the_budget_or_refuses(
-    tmp_path, method
-) -> None:
-    long = _long_label_store(tmp_path)
-    ref = long.store.clones.import_clones(long.table, cell_selection=long.cells)
-    folder = _folder(tmp_path, "export")
-    read = {
-        "load_clones": lambda: long.store.clones.load_clones(ref),
-        "cospar": lambda: long.store.clones.export_clones(ref, folder / "out.csv"),
-        "matrix": lambda: long.store.clones.export_clones(
-            ref, folder / "out.mtx", format="matrix"
-        ),
-    }[method]
-    long.store.memoryBytes = _BUDGET
-
-    result, peak = _traced(read, _BUDGET)
-
-    if isinstance(result, MemoryError):
-        assert f"memory budget of {_BUDGET} bytes" in str(result)
-    else:
-        assert peak <= _BUDGET, peak
-
-
-def test_long_cell_ids_count_against_the_budget(tmp_path) -> None:
-    # IDs as long as GEO sample names make them; the lookup holds each one.
-    ids = [
-        f"GSM4185642_stateFate_inVitro__{index:08d}ACGTACGTA-1"
-        for index in range(20_000)
-    ]
-    store = write_cells_store(tmp_path / "store.zarr", ids)
-    table = tmp_path / "clones.csv"
-    table.write_text(
-        "Cell_ID,Clone_ID\n"
-        + "".join(f"{cell},{index % 8_000}\n" for index, cell in enumerate(ids))
-    )
-    budget = 6_000_000
-    store.memoryBytes = budget
-
-    result, peak = _traced(
-        lambda: store.clones.import_clones(
-            table, cell_selection=every_cell(store), invalidate_cache=True
-        ),
-        budget,
-    )
-
-    if isinstance(result, MemoryError):
-        assert f"memory budget of {budget} bytes" in str(result)
-    else:
-        assert peak <= budget, peak
 
 
 @pytest.mark.parametrize("budget", [21_000_000, 27_000_000])

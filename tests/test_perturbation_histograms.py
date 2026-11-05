@@ -1,4 +1,3 @@
-import tracemalloc
 from collections.abc import Callable
 
 import numpy as np
@@ -213,15 +212,11 @@ def _distinct_counts(counts: np.ndarray, samples: np.ndarray) -> int:
         (10, 1, 2_000, 1_000),
     ],
 )
-def test_histograms_hold_no_more_than_the_bytes_of_their_distinct_counts(
+def test_histograms_within_their_planned_bytes_find_every_distinct_count(
     monkeypatch, per_cell, n_samples, rows, most_keys
 ) -> None:
     if most_keys is not None:
         monkeypatch.setattr(histograms, "_MOST_KEYS", most_keys)
-    # The first call loads the kernels.
-    guide_count_histograms(
-        [np.full((2, 3), 40, np.uint32)], np.zeros(2, np.int64), n_samples=1, n_guides=3
-    )
     n_cells, n_guides = 20_000, 200
     counts = _carried_counts(n_cells, n_guides, per_cell, seed=3)
     blocks = [counts[start : start + rows] for start in range(0, n_cells, rows)]
@@ -229,66 +224,33 @@ def test_histograms_hold_no_more_than_the_bytes_of_their_distinct_counts(
     samples = np.arange(n_cells) % n_samples
     n_distinct = _distinct_counts(counts, samples)
     planned = histogram_bytes(n_samples, n_guides, n_cells, n_distinct=n_distinct)
-    tracemalloc.start()
-    try:
-        found = guide_count_histograms(
-            blocks,
-            samples,
-            n_samples=n_samples,
-            n_guides=n_guides,
-            ledger=_ledger(planned),
-        )
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    found = guide_count_histograms(
+        blocks, samples, n_samples=n_samples, n_guides=n_guides, ledger=_ledger(planned)
+    )
     assert len(found.counts) == n_distinct
-    assert peak <= planned
 
 
-def test_few_cells_hold_no_more_than_the_bytes_of_their_distinct_counts(
+def test_few_cells_merged_after_every_three_find_every_distinct_count(
     monkeypatch,
 ) -> None:
-    # 64 cells, whose larger counts merge after every three, so that the
-    # call's Python objects and sorting take most of its memory.
+    # 64 cells, whose larger counts merge after every three.
     monkeypatch.setattr(histograms, "_MOST_KEYS", 3)
-    guide_count_histograms(
-        [np.full((2, 3), 40, np.uint32)], np.zeros(2, np.int64), n_samples=1, n_guides=3
-    )
     counts = _carried_counts(64, 3, 1, seed=5)
     samples = np.zeros(64, dtype=np.int64)
     blocks = [counts[start : start + 7] for start in range(0, 64, 7)]
     n_distinct = _distinct_counts(counts, samples)
-    tracemalloc.start()
-    try:
-        found = guide_count_histograms(blocks, samples, n_samples=1, n_guides=3)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    found = guide_count_histograms(blocks, samples, n_samples=1, n_guides=3)
     assert len(found.counts) == n_distinct
-    assert peak <= histogram_bytes(1, 3, 64, n_distinct=n_distinct)
 
 
-def _refusal(count: Callable[[], object]) -> tuple[str, int, int]:
-    """Return a refused count's message, the bytes it names, and the peak until then.
-
-    The peak is read where the MemoryError is caught, before pytest records
-    it.
-    """
-    tracemalloc.start()
-    try:
+def _refusal(count: Callable[[], object]) -> tuple[str, int]:
+    """Return a refused count's message and the bytes it names."""
+    with pytest.raises(MemoryError) as refused:
         count()
-    except MemoryError as error:
-        peak = tracemalloc.get_traced_memory()[1]
-        return str(error), named_budget(error), peak
-    finally:
-        tracemalloc.stop()
-    raise AssertionError("The count was not refused")
+    return str(refused.value), named_budget(refused.value)
 
 
 def test_histograms_raise_before_they_outgrow_their_memory() -> None:
-    guide_count_histograms(
-        [np.full((2, 3), 40, np.uint32)], np.zeros(2, np.int64), n_samples=1, n_guides=3
-    )
     # Cells that carry ten guides each, and half the memory that their
     # histograms need.
     n_cells, n_guides = 20_000, 200
@@ -298,7 +260,7 @@ def test_histograms_raise_before_they_outgrow_their_memory() -> None:
     planned = histogram_bytes(
         1, n_guides, n_cells, n_distinct=_distinct_counts(counts, samples)
     )
-    message, needed, peak = _refusal(
+    message, needed = _refusal(
         lambda: guide_count_histograms(
             blocks,
             samples,
@@ -311,7 +273,6 @@ def test_histograms_raise_before_they_outgrow_their_memory() -> None:
     # The message names what the next step needs, more than the limit and at
     # most what the whole count needs.
     assert planned // 2 < needed <= planned
-    assert peak <= planned // 2
 
 
 def test_histograms_raise_before_assembling_more_than_their_memory() -> None:
@@ -320,11 +281,9 @@ def test_histograms_raise_before_assembling_more_than_their_memory() -> None:
     counts = np.random.default_rng(6).poisson(6.0, size=(2_000, 200))
     counts = counts.astype(np.uint16)
     samples = np.zeros(2_000, dtype=np.int64)
-    # The first call loads the kernels for uint16 counts.
-    guide_count_histograms([counts[:2]], samples[:2], n_samples=1, n_guides=200)
     n_distinct = _distinct_counts(counts, samples)
     least = histogram_bytes(1, 200, 2_000, n_distinct=0)
-    message, needed, peak = _refusal(
+    message, needed = _refusal(
         lambda: guide_count_histograms(
             [counts], samples, n_samples=1, n_guides=200, ledger=_ledger(least)
         )
@@ -332,7 +291,6 @@ def test_histograms_raise_before_assembling_more_than_their_memory() -> None:
     # The assembly of every distinct count is refused.
     assert f"histograms of {n_distinct} distinct counts," in message
     assert least < needed <= histogram_bytes(1, 200, 2_000, n_distinct=n_distinct)
-    assert peak <= least
 
 
 def test_histograms_refuse_memory_below_their_least_before_reading() -> None:

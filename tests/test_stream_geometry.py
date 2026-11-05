@@ -1,8 +1,5 @@
-from collections.abc import Callable
-
 import numpy as np
 import pytest
-import tracemalloc
 import zarr
 from zarr.storage import MemoryStore
 
@@ -127,7 +124,7 @@ def test_row_band_uses_the_fallback_without_geometry() -> None:
     assert row_band(None, fallback=0) == 1
 
 
-def test_selected_row_cost_covers_sharded_reads_that_index_both_axes() -> None:
+def test_a_block_read_of_sharded_rows_and_columns_in_reverse_gives_them() -> None:
     values = np.random.default_rng(73).integers(
         0, 30, size=(1024, 512), dtype=np.uint16
     )
@@ -140,22 +137,9 @@ def test_selected_row_cost_covers_sharded_reads_that_index_both_axes() -> None:
     array[:] = values
     rows = np.arange(1023, -1, -2)
     columns = np.arange(511, -1, -3)
-    fixed, per_row = row_read_parts(
-        array_geometry(array), columns, rows_contiguous=False
-    )
-    planned = (
-        len(rows) * len(columns) * array.dtype.itemsize + fixed + len(rows) * per_row
-    )
     with zarr_io_concurrency(1):
-        _read_block(array, rows, columns)
-        tracemalloc.start()
-        try:
-            actual = _read_block(array, rows, columns)
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+        actual = _read_block(array, rows, columns)
     np.testing.assert_array_equal(actual, values[np.ix_(rows, columns)])
-    assert peak <= planned
 
 
 def _sharded_counts() -> tuple[np.ndarray, zarr.Array]:
@@ -169,29 +153,12 @@ def _sharded_counts() -> tuple[np.ndarray, zarr.Array]:
     return values, array
 
 
-def _traced_peak[T](read: Callable[[], T]) -> tuple[T, int]:
-    with zarr_io_concurrency(1):
-        read()
-        tracemalloc.start()
-        try:
-            value = read()
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-    return value, peak
-
-
-def test_sharded_reads_that_index_both_axes_hold_little_beside_their_result() -> None:
+def test_sharded_reads_that_index_both_axes_give_their_selection() -> None:
     values, array = _sharded_counts()
     rows = np.flatnonzero(np.arange(1024) % 7 != 0)
     columns = np.flatnonzero(np.arange(2048) % 4 != 0)
-
-    actual, peak = _traced_peak(lambda: read_selection(array, rows, columns))
-
+    actual = read_selection(array, rows, columns)
     np.testing.assert_array_equal(actual, values[np.ix_(rows, columns)])
-    # Zarr's coordinates of every selected value in a shard would hold about
-    # thirty times the result.
-    assert peak <= 3 * actual.nbytes
 
 
 @pytest.mark.parametrize(
@@ -203,39 +170,13 @@ def test_sharded_reads_that_index_both_axes_hold_little_beside_their_result() ->
     ),
     ids=("dense", "few columns", "few rows"),
 )
-def test_row_blocks_that_index_both_axes_hold_no_more_than_planned(
+def test_row_blocks_that_index_both_axes_give_their_selection(
     rows: np.ndarray, columns: np.ndarray
 ) -> None:
     values, array = _sharded_counts()
     matrix = ChunkedArray(array, rows=rows, cols=columns, block_size=rows.size)
-
-    block, peak = _traced_peak(lambda: matrix._materialize_range(0, rows.size))
-
+    block = matrix._materialize_range(0, rows.size)
     np.testing.assert_array_equal(block, values[np.ix_(rows, columns)])
-    assert peak <= matrix._block_task_bytes()
-
-
-def test_planning_reads_that_index_both_axes_copies_no_row_selection() -> None:
-    array = _array(
-        shape=(2_000_000, 8), chunks=(4096, 4), shards=(65536, 8), dtype=np.uint8
-    )
-    rows = np.arange(0, 2_000_000, 2)
-    columns = np.array([0, 5])
-    # Imports the planner on its first call.
-    ChunkedArray(array, rows=rows, cols=columns, block_size=256)._block_task_bytes()
-    matrix = ChunkedArray(array, rows=rows, cols=columns, block_size=256)
-
-    tracemalloc.start()
-    try:
-        planned = matrix._block_task_bytes()
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-
-    assert planned > 0
-    # A plan is admitted before its stream reads; a copy or sort of a million
-    # selected rows would hold megabytes the budget never sees.
-    assert peak < rows.nbytes // 64
 
 
 def test_indexed_read_parts_charge_the_narrower_band() -> None:

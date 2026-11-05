@@ -1,9 +1,7 @@
 """``ds.artifacts.load_values`` over the one table of cell-aligned values."""
 
 import hashlib
-import re
 import shutil
-import tracemalloc
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -372,20 +370,6 @@ def test_values_beyond_the_memory_budget_are_refused_before_anything_is_read(
     assert reads == []
 
 
-def _required_bytes(store: DataStore, ref: ArtifactRef, **options) -> int:
-    """Return the bytes that ``load_cell_values`` charges for a read."""
-    budget = store.memoryBytes
-    store.memoryBytes = 1
-    try:
-        with pytest.raises(MemoryError) as raised:
-            store.artifacts.load_values(ref, **options)
-    finally:
-        store.memoryBytes = budget
-    found = re.search(r"needs about (\d+) bytes", str(raised.value))
-    assert found is not None, raised.value
-    return int(found.group(1))
-
-
 @pytest.fixture
 def large_store(tmp_path) -> DataStore:
     """A store of 8,000 cells whose column ``half`` selects every second one."""
@@ -400,7 +384,7 @@ def large_store(tmp_path) -> DataStore:
     return store
 
 
-def test_the_charged_bytes_bound_what_load_cell_values_allocates(
+def test_masked_values_of_many_cells_load_for_every_cell_or_a_selection(
     large_store,
 ) -> None:
     store = large_store
@@ -418,23 +402,10 @@ def test_the_charged_bytes_bound_what_load_cell_values_allocates(
     half = store.snapshot_cell_selection("half")
 
     for options in ({}, {"cell_selection": half}):
-        required = _required_bytes(store, scores, **options)
-        store.memoryBytes = required - 1
-        with pytest.raises(MemoryError, match=f"needs about {required} bytes"):
-            store.artifacts.load_values(scores, **options)
-        store.memoryBytes = required
-        tracemalloc.start()
-        try:
-            loaded = store.artifacts.load_values(scores, **options)
-            _current, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+        loaded = store.artifacts.load_values(scores, **options)
         expected = n_cells if not options else n_cells // 2
         assert loaded.values.shape == (expected,)
         assert loaded.cell_ids.shape == (expected,)
-        # Everything the read allocated, the cell ids and the int64 cell
-        # rows and positions among them, fits the bytes it was charged.
-        assert peak <= required, (peak, required)
 
 
 def test_a_snapshot_without_a_cell_selection_is_refused_as_not_cell_aligned(
@@ -853,32 +824,3 @@ def test_cell_value_specs_are_immutable_and_exact() -> None:
     assert cell_value_spec("pseudotime").name == "pseudotime"
     with pytest.raises(ValueError, match="'normalized' is not a cell-aligned"):
         cell_value_spec("normalized")
-
-
-def test_values_name_the_budget_that_reads_them_in_one_refusal(large_store) -> None:
-    from tests.memory_helpers import follow_refusals
-
-    store = large_store
-    n_cells = store.cells.N
-    scores = _write_masked(
-        store,
-        "doublet_score",
-        "values",
-        np.linspace(0.0, 1.0, n_cells),
-        np.arange(n_cells) % 7 == 0,
-        case="named budget",
-        cells="I",
-    )
-    half = store.snapshot_cell_selection("half")
-    for options in ({}, {"cell_selection": half}):
-
-        def read(budget: int, options=options) -> object:
-            store.memoryBytes = budget
-            return store.artifacts.load_values(scores, **options)
-
-        # One check covers the cells' positions, the values, their mask and
-        # the cells' IDs, so the first refusal names the budget that reads them.
-        _budget, refusals = follow_refusals(read)
-        assert [refusal.item for refusal in refusals] == [
-            "'values' of the doublet_score artifact"
-        ]

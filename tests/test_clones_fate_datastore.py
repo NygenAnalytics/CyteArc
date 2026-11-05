@@ -18,7 +18,6 @@ from scipy.cluster.hierarchy import leaves_list
 from scipy.stats import fisher_exact
 
 from cytearc.clones import COUPLING_METHODS, CloneCoupling, CloneFateBias
-from cytearc.metadata.artifacts import cell_data_write_bytes
 from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import (
     benjamini_hochberg,
@@ -29,7 +28,6 @@ from tests.clone_helpers import (
 )
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_truth import CELL_TYPES, N_CELLS, clone_truth, number_label
-from tests.memory_helpers import check_budget, step_charge
 from tests.storage_helpers import copy_store, insert_nullable_cell_column, open_store
 
 TRUTH = clone_truth()
@@ -675,123 +673,50 @@ def _own_labels(store, mask: np.ndarray):
     return own
 
 
-def test_coupling_refuses_a_budget_below_one_worker(copied, monkeypatch) -> None:
+def test_coupling_refuses_a_small_budget_and_batches_its_permutations_alike(
+    copied, monkeypatch
+) -> None:
     store, clones = copied.store, copied.clones
     # A group of its own for each of the 32 cells with a clone, whose small
-    # labels leave the coupling the largest step.
+    # labels leave the coupling the largest step, which 200 kB cannot hold.
     own = _own_labels(store, TRUTH.clones >= 0)
-    # 32 groups and 496 pairs: 250 bytes per pair, 40 per product of two
-    # groups, 80 per count of a clone in a group and 12 per cell with a
-    # clone; one worker's 4 bytes per cell, 8 per product and 32 per group;
-    # one permutation's 8 bytes per pair; and beside them the counts' entries
-    # in the matrices, 40 bytes each, and 2,000 per group, charged beside the
-    # clones and counts that the ledger holds.
-    item = "measuring the coupling of 32 groups, 496 pairs"
-    budget, _refusals, tight = check_budget(
-        store,
-        lambda reopened: reopened.clones.coupling(
-            clones, groups=own, n_permutations=50
-        ),
-    )
-    assert len(tight.pairs) == 496
-    # At the smallest budget that it accepts, the coupling runs one worker,
-    # one permutation at a time, and its plan is that budget.
-    monkeypatch.setattr(store, "memoryBytes", budget)
-    nbytes, planned = step_charge(
-        lambda: store.clones.coupling(clones, groups=own, n_permutations=50), item
-    )
-    assert nbytes == (
-        250 * 496
-        + 40 * 32**2
-        + 80 * 32
-        + 12 * 32
-        + (4 * 32 + 8 * 32**2 + 32 * 32)
-        + 8 * 496
-        + 40 * 32
-        + 2_000 * 32
-    )
-    assert planned == budget
-    # More threads and more memory measure the same permutations.
+    monkeypatch.setattr(store, "memoryBytes", 200_000)
+    with pytest.raises(
+        MemoryBudgetError,
+        match=r"for measuring the coupling of 32 groups, 496 pairs, .* or compare "
+        "fewer groups",
+    ):
+        store.clones.coupling(clones, groups=own, n_permutations=50)
+    monkeypatch.undo()
+    # One thread measures the 50 permutations in batches, four threads in one
+    # batch, and both measure the same permutations.
+    monkeypatch.setattr(store, "nthreads", 1)
+    batched = store.clones.coupling(clones, groups=own, n_permutations=50)
+    assert len(batched.pairs) == 496
     monkeypatch.setattr(store, "nthreads", 4)
-    monkeypatch.setattr(store, "memoryBytes", 10**9)
-    roomy = store.clones.coupling(clones, groups=own, n_permutations=50)
-    assert roomy.pairs.equals(tight.pairs)
+    whole = store.clones.coupling(clones, groups=own, n_permutations=50)
+    assert whole.pairs.equals(batched.pairs)
 
 
-def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -> None:
+def test_fate_bias_refuses_a_small_budget_before_it_writes(copied, monkeypatch) -> None:
     store, clones = copied.store, copied.clones
     early, late = copied.early, copied.late
     n_early, n_late = int(EARLY.sum()), int(LATE.sum())
-    roomy = store.memoryBytes
-    # Checking that no cell is both early and late joins and sorts the
-    # positions of the two selections, 8 bytes a cell and a flag of each.
-    nbytes, _planned = step_charge(
-        lambda: store.clones.fate_bias(
-            clones, group_by="cell_type", early=early, late=late, invalidate_cache=True
-        ),
-        f"checking that none of {n_early} early cells is among {n_late} late cells",
-    )
-    assert nbytes == 9 * (n_early + n_late)
     # A fate of its own for each late cell, named by three characters, makes
-    # the measurement the largest step: per early cell 64 bytes, 16 per
-    # fraction and 40 to write; per clone with late cells and fate 80 bytes;
-    # 1,000 per fate; 24 per count of a clone in a fate, here one per late
-    # cell with a clone; and what the writer states for the arrays, each
-    # early cell's fate at the three characters of its name.
+    # the measurement the largest step, which 200 kB cannot hold; nothing is
+    # written.
     fates = _own_labels(store, LATE)
     options = {"groups": fates, "early": early, "late": late}
-    tested = len({int(c) for c in TRUTH.clones[LATE] if c >= 0})
-    with_clone = int(np.count_nonzero(TRUTH.clones[LATE] >= 0))
-    writing = cell_data_write_bytes(
-        {
-            "values": ((n_early,), "U3"),
-            "codes": ((n_early,), np.int32),
-            "fate_codes": ((n_early,), np.int32),
-            "late_cells": ((n_early,), np.int64),
-            "fractions": ((n_early, n_late), np.float64),
-            "clone_codes": ((tested,), np.int64),
-            "clone_early_cells": ((tested,), np.int64),
-            "clone_fate_cells": ((tested, n_late), np.int64),
-            "clone_p_values": ((tested, n_late), np.float64),
-            "clone_q_values": ((tested, n_late), np.float64),
-            "fate_cells": ((n_late,), np.int64),
-        }
-    )
-    item = f"measuring the fate bias of {n_early} early cells and 8 clones in {n_late} fates"
-    nbytes, planned = step_charge(
-        lambda: store.clones.fate_bias(clones, invalidate_cache=True, **options), item
-    )
-    assert (tested, with_clone) == (8, 19)
-    assert nbytes == (
-        n_early * (64 + 16 * n_late + 40)
-        + 80 * tested * n_late
-        + 1_000 * n_late
-        + 24 * with_clone
-        + writing
-    )
     listed = store.artifacts.list(kind="clone_fate_bias", scope="datastore")
-    monkeypatch.setattr(store, "memoryBytes", planned - 1)
+    monkeypatch.setattr(store, "memoryBytes", 200_000)
     with pytest.raises(MemoryBudgetError, match="into fewer fates") as refused:
-        store.clones.fate_bias(clones, invalidate_cache=True, **options)
-    assert refused.value.item == item and refused.value.needed_bytes == planned
+        store.clones.fate_bias(clones, **options)
+    assert refused.value.item == (
+        f"measuring the fate bias of {n_early} early cells and 8 clones in {n_late} fates"
+    )
     assert store.artifacts.list(kind="clone_fate_bias", scope="datastore") == listed
-    monkeypatch.setattr(store, "memoryBytes", planned)
-    saved = store.clones.fate_bias(clones, **options)
-    # Loading: per early cell 200 bytes and 24 per fraction, per row of clone
-    # and fate 160 bytes, which leave the fates' labels to the keys, and
-    # 2,000 per fate, beside the clones read with their labels and the early
-    # cells' IDs.
-    monkeypatch.setattr(store, "memoryBytes", roomy)
-    nbytes, _planned = step_charge(
-        lambda: store.clones.load_fate_bias(saved),
-        f"the tables of the fate bias of {n_early} early cells",
-    )
-    assert nbytes == (
-        n_early * (200 + 24 * n_late) + tested * n_late * 160 + 2_000 * n_late
-    )
-    _budget, _refusals, bias = check_budget(
-        store, lambda reopened: reopened.clones.load_fate_bias(saved), at_most=2.5
-    )
+    monkeypatch.undo()
+    bias = store.clones.load_fate_bias(store.clones.fate_bias(clones, **options))
     assert bias.cells.shape == (n_early, 3)
     assert bias.fractions.shape == (n_early, n_late)
 

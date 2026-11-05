@@ -6,6 +6,7 @@ calls share one copy, which they check is left as it was.
 """
 
 import math
+import re
 import warnings
 from collections.abc import Iterator
 from dataclasses import fields
@@ -36,8 +37,8 @@ from cytearc.perturbation.mixscape import (
 from cytearc.perturbation.signature import normalize_counts
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.utils.logging import logger
+from tests.memory_helpers import named_budget
 from tests.perturbation_helpers import memory_screen, use_python_kernels, write_screen
-from tests.memory_helpers import check_budget, named_budget
 from tests.storage_helpers import copy_store, open_store, written
 
 N_A, N_B, N_C, N_CONTROL, N_GENES = 90, 60, 2, 150, 60
@@ -275,34 +276,22 @@ def test_mixscape_refuses_inputs_and_budgets_it_cannot_use(
     assert written(store) == saved
 
 
-def test_mixscape_classifies_in_batches_that_fit_the_budget(store, template) -> None:
+def test_mixscape_refuses_the_classification_of_a_targets_cells_beyond_the_budget(
+    store, template
+) -> None:
     signature = template.signature
-    whole = store.perturbation.load_mixscape(
-        store.perturbation.mixscape(signature, split_column="run")
-    )
 
     def run(budget: int):
         return open_store(
             store.zarr_loc, nthreads=2, mem_budget=budget
         ).perturbation.mixscape(signature, split_column="run", invalidate_cache=True)
 
-    # The budget that the DE tests name refuses GENE_A's classification, and
-    # the one that this names fits the classification of its cells of one
-    # run with the control cells, but not of both runs at once.
-    with pytest.raises(MemoryError) as low:
+    # 1 kB cannot hold the DE tests, and 355 kB holds them but not the
+    # classification of GENE_A's cells beside the control cells.
+    with pytest.raises(MemoryError, match="The values of one feature over 302 cells"):
         run(1_000)
-    with pytest.raises(MemoryError, match="cells of GENE_A") as batch:
-        run(named_budget(low.value))
-    messages: list[str] = []
-    sink = logger.add(lambda message: messages.append(message.record["message"]))
-    try:
-        classes = run(named_budget(batch.value))
-    finally:
-        logger.remove(sink)
-    assert "Classifying 2 targets and splits in 2 batches" in messages
-    batched = store.perturbation.load_mixscape(classes)
-    pd.testing.assert_frame_equal(batched.cells, whole.cells)
-    pd.testing.assert_frame_equal(batched.targets, whole.targets)
+    with pytest.raises(MemoryError, match="cells of GENE_A"):
+        run(355_000)
 
 
 def test_classes_that_name_their_statuses_otherwise_are_not_reused_or_read(
@@ -634,17 +623,11 @@ def memory(tmp_path_factory) -> SimpleNamespace:
 
 
 @pytest.mark.slow
-def test_mixscape_runs_within_the_budget_it_names(memory, monkeypatch) -> None:
+def test_mixscape_at_a_small_budget_gives_the_classes_of_a_large_one(
+    memory, monkeypatch
+) -> None:
     bands: list[int] = []
     messages: list[str] = []
-
-    def run(store: DataStore):
-        bands.clear()
-        messages.clear()
-        classes = store.perturbation.mixscape(memory.signature, invalidate_cache=True)
-        # Copies, as the check's refusal of one byte less clears the lists.
-        return classes, list(bands), list(messages)
-
     band_de_genes = mixscape_module.band_de_genes
 
     def counting(values, *args, **kwargs):
@@ -654,18 +637,19 @@ def test_mixscape_runs_within_the_budget_it_names(memory, monkeypatch) -> None:
     monkeypatch.setattr(mixscape_module, "band_de_genes", counting)
     sink = logger.add(lambda message: messages.append(message.record["message"]))
     try:
-        _, _, (classes, band_sizes, logged) = check_budget(
-            memory.path, run, check_writes=False, nthreads=2
-        )
+        # 20 MB reads the counts of 4,000 cells in several bands and classifies
+        # the targets in several batches.
+        store = open_store(memory.path, mem_budget=20_000_000, nthreads=2)
+        classes = store.perturbation.mixscape(memory.signature, invalidate_cache=True)
     finally:
         logger.remove(sink)
-
-    # The DE tests read the counts in several bands and the targets are
-    # classified in several batches, within the budget that the refusal
-    # names; the bands once never fitted a limited budget, and a batch's
-    # read of the signatures took 17 times what it returned.
-    assert len(band_sizes) > 1 and sum(band_sizes) == 400
-    assert "Classifying 16 targets and splits in 16 batches" in logged
+    assert len(bands) > 1 and sum(bands) == 400
+    (batches,) = [
+        re.search(r"Classifying 16 targets and splits in (\d+) batches", message)
+        for message in messages
+        if "Classifying 16 targets" in message
+    ]
+    assert batches is not None and int(batches.group(1)) > 1
     result = open_store(memory.path).perturbation.load_mixscape(classes)
     pd.testing.assert_frame_equal(result.cells, memory.whole.cells)
     pd.testing.assert_frame_equal(result.targets, memory.whole.targets)

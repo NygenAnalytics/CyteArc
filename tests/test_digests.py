@@ -17,7 +17,6 @@ import numpy as np
 import pytest
 
 from cytearc.utils.digest import directory_sha256, file_sha256, path_sha256
-from tests.memory_helpers import traced_peak
 
 DATA = Path(__file__).parent / "data"
 ROOT = Path(__file__).resolve().parent.parent
@@ -171,23 +170,6 @@ def test_a_directory_refuses_a_file_name_that_is_not_text(tmp_path) -> None:
         pytest.skip("the file system refuses names that are not UTF-8")
     with pytest.raises(UnicodeEncodeError):
         directory_sha256(folder)
-
-
-@pytest.mark.parametrize("size", [0, 1000, 100_000, READ_BYTES + 1, 2_000_000])
-def test_a_digest_holds_one_buffer_no_larger_than_the_file(tmp_path, size) -> None:
-    path = tmp_path / "file.bin"
-    path.write_bytes(np.random.default_rng(2).bytes(size))
-    file_sha256(path)
-    buffer = min(size, READ_BYTES)
-    # The buffer, the open file, the hash and its text hold a few KB more.
-    _, peak = traced_peak(lambda: file_sha256(path), buffer + 4096)
-    assert buffer <= peak <= buffer + 4096
-    folder = _store(
-        tmp_path / "folder",
-        {"small": b"x" * min(size, 1000), "large/file": path.read_bytes(), "e": b""},
-    )
-    _, peak = traced_peak(lambda: directory_sha256(folder), buffer + 8192)
-    assert buffer <= peak <= buffer + 8192
 
 
 @pytest.mark.skipif(

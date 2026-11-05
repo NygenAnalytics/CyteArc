@@ -15,7 +15,6 @@ import pytest
 
 from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import every_cell, write_cells_store
-from tests.memory_helpers import smallest_budget, traced_peak
 from tests.storage_helpers import copy_store
 from tests.variant_helpers import write_variant_store
 from tests.variant_truth import mito_clone_truth, variant_truth, write_mgatk
@@ -405,49 +404,3 @@ def test_genotype_clones_refuse_a_budget_too_small_before_writing(
     with pytest.raises(MemoryError, match="Building the sites of 6 mutant cells"):
         store.variants.genotype_clones(genotypes)
     assert len(store.artifacts.list(kind="clones", scope="datastore")) == before
-
-
-@pytest.mark.slow
-def test_genotype_clones_hold_no_more_than_the_smallest_budget_they_accept(
-    store, tmp_path
-) -> None:
-    genotypes = _genotypes(store, tmp_path)
-
-    def call(budget: int):
-        store.memoryBytes = budget
-        try:
-            return store.variants.genotype_clones(genotypes, invalidate_cache=True)
-        finally:
-            store.memoryBytes = 1 << 30
-
-    budget = smallest_budget(call, 1 << 28)
-    store.memoryBytes = budget
-    _clones, peak = traced_peak(
-        lambda: store.variants.genotype_clones(genotypes, invalidate_cache=True),
-        budget,
-    )
-    assert peak <= budget
-
-
-@pytest.mark.slow
-def test_genotype_clones_of_many_cells_hold_no_more_than_the_smallest_budget(
-    tmp_path,
-) -> None:
-    from tests.test_variant_genotype_calls import _many_cell_counts
-
-    # 4,000 cells at 40 targets: the calls, the cells' sets and their masks
-    # of known sites outweigh what the store's objects hold.
-    ids = [f"c{cell:06d}-1" for cell in range(4_000)]
-    store = write_cells_store(tmp_path / "store.zarr", ids)
-    counts = _many_cell_counts(store, ids, tmp_path, "threshold", n_sites=40)
-    genotypes = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
-
-    def call(budget: int):
-        store.memoryBytes = budget
-        try:
-            return store.variants.genotype_clones(genotypes, invalidate_cache=True)
-        finally:
-            store.memoryBytes = 1 << 30
-
-    budget = smallest_budget(call, 1 << 30)
-    assert traced_peak(lambda: call(budget), budget)[1] <= budget

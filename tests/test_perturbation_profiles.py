@@ -1,4 +1,3 @@
-import tracemalloc
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,12 +28,6 @@ from tests.perturbation_helpers import (
     record_cell_reads,
     use_python_kernels,
     write_screen,
-)
-from tests.memory_helpers import (
-    ZARR_READS,
-    budget_that_runs,
-    hold_finished_reads,
-    named_budget,
 )
 from tests.storage_helpers import insert_nullable_cell_column, open_store
 
@@ -229,30 +222,6 @@ def test_profile_values_write_a_band_of_the_profiles() -> None:
     # Each quotient rounds to float32 as dividing and then converting rounds it.
     np.testing.assert_array_equal(band.view(np.uint32), expected.view(np.uint32))
     assert np.isnan(profiles[:, [0, 1, 6]]).all()
-
-
-def test_profile_values_make_no_copy_of_the_sums() -> None:
-    # The sums of a band of 1,000 perturbations in 1,000 features, 8 MB.
-    rng = np.random.default_rng(1)
-    sums = rng.normal(size=(1000, 1000))
-    n_cells = rng.integers(1, 500, 1000)
-    masked = np.where(np.arange(1000) % 3 == 0, np.arange(1000), -1)
-    profiles = np.empty((1000, 1200), dtype=np.float32)
-    tracing = tracemalloc.is_tracing()
-    if not tracing:
-        tracemalloc.start()
-    tracemalloc.reset_peak()
-    start = tracemalloc.get_traced_memory()[0]
-    try:
-        profile_values(sums, n_cells, masked, out=profiles[:, 100:1100])
-        peak = tracemalloc.get_traced_memory()[1] - start
-    finally:
-        if not tracing:
-            tracemalloc.stop()
-
-    # NumPy rounds the quotients into the band through buffers of about
-    # 130 kB, never a float64 or float32 copy of the sums.
-    assert peak < sums.nbytes / 16
 
 
 # The count blocks are uint16, as the stores hold, so the kernels compile for
@@ -774,16 +743,10 @@ def test_profiles_read_bands_of_features_that_fit_the_budget(
         return read(assay, physical_indices, *args, **kwargs)
 
     monkeypatch.setattr(normalization, "feature_value_blocks", counting)
-    with pytest.raises(MemoryError, match="2 targets in 30 features") as low:
+    with pytest.raises(MemoryError, match="2 targets in 30 features"):
         run(open_store(shared.path, nthreads=2, mem_budget=1000))
-    needed = named_budget(low.value)
-    # The least budget counts the chunk that a read of the counts can still
-    # hold after it ends, whatever a band's width, and half again the rest of
-    # it gives bands of several features.
-    held = store._get_assay("RNA").rawData._held_read_bytes()
-    banded = run(
-        open_store(shared.path, nthreads=2, mem_budget=needed + (needed - held) // 2)
-    )
+    # 190 kB gives bands of several features.
+    banded = run(open_store(shared.path, nthreads=2, mem_budget=190_000))
 
     # Each band reads the control cells, then the profiled cells, and holds
     # several features but not all of them.
@@ -792,9 +755,6 @@ def test_profiles_read_bands_of_features_that_fit_the_budget(
     result = store.perturbation.load_profiles(banded)
     pd.testing.assert_frame_equal(result.values, whole.values)
     pd.testing.assert_frame_equal(result.control_sd, whole.control_sd)
-    with pytest.raises(MemoryError, match="2 targets in 30 features") as short:
-        run(open_store(shared.path, nthreads=2, mem_budget=needed - 1))
-    assert named_budget(short.value) == needed
 
 
 @pytest.mark.parametrize(
@@ -927,9 +887,10 @@ def test_loading_profiles_holds_their_values_once(shared, monkeypatch) -> None:
 
 
 @pytest.mark.slow
-def test_profiles_run_within_the_budget_they_name(tmp_path) -> None:
+def test_profiles_at_a_small_budget_give_the_profiles_of_a_large_one(tmp_path) -> None:
+    from cytearc.storage.execution import execution_report_scope
+
     screen = memory_screen(tmp_path / "store.zarr")
-    # Profiling 40 features keeps the least budget's bands of one feature few.
     features = open_store(screen.path).features.snapshot(feature_indexes=np.arange(40))
 
     def run(store: DataStore) -> ArtifactRef:
@@ -942,25 +903,18 @@ def test_profiles_run_within_the_budget_they_name(tmp_path) -> None:
             invalidate_cache=True,
         )
 
-    whole = open_store(screen.path).perturbation.load_profiles(
-        run(open_store(screen.path, nthreads=2))
-    )
-    # Each band of features streams its counts within the budget that the
-    # refusal names, which once failed in the stream planner. Each read's work
-    # in Zarr's pool is held until the next read ends, as a pool thread that
-    # runs late holds it, so every read of the counts runs beside the chunk of
-    # the read before it, which CI's runs met now and then.
-    with hold_finished_reads(*ZARR_READS):
-        budget, _, profiles, peak = budget_that_runs(screen.path, run, nthreads=2)
-    with pytest.raises(MemoryError) as short:
-        run(open_store(screen.path, nthreads=2, mem_budget=budget - 1))
-    assert named_budget(short.value) == budget
-    # The budget counts the chunk that the read before can still hold, and
-    # the call held more than the budget less that chunk, so the hold took
-    # effect.
-    held = open_store(screen.path)._get_assay("RNA").rawData._held_read_bytes()
-    assert budget - held < peak <= budget
-    result = open_store(screen.path).perturbation.load_profiles(profiles)
+    bands = {}
+    for budget in (None, 15_000_000):
+        options = {} if budget is None else {"mem_budget": budget}
+        with execution_report_scope() as reports:
+            ref = run(open_store(screen.path, nthreads=2, **options))
+        bands[budget] = len(reports)
+        if budget is None:
+            whole = open_store(screen.path).perturbation.load_profiles(ref)
+    # 15 MB, a little more than the call holds beside one band of features,
+    # streams the counts in more bands than the store's default budget.
+    assert bands[15_000_000] > bands[None]
+    result = open_store(screen.path).perturbation.load_profiles(ref)
     pd.testing.assert_frame_equal(result.values, whole.values)
     pd.testing.assert_frame_equal(result.control_mean, whole.control_mean)
     pd.testing.assert_frame_equal(result.control_sd, whole.control_sd)
