@@ -1,5 +1,4 @@
 import os
-import re
 import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -92,7 +91,6 @@ from ...metadata.selection import (
     plan_cell_selection_read,
     read_cell_selection,
 )
-from ...repertoire.chains import RECEPTOR_TYPES
 from ...repertoire.clonotypes import clonotype_nouns, within_type_parts
 from ...storage.artifacts import (
     ArtifactRef,
@@ -137,6 +135,7 @@ from .clone_artifacts import (
 )
 from .clone_steps import (
     CODES_WITHIN_TYPE,
+    REPRESENTATIVES_WITHIN_TYPE,
     artifact_cell_ids,
     files_text,
     measured_within_types,
@@ -182,12 +181,6 @@ _EXPORT_BYTES_PER_CELL = 200
 # code, and its label, a string of up to four bytes per character, beside the
 # junction that the repertoire operations read.
 _FIGURE_LABEL_BYTES = 400
-# The text that a clonotype within a receptor type adds to its clonotype's
-# label, after a space and an opening parenthesis: a receptor type, and a
-# number where its type splits.
-_ADDED_TYPE = re.compile(
-    "(?:" + "|".join(re.escape(kind) for kind in RECEPTOR_TYPES) + r")(?: [1-9]\d*)?\)"
-)
 # What a refusal of comparing groups suggests beside a larger budget.
 _FEWER_GROUPS = "compare fewer groups, with fewer group_by columns or a cell_selection"
 # The kinds of clone artifact that every clone summary reads.
@@ -1303,20 +1296,24 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         own = read_whole_text(
             ledger, group, "clonotype_ids", item="the clonotypes' own labels"
         )
-        # pandas' hash table of the labels, each name's place among them, and
-        # a flag and position for each clonotype within a type.
+        # pandas' hash table of the labels, each name's place among them, a
+        # flag for each clonotype, and for each clonotype within a type the
+        # flag of its clonotype and its position.
         ledger.peak(
             "finding the clonotypes named",
             hash_table_bytes(len(own))
             + 8 * len(unknown)
+            + len(own)
             + 9 * len(clonotypes)
             + NUMPY_STEP_BYTES,
         )
         named = pd.Index(own, dtype=object).get_indexer(unknown)
+        wanted = np.zeros(len(own), dtype=bool)
+        wanted[named[named >= 0]] = True
+        parts = np.flatnonzero(wanted[clonotypes])
         held = ledger.charged - entry
-        del own
+        del own, wanted
         ledger.release(held)
-        parts = np.flatnonzero(np.isin(clonotypes, named[named >= 0]))
         return (
             np.concatenate([found, parts.astype(np.int64)]),
             [name for name, at in zip(unknown, named.tolist(), strict=True) if at < 0],
@@ -1353,11 +1350,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         by ``receptor_arms="VJ"`` by the ``VJ_1`` chain first. Where two of
         the clonotypes given share a junction, the label of each also shows
         its number, the rank in its ID, such as ``CAVA 1`` and ``CAVA 3`` for
-        ``clonotype_1`` and ``clonotype_3``. A clonotype within a receptor
-        type, as the summaries of clonotypes across types label it, such as
-        ``clonotype_1 (TCR 2)``, adds its type to its clonotype's junction,
-        such as ``CASSA (TCR 2)``. The clonotypes' IDs are read to find those
-        given, and the repertoire operations read the junctions.
+        ``clonotype_1`` and ``clonotype_3``. Clonotypes defined across
+        receptor types are given as their summaries label the clonotypes
+        within receptor types that they measure, such as ``clonotype_1 (TCR
+        2)``, and each is labelled as ``within_receptor_type=True`` labels it,
+        by its own representative's junction, with its number among those
+        where two given share one, then the text that its label adds, such as
+        ``CASSB (TCR 2)``. The clonotypes' IDs, or those labels, are read to
+        find those given, and the repertoire operations read the junctions.
 
         Args:
             clones: A clone artifact: ``clones`` or ``clonotypes``.
@@ -1383,29 +1383,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         given = np.asarray([str(name) for name in ids], dtype=object)
         if clones.kind != ClonotypeArguments.artifact_kind or not len(given):
             return given
-        # A clonotype within a receptor type, as the summaries of clonotypes
-        # across types label it, is its clonotype's label and the text that
-        # this adds after a space: its type, and its number where its type
-        # splits, in parentheses. Clonotypes within types add none.
-        parted = [name.partition(" (") for name in given.tolist()]
         across = measured_within_types(clones, inspect_artifact(self.zw, clones), group)
-        added = [
-            f" ({rest}" if space and across and _ADDED_TYPE.fullmatch(rest) else ""
-            for _base, space, rest in parted
-        ]
-        names = np.asarray(
-            [
-                base if text else name
-                for (base, _space, _rest), text, name in zip(
-                    parted, added, given.tolist(), strict=True
-                )
-            ],
-            dtype=object,
-        )
-        del parted
-        n_clonotypes = int(
-            as_zarr_array(group["clonotype_ids"], name="clonotype_ids").shape[0]
-        )
+        if across and REPRESENTATIVES_WITHIN_TYPE not in group:
+            raise ValueError(
+                "clonotypes was defined across receptor types by an earlier version "
+                "of CyteArc, without the representative of each clonotype within a "
+                "receptor type, which names it in figures; define the clonotypes "
+                "again with ds.repertoire.clonotypes, which saves it"
+            )
         ledger = MemoryLedger(
             self.memoryBytes,
             "Labelling clonotypes by their junctions",
@@ -1414,44 +1399,57 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         )
         # Each clone given, as its ID, code and label, is held throughout.
         ledger.hold(
-            f"the {len(names)} clonotypes labelled", _FIGURE_LABEL_BYTES * len(names)
+            f"the {len(given)} clonotypes labelled", _FIGURE_LABEL_BYTES * len(given)
         )
-        # The IDs read as Python strings, and pandas' hash table of them,
-        # which finds those given.
+        # The labels read as Python strings, and pandas' hash table of them,
+        # which finds those given: the IDs, or for clonotypes across receptor
+        # types the summaries' labels of their clonotypes within types.
         entry = ledger.charged
-        stored_ids = read_whole_text(
-            ledger, group, "clonotype_ids", item=f"the IDs of {n_clonotypes} clonotypes"
-        )
+        if across:
+            source = self._read_clone_input(clones, ledger, with_ids=True)
+            assert source.clone_ids is not None
+            stored = source.clone_ids
+            what = f"the labels of {len(stored)} clonotypes within receptor types"
+            del source
+        else:
+            n_clonotypes = int(
+                as_zarr_array(group["clonotype_ids"], name="clonotype_ids").shape[0]
+            )
+            what = f"the IDs of {n_clonotypes} clonotypes"
+            stored = read_whole_text(ledger, group, "clonotype_ids", item=what)
         ledger.peak(
-            f"the index of the IDs of {n_clonotypes} clonotypes",
-            hash_table_bytes(n_clonotypes) + 8 * len(names),
+            f"the index of {what}", hash_table_bytes(len(stored)) + 8 * len(given)
         )
         codes = np.asarray(
-            pd.Index(stored_ids, dtype=object).get_indexer(names), dtype=np.int64
+            pd.Index(stored, dtype=object).get_indexer(given), dtype=np.int64
         )
-        id_bytes = ledger.charged - entry
-        del stored_ids
-        ledger.release(id_bytes)
+        read_bytes = ledger.charged - entry
+        del stored
+        ledger.release(read_bytes)
         if (codes < 0).any():
-            unknown = names[codes < 0].tolist()
+            unknown = given[codes < 0].tolist()
             raise ValueError(f"No clonotype is labelled {unknown[:5]}")
-        junctions = self._representative_junctions(clones, codes, ledger=ledger)
+        junctions = self._representative_junctions(
+            clones, codes, ledger=ledger, within_types=across
+        )
         unnamed = np.asarray([junction is None for junction in junctions.tolist()])
         if unnamed.any():
             raise ValueError(
                 f"The representative cells of the clonotypes "
-                f"{names[unnamed].tolist()[:5]} have no junction amino-acid "
+                f"{given[unnamed].tolist()[:5]} have no junction amino-acid "
                 "sequence in the VDJ_1 or VJ_1 chain that names them"
             )
         # A junction that two of the clonotypes share names each with its
-        # number too; a clonotype within a type then adds its type.
+        # number too; a clonotype within a type then adds the text that its
+        # label adds to its clonotype's, its type in parentheses.
         distinct = np.unique(codes, return_index=True)[1]
         counted = Counter(junctions[distinct].tolist())
         return np.asarray(
             [
-                (f"{junction} {code + 1}" if counted[junction] > 1 else junction) + text
-                for junction, code, text in zip(
-                    junctions.tolist(), codes.tolist(), added, strict=True
+                (f"{junction} {code + 1}" if counted[junction] > 1 else junction)
+                + (name[name.index(" (") :] if across and " (" in name else "")
+                for junction, code, name in zip(
+                    junctions.tolist(), codes.tolist(), given.tolist(), strict=True
                 )
             ],
             dtype=object,

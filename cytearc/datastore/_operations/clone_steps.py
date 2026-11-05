@@ -27,6 +27,7 @@ from ...utils.memory_budget import MemoryLedger
 
 __all__ = [
     "CODES_WITHIN_TYPE",
+    "REPRESENTATIVES_WITHIN_TYPE",
     "artifact_cell_ids",
     "files_text",
     "hold_ranked_clone_labels",
@@ -40,6 +41,10 @@ __all__ = [
 #: cell's clonotype within its receptor type, as ``within_receptor_type=True``
 #: codes it, -1 for none, which every clone summary measures.
 CODES_WITHIN_TYPE = "codes_within_type"
+#: The array in which clonotypes defined across receptor types save the
+#: representative cell of each clonotype within a receptor type, by its code,
+#: as ``within_receptor_type=True`` chooses it, which names it in figures.
+REPRESENTATIVES_WITHIN_TYPE = "representatives_within_type"
 
 # What writing a text file holds whatever its rows: the writer's objects and
 # one of io's default buffers, 138 to 143 KB as traced on Python 3.13, whose

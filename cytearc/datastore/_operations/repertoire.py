@@ -111,6 +111,7 @@ from .cell_groups import cell_groups, group_columns, within_groups
 from .clone_artifacts import clone_diagnostics
 from .clone_steps import (
     CODES_WITHIN_TYPE,
+    REPRESENTATIVES_WITHIN_TYPE,
     artifact_cell_ids,
     files_text,
     measured_within_types,
@@ -442,6 +443,7 @@ def _clonotype_write_bytes(
     }
     if within_types:
         arrays[CODES_WITHIN_TYPE] = ((n_cells,), np.int32)
+        arrays[REPRESENTATIVES_WITHIN_TYPE] = ((n_cells,), np.int64)
     if columns:
         widest = max(
             (len(key[column]) for key in within_labels for column in columns), default=1
@@ -1217,7 +1219,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         within its type, as ``within_receptor_type=True`` defines it, in
         ``codes_within_type``, which every clone summary measures, so the
         summaries of clonotypes across types equal those of clonotypes within
-        types, under labels such as ``clonotype_1 (TCR 2)``.
+        types, under labels such as ``clonotype_1 (TCR 2)``, and the
+        representative of each, as ``within_receptor_type=True`` chooses it,
+        in ``representatives_within_type``, whose junction names it in
+        figures, such as ``CASSB (TCR 2)``.
 
         ``metric`` links chains whose junctions are similar instead, as
         scirpy's ``define_clonotype_clusters`` does: ``"hamming"`` (at most
@@ -1430,6 +1435,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             },
             invalidate_cache=invalidate_cache,
             required_attributes=("n_clonotypes",),
+            # Clonotypes across receptor types are reused with the
+            # representative of each clonotype within a type, which names it.
+            reuse_validator=None
+            if within_receptor_type
+            else lambda _ref, saved: REPRESENTATIVES_WITHIN_TYPE in saved,
         )
         if planned.reused:
             return planned.ref
@@ -1490,11 +1500,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
 
         assignment = assigned(groups)
         within_type = None
+        within_representatives = None
         if not within_receptor_type:
             # The clonotypes across receptor types are held while each type's
             # cells are linked apart, as within_receptor_type=True links them,
             # so every summary can measure each cell's clonotype within its
-            # type, whose code is kept to be written.
+            # type, whose code is kept to be written, and its representative,
+            # chosen as within_receptor_type=True chooses it, which names it in
+            # figures.
             ledger.hold(
                 "the clonotypes across receptor types",
                 assignment.codes.nbytes
@@ -1502,9 +1515,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 + assignment.configurations.nbytes
                 + assignment.configuration_clonotypes.nbytes,
             )
-            within_type = assigned(typed_groups).codes
+            within_assignment = assigned(typed_groups)
+            within_representatives, _configurations = representative_cells(
+                within_assignment
+            )
+            within_type = within_assignment.codes
+            del within_assignment, _configurations
             ledger.hold(
-                "each cell's clonotype within its receptor type", within_type.nbytes
+                "each cell's clonotype within its receptor type and each one's "
+                "representative",
+                within_type.nbytes + within_representatives.nbytes,
             )
         del typed_groups
         labels = clonotype_labels(assignment.n_clonotypes)
@@ -1529,8 +1549,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             "n_configurations": n_configurations,
             "clonotype_within": clonotype_within,
         }
-        if within_type is not None:
+        if within_type is not None and within_representatives is not None:
             arrays[CODES_WITHIN_TYPE] = within_type.astype(np.int32)
+            arrays[REPRESENTATIVES_WITHIN_TYPE] = within_representatives
         if columns:
             # Each within group's label in each column, row by row, as an
             # array, so opening the artifact reads none of them.
@@ -1572,14 +1593,22 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         return artifact_group(self.zw, clonotypes)
 
     def _representative_junctions(
-        self, clonotypes: ArtifactRef, codes: np.ndarray, *, ledger: MemoryLedger
+        self,
+        clonotypes: ArtifactRef,
+        codes: np.ndarray,
+        *,
+        ledger: MemoryLedger,
+        within_types: bool = False,
     ) -> np.ndarray:
         """The junction amino acids that name some clonotypes in figures.
 
         A clonotype is named by its representative cell's ``VDJ_1`` chain, or
         its ``VJ_1`` chain without one; clonotypes defined by
         ``receptor_arms="VJ"`` by the ``VJ_1`` chain first, which their
-        cells share. Of the receptors, only the representatives' slots and
+        cells share. With ``within_types``, the codes are of the clonotypes
+        within receptor types that clonotypes across types save, each named
+        by its own representative, as ``within_receptor_type=True`` names it.
+        Of the receptors, only the representatives' slots and
         junction codes, the bounds of the junctions they name, a chunk at a
         time or whole where that holds less, and those junctions' bytes are
         read, each array a physical chunk at a time. Each read, and the
@@ -1590,8 +1619,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Args:
             clonotypes: A complete ``clonotypes`` artifact.
             codes: The positions of some of its clonotypes, such as 0 for
-                ``clonotype_1``.
+                ``clonotype_1``, or with ``within_types`` of its clonotypes
+                within receptor types.
             ledger: The caller's memory ledger.
+            within_types: Name clonotypes within receptor types.
 
         Returns:
             Each clonotype's junction, None where the chain that names it
@@ -1607,9 +1638,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if (status.parameters or {}).get("receptor_arms") != "VJ":
             naming = ("VDJ_1", "VJ_1")
         wanted, back = np.unique(np.asarray(codes, dtype=np.int64), return_inverse=True)
+        name = REPRESENTATIVES_WITHIN_TYPE if within_types else "representatives"
         cells = read_rows(
             ledger,
-            as_zarr_array(group["representatives"], name="representatives"),
+            as_zarr_array(group[name], name=name),
             wanted,
             item="their representatives",
         ).astype(np.int64)

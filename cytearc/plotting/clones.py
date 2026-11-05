@@ -181,7 +181,8 @@ def clone_abundance(
     summary counts them, so their groups are the receptor types, or each
     group's receptor types, named like ``"s1, TCR"``; clonotypes defined
     across receptor types are counted by each cell's clonotype within its
-    type, labelled with the type, such as ``CASSA (TCR 2)``.
+    type, labelled as the clonotypes within types label its cells, by its
+    own representative's junction, then its type, such as ``CASSB (TCR 2)``.
 
     Tables: ``sizes`` (``group``, ``clone_size``, ``n_clones``) and ``top``,
     one row per clone drawn and group, the largest clone first, zeros
