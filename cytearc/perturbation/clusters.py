@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from cytearc.utils.arguments import integer_argument
+from cytearc.utils.memory_budget import MemoryLedger
 
 __all__ = [
     "METRICS",
@@ -428,6 +429,7 @@ def cluster_profiles(
     min_samples: int,
     selection: str,
     seed: int,
+    ledger: MemoryLedger | None = None,
 ) -> ClusterArrays:
     """Cluster the perturbations, order them and lay them out.
 
@@ -439,6 +441,9 @@ def cluster_profiles(
             perturbation's core distance.
         selection: ``"eom"`` or ``"leaf"``.
         seed: The seed of the layout.
+        ledger: The caller's memory ledger, which holds the profiles passed
+            and is charged the clustering's peak, as
+            :func:`cluster_memory_bytes` counts it, before it starts.
 
     Returns:
         The clusters, their strengths, the leaf order and the layout.
@@ -446,6 +451,11 @@ def cluster_profiles(
     Raises:
         ValueError: If there are fewer than 3 perturbations or 2 features.
     """
+    if ledger is not None and np.ndim(values) == 2:
+        ledger.peak(
+            "clustering the perturbations",
+            cluster_memory_bytes(*np.shape(values)),
+        )
     data = np.asarray(values, dtype=np.float64)
     if data.ndim != 2 or data.shape[0] < 3 or data.shape[1] < 2:
         raise ValueError(

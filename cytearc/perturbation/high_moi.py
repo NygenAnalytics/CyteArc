@@ -61,6 +61,7 @@ from cytearc.perturbation.random_sets import (
     resampling_keys,
     set_key,
 )
+from cytearc.utils.memory_budget import MemoryLedger
 from cytearc.utils.numba import njit
 
 __all__ = [
@@ -70,6 +71,7 @@ __all__ = [
     "cells_by_code",
     "code_counts",
     "complement_tests",
+    "complement_test_work",
     "complement_thread_bytes",
     "fit_detection_models",
     "nonzero_group_counts",
@@ -1061,6 +1063,56 @@ def complement_thread_bytes(n_cells: int, gather_bytes: int) -> int:
     return 24 * n_cells + max(gather_bytes, 16 * n_cells)
 
 
+def complement_test_work(
+    room: int | None,
+    n_cells: int,
+    n_resamples: tuple[int, int, int],
+    threads: int,
+) -> tuple[int, int, int]:
+    """Return what the tests of :func:`complement_tests` hold within ``room``: the threads' buffers, their copies of genes and the second round's statistics.
+
+    Each thread copies one gene of a group at least, 16 bytes per cell, and
+    up to ``GATHER_BYTES`` with a quarter of what the room leaves beside the
+    least of the tests shared among the threads, as
+    :func:`complement_thread_bytes` counts its buffers; the statistics hold
+    one pair's second round, ``8 * n_resamples[1]`` bytes, and up to a
+    quarter of what is left, at most ``STATISTICS_BYTES``, with one working
+    copy no larger than them. The tests then hold the threads' buffers and
+    twice the statistics. Without a room, the copies take ``GATHER_BYTES``
+    and the statistics ``STATISTICS_BYTES``.
+
+    Args:
+        room: The bytes that the tests may hold, or None for no budget.
+        n_cells: The cells tested, every labelled cell.
+        n_resamples: The random sets of the three rounds.
+        threads: The threads that test groups at once.
+
+    Returns:
+        The threads' buffers, each thread's copy of genes and the
+        statistics' bytes.
+    """
+    threads = max(1, int(threads))
+    if room is None:
+        return (
+            threads * complement_thread_bytes(n_cells, GATHER_BYTES),
+            GATHER_BYTES,
+            STATISTICS_BYTES,
+        )
+    one_copy = 16 * int(n_cells)
+    least_statistics = 8 * n_resamples[1]
+    least = threads * complement_thread_bytes(n_cells, 0) + 2 * least_statistics
+    spare = max(0, int(room) - least)
+    gather_bytes = one_copy + min(
+        max(GATHER_BYTES - one_copy, 0), spare // (4 * threads)
+    )
+    statistics_bytes = max(least_statistics, min(STATISTICS_BYTES, spare // 4))
+    return (
+        threads * complement_thread_bytes(n_cells, gather_bytes),
+        gather_bytes,
+        statistics_bytes,
+    )
+
+
 def complement_tests(
     values: np.ndarray,
     covariates: np.ndarray,
@@ -1075,8 +1127,9 @@ def complement_tests(
     stage_threshold: float = 0.02,
     approximation: str = "skew_normal",
     side: str = "both",
-    statistics_bytes: int = STATISTICS_BYTES,
-    gather_bytes: int = GATHER_BYTES,
+    statistics_bytes: int | None = None,
+    gather_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> PairResults:
     """Test pairs of a group and a gene of a band against all other cells.
 
@@ -1144,6 +1197,12 @@ def complement_tests(
             them from one place; when they exceed it, genes that fill at least
             half of their span of the band are read in place, and scattered
             genes are copied as many at a time as it holds, or one at a time.
+            ``GATHER_BYTES`` when None without a ledger, and
+            ``statistics_bytes`` ``STATISTICS_BYTES``.
+        ledger: The caller's memory ledger, which holds the counts and the
+            covariates. The copies and the statistics then take what
+            :func:`complement_test_work` gives them in its room, which it is
+            charged before the tests, and neither may be passed.
 
     Returns:
         Each pair's test.
@@ -1154,6 +1213,26 @@ def complement_tests(
             do not go together, or a detection model expects less than half
             a cell in a set or leaves less than half a cell out.
     """
+    if ledger is not None:
+        if statistics_bytes is not None or gather_bytes is not None:
+            raise TypeError(
+                "Pass a ledger or statistics_bytes and gather_bytes, not both"
+            )
+        scratch, gather_bytes, statistics_bytes = complement_test_work(
+            ledger.room,
+            int(np.shape(covariates)[0]),
+            n_resamples,
+            numba.get_num_threads(),
+        )
+        ledger.peak(
+            "testing the pairs: the threads' sets and copies of genes and the "
+            "statistics",
+            scratch + 2 * statistics_bytes,
+        )
+    statistics_bytes = (
+        STATISTICS_BYTES if statistics_bytes is None else statistics_bytes
+    )
+    gather_bytes = GATHER_BYTES if gather_bytes is None else gather_bytes
     counts = count_array(values)
     design = _design(covariates)
     if counts.ndim != 2 or counts.shape[1] != design.shape[0]:

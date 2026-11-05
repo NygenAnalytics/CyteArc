@@ -26,10 +26,24 @@ from cytearc.perturbation.edistance import (
     edistance_memory_bytes,
 )
 from cytearc.storage.artifacts import inspect_artifact
+from cytearc.storage.validation_scope import validation_scope
 from cytearc.utils.logging import logger
+from cytearc.utils.memory_budget import MemoryLedger
 from tests.perturbation_helpers import fixed_labels, use_python_kernels, write_screen
-from tests.memory_helpers import check_budget
-from tests.storage_helpers import copy_store, open_store, written
+from tests.memory_helpers import (
+    ZARR_READS,
+    at_budget,
+    audited,
+    check_budget,
+    hold_finished_reads,
+    refusal_naming,
+)
+from tests.storage_helpers import (
+    copy_store,
+    open_store,
+    rechunk_feature_tables,
+    written,
+)
 
 # Guides and their targets; no cell carries GENE_D's guide.
 TARGETS = ["GENE_A", "GENE_A", "GENE_B", "Non-Targeting", "GENE_C", "GENE_D"]
@@ -350,9 +364,12 @@ def test_edistance_refuses_inputs_it_cannot_measure(
         ValueError, match="No labelled cell carries control guides only"
     ):
         store.perturbation.edistance(template.without_controls, coordinates)
-    monkeypatch.setattr(store, "memoryBytes", 100)
-    with pytest.raises(MemoryError, match="E-distances of 15 cells in 3 dimensions"):
-        store.perturbation.edistance(labels, coordinates)
+    # The refusals from a budget of 100 bytes reach the measurement's.
+    refusal_naming(
+        at_budget(store, lambda: store.perturbation.edistance(labels, coordinates)),
+        "E-distances of 15 cells in 3 dimensions",
+        start=100,
+    )
     assert written(store) == saved
 
 
@@ -649,6 +666,21 @@ def large_screen(tmp_path_factory) -> SimpleNamespace:
     )
 
 
+#: The most times its traced peak that an E-distance budget may be, beside
+#: 1 MiB.
+_EDISTANCE_AT_MOST = 3.0
+
+
+def _audit(path, measure, budget: int, **options) -> None:
+    """Check that ``measure`` holds no more than its ledger plans from each charge to the next at ``budget``, with each read's work held until the next read ends."""
+    store = open_store(path, mem_budget=budget, **options)
+    with validation_scope():
+        measure(store)
+        with hold_finished_reads(*ZARR_READS):
+            _ref, overruns = audited(lambda: measure(store))
+    assert overruns == []
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize(
     ("n_dims", "nthreads"),
@@ -664,20 +696,38 @@ def test_the_memory_check_bounds_what_the_operation_holds(
     large_screen, tmp_path, monkeypatch, n_dims, nthreads
 ) -> None:
     path = copy_store(large_screen.path, tmp_path).zarr_loc
+    rechunk_feature_tables(path)
     labels, coordinates = large_screen.labels, large_screen.coordinates[n_dims]
     # The kernels run as Python, so that tracemalloc sees their arrays.
     use_python_kernels(monkeypatch, edistance_module)
-    # The whole call, from the labels and the check of the coordinates to the
-    # table, holds no more than the budget that its one refusal names.
-    _, refusals, _ = check_budget(
-        path,
-        lambda store: store.perturbation.edistance(
+
+    def measure(store):
+        return store.perturbation.edistance(
             labels, coordinates, n_permutations=1, invalidate_cache=True
-        ),
+        )
+
+    # The whole call, from the labels and the check of the coordinates to the
+    # table, holds no more than the budget that its last refusal names, and
+    # no less than a share of it.
+    budget, refusals, _ = check_budget(
+        path,
+        measure,
         nthreads=nthreads,
+        at_most=_EDISTANCE_AT_MOST,
+        allowance=1 << 20,
+        max_refusals=100,
     )
-    assert len(refusals) == 1
-    assert refusals[0].startswith("The E-distances of 20000 cells")
+    assert 1 <= len(refusals) <= 12
+    assert all(
+        refusal.startswith(
+            (
+                "Measuring the E-distances of the targets holds",
+                f"Measuring the E-distances of 20000 cells in {n_dims} dimensions",
+            )
+        )
+        for refusal in refusals
+    )
+    _audit(path, measure, budget, nthreads=nthreads)
 
 
 @pytest.mark.parametrize(
@@ -718,9 +768,21 @@ def test_one_refusal_names_a_budget_that_runs_for_few_compared_cells(
             labels, coordinates, by=by, n_permutations=9, invalidate_cache=True
         )
 
-    _, refusals, ref = check_budget(path, measure)
-    assert len(refusals) == 1
-    assert refusals[0].startswith("The E-distances of 5 cells in 2 dimensions")
+    rechunk_feature_tables(path)
+    budget, refusals, ref = check_budget(
+        path, measure, at_most=_EDISTANCE_AT_MOST, allowance=1 << 20, max_refusals=100
+    )
+    assert 1 <= len(refusals) <= 12
+    assert all(
+        refusal.startswith(
+            (
+                f"Measuring the E-distances of the {by}s holds",
+                "Measuring the E-distances of 5 cells in 2 dimensions",
+            )
+        )
+        for refusal in refusals
+    )
+    _audit(path, measure, budget)
     table = open_store(path).perturbation.load_edistance(ref).table
     assert table["n_cells"].iloc[0] == 2
     assert table["n_control_cells"].iloc[0] == 3
@@ -780,6 +842,9 @@ class _RecordedReads:
     def __init__(self, array: zarr.Array) -> None:
         self.shape = array.shape
         self.chunks = array.chunks
+        # The read charges a chunk of the array as its metadata states it.
+        self.dtype = array.dtype
+        self.metadata = array.metadata
         self.reads: list[list[int]] = []
         reads, oindex = self.reads, array.oindex
 
@@ -799,7 +864,9 @@ def test_coordinate_rows_are_read_one_chunk_at_a_time(tmp_path) -> None:
     recorded = _RecordedReads(array)
     # No row of the chunk of rows 3 to 5 is read.
     rows = np.asarray([0, 2, 7, 9])
-    found = operations._float64_rows(recorded, rows)
+    found = operations._float64_rows(
+        MemoryLedger(None, "Reading coordinates"), recorded, rows
+    )
     assert found.dtype == np.float64
     np.testing.assert_array_equal(found, np.asarray(array[:], dtype=np.float64)[rows])
     assert recorded.reads == [[0, 2], [7], [9]]

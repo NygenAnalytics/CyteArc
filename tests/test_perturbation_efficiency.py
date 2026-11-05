@@ -16,6 +16,7 @@ from scipy.stats import false_discovery_control, mannwhitneyu
 
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationEfficiency
+from cytearc.perturbation import efficiency as efficiency_module
 from cytearc.perturbation.efficiency import (
     efficiency_arrays,
     efficiency_memory_bytes,
@@ -23,8 +24,27 @@ from cytearc.perturbation.efficiency import (
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
 from tests.perturbation_helpers import fixed_labels, write_screen
-from tests.memory_helpers import check_budget
-from tests.storage_helpers import copy_store, open_store, write_count_store, written
+from cytearc.storage.validation_scope import validation_scope
+from tests.memory_helpers import (
+    ZARR_READS,
+    at_budget,
+    audited,
+    check_budget,
+    hold_finished_reads,
+    refusal_naming,
+)
+from tests.storage_helpers import (
+    copy_store,
+    open_store,
+    rechunk_feature_tables,
+    write_count_store,
+    written,
+)
+
+#: The most times its traced peak that efficiency's budget may be, beside
+#: 1 MiB: the call's own objects and the reads' chunks outweigh the few
+#: cells it compares.
+_EFFICIENCY_AT_MOST = 3.0
 
 # Guides, their targets and the feature IDs of the targets. RNA4 has no ID and
 # matches the RNA feature named RNA4; GENE_C's ID matches no feature; GENE_D
@@ -331,10 +351,18 @@ def test_efficiency_refuses_labels_it_cannot_measure(
         ValueError, match="No labelled cell carries control guides only"
     ):
         store.perturbation.efficiency(template.without_controls)
-    monkeypatch.setattr(store, "memoryBytes", 100)
-    # RNA1, RNA2, RNA4 and RNA5 over the 8 perturbed and 4 control cells.
-    with pytest.raises(MemoryError, match="Comparing 4 target genes over 12 cells"):
-        store.perturbation.efficiency(template.labels)
+    # RNA1, RNA2, RNA4 and RNA5 over the 8 perturbed and 4 control cells: with
+    # a comparison that no budget holds, the refusals from a budget of 100
+    # bytes reach the comparison's, which names its genes and cells.
+    monkeypatch.setattr(
+        efficiency_module, "efficiency_memory_bytes", lambda *_args: 1 << 50
+    )
+    refusal = refusal_naming(
+        at_budget(store, lambda: store.perturbation.efficiency(template.labels)),
+        "Comparing 4 target genes over 12 cells",
+        start=100,
+    )
+    assert refusal.item == "comparing the target genes"
     assert written(store) == saved
 
 
@@ -581,20 +609,42 @@ def test_efficiency_holds_no_more_than_the_budget_it_names(
 ) -> None:
     labels = getattr(budget_screens, screen).labels
     path = copy_store(getattr(budget_screens, screen).path, tmp_path).zarr_loc
+    # In chunks of their rows, the feature tables' reads hold what their rows
+    # do, so the budget shows what each step holds besides.
+    rechunk_feature_tables(path)
 
     def measure(store):
         return store.perturbation.efficiency(
             labels, by=by, id_column=None, invalidate_cache=True
         )
 
-    # One refusal names the whole need, by guide too, and the call runs at
-    # that budget, holding no more than it.
-    _, refusals, ref = check_budget(path, measure)
-    assert len(refusals) == 1
-    assert refusals[0].startswith("Comparing 1 target genes over")
+    # Each refusal names the step that it refused, by guide too, and the call
+    # runs at the budget that the last names, holding no more than it and no
+    # less than a share of it.
+    budget, refusals, ref = check_budget(
+        path, measure, at_most=_EFFICIENCY_AT_MOST, allowance=1 << 20, max_refusals=100
+    )
+    assert 1 <= len(refusals) <= 12
+    assert all(
+        refusal.startswith(
+            (
+                f"Measuring the efficiency of the {by}s holds",
+                "Comparing 1 target genes over",
+            )
+        )
+        for refusal in refusals
+    )
     # The first row, RNA0 or its first guide, is compared.
     table = open_store(path).perturbation.load_efficiency(ref).table
     assert table["status"].iloc[0] == "tested"
+    # From each charge to the next, the call holds no more than its ledger
+    # planned, with each read's work held until the next read ends.
+    store = open_store(path, mem_budget=budget)
+    with validation_scope():
+        measure(store)
+        with hold_finished_reads(*ZARR_READS):
+            _ref, overruns = audited(lambda: measure(store))
+    assert overruns == []
 
 
 def test_target_features_prefer_one_id_then_one_name() -> None:

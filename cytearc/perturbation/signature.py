@@ -34,6 +34,7 @@ from cytearc.utils.arguments import (
     optional_name_argument,
 )
 from cytearc.utils.numba import njit
+from cytearc.utils.memory_budget import MemoryLedger
 
 __all__ = [
     "PerturbationSignature",
@@ -101,7 +102,7 @@ def nearest_control_bytes(
     """Return the bytes that :func:`nearest_controls` holds for a block of queries.
 
     These come beside the query and control coordinates and the result, which
-    its caller holds. A search given at least this many ``memory_bytes`` for
+    its caller holds. A search whose ledger leaves at least this much room for
     one query runs.
 
     Args:
@@ -118,7 +119,7 @@ def nearest_control_bytes(
 
 
 def nearest_controls(
-    query: np.ndarray, controls: np.ndarray, n_neighbors: int, *, memory_bytes: int
+    query: np.ndarray, controls: np.ndarray, n_neighbors: int, *, ledger: MemoryLedger
 ) -> np.ndarray:
     """Return the positions of each query's nearest controls, nearest first.
 
@@ -127,17 +128,17 @@ def nearest_controls(
     squared distances, ties going to the lower position, and a query whose
     k-th distance comes within rounding of a control outside the candidates is
     ranked exactly over every control, so the result is exact. The blocks
-    hold as many queries as fit ``memory_bytes``, and at least one, as
-    :func:`nearest_control_bytes` counts them; the result does not depend on
-    them.
+    hold as many queries as fit the room that ``ledger`` leaves, and at least
+    one, as :func:`nearest_control_bytes` counts them, which the ledger is
+    charged before the search; the result does not depend on them.
 
     Args:
         query: The query cells' coordinates, cells x dimensions.
         controls: The control cells' coordinates, cells x dimensions.
         n_neighbors: The controls to return for each query, from 1 to the
             number of controls.
-        memory_bytes: The bytes that the search may hold beside the
-            coordinates and the result.
+        ledger: The caller's memory ledger, which holds the coordinates and
+            the result; one block of queries for a ledger without a budget.
 
     Returns:
         The positions in ``controls`` of each query's ``n_neighbors`` nearest
@@ -164,7 +165,14 @@ def nearest_controls(
     # A bound on the rounding of the fast distances, with a wide margin.
     rounding = 4.0 * (n_dims + 2) * np.finfo(np.float64).eps
     fixed, per_query = _search_bytes(n_controls, n_neighbors, n_dims)
-    block = max(1, (int(memory_bytes) - fixed) // per_query)
+    room = ledger.room
+    block = max(
+        1,
+        len(queries)
+        if room is None
+        else min(len(queries), (room - fixed) // per_query),
+    )
+    ledger.peak("searching the nearest controls", fixed + block * per_query)
     positions = np.empty((len(queries), n_neighbors), dtype=np.int64)
     every = np.arange(n_controls)
     for start in range(0, len(queries), block):

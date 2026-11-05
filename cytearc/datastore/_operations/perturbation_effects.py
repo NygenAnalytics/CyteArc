@@ -10,13 +10,12 @@ from ...metadata.arguments import (
     PerturbationLabelArguments,
 )
 from ...metadata.artifacts import write_cell_data_artifact
-from ...metadata.rows import array_row_selection_parts
+from ...metadata.rows import array_row_selection_parts, read_whole
 from ...perturbation.edistance import (
     EDISTANCE_STATUSES,
     EDISTANCE_TESTED,
     PerturbationEDistance,
     edistance_arrays,
-    edistance_memory_bytes,
     edistance_settings,
 )
 from ...perturbation.efficiency import (
@@ -25,34 +24,35 @@ from ...perturbation.efficiency import (
     EFFICIENCY_TESTED,
     PerturbationEfficiency,
     efficiency_arrays,
-    efficiency_memory_bytes,
     efficiency_settings,
 )
 from ...storage.artifact_writer import ArrayRequirement, AttributeRequirement
-from ...storage.arrays import zarr_write_buffer_bytes
 from ...storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
-from ...storage.types import as_zarr_array, read_array
+from ...storage.async_execution import zarr_decoding_threads
+from ...storage.geometry import array_geometry
+from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryLedger
 from ...utils.warnings import warn
 from .perturbation_store import (
     _COORDINATE_KINDS,
+    _call_ledger,
     _cell_selection_check_bytes,
-    _column_read_bytes,
+    _cell_totals,
     _compared_cells,
     _count_blocks,
-    _count_stream_bytes,
+    _feature_text,
+    _frame_bytes,
     _label_rows,
     _matched_ids,
     _pairs_fingerprint,
-    _require_budget,
-    _resident_ledger,
     _require_ref,
     _row_features,
     _selected_rows,
-    _selection_block_bytes,
     _status_labels,
+    _table_write_bytes,
 )
 
 if TYPE_CHECKING:
@@ -75,21 +75,41 @@ _EFFICIENCY_VALUES = (
 )
 
 
-def _float64_rows(data: zarr.Array, rows: np.ndarray) -> np.ndarray:
-    """Read ascending rows of a two-dimensional array as float64.
+def _float64_rows(
+    ledger: MemoryLedger, data: zarr.Array, rows: np.ndarray
+) -> np.ndarray:
+    """Read ascending rows of a two-dimensional array as float64, keeping them charged.
 
     The rows are read one chunk of rows at a time, so that a read holds the
-    values of one chunk in their stored type, not those of every row.
+    values of one chunk in their stored type, not those of every row. Each
+    read holds its chunk as stored and decoded beside the rows it returns and
+    the chunk that the read before can still hold, which the ledger counts,
+    and decodes on the ledger's codec threads.
     """
-    values = np.empty((len(rows), int(data.shape[1])))
+    n_rows, n_columns = len(rows), int(data.shape[1])
+    ledger.hold("the cells' coordinates", 8 * n_rows * n_columns)
+    values = np.empty((n_rows, n_columns))
     step = int(data.chunks[0])
+    geometry = array_geometry(data)
+    fixed, per_row = array_row_selection_parts(data)
+    held = 0 if geometry is None else geometry.heldReadBytes(ledger.codec_threads)
+    # Before the first chunk, the read before is the ledger's last, whose
+    # leftover the ledger counts already.
+    ledger.peak(
+        "reading the cells' coordinates",
+        fixed + per_row * min(n_rows, step) + max(0, held - ledger.left),
+    )
     # Where the rows of each chunk start among the rows, once per chunk that
     # holds any.
     edges = np.unique(
         np.searchsorted(rows, np.arange(0, int(data.shape[0]) + step, step))
     )
-    for start, stop in zip(edges[:-1], edges[1:], strict=True):
-        values[start:stop] = data.oindex[rows[start:stop], :]
+    with zarr_decoding_threads(ledger.codec_threads):
+        for start, stop in zip(edges[:-1], edges[1:], strict=True):
+            values[start:stop] = data.oindex[rows[start:stop], :]
+    if geometry is not None:
+        chunks = max(1, len(edges) - 1)
+        ledger.leave(geometry.heldReadBytes(ledger.holding_threads(chunks)))
     return values
 
 
@@ -200,29 +220,28 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         if not isinstance(from_assay, str) or from_assay not in self.assay_names:
             raise ValueError(f"from_assay must name an assay, not {from_assay!r}")
         efficiency_settings(by, id_column)
-        rows = _label_rows(self, labels, by)
+        ledger = _call_ledger(self, f"Measuring the efficiency of the {by}s")
+        rows = _label_rows(self, ledger, labels, by)
         status = rows.status
         row_names = rows.names
         expression = self._get_assay(from_assay)
-        feature_ids = np.asarray(expression.feats.fetch_all("ids")).astype(str)
-        feature_names = np.asarray(expression.feats.fetch_all("names")).astype(str)
+        feature_ids = _feature_text(ledger, expression, "ids")
+        feature_names = _feature_text(ledger, expression, "names")
         row_features = _row_features(
-            self, labels, rows, id_column, feature_ids, feature_names
-        )
-        # The expression assay's feature IDs and names and the guide assay's
-        # feature IDs of the targets, each read in whole chunks and copied.
-        feature_bytes = (
-            _column_read_bytes(expression.feats, "ids")
-            + _column_read_bytes(expression.feats, "names")
-            + _column_read_bytes(self._get_assay(str(labels.assay)).feats, id_column)
+            self, ledger, labels, rows, id_column, feature_ids, feature_names
         )
         self._require_measured_cells(
             expression.name,
             status.input_ref("cell_selection"),
             operation=PerturbationEfficiencyArguments.operation,
         )
+        ledger.hold(
+            "each row's feature ID", len(row_features) * feature_ids.dtype.itemsize
+        )
         row_feature_ids = _matched_ids(row_features, feature_ids)
+        features_bytes = feature_ids.nbytes + feature_names.nbytes
         del feature_ids, feature_names
+        ledger.release(features_bytes)
         arguments = PerturbationEfficiencyArguments(
             labels=labels,
             dataset_fingerprint=self._ensure_dataset_fingerprint(expression.name),
@@ -260,52 +279,27 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             # A saved table warns as it did when it was measured.
             stored = artifact_group(self.zw, planned.ref)
             message = _unmatched_targets_warning(
-                read_array(stored, "names").astype(str),
-                read_array(stored, "targets").astype(str),
-                read_array(stored, "status"),
+                read_whole(ledger, stored, "names", item="the saved rows' names"),
+                read_whole(ledger, stored, "targets", item="the saved rows' targets"),
+                read_whole(ledger, stored, "status", item="the saved rows' statuses"),
                 expression.name,
                 by,
             )
             if message is not None:
                 warn(message)
             return planned.ref
-        compared, finding = _compared_cells(self, labels, rows, by)
+        compared = _compared_cells(self, ledger, labels, rows, by)
         n_compared = len(compared.cells)
         needed_features = np.unique(row_features[row_features >= 0])
         n_features = len(needed_features)
-        sizes = np.bincount(compared.groups[compared.groups >= 0], minlength=n_rows)
+        ledger.doing = f"Comparing {n_features} target genes over {n_compared} cells"
         n_control = int(np.count_nonzero(compared.control))
-        # The compared cells' positions, rows and flags and their library
-        # sizes are held from the read of the library sizes to the end.
-        held = 25 * n_compared
-        # The counts are streamed beside the blocks gathered so far, and
-        # joined into one array beside them.
-        gathered = held + 8 * n_features * n_compared
-        streaming = gathered
-        if n_features:
-            streaming += _count_stream_bytes(
-                expression,
-                needed_features,
-                compared.cells,
-                scratch_bytes_per_row=8 * n_features,
-            )
-        needed = max(
-            feature_bytes,
-            finding,
-            streaming,
-            held + 16 * n_features * n_compared,
-            8 * n_compared
-            + efficiency_memory_bytes(
-                n_compared, n_features, n_control, int(sizes.max(initial=0))
-            ),
+        library = _cell_totals(
+            ledger,
+            expression,
+            compared.cells,
+            item="the compared cells' library sizes",
         )
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            f"Comparing {n_features} target genes over {n_compared} cells holds about",
-            remedy=f"Raise mem_budget to at least {needed} bytes.",
-        )
-        library = expression._cell_count_totals(compared.cells)
         if not np.any(library > 0):
             raise ValueError(
                 f"None of the {n_compared} compared cells, those that carry a "
@@ -315,43 +309,65 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
                 "these cells"
             )
         self._require_writable(arguments.operation)
+        counts_bytes = 8 * n_features * n_compared
         if n_features:
-            _, blocks = _count_blocks(
-                self,
-                _resident_ledger(self, gathered),
-                expression,
-                needed_features,
-                compared.cells,
-                scratch_bytes_per_row=8 * n_features,
-            )
-            counts = np.concatenate(
-                [np.asarray(block, dtype=np.float64) for block in blocks]
-            )
+            # The counts are streamed beside the blocks gathered so far, and
+            # joined into one array beside them.
+            ledger.hold("the target genes' counts", counts_bytes)
+            gathered = [
+                np.asarray(block, dtype=np.float64)
+                for block in _count_blocks(
+                    self,
+                    ledger,
+                    expression,
+                    needed_features,
+                    compared.cells,
+                    scratch_bytes_per_row=8 * n_features,
+                    item="reading the target genes' counts",
+                )
+            ]
+            ledger.hold("the target genes' counts", counts_bytes)
+            counts = np.concatenate(gathered)
+            del gathered
+            ledger.release(counts_bytes)
         else:
             counts = np.zeros((n_compared, 0))
         row_columns = np.where(
             row_features >= 0, np.searchsorted(needed_features, row_features), -1
         )
         arrays = efficiency_arrays(
-            counts, library, compared.groups, compared.control, row_columns
+            counts,
+            library,
+            compared.groups,
+            compared.control,
+            row_columns,
+            ledger=ledger,
         )
+        columns = {
+            "names": row_names,
+            "targets": rows.target_names[rows.codes],
+            "features": row_feature_ids,
+            **{
+                name: getattr(arrays, name)
+                for name in (
+                    "status",
+                    "n_cells",
+                    "n_control_cells",
+                    *_EFFICIENCY_VALUES,
+                )
+            },
+        }
+        del counts, library
+        ledger.release(counts_bytes + 8 * n_compared)
+        ledger.hold(
+            "the efficiency table",
+            sum(np.asarray(values).nbytes for values in columns.values()),
+        )
+        ledger.peak("saving the efficiency table", _table_write_bytes(columns))
         write_cell_data_artifact(
             self.zw,
             planned,
-            {
-                "names": row_names,
-                "targets": rows.target_names[rows.codes],
-                "features": row_feature_ids,
-                **{
-                    name: getattr(arrays, name)
-                    for name in (
-                        "status",
-                        "n_cells",
-                        "n_control_cells",
-                        *_EFFICIENCY_VALUES,
-                    )
-                },
-            },
+            columns,
             attributes={"status_names": list(EFFICIENCY_STATUSES), "by": by},
         )
         message = _unmatched_targets_warning(
@@ -395,19 +411,40 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         )
         status = require_complete_artifact(self.zw, efficiency)
         group = artifact_group(self.zw, efficiency)
+        ledger = _call_ledger(self, f"Reading the {efficiency.kind} artifact")
 
         by = str((status.parameters or {})["by"])
-        features = read_array(group, "features").astype(str)
         columns: dict[str, Any] = {}
         if by == "guide":
-            columns["guide"] = read_array(group, "names").astype(str)
-        columns["target"] = read_array(group, "targets").astype(str)
-        columns["feature"] = pd.Series(
-            [None if feature == "" else feature for feature in features], dtype=object
+            columns["guide"] = read_whole(ledger, group, "names", item="the guides")
+        columns["target"] = read_whole(ledger, group, "targets", item="the targets")
+        features = read_whole(ledger, group, "features", item="the features")
+        columns["status"] = _status_labels(
+            group,
+            EFFICIENCY_STATUSES,
+            read_whole(ledger, group, "status", item="the statuses"),
         )
-        columns["status"] = _status_labels(group, EFFICIENCY_STATUSES)
         for name in ("n_cells", "n_control_cells", *_EFFICIENCY_VALUES):
-            columns[name] = read_array(group, name)
+            columns[name] = read_whole(ledger, group, name, item=f"the rows' {name}")
+        ledger.peak(
+            "the efficiency table", _frame_bytes({**columns, "feature": features})
+        )
+        columns["feature"] = pd.Series(
+            [None if feature == "" else str(feature) for feature in features],
+            dtype=object,
+        )
+        columns = {
+            name: columns[name]
+            for name in (
+                *(("guide",) if by == "guide" else ()),
+                "target",
+                "feature",
+                "status",
+                "n_cells",
+                "n_control_cells",
+                *_EFFICIENCY_VALUES,
+            )
+        }
         return PerturbationEfficiency(
             table=pd.DataFrame(columns),
             by=by,
@@ -480,7 +517,8 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         _require_ref(labels, "labels", PerturbationLabelArguments.artifact_kind)
         _require_ref(coordinates, "coordinates", *_COORDINATE_KINDS)
         permutations, seed = edistance_settings(by, n_permutations, random_seed)
-        rows = _label_rows(self, labels, by)
+        ledger = _call_ledger(self, f"Measuring the E-distances of the {by}s")
+        rows = _label_rows(self, ledger, labels, by)
         inputs = resolve_coordinate_inputs(self.zw, coordinates)
         arguments = PerturbationEDistanceArguments(
             labels=labels,
@@ -517,8 +555,18 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         )
         if planned.reused:
             return planned.ref
-        compared, finding = _compared_cells(self, labels, rows, by)
-        positions, present = _selected_rows(self, inputs.cell_selection, compared.cells)
+        compared = _compared_cells(self, ledger, labels, rows, by)
+        # Imported coordinates are checked against the order of their cells'
+        # IDs as their selection is first read.
+        ledger.peak(
+            "checking the coordinates' cells against the cell IDs",
+            _cell_selection_check_bytes(
+                self, selected_ids=coordinates.kind == "imported_coordinates"
+            ),
+        )
+        positions, present = _selected_rows(
+            self, ledger, inputs.cell_selection, compared.cells
+        )
         n_compared = len(compared.cells)
         if not present.all():
             logger.info(
@@ -527,11 +575,13 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             )
         # The measurement needs only the kept cells' coordinate rows, groups
         # and flags, so the arrays of every compared cell are released here.
+        n_kept = int(np.count_nonzero(present))
+        ledger.hold("the kept cells' rows, groups and flags", 17 * n_kept)
         coordinate_rows = positions[present]
         kept_groups = compared.groups[present]
         kept_control = compared.control[present]
         del compared, positions, present
-        n_kept = len(kept_groups)
+        ledger.release(26 * n_compared)
         n_control = int(np.count_nonzero(kept_control))
         if n_control < 2:
             raise ValueError(
@@ -540,45 +590,14 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             )
         data = as_zarr_array(artifact_group(self.zw, coordinates)["data"], name="data")
         n_dims = int(data.shape[1])
-        # The coordinates are read as float64 one chunk of rows at a time,
-        # beside each kept cell's group, flag and row, and the measurement
-        # then holds what edistance_memory_bytes counts.
-        read_fixed, read_per_row = array_row_selection_parts(data)
-        reading = (
-            n_kept * (8 * n_dims + 17)
-            + read_fixed
-            + read_per_row * min(n_kept, int(data.chunks[0]))
-        )
-        measuring = edistance_memory_bytes(
-            np.bincount(kept_groups[kept_groups >= 0], minlength=n_rows),
-            n_control,
-            n_dims,
-            n_permutations=permutations,
-            nthreads=self.nthreads,
-        )
-        # Placing the compared cells among the cells with coordinates holds
-        # their positions, rows and flags, where each sits and whether it is
-        # there, and the kept cells' rows, groups and flags.
-        placing = 43 * n_compared + _selection_block_bytes(self, inputs.cell_selection)
-        # Imported coordinates are checked against the order of their cells'
-        # IDs before anything else is held.
-        checking = _cell_selection_check_bytes(
-            self, selected_ids=coordinates.kind == "imported_coordinates"
-        )
-        # Writing the table also holds Zarr's file buffers.
-        needed = (
-            max(checking, finding, placing, reading, measuring)
-            + zarr_write_buffer_bytes()
-        )
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            f"The E-distances of {n_kept} cells in {n_dims} dimensions hold about",
-            remedy=f"Raise mem_budget to at least {needed} bytes.",
+        ledger.doing = (
+            f"Measuring the E-distances of {n_kept} cells in {n_dims} dimensions"
         )
         self._require_writable(arguments.operation)
-        values = _float64_rows(data, coordinate_rows)
+        values = _float64_rows(ledger, data, coordinate_rows)
+        rows_bytes = coordinate_rows.nbytes
         del coordinate_rows
+        ledger.release(rows_bytes)
         arrays = edistance_arrays(
             values,
             kept_groups,
@@ -587,25 +606,34 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             n_permutations=permutations,
             random_seed=seed,
             nthreads=self.nthreads,
+            ledger=ledger,
         )
+        del values
+        ledger.release(8 * n_dims * n_kept)
+        columns = {
+            "names": rows.names,
+            "targets": rows.target_names[rows.codes],
+            **{
+                name: getattr(arrays, name)
+                for name in (
+                    "status",
+                    "n_cells",
+                    "n_control_cells",
+                    "edistance",
+                    "p_value",
+                    "adjusted_p_value",
+                )
+            },
+        }
+        ledger.hold(
+            "the E-distance table",
+            sum(np.asarray(values).nbytes for values in columns.values()),
+        )
+        ledger.peak("saving the E-distance table", _table_write_bytes(columns))
         write_cell_data_artifact(
             self.zw,
             planned,
-            {
-                "names": rows.names,
-                "targets": rows.target_names[rows.codes],
-                **{
-                    name: getattr(arrays, name)
-                    for name in (
-                        "status",
-                        "n_cells",
-                        "n_control_cells",
-                        "edistance",
-                        "p_value",
-                        "adjusted_p_value",
-                    )
-                },
-            },
+            columns,
             attributes={"status_names": list(EDISTANCE_STATUSES), "by": by},
         )
         logger.info(
@@ -640,14 +668,19 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         )
         status = require_complete_artifact(self.zw, edistance)
         group = artifact_group(self.zw, edistance)
+        ledger = _call_ledger(self, f"Reading the {edistance.kind} artifact")
 
         parameters = status.parameters or {}
         by = str(parameters["by"])
         columns: dict[str, Any] = {}
         if by == "guide":
-            columns["guide"] = read_array(group, "names").astype(str)
-        columns["target"] = read_array(group, "targets").astype(str)
-        columns["status"] = _status_labels(group, EDISTANCE_STATUSES)
+            columns["guide"] = read_whole(ledger, group, "names", item="the guides")
+        columns["target"] = read_whole(ledger, group, "targets", item="the targets")
+        columns["status"] = _status_labels(
+            group,
+            EDISTANCE_STATUSES,
+            read_whole(ledger, group, "status", item="the statuses"),
+        )
         for name in (
             "n_cells",
             "n_control_cells",
@@ -655,7 +688,8 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             "p_value",
             "adjusted_p_value",
         ):
-            columns[name] = read_array(group, name)
+            columns[name] = read_whole(ledger, group, name, item=f"the rows' {name}")
+        ledger.peak("the E-distance table", _frame_bytes(columns))
         return PerturbationEDistance(
             table=pd.DataFrame(columns),
             by=by,

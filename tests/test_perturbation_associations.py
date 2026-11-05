@@ -51,7 +51,9 @@ from cytearc.perturbation.p_values import (
 )
 from cytearc.perturbation.random_sets import resampling_keys
 from cytearc.storage.artifacts import ArtifactRef
+from cytearc.storage.validation_scope import validation_scope
 from cytearc.utils.logging import logger
+from cytearc.utils.memory_budget import MemoryLedger
 from tests.perturbation_helpers import (
     dense_pair,
     fixed_labels,
@@ -60,8 +62,14 @@ from tests.perturbation_helpers import (
     use_python_kernels,
     write_screen,
 )
-from tests.memory_helpers import check_budget, named_budget
-from tests.storage_helpers import open_store
+from tests.memory_helpers import (
+    ZARR_READS,
+    audited,
+    check_budget,
+    hold_finished_reads,
+    refusal_naming,
+)
+from tests.storage_helpers import open_store, rechunk_feature_tables
 
 
 def _python_kernels(monkeypatch: pytest.MonkeyPatch, python_kernels: bool) -> None:
@@ -1420,7 +1428,7 @@ def _operation_store(
     gene_ids: list[str] = GUIDE_GENE_IDS,
 ) -> DataStore:
     runs = np.asarray(OPERATION_RUNS, dtype=object)
-    return write_screen(
+    write_screen(
         tmp_path / name,
         OPERATION_RNA if rna is None else rna,
         OPERATION_GUIDES if guides is None else guides,
@@ -1429,6 +1437,10 @@ def _operation_store(
         cell_columns={"run": runs, "mito": OPERATION_MITO, "label": runs},
         nthreads=2,
     )
+    # In chunks of their rows, the feature tables' reads hold what their rows
+    # do, so a budget shows what the tests hold besides.
+    rechunk_feature_tables(tmp_path / name)
+    return open_store(tmp_path / name, nthreads=2)
 
 
 def _every_gene(store: DataStore) -> ArtifactRef:
@@ -1563,7 +1575,9 @@ def test_associations_test_tables_of_pairs_one_guide_at_a_time(shared) -> None:
 
 def test_association_pairs_match_features_by_id_then_name(shared) -> None:
     store = shared.store
-    rows = _label_rows(store, shared.labels, "target")
+    rows = _label_rows(
+        store, MemoryLedger(None, "Reading the labels"), shared.labels, "target"
+    )
     ids = np.array(["ENSG0", "ENSG1", "ENSG2", "ENSG3"])
     names = np.array(["A", "B", "B", "ENSG0"])
     frame = pd.DataFrame(
@@ -1813,12 +1827,34 @@ def test_association_reads_leave_room_for_the_held_counts(shared, monkeypatch) -
 def test_associations_refuse_a_budget_without_room_for_one_feature(shared) -> None:
     store, labels = shared.store, shared.labels
     # The second round's random sets of the 150 cells of a group fill it.
-    budgeted = open_store(store.zarr_loc, mem_budget=8_000_000)
-
-    with pytest.raises(MemoryError, match="one feature over 540 tested cells"):
-        budgeted.perturbation.associations(
+    # The refusals from a budget of 8,000,000 bytes reach the counts of one
+    # feature over the 540 tested cells, with the tests.
+    refusal = refusal_naming(
+        lambda budget: open_store(
+            store.zarr_loc, mem_budget=budget
+        ).perturbation.associations(
             labels, features=_every_gene(store), n_resamples=(200, 1000, 100_000)
-        )
+        ),
+        "for the counts of one feature with the tests and their random sets",
+        start=8_000_000,
+    )
+    assert " over 540 cells holds about " in str(refusal)
+
+
+#: The most times its traced peak that an association budget may be, beside
+#: 1 MiB.
+_ASSOCIATION_AT_MOST = 3.0
+_WIDE_CHUNK_AT_MOST = 4.0
+
+
+def _audit(path, run, budget: int) -> None:
+    """Check that ``run`` holds no more than its ledger plans from each charge to the next at ``budget`` on two threads, with each read's work held until the next read ends."""
+    store = open_store(path, mem_budget=budget, nthreads=2)
+    with validation_scope():
+        run(store)
+        with hold_finished_reads(*ZARR_READS):
+            _result, overruns = audited(lambda: run(store))
+    assert overruns == []
 
 
 def test_association_refusals_name_the_budget_that_runs_the_tests(shared) -> None:
@@ -1832,20 +1868,28 @@ def test_association_refusals_name_the_budget_that_runs_the_tests(shared) -> Non
     def run(budgeted: DataStore) -> ArtifactRef:
         return budgeted.perturbation.associations(labels, **arguments)
 
-    # The tests hold far more than this budget, the pairs' arrays alone.
-    with pytest.raises(MemoryError, match="one feature over 540 tested cells") as low:
-        run(open_store(store.zarr_loc, nthreads=2, mem_budget=1000))
-    needed = named_budget(low.value)
-
-    # A budget one byte short asks for the same budget, which runs the tests
-    # with the results of the default budget; the wide count chunk below
-    # checks the traced peak.
-    with pytest.raises(MemoryError) as short:
-        run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed - 1))
-    assert named_budget(short.value) == needed
-    tight = store.perturbation.load_associations(
-        run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed))
+    # Each refusal from a budget of one byte names its step, the last the
+    # budget that runs the tests within it, by no more than a few times its
+    # traced peak, with the results of the default budget; one byte less is
+    # refused naming the same budget.
+    budget, refusals, tests = check_budget(
+        store.zarr_loc,
+        run,
+        nthreads=2,
+        at_most=_ASSOCIATION_AT_MOST,
+        allowance=1 << 20,
+        max_refusals=100,
     )
+    assert 1 <= len(refusals) <= 24
+    assert all(
+        refusal.startswith(
+            ("Testing the associations of the targets holds", "Testing the pairs of ")
+        )
+        for refusal in refusals
+    )
+    assert any("over 540 cells holds about" in refusal for refusal in refusals)
+    _audit(store.zarr_loc, run, budget)
+    tight = store.perturbation.load_associations(tests)
     for name in ("discovery", "calibration", "positive"):
         pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
 
@@ -1874,9 +1918,20 @@ def test_association_refusals_count_the_read_of_a_wide_count_chunk(tmp_path) -> 
     def run(budgeted: DataStore) -> ArtifactRef:
         return budgeted.perturbation.associations(labels, **arguments)
 
-    # The named budget runs the tests within it; it once left out the read,
-    # which then failed in the stream planner.
-    _, _, tests = check_budget(store.zarr_loc, run, check_writes=False, nthreads=2)
+    # The named budget runs the tests within it, by no more than a few times
+    # its traced peak; it once left out the read, which then failed in the
+    # stream planner. The read of the wide chunk is planned at the bound of
+    # its encoded bytes, which counts compress far below.
+    budget, _refusals, tests = check_budget(
+        store.zarr_loc,
+        run,
+        check_writes=False,
+        nthreads=2,
+        at_most=_WIDE_CHUNK_AT_MOST,
+        allowance=1 << 20,
+        max_refusals=100,
+    )
+    _audit(store.zarr_loc, run, budget)
     tight = store.perturbation.load_associations(tests)
     for name in ("discovery", "positive"):
         pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
@@ -1890,7 +1945,8 @@ def test_loading_associations_checks_the_memory_budget(shared, monkeypatch) -> N
 
     budgeted = open_store(store.zarr_loc, mem_budget=1000)
     with pytest.raises(
-        MemoryError, match=f"^The association tests of {n_pairs} pairs hold about"
+        MemoryError,
+        match=f"^Reading the association tests of {n_pairs} pairs holds about",
     ):
         budgeted.perturbation.load_associations(tests)
 
@@ -1915,7 +1971,7 @@ def test_associations_plan_only_the_calibration_pairs_a_check_can_draw(
     # pairs fit in 214 MiB, which 244 pairs, with as many calibration pairs as
     # discovery pairs, would not.
     monkeypatch.setattr(perturbation_operations, "_ASSOCIATION_PAIR_BYTES", mib)
-    with pytest.raises(MemoryError, match="one feature over"):
+    with pytest.raises(MemoryError, match="for the pairs and their QC counts"):
         open_store(store.zarr_loc, mem_budget=183 * mib).perturbation.associations(
             **arguments
         )

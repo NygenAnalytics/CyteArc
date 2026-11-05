@@ -26,6 +26,13 @@ import pandas as pd
 from scipy.stats import false_discovery_control, mannwhitneyu
 
 from cytearc.utils.arguments import optional_name_argument
+from cytearc.utils.memory_budget import (
+    MemoryLedger,
+    fixed_text_bytes,
+    hash_table_bytes,
+    object_array_bytes,
+    python_text_bytes,
+)
 
 __all__ = [
     "EFFICIENCY_NO_CELLS",
@@ -40,6 +47,7 @@ __all__ = [
     "efficiency_settings",
     "id_column_setting",
     "rows_setting",
+    "target_feature_bytes",
     "target_features",
 ]
 
@@ -168,6 +176,54 @@ def target_features(
     return matched
 
 
+def _strings_bytes(values: np.ndarray) -> int:
+    """Return the bytes of fixed-width text ``values`` as Python strings in an object array, each at the width of the widest."""
+    text = np.asarray(values)
+    if text.dtype.kind != "U":
+        text = text.astype(str)
+    n_values = len(text)
+    width = text.dtype.itemsize // 4
+    widest = int(text.view(np.uint32).max()) if text.size and width else 0
+    return object_array_bytes(n_values) + python_text_bytes(
+        n_values, n_values * width, widest=widest
+    )
+
+
+def target_feature_bytes(
+    n_targets: int,
+    feature_ids: np.ndarray,
+    feature_names: np.ndarray,
+    guide_feature_ids: np.ndarray | None = None,
+) -> int:
+    """Return the bytes that :func:`target_features` holds beside its arguments.
+
+    It holds the feature IDs as text and as an index of Python strings, with
+    the hash table that finds whether they are unique, and the names as text,
+    sorted, their distinct values with their positions and counts, the names
+    that occur once and a series of positions by name, each index of Python
+    strings with its hash table. Each string is counted at the width of its
+    column's widest value. Each target gathers its guides' IDs, and holds
+    its match.
+
+    Args:
+        n_targets: The targets matched.
+        feature_ids: The IDs of the expression features, as text.
+        feature_names: The names of the expression features, as text.
+        guide_feature_ids: Each guide's target feature ID, or None.
+    """
+    ids = np.asarray(feature_ids)
+    names = np.asarray(feature_names)
+    n_ids, n_names = len(ids), len(names)
+    id_width = max(1, ids.dtype.itemsize // 4) if ids.dtype.kind == "U" else 1
+    name_width = max(1, names.dtype.itemsize // 4) if names.dtype.kind == "U" else 1
+    by_id = fixed_text_bytes(n_ids, id_width) + _strings_bytes(ids)
+    by_id += hash_table_bytes(n_ids)
+    by_name = 4 * fixed_text_bytes(n_names, name_width) + 32 * n_names
+    by_name += 2 * (_strings_bytes(names) + hash_table_bytes(n_names))
+    guides = 0 if guide_feature_ids is None else 16 * len(guide_feature_ids)
+    return by_id + by_name + guides + 16 * int(n_targets)
+
+
 def _two_sided_p(perturbed: np.ndarray, control: np.ndarray) -> float:
     """Return the two-sided Mann-Whitney p-value, 1 when every value is equal.
 
@@ -223,6 +279,8 @@ def efficiency_arrays(
     groups: np.ndarray,
     control: np.ndarray,
     row_columns: np.ndarray,
+    *,
+    ledger: MemoryLedger | None = None,
 ) -> EfficiencyArrays:
     """Compare each row's target gene between its cells and the control cells.
 
@@ -237,6 +295,9 @@ def efficiency_arrays(
         control: Whether each cell is a control cell.
         row_columns: The column of each row's gene in ``counts``, or -1 when
             the row's target matches no feature.
+        ledger: The caller's memory ledger, which holds the arrays passed and
+            is charged what the comparison holds beside them, as
+            :func:`efficiency_memory_bytes` counts it, before it starts.
 
     Returns:
         The status, cell counts, means, remaining fraction, fold change and
@@ -247,6 +308,29 @@ def efficiency_arrays(
             compared cell holds a UMI, or a cell holds UMIs of a target gene
             with a library size of 0.
     """
+    if ledger is not None:
+        passed = sum(
+            np.asarray(values).nbytes
+            for values in (counts, library_sizes, groups, control)
+        )
+        n_rows = len(row_columns)
+        sizes = np.bincount(
+            np.asarray(groups)[np.asarray(groups) >= 0], minlength=n_rows
+        )
+        ledger.peak(
+            "comparing the target genes",
+            max(
+                0,
+                efficiency_memory_bytes(
+                    len(groups),
+                    np.asarray(counts).shape[1] if np.ndim(counts) == 2 else 0,
+                    int(np.count_nonzero(control)),
+                    int(sizes.max(initial=0)),
+                )
+                - passed,
+            ),
+        )
+        del sizes
     counts = np.asarray(counts, dtype=np.float64)
     library = np.asarray(library_sizes, dtype=np.float64)
     groups = np.asarray(groups, dtype=np.int64)

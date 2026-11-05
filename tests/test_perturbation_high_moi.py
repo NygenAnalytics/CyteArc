@@ -31,8 +31,18 @@ from tests.perturbation_helpers import (
     use_python_kernels,
     write_screen,
 )
-from tests.memory_helpers import budget_that_runs, named_budget
-from tests.storage_helpers import open_store
+from cytearc.storage.validation_scope import validation_scope
+from cytearc.utils.memory_budget import MemoryLedger, observed_charges
+from tests.memory_helpers import (
+    ZARR_READS,
+    audited,
+    budget_that_runs,
+    check_budget,
+    follow_refusals,
+    hold_finished_reads,
+    refusal_naming,
+)
+from tests.storage_helpers import open_store, rechunk_feature_tables
 
 
 def _python_kernels(monkeypatch: pytest.MonkeyPatch, python_kernels: bool) -> None:
@@ -1204,7 +1214,12 @@ def _warned(store, *args, **kwargs):
 @pytest.fixture(scope="module")
 def screen(tmp_path_factory):
     """One store of the multi-guide screen, its labels and its genes."""
-    store = _screen_store(tmp_path_factory.mktemp("high_moi") / "store.zarr")
+    location = tmp_path_factory.mktemp("high_moi") / "store.zarr"
+    _screen_store(location)
+    # In chunks of their rows, the feature tables' reads hold what their rows
+    # do, so a budget shows what the tests hold besides.
+    rechunk_feature_tables(location)
+    store = open_store(location, nthreads=2)
     return store, _screen_labels(store), _every_screen_gene(store)
 
 
@@ -1452,17 +1467,30 @@ def test_high_moi_held_and_streamed_counts_agree(screen, monkeypatch) -> None:
 
 def test_high_moi_refuses_a_budget_without_room_for_one_gene(screen) -> None:
     store, labels, genes = screen
-    arguments = {"features": genes, "moi": "high", "invalidate_cache": True, **FAST}
-    with pytest.raises(MemoryError, match="^Counting the cells") as counting:
-        open_store(store.zarr_loc, mem_budget=100_000).perturbation.associations(
+    # A second round of 99,999 random sets, whose statistics one gene's tests
+    # hold, outweighs every step before the tests.
+    arguments = {
+        "features": genes,
+        "moi": "high",
+        "invalidate_cache": True,
+        "n_resamples": (199, 99_999, 199_999),
+    }
+
+    def run(budget: int) -> object:
+        return open_store(store.zarr_loc, mem_budget=budget).perturbation.associations(
             labels, **arguments
         )
-    # The budget that counts each guide's and target's cells holds too little
-    # to test a gene.
-    budgeted = open_store(store.zarr_loc, mem_budget=named_budget(counting.value))
 
-    with pytest.raises(MemoryError, match="one gene over 400 labelled cells"):
-        budgeted.perturbation.associations(labels, **arguments)
+    # The refusals from a budget of 100,000 bytes pass the labels' steps and
+    # the count of each guide's and target's cells, and reach a budget that
+    # holds too little to test a gene.
+    refusal = refusal_naming(
+        run,
+        "for the tests of one gene, their random sets and one feature's counts",
+        start=100_000,
+    )
+    assert str(refusal).startswith("Testing one gene over 400 labelled cells")
+    assert refusal.needed_bytes > 16 * 99_999
 
 
 def test_high_moi_checks_the_budget_of_counting_guides_before_reading_them(
@@ -1491,51 +1519,80 @@ def test_high_moi_checks_the_budget_of_counting_guides_before_reading_them(
 
     monkeypatch.setattr(high_moi, "code_counts", traced_count)
 
-    def run(budget):
-        return open_store(
-            store.zarr_loc, nthreads=2, mem_budget=budget
-        ).perturbation.associations(labels, **arguments)
+    def run(budgeted):
+        return budgeted.perturbation.associations(labels, **arguments)
 
-    counts_cells = (
-        "^Counting the cells of each guide and target over 400 labelled cells"
+    budget, _refusals = follow_refusals(
+        lambda memory: run(open_store(store.zarr_loc, nthreads=2, mem_budget=memory)),
+        start=1000,
     )
-    with pytest.raises(MemoryError, match=counts_cells) as low:
-        run(1000)
-    counting = named_budget(low.value)
-    # One byte short of that budget is refused naming it, and neither refusal
-    # reads the codes.
-    with pytest.raises(MemoryError, match=counts_cells) as short:
-        run(counting - 1)
-    assert named_budget(short.value) == counting
-    assert passes == []
+    passes.clear()
+    charged: list[tuple[str, int]] = []
+    with observed_charges(
+        lambda item, _nbytes, _planned: charged.append((item, len(passes)))
+    ):
+        run(open_store(store.zarr_loc, nthreads=2, mem_budget=budget))
 
-    # That budget counts the guides' cells, then the targets', within it, and
-    # the tests then name more.
-    with pytest.raises(MemoryError, match="one gene over 400 labelled cells") as tests:
-        run(counting)
+    # Counting the guides' cells, then the targets', is charged before the
+    # pass over the codes that counts them, and at the budget that runs, each
+    # interval from one charge to the next holds no more than the ledger
+    # planned, each pass over the codes among them.
+    counted = [
+        made
+        for item, made in charged
+        if item
+        in ("counting the cells of each guide", "counting the cells of each target")
+    ]
+    assert counted == [0, 1]
     assert len(passes) == 2
-    assert max(passes) <= counting, f"A pass held {max(passes)} bytes of {counting}"
-    assert named_budget(tests.value) > counting
+    _audit(store.zarr_loc, run, budget)
 
 
 def test_high_moi_checks_the_budget_before_the_store_must_be_writable(
     screen,
 ) -> None:
     store, labels, genes = screen
-    # A seed whose tests are not saved yet.
-    arguments = {"features": genes, "moi": "high", "seed": 11, **FAST}
+    # A seed whose tests are not saved yet, and a second round whose
+    # statistics outweigh every step before the tests.
+    arguments = {
+        "features": genes,
+        "moi": "high",
+        "seed": 11,
+        "n_resamples": (199, 99_999, 199_999),
+    }
 
-    reader = open_store(store.zarr_loc, zarr_mode="r", mem_budget=1000)
-    with pytest.raises(MemoryError, match="^Counting the cells") as counting:
-        reader.perturbation.associations(labels, **arguments)
-    reader = open_store(
-        store.zarr_loc, zarr_mode="r", mem_budget=named_budget(counting.value)
-    )
-    with pytest.raises(MemoryError, match="one gene over 400 labelled cells"):
-        reader.perturbation.associations(labels, **arguments)
+    def read_only(budget: int) -> object:
+        reader = open_store(store.zarr_loc, zarr_mode="r", mem_budget=budget)
+        return reader.perturbation.associations(labels, **arguments)
+
+    # The memory budget of each step, the tests' included, is checked before
+    # a read-only store refuses the write.
+    tests = refusal_naming(read_only, "for the tests of one gene", start=1000)
+    with pytest.raises(PermissionError, match="perturbation_associations"):
+        read_only(tests.needed_bytes)
     reader = open_store(store.zarr_loc, zarr_mode="r")
     with pytest.raises(PermissionError, match="perturbation_associations"):
         reader.perturbation.associations(labels, **arguments)
+
+
+#: The most times its traced peak that a high-MOI budget may be, beside 1 MiB.
+_HIGH_MOI_AT_MOST = 3.0
+#: What the high-MOI tests' refusals say the call does, step by step.
+_HIGH_MOI_DOINGS = (
+    "Testing the associations of the targets holds",
+    "Counting the cells of each guide and target over ",
+    "Testing one gene over ",
+)
+
+
+def _audit(path, run, budget: int) -> None:
+    """Check that ``run`` holds no more than its ledger plans from each charge to the next at ``budget`` on two threads, with each read's work held until the next read ends."""
+    store = open_store(path, mem_budget=budget, nthreads=2)
+    with validation_scope():
+        run(store)
+        with hold_finished_reads(*ZARR_READS):
+            _result, overruns = audited(lambda: run(store))
+    assert overruns == []
 
 
 def test_high_moi_refusals_name_the_budget_that_runs_the_tests(screen) -> None:
@@ -1548,31 +1605,24 @@ def test_high_moi_refusals_name_the_budget_that_runs_the_tests(screen) -> None:
     def run(budgeted):
         return budgeted.perturbation.associations(labels, **arguments)
 
-    # The tests hold far more than this budget, the labelled cells' arrays
-    # alone. Counting each guide's and target's cells comes first and names
-    # its own budget, which the tests then refuse.
-    with pytest.raises(MemoryError, match="^Counting the cells") as counting:
-        run(open_store(store.zarr_loc, nthreads=2, mem_budget=1000))
-    with pytest.raises(MemoryError, match="one gene over 400 labelled cells") as low:
-        run(
-            open_store(
-                store.zarr_loc, nthreads=2, mem_budget=named_budget(counting.value)
-            )
-        )
-    needed = named_budget(low.value)
-
-    # A budget one byte short asks for the same budget, which runs the tests
-    # with the results of the default budget; it once left out the read of a
-    # gene's counts, which then failed in the stream planner. On these 400
-    # cells every call's reads of the store's cell and feature columns,
-    # whole chunks of 100,000 rows, outweigh the tests, so the wide screen
-    # below checks the traced peak.
-    with pytest.raises(MemoryError) as short:
-        run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed - 1))
-    assert named_budget(short.value) == needed
-    tight = store.perturbation.load_associations(
-        run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed))
+    # Each refusal from a budget of one byte names its step: those of the
+    # labels, counting each guide's and target's cells, then the tests, the
+    # last the budget that runs the tests within it, by no more than a few
+    # times its traced peak, with the results of the default budget; it once
+    # left out the read of a gene's counts, which then failed in the stream
+    # planner. One byte less is refused naming the same budget.
+    budget, refusals, tests = check_budget(
+        store.zarr_loc,
+        run,
+        nthreads=2,
+        at_most=_HIGH_MOI_AT_MOST,
+        allowance=1 << 20,
+        max_refusals=100,
     )
+    assert 1 <= len(refusals) <= 24
+    assert all(refusal.startswith(_HIGH_MOI_DOINGS) for refusal in refusals)
+    _audit(store.zarr_loc, run, budget)
+    tight = store.perturbation.load_associations(tests)
     for name in ("discovery", "calibration", "positive"):
         pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
 
@@ -1615,7 +1665,11 @@ def _wide_screen_store(path):
 def test_high_moi_stays_within_the_budget_it_names_with_a_few_wide_cells(
     tmp_path,
 ) -> None:
-    store = _wide_screen_store(tmp_path / "wide.zarr")
+    _wide_screen_store(tmp_path / "wide.zarr")
+    # In chunks of their rows, the feature tables' reads hold what their rows
+    # do, so the budget shows what the tests hold besides.
+    rechunk_feature_tables(tmp_path / "wide.zarr")
+    store = open_store(tmp_path / "wide.zarr", nthreads=2)
     labels = _screen_labels(store)
     genes = store.features.snapshot(feature_indexes=np.arange(10))
     # Every guide of the wide cells widens the stored codes of every cell.
@@ -1637,17 +1691,32 @@ def test_high_moi_stays_within_the_budget_it_names_with_a_few_wide_cells(
             warnings.simplefilter("ignore")
             return budgeted.perturbation.associations(labels, **arguments)
 
-    # Counting each guide's and target's cells names its budget first, then
-    # the tests name theirs, which runs the call.
-    needed, refusals, _, peak = budget_that_runs(store.zarr_loc, run, nthreads=2)
-    assert [refusal.split(" over ")[0] for refusal in refusals] == [
-        "Counting the cells of each guide and target",
-        "Testing one gene",
+    # The labels' steps name their budgets first, then counting each guide's
+    # and target's cells, then the tests, which runs the call.
+    needed, refusals, _, peak = budget_that_runs(
+        store.zarr_loc, run, nthreads=2, max_refusals=100
+    )
+    assert all(refusal.startswith(_HIGH_MOI_DOINGS) for refusal in refusals)
+    doings = [
+        doing
+        for doing in ("Counting the cells of each guide and target", "Testing one gene")
+        if any(refusal.startswith(doing) for refusal in refusals)
     ]
+    assert doings == ["Counting the cells of each guide and target", "Testing one gene"]
+    last_count = max(
+        index
+        for index, refusal in enumerate(refusals)
+        if refusal.startswith("Counting the cells")
+    )
+    assert all(
+        refusal.startswith("Testing one gene") for refusal in refusals[last_count + 1 :]
+    )
 
     # Reading the codes whole with 64-bit copies of their 120 slots per cell
     # held about 4 times this budget before its check.
     assert peak <= needed, f"The call held {peak} bytes within a budget of {needed}"
+    assert needed <= _HIGH_MOI_AT_MOST * peak + (1 << 20)
+    _audit(store.zarr_loc, run, needed)
 
 
 def test_codes_are_read_a_stored_chunk_at_a_time(tmp_path) -> None:
@@ -1674,14 +1743,16 @@ def test_codes_are_read_a_stored_chunk_at_a_time(tmp_path) -> None:
         """
         import json, sys, tracemalloc, zarr
         from cytearc.datastore._operations import perturbation_associations as ops
+        from cytearc.utils.memory_budget import MemoryLedger
 
         array = zarr.open_array(sys.argv[1], mode="r")
-        for block in ops._code_blocks(array):
+        ledger = MemoryLedger(None, "Reading the codes")
+        for block in ops._code_blocks(ledger, array, item="the codes"):
             del block
         tracemalloc.start()
         start = tracemalloc.get_traced_memory()[0]
         sizes = []
-        for block in ops._code_blocks(array):
+        for block in ops._code_blocks(ledger, array, item="the codes"):
             sizes.append(len(block))
             del block
         peak = tracemalloc.get_traced_memory()[1] - start
@@ -1699,7 +1770,14 @@ def test_codes_are_read_a_stored_chunk_at_a_time(tmp_path) -> None:
 
     assert sizes == [12000] * 16 + [8000]
     np.testing.assert_array_equal(
-        np.concatenate(list(operations._code_blocks(array))), codes
+        np.concatenate(
+            list(
+                operations._code_blocks(
+                    MemoryLedger(None, "Reading the codes"), array, item="the codes"
+                )
+            )
+        ),
+        codes,
     )
     # Each read holds a stored chunk, not the whole array, which the codes were
     # once read as. The budget test above checks the plan of the whole call.
@@ -1734,8 +1812,11 @@ def test_a_codes_read_plans_for_the_previous_chunk_that_zarr_still_holds(
         from concurrent.futures import thread
         from cytearc.datastore._operations import perturbation_associations as ops
 
+        from cytearc.utils.memory_budget import MemoryLedger, observed_charges
+
         array = zarr.open_array(sys.argv[1], mode="r")
-        for block in ops._code_blocks(array):
+        ledger = MemoryLedger(None, "Reading the codes")
+        for block in ops._code_blocks(ledger, array, item="the codes"):
             del block
         lock = threading.Lock()
         reading = [0]
@@ -1751,15 +1832,20 @@ def test_a_codes_read_plans_for_the_previous_chunk_that_zarr_still_holds(
                     held.setdefault(read, []).append(item)
 
         thread._WorkItem.run = run_and_hold
+        # The ledger's plan of the pass: what it holds beside the reads, the
+        # leftover of the first pass, and what the reads hold.
+        planned = []
         tracemalloc.start()
         start = tracemalloc.get_traced_memory()[0]
-        for block in ops._code_blocks(array):
+        with observed_charges(lambda item, nbytes, plan: planned.append(plan)):
+            blocks = ops._code_blocks(ledger, array, item="the codes")
+        for block in blocks:
             del block
             with lock:
                 held.pop(reading[0] - 1, None)
                 reading[0] += 1
         peak = tracemalloc.get_traced_memory()[1] - start
-        print(json.dumps({"peak": peak, "plan": ops._chunk_read_bytes(array)}))
+        print(json.dumps({"peak": peak, "plan": max(planned)}))
         """
     )
     traced = subprocess.run(
@@ -1776,8 +1862,11 @@ def test_a_codes_read_plans_for_the_previous_chunk_that_zarr_still_holds(
     chunk = 12000 * 40 * 4
     assert peak > 3 * chunk, f"The pass held {peak} bytes, no previous read"
     # A plan of one chunk as stored and decoded and its rows, 5.8 MB, missed
-    # the previous chunk that a busy machine held beside them, 7.4 MB in all.
+    # the previous chunk that a busy machine held beside them, 7.4 MB in all;
+    # the ledger's plan counts it, on its one codec thread, and by no more
+    # than a third again.
     assert peak <= plan, f"The pass held {peak} bytes within a plan of {plan}"
+    assert plan <= 4 / 3 * peak, f"The plan of {plan} bytes outweighs the pass"
 
 
 def test_high_moi_plans_only_the_calibration_pairs_a_check_can_draw(

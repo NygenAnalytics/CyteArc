@@ -11,36 +11,50 @@ from ...metadata.arguments import (
     PerturbationSignatureArguments,
 )
 from ...metadata.artifacts import write_cell_data_artifact
-from ...metadata.rows import array_row_selection_parts, read_metadata_rows_chunkwise
-from ...metadata.selection import cell_selection_indices
+from ...metadata.rows import (
+    operation_concurrency,
+    read_rows,
+    read_whole,
+)
+from ...metadata.selection import plan_cell_selection_read, read_cell_selection
 from ...perturbation.mixscape import UNLABELLED, MixscapeResult, mixscape_settings
 from ...perturbation.signature import PerturbationSignature, signature_settings
 from ...storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
+from ...storage.async_execution import zarr_decoding_threads
 from ...storage.geometry import array_geometry
-from ...storage.types import as_zarr_array, read_array
+from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.compute import process_thread_limit
 from ...utils.logging import logger
-from ...utils.memory_budget import MemoryLedger
+from ...utils.memory_budget import (
+    MemoryLedger,
+    object_array_bytes,
+    python_text_bytes,
+)
 from ...utils.numba import numba_threads
 from .perturbation_store import (
     _BAND_BYTES,
     _COORDINATE_KINDS,
     _band_bytes,
+    _call_ledger,
     _cell_samples,
+    _cell_selection_check_bytes,
+    _cell_totals,
     _cell_values,
+    _converted,
     _count_bands,
     _count_blocks,
     _count_stream_bytes,
+    _feature_text,
+    _frame_bytes,
     _plan_cells,
     _positions_in,
-    _require_budget,
-    _resident_ledger,
     _require_cell_column,
     _require_ref,
     _status_labels,
     _stored_samples,
+    _table_write_bytes,
 )
 
 if TYPE_CHECKING:
@@ -56,11 +70,16 @@ else:
 _SIGNATURE_BAND_BYTES = 1 << 23
 
 
-def _signature_read_bytes(stored: zarr.Array, n_columns: int) -> int:
-    """Return the bytes that reading one stored chunk of signature rows holds.
+def _signature_read_bytes(
+    ledger: MemoryLedger, stored: zarr.Array, n_columns: int, n_chunks: int
+) -> int:
+    """Return what reading ``n_chunks`` stored chunks of signature rows one at a time holds beside what ``ledger`` holds.
 
-    Zarr decodes the chunk's rows over every feature, and the signatures of
-    ``n_columns`` features of its rows are then copied out of them.
+    Zarr decodes each chunk's rows over every feature, and the signatures of
+    ``n_columns`` features of its rows are then copied out of them, beside
+    the chunk that the read before can still hold on each codec thread, as
+    ``ArrayGeometry.heldReadBytes`` counts it; before the first read that is
+    the ledger's last read, whose leftover the ledger counts already.
     """
     geometry = array_geometry(stored)
     assert geometry is not None
@@ -68,10 +87,12 @@ def _signature_read_bytes(stored: zarr.Array, n_columns: int) -> int:
     read: int = geometry.readBytes(
         rows * int(stored.shape[1]) * geometry.itemsize, 1, decodes=1
     )
-    return read + rows * int(n_columns) * geometry.itemsize
+    held = geometry.heldReadBytes(ledger.holding_threads(n_chunks))
+    return read + rows * int(n_columns) * geometry.itemsize + max(0, held - ledger.left)
 
 
 def _read_signature_rows(
+    ledger: MemoryLedger,
     stored: zarr.Array,
     rows: np.ndarray,
     columns: np.ndarray,
@@ -84,34 +105,104 @@ def _read_signature_rows(
     of ``out``, in its ``out_columns``. Each stored chunk of rows that holds
     some of them is read whole, one at a time, and its columns are selected
     in memory, so that Zarr decodes each chunk once; reading chosen rows and
-    columns at once decodes many times what it returns.
+    columns at once decodes many times what it returns. The ledger is charged
+    one chunk's read beside the chunks that the read before can still hold on
+    its codec threads, which the reads decode on.
     """
+    geometry = array_geometry(stored)
+    assert geometry is not None
     chunk_rows = int(stored.chunks[0])
     chunks = rows // chunk_rows
     starts = np.flatnonzero(np.r_[True, chunks[1:] != chunks[:-1]])
     stops = np.r_[starts[1:], len(rows)]
-    for first, last in zip(starts.tolist(), stops.tolist(), strict=True):
-        offset = int(chunks[first]) * chunk_rows
-        band = np.asarray(stored[offset : offset + chunk_rows])
-        out[first:last, out_columns] = band[np.ix_(rows[first:last] - offset, columns)]
-        del band
+    held = geometry.heldReadBytes(ledger.holding_threads(len(starts)))
+    ledger.peak(
+        "reading a stored chunk of signatures",
+        _signature_read_bytes(ledger, stored, len(columns), len(starts)),
+    )
+    with zarr_decoding_threads(ledger.codec_threads):
+        for first, last in zip(starts.tolist(), stops.tolist(), strict=True):
+            offset = int(chunks[first]) * chunk_rows
+            band = np.asarray(stored[offset : offset + chunk_rows])
+            out[first:last, out_columns] = band[
+                np.ix_(rows[first:last] - offset, columns)
+            ]
+            del band
+    ledger.leave(held)
+
+
+def _first_columns(
+    ledger: MemoryLedger, data: zarr.Array, n_columns: int
+) -> np.ndarray:
+    """Read the first ``n_columns`` columns of a two-dimensional array as float64, keeping them charged.
+
+    The read decodes whole chunks, up to the operation's Zarr concurrency of
+    them at once, on the ledger's codec threads, and returns every column of
+    them at their stored type, as a whole read does, before the columns are
+    copied as float64; it can leave a chunk on each codec thread.
+    """
+    n_rows = int(data.shape[0])
+    ledger.hold("the cells' coordinates", 8 * n_rows * n_columns)
+    geometry = array_geometry(data)
+    if geometry is None:
+        ledger.peak("reading the cells' coordinates", int(data.nbytes))
+        return np.asarray(data[:, :n_columns], dtype=np.float64)
+    chunks = -(-n_rows // geometry.axisChunk(0)) * geometry.bandChunks()
+    held = geometry.heldReadBytes(ledger.holding_threads(chunks))
+    ledger.peak(
+        "reading the cells' coordinates",
+        max(
+            geometry.wholeReadBytes(operation_concurrency()),
+            n_rows * geometry.rowBytes() + held,
+        ),
+    )
+    with zarr_decoding_threads(ledger.codec_threads):
+        values = np.asarray(data[:, :n_columns], dtype=np.float64)
+    ledger.leave(held)
+    return values
 
 
 class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
     def _signature_controls(
-        self, labels: ArtifactRef, cell_index: np.ndarray
+        self, ledger: MemoryLedger, labels: ArtifactRef, cell_index: np.ndarray
     ) -> tuple[np.ndarray, int]:
-        """Return which cells of ``cell_index`` the labels call controls.
+        """Return which cells of ``cell_index`` the labels call controls, keeping the flags charged.
 
         Also returns the number of labelled cells that ``cell_index`` lacks.
+        The labelled cells and their flags are read through ``ledger`` and let
+        go.
         """
         status = require_complete_artifact(self.zw, labels)
-        labelled = cell_selection_indices(self.zw, status.input_ref("cell_selection"))
-        flags = read_array(artifact_group(self.zw, labels), "is_control").astype(bool)
+        ledger.peak(
+            "checking the labels' cells against the cell IDs",
+            _cell_selection_check_bytes(self),
+        )
+        selection = plan_cell_selection_read(
+            self.zw, status.input_ref("cell_selection")
+        )
+        before = ledger.charged
+        labelled = read_cell_selection(
+            ledger, self.zw, selection, item="the labelled cells' positions"
+        )
+        item = "the labelled cells' control flags"
+        flags = _converted(
+            ledger,
+            read_whole(
+                ledger, artifact_group(self.zw, labels), "is_control", item=item
+            ),
+            bool,
+            item,
+        )
+        # Where each labelled cell sits among the cells and whether it is
+        # there, and each cell's flag.
+        ledger.hold("the cells' control flags", 10 * len(labelled) + len(cell_index))
         positions, present = _positions_in(cell_index, labelled)
         is_control = np.zeros(len(cell_index), dtype=bool)
         is_control[positions[present & flags]] = True
-        return is_control, int(np.count_nonzero(~present))
+        n_missing = int(np.count_nonzero(~present))
+        del labelled, flags, positions, present
+        ledger.release(ledger.charged - before - len(cell_index))
+        return is_control, n_missing
 
     @validation_scoped
     def _perturbation_signature(
@@ -189,7 +280,6 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         from ...graph.feature_projection import resolve_coordinate_inputs
 
         from ...perturbation.signature import (
-            nearest_control_bytes,
             nearest_controls,
             normalize_counts,
             signature_rows,
@@ -232,14 +322,22 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             cell_selection,
             operation=PerturbationSignatureArguments.operation,
         )
-        cell_index = cell_selection_indices(self.zw, cell_selection)
+        selection = plan_cell_selection_read(self.zw, cell_selection)
+        n_features = len(feature_index)
+        ledger = _call_ledger(
+            self,
+            f"Computing the signatures of {selection.cells} cells in {n_features} "
+            "features",
+            remedy="pass fewer features",
+        )
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the cells' positions"
+        )
         n_cells = len(cell_index)
-        is_control, n_missing = self._signature_controls(labels, cell_index)
+        is_control, n_missing = self._signature_controls(ledger, labels, cell_index)
         cell_samples = _cell_samples(
             self,
-            MemoryLedger(
-                None, "Numbering the cells' samples", codec_threads=self.nthreads
-            ),
+            ledger,
             sample_column,
             cell_index,
             reason="Each cell takes its neighbors from the control cells of its "
@@ -279,7 +377,6 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             scale_factor=factor,
             invalidate_cache=invalidate_cache,
         )
-        n_features = len(feature_index)
 
         def has_features(_ref: ArtifactRef, stored: zarr.Group) -> bool:
             stored_features = stored.get("features")
@@ -309,121 +406,97 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             logger.info(
                 f"{n_missing} labelled cells have no coordinates and get no signature"
             )
+        # The control cells' positions, and each cell's nearest controls.
+        ledger.hold(
+            "the cells' nearest controls", 8 * n_cells + 8 * n_cells * neighbors_k
+        )
         controls = np.flatnonzero(is_control)
         n_controls = len(controls)
-        # Every step holds each cell's position, sample, control flag, total
-        # and neighbors, and the control cells' positions.
-        held = n_cells * (40 + 8 * neighbors_k) + 8 * n_controls
-        # The coordinates as read, float32 over all their dimensions, and as
-        # float64 over the first dims.
-        coordinate_bytes = 8 * resolved_dims * n_cells
-        reading = held + 4 * n_dims * n_cells + coordinate_bytes
-        # Within the largest sample, a copy of its cells' and its control
-        # cells' coordinates, and its cells' nearest controls as positions
-        # among the sample's controls and among every control.
-        n_largest = int(np.bincount(codes, minlength=len(sample_names)).max())
-        largest_pool = int(control_counts.max())
-        searching = (
-            held
-            + coordinate_bytes
-            + n_largest * (8 * resolved_dims + 16 * neighbors_k + 8)
-            + largest_pool * (8 * resolved_dims + 16)
-        )
-        # The control cells' scaled float64 values, from their read to the
-        # last block of signatures, while every cell's counts stream; a cell's
-        # counts as float64 and its float32 signatures take 16 bytes of a
-        # feature. The writer assembles and encodes a band of the float32
-        # signatures beside the stream.
-        scratch = 16 * n_features
-        holding = held + 8 * n_controls * n_features
-        spec = row_sharded_array_spec(
-            (n_cells, n_features),
-            np.float32,
-            profile=resolve_storage_profile(self.zw.store),
-            band_rows=max(1, min(n_cells, _SIGNATURE_BAND_BYTES // (4 * n_features))),
-        )
-        # One band as the writer holds it, planned without a limit on one
-        # worker.
-        writing = plan_dense_write(
-            spec, ResourceBudget(1 << 62, 1), 1, io=StorageIoPolicy(readWorkers=1)
-        ).reservedBytes
-        cell_stream = _count_stream_bytes(
-            assay, feature_index, cell_index, scratch_bytes_per_row=scratch
-        )
-        needed = max(
-            reading,
-            searching + nearest_control_bytes(largest_pool, neighbors_k, resolved_dims),
-            holding
-            + _count_stream_bytes(
-                assay,
-                feature_index,
-                cell_index[controls],
-                scratch_bytes_per_row=scratch,
-            ),
-            holding + writing + cell_stream,
-            # The neighbors written as int32 from int64 positions, a stored
-            # chunk of up to 100,000 rows encoded at a time.
-            holding
-            + 12 * neighbors_k * n_cells
-            + 8 * neighbors_k * min(n_cells, 100_000),
-        )
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            f"The values of {n_controls} control cells in {n_features} features "
-            f"and the neighbors of {n_cells} cells hold about",
-            remedy=f"Raise mem_budget to at least {needed} bytes, or pass fewer "
-            "features.",
-        )
         self._require_writable(arguments.operation)
-        values = np.asarray(data[:, :resolved_dims], dtype=np.float64)
+        values = _first_columns(ledger, data, resolved_dims)
         neighbors = np.empty((n_cells, neighbors_k), dtype=np.int64)
         # The distances' matrix products use as many BLAS threads as the store.
         with process_thread_limit(self.nthreads, user_api="blas"):
             for code in range(len(sample_names)):
                 members = np.flatnonzero(codes == code)
                 pool = members[is_control[members]]
+                # The sample's cells and control cells, their coordinates
+                # copied, and its cells' nearest controls as positions among
+                # the sample's controls and among every control.
+                searching = len(members) * (
+                    8 * resolved_dims + 16 * neighbors_k + 8
+                ) + len(pool) * (8 * resolved_dims + 16)
+                ledger.hold("searching a sample's nearest controls", searching)
                 nearest = nearest_controls(
-                    values[members],
-                    values[pool],
-                    neighbors_k,
-                    memory_bytes=self.memoryBytes - searching,
+                    values[members], values[pool], neighbors_k, ledger=ledger
                 )
                 neighbors[members] = np.searchsorted(controls, pool)[nearest]
+                del members, pool, nearest
+                ledger.release(searching)
         del values
-        totals = assay._cell_count_totals(cell_index)
+        ledger.release(8 * resolved_dims * n_cells)
+        totals = _cell_totals(ledger, assay, cell_index, item="the cells' totals")
+        # The control cells' scaled float64 values, from their read to the
+        # last block of signatures, while every cell's counts stream; a cell's
+        # counts as float64 and its float32 signatures take 16 bytes of a
+        # feature.
+        scratch = 16 * n_features
+        ledger.hold("the control cells' scaled values", 8 * n_controls * n_features)
         control_scaled = np.empty((n_controls, n_features))
         offset = 0
-        _, control_blocks = _count_blocks(
+        for block in _count_blocks(
             self,
-            _resident_ledger(self, holding),
+            ledger,
             assay,
             feature_index,
             cell_index[controls],
             scratch_bytes_per_row=scratch,
-        )
-        for block in control_blocks:
+            item="reading the control cells' counts",
+        ):
             stop = offset + len(block)
             control_scaled[offset:stop] = normalize_counts(
                 block, totals[controls[offset:stop]], factor
             )
             offset = stop
-        # The writer takes one band, or half of what the stream leaves when
-        # that is more, so that bands are written in parallel.
-        writer_bytes = max(writing, (self.memoryBytes - holding - cell_stream) // 2)
+        spec = row_sharded_array_spec(
+            (n_cells, n_features),
+            np.float32,
+            profile=resolve_storage_profile(self.zw.store),
+            band_rows=max(1, min(n_cells, _SIGNATURE_BAND_BYTES // (4 * n_features))),
+        )
+        # The writer assembles and encodes a band of the float32 signatures
+        # beside the stream: one band as it holds it, planned without a limit
+        # on one worker, or half of what the stream leaves when that is more,
+        # so that bands are written in parallel.
+        writing = plan_dense_write(
+            spec, ResourceBudget(1 << 62, 1), 1, io=StorageIoPolicy(readWorkers=1)
+        ).reservedBytes
+        cell_stream = _count_stream_bytes(
+            assay, feature_index, cell_index, scratch_bytes_per_row=scratch
+        )
+        room = ledger.room
+        writer_bytes = (
+            writing if room is None else max(writing, (room - cell_stream) // 2)
+        )
+        ledger.hold("the signatures' writer", writer_bytes)
+        # The scaled values, which the signatures' blocks read until the last.
+        scaled = [control_scaled]
+        del control_scaled
+        budget = self.memoryBytes if ledger.budget is None else ledger.budget
         with (
             numba_threads(self.nthreads),
             artifact_transaction(self.zw, planned) as group,
         ):
             group.attrs["sample_names"] = sample_names
             output = create_numeric_array(group, "values", spec)
-            _, cell_blocks = _count_blocks(
+            cell_blocks = _count_blocks(
                 self,
-                _resident_ledger(self, holding + writer_bytes),
+                ledger,
                 assay,
                 feature_index,
                 cell_index,
                 scratch_bytes_per_row=scratch,
+                item="reading every cell's counts",
             )
 
             def signature_blocks() -> Iterator[np.ndarray]:
@@ -435,7 +508,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                         counts,
                         totals[start:stop],
                         neighbors[start:stop],
-                        control_scaled,
+                        scaled[0],
                         factor,
                     )
                     start = stop
@@ -448,9 +521,17 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 io=self.storageIo,
                 # The producer holds what the stream may, and the writer the
                 # rest of the budget.
-                producerReserveBytes=self.memoryBytes - writer_bytes,
+                producerReserveBytes=budget - writer_bytes,
                 requireFinite=True,
                 operation=arguments.operation,
+            )
+            scaled.clear()
+            ledger.release(writer_bytes + 8 * n_controls * n_features)
+            # The neighbors written as int32 from int64 positions, a stored
+            # chunk of up to 100,000 rows encoded at a time.
+            ledger.peak(
+                "saving the neighbors",
+                12 * neighbors_k * n_cells + 8 * neighbors_k * min(n_cells, 100_000),
             )
             for name, array in (
                 ("neighbors", controls[neighbors].astype(np.int32)),
@@ -508,17 +589,44 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         status = require_complete_artifact(self.zw, signature)
         group = artifact_group(self.zw, signature)
         assay = self._get_assay(str(signature.assay))
+        selection = plan_cell_selection_read(
+            self.zw, status.input_ref("cell_selection")
+        )
+        if features is not None and (
+            isinstance(features, str)
+            or not all(isinstance(name, str) for name in features)
+        ):
+            raise TypeError("features must be a sequence of feature IDs or None")
+        n_columns = (
+            int(as_zarr_array(group["features"], name="features").shape[0])
+            if features is None
+            else len(features)
+        )
+        ledger = _call_ledger(
+            self,
+            f"Reading the signatures of {selection.cells} cells in {n_columns} "
+            "features",
+            remedy="pass fewer features",
+        )
 
-        feature_ids = np.asarray(assay.feats.fetch_all("ids")).astype(str)[
-            read_array(group, "features")
-        ]
+        every_id = _feature_text(ledger, assay, "ids")
+        positions = read_whole(
+            ledger, group, "features", item="the signature's features"
+        )
+        ledger.hold(
+            "the signature's feature IDs", len(positions) * every_id.dtype.itemsize
+        )
+        feature_ids = every_id[positions]
+        read_bytes = every_id.nbytes + positions.nbytes
+        del every_id, positions
+        ledger.release(read_bytes)
         if features is None:
             columns = np.arange(len(feature_ids))
         else:
-            if isinstance(features, str) or not all(
-                isinstance(name, str) for name in features
-            ):
-                raise TypeError("features must be a sequence of feature IDs or None")
+            ledger.peak(
+                "finding the features",
+                _frame_bytes({"ids": feature_ids}) + 16 * len(feature_ids),
+            )
             columns = pd.Index(feature_ids).get_indexer(list(features))
             unknown = [
                 name
@@ -530,58 +638,53 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                     f"The signature has no feature {unknown[0]!r}; it holds the "
                     "features of its feature selection"
                 )
-        cell_index = cell_selection_indices(self.zw, status.input_ref("cell_selection"))
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the cells' positions"
+        )
         n_cells = len(cell_index)
         stored = as_zarr_array(group["values"], name="values")
-        n_neighbors = int(as_zarr_array(group["neighbors"], name="neighbors").shape[1])
-        ids = self.cells._get_array("ids")
-        id_chunk, _ = array_row_selection_parts(ids)
-        # Each cell's ID and each neighbor's: a numpy text of the stored width
-        # as read, then a Python string of its characters in its frame, which
-        # pandas builds through a working copy.
-        text = np.dtype(ids.dtype).itemsize
-        per_id = text + 2 * (64 + text // np.dtype(ids.dtype).alignment)
-        n_bytes = (
-            4 * n_cells * len(columns)
-            + _signature_read_bytes(stored, len(columns))
-            + id_chunk
-            + n_cells * ((n_neighbors + 2) * per_id + 4 * n_neighbors + 17)
-        )
-        _require_budget(
-            n_bytes,
-            self.memoryBytes,
-            f"The signatures of {n_cells} cells in {len(columns)} features hold about",
-            beside=" with the IDs of the cells and their neighbors and a stored "
-            "chunk of signatures read",
-            remedy=f"Pass fewer features, or raise mem_budget to at least {n_bytes} "
-            "bytes.",
-        )
+        ledger.hold("the signatures", 4 * n_cells * len(columns))
         values = np.empty((n_cells, len(columns)), dtype=np.float32)
-        _read_signature_rows(stored, np.arange(n_cells), columns, values, slice(None))
-        cell_ids = np.asarray(
-            read_metadata_rows_chunkwise(self.cells, "ids", cell_index)
-        ).astype(str)
+        _read_signature_rows(
+            ledger, stored, np.arange(n_cells), columns, values, slice(None)
+        )
+        cell_ids = read_rows(
+            ledger, self.cells._get_array("ids"), cell_index, item="the cells' IDs"
+        )
+        neighbors = read_whole(ledger, group, "neighbors", item="the cells' neighbors")
+        n_neighbors = int(neighbors.shape[1]) if neighbors.ndim == 2 else 0
+        is_control = read_whole(
+            ledger, group, "is_control", item="the cells' control flags"
+        )
+        samples = read_whole(ledger, group, "samples", item="the cells' samples")
+        # Each cell's ID and each neighbor's: a numpy text of the stored width,
+        # then a Python string of its characters in its frame, which pandas
+        # builds through a working copy.
+        text = cell_ids.dtype.itemsize
+        per_id = text + 2 * (64 + text // max(1, cell_ids.dtype.alignment))
+        ledger.peak(
+            "the tables of signatures, cells and neighbors",
+            n_cells * ((n_neighbors + 2) * per_id + 17),
+        )
         sample_names = _stored_samples(group, "sample_names")
         parameters = status.parameters or {}
         sample_columns = list(parameters["sample_columns"])
-        index = pd.Index(cell_ids, name="ids")
+        index = pd.Index(cell_ids.astype(str, copy=False), name="ids")
         return PerturbationSignature(
             # The frame wraps the values as read, the 4 bytes per value that the
-            # budget check above counts; pandas would otherwise copy them.
+            # ledger holds; pandas would otherwise copy them.
             values=pd.DataFrame(
                 values, index=index, columns=feature_ids[columns], copy=False
             ),
             cells=pd.DataFrame(
                 {
-                    "is_control": read_array(group, "is_control").astype(bool),
-                    "sample": np.asarray(sample_names, dtype=object)[
-                        read_array(group, "samples")
-                    ],
+                    "is_control": is_control.astype(bool),
+                    "sample": np.asarray(sample_names, dtype=object)[samples],
                 },
                 index=index,
             ),
             neighbors=pd.DataFrame(
-                cell_ids[read_array(group, "neighbors")], index=index
+                cell_ids.astype(str, copy=False)[neighbors], index=index
             ),
             from_assay=assay.name,
             dims=int(parameters["dims"]),
@@ -591,36 +694,63 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         )
 
     def _mixscape_labels(
-        self, labels: ArtifactRef, cell_index: np.ndarray
+        self, ledger: MemoryLedger, labels: ArtifactRef, cell_index: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
         """Return each cell's label, its single target's code, the targets, and the longest label.
 
         A cell outside the labels is ``"unlabelled"``; a cell without a single
-        target that is not a control has the code -1.
+        target that is not a control has the code -1. The labels are read
+        through ``ledger``, which keeps the results charged, each label as a
+        Python string.
         """
         status = require_complete_artifact(self.zw, labels)
         group = artifact_group(self.zw, labels)
-        labelled = cell_selection_indices(self.zw, status.input_ref("cell_selection"))
-
-        values = read_array(group, "values").astype(str)
-        single = (read_array(group, "n_targets") == 1) & ~read_array(
-            group, "is_control"
-        ).astype(bool)
-        codes = np.where(single, read_array(group, "target_codes")[:, 0], -1).astype(
-            np.int64
+        ledger.peak(
+            "checking the labels' cells against the cell IDs",
+            _cell_selection_check_bytes(self),
         )
+        selection = plan_cell_selection_read(
+            self.zw, status.input_ref("cell_selection")
+        )
+        before = ledger.charged
+        labelled = read_cell_selection(
+            ledger, self.zw, selection, item="the labelled cells' positions"
+        )
+        n_labelled = len(labelled)
+        values = read_whole(ledger, group, "values", item="the cells' labels")
+        counts = read_whole(ledger, group, "n_targets", item="the cells' targets")
+        flags = read_whole(ledger, group, "is_control", item="the cells' control flags")
+        codes = read_whole(ledger, group, "target_codes", item="the cells' targets")
+        # Each labelled cell's single target, and where it sits among the cells.
+        ledger.hold("the labelled cells' targets", 18 * n_labelled)
+        single = (counts == 1) & ~flags.astype(bool, copy=False)
+        first = np.where(single, codes[:, 0], -1).astype(np.int64)
+        del counts, flags, codes, single
         positions, present = _positions_in(cell_index, labelled)
-        cell_labels = np.full(len(cell_index), UNLABELLED, dtype=object)
-        cell_labels[positions[present]] = values[present]
-        cell_codes = np.full(len(cell_index), -1, dtype=np.int64)
-        cell_codes[positions[present]] = codes[present]
-        longest = max(len(UNLABELLED), values.dtype.itemsize // values.dtype.alignment)
-        return (
-            cell_labels,
-            cell_codes,
-            read_array(group, "targets").astype(str),
-            longest,
+        # Each cell's label as a Python string, and its target.
+        n_cells = len(cell_index)
+        width = max(1, values.dtype.itemsize // 4)
+        ledger.hold(
+            "the cells' labels",
+            object_array_bytes(n_cells)
+            + python_text_bytes(n_cells, n_cells * max(width, len(UNLABELLED)))
+            + 8 * n_cells,
         )
+        cell_labels = np.full(n_cells, UNLABELLED, dtype=object)
+        cell_labels[positions[present]] = values[present]
+        cell_codes = np.full(n_cells, -1, dtype=np.int64)
+        cell_codes[positions[present]] = first[present]
+        longest = max(len(UNLABELLED), values.dtype.itemsize // values.dtype.alignment)
+        del labelled, values, first, positions, present
+        ledger.release(
+            ledger.charged
+            - before
+            - object_array_bytes(n_cells)
+            - python_text_bytes(n_cells, n_cells * max(width, len(UNLABELLED)))
+            - 8 * n_cells
+        )
+        targets = read_whole(ledger, group, "targets", item="the targets")
+        return cell_labels, cell_codes, targets, longest
 
     @validation_scoped
     def _perturbation_mixscape(
@@ -745,17 +875,24 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         stored = artifact_group(self.zw, signature)
         assay = self._get_assay(str(signature.assay))
         scale_factor = float((source.parameters or {})["scale_factor"])
-        cell_index = cell_selection_indices(self.zw, source.input_ref("cell_selection"))
+        selection = plan_cell_selection_read(
+            self.zw, source.input_ref("cell_selection")
+        )
+        ledger = _call_ledger(self, f"Classifying {selection.cells} cells")
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the cells' positions"
+        )
         n_cells = len(cell_index)
         cell_labels, target_codes, target_names, label_length = self._mixscape_labels(
-            source.input_ref("labels"), cell_index
+            ledger, source.input_ref("labels"), cell_index
         )
-        is_control = read_array(stored, "is_control").astype(bool)
+        item = "the cells' control flags"
+        is_control = _converted(
+            ledger, read_whole(ledger, stored, "is_control", item=item), bool, item
+        )
         cell_splits = _cell_samples(
             self,
-            MemoryLedger(
-                None, "Numbering the cells' samples", codec_threads=self.nthreads
-            ),
+            ledger,
             split_column,
             cell_index,
             reason="Each split is classified apart, so every cell needs one",
@@ -778,6 +915,10 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         )
         # One row per target and split with cells of the target, by target.
         n_splits = len(split_names)
+        # Each cell's row key and whether it has one, with the sorted copy of
+        # the keys that finds the rows.
+        ledger.hold("the cells' rows", 9 * n_cells)
+        ledger.peak("finding the rows", 16 * n_cells)
         grouped = target_codes >= 0
         cell_keys = target_codes * n_splits + splits
         row_keys = np.unique(cell_keys[grouped])
@@ -815,6 +956,9 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             return planned.ref
         n_features = int(assay.feats.N)
         n_groups = n_splits + n_rows
+        # Each cell's row key and group, and each member's position, group and
+        # order, with the rows' and groups' bounds.
+        ledger.hold("the cells' groups", 48 * n_cells + 24 * (n_rows + n_groups + 1))
         # Each cell's group: the control cells of its split first, then the
         # cells of each row. The cells of the groups are the members.
         row_of = np.full(max(len(target_names), 1) * n_splits, -1, dtype=np.int64)
@@ -838,47 +982,49 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         n_controls = len(control_members)
         stored_neighbors = as_zarr_array(stored["neighbors"], name="neighbors")
         n_neighbors = int(stored_neighbors.shape[1])
-        # Each cell's label as a Python string, its position, target, split,
-        # group and flags, and its stored neighbors as read; and each member's
-        # position, group, order, total and neighbors among the members.
-        resident = (128 + label_length + 4 * n_neighbors) * n_cells + 8 * (
-            n_neighbors + 4
-        ) * n_members
-        # The classes: each cell's class and global class as Python strings,
-        # with copies as fixed-width text that are written a chunk of up to
-        # 100,000 rows at a time, and its posterior, score and split.
-        class_length = max(
-            label_length,
-            target_names.dtype.itemsize // target_names.dtype.alignment
-            + 1
-            + max(len(perturbation_type), 2),
-        )
-        finishing = (
-            resident
-            + n_cells * (16 * class_length + 164)
-            + 8 * class_length * min(n_cells, 100_000)
-        )
         # One feature of the DE pass: every member's value, the control cells'
         # sorted values and each group's sums. Its counts stream beside them.
         per_feature = 8 * (n_members + n_controls) + 16 * n_groups
         member_cells = cell_index[members]
-        needed = max(
-            finishing,
+        ledger.doing = f"Classifying {n_members} cells of {n_rows} targets and splits"
+        self._require_writable(arguments.operation)
+        member_totals = _cell_totals(
+            ledger, assay, cell_index[members], item="the members' totals"
+        )
+        # Every neighbor is a control cell, so a member: each member's
+        # neighbors among the members, through each cell's position among them.
+        ledger.hold("the members' neighbors", 8 * n_cells + 8 * n_neighbors * n_members)
+        position_of = np.full(n_cells, -1, dtype=np.int64)
+        position_of[members] = np.arange(n_members)
+        every_neighbor = read_whole(
+            ledger, stored, "neighbors", item="the cells' stored neighbors"
+        )
+        member_neighbors = position_of[every_neighbor[members]]
+        neighbors_bytes = every_neighbor.nbytes + 8 * n_cells
+        del every_neighbor, position_of
+        ledger.release(neighbors_bytes)
+        signature_values = as_zarr_array(stored["values"], name="values")
+        item = "the signature's features"
+        signature_features = _converted(
+            ledger, read_whole(ledger, stored, "features", item=item), np.int64, item
+        )
+        ledger.hold(
+            "the signature's features", 16 * len(signature_features) + n_features
+        )
+        signature_column = pd.Index(signature_features)
+        in_signature = np.zeros(n_features, dtype=bool)
+        in_signature[signature_features] = True
+
+        ledger.peak(
+            "the values of one feature and the read of its counts",
             _band_bytes(
-                _resident_ledger(self, resident),
+                ledger,
                 assay,
                 np.arange(1),
                 (member_cells,),
                 per_feature=per_feature,
                 scratch_per_feature=8,
             ),
-        )
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            f"The values of one feature over {n_members} cells hold about",
-            beside=" with the cells' classes and neighbors and the read of its counts",
-            remedy=f"Raise mem_budget to at least {needed} bytes.",
         )
         # The DE genes, from one pass over bands of every feature: a row's
         # genes are tested on its cells and the control cells of its split,
@@ -890,7 +1036,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         ]
         de_bands = (
             _count_bands(
-                _resident_ledger(self, resident),
+                ledger,
                 assay,
                 np.arange(n_features),
                 (member_cells,),
@@ -902,30 +1048,19 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             else []
         )
         del member_cells
-        self._require_writable(arguments.operation)
-        member_totals = assay._cell_count_totals(cell_index[members])
-        position_of = np.full(n_cells, -1, dtype=np.int64)
-        position_of[members] = np.arange(n_members)
-        # Every neighbor is a control cell, so a member.
-        member_neighbors = position_of[np.asarray(stored_neighbors[:])[members]]
-        signature_values = as_zarr_array(stored["values"], name="values")
-        signature_features = read_array(stored, "features").astype(np.int64)
-        signature_column = pd.Index(signature_features)
-        in_signature = np.zeros(n_features, dtype=bool)
-        in_signature[signature_features] = True
 
-        def normalized(
-            features: np.ndarray, cells: np.ndarray, held: int
-        ) -> np.ndarray:
+        def normalized(features: np.ndarray, cells: np.ndarray) -> np.ndarray:
             """The normalized values of features over members, features x cells."""
+            ledger.hold("the normalized values", 8 * len(features) * len(cells))
             out = np.empty((len(features), len(cells)))
-            _, blocks = _count_blocks(
+            blocks = _count_blocks(
                 self,
-                _resident_ledger(self, held),
+                ledger,
                 assay,
                 features,
                 cell_index[members[cells]],
                 scratch_bytes_per_row=8 * len(features),
+                item="reading the counts of a band of features",
             )
             offset = 0
             for block in blocks:
@@ -942,7 +1077,11 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         def band_genes(start: int, stop: int) -> dict[int, np.ndarray]:
             """The DE genes of each row among the features of a band."""
             band = np.arange(start, stop)
-            values = normalized(band, every_member, resident + per_feature * len(band))
+            # A band's control cells' sorted values and the groups' sums, beside
+            # the members' values.
+            extra = (per_feature - 8 * n_members) * len(band)
+            ledger.hold("the DE tests of a band of features", extra)
+            values = normalized(band, every_member)
             found = band_de_genes(
                 values,
                 member_groups,
@@ -955,6 +1094,8 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 p_value_cutoff=cutoff,
                 n_features=n_features,
             )
+            del values
+            ledger.release(extra + 8 * n_members * len(band))
             return {row: band[genes] for row, genes in found.items()}
 
         de_parts: list[list[np.ndarray]] = [[] for _ in range(n_rows)]
@@ -988,7 +1129,15 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             its largest classification."""
             n = n_targets + n_controls
             step = max(
-                _signature_read_bytes(signature_values, n_genes),
+                _signature_read_bytes(
+                    ledger,
+                    signature_values,
+                    n_genes,
+                    -(
+                        -int(signature_values.shape[0])
+                        // int(signature_values.chunks[0])
+                    ),
+                ),
                 16 * n + outside_stream if outside else 0,
                 scratch,
             )
@@ -1015,17 +1164,20 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 max(size[2], scratch),
                 size[3] or outside,
             )
-            if batch and resident + batch_bytes(*grown) > self.memoryBytes:
+            if (
+                batch
+                and ledger.budget is not None
+                and ledger.held_bytes + batch_bytes(*grown) > ledger.budget
+            ):
                 batches.append(batch)
                 batch = []
                 chosen[:] = False
                 grown = (n_target, len(genes), scratch, outside)
-            _require_budget(
-                resident + batch_bytes(*grown),
-                self.memoryBytes,
-                f"The signatures of the {n_target} cells of "
+            ledger.peak(
+                f"the signatures of the {n_target} cells of "
                 f"{target_names[row_targets[row]]} and of the {n_controls} control "
-                f"cells in its {len(genes)} DE genes hold about",
+                f"cells in its {len(genes)} DE genes",
+                batch_bytes(*grown),
             )
             batch.append(row)
             chosen[genes] = True
@@ -1038,15 +1190,14 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         )
         fits: list[MixscapeFit | None] = [None] * n_rows
 
-        def batch_signatures(
-            genes: np.ndarray, cells: np.ndarray, held: int
-        ) -> np.ndarray:
-            """The float32 signatures of members ``cells`` in ``genes``."""
+        def batch_signatures(genes: np.ndarray, cells: np.ndarray) -> np.ndarray:
+            """The float32 signatures of members ``cells`` in ``genes``, which the batch's charge holds."""
             inside = genes[in_signature[genes]]
             outside = genes[~in_signature[genes]]
             signatures = np.empty((len(cells), len(genes)), dtype=np.float32)
             if len(inside):
                 _read_signature_rows(
+                    ledger,
                     signature_values,
                     members[cells],
                     signature_column.get_indexer(inside),
@@ -1062,7 +1213,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 # Each step holds its normalized values and signatures, 16
                 # bytes per cell of a gene, beside its counts' stream.
                 steps = _count_bands(
-                    _resident_ledger(self, held),
+                    ledger,
                     assay,
                     outside,
                     (cell_index[members[cells]],),
@@ -1072,12 +1223,19 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 )
                 for start, stop in steps:
                     part = outside[start:stop]
+                    # The step's signatures beside its normalized values.
+                    ledger.hold(
+                        "the signatures of a band of genes", 8 * len(cells) * len(part)
+                    )
+                    values = normalized(part, cells)
                     signatures[:, computed[start:stop]] = signature_of_values(
-                        normalized(part, cells, held + 16 * len(cells) * len(part)),
+                        values,
                         np.arange(len(part)),
                         np.arange(len(cells)),
                         nearest,
                     )
+                    del values
+                    ledger.release(16 * len(cells) * len(part))
             return signatures
 
         def classify_batch(batch: list[int]) -> None:
@@ -1087,11 +1245,11 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 np.concatenate([group_members(n_splits + row) for row in batch]),
                 control_members,
             )
-            signatures = batch_signatures(
-                genes,
-                cells,
-                resident + batch_held(len(cells) - n_controls, len(genes)),
+            held = ledger.hold(
+                "the signatures of a batch",
+                batch_held(len(cells) - n_controls, len(genes)),
             )
+            signatures = batch_signatures(genes, cells)
             for row in batch:
                 targets = group_members(n_splits + row)
                 places = np.searchsorted(
@@ -1111,6 +1269,8 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                     max_iterations=iterations,
                     scale=scale,
                 )
+            del signatures
+            ledger.release(held)
 
         with numba_threads(self.nthreads):
             for batch in batches:
@@ -1133,6 +1293,15 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             else fit
             for row, fit in enumerate(fits)
         ]
+        # The classes: each cell's class and global class as Python strings,
+        # with copies as fixed-width text, and its posterior, score and split.
+        class_length = max(
+            label_length,
+            target_names.dtype.itemsize // target_names.dtype.alignment
+            + 1
+            + max(len(perturbation_type), 2),
+        )
+        ledger.hold("the cells' classes", n_cells * (16 * class_length + 164))
         assigned = mixscape_classes(
             cell_labels,
             is_control,
@@ -1146,40 +1315,42 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         de_offsets = np.concatenate(
             [[0], np.cumsum([len(genes) for genes in de_lists])]
         ).astype(np.int64)
+        columns = {
+            "values": assigned.classes.astype(str),
+            "global_class": global_class.astype(str),
+            "posterior": assigned.posterior,
+            "score": assigned.score,
+            "splits": splits.astype(np.int32),
+            "targets": target_names[row_targets].astype(str),
+            "row_splits": row_splits.astype(np.int32),
+            **{
+                key: getattr(assigned, key)
+                for key in (
+                    "status",
+                    "n_cells",
+                    "n_ko",
+                    "n_de_genes",
+                    "iterations",
+                    "converged",
+                    "control_mean",
+                    "control_sd",
+                    "perturbed_mean",
+                    "perturbed_sd",
+                    "perturbed_weight",
+                )
+            },
+            "de_offsets": de_offsets,
+            "de_features": (
+                np.concatenate(de_lists).astype(np.int64)
+                if n_rows
+                else np.empty(0, dtype=np.int64)
+            ),
+        }
+        ledger.peak("saving the classes", _table_write_bytes(columns))
         write_cell_data_artifact(
             self.zw,
             planned,
-            {
-                "values": assigned.classes.astype(str),
-                "global_class": global_class.astype(str),
-                "posterior": assigned.posterior,
-                "score": assigned.score,
-                "splits": splits.astype(np.int32),
-                "targets": target_names[row_targets].astype(str),
-                "row_splits": row_splits.astype(np.int32),
-                **{
-                    key: getattr(assigned, key)
-                    for key in (
-                        "status",
-                        "n_cells",
-                        "n_ko",
-                        "n_de_genes",
-                        "iterations",
-                        "converged",
-                        "control_mean",
-                        "control_sd",
-                        "perturbed_mean",
-                        "perturbed_sd",
-                        "perturbed_weight",
-                    )
-                },
-                "de_offsets": de_offsets,
-                "de_features": (
-                    np.concatenate(de_lists).astype(np.int64)
-                    if n_rows
-                    else np.empty(0, dtype=np.int64)
-                ),
-            },
+            columns,
             attributes={
                 "status_names": list(MIXSCAPE_STATUSES),
                 "split_names": split_names,
@@ -1217,48 +1388,47 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         status = require_complete_artifact(self.zw, classes)
         group = artifact_group(self.zw, classes)
         assay = self._get_assay(str(classes.assay))
+        selection = plan_cell_selection_read(
+            self.zw, status.input_ref("cell_selection")
+        )
+        ledger = _call_ledger(self, f"Reading the {classes.kind} artifact")
 
-        cell_index = cell_selection_indices(self.zw, status.input_ref("cell_selection"))
-        index = pd.Index(
-            np.asarray(
-                read_metadata_rows_chunkwise(self.cells, "ids", cell_index)
-            ).astype(str),
-            name="ids",
+        cell_index = read_cell_selection(
+            ledger, self.zw, selection, item="the cells' positions"
+        )
+        cell_ids = read_rows(
+            ledger, self.cells._get_array("ids"), cell_index, item="the cells' IDs"
         )
         split_names = np.asarray(_stored_samples(group, "split_names"), dtype=object)
-        cells = pd.DataFrame(
-            {
-                "mixscape_class": _cell_values(
-                    self,
-                    MemoryLedger(
-                        self.memoryBytes,
-                        f"Reading the {classes.kind} artifact",
-                        codec_threads=self.nthreads,
-                    ),
-                    classes,
-                ).astype(str),
-                "global_class": _cell_values(
-                    self,
-                    MemoryLedger(
-                        self.memoryBytes,
-                        f"Reading the {classes.kind} artifact",
-                        codec_threads=self.nthreads,
-                    ),
-                    classes,
-                    "global_class",
-                ).astype(str),
-                "posterior": read_array(group, "posterior"),
-                "score": read_array(group, "score"),
-                "split": split_names[read_array(group, "splits")],
-            },
-            index=index,
+        cell_columns = {
+            "mixscape_class": _cell_values(self, ledger, classes),
+            "global_class": _cell_values(self, ledger, classes, "global_class"),
+            "posterior": read_whole(ledger, group, "posterior", item="the posteriors"),
+            "score": read_whole(ledger, group, "score", item="the scores"),
+            "split": read_whole(ledger, group, "splits", item="the cells' splits"),
+        }
+        ledger.peak(
+            "the table of cells", _frame_bytes({**cell_columns, "ids": cell_ids})
         )
-        row_splits = split_names[read_array(group, "row_splits")]
-        targets = read_array(group, "targets").astype(str)
+        cell_columns["mixscape_class"] = cell_columns["mixscape_class"].astype(str)
+        cell_columns["global_class"] = cell_columns["global_class"].astype(str)
+        cell_columns["split"] = split_names[cell_columns["split"]]
+        cells = pd.DataFrame(
+            cell_columns, index=pd.Index(cell_ids.astype(str, copy=False), name="ids")
+        )
+        del cell_columns
+        row_splits = split_names[
+            read_whole(ledger, group, "row_splits", item="the rows' splits")
+        ]
+        targets = read_whole(ledger, group, "targets", item="the targets")
         table: dict[str, Any] = {
             "target": targets,
             "split": row_splits,
-            "status": _status_labels(group, MIXSCAPE_STATUSES),
+            "status": _status_labels(
+                group,
+                MIXSCAPE_STATUSES,
+                read_whole(ledger, group, "status", item="the statuses"),
+            ),
         }
         for name in (
             "n_cells",
@@ -1272,10 +1442,18 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             "perturbed_sd",
             "perturbed_weight",
         ):
-            table[name] = read_array(group, name)
-        offsets = read_array(group, "de_offsets")
-        feature_ids = np.asarray(assay.feats.fetch_all("ids")).astype(str)
+            table[name] = read_whole(ledger, group, name, item=f"the rows' {name}")
+        offsets = read_whole(ledger, group, "de_offsets", item="the DE genes' offsets")
+        feature_ids = _feature_text(ledger, assay, "ids")
+        de_features = read_whole(ledger, group, "de_features", item="the DE genes")
         rows = np.repeat(np.arange(len(targets)), np.diff(offsets))
+        # Each DE gene's target and feature as text, then as Python strings in
+        # its table, and its split's reference.
+        widths = targets.dtype.itemsize + feature_ids.dtype.itemsize
+        ledger.peak(
+            "the tables of targets and DE genes",
+            _frame_bytes(table) + len(rows) * (2 * widths + 3 * 64 + 24),
+        )
         parameters = status.parameters or {}
         split_columns = list(parameters["split_columns"])
         return MixscapeResult(
@@ -1285,7 +1463,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 {
                     "target": targets[rows],
                     "split": row_splits[rows],
-                    "feature": feature_ids[read_array(group, "de_features")],
+                    "feature": feature_ids[de_features],
                 }
             ),
             from_assay=assay.name,

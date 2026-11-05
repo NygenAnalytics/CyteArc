@@ -12,10 +12,11 @@ from ...metadata.rows import (
     metadata_missing_mask,
     read_rows,
     read_text_rows,
+    read_whole,
 )
 from ...metadata.selection import resolve_cell_aligned_artifact, sample_codes
 from ...graph.arguments import OperationArguments
-from ...perturbation.efficiency import target_features
+from ...perturbation.efficiency import target_feature_bytes, target_features
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactStatus,
@@ -24,18 +25,14 @@ from ...storage.artifacts import (
     fingerprint_strings,
     require_complete_artifact,
 )
+from ...storage.async_execution import zarr_decoding_threads
 from ...storage.geometry import array_geometry
-from ...storage.partition import scan_band
 from ...storage.selections import (
     iter_stored_selection_blocks,
     validate_cell_selection,
 )
 from ...storage.types import as_zarr_array, read_array
-from ...utils.memory_budget import (
-    MemoryBudgetError,
-    MemoryLedger,
-    object_array_bytes,
-)
+from ...utils.memory_budget import MemoryLedger, object_array_bytes
 
 # The most bytes of values that one band of features holds, in Mixscape and
 # the association tests, whatever the budget, so that a large budget does not
@@ -112,47 +109,95 @@ class _CellSamples:
     assignments: str | None
 
 
-def _require_budget(
-    needed: int,
-    budget: int,
-    holding: str,
-    *,
-    beside: str = "",
-    remedy: str = "Raise mem_budget.",
-) -> None:
-    """Refuse a memory budget below the ``needed`` bytes of an operation.
-
-    The message reads ``holding``, which names what holds the bytes and ends
-    with its verb, such as ``"The profiles of 9 targets hold about"``, then
-    the bytes, ``beside``, which names what else they cover, the budget, and
-    ``remedy``. The refusal is a :class:`MemoryBudgetError` whose item is
-    ``holding`` up to its verb. The screen steps that charge a
-    :class:`MemoryLedger` refuse through it instead.
-    """
-    if needed > budget:
-        raise MemoryBudgetError(
-            f"{holding} {needed} bytes{beside}, more than the memory budget of "
-            f"{budget} bytes. {remedy}",
-            needed_bytes=needed,
-            budget_bytes=budget,
-            item=holding.rpartition(" hold")[0] or holding,
-        )
+#: The Python objects that a screen call holds besides its arrays: its plans
+#: and the store's metadata that it opens, as traced for guide calling.
+_CALL_FIXED_BYTES = 1 << 18
 
 
-def _resident_ledger(store: Any, resident_bytes: int) -> MemoryLedger:
-    """A ledger of the store's budget that holds ``resident_bytes``, for a step that checks its budget with :func:`_require_budget`.
+def _call_ledger(store: Any, doing: str, *, remedy: str | None = None) -> MemoryLedger:
+    """Return the memory ledger of one screen call, holding the call's own objects.
 
-    The count streams and bands plan within such a ledger's room as they plan
-    within any operation's ledger, and the step's check, not the ledger,
-    refuses a budget that does not hold them.
+    The ledger refuses the store's budget as ``doing``, such as ``"Measuring
+    the efficiency of 3 targets"``, naming ``remedy`` beside a larger budget,
+    and its reads decode on the store's ``nthreads`` codec threads.
     """
     ledger = MemoryLedger(
-        store.memoryBytes, "Streaming counts", codec_threads=store.nthreads
+        store.memoryBytes, doing, remedy=remedy, codec_threads=store.nthreads
     )
-    # The step's own check refuses what does not fit, in its own words, so
-    # the ledger carries the bytes to the stream's plan without refusing them.
-    ledger.charged = int(resident_bytes)
+    ledger.hold("the call's plans and the store's metadata it opens", _CALL_FIXED_BYTES)
     return ledger
+
+
+def _converted(
+    ledger: MemoryLedger, values: np.ndarray, dtype: Any, item: str
+) -> np.ndarray:
+    """Return ``values``, which ``ledger`` holds, as ``dtype``, holding the copy in place of them.
+
+    Values of that dtype already are returned as they are.
+    """
+    if values.dtype == np.dtype(dtype):
+        return values
+    ledger.hold(item, values.size * np.dtype(dtype).itemsize)
+    converted = values.astype(dtype)
+    ledger.release(values.nbytes)
+    return converted
+
+
+def _text_width(values: np.ndarray) -> int:
+    """Return the characters of the widest of text ``values``, at least 1."""
+    if values.dtype.kind == "U":
+        return max(1, values.dtype.itemsize // 4)
+    return max((len(str(value)) for value in values.ravel()), default=1) or 1
+
+
+def _table_write_bytes(columns: Mapping[str, np.ndarray]) -> int:
+    """Return what writing ``columns`` with ``write_cell_data_artifact`` holds beside them.
+
+    Each column is counted as ``cell_data_write_bytes`` counts it, with its
+    file buffers, a text column at the width of its widest value.
+    """
+    from ...metadata.artifacts import cell_data_write_bytes
+
+    specs: dict[str, tuple[tuple[int, ...], Any]] = {}
+    for name, values in columns.items():
+        array = np.asarray(values)
+        dtype = f"U{_text_width(array)}" if array.dtype.kind in "OU" else array.dtype
+        specs[name] = (tuple(int(size) for size in array.shape), dtype)
+    return cell_data_write_bytes(specs)
+
+
+#: A table's bytes for each of its values, beside the values that its
+#: columns copy: the references of a text value and its index.
+_FRAME_BYTES_PER_VALUE = 16
+
+
+def _frame_bytes(columns: Mapping[str, np.ndarray]) -> int:
+    """Return what building a table of ``columns`` holds beside them.
+
+    A numeric column is copied into the table, and a text column becomes
+    Python strings, each at the width of the column's widest value, as
+    ``python_text_bytes`` counts them, beside the references of every value.
+    """
+    from ...utils.memory_budget import python_text_bytes
+
+    held = 0
+    for values in columns.values():
+        array = np.asarray(values)
+        n_values = int(array.size)
+        held += _FRAME_BYTES_PER_VALUE * n_values
+        if array.dtype.kind in "OU":
+            # The widest code point of stored text, or any for objects.
+            widest = (
+                int(array.view(np.uint32).max())
+                if array.dtype.kind == "U" and array.dtype.itemsize and n_values
+                else 0x10FFFF
+            )
+            held += python_text_bytes(
+                n_values, n_values * _text_width(array), widest=widest
+            )
+        else:
+            held += array.nbytes
+    return held
 
 
 def _require_ref(ref: object, name: str, *kinds: str, optional: bool = False) -> None:
@@ -282,6 +327,47 @@ def _stream_bytes(counts: Any, scratch_bytes_per_row: int = 0) -> tuple[int, int
     return fixed + per_row, fixed + chunk_rows * per_row
 
 
+def _stream_beside(ledger: MemoryLedger, counts: Any, block: int) -> int:
+    """Return what a stream of ``counts`` whose blocks hold ``block`` bytes needs beside the bytes that ``ledger`` charges.
+
+    ``block`` counts, beside the block's rows and decode, the chunk that the
+    reader's previous read can still hold, as ``ChunkedArray._held_read_bytes``
+    states it; before the stream's first block that previous read is the
+    ledger's last, whose leftover ``ledger.left`` counts. The two are one
+    chunk, so the stream needs the larger of them beside the rest of its
+    block, which a later stream of the same counts, after the leftover of
+    this one, needs too.
+    """
+    held = int(counts._held_read_bytes())
+    return max(ledger.left, held) + block - held
+
+
+def _charge_stream(
+    ledger: MemoryLedger, counts: Any, scratch_bytes_per_row: int, item: str
+) -> int:
+    """Charge ``ledger`` a stream of ``counts`` in blocks of a stored chunk's rows as ``item``, plan the room it reads ahead in, and return the resident bytes it plans beside.
+
+    The stream holds a block of the rows of a stored chunk beside what the
+    ledger charges, as :func:`_stream_bytes` counts it, with the chunk that
+    the ledger's last read can still hold in place of the one that the
+    block's previous read can, as :func:`_stream_beside` counts them; the
+    ledger refuses that beyond its budget: a smaller block decodes the same
+    chunk again for each block, so it would save little memory for much
+    time. The stream then reads as many blocks ahead as the room holds,
+    which the ledger plans for, beside the returned resident bytes: what the
+    ledger charges and what its last read can hold beyond the block's own
+    held chunk.
+    """
+    _least, block = _stream_bytes(counts, scratch_bytes_per_row)
+    beside = _stream_beside(ledger, counts, block)
+    ledger.peak(item, beside - ledger.left)
+    room = ledger.room
+    ledger.peak(
+        item, beside - ledger.left if room is None else max(beside - ledger.left, room)
+    )
+    return ledger.charged + beside - block
+
+
 def _count_stream(
     ledger: MemoryLedger,
     counts: Any,
@@ -293,24 +379,18 @@ def _count_stream(
 ) -> Iterable[np.ndarray]:
     """Stream the row blocks of ``counts`` within the ledger's room, after charging a block of a stored chunk's rows as ``item``.
 
-    The stream holds a block of the rows of a stored chunk beside what the
-    ledger holds, as :func:`_stream_bytes` counts it, which the ledger
-    refuses beyond its budget: a smaller block decodes the same chunk again
-    for each block, so it would save little memory for much time. The stream
-    then reads as many blocks ahead as the room holds, beside
-    ``ledger.held_bytes``. Once the blocks are read, the ledger counts the
-    chunk that the last read can still hold.
+    The ledger is charged as :func:`_charge_stream` charges it, and the
+    stream plans within its room, beside ``ledger.held_bytes``. Once the
+    blocks are read, the ledger counts the chunk that the last read can
+    still hold.
     """
-    _least, block = _stream_bytes(counts, scratch_bytes_per_row)
-    ledger.peak(item, block)
-    room = ledger.room
-    ledger.peak(item, block if room is None else max(block, room))
+    resident = _charge_stream(ledger, counts, scratch_bytes_per_row, item)
     blocks: Iterator[np.ndarray] = counts._stream_blocks(
         nthreads=nthreads,
         msg=msg,
         prefetch=None,
         row_mask=None,
-        resident_bytes=ledger.held_bytes,
+        resident_bytes=resident,
         memory_bytes=ledger.budget,
         scratch_bytes_per_row=scratch_bytes_per_row,
     )
@@ -337,28 +417,40 @@ def _count_blocks(
     cells: np.ndarray,
     *,
     scratch_bytes_per_row: int,
-) -> tuple[int, Iterable[np.ndarray]]:
-    """Stream the raw counts of features over cells, cells x features.
+    item: str,
+) -> Iterable[np.ndarray]:
+    """Stream the raw counts of features over cells, cells x features, in the order of ``cells``.
 
-    The blocks hold the rows of a stored chunk beside ``ledger.held_bytes``
-    and the ``scratch_bytes_per_row`` that the caller makes of each row,
-    which :func:`_count_stream_bytes` counts, and shrink to fit the ledger's
-    room when it leaves less. Returns the most rows of one block as stored
-    and the blocks, in the order of ``cells``.
+    The ledger is charged a block of a stored chunk's rows with the
+    ``scratch_bytes_per_row`` that the caller makes of each row, as
+    :func:`_charge_stream` charges it, as ``item``, and the blocks shrink to
+    fit its room when it leaves less than whole blocks. The counts may come
+    from their stored transpose, ``countsT``, when that reads less. Once the
+    blocks are read, the ledger counts the chunk that the last read of either
+    array can still hold.
     """
     from ...assay.normalization import feature_value_blocks
     from ...metadata.selection import NormalizationSpec
 
-    return feature_value_blocks(
+    counts = _count_matrix(assay, features, cells)
+    resident = _charge_stream(ledger, counts, scratch_bytes_per_row, item)
+    _, blocks = feature_value_blocks(
         assay,
         features,
         cells,
         NormalizationSpec(source="raw"),
         nthreads=store.nthreads,
-        resident_bytes=ledger.held_bytes,
+        resident_bytes=resident,
         scratch_bytes_per_row=scratch_bytes_per_row,
         memory_bytes=ledger.budget,
     )
+    transposed = getattr(counts, "_transposed", None)
+    held = counts._held_read_bytes()
+    if transposed is not None:
+        geometry = array_geometry(transposed)
+        if geometry is not None:
+            held = max(held, geometry.heldReadBytes())
+    return _leaving(ledger, iter(blocks), held)
 
 
 def _count_matrix(assay: Any, features: np.ndarray, cells: np.ndarray) -> Any:
@@ -374,17 +466,17 @@ def _count_matrix(assay: Any, features: np.ndarray, cells: np.ndarray) -> Any:
 def _count_stream_bytes(
     assay: Any, features: np.ndarray, cells: np.ndarray, *, scratch_bytes_per_row: int
 ) -> int:
-    """Return the bytes that :func:`_count_blocks` holds beside its caller's.
+    """Return the bytes that :func:`_count_blocks` holds beside its caller's, with blocks of a stored chunk's rows.
 
     That is the stream's index arrays and one block of the counts of
     ``features`` over the ``cells`` of a stored chunk, with its decode, the
     chunk that the previous read can still hold, and the
     ``scratch_bytes_per_row`` that the caller makes of each row.
     """
-    held: int = _count_matrix(assay, features, cells).stream_bytes(
-        scratch_bytes_per_row
+    _least, block = _stream_bytes(
+        _count_matrix(assay, features, cells), scratch_bytes_per_row
     )
-    return held
+    return block
 
 
 def _band_bytes(
@@ -396,28 +488,24 @@ def _band_bytes(
     per_feature: int,
     scratch_per_feature: int,
 ) -> int:
-    """Return the bytes that the call holds while it reads one band of ``features``.
+    """Return what reading one band of ``features`` needs beside what ``ledger`` holds, the bytes to charge it as a peak.
 
-    The band holds, beside ``ledger.held_bytes``, ``per_feature`` bytes for each of its
-    features, and the stream of its counts over each of ``cell_sets`` in
-    turn, with ``scratch_per_feature`` bytes for each feature of a row, as
-    :func:`_count_stream_bytes` counts it. A band of one feature holds this
-    for ``features[:1]``, and as much for any other feature.
+    The band holds ``per_feature`` bytes for each of its features, and the
+    stream of its counts over each of ``cell_sets`` in turn, with
+    ``scratch_per_feature`` bytes for each feature of a row, as
+    :func:`_count_stream_bytes` counts it, beside the chunk that the ledger's
+    last read can still hold, as :func:`_stream_beside` counts them. A band
+    of one feature holds this for ``features[:1]``, and as much for any other
+    feature.
     """
     width = len(features)
-    return (
-        ledger.held_bytes
-        + per_feature * width
-        + max(
-            _count_stream_bytes(
-                assay,
-                features,
-                cells,
-                scratch_bytes_per_row=scratch_per_feature * width,
-            )
-            for cells in cell_sets
+    streams = max(
+        _stream_beside(
+            ledger, matrix, _stream_bytes(matrix, scratch_per_feature * width)[1]
         )
+        for matrix in (_count_matrix(assay, features, cells) for cells in cell_sets)
     )
+    return per_feature * width + streams - ledger.left
 
 
 def _count_bands(
@@ -432,29 +520,35 @@ def _count_bands(
 ) -> list[tuple[int, int]]:
     """Split ``features`` into consecutive bands whose reads fit the ledger's room.
 
-    A band holds what :func:`_band_bytes` counts for it beside
-    ``ledger.held_bytes``. Each band takes as many features as fit, at most
-    ``most``, and every band of ``most`` features without a budget; a band of
-    one feature is taken whatever it holds, since the caller refuses a budget
-    that it does not fit. What a stream decodes depends on the stored chunks of the band's
-    features, so each band is sized on its own.
+    A band holds what :func:`_band_bytes` counts for it beside what
+    ``ledger`` charges, its counts streamed in blocks of a stored chunk's rows
+    beside the chunk that the ledger's last read, or the band's stream before
+    it, can still hold, as :func:`_stream_beside` counts them. Each band takes as many features as fit, at most ``most``, and
+    every band of ``most`` features without a budget; a band of one feature
+    is taken whatever it holds, since the caller refuses a budget that it
+    does not fit. What a stream decodes depends on the stored chunks of the
+    band's features, so each band is sized on its own.
 
     Returns:
         Each band's first position in ``features`` and the position past
         its last feature, in order.
     """
     matrices = [_count_matrix(assay, features, cells) for cells in cell_sets]
-    budget, held_bytes = ledger.budget, ledger.held_bytes
+    budget, charged = ledger.budget, ledger.charged
 
     def fits(start: int, stop: int) -> bool:
         if budget is None:
             return True
         width = stop - start
         streams: int = max(
-            matrix[:, start:stop].stream_bytes(scratch_per_feature * width)
-            for matrix in matrices
+            _stream_beside(
+                ledger,
+                band,
+                _stream_bytes(band, scratch_per_feature * width)[1],
+            )
+            for band in (matrix[:, start:stop] for matrix in matrices)
         )
-        return held_bytes + per_feature * width + streams <= budget
+        return charged + per_feature * width + streams <= budget
 
     bands: list[tuple[int, int]] = []
     start = 0
@@ -585,8 +679,42 @@ def _cell_samples(
     )
 
 
+def _feature_text(ledger: MemoryLedger, assay: Any, column: str) -> np.ndarray:
+    """Read the feature column ``column`` of ``assay`` as fixed-width text, keeping it charged.
+
+    The column is read through ``read_rows``, which charges the chunks that
+    its read decodes; a column stored as anything but text is held again as
+    text.
+    """
+    array = assay.feats._get_array(column)
+    item = f"the features' {column}"
+    values = read_rows(
+        ledger, array, np.arange(int(array.shape[0]), dtype=np.int64), item=item
+    )
+    if values.dtype.kind == "U":
+        return values
+    text: np.ndarray = values.astype(str)
+    ledger.hold(item, text.nbytes)
+    ledger.release(values.nbytes)
+    return text
+
+
+def _cell_totals(
+    ledger: MemoryLedger, assay: Any, cells: np.ndarray, *, item: str
+) -> np.ndarray:
+    """Read the count totals of distinct ``cells`` of ``assay`` as float64, keeping them charged as ``item``."""
+    totals = read_rows(
+        ledger,
+        assay.cells._get_array(assay._totals_name),
+        np.asarray(cells, dtype=np.int64),
+        item=item,
+    )
+    return _converted(ledger, totals, np.float64, item)
+
+
 def _row_features(
     store: Any,
+    ledger: MemoryLedger,
     labels: ArtifactRef,
     rows: _LabelRows,
     id_column: str | None,
@@ -598,18 +726,24 @@ def _row_features(
     A target takes the feature whose ID its guides give in ``id_column``
     of the guide assay of ``labels``, or else the one feature with its
     name, as :func:`~cytearc.perturbation.efficiency.target_features`
-    describes. Returns each row's feature position, -1 without a match.
+    describes. The guides' column is read through ``ledger``, and it and
+    what matching builds are let go once the targets are matched. Returns
+    each row's feature position, -1 without a match, which stays charged.
 
     Raises:
         ValueError: If ``id_column`` is not a feature column of the guide
             assay.
     """
+    before = ledger.charged
     guide_feature_ids = store._guide_feature_column(
-        store._get_assay(str(labels.assay)),
-        id_column,
-        "id_column",
-        ledger=MemoryLedger(
-            None, "Reading the guides' IDs", codec_threads=store.nthreads
+        store._get_assay(str(labels.assay)), id_column, "id_column", ledger=ledger
+    )
+    column_bytes = ledger.charged - before
+    ledger.hold("each row's feature", 8 * len(rows.codes))
+    ledger.peak(
+        "matching the targets to features",
+        target_feature_bytes(
+            len(rows.target_names), feature_ids, feature_names, guide_feature_ids
         ),
     )
     matched: np.ndarray = target_features(
@@ -619,36 +753,70 @@ def _row_features(
         feature_ids,
         feature_names,
     )[rows.codes]
+    del guide_feature_ids
+    ledger.release(column_bytes)
     return matched
 
 
 def _label_rows(
-    store: Any, labels: ArtifactRef, by: str, *, control_guides: bool = False
+    store: Any,
+    ledger: MemoryLedger,
+    labels: ArtifactRef,
+    by: str,
+    *,
+    control_guides: bool = False,
 ) -> _LabelRows:
     """Read the rows of a per-perturbation table: each target or each guide.
 
     A row is a target that is not a control, or with ``by="guide"`` a guide
     whose target is not a control, in assay order; ``control_guides``
-    makes the guides of control targets rows too.
+    makes the guides of control targets rows too. The labels' targets and
+    the guides' targets are read through ``ledger``, and the rows stay
+    charged with them.
     """
     status = require_complete_artifact(store.zw, labels)
     group = artifact_group(store.zw, labels)
     calls = artifact_group(store.zw, status.input_ref("guide_calls"))
 
-    target_names = read_array(group, "targets").astype(str)
-    is_control = read_array(group, "target_is_control").astype(bool)
-    guide_targets = read_array(group, "guide_target_codes").astype(np.int64)
+    target_names = read_whole(ledger, group, "targets", item="the targets")
+    flags_item = "the targets' control flags"
+    is_control = _converted(
+        ledger,
+        read_whole(ledger, group, "target_is_control", item=flags_item),
+        bool,
+        flags_item,
+    )
+    targets_item = "the guides' targets"
+    guide_targets = _converted(
+        ledger,
+        read_whole(ledger, group, "guide_target_codes", item=targets_item),
+        np.int64,
+        targets_item,
+    )
+    # Each row's target, name and guide, at most one row for each target or
+    # guide.
+    n_candidates = len(target_names) if by == "target" else len(guide_targets)
+    ledger.hold("the rows", 16 * n_candidates)
     if by == "target":
         guides = np.empty(0, dtype=np.int64)
         codes = np.flatnonzero(~is_control)
         names = target_names[codes]
+        ledger.hold("the rows", names.nbytes)
     else:
         guides = np.flatnonzero(
             (guide_targets >= 0)
             & (control_guides | ~is_control[np.maximum(guide_targets, 0)])
         )
         codes = guide_targets[guides]
-        names = read_array(calls, "guides").astype(str)[guides]
+        guide_ids = read_whole(ledger, calls, "guides", item="the guide IDs")
+        names = guide_ids[guides]
+        ledger.hold("the rows", names.nbytes)
+        ids_bytes = guide_ids.nbytes
+        del guide_ids
+        ledger.release(ids_bytes)
+    flags_bytes = is_control.nbytes
+    del is_control
+    ledger.release(flags_bytes)
     return _LabelRows(
         status=status,
         target_names=target_names,
@@ -670,14 +838,9 @@ _NO_CONTROL_CELLS = (
 # to place them.
 _LABEL_BLOCK_ROWS = 1 << 16
 _SELECTION_BLOCK_ROWS = 1 << 14
-# The bytes that finding the compared cells holds for each cell of a block of
-# labels, beside the chunks that its reads decode: the cells' flags, counts,
-# first codes and rows, and the positions, rows and flags of those compared.
-_LABEL_BLOCK_BYTES_PER_CELL = 64
-# The bytes that the compared cells hold for each of them while they are
-# found: their positions among the labels, rows and flags, gathered from the
-# blocks and joined, and their positions in the store.
-_COMPARED_BYTES_PER_CELL = 48
+# The bytes that finding a block's rows holds for each of its cells beside
+# the arrays it reads: their positions, rows and the checks that pick them.
+_LABEL_BLOCK_BYTES_PER_CELL = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -688,7 +851,7 @@ class _CellRowArrays:
     no other, and a guide alone when it is the cell's one called guide: by
     target, the labels' ``n_targets`` and ``target_codes``; by guide, the
     calls' ``n_guides`` and ``guide_codes``. Only each cell's first code is
-    read.
+    used.
 
     Attributes:
         is_control: Whether each cell carries control guides only.
@@ -703,24 +866,37 @@ class _CellRowArrays:
     codes: zarr.Array
     row_of: np.ndarray
 
-    def rows(self, start: int, stop: int) -> tuple[np.ndarray, np.ndarray]:
-        """Return the row that each cell from ``start`` to ``stop`` carries alone, or -1, and its control flag."""
-        control = np.asarray(self.is_control[start:stop], dtype=bool)
-        single = np.asarray(self.counts[start:stop]) == 1
-        first = np.asarray(self.codes[start:stop, 0])
-        return np.where(single, self.row_of[np.maximum(first, 0)], -1), control
+    def blocks(self) -> Iterator[tuple[int, int]]:
+        """Yield the first and past-last cell of each block of cells read at once: whole chunks of the codes, up to a bound."""
+        n_labelled = int(self.is_control.shape[0])
+        chunk_rows = max(1, int(self.codes.chunks[0]))
+        block_rows = max(chunk_rows, _LABEL_BLOCK_ROWS // chunk_rows * chunk_rows)
+        for start in range(0, n_labelled, block_rows):
+            yield start, min(start + block_rows, n_labelled)
 
-    def block_bytes(self, block_rows: int) -> int:
-        """Return the bytes that finding the compared cells of one block holds."""
-        decoded = max(
-            array_row_selection_parts(array)[0]
-            for array in (self.is_control, self.counts)
+    def rows(
+        self, ledger: MemoryLedger, start: int, stop: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return the row that each cell from ``start`` to ``stop`` carries alone, or -1, and its control flag.
+
+        The cells' flags, counts and codes are read through ``ledger``; the
+        rows and flags stay charged, and the rest is let go.
+        """
+        n_cells = stop - start
+        before = ledger.charged
+        ledger.hold("the labelled cells' rows", _LABEL_BLOCK_BYTES_PER_CELL * n_cells)
+        cells = np.arange(start, stop, dtype=np.int64)
+        control = read_rows(
+            ledger, self.is_control, cells, item="the labelled cells' control flags"
+        ).astype(bool, copy=False)
+        counts = read_rows(
+            ledger, self.counts, cells, item="the labelled cells' numbers of targets"
         )
-        return (
-            block_rows * _LABEL_BLOCK_BYTES_PER_CELL
-            + array_row_selection_parts(self.codes)[0]
-            + decoded
-        )
+        codes = read_rows(ledger, self.codes, cells, item="the labelled cells' targets")
+        row = np.where(counts == 1, self.row_of[np.maximum(codes[:, 0], 0)], -1)
+        del counts, codes, cells
+        ledger.release(ledger.charged - before - row.nbytes - control.nbytes)
+        return row, control
 
 
 def _cell_row_arrays(
@@ -746,71 +922,87 @@ def _cell_row_arrays(
 
 
 def _label_groups(
-    store: Any, labels: ArtifactRef, rows: _LabelRows, by: str
+    store: Any, ledger: MemoryLedger, labels: ArtifactRef, rows: _LabelRows, by: str
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return the row that each labelled cell carries alone, or -1, and its control flag.
 
     A cell carries a target alone when its called guides target that gene
     and no other, and a guide alone when it is the cell's one called guide.
-
-    Raises:
-        ValueError: If no labelled cell carries control guides only.
-    """
-    arrays = _cell_row_arrays(store, labels, rows, by)
-    control = np.asarray(arrays.is_control[:], dtype=bool)
-    if not control.any():
-        raise ValueError(_NO_CONTROL_CELLS)
-    groups, _ = arrays.rows(0, len(control))
-    return groups, control
-
-
-def _compared_cells(
-    store: Any, labels: ArtifactRef, rows: _LabelRows, by: str
-) -> tuple[_ComparedCells, int]:
-    """Return the cells that a per-perturbation table compares, and the bytes that finding them holds.
-
-    The labels are read a block of cells at a time, so that only the arrays of
-    the compared cells grow with the cells: a screen with many labelled cells
-    and few compared ones holds little. The bytes are the most that finding
-    the compared cells holds beside what the caller holds.
+    The labels are read through ``ledger`` a block of cells at a time, and
+    the rows and flags of every cell stay charged.
 
     Raises:
         ValueError: If no labelled cell carries control guides only.
     """
     arrays = _cell_row_arrays(store, labels, rows, by)
     n_labelled = int(arrays.is_control.shape[0])
+    ledger.hold("the labelled cells' rows and control flags", 9 * n_labelled)
+    groups = np.empty(n_labelled, dtype=np.int64)
+    control = np.empty(n_labelled, dtype=bool)
+    for start, stop in arrays.blocks():
+        row, flag = arrays.rows(ledger, start, stop)
+        groups[start:stop] = row
+        control[start:stop] = flag
+        block_bytes = row.nbytes + flag.nbytes
+        del row, flag
+        ledger.release(block_bytes)
+    if not control.any():
+        raise ValueError(_NO_CONTROL_CELLS)
+    return groups, control
+
+
+def _compared_cells(
+    store: Any, ledger: MemoryLedger, labels: ArtifactRef, rows: _LabelRows, by: str
+) -> _ComparedCells:
+    """Return the cells that a per-perturbation table compares, keeping them charged.
+
+    The labels are read through ``ledger`` a block of cells at a time, so
+    that only the arrays of the compared cells grow with the cells: a screen
+    with many labelled cells and few compared ones holds little.
+
+    Raises:
+        ValueError: If no labelled cell carries control guides only.
+    """
+    arrays = _cell_row_arrays(store, labels, rows, by)
     # The labels' cells are checked against the cell IDs before any array
     # of the compared cells is held.
     selection = rows.status.input_ref("cell_selection")
+    ledger.peak(
+        "checking the labels' cells against the cell IDs",
+        _cell_selection_check_bytes(store),
+    )
     validate_cell_selection(store.zw, selection)
-    # Whole chunks of the codes, whose reads decode the most, up to a bound.
-    chunk_rows = max(1, int(arrays.codes.chunks[0]))
-    block_rows = max(chunk_rows, _LABEL_BLOCK_ROWS // chunk_rows * chunk_rows)
     positions, groups, control = [], [], []
-    for start in range(0, n_labelled, block_rows):
-        row, flag = arrays.rows(start, min(start + block_rows, n_labelled))
+    for start, stop in arrays.blocks():
+        row, flag = arrays.rows(ledger, start, stop)
+        # The block's compared cells: their positions among the labels, rows
+        # and flags.
+        ledger.peak("the compared cells", 8 * len(row))
         kept = np.flatnonzero((row >= 0) | flag)
+        ledger.hold("the compared cells", 17 * len(kept))
         positions.append(kept + start)
         groups.append(row[kept])
         control.append(flag[kept])
+        block_bytes = row.nbytes + flag.nbytes
+        del row, flag, kept
+        ledger.release(block_bytes)
     if not any(flags.any() for flags in control):
         raise ValueError(_NO_CONTROL_CELLS)
+    n_compared = sum(len(block) for block in positions)
+    # The positions joined, then placed in the store, beside the blocks.
+    ledger.hold("the compared cells", 8 * n_compared)
     compared = np.concatenate(positions)
     del positions
-    cells = _store_positions(store, selection, compared)
-    del compared
+    ledger.release(8 * n_compared)
+    cells = _store_positions(store, ledger, selection, compared)
+    ledger.hold("the compared cells", 9 * n_compared)
     found = _ComparedCells(
         cells=cells, groups=np.concatenate(groups), control=np.concatenate(control)
     )
-    held = max(
-        _cell_selection_check_bytes(store),
-        len(cells) * _COMPARED_BYTES_PER_CELL
-        + max(
-            arrays.block_bytes(min(block_rows, n_labelled)),
-            _selection_block_bytes(store, selection),
-        ),
-    )
-    return found, held
+    del groups, control
+    ledger.release(9 * n_compared)
+    ledger.release(compared.nbytes)
+    return found
 
 
 def _selection_blocks(store: Any, selection: ArtifactRef) -> Iterable[Any]:
@@ -826,51 +1018,75 @@ def _selection_blocks(store: Any, selection: ArtifactRef) -> Iterable[Any]:
     )
 
 
-def _selection_block_bytes(store: Any, selection: ArtifactRef) -> int:
-    """Return the bytes that one block of a cell selection holds as it is read.
+def _selection_read(
+    store: Any, ledger: MemoryLedger, selection: ArtifactRef
+) -> tuple[int, int]:
+    """Return what reading a cell selection a block of cells at a time holds, and what its last read leaves.
 
     A block holds its flags and the store positions of its cells, beside
     those of the block before it, and the positions of the cells looked up in
-    it, at most 64 bytes for each of its cells, and the two chunks of flags
-    that its read may decode.
+    it, at most 64 bytes for each of its cells, and the chunk of flags that
+    its read decodes beside one on each of the ledger's codec threads that
+    the read before can still hold.
     """
     flags = as_zarr_array(artifact_group(store.zw, selection)["values"], name="values")
-    block_rows = min(_SELECTION_BLOCK_ROWS, int(flags.shape[0]))
-    return block_rows * 64 + 2 * array_row_selection_parts(flags)[0]
+    n_rows = int(flags.shape[0])
+    block_rows = min(_SELECTION_BLOCK_ROWS, n_rows)
+    geometry = array_geometry(flags)
+    if geometry is None:
+        return block_rows * 64, 0
+    chunks = -(-max(1, n_rows) // geometry.axisChunk(0))
+    held = geometry.heldReadBytes(ledger.holding_threads(chunks))
+    # Before the first block, the read before is the ledger's last, whose
+    # leftover the ledger counts already.
+    reading = block_rows * 64 + array_row_selection_parts(flags)[0]
+    return reading + max(0, held - ledger.left), held
 
 
 def _store_positions(
-    store: Any, selection: ArtifactRef, compact: np.ndarray
+    store: Any, ledger: MemoryLedger, selection: ArtifactRef, compact: np.ndarray
 ) -> np.ndarray:
-    """Return the store positions of a selection's cells at ascending ``compact`` positions.
+    """Return the store positions of a selection's cells at ascending ``compact`` positions, keeping them charged.
 
-    The selection is read a block of cells at a time.
+    The selection is read a block of cells at a time through ``ledger``.
     """
+    ledger.hold("the cells' positions in the store", 8 * len(compact))
     positions = np.empty(len(compact), dtype=np.int64)
-    for block in _selection_blocks(store, selection):
-        low, high = np.searchsorted(compact, (block.compact_start, block.compact_stop))
-        positions[low:high] = block.selected_indices[
-            compact[low:high] - block.compact_start
-        ]
+    reading, held = _selection_read(store, ledger, selection)
+    ledger.peak("reading the cell selection", reading)
+    with zarr_decoding_threads(ledger.codec_threads):
+        for block in _selection_blocks(store, selection):
+            low, high = np.searchsorted(
+                compact, (block.compact_start, block.compact_stop)
+            )
+            positions[low:high] = block.selected_indices[
+                compact[low:high] - block.compact_start
+            ]
+    ledger.leave(held)
     return positions
 
 
 def _selected_rows(
-    store: Any, selection: ArtifactRef, cells: np.ndarray
+    store: Any, ledger: MemoryLedger, selection: ArtifactRef, cells: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return where each of ascending store positions sits among a selection's cells.
+    """Return where each of ascending store positions sits among a selection's cells, keeping them charged.
 
     Also returns whether each is a cell of the selection; the position of one
     that is not means nothing. The selection is read a block of cells at a
-    time.
+    time through ``ledger``.
     """
+    ledger.hold("where the cells sit in the cell selection", 9 * len(cells))
     found = np.zeros(len(cells), dtype=np.int64)
     present = np.zeros(len(cells), dtype=bool)
-    for block in _selection_blocks(store, selection):
-        low, high = np.searchsorted(cells, (block.start, block.stop))
-        within, here = _positions_in(block.selected_indices, cells[low:high])
-        found[low:high] = block.compact_start + within
-        present[low:high] = here
+    reading, held = _selection_read(store, ledger, selection)
+    ledger.peak("reading the cell selection", reading)
+    with zarr_decoding_threads(ledger.codec_threads):
+        for block in _selection_blocks(store, selection):
+            low, high = np.searchsorted(cells, (block.start, block.stop))
+            within, here = _positions_in(block.selected_indices, cells[low:high])
+            found[low:high] = block.compact_start + within
+            present[low:high] = here
+    ledger.leave(held)
     return found, present
 
 
@@ -884,6 +1100,8 @@ def _cell_selection_check_bytes(store: Any, *, selected_ids: bool = False) -> in
     cell ID, which the first check in a process computes a chunk at a time,
     is kept while the IDs are unchanged, so it is not counted.
     """
+    from ...storage.partition import scan_band
+
     ids = as_zarr_array(store.zw["cellData"]["ids"], name="ids")
     n_cells = int(ids.shape[0])
     held = 2 * n_cells
@@ -892,16 +1110,3 @@ def _cell_selection_check_bytes(store: Any, *, selected_ids: bool = False) -> in
         itemsize = int(np.dtype(ids.dtype).itemsize)
         held += array_row_selection_parts(ids)[0] + 2 * band * itemsize
     return held
-
-
-def _column_read_bytes(metadata: Any, column: str | None) -> int:
-    """Return the bytes that reading a whole metadata column holds, 0 without one.
-
-    Zarr decodes whole chunks, also where a chunk reaches past the column's
-    end, so that reading a column shorter than its chunk holds the chunk as
-    stored and decoded, beside the column's values as read and as copied.
-    """
-    if column is None:
-        return 0
-    array = metadata._get_array(column)
-    return array_row_selection_parts(array)[0] + 2 * int(array.nbytes)

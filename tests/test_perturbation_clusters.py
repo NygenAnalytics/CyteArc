@@ -24,6 +24,7 @@ from cytearc.perturbation.clusters import (
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
 from tests.perturbation_helpers import fixed_labels, write_screen
+from tests.memory_helpers import refusal_naming
 from tests.storage_helpers import open_store
 
 
@@ -492,9 +493,20 @@ def test_cluster_refuses_inputs_and_budgets_it_cannot_use(shared) -> None:
         store.perturbation.load_clusters("clusters")
     with pytest.raises(ValueError, match="not 'perturbation_profiles'"):
         store.perturbation.load_clusters(profiles)
-    # The clustering takes about 30 kB, and the distances on loading 12 kB.
-    budgeted = open_store(store.zarr_loc, mem_budget=10_000)
-    with pytest.raises(MemoryError, match="Clustering 12 perturbations in 40"):
-        budgeted.perturbation.cluster(profiles, min_cluster_size=6)
-    with pytest.raises(MemoryError, match="distances between 12 profiles"):
-        budgeted.perturbation.load_clusters(clusters)
+    # The clustering takes about 30 kB, and the distances on loading 12 kB,
+    # less than the reads before them; the refusals from a budget of 10,000
+    # bytes name the profiles that they hold.
+    refusal_naming(
+        lambda budget: open_store(
+            store.zarr_loc, mem_budget=budget
+        ).perturbation.cluster(profiles, min_cluster_size=6),
+        "Clustering 12 perturbations in 40 features holds about",
+        start=10_000,
+    )
+    refusal_naming(
+        lambda budget: open_store(
+            store.zarr_loc, mem_budget=budget
+        ).perturbation.load_clusters(clusters),
+        "Reading the distances between 12 profiles holds about",
+        start=10_000,
+    )

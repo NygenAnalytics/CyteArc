@@ -12,12 +12,11 @@ from ...metadata.arguments import (
 from ...metadata.artifacts import write_cell_data_artifact
 from ...metadata.rows import (
     apply_missing_mask,
-    array_row_selection_parts,
-    read_array_rows_chunkwise,
-    read_metadata_missing_rows_chunkwise,
-    read_metadata_rows_chunkwise,
+    metadata_missing_mask,
+    read_rows,
+    read_whole,
 )
-from ...metadata.selection import cell_selection_indices
+from ...metadata.selection import plan_cell_selection_read, read_cell_selection
 from ...perturbation.associations import (
     AssociationPairs,
     AssociationTables,
@@ -32,30 +31,36 @@ from ...storage.artifact_writer import (
     PlannedArtifact,
 )
 from ...storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
-from ...storage.geometry import READ_OBJECT_BYTES, array_geometry
+from ...storage.async_execution import zarr_decoding_threads
+from ...storage.geometry import array_geometry
 from ...storage.partition import row_band
-from ...storage.types import as_zarr_array, read_array
+from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.logging import logger
-from ...utils.memory_budget import MemoryLedger
+from ...utils.memory_budget import MemoryLedger, hash_table_bytes
 from ...utils.numba import numba_threads
 from ...utils.warnings import warn
 from .perturbation_store import (
     _BAND_BYTES,
     _LabelRows,
+    _call_ledger,
     _cell_samples,
+    _cell_selection_check_bytes,
+    _cell_totals,
+    _converted,
     _count_bands,
     _count_blocks,
     _count_stream_bytes,
+    _feature_text,
+    _frame_bytes,
     _label_groups,
     _label_rows,
     _pairs_fingerprint,
-    _require_budget,
-    _resident_ledger,
     _require_cell_column,
     _require_ref,
     _row_features,
+    _table_write_bytes,
 )
 
 if TYPE_CHECKING:
@@ -103,28 +108,47 @@ def _chunk_rows(codes: zarr.Array) -> int:
     return min(row_band(array_geometry(codes), unit="chunk", fallback=n_rows), n_rows)
 
 
-def _code_blocks(codes: zarr.Array) -> Iterator[np.ndarray]:
-    """Yield the rows of a cells x slots array of codes, a stored chunk at a time.
+def _code_blocks(
+    ledger: MemoryLedger, codes: zarr.Array, *, item: str
+) -> Iterator[np.ndarray]:
+    """Charge ``ledger`` as ``item`` the read of the rows of a cells x slots array of codes, a stored chunk at a time, and return the reads.
 
     Zarr decodes a whole chunk for any of its rows, so whole chunks are read.
+    Each read holds its chunk as stored and decoded and the rows it returns,
+    beside what the read before can still hold: a chunk on each of the
+    ledger's codec threads, which the reads decode on, and Zarr's objects for
+    both reads, as ``ArrayGeometry.heldReadBytes`` counts them; before the
+    first read, the read before is the ledger's last, whose leftover the
+    ledger counts already. The ledger is charged that before any read, and
+    once the reads end it counts what the last can still hold.
     """
     step = max(_chunk_rows(codes), 1)
+    n_rows = int(codes.shape[0])
+    geometry = array_geometry(codes)
+    if geometry is None:
+        ledger.peak(item, int(codes.nbytes))
+        return iter((np.asarray(codes[:]),))
+    n_chunks = -(-n_rows // step) * geometry.bandChunks()
+    held = geometry.bandHeldBytes(ledger.holding_threads(n_chunks))
+    ledger.peak(
+        item,
+        geometry.storedChunkBytes() * geometry.bandChunks()
+        + min(step, n_rows) * geometry.rowBytes()
+        + max(0, held - ledger.left),
+    )
+    return _read_code_blocks(ledger, codes, step, held)
+
+
+def _read_code_blocks(
+    ledger: MemoryLedger, codes: zarr.Array, step: int, held: int
+) -> Iterator[np.ndarray]:
+    """Yield the rows of ``codes`` ``step`` rows at a time on the ledger's codec threads, then record that the last read can still hold ``held`` bytes."""
     for start in range(0, int(codes.shape[0]), step):
-        yield np.asarray(codes[start : start + step])
-
-
-def _chunk_read_bytes(codes: zarr.Array) -> int:
-    """Return what reading one stored chunk of rows of an array of codes holds.
-
-    The read holds the chunk as stored and decoded, the rows it returns, and
-    the objects Zarr makes to run it. The previous chunk, as stored and
-    decoded, can still be held beside them: the thread of Zarr's pool that
-    decoded it lets go of it only when that thread next runs, which on a busy
-    machine can come after the next read has begun.
-    """
-    stored, _ = array_row_selection_parts(codes)
-    row_bytes = int(np.prod(codes.shape[1:], dtype=np.int64)) * codes.dtype.itemsize
-    return 2 * stored + _chunk_rows(codes) * row_bytes + READ_OBJECT_BYTES
+        with zarr_decoding_threads(ledger.codec_threads):
+            block = np.asarray(codes[start : start + step])
+        yield block
+        del block
+    ledger.leave(held)
 
 
 def _association_warnings(
@@ -471,7 +495,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         for column in covariate_names:
             _require_cell_column(self, column, "covariate")
         by = "target" if integration == "union" else "guide"
-        rows = _label_rows(self, labels, by)
+        ledger = _call_ledger(self, f"Testing the associations of the {by}s")
+        rows = _label_rows(self, ledger, labels, by)
         status = rows.status
         expression = self._get_assay(from_assay)
         cell_selection = status.input_ref("cell_selection")
@@ -480,8 +505,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             cell_selection,
             operation=PerturbationAssociationArguments.operation,
         )
-        feature_ids = np.asarray(expression.feats.fetch_all("ids")).astype(str)
-        feature_names = np.asarray(expression.feats.fetch_all("names")).astype(str)
+        feature_ids = _feature_text(ledger, expression, "ids")
+        feature_names = _feature_text(ledger, expression, "names")
         n_rows = len(rows.names)
         # A table of pairs names the target of each row, by target or by guide.
         row_targets = rows.names if by == "target" else rows.target_names[rows.codes]
@@ -500,6 +525,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 read_feature_selection_indices(self.zw, expression.name, features),
                 dtype=np.int64,
             )
+            # Each discovery pair's row and feature.
+            ledger.hold("the discovery pairs", 16 * n_rows * len(selected))
             discovery = (
                 np.repeat(np.arange(n_rows, dtype=np.int64), len(selected)),
                 np.tile(selected, n_rows),
@@ -515,7 +542,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             positive = (np.empty(0, np.int64), np.empty(0, np.int64))
         elif isinstance(positive_controls, str):
             row_features = _row_features(
-                self, labels, rows, id_column, feature_ids, feature_names
+                self, ledger, labels, rows, id_column, feature_ids, feature_names
             )
             matched = np.flatnonzero(row_features >= 0)
             positive = (
@@ -537,21 +564,39 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             raise ValueError(
                 "There is no pair to test; pass pairs or positive controls"
             )
-        cell_index = cell_selection_indices(self.zw, cell_selection)
+        ledger.peak(
+            "checking the labels' cells against the cell IDs",
+            _cell_selection_check_bytes(self),
+        )
+        cell_index = read_cell_selection(
+            ledger,
+            self.zw,
+            plan_cell_selection_read(self.zw, cell_selection),
+            item="the labelled cells' positions",
+        )
         n_labelled = len(cell_index)
+        # The tested rows, and each row's place among them.
+        ledger.peak(
+            "finding the tested rows", 32 * (len(discovery[0]) + len(positive[0]))
+        )
         used = np.unique(np.concatenate([discovery[0], positive[0]]))
         compact = np.full(n_rows, -1, dtype=np.int64)
         compact[used] = np.arange(len(used))
         if high:
             # Every labelled cell is tested, as a treatment cell of its
-            # groups and a comparison cell of the others.
+            # groups and a comparison cell of the others: each one's position
+            # among them and in the store.
+            ledger.hold("the tested cells", 16 * n_labelled)
             tested = np.arange(n_labelled, dtype=np.int64)
             needing = "every labelled cell needs one"
         else:
             # The tested cells: the control cells, then the cells of each
             # tested row, row by row. Only their samples and covariates enter
-            # the tests.
-            row_of, control = _label_groups(self, labels, rows, by)
+            # the tests. Each labelled cell's tested row, the control cells,
+            # the cells of the tested rows as found and ordered, and each
+            # tested cell's position among the labelled cells and in the store.
+            row_of, control = _label_groups(self, ledger, labels, rows, by)
+            ledger.hold("the tested cells", 64 * n_labelled)
             controls = np.flatnonzero(control)
             target_row = np.where(row_of >= 0, compact[np.maximum(row_of, 0)], -1)
             targets_cells = np.flatnonzero(~control & (target_row >= 0))
@@ -563,9 +608,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         tested_cells = cell_index[tested]
         cell_samples = _cell_samples(
             self,
-            MemoryLedger(
-                None, "Numbering the cells' samples", codec_threads=self.nthreads
-            ),
+            ledger,
             sample_column,
             tested_cells,
             reason=f"Each sample gets an indicator, so {needing}",
@@ -574,19 +617,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         extra: np.ndarray | None = None
         covariates_fingerprint = None
         if covariate_names:
-            columns = []
-            for column in covariate_names:
-                values = np.asarray(
-                    read_metadata_rows_chunkwise(self.cells, column, tested_cells)
-                )
-                if values.dtype.kind not in "biuf":
-                    raise ValueError(f"covariate '{column}' must be numeric")
-                # A missing value becomes NaN, which the covariates refuse.
-                missing = read_metadata_missing_rows_chunkwise(
-                    self.cells, column, tested_cells
-                )
-                columns.append(apply_missing_mask(values.astype(np.float64), missing))
-            extra = np.column_stack(columns)
+            extra = self._covariate_values(ledger, covariate_names, tested_cells)
             covariates_fingerprint = fingerprint_array(extra)
         arguments = PerturbationAssociationArguments(
             labels=labels,
@@ -669,6 +700,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             return planned.ref
         if high:
             tables = self._complement_association_tables(
+                ledger,
                 labels,
                 rows,
                 by,
@@ -692,6 +724,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             )
         else:
             tables = self._control_association_tables(
+                ledger,
                 labels,
                 rows,
                 by,
@@ -716,6 +749,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 operation=arguments.operation,
             )
         return self._save_association_tables(
+            ledger,
             planned,
             tables,
             rows=rows,
@@ -728,8 +762,41 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             moi=moi,
         )
 
+    def _covariate_values(
+        self, ledger: MemoryLedger, columns: Sequence[str], cells: np.ndarray
+    ) -> np.ndarray:
+        """Read numeric cell metadata columns at ``cells`` as float64 covariates, cells x columns, keeping them charged.
+
+        Each column and its missing mask are read through ``ledger``; a missing
+        value becomes NaN, which the covariates refuse.
+
+        Raises:
+            ValueError: If a column is not numeric.
+        """
+        n_cells = len(cells)
+        ledger.hold("the covariates", 8 * n_cells * len(columns))
+        extra = np.empty((n_cells, len(columns)))
+        for position, column in enumerate(columns):
+            before = ledger.charged
+            item = f"the cells' covariate {column!r}"
+            values = read_rows(ledger, self.cells._get_array(column), cells, item=item)
+            if values.dtype.kind not in "biuf":
+                raise ValueError(f"covariate '{column}' must be numeric")
+            mask = metadata_missing_mask(self.cells, column)
+            missing = (
+                None
+                if mask is None
+                else read_rows(ledger, mask, cells, item=item).astype(bool, copy=False)
+            )
+            ledger.peak(item, 16 * n_cells)
+            extra[:, position] = apply_missing_mask(values.astype(np.float64), missing)
+            del values, missing
+            ledger.release(ledger.charged - before)
+        return extra
+
     def _control_association_tables(
         self,
+        ledger: MemoryLedger,
         labels: ArtifactRef,
         rows: _LabelRows,
         by: str,
@@ -765,7 +832,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         counts are read once for the QC, every feature of the assay when a
         calibration check runs, and held for the tests when they fit a share
         of the memory left. The store must be writable for ``operation`` once
-        the memory budget is checked.
+        the memory budget is checked. Each step charges ``ledger``.
         """
         from ...perturbation.associations import (
             CALIBRATION_GROUPS,
@@ -777,29 +844,47 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             most_calibration_pairs,
             negative_control_groups,
             nonzero_counts,
-            pair_test_bytes,
+            pair_test_work,
             pair_tests,
         )
-        from ...perturbation.p_values import STATISTICS_BYTES
 
+        n_tested = len(controls) + len(targets_cells)
+        ledger.hold("the tested cells' positions", 16 * n_tested)
         tested = np.concatenate([controls, targets_cells])
         tested_cells = cell_index[tested]
         calls = artifact_group(self.zw, rows.status.input_ref("guide_calls"))
-        guide_names = read_array(calls, "guides").astype(str)
+        guide_names = read_whole(ledger, calls, "guides", item="the guide IDs")
         label_group = artifact_group(self.zw, labels)
-        target_is_control = read_array(label_group, "target_is_control").astype(bool)
+        item = "the targets' control flags"
+        target_is_control = _converted(
+            ledger,
+            read_whole(ledger, label_group, "target_is_control", item=item),
+            bool,
+            item,
+        )
         guide_targets_of = rows.guide_targets
         n_controls = len(controls)
         # Each control cell's one guide, or -1 when it carries several control
-        # guides; only the labels of the control cells are read.
-        one_guide = pd.Index(guide_names).get_indexer(
-            np.asarray(
-                read_array_rows_chunkwise(
-                    as_zarr_array(label_group["guide_label"], name="guide_label"),
-                    controls,
-                )
-            ).astype(str)
+        # guides; only the labels of the control cells are read, and matched
+        # to the guides as Python strings through a hash table of the guides.
+        before = ledger.charged
+        control_labels = read_rows(
+            ledger,
+            as_zarr_array(label_group["guide_label"], name="guide_label"),
+            controls,
+            item="the control cells' labels",
         )
+        ledger.hold("each control cell's one guide", 8 * n_controls)
+        ledger.peak(
+            "matching the control cells' labels to the guides",
+            _frame_bytes({"guides": guide_names, "labels": control_labels})
+            + hash_table_bytes(len(guide_names)),
+        )
+        one_guide = pd.Index(guide_names).get_indexer(
+            control_labels.astype(str, copy=False)
+        )
+        del control_labels
+        ledger.release(ledger.charged - before - one_guide.nbytes)
         # The control guides that are the one guide of a control cell make up
         # the calibration groups.
         control_guides = np.flatnonzero(
@@ -823,10 +908,15 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             else []
         )
         n_groups_nt = len(nt_groups)
+        # Each control cell's control guide, the calibration groups' control
+        # cells, and the groups of treatment cells: the tested rows, whose
+        # cells follow the control cells, then the calibration groups among
+        # the controls.
+        ledger.hold(
+            "the groups of treatment cells",
+            8 * n_controls * (2 + n_groups_nt) + 8 * n_tested,
+        )
         guide_of_control = pd.Index(control_guides).get_indexer(one_guide)
-        n_tested = len(tested)
-        # Each group of treatment cells: the tested rows, whose cells follow
-        # the control cells, then the calibration groups among the controls.
         row_sizes = np.bincount(target_row[targets_cells], minlength=len(used))
         nt_members = [
             np.flatnonzero(np.isin(guide_of_control, members)) for members in nt_groups
@@ -848,20 +938,22 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             n_controls=n_controls,
         )
         del nt_members
-        design = association_covariates(
-            expression._cell_count_totals(tested_cells),
-            read_metadata_rows_chunkwise(
-                self.cells, f"{expression.name}_nFeatures", tested_cells
-            ),
+        design = self._association_design(
+            ledger,
+            association_covariates,
+            expression,
+            tested_cells,
             samples,
             extra,
-            names=covariate_names,
+            covariate_names,
         )
         n_covariates = design.shape[1]
         # The units of the QC counts: each tested row, each control guide, and
         # the control cells without one control guide. Calibration pairs may
         # take any feature, so the QC reads every feature then.
         n_units = len(used) + n_control_guides + 1
+        # Each tested cell's unit, and the features checked.
+        ledger.hold("the QC's units", 8 * n_tested + 8 * int(expression.feats.N))
         unit = np.concatenate(
             [
                 len(used)
@@ -888,72 +980,72 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 n_calibration_pairs,
             )
         )
-        # Each labelled cell's position, row and flags; each tested cell's
-        # positions, sample, unit and control guide, and its covariates as read
-        # and as fitted; and the treatment cells of every group.
-        resident = len(cell_index) * 48 + groups.members.nbytes
-        resident += n_tested * (80 + 8 * (n_covariates + len(covariate_names)))
-        resident += _ASSOCIATION_PAIR_BYTES * n_pairs_most
-        resident += 4 * n_units * len(checked) + 9 * n_groups_nt * len(checked)
-        # Each thread's buffers of one pair's fit and the records of a batch of
-        # pairs, and one group's random sets of the largest round.
-        scratch = self.nthreads * pair_test_bytes(n_controls + largest, n_covariates)
-        one_set = 4 * max(n_resamples) * largest
+        # Every pair's arrays, and the QC counts of each unit and calibration
+        # group in each feature checked.
+        ledger.hold(
+            "the pairs and their QC counts",
+            _ASSOCIATION_PAIR_BYTES * n_pairs_most
+            + 4 * n_units * len(checked)
+            + 9 * n_groups_nt * len(checked),
+        )
         # One feature of a band: its float32 counts over the tested cells, the
         # block they are read from, and its QC counts and fit.
         per_feature = (
             24 * n_tested + 16 * n_units + 8 * n_covariates * (n_covariates + 2)
         )
-        # The least that the tests hold: one thread's random sets, the second
-        # round's statistics and one working copy no larger than them, and
-        # one feature's counts; or, while those counts are read, their
-        # stream.
-        least_statistics = 8 * n_resamples[1]
+        # The least that the tests hold: each thread's buffers, one thread's
+        # random sets, the second round's statistics and one working copy no
+        # larger than them, and one feature's counts; or, while those counts
+        # are read, their stream.
         stream = _count_stream_bytes(
             expression, checked[:1], tested_cells, scratch_bytes_per_row=8
         )
-        needed = (
-            resident
-            + scratch
-            + per_feature
-            + max(one_set + 2 * least_statistics, stream)
+        room = ledger.room
+        scratch, draw_bytes, statistics_bytes = pair_test_work(
+            None if room is None else room - per_feature,
+            groups,
+            n_covariates,
+            n_resamples,
+            self.nthreads,
         )
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            f"The counts of one feature over {n_tested} tested cells hold about",
-            beside=" with the tests and their random sets",
-            remedy=f"Raise mem_budget to at least {needed} bytes.",
+        least_tests = scratch + 4 * max(n_resamples) * largest + 16 * n_resamples[1]
+        ledger.doing = f"Testing the pairs of {len(used)} {by}s over {n_tested} cells"
+        ledger.peak(
+            "the counts of one feature with the tests and their random sets",
+            per_feature + max(least_tests, scratch + stream),
         )
-        # The random sets of the other threads and the statistics may each
-        # take a quarter of the rest, and the counts take what they leave.
-        spare = self.memoryBytes - needed
-        draw_bytes = one_set + min((self.nthreads - 1) * one_set, spare // 4)
-        statistics_bytes = max(least_statistics, min(STATISTICS_BYTES, spare // 4))
-        free = self.memoryBytes - resident - scratch - draw_bytes - 2 * statistics_bytes
+        # The random sets and the statistics take what pair_test_work gives
+        # them, and the counts what they leave.
+        room = ledger.room
+        free = (
+            None if room is None else room - scratch - draw_bytes - 2 * statistics_bytes
+        )
         band_cap = max(1, _BAND_BYTES // (8 * max(n_tested, 1)))
-        width = min(max(len(checked), 1), free // per_feature, band_cap)
+        width = min(
+            max(len(checked), 1),
+            band_cap if free is None else free // per_feature,
+            band_cap,
+        )
         # The counts are read once and held for the tests when they take at
-        # most a share of the memory left, so that the reads keep the rest;
-        # otherwise the tests read them again.
+        # most a share of the memory left; otherwise the tests read them again.
         held_bytes = 4 * n_tested * len(checked)
-        hold = (
+        hold = free is None or (
             held_bytes <= _ASSOCIATION_HELD_SHARE * free
-            and self.memoryBytes - resident - scratch - held_bytes
+            and free + draw_bytes + 2 * statistics_bytes - held_bytes
             >= per_feature + stream
         )
         self._require_writable(operation)
+        if hold:
+            ledger.hold("the counts held for the tests", held_bytes)
         # The reads keep clear of the held counts, which fill as they go.
         counts_of, bands_of = self._band_reader(
-            expression,
-            tested_cells,
-            resident + scratch + (held_bytes if hold else 0),
-            per_feature,
+            ledger, expression, tested_cells, per_feature
         )
 
         held: np.ndarray | None = None
         if hold:
-            width = min(width, max(1, (free - held_bytes) // per_feature))
+            if free is not None:
+                width = min(width, max(1, (free - held_bytes) // per_feature))
             held = np.empty((len(checked), n_tested), dtype=np.float32)
         detected = np.zeros((n_units, len(checked)), dtype=np.int32)
         with numba_threads(self.nthreads):
@@ -962,13 +1054,12 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 detected[:, start:stop] = nonzero_counts(
                     counts_of(
                         band,
-                        np.empty((len(band), n_tested), dtype=np.float32)
-                        if held is None
-                        else held[start : start + len(band)],
+                        None if held is None else held[start : start + len(band)],
                     ),
                     unit,
                     n_units,
                 )
+                ledger.release(per_feature * len(band))
         guide_detected = detected[len(used) : len(used) + n_control_guides]
         compact = np.full(len(rows.names), -1, dtype=np.int64)
         compact[used] = np.arange(len(used))
@@ -995,6 +1086,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             seed=seed,
         )
         del calibration_counts, guide_detected, detected
+        ledger.release(4 * n_units * len(checked) + 9 * n_groups_nt * len(checked))
 
         def test(
             counts: np.ndarray, chosen: np.ndarray, rows_of: np.ndarray
@@ -1010,20 +1102,20 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 stage_threshold=stage_threshold,
                 approximation=approximation,
                 side=side,
-                statistics_bytes=statistics_bytes,
-                draw_bytes=draw_bytes,
+                ledger=ledger,
             )
 
         # With the counts held, every pair is tested at once; otherwise a band
         # of features at a time, read again.
         with numba_threads(self.nthreads):
             pair_values, stage = self._test_bands(
+                ledger,
                 pairs,
                 None if hold else lambda tested: bands_of(tested, width),
                 held,
                 checked,
                 counts_of,
-                n_tested,
+                per_feature,
                 test,
             )
         return AssociationTables(
@@ -1035,41 +1127,111 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             calibration_groups=nt_groups,
         )
 
+    def _association_design(
+        self,
+        ledger: MemoryLedger,
+        association_covariates: Callable[..., np.ndarray],
+        expression: Any,
+        cells: np.ndarray,
+        samples: np.ndarray | None,
+        extra: np.ndarray | None,
+        covariate_names: tuple[str, ...],
+        *,
+        guide_assay: Any = None,
+    ) -> np.ndarray:
+        """Read the tested cells' counts and build the covariates of the tests, keeping them charged.
+
+        Each cell's UMIs and detected features in ``expression``, and with a
+        ``guide_assay`` its guide UMIs and detected guides, are read through
+        ``ledger``; building the covariates holds each column beside their
+        stacked copy, which stays, and the counts read are let go.
+        """
+        n_cells = len(cells)
+        before = ledger.charged
+        umis = _cell_totals(ledger, expression, cells, item="the tested cells' UMIs")
+        detected = read_rows(
+            ledger,
+            self.cells._get_array(f"{expression.name}_nFeatures"),
+            cells,
+            item="the tested cells' detected features",
+        )
+        guide_umis = guide_detected = None
+        if guide_assay is not None:
+            guide_umis = _cell_totals(
+                ledger, guide_assay, cells, item="the tested cells' guide UMIs"
+            )
+            guide_detected = read_rows(
+                ledger,
+                self.cells._get_array(f"{guide_assay.name}_nFeatures"),
+                cells,
+                item="the tested cells' detected guides",
+            )
+        n_samples = (
+            1 if samples is None or not len(samples) else int(np.max(samples)) + 1
+        )
+        n_columns = (
+            3
+            + (2 if guide_assay is not None else 0)
+            + n_samples
+            - 1
+            + (0 if extra is None else int(extra.shape[1]))
+        )
+        kept = ledger.hold("the covariates as fitted", 8 * n_cells * n_columns)
+        ledger.peak("building the covariates", 8 * n_cells * (n_columns + 2))
+        design = association_covariates(
+            umis,
+            detected,
+            samples,
+            extra,
+            names=covariate_names,
+            guide_umis=guide_umis,
+            guide_detected=guide_detected,
+        )
+        del umis, detected, guide_umis, guide_detected
+        ledger.release(ledger.charged - before - kept)
+        return design
+
     def _band_reader(
-        self, expression: Any, cells: np.ndarray, held_bytes: int, per_feature: int
+        self, ledger: MemoryLedger, expression: Any, cells: np.ndarray, per_feature: int
     ) -> tuple[
-        Callable[[np.ndarray, np.ndarray], np.ndarray],
+        Callable[[np.ndarray, np.ndarray | None], np.ndarray],
         Callable[[np.ndarray, int], list[tuple[int, int]]],
     ]:
         """Return a reader of a band of features' counts over ``cells``, and its bands.
 
-        The reader writes features x cells into ``out``. The cells are read in
-        store order, and each read keeps clear of ``held_bytes`` and of
-        ``per_feature`` bytes for each feature of the band. The second
-        function splits features into bands of at most ``most`` whose reads
-        fit the memory budget, as start and stop positions.
+        The reader holds ``per_feature`` bytes of ``ledger`` for each feature
+        of the band, which its caller releases once done with the band, and
+        writes features x cells into ``out``, or a new array without one. The
+        cells are read in store order, each read within the ledger's room. The
+        second function splits features into bands of at most ``most`` whose
+        reads fit the ledger's room, as start and stop positions.
         """
+        # The cells' order, and the cells in store order.
+        ledger.hold("the tested cells in store order", 16 * len(cells))
         order = np.argsort(cells, kind="stable")
         sorted_cells = cells[order]
 
-        def counts_of(band: np.ndarray, out: np.ndarray) -> np.ndarray:
-            _, blocks = _count_blocks(
+        def counts_of(band: np.ndarray, out: np.ndarray | None) -> np.ndarray:
+            ledger.hold("the counts of a band of features", per_feature * len(band))
+            if out is None:
+                out = np.empty((len(band), len(cells)), dtype=np.float32)
+            offset = 0
+            for block in _count_blocks(
                 self,
-                _resident_ledger(self, held_bytes + per_feature * len(band)),
+                ledger,
                 expression,
                 band,
                 sorted_cells,
                 scratch_bytes_per_row=8 * len(band),
-            )
-            offset = 0
-            for block in blocks:
+                item="reading the counts of a band of features",
+            ):
                 out[:, order[offset : offset + len(block)]] = np.asarray(block).T
                 offset += len(block)
             return out
 
         def bands_of(features: np.ndarray, most: int) -> list[tuple[int, int]]:
             return _count_bands(
-                _resident_ledger(self, held_bytes),
+                ledger,
                 expression,
                 features,
                 (sorted_cells,),
@@ -1082,24 +1244,26 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
 
     def _test_bands(
         self,
+        ledger: MemoryLedger,
         pairs: AssociationPairs,
         bands_of: Callable[[np.ndarray], list[tuple[int, int]]] | None,
         held: np.ndarray | None,
         checked: np.ndarray,
-        counts_of: Callable[[np.ndarray, np.ndarray], np.ndarray],
-        n_cells: int,
+        counts_of: Callable[[np.ndarray, np.ndarray | None], np.ndarray],
+        per_feature: int,
         test: Callable[[np.ndarray, np.ndarray, np.ndarray], PairResults],
     ) -> tuple[dict[str, np.ndarray], np.ndarray]:
         """Test the pairs that pass QC, in the bands of ``bands_of`` or all at once.
 
-        With ``held`` counts of the ``checked`` features over the ``n_cells``
-        tested cells, every band reads them; otherwise ``bands_of`` splits
-        the tested features into bands, and ``counts_of`` reads each band's
-        counts again. ``test`` tests the chosen pairs on a band's
-        counts, given the row of each pair's feature among them. Returns each
-        pair's values by their names in the table, NaN for an untested pair,
-        and the round that gave its p-value, 0 for an untested pair or one
-        without a statistic.
+        With ``held`` counts of the ``checked`` features over the tested
+        cells, every band reads them; otherwise ``bands_of`` splits the tested
+        features into bands, and ``counts_of`` reads each band's counts again,
+        holding ``per_feature`` bytes of ``ledger`` for each feature until the
+        band is tested. ``test`` tests the chosen pairs on a band's counts,
+        given the row of each pair's feature among them. Returns each pair's
+        values by their names in the table, NaN for an untested pair, and the
+        round that gave its p-value, 0 for an untested pair or one without a
+        statistic.
         """
         n_pairs = len(pairs.sets)
         values = {name: np.full(n_pairs, np.nan) for name in _ASSOCIATION_VALUES}
@@ -1115,9 +1279,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             if held is not None:
                 counts, rows_of = held, np.searchsorted(checked, pairs.features[chosen])
             else:
-                counts = counts_of(
-                    band, np.empty((len(band), n_cells), dtype=np.float32)
-                )
+                counts = counts_of(band, None)
                 rows_of = np.searchsorted(band, pairs.features[chosen])
             result = test(counts, chosen, rows_of)
             for name in _ASSOCIATION_VALUES:
@@ -1126,10 +1288,13 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             # No round gives a p-value to a pair without a statistic.
             stage[chosen] = np.where(np.isnan(result.z), 0, result.stage)
             del counts, result
+            if held is None:
+                ledger.release(per_feature * len(band))
         return values, stage
 
     def _complement_association_tables(
         self,
+        ledger: MemoryLedger,
         labels: ArtifactRef,
         rows: _LabelRows,
         by: str,
@@ -1161,7 +1326,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         the QC, every feature of the assay when a calibration check runs, and
         held for the tests when they fit half the memory left; the tests take
         bands of genes, each gene fitted once on all cells. The store must be
-        writable for ``operation`` once the memory budget is checked.
+        writable for ``operation`` once the memory budget is checked. Each step
+        charges ``ledger``.
         """
         from ...perturbation.associations import (
             CALIBRATION_GROUPS,
@@ -1173,21 +1339,26 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             negative_control_groups,
         )
         from ...perturbation.high_moi import (
-            GATHER_BYTES,
             ComplementGroups,
             cells_by_code,
             code_counts,
+            complement_test_work,
             complement_tests,
             complement_thread_bytes,
             fit_detection_models,
             nonzero_group_counts,
         )
-        from ...perturbation.p_values import STATISTICS_BYTES
 
         calls = artifact_group(self.zw, rows.status.input_ref("guide_calls"))
         label_group = artifact_group(self.zw, labels)
-        guide_names = read_array(calls, "guides").astype(str)
-        target_is_control = read_array(label_group, "target_is_control").astype(bool)
+        guide_names = read_whole(ledger, calls, "guides", item="the guide IDs")
+        item = "the targets' control flags"
+        target_is_control = _converted(
+            ledger,
+            read_whole(ledger, label_group, "target_is_control", item=item),
+            bool,
+            item,
+        )
         # Each labelled cell's called guides, and by target the targets of its
         # guides, as stored: cells x the most of one cell, padded with -1. A
         # few cells with many guides widen every row, so the codes are read a
@@ -1204,22 +1375,19 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         n_discovery = len(discovery[0])
         # Counting each guide's cells, and by target each target's, holds the
         # counts and one stored chunk of codes read at a time. The counts size
-        # the rest of the budget, so this part is checked before they are read.
-        code_read_bytes = max(
-            _chunk_read_bytes(guide_codes), _chunk_read_bytes(row_codes)
-        )
-        code_count_bytes = 8 * (len(guide_names) + len(rows.target_names))
-        counting_bytes = code_read_bytes + code_count_bytes
+        # the rest of the budget, so this part is charged before they are read.
         counted_codes = "guide and target" if by == "target" else "guide"
-        _require_budget(
-            counting_bytes,
-            self.memoryBytes,
-            f"Counting the cells of each {counted_codes} over {n_cells} labelled "
-            "cells holds about",
-            beside=" with the cells' guides read a stored chunk at a time",
-            remedy=f"Raise mem_budget to at least {counting_bytes} bytes.",
+        ledger.doing = (
+            f"Counting the cells of each {counted_codes} over {n_cells} labelled cells"
         )
-        guide_cells = code_counts(_code_blocks(guide_codes), len(guide_names))
+        ledger.hold(
+            "the cells of each guide and target",
+            8 * (len(guide_names) + len(rows.target_names)),
+        )
+        guide_cells = code_counts(
+            _code_blocks(ledger, guide_codes, item="counting the cells of each guide"),
+            len(guide_names),
+        )
         # The control guides that some labelled cell carries make up the
         # calibration groups, which hold the median target's guides, or every
         # control guide when there are fewer; one is enough, since a group is
@@ -1251,10 +1419,16 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         # its guides together.
         if by == "target":
             row_code = rows.codes[used]
-            code_cells = code_counts(_code_blocks(row_codes), len(rows.target_names))
+            code_cells = code_counts(
+                _code_blocks(
+                    ledger, row_codes, item="counting the cells of each target"
+                ),
+                len(rows.target_names),
+            )
         else:
             row_code = pd.Index(guide_names).get_indexer(rows.names[used])
             code_cells = guide_cells
+        ledger.doing = f"Testing one gene over {n_cells} labelled cells"
         row_lookup = np.full(len(code_cells), -1, dtype=np.int64)
         row_lookup[row_code] = np.arange(len(used))
         row_sizes = code_cells[row_code]
@@ -1265,18 +1439,15 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         n_groups = len(used) + n_groups_nt
         codes = np.concatenate([used, n_rows + np.arange(n_groups_nt)]).astype(np.int64)
         guide_assay = self._get_assay(str(labels.assay))
-        design = association_covariates(
-            expression._cell_count_totals(cells),
-            read_metadata_rows_chunkwise(
-                self.cells, f"{expression.name}_nFeatures", cells
-            ),
+        design = self._association_design(
+            ledger,
+            association_covariates,
+            expression,
+            cells,
             samples,
             extra,
-            names=covariate_names,
-            guide_umis=guide_assay._cell_count_totals(cells),
-            guide_detected=read_metadata_rows_chunkwise(
-                self.cells, f"{guide_assay.name}_nFeatures", cells
-            ),
+            covariate_names,
+            guide_assay=guide_assay,
         )
         n_covariates = design.shape[1]
         # The QC counts each row's expressing cells in the features of its
@@ -1296,17 +1467,17 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 n_groups_nt, n_features, n_discovery, n_calibration_pairs
             )
         )
-        # Each labelled cell's positions, sample, totals and covariates as read
-        # and as fitted; each guide's and target's cells; every group's cells,
-        # with the cells' groups that the QC finds; every pair's arrays; and
-        # the QC counts.
+        # Every group's cells, with the cells' groups that the QC finds, every
+        # pair's arrays, and the QC counts.
+        ledger.hold(
+            "the groups' cells, the pairs and their QC counts",
+            32 * int(row_sizes.sum() + nt_most.sum())
+            + _ASSOCIATION_PAIR_BYTES * n_pairs_most
+            + 4 * len(used) * len(target_features)
+            + 13 * n_groups_nt * len(checked)
+            + 16 * n_features,
+        )
         threads = self.nthreads
-        resident = n_cells * (144 + 8 * (n_covariates + len(covariate_names)))
-        resident += code_count_bytes
-        resident += 32 * int(row_sizes.sum() + nt_most.sum())
-        resident += _ASSOCIATION_PAIR_BYTES * n_pairs_most
-        resident += 4 * len(used) * len(target_features)
-        resident += 13 * n_groups_nt * len(checked) + 8 * len(checked)
         # A feature of the QC pass: its float32 counts, the block they are read
         # from and its QC counts. A gene of a band of tests: its scores and
         # weights on every cell and its fit, beside its counts when they are
@@ -1318,45 +1489,40 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         # 16 bytes per cell, which also bounds its gene and logistic fits; the
         # second round holds its statistics and one working copy no larger
         # than them; and the QC reads one feature and the tests one gene.
-        one_copy = 16 * n_cells
         least_statistics = 8 * n_resamples[1]
         # The counts of one feature stream beside the threads' buffers, while
         # the tests hold nothing else.
         stream = _count_stream_bytes(
             expression, checked[:1], cells, scratch_bytes_per_row=8
         )
-        testing = (
+        ledger.peak(
+            "the tests of one gene, their random sets and one feature's counts",
             threads * complement_thread_bytes(n_cells, 0)
             + per_feature
-            + max(2 * least_statistics + per_gene, stream)
-        )
-        # Before the tests, placing the groups' cells reads one stored chunk
-        # of codes at a time, and the calibration groups hold the control
-        # guides' cells and merge the cells of one group's guides.
-        building = code_read_bytes
-        if n_groups_nt:
-            building += 8 * int(guide_sizes.sum()) + 32 * int(nt_most.max())
-        needed = resident + max(testing, building)
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            f"Testing one gene over {n_cells} labelled cells holds about",
-            beside=(
-                " with the tests, their random sets and the cells' guides, read "
-                "a stored chunk at a time"
-            ),
-            remedy=f"Raise mem_budget to at least {needed} bytes.",
+            + max(2 * least_statistics + per_gene, stream),
         )
         self._require_writable(operation)
         row_members, row_offsets = cells_by_code(
-            _code_blocks(row_codes), row_lookup, row_sizes
+            _code_blocks(ledger, row_codes, item="placing the groups' cells"),
+            row_lookup,
+            row_sizes,
         )
         nt_members: list[np.ndarray] = []
         if n_groups_nt:
+            # The control guides' cells, and the cells of one group's guides as
+            # merged.
+            ledger.peak(
+                "placing the calibration groups' cells",
+                8 * int(guide_sizes.sum()) + 32 * int(nt_most.max()),
+            )
             slot = np.full(len(guide_names), -1, dtype=np.int64)
             slot[control_guides] = np.arange(n_control_guides)
             guide_members, guide_offsets = cells_by_code(
-                _code_blocks(guide_codes), slot, guide_sizes
+                _code_blocks(
+                    ledger, guide_codes, item="placing the control guides' cells"
+                ),
+                slot,
+                guide_sizes,
             )
             nt_members = [
                 np.unique(
@@ -1383,42 +1549,46 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         # Each thread's copy may take more genes, up to a quarter of the rest
         # among the threads, and the statistics a quarter of the rest; the
         # counts and the tests take what they leave.
-        spare = self.memoryBytes - needed
-        gather_bytes = one_copy + min(
-            max(GATHER_BYTES - one_copy, 0), spare // (4 * threads)
+        room = ledger.room
+        scratch, _gather, statistics_bytes = complement_test_work(
+            None if room is None else room - per_feature - per_gene,
+            n_cells,
+            n_resamples,
+            threads,
         )
-        statistics_bytes = max(least_statistics, min(STATISTICS_BYTES, spare // 4))
-        scratch = threads * complement_thread_bytes(n_cells, gather_bytes)
-        free = self.memoryBytes - resident - scratch - 2 * statistics_bytes
+        free = None if room is None else room - scratch - 2 * statistics_bytes
         # The counts are read once and held for the tests when they take at
         # most a share of the memory left and leave room for a feature and a
         # gene; otherwise the tests read them again.
         held_bytes = 4 * n_cells * len(checked)
-        hold = (
+        hold = free is None or (
             held_bytes <= _ASSOCIATION_HELD_SHARE * free
             and free - held_bytes >= per_feature + per_gene
-            and self.memoryBytes - resident - scratch - held_bytes
-            >= per_feature + stream
+            and free + 2 * statistics_bytes - held_bytes >= per_feature + stream
         )
-        room = free - held_bytes if hold else free
+        if free is None:
+            room_left = None
+        else:
+            room_left = free - held_bytes if hold else free
         # A band holds at most so many bytes of float64 values, or of scores
         # and weights, whatever the budget.
+        qc_cap = max(1, _BAND_BYTES // (8 * max(n_cells, 1)))
+        test_cap = max(1, _BAND_BYTES // (16 * max(n_cells, 1)))
         qc_width = min(
             len(checked),
-            room // per_feature,
-            max(1, _BAND_BYTES // (8 * max(n_cells, 1))),
+            qc_cap if room_left is None else room_left // per_feature,
+            qc_cap,
         )
         test_width = min(
-            room // (per_gene + (0 if hold else per_feature)),
-            max(1, _BAND_BYTES // (16 * max(n_cells, 1))),
+            test_cap
+            if room_left is None
+            else room_left // (per_gene + (0 if hold else per_feature)),
+            test_cap,
         )
+        if hold:
+            ledger.hold("the counts held for the tests", held_bytes)
         # The reads keep clear of the held counts, which fill as they go.
-        counts_of, bands_of = self._band_reader(
-            expression,
-            cells,
-            resident + scratch + (held_bytes if hold else 0),
-            per_feature,
-        )
+        counts_of, bands_of = self._band_reader(ledger, expression, cells, per_feature)
 
         proper = (sizes > 0) & (sizes < n_cells)
 
@@ -1463,12 +1633,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             for start, stop in bands_of(checked, qc_width):
                 band = checked[start:stop]
                 span = slice(start, stop)
-                values = counts_of(
-                    band,
-                    np.empty((len(band), n_cells), dtype=np.float32)
-                    if held is None
-                    else held[span],
-                )
+                values = counts_of(band, None if held is None else held[span])
                 if n_groups_nt:
                     nt_detected[:, span], expressing[span] = group_counts(
                         values, nt_groups_of, nt_counting
@@ -1485,6 +1650,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                     )
                     row_detected[:, target_column[band[targeted]]] = counted
                 del values
+                ledger.release(per_feature * len(band))
         del row_counting, nt_counting
         compact = np.full(n_rows, -1, dtype=np.int64)
         compact[used] = np.arange(len(used))
@@ -1519,6 +1685,13 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             codes=codes[active],
         )
         with numba_threads(self.nthreads):
+            if resampling == "conditional" and len(active):
+                # Each thread fits a group's detection model within the bytes
+                # that its sets and copy take in the tests.
+                ledger.peak(
+                    "fitting the groups' detection models",
+                    threads * complement_thread_bytes(n_cells, 0),
+                )
             models = (
                 fit_detection_models(design, engine)
                 if resampling == "conditional" and len(active)
@@ -1528,7 +1701,12 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             def test(
                 counts: np.ndarray, chosen: np.ndarray, rows_of: np.ndarray
             ) -> PairResults:
-                return complement_tests(
+                # The scores and weights of the band's genes on every cell.
+                scoring = ledger.hold(
+                    "the scores and weights of a band of genes",
+                    per_gene * len(np.unique(rows_of)),
+                )
+                tested = complement_tests(
                     counts,
                     design,
                     engine,
@@ -1541,9 +1719,10 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                     stage_threshold=stage_threshold,
                     approximation=approximation,
                     side=side,
-                    statistics_bytes=statistics_bytes,
-                    gather_bytes=gather_bytes,
+                    ledger=ledger,
                 )
+                ledger.release(scoring)
+                return tested
 
             def test_bands(tested: np.ndarray) -> list[tuple[int, int]]:
                 """Bands of at most test_width genes, whose reads fit the
@@ -1556,7 +1735,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 return bands_of(tested, test_width)
 
             pair_values, stage = self._test_bands(
-                pairs, test_bands, held, checked, counts_of, n_cells, test
+                ledger, pairs, test_bands, held, checked, counts_of, per_feature, test
             )
         return AssociationTables(
             pairs=pairs,
@@ -1569,6 +1748,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
 
     def _save_association_tables(
         self,
+        ledger: MemoryLedger,
         planned: PlannedArtifact,
         tables: AssociationTables,
         *,
@@ -1668,26 +1848,23 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             group_targets[without[without >= len(used)]].astype(str).tolist()
         )
         qc = pairs.qc
-        write_cell_data_artifact(
-            self.zw,
-            planned,
-            {
-                "sets": sets,
-                "groups": pairs.groups,
-                "group_targets": group_targets,
-                "group_guides": group_guides,
-                "features": pairs.features,
-                "n_cells": qc[0],
-                "n_control_cells": qc[1],
-                "n_nonzero_cells": qc[2],
-                "n_nonzero_control_cells": qc[3],
-                "pass_qc": pass_qc,
-                "significant": significant,
-                "stage": tables.stage,
-                **values_out,
-            },
-            attributes=attributes,
-        )
+        columns = {
+            "sets": sets,
+            "groups": pairs.groups,
+            "group_targets": group_targets,
+            "group_guides": group_guides,
+            "features": pairs.features,
+            "n_cells": qc[0],
+            "n_control_cells": qc[1],
+            "n_nonzero_cells": qc[2],
+            "n_nonzero_control_cells": qc[3],
+            "pass_qc": pass_qc,
+            "significant": significant,
+            "stage": tables.stage,
+            **values_out,
+        }
+        ledger.peak("saving the tests", _table_write_bytes(columns))
+        write_cell_data_artifact(self.zw, planned, columns, attributes=attributes)
         for message in _association_warnings(
             unmatched, len(rows.names), by, assay, attributes, moi
         ):
@@ -1759,41 +1936,46 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             "skew_scale",
             "skew_shape",
         )
+        n_pairs = int(array("sets").shape[0])
+        ledger = _call_ledger(self, f"Reading the association tests of {n_pairs} pairs")
         # Each pair names its group of treatment cells, whose target and
         # guides are stored once.
-        group_targets = read_array(group, "group_targets").astype(str)
-        group_guides = read_array(group, "group_guides").astype(str)
-        feature_ids = np.asarray(assay.feats.fetch_all("ids")).astype(str)
-        feature_names = np.asarray(assay.feats.fetch_all("names")).astype(str)
-        # Each pair's numbers as read, in the table and in its set's table,
-        # and each of its four texts as read and as a Python string, to which
-        # both tables point.
-        n_pairs = int(array("sets").shape[0])
-        row_bytes = sum(
-            np.dtype(array(name).dtype).itemsize
-            for name in ("sets", "groups", "features", *numbers)
+        group_targets = read_whole(
+            ledger, group, "group_targets", item="the groups' targets"
         )
+        group_guides = read_whole(
+            ledger, group, "group_guides", item="the groups' guides"
+        )
+        feature_ids = _feature_text(ledger, assay, "ids")
+        feature_names = _feature_text(ledger, assay, "names")
+        feature_positions = read_whole(
+            ledger, group, "features", item="the pairs' features"
+        )
+        groups = read_whole(ledger, group, "groups", item="the pairs' groups")
+        sets = read_whole(ledger, group, "sets", item="the pairs' sets")
+        numbers_read = {
+            name: read_whole(ledger, group, name, item=f"the pairs' {name}")
+            for name in numbers
+        }
+        # Each pair's numbers in the table and in its set's table, and each of
+        # its four texts as read and as a Python string, to which both tables
+        # point.
+        row_bytes = sum(values.dtype.itemsize for values in numbers_read.values())
         text_bytes = sum(
             5 * (texts.dtype.itemsize // 4) + 80
             for texts in (group_targets, group_guides, feature_ids, feature_names)
         )
-        n_bytes = n_pairs * (3 * row_bytes + text_bytes)
-        _require_budget(
-            n_bytes,
-            self.memoryBytes,
-            f"The association tests of {n_pairs} pairs hold about",
+        ledger.peak(
+            "the tables of the pairs", n_pairs * (2 * row_bytes + 24 + text_bytes)
         )
-        feature_positions = read_array(group, "features")
-        groups = read_array(group, "groups")
         table: dict[str, Any] = {
             "target": group_targets[groups],
             "feature": feature_ids[feature_positions],
             "feature_name": feature_names[feature_positions],
         }
-        for name in numbers:
-            table[name] = read_array(group, name)
+        table.update(numbers_read)
+        del numbers_read
         frame = pd.DataFrame(table)
-        sets = read_array(group, "sets")
         parts = {}
         for code, name in enumerate(ASSOCIATION_SETS):
             members = sets == code

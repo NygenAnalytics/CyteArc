@@ -810,12 +810,93 @@ def test_a_read_that_a_pool_thread_still_holds_is_missed_unless_reads_are_held(
 
 
 def test_reads_of_zarr_arrays_end_only_while_reads_are_held() -> None:
-    methods = {name: getattr(zarr.Array, name) for _owner, name in ZARR_READS}
+    methods = {(owner, name): getattr(owner, name) for owner, name in ZARR_READS}
+    # The synchronous array's reads and its async_array's.
+    assert {owner for owner, _name in ZARR_READS} == {zarr.Array, zarr.AsyncArray}
     with hold_finished_reads(*ZARR_READS):
         assert all(
-            getattr(zarr.Array, name) is not method for name, method in methods.items()
+            getattr(owner, name) is not method
+            for (owner, name), method in methods.items()
         )
-    assert all(getattr(zarr.Array, name) is method for name, method in methods.items())
+    assert all(
+        getattr(owner, name) is method for (owner, name), method in methods.items()
+    )
+
+
+def test_a_coroutine_read_ends_when_its_coroutine_finishes() -> None:
+    import asyncio
+
+    with ThreadPoolExecutor(1) as pool:
+
+        async def finish() -> weakref.ref:
+            await asyncio.sleep(0)
+            return _finished(pool)
+
+        owner = SimpleNamespace(read=finish)
+        with hold_finished_reads((owner, "read")):
+            # The work runs while the coroutine runs, so it belongs to its
+            # read, which ends when the coroutine finishes, not when it is made.
+            first = asyncio.run(owner.read())
+            assert first() is not None
+            second = asyncio.run(owner.read())
+            assert _gone(first)
+            assert second() is not None
+        assert _gone(second)
+        assert owner.read is finish
+
+
+def test_coroutine_reads_may_overlap_and_each_is_held_until_the_next_ends() -> None:
+    import asyncio
+
+    with ThreadPoolExecutor(1) as pool:
+
+        async def finish() -> weakref.ref:
+            await asyncio.sleep(0.01)
+            return _finished(pool)
+
+        owner = SimpleNamespace(read=finish)
+
+        async def overlapping() -> list[weakref.ref]:
+            return list(await asyncio.gather(owner.read(), owner.read()))
+
+        with hold_finished_reads((owner, "read")):
+            # Two reads in flight together, as a stream's reads ahead run: the
+            # work of the second, which began last, is held until the read
+            # that ends after it ends.
+            _first, second = asyncio.run(overlapping())
+            assert second() is not None
+            third = asyncio.run(owner.read())
+            assert _gone(second)
+            assert third() is not None
+        assert _gone(third)
+
+
+def test_a_read_through_an_async_array_is_held(tmp_path) -> None:
+    from zarr.core.sync import sync
+
+    values = np.arange(8 * 1024, dtype=np.int64)
+    array = zarr.open_group(str(tmp_path / "s.zarr"), mode="w").create_array(
+        "values", shape=values.shape, chunks=(1024,), dtype="int64"
+    )
+    array[...] = values
+    held: list[int] = []
+    run = pool_thread._WorkItem.run
+    with hold_finished_reads(*ZARR_READS):
+        replaced = pool_thread._WorkItem.run
+
+        def counting(item: object, *args: object) -> None:
+            replaced(item, *args)
+            held.append(1)
+
+        pool_thread._WorkItem.run = counting  # type: ignore[method-assign]
+        try:
+            block = sync(array.async_array.getitem(slice(0, 1024)))
+        finally:
+            pool_thread._WorkItem.run = replaced  # type: ignore[method-assign]
+    assert pool_thread._WorkItem.run is run
+    np.testing.assert_array_equal(np.asarray(block), values[:1024])
+    # The read decoded its chunk on Zarr's pool while it ran, as a named read.
+    assert held
 
 
 def test_writes_of_zarr_arrays_end_only_while_writes_are_held(tmp_path) -> None:

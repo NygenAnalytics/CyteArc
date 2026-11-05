@@ -32,7 +32,6 @@ from ....utils.memory_budget import (
     python_text_bytes,
 )
 from ..._operations.perturbation_guides import (
-    _CALL_FIXED_BYTES,
     _CELL_CHECK_BYTES_PER_CELL,
     _barcode_ids,
     _guide_positions,
@@ -41,7 +40,7 @@ from ..._operations.perturbation_guides import (
     _require_call_file_cells,
     _strings_bytes,
 )
-from ..._operations.perturbation_store import _require_cell_column
+from ..._operations.perturbation_store import _call_ledger, _require_cell_column
 from ..executor import PlannedStage, RecipePlan, RunState
 from ..fields import (
     PERTURBATION_CELL_FIELDS,
@@ -497,12 +496,9 @@ def _check_call_file_cells(
     """
     # Only the input cells' IDs are read; the import checks its cells alike.
     rows = np.flatnonzero(input_cell_mask(store, source))
-    ledger = MemoryLedger(
-        store.memoryBytes,
-        f"Checking the call file against the run's {len(rows)} cells",
-        codec_threads=store.nthreads,
+    ledger = _call_ledger(
+        store, f"Checking the call file against the run's {len(rows)} cells"
     )
-    ledger.hold("the call's plans and the store's metadata it opens", _CALL_FIXED_BYTES)
     ids = read_rows(
         ledger, store.cells._get_array("ids"), rows, item="the run's cells' IDs"
     )

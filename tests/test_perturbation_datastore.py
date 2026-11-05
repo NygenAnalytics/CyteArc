@@ -23,7 +23,7 @@ from cytearc.storage.selections import read_stored_selection_indices
 from cytearc.utils.logging import collect_warnings, logger
 from tests.perturbation_helpers import record_cell_reads, write_screen
 from cytearc.storage.validation_scope import validation_scope
-from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
+from cytearc.utils.memory_budget import MemoryLedger
 from tests.memory_helpers import ZARR_READS, audited, check_budget, hold_finished_reads
 from tests.storage_helpers import (
     copy_store,
@@ -882,32 +882,6 @@ def test_reference_checks_name_the_kinds_they_take() -> None:
             _require_ref(ref, "labels", *kinds)
     # The refusal names every coordinate kind that the graph reads.
     assert set(_COORDINATE_KINDS) == NATIVE_COORDINATE_KINDS
-
-
-def test_the_other_screen_steps_refuse_their_budgets_with_memory_budget_error() -> None:
-    from cytearc.datastore._operations.perturbation_store import _require_budget
-
-    # The steps that C25 moves onto a ledger keep their words and carry the
-    # bytes that pass them, the budget and the step.
-    with pytest.raises(MemoryBudgetError) as refused:
-        _require_budget(
-            10,
-            9,
-            "The profiles of 3 targets in 2 features hold about",
-            beside=" with the read of one feature",
-            remedy="Raise mem_budget to at least 10 bytes.",
-        )
-    assert str(refused.value) == (
-        "The profiles of 3 targets in 2 features hold about 10 bytes with the read "
-        "of one feature, more than the memory budget of 9 bytes. Raise mem_budget "
-        "to at least 10 bytes."
-    )
-    assert (
-        refused.value.needed_bytes,
-        refused.value.budget_bytes,
-        refused.value.item,
-    ) == (10, 9, "The profiles of 3 targets in 2 features")
-    _require_budget(9, 9, "The profiles of 3 targets hold about")
 
 
 def test_samples_of_any_column_are_numbered_as_before_within_the_ledger(

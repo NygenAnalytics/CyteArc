@@ -32,9 +32,8 @@ def named_budget(refusal: BaseException) -> int:
     """Return the memory budget that a refusal names in its closing ``raise mem_budget to at least N bytes``.
 
     A refusal that says the call holds about M bytes must name M. A refusal
-    that closes with ``Raise mem_budget.`` names no budget, as Mixscape's
-    refusal of a classification batch does, and asks for the M bytes the call
-    holds.
+    that closes with ``Raise mem_budget.`` names no budget, as some refusals
+    of the clone stack do, and asks for the M bytes the call holds.
     """
     message = str(refusal)
     held = re.search(r"holds? about (\d+) bytes", message)
@@ -323,6 +322,37 @@ def follow_refusals(
     return budget, refusals
 
 
+def refusal_naming(
+    at_budget: Callable[[int], object], words: str, *, start: int = 1, limit: int = 100
+) -> Any:
+    """Follow the refusals of ``at_budget`` from ``start`` bytes to the first whose message holds ``words``, and return it.
+
+    Every refusal on the way must be a ``MemoryBudgetError`` of the budget
+    tried that names a larger budget, which the next attempt takes, as
+    :func:`follow_refusals` requires; a call that runs before a refusal holds
+    ``words`` fails, so the steps before the one sought refuse without
+    writing anything.
+    """
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    budget = start
+    for _attempt in range(limit):
+        try:
+            at_budget(budget)
+        except MemoryError as error:
+            assert isinstance(error, MemoryBudgetError), error
+            assert error.budget_bytes == budget, error
+            assert error.needed_bytes > budget, error
+            if words in str(error):
+                return error
+            budget = error.needed_bytes
+        else:
+            raise AssertionError(
+                f"The call ran at {budget} bytes before a refusal named {words!r}"
+            )
+    raise AssertionError(f"{limit} refusals named no {words!r}")
+
+
 def named_budget_passes(
     at_budget: Callable[[int], object], budget: int, *, item: str
 ) -> Any:
@@ -572,8 +602,10 @@ def interval_peaks(
 
 #: The methods through which a read of a stored Zarr array's values goes, by
 #: index or by selection, for :func:`hold_finished_reads` to end a read at
-#: each. Reads through an array's ``async_array``, as the feature stream makes
-#: them, go through none of them, so holding these leaves such reads unheld.
+#: each: those of the synchronous array, and those of its ``async_array``,
+#: through which the feature stream and the count layout read. A synchronous
+#: read runs its selection without calling these asynchronous methods, so
+#: no read is counted twice.
 ZARR_READS: tuple[tuple[Any, str], ...] = tuple(
     (zarr.Array, name)
     for name in (
@@ -582,6 +614,14 @@ ZARR_READS: tuple[tuple[Any, str], ...] = tuple(
         "get_coordinate_selection",
         "get_mask_selection",
         "get_block_selection",
+    )
+) + tuple(
+    (zarr.AsyncArray, name)
+    for name in (
+        "getitem",
+        "get_orthogonal_selection",
+        "get_coordinate_selection",
+        "get_mask_selection",
     )
 )
 
@@ -621,59 +661,111 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
     reads are let go at once.
 
     A read is a call of a function named in ``reads``, as (owner, attribute)
-    pairs, and ends when the call returns or raises. Work belongs to the read
-    under way when a pool thread starts it, so work that finishes after its
-    read returned stays held, and work that starts while no named read runs,
-    such as the writes after an operation's last read, belongs to no read and
-    is let go as it would be without the hold. Named reads run one at a time:
-    one that begins while another runs, in any thread, fails. With no
-    function named, the caller ends each read by calling the function that
-    this context gives, and all work belongs to the read under way. The last
-    read stays held until the context closes, so a test holds the reads of the
-    step whose estimate counts the read before, not of a whole operation with
-    the writes after its last read.
+    pairs, and ends when the call returns or raises; a read through a
+    coroutine function, such as ``zarr.AsyncArray.getitem``, ends when its
+    coroutine finishes. Work belongs to the read under way when a pool thread
+    starts it, so work that finishes after its read returned stays held, and
+    work that starts while no named read runs, such as the writes after an
+    operation's last read, belongs to no read and is let go as it would be
+    without the hold. Synchronous named reads run one at a time: one that
+    begins while another runs, in any thread, fails. Reads through
+    coroutines may overlap, as a stream's reads ahead do; work that a pool
+    thread starts while several run belongs to the one that began last, and
+    each read's work is held until the read that ends after it ends. With no
+    function named, the
+    caller ends each read by calling the function that this context gives,
+    and all work belongs to the read under way. The last read stays held until
+    the context closes, so a test holds the reads of the step whose estimate
+    counts the read before, not of a whole operation with the writes after its
+    last read.
 
     The hold applies to every thread pool of the process, so a test that must
     see only its own reads traces them in a fresh process, which imports this
     helper as an in-process test does.
     """
     lock = threading.Lock()
-    reading = [0]
-    # The calls of named reads under way, and whether the context has closed.
-    running = [0]
+    # Each read has an id: a named read the next when it begins, and without
+    # named reads the read under way the count of reads ended. A read's work
+    # is held by its id until the read that ends after it ends.
+    next_id = [0]
+    under_way = [0]
+    # The ids of the named reads in flight, of the synchronous ones, and of the
+    # read that ended last; the reads whose work was let go; and whether the
+    # context has closed.
+    running: list[int] = []
+    running_sync = [0]
+    last_ended: list[int | None] = [None]
+    let_go: set[int] = set()
     closed = [False]
     held: dict[int, list[object]] = {}
     run = pool_thread._WorkItem.run
 
     def run_and_hold(item: object, *args: Any) -> None:
         with lock:
-            read = reading[0]
-            for_a_read = running[0] > 0 or not reads
+            if not reads:
+                owner: int | None = under_way[0]
+            else:
+                # Work belongs to the newest named read in flight.
+                owner = max(running) if running else None
         run(item, *args)  # type: ignore[arg-type]
         with lock:
-            if for_a_read and not closed[0] and read >= reading[0] - 1:
-                held.setdefault(read, []).append(item)
+            if owner is not None and not closed[0] and owner not in let_go:
+                held.setdefault(owner, []).append(item)
+
+    def ended(read_id: int) -> None:
+        """Let go of the work of the read that ended before ``read_id``."""
+        with lock:
+            before = last_ended[0]
+            if before is not None:
+                held.pop(before, None)
+                let_go.add(before)
+            last_ended[0] = read_id
 
     def end_read() -> None:
         with lock:
-            held.pop(reading[0] - 1, None)
-            reading[0] += 1
+            read_id = under_way[0]
+            under_way[0] += 1
+        ended(read_id)
 
-    def ending(function: Callable[..., Any]) -> Callable[..., Any]:
-        def read(*args: Any, **kwargs: Any) -> Any:
-            with lock:
-                assert not running[0], (
+    def begin(synchronous: bool, function: Callable[..., Any]) -> int:
+        with lock:
+            if synchronous:
+                assert not running_sync[0], (
                     f"{getattr(function, '__qualname__', function)} began while "
                     "another named read ran; hold_finished_reads holds one read "
                     "at a time"
                 )
-                running[0] += 1
+                running_sync[0] += 1
+            read_id = next_id[0]
+            next_id[0] += 1
+            running.append(read_id)
+            return read_id
+
+    def finish(read_id: int, synchronous: bool) -> None:
+        with lock:
+            running.remove(read_id)
+            if synchronous:
+                running_sync[0] -= 1
+        ended(read_id)
+
+    def ending(function: Callable[..., Any]) -> Callable[..., Any]:
+        if inspect.iscoroutinefunction(function):
+
+            async def read_async(*args: Any, **kwargs: Any) -> Any:
+                read_id = begin(False, function)
+                try:
+                    return await function(*args, **kwargs)
+                finally:
+                    finish(read_id, False)
+
+            return read_async
+
+        def read(*args: Any, **kwargs: Any) -> Any:
+            read_id = begin(True, function)
             try:
                 return function(*args, **kwargs)
             finally:
-                with lock:
-                    running[0] -= 1
-                end_read()
+                finish(read_id, True)
 
         return read
 
@@ -701,4 +793,3 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
         with lock:
             closed[0] = True
             held.clear()
-            reading[0] = 0

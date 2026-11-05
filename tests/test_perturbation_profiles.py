@@ -30,13 +30,25 @@ from tests.perturbation_helpers import (
     use_python_kernels,
     write_screen,
 )
+from cytearc.storage.validation_scope import validation_scope
 from tests.memory_helpers import (
     ZARR_READS,
+    audited,
     budget_that_runs,
+    follow_refusals,
     hold_finished_reads,
     named_budget,
+    refusal_naming,
 )
-from tests.storage_helpers import insert_nullable_cell_column, open_store
+from tests.storage_helpers import (
+    insert_nullable_cell_column,
+    open_store,
+    rechunk_feature_tables,
+)
+
+#: The most times its traced peak that the profiles' budget may be, beside
+#: 1 MiB.
+_PROFILES_AT_MOST = 3.0
 
 # Tests that check the warning about thin perturbations catch it themselves.
 pytestmark = pytest.mark.filterwarnings("ignore:.*and get no profile")
@@ -497,6 +509,9 @@ def shared(tmp_path_factory) -> _Shared:
     """One store of the screen for the tests that keep its data."""
     folder = tmp_path_factory.mktemp("profiles")
     store = _store(folder)
+    # In chunks of their rows, the feature tables' reads hold what their rows
+    # do, so a budget shows what the bands of features hold besides.
+    rechunk_feature_tables(folder / "store.zarr")
     return _Shared(
         folder / "store.zarr", store, fixed_labels(store, ["NT"]), _selected(store)
     )
@@ -774,16 +789,22 @@ def test_profiles_read_bands_of_features_that_fit_the_budget(
         return read(assay, physical_indices, *args, **kwargs)
 
     monkeypatch.setattr(normalization, "feature_value_blocks", counting)
-    with pytest.raises(MemoryError, match="2 targets in 30 features") as low:
-        run(open_store(shared.path, nthreads=2, mem_budget=1000))
-    needed = named_budget(low.value)
-    # The least budget counts the chunk that a read of the counts can still
-    # hold after it ends, whatever a band's width, and half again the rest of
-    # it gives bands of several features.
-    held = store._get_assay("RNA").rawData._held_read_bytes()
-    banded = run(
-        open_store(shared.path, nthreads=2, mem_budget=needed + (needed - held) // 2)
-    )
+    # Saving the profiles of this small screen holds Zarr's file buffers,
+    # more than any band of its features, so the save is charged nothing and
+    # the bands set the least budget.
+    monkeypatch.setattr(perturbation_operations, "_table_write_bytes", lambda _: 0)
+
+    def at(budget: int) -> ArtifactRef:
+        return run(open_store(shared.path, nthreads=2, mem_budget=budget))
+
+    # The refusals from a budget of 1,000 bytes name the profiles of the 2
+    # targets in the 30 features once they are counted, and end at the least
+    # budget that runs, which one byte less refuses naming it. There the
+    # reads of the labels and the cells leave room for bands of several
+    # features beside the chunk that a read of the counts can still hold.
+    budget, refusals = follow_refusals(at, start=1000)
+    assert str(refusals[-1]).startswith("Profiling 2 targets in 30 features holds")
+    banded = at(budget)
 
     # Each band reads the control cells, then the profiled cells, and holds
     # several features but not all of them.
@@ -792,9 +813,6 @@ def test_profiles_read_bands_of_features_that_fit_the_budget(
     result = store.perturbation.load_profiles(banded)
     pd.testing.assert_frame_equal(result.values, whole.values)
     pd.testing.assert_frame_equal(result.control_sd, whole.control_sd)
-    with pytest.raises(MemoryError, match="2 targets in 30 features") as short:
-        run(open_store(shared.path, nthreads=2, mem_budget=needed - 1))
-    assert named_budget(short.value) == needed
 
 
 @pytest.mark.parametrize(
@@ -890,33 +908,33 @@ def test_loading_profiles_refuses_other_artifacts_and_budgets(
         store.perturbation.load_profiles("profiles")
     with pytest.raises(ValueError, match="not 'perturbation_labels'"):
         store.perturbation.load_profiles(shared.labels)
-    budgeted = open_store(shared.path, mem_budget=100)
-    with pytest.raises(MemoryError, match="2 perturbations in 30 features hold 240"):
-        budgeted.perturbation.load_profiles(profiles)
+    # The refusals from a budget of 100 bytes reach the read of the profiles
+    # of the 2 perturbations in the 30 features.
+    refusal = refusal_naming(
+        lambda budget: open_store(
+            shared.path, mem_budget=budget
+        ).perturbation.load_profiles(profiles),
+        "for the profiles,",
+        start=100,
+    )
+    assert str(refusal).startswith(
+        "Reading the profiles of 2 perturbations in 30 features holds about"
+    )
 
 
 def test_loading_profiles_holds_their_values_once(shared, monkeypatch) -> None:
     store = shared.store
     profiles = store.perturbation.profiles(shared.labels, shared.features)
     read: list[np.ndarray] = []
-    as_zarr_array = perturbation_operations.as_zarr_array
+    read_whole = perturbation_operations.read_whole
 
-    class Recorded:
-        """The stored values, keeping each array that a read returns."""
+    def recording(ledger, group, name, *, item):
+        values = read_whole(ledger, group, name, item=item)
+        if name == "values":
+            read.append(values)
+        return values
 
-        def __init__(self, stored) -> None:
-            self.stored = stored
-            self.shape = stored.shape
-
-        def __getitem__(self, selection) -> np.ndarray:
-            read.append(np.asarray(self.stored[selection]))
-            return read[-1]
-
-    def recording(node, *, name=""):
-        stored = as_zarr_array(node, name=name)
-        return Recorded(stored) if name == "values" else stored
-
-    monkeypatch.setattr(perturbation_operations, "as_zarr_array", recording)
+    monkeypatch.setattr(perturbation_operations, "read_whole", recording)
 
     result = store.perturbation.load_profiles(profiles)
 
@@ -929,6 +947,9 @@ def test_loading_profiles_holds_their_values_once(shared, monkeypatch) -> None:
 @pytest.mark.slow
 def test_profiles_run_within_the_budget_they_name(tmp_path) -> None:
     screen = memory_screen(tmp_path / "store.zarr")
+    # In chunks of their rows, the feature tables' reads hold what their rows
+    # do, so the budget shows what each step holds besides.
+    rechunk_feature_tables(screen.path)
     # Profiling 40 features keeps the least budget's bands of one feature few.
     features = open_store(screen.path).features.snapshot(feature_indexes=np.arange(40))
 
@@ -946,15 +967,28 @@ def test_profiles_run_within_the_budget_they_name(tmp_path) -> None:
         run(open_store(screen.path, nthreads=2))
     )
     # Each band of features streams its counts within the budget that the
-    # refusal names, which once failed in the stream planner. Each read's work
-    # in Zarr's pool is held until the next read ends, as a pool thread that
-    # runs late holds it, so every read of the counts runs beside the chunk of
-    # the read before it, which CI's runs met now and then.
+    # refusals name, which once failed in the stream planner. Each read's
+    # work in Zarr's pool is held until the next read ends, as a pool thread
+    # that runs late holds it, so every read of the counts runs beside the
+    # chunk of the read before it on the second decoding thread, which CI's
+    # runs met now and then.
     with hold_finished_reads(*ZARR_READS):
-        budget, _, profiles, peak = budget_that_runs(screen.path, run, nthreads=2)
+        budget, refusals, profiles, peak = budget_that_runs(
+            screen.path, run, nthreads=2, max_refusals=100
+        )
+    assert 1 <= len(refusals) <= 16
+    assert budget <= _PROFILES_AT_MOST * peak + (1 << 20)
     with pytest.raises(MemoryError) as short:
         run(open_store(screen.path, nthreads=2, mem_budget=budget - 1))
     assert named_budget(short.value) == budget
+    # From each charge to the next, the call holds no more than its ledger
+    # planned, with each read's work held until the next read ends.
+    store = open_store(screen.path, nthreads=2, mem_budget=budget)
+    with validation_scope():
+        run(store)
+        with hold_finished_reads(*ZARR_READS):
+            _ref, overruns = audited(lambda: run(store))
+    assert overruns == []
     # The budget counts the chunk that the read before can still hold, and
     # the call held more than the budget less that chunk, so the hold took
     # effect.

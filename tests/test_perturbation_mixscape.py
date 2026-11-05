@@ -35,10 +35,23 @@ from cytearc.perturbation.mixscape import (
 )
 from cytearc.perturbation.signature import normalize_counts
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
+from cytearc.storage.validation_scope import validation_scope
 from cytearc.utils.logging import logger
 from tests.perturbation_helpers import memory_screen, use_python_kernels, write_screen
-from tests.memory_helpers import check_budget, named_budget
-from tests.storage_helpers import copy_store, open_store, written
+from tests.memory_helpers import (
+    ZARR_READS,
+    audited,
+    check_budget,
+    follow_refusals,
+    hold_finished_reads,
+    refusal_naming,
+)
+from tests.storage_helpers import (
+    copy_store,
+    open_store,
+    rechunk_feature_tables,
+    written,
+)
 
 N_A, N_B, N_C, N_CONTROL, N_GENES = 90, 60, 2, 150, 60
 # Guide 0 targets GENE_A, guide 1 GENE_B, guide 2 GENE_C, and guide 3 is
@@ -260,18 +273,23 @@ def test_mixscape_refuses_inputs_and_budgets_it_cannot_use(
     reader = open_store(template.path, zarr_mode="r")
     with pytest.raises(PermissionError, match="run_mixscape"):
         reader.perturbation.mixscape(signature)
-    budgeted = open_store(store.zarr_loc, nthreads=2, mem_budget=1_000)
-    with pytest.raises(MemoryError, match="one feature over 302 cells") as low:
-        budgeted.perturbation.mixscape(signature)
-    # The budget that this names fits the DE tests, but not GENE_A's
-    # classification.
-    budgeted = open_store(
-        store.zarr_loc, nthreads=2, mem_budget=named_budget(low.value)
+
+    def classify(budget: int) -> object:
+        budgeted = open_store(store.zarr_loc, nthreads=2, mem_budget=budget)
+        return budgeted.perturbation.mixscape(signature)
+
+    # The refusals from a budget of 1,000 bytes reach the DE tests' one
+    # feature over the 302 cells, and the budget that this names fits the DE
+    # tests, but not GENE_A's classification.
+    low = refusal_naming(
+        classify, "the values of one feature and the read of its counts", start=1_000
     )
-    with pytest.raises(
-        MemoryError, match="90 cells of GENE_A and of the 150 control cells in its 12"
-    ):
-        budgeted.perturbation.mixscape(signature)
+    assert str(low).startswith("Classifying 302 cells of 3 targets and splits")
+    refusal_naming(
+        classify,
+        "90 cells of GENE_A and of the 150 control cells in its 12",
+        start=low.needed_bytes,
+    )
     assert written(store) == saved
 
 
@@ -286,17 +304,16 @@ def test_mixscape_classifies_in_batches_that_fit_the_budget(store, template) -> 
             store.zarr_loc, nthreads=2, mem_budget=budget
         ).perturbation.mixscape(signature, split_column="run", invalidate_cache=True)
 
-    # The budget that the DE tests name refuses GENE_A's classification, and
-    # the one that this names fits the classification of its cells of one
-    # run with the control cells, but not of both runs at once.
-    with pytest.raises(MemoryError) as low:
-        run(1_000)
-    with pytest.raises(MemoryError, match="cells of GENE_A") as batch:
-        run(named_budget(low.value))
+    # The refusals from a budget of 1,000 bytes end at the budget that fits
+    # the classification of GENE_A's cells of one run with the control cells,
+    # but not of both runs at once.
+    budget, refusals = follow_refusals(run, start=1_000)
+    assert refusals[-1].item.startswith("the signatures of the ")
+    assert "cells of GENE_A" in refusals[-1].item
     messages: list[str] = []
     sink = logger.add(lambda message: messages.append(message.record["message"]))
     try:
-        classes = run(named_budget(batch.value))
+        classes = run(budget)
     finally:
         logger.remove(sink)
     assert "Classifying 2 targets and splits in 2 batches" in messages
@@ -623,6 +640,9 @@ def test_de_genes_follow_seurat_on_normalized_values() -> None:
 def memory(tmp_path_factory) -> SimpleNamespace:
     """A screen whose reads outweigh what every call reads besides, and its classes."""
     screen = memory_screen(tmp_path_factory.mktemp("mixscape_memory") / "store.zarr")
+    # In chunks of their rows, the feature tables' reads hold what their rows
+    # do, so the budget shows what each step holds besides.
+    rechunk_feature_tables(screen.path)
     store = open_store(screen.path, nthreads=2)
     screen.signature = store.perturbation.signature(
         screen.labels, screen.coordinates, features=screen.features, dims=10
@@ -631,6 +651,11 @@ def memory(tmp_path_factory) -> SimpleNamespace:
         store.perturbation.mixscape(screen.signature)
     )
     return screen
+
+
+#: The most times its traced peak that Mixscape's budget may be, beside
+#: 1 MiB.
+_MIXSCAPE_AT_MOST = 3.0
 
 
 @pytest.mark.slow
@@ -654,11 +679,27 @@ def test_mixscape_runs_within_the_budget_it_names(memory, monkeypatch) -> None:
     monkeypatch.setattr(mixscape_module, "band_de_genes", counting)
     sink = logger.add(lambda message: messages.append(message.record["message"]))
     try:
-        _, _, (classes, band_sizes, logged) = check_budget(
-            memory.path, run, check_writes=False, nthreads=2
+        budget, refusals, (classes, band_sizes, logged) = check_budget(
+            memory.path,
+            run,
+            check_writes=False,
+            nthreads=2,
+            at_most=_MIXSCAPE_AT_MOST,
+            allowance=1 << 20,
+            max_refusals=100,
         )
     finally:
         logger.remove(sink)
+    assert 1 <= len(refusals) <= 16
+    assert all(refusal.startswith("Classifying ") for refusal in refusals)
+    # From each charge to the next, the call holds no more than its ledger
+    # planned, with each read's work held until the next read ends.
+    store = open_store(memory.path, mem_budget=budget, nthreads=2)
+    with validation_scope():
+        run(store)
+        with hold_finished_reads(*ZARR_READS):
+            _result, overruns = audited(lambda: run(store))
+    assert overruns == []
 
     # The DE tests read the counts in several bands and the targets are
     # classified in several batches, within the budget that the refusal

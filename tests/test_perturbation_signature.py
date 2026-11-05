@@ -28,15 +28,29 @@ from cytearc.perturbation.signature import (
     signature_rows,
 )
 from cytearc.storage.artifacts import inspect_artifact
+from cytearc.storage.validation_scope import validation_scope
 from cytearc.utils.logging import logger
+from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 from tests.perturbation_helpers import (
     fixed_labels,
     memory_screen,
     use_python_kernels,
     write_screen,
 )
-from tests.memory_helpers import check_budget
-from tests.storage_helpers import copy_store, open_store, written
+from tests.memory_helpers import (
+    ZARR_READS,
+    at_budget,
+    audited,
+    check_budget,
+    hold_finished_reads,
+    refusal_naming,
+)
+from tests.storage_helpers import (
+    copy_store,
+    open_store,
+    rechunk_feature_tables,
+    written,
+)
 
 N_CELLS = 48
 # Guide 0 targets GENE_A, guide 1 GENE_B, and guide 2 is non-targeting.
@@ -221,9 +235,9 @@ def test_loading_a_signature_holds_its_values_once(
     read: list[np.ndarray] = []
     read_rows = perturbation_operations._read_signature_rows
 
-    def recording(stored, rows, columns, out, out_columns) -> None:
+    def recording(ledger, stored, rows, columns, out, out_columns) -> None:
         read.append(out)
-        read_rows(stored, rows, columns, out, out_columns)
+        read_rows(ledger, stored, rows, columns, out, out_columns)
 
     monkeypatch.setattr(perturbation_operations, "_read_signature_rows", recording)
 
@@ -361,7 +375,8 @@ def test_signature_refuses_inputs_it_cannot_use(
             labels, coordinates, features=features, n_neighbors=9, sample_column="run"
         )
     budgeted = open_store(store.zarr_loc, mem_budget=100)
-    with pytest.raises(MemoryError, match="16 control cells in 6 features"):
+    # The refusals name the signatures of the 48 cells in the 6 features.
+    with pytest.raises(MemoryError, match="signatures of 48 cells in 6 features"):
         budgeted.perturbation.signature(
             labels, coordinates, features=features, n_neighbors=5
         )
@@ -437,8 +452,13 @@ def test_loading_a_signature_refuses_what_it_cannot_read(
     with pytest.raises(ValueError, match="has no feature 'GENE_A'"):
         store.perturbation.load_signature(ref, features=["RNA0", "GENE_A"])
     budgeted = open_store(store.zarr_loc, mem_budget=100)
-    with pytest.raises(MemoryError, match="48 cells in 6 features"):
-        budgeted.perturbation.load_signature(ref)
+    # The refusals from a budget of 100 bytes reach the read of the
+    # signatures of the 48 cells in the 6 features.
+    refusal_naming(
+        at_budget(budgeted, lambda: budgeted.perturbation.load_signature(ref)),
+        "48 cells in 6 features",
+        start=100,
+    )
     assert written(store) == saved
 
 
@@ -449,38 +469,56 @@ def _brute_nearest(query: np.ndarray, controls: np.ndarray, k: int) -> np.ndarra
     )
 
 
+def _search_ledger(budget: int) -> MemoryLedger:
+    """A ledger of ``budget`` bytes for a search whose coordinates its caller holds outside it."""
+    return MemoryLedger(budget, "Searching the nearest controls")
+
+
 def test_nearest_controls_are_exact_with_ties_to_the_first() -> None:
     rng = np.random.default_rng(3)
     query = rng.normal(size=(50, 3))
     controls = rng.normal(size=(40, 3))
     np.testing.assert_array_equal(
-        nearest_controls(query, controls, 5, memory_bytes=1 << 30),
+        nearest_controls(query, controls, 5, ledger=_search_ledger(1 << 30)),
         _brute_nearest(query, controls, 5),
     )
-    # Blocks of one query give the same neighbors.
+    # Blocks of one query, all that the room holds, give the same neighbors.
     np.testing.assert_array_equal(
-        nearest_controls(query, controls, 5, memory_bytes=1),
+        nearest_controls(
+            query, controls, 5, ledger=_search_ledger(nearest_control_bytes(40, 5, 3))
+        ),
         _brute_nearest(query, controls, 5),
     )
     # Thirty controls at one point tie for every query, so the first ones win.
     tied = np.tile([[0.5, -1.0, 2.0]], (30, 1))
     assert (
-        nearest_controls(query[:3], tied, 4, memory_bytes=1 << 30).tolist()
+        nearest_controls(query[:3], tied, 4, ledger=_search_ledger(1 << 30)).tolist()
         == [[0, 1, 2, 3]] * 3
     )
     # With few controls, every control is a candidate.
     few = controls[:6]
     np.testing.assert_array_equal(
-        nearest_controls(query, few, 6, memory_bytes=1 << 30),
+        nearest_controls(query, few, 6, ledger=_search_ledger(1 << 30)),
         _brute_nearest(query, few, 6),
     )
 
 
 def test_nearest_controls_check_their_inputs() -> None:
     with pytest.raises(ValueError, match="the same dimensions"):
-        nearest_controls(np.zeros((2, 3)), np.zeros((4, 2)), 1, memory_bytes=1 << 20)
+        nearest_controls(
+            np.zeros((2, 3)), np.zeros((4, 2)), 1, ledger=_search_ledger(1 << 20)
+        )
     with pytest.raises(ValueError, match="from 1 to the 4 controls, not 5"):
-        nearest_controls(np.zeros((2, 3)), np.zeros((4, 3)), 5, memory_bytes=1 << 20)
+        nearest_controls(
+            np.zeros((2, 3)), np.zeros((4, 3)), 5, ledger=_search_ledger(1 << 20)
+        )
+    # A room without one query's search is refused, naming that search.
+    with pytest.raises(MemoryBudgetError) as refused:
+        nearest_controls(
+            np.zeros((2, 3)), np.zeros((4, 3)), 2, ledger=_search_ledger(1)
+        )
+    assert refused.value.item == "searching the nearest controls"
+    assert refused.value.needed_bytes == nearest_control_bytes(4, 2, 3)
 
 
 @pytest.mark.parametrize("python_kernels", [False, True])
@@ -571,7 +609,7 @@ def test_nearest_controls_hold_what_their_budget_allows(n_queries) -> None:
     tracemalloc.start()
     try:
         start = tracemalloc.get_traced_memory()[0]
-        found = nearest_controls(query, controls, 20, memory_bytes=budget)
+        found = nearest_controls(query, controls, 20, ledger=_search_ledger(budget))
         peak = tracemalloc.get_traced_memory()[1] - start
     finally:
         tracemalloc.stop()
@@ -586,12 +624,30 @@ def test_nearest_controls_hold_what_their_budget_allows(n_queries) -> None:
 def memory(tmp_path_factory) -> SimpleNamespace:
     """A screen whose reads outweigh what every call reads besides, and its signature."""
     screen = memory_screen(tmp_path_factory.mktemp("signature_memory") / "store.zarr")
+    # In chunks of their rows, the feature tables' reads hold what their rows
+    # do, so the budgets show what each step holds besides.
+    rechunk_feature_tables(screen.path)
     store = open_store(screen.path, nthreads=2)
     screen.signature = store.perturbation.signature(
         screen.labels, screen.coordinates, features=screen.features, dims=10
     )
     screen.whole = store.perturbation.load_signature(screen.signature)
     return screen
+
+
+#: The most times its traced peak that a signature's budget may be, beside
+#: 1 MiB.
+_SIGNATURE_AT_MOST = 3.0
+
+
+def _audit(path, run, budget: int) -> None:
+    """Check that ``run`` holds no more than its ledger plans from each charge to the next at ``budget`` on two threads, with each read's work held until the next read ends."""
+    store = open_store(path, mem_budget=budget, nthreads=2)
+    with validation_scope():
+        run(store)
+        with hold_finished_reads(*ZARR_READS):
+            _result, overruns = audited(lambda: run(store))
+    assert overruns == []
 
 
 @pytest.mark.slow
@@ -606,9 +662,25 @@ def test_signature_runs_within_the_budget_it_names(memory) -> None:
         )
 
     # Finding the neighbors, reading the counts and writing the signatures
-    # stay within the budget that the refusal names, which once failed in
-    # the stream planner.
-    _, _, ref = check_budget(memory.path, run, check_writes=False, nthreads=2)
+    # stay within the budget that the refusals name, which once failed in
+    # the stream planner, and each refusal names its step.
+    budget, refusals, ref = check_budget(
+        memory.path,
+        run,
+        check_writes=False,
+        nthreads=2,
+        at_most=_SIGNATURE_AT_MOST,
+        allowance=1 << 20,
+        max_refusals=100,
+    )
+    assert 1 <= len(refusals) <= 16
+    assert all(
+        refusal.startswith(
+            "Computing the signatures of 4000 cells in 200 features holds"
+        )
+        for refusal in refusals
+    )
+    _audit(memory.path, run, budget)
     loaded = open_store(memory.path).perturbation.load_signature(ref)
     pd.testing.assert_frame_equal(loaded.values, memory.whole.values)
     pd.testing.assert_frame_equal(loaded.neighbors, memory.whole.neighbors)
@@ -623,7 +695,21 @@ def test_loading_signatures_stays_within_the_budget_it_names(memory, features) -
     # Reading one feature decodes whole stored chunks of every feature, and
     # the frames hold every cell's and neighbor's ID; the budget once
     # counted 4 bytes per value read.
-    _, _, loaded = check_budget(memory.path, run, check_writes=False, nthreads=2)
+    budget, refusals, loaded = check_budget(
+        memory.path,
+        run,
+        check_writes=False,
+        nthreads=2,
+        at_most=_SIGNATURE_AT_MOST,
+        allowance=1 << 20,
+        max_refusals=100,
+    )
+    assert 1 <= len(refusals) <= 12
+    assert all(
+        refusal.startswith("Reading the signatures of 4000 cells")
+        for refusal in refusals
+    )
+    _audit(memory.path, run, budget)
     expected = (
         memory.whole.values if features is None else memory.whole.values[features]
     )

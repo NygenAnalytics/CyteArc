@@ -65,6 +65,7 @@ from cytearc.utils.arguments import (
     integer_argument,
     optional_name_argument,
 )
+from cytearc.utils.memory_budget import MemoryLedger
 from cytearc.utils.numba import njit
 
 __all__ = [
@@ -94,6 +95,7 @@ __all__ = [
     "nonzero_counts",
     "pair_table_rows",
     "pair_test_bytes",
+    "pair_test_work",
     "pair_tests",
     "record_batch",
     "resampled_statistics",
@@ -740,6 +742,54 @@ def pair_test_bytes(n_union: int, n_covariates: int) -> int:
     )
 
 
+#: The random sets' memory of :func:`pair_tests` without a ledger.
+_DRAW_BYTES = 1 << 28
+
+
+def pair_test_work(
+    room: int | None,
+    groups: TreatmentGroups,
+    n_covariates: int,
+    n_resamples: tuple[int, int, int],
+    threads: int,
+) -> tuple[int, int, int]:
+    """Return what the tests of :func:`pair_tests` hold within ``room``: the threads' buffers, the random sets and the second round's statistics.
+
+    Each thread holds one pair's fit and a batch's records, as
+    :func:`pair_test_bytes` counts them for the largest group. The random
+    sets of one group of the largest round, 4 bytes for each cell of the
+    largest group and set, take a quarter of what the room leaves beside the
+    least of the tests, up to one group for each thread; the statistics hold
+    one pair's second round, ``8 * n_resamples[1]`` bytes, and up to a
+    quarter of what is left, at most ``STATISTICS_BYTES``, with one working
+    copy no larger than them. The tests then hold the threads' buffers, the
+    random sets and twice the statistics. Without a room, the random sets take
+    256 MiB and the statistics ``STATISTICS_BYTES``.
+
+    Args:
+        room: The bytes that the tests may hold, or None for no budget.
+        groups: The groups of treatment cells.
+        n_covariates: The covariates of the cells, the intercept included.
+        n_resamples: The random sets of the three rounds.
+        threads: The threads that test pairs at once.
+
+    Returns:
+        The threads' buffers, the random sets' bytes and the statistics' bytes.
+    """
+    largest = int(np.diff(groups.offsets).max(initial=0))
+    scratch = max(1, int(threads)) * pair_test_bytes(
+        groups.n_controls + largest, n_covariates
+    )
+    if room is None:
+        return scratch, _DRAW_BYTES, STATISTICS_BYTES
+    one_set = 4 * max(n_resamples) * largest
+    least_statistics = 8 * n_resamples[1]
+    spare = max(0, int(room) - scratch - one_set - 2 * least_statistics)
+    draw_bytes = one_set + min((max(1, int(threads)) - 1) * one_set, spare // 4)
+    statistics_bytes = max(least_statistics, min(STATISTICS_BYTES, spare // 4))
+    return scratch, draw_bytes, statistics_bytes
+
+
 def record_batch(n_union: int, n_covariates: int) -> int:
     """Return how many pairs of a group are scored together.
 
@@ -1158,8 +1208,9 @@ def pair_tests(
     stage_threshold: float = 0.02,
     approximation: str = "skew_normal",
     side: str = "both",
-    statistics_bytes: int = STATISTICS_BYTES,
-    draw_bytes: int = 1 << 28,
+    statistics_bytes: int | None = None,
+    draw_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> PairResults:
     """Test pairs of groups of treatment cells and genes in up to three rounds.
 
@@ -1195,12 +1246,42 @@ def pair_tests(
             pair's when those are larger, in one working copy never larger
             than the statistics, so the second round holds at most twice the
             statistics' memory besides the random sets, the records that
-            score them and a few values per pair.
-        draw_bytes: The memory that the groups' random sets may take at once.
+            score them and a few values per pair. ``STATISTICS_BYTES`` when
+            None without a ledger.
+        draw_bytes: The memory that the groups' random sets may take at once,
+            256 MiB when None without a ledger.
+        ledger: The caller's memory ledger, which holds the counts and the
+            covariates. The statistics and the random sets then take what
+            :func:`pair_test_work` gives them in its room, which it is
+            charged before the tests, and neither may be passed.
 
     Returns:
         Each pair's test.
+
+    Raises:
+        TypeError: If a ledger is passed with ``statistics_bytes`` or
+            ``draw_bytes``.
+        MemoryBudgetError: If the ledger has no room for the least of the
+            tests.
     """
+    if ledger is not None:
+        if statistics_bytes is not None or draw_bytes is not None:
+            raise TypeError(
+                "Pass a ledger or statistics_bytes and draw_bytes, not both"
+            )
+        threads = numba.get_num_threads()
+        scratch, draw_bytes, statistics_bytes = pair_test_work(
+            ledger.room, groups, int(covariates.shape[1]), n_resamples, threads
+        )
+        ledger.peak(
+            "testing the pairs: the threads' buffers, the random sets and the "
+            "statistics",
+            scratch + draw_bytes + 2 * statistics_bytes,
+        )
+    statistics_bytes = (
+        STATISTICS_BYTES if statistics_bytes is None else statistics_bytes
+    )
+    draw_bytes = _DRAW_BYTES if draw_bytes is None else draw_bytes
     rows = np.asarray(pair_rows, dtype=np.int64)
     pair_group = np.asarray(pair_groups, dtype=np.int64)
     coefficients = fit_null_models(values, covariates, groups.n_controls, rows)

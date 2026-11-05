@@ -39,6 +39,7 @@ from scipy.stats import false_discovery_control
 
 from cytearc.perturbation.efficiency import rows_setting
 from cytearc.utils.arguments import integer_argument
+from cytearc.utils.memory_budget import MemoryLedger
 from cytearc.utils.numba import njit
 
 __all__ = [
@@ -273,6 +274,7 @@ def edistance_arrays(
     n_permutations: int,
     random_seed: int,
     nthreads: int = 1,
+    ledger: MemoryLedger | None = None,
 ) -> EDistanceArrays:
     """Compute each row's E-distance to the control cells and its p-value.
 
@@ -285,6 +287,9 @@ def edistance_arrays(
         random_seed: The seed from which each row's permutations draw.
         nthreads: The threads that test rows at once. The results do not
             depend on it.
+        ledger: The caller's memory ledger, which holds the arrays passed and
+            is charged what the measurement holds beside them, as
+            :func:`edistance_memory_bytes` counts it, before it starts.
 
     Returns:
         The status, cells, E-distance and p-values of every row.
@@ -294,6 +299,26 @@ def edistance_arrays(
             range or is a control cell that carries a row, or there are fewer
             than two control cells.
     """
+    if ledger is not None:
+        passed = sum(
+            np.asarray(array).nbytes for array in (coordinates, groups, control)
+        )
+        codes = np.asarray(groups)
+        ledger.peak(
+            "measuring the E-distances",
+            max(
+                0,
+                edistance_memory_bytes(
+                    np.bincount(codes[codes >= 0], minlength=int(n_rows)),
+                    int(np.count_nonzero(control)),
+                    int(np.shape(coordinates)[1]) if np.ndim(coordinates) == 2 else 0,
+                    n_permutations=n_permutations,
+                    nthreads=nthreads,
+                )
+                - passed,
+            ),
+        )
+        del codes
     values = np.asarray(coordinates, dtype=np.float64)
     groups = np.asarray(groups, dtype=np.int64)
     control = np.asarray(control, dtype=bool)

@@ -12,7 +12,8 @@ from ...metadata.arguments import (
     PerturbationProfileArguments,
 )
 from ...metadata.artifacts import write_cell_data_artifact
-from ...metadata.selection import cell_selection_indices
+from ...metadata.rows import read_rows, read_whole
+from ...metadata.selection import plan_cell_selection_read, read_cell_selection
 from ...perturbation.clusters import PerturbationClusters, cluster_settings
 from ...perturbation.profiles import PerturbationProfiles, profile_settings
 from ...storage.artifact_writer import ArrayRequirement, AttributeRequirement
@@ -22,7 +23,7 @@ from ...storage.artifacts import (
     fingerprint_strings,
     require_complete_artifact,
 )
-from ...storage.types import as_zarr_array, read_array
+from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.compute import process_thread_limit
@@ -33,21 +34,26 @@ from ...utils.warnings import warn
 from .perturbation_store import (
     _LabelRows,
     _band_bytes,
+    _call_ledger,
     _cell_samples,
+    _cell_selection_check_bytes,
+    _cell_totals,
     _cell_values,
+    _converted,
     _count_bands,
     _count_blocks,
+    _feature_text,
+    _frame_bytes,
     _label_groups,
     _label_rows,
     _matched_ids,
     _pairs_fingerprint,
     _positions_in,
-    _require_budget,
-    _resident_ledger,
     _require_cell_column,
     _require_ref,
     _row_features,
     _stored_samples,
+    _table_write_bytes,
 )
 
 if TYPE_CHECKING:
@@ -115,14 +121,17 @@ def _left_out_warning(
 
 
 class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
-    def _profile_cells(self, labels: ArtifactRef, by: str) -> _ProfileCells:
-        """Read the rows and cells of perturbation profiles.
+    def _profile_cells(
+        self, ledger: MemoryLedger, labels: ArtifactRef, by: str
+    ) -> _ProfileCells:
+        """Read the rows and cells of perturbation profiles, keeping them charged.
 
         The rows are the targets of the labels that are not controls, or with
         ``by="guide"`` every guide with a target, the control guides included.
         A row's cells carry its target, or its guide, alone. With Mixscape
         classes, the cells are those of the classes, and of a row that is not
         a control guide only those that Mixscape called knocked out count.
+        The labels are read through ``ledger``.
 
         Raises:
             ValueError: If no labelled cell carries control guides only.
@@ -134,40 +143,65 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             perturbation_labels = require_complete_artifact(
                 self.zw, classes.input_ref("signature")
             ).input_ref("labels")
-        rows = _label_rows(self, perturbation_labels, by, control_guides=True)
-        groups, control = _label_groups(self, perturbation_labels, rows, by)
-        row_control = read_array(
-            artifact_group(self.zw, perturbation_labels), "target_is_control"
-        ).astype(bool)[rows.codes]
+        rows = _label_rows(self, ledger, perturbation_labels, by, control_guides=True)
+        groups, control = _label_groups(self, ledger, perturbation_labels, rows, by)
+        item = "the targets' control flags"
+        flags = _converted(
+            ledger,
+            read_whole(
+                ledger,
+                artifact_group(self.zw, perturbation_labels),
+                "target_is_control",
+                item=item,
+            ),
+            bool,
+            item,
+        )
+        ledger.hold("the rows' control flags", len(rows.codes))
+        row_control = flags[rows.codes]
+        flags_bytes = flags.nbytes
+        del flags
+        ledger.release(flags_bytes)
         selection = rows.status.input_ref("cell_selection")
-        cell_index = cell_selection_indices(self.zw, selection)
+        cell_index = self._profile_selection(ledger, selection, "the labelled cells")
         if classes is not None:
             # The cells of the classes, with the rows and flags of those that
             # the labels cover.
             selection = classes.input_ref("cell_selection")
-            classified = cell_selection_indices(self.zw, selection)
+            before = ledger.charged
+            classified = self._profile_selection(
+                ledger, selection, "the classified cells"
+            )
+            n_classified = len(classified)
+            # Where each labelled cell sits among the classified cells, and the
+            # classified cells' rows, flags and whether each is kept.
+            ledger.hold(
+                "the classified cells' rows",
+                9 * len(cell_index) + 18 * n_classified,
+            )
             positions, present = _positions_in(classified, cell_index)
-            aligned = np.full(len(classified), -1, dtype=np.int64)
+            aligned = np.full(n_classified, -1, dtype=np.int64)
             aligned[positions[present]] = groups[present]
-            control_flags = np.zeros(len(classified), dtype=bool)
+            control_flags = np.zeros(n_classified, dtype=bool)
             control_flags[positions[present]] = control[present]
-            knocked_out = _cell_values(
-                self,
-                MemoryLedger(
-                    self.memoryBytes,
-                    f"Reading the {labels.kind} artifact",
-                    codec_threads=self.nthreads,
-                ),
-                labels,
-                "global_class",
-            ).astype(str) == str((classes.parameters or {})["perturbation_type"])
+            del positions, present
+            global_class = _cell_values(self, ledger, labels, "global_class")
+            ledger.peak("finding the knocked-out cells", 2 * n_classified)
+            knocked_out = global_class.astype(str, copy=False) == str(
+                (classes.parameters or {})["perturbation_type"]
+            )
             kept = aligned >= 0
             kept[kept] = knocked_out[kept] | row_control[aligned[kept]]
+            del global_class, knocked_out
+            labelled_bytes = cell_index.nbytes + groups.nbytes + control.nbytes
             cell_index, groups, control = (
                 classified,
                 np.where(kept, aligned, -1),
                 control_flags,
             )
+            del aligned, kept, classified
+            # The classified cells' positions, rows and flags stay.
+            ledger.release(ledger.charged - before + labelled_bytes - 17 * n_classified)
         return _ProfileCells(
             labels=perturbation_labels,
             rows=rows,
@@ -177,6 +211,16 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             groups=groups,
             control=control,
         )
+
+    def _profile_selection(
+        self, ledger: MemoryLedger, selection: ArtifactRef, cells: str
+    ) -> np.ndarray:
+        """Check a cell selection and read its cells' positions through ``ledger``, keeping them charged."""
+        ledger.peak(
+            f"checking {cells} against the cell IDs", _cell_selection_check_bytes(self)
+        )
+        planned = plan_cell_selection_read(self.zw, selection)
+        return read_cell_selection(ledger, self.zw, planned, item=f"{cells}' positions")
 
     @validation_scoped
     def _perturbation_profiles(
@@ -293,7 +337,10 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         _require_ref(features, "features", "feature_selection")
         floor = profile_settings(by, min_cells, mask_targets, id_column, sample_column)
         _require_cell_column(self, sample_column, "sample_column")
-        cells = self._profile_cells(labels, by)
+        ledger = _call_ledger(
+            self, f"Profiling the {by}s", remedy="pass fewer features"
+        )
+        cells = self._profile_cells(ledger, labels, by)
         expression = self._get_assay(str(features.assay))
         self._require_measured_cells(
             expression.name,
@@ -323,21 +370,32 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
                 "lower min_cells"
             )
         n_kept = len(kept)
+        # Each profile's name, target, masked feature and slot.
+        ledger.hold(
+            "the profiles' rows",
+            len(rows.names)
+            * (rows.names.dtype.itemsize + rows.target_names.dtype.itemsize + 24),
+        )
         names = rows.names[kept].astype(str)
         row_targets = rows.target_names[rows.codes].astype(str)
-        feature_ids = np.asarray(expression.feats.fetch_all("ids")).astype(str)
+        feature_ids = _feature_text(ledger, expression, "ids")
         # Each profile's masked feature, as a position in the assay.
         masked = np.full(n_kept, -1, dtype=np.int64)
         targets_fingerprint = None
         if mask_targets:
+            feature_names = _feature_text(ledger, expression, "names")
             matched = _row_features(
                 self,
+                ledger,
                 cells.labels,
                 rows,
                 id_column,
                 feature_ids,
-                np.asarray(expression.feats.fetch_all("names")).astype(str),
+                feature_names,
             )[kept]
+            names_bytes = feature_names.nbytes
+            del feature_names
+            ledger.release(names_bytes)
             # A control target is no gene of the genome.
             matched[cells.row_control[kept]] = -1
             targets_fingerprint = _pairs_fingerprint(
@@ -352,14 +410,15 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         # The cells read: the control cells and the cells of the profiled
         # perturbations, which by guide include the control cells of a
         # control guide, in store order.
+        # Each labelled cell's profile slot, and each read cell's position
+        # among them and in the store, and its flag.
+        ledger.hold("the read cells", 8 * len(cells.cell_index) + 17 * len(groups))
         used = np.flatnonzero(cells.control | (groups >= 0))
         used_cells = cells.cell_index[used]
         is_control = cells.control[used]
         cell_samples = _cell_samples(
             self,
-            MemoryLedger(
-                None, "Numbering the cells' samples", codec_threads=self.nthreads
-            ),
+            ledger,
             sample_column,
             used_cells,
             reason="Each sample's control cells z-normalize its cells, so every "
@@ -444,42 +503,47 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             if left_out is not None:
                 warn(left_out)
             return planned.ref
-        # Each labelled cell's position, perturbation and flag, each read
-        # cell's position, sample and total, the float32 profiles, and each
-        # sample's control mean and standard deviation of every feature.
-        held = (
-            24 * len(cells.cell_index)
-            + 32 * len(used)
-            + 4 * n_kept * n_features
-            + 16 * n_samples * n_features
-            + 16 * n_features
+        ledger.doing = f"Profiling {n_kept} {by}s in {n_features} features"
+        # The float32 profiles, and each sample's control mean and standard
+        # deviation of every feature.
+        ledger.hold(
+            "the profiles",
+            4 * n_kept * n_features + 16 * n_samples * n_features + 16 * n_features,
         )
         # One feature of a band: its float64 sums over the perturbations,
         # which are divided straight into the profiles counted above, and its
         # running moments in each sample. Its counts stream beside them, with
         # a cell's value as read and as a C-ordered copy.
         per_feature = 8 * n_kept + 24 * n_samples
+        # The control cells and the cells of the profiled perturbations, as
+        # positions among the read cells and in the store.
+        ledger.hold("the read cells", 16 * len(used))
         controls = np.flatnonzero(is_control)
         members = np.flatnonzero(groups[used] >= 0)
         read_cells = (used_cells[controls], used_cells[members])
-        needed = _band_bytes(
-            _resident_ledger(self, held),
-            expression,
-            feature_index[:1],
-            read_cells,
-            per_feature=per_feature,
-            scratch_per_feature=16,
+        totals = _cell_totals(ledger, expression, used_cells, item="the cells' totals")
+        target = depth_target(totals, is_control)
+        # Each member's perturbation, each profile's cells and masked column.
+        ledger.hold("the members' perturbations", 8 * len(members) + 16 * n_kept)
+        member_groups = groups[used][members]
+        n_cells = sizes[kept].astype(np.int64)
+        masked_columns = np.full(n_kept, -1, dtype=np.int64)
+        masked_columns[masked >= 0] = np.searchsorted(
+            feature_index, masked[masked >= 0]
         )
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            f"The profiles of {n_kept} {by}s in {n_features} features hold about",
-            beside=" with one feature's sums and the read of its counts",
-            remedy=f"Raise mem_budget to at least {needed} bytes, or pass fewer "
-            "features.",
+        ledger.peak(
+            "one feature's sums and the read of its counts",
+            _band_bytes(
+                ledger,
+                expression,
+                feature_index[:1],
+                read_cells,
+                per_feature=per_feature,
+                scratch_per_feature=16,
+            ),
         )
         bands = _count_bands(
-            _resident_ledger(self, held),
+            ledger,
             expression,
             feature_index,
             read_cells,
@@ -487,37 +551,33 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             scratch_per_feature=16,
             most=n_features,
         )
-        del read_cells
         self._require_writable(arguments.operation)
-        totals = expression._cell_count_totals(used_cells)
-        target = depth_target(totals, is_control)
-        member_groups = groups[used][members]
-        n_cells = sizes[kept].astype(np.int64)
-        masked_columns = np.full(n_kept, -1, dtype=np.int64)
-        masked_columns[masked >= 0] = np.searchsorted(
-            feature_index, masked[masked >= 0]
-        )
         values = np.empty((n_kept, n_features), dtype=np.float32)
         means = np.empty((n_samples, n_features))
         sds = np.empty((n_samples, n_features))
 
-        def counts(band: np.ndarray, positions: np.ndarray) -> Iterator[np.ndarray]:
+        def counts(
+            band: np.ndarray, read: np.ndarray, whose: str
+        ) -> Iterator[np.ndarray]:
             """Stream the counts of a band of features over some read cells."""
-            _, blocks = _count_blocks(
+            yield from _count_blocks(
                 self,
-                _resident_ledger(self, held + per_feature * len(band)),
+                ledger,
                 expression,
                 band,
-                used_cells[positions],
+                read,
                 scratch_bytes_per_row=16 * len(band),
+                item=f"reading the counts of a band of features over the {whose}",
             )
-            yield from blocks
 
         with numba_threads(self.nthreads):
             for start, stop in bands:
                 band = feature_index[start:stop]
+                band_bytes = ledger.hold(
+                    "one band's sums and moments", per_feature * len(band)
+                )
                 _, means[:, start:stop], sds[:, start:stop] = control_moments(
-                    counts(band, controls),
+                    counts(band, read_cells[0], "control cells"),
                     totals[controls],
                     target,
                     samples[controls],
@@ -525,7 +585,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
                     len(band),
                 )
                 sums = z_score_sums(
-                    counts(band, members),
+                    counts(band, read_cells[1], "profiled cells"),
                     totals[members],
                     target,
                     samples[members],
@@ -543,26 +603,29 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
                     out=values[:, start:stop],
                 )
                 del sums
+                ledger.release(band_bytes)
         n_zero_sd = np.count_nonzero(sds == 0, axis=0).astype(np.int64)
+        columns = {
+            "values": values,
+            "perturbations": names,
+            "targets": row_targets[kept],
+            "is_control": cells.row_control[kept],
+            "n_cells": n_cells,
+            "masked_features": masked,
+            "left_out": rows.names[thin].astype(str),
+            "left_out_targets": row_targets[thin],
+            "left_out_n_cells": sizes[thin].astype(np.int64),
+            "features": feature_index,
+            "n_zero_sd": n_zero_sd,
+            "n_control_cells": n_controls.astype(np.int64),
+            "control_mean": means,
+            "control_sd": sds,
+        }
+        ledger.peak("saving the profiles", _table_write_bytes(columns))
         write_cell_data_artifact(
             self.zw,
             planned,
-            {
-                "values": values,
-                "perturbations": names,
-                "targets": row_targets[kept],
-                "is_control": cells.row_control[kept],
-                "n_cells": n_cells,
-                "masked_features": masked,
-                "left_out": rows.names[thin].astype(str),
-                "left_out_targets": row_targets[thin],
-                "left_out_n_cells": sizes[thin].astype(np.int64),
-                "features": feature_index,
-                "n_zero_sd": n_zero_sd,
-                "n_control_cells": n_controls.astype(np.int64),
-                "control_mean": means,
-                "control_sd": sds,
-            },
+            columns,
             attributes={"sample_names": sample_names},
         )
         if left_out is not None:
@@ -607,23 +670,68 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         status = require_complete_artifact(self.zw, profiles)
         group = artifact_group(self.zw, profiles)
         assay = self._get_assay(str(profiles.assay))
-
         stored = as_zarr_array(group["values"], name="values")
+        ledger = _call_ledger(
+            self,
+            f"Reading the profiles of {stored.shape[0]} perturbations in "
+            f"{stored.shape[1]} features",
+        )
+
         # The frame holds the float32 values as read, without a copy.
-        n_bytes = 4 * int(np.prod(stored.shape))
-        _require_budget(
-            n_bytes,
-            self.memoryBytes,
-            f"The profiles of {stored.shape[0]} perturbations in {stored.shape[1]} "
-            "features hold",
+        profile_values = read_whole(ledger, group, "values", item="the profiles")
+        feature_ids = _feature_text(ledger, assay, "ids")
+        feature_names = _feature_text(ledger, assay, "names")
+        positions = read_whole(ledger, group, "features", item="the features")
+        perturbations = read_whole(
+            ledger, group, "perturbations", item="the perturbations"
         )
-        feature_ids = np.asarray(assay.feats.fetch_all("ids")).astype(str)
-        positions = read_array(group, "features")
-        columns = pd.Index(feature_ids[positions], name="feature")
-        index = pd.Index(
-            read_array(group, "perturbations").astype(str), name="perturbation"
+        masked = read_whole(
+            ledger, group, "masked_features", item="the masked features"
         )
-        masked = read_array(group, "masked_features")
+        arrays = {
+            name: read_whole(ledger, group, name, item=f"the profiles' {name}")
+            for name in (
+                "targets",
+                "is_control",
+                "n_cells",
+                "left_out",
+                "left_out_targets",
+                "left_out_n_cells",
+                "n_zero_sd",
+                "n_control_cells",
+                "control_mean",
+                "control_sd",
+            )
+        }
+        # The profiled features' IDs and names, and each masked feature's ID.
+        ledger.hold(
+            "the profiled features",
+            len(positions) * (feature_ids.dtype.itemsize + feature_names.dtype.itemsize)
+            + len(masked) * feature_ids.dtype.itemsize,
+        )
+        profiled_ids = feature_ids[positions]
+        profiled_names = feature_names[positions]
+        masked_ids = np.where(masked >= 0, feature_ids[np.maximum(masked, 0)], "")
+        features_bytes = feature_ids.nbytes + feature_names.nbytes
+        del feature_ids, feature_names
+        ledger.release(features_bytes)
+        # The tables beside the profiles: every value of the others once, the
+        # features' IDs as the index of three tables, and the samples' control
+        # statistics.
+        ledger.peak(
+            "the tables of perturbations, features and samples",
+            _frame_bytes(
+                {
+                    "perturbations": perturbations,
+                    "masked": masked_ids,
+                    "names": profiled_names,
+                    **arrays,
+                }
+            )
+            + 3 * _frame_bytes({"ids": profiled_ids}),
+        )
+        columns = pd.Index(profiled_ids, name="feature")
+        index = pd.Index(perturbations.astype(str), name="perturbation")
         samples = pd.Index(
             np.asarray(_stored_samples(group, "sample_names"), dtype=object),
             name="sample",
@@ -632,17 +740,17 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         sample_columns = list(parameters["sample_columns"])
         return PerturbationProfiles(
             values=pd.DataFrame(
-                np.asarray(stored[:]), index=index, columns=columns, copy=False
+                profile_values, index=index, columns=columns, copy=False
             ),
             perturbations=pd.DataFrame(
                 {
-                    "target": read_array(group, "targets").astype(str),
-                    "is_control": read_array(group, "is_control").astype(bool),
-                    "n_cells": read_array(group, "n_cells"),
+                    "target": arrays["targets"].astype(str),
+                    "is_control": arrays["is_control"].astype(bool),
+                    "n_cells": arrays["n_cells"],
                     "masked_feature": pd.Series(
                         [
-                            None if code < 0 else str(feature_ids[code])
-                            for code in masked
+                            None if code < 0 else str(feature)
+                            for code, feature in zip(masked, masked_ids, strict=True)
                         ],
                         dtype=object,
                         index=index,
@@ -652,28 +760,26 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             ),
             left_out=pd.DataFrame(
                 {
-                    "perturbation": read_array(group, "left_out").astype(str),
-                    "target": read_array(group, "left_out_targets").astype(str),
-                    "n_cells": read_array(group, "left_out_n_cells"),
+                    "perturbation": arrays["left_out"].astype(str),
+                    "target": arrays["left_out_targets"].astype(str),
+                    "n_cells": arrays["left_out_n_cells"],
                 }
             ),
             features=pd.DataFrame(
                 {
-                    "feature_name": np.asarray(assay.feats.fetch_all("names")).astype(
-                        str
-                    )[positions],
-                    "n_zero_sd": read_array(group, "n_zero_sd"),
+                    "feature_name": profiled_names,
+                    "n_zero_sd": arrays["n_zero_sd"],
                 },
                 index=columns,
             ),
             samples=pd.DataFrame(
-                {"n_control_cells": read_array(group, "n_control_cells")}, index=samples
+                {"n_control_cells": arrays["n_control_cells"]}, index=samples
             ),
             control_mean=pd.DataFrame(
-                read_array(group, "control_mean"), index=samples, columns=columns
+                arrays["control_mean"], index=samples, columns=columns
             ),
             control_sd=pd.DataFrame(
-                read_array(group, "control_sd"), index=samples, columns=columns
+                arrays["control_sd"], index=samples, columns=columns
             ),
             by=str(parameters["by"]),
             from_assay=assay.name,
@@ -749,10 +855,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
                 with their working copies, do not fit the memory budget.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
-        from ...perturbation.clusters import (
-            cluster_memory_bytes,
-            cluster_profiles,
-        )
+        from ...perturbation.clusters import cluster_profiles
 
         _require_ref(profiles, "profiles", PerturbationProfileArguments.artifact_kind)
         cluster_size, core_size, resolved_seed, requested = cluster_settings(
@@ -760,10 +863,17 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         )
         require_complete_artifact(self.zw, profiles)
         group = artifact_group(self.zw, profiles)
-        names = read_array(group, "perturbations").astype(str)
+        ledger = _call_ledger(
+            self, "Clustering the perturbations", remedy="pass fewer perturbations"
+        )
+        names = read_whole(ledger, group, "perturbations", item="the perturbations")
         if requested is None:
             chosen = np.arange(len(names))
         else:
+            ledger.peak(
+                "finding the perturbations",
+                _frame_bytes({"perturbations": names}) + 16 * len(requested),
+            )
             positions = pd.Index(names).get_indexer(requested)
             unknown = sorted(
                 {
@@ -824,16 +934,10 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         )
         if planned.reused:
             return planned.ref
-        # The float32 profiles as read, and the clustering's peak.
-        needed = 4 * n_chosen * n_features + cluster_memory_bytes(n_chosen, n_features)
-        _require_budget(
-            needed,
-            self.memoryBytes,
-            f"Clustering {n_chosen} perturbations in {n_features} features holds about",
-            remedy="Pass fewer perturbations, or raise mem_budget.",
-        )
+        ledger.doing = f"Clustering {n_chosen} perturbations in {n_features} features"
         self._require_writable(arguments.operation)
-        values = np.asarray(stored.oindex[chosen, :])
+        # The float32 profiles as read.
+        values = read_rows(ledger, stored, chosen, item="the profiles")
         # The distances' matrix products use as many BLAS threads as the store.
         with process_thread_limit(self.nthreads, user_api="blas"):
             arrays = cluster_profiles(
@@ -843,18 +947,17 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
                 min_samples=core_size,
                 selection=selection,
                 seed=resolved_seed,
+                ledger=ledger,
             )
-        write_cell_data_artifact(
-            self.zw,
-            planned,
-            {
-                "perturbations": selected,
-                "cluster": arrays.cluster,
-                "probability": arrays.probability,
-                "order": arrays.order,
-                "embedding": arrays.embedding,
-            },
-        )
+        columns = {
+            "perturbations": selected,
+            "cluster": arrays.cluster,
+            "probability": arrays.probability,
+            "order": arrays.order,
+            "embedding": arrays.embedding,
+        }
+        ledger.peak("saving the clusters", _table_write_bytes(columns))
+        write_cell_data_artifact(self.zw, planned, columns)
         logger.info(
             f"Clustered {n_chosen} perturbations into "
             f"{int(arrays.cluster.max(initial=-1)) + 1} clusters, with "
@@ -897,41 +1000,56 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         require_complete_artifact(self.zw, source_ref)
         source = artifact_group(self.zw, source_ref)
 
-        names = read_array(group, "perturbations").astype(str)
-        positions = pd.Index(
-            read_array(source, "perturbations").astype(str)
-        ).get_indexer(names)
+        ledger = _call_ledger(self, f"Reading the {clusters.kind} artifact")
+        names = read_whole(ledger, group, "perturbations", item="the perturbations")
+        profiled = read_whole(
+            ledger, source, "perturbations", item="the profiled perturbations"
+        )
+        ledger.peak(
+            "finding the perturbations",
+            _frame_bytes({"perturbations": profiled}) + 16 * len(names),
+        )
+        positions = pd.Index(profiled.astype(str, copy=False)).get_indexer(names)
+        profiled_bytes = profiled.nbytes
+        del profiled
+        ledger.release(profiled_bytes)
         values = as_zarr_array(source["values"], name="values")
         n_clustered = len(names)
         n_features = int(values.shape[1])
-        # The distances and their symmetric copy, and the profiles as read,
-        # as float64 and centred.
-        n_bytes = 16 * n_clustered * n_clustered + 20 * n_clustered * n_features
-        _require_budget(
-            n_bytes,
-            self.memoryBytes,
-            f"The distances between {n_clustered} profiles hold about",
+        ledger.doing = f"Reading the distances between {n_clustered} profiles"
+        # The profiles as read, as float64 and centred, and the distances and
+        # their symmetric copy.
+        profile_values = read_rows(ledger, values, positions, item="the profiles")
+        ledger.peak(
+            "the distances between the profiles",
+            16 * n_clustered * n_clustered + 20 * n_clustered * n_features,
         )
         parameters = status.parameters or {}
         metric = str(parameters["metric"])
         with process_thread_limit(self.nthreads, user_api="blas"):
-            distances = profile_distances(
-                np.asarray(values.oindex[positions, :]), metric
-            )
-        index = pd.Index(names, name="perturbation")
-        embedding = read_array(group, "embedding")
+            distances = profile_distances(profile_values, metric)
+        index = pd.Index(names.astype(str, copy=False), name="perturbation")
+        embedding = read_whole(ledger, group, "embedding", item="the layout")
         return PerturbationClusters(
             table=pd.DataFrame(
                 {
-                    "cluster": read_array(group, "cluster"),
-                    "probability": read_array(group, "probability"),
-                    "n_cells": read_array(source, "n_cells")[positions],
+                    "cluster": read_whole(
+                        ledger, group, "cluster", item="the clusters"
+                    ),
+                    "probability": read_whole(
+                        ledger, group, "probability", item="the probabilities"
+                    ),
+                    "n_cells": read_whole(
+                        ledger, source, "n_cells", item="the perturbations' cells"
+                    )[positions],
                     "x": embedding[:, 0],
                     "y": embedding[:, 1],
                 },
                 index=index,
             ),
-            order=names[read_array(group, "order")],
+            order=names.astype(str, copy=False)[
+                read_whole(ledger, group, "order", item="the order")
+            ],
             distances=pd.DataFrame(distances, index=index, columns=index.copy()),
             metric=metric,
             min_cluster_size=int(parameters["min_cluster_size"]),

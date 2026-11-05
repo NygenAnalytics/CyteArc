@@ -105,6 +105,7 @@ from .cell_barcodes import (
 )
 from .cell_barcodes import barcode_pattern as checked_barcode_pattern
 from .perturbation_store import (
+    _call_ledger,
     _cell_samples,
     _count_stream,
     _plan_cells,
@@ -130,9 +131,6 @@ _GUIDE_CALL_ARRAYS = (
     "guide_codes",
     "guide_umis",
 )
-# The bytes of the Python objects that a guide operation holds beside its
-# arrays: the plans of its artifacts and the store's metadata it opens.
-_CALL_FIXED_BYTES = 1 << 18
 # Checking the guide IDs holds, beside them as Python text, a list and an
 # array of their references and four copies at their fixed width: their text
 # as an array, and the copies and distinct values of the sort that finds a
@@ -788,14 +786,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         """
         assay = self._guide_assay(from_assay)
         selection = plan_cell_selection_read(self.zw, cell_selection)
-        ledger = MemoryLedger(
-            self.memoryBytes,
-            doing.format(n_cells=selection.cells),
-            codec_threads=self.nthreads,
-        )
-        ledger.hold(
-            "the call's plans and the store's metadata it opens", _CALL_FIXED_BYTES
-        )
+        ledger = _call_ledger(self, doing.format(n_cells=selection.cells))
         guide_ids = _read_guide_ids(ledger, assay.feats._get_array("ids"))
         # A smaller selection shrinks the steps from here on, not the guides.
         ledger.remedy = "pass a smaller cell_selection"
@@ -1201,16 +1192,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         self, ref: ArtifactRef, *, remedy: str | None = None
     ) -> MemoryLedger:
         """The ledger of a call that reads the artifact ``ref`` within the store's budget, whose refusals name ``remedy``."""
-        ledger = MemoryLedger(
-            self.memoryBytes,
-            f"Reading the {ref.kind} artifact",
-            remedy=remedy,
-            codec_threads=self.nthreads,
-        )
-        ledger.hold(
-            "the call's plans and the store's metadata it opens", _CALL_FIXED_BYTES
-        )
-        return ledger
+        return _call_ledger(self, f"Reading the {ref.kind} artifact", remedy=remedy)
 
     def _cell_arrays(
         self, ledger: MemoryLedger, ref: ArtifactRef, names: Sequence[str]
@@ -2154,12 +2136,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         group = artifact_group(self.zw, calls)
         codes = as_zarr_array(group["guide_codes"], name="guide_codes")
         n_cells, width = (int(size) for size in codes.shape)
-        ledger = MemoryLedger(
-            self.memoryBytes, f"Labelling {n_cells} cells", codec_threads=self.nthreads
-        )
-        ledger.hold(
-            "the call's plans and the store's metadata it opens", _CALL_FIXED_BYTES
-        )
+        ledger = _call_ledger(self, f"Labelling {n_cells} cells")
         guide_ids = read_whole(ledger, group, "guides", item="the guide IDs").astype(
             str
         )
