@@ -1562,3 +1562,153 @@ def write_large_tapestri(
                 compression="gzip",
             )
     return path
+
+
+#: Each cell's clone in a :class:`DropoutTruth` that is the wild type or a
+#: doublet of two clones.
+WILD_TYPE_CELL = -1
+DOUBLET_CELL = -2
+
+
+@dataclass(frozen=True, slots=True)
+class DropoutTruth:
+    """Cells of clones defined by mutations, read with known dropout and error.
+
+    Attributes:
+        clones: Each cell's clone from 0, ``WILD_TYPE_CELL`` for a cell
+            without a mutation and ``DOUBLET_CELL`` for a doublet.
+        genotypes: Each clone's mutations, shaped (clones, sites).
+        parents: Each clone's parent clone, -1 for a clone of the root.
+        carried: Each cell's true mutations, shaped (cells, sites); a doublet
+            carries the mutations of both its cells.
+        calls: Each cell's call at each site: 1 mutant, 0 wild type, -1
+            unknown.
+        dropout: Each site's dropout rate, the chance that a cell carrying
+            its mutation reads wild type.
+        error: Each site's error rate, the chance that a cell without its
+            mutation reads mutant.
+    """
+
+    clones: np.ndarray
+    genotypes: np.ndarray
+    parents: np.ndarray
+    carried: np.ndarray
+    calls: np.ndarray
+    dropout: np.ndarray
+    error: np.ndarray
+
+    def realized_rates(self) -> tuple[float, float]:
+        """The shares of wild-type calls at carried sites and of mutant calls at other sites, over the singlet cells' known calls."""
+        known = (self.calls >= 0) & (self.clones != DOUBLET_CELL)[:, None]
+        carried = self.carried & known
+        absent = ~self.carried & known
+        dropout = np.count_nonzero(carried & (self.calls == 0)) / np.count_nonzero(
+            carried
+        )
+        error = np.count_nonzero(absent & (self.calls == 1)) / np.count_nonzero(absent)
+        return float(dropout), float(error)
+
+
+def dropout_truth(
+    *,
+    n_cells: int = 2_000,
+    n_sites: int = 40,
+    n_clones: int = 8,
+    dropout: float = 0.2,
+    error: float = 0.01,
+    missing: float = 0.05,
+    wild_type_share: float = 0.1,
+    doublet_share: float = 0.0,
+    min_own: int = 2,
+    equal_sites: bool = False,
+    seed: int = 0,
+) -> DropoutTruth:
+    """Draw clones on a random tree and each cell's calls under dropout and error.
+
+    Clone 0 descends from the root and each later clone from a uniformly
+    drawn earlier one, carrying its parent's mutations and at least
+    ``min_own`` sites of its own, so a clone that differs from its parent at
+    two sites or more can be told from a site's dropout. Cells are drawn
+    into the clones by Dirichlet shares of at least 2% each, beside
+    wild-type cells and doublets of two clones. Each call is unknown with
+    the site's missing rate, and otherwise reads wild type at a carried
+    mutation with the site's dropout rate, or mutant at a site the cell does
+    not carry with the site's error rate. Sites' rates scatter around the
+    stated rates as Beta draws, a site's dropout with a concentration of 20
+    and its error of 200, or equal ``dropout`` and ``error`` at every site
+    with ``equal_sites``.
+    """
+    rng = np.random.default_rng(seed)
+    if min_own * n_clones > n_sites:
+        raise ValueError("each clone needs min_own sites of its own")
+    free = list(rng.permutation(n_sites))
+    own = [[int(free.pop()) for _ in range(min_own)] for _ in range(n_clones)]
+    parents = np.full(n_clones, -1, dtype=np.int64)
+    genotypes = np.zeros((n_clones, n_sites), dtype=bool)
+    for clone in range(n_clones):
+        if clone > 0:
+            parents[clone] = int(rng.integers(0, clone))
+            genotypes[clone] |= genotypes[parents[clone]]
+        genotypes[clone, own[clone]] = True
+    shares = np.maximum(rng.dirichlet(np.ones(n_clones)), 0.02)
+    shares /= shares.sum()
+    n_doublets = int(round(doublet_share * n_cells))
+    n_wild_type = int(round(wild_type_share * n_cells))
+    n_clonal = n_cells - n_doublets - n_wild_type
+    sizes = np.floor(shares * n_clonal).astype(np.int64)
+    sizes[: n_clonal - int(sizes.sum())] += 1
+    clones = np.concatenate(
+        [
+            np.repeat(np.arange(n_clones), sizes),
+            np.full(n_wild_type, WILD_TYPE_CELL),
+            np.full(n_doublets, DOUBLET_CELL),
+        ]
+    )
+    clones = clones[rng.permutation(n_cells)]
+    carried = np.zeros((n_cells, n_sites), dtype=bool)
+    clonal = clones >= 0
+    carried[clonal] = genotypes[clones[clonal]]
+    doublets = np.flatnonzero(clones == DOUBLET_CELL)
+    if len(doublets):
+        pairs = rng.integers(0, n_clones, size=(len(doublets), 2))
+        carried[doublets] = genotypes[pairs[:, 0]] | genotypes[pairs[:, 1]]
+    if equal_sites:
+        site_dropout = np.full(n_sites, float(dropout))
+        site_error = np.full(n_sites, float(error))
+    else:
+        site_dropout = rng.beta(dropout * 20, (1 - dropout) * 20, size=n_sites)
+        site_error = rng.beta(error * 200, (1 - error) * 200, size=n_sites)
+    draw = rng.random(carried.shape)
+    mutant = np.where(carried, draw >= site_dropout, draw < site_error)
+    calls = np.where(mutant, 1, 0).astype(np.int8)
+    calls[rng.random(carried.shape) < missing] = -1
+    return DropoutTruth(
+        clones=clones,
+        genotypes=genotypes,
+        parents=parents,
+        carried=carried,
+        calls=calls,
+        dropout=site_dropout,
+        error=site_error,
+    )
+
+
+def write_call_tables(
+    calls: np.ndarray, cell_ids: Sequence[str], folder: Path
+) -> list[Path]:
+    """One GoT table (``BC wtUMIs mutUMIs``) per site of ``calls``, from which ``min_mutant_umis=1`` calls each cell back.
+
+    A mutant call is one mutant UMI beside one wild-type UMI, a wild-type
+    call two wild-type UMIs, and an unknown call leaves the cell out of the
+    site's table. The tables are named ``T1.tsv`` and on.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for site in range(calls.shape[1]):
+        lines = ["BC\twtUMIs\tmutUMIs"] + [
+            f"{cell}\t{1 if call == 1 else 2}\t{1 if call == 1 else 0}"
+            for cell, call in zip(cell_ids, calls[:, site].tolist(), strict=True)
+            if call >= 0
+        ]
+        paths.append(_write(folder / f"T{site + 1}.tsv", lines))
+    return paths

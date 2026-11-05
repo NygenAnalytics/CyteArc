@@ -34,6 +34,7 @@ from ...utils.memory_budget import MemoryLedger
 
 __all__ = [
     "CLONE_PROBABILITY",
+    "SITE_ARRAYS",
     "SOURCE_ARRAYS",
     "CloneArguments",
     "clone_diagnostics",
@@ -57,6 +58,14 @@ SOURCE_ARRAYS: Mapping[str, Any] = {
     "ambiguous": bool,
     "n_alleles": np.int64,
 }
+#: The arrays of the sites that a clone source may save beside its clones:
+#: genotype clones' site labels and each within group's dropout and error
+#: probability at each site, a row per group.
+SITE_ARRAYS: tuple[str, ...] = (
+    "site_labels",
+    "dropout_probability",
+    "error_probability",
+)
 # Bytes of a reference to a Python object in an array of objects.
 _REFERENCE_BYTES = 8
 # Python's objects of a save while it gathers the clone sizes, whatever the
@@ -136,6 +145,7 @@ def clone_write_bytes(
     *,
     with_probability: bool = False,
     source_arrays: Mapping[str, Any] | None = None,
+    site_arrays: Mapping[str, tuple[tuple[int, ...], Any]] | None = None,
 ) -> int:
     """The most bytes that saving clones holds, from their assignment on.
 
@@ -150,8 +160,11 @@ def clone_write_bytes(
     the clones' sizes and the probabilities; writing them holds what
     :func:`~cytearc.metadata.artifacts.cell_data_write_bytes` states. What
     the save builds and gathers is counted exactly as it is held, so the
-    cost adds :func:`~cytearc.metadata.artifacts.headroom_bytes` of it. The
-    labels' text is the caller's to count.
+    cost adds :func:`~cytearc.metadata.artifacts.headroom_bytes` of it.
+    ``site_arrays`` maps each array of the sites that the source saves to its
+    shape and stored dtype, a text array at its widest value's width, written
+    after the clones' arrays from what the caller holds. The labels' text is
+    the caller's to count.
     """
     label = np.dtype(f"U{max(1, width)}")
     sources = {name: np.dtype(dtype) for name, dtype in (source_arrays or {}).items()}
@@ -174,10 +187,20 @@ def clone_write_bytes(
     if with_probability:
         arrays[CLONE_PROBABILITY] = ((n_cells,), np.float64)
     arrays.update({name: ((n_cells,), dtype) for name, dtype in sources.items()})
+    arrays.update(dict(site_arrays or {}))
     return given + max(
         gathering + headroom_bytes(gathering) + _GATHERING_FIXED_BYTES,
         built + headroom_bytes(built) + cell_data_write_bytes(arrays),
     )
+
+
+def _stored_dtype(values: np.ndarray) -> np.dtype:
+    """The dtype that the store saves ``values`` at: text at its widest value's width, numbers as they are."""
+    values = np.asarray(values)
+    if values.dtype.kind in {"O", "U", "S"}:
+        width = max((len(str(value)) for value in values.tolist()), default=0)
+        return np.dtype(f"U{max(1, width)}")
+    return values.dtype
 
 
 def clone_diagnostics(codes: np.ndarray, sizes: np.ndarray) -> dict[str, int | float]:
@@ -206,6 +229,7 @@ def write_clones(
     *,
     ledger: MemoryLedger,
     diagnostics: Mapping[str, Any] | None = None,
+    site_arrays: Mapping[str, np.ndarray] | None = None,
 ) -> None:
     """Write planned clones with their attributes and the arrays their source adds.
 
@@ -219,6 +243,7 @@ def write_clones(
     Raises:
         ValueError: If ``source_arrays`` names an array that is not one of
             ``SOURCE_ARRAYS``, or the assignment's probabilities already;
+            ``site_arrays`` names one that is not one of ``SITE_ARRAYS``;
             ``diagnostics`` names one that the writer saves; or the
             diagnostics are not those that the operation declares.
         MemoryBudgetError: If saving the clones would pass the ledger's
@@ -243,6 +268,13 @@ def write_clones(
                 f"{quoted_value(name)} is written from the assignment's probabilities already; "
                 "pass it once"
             )
+    sites = dict(site_arrays or {})
+    for name in sites:
+        if name not in SITE_ARRAYS:
+            raise ValueError(
+                f"{quoted_value(name)} is not an array of the sites that a clone source "
+                f"saves; those are {', '.join(SITE_ARRAYS)}"
+            )
     n_cells = len(assignment.codes)
     width = max((len(str(label)) for label in assignment.clone_ids.tolist()), default=0)
     # The store saves each cell's clone label at the width of the longest.
@@ -257,6 +289,10 @@ def write_clones(
             source_arrays={
                 name: np.asarray(values).dtype for name, values in sources.items()
             },
+            site_arrays={
+                name: (np.shape(values), _stored_dtype(values))
+                for name, values in sites.items()
+            },
         ),
     )
     arrays: dict[str, np.ndarray] = {
@@ -269,6 +305,7 @@ def write_clones(
     if assignment.probabilities is not None:
         arrays[CLONE_PROBABILITY] = assignment.probabilities.astype(np.float64)
     arrays.update(sources)
+    arrays.update(sites)
     write_cell_data_artifact(
         root,
         planned,

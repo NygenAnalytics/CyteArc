@@ -619,7 +619,9 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         variant_counts, method="threshold", min_mutant_umis=1
     )
     # The four mutant cells carry one combination of calls, one clone.
-    genotype_clones = store.variants.genotype_clones(variant_genotypes)
+    # One site: the exact rule links the four mutant cells, where the
+    # likelihood cannot tell one site's clone from its error.
+    genotype_clones = store.variants.genotype_clones(variant_genotypes, method="exact")
     stored: dict[str, set[str]] = {}
     # PEtracer's characters: two marks and an unedited site of cell0, an
     # unknown mark of cell1, nothing read of cell3 and three marks of cell5.

@@ -82,7 +82,7 @@ def _ambiguous(store, clones) -> list[int]:
 def test_cells_link_where_they_agree_and_ambiguous_cells_join_none(
     store, tmp_path
 ) -> None:
-    clones = store.variants.genotype_clones(_genotypes(store, tmp_path))
+    clones = store.variants.genotype_clones(_genotypes(store, tmp_path), method="exact")
     # Z, unread at S1, joins B, with which it agrees at S2; X agrees with A
     # and B, which disagree at S2, where X was not read, so it is ambiguous.
     assert _clones(store, clones) == {"clone_1": [2, 3, 8], "clone_2": [0, 1]}
@@ -105,11 +105,15 @@ def test_an_unread_site_is_unknown_rather_than_wild_type(store, tmp_path) -> Non
     # Without X, nothing joins A and B; Z still joins B, which it could not
     # if its unread S1 counted as wild type, where B is mutant.
     calls = {cell: umis for cell, umis in CALLS.items() if cell != 4}
-    clones = store.variants.genotype_clones(_genotypes(store, tmp_path, calls))
+    clones = store.variants.genotype_clones(
+        _genotypes(store, tmp_path, calls), method="exact"
+    )
     assert _clones(store, clones) == {"clone_1": [2, 3, 8], "clone_2": [0, 1]}
     # Read as wild type at S1, Z disagrees with B and is a clone of its own.
     calls[8] = ((3, 0), (0, 2))
-    clones = store.variants.genotype_clones(_genotypes(store, tmp_path, calls))
+    clones = store.variants.genotype_clones(
+        _genotypes(store, tmp_path, calls), method="exact"
+    )
     assert _clones(store, clones) == {
         "clone_1": [0, 1],
         "clone_2": [2, 3],
@@ -122,7 +126,9 @@ def test_many_cells_that_cannot_be_placed_join_no_clone(store, tmp_path) -> None
     # one node of two cells they would join A and B if only cells of their
     # own were left out.
     calls = {**CALLS, 5: ((1, 2), None)}
-    clones = store.variants.genotype_clones(_genotypes(store, tmp_path, calls))
+    clones = store.variants.genotype_clones(
+        _genotypes(store, tmp_path, calls), method="exact"
+    )
     assert _clones(store, clones) == {"clone_1": [2, 3, 8], "clone_2": [0, 1]}
     assert _ambiguous(store, clones) == [4, 5]
 
@@ -141,7 +147,9 @@ def test_a_cell_read_where_partial_cells_were_not_stays_with_them(
         3: (None, (0, 1)),
         4: (None, (2, 2)),
     }
-    clones = store.variants.genotype_clones(_genotypes(store, tmp_path, calls))
+    clones = store.variants.genotype_clones(
+        _genotypes(store, tmp_path, calls), method="exact"
+    )
     assert _clones(store, clones) == {"clone_1": [0, 1, 2, 3, 4]}
     assert _ambiguous(store, clones) == []
 
@@ -156,7 +164,9 @@ def test_a_doublet_of_two_read_clones_forms_a_clone_of_its_own(store, tmp_path) 
         3: ((2, 0), (1, 1)),
         4: ((0, 2), (0, 2)),
     }
-    clones = store.variants.genotype_clones(_genotypes(store, tmp_path, calls))
+    clones = store.variants.genotype_clones(
+        _genotypes(store, tmp_path, calls), method="exact"
+    )
     assert _clones(store, clones) == {
         "clone_1": [0, 1],
         "clone_2": [2, 3],
@@ -189,7 +199,7 @@ def test_a_subclone_under_dropout_stays_apart_from_its_founder(tmp_path) -> None
         warnings.simplefilter("ignore", UserWarning)
         counts = store.variants.import_counts(paths, cell_selection=every_cell(store))
     genotypes = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
-    clones = store.variants.genotype_clones(genotypes)
+    clones = store.variants.genotype_clones(genotypes, method="exact")
     cells = store.clones.load_clones(clones).cells.loc[ids]
     members = {
         str(label): set(np.flatnonzero((cells["clone"] == label).to_numpy()).tolist())
@@ -210,11 +220,11 @@ def test_a_subclone_under_dropout_stays_apart_from_its_founder(tmp_path) -> None
 def test_clones_of_chosen_sites_and_within_groups(store, tmp_path) -> None:
     genotypes = _genotypes(store, tmp_path)
     # At S1 alone, A, B and X carry one combination; Z carries none there.
-    alone = store.variants.genotype_clones(genotypes, sites=["S1"])
+    alone = store.variants.genotype_clones(genotypes, sites=["S1"], method="exact")
     assert _clones(store, alone) == {"clone_1": [0, 1, 2, 3, 4]}
     donors = np.where(np.arange(len(IDS)) == 4, "d2", "d1").astype(object)
     store.cells.insert("donor", donors)
-    within = store.variants.genotype_clones(genotypes, within="donor")
+    within = store.variants.genotype_clones(genotypes, within="donor", method="exact")
     # X's donor holds no other cell, so it agrees with no clone that
     # disagrees with another and forms a clone of its own.
     assert _clones(store, within) == {
@@ -223,7 +233,7 @@ def test_clones_of_chosen_sites_and_within_groups(store, tmp_path) -> None:
         "clone_3": [4],
     }
     assert _ambiguous(store, within) == []
-    assert within != store.variants.genotype_clones(genotypes)
+    assert within != store.variants.genotype_clones(genotypes, method="exact")
 
 
 def test_every_genotype_method_names_sites_by_label_or_position(tmp_path) -> None:
@@ -334,14 +344,19 @@ def test_a_position_names_every_variant_genotyped_there_and_no_named_site(
         store.variants.genotype_clones(genotypes, sites=[-1])
 
 
-def test_saved_genotype_clones_are_reused_and_called_again(store, tmp_path) -> None:
+@pytest.mark.parametrize("method", ["likelihood", "exact"])
+def test_saved_genotype_clones_are_reused_and_called_again(
+    store, tmp_path, method
+) -> None:
     genotypes = _genotypes(store, tmp_path)
-    first = store.variants.genotype_clones(genotypes)
-    assert store.variants.genotype_clones(genotypes) == first
-    again = store.variants.genotype_clones(genotypes, invalidate_cache=True)
+    first = store.variants.genotype_clones(genotypes, method=method)
+    assert store.variants.genotype_clones(genotypes, method=method) == first
+    again = store.variants.genotype_clones(
+        genotypes, method=method, invalidate_cache=True
+    )
     assert _clones(store, again) == _clones(store, first)
     del artifact_group(store.zw, first)["ambiguous"]
-    assert store.variants.genotype_clones(genotypes) != first
+    assert store.variants.genotype_clones(genotypes, method=method) != first
 
 
 def test_genotype_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -> None:
@@ -360,7 +375,17 @@ def test_genotype_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -
         "half", np.where(np.arange(len(IDS)) == 2, "", "a").astype(object)
     )
     with pytest.raises(ValueError, match="no label for 1 cells with a mutant call"):
-        store.variants.genotype_clones(genotypes, within="half")
+        store.variants.genotype_clones(genotypes, within="half", method="exact")
+    # W, wild type at both sites, takes part in the likelihood's fit, so it
+    # needs a label there and not in the exact rule.
+    store.cells.insert(
+        "wild", np.where(np.arange(len(IDS)) == 7, "", "a").astype(object)
+    )
+    with pytest.raises(ValueError, match="no label for 1 cells with a call"):
+        store.variants.genotype_clones(genotypes, within="wild")
+    assert _clones(
+        store, store.variants.genotype_clones(genotypes, within="wild", method="exact")
+    ) == {"clone_1": [2, 3, 8], "clone_2": [0, 1]}
 
 
 def test_within_may_name_a_column_of_the_loaded_clones(store, tmp_path) -> None:
@@ -370,9 +395,11 @@ def test_within_may_name_a_column_of_the_loaded_clones(store, tmp_path) -> None:
     donors = np.where(np.arange(len(IDS)) == 4, "d2", "d1").astype(object)
     store.cells.insert("donor", donors)
     store.cells.insert("ambiguous", donors.copy())
-    named = store.variants.genotype_clones(genotypes, within="ambiguous")
+    named = store.variants.genotype_clones(
+        genotypes, within="ambiguous", method="exact"
+    )
     assert _clones(store, named) == _clones(
-        store, store.variants.genotype_clones(genotypes, within="donor")
+        store, store.variants.genotype_clones(genotypes, within="donor", method="exact")
     )
     assert list(store.clones.load_clones(named).cells.columns) == [
         "clone",
@@ -381,26 +408,15 @@ def test_within_may_name_a_column_of_the_loaded_clones(store, tmp_path) -> None:
     ]
 
 
+@pytest.mark.parametrize("method", ["likelihood", "exact"])
 def test_genotype_clones_refuse_a_budget_too_small_before_writing(
-    store, tmp_path
+    store, tmp_path, method
 ) -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
     genotypes = _genotypes(store, tmp_path)
     before = len(store.artifacts.list(kind="clones", scope="datastore"))
     store.memoryBytes = 500
-    with pytest.raises(MemoryError, match="Raise mem_budget"):
-        store.variants.genotype_clones(genotypes)
-    # A budget that reads the calls and groups the cells, each cell's group
-    # 8 bytes beside the calls, but not the cells' sets and masks.
-    from cytearc.datastore._operations import variants
-
-    n_cells = len(IDS)
-    n_rows = int(artifact_group(store.zw, genotypes)["calls"].shape[0])
-    store.memoryBytes = (
-        variants._GENOTYPE_FIXED_BYTES
-        + variants._GENOTYPE_CLONE_BYTES_PER_CELL * n_cells
-        + variants._GENOTYPE_CLONE_BYTES_PER_ROW * n_rows
-        + 8 * n_cells
-    )
-    with pytest.raises(MemoryError, match="Building the sites of 6 mutant cells"):
-        store.variants.genotype_clones(genotypes)
+    with pytest.raises(MemoryBudgetError, match="Raise mem_budget to at least"):
+        store.variants.genotype_clones(genotypes, method=method)
     assert len(store.artifacts.list(kind="clones", scope="datastore")) == before

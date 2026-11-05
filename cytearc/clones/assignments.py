@@ -581,8 +581,10 @@ class Clones:
             of its clone, NaN without one), for clones called from lineage
             barcodes ``n_barcodes`` (its barcodes after the pair filters) and
             ``doublet`` (whether TREX's rule removed it), for clones called
-            from genotypes ``ambiguous`` (whether its calls agree with two
-            clones that disagree, which left it without one), for clones
+            from genotypes ``ambiguous`` (whether it was left without one,
+            by the likelihood because no clone reached the posterior it
+            needs, by the exact rule because its calls agree with two
+            clones that disagree), for clones
             called from recorder alleles ``n_alleles`` (its distinct rare
             alleles), and each column of ``kept_apart``, a categorical of the
             cell's labels. Clonotypes defined across receptor types also hold

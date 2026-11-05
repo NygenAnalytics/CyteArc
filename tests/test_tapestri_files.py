@@ -113,9 +113,10 @@ def test_the_tapestri_example_reads_into_a_store_and_its_variants(tmp_path) -> N
         "homozygous_alternative": 9_476,
         "filtered": 151,
     }
-    # Four cell lines give four clones at the variants that some but not
-    # most called cells carry, each line's own, while every variant that
-    # passes splits them wherever allelic dropout turns a call.
+    # Under the exact rule, four cell lines give four clones at the
+    # variants that some but not most called cells carry, each line's own,
+    # while every variant that passes splits them wherever allelic dropout
+    # turns a call.
     sites = genotypes.sites
     mutant = sites["heterozygous"] + sites["homozygous_alternative"]
     share = mutant / (mutant + sites["wild_type"])
@@ -123,14 +124,42 @@ def test_the_tapestri_example_reads_into_a_store_and_its_variants(tmp_path) -> N
     assert len(chosen) == 16
     genotype_ref = ds.variants.genotypes(counts, method="source")
     sizes = {}
+    loaded = {}
     for name, clone_sites in (("chosen", chosen), ("every", None)):
-        clones = ds.clones.load_clones(
-            ds.variants.genotype_clones(genotype_ref, sites=clone_sites)
-        ).clones
-        sizes[name] = clones["n_cells"].sort_values(ascending=False).tolist()
+        loaded[name] = ds.clones.load_clones(
+            ds.variants.genotype_clones(genotype_ref, sites=clone_sites, method="exact")
+        )
+        sizes[name] = (
+            loaded[name].clones["n_cells"].sort_values(ascending=False).tolist()
+        )
     assert sizes["chosen"][:5] == [351, 223, 200, 194, 43]
     assert sum(sizes["chosen"][:4]) > 0.7 * 1313
     assert (len(sizes["every"]), sizes["every"][0]) == (587, 51)
+    # The likelihood gives the four lines from every variant that passes:
+    # each of the exact rule's four lines keeps at least 80% of its cells in
+    # one of the four largest clones, beside small clones of doublets and of
+    # cells that lack one variant of their line, which dropout or a lost
+    # amplicon explains as well. Line 0 keeps 295 of its 351 cells.
+    likely_ref = ds.variants.genotype_clones(genotype_ref)
+    likely = ds.clones.load_clones(likely_ref)
+    largest = likely.clones["clone"].tolist()[:4]
+    labels = likely.cells["clone"]
+    kept = []
+    for line in loaded["chosen"].clones["clone"].tolist()[:4]:
+        cells = loaded["chosen"].cells["clone"] == line
+        kept.append(max(int((labels[cells] == clone).sum()) for clone in largest))
+    assert kept == [295, 223, 200, 194]
+    assert all(
+        count >= 0.8 * size
+        for count, size in zip(kept, sizes["chosen"][:4], strict=True)
+    )
+    diagnostics = ds.artifacts.inspect(likely_ref).diagnostics
+    assert diagnostics["sites"] == 40
+    assert diagnostics["dropoutProbability"] == pytest.approx(0.0714, abs=0.001)
+    assert diagnostics["errorProbability"] == pytest.approx(0.0273, abs=0.0005)
+    dropout = ds.artifacts.load(likely_ref)["dropout_probability"][:]
+    assert dropout.shape == (1, 40)
+    assert dropout.min() < 0.01 and dropout.max() > 0.4
     # Filtering calls by quality and depth leaves more cells ambiguous.
     filtered_ref = ds.variants.genotypes(
         counts, method="source", min_quality=30, min_depth=10
@@ -139,7 +168,7 @@ def test_the_tapestri_example_reads_into_a_store_and_its_variants(tmp_path) -> N
     mutant = sites["heterozygous"] + sites["homozygous_alternative"]
     share = mutant / (mutant + sites["wild_type"])
     chosen = share[share.between(0.15, 0.4)].index.tolist()
-    clones = ds.variants.genotype_clones(filtered_ref, sites=chosen)
+    clones = ds.variants.genotype_clones(filtered_ref, sites=chosen, method="exact")
     assert (
         len(chosen),
         ds.artifacts.inspect(clones).diagnostics["ambiguousCells"],

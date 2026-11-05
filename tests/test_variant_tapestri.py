@@ -1021,7 +1021,9 @@ def test_genotype_clones_of_tapestri_calls_are_the_truth_clones(
 ) -> None:
     path = write_tapestri(TRUTH, tmp_path / "run.h5")
     genotypes = store.variants.genotypes(_import(store, path)[0], method="source")
-    clones = store.variants.genotype_clones(genotypes)
+    # Most clones carry one variant, which the exact rule links and the
+    # likelihood cannot tell from that variant's error.
+    clones = store.variants.genotype_clones(genotypes, method="exact")
     ids = TRUTH.row_ids
     truth = {
         frozenset(

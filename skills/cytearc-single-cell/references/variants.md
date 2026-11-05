@@ -31,7 +31,7 @@ Import each cell's counts of each allele at variant sites, from mitochondrial li
 - `ds.variants.genotypes(counts, *, method, sites=None, alleles=None, min_umis=None, min_mutant_umis=None, min_fraction=None, min_posterior=None, swap_probabilities=None, min_quality=None, min_depth=None, invalidate_cache=False)` calls each cell's genotype at targeted sites and saves a cell-aligned `variant_genotypes` artifact (canonical `n_mutant_sites`, also `n_called_sites`). Calls: `wild_type`, `heterozygous`, `homozygous_alternative`, `alternative_present` (mutant, copies unknown, as GoT's UMIs give), `missing` (no evidence), `filtered` (evidence the rule did not call); each keeps the source's label. A cell not listed at a site is `missing`.
 - `method="source"` adopts the tool's calls: GoT's `Genotype` (`MUT` is `alternative_present`), GoT-Multi's `genotype_final` before `genotype_merged` (`FalsePositive` is `filtered`), Gotcha's `genotype_pred` (`HET` is `heterozygous`), Tapestri's `NGT` and DAb-seq's `GT` (0 to 3: wild type, heterozygous, homozygous alternative, no call, which is `filtered` with reads and `missing` without). A site with coordinates is genotyped once per alternative that holds calls, labelled like `chr1:115256513:G/A`; a named site (GoT target, FLT3-ITD) once. `min_quality` and `min_depth` filter adopted calls below a quality (`GQ`; a missing quality fails) or a depth at the site, as Tapestri's `gq_cutoff` and `dp_cutoff` do, and leave more cells ambiguous in genotype clones; counts of other formats, whose calls carry no quality, refuse `min_quality`, and a site where no cell holds depth (a GoT table of calls alone) refuses `min_depth`. `method="threshold"` refuses Tapestri counts, which hold no reference reads. `method="threshold"` applies GoT's rules as parameters: `min_mutant_umis=1` for patient samples (one mutant UMI calls `alternative_present`, none `wild_type`), `min_fraction` for cell lines (the allele's share must reach it, above 0.5 and up to 1; GoT's "more than 90%" is `min_fraction=float(np.nextafter(0.9, 1))`, while `0.9` also calls 9 of 10 UMIs); one of the two is required and `min_umis` defaults to 1. `method="gift"` applies GIFT's per-UMI model to giftwrap counts: gapfills weighed 0.01 per edit between the probe's wild type and mutant, each UMI's swap probability from `swap_probabilities` by reads (`{1: 0.5, 2: 0.2, 4: 0.05}`; reads are the entry's reads per UMI), uniform prior, called when the posterior reaches `min_posterior` (None, the default, is GIFT's rule, a posterior above 0.6, recorded as 0.6000000000000001) with `min_umis` UMIs of swap probability below 0.1; GIFT's published tables give the likelihood of no swap, so pass one minus it, and the table starts at 1 read. `alleles={"JAK2 c.1849G>T": ("CAC", "AAC")}` names a probe's wild type and mutant, in the probe's orientation, when the manifest does not; a wild type no cell shows raises. `method="gift"` refuses counts that are not giftwrap's.
 - `ds.variants.load_genotypes(genotypes, *, sites=None)` returns a `VariantGenotypes`: `.sites` (`reference`, `alternative`, `source`, cells per call), `.cells` (`n_mutant_sites`, `n_called_sites`), `.calls` (`ids`, `site`, `call` ordered categorical, `label`, `reference_umis`, `alternative_umis`, three GIFT posteriors), `.counts`, `.method`, `.rules` (the method and rules as the artifact's provenance records them). `sites` takes labels, such as `"CALR"`, or positions on counts of one contig, such as `310`, which take every genotyped site there; `genotypes` and `genotype_clones` take them the same way.
-- `ds.variants.genotype_clones(genotypes, *, sites=None, within=None, invalidate_cache=False)` calls clones from each cell's set of mutant sites, within one or several `within` columns, with `missing` and `filtered` sites unknown rather than wild type: cells link when they agree at every site both were called at, and cells whose calls agree with two clones that disagree are left out as ambiguous, however many (`ambiguous` array), so dropout does not join a subclone to its founder. Cells without a mutant call get no clone; labels `clone_1` and on by size. Saves a `clones` artifact.
+- `ds.variants.genotype_clones(genotypes, *, sites=None, within=None, method="likelihood", dropout_probability=None, error_probability=None, min_size=None, min_posterior=None, invalidate_cache=False)` calls clones from each cell's mutant, wild-type and unknown (`missing`, `filtered`) calls, within one or several `within` columns. `"likelihood"` fits SCClone's mixture: each clone a set of mutations, each site's dropout and error probability estimated (or held at every site by `dropout_probability`, `error_probability`), the number of clones by Schwarz's criterion; each cell takes its most probable clone (`clone_probability`), below `min_posterior` (0.6) it is `ambiguous`, clones under `min_size` (2) cells keep none, and wild-type cells take none. Each `within` group is fitted apart. A clone one site from its parent or from the wild type cannot be told from that site's dropout or error, so panels whose clones differ by one mutation (few GoT targets) use `method="exact"`: cells link when they agree at every site both were called at, and cells whose calls agree with two clones that disagree are left out as `ambiguous`. Labels `clone_1` and on by size. Saves a `clones` artifact; diagnostics `dropoutProbability`, `errorProbability` (pooled), `cellsInSmallClones`, and `ds.artifacts.load(clones)` holds `site_labels`, `dropout_probability` and `error_probability` per group and site.
 - `ds.plots.genotypes(genotypes, sites=None, group_by=None, groups=None, layout=None)` draws the fraction of each call per site and group (groups as `variant_depth`'s), and with `layout=umap_ref`, an embedding artifact whose cell selection is the genotypes' own, the cells at its coordinates as `ds.plots.embedding(layout=umap_ref)` draws them, coloured by their call at the one site that `sites` names, such as `sites=["CALR"]`; a layout of several sites or of other cells raises `ValueError`. Calls are named in words in the legend ("Wild type") and keep their tokens in the tables. Tables: `calls` (with `share`) and `cells`.
 
 ## Recipe
@@ -73,14 +73,15 @@ calls[calls["source"] == "genotype_final"]["call"].value_counts()
 ```
 
 ```python
-# GoT genotypes of patient cells, the clones of their mutant calls, and the calls by cell type.
+# GoT genotypes of patient cells, the clones of their mutations, and the calls by cell type.
 got = ds.variants.import_counts(["CALR_summTable.txt", "SF3B1_summTable.txt"], cell_selection=cells)
 genotypes = ds.variants.genotypes(got, method="threshold", min_mutant_umis=1)
 loaded = ds.variants.load_genotypes(genotypes)
 loaded.sites  # cells per call at each site
 # `umap_ref` embeds the same cells: import the counts with cell_selection set to the layout's cells.
 ds.plots.genotypes(genotypes, sites=["CALR"], group_by="cell_type", layout=umap_ref)
-clones = ds.variants.genotype_clones(genotypes, within="donor")
+# Two targets, a clone to each mutation: the exact rule links them.
+clones = ds.variants.genotype_clones(genotypes, method="exact", within="donor")
 ds.clones.load_clones(clones).cells["ambiguous"].sum()
 
 # GIFT probes with the swap probabilities of the library.
@@ -89,7 +90,7 @@ calls = ds.variants.genotypes(gift, method="gift", swap_probabilities={1: 0.5, 2
 ```
 
 ```python
-# Tapestri: a store of its own, its passing variants and one extra, and the clones of NGT's mutant calls.
+# Tapestri: a store of its own, its passing variants and one extra, and the clones of NGT's calls.
 reader = cytearc.TapestriReader("sample.dna+protein.h5")
 cytearc.TapestriToZarr(reader, zarr_loc="sample.zarr").dump()
 reader.close()
@@ -97,11 +98,9 @@ ds = cytearc.DataStore("sample.zarr", default_assay="ADT")
 cells = ds.snapshot_cell_selection()
 counts = ds.variants.import_counts("sample.dna+protein.h5", cell_selection=cells, include_variants=["chr1:115256513:G/T"])
 genotypes = ds.variants.genotypes(counts, method="source")
-# Clones from the variants that some but not most called cells carry: allelic dropout at the others splits clones.
-sites = ds.variants.load_genotypes(genotypes).sites
-mutant = sites["heterozygous"] + sites["homozygous_alternative"]
-share = mutant / (mutant + sites["wild_type"])
-clones = ds.variants.genotype_clones(genotypes, sites=share[share.between(0.15, 0.4)].index.tolist(), within="sample_name")
+# The likelihood tolerates allelic dropout, so every passing variant takes part.
+clones = ds.variants.genotype_clones(genotypes, within="sample_name")
+ds.artifacts.inspect(clones).diagnostics["dropoutProbability"]
 ```
 
 ## Checks
@@ -114,4 +113,4 @@ clones = ds.variants.genotype_clones(genotypes, sites=share[share.between(0.15, 
 - Check the clones' diagnostics: many `cellsWithoutCoverage` or `cellsWithoutAlternative` cells mean shallow coverage or variants that mark few clones; such cells are not clones.
 - Choose the threshold rule from the study design: one mutant UMI for patient cells, a 90% share for cell lines, whose many transcripts make PCR recombination likely. `alternative_present` makes no claim of zygosity; only GIFT and Gotcha's `HET` call heterozygotes.
 - Check `.sites` of loaded genotypes: many `missing` or `filtered` cells mean few UMIs per cell, and genotype clones treat those sites as unknown, so a few covered sites give coarse clones.
-- Check the sizes of genotype clones from targeted DNA: hundreds of small clones mean allelic dropout splits them; restrict `sites` to the variants that some but not most called cells carry.
+- Check the sizes of genotype clones from targeted DNA: small clones beside the large ones are often doublets, which carry two clones' mutations, or cells that lack one mutation of their clone, which a subclone and that site's dropout explain equally. Hundreds of small clones under `method="exact"` mean allelic dropout splits them; use the default likelihood.

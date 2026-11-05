@@ -227,7 +227,9 @@ def test_tied_clones_are_numbered_by_their_first_cell() -> None:
         status=np.zeros(10, dtype=np.int8),
         n_edges=0,
     )
-    assignment = _clone_assignment(13, positions, called)
+    assignment = _clone_assignment(
+        13, positions, groups=called.groups, clusters=called.clusters
+    )
     assert assignment.clone_ids.tolist() == ["clone_1", "clone_2", "clone_3", "clone_4"]
     assert assignment.clone_sizes.tolist() == [3, 2, 2, 2]
     assert assignment.codes.tolist() == [1, -1, 2, 3, -1, 1, 3, -1, 0, 2, 0, 0, -1]
@@ -235,12 +237,8 @@ def test_tied_clones_are_numbered_by_their_first_cell() -> None:
     empty = _clone_assignment(
         3,
         np.asarray([0, 2]),
-        FrequencyClones(
-            clusters=np.zeros(2, dtype=np.int64),
-            groups=np.zeros(2, dtype=np.int64),
-            status=np.zeros(2, dtype=np.int8),
-            n_edges=0,
-        ),
+        groups=np.zeros(2, dtype=np.int64),
+        clusters=np.zeros(2, dtype=np.int64),
     )
     assert empty.clone_ids.tolist() == [] and empty.codes.tolist() == [-1, -1, -1]
 
