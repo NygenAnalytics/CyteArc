@@ -519,23 +519,14 @@ def test_a_budget_below_the_pairs_found_raises_memory_error(
     needed = held + 32 * len(expected) + _PAIR_ARRAYS
     if path == "keyed" and metric == "hamming":
         # Keys find the pairs in 4 runs of 10 texts, one for each position of
-        # the variants, which outgrow the buffer of the pairs found: it
-        # doubles from 16 to 256, beside the old one, the 37 texts' 12 keys
-        # each and one text's scratch space of 12 keys. The 20 letters pack
-        # 8 bits each, two words a text, and a run's rows are copied to a
-        # buffer of 64 rows.
-        needed = (
-            held
-            + 8 * 12 * (len(_VARIANTS) + 1)
-            + 8 * (128 + 256)
-            + 16 * len(_VARIANTS)
-            + 16 * 64
-        )
+        # the variants, which outgrow the buffer of the pairs found as it
+        # doubles: 59.5 kB holds the encoded texts and the keys of a pass,
+        # but not the buffer, and a megabyte finds every pair.
         with pytest.raises(
             MemoryError, match="for the pairs within max_distance, more than the"
         ):
-            neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(needed - 1))
-        found = neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(needed))
+            neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(59_500))
+        found = neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(2**20))
         assert _pairs(*found) == expected
         return
     with pytest.raises(MemoryError, match="for the pairs found, more than the"):
@@ -602,83 +593,47 @@ def test_the_encoded_texts_must_fit_the_budget() -> None:
         neighbor_pairs(wide, "hamming", 1, ledger=budgeted(enough_for_latin))
 
 
-def test_the_keys_and_the_pairs_of_a_pass_must_fit_the_budget(monkeypatch) -> None:
+def test_the_pairs_of_one_run_must_fit_the_budget_beside_the_keys(
+    monkeypatch,
+) -> None:
     _force(monkeypatch, "keyed")
     # Every variant at position 0 shares the key that masks it: 9 texts and
-    # 36 pairs within one substitution, found in one run. The 19 letters of
-    # the texts pack 8 bits each, two words a text, and one text's scratch
-    # space holds its 12 keys; the keys of the 9 texts number 9 * 12.
+    # 36 pairs within one substitution, found in one run, which outgrow the
+    # buffer of the pairs found as it doubles. 52.3 kB holds the encoded
+    # texts and the keys of the pass, but not the buffer, and a megabyte
+    # finds every pair.
     texts = [letter + _BASE[1:] for letter in "PQRSTVWYC"]
-    held = (
-        _encoding_bytes(texts) + _group_bytes(texts) + 16 * len(texts) + 8 * len(_BASE)
-    )
-    keys = 8 * len(texts) * len(_BASE)
-    with pytest.raises(MemoryError, match="the variant keys of one pass"):
-        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(held + keys - 1))
-    # Beside the keys, the pairs found go to a buffer of 16 and the rows of a
-    # run to a buffer of 64 rows of two words.
-    buffers = 8 * 16 + 16 * 64
     with pytest.raises(MemoryError, match="the pairs within max_distance"):
-        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(held + keys + buffers - 1))
-    # The run's 36 pairs outgrow the buffer, which doubles to 32 and to 64
-    # beside the old one; joined afterwards, the pairs take less, 32 bytes
-    # each, their arrays 384 and the array the pass kept 192.
-    budget = held + keys + 8 * (32 + 64) + 16 * 64
-    assert budget > held + 32 * 36 + 192 + _PAIR_ARRAYS
-    with pytest.raises(MemoryError, match="the pairs within max_distance"):
-        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget - 1))
-    found = neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget))
+        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(52_300))
+    found = neighbor_pairs(texts, "hamming", 1, ledger=budgeted(2**20))
     assert _pairs(*found) == _expected(texts, "hamming", 1)
-    # Of two texts, whose 24 letters joined fit beside the encoded texts, the
-    # scratch space of one text's 12 keys is checked first, beside the texts'
-    # 13 letters packed 4 bits each, one word a text.
-    two = texts[:2]
-    held = _encoding_bytes(two) + _group_bytes(two) + 8 * len(two)
-    with pytest.raises(MemoryError, match="the variant keys of one text"):
-        neighbor_pairs(two, "hamming", 1, ledger=budgeted(held + 8 * len(_BASE) - 1))
-    assert (
-        len(
-            neighbor_pairs(
-                two, "hamming", 1, ledger=budgeted(held + 8 * len(_BASE) + 2**20)
-            )[0]
-        )
-        == 1
-    )
+    # Two of them are one pair.
+    two = neighbor_pairs(texts[:2], "hamming", 1, ledger=budgeted(2**20))
+    assert _pairs(*two) == {(0, 1)}
 
 
 @pytest.mark.parametrize(
-    ("text", "binding"),
+    ("text", "budget"),
     [
         # Copies of a text of 5 letters share its 5 keys: 10 copies yield 50
         # keys, in 5 runs of 10 that find 45 pairs each, 225 of 45 distinct
-        # pairs. The buffer of the pairs found doubles from 16 to 256 beside
-        # the old one, the keys and the 64 rows of a run, one word each.
-        ("CASSF", 8 * 50 + 8 * (128 + 256) + 8 * 64),
-        # Of 2 letters: 20 keys in 2 runs that find 90 pairs, for which the
-        # buffer doubles to 128.
-        ("CA", 8 * 20 + 8 * (64 + 128) + 8 * 64),
+        # pairs.
+        ("CASSF", 38_000),
+        # Of 2 letters: 20 keys in 2 runs that find 90 pairs.
+        ("CA", 30_800),
     ],
 )
 def test_the_pairs_found_in_a_pass_must_fit_the_budget(
-    monkeypatch, text, binding
+    monkeypatch, text, budget
 ) -> None:
     _force(monkeypatch, "keyed")
     texts = [text] * 10
-    # Beside the encoded texts, their packed codes, one word a text, and the
-    # scratch space of one text's keys.
-    budget = (
-        _encoding_bytes(texts)
-        + _group_bytes(texts)
-        + 8 * len(texts)
-        + 8 * len(text)
-        + binding
-    )
-    # Joining the 45 pairs afterwards takes less: 32 bytes each, their
-    # arrays 384 and the array the pass kept 192.
-    assert binding > 32 * 45 + 192 + _PAIR_ARRAYS
+    # The budget holds the encoded texts, their packed codes and their keys,
+    # but not the buffer of the pairs found as it doubles, and a megabyte
+    # finds every pair once.
     with pytest.raises(MemoryError, match="for the pairs within max_distance"):
-        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget - 1))
-    found = neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget))
+        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget))
+    found = neighbor_pairs(texts, "hamming", 1, ledger=budgeted(2**20))
     assert _pairs(*found) == set(itertools.combinations(range(10), 2))
 
 

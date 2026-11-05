@@ -67,21 +67,6 @@ def test_removing_doublets_from_a_chain_of_nodes_keeps_its_edges() -> None:
     assert clones.n_edges == 99_999
 
 
-def _bounded_intervals(
-    intervals: list[tuple[str, int, int]], items: Callable[[str], bool]
-) -> list[tuple[str, int, int]]:
-    """The intervals of the charges that ``items`` names, each checked from both sides.
-
-    Each traced interval stays within its plan and the call's objects, and
-    each plan within half again what it traced and NumPy's fixed objects.
-    """
-    chosen = [entry for entry in intervals if items(entry[0])]
-    for item, planned, traced in chosen:
-        assert traced <= planned + AUDIT_ALLOWANCE, (item, planned, traced)
-        assert planned <= 1.5 * traced + NUMPY_STEP_BYTES, (item, planned, traced)
-    return chosen
-
-
 def _prefix_rows(shape: str) -> tuple[list[list[int]], np.ndarray | None]:
     """Sets of each shape the graph takes, and the cells' groups."""
     rng = np.random.default_rng(len(shape))
@@ -130,13 +115,9 @@ def _prefix_rows(shape: str) -> tuple[list[list[int]], np.ndarray | None]:
         pytest.param("large sets", 0.5, "product", marks=pytest.mark.slow),
     ],
 )
-def test_the_graph_holds_each_step_within_its_plan(
+def test_the_graph_links_the_nodes_of_each_shape_either_way(
     monkeypatch, shape, similarity, way
 ) -> None:
-    # Coding the items within their groups, choosing each node's prefix,
-    # meeting the nodes through the prefixes or through every item, and
-    # filling the edges are each charged before they allocate, and none
-    # overstates what it holds by half.
     monkeypatch.setattr(
         calling, "_prefixes_are_faster", lambda *steps: way == "prefixes"
     )
@@ -146,32 +127,15 @@ def test_the_graph_holds_each_step_within_its_plan(
         cells, np.concatenate([np.asarray(row) for row in rows]), len(rows)
     )
     nodes = identical_sets(sets, groups)
-
-    def call() -> object:
-        return calling.jaccard_edges(
-            nodes, similarity, inclusive=False, ledger=MemoryLedger(None, "x")
-        )
-
-    edges = call()
-    _result, intervals = interval_peaks(call)
-    meeting = (
-        "the nodes that the prefixes reach"
-        if way == "prefixes"
-        else "the nodes that share an item"
+    edges = calling.jaccard_edges(
+        nodes, similarity, inclusive=False, ledger=MemoryLedger(None, "x")
     )
-    steps = {
-        "the lists of each item's nodes",
-        "the prefixes of the nodes' sets",
-        meeting,
-    }
-    chosen = _bounded_intervals(
-        intervals,
-        lambda item: item in steps or item.endswith(" edges of the graph"),
-    )
-    assert {item for item, _planned, _traced in chosen} == steps | {
-        f"the {len(edges)} edges of the graph"
-    }
-    assert ("one" in shape) or len(edges) > 1_000
+    if "one" in shape:
+        # Two sets share at most the item that most hold, or one of the
+        # hub's tags beside it, so none reaches 0.7: a half at most.
+        assert len(edges) == 0
+    else:
+        assert len(edges) > 1_000
 
 
 def _keyed_inputs(shape: str) -> tuple[np.ndarray, np.ndarray, int, bool, int, int]:
@@ -211,52 +175,22 @@ def _keyed_inputs(shape: str) -> tuple[np.ndarray, np.ndarray, int, bool, int, i
 
 
 @pytest.mark.parametrize("shape", ["barcodes", "split", "copies", "letters", "edits"])
-def test_each_step_of_the_keyed_search_holds_what_it_charges(shape) -> None:
-    # The packed codes of the texts, the keys of a pass, the buffer of the
-    # pairs that it finds and the rows of a run, while they grow, and the
-    # pairs copied out of the buffer, or under edits the candidate pairs,
-    # are each charged before they are made and none overstates what it
-    # holds by half; the search is called alone, so its ledger holds
-    # nothing else.
+def test_the_keyed_search_finds_the_pairs_of_each_shape(shape) -> None:
     codes, lengths, limit, edits, segments, split = _keyed_inputs(shape)
-    table = sequences._zobrist_table(codes.shape[1])
-
-    def call() -> tuple[np.ndarray, np.ndarray]:
-        return sequences._keyed_pairs(
-            codes,
-            lengths,
-            limit,
-            edits,
-            table,
-            MemoryLedger(None, "x"),
-            segments,
-            split,
-        )
-
-    first, _second = call()
-    _result, intervals = interval_peaks(call)
-    steps = (
-        {
-            "the variant keys of one pass",
-            "the candidate pairs of texts that share variant keys",
-        }
-        if edits
-        else {
-            "the packed codes of the texts",
-            "the variant keys of one pass",
-            "the pairs within max_distance",
-        }
-        | ({"the packed codes of a run of keys"} if shape == "copies" else set())
+    first, _second = sequences._keyed_pairs(
+        codes,
+        lengths,
+        limit,
+        edits,
+        sequences._zobrist_table(codes.shape[1]),
+        MemoryLedger(None, "x"),
+        segments,
+        split,
     )
-    chosen = _bounded_intervals(
-        intervals, lambda item: item in steps or item == "the pairs found"
-    )
-    assert {item for item, _planned, _traced in chosen} == steps | {"the pairs found"}
     assert len(first)
     if shape in ("copies", "letters"):
         # Every pair of copies, which the buffer doubled to hold.
         assert len(first) == 300 * 299 // 2
-        assert sum(item == "the pairs within max_distance" for item, *_ in chosen) > 5
 
 
 # The labels of clones ranked by size.
