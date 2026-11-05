@@ -17,6 +17,9 @@ import pytest
 from scipy.optimize import minimize
 from scipy.stats import mannwhitneyu, norm
 
+from cytearc.datastore._operations import (
+    perturbation_mixscape as mixscape_operations,
+)
 from cytearc.datastore.datastore import DataStore
 from cytearc.features.markers.rank import tie_sum
 from cytearc.perturbation import MixscapeResult
@@ -291,7 +294,9 @@ def test_mixscape_refuses_inputs_and_budgets_it_cannot_use(
     assert written(store) == saved
 
 
-def test_mixscape_classifies_in_batches_that_fit_the_budget(store, template) -> None:
+def test_mixscape_classifies_in_batches_that_fit_the_budget(
+    store, template, monkeypatch
+) -> None:
     signature = template.signature
     whole = store.perturbation.load_mixscape(
         store.perturbation.mixscape(signature, split_column="run")
@@ -302,9 +307,13 @@ def test_mixscape_classifies_in_batches_that_fit_the_budget(store, template) -> 
             store.zarr_loc, nthreads=2, mem_budget=budget
         ).perturbation.mixscape(signature, split_column="run", invalidate_cache=True)
 
-    # The refusals from a budget of 1,000 bytes end at the budget that fits
-    # the classification of GENE_A's cells of one run with the control cells,
-    # but not of both runs at once.
+    # Saving the classes of this small screen holds Zarr's file buffers, 128
+    # KiB each from Python 3.14, more than its batches, so the save is charged
+    # nothing and the batches set the least budget. The refusals from a budget
+    # of 1,000 bytes then end at the budget that fits the classification of
+    # GENE_A's cells of one run with the control cells, but not of both runs
+    # at once.
+    monkeypatch.setattr(mixscape_operations, "_table_write_bytes", lambda _: 0)
     budget, refusals = follow_refusals(run, start=1_000)
     assert refusals[-1].item.startswith("the signatures of the ")
     assert "cells of GENE_A" in refusals[-1].item
