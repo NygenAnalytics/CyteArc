@@ -337,12 +337,8 @@ def test_the_likelihood_recovers_the_clones_and_rates_of_a_dropout_truth(
     assert len(called.sizes) == 8
     assert _singlet_ari(truth, called.codes) >= least_ari
     realized_dropout, realized_error = truth.realized_rates()
-    assert called.carried_wild / called.carried_calls == pytest.approx(
-        realized_dropout, abs=0.03
-    )
-    assert called.absent_mutant / called.absent_calls == pytest.approx(
-        realized_error, abs=0.002
-    )
+    assert called.pooled_dropout == pytest.approx(realized_dropout, abs=0.03)
+    assert called.pooled_error == pytest.approx(realized_error, abs=0.002)
     # Every clone holds at least min_size cells, numbered by size.
     assert (called.sizes >= 2).all()
     assert (np.diff(called.sizes) <= 0).all()
@@ -551,12 +547,8 @@ def test_likelihood_clones_save_probabilities_rates_and_diagnostics(tmp_path) ->
     assert "dropout_probability" not in record.parameters
     assert "similarity" not in record.parameters
     diagnostics = record.diagnostics
-    assert diagnostics["dropoutProbability"] == pytest.approx(
-        direct.carried_wild / direct.carried_calls
-    )
-    assert diagnostics["errorProbability"] == pytest.approx(
-        direct.absent_mutant / direct.absent_calls
-    )
+    assert diagnostics["dropoutProbability"] == pytest.approx(direct.pooled_dropout)
+    assert diagnostics["errorProbability"] == pytest.approx(direct.pooled_error)
     assert diagnostics["cellsInSmallClones"] == direct.cells_in_small_clones
     assert diagnostics["ambiguousCells"] == int(direct.ambiguous.sum())
     assert diagnostics["mutantCells"] == int((truth.calls == 1).any(axis=1).sum())
@@ -586,32 +578,43 @@ def test_likelihood_clones_save_probabilities_rates_and_diagnostics(tmp_path) ->
 
 def test_within_groups_are_fitted_apart_with_rates_of_their_own(tmp_path) -> None:
     # Two donors of one panel, the second read with three times the
-    # first's dropout: each is fitted alone, so each keeps its own rates and
-    # clones, numbered by size over both.
+    # first's dropout, their cells interleaved in the store: each is fitted
+    # alone, so each keeps its own rates and clones, numbered by size over
+    # both.
     first = dropout_truth(n_cells=800, n_sites=20, n_clones=4, dropout=0.08, seed=15)
     second = dropout_truth(n_cells=600, n_sites=20, n_clones=4, dropout=0.25, seed=16)
-    calls = np.vstack([first.calls, second.calls])
-    donors = np.array(["d1"] * 800 + ["d2"] * 600)
+    order = np.random.default_rng(15).permutation(1_400)
+    calls = np.vstack([first.calls, second.calls])[order]
+    donors = np.array(["d1"] * 800 + ["d2"] * 600)[order]
     store, ids, genotypes = _store_of_truth(tmp_path, calls, donors)
     clones = store.variants.genotype_clones(genotypes, within="donor")
     cells = store.clones.load_clones(clones).cells.loc[ids]
-    alone = [_call(first.calls), _call(second.calls)]
+    # Each donor fitted alone, its cells in the store's order.
+    alone = [_call(calls[donors == donor]) for donor in ("d1", "d2")]
     labels = cells["clone"].astype(object).where(cells["clone"].notna(), "").to_numpy()
     # Each donor's cells are partitioned as its fit alone partitions them,
     # and no clone holds cells of both.
-    assert adjusted_rand_score(alone[0].codes, labels[:800]) == 1.0
-    assert adjusted_rand_score(alone[1].codes, labels[800:]) == 1.0
-    assert not (set(labels[:800]) - {""}) & (set(labels[800:]) - {""})
+    for donor, fit in zip(("d1", "d2"), alone, strict=True):
+        assert adjusted_rand_score(fit.codes, labels[donors == donor]) == 1.0
+    assert not (set(labels[donors == "d1"]) - {""}) & (
+        set(labels[donors == "d2"]) - {""}
+    )
     saved = store.artifacts.load(clones)["dropout_probability"][:]
     assert saved.shape == (2, 20)
     np.testing.assert_array_equal(saved[0], alone[0].dropout)
     np.testing.assert_array_equal(saved[1], alone[1].dropout)
     assert saved[1].mean() > 2 * saved[0].mean()
-    pooled = store.artifacts.inspect(clones).diagnostics["dropoutProbability"]
-    expected = (alone[0].carried_wild + alone[1].carried_wild) / (
-        alone[0].carried_calls + alone[1].carried_calls
+    # The pooled rates are each donor's, weighed by the calls that estimate
+    # them.
+    diagnostics = store.artifacts.inspect(clones).diagnostics
+    weights = np.array([fit.carried_calls for fit in alone])
+    assert diagnostics["dropoutProbability"] == pytest.approx(
+        float(np.dot(weights, [fit.pooled_dropout for fit in alone]) / weights.sum())
     )
-    assert pooled == pytest.approx(expected)
+    weights = np.array([fit.absent_calls for fit in alone])
+    assert diagnostics["errorProbability"] == pytest.approx(
+        float(np.dot(weights, [fit.pooled_error for fit in alone]) / weights.sum())
+    )
 
 
 def test_a_split_of_more_sites_than_a_split_may_read_keeps_its_strongest() -> None:
@@ -812,3 +815,349 @@ def test_the_likelihood_holds_no_more_than_the_smallest_budget_it_accepts() -> N
     assert refused.value.needed_bytes == budget
     _result, overruns = audited(lambda: call(budget))
     assert overruns == []
+
+
+@pytest.mark.parametrize("n_sites", [2, 5, 20])
+def test_one_clone_without_wild_type_cells_is_one_clone(n_sites) -> None:
+    # Every cell carries every site: "no cell carries a site, with error
+    # 1 - dropout" fits the calls as well as the clone, which the bound on
+    # the pooled error rules out.
+    from cytearc.variants.genotype_mixture import MAX_POOLED_ERROR
+
+    rng = np.random.default_rng(n_sites)
+    calls = np.where(rng.random((1_000, n_sites)) >= 0.15, 1, 0).astype(np.int8)
+    called = _call(calls)
+    assert len(called.sizes) == 1
+    assert called.sizes[0] >= 950
+    assert called.pooled_dropout == pytest.approx(0.15, abs=0.02)
+    assert called.pooled_error <= MAX_POOLED_ERROR
+    assert (called.error <= 0.5).all()
+
+
+def test_two_clones_that_share_a_founder_mutation_keep_their_genotypes() -> None:
+    # 500 cells of each of two clones that both carry sites 0 and 1, the
+    # first also 2 to 5 and the second 6 to 9, and no wild-type cell: the
+    # founder sites cannot pass as errors, so each clone keeps its sites.
+    rng = np.random.default_rng(20)
+    genotypes = np.zeros((2, 10), dtype=bool)
+    genotypes[:, :2] = True
+    genotypes[0, 2:6] = genotypes[1, 6:] = True
+    truth = np.repeat([0, 1], 500)
+    carried = genotypes[truth]
+    draw = rng.random(carried.shape)
+    calls = np.where(np.where(carried, draw >= 0.15, draw < 0.01), 1, 0).astype(np.int8)
+    called = _call(calls)
+    found = {tuple(np.flatnonzero(genotype)) for genotype in called.genotypes}
+    assert found == {(0, 1, 2, 3, 4, 5), (0, 1, 6, 7, 8, 9)}
+    assert adjusted_rand_score(truth, called.codes) > 0.95
+    assert called.pooled_error < 0.02
+
+
+def test_cells_that_all_carry_hundreds_of_sites_are_one_clone_with_finite_rates() -> (
+    None
+):
+    # Every cell's posterior of the wild type underflows to 0: its weight
+    # stays finite, and removing the only clone is scored without losing
+    # the weight that the wild type keeps.
+    rng = np.random.default_rng(21)
+    calls = np.where(rng.random((150, 250)) >= 0.15, 1, 0).astype(np.int8)
+    called = _call(calls)
+    assert called.sizes.tolist() == [150]
+    assert np.isfinite(called.loglik)
+    assert np.isfinite(called.dropout).all() and np.isfinite(called.error).all()
+
+
+def test_the_rates_are_shrunk_toward_the_pooled_rates_by_their_priors() -> None:
+    # Two sites, one clone carrying the first: 10 calls at the first of
+    # which 5 wild type, 1,000 at the second of which 30 mutant, by hand.
+    mixture = GenotypeMixture(
+        np.zeros((1, 1), dtype=np.uint64),
+        np.zeros((1, 1), dtype=np.uint64),
+        2,
+        dropout_probability=None,
+        error_probability=None,
+        ledger=MemoryLedger(None, "Calling clones"),
+    )
+    genotypes = np.array([[True, False]])
+    mutant = np.array([[0.0, 30.0], [5.0, 0.0]])
+    wild = np.array([[0.0, 970.0], [5.0, 0.0]])
+    rates = mixture.update_rates(genotypes, mutant, wild)
+    # Pooled: (5 + 1) / (10 + 2) dropout and (30 + 1) / (1000 + 2) error.
+    assert rates.pooled_dropout == pytest.approx(0.5)
+    assert rates.pooled_error == pytest.approx(31 / 1002)
+    # A site's dropout is shrunk by a prior worth 20 calls, its error by
+    # one worth 200, and the error of the site without carried calls is the
+    # pooled one; the error of the carried site, without absent calls, too.
+    assert rates.dropout[0] == pytest.approx((5 + 20 * 0.5) / (10 + 20))
+    assert rates.dropout[1] == pytest.approx(0.5)
+    assert rates.error[1] == pytest.approx((30 + 200 * 31 / 1002) / (1000 + 200))
+    assert rates.error[0] == pytest.approx(31 / 1002)
+
+
+def test_a_site_rate_stays_below_its_caps_and_held_rates_are_kept() -> None:
+    from cytearc.variants.genotype_mixture import rate_update
+
+    # 50 mutant calls among 100 at absent sites, pooled error 0.02: the
+    # shrunk estimate (50 + 4) / 300 = 0.18 passes five times the pooled
+    # error, which caps it at 0.1.
+    dropout, error = rate_update(
+        10.0, 100.0, 50.0, 100.0, 0.2, 0.02, 20.0, 200.0, 5.0, -1.0, -1.0
+    )
+    assert dropout == pytest.approx((10 + 20 * 0.2) / 120)
+    assert error == pytest.approx(0.1)
+    # Without a cap, the shrunk estimate; held rates whatever the calls.
+    assert rate_update(
+        10.0, 100.0, 50.0, 100.0, 0.2, 0.02, 20.0, 200.0, -1.0, -1.0, -1.0
+    )[1] == pytest.approx(54 / 300)
+    assert rate_update(
+        10.0, 100.0, 50.0, 100.0, 0.2, 0.02, 20.0, 200.0, 5.0, 0.3, 0.05
+    ) == (0.3, 0.05)
+
+
+def test_a_site_that_no_cell_of_a_clone_was_read_at_keeps_its_state() -> None:
+    mixture = GenotypeMixture(
+        np.zeros((1, 1), dtype=np.uint64),
+        np.zeros((1, 1), dtype=np.uint64),
+        3,
+        dropout_probability=None,
+        error_probability=None,
+        ledger=MemoryLedger(None, "Calling clones"),
+    )
+    rates = SiteRates(np.full(3, 0.1), np.full(3, 0.01), 0.1, 0.01)
+    genotypes = np.array([[True, True, False], [False, True, True]])
+    # Clone 1 reads mutant at site 0 and nothing at sites 1 and 2; clone 2
+    # reads wild type at site 1 and nothing at site 2.
+    mutant = np.array([[0.0, 0.0, 0.0], [40.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+    wild = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 40.0, 0.0]])
+    updated = mixture.update_genotypes(genotypes, mutant, wild, rates)
+    np.testing.assert_array_equal(updated, [[True, True, False], [False, False, True]])
+
+
+def test_a_clone_left_with_fewer_than_min_size_cells_gives_them_none() -> None:
+    # A posterior of 0.99 leaves a clone fewer than 20 cells that reach it,
+    # although it holds more cells by their most probable component.
+    truth = dropout_truth(n_cells=1_500, n_sites=30, n_clones=8, dropout=0.3, seed=1)
+    called = _call(truth.calls, min_size=20, min_posterior=0.99)
+    assert called.cells_in_small_clones > 0
+    assert (called.sizes >= 20).all()
+    loose = _call(truth.calls, min_size=1, min_posterior=0.99)
+    assert int(np.count_nonzero(loose.codes >= 0)) >= int(
+        np.count_nonzero(called.codes >= 0)
+    ) + called.cells_in_small_clones - int(loose.sizes[loose.sizes < 20].sum())
+
+
+def test_pruning_removes_a_clone_whose_removal_raises_the_score() -> None:
+    from cytearc.variants.genotype_clones import _pruned
+
+    # 200 cells of a clone of sites 0 to 4 read wild type at site 5, and 3
+    # more read mutant there; nothing is read at sites 6 to 14. With the
+    # error held at 0.005, so that EM keeps the 3 cells apart instead of
+    # reading their calls as errors, a spare clone of sites 0 to 14 holds
+    # them, which saves it about 16 nats, while its ten edits cost about 29,
+    # so its removal raises the score.
+    calls = np.full((203, 15), -1, dtype=np.int8)
+    calls[:, :5] = 1
+    calls[:200, 5] = 0
+    calls[200:, 5] = 1
+    mutant, wild = _packed(calls)
+    ledger = MemoryLedger(None, "Calling clones")
+    mixture = GenotypeMixture(
+        mutant,
+        wild,
+        15,
+        dropout_probability=None,
+        error_probability=0.005,
+        ledger=ledger,
+    )
+    genotypes = np.zeros((2, 15), dtype=bool)
+    genotypes[:, :5] = True
+    genotypes[1, 5:] = True
+    start = MixtureFit(
+        genotypes, np.log(np.array([0.1, 0.8, 0.1])), mixture.initial_rates()
+    )
+    fit = mixture.em(start, max_iter=50)
+    assert np.bincount(np.argmax(fit.posteriors, axis=1), minlength=3)[2] >= 2
+    fit = _pruned(mixture, fit, min_size=2)
+    np.testing.assert_array_equal(fit.genotypes, genotypes[:1])
+    mixture.release(fit)
+
+
+@pytest.mark.parametrize("n_local", [3, 10, 12, 40, 70, 200])
+def test_a_split_charges_its_call_patterns_as_they_are_traced(n_local) -> None:
+    import tracemalloc
+
+    from cytearc.utils.memory_budget import NUMPY_STEP_BYTES
+    from cytearc.variants.genotype_clones import pattern_bytes
+
+    # Nearly as many patterns as rows, the most the patterns hold.
+    rng = np.random.default_rng(n_local)
+    calls = rng.choice(
+        np.array([-1, 0, 1], dtype=np.int8), size=(30_000, n_local), p=[0.1, 0.6, 0.3]
+    )
+    local_mutant, local_wild = _packed(calls)
+    weights = rng.random(30_000)
+    call_patterns(local_mutant[:50], local_wild[:50], weights[:50], n_local)
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        call_patterns(local_mutant, local_wild, weights, n_local)
+        peak = tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+    counted = pattern_bytes(30_000, n_local)
+    assert peak <= counted + NUMPY_STEP_BYTES, (peak, counted)
+    assert counted <= 1.5 * peak + NUMPY_STEP_BYTES, (peak, counted)
+
+
+def test_ordering_the_cells_by_group_holds_what_it_is_charged() -> None:
+    import tracemalloc
+
+    from cytearc.datastore._operations.variants import (
+        _GROUP_ORDER_BYTES,
+        _cells_by_group,
+    )
+    from cytearc.utils.memory_budget import NUMPY_STEP_BYTES
+
+    rng = np.random.default_rng(25)
+    members = rng.random(100_000) < 0.9
+    group_codes = rng.integers(0, 4, size=100_000)
+    fitted, bounds = _cells_by_group(members, group_codes, 4)
+    # Cells in order of their groups, each group's in order, and its bounds.
+    expected = np.concatenate(
+        [np.flatnonzero(members & (group_codes == group)) for group in range(4)]
+    )
+    np.testing.assert_array_equal(fitted, expected)
+    np.testing.assert_array_equal(
+        np.diff(bounds),
+        [np.count_nonzero(members & (group_codes == g)) for g in range(4)],
+    )
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        _cells_by_group(members, group_codes, 4)
+        peak = tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+    # Beside the positions, which the caller holds.
+    beside = peak - 8 * len(fitted)
+    counted = _GROUP_ORDER_BYTES * len(fitted)
+    assert beside <= counted + NUMPY_STEP_BYTES
+    assert counted <= 1.5 * beside
+
+
+def test_the_operation_runs_its_kernels_on_the_store_threads(
+    tmp_path, monkeypatch
+) -> None:
+    import numba
+
+    from cytearc.variants import genotype_mixture
+
+    # The store's one thread, against the two or more that the tests'
+    # Numba runs on otherwise.
+    truth = dropout_truth(n_cells=300, n_sites=12, n_clones=3, seed=22)
+    store, _ids, genotypes = _store_of_truth(tmp_path, truth.calls)
+    assert store.nthreads == 1 and numba.get_num_threads() >= 2
+    seen: list[int] = []
+    original = genotype_mixture.any_bits
+
+    def watched(*args):
+        seen.append(numba.get_num_threads())
+        return original(*args)
+
+    monkeypatch.setattr(genotype_mixture, "any_bits", watched)
+    store.variants.genotype_clones(genotypes)
+    assert seen and set(seen) == {1}
+
+
+def test_the_operation_charges_its_packed_calls_and_their_order_by_group(
+    tmp_path,
+) -> None:
+    from tests.memory_helpers import charges
+
+    # 600 cells at 70 sites, two words a cell, of two interleaved donors,
+    # so the fitted cells' calls are gathered in order of their donors.
+    truth = dropout_truth(n_cells=600, n_sites=70, n_clones=4, seed=23)
+    donors = np.where(np.arange(600) % 2 == 0, "d1", "d2")
+    store, _ids, genotypes = _store_of_truth(tmp_path, truth.calls, donors)
+    _result, taken = charges(
+        lambda: store.variants.genotype_clones(genotypes, within="donor")
+    )
+    packed = [nbytes for item, nbytes, _plan in taken if item.endswith("sites, packed")]
+    assert packed == [2 * 600 * 2 * 8]
+    gathered = [
+        nbytes
+        for item, nbytes, _plan in taken
+        if item.endswith("in order of their groups")
+    ]
+    assert len(gathered) == 1 and gathered[0] >= 2 * 600 * 2 * 8 + 8 * 600
+
+
+@pytest.mark.slow
+def test_the_likelihood_charges_hold_what_it_traces_at_a_thousand_sites() -> None:
+    from cytearc.utils.memory_budget import observed_charges
+    from tests.memory_helpers import audited
+
+    # 1,500 cells at 1,000 sites: the arrays of components by sites and the
+    # M-step's chunks of them outweigh each cell's posteriors.
+    truth = dropout_truth(n_cells=1_500, n_sites=1_000, n_clones=12, seed=24)
+    mutant, wild = _packed(truth.calls)
+
+    def call():
+        ledger = MemoryLedger(None, "Calling clones")
+        ledger.hold("the packed calls", mutant.nbytes + wild.nbytes)
+        return likelihood_clones(
+            mutant,
+            wild,
+            1_000,
+            dropout_probability=None,
+            error_probability=None,
+            min_size=2,
+            min_posterior=0.6,
+            ledger=ledger,
+            nthreads=2,
+        )
+
+    call()
+    _result, overruns = audited(call)
+    assert overruns == []
+    planned = [0]
+
+    def observe(_item, _nbytes, plan):
+        planned[0] = max(planned[0], plan)
+
+    with observed_charges(observe):
+        _called, peak = _traced(call)
+    assert planned[0] <= 1.5 * (peak + mutant.nbytes + wild.nbytes) + (256 << 10)
+
+
+def _traced(call):
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        result = call()
+        return result, tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+
+
+def test_a_fit_that_ends_without_a_finite_log_likelihood_is_refused(
+    monkeypatch,
+) -> None:
+    from cytearc.variants import genotype_clones
+
+    pruned = genotype_clones._pruned
+
+    def broken(mixture, fit, min_size):
+        fit = pruned(mixture, fit, min_size)
+        fit.loglik = float("nan")
+        return fit
+
+    monkeypatch.setattr(genotype_clones, "_pruned", broken)
+    truth = dropout_truth(n_cells=600, n_sites=12, n_clones=3, seed=26)
+    with pytest.raises(RuntimeError, match="not finite; this is a bug"):
+        _call(truth.calls)

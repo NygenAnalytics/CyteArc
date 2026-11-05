@@ -94,13 +94,15 @@ def plan_clones(
     with_probability: bool,
     required_attributes: tuple[str, ...],
     source_arrays: Mapping[str, str] | None = None,
+    site_arrays: tuple[str, ...] = (),
 ) -> PlannedArtifact:
     """Reuse saved clones with these arguments, or plan new ones.
 
     ``source_arrays`` names further per-cell arrays that the source saves,
     each one of ``SOURCE_ARRAYS``, with their dtype kinds, such as barcode
-    clones' ``n_barcodes`` and ``doublet``; saved clones are reused only with
-    them.
+    clones' ``n_barcodes`` and ``doublet``, and ``site_arrays`` the arrays of
+    the sites that it saves, of ``SITE_ARRAYS``; saved clones are reused only
+    with them.
     """
     record = arguments.to_record()
     arrays: dict[str, tuple[tuple[int | None, ...], str | None]] = {
@@ -120,6 +122,7 @@ def plan_clones(
             isinstance(ids, zarr.Array)
             and isinstance(sizes, zarr.Array)
             and ids.shape == sizes.shape
+            and all(isinstance(group.get(name), zarr.Array) for name in site_arrays)
         )
 
     return plan_cell_data_artifact(

@@ -45,10 +45,12 @@ import numpy as np
 
 from ..utils.arguments import quoted_value
 from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
+from ..utils.logging import logger
 from ..utils.numba import numba_threads
 from .genotype_mixture import (
     DROPOUT_PRIOR_CALLS,
     ERROR_PRIOR_CALLS,
+    MAX_POOLED_ERROR,
     MAX_SITE_ERROR_RATIO,
     DENSE_PATTERN_SITES,
     N_CHUNKS,
@@ -232,12 +234,15 @@ class LikelihoodClones:
         sizes: The cells of each clone by rank.
         dropout: Each site's dropout rate.
         error: Each site's error rate.
-        carried_wild: The expected wild-type calls at sites that each cell's
-            component carries, over the cells.
-        carried_calls: The expected calls at those sites.
-        absent_mutant: The expected mutant calls at sites that the cells'
-            components lack.
-        absent_calls: The expected calls at those sites.
+        pooled_dropout: The pooled dropout rate that the fit used, which the
+            sites' rates are shrunk toward, or the rate held.
+        pooled_error: The pooled error rate that the fit used, or the rate
+            held.
+        carried_calls: The expected calls at sites that each cell's
+            component carries, over the cells, which weigh the pooled dropout
+            rate when groups are pooled.
+        absent_calls: The expected calls at sites that the cells' components
+            lack, which weigh the pooled error rate.
         loglik: The log-likelihood of the calls under the fit.
         score: Schwarz's score of the fit.
         cells_in_small_clones: Cells left without a clone because their clone
@@ -255,9 +260,9 @@ class LikelihoodClones:
     sizes: np.ndarray
     dropout: np.ndarray
     error: np.ndarray
-    carried_wild: float
+    pooled_dropout: float
+    pooled_error: float
     carried_calls: float
-    absent_mutant: float
     absent_calls: float
     loglik: float
     score: float
@@ -309,26 +314,36 @@ def kept_seed_bytes(n_rows: int, n_sites: int) -> int:
     return N_SEED_CANDIDATES * (n_rows + 2 * n_sites + 8 * MAX_SPLIT_SITES + 512)
 
 
+def pattern_bytes(n_rows: int, n_local: int) -> int:
+    """What :func:`~cytearc.variants.genotype_mixture.call_patterns` builds for ``n_rows`` cells at ``n_local`` sites, beside their packed calls.
+
+    Up to ten sites, each cell's code and pattern beside the dense table of
+    codes and the patterns. Above, NumPy's unique of the rows: its sorted
+    copy, order, mask and inverse beside the keys and the patterns, of one
+    word a row up to 32 sites, where a mutant and a wild-type word share
+    one key, and of both words otherwise. As traced on 100,000 rows of
+    nearly as many patterns: 16 and 30 bytes a row at 3 and 10 sites, 56 at
+    12, and 97, 161 and 289 at 40, 70 and 200 sites, below the 72, 136, 208
+    and 352 counted.
+    """
+    if n_local <= DENSE_PATTERN_SITES:
+        codes = int(3**n_local)
+        return 16 * n_rows + 16 * codes + 24 * min(n_rows, codes)
+    if n_local <= 32:
+        return 72 * n_rows
+    return (72 * n_words(n_local) + 64) * n_rows
+
+
 def split_fit_bytes(n_rows: int, n_local: int, n_sites: int) -> int:
     """What fitting one split at ``n_local`` sites over ``n_rows`` cells builds and lets go.
 
-    The cells' calls at the sites, packed; their distinct patterns, by a
-    dense table up to ten sites or by sorting; the posteriors of the
-    children per cell and their weights; and a refit of both children at
-    every site.
+    The cells' calls at the sites, packed; their distinct patterns
+    (:func:`pattern_bytes`); the posteriors of the children per cell and
+    their weights; and a refit of both children at every site.
     """
-    local_words = n_words(n_local)
-    grouping: int
-    if n_local <= DENSE_PATTERN_SITES:
-        # Each cell's code and pattern, the table of codes and the patterns.
-        codes = int(3**n_local)
-        grouping = 16 * n_rows + 16 * codes + 24 * min(n_rows, codes)
-    else:
-        # The keys, NumPy's sorted copy, order and inverse, and the patterns.
-        grouping = (64 * local_words + 80) * n_rows
     return (
-        16 * local_words * n_rows
-        + grouping
+        16 * n_words(n_local) * n_rows
+        + pattern_bytes(n_rows, n_local)
         + 24 * n_rows
         + 16 * N_CHUNKS * n_sites
         + 256 * n_sites
@@ -456,6 +471,8 @@ class _Search:
         self.ledger = mixture.ledger
         self.min_size = min_size
         self.half_log_n = 0.5 * math.log(max(mixture.n_cells, 2))
+        # Whether a round stopped proposing splits at MAX_CLONES.
+        self.capped = False
 
     def parent_of(self, fit: MixtureFit, component: int) -> np.ndarray:
         if component == 0:
@@ -917,6 +934,7 @@ class _Search:
             ]
             for component in order:
                 if len(fit.genotypes) + len(proposals) >= MAX_CLONES:
+                    self.capped = True
                     break
                 key = (
                     b"wild type"
@@ -1019,8 +1037,10 @@ def _profiled_loglik(
     pooled_dropout = (carried_wild.sum(axis=-1, keepdims=True) + 1.0) / (
         carried_all.sum(axis=-1, keepdims=True) + 2.0
     )
-    pooled_error = (absent_mutant.sum(axis=-1, keepdims=True) + 1.0) / (
-        absent_all.sum(axis=-1, keepdims=True) + 2.0
+    pooled_error = np.minimum(
+        (absent_mutant.sum(axis=-1, keepdims=True) + 1.0)
+        / (absent_all.sum(axis=-1, keepdims=True) + 2.0),
+        MAX_POOLED_ERROR,
     )
     if mixture.fixed_dropout is not None:
         dropout = np.full_like(carried_all, mixture.fixed_dropout)
@@ -1177,8 +1197,14 @@ def _removal_deltas(fit: MixtureFit, n_cells: int) -> np.ndarray:
     arrays = fit_arrays(fit)
     log_weights = fit.log_weights - np.logaddexp.reduce(fit.log_weights)
     lost = removal_logliks(arrays.relative, log_weights, arrays.posteriors, N_CHUNKS)
-    with np.errstate(divide="ignore"):
-        renormalised = np.log1p(-np.exp(log_weights))
+    # The weight that the rest keep, the log of the sum of their weights,
+    # which stays exact where one component holds nearly all the weight.
+    renormalised = np.array(
+        [
+            np.logaddexp.reduce(np.delete(log_weights, component))
+            for component in range(len(log_weights))
+        ]
+    )
     deltas: np.ndarray = lost - n_cells * renormalised
     return deltas
 
@@ -1369,7 +1395,23 @@ def _search(
     flags = ledger.hold("whether each cell has a mutant call", n_cells)
     has_mutant = np.empty(n_cells, dtype=bool)
     any_bits(mixture.mbits, has_mutant)
+    if search.capped:
+        logger.warning(
+            f"The search for the clones of {n_cells} cells stopped splitting at "
+            f"{MAX_CLONES} clones, the most that a fit holds, so clones that its "
+            "score would split further may hold several of the cells' clones"
+        )
     fit = _pruned(mixture, fit, min_size)
+    if not (
+        np.isfinite(fit.loglik)
+        and np.isfinite(fit.rates.dropout).all()
+        and np.isfinite(fit.rates.error).all()
+    ):
+        raise RuntimeError(
+            f"The fit of the clones of {n_cells} cells at {n_sites} sites ended "
+            f"with a log-likelihood of {fit.loglik} or rates that are not "
+            "finite; this is a bug of the model's fit"
+        )
     n_clones = len(fit.genotypes)
     ledger.peak(
         f"assigning {n_cells} cells to {n_clones} clones",
@@ -1399,9 +1441,7 @@ def _search(
     del component
     carried = np.vstack([np.zeros((1, n_sites), dtype=bool), fit.genotypes])
     calls = arrays.mutant + arrays.wild
-    carried_wild = float((arrays.wild * carried).sum())
     carried_calls = float((calls * carried).sum())
-    absent_mutant = float((arrays.mutant * ~carried).sum())
     absent_calls = float((calls * ~carried).sum())
     del carried, calls, arrays
     # The clones returned stay charged, for the caller to release.
@@ -1417,9 +1457,9 @@ def _search(
         sizes=sizes[order],
         dropout=np.array(fit.rates.dropout, dtype=np.float64),
         error=np.array(fit.rates.error, dtype=np.float64),
-        carried_wild=carried_wild,
+        pooled_dropout=float(fit.rates.pooled_dropout),
+        pooled_error=float(fit.rates.pooled_error),
         carried_calls=carried_calls,
-        absent_mutant=absent_mutant,
         absent_calls=absent_calls,
         loglik=fit.loglik,
         score=schwarz_score(fit.loglik, fit.genotypes, n_cells),

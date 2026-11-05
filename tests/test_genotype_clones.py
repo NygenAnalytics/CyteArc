@@ -356,7 +356,12 @@ def test_saved_genotype_clones_are_reused_and_called_again(
     )
     assert _clones(store, again) == _clones(store, first)
     del artifact_group(store.zw, first)["ambiguous"]
-    assert store.variants.genotype_clones(genotypes, method=method) != first
+    second = store.variants.genotype_clones(genotypes, method=method)
+    assert second != first
+    if method == "likelihood":
+        # The likelihood's clones are reused only with the sites' rates.
+        del artifact_group(store.zw, second)["dropout_probability"]
+        assert store.variants.genotype_clones(genotypes, method=method) != second
 
 
 def test_genotype_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -> None:

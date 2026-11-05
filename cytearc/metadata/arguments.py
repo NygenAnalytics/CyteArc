@@ -855,11 +855,13 @@ class GenotypeCloneArguments(OperationArguments):
     min_size: int | None = parameter(omit_if_none=True)
     min_posterior: float | None = parameter(omit_if_none=True)
     # Fixed choices of the likelihood's model: each site's rates are shrunk
-    # toward the pooled rates by priors worth these many calls, and a site's
-    # error rate stays at most this multiple of the pooled error.
+    # toward the pooled rates by priors worth these many calls, a site's
+    # error rate stays at most this multiple of the pooled error, and an
+    # estimated pooled error at most this rate.
     dropout_prior_calls: float | None = parameter(omit_if_none=True)
     error_prior_calls: float | None = parameter(omit_if_none=True)
     max_site_error_ratio: float | None = parameter(omit_if_none=True)
+    max_pooled_error: float | None = parameter(omit_if_none=True)
     # Fixed choices of the exact rule: cells link through a Jaccard index of
     # 1 over the sites both know, and cells whose calls agree with two clones
     # that disagree are ambiguous and join neither.

@@ -171,11 +171,13 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
             },
         ),
         # clone_probability is stored when the clone source gives each cell's
-        # posterior, such as Numbat's p_opt; n_barcodes when the clones were
-        # called from lineage barcodes; doublet when calling removed cells as
-        # doublets, as barcode clones do; ambiguous when calling left out
-        # cells whose calls agree with two clones that disagree, as genotype
-        # clones do; and n_alleles when the clones were called from recorder
+        # posterior, such as Numbat's p_opt or genotype clones' likelihood;
+        # n_barcodes when the clones were called from lineage barcodes;
+        # doublet when calling removed cells as doublets, as barcode clones
+        # do; ambiguous when calling left cells out, as genotype clones do
+        # where no clone reaches the posterior a cell needs or, by exact
+        # agreement, where a cell's calls agree with two clones that
+        # disagree; and n_alleles when the clones were called from recorder
         # alleles.
         "clones": CellValueSpec(
             "values",

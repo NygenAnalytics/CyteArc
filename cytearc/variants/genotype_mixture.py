@@ -21,7 +21,12 @@ Two departures, which :mod:`cytearc.variants.genotype_clones` relies on:
   ``MAX_SITE_ERROR_RATIO`` times the pooled error, so that a clone's private
   mutation is not read as that site's error. The pooled rates are the
   expected shares of wild-type calls at carried sites and of mutant calls at
-  absent sites over every component.
+  absent sites over every component, and an estimated pooled error stays at
+  most ``MAX_POOLED_ERROR``. A site that every cell carries fits its calls
+  as well with error ``1 - dropout`` and no clone carrying it, so without
+  that bound a population of one clone, or a mutation that every cell
+  carries, would be read as errors whenever no wild-type cell pinned the
+  error down.
 
 Calls are packed 64 sites to a word, mutant and wild-type calls apart, site
 ``j`` at bit ``j % 64`` of word ``j // 64``. The E-step walks a minimum
@@ -51,6 +56,14 @@ ERROR_PRIOR_CALLS = 200.0
 #: The most that a site's error rate may be, as a multiple of the pooled
 #: error rate.
 MAX_SITE_ERROR_RATIO = 5.0
+#: The most that an estimated pooled error rate may be: the largest
+#: false-positive rate of SCClone's simulations, whose real data gave 0.6%
+#: to 2.3%. With it, a site's error stays at most 0.5.
+MAX_POOLED_ERROR = 0.1
+#: Each component keeps at least this posterior mass, so that a component
+#: whose cells all prefer another, such as the wild type where every cell
+#: carries hundreds of mutations, keeps a finite log weight.
+_LEAST_MASS = 1e-300
 #: The dropout and error rates that EM starts from where they are estimated.
 INITIAL_DROPOUT = 0.1
 INITIAL_ERROR = 0.01
@@ -1433,6 +1446,8 @@ class GenotypeMixture:
             pooled_dropout = self.fixed_dropout
         if self.fixed_error is not None:
             pooled_error = self.fixed_error
+        else:
+            pooled_error = min(pooled_error, MAX_POOLED_ERROR)
         dropout = (
             np.full(self.n_sites, float(pooled_dropout))
             if self.fixed_dropout is not None
@@ -1518,12 +1533,7 @@ class GenotypeMixture:
             previous = loglik
             genotypes = self.update_genotypes(genotypes, mutant, wild, rates)
             totals = posteriors.sum(axis=0)
-            with np.errstate(divide="ignore"):
-                log_weights = np.where(
-                    np.isneginf(log_weights),
-                    -np.inf,
-                    np.log(np.maximum(totals, 0.0) / self.n_cells),
-                )
+            log_weights = np.log(np.maximum(totals, _LEAST_MASS) / self.n_cells)
             del totals
             rates = self.update_rates(genotypes, mutant, wild)
         del sums, mass, scratch, bits

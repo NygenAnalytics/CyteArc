@@ -417,6 +417,7 @@ _CONTRACTS = (
                 "dropout_prior_calls",
                 "error_prior_calls",
                 "max_site_error_ratio",
+                "max_pooled_error",
                 "similarity",
                 "inclusive",
                 "ambiguous",

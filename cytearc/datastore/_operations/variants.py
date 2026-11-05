@@ -60,6 +60,7 @@ from ...utils.arrays import sorted_unique
 from ...utils.files import is_hdf5
 from ...utils.logging import logger
 from ...utils.memory_budget import MemoryLedger
+from ...utils.numba import numba_threads
 from ...variants.counts import (
     CALL_DTYPE,
     CALL_FIELDS,
@@ -122,7 +123,7 @@ from .cell_barcodes import (
     unmatched_barcode_rules,
 )
 from .cell_groups import group_columns, within_groups
-from .clone_artifacts import log_clones, plan_clones, write_clones
+from .clone_artifacts import SITE_ARRAYS, log_clones, plan_clones, write_clones
 
 if TYPE_CHECKING:
     from ..mapping_datastore import MappingDatastore as _VariantOperationsBase
@@ -245,6 +246,11 @@ _LIKELIHOOD_CLONE_ATTRIBUTES = ("n_clones",)
 # of the chosen cells, the gaps between them and each band's cells and their
 # rows' counts that the bands read.
 _CALL_BAND_BYTES_PER_CELL = 64
+# Bytes per cell that ordering the likelihood's cells by their within group
+# holds beside their positions: each cell's group, the order of the stable
+# sort and its scratch, and the positions as found beside them reordered,
+# 24 as traced on 90,000 and 180,000 cells of 2, 4 and 50 groups.
+_GROUP_ORDER_BYTES = 32
 # Bytes that numbering genotype clones holds for each cell: each clustered
 # cell's key of group and clone, their sorted copy, first cells and order,
 # and each cell's rank.
@@ -3373,12 +3379,14 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         site's error probability, and an unknown call adds nothing. Each
         site's two probabilities are estimated from the cells by EM, shrunk
         toward the probabilities pooled over every site by priors worth 20
-        and 200 calls, and a site's error probability stays at most five
-        times the pooled one; ``dropout_probability`` or
-        ``error_probability`` holds one probability at every site instead.
-        The number of clones is the one that maximises Schwarz's criterion,
-        in which a clone costs its weight and the mutations it adds to its
-        nearest clone. The genotype without mutations is always a
+        and 200 calls, a site's error probability stays at most five times
+        the pooled one, and the pooled one at most 0.1, so that a mutation
+        that every cell carries cannot pass for errors;
+        ``dropout_probability`` or ``error_probability`` holds one
+        probability at every site instead. A greedy search chooses the
+        number of clones by Schwarz's criterion, in which a clone costs its
+        weight and the sites at which it differs from its neighbour on a
+        minimum spanning tree of the clones rooted at the wild type. The genotype without mutations is always a
         component: its cells, like cells without a mutant call, take no
         clone. Each cell takes its most probable clone, its posterior saved
         as ``clone_probability``; a cell with a mutant call whose most
@@ -3404,9 +3412,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         rates. The artifact's diagnostics, which
         ``ds.artifacts.inspect(clones).diagnostics`` returns, count the
         ``sites`` compared, the ``mutantCells``, the ``ambiguousCells`` and,
-        for the likelihood, the ``cellsInSmallClones``, and record the
-        ``dropoutProbability`` and ``errorProbability`` pooled over every
-        site and group, beside every source's ``cellsWithClone`` and
+        for the likelihood, the ``cellsInSmallClones``, and record the pooled
+        ``dropoutProbability`` and ``errorProbability`` that the fit used,
+        weighed over the groups by the calls that estimate them, beside
+        every source's ``cellsWithClone`` and
         ``largestCloneShare``; the rule that does not run records None. The
         likelihood also saves each site's label and each group's dropout and
         error probability at each site.
@@ -3464,6 +3473,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         from ...variants.genotype_mixture import (
             DROPOUT_PRIOR_CALLS,
             ERROR_PRIOR_CALLS,
+            MAX_POOLED_ERROR,
             MAX_SITE_ERROR_RATIO,
             any_bits,
         )
@@ -3505,8 +3515,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         )
         has_mutant = np.empty(n_cells, dtype=bool)
         has_wild = np.empty(n_cells, dtype=bool)
-        any_bits(calls.mutant, has_mutant)
-        any_bits(calls.wild, has_wild)
+        with numba_threads(self.nthreads):
+            any_bits(calls.mutant, has_mutant)
+            any_bits(calls.wild, has_wild)
         members = has_mutant | has_wild if likelihood else has_mutant.copy()
         del has_wild
         group_codes, group_keys, within_fingerprint = within_groups(
@@ -3532,6 +3543,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             dropout_prior_calls=DROPOUT_PRIOR_CALLS if likelihood else None,
             error_prior_calls=ERROR_PRIOR_CALLS if likelihood else None,
             max_site_error_ratio=MAX_SITE_ERROR_RATIO if likelihood else None,
+            max_pooled_error=MAX_POOLED_ERROR if likelihood else None,
             similarity=None if likelihood else 1.0,
             inclusive=None if likelihood else True,
             ambiguous=None if likelihood else True,
@@ -3547,6 +3559,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 _LIKELIHOOD_CLONE_ATTRIBUTES if likelihood else _EXACT_CLONE_ATTRIBUTES
             ),
             source_arrays={"ambiguous": "b"},
+            site_arrays=SITE_ARRAYS if likelihood else (),
         )
         if planned.reused:
             return planned.ref
@@ -3709,15 +3722,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 f"the calls of {n_fitted} cells in order of their groups",
                 16 * n_fitted * words + 8 * n_fitted + 8 * (n_groups + 1),
             )
-            ledger.peak("ordering the cells by group", 24 * n_fitted)
-            fitted = np.flatnonzero(members)
-            fitted_groups = group_codes[fitted]
-            order = np.argsort(fitted_groups, kind="stable")
-            fitted = fitted[order]
-            bounds = np.searchsorted(
-                fitted_groups[order], np.arange(n_groups + 1), side="left"
-            )
-            del order, fitted_groups
+            ledger.peak("ordering the cells by group", _GROUP_ORDER_BYTES * n_fitted)
+            fitted, bounds = _cells_by_group(members, group_codes, n_groups)
             calls.gather(ledger, fitted)
         # Each cell's clone within its group, from 1, its posterior and its
         # flag, and each group's rates at each site.
@@ -3730,7 +3736,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         ambiguous = np.zeros(n_cells, dtype=bool)
         dropout = np.full((n_groups, n_sites), np.nan)
         error = np.full((n_groups, n_sites), np.nan)
-        totals = np.zeros(4)
+        # Each group's pooled rates, weighed by the calls that estimate them.
+        weighed = np.zeros(4)
         cells_in_small_clones = 0
         offset = 0
         for index in range(n_groups):
@@ -3759,10 +3766,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             offset += len(result.sizes)
             dropout[index] = result.dropout
             error[index] = result.error
-            totals += (
-                result.carried_wild,
+            weighed += (
+                result.pooled_dropout * result.carried_calls,
                 result.carried_calls,
-                result.absent_mutant,
+                result.pooled_error * result.absent_calls,
                 result.absent_calls,
             )
             cells_in_small_clones += result.cells_in_small_clones
@@ -3806,12 +3813,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             dropout_probability=(
                 rules.dropout_probability
                 if rules.dropout_probability is not None
-                else (float(totals[0] / totals[1]) if totals[1] > 0 else None)
+                else (float(weighed[0] / weighed[1]) if weighed[1] > 0 else None)
             ),
             error_probability=(
                 rules.error_probability
                 if rules.error_probability is not None
-                else (float(totals[2] / totals[3]) if totals[3] > 0 else None)
+                else (float(weighed[2] / weighed[3]) if weighed[3] > 0 else None)
             ),
         )
 
@@ -3878,6 +3885,21 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "n_edges": called.n_edges,
         }
         return assignment, called.ambiguous.astype(bool, copy=False), attributes
+
+
+def _cells_by_group(
+    members: np.ndarray, group_codes: np.ndarray, n_groups: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """The positions of the member cells in order of their groups, cells in order within each, and where each group starts and stops among them.
+
+    Beside the positions, this holds ``_GROUP_ORDER_BYTES`` a member cell.
+    """
+    fitted = np.flatnonzero(members)
+    fitted_groups = group_codes[fitted]
+    order = np.argsort(fitted_groups, kind="stable")
+    fitted = fitted[order]
+    bounds = np.searchsorted(fitted_groups[order], np.arange(n_groups + 1), side="left")
+    return fitted, bounds
 
 
 @dataclass(slots=True)

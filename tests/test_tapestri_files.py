@@ -160,6 +160,23 @@ def test_the_tapestri_example_reads_into_a_store_and_its_variants(tmp_path) -> N
     dropout = ds.artifacts.load(likely_ref)["dropout_probability"][:]
     assert dropout.shape == (1, 40)
     assert dropout.min() < 0.01 and dropout.max() > 0.4
+    # Each line fitted alone, as a within group of its own beside the other
+    # cells', is one clone of all its cells: no wild-type cell pins a line's
+    # error rate, and the bound on the pooled error keeps the mutations that
+    # every cell of the line carries from passing as errors.
+    lines = loaded["chosen"].cells["clone"].astype(object)
+    names = np.where(
+        lines.isin(loaded["chosen"].clones["clone"].tolist()[:4]), lines, "other"
+    ).astype(object)
+    ds.cells.insert("line", names, overwrite=True)
+    alone = ds.clones.load_clones(
+        ds.variants.genotype_clones(genotype_ref, within="line")
+    ).cells["clone"]
+    kept = [
+        int(alone[lines == line].value_counts().iloc[0])
+        for line in loaded["chosen"].clones["clone"].tolist()[:4]
+    ]
+    assert kept == [351, 223, 200, 194]
     # Filtering calls by quality and depth leaves more cells ambiguous.
     filtered_ref = ds.variants.genotypes(
         counts, method="source", min_quality=30, min_depth=10
