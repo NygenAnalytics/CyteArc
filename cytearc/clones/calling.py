@@ -13,9 +13,13 @@ mark:
 - a Jaccard graph: two nodes of a group whose sets share an item are linked
   when the Jaccard index of their sets, the items they share over the items
   either holds that both know, exceeds a similarity, or reaches it when
-  ``inclusive``; the intersections come from the sparse product of the
-  nodes-by-items matrix with its transpose, row by row, so nodes that share
-  no item are never compared;
+  ``inclusive``. Each node meets only the nodes that share an item of its
+  prefix, the items of its set that the fewest nodes hold, as many as a
+  linked pair's overlap allows, so an item that most nodes hold, such as the
+  barcode that correction merged many into, is followed almost never. With
+  unknown items, the intersections come from the sparse product of the
+  nodes-by-items matrix with its transpose, row by row. Either way, nodes
+  that share no item are never compared;
 - or links through any item that two nodes share, which joins the nodes of
   each item without listing every pair of them;
 - pruning, as TREX does: edges whose two ends share no neighbour are removed
@@ -98,6 +102,17 @@ _HELD_ITEM_BYTES = 8
 _GRAPH_ITEM_BYTES = 64
 _GRAPH_UNKNOWN_BYTES = 72
 _GRAPH_NODE_BYTES = 40
+# Without unknown items, the graph is built through the nodes' prefixes. Bytes
+# of each item of a node while the items are coded within their groups: the
+# group of its entry, its code, the lists of each code's nodes and their
+# order, 43 as traced on 50,000 to 190,000 nodes of 3 to 20 items; and of each
+# node, the pointers that place its entries.
+_ITEM_CODE_BYTES = 48
+_ITEM_CODE_NODE_BYTES = 16
+# A pair linked at an index of at least t shares at least t times the items
+# of each of its nodes; the bound is taken this much lower, so that rounding
+# the product never makes a prefix too short.
+_PREFIX_MARGIN = 1e-9
 # Bytes of each edge kept: its two ends; and while the graph is pruned or its
 # cut vertices found, each edge twice in the lists of neighbours with their
 # order, and each node's pointer, marks and stack.
@@ -634,6 +649,205 @@ def _jaccard_pairs(
     return count
 
 
+@njit(cache=True)
+def _prefix_length(size: int, lowest: float) -> int:
+    """The items of a node of ``size`` items that its prefix holds.
+
+    A pair linked at an index of at least ``lowest`` shares at least
+    ``lowest`` times the items of each of its nodes, and one item at least.
+    A node that shares ``overlap`` items with another holds at most
+    ``size - overlap`` items before the first of them, in any order of the
+    items, so its first ``size - overlap + 1`` items in that order hold the
+    first item that it shares with any node it is linked to.
+    """
+    overlap = max(int(np.ceil((lowest - _PREFIX_MARGIN) * size)), 1)
+    return min(max(size - overlap + 1, 0), size)
+
+
+@njit(cache=True)
+def _prefix_shape(
+    indptr: np.ndarray, item_indptr: np.ndarray, lowest: float
+) -> tuple[int, int, int]:
+    """The items of every node's prefix, the most items of a node, and the most nodes of an item."""
+    n_prefix = 0
+    largest = 0
+    for node in range(len(indptr) - 1):
+        size = indptr[node + 1] - indptr[node]
+        n_prefix += _prefix_length(size, lowest)
+        largest = max(largest, size)
+    most = 0
+    for code in range(len(item_indptr) - 1):
+        most = max(most, item_indptr[code + 1] - item_indptr[code])
+    return n_prefix, largest, most
+
+
+@njit(cache=True)
+def _item_ranks(item_indptr: np.ndarray, most: int) -> np.ndarray:
+    """Each item code's rank by how many nodes hold it, then by code.
+
+    A counting sort by the nodes of each code, which ``most`` bounds, keeps
+    codes held by equally many nodes in the order of their codes.
+    """
+    n_codes = len(item_indptr) - 1
+    starts = np.zeros(most + 2, dtype=np.int64)
+    for code in range(n_codes):
+        starts[item_indptr[code + 1] - item_indptr[code] + 1] += 1
+    for held in range(most + 1):
+        starts[held + 1] += starts[held]
+    ranks = np.empty(n_codes, dtype=np.int64)
+    for code in range(n_codes):
+        held = item_indptr[code + 1] - item_indptr[code]
+        ranks[code] = starts[held]
+        starts[held] += 1
+    return ranks
+
+
+@njit(cache=True)
+def _set_prefixes(
+    indptr: np.ndarray,
+    items: np.ndarray,
+    ranks: np.ndarray,
+    lowest: float,
+    n_prefix: int,
+    largest: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Each node's prefix, and the nodes whose prefix holds each item code.
+
+    A node's prefix is its items of lowest rank, as many as
+    :func:`_prefix_length` gives for its size. ``n_prefix`` is the items of
+    every prefix and ``largest`` the most items of a node.
+
+    Returns:
+        Whether each item of each node lies in its prefix, and the pointers
+        and nodes of each code's list of the nodes whose prefix holds it,
+        ascending.
+    """
+    n_nodes = len(indptr) - 1
+    n_codes = len(ranks)
+    in_prefix = np.zeros(len(items), dtype=np.bool_)
+    scratch = np.empty(largest, dtype=np.int64)
+    for node in range(n_nodes):
+        start = indptr[node]
+        size = indptr[node + 1] - start
+        length = _prefix_length(size, lowest)
+        if length == size:
+            for at in range(start, start + size):
+                in_prefix[at] = True
+            continue
+        for at in range(size):
+            scratch[at] = ranks[items[start + at]]
+        # The prefix holds the items up to the rank of its last, the
+        # length-th lowest of the node's distinct ranks.
+        if size <= 16:
+            for at in range(1, size):
+                value = scratch[at]
+                place = at
+                while place > 0 and scratch[place - 1] > value:
+                    scratch[place] = scratch[place - 1]
+                    place -= 1
+                scratch[place] = value
+            last = scratch[length - 1]
+        else:
+            last = np.sort(scratch[:size])[length - 1]
+        for at in range(start, start + size):
+            if ranks[items[at]] <= last:
+                in_prefix[at] = True
+    prefix_indptr = np.zeros(n_codes + 1, dtype=np.int64)
+    for at in range(len(items)):
+        if in_prefix[at]:
+            prefix_indptr[items[at] + 1] += 1
+    for code in range(n_codes):
+        prefix_indptr[code + 1] += prefix_indptr[code]
+    prefix_nodes = np.empty(n_prefix, dtype=np.int64)
+    filled = prefix_indptr[:-1].copy()
+    for node in range(n_nodes):
+        for at in range(indptr[node], indptr[node + 1]):
+            if in_prefix[at]:
+                code = items[at]
+                prefix_nodes[filled[code]] = node
+                filled[code] += 1
+    return in_prefix, prefix_indptr, prefix_nodes
+
+
+@njit(cache=True)
+def _prefix_jaccard_pairs(
+    node_indptr: np.ndarray,
+    node_items: np.ndarray,
+    in_prefix: np.ndarray,
+    prefix_indptr: np.ndarray,
+    prefix_nodes: np.ndarray,
+    within: float,
+    across: float,
+    modalities: np.ndarray,
+    inclusive: bool,
+    first: np.ndarray,
+    second: np.ndarray,
+    fill: bool,
+) -> tuple[int, int]:
+    """Count, or fill, the pairs of nodes linked by their Jaccard index, met through their prefixes.
+
+    Two linked nodes share an item of both their prefixes, the first item
+    they share in the order of the ranks, so each node meets every higher
+    node it may be linked to through the lists of its own prefix's items.
+    Each pair met is compared over the two whole sets, whose ascending codes
+    are merged, and linked as :func:`_jaccard_pairs` links it; with ``fill``
+    the pairs are written in order of their two ends.
+
+    Returns:
+        The pairs linked, and the most nodes that one node met.
+    """
+    n_nodes = len(node_indptr) - 1
+    seen = np.full(n_nodes, -1, dtype=np.int64)
+    touched = np.empty(n_nodes, dtype=np.int64)
+    count = 0
+    most = 0
+    for node in range(n_nodes):
+        n_touched = 0
+        start = node_indptr[node]
+        end = node_indptr[node + 1]
+        for at in range(start, end):
+            if not in_prefix[at]:
+                continue
+            code = node_items[at]
+            for position in range(prefix_indptr[code], prefix_indptr[code + 1]):
+                other = prefix_nodes[position]
+                if other <= node or seen[other] == node:
+                    continue
+                seen[other] = node
+                touched[n_touched] = other
+                n_touched += 1
+        most = max(most, n_touched)
+        if fill and n_touched > 1:
+            touched[:n_touched] = np.sort(touched[:n_touched])
+        for at in range(n_touched):
+            other = touched[at]
+            other_start = node_indptr[other]
+            other_end = node_indptr[other + 1]
+            # The items both hold, by merging their ascending codes.
+            left = start
+            right = other_start
+            common = 0
+            while left < end and right < other_end:
+                if node_items[left] == node_items[right]:
+                    common += 1
+                    left += 1
+                    right += 1
+                elif node_items[left] < node_items[right]:
+                    left += 1
+                else:
+                    right += 1
+            index = common / ((end - start) + (other_end - other_start) - common)
+            same = modalities[node] >= 0 and modalities[node] == modalities[other]
+            limit = within if same else across
+            linked = index >= limit if inclusive else index > limit
+            if linked:
+                if fill:
+                    first[count] = node
+                    second[count] = other
+                count += 1
+    return count, most
+
+
 def _similarity(value: float, name: str) -> float:
     if isinstance(value, bool | np.bool_) or not isinstance(
         value, int | float | np.integer | np.floating
@@ -665,6 +879,15 @@ def jaccard_edges(
     an item that one node holds and the other holds unknown counts in
     neither, so the index compares the items both know, and a similarity
     of 1 with ``inclusive`` links the nodes that agree wherever both know.
+
+    Without unknown items, each node meets only the nodes that share an item
+    of its prefix: its items that the fewest nodes of the group hold, as
+    many as the lower of the two similarities allows a linked pair to leave
+    unshared, the prefix filtering of exact set-similarity joins. Every pair
+    met is compared over the two whole sets, so the edges are those of every
+    pair that shares an item, in the same order. With unknown items, the
+    index's denominator leaves out items unknown to the other node, so that
+    bound does not hold, and every node meets every node that shares an item.
 
     Args:
         nodes: The nodes of :func:`identical_sets`.
@@ -710,11 +933,12 @@ def jaccard_edges(
         node_modalities = node_modalities.astype(np.int64)
     indptr = np.asarray(nodes.sets.indptr, dtype=np.int64)
     n_items = len(nodes.sets.items)
-    unknown_indptr = np.zeros(n_nodes + 1, dtype=np.int64)
-    n_unknown = 0
-    if nodes.unknown is not None:
-        unknown_indptr = np.asarray(nodes.unknown.indptr, dtype=np.int64)
-        n_unknown = len(nodes.unknown.items)
+    if nodes.unknown is None or not len(nodes.unknown.items):
+        return _prefix_edges(
+            nodes, indptr, within, other, node_modalities, bool(inclusive), ledger
+        )
+    unknown_indptr = np.asarray(nodes.unknown.indptr, dtype=np.int64)
+    n_unknown = len(nodes.unknown.items)
     graph_bytes = (
         _GRAPH_ITEM_BYTES * n_items
         + _GRAPH_UNKNOWN_BYTES * n_unknown
@@ -747,6 +971,79 @@ def jaccard_edges(
     first = np.empty(n_edges, dtype=np.int64)
     second = np.empty(n_edges, dtype=np.int64)
     _jaccard_pairs(*arguments, first, second, True)
+    return Edges(first=first, second=second)
+
+
+def _prefix_edges(
+    nodes: SetNodes,
+    indptr: np.ndarray,
+    within: float,
+    across: float,
+    modalities: np.ndarray,
+    inclusive: bool,
+    ledger: MemoryLedger,
+) -> Edges:
+    """The edges of :func:`jaccard_edges` between nodes without unknown items, met through their prefixes.
+
+    Each step is charged beside the nodes' modalities, which the caller made
+    and holds until the edges are returned.
+    """
+    n_nodes = nodes.n_nodes
+    n_items = len(nodes.sets.items)
+    modality_bytes = 8 * n_nodes
+    _peak(
+        ledger,
+        "the lists of each item's nodes",
+        modality_bytes + _ITEM_CODE_BYTES * n_items + _ITEM_CODE_NODE_BYTES * n_nodes,
+    )
+    item_indptr, item_nodes, codes = _items_by_group(nodes, 0)
+    del item_nodes
+    n_codes = len(item_indptr) - 1
+    lowest = min(within, across)
+    n_prefix, largest, most_holders = _prefix_shape(indptr, item_indptr, lowest)
+    # The codes and their pointers stay while each code's rank is counted,
+    # and the ranks while the prefixes are chosen: each node's flags, the
+    # lists of each code's nodes with their pointers and the places they are
+    # filled at, and one node's ranks with their sorted copy.
+    coded = modality_bytes + 8 * n_items + 8 * (n_codes + 1)
+    prefixes = n_items + 8 * (n_codes + 1) + 8 * n_prefix
+    choosing = 8 * n_codes + 8 * largest * (2 if largest > 16 else 1)
+    _peak(
+        ledger,
+        "the prefixes of the nodes' sets",
+        coded + 8 * n_codes + max(8 * (most_holders + 2), prefixes + choosing),
+    )
+    ranks = _item_ranks(item_indptr, most_holders)
+    in_prefix, prefix_indptr, prefix_nodes = _set_prefixes(
+        indptr, codes, ranks, lowest, n_prefix, largest
+    )
+    del ranks, item_indptr
+    # Each node then meets the nodes its prefix reaches, marking each and
+    # listing those it touched.
+    kept = modality_bytes + 8 * n_items + prefixes
+    _peak(ledger, "the nodes that the prefixes reach", kept + 16 * n_nodes)
+    empty = np.empty(0, dtype=np.int64)
+    arguments = (
+        indptr,
+        codes,
+        in_prefix,
+        prefix_indptr,
+        prefix_nodes,
+        within,
+        across,
+        modalities,
+        inclusive,
+    )
+    n_edges, most_met = _prefix_jaccard_pairs(*arguments, empty, empty, False)
+    # Filling the edges sorts the nodes each node met, a copy of the most.
+    _peak(
+        ledger,
+        f"the {n_edges} edges of the graph",
+        kept + 16 * n_nodes + 8 * most_met + _EDGE_BYTES * n_edges,
+    )
+    first = np.empty(n_edges, dtype=np.int64)
+    second = np.empty(n_edges, dtype=np.int64)
+    _prefix_jaccard_pairs(*arguments, first, second, True)
     return Edges(first=first, second=second)
 
 
