@@ -135,7 +135,6 @@ from .clone_artifacts import (
 )
 from .clone_steps import (
     CODES_WITHIN_TYPE,
-    REPRESENTATIVES_WITHIN_TYPE,
     artifact_cell_ids,
     files_text,
     measured_within_types,
@@ -1371,11 +1370,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
             ValueError: If it is not a clone artifact, an ID names no
-                clonotype, or a representative has no junction to show.
+                clonotype, clonotypes across receptor types were saved
+                without each cell's clonotype within its type, or a
+                representative has no junction to show.
             KeyError: If the store holds no such artifact.
             RuntimeError: If the artifact is incomplete.
             MemoryError: If reading the clonotypes' IDs as text and a hash
-                index of them, and 400 bytes for each clone given, or reading
+                index of them, or for clonotypes across receptor types each
+                cell's clonotype within its type and the summaries' labels
+                of those, and 400 bytes for each clone given, or reading
                 their representatives' junctions, a chunk of each array at a
                 time, does not fit the memory budget.
         """
@@ -1384,22 +1387,20 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if clones.kind != ClonotypeArguments.artifact_kind or not len(given):
             return given
         across = measured_within_types(clones, inspect_artifact(self.zw, clones), group)
-        if across and REPRESENTATIVES_WITHIN_TYPE not in group:
-            raise ValueError(
-                "clonotypes was defined across receptor types by an earlier version "
-                "of CyteArc, without the representative of each clonotype within a "
-                "receptor type, which names it in figures; define the clonotypes "
-                "again with ds.repertoire.clonotypes, which saves it"
-            )
+        # Across receptor types, every cell's clonotype within its type is
+        # read whatever the clonotypes given, so fewer would not fit.
+        fewer = "label fewer clonotypes"
         ledger = MemoryLedger(
             self.memoryBytes,
             "Labelling clonotypes by their junctions",
-            remedy="label fewer clonotypes",
+            remedy=None if across else fewer,
             codec_threads=self.nthreads,
         )
         # Each clone given, as its ID, code and label, is held throughout.
         ledger.hold(
-            f"the {len(given)} clonotypes labelled", _FIGURE_LABEL_BYTES * len(given)
+            f"the {len(given)} clonotypes labelled",
+            _FIGURE_LABEL_BYTES * len(given),
+            remedy=fewer,
         )
         # The labels read as Python strings, and pandas' hash table of them,
         # which finds those given: the IDs, or for clonotypes across receptor

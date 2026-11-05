@@ -1435,11 +1435,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             },
             invalidate_cache=invalidate_cache,
             required_attributes=("n_clonotypes",),
-            # Clonotypes across receptor types are reused with the
-            # representative of each clonotype within a type, which names it.
-            reuse_validator=None
-            if within_receptor_type
-            else lambda _ref, saved: REPRESENTATIVES_WITHIN_TYPE in saved,
         )
         if planned.reused:
             return planned.ref

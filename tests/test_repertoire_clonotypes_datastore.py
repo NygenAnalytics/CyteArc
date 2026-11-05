@@ -1604,6 +1604,27 @@ def test_each_clonotype_within_a_type_is_named_by_its_own_representative(
     assert whole.loc[0, "VDJ_1_junction_aa"] in junctions
 
 
+def test_labelling_clonotypes_across_types_suggests_fewer_only_where_fewer_fit(
+    spanning, monkeypatch
+) -> None:
+    store, together = spanning.store, spanning.together
+    # 1 kB holds the one clonotype given but not every cell's clonotype within
+    # its type, which labelling clonotypes across types reads whatever the
+    # clonotypes given: the refusal asks for a larger budget alone.
+    monkeypatch.setattr(store, "memoryBytes", 1_000)
+    with pytest.raises(MemoryError) as refused:
+        store._clone_figure_labels(together, ["clonotype_1 (TCR)"])
+    assert str(refused.value).startswith("Labelling clonotypes by their junctions")
+    assert "label fewer" not in str(refused.value), refused.value
+    # The clonotypes given are held throughout, so where they do not fit,
+    # fewer would.
+    monkeypatch.setattr(store, "memoryBytes", 1)
+    with pytest.raises(
+        MemoryError, match=r"the 1 clonotypes labelled.*, or label fewer clonotypes\.$"
+    ):
+        store._clone_figure_labels(together, ["clonotype_1 (TCR)"])
+
+
 def test_summaries_of_clonotypes_follow_a_cell_selection(tmp_path) -> None:
     store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
