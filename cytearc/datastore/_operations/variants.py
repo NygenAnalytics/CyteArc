@@ -3670,12 +3670,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             1, min(n_rows, _MIN_GENOTYPE_BAND_ROWS), _most_cell_rows(group, tables)
         )
         ledger.peak("a band of the genotype calls", chunk_bytes + fewest * per_row)
-        room = ledger.room
-        max_rows = (
-            max(fewest, n_rows)
-            if room is None
-            else max(fewest, (room - chunk_bytes) // per_row)
-        )
+        # The room that the budget leaves sizes the bands.
+        max_rows = (self.memoryBytes - ledger.held_bytes - chunk_bytes) // per_row
         for _band, rows in _variant_bands(group, tables, positions, max_rows):
             cells_of_rows, values = rows["call"]
             pack_calls(
