@@ -1395,6 +1395,31 @@ def test_a_tree_legend_lists_the_categories_of_its_wedges_and_at_most_80(ax) -> 
     assert plain is None
 
 
+def test_a_tree_colours_categories_that_its_legend_leaves_out(ax) -> None:
+    # The order names s1 alone: s2 and s3 take their colours, unlisted, and
+    # the title counts them.
+    listed = CategoricalScale(order=("s1",), palette=dict(SEGMENTS.palette))
+    drawn = draw_tree(
+        ax,
+        _tree(),
+        categories=TREE_KINDS,
+        colors=listed,
+        line_color="#333333",
+        x_label="Time",
+        legend_title="Clone",
+    )
+    from matplotlib.legend import Legend
+
+    (legend,) = [child for child in ax.get_children() if isinstance(child, Legend)]
+    assert legend.get_title().get_text() == "Clone (1 of 3)"
+    assert [text.get_text() for text in legend.get_texts()] == ["s1"]
+    assert drawn is not None and drawn.legend.label == "Clone (1 of 3)"
+    assert drawn.scale.order == ("s1",)
+    fills = {to_hex(patch.get_facecolor()) for patch in _paths(ax, filled=True)}
+    assert fills == {RED, BLUE}
+    assert [to_hex(color) for color in ax.collections[0].get_facecolors()] == [GREEN]
+
+
 def test_trees_refuse_what_they_cannot_draw(ax) -> None:
     options = {"colors": SEGMENTS, "line_color": "#333333", "x_label": "Time"}
     with pytest.raises(ValueError, match="needs a node"):
@@ -1405,6 +1430,19 @@ def test_trees_refuse_what_they_cannot_draw(ax) -> None:
             _tree(),
             categories=np.asarray(["", "s1", "s9", "s3"], dtype=object),
             **options,
+        )
+    with pytest.raises(ValueError, match="list no category that a wedge holds"):
+        draw_tree(
+            ax,
+            _tree(),
+            categories=TREE_KINDS,
+            legend_title="Clone",
+            **{
+                **options,
+                "colors": CategoricalScale(
+                    order=("s9",), palette={**SEGMENTS.palette, "s9": RED}
+                ),
+            },
         )
     with pytest.raises(ValueError, match="one category and one text for each row"):
         draw_tree(ax, _tree(), categories=TREE_KINDS[:3], **options)

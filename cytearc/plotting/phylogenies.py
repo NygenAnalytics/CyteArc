@@ -7,6 +7,7 @@ import pandas as pd
 
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import bool_argument, integer_argument
+from ..utils.arrays import sorted_unique
 from ._charts import draw_tree, tree_drawing_bytes
 from ._clone_names import clone_names
 from ._contracts import CategoricalScale
@@ -57,24 +58,40 @@ def _kinds(nodes: pd.DataFrame) -> np.ndarray:
 
 
 def _counted(nodes: pd.DataFrame) -> np.ndarray:
-    """Whether each row is a wedge that says how many clones or trees it holds.
+    """Whether each row is a tall wedge of several clones or trees, which says how many it holds."""
+    grouped = (nodes["n_clones"].to_numpy() >= 2) | (nodes["n_trees"].to_numpy() > 1)
+    return np.asarray(_tall(nodes) & grouped, dtype=bool)
 
-    A wedge of several clones or trees says so where it is at least a
-    fortieth of the height, so at most 40 do.
-    """
+
+def _tall(nodes: pd.DataFrame) -> np.ndarray:
+    """Whether each row is a wedge at least a fortieth of the height, so at most 40 are."""
     wedge = nodes["wedge"].to_numpy(dtype=bool)
     extent = nodes["high"].to_numpy() - nodes["low"].to_numpy()
-    tall = extent >= float(nodes["high"].max()) / MAX_NAMED_ITEMS
-    grouped = (nodes["n_clones"].to_numpy() >= 2) | (nodes["n_trees"].to_numpy() > 1)
-    return np.asarray(wedge & tall & grouped, dtype=bool)
+    return np.asarray(
+        wedge & (extent >= float(nodes["high"].max()) / MAX_NAMED_ITEMS), dtype=bool
+    )
+
+
+def _listed(nodes: pd.DataFrame) -> np.ndarray:
+    """The categories that the legend lists: the greys drawn, then each tall wedge's one clone, the largest first.
+
+    Where no wedge of one clone is tall enough, the legend lists the largest
+    clone drawn, so it lists one at least.
+    """
+    kinds = _kinds(nodes)
+    drawn = kinds[nodes["wedge"].to_numpy(dtype=bool)]
+    greys = [kind for kind in (_SEVERAL, _NO_CLONE) if (drawn == kind).any()]
+    clones = sorted_unique(kinds[_tall(nodes) & (kinds >= 0)])
+    if not len(clones) and (drawn >= 0).any():
+        clones = np.asarray([drawn[drawn >= 0].min()])
+    return np.asarray([*greys, *clones.tolist()], dtype=np.int64)
 
 
 def _drawing_bytes(nodes: pd.DataFrame) -> int:
     """What drawing the collapsed ``nodes`` holds: their rows, legend entries and texts."""
-    kinds = _kinds(nodes)[nodes["wedge"].to_numpy(dtype=bool)]
     return tree_drawing_bytes(
         len(nodes),
-        n_entries=len(pd.unique(kinds)),
+        n_entries=len(_listed(nodes)),
         n_texts=int(np.count_nonzero(_counted(nodes))),
     )
 
@@ -171,10 +188,9 @@ def phylogeny(
     )
     row_labels = np.full(len(nodes), None, dtype=object)
     row_labels[one] = drawn_labels[at]
-    greys = [kind for kind in (_SEVERAL, _NO_CLONE) if (kinds[wedge] == kind).any()]
     code_list = drawn_codes.tolist()
     colors = CategoricalScale(
-        order=(*greys, *code_list),
+        order=tuple(_listed(nodes).tolist()),
         palette={
             _SEVERAL: _SEVERAL_CLONES_COLOR,
             _NO_CLONE: NO_VALUE_COLOR,

@@ -9,6 +9,7 @@ that several figures share once.
 
 import functools
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -746,21 +747,28 @@ def draw_tree(
     ``y``, ``low`` and ``high``, its middle and extent down the y axis, which
     runs from 0 at the top. A node opened joins its children with a line
     at its ``x``. A wedge runs from its node to a base at ``end`` as tall as
-    nine tenths of its extent, in the colour that ``colors`` gives its
-    category in ``categories``; a wedge that ends where it starts, such as
-    one leaf, is a point. ``texts`` holds what each wedge says at its base,
-    empty for nothing, and ``cut`` draws a dashed line at that ``x``. The
-    categories and texts are arrays aligned with the rows, so a figure of
-    many rows adds no columns to its table to draw them.
+    nine tenths of its extent, in the colour that the palette of ``colors``
+    gives its category in ``categories``; a wedge that ends where it starts,
+    such as one leaf, is a point. ``texts`` holds what each wedge says at its
+    base, empty for nothing, and ``cut`` draws a dashed line at that ``x``.
+    The categories and texts are arrays aligned with the rows, so a figure
+    of many rows adds no columns to its table to draw them.
+
+    The legend lists the wedges' categories that the scale's order names, in
+    that order and at most ``LEGEND_SIDE_MAX_ENTRIES``; a figure leaves
+    categories out of the order to keep them out of the legend, such as
+    clones too thin to see, and the legend's title says how many of the
+    categories drawn it lists when it leaves some out.
 
     Returns:
-        The legend of the categories of the wedges drawn, in the scale's
-        order, drawn beside the panel when ``show_legend`` is true, and its
-        scale; or None without ``legend_title``.
+        The legend of the categories listed, drawn beside the panel when
+        ``show_legend`` is true, and its scale; or None without
+        ``legend_title``.
 
     Raises:
         ValueError: If the table is empty, the categories or texts are not
-            one for each row, or a wedge's category has no colour.
+            one for each row, a wedge's category has no colour, or the
+            scale's order, with a legend title, lists no category drawn.
     """
     _, mpl = require_matplotlib()
     from matplotlib.patches import PathPatch
@@ -826,14 +834,15 @@ def draw_tree(
     outline = np.asarray(
         [Path.MOVETO, Path.LINETO, Path.LINETO, Path.CLOSEPOLY], dtype=Path.code_type
     )
-    shades = list(dict.fromkeys(palette[value] for value in order))
-    shade_of = {shade: at for at, shade in enumerate(shades)}
     # Each wedge's colour as a position among the colours, through its
-    # category's position in the scale.
-    ranked = pd.Index(order).get_indexer(kinds)
-    shading = np.asarray([shade_of[palette[value]] for value in order], dtype=np.int64)[
-        ranked
-    ]
+    # category's position in the palette, which also colours the categories
+    # that the legend leaves out.
+    coloured = list(palette)
+    shades = list(dict.fromkeys(palette[value] for value in coloured))
+    shade_of = {shade: at for at, shade in enumerate(shades)}
+    shading = np.asarray(
+        [shade_of[palette[value]] for value in coloured], dtype=np.int64
+    )[pd.Index(coloured).get_indexer(kinds)]
     shading[~wide] = -1
     for at, shade in enumerate(shades):
         drawn = shading == at
@@ -900,10 +909,19 @@ def draw_tree(
         return None
     drawn = set(pd.unique(kinds[wedge]).tolist())
     entries = [value for value in order if value in drawn]
+    if not entries:
+        raise ValueError(
+            "The colours of the wedges list no category that a wedge holds"
+        )
+    # Only the entries that the legend lists get handles, under a title that
+    # counts every category drawn.
+    shown = entries[:LEGEND_SIDE_MAX_ENTRIES]
+    label = (
+        legend_title
+        if len(shown) == len(drawn)
+        else f"{legend_title} ({len(shown)} of {len(drawn)})"
+    )
     if show_legend:
-        # Only the entries that the legend lists get handles, under a title
-        # that counts every entry.
-        shown = entries[:LEGEND_SIDE_MAX_ENTRIES]
         side_legend(
             ax,
             [
@@ -911,6 +929,7 @@ def draw_tree(
                 for value in shown
             ],
             [category_label(colors, value) for value in shown],
-            title=side_legend_title(legend_title, len(entries)),
+            title=label,
         )
-    return legend_of(colors, entries, legend_title)
+    reported = legend_of(colors, entries, legend_title)
+    return Drawn(replace(reported.legend, label=label), reported.scale)

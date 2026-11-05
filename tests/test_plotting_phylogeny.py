@@ -364,12 +364,14 @@ def test_a_caterpillar_30000_levels_deep_is_drawn_without_recursion(tmp_path) ->
         assert len(_wedges(capped)) == 100
     finally:
         capped.close()
+    # Drawn leaf by leaf, no clone is tall enough to list but the largest.
     # Every leaf drawn alone: the spine opens to its last node.
     every = store.plots.phylogeny(clones, max_leaves=depth + 1, show=False)
     try:
         nodes = every.tables["nodes"]
         assert len(_wedges(every)) == depth + 1
         assert nodes.loc[~nodes["wedge"], "x"].max() == depth - 1
+        assert every.legends[0].label == f"Clone (1 of {depth + 1})"
     finally:
         every.close()
 
@@ -406,6 +408,37 @@ def random_tree(tmp_path_factory) -> SimpleNamespace:
             "depth": by_depth,
         },
     )
+
+
+def test_the_legend_lists_the_clones_tall_enough_to_see(random_tree) -> None:
+    result = random_tree.store.plots.phylogeny(random_tree.clones["time"], show=False)
+    try:
+        nodes = result.tables["nodes"]
+        wedges = nodes[nodes["wedge"]]
+        tall = wedges[wedges["high"] - wedges["low"] >= wedges["high"].max() / 40]
+        listed = tall[tall["n_clones"] == 1]
+        thin = wedges[(wedges["n_clones"] == 1) & ~wedges.index.isin(listed.index)]
+        # Some clones are too thin to list, and every grey is listed first.
+        assert len(listed) and len(thin)
+        greys = ["Several clones"] if (wedges["n_clones"] >= 2).any() else []
+        greys += ["No clone"] if (wedges["n_clones"] == 0).any() else []
+        legend = next(
+            artist
+            for artist in result.figure.axes[0].get_children()
+            if isinstance(artist, Legend)
+        )
+        labels = [text.get_text() for text in legend.get_texts()]
+        clones = labels[len(greys) :]
+        assert labels[: len(greys)] == greys
+        # The clones listed, the largest first, which their rank orders.
+        assert sorted(clones) == sorted(listed["label"])
+        ranks = [result.scales[0].order[len(greys) + at] for at in range(len(clones))]
+        assert ranks == sorted(ranks)
+        n_drawn = len(greys) + int((wedges["n_clones"] == 1).sum())
+        assert legend.get_title().get_text() == f"Clone ({len(labels)} of {n_drawn})"
+        assert result.legends[0].label == legend.get_title().get_text()
+    finally:
+        result.close()
 
 
 @pytest.mark.slow
