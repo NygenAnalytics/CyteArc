@@ -22,8 +22,17 @@ from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.selections import read_stored_selection_indices
 from cytearc.utils.logging import collect_warnings, logger
 from tests.perturbation_helpers import record_cell_reads, write_screen
-from tests.memory_helpers import check_budget
-from tests.storage_helpers import copy_store, open_store, write_count_store, written
+from cytearc.storage.validation_scope import validation_scope
+from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
+from tests.memory_helpers import ZARR_READS, audited, check_budget, hold_finished_reads
+from tests.storage_helpers import (
+    copy_store,
+    insert_nullable_cell_column,
+    open_store,
+    rechunk_feature_tables,
+    write_count_store,
+    written,
+)
 
 # Guides are named CRISPR0 to CRISPR3 and cells cell0 to cell7.
 GUIDE_COUNTS = np.asarray(
@@ -466,26 +475,46 @@ def _wide_screen(folder: Path) -> tuple[Path, Path]:
     return store_path, call_path
 
 
+# The most times its traced peak that the budget an import names may be.
+_IMPORT_AT_MOST = 2.0
+
+
 @pytest.mark.slow
 def test_an_import_runs_within_the_budget_that_its_refusal_names(tmp_path) -> None:
     store_path, call_path = _wide_screen(tmp_path)
+    # Feature tables in chunks of their rows, so that the import's own steps,
+    # not a chunk of 100,000 guide IDs, set the budget.
+    rechunk_feature_tables(store_path)
     store = open_store(store_path)
     store.cells.insert("every", np.ones(4_000, dtype=bool))
     every = store.snapshot_cell_selection("every")
 
-    budget, refusals, _ = check_budget(
-        store_path,
-        lambda opened: opened.perturbation.import_guide_calls(
+    def run(opened):
+        return opened.perturbation.import_guide_calls(
             call_path, cell_selection=every, invalidate_cache=True
-        ),
+        )
+
+    budget, refusals, _ = check_budget(
+        store_path, run, at_most=_IMPORT_AT_MOST, allowance=1 << 20, max_refusals=100
     )
 
-    # One refusal, before the file is parsed, names the budget that runs:
-    # it holds the 80 padded slots of every cell and the labels' text, which
-    # the import left out before.
-    assert len(refusals) == 1
-    assert refusals[0].startswith("Importing the guide calls of 4000 cells holds about")
+    # Each refusal comes before anything is written and names the step that
+    # it refused. The budget holds the 80 padded slots of every cell and the
+    # labels' text.
+    assert 1 <= len(refusals) <= 9
+    assert all(
+        refusal.startswith("Importing the guide calls of 4000 cells holds about")
+        for refusal in refusals
+    )
     assert budget > 8 * 80 * 4_000 + 8 * 60 * 4_000
+    # From each charge to the next, the import holds no more than its ledger
+    # planned, with each read's work held until the next read ends.
+    opened = open_store(store_path, mem_budget=budget)
+    with validation_scope():
+        run(opened)
+        with hold_finished_reads(*ZARR_READS):
+            _ref, overruns = audited(lambda: run(opened))
+    assert overruns == []
 
 
 def test_import_refuses_assays_and_guides_it_cannot_use(
@@ -853,3 +882,139 @@ def test_reference_checks_name_the_kinds_they_take() -> None:
             _require_ref(ref, "labels", *kinds)
     # The refusal names every coordinate kind that the graph reads.
     assert set(_COORDINATE_KINDS) == NATIVE_COORDINATE_KINDS
+
+
+def test_the_other_screen_steps_refuse_their_budgets_with_memory_budget_error() -> None:
+    from cytearc.datastore._operations.perturbation_store import _require_budget
+
+    # The steps that C25 moves onto a ledger keep their words and carry the
+    # bytes that pass them, the budget and the step.
+    with pytest.raises(MemoryBudgetError) as refused:
+        _require_budget(
+            10,
+            9,
+            "The profiles of 3 targets in 2 features hold about",
+            beside=" with the read of one feature",
+            remedy="Raise mem_budget to at least 10 bytes.",
+        )
+    assert str(refused.value) == (
+        "The profiles of 3 targets in 2 features hold about 10 bytes with the read "
+        "of one feature, more than the memory budget of 9 bytes. Raise mem_budget "
+        "to at least 10 bytes."
+    )
+    assert (
+        refused.value.needed_bytes,
+        refused.value.budget_bytes,
+        refused.value.item,
+    ) == (10, 9, "The profiles of 3 targets in 2 features")
+    _require_budget(9, 9, "The profiles of 3 targets hold about")
+
+
+def test_samples_of_any_column_are_numbered_as_before_within_the_ledger(
+    tmp_path,
+) -> None:
+    from cytearc.datastore._operations.perturbation_store import _cell_samples
+    from cytearc.metadata.rows import (
+        apply_missing_mask,
+        read_metadata_missing_rows_chunkwise,
+        read_metadata_rows_chunkwise,
+    )
+    from cytearc.metadata.selection import sample_codes
+
+    # 20,000 cells, labelled by text, by numbers, and by text with gaps, and a
+    # selection of every other cell.
+    n_cells = 20_000
+    rng = np.random.default_rng(5)
+    path = tmp_path / "store.zarr"
+    store = write_screen(
+        path,
+        rng.poisson(2.0, size=(n_cells, 3)),
+        rng.poisson(1.0, size=(n_cells, 4)),
+        cell_columns={
+            "lane": np.asarray(
+                [f"L{index % 3}" for index in range(n_cells)], dtype=object
+            ),
+            "batch": np.arange(n_cells) % 4,
+        },
+    )
+    insert_nullable_cell_column(
+        store,
+        "donor",
+        np.asarray([f"D{index % 5}" for index in range(n_cells)]),
+        np.arange(n_cells) % 7 == 1,
+    )
+    cells = np.arange(0, n_cells, 2, dtype=np.int64)
+    for column in ("lane", "batch", "donor", None):
+
+        def number(column=column):
+            ledger = MemoryLedger(10**9, "Numbering samples")
+            return ledger, _cell_samples(
+                store, ledger, column, cells, reason="every cell needs one"
+            )
+
+        if column == "donor":
+            # Every seventh cell has no label, which every selected cell needs.
+            missing = int(np.count_nonzero(cells % 7 == 1))
+            with pytest.raises(
+                ValueError, match=f"has no label for {missing} selected"
+            ):
+                number()
+            continue
+        # The samples that the labels read unbudgeted give, as before.
+        columns = () if column is None else (column,)
+        expected = sample_codes(
+            columns,
+            [
+                apply_missing_mask(
+                    np.asarray(read_metadata_rows_chunkwise(store.cells, name, cells)),
+                    read_metadata_missing_rows_chunkwise(store.cells, name, cells),
+                    labels=True,
+                )
+                for name in columns
+            ],
+            len(cells),
+            reason="every cell needs one",
+        )
+        number()
+        with hold_finished_reads(*ZARR_READS):
+            (ledger, samples), overruns = audited(number)
+        assert overruns == []
+        assert samples.codes.tolist() == expected[0].tolist()
+        assert samples.names == [
+            None if column is None else sample[column] for sample in expected[1]
+        ]
+        assert samples.assignments == expected[2]
+        # Only the codes and the samples' labels stay charged.
+        assert (
+            8 * len(cells)
+            <= ledger.charged
+            <= 8 * len(cells) + 1_024 * len(samples.names)
+        )
+
+
+def test_bands_without_a_budget_take_the_most_features_they_may(template) -> None:
+    from cytearc.datastore._operations.perturbation_store import _count_bands
+
+    store = open_store(template.path)
+    bands = _count_bands(
+        MemoryLedger(None, "Reading bands"),
+        store._get_assay("CRISPR"),
+        np.arange(4),
+        (np.arange(len(GUIDE_COUNTS)),),
+        per_feature=8,
+        scratch_per_feature=8,
+        most=3,
+    )
+    assert bands == [(0, 3), (3, 4)]
+
+
+def test_a_feature_column_of_numbers_is_read_as_python_objects(template) -> None:
+    store = open_store(template.path)
+    assay = store._get_assay("CRISPR")
+    ledger = MemoryLedger(None, "Reading a feature column")
+    values = store._guide_feature_column(assay, "nCells", "id_column", ledger=ledger)
+    expected = np.asarray(assay.feats.fetch_all("nCells"), dtype=object)
+    assert values.dtype == object
+    assert values.tolist() == expected.tolist()
+    assert ledger.charged >= 8 * len(values)
+    assert store._guide_feature_column(assay, None, "id_column", ledger=ledger) is None

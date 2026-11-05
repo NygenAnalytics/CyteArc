@@ -47,6 +47,7 @@ from .perturbation_store import (
     _matched_ids,
     _pairs_fingerprint,
     _require_budget,
+    _resident_ledger,
     _require_ref,
     _row_features,
     _selected_rows,
@@ -317,10 +318,10 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         if n_features:
             _, blocks = _count_blocks(
                 self,
+                _resident_ledger(self, gathered),
                 expression,
                 needed_features,
                 compared.cells,
-                resident_bytes=gathered,
                 scratch_bytes_per_row=8 * n_features,
             )
             counts = np.concatenate(

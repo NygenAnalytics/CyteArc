@@ -226,11 +226,13 @@ def check_budget(
     at_most: float | None = None,
     allowance: int = 0,
     refusal_budget: Callable[[BaseException], int] = named_budget,
+    max_refusals: int = 10,
     **options: Any,
 ) -> tuple[int, list[str], Any]:
     """Check that ``call`` runs within the budget that its refusals name.
 
-    :func:`budget_that_runs` finds that budget and traces the call at it. The
+    :func:`budget_that_runs` finds that budget, following up to
+    ``max_refusals`` refusals, and traces the call at it. The
     traced peak must be within the budget, and one byte less must be refused
     naming the same budget. With ``check_writes``, the refused call must leave
     what the store holds unchanged. With ``at_most``, the budget must also be
@@ -243,7 +245,11 @@ def check_budget(
         of the call at that budget.
     """
     budget, refusals, result, peak = budget_that_runs(
-        store, call, refusal_budget=refusal_budget, **options
+        store,
+        call,
+        refusal_budget=refusal_budget,
+        max_refusals=max_refusals,
+        **options,
     )
     assert peak is not None and peak <= budget, (
         f"The call held {peak} bytes within a budget of {budget}"

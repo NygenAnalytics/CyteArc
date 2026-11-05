@@ -142,6 +142,23 @@ def rechunk_column(group: zarr.Group, name: str, rows: int = 100_000) -> None:
     )
 
 
+def rechunk_feature_tables(location: str | Path) -> None:
+    """Store every column of each assay's feature table at ``location`` again in one chunk of its rows.
+
+    Feature tables keep the chunks of 100,000 rows that their writers give
+    them, so a read of a few guides' IDs decodes a chunk of 100,000 of them;
+    in chunks of their rows, the reads hold what the rows do, and a memory
+    test sees what each step of a screen operation holds besides.
+    """
+    root = zarr.open_group(str(location), mode="r+")
+    for assay in root.group_keys():
+        if "featureData" not in root[assay]:
+            continue
+        table = root[assay]["featureData"]
+        for name in list(table.array_keys()):
+            rechunk_column(table, name, rows=max(1, int(table[name].shape[0])))
+
+
 def insert_nullable_cell_column(
     datastore: Any,
     name: str,

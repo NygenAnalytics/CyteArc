@@ -8,7 +8,7 @@ write their own stores.
 
 import re
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,8 +30,15 @@ from cytearc.perturbation.mixtures import (
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.utils.logging import logger
 from tests.perturbation_helpers import record_cell_reads, write_screen
-from tests.memory_helpers import check_budget
-from tests.storage_helpers import copy_store, open_store, write_count_store, written
+from cytearc.storage.validation_scope import validation_scope
+from tests.memory_helpers import ZARR_READS, audited, check_budget, hold_finished_reads
+from tests.storage_helpers import (
+    copy_store,
+    open_store,
+    rechunk_feature_tables,
+    write_count_store,
+    written,
+)
 
 N_PER_LANE = 200
 # Cells come in this lane order, so the fits must sort the lanes.
@@ -515,7 +522,7 @@ def test_a_read_only_store_checks_the_budget_before_writing(
     monkeypatch.setattr(reader, "memoryBytes", 100)
     with pytest.raises(MemoryError, match="Fitting guide thresholds for 600"):
         reader.perturbation.call_guides(cells, sample_column="lane")
-    with pytest.raises(MemoryError, match="Calling guides makes"):
+    with pytest.raises(MemoryError, match="Calling guides for 600 cells"):
         reader.perturbation.call_guides(cells, method="fixed", min_umi=2)
     monkeypatch.undo()
     for arguments in ({"sample_column": "lane"}, {"method": "fixed", "min_umi": 2}):
@@ -637,7 +644,24 @@ def _wide_screen(folder: Path) -> Path:
     )
     store.cells.insert("every", np.ones(n_cells, dtype=bool))
     store.snapshot_cell_selection("every")
+    # Feature tables in chunks of their rows, so that the calls' own steps,
+    # not a chunk of 100,000 guide IDs, set the budget.
+    rechunk_feature_tables(path)
     return path
+
+
+# The most times its traced peak that the budget of guide calling may be.
+_CALLING_AT_MOST = 3.0
+
+
+def _audited_at(path: Path, call: Callable[[DataStore], object], budget: int) -> None:
+    """Check that ``call`` holds no more than its ledger plans at ``budget``, with each read's work held until the next read ends."""
+    store = open_store(path, mem_budget=budget)
+    with validation_scope():
+        call(store)
+        with hold_finished_reads(*ZARR_READS):
+            _ref, overruns = audited(lambda: call(store))
+    assert overruns == []
 
 
 @pytest.mark.slow
@@ -657,25 +681,28 @@ def test_call_guides_runs_within_the_budget_that_its_refusals_name(
     path = _wide_screen(tmp_path)
     cells = open_store(path).snapshot_cell_selection("every")
 
+    def call(store):
+        return store.perturbation.call_guides(cells, invalidate_cache=True, **options)
+
     budget, refusals, _ = check_budget(
-        path,
-        lambda store: store.perturbation.call_guides(
-            cells, invalidate_cache=True, **options
-        ),
+        path, call, at_most=_CALLING_AT_MOST, allowance=1 << 20, max_refusals=100
     )
 
-    # The first refusal comes before any count is read and names a budget
-    # that runs, or for the fitted methods one that gets the fits past the
-    # stream; the calls may then need more, which a second refusal names.
-    assert 1 <= len(refusals) <= (2 if options["method"].endswith("gaussian") else 1)
-    first = (
-        "Fitting guide" if options["method"].endswith("gaussian") else "Calling guides"
-    )
+    # Each refusal comes before anything is written and names the step that
+    # it refused: the fitted methods' first steps fit thresholds, and the
+    # calls' steps then call guides.
+    fitting = options["method"].endswith("gaussian")
+    first = "Fitting guide" if fitting else "Calling guides"
+    assert 1 <= len(refusals) <= 12
     assert refusals[0].startswith(first)
+    assert all(
+        refusal.startswith(("Fitting guide", "Calling guides")) for refusal in refusals
+    )
     if options["method"] != "top_guide":
         # The padded calls of cell0, 80 slots for each of the 4,000 cells, and
         # the 60 characters of the labels count.
         assert budget > 8 * 80 * 4_000
+    _audited_at(path, call, budget)
 
 
 def _distinct_screen(folder: Path) -> Path:
@@ -699,6 +726,7 @@ def _distinct_screen(folder: Path) -> Path:
     store = open_store(path)
     store.cells.insert("every", np.ones(n_cells, dtype=bool))
     store.snapshot_cell_selection("every")
+    rechunk_feature_tables(path)
     return path
 
 
@@ -707,30 +735,35 @@ def test_histogram_refusals_name_a_budget_past_where_they_stopped(tmp_path) -> N
     path = _distinct_screen(tmp_path)
     cells = open_store(path).snapshot_cell_selection("every")
 
+    def call(store):
+        return store.perturbation.call_guides(cells, invalidate_cache=True)
+
     budget, refusals, _ = check_budget(
-        path,
-        lambda store: store.perturbation.call_guides(cells, invalidate_cache=True),
+        path, call, at_most=_CALLING_AT_MOST, allowance=1 << 20, max_refusals=100
     )
 
     # Within the least that the fits hold, the histograms stop while counts
     # remain, and estimate what every row needs from the rows read.
-    stopped = [refusal for refusal in refusals if "histograms" in refusal]
+    stopped = [refusal for refusal in refusals if "histograms of " in refusal]
     assert stopped
     first = stopped[0]
     assert re.search(
-        r"; \d+ of 3000 rows of counts remain to be read, and at the ", first
+        r", while \d+ of 3000 rows of counts remain to be read, and at the rate ",
+        first,
     )
     distinct = [
-        int(re.search(r"for (\d+) distinct counts", refusal).group(1))
+        int(re.search(r"histograms of (\d+) distinct counts", refusal).group(1))
         for refusal in stopped
     ]
     # Each refusal names a budget that gets past the point where the one before
     # stopped, so the next stops later, with more distinct counts, or not at
     # all, and a few refusals reach the budget that runs.
     assert distinct == sorted(set(distinct))
-    assert len(refusals) <= 5
+    assert len(stopped) <= 5
+    assert len(refusals) <= 12
     # The budget holds the counts beside histograms of every count.
     assert budget > 16 * 60_000
+    _audited_at(path, call, budget)
 
 
 def test_gaussian_warns_when_most_calls_carry_several_guides(tmp_path) -> None:
@@ -817,7 +850,7 @@ def test_loading_thresholds_checks_the_budget_and_the_samples(
         store.perturbation.load_guide_thresholds(fits)
     group.attrs["samples"] = SORTED_LANES
     monkeypatch.setattr(store, "memoryBytes", 100)
-    with pytest.raises(MemoryError, match="Pass guides to read fewer"):
+    with pytest.raises(MemoryError, match="or pass guides to read fewer"):
         store.perturbation.load_guide_thresholds(fits)
 
 
@@ -839,3 +872,42 @@ def test_loading_thresholds_needs_the_status_names_that_decode_them(
     pd.testing.assert_frame_equal(
         store.perturbation.load_guide_thresholds(ref).table, table
     )
+
+
+def test_loading_calls_fits_and_labels_holds_no_more_than_their_ledgers_plan(
+    tmp_path,
+) -> None:
+    # 4,000 cells, so that a few bytes a cell that a ledger leaves out pass
+    # the audit's allowance.
+    store = open_store(_wide_screen(tmp_path))
+    cells = store.snapshot_cell_selection("every")
+    calls = store.perturbation.call_guides(
+        cells, method="gaussian", sample_column="lane"
+    )
+    labels = store.perturbation.labels(
+        calls,
+        controls=["NT"],
+        target_column=None,
+        targets={
+            guide: "NT" if position % 10 == 0 else f"GENE{position // 2}"
+            for position, guide in enumerate(
+                store.perturbation.load_guide_calls(calls).guides
+            )
+        },
+        policy="combinations",
+    )
+    # Each loader charges one ledger, and from each charge to the next holds no
+    # more than it planned, with each read's work held until the next read
+    # ends; a first call loads what later calls reuse.
+    guide = str(store.perturbation.load_guide_calls(calls).guides[1])
+    for load in (
+        lambda: store.perturbation.load_guide_calls(calls),
+        lambda: store.perturbation.load_guide_thresholds(calls),
+        lambda: store.perturbation.load_guide_thresholds(calls, guides=[guide]),
+        lambda: store.perturbation.load_labels(labels),
+    ):
+        with validation_scope():
+            load()
+            with hold_finished_reads(*ZARR_READS):
+                _loaded, overruns = audited(load)
+        assert overruns == []

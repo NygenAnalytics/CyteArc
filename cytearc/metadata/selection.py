@@ -29,6 +29,7 @@ from ..utils.arrays import sort_categories, sort_categories_bytes
 from ..utils.memory_budget import (
     MemoryBudgetError,
     MemoryLedger,
+    fixed_text_bytes,
     hash_table_bytes,
     object_array_bytes,
     python_text_bytes,
@@ -513,6 +514,7 @@ def sample_codes(
     n_cells: int,
     *,
     reason: str,
+    ledger: MemoryLedger | None = None,
 ) -> tuple[np.ndarray, list[dict[str, str]], str | None]:
     """Group the selected cells into samples by their label in every column.
 
@@ -528,20 +530,34 @@ def sample_codes(
         n_cells: The number of selected cells.
         reason: Why every selected cell needs a label; it ends the error for
             a cell without one.
+        ledger: The caller's memory ledger, charged before each step
+            allocates: numbering each column's labels, as
+            :func:`label_numbering_bytes` states, and the samples and their
+            fingerprint, as :func:`sample_fingerprint_bytes` states, and kept
+            charged with the codes it returns. None charges nothing.
 
     Raises:
         ValueError: If a column does not hold one label per selected cell, or
             a selected cell has a missing or blank label.
+        MemoryBudgetError: If a step would pass the ledger's budget.
     """
     if not columns:
+        if ledger is not None:
+            ledger.hold("the cells' sample codes", 8 * n_cells)
         return np.zeros(n_cells, dtype=np.int64), [{}], None
     names_by_column = []
     codes_by_column = []
+    held = 0
     for column, values in zip(columns, labels, strict=True):
         array = np.asarray(values, dtype=object)
         if array.shape != (n_cells,):
             raise ValueError(
                 f"Sample column {column!r} must hold one label per selected cell"
+            )
+        if ledger is not None:
+            ledger.peak(
+                f"numbering the cells' labels in {column!r}",
+                label_numbering_bytes(array),
             )
         missing = int(np.count_nonzero(~valid_category_mask(array)))
         if missing:
@@ -550,8 +566,17 @@ def sample_codes(
                 f"cells. {reason}"
             )
         names, codes = np.unique(array.astype(str), return_inverse=True)
+        if ledger is not None:
+            held += ledger.hold(
+                f"the cells' codes in {column!r}", codes.nbytes + names.nbytes
+            )
         names_by_column.append(names)
         codes_by_column.append(codes.reshape(-1))
+    if ledger is not None:
+        ledger.peak(
+            "the cells' samples and their fingerprint",
+            sample_fingerprint_bytes(n_cells, columns, names_by_column),
+        )
     combinations, codes = np.unique(
         np.column_stack(codes_by_column), axis=0, return_inverse=True
     )
@@ -564,7 +589,77 @@ def sample_codes(
     ]
     rendered = np.asarray([json.dumps(sample) for sample in samples])
     codes = codes.reshape(-1).astype(np.int64, copy=False)
-    return codes, samples, fingerprint_strings(rendered[codes])
+    fingerprint = fingerprint_strings(rendered[codes])
+    del codes_by_column, names_by_column, combinations, rendered
+    if ledger is not None:
+        # The codes of each column and their labels give way to the codes of
+        # the samples and the samples' labels.
+        ledger.hold(
+            "the cells' sample codes and the samples' labels",
+            codes.nbytes + _KEPT_BYTES_PER_SAMPLE * len(samples),
+        )
+        ledger.release(held)
+    return codes, samples, fingerprint
+
+
+#: Numbering a column's labels holds, for each label beside its text at the
+#: width of the widest, whether it is valid, its position in the sorted order,
+#: the flags of the distinct values and their running count, and its code.
+_NUMBERING_BYTES_PER_LABEL = 40
+#: Numbering the samples holds, for each cell, its codes stacked by column
+#: and their copies while they are sorted, its position in the sorted order,
+#: the flags of the distinct samples and their running count, and its code.
+_SAMPLE_BYTES_PER_CELL = 48
+#: Each sample's labels by column and their text, beside the characters.
+_BYTES_PER_SAMPLE = 512
+#: Each sample's labels by column, as returned: a dictionary and its texts.
+_KEPT_BYTES_PER_SAMPLE = 640
+
+
+def label_numbering_bytes(labels: np.ndarray) -> int:
+    """Return the most bytes that :func:`sample_codes` holds to number one column's ``labels``, beside them.
+
+    The labels become text at the width of the widest, a number as its text,
+    which a sort copies twice, as NumPy's ``np.unique`` sorts them, beside
+    the distinct labels, as many as the labels at most.
+    """
+    array = np.asarray(labels, dtype=object)
+    # The labels' text, as numbering makes it: a number's text is measured
+    # one at a time, as it is made and let go.
+    width = max(
+        (len(value) if isinstance(value, str) else len(str(value)) for value in array),
+        default=1,
+    )
+    n_values = len(array)
+    return 4 * fixed_text_bytes(n_values, max(1, width)) + (
+        _NUMBERING_BYTES_PER_LABEL * n_values
+    )
+
+
+def sample_fingerprint_bytes(
+    n_cells: int, columns: Sequence[str], names: Sequence[np.ndarray]
+) -> int:
+    """Return the most bytes that :func:`sample_codes` holds to number the cells' samples and fingerprint them.
+
+    ``names`` holds each column's distinct labels, which bound the samples.
+    Each cell's sample is rendered as JSON text at the width of the widest,
+    which the fingerprint copies, beside each column's code and the
+    samples' own labels and texts.
+    """
+    n_samples = min(int(n_cells), int(np.prod([max(1, len(each)) for each in names])))
+    # The widest JSON text of a sample: each column's name and its widest
+    # label, quoted and escaped, and the ": " between them, separated by ", "
+    # between braces.
+    width = 4 * len(columns) + sum(
+        len(json.dumps(column))
+        + max((len(json.dumps(str(name))) for name in each), default=2)
+        for column, each in zip(columns, names, strict=True)
+    )
+    return (
+        2 * fixed_text_bytes(n_cells, width)
+        + (_SAMPLE_BYTES_PER_CELL + 8 * len(columns)) * int(n_cells)
+        + n_samples * (_BYTES_PER_SAMPLE + 4 * width)
+    )
 
 
 @dataclass(frozen=True, slots=True)

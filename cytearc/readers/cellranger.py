@@ -1,3 +1,4 @@
+import io
 import os
 import re
 from abc import ABC, abstractmethod
@@ -13,6 +14,7 @@ from scipy.sparse import coo_matrix
 from ..utils.progress import iter_progress
 from ..utils.files import open_binary
 from ._contigs import contig_chunks, header_fields
+from ._delimited import stripped_text
 from ._assay_names import (
     AUTO_ASSAY_NAMES,
     auto_name_feat_table,
@@ -602,7 +604,16 @@ _NO_CALL = frozenset({"", "None"})
 _MAX_UMIS = int(np.iinfo(np.uint32).max)
 # The decompressed bytes that the size scan reads at a time, a small share of
 # what parsing the file holds.
-_SCAN_BYTES = 1 << 18
+_SCAN_BYTES = 1 << 15
+#: The most bytes that :func:`protospacer_calls_size` holds while it counts a
+#: file, whatever the file holds: a chunk as read and the flags of its
+#: characters, and the positions of its line ends and its separators, the
+#: line of each separator and the separators of each line, 8 bytes each,
+#: which reach 22 bytes for each byte of a chunk of nothing but line ends and
+#: separators, as traced; the gzip reader's two buffers of compressed and
+#: decompressed bytes, ``io.DEFAULT_BUFFER_SIZE`` each, 128 KiB since Python
+#: 3.14; and the scan's own objects.
+PROTOSPACER_SCAN_BYTES = 24 * _SCAN_BYTES + 2 * io.DEFAULT_BUFFER_SIZE + (64 << 10)
 # The bytes that read_protospacer_calls holds while it parses, by the size of
 # the file, measured with Python 3.13 and pandas 3.0 and rounded up: for
 # each row, its four fields as Python text, pandas' copies of them, and its
@@ -815,10 +826,13 @@ def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
             empty, or a row calls one feature twice.
     """
     frame = _read_call_table(path)
-    barcodes = frame["cell_barcode"].str.strip().to_numpy(dtype=object)
-    declared_text = frame["num_features"].str.strip()
-    feature_text = frame["feature_call"].str.strip()
-    umi_text = frame["num_umis"].str.strip()
+    # The fields are stripped and split one at a time, without pandas' .str
+    # accessor, which pandas 2 keeps in a reference cycle with its text.
+    barcodes = stripped_text(frame["cell_barcode"]).to_numpy(dtype=object)
+    declared_text = stripped_text(frame["num_features"])
+    feature_text = stripped_text(frame["feature_call"])
+    umi_text = stripped_text(frame["num_umis"])
+    del frame
     blank = (
         (barcodes == "")
         & (declared_text == "").to_numpy()
@@ -876,10 +890,12 @@ def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
             f"Rows with num_features 0 list calls on lines {_line_numbers(stray)}"
         )
     called = np.flatnonzero(~uncalled)
-    feature_lists = feature_text.iloc[called].str.split("|")
-    umi_lists = umi_text.iloc[called].str.split("|")
-    feature_lengths = feature_lists.str.len().to_numpy(dtype=np.int64)
-    umi_lengths = umi_lists.str.len().to_numpy(dtype=np.int64)
+    feature_lists = [text.split("|") for text in feature_text.iloc[called].tolist()]
+    umi_lists = [text.split("|") for text in umi_text.iloc[called].tolist()]
+    feature_lengths = np.fromiter(
+        map(len, feature_lists), dtype=np.int64, count=len(feature_lists)
+    )
+    umi_lengths = np.fromiter(map(len, umi_lists), dtype=np.int64, count=len(umi_lists))
     mismatched = called[
         (feature_lengths != counts[called]) | (umi_lengths != counts[called])
     ]
@@ -890,9 +906,16 @@ def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
         )
     rows = np.repeat(called, counts[called]).astype(np.int64)
     if len(rows):
-        features = feature_lists.explode().str.strip().to_numpy(dtype=object)
+        features = np.asarray(
+            [piece.strip() for pieces in feature_lists for piece in pieces],
+            dtype=object,
+        )
         umi_values = pd.to_numeric(
-            umi_lists.explode().str.strip(), errors="coerce"
+            pd.Series(
+                [piece.strip() for pieces in umi_lists for piece in pieces],
+                dtype=object,
+            ),
+            errors="coerce",
         ).to_numpy(dtype=np.float64)
     else:
         features = np.empty(0, dtype=object)

@@ -27,8 +27,14 @@ from cytearc.perturbation.labels import (
 from cytearc.storage.artifacts import inspect_artifact
 from cytearc.storage.selections import read_stored_selection_indices
 from tests.perturbation_helpers import record_cell_reads, write_screen
-from tests.memory_helpers import check_budget
-from tests.storage_helpers import copy_store, open_store, written
+from cytearc.storage.validation_scope import validation_scope
+from tests.memory_helpers import ZARR_READS, audited, check_budget, hold_finished_reads
+from tests.storage_helpers import (
+    copy_store,
+    open_store,
+    rechunk_feature_tables,
+    written,
+)
 
 # Guides CRISPR0 and CRISPR1 target GENE_A, CRISPR2 targets GENE_B, and
 # CRISPR3 and CRISPR4 are controls. Every count of 20 is called at min_umi=10.
@@ -513,7 +519,11 @@ def test_the_memory_estimate_bounds_the_labels_peak(policy) -> None:
 
 @pytest.fixture(scope="module")
 def wide_calls(tmp_path_factory) -> SimpleNamespace:
-    """4,000 cells of one guide each, and 20 cells of 40 guides of 30 genes."""
+    """4,000 cells of one guide each, and 20 cells of 40 guides of 30 genes.
+
+    The feature tables are stored in chunks of their rows, so that the
+    labels' own steps, not a chunk of 100,000 targets, set their budget.
+    """
     n_cells, n_guides = 4_000, 64
     rng = np.random.default_rng(11)
     guides = np.zeros((n_cells, n_guides), dtype=np.uint16)
@@ -522,13 +532,18 @@ def wide_calls(tmp_path_factory) -> SimpleNamespace:
         guides[cell, rng.choice(n_guides, 40, replace=False)] = 20
     targets = [f"GENE{index // 2}" for index in range(n_guides - 4)]
     path = tmp_path_factory.mktemp("wide_labels") / "store.zarr"
-    store = write_screen(
+    write_screen(
         path,
         rng.poisson(2.0, size=(n_cells, 3)) + 1,
         guides,
         targets=targets + ["Non-Targeting"] * 4,
     )
-    return SimpleNamespace(path=path, calls=_calls(store))
+    rechunk_feature_tables(path)
+    return SimpleNamespace(path=path, calls=_calls(open_store(path)))
+
+
+# The most times its traced peak that the budget of labelling may be.
+_LABEL_AT_MOST = 2.5
 
 
 @pytest.mark.slow
@@ -546,9 +561,22 @@ def test_labelling_holds_no_more_than_the_budget_it_names(
             invalidate_cache=True,
         )
 
-    # One refusal names the budget that runs, which holds the whole call.
-    _, refusals, ref = check_budget(path, label)
-    assert len(refusals) == 1
-    assert refusals[0].startswith("Labelling 4000 cells holds about")
+    # Each refusal names the step that it refused, and the budget that runs
+    # holds the whole call, by no more than a few times its traced peak.
+    budget, refusals, ref = check_budget(
+        path, label, at_most=_LABEL_AT_MOST, allowance=1 << 20, max_refusals=100
+    )
+    assert 1 <= len(refusals) <= 9
+    assert all(
+        refusal.startswith("Labelling 4000 cells holds about") for refusal in refusals
+    )
     loaded = open_store(path).perturbation.load_labels(ref)
     assert loaded.cells["n_targets"].max() > 20
+    # From each charge to the next, labelling holds no more than its ledger
+    # planned, with each read's work held until the next read ends.
+    store = open_store(path, mem_budget=budget)
+    with validation_scope():
+        label(store)
+        with hold_finished_reads(*ZARR_READS):
+            _ref, overruns = audited(lambda: label(store))
+    assert overruns == []

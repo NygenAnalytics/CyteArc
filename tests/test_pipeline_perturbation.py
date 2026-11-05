@@ -31,10 +31,6 @@ from cytearc import (
 from cytearc.datastore._pipeline import summaries
 from cytearc.datastore._pipeline.executor import RecipePlan
 from cytearc.datastore._pipeline.recipes.common import require_labeled_cells
-from cytearc.datastore._operations.perturbation_guides import (
-    _call_file_check_bytes,
-    _guide_id_check_bytes,
-)
 from cytearc.datastore._pipeline.recipes.perturbation import (
     _check_call_file,
     _check_call_file_cells,
@@ -48,12 +44,20 @@ from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.metadata.membership import UnmeasuredCellsError, membership_attributes
 from cytearc.perturbation import PerturbationAssociations
 from cytearc.perturbation.labels import guide_targets
-from cytearc.readers.cellranger import protospacer_calls_size
+from cytearc.readers.cellranger import PROTOSPACER_SCAN_BYTES
 from cytearc.storage.artifacts import artifact_group
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.perturbation_helpers import record_cell_reads
-from tests.memory_helpers import traced_peak
+from tests.memory_helpers import (
+    ZARR_READS,
+    audited,
+    budget_that_runs,
+    hold_finished_reads,
+    named_budget,
+)
 from tests.storage_helpers import (
     insert_nullable_cell_column,
+    rechunk_feature_tables,
     write_count_store,
     written,
 )
@@ -1357,61 +1361,64 @@ def test_a_call_file_that_cannot_label_the_runs_cells_is_refused(
     assert plan.config["stages"]["guide_calling"]["barcode_prefix"] == "s1__"
 
 
+def _check_every_cell(store: DataStore, path: Path) -> None:
+    """Check a call file against every cell of ``store``, as the recipe checks its input cells."""
+    cell_ids, ledger = _check_call_file_cells(
+        store, CellSource(column="I", selection=None), None
+    )
+    _check_call_file(
+        ledger, store, store._get_assay("CRISPR"), str(path), cell_ids, None
+    )
+
+
 def test_the_call_file_is_read_before_the_run_within_the_memory_budget(
     screen, tmp_path
 ) -> None:
     location = tmp_path / "screen.zarr"
     shutil.copytree(screen, location)
+    # Feature tables in chunks of their rows, so that the check's own steps,
+    # not a chunk of 100,000 guide IDs, set the budget.
+    rechunk_feature_tables(location)
     path = _call_file(tmp_path / "calls.csv")
-    guide = _open(location)._get_assay("CRISPR")
-    ids = np.asarray([f"cell{cell}" for cell in range(N_CELLS)])
-    needed = _call_file_check_bytes(
-        protospacer_calls_size(path),
-        n_cells=N_CELLS,
-        guide_ids=np.asarray(guide.feats.fetch_all("ids")).astype(str),
-        id_array=_open(location).cells._get_array("ids"),
-        prefix_length=0,
+    store = _open(location)
+    budget, refusals, _result, peak = budget_that_runs(
+        store, lambda opened: _check_every_cell(opened, path), max_refusals=100
     )
-    small = _open(location, mem_budget=needed - 1)
+    small = _open(location, mem_budget=budget - 1)
     before = written(small)
 
-    # The read holds the parsed file beside the IDs of the run's cells.
-    with pytest.raises(
-        MemoryError,
-        match=f"^Checking the call file against the run's {N_CELLS} cells holds about "
-        f"{needed} bytes, more than the memory budget of {needed - 1} bytes. Raise "
-        f"mem_budget to at least {needed} bytes.$",
-    ):
+    # A byte less is refused before the run, naming the same budget, and the
+    # store is left as it was.
+    with pytest.raises(MemoryBudgetError) as refused:
         small.pipeline.perturbation(labels=LABELS, guide_calling={"path": path}, **HEAD)
-
-    assert written(small) == before
-    store = _open(location, mem_budget=needed)
-    plan = _resolve(store, guide_calling={"path": path}, **HEAD)
-    assert plan.config["stages"]["guide_calling"] == {"path": str(path)}
-    # The budget bounds what the check holds beside the cells' IDs.
-    _, peak = traced_peak(
-        lambda: _check_call_file(
-            store, store._get_assay("CRISPR"), str(path), ids, None
-        ),
-        needed,
+    assert named_budget(refused.value) == budget
+    assert str(refused.value).startswith(
+        f"Checking the call file against the run's {N_CELLS} cells holds about "
+        f"{budget} bytes for "
     )
-    assert peak <= needed
-
-
-def test_the_guide_id_check_refuses_ids_without_stored_chunks() -> None:
-    # The check counts the read from the stored array's chunks, so IDs held in
-    # memory, with no chunks, are refused rather than costed as nothing.
-    with pytest.raises(ValueError, match="guide assay's IDs are not stored in chunks"):
-        _guide_id_check_bytes(
-            np.asarray(["g1", "g2"]), n_cells=1, id_array=np.asarray(["c1"])
-        )
+    assert written(small) == before
+    plan = _resolve(
+        _open(location, mem_budget=budget), guide_calling={"path": path}, **HEAD
+    )
+    assert plan.config["stages"]["guide_calling"] == {"path": str(path)}
+    # Each refusal names the step that it refused, and the budget bounds what
+    # the check holds, by no more than a few times beside the fixed bound of
+    # the scan that counts the file's rows.
+    assert 2 <= len(refusals) <= 7
+    assert all(refusal.startswith("Checking the call file") for refusal in refusals)
+    assert peak is not None
+    assert peak <= budget <= 3 * peak + (1 << 20) + PROTOSPACER_SCAN_BYTES
+    store.memoryBytes = budget
+    _check_every_cell(store, path)
+    with hold_finished_reads(*ZARR_READS):
+        _result, overruns = audited(lambda: _check_every_cell(store, path))
+    assert overruns == []
 
 
 def test_the_call_file_check_counts_the_read_of_the_guide_ids_before_it(
     tmp_path, monkeypatch
 ) -> None:
-    from cytearc.metadata.table import MetaData
-    from tests.memory_helpers import budget_that_runs, named_budget
+    from cytearc.metadata import rows as metadata_rows
 
     # Forty cells and ten guides whose IDs have 60 characters: a feature
     # column is stored in chunks of 100,000 rows, so reading the IDs decodes
@@ -1436,38 +1443,39 @@ def test_the_call_file_check_counts_the_read_of_the_guide_ids_before_it(
             "num_umis": 20,
         }
     ).to_csv(path, index=False)
-    ids = np.asarray([f"cell{cell}" for cell in range(n_cells)])
     reads: list[str] = []
-    fetch_all = MetaData.fetch_all
+    read_rows = metadata_rows.read_array_rows_chunkwise
 
-    def counted(table, column):
-        reads.append(column)
-        return fetch_all(table, column)
+    def counted(array, rows):
+        reads.append(str(array.path))
+        return read_rows(array, rows)
 
-    monkeypatch.setattr(MetaData, "fetch_all", counted)
-
-    def check(store: DataStore) -> None:
-        _check_call_file(store, store._get_assay("CRISPR"), str(path), ids, None)
-
+    monkeypatch.setattr(metadata_rows, "read_array_rows_chunkwise", counted)
     store = _open(location)
-    budget, refusals, _result, peak = budget_that_runs(store, check)
+    budget, refusals, _result, peak = budget_that_runs(
+        store, lambda opened: _check_every_cell(opened, path), max_refusals=100
+    )
 
     # The budget holds the read of the IDs' chunk, the largest read.
     assert 24_000_000 < peak <= budget
-    # The read of the IDs is refused before it reads them, then the read of
-    # the file beside them names more.
-    assert len(refusals) == 2, refusals
-    reading = named_budget(MemoryError(refusals[0]))
-    assert reading > 24_000_000
+    # The read of the IDs is refused before it reads them, naming a budget
+    # that reads them; the read of the file beside them then names more.
+    (reading,) = [
+        named_budget(MemoryError(refusal))
+        for refusal in refusals
+        if " for the guide IDs, " in refusal
+    ]
+    assert 24_000_000 < reading < budget
     store.memoryBytes = reading - 1
     reads.clear()
-    with pytest.raises(MemoryError, match=f"holds about {reading} bytes"):
-        check(store)
-    assert reads == []
+    with pytest.raises(MemoryError, match=f"holds about {reading} bytes for the guide"):
+        _check_every_cell(store, path)
+    assert not any(read.endswith("/ids") and "CRISPR" in read for read in reads)
     store.memoryBytes = reading
-    with pytest.raises(MemoryError, match=f"holds about {budget} bytes"):
-        check(store)
-    assert reads == ["ids"]
+    with pytest.raises(MemoryError) as later:
+        _check_every_cell(store, path)
+    assert named_budget(later.value) > reading
+    assert any(read.endswith("/ids") and "CRISPR" in read for read in reads)
 
 
 def test_a_screen_without_targets_besides_controls_has_none_to_cluster() -> None:

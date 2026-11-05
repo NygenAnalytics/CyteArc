@@ -22,6 +22,7 @@ from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.compute import process_thread_limit
 from ...utils.logging import logger
+from ...utils.memory_budget import MemoryLedger
 from ...utils.numba import numba_threads
 from .perturbation_store import (
     _BAND_BYTES,
@@ -35,6 +36,7 @@ from .perturbation_store import (
     _plan_cells,
     _positions_in,
     _require_budget,
+    _resident_ledger,
     _require_cell_column,
     _require_ref,
     _status_labels,
@@ -235,6 +237,9 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         is_control, n_missing = self._signature_controls(labels, cell_index)
         cell_samples = _cell_samples(
             self,
+            MemoryLedger(
+                None, "Numbering the cells' samples", codec_threads=self.nthreads
+            ),
             sample_column,
             cell_index,
             reason="Each cell takes its neighbors from the control cells of its "
@@ -391,10 +396,10 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         offset = 0
         _, control_blocks = _count_blocks(
             self,
+            _resident_ledger(self, holding),
             assay,
             feature_index,
             cell_index[controls],
-            resident_bytes=holding,
             scratch_bytes_per_row=scratch,
         )
         for block in control_blocks:
@@ -414,10 +419,10 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             output = create_numeric_array(group, "values", spec)
             _, cell_blocks = _count_blocks(
                 self,
+                _resident_ledger(self, holding + writer_bytes),
                 assay,
                 feature_index,
                 cell_index,
-                resident_bytes=holding + writer_bytes,
                 scratch_bytes_per_row=scratch,
             )
 
@@ -748,6 +753,9 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         is_control = read_array(stored, "is_control").astype(bool)
         cell_splits = _cell_samples(
             self,
+            MemoryLedger(
+                None, "Numbering the cells' samples", codec_threads=self.nthreads
+            ),
             split_column,
             cell_index,
             reason="Each split is classified apart, so every cell needs one",
@@ -857,10 +865,10 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         needed = max(
             finishing,
             _band_bytes(
+                _resident_ledger(self, resident),
                 assay,
                 np.arange(1),
                 (member_cells,),
-                held_bytes=resident,
                 per_feature=per_feature,
                 scratch_per_feature=8,
             ),
@@ -882,11 +890,10 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         ]
         de_bands = (
             _count_bands(
+                _resident_ledger(self, resident),
                 assay,
                 np.arange(n_features),
                 (member_cells,),
-                budget=self.memoryBytes,
-                held_bytes=resident,
                 per_feature=per_feature,
                 scratch_per_feature=8,
                 most=max(1, _BAND_BYTES // (8 * max(n_members, 1))),
@@ -914,10 +921,10 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             out = np.empty((len(features), len(cells)))
             _, blocks = _count_blocks(
                 self,
+                _resident_ledger(self, held),
                 assay,
                 features,
                 cell_index[members[cells]],
-                resident_bytes=held,
                 scratch_bytes_per_row=8 * len(features),
             )
             offset = 0
@@ -1055,11 +1062,10 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 # Each step holds its normalized values and signatures, 16
                 # bytes per cell of a gene, beside its counts' stream.
                 steps = _count_bands(
+                    _resident_ledger(self, held),
                     assay,
                     outside,
                     (cell_index[members[cells]],),
-                    budget=self.memoryBytes,
-                    held_bytes=held,
                     per_feature=16 * len(cells),
                     scratch_per_feature=8,
                     most=max(1, _BAND_BYTES // (8 * len(cells))),
@@ -1222,8 +1228,25 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         split_names = np.asarray(_stored_samples(group, "split_names"), dtype=object)
         cells = pd.DataFrame(
             {
-                "mixscape_class": _cell_values(self, classes).astype(str),
-                "global_class": _cell_values(self, classes, "global_class").astype(str),
+                "mixscape_class": _cell_values(
+                    self,
+                    MemoryLedger(
+                        self.memoryBytes,
+                        f"Reading the {classes.kind} artifact",
+                        codec_threads=self.nthreads,
+                    ),
+                    classes,
+                ).astype(str),
+                "global_class": _cell_values(
+                    self,
+                    MemoryLedger(
+                        self.memoryBytes,
+                        f"Reading the {classes.kind} artifact",
+                        codec_threads=self.nthreads,
+                    ),
+                    classes,
+                    "global_class",
+                ).astype(str),
                 "posterior": read_array(group, "posterior"),
                 "score": read_array(group, "score"),
                 "split": split_names[read_array(group, "splits")],

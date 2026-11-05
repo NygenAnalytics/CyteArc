@@ -16,6 +16,7 @@ These functions resolve the target of each guide and turn calls into the arrays
 of a ``perturbation_labels`` artifact. They never touch storage.
 """
 
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -24,6 +25,7 @@ import pandas as pd
 
 from cytearc.perturbation.guide_calls import MULTIPLE, NEGATIVE
 from cytearc.utils.arguments import optional_name_argument
+from cytearc.utils.memory_budget import MemoryLedger
 
 __all__ = [
     "CONTROL",
@@ -287,6 +289,7 @@ def perturbation_label_arrays(
     targets: GuideTargets,
     *,
     policy: str,
+    ledger: MemoryLedger | None = None,
 ) -> PerturbationLabelArrays:
     """Label each cell by the genes its called guides target.
 
@@ -297,6 +300,9 @@ def perturbation_label_arrays(
         policy: ``"single"`` labels a cell whose guides target several genes
             ``"Multiple"``; ``"combinations"`` joins the genes, sorted, with
             ``"+"``.
+        ledger: The caller's memory ledger, which holds the codes: labelling
+            charges it what :func:`label_memory_bytes` states before it
+            allocates, and the labels stay charged. None charges nothing.
 
     Returns:
         The label, control flag, number of targets and target codes of each
@@ -304,8 +310,20 @@ def perturbation_label_arrays(
 
     Raises:
         ValueError: If a called guide has no target.
+        MemoryBudgetError: If labelling would pass the ledger's budget.
     """
     codes = np.asarray(guide_codes)
+    if ledger is not None:
+        n_cells, width = (int(size) for size in codes.shape)
+        ledger.peak(
+            f"the labels of {n_cells} cells",
+            label_memory_bytes(
+                n_cells,
+                width,
+                label_length=longest_label(targets, width, policy=policy),
+                joined=policy == "combinations",
+            ),
+        )
     guide_target = np.asarray(targets.guide_codes, dtype=np.int32)
     guide_control = np.zeros(len(guide_target), dtype=bool)
     targeted = guide_target >= 0
@@ -353,11 +371,33 @@ def perturbation_label_arrays(
         for row in several:
             genes = target_codes[row]
             values[row] = _SEPARATOR.join(targets.names[genes[genes >= 0]])
-    return PerturbationLabelArrays(
+    arrays = PerturbationLabelArrays(
         values=values,
         is_control=is_control,
         n_targets=n_targets,
         target_codes=target_codes,
+    )
+    if ledger is not None:
+        ledger.hold(f"the labels of {len(codes)} cells", _label_array_bytes(arrays))
+    return arrays
+
+
+def _label_array_bytes(arrays: PerturbationLabelArrays) -> int:
+    """Return the bytes that the label arrays hold: their arrays, and the joined labels' own strings.
+
+    A label of one gene, ``"control"``, ``"Negative"`` or ``"Multiple"`` refers
+    to a text that every such cell shares; a joined label of several genes is
+    a string of its own.
+    """
+    joined = [
+        value for value in arrays.values[arrays.n_targets > 1] if value is not MULTIPLE
+    ]
+    return (
+        arrays.values.nbytes
+        + arrays.is_control.nbytes
+        + arrays.n_targets.nbytes
+        + arrays.target_codes.nbytes
+        + sum(map(sys.getsizeof, joined))
     )
 
 

@@ -17,6 +17,7 @@ from cytearc.perturbation.guide_calls import (
     validated_guide_ids,
 )
 from cytearc.readers import cellranger
+from tests.memory_helpers import cost_bound, traced_peak
 from tests.perturbation_helpers import use_python_kernels
 from cytearc.readers.cellranger import protospacer_calls_size, read_protospacer_calls
 
@@ -485,3 +486,269 @@ def test_call_file_frames_round_trip_through_pandas(tmp_path) -> None:
     assert (
         np.bincount(calls.rows, minlength=50).tolist() == frame["num_features"].tolist()
     )
+
+
+# The costs that only guide calling's steps build, each bounded from both
+# sides by what it holds.
+
+
+def _padded_calls(n_cells: int, width: int, n_guides: int, seed: int = 0):
+    """Calls of up to ``width`` distinct guides in each of ``n_cells`` cells."""
+    rng = np.random.default_rng(seed)
+    per_cell = rng.integers(0, width + 1, n_cells)
+    per_cell[0] = width
+    cells = np.repeat(np.arange(n_cells, dtype=np.int64), per_cell)
+    rank = np.arange(len(cells)) - np.repeat(np.cumsum(per_cell) - per_cell, per_cell)
+    codes = (rank + rng.integers(0, n_guides, n_cells)[cells]) % n_guides
+    umis = rng.integers(1, 1_000, len(cells)).astype(np.uint32)
+    return cells, codes.astype(np.int64), umis
+
+
+@pytest.mark.parametrize(
+    ("n_cells", "width", "n_guides"),
+    [(4_000, 3, 80), (100_000, 4, 2_000), (100_000, 1, 2_000), (50_000, 23, 200)],
+)
+def test_padding_calls_holds_what_its_charge_plans(n_cells, width, n_guides) -> None:
+    from cytearc.datastore._operations.perturbation_guides import _padding_bytes
+
+    cells, codes, umis = _padded_calls(n_cells, width, n_guides)
+    guide_ids = np.asarray([f"guide{index}" for index in range(n_guides)], dtype=object)
+    guide_call_arrays(cells[:3], codes[:3], umis[:3], n_cells=3, guide_ids=guide_ids)
+    arrays, _peak = cost_bound(
+        _padding_bytes(n_cells, width, n_guides),
+        lambda: guide_call_arrays(
+            cells, codes, umis, n_cells=n_cells, guide_ids=guide_ids
+        ),
+        slack=1.75,
+        allowance=64 * 1024,
+    )
+    assert arrays.guide_codes.shape == (n_cells, width)
+
+
+@pytest.mark.parametrize("fit", ["poisson_gaussian", "gaussian"])
+@pytest.mark.parametrize(
+    ("n_cells", "n_guides", "n_samples"),
+    [(4_000, 80, 2), (20_000, 2_000, 1), (20_000, 2_000, 4)],
+)
+def test_fitting_guides_holds_what_its_charges_plan(
+    fit, n_cells, n_guides, n_samples
+) -> None:
+    from cytearc.datastore._operations.perturbation_guides import (
+        _fitted_bytes,
+        _fitting_bytes,
+    )
+    from cytearc.perturbation.histograms import guide_count_histograms
+    from cytearc.perturbation.mixtures import fit_gaussian, fit_poisson_gaussian
+
+    rng = np.random.default_rng(3)
+    counts = rng.poisson(0.3, size=(n_cells, n_guides)).astype(np.uint32)
+    counts[np.arange(n_cells), rng.integers(0, n_guides, n_cells)] += rng.integers(
+        30, 300, n_cells
+    ).astype(np.uint32)
+    codes = (np.arange(n_cells) % n_samples).astype(np.int64)
+    histograms = guide_count_histograms(
+        [counts], codes, n_samples=n_samples, n_guides=n_guides
+    )
+    fitting = fit_poisson_gaussian if fit == "poisson_gaussian" else fit_gaussian
+    fitting(histograms)
+    n_entries = n_samples * n_guides
+    cost_bound(
+        _fitting_bytes(n_entries),
+        lambda: fitting(histograms),
+        slack=2.2,
+        allowance=64 * 1024,
+    )
+    # The fits kept: their status, threshold, parameters and iterations.
+    tracemalloc.start()
+    try:
+        start = tracemalloc.get_traced_memory()[0]
+        fits = fitting(histograms)
+        kept = tracemalloc.get_traced_memory()[0] - start
+    finally:
+        tracemalloc.stop()
+    assert fits.threshold.shape == (n_samples, n_guides)
+    assert kept <= _fitted_bytes(fit, n_entries) <= 1.5 * kept + 16 * 1024
+
+
+@pytest.mark.parametrize(
+    ("n_samples", "n_guides", "per_guide"),
+    [(2, 80, 20), (1, 2_000, 300), (4, 2_000, 50), (2, 200, 3_000)],
+)
+def test_the_tables_of_saved_fits_hold_what_their_charge_plans(
+    n_samples, n_guides, per_guide
+) -> None:
+    from cytearc.datastore._operations.perturbation_guides import (
+        _TABLE_BYTES_PER_COUNT,
+        _TABLE_BYTES_PER_FIT,
+    )
+    from cytearc.perturbation.guide_thresholds import (
+        METHOD_PARAMETERS,
+        guide_threshold_frames,
+    )
+
+    rng = np.random.default_rng(4)
+    n_entries = n_samples * n_guides
+    offsets = np.arange(n_entries + 1, dtype=np.int64) * per_guide
+    n_counts = int(offsets[-1])
+    grid = (n_samples, n_guides)
+    arguments = {
+        "samples": [f"lane{sample}" for sample in range(n_samples)],
+        "guides": np.asarray([f"guide{guide}" for guide in range(n_guides)]),
+        "n_cells": np.full(n_samples, 100_000, dtype=np.int64),
+        "status": np.zeros(grid, dtype=np.int8),
+        "threshold": np.ones(grid, dtype=np.uint32),
+        "n_umi_cells": np.full(grid, 10, dtype=np.int64),
+        "max_umi": np.full(grid, per_guide, dtype=np.uint32),
+        "iterations": np.ones(grid, dtype=np.int32),
+        "parameters": {name: np.zeros(grid) for name in METHOD_PARAMETERS["gaussian"]},
+        "histogram_offsets": offsets,
+        "histogram_counts": np.tile(
+            np.arange(1, per_guide + 1, dtype=np.uint32), n_entries
+        ),
+        "histogram_cells": rng.integers(1, 5, n_counts).astype(np.int64),
+        "min_umi": 1,
+    }
+    guide_threshold_frames(**arguments)
+    cost_bound(
+        _TABLE_BYTES_PER_COUNT * n_counts + _TABLE_BYTES_PER_FIT * n_entries,
+        lambda: guide_threshold_frames(**arguments),
+        slack=1.4,
+        allowance=64 * 1024,
+    )
+
+
+def _text_slack() -> float:
+    """How far the tables' charge may pass their peak: pandas keeps their text as Python strings, as charged, without pyarrow, and in Arrow's buffers, about half as large, with it."""
+    storage = getattr(pd.Series(["ab"]).dtype, "storage", "python")
+    return 1.4 if storage == "python" else 2.3
+
+
+@pytest.mark.parametrize(
+    ("n_cells", "width", "n_guides"),
+    [(4_000, 80, 80), (100_000, 3, 2_000), (50_000, 20, 200)],
+)
+def test_the_tables_of_saved_calls_and_labels_hold_what_their_charge_plans(
+    n_cells, width, n_guides
+) -> None:
+    from cytearc.datastore._operations.perturbation_guides import _frame_bytes
+    from cytearc.perturbation.labels import perturbation_label_frames
+
+    cells, codes, umis = _padded_calls(n_cells, width, n_guides, seed=5)
+    guide_ids = np.asarray([f"GUIDE{guide:04d}_T" for guide in range(n_guides)])
+    arrays = guide_call_arrays(
+        cells, codes, umis, n_cells=n_cells, guide_ids=guide_ids.astype(object)
+    )
+    ids = np.asarray([f"s1__ACGTACGTACGTACGT{cell:08d}-1" for cell in range(n_cells)])
+    # The arrays as a guide_calls artifact stores them, labels as text.
+    stored = {
+        "values": arrays.values.astype(str),
+        "n_guides": arrays.n_guides,
+        "top_guide": guide_ids[np.maximum(arrays.guide_codes[:, 0], 0)],
+        "top_umi": arrays.guide_umis[:, 0].copy(),
+        "top_fraction": np.linspace(0, 1, n_cells),
+        "total_umi": arrays.guide_umis.sum(axis=1).astype(np.uint64),
+        "guide_codes": arrays.guide_codes,
+        "guide_umis": arrays.guide_umis,
+    }
+    guide_calls_frames(
+        ids[:3], **{k: v[:3] for k, v in stored.items()}, guide_ids=guide_ids
+    )
+    cost_bound(
+        _frame_bytes(ids, stored, entries="guide_codes"),
+        lambda: guide_calls_frames(ids, **stored, guide_ids=guide_ids),
+        slack=_text_slack(),
+        allowance=64 * 1024,
+    )
+    labels = {
+        "values": stored["values"],
+        "guide_label": stored["values"],
+        "is_control": arrays.n_guides == 0,
+        "n_targets": arrays.n_guides,
+        "target_codes": arrays.guide_codes,
+    }
+    targets = {
+        "target_names": np.asarray([f"GENE{guide}" for guide in range(n_guides)]),
+        "target_is_control": np.zeros(n_guides, dtype=bool),
+        "guide_ids": guide_ids,
+        "guide_target_codes": np.arange(n_guides, dtype=np.int32),
+    }
+    perturbation_label_frames(
+        ids[:3], **{k: v[:3] for k, v in labels.items()}, **targets
+    )
+    cost_bound(
+        _frame_bytes(ids, labels, entries="target_codes"),
+        lambda: perturbation_label_frames(ids, **labels, **targets),
+        slack=_text_slack(),
+        allowance=64 * 1024,
+    )
+
+
+@pytest.mark.parametrize(
+    ("n_guides", "width"), [(2_000, 20), (20_000, 40), (100_000, 12)]
+)
+def test_checking_guide_ids_holds_what_its_charges_plan(n_guides, width) -> None:
+    from cytearc.datastore._operations.perturbation_guides import (
+        _GUIDE_CHECK_BYTES_PER_GUIDE,
+        _GUIDE_CHECK_COPIES,
+    )
+    from cytearc.utils.memory_budget import fixed_text_bytes
+
+    ids = np.asarray(
+        [f"g{index:0{width - 1}d}" for index in range(n_guides)], dtype=object
+    )
+    validated_guide_ids(ids[:5])
+    cost_bound(
+        _GUIDE_CHECK_BYTES_PER_GUIDE * n_guides
+        + _GUIDE_CHECK_COPIES * fixed_text_bytes(n_guides, width),
+        lambda: validated_guide_ids(ids),
+        slack=1.4,
+        allowance=64 * 1024,
+    )
+
+
+@pytest.mark.parametrize("gzipped", [False, True])
+@pytest.mark.parametrize("rows", ["typical", "many calls", "separators only"])
+def test_the_size_scan_holds_no_more_than_its_bound(tmp_path, rows, gzipped) -> None:
+    from cytearc.readers.cellranger import PROTOSPACER_SCAN_BYTES
+
+    lines = {
+        "typical": [
+            f"AAACCCAAGT{index:06d}-1,1,guide{index % 80},{index % 97}"
+            for index in range(20_000)
+        ],
+        "many calls": [
+            f"A{index:06d},30,"
+            + "|".join("g" * 3 for _ in range(30))
+            + ","
+            + "|".join("1" for _ in range(30))
+            for index in range(5_000)
+        ],
+        # A chunk of nothing but line ends and separators, the scan's worst.
+        "separators only": ["|" * 15 for _ in range(40_000)],
+    }[rows]
+    text = (
+        "cell_barcode,num_features,feature_call,num_umis\n" + "\n".join(lines) + "\n"
+    ).encode()
+    path = tmp_path / "calls.csv"
+    path.write_bytes(gzip.compress(text) if gzipped else text)
+    protospacer_calls_size(path)
+    _size, peak = traced_peak(
+        lambda: protospacer_calls_size(path), PROTOSPACER_SCAN_BYTES
+    )
+    assert peak <= PROTOSPACER_SCAN_BYTES
+    if rows == "separators only" and gzipped:
+        # The bound is not loose for the worst file, whose decompression
+        # fills the gzip reader's buffers.
+        assert PROTOSPACER_SCAN_BYTES <= 1.6 * peak
+
+
+def test_calls_are_stripped_of_the_spaces_around_each_guide_and_count(tmp_path) -> None:
+    path = tmp_path / "calls.csv"
+    path.write_text(
+        "cell_barcode,num_features,feature_call,num_umis\n"
+        " AAAC-1 , 2 , g1 | g2 , 3 | 40 \n"
+    )
+    calls = read_protospacer_calls(path)
+    assert calls.barcodes.tolist() == ["AAAC-1"]
+    assert calls.features.tolist() == ["g1", "g2"]
+    assert calls.umis.tolist() == [3, 40]
