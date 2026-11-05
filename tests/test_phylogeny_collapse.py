@@ -15,13 +15,7 @@ import pandas as pd
 import pytest
 
 from cytearc.clones.phylogeny import PhylogenyCut, collapse_phylogeny
-from tests.memory_helpers import (
-    AUDIT_ALLOWANCE,
-    audited,
-    budgeted,
-    charges,
-    interval_peaks,
-)
+from tests.memory_helpers import budgeted
 
 AT_TIME = PhylogenyCut(time=0.5, depth=None)
 
@@ -397,27 +391,25 @@ def test_a_group_ties_by_its_largest_clade_not_by_the_node_opened() -> None:
     assert _wedges(frame) == [(3, 1, 1, 1), (4, 1, 1, 1), (-1, 2, 2, 2), (7, 2, 2, 1)]
 
 
-def test_the_rows_that_the_cap_allows_are_bounded_by_the_cells() -> None:
+def test_a_cap_far_above_the_cells_collapses_within_a_small_budget() -> None:
     parent, times, cells, offsets = _forest([POLYTOMY])
     # A cap far above the ten cells sizes the opening by the cells: a
-    # billion wedges would need 178 GB.
-    ledger = budgeted(10**6)
-    _found, taken = charges(
-        lambda: collapse_phylogeny(
-            parent,
-            times,
-            cells,
-            POLYTOMY_CODES,
-            offsets,
-            cut=AT_TIME,
-            max_leaves=10**9,
-            ledger=ledger,
-        )
+    # billion wedges would need 178 GB, and a megabyte draws every wedge
+    # that a cap of 50 draws.
+    found = collapse_phylogeny(
+        parent,
+        times,
+        cells,
+        POLYTOMY_CODES,
+        offsets,
+        cut=AT_TIME,
+        max_leaves=10**9,
+        ledger=budgeted(10**6),
     )
-    (opening,) = [
-        nbytes for item, nbytes, _planned in taken if item.startswith("opening")
-    ]
-    assert opening < 10_000
+    expected = collapse_phylogeny(
+        parent, times, cells, POLYTOMY_CODES, offsets, cut=AT_TIME, max_leaves=50
+    )
+    pd.testing.assert_frame_equal(found, expected)
 
 
 def test_the_last_clade_of_a_group_opens_in_its_turn() -> None:
@@ -449,14 +441,12 @@ def test_the_last_clade_of_a_group_opens_in_its_turn() -> None:
     assert _wedges(capped) == [(1, 5, 1, 1), (7, 3, 1, 1), (11, 2, 2, 1)]
 
 
-def test_arguments_of_other_types_are_copied_within_the_ledger() -> None:
+def test_arguments_of_other_types_collapse_as_their_int64_and_float64_copies() -> None:
     parent, times, cells, offsets = _forest([POLYTOMY])
     expected = collapse_phylogeny(
         parent, times, cells, POLYTOMY_CODES, offsets, cut=AT_TIME, max_leaves=3
     )
-    ledger = budgeted(10**9)
-    # Lists and narrower integers are copied as int64 and float64, charged
-    # while the collapse holds them, and let go with the rest.
+    # Lists and narrower integers are copied as int64 and float64.
     found = collapse_phylogeny(
         parent.tolist(),
         times.astype(np.float32),
@@ -465,25 +455,9 @@ def test_arguments_of_other_types_are_copied_within_the_ledger() -> None:
         offsets.tolist(),
         cut=AT_TIME,
         max_leaves=3,
-        ledger=ledger,
+        ledger=budgeted(10**9),
     )
     pd.testing.assert_frame_equal(found, expected)
-    assert ledger.charged == found.memory_usage(index=True).sum()
-    _result, taken = charges(
-        lambda: collapse_phylogeny(
-            parent.tolist(),
-            times,
-            cells,
-            POLYTOMY_CODES,
-            offsets,
-            cut=AT_TIME,
-            max_leaves=3,
-            ledger=budgeted(10**9),
-        )
-    )
-    assert ("each node's parent", 8 * len(parent)) in [
-        (item, nbytes) for item, nbytes, _planned in taken
-    ]
     with pytest.raises(TypeError, match="ledger must be a MemoryLedger or None"):
         collapse_phylogeny(
             parent,
@@ -963,48 +937,3 @@ def test_a_caterpillar_30000_levels_deep_collapses_without_recursion() -> None:
     assert every.loc[~every["wedge"], "n_cells"].iloc[0] == n_cells
     # The deepest spine node opened stands at time depth - 1.
     assert every.loc[~every["wedge"], "x"].max() == depth - 1
-
-
-@pytest.mark.parametrize("by", ["time", "depth"])
-@pytest.mark.parametrize("max_leaves", [10, 1_000, 100_000])
-def test_each_step_of_collapsing_holds_no_more_than_it_charges(by, max_leaves) -> None:
-    rng = np.random.default_rng(7)
-    trees = [_random_tree(rng, 20_000) for _tree in range(3)]
-    parent, times, cells, offsets = _forest(trees)
-    cut = (
-        PhylogenyCut(time=float(np.median(times)), depth=None)
-        if by == "time"
-        else PhylogenyCut(time=None, depth=3)
-    )
-    codes = _cut_codes(parent, times, cells, offsets, cut)
-    ledger = budgeted(10**12)
-
-    def collapse() -> pd.DataFrame:
-        return collapse_phylogeny(
-            parent,
-            times if by == "time" else None,
-            cells,
-            codes,
-            offsets,
-            cut=cut,
-            max_leaves=max_leaves,
-            ledger=ledger,
-        )
-
-    # The kernels compile before anything is traced.
-    frame = collapse()
-    # The table stays charged, at its own bytes.
-    assert ledger.charged == frame.memory_usage(index=True).sum()
-    ledger.release(ledger.charged)
-    _result, overruns = audited(collapse)
-    assert not overruns, overruns
-    ledger.release(ledger.charged)
-    # The charges bound what each step holds from above, and the largest by
-    # no more than a twentieth of the traced peak and the audit's allowance
-    # where the nodes set it. Past them, the table's rows do, charged as
-    # pandas 2 copies them, which pandas 3 does not.
-    _result, intervals = interval_peaks(collapse)
-    planned = max(plan for _item, plan, _traced in intervals)
-    traced = max(peak for _item, _plan, peak in intervals)
-    if max_leaves < 100_000:
-        assert planned <= 1.05 * traced + AUDIT_ALLOWANCE

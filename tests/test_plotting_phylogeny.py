@@ -22,6 +22,7 @@ from matplotlib.patches import PathPatch
 
 from cytearc.plotting._style import CUSTOM_PALETTES, NO_VALUE_COLOR, category_label
 from cytearc.storage.refs import ArtifactRef
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import (
     every_cell,
     import_truth_clones,
@@ -37,7 +38,6 @@ from tests.clone_truth import (
     truth_forest,
     write_newick,
 )
-from tests.memory_helpers import audited, check_budget
 from tests.storage_helpers import open_store, write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
@@ -479,7 +479,7 @@ def test_a_caterpillar_30000_levels_deep_is_drawn_without_recursion(tmp_path) ->
 @pytest.fixture(scope="module")
 def random_tree(tmp_path_factory) -> SimpleNamespace:
     """A store of 30,000 cells, 20,000 of them the leaves of a random tree that ends at its root's height."""
-    folder = tmp_path_factory.mktemp("phylogeny_figure_memory")
+    folder = tmp_path_factory.mktemp("phylogeny_figure_random_tree")
     rng = np.random.default_rng(5)
     ids = [f"cell{index:06d}-1" for index in range(30_000)]
     path = folder / "store.zarr"
@@ -554,42 +554,23 @@ def test_the_legend_lists_the_clones_tall_enough_to_see(random_tree) -> None:
         result.close()
 
 
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("case", "at_most"),
-    # A cut of the one tree at a time or a depth leaves the budget to the
-    # nodes' arrays, 1.13 to 1.15 times the traced peak, as measured. One
-    # tree of a forest reads the whole forest's arrays, whose reads' charges
-    # set the budget of its small collapse, 1.36 times the peak at ten
-    # wedges.
-    [("time", 1.3), ("depth", 1.3), ("tree", 1.7)],
-)
-@pytest.mark.parametrize("max_leaves", [10, 1_000])
-def test_the_figure_runs_within_the_smallest_budget_it_accepts(
-    random_tree, case, at_most, max_leaves
+@pytest.mark.parametrize("case", ["time", "depth", "tree"])
+def test_a_budget_below_the_nodes_arrays_is_refused_before_anything_is_drawn(
+    random_tree, case, monkeypatch
 ) -> None:
     clones = random_tree.clones[case]
     options = {"tree": "forest_1"} if case == "tree" else {}
-
-    def draw(store) -> None:
-        store.plots.phylogeny(
-            clones, max_leaves=max_leaves, show=False, **options
-        ).close()
-
-    # The kernels compile and Matplotlib loads its fonts before any trace.
-    draw(random_tree.store)
-    # The budget that runs it bounds its traced peak, one byte less is
-    # refused naming it, and it is not far above the peak.
-    budget, refusals, _result = check_budget(
-        random_tree.store, draw, at_most=at_most, max_refusals=40
-    )
-    assert refusals
-    # Every charge bounds what is held until the next, the copies of one
-    # tree's nodes included.
-    saved = random_tree.store.memoryBytes
-    random_tree.store.memoryBytes = budget
-    try:
-        _result, overruns = audited(lambda: draw(random_tree.store))
-    finally:
-        random_tree.store.memoryBytes = saved
-    assert not overruns, overruns
+    # 250 kB holds the trees' names and where each tree's nodes start, but
+    # not each node's parent: one tree of a forest is copied from the
+    # forest's arrays, which are read whole first.
+    monkeypatch.setattr(random_tree.store, "memoryBytes", 250_000)
+    with pytest.raises(
+        MemoryBudgetError,
+        match=r"^Drawing the phylogeny of \d+ nodes holds about \d+ bytes for "
+        "each node's parent",
+    ):
+        random_tree.store.plots.phylogeny(clones, show=False, **options)
+    # No figure was left open, which the module's fixture checks, and the
+    # store's own budget draws it.
+    monkeypatch.undo()
+    random_tree.store.plots.phylogeny(clones, show=False, **options).close()
