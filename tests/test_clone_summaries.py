@@ -148,7 +148,9 @@ def _genotype_clones(store: DataStore, folder: Path) -> ArtifactRef:
     )
     counts = store.variants.import_counts(paths, cell_selection=every_cell(store))
     genotypes = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
-    return store.variants.genotype_clones(genotypes)
+    # One target marks each clone, which the exact rule links and the
+    # likelihood cannot tell from that target's error.
+    return store.variants.genotype_clones(genotypes, method="exact")
 
 
 def _allele_clones(store: DataStore, folder: Path) -> ArtifactRef:
@@ -420,7 +422,14 @@ def test_every_source_records_the_clone_writers_diagnostics(source) -> None:
             "cellsWithoutNeighbors",
             "edges",
         ],
-        "call_genotype_clones": ["sites", "mutantCells", "ambiguousCells"],
+        "call_genotype_clones": [
+            "sites",
+            "mutantCells",
+            "ambiguousCells",
+            "cellsInSmallClones",
+            "dropoutProbability",
+            "errorProbability",
+        ],
         "cut_phylogeny_clones": ["cellsBeforeCut"],
     }.get(str(status.operation), [])
     assert list(status.diagnostics) == [

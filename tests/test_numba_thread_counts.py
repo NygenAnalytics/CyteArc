@@ -219,6 +219,33 @@ def _marker_regression() -> tuple[str, str, Callable[[], object]]:
     )
 
 
+def _genotype_clones() -> tuple[str, str, Callable[[], object]]:
+    from cytearc.utils.memory_budget import MemoryLedger
+    from cytearc.variants.genotype_clones import likelihood_clones
+    from cytearc.variants.genotype_mixture import pack_mask
+
+    rng = np.random.default_rng(8)
+    carried = np.repeat(
+        np.eye(3, 12, dtype=bool) | np.eye(3, 12, 3, dtype=bool), 40, axis=0
+    )
+    calls = np.where(rng.random(carried.shape) < 0.9, carried, ~carried)
+    return (
+        "cytearc.variants.genotype_mixture",
+        "_call_sums",
+        lambda: likelihood_clones(
+            pack_mask(calls),
+            pack_mask(~calls),
+            12,
+            dropout_probability=None,
+            error_probability=None,
+            min_size=2,
+            min_posterior=0.6,
+            ledger=MemoryLedger(None, "Calling clones"),
+            nthreads=_REQUESTED,
+        ),
+    )
+
+
 _CASES = {
     "Harmony": _harmony,
     "Paris": _paris,
@@ -231,6 +258,7 @@ _CASES = {
     "WNN integration": _integration,
     "marker ranks": _marker_ranks,
     "marker regression": _marker_regression,
+    "genotype clones": _genotype_clones,
 }
 
 

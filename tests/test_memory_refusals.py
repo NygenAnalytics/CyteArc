@@ -35,7 +35,7 @@ CYTEARC_ROOT = Path(cytearc.__file__).parent
 PLAIN_MEMORY_ERRORS = {
     # Variant counts, genotypes and frequency clones, with the shared-neighbour
     # graph that frequency clones build.
-    "datastore/_operations/variants.py": 10,
+    "datastore/_operations/variants.py": 8,
     "neighbors/graph.py": 2,
     "readers/tapestri.py": 1,
     "variants/frequencies.py": 5,

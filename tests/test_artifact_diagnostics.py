@@ -271,7 +271,14 @@ _OWN_KEYS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
     "GenotypeCloneArguments": (
         CLONE_DIAGNOSTICS,
-        ("sites", "mutantCells", "ambiguousCells"),
+        (
+            "sites",
+            "mutantCells",
+            "ambiguousCells",
+            "cellsInSmallClones",
+            "dropoutProbability",
+            "errorProbability",
+        ),
     ),
     "ClonalExpansionArguments": (GROUPING_DIAGNOSTICS, ()),
     "CloneFateBiasArguments": (

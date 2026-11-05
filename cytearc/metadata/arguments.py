@@ -830,25 +830,44 @@ class GenotypeCloneArguments(OperationArguments):
         "sites",
         "mutantCells",
         "ambiguousCells",
+        "cellsInSmallClones",
+        "dropoutProbability",
+        "errorProbability",
     )
     call: ClassVar[str | None] = "ds.variants.genotype_clones"
 
     # The genotypes' cells, which the clones label.
     cell_selection: ArtifactRef = artifact_input()
     genotypes: ArtifactRef = artifact_input()
-    # The fingerprint of each mutant cell's within labels, or None without
-    # within columns.
+    # The fingerprint of each grouped cell's within labels, or None without
+    # within columns: the cells with a call for "likelihood", those with a
+    # mutant call for "exact".
     within_fingerprint: str | None = artifact_input()
-    # The sites whose mutant calls define the clones, by label.
+    # The sites whose calls define the clones, by label.
     sites: tuple[str, ...] = parameter()
     within: tuple[str, ...] = parameter()
-    # Fixed choices of the method: cells link through a Jaccard index of 1
-    # over the sites both know, and cells whose calls agree with two clones
+    method: Literal["likelihood", "exact"] = parameter()
+    # The likelihood's rules: a dropout or error rate held at every site,
+    # left out where each site's is estimated, the fewest cells of a clone and
+    # the posterior a cell's clone must reach.
+    dropout_probability: float | None = parameter(omit_if_none=True)
+    error_probability: float | None = parameter(omit_if_none=True)
+    min_size: int | None = parameter(omit_if_none=True)
+    min_posterior: float | None = parameter(omit_if_none=True)
+    # Fixed choices of the likelihood's model: each site's rates are shrunk
+    # toward the pooled rates by priors worth these many calls, a site's
+    # error rate stays at most this multiple of the pooled error, and an
+    # estimated pooled error at most this rate.
+    dropout_prior_calls: float | None = parameter(omit_if_none=True)
+    error_prior_calls: float | None = parameter(omit_if_none=True)
+    max_site_error_ratio: float | None = parameter(omit_if_none=True)
+    max_pooled_error: float | None = parameter(omit_if_none=True)
+    # Fixed choices of the exact rule: cells link through a Jaccard index of
+    # 1 over the sites both know, and cells whose calls agree with two clones
     # that disagree are ambiguous and join neither.
-    method: str = parameter()
-    similarity: float = parameter()
-    inclusive: bool = parameter()
-    ambiguous: bool = parameter()
+    similarity: float | None = parameter(omit_if_none=True)
+    inclusive: bool | None = parameter(omit_if_none=True)
+    ambiguous: bool | None = parameter(omit_if_none=True)
     invalidate_cache: bool = execution()
 
 

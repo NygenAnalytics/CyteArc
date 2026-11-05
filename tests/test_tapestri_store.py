@@ -344,7 +344,10 @@ def test_a_store_imports_its_variants_and_calls_their_clones(tmp_path) -> None:
     assert diagnostics["unmatchedBarcodes"] == 0
     assert diagnostics["listedCells"] == TRUTH.n_rows
     genotypes = ds.variants.genotypes(counts, method="source")
-    clones = ds.variants.genotype_clones(genotypes, within="sample_name")
+    # Most clones carry one variant, which the exact rule links.
+    clones = ds.variants.genotype_clones(
+        genotypes, within="sample_name", method="exact"
+    )
     ids = TRUTH.row_ids
     expected = {
         frozenset(

@@ -2,7 +2,7 @@ import math
 import os
 import sys
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
@@ -23,6 +23,7 @@ from ...metadata.artifacts import plan_cell_data_artifact
 from ...metadata.rows import (
     read_metadata_rows_chunkwise,
     read_text_rows,
+    read_whole,
     text_read_bytes,
 )
 from ...metadata.selection import (
@@ -59,6 +60,7 @@ from ...utils.arrays import sorted_unique
 from ...utils.files import is_hdf5
 from ...utils.logging import logger
 from ...utils.memory_budget import MemoryLedger
+from ...utils.numba import numba_threads
 from ...variants.counts import (
     CALL_DTYPE,
     CALL_FIELDS,
@@ -78,7 +80,6 @@ from ...variants.counts import (
     variant_count_frames,
 )
 from ...variants.frequencies import (
-    FrequencyClones,
     band_frequencies,
     clone_status_counts,
     frequency_clones,
@@ -122,7 +123,7 @@ from .cell_barcodes import (
     unmatched_barcode_rules,
 )
 from .cell_groups import group_columns, within_groups
-from .clone_artifacts import log_clones, plan_clones, write_clones
+from .clone_artifacts import SITE_ARRAYS, log_clones, plan_clones, write_clones
 
 if TYPE_CHECKING:
     from ..mapping_datastore import MappingDatastore as _VariantOperationsBase
@@ -236,16 +237,24 @@ _GENOTYPE_BYTES_PER_ROW = {"threshold": 144, "source": 168, "gift": 360}
 # Bytes per call row of loaded genotypes: its row of the table of calls and
 # the stored arrays read beside it, 174 as traced on 128,000 rows.
 _LOADED_GENOTYPE_BYTES_PER_ROW = 220
-# Genotype clones hold, for each cell of the genotypes, its offsets, group,
-# membership and the arrays that number its clone; and for each call row its
-# cell, site, rank and call as read, and its membership masks.
-_GENOTYPE_CLONE_BYTES_PER_CELL = 80
-_GENOTYPE_CLONE_BYTES_PER_ROW = 48
-# Bytes held for each cell while genotype clones are saved, beside what saving
-# them holds: its ambiguous flag as called.
-_GENOTYPE_CLONE_CALL_BYTES_PER_CELL = 1
-# The attributes that saved genotype clones need to be reused.
-_GENOTYPE_CLONE_ATTRIBUTES = ("n_clones", "n_nodes", "n_edges")
+# The attributes that saved genotype clones need to be reused: the exact
+# rule's graph sizes, which describe the method, and the clones of each.
+_EXACT_CLONE_ATTRIBUTES = ("n_clones", "n_nodes", "n_edges")
+_LIKELIHOOD_CLONE_ATTRIBUTES = ("n_clones",)
+# Bytes per cell that reading the genotype calls in bands holds beside the
+# packed calls: each cell's position, and the offsets, their sum, the flags
+# of the chosen cells, the gaps between them and each band's cells and their
+# rows' counts that the bands read.
+_CALL_BAND_BYTES_PER_CELL = 64
+# Bytes per cell that ordering the likelihood's cells by their within group
+# holds beside their positions: each cell's group, the order of the stable
+# sort and its scratch, and the positions as found beside them reordered,
+# 24 as traced on 90,000 and 180,000 cells of 2, 4 and 50 groups.
+_GROUP_ORDER_BYTES = 32
+# Bytes that numbering genotype clones holds for each cell: each clustered
+# cell's key of group and clone, their sorted copy, first cells and order,
+# and each cell's rank.
+_CLONE_RANK_BYTES = 64
 
 
 # The formats whose files hold a chosen subset of variants.
@@ -2504,7 +2513,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             nthreads=self.nthreads,
         )
         del frequencies, group_codes
-        assignment = _clone_assignment(n_cells, positions, called)
+        assignment = _clone_assignment(
+            n_cells, positions, groups=called.groups, clusters=called.clusters
+        )
         counts_by_status = clone_status_counts(called.status)
         saving = MemoryLedger(
             self.memoryBytes,
@@ -3343,27 +3354,71 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         *,
         sites: Sequence[str | int] | np.ndarray | pd.Index | None = None,
         within: str | Sequence[str] | None = None,
+        method: str = "likelihood",
+        dropout_probability: float | None = None,
+        error_probability: float | None = None,
+        min_size: int | None = None,
+        min_posterior: float | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
-        """Call clones from the combinations of mutant calls that cells carry.
+        """Call clones from the combinations of mutations that cells carry, tolerating allelic dropout.
 
-        Cells that descend from one mutated ancestor share its mutations. Each
-        cell's mutant sites, those called heterozygous, homozygous alternative
-        or alternative present, form a set, and the sites it was not called at,
-        missing or filtered, are unknown rather than wild type. Cells are
-        linked when they agree at every site that both were called at, a
-        Jaccard index of 1 over the sites both know. Cells whose calls agree
-        with two cells that disagree at a site they were not called at, such
-        as cells that carry a founder mutation and were not read where a
-        subclone differs, cannot be placed and join neither: they are left
-        out as ambiguous, however many there are. The linked groups are the
-        clones, numbered by size as ``clone_1`` and on, and a cell without a
-        mutant call gets no clone. ``within`` names cell metadata columns,
-        such as the donor: clones never join cells of two groups. The
-        artifact's diagnostics, which
+        Cells that descend from one mutated ancestor share its mutations.
+        Each cell's calls at the chosen sites are mutant (heterozygous,
+        homozygous alternative or alternative present), wild type, or
+        unknown where the cell was ``missing`` or ``filtered``. Single-cell
+        DNA amplification loses one allele of a cell at some sites, allelic
+        dropout, which turns a heterozygous mutant call into a wild-type one,
+        so two cells of one clone can disagree.
+
+        ``method="likelihood"``, the default, fits SCClone's mixture model
+        (Yu, Du and Song, Frontiers in Genetics 2022,
+        doi:10.3389/fgene.2022.823941): each clone is a set of mutations, a
+        cell of a clone reads wild type at one of its mutations with the
+        site's dropout probability and mutant at another site with the
+        site's error probability, and an unknown call adds nothing. Each
+        site's two probabilities are estimated from the cells by EM, shrunk
+        toward the probabilities pooled over every site by priors worth 20
+        and 200 calls, a site's error probability stays at most five times
+        the pooled one, and the pooled one at most 0.1, so that a mutation
+        that every cell carries cannot pass for errors;
+        ``dropout_probability`` or ``error_probability`` holds one
+        probability at every site instead. A greedy search chooses the
+        number of clones by Schwarz's criterion, in which a clone costs its
+        weight and the sites at which it differs from its neighbour on a
+        minimum spanning tree of the clones rooted at the wild type. The genotype without mutations is always a
+        component: its cells, like cells without a mutant call, take no
+        clone. Each cell takes its most probable clone, its posterior saved
+        as ``clone_probability``; a cell with a mutant call whose most
+        probable component has a posterior below ``min_posterior`` is
+        ambiguous and takes none, and a clone of fewer than ``min_size``
+        cells leaves its cells without one. Every cell with a call at the
+        chosen sites takes part in the fit. A subclone that differs from
+        its parent at one site cannot be told from that site's dropout by
+        calls alone: both explanations fit the calls equally, so such a
+        subclone may join its parent.
+
+        ``method="exact"`` links two cells when they agree at every site
+        that both were called at, a Jaccard index of 1 over the sites both
+        know. Cells whose calls agree with two cells that disagree at a site
+        they were not called at cannot be placed and join neither: they are
+        left out as ambiguous, however many there are. The linked groups are
+        the clones, and a cell without a mutant call gets no clone. One
+        dropout splits a cell from its clone under this rule.
+
+        Clones are numbered by size as ``clone_1`` and on. ``within`` names
+        cell metadata columns, such as the donor: clones never join cells of
+        two groups, and the likelihood fits each group apart, with its own
+        rates. The artifact's diagnostics, which
         ``ds.artifacts.inspect(clones).diagnostics`` returns, count the
-        ``sites`` compared, the ``mutantCells`` and the ``ambiguousCells``
-        beside every source's ``cellsWithClone`` and ``largestCloneShare``.
+        ``sites`` compared, the ``mutantCells``, the ``ambiguousCells`` and,
+        for the likelihood, the ``cellsInSmallClones``, and record the pooled
+        ``dropoutProbability`` and ``errorProbability`` that the fit used,
+        weighed over the groups by the calls that estimate them, beside
+        every source's ``cellsWithClone`` and
+        ``largestCloneShare``; the rule that does not run records None. The
+        likelihood also saves each site's label and each group's dropout and
+        error probability at each site.
 
         Args:
             genotypes: A ``variant_genotypes`` artifact from
@@ -3372,78 +3427,107 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 or by position on counts of one contig, as
                 :meth:`~cytearc.datastore.namespaces.VariantsAccessor.load_genotypes`
                 takes them, or None for every genotyped site.
-            within: Cell metadata columns to call clones within, or None; every
-                cell with a mutant call needs a label.
+            within: Cell metadata columns to call clones within, or None;
+                every cell with a call, for ``"likelihood"``, or with a mutant
+                call, for ``"exact"``, needs a label.
+            method: ``"likelihood"`` or ``"exact"``.
+            dropout_probability: For ``"likelihood"``, the chance that a cell
+                carrying a site's mutation reads wild type there, held at every
+                site, from 0 up to 1; None to estimate each site's.
+            error_probability: For ``"likelihood"``, the chance that a cell
+                without a site's mutation reads mutant there, held at every
+                site, from 0 up to 1; None to estimate each site's.
+            min_size: For ``"likelihood"``, the fewest cells of a clone, None
+                for 2.
+            min_posterior: For ``"likelihood"``, the posterior that a cell's
+                most probable component must reach, else the cell is
+                ambiguous, from 0 to 1; None for 0.6.
             invalidate_cache: Call the clones again instead of reusing them.
 
         Returns:
             A complete datastore-scoped ``clones`` artifact over the
             genotypes' cells, which every clone summary reads. Its
-            ``ambiguous`` array marks the cells left out as ambiguous. Read it
-            with
+            ``ambiguous`` array marks the cells left out as ambiguous and,
+            for the likelihood, its ``clone_probability`` array holds each
+            cell's posterior of its clone. Read it with
             :meth:`~cytearc.datastore.namespaces.ClonesAccessor.load_clones`.
 
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``genotypes`` is not a ``variant_genotypes``
                 artifact, ``sites`` names a site it did not genotype or a
-                position of counts of several contigs, ``within`` names a
-                column twice or no cell metadata column, or a mutant cell has
-                no label in it.
+                position of counts of several contigs, ``method`` is unknown,
+                a rule is given to ``"exact"`` or is out of range, ``within``
+                names a column twice or no cell metadata column, or a cell
+                that needs a label has none in it.
             KeyError: If the store holds no such artifact, or not its counts
                 when ``sites`` names a position.
             RuntimeError: If the artifact is incomplete, or its counts when
                 ``sites`` names a position.
             PermissionError: If the store is read-only and the clones are not
                 saved yet.
-            MemoryError: If the cells' sets, the graph or the clone labels as
-                the store saves them do not fit the memory budget.
+            MemoryError: If reading the calls, fitting or linking the cells,
+                or saving the clone labels does not fit the memory budget.
         """
+        from ...variants.genotype_clones import genotype_clone_rules
+        from ...variants.genotype_mixture import (
+            DROPOUT_PRIOR_CALLS,
+            ERROR_PRIOR_CALLS,
+            MAX_POOLED_ERROR,
+            MAX_SITE_ERROR_RATIO,
+            any_bits,
+        )
+
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
+        rules = genotype_clone_rules(
+            method,
+            dropout_probability=dropout_probability,
+            error_probability=error_probability,
+            min_size=min_size,
+            min_posterior=min_posterior,
+        )
+        likelihood = rules.method == "likelihood"
         group = self._genotype_group(genotypes)
         columns = group_columns(within, "within")
-        site_labels = _read(group, "site_labels").astype(str)
-        chosen = self._chosen_genotype_sites(genotypes, group, site_labels, sites)
         cell_selection = inspect_artifact(self.zw, genotypes).input_ref(
             "cell_selection"
         )
-        offsets = _read(group, "call_offsets").astype(np.int64)
-        n_cells = len(offsets) - 1
-        n_rows = int(offsets[-1])
-        # The calls are read whole: each row's cell, site and call.
-        held = _GENOTYPE_FIXED_BYTES + _GENOTYPE_CLONE_BYTES_PER_CELL * n_cells
-        reading = held + _GENOTYPE_CLONE_BYTES_PER_ROW * n_rows
-        if reading > self.memoryBytes:
-            raise MemoryError(
-                f"Reading the {n_rows} genotype calls of {n_cells} cells holds about "
-                f"{reading} bytes, more than the memory budget of {self.memoryBytes} "
-                "bytes. Raise mem_budget."
-            )
-        cells_of_rows = np.repeat(np.arange(n_cells, dtype=np.int64), np.diff(offsets))
-        call_sites = _read(group, "call_sites").astype(np.int64)
-        calls = _read(group, "calls").astype(np.int64)
-        rank = np.full(len(site_labels), -1, dtype=np.int64)
-        rank[chosen] = np.arange(len(chosen))
-        site_ranks = rank[call_sites]
-        on_chosen = site_ranks >= 0
-        mutant_rows = on_chosen & np.isin(calls, list(MUTANT_CALLS))
-        known_rows = mutant_rows | (on_chosen & (calls == WILD_TYPE))
-        members = np.zeros(n_cells, dtype=bool)
-        members[cells_of_rows[mutant_rows]] = True
-        grouping = MemoryLedger(
+        n_cells = (
+            int(as_zarr_array(group["call_offsets"], name="call_offsets").shape[0]) - 1
+        )
+        ledger = MemoryLedger(
             self.memoryBytes,
-            f"Grouping the {n_cells} cells of the genotypes",
+            f"Calling clones from the genotypes of {n_cells} cells",
             codec_threads=self.nthreads,
         )
-        grouping.hold("the genotype calls", reading)
-        group_codes, _keys, within_fingerprint = within_groups(
+        ledger.hold(
+            "Zarr's objects for the arrays that the call opens and writes",
+            _GENOTYPE_FIXED_BYTES,
+        )
+        site_labels = read_whole(ledger, group, "site_labels", item="the sites' labels")
+        chosen = self._chosen_genotype_sites(genotypes, group, site_labels, sites)
+        n_sites = len(chosen)
+        calls = self._packed_genotype_calls(
+            ledger, group, len(site_labels), chosen, n_cells
+        )
+        flags_held = ledger.hold(
+            "whether each cell has a call and a mutant call", 3 * n_cells
+        )
+        has_mutant = np.empty(n_cells, dtype=bool)
+        has_wild = np.empty(n_cells, dtype=bool)
+        with numba_threads(self.nthreads):
+            any_bits(calls.mutant, has_mutant)
+            any_bits(calls.wild, has_wild)
+        members = has_mutant | has_wild if likelihood else has_mutant.copy()
+        del has_wild
+        group_codes, group_keys, within_fingerprint = within_groups(
             self.zw,
             self.cells,
             cell_selection,
             columns,
             members,
-            ledger=grouping,
-            what="a mutant call",
+            ledger=ledger,
+            what="a call" if likelihood else "a mutant call",
         )
         arguments = GenotypeCloneArguments(
             cell_selection=cell_selection,
@@ -3451,10 +3535,18 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             within_fingerprint=within_fingerprint,
             sites=tuple(str(site_labels[site]) for site in chosen),
             within=columns,
-            method="jaccard",
-            similarity=1.0,
-            inclusive=True,
-            ambiguous=True,
+            method="likelihood" if likelihood else "exact",
+            dropout_probability=rules.dropout_probability,
+            error_probability=rules.error_probability,
+            min_size=rules.min_size,
+            min_posterior=rules.min_posterior,
+            dropout_prior_calls=DROPOUT_PRIOR_CALLS if likelihood else None,
+            error_prior_calls=ERROR_PRIOR_CALLS if likelihood else None,
+            max_site_error_ratio=MAX_SITE_ERROR_RATIO if likelihood else None,
+            max_pooled_error=MAX_POOLED_ERROR if likelihood else None,
+            similarity=None if likelihood else 1.0,
+            inclusive=None if likelihood else True,
+            ambiguous=None if likelihood else True,
             invalidate_cache=invalidate_cache,
         )
         planned = plan_clones(
@@ -3462,38 +3554,306 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             arguments,
             cell_selection,
             n_cells,
-            with_probability=False,
-            required_attributes=_GENOTYPE_CLONE_ATTRIBUTES,
+            with_probability=likelihood,
+            required_attributes=(
+                _LIKELIHOOD_CLONE_ATTRIBUTES if likelihood else _EXACT_CLONE_ATTRIBUTES
+            ),
             source_arrays={"ambiguous": "b"},
+            site_arrays=SITE_ARRAYS if likelihood else (),
         )
         if planned.reused:
             return planned.ref
         self._require_writable(arguments.operation)
-        # A mutant cell's unknown sites are the chosen sites it was not
-        # called at, which a dense mask of its sites finds.
-        member_cells = np.flatnonzero(members)
-        mask_bytes = len(member_cells) * len(chosen) + 16 * len(member_cells)
-        unknown_bytes = 8 * len(member_cells) * len(chosen)
-        sets_bytes = held + mask_bytes + 2 * unknown_bytes + 64 * n_rows
-        if sets_bytes > self.memoryBytes:
-            raise MemoryError(
-                f"Building the sites of {len(member_cells)} mutant cells at "
-                f"{len(chosen)} sites holds about {sets_bytes} bytes, more than the "
-                f"memory budget of {self.memoryBytes} bytes. Raise mem_budget, or "
-                "pass fewer sites."
+        n_mutant_cells = int(np.count_nonzero(has_mutant))
+        del has_mutant
+        labels_text = np.asarray(site_labels, dtype=object)[chosen]
+        site_arrays: dict[str, np.ndarray] = {}
+        if likelihood:
+            called = self._likelihood_genotype_clones(
+                ledger, calls, members, group_codes, len(group_keys), n_sites, rules
             )
-        mutant_sets = cell_sets(
-            cells_of_rows[mutant_rows], site_ranks[mutant_rows], n_cells
+            assignment = called.assignment
+            ambiguous = called.ambiguous
+            attributes: dict[str, Any] = {"n_clones": len(assignment.clone_ids)}
+            site_arrays = {
+                "site_labels": labels_text,
+                "dropout_probability": called.dropout,
+                "error_probability": called.error,
+            }
+            own = {
+                "cellsInSmallClones": called.cells_in_small_clones,
+                "dropoutProbability": called.dropout_probability,
+                "errorProbability": called.error_probability,
+            }
+        else:
+            assignment, ambiguous, attributes = self._exact_genotype_clones(
+                ledger, calls, members, group_codes, n_sites
+            )
+            own = {
+                "cellsInSmallClones": None,
+                "dropoutProbability": None,
+                "errorProbability": None,
+            }
+        del members, group_codes
+        ledger.hold(
+            "the clones' labels and the sites' labels",
+            sum(map(sys.getsizeof, assignment.clone_ids.tolist()))
+            + sum(map(sys.getsizeof, labels_text.tolist())),
         )
-        member_row = np.full(n_cells, -1, dtype=np.int64)
-        member_row[member_cells] = np.arange(len(member_cells))
-        known = np.zeros((len(member_cells), len(chosen)), dtype=bool)
-        kept = known_rows & members[cells_of_rows]
-        known[member_row[cells_of_rows[kept]], site_ranks[kept]] = True
-        unknown_rows, unknown_sites = np.nonzero(~known)
-        del known
-        unknown = cell_sets(member_cells[unknown_rows], unknown_sites, n_cells)
-        del unknown_rows, unknown_sites, cells_of_rows, call_sites, calls
+        write_clones(
+            self.zw,
+            planned,
+            assignment,
+            attributes,
+            source_arrays={"ambiguous": ambiguous},
+            site_arrays=site_arrays,
+            ledger=ledger,
+            diagnostics={
+                "sites": n_sites,
+                "mutantCells": n_mutant_cells,
+                "ambiguousCells": int(np.count_nonzero(ambiguous)),
+                **own,
+            },
+        )
+        ledger.release(flags_held)
+        log_clones(assignment, n_cells)
+        return planned.ref
+
+    def _packed_genotype_calls(
+        self,
+        ledger: MemoryLedger,
+        group: zarr.Group,
+        n_labels: int,
+        chosen: np.ndarray,
+        n_cells: int,
+    ) -> "_PackedCalls":
+        """Each cell's mutant and wild-type calls at the chosen sites, packed 64 sites to a word, read in bands of cells.
+
+        The packed calls stay charged to ``ledger`` until the caller lets
+        them go.
+        """
+        from ...variants.genotype_mixture import n_words, pack_calls
+
+        words = n_words(len(chosen))
+        held = ledger.hold(
+            f"the calls of {n_cells} cells at {len(chosen)} sites, packed",
+            16 * n_cells * words,
+        )
+        calls = _PackedCalls(
+            np.zeros((n_cells, words), dtype=np.uint64),
+            np.zeros((n_cells, words), dtype=np.uint64),
+            held,
+        )
+        # Each stored site's column among the chosen ones, whether each call
+        # is mutant, and what the bands read for every cell.
+        lookup = ledger.hold(
+            "each stored site's chosen column",
+            8 * n_labels + _CALL_BAND_BYTES_PER_CELL * n_cells + 64,
+        )
+        rank = np.full(n_labels, -1, dtype=np.int64)
+        rank[chosen] = np.arange(len(chosen))
+        mutant = np.zeros(len(CALLS), dtype=bool)
+        mutant[sorted(MUTANT_CALLS)] = True
+        positions = np.arange(n_cells, dtype=np.int64)
+        tables = {"call": ("call_sites", "calls")}
+        n_rows = int(as_zarr_array(group["calls"], name="calls").shape[0])
+        # A band holds each row's cell beside its site and call as stored,
+        # and the chunks at its ends that its read decompresses. It holds at
+        # least _MIN_GENOTYPE_BAND_ROWS rows, or every row, and every row of
+        # the cell that holds the most.
+        per_row = 8 + sum(
+            int(as_zarr_array(group[name], name=name).dtype.itemsize)
+            for name in tables["call"]
+        )
+        chunk_bytes = _band_chunk_bytes(group, tables)
+        fewest = max(
+            1, min(n_rows, _MIN_GENOTYPE_BAND_ROWS), _most_cell_rows(group, tables)
+        )
+        ledger.peak("a band of the genotype calls", chunk_bytes + fewest * per_row)
+        # The room that the budget leaves sizes the bands.
+        max_rows = (self.memoryBytes - ledger.held_bytes - chunk_bytes) // per_row
+        for _band, rows in _variant_bands(group, tables, positions, max_rows):
+            cells_of_rows, values = rows["call"]
+            pack_calls(
+                cells_of_rows,
+                values["call_sites"],
+                values["calls"],
+                rank,
+                mutant,
+                calls.mutant,
+                calls.wild,
+            )
+            del cells_of_rows, values, rows
+        del rank, mutant, positions
+        ledger.release(lookup)
+        return calls
+
+    def _likelihood_genotype_clones(
+        self,
+        ledger: MemoryLedger,
+        calls: "_PackedCalls",
+        members: np.ndarray,
+        group_codes: np.ndarray,
+        n_groups: int,
+        n_sites: int,
+        rules: Any,
+    ) -> "_LikelihoodCall":
+        """Fit each within group's cells apart and number their clones by size over every group.
+
+        The packed calls of the fitted cells are gathered in order of their
+        groups, unless every cell is fitted in one group, and the packed
+        calls are let go once every group is fitted.
+        """
+        from ...variants.genotype_clones import likelihood_clones
+
+        n_cells = len(members)
+        words = calls.mutant.shape[1]
+        n_fitted = int(np.count_nonzero(members))
+        if n_fitted == n_cells and n_groups == 1:
+            order_held = ledger.hold("each fitted cell's position", 8 * n_fitted + 16)
+            fitted = np.flatnonzero(members)
+            bounds = np.array([0, n_cells], dtype=np.int64)
+        else:
+            order_held = ledger.hold(
+                f"the calls of {n_fitted} cells in order of their groups",
+                16 * n_fitted * words + 8 * n_fitted + 8 * (n_groups + 1),
+            )
+            ledger.peak("ordering the cells by group", _GROUP_ORDER_BYTES * n_fitted)
+            fitted, bounds = _cells_by_group(members, group_codes, n_groups)
+            calls.gather(ledger, fitted)
+        # Each cell's clone within its group, from 1, its posterior and its
+        # flag, and each group's rates at each site.
+        ledger.hold(
+            f"the clones of {n_cells} cells",
+            17 * n_cells + 16 * n_groups * n_sites,
+        )
+        clusters = np.zeros(n_cells, dtype=np.int64)
+        probability = np.full(n_cells, np.nan)
+        ambiguous = np.zeros(n_cells, dtype=bool)
+        dropout = np.full((n_groups, n_sites), np.nan)
+        error = np.full((n_groups, n_sites), np.nan)
+        # Each group's pooled rates, weighed by the calls that estimate them.
+        weighed = np.zeros(4)
+        cells_in_small_clones = 0
+        offset = 0
+        for index in range(n_groups):
+            first, stop = int(bounds[index]), int(bounds[index + 1])
+            if first == stop:
+                continue
+            group_cells = fitted[first:stop]
+            result = likelihood_clones(
+                calls.mutant[first:stop],
+                calls.wild[first:stop],
+                n_sites,
+                dropout_probability=rules.dropout_probability,
+                error_probability=rules.error_probability,
+                min_size=rules.min_size,
+                min_posterior=rules.min_posterior,
+                ledger=ledger,
+                nthreads=self.nthreads,
+            )
+            ledger.peak(
+                f"placing the clones of {stop - first} cells", 41 * (stop - first)
+            )
+            clustered = result.codes >= 0
+            clusters[group_cells[clustered]] = result.codes[clustered] + 1 + offset
+            probability[group_cells[clustered]] = result.probability[clustered]
+            ambiguous[group_cells] = result.ambiguous
+            offset += len(result.sizes)
+            dropout[index] = result.dropout
+            error[index] = result.error
+            weighed += (
+                result.pooled_dropout * result.carried_calls,
+                result.carried_calls,
+                result.pooled_error * result.absent_calls,
+                result.absent_calls,
+            )
+            cells_in_small_clones += result.cells_in_small_clones
+            held = result.held_bytes
+            del clustered, group_cells, result
+            ledger.release(held)
+        del fitted, bounds
+        calls.let_go(ledger)
+        ledger.release(order_held)
+        # Clones are numbered by size over every group, ties by their first
+        # cell, as frequency clones are.
+        ledger.peak(
+            f"numbering the clones of {n_cells} cells", _CLONE_RANK_BYTES * n_cells
+        )
+        positions = np.flatnonzero(clusters > 0)
+        assignment = _clone_assignment(
+            n_cells,
+            positions,
+            groups=np.zeros(len(positions), dtype=np.int64),
+            clusters=clusters[positions],
+        )
+        del positions, clusters
+        assignment = replace(
+            assignment,
+            probabilities=np.where(assignment.codes >= 0, probability, np.nan),
+        )
+        del probability
+        # Each cell's code and probability take the place of its clone
+        # within its group and its posterior, which the results' charge
+        # holds, and the clones' sizes and labels come beside them.
+        ledger.hold(
+            f"the sizes of {len(assignment.clone_ids)} clones",
+            24 * len(assignment.clone_ids),
+        )
+        return _LikelihoodCall(
+            assignment=assignment,
+            ambiguous=ambiguous,
+            dropout=dropout,
+            error=error,
+            cells_in_small_clones=cells_in_small_clones,
+            dropout_probability=(
+                rules.dropout_probability
+                if rules.dropout_probability is not None
+                else (float(weighed[0] / weighed[1]) if weighed[1] > 0 else None)
+            ),
+            error_probability=(
+                rules.error_probability
+                if rules.error_probability is not None
+                else (float(weighed[2] / weighed[3]) if weighed[3] > 0 else None)
+            ),
+        )
+
+    def _exact_genotype_clones(
+        self,
+        ledger: MemoryLedger,
+        calls: "_PackedCalls",
+        members: np.ndarray,
+        group_codes: np.ndarray,
+        n_sites: int,
+    ) -> tuple[CloneAssignment, np.ndarray, dict[str, Any]]:
+        """Link the cells that agree at every site both were called at, with each mutant cell's unread sites as unknown items.
+
+        The packed calls are let go once each mutant cell's mutant and
+        unknown sites are listed.
+        """
+        from ...variants.genotype_mixture import bit_pairs
+
+        n_cells = len(members)
+        ledger.peak("finding the mutant cells", 8 * n_cells)
+        member_cells = np.flatnonzero(members)
+        held = ledger.hold("the mutant cells", member_cells.nbytes)
+        mutant_cells, mutant_sites, mutant_held = bit_pairs(
+            ledger, calls.mutant, calls.wild, member_cells, n_sites, unknown=False
+        )
+        unknown_cells, unknown_sites, unknown_held = bit_pairs(
+            ledger, calls.mutant, calls.wild, member_cells, n_sites, unknown=True
+        )
+        del member_cells
+        calls.let_go(ledger)
+        ledger.release(held)
+        mutant_sets = cell_sets(mutant_cells, mutant_sites, n_cells, ledger=ledger)
+        sets_held = ledger.hold("each cell's mutant sites", mutant_sets.nbytes)
+        del mutant_cells, mutant_sites
+        ledger.release(mutant_held)
+        unknown = cell_sets(unknown_cells, unknown_sites, n_cells, ledger=ledger)
+        sets_held += ledger.hold("each mutant cell's unknown sites", unknown.nbytes)
+        del unknown_cells, unknown_sites
+        ledger.release(unknown_held)
         called = set_clones(
             mutant_sets,
             unknown=unknown,
@@ -3502,11 +3862,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             similarity=1.0,
             inclusive=True,
             ambiguous=True,
-            ledger=MemoryLedger(
-                self.memoryBytes - held - 64 * n_rows,
-                f"Calling clones from the genotypes of {n_cells} cells",
-            ),
+            ledger=ledger,
         )
+        del mutant_sets, unknown
+        ledger.release(sets_held)
         labels = ranked_clone_labels(len(called.sizes))
         assignment = CloneAssignment(
             codes=called.codes,
@@ -3521,33 +3880,60 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "n_nodes": called.n_nodes,
             "n_edges": called.n_edges,
         }
-        saving = MemoryLedger(
-            self.memoryBytes,
-            f"Calling clones from the genotypes of {n_cells} cells",
-            codec_threads=self.nthreads,
-        )
-        saving.hold(
-            "each cell's calls, the clones' labels and what calling holds "
-            "whatever the counts",
-            _GENOTYPE_FIXED_BYTES
-            + _GENOTYPE_CLONE_CALL_BYTES_PER_CELL * n_cells
-            + sum(map(sys.getsizeof, labels.tolist())),
-        )
-        write_clones(
-            self.zw,
-            planned,
-            assignment,
-            attributes,
-            source_arrays={"ambiguous": called.ambiguous.astype(bool)},
-            ledger=saving,
-            diagnostics={
-                "sites": len(chosen),
-                "mutantCells": int(len(member_cells)),
-                "ambiguousCells": int(np.count_nonzero(called.ambiguous)),
-            },
-        )
-        log_clones(assignment, n_cells)
-        return planned.ref
+        return assignment, called.ambiguous.astype(bool, copy=False), attributes
+
+
+def _cells_by_group(
+    members: np.ndarray, group_codes: np.ndarray, n_groups: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """The positions of the member cells in order of their groups, cells in order within each, and where each group starts and stops among them.
+
+    Beside the positions, this holds ``_GROUP_ORDER_BYTES`` a member cell.
+    """
+    fitted = np.flatnonzero(members)
+    fitted_groups = group_codes[fitted]
+    order = np.argsort(fitted_groups, kind="stable")
+    fitted = fitted[order]
+    bounds = np.searchsorted(fitted_groups[order], np.arange(n_groups + 1), side="left")
+    return fitted, bounds
+
+
+@dataclass(slots=True)
+class _PackedCalls:
+    """Each cell's mutant and wild-type calls packed 64 sites to a word, with the bytes that they are charged as.
+
+    One holder owns the packed calls, so that letting them go frees them.
+    """
+
+    mutant: np.ndarray
+    wild: np.ndarray
+    held: int
+
+    def gather(self, ledger: MemoryLedger, rows: np.ndarray) -> None:
+        """Keep the calls of ``rows`` alone, in their order; the caller has charged them."""
+        self.mutant = self.mutant[rows]
+        self.wild = self.wild[rows]
+        ledger.release(self.held)
+        self.held = 0
+
+    def let_go(self, ledger: MemoryLedger) -> None:
+        """Let the packed calls go and release their charge."""
+        self.mutant = self.wild = np.empty((0, 1), dtype=np.uint64)
+        ledger.release(self.held)
+        self.held = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _LikelihoodCall:
+    """The clones that the likelihood calls over every within group, with what the artifact saves of them."""
+
+    assignment: CloneAssignment
+    ambiguous: np.ndarray
+    dropout: np.ndarray
+    error: np.ndarray
+    cells_in_small_clones: int
+    dropout_probability: float | None
+    error_probability: float | None
 
 
 def _mask_names(mask: str | Sequence[str] | None) -> tuple[str, ...]:
@@ -3568,7 +3954,7 @@ def _mask_names(mask: str | Sequence[str] | None) -> tuple[str, ...]:
 
 
 def _clone_assignment(
-    n_cells: int, positions: np.ndarray, called: FrequencyClones
+    n_cells: int, positions: np.ndarray, *, groups: np.ndarray, clusters: np.ndarray
 ) -> CloneAssignment:
     """Number called clones by size over every group, ties by their first cell.
 
@@ -3576,15 +3962,17 @@ def _clone_assignment(
     CyteArc calls is.
 
     Args:
-        n_cells: The counts' cells.
-        positions: The scored cells, as ascending positions among them.
-        called: The clones of the scored cells, numbered within each group.
+        n_cells: The cells of the artifact.
+        positions: The called cells, as ascending positions among them.
+        groups: Each called cell's group.
+        clusters: Each called cell's clone within its group, from 1, or 0
+            for none.
     """
-    clustered = called.clusters > 0
+    clustered = np.asarray(clusters) > 0
     cells = np.asarray(positions, dtype=np.int64)[clustered]
-    clusters = np.asarray(called.clusters, dtype=np.int64)[clustered]
+    clusters = np.asarray(clusters, dtype=np.int64)[clustered]
     keys = (
-        np.asarray(called.groups, dtype=np.int64)[clustered]
+        np.asarray(groups, dtype=np.int64)[clustered]
         * (int(clusters.max(initial=0)) + 1)
         + clusters
     )

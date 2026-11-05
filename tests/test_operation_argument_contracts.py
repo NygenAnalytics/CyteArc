@@ -409,10 +409,18 @@ _CONTRACTS = (
             # The clones label the genotypes' cells; the within columns'
             # labels are recorded by their fingerprint.
             **_classified("resolved_input", "cell_selection", "within_fingerprint"),
-            # Cells link through a Jaccard index of 1 with ambiguous cells left
-            # out, a fixed choice of the method.
+            # The likelihood's priors on each site's rates and its cap on a
+            # site's error, and the exact rule's Jaccard index of 1 with
+            # ambiguous cells left out, are fixed choices of each method.
             **_classified(
-                "algorithm_policy", "method", "similarity", "inclusive", "ambiguous"
+                "algorithm_policy",
+                "dropout_prior_calls",
+                "error_prior_calls",
+                "max_site_error_ratio",
+                "max_pooled_error",
+                "similarity",
+                "inclusive",
+                "ambiguous",
             ),
         },
     ),
