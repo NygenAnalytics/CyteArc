@@ -36,6 +36,7 @@ from ...utils.numba import numba_threads
 from .perturbation_store import (
     _BAND_BYTES,
     _COORDINATE_KINDS,
+    _POSITIONS_SCRATCH_BYTES,
     _band_bytes,
     _call_ledger,
     _cell_samples,
@@ -45,6 +46,8 @@ from .perturbation_store import (
     _converted,
     _count_bands,
     _count_blocks,
+    _count_leftover,
+    _count_matrix,
     _count_stream_bytes,
     _feature_text,
     _frame_bytes,
@@ -144,9 +147,8 @@ def _first_columns(
     n_rows = int(data.shape[0])
     ledger.hold("the cells' coordinates", 8 * n_rows * n_columns)
     geometry = array_geometry(data)
-    if geometry is None:
-        ledger.peak("reading the cells' coordinates", int(data.nbytes))
-        return np.asarray(data[:, :n_columns], dtype=np.float64)
+    # Coordinates are cells x dimensions, so stored in chunks.
+    assert geometry is not None
     chunks = -(-n_rows // geometry.axisChunk(0)) * geometry.bandChunks()
     held = geometry.heldReadBytes(ledger.holding_threads(chunks))
     ledger.peak(
@@ -196,6 +198,9 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         # Where each labelled cell sits among the cells and whether it is
         # there, and each cell's flag.
         ledger.hold("the cells' control flags", 10 * len(labelled) + len(cell_index))
+        ledger.peak(
+            "placing the labelled cells", _POSITIONS_SCRATCH_BYTES * len(labelled)
+        )
         positions, present = _positions_in(cell_index, labelled)
         is_control = np.zeros(len(cell_index), dtype=bool)
         is_control[positions[present & flags]] = True
@@ -483,21 +488,38 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         scaled = [control_scaled]
         del control_scaled
         budget = self.memoryBytes if ledger.budget is None else ledger.budget
+        cell_blocks = _count_blocks(
+            self,
+            ledger,
+            assay,
+            feature_index,
+            cell_index,
+            scratch_bytes_per_row=scratch,
+            item="reading every cell's counts",
+        )
+        # The neighbors are written as int32 from int64 positions, a stored
+        # chunk of up to 100,000 rows encoded at a time, after the signatures,
+        # once the control cells' values and the writer are let go and beside
+        # the chunk that the last read of the counts can still hold; a budget
+        # that cannot hold them is refused before anything is written.
+        neighbors_bytes = 12 * neighbors_k * n_cells + 8 * neighbors_k * min(
+            n_cells, 100_000
+        )
+        scaled_bytes = 8 * n_controls * n_features
+        ledger.refuse_beyond(
+            "saving the neighbors",
+            ledger.charged
+            - writer_bytes
+            - scaled_bytes
+            + _count_leftover(_count_matrix(assay, feature_index, cell_index))
+            + neighbors_bytes,
+        )
         with (
             numba_threads(self.nthreads),
             artifact_transaction(self.zw, planned) as group,
         ):
             group.attrs["sample_names"] = sample_names
             output = create_numeric_array(group, "values", spec)
-            cell_blocks = _count_blocks(
-                self,
-                ledger,
-                assay,
-                feature_index,
-                cell_index,
-                scratch_bytes_per_row=scratch,
-                item="reading every cell's counts",
-            )
 
             def signature_blocks() -> Iterator[np.ndarray]:
                 start = 0
@@ -526,13 +548,8 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 operation=arguments.operation,
             )
             scaled.clear()
-            ledger.release(writer_bytes + 8 * n_controls * n_features)
-            # The neighbors written as int32 from int64 positions, a stored
-            # chunk of up to 100,000 rows encoded at a time.
-            ledger.peak(
-                "saving the neighbors",
-                12 * neighbors_k * n_cells + 8 * neighbors_k * min(n_cells, 100_000),
-            )
+            ledger.release(writer_bytes + scaled_bytes)
+            ledger.peak("saving the neighbors", neighbors_bytes)
             for name, array in (
                 ("neighbors", controls[neighbors].astype(np.int32)),
                 ("is_control", is_control),
@@ -726,29 +743,23 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         single = (counts == 1) & ~flags.astype(bool, copy=False)
         first = np.where(single, codes[:, 0], -1).astype(np.int64)
         del counts, flags, codes, single
+        ledger.peak("placing the labelled cells", _POSITIONS_SCRATCH_BYTES * n_labelled)
         positions, present = _positions_in(cell_index, labelled)
         # Each cell's label as a Python string, and its target.
         n_cells = len(cell_index)
         width = max(1, values.dtype.itemsize // 4)
-        ledger.hold(
-            "the cells' labels",
-            object_array_bytes(n_cells)
-            + python_text_bytes(n_cells, n_cells * max(width, len(UNLABELLED)))
-            + 8 * n_cells,
+        widest = int(values.view(np.uint32).max()) if values.size else 0
+        labels_bytes = object_array_bytes(n_cells) + python_text_bytes(
+            n_cells, n_cells * max(width, len(UNLABELLED)), widest=widest
         )
+        ledger.hold("the cells' labels", labels_bytes + 8 * n_cells)
         cell_labels = np.full(n_cells, UNLABELLED, dtype=object)
         cell_labels[positions[present]] = values[present]
         cell_codes = np.full(n_cells, -1, dtype=np.int64)
         cell_codes[positions[present]] = first[present]
         longest = max(len(UNLABELLED), values.dtype.itemsize // values.dtype.alignment)
         del labelled, values, first, positions, present
-        ledger.release(
-            ledger.charged
-            - before
-            - object_array_bytes(n_cells)
-            - python_text_bytes(n_cells, n_cells * max(width, len(UNLABELLED)))
-            - 8 * n_cells
-        )
+        ledger.release(ledger.charged - before - labels_bytes - 8 * n_cells)
         targets = read_whole(ledger, group, "targets", item="the targets")
         return cell_labels, cell_codes, targets, longest
 

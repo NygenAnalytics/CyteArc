@@ -125,9 +125,8 @@ def _code_blocks(
     step = max(_chunk_rows(codes), 1)
     n_rows = int(codes.shape[0])
     geometry = array_geometry(codes)
-    if geometry is None:
-        ledger.peak(item, int(codes.nbytes))
-        return iter((np.asarray(codes[:]),))
+    # Codes are cells x slots, so stored in chunks.
+    assert geometry is not None
     n_chunks = -(-n_rows // step) * geometry.bandChunks()
     held = geometry.bandHeldBytes(ledger.holding_threads(n_chunks))
     ledger.peak(

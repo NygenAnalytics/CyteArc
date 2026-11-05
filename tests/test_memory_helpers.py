@@ -871,7 +871,9 @@ def test_coroutine_reads_may_overlap_and_each_is_held_until_the_next_ends() -> N
         assert _gone(third)
 
 
-def test_a_read_through_an_async_array_is_held(tmp_path) -> None:
+def test_a_read_through_an_async_array_is_held_until_the_next_read_ends(
+    tmp_path,
+) -> None:
     from zarr.core.sync import sync
 
     values = np.arange(8 * 1024, dtype=np.int64)
@@ -879,24 +881,30 @@ def test_a_read_through_an_async_array_is_held(tmp_path) -> None:
         "values", shape=values.shape, chunks=(1024,), dtype="int64"
     )
     array[...] = values
-    held: list[int] = []
     run = pool_thread._WorkItem.run
     with hold_finished_reads(*ZARR_READS):
-        replaced = pool_thread._WorkItem.run
+        holding = pool_thread._WorkItem.run
+        work: list[weakref.ref] = []
 
-        def counting(item: object, *args: object) -> None:
-            replaced(item, *args)
-            held.append(1)
+        def recording(item: object, *args: object) -> None:
+            work.append(weakref.ref(item))
+            holding(item, *args)
 
-        pool_thread._WorkItem.run = counting  # type: ignore[method-assign]
+        pool_thread._WorkItem.run = recording  # type: ignore[method-assign]
         try:
-            block = sync(array.async_array.getitem(slice(0, 1024)))
+            first = sync(array.async_array.getitem(slice(0, 1024)))
+            # The work that Zarr's pool ran for the read, its fetch and decode,
+            # is held after the read ends, as a late pool thread holds it.
+            read = list(work)
+            assert read and all(item() is not None for item in read)
+            second = sync(array.async_array.getitem(slice(1024, 2048)))
+            # The next read's end lets it go.
+            assert all(_gone(item) for item in read)
         finally:
-            pool_thread._WorkItem.run = replaced  # type: ignore[method-assign]
+            pool_thread._WorkItem.run = holding  # type: ignore[method-assign]
     assert pool_thread._WorkItem.run is run
-    np.testing.assert_array_equal(np.asarray(block), values[:1024])
-    # The read decoded its chunk on Zarr's pool while it ran, as a named read.
-    assert held
+    np.testing.assert_array_equal(np.asarray(first), values[:1024])
+    np.testing.assert_array_equal(np.asarray(second), values[1024:2048])
 
 
 def test_writes_of_zarr_arrays_end_only_while_writes_are_held(tmp_path) -> None:

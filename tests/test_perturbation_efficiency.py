@@ -618,6 +618,9 @@ def test_efficiency_holds_no_more_than_the_budget_it_names(
             labels, by=by, id_column=None, invalidate_cache=True
         )
 
+    # A first run imports what any later run uses, so that the traced peak
+    # holds the call alone.
+    measure(open_store(path))
     # Each refusal names the step that it refused, by guide too, and the call
     # runs at the budget that the last names, holding no more than it and no
     # less than a share of it.
@@ -677,6 +680,53 @@ def test_matching_targets_holds_no_more_than_its_cost_states(
         lambda: target_features(targets, guide_codes, guide_ids, ids, names),
         slack=2.0,
     )
+
+
+@pytest.mark.slow
+def test_efficiency_over_many_compared_cells_holds_no_more_than_its_ledger_plans(
+    tmp_path,
+) -> None:
+    # 20,000 cells, each carrying one guide of 40 targets or the control, in
+    # the 40 target genes: their counts as float64, 6.4 MB, and the scaled
+    # copy outweigh the call's own objects and the audit's allowance.
+    rng = np.random.default_rng(41)
+    n_cells, n_targets = 20_000, 40
+    targets = [f"RNA{gene}" for gene in range(n_targets)] + ["Non-Targeting"]
+    guides = np.zeros((n_cells, n_targets + 1), dtype=np.uint16)
+    guides[np.arange(n_cells), rng.integers(0, n_targets + 1, n_cells)] = 20
+    path = tmp_path / "store.zarr"
+    store = write_screen(
+        path, rng.poisson(3.0, size=(n_cells, n_targets)) + 1, guides, targets=targets
+    )
+    labels = fixed_labels(store, ["Non-Targeting"])
+    rechunk_feature_tables(path)
+
+    def measure(budgeted):
+        return budgeted.perturbation.efficiency(
+            labels, id_column=None, invalidate_cache=True
+        )
+
+    measure(open_store(path))
+    budget, _refusals, ref = check_budget(
+        path, measure, at_most=_EFFICIENCY_AT_MOST, allowance=1 << 20, max_refusals=100
+    )
+    assert budget > 8 * n_targets * n_cells
+    audit_at(path, measure, budget)
+    assert (
+        open_store(path).perturbation.load_efficiency(ref).table["status"] == "tested"
+    ).all()
+
+
+@pytest.mark.parametrize("dtype", ["U", "O"])
+def test_the_target_match_counts_ids_of_any_text(dtype) -> None:
+    ids = np.asarray([f"ID{index:05d}" for index in range(2_000)])
+    names = np.asarray([f"G{index:04d}" for index in range(2_000)])
+    stored = (
+        (ids, names) if dtype == "U" else (ids.astype(object), names.astype(object))
+    )
+    # Text that is not stored at a fixed width is counted at its widest value,
+    # as the same text at a fixed width is.
+    assert target_feature_bytes(10, *stored) == target_feature_bytes(10, ids, names)
 
 
 def test_target_features_prefer_one_id_then_one_name() -> None:

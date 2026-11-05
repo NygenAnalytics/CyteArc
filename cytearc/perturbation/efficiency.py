@@ -176,11 +176,15 @@ def target_features(
     return matched
 
 
-def _strings_bytes(values: np.ndarray) -> int:
-    """Return the bytes of fixed-width text ``values`` as Python strings in an object array, each at the width of the widest."""
+def _as_text(values: np.ndarray) -> np.ndarray:
+    """Return ``values`` as fixed-width text, as they are when they are text already."""
     text = np.asarray(values)
-    if text.dtype.kind != "U":
-        text = text.astype(str)
+    return text if text.dtype.kind == "U" else text.astype(str)
+
+
+def _strings_bytes(values: np.ndarray) -> int:
+    """Return the bytes of text ``values`` as Python strings in an object array, each at the width of the widest."""
+    text = _as_text(values)
     n_values = len(text)
     width = text.dtype.itemsize // 4
     widest = int(text.view(np.uint32).max()) if text.size and width else 0
@@ -211,11 +215,13 @@ def target_feature_bytes(
         feature_names: The names of the expression features, as text.
         guide_feature_ids: Each guide's target feature ID, or None.
     """
-    ids = np.asarray(feature_ids)
-    names = np.asarray(feature_names)
+    # The text that target_features makes of the IDs and names, at the width
+    # of the widest of each.
+    ids = _as_text(feature_ids)
+    names = _as_text(feature_names)
     n_ids, n_names = len(ids), len(names)
-    id_width = max(1, ids.dtype.itemsize // 4) if ids.dtype.kind == "U" else 1
-    name_width = max(1, names.dtype.itemsize // 4) if names.dtype.kind == "U" else 1
+    id_width = max(1, ids.dtype.itemsize // 4)
+    name_width = max(1, names.dtype.itemsize // 4)
     by_id = fixed_text_bytes(n_ids, id_width) + _strings_bytes(ids)
     by_id += hash_table_bytes(n_ids)
     by_name = 4 * fixed_text_bytes(n_names, name_width) + 32 * n_names

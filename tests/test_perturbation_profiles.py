@@ -23,6 +23,7 @@ from cytearc.perturbation.profiles import (
     z_score_sums,
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
+from cytearc.utils.memory_budget import MemoryLedger
 from tests.perturbation_helpers import (
     fixed_labels,
     memory_screen,
@@ -31,6 +32,7 @@ from tests.perturbation_helpers import (
     write_screen,
 )
 from tests.memory_helpers import (
+    charges,
     audit_at,
     audited_least,
     ZARR_READS,
@@ -999,3 +1001,54 @@ def test_profiles_run_within_the_budget_they_name(tmp_path) -> None:
     pd.testing.assert_frame_equal(result.values, whole.values)
     pd.testing.assert_frame_equal(result.control_mean, whole.control_mean)
     pd.testing.assert_frame_equal(result.control_sd, whole.control_sd)
+
+
+def test_a_stream_counts_the_larger_of_the_last_reads_leftover_and_its_held_chunk(
+    shared,
+) -> None:
+    from cytearc.datastore._operations import perturbation_store
+
+    counts = perturbation_store._count_matrix(
+        shared.store._get_assay("RNA"), np.arange(5), np.arange(20)
+    )
+    held = counts._held_read_bytes()
+    _least, block = perturbation_store._stream_bytes(counts, 0)
+    for leftover, resident in (
+        # A leftover larger than the chunk that the block's own read before
+        # can hold counts in its place, and the stream plans beside the rest.
+        (held + 5_000, 1_000 + 5_000),
+        # A smaller one is within that chunk, which the block counts.
+        (held - 100, 1_000),
+    ):
+        ledger = MemoryLedger(None, "Streaming counts")
+        ledger.hold("the call's arrays", 1_000)
+        ledger.leave(leftover)
+        planned, taken = charges(
+            lambda ledger=ledger: perturbation_store._charge_stream(
+                ledger, counts, 0, "the stream"
+            )
+        )
+        assert planned == resident
+        stream = max(leftover, held) + block - held
+        assert taken == [("the stream", stream - leftover, 1_000 + stream)] * 2
+
+
+def test_a_feature_column_of_numbers_is_read_as_text_charged_before_it_is_made(
+    shared,
+) -> None:
+    from cytearc.datastore._operations import perturbation_store
+
+    assay = shared.store._get_assay("RNA")
+    stored = np.asarray(assay.feats._get_array("nCells")[:])
+    assert stored.dtype.kind == "i"
+    taken: list[tuple[str, int, int]] = []
+    ledger = MemoryLedger(None, "Reading features")
+    text, taken = charges(
+        lambda: perturbation_store._feature_text(ledger, assay, "nCells")
+    )
+    np.testing.assert_array_equal(text, stored.astype(str))
+    # The text is charged before it is made, at the 21 characters of an int64
+    # as NumPy gives them, and the stored numbers are let go.
+    items = [(item, nbytes) for item, nbytes, _planned in taken]
+    assert ("the features' nCells", 84 * len(stored)) in items
+    assert ledger.charged == text.nbytes == 84 * len(stored)

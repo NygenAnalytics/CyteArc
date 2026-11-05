@@ -32,7 +32,12 @@ from ...storage.selections import (
     validate_cell_selection,
 )
 from ...storage.types import as_zarr_array, read_array
-from ...utils.memory_budget import MemoryLedger, object_array_bytes
+from ...utils.memory_budget import (
+    MemoryBudgetError,
+    MemoryLedger,
+    memory_refusal,
+    object_array_bytes,
+)
 
 # The most bytes of values that one band of features holds, in Mixscape and
 # the association tests, whatever the budget, so that a large budget does not
@@ -232,6 +237,13 @@ def _positions_in(
     present = positions < len(sorted_cells)
     present[present] = sorted_cells[positions[present]] == cells[present]
     return positions, present
+
+
+#: What finding where each of some cells sits among sorted cells holds for
+#: each of them beside the position and flag that :func:`_positions_in`
+#: returns: the masks and gathered positions that compare them, 17 bytes a
+#: cell of 26 in all as traced at a million cells.
+_POSITIONS_SCRATCH_BYTES = 24
 
 
 def _matched_ids(features: np.ndarray, feature_ids: np.ndarray) -> np.ndarray:
@@ -444,13 +456,18 @@ def _count_blocks(
         scratch_bytes_per_row=scratch_bytes_per_row,
         memory_bytes=ledger.budget,
     )
+    return _leaving(ledger, iter(blocks), _count_leftover(counts))
+
+
+def _count_leftover(counts: Any) -> int:
+    """Return what the last read of a stream of ``counts`` from :func:`_count_matrix` can still hold, from the counts or their stored transpose."""
+    held = int(counts._held_read_bytes())
     transposed = getattr(counts, "_transposed", None)
-    held = counts._held_read_bytes()
     if transposed is not None:
         geometry = array_geometry(transposed)
         if geometry is not None:
             held = max(held, geometry.heldReadBytes())
-    return _leaving(ledger, iter(blocks), held)
+    return held
 
 
 def _count_matrix(assay: Any, features: np.ndarray, cells: np.ndarray) -> Any:
@@ -603,11 +620,25 @@ def _cell_values(
     """Read one per-cell array of a cell-aligned artifact, without cell IDs.
 
     ``value`` names the array, None for the canonical one. The read charges
-    ``ledger``, which keeps the values and the cells' positions charged.
+    ``ledger``, which keeps the values and the cells' positions charged, and
+    a refusal of the read names the call's step in the one form of every
+    screen refusal.
+
+    Raises:
+        MemoryBudgetError: If the read would pass the ledger's budget.
     """
-    resolved = resolve_cell_aligned_artifact(
-        store.zw, ref, value_name=value, ndim=None, ledger=ledger
-    )
+    try:
+        resolved = resolve_cell_aligned_artifact(
+            store.zw, ref, value_name=value, ndim=None, ledger=ledger
+        )
+    except MemoryBudgetError as refusal:
+        raise memory_refusal(
+            ledger.doing,
+            refusal.item,
+            refusal.needed_bytes,
+            refusal.budget_bytes,
+            remedy=ledger.remedy,
+        ) from refusal
     values: np.ndarray = np.asarray(resolved.values)
     return values
 
@@ -682,20 +713,30 @@ def _cell_samples(
 def _feature_text(ledger: MemoryLedger, assay: Any, column: str) -> np.ndarray:
     """Read the feature column ``column`` of ``assay`` as fixed-width text, keeping it charged.
 
-    The column is read through ``read_rows``, which charges the chunks that
-    its read decodes; a column stored as anything but text is held again as
-    text.
+    The column is read whole through ``read_whole``, which charges the
+    chunks that its read decodes; a column of numbers is held again as text,
+    at the width that NumPy gives its dtype, charged before it is made.
+
+    Raises:
+        KeyError: If the assay has no feature column of that name.
+        TypeError: If the column holds neither text nor numbers.
     """
     array = assay.feats._get_array(column)
     item = f"the features' {column}"
-    values = read_rows(
-        ledger, array, np.arange(int(array.shape[0]), dtype=np.int64), item=item
-    )
+    values = read_whole(ledger, assay.feats._group, column, item=item)
     if values.dtype.kind == "U":
         return values
+    if values.dtype.kind not in "biuf":
+        raise TypeError(
+            f"The feature column {column!r} of assay {assay.name!r} must hold "
+            f"text or numbers, not {array.dtype}"
+        )
+    width = np.empty(0, dtype=values.dtype).astype(str).dtype.itemsize // 4
+    ledger.hold(item, 4 * width * values.size)
     text: np.ndarray = values.astype(str)
-    ledger.hold(item, text.nbytes)
-    ledger.release(values.nbytes)
+    stored_bytes = values.nbytes
+    del values
+    ledger.release(stored_bytes)
     return text
 
 
@@ -1033,8 +1074,8 @@ def _selection_read(
     n_rows = int(flags.shape[0])
     block_rows = min(_SELECTION_BLOCK_ROWS, n_rows)
     geometry = array_geometry(flags)
-    if geometry is None:
-        return block_rows * 64, 0
+    # A selection's flags are one-dimensional, so stored in chunks.
+    assert geometry is not None
     chunks = -(-max(1, n_rows) // geometry.axisChunk(0))
     held = geometry.heldReadBytes(ledger.holding_threads(chunks))
     # Before the first block, the read before is the ledger's last, whose

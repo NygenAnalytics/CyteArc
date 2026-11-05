@@ -31,12 +31,15 @@ from tests.perturbation_helpers import (
     use_python_kernels,
     write_screen,
 )
-from cytearc.utils.memory_budget import MemoryLedger, observed_charges
+from cytearc.utils.memory_budget import (
+    MemoryBudgetError,
+    MemoryLedger,
+    observed_charges,
+)
 from tests.memory_helpers import (
     audit_at,
     budget_that_runs,
     check_budget,
-    follow_refusals,
     refusal_naming,
 )
 from tests.storage_helpers import open_store, rechunk_feature_tables
@@ -960,6 +963,56 @@ def test_results_do_not_depend_on_the_number_of_threads() -> None:
     np.testing.assert_array_equal(models, one_model)
 
 
+def test_complement_tests_size_their_work_from_a_ledger_and_refuse_a_room_without_it() -> (
+    None
+):
+    from cytearc.perturbation.high_moi import (
+        GATHER_BYTES,
+        complement_test_work,
+        complement_thread_bytes,
+    )
+    from cytearc.perturbation.p_values import STATISTICS_BYTES
+
+    counts, design, groups, _ = _screen(n_cells=400, n_genes=6, seed=12, effect=0.4)
+    pair_groups = np.repeat(np.arange(3), 6)
+    pair_rows = np.tile(np.arange(6), 3)
+    settings = {
+        "detection_models": fit_detection_models(design, groups),
+        "n_resamples": (99, 499, 999),
+    }
+    arguments = (counts, design, groups, pair_groups, pair_rows)
+    default = complement_tests(*arguments, **settings)
+    threads = numba.get_num_threads()
+    # Without a room the copies and statistics take their defaults.
+    assert complement_test_work(None, 400, settings["n_resamples"], threads)[1:] == (
+        GATHER_BYTES,
+        STATISTICS_BYTES,
+    )
+    # The least of the tests: each thread's sets and one gene's copy over the
+    # 400 cells, and twice one pair's second round.
+    least = threads * complement_thread_bytes(400, 0) + 2 * 8 * 499
+    for budget in (None, least, least + (1 << 20)):
+        _same(
+            default,
+            complement_tests(
+                *arguments, **settings, ledger=MemoryLedger(budget, "Testing pairs")
+            ),
+        )
+    with pytest.raises(MemoryBudgetError) as refused:
+        complement_tests(
+            *arguments, **settings, ledger=MemoryLedger(least - 1, "Testing pairs")
+        )
+    assert refused.value.needed_bytes == least
+    assert refused.value.item.startswith("testing the pairs")
+    with pytest.raises(TypeError, match="not both"):
+        complement_tests(
+            *arguments,
+            **settings,
+            ledger=MemoryLedger(None, "Testing pairs"),
+            gather_bytes=1,
+        )
+
+
 def test_units_copy_small_or_scattered_genes_and_read_dense_ones_in_place() -> None:
     # Pairs sorted by group and gene: a dense group, a scattered group, and a
     # group of one gene twice.
@@ -1519,10 +1572,10 @@ def test_high_moi_checks_the_budget_of_counting_guides_before_reading_them(
     def run(budgeted):
         return budgeted.perturbation.associations(labels, **arguments)
 
-    budget, _refusals = follow_refusals(
-        lambda memory: run(open_store(store.zarr_loc, nthreads=2, mem_budget=memory)),
-        start=1000,
+    budget, _refusals, _result, peak = budget_that_runs(
+        store.zarr_loc, run, nthreads=2, max_refusals=100
     )
+    assert budget <= _HIGH_MOI_AT_MOST * peak + (1 << 20)
     passes.clear()
     charged: list[tuple[str, int]] = []
     with observed_charges(
@@ -1819,8 +1872,9 @@ def test_a_codes_read_plans_for_the_previous_chunk_that_zarr_still_holds(
                     held.setdefault(read, []).append(item)
 
         thread._WorkItem.run = run_and_hold
-        # The ledger's plan of the pass: what it holds beside the reads, the
-        # leftover of the first pass, and what the reads hold.
+        # The ledger's plan of the pass, on a ledger of its own, which counts
+        # no leftover of the first pass: what the reads hold.
+        ledger = MemoryLedger(None, "Reading the codes")
         planned = []
         tracemalloc.start()
         start = tracemalloc.get_traced_memory()[0]
@@ -1850,10 +1904,11 @@ def test_a_codes_read_plans_for_the_previous_chunk_that_zarr_still_holds(
     assert peak > 3 * chunk, f"The pass held {peak} bytes, no previous read"
     # A plan of one chunk as stored and decoded and its rows, 5.8 MB, missed
     # the previous chunk that a busy machine held beside them, 7.4 MB in all;
-    # the ledger's plan counts it, on its one codec thread, and by no more
-    # than a third again.
+    # the ledger's plan counts it, on its one codec thread, at the bound of its
+    # encoded bytes, which these codes compress below, so by no more than half
+    # again.
     assert peak <= plan, f"The pass held {peak} bytes within a plan of {plan}"
-    assert plan <= 4 / 3 * peak, f"The plan of {plan} bytes outweighs the pass"
+    assert plan <= 1.5 * peak, f"The plan of {plan} bytes outweighs the pass"
 
 
 def test_high_moi_plans_only_the_calibration_pairs_a_check_can_draw(

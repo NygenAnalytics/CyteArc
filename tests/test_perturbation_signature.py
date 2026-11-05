@@ -37,6 +37,7 @@ from tests.perturbation_helpers import (
     write_screen,
 )
 from tests.memory_helpers import (
+    follow_refusals,
     audit_at,
     at_budget,
     check_budget,
@@ -702,3 +703,63 @@ def test_loading_signatures_stays_within_the_budget_it_names(memory, features) -
     )
     pd.testing.assert_frame_equal(loaded.values, expected)
     pd.testing.assert_frame_equal(loaded.neighbors, memory.whole.neighbors)
+
+
+@pytest.mark.slow
+def test_a_signature_refused_for_its_neighbors_writes_nothing(
+    tmp_path, monkeypatch
+) -> None:
+    import cytearc.storage.sharding as sharding
+
+    # 20,000 cells of 4 targets and controls in 8 genes, with 4 features and
+    # 60 neighbors each: saving the neighbors, 20 bytes for each neighbor of a
+    # cell, outweighs every other step.
+    rng = np.random.default_rng(31)
+    n_cells, targets = 20_000, ["GENE_A", "GENE_B", "GENE_C", "GENE_D", "NT"]
+    guides = np.zeros((n_cells, len(targets)), dtype=np.uint16)
+    guides[np.arange(n_cells), rng.integers(0, len(targets), n_cells)] = 20
+    path = tmp_path / "store.zarr"
+    store = write_screen(
+        path, rng.poisson(3.0, size=(n_cells, 8)) + 1, guides, targets=targets
+    )
+    coordinates = store.reduction.import_coordinates(
+        rng.normal(size=(n_cells, 5)),
+        cell_selection=store.select_measured_cells("RNA"),
+        name="X",
+    )
+    labels = fixed_labels(store, ["NT"])
+    features = store.features.snapshot(feature_indexes=np.arange(4))
+    writes: list[int] = []
+    write = sharding.write_dense_from_row_batches
+
+    def recorded(*args, **kwargs):
+        writes.append(1)
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(sharding, "write_dense_from_row_batches", recorded)
+
+    # The signatures written before each refusal.
+    written_before: list[int] = []
+
+    def run(budget: int) -> object:
+        writes.clear()
+        try:
+            return open_store(path, mem_budget=budget).perturbation.signature(
+                labels,
+                coordinates,
+                features=features,
+                dims=5,
+                n_neighbors=60,
+                invalidate_cache=True,
+            )
+        except MemoryBudgetError:
+            written_before.append(len(writes))
+            raise
+
+    # Every refusal from a budget of one byte comes before the signatures
+    # are written, the neighbors' save's among them, which names the budget
+    # that runs; one byte less is refused there before any write.
+    budget, refusals = follow_refusals(run, start=1)
+    assert refusals[-1].item == "saving the neighbors"
+    assert len(written_before) == len(refusals) + 1
+    assert set(written_before) == {0}

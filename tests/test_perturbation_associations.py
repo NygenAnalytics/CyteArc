@@ -5,6 +5,7 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
+import numba
 import numpy as np
 import pandas as pd
 import pytest
@@ -52,7 +53,7 @@ from cytearc.perturbation.p_values import (
 from cytearc.perturbation.random_sets import resampling_keys
 from cytearc.storage.artifacts import ArtifactRef
 from cytearc.utils.logging import logger
-from cytearc.utils.memory_budget import MemoryLedger
+from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 from tests.perturbation_helpers import (
     dense_pair,
     fixed_labels,
@@ -1312,6 +1313,47 @@ def test_pair_tests_without_the_approximation_keep_the_sets_p_values() -> None:
     assert exact.p_value[0] == pytest.approx(2 / 100)
     assert np.isnan(exact.skew_location[0])
     np.testing.assert_array_equal(exact.p_value, batched.p_value)
+
+
+def test_pair_tests_size_their_work_from_a_ledger_and_refuse_a_room_without_it() -> (
+    None
+):
+    from cytearc.perturbation.associations import pair_test_work
+    from cytearc.perturbation.p_values import STATISTICS_BYTES
+
+    counts, design, groups = _screen(n_controls=200, sizes=(80,), n_genes=2, effect=0.3)
+    arguments = (counts, design, groups, np.zeros(2, int), np.arange(2))
+    settings = {"n_resamples": (49, 99, 199), "stage_threshold": 0.05}
+    default = pair_tests(*arguments, **settings)
+    threads = numba.get_num_threads()
+    scratch, draws, statistics = pair_test_work(
+        None, groups, design.shape[1], settings["n_resamples"], threads
+    )
+    # Without a room the sets and statistics take their defaults.
+    assert (draws, statistics) == (1 << 28, STATISTICS_BYTES)
+    # The least of the tests: the threads' buffers, one group's sets of the
+    # largest round over its 80 treatment cells, and twice one pair's second
+    # round.
+    least = scratch + 4 * 199 * 80 + 2 * 8 * 99
+    for budget in (None, least, least + (1 << 20)):
+        tested = pair_tests(
+            *arguments, **settings, ledger=MemoryLedger(budget, "Testing pairs")
+        )
+        np.testing.assert_array_equal(tested.p_value, default.p_value)
+        np.testing.assert_array_equal(tested.z, default.z)
+    with pytest.raises(MemoryBudgetError) as refused:
+        pair_tests(
+            *arguments, **settings, ledger=MemoryLedger(least - 1, "Testing pairs")
+        )
+    assert refused.value.needed_bytes == least
+    assert refused.value.item.startswith("testing the pairs")
+    with pytest.raises(TypeError, match="not both"):
+        pair_tests(
+            *arguments,
+            **settings,
+            ledger=MemoryLedger(None, "Testing pairs"),
+            statistics_bytes=8,
+        )
 
 
 def test_pair_tests_take_a_third_round_when_the_fit_fails(monkeypatch) -> None:

@@ -32,6 +32,7 @@ from ...utils.memory_budget import MemoryLedger
 from ...utils.numba import numba_threads
 from ...utils.warnings import warn
 from .perturbation_store import (
+    _POSITIONS_SCRATCH_BYTES,
     _LabelRows,
     _band_bytes,
     _call_ledger,
@@ -178,6 +179,10 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             ledger.hold(
                 "the classified cells' rows",
                 9 * len(cell_index) + 18 * n_classified,
+            )
+            ledger.peak(
+                "placing the labelled cells",
+                _POSITIONS_SCRATCH_BYTES * len(cell_index),
             )
             positions, present = _positions_in(classified, cell_index)
             aligned = np.full(n_classified, -1, dtype=np.int64)
