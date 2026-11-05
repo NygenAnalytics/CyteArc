@@ -27,7 +27,8 @@ one file stay apart even where their barcodes repeat.
 The DAb-seq pipeline writes a ``.hdf5`` file of genotypes of cells by
 variants: ``AD`` and ``RD``, the reads of the alternative and the reference,
 ``DP``, ``GQ`` and ``GT`` (0 wild type, 1 heterozygous, 2 homozygous
-alternative, 3 no call), with the variants named
+alternative, 3 no call, and -1 one reference allele beside one not called),
+with the variants named
 ``<gene>:<chrom>:<pos>:<ref>/<alt>`` in ``VARIANTS``, the cells in
 ``CELL_BARCODES`` (such as ``AACAACCTAGTCTTCTCG-1-all``, the barcode, the
 tube and the sample) and missing values written as -1. Its ``FLT3-ITD``
@@ -94,9 +95,16 @@ _RECORDED_METADATA = (
     "dp_cutoff",
     "af_cutoff",
 )
-# The labels of the genotype codes 0 to 3, as Tapestri and DAb-seq write them.
-_CALL_LABELS = np.asarray(["0", "1", "2", "3"], dtype=object)
+# The labels of the genotype codes -1 to 3, as Tapestri and DAb-seq write
+# them, by the code plus one. DAb-seq's GT is the sum of a diploid call's two
+# allele indices as scikit-allel reads them from the pipeline's VCF, 0 for the
+# reference, 1 for the alternative and -1 for an allele not called, with a sum
+# of -2, neither allele called, written as 3 (resources.py, vcf_to_tables); so
+# its -1 is one reference allele beside one not called. Tapestri's NGT is 0
+# to 3.
+_CALL_LABELS = np.asarray(["-1", "0", "1", "2", "3"], dtype=object)
 _NO_CALL = 3
+_LOWEST_CALL = {"tapestri": 0, "dab_seq": -1}
 # DAb-seq writes a missing depth, read count or quality as -1.
 _MISSING = -1
 # AF times DP over 100 is a whole number of reads up to the rounding of AF's
@@ -928,18 +936,19 @@ class TapestriSource:
             barcode_codes=rows.astype(np.int64),
             keys=self._columns.column_allele[columns],
             call_source=source,
-            calls=_CALL_LABELS[calls[rows, columns]],
+            calls=_CALL_LABELS[calls[rows, columns] + 1],
             call_quality=quality[rows, columns],
         )
 
     def _check_codes(self, calls: np.ndarray, ids: np.ndarray, layer: str) -> None:
-        bad = (calls < 0) | (calls > _NO_CALL)
+        lowest = _LOWEST_CALL[self.format]
+        bad = (calls < lowest) | (calls > _NO_CALL)
         if bad.any():
             row, column = (int(value) for value in np.argwhere(bad)[0])
             raise ValueError(
                 f"{layer} of {self.path} gives the cell {quoted_value(ids[row])} at "
                 f"{quoted_value(self._columns.labels[column])} the genotype "
-                f"{int(calls[row, column])}; genotypes are 0 to 3"
+                f"{int(calls[row, column])}; genotypes are {lowest} to {_NO_CALL}"
             )
 
     def _tapestri_block(

@@ -106,7 +106,9 @@ _GOT_MULTI = {**_GOT, "Unprofiled": MISSING}
 #: ``Unprofiled`` means no evidence and its refined ``FalsePositive`` a mutant
 #: call that its model rejected; Gotcha's ``HET`` is ``heterozygous``; and
 #: Tapestri's ``NGT`` codes 0 to 3, and DAb-seq's ``GT`` codes, are wild type,
-#: heterozygous, homozygous alternative and no call.
+#: heterozygous, homozygous alternative and no call. DAb-seq's ``GT`` of -1 is
+#: one reference allele beside one not called, which tells neither wild type
+#: nor heterozygous, so it is no call too.
 SOURCE_CALLS: Mapping[str, Mapping[str, int]] = {
     "Genotype": _GOT,
     "genotype": _GOT,
@@ -122,6 +124,7 @@ SOURCE_CALLS: Mapping[str, Mapping[str, int]] = {
         "3": MISSING,
     },
     "GT": {
+        "-1": MISSING,
         "0": WILD_TYPE,
         "1": HETEROZYGOUS,
         "2": HOMOZYGOUS_ALTERNATIVE,
