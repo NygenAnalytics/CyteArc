@@ -1057,7 +1057,7 @@ def _fate_bias_of(spanning: SimpleNamespace, clonotypes: ArtifactRef) -> Artifac
 
 
 def test_clonotypes_across_receptor_types_save_each_cells_clonotype_within_its_type(
-    spanning,
+    spanning, tmp_path
 ) -> None:
     store, together, apart = spanning.store, spanning.together, spanning.apart
     # Defined across types, the clonotypes also save each cell's clonotype as
@@ -1091,6 +1091,14 @@ def test_clonotypes_across_receptor_types_save_each_cells_clonotype_within_its_t
         "clonotype_1 (ambiguous)",
     ]
     assert "within_type_clone" not in store.clones.load_clones(apart).cells
+    # Their export writes each cell's clonotype that they define.
+    path = tmp_path / "together.csv"
+    store.clones.export_clones(together, path)
+    written = pd.read_csv(path, dtype=str)
+    assert written.shape[1] == 2
+    assert sorted(map(tuple, written.values.tolist())) == sorted(
+        zip(cells.index.astype(str), cells["clone"].astype(str), strict=True)
+    )
 
 
 def test_clonotypes_across_types_saved_without_their_clonotypes_within_types_are_refused(
@@ -1117,7 +1125,7 @@ def test_clonotypes_across_types_saved_without_their_clonotypes_within_types_are
             measure()
     # Their own export still reads the clonotypes that they define, and
     # defining them again does not reuse them but saves the codes beside them.
-    store.clones.export_clones(together, tmp_path / "together.csv")
+    store.clones.export_clones(together, tmp_path / "old.csv")
     receptors = store.artifacts.inspect(together).input_ref("receptors")
     again = store.repertoire.clonotypes(
         receptors, receptor_arms="VDJ", within_receptor_type=False
@@ -1265,6 +1273,12 @@ def test_the_fates_plot_draws_a_bar_for_each_clonotype_within_a_type(
     ]
     with pytest.raises(ValueError, match="No clonotype is labelled"):
         names.labels(["clonotype_3 (TCR)"])
+    # A text that names no receptor type adds nothing, and clonotypes within
+    # types take none, so neither label names a clonotype.
+    with pytest.raises(ValueError, match="No clonotype is labelled"):
+        names.labels(["clonotype_1 (XYZ 9)"])
+    with pytest.raises(ValueError, match="No clonotype is labelled"):
+        clone_names(store, spanning.apart).labels(["clonotype_1 (TCR)"])
 
 
 def test_the_largest_clonotypes_and_their_tracks_draw_each_clonotype_within_a_type(
@@ -1343,6 +1357,17 @@ def test_the_largest_clonotypes_and_their_tracks_draw_each_clonotype_within_a_ty
         spanning.together, group_by="tp", labels=["clonotype_1 (BCR)", "clonotype_2"]
     )
     assert one.tracked == ("clonotype_1 (BCR)", "clonotype_2")
+    # Labels of both kinds together follow each clonotype within a type they
+    # name, by rank.
+    mixed = store.clones.track(
+        spanning.together, group_by="tp", labels=["clonotype_2", "clonotype_1"]
+    )
+    assert mixed.tracked == (
+        "clonotype_1 (TCR)",
+        "clonotype_1 (BCR)",
+        "clonotype_2",
+        "clonotype_1 (ambiguous)",
+    )
     with pytest.raises(ValueError, match="No clone is labelled"):
         store.clones.track(spanning.together, labels=["clonotype_3"])
 
@@ -1482,6 +1507,22 @@ def test_measuring_clonotypes_across_receptor_types_charges_each_step(
     )
     assert found["each cell's clonotype within its receptor type"] == 8 * 8
     assert "the clonotypes across receptor types" in found
+    # Each cell's group among the within groups alone sits beside its group
+    # among the types too, and the save writes each cell's clonotype within
+    # its type.
+    assert found["each cell's group"] == 16 * 8
+    assert found[
+        "writing the clonotypes"
+    ] == repertoire_operations._clonotype_write_bytes(8, (), [], within_types=True)
+    within = charged(
+        lambda: store.repertoire.clonotypes(
+            receptors, receptor_arms="VDJ", invalidate_cache=True
+        )
+    )
+    assert within["each cell's group"] == 8 * 8
+    assert within[
+        "writing the clonotypes"
+    ] == repertoire_operations._clonotype_write_bytes(8, (), [])
     # Tracking names its four clonotypes within types from the eight cells;
     # a clonotype's own label is found among its two clonotypes' labels.
     found = charged(
@@ -1497,8 +1538,29 @@ def test_measuring_clonotypes_across_receptor_types_charges_each_step(
         "numbering 3 clonotypes within types of clonotypes that span types"
     ] == (24 * 4 + 240 * 3 + NUMPY_STEP_BYTES)
     assert "finding the clonotypes named" in found
-    assert "choosing the clones to follow among 7 counts" in found
-    assert "finding the counts of 3 clones followed" in found
+    # Choosing and finding the clones followed hold 40 bytes a count, of its
+    # seven counts of a clonotype within a type in a group.
+    assert found["choosing the clones to follow among 7 counts"] == (
+        40 * 7 + NUMPY_STEP_BYTES
+    )
+    assert found["finding the counts of 3 clones followed"] == (
+        40 * 7 + NUMPY_STEP_BYTES
+    )
+    # Named among the B cells of a, two of clonotype_1's three clonotypes
+    # within types have no counted cell, whose first cells are found among
+    # the eight cells' clones.
+    store.cells.insert("b_cell_of_a", np.isin(np.arange(N_CELLS), [6]))
+    found = charged(
+        lambda: store.clones.track(
+            together,
+            group_by="tp",
+            labels=["clonotype_1"],
+            cell_selection=store.snapshot_cell_selection("b_cell_of_a"),
+        )
+    )
+    assert found[
+        "finding the first cell of each clone named without a counted cell"
+    ] == (20 * 8 + NUMPY_STEP_BYTES)
 
 
 def test_summaries_of_clonotypes_follow_a_cell_selection(tmp_path) -> None:

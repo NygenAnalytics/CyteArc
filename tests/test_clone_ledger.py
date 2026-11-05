@@ -140,6 +140,9 @@ def test_naming_clonotypes_within_types_holds_what_each_step_charges(
 
     def run() -> tuple:
         ledger = MemoryLedger(1 << 40, "Naming clonotypes within types")
+        # A charge of nothing before the call shows what it allocates before
+        # its own first charge.
+        ledger.hold("the call", 0)
         return within_type_parts(
             codes, within, types, ["BCR", "TCR", "no IR"], ledger=ledger
         )
@@ -151,9 +154,13 @@ def test_naming_clonotypes_within_types_holds_what_each_step_charges(
     shared = np.bincount(clonotypes)[clonotypes] > 1
     assert [bool(text) for text in added.tolist()] == shared.tolist()
     _result, intervals = interval_peaks(run)
-    assert len(intervals) == (3 if shared.any() else 2)
+    (_call, _nothing, before), *steps = intervals
+    # Before its first charge, the call holds its own objects alone, 1.6 KB
+    # as traced.
+    assert before <= 16 * 1024, before
+    assert len(steps) == (3 if shared.any() else 2)
     # Each step plans 1.18 to 1.62 times what it traced.
-    for item, planned, traced in intervals:
+    for item, planned, traced in steps:
         assert traced <= planned <= 2 * traced, (item, planned, traced)
 
 

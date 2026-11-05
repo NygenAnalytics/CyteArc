@@ -158,12 +158,6 @@ def within_type_parts(
     types = np.asarray(types, dtype=np.int64)
     if codes.ndim != 1 or within.shape != codes.shape or types.shape != codes.shape:
         raise ValueError("codes, codes_within_type and types must align")
-    has = within >= 0
-    if not np.array_equal(has, codes >= 0):
-        raise ValueError(
-            "A cell has a clonotype across receptor types and none within its "
-            "type, or one within and none across"
-        )
     n_parts = int(within.max(initial=-1)) + 1
     if ledger is not None:
         ledger.peak(
@@ -171,6 +165,12 @@ def within_type_parts(
             _WITHIN_TYPE_BYTES_PER_CELL * len(within)
             + _WITHIN_TYPE_BYTES_PER_PART * n_parts
             + NUMPY_STEP_BYTES,
+        )
+    has = within >= 0
+    if not np.array_equal(has, codes >= 0):
+        raise ValueError(
+            "A cell has a clonotype across receptor types and none within its "
+            "type, or one within and none across"
         )
     # Each clonotype within a type takes the clonotype and type of its cells,
     # which must all agree.

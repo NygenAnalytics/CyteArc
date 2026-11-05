@@ -1285,7 +1285,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             MemoryError: If reading the receptor types, grouping the cells
                 by their ``within`` labels, or the definition, 1,000 bytes per
                 cell and 12 per contig and with a distance metric the 512 MiB
-                of the search, does not fit the memory budget; or, with a
+                of the search, does not fit the memory budget, across
+                receptor types beside the clonotypes across types while each
+                cell's clonotype within its type is defined; or, with a
                 distance metric, the junctions that the cells' chains hold,
                 decoded for the search, or the pairs of chains within
                 ``max_distance`` and the links between the chains or arms that
