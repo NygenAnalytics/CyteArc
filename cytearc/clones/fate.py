@@ -96,9 +96,10 @@ _BIAS_BYTES_PER_CLONE_FATE = 80
 _BIAS_BYTES_PER_FATE = 1_000
 # With each early cell's stratum, the codes of each clone within its strata
 # are let go before the fractions are built: on 200,000 and 400,000 early
-# cells in two to four strata of one to four fates each, the traced peak was
-# at most 0.58 times these bytes, and that of clones of one stratum each did
-# not move.
+# cells of 20,000 to 400,000 clones in two to four strata of one to four
+# fates each, the traced peak was at most 0.66 times these bytes, where the
+# same pairs in one stratum traced up to 0.80, and clones of one stratum each
+# traced the same with or without their early cells' strata.
 
 
 def _checked_method(method: Any) -> int:
@@ -1036,11 +1037,12 @@ class CloneFateBias:
 
     Attributes:
         cells: One row per early cell, indexed by cell ``ids``: ``clone``,
-            ``n_late_cells`` (its clone's late cells with a fate) and ``fate``
-            (the fate that holds the most of them, missing for none or a tie).
+            ``n_late_cells`` (its clone's late cells with a fate of its own
+            labels kept apart, such as its receptor type) and ``fate`` (the
+            fate that holds the most of them, missing for none or a tie).
         fractions: One row per early cell, indexed by cell ``ids``, and one
-            column per fate, named by the fate, of the share of the clone's
-            late cells in it, NaN without late cells.
+            column per fate, named by the fate, of the share of those late
+            cells in it, NaN without late cells.
         clone_fates: One row per clone with late cells and fate of its
             stratum, by clone and then fate: ``clone``, ``fate``,
             ``n_early_cells``, ``n_late_cells``, ``n_cells`` (its late cells in
@@ -1066,9 +1068,11 @@ class CloneFateBias:
             saved it: ``cellsWithoutClone``, the late cells without a clone,
             ``cellsWithoutGroup``, those with a clone but no fate, the fates
             in ``groups``, ``earlyCellsWithoutLateCells``, the early cells
-            with a clone whose clone has no late cell with a fate,
-            ``earlyCellsWithTiedFates``, those whose clone's late cells tie
-            between fates, and ``testedClones``, the clones tested.
+            with a clone whose clone has no late cell with a fate of the early
+            cell's labels kept apart, ``earlyCellsWithTiedFates``, those whose
+            clone's late cells tie between fates, and ``testedClones``, the
+            clones tested, a clone once for each label kept apart of its late
+            cells.
     """
 
     cells: pd.DataFrame = field(repr=False)

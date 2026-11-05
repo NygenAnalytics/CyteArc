@@ -1172,6 +1172,17 @@ def test_the_fates_plot_draws_a_bar_for_each_receptor_type_of_a_clonotype(
     ticks = [tick.get_text() for tick in result.axes["fates"].get_xticklabels()]
     assert ticks == table["label"].tolist()
     result.close()
+    # A clonotype drawn with two receptor types names each, and one drawn
+    # with one type, or twice with the same, names none.
+    from cytearc.plotting._clone_names import clone_names
+
+    names = clone_names(store, spanning.together)
+    assert names.labels(
+        ["clonotype_1", "clonotype_1", "clonotype_2", "clonotype_2"],
+        [("TCR",), ("BCR",), ("TCR",), ("TCR",)],
+    ) == ["CASSA (TCR)", "CASSA (BCR)", "CASSB", "CASSB"]
+    with pytest.raises(ValueError, match="of each of the 2 clones, not 1"):
+        names.labels(["clonotype_1", "clonotype_2"], [("TCR",)])
     # Defined within receptor types, the same bars under other labels.
     within = store.plots.clone_fate_bias(
         _fate_bias_of(spanning, spanning.apart), show=False
@@ -1285,6 +1296,110 @@ def test_counts_of_clonotypes_count_one_in_each_receptor_type_it_spans(
         ["IGH", "IGHV1", 2],
         ["TRB", "TRBV1", 6],
     ]
+
+
+_BRIDGED_CHAINS = {
+    "CAVA": ("TRA", "TGTGCTGTGGCC"),
+    "CAVB": ("TRA", "TGTGCTGTGTAC"),
+    "CASSA": ("TRB", "TGTGCCAGCAGCGCC"),
+    "CASSB": ("TRB", "TGTGCCAGCAGCTAC"),
+    "CQQY": ("IGK", "TGTCAGCAGTAT"),
+    "CARW": ("IGH", "TGTGCGAGATGG"),
+}
+# T cells of clone A, cell0 and cell1, and of clone B, cell2 and cell3, a B
+# cell, cell4, and two doublets, cell5 of a T cell of A and a B cell of
+# cell4's clone and cell6 of a T cell of B and a B cell of that clone.
+BRIDGED_ROWS = [
+    f"cell{cell},true,cell{cell}_contig_{contig},true,500,{chain},{chain}V1,,"
+    f"{chain}J1,{chain}C,true,true,{junction_aa},{junction},50,{umis},ct{cell},"
+    f"ct{cell}_{contig}"
+    for cell, chains in (
+        (0, (("CAVA", 9), ("CASSA", 9))),
+        (1, (("CAVA", 9), ("CASSA", 9))),
+        (2, (("CAVB", 9), ("CASSB", 9))),
+        (3, (("CAVB", 9), ("CASSB", 9))),
+        (4, (("CQQY", 9), ("CARW", 9))),
+        (5, (("CAVA", 8), ("CASSA", 8), ("CQQY", 5), ("CARW", 5))),
+        (6, (("CAVB", 8), ("CASSB", 8), ("CQQY", 5), ("CARW", 5))),
+    )
+    for contig, (junction_aa, umis) in enumerate(chains, start=1)
+    for chain, junction in [_BRIDGED_CHAINS[junction_aa]]
+]
+
+
+def test_doublets_join_t_cell_clonotypes_that_receptor_types_keep_apart(
+    tmp_path,
+) -> None:
+    # Within receptor types, A and B are two T cell clonotypes and the
+    # doublets an ambiguous one. Across types, the doublets share an arm's
+    # chains with A, with B and with the B cell, which joins all seven cells
+    # into one clonotype, whose T cells every summary counts as one clonotype
+    # of T cells.
+    store, receptors = clonal_receptors(tmp_path, BRIDGED_ROWS)
+    apart = store.repertoire.clonotypes(receptors)
+    together = store.repertoire.clonotypes(receptors, within_receptor_type=False)
+    assert store.clones.load_clones(apart).clones["n_cells"].tolist() == [2, 2, 2, 1]
+    assert store.clones.load_clones(together).clones["n_cells"].tolist() == [7]
+    within = store.clones.diversity(apart).indices.set_index("group")
+    across = store.clones.diversity(together).indices.set_index("group")
+    assert within.loc["TCR", ["n_cells", "n_clones"]].tolist() == [4, 2]
+    assert across.loc["TCR", ["n_cells", "n_clones"]].tolist() == [4, 1]
+    for group in ("BCR", "ambiguous"):
+        assert within.loc[group, "n_clones"] == across.loc[group, "n_clones"] == 1
+    # The T cells' and doublets' primary beta chains, TRBV1, count as three
+    # clonotypes within types, A, B and the doublets, and as two across.
+    for clonotypes, n_clonotypes in ((apart, 3), (together, 2)):
+        usage = store.repertoire.gene_usage(clonotypes, count="clonotypes").table
+        assert usage.loc[usage["locus"] == "TRB", "n_clonotypes"].tolist() == [
+            n_clonotypes
+        ]
+
+
+def test_measuring_each_receptor_type_of_a_clonotype_charges_each_step(
+    spanning,
+) -> None:
+    from cytearc.datastore._operations import clones as clone_operations
+    from cytearc.utils.memory_budget import NUMPY_STEP_BYTES
+    from tests.memory_helpers import charges
+
+    store, together = spanning.store, spanning.together
+
+    def charged(call) -> dict[str, int]:
+        _result, taken = charges(call)
+        return {item: nbytes for item, nbytes, _planned in taken}
+
+    # Fate bias counts its four pairs of fate and clone within their types,
+    # and finds and keeps the type of each of its three early cells.
+    found = charged(lambda: _fate_bias_of(spanning, together))
+    assert found["counting the clones tested in each stratum"] == (
+        clone_operations._PART_BYTES_PER_PAIR * 4 + NUMPY_STEP_BYTES
+    )
+    assert found[
+        "finding the stratum of each early cell"
+    ] == clone_operations._cell_strata_bytes(3, 1)
+    assert found["the stratum of each early cell"] == 8 * 3
+    # Tracking codes its seven pairs of group and clone and keeps the codes.
+    found = charged(lambda: store.clones.track(together, group_by="tp", top_n=2))
+    assert found["coding each pair's clone within its stratum"] == (
+        clone_operations._PART_CODE_BYTES_PER_PAIR * 7 + NUMPY_STEP_BYTES
+    )
+    assert found["each pair's clone within its stratum"] == 8 * 7
+    # Named, clonotype_1 is found among the eight cells, and its six cells'
+    # types are found.
+    found = charged(
+        lambda: store.clones.track(together, group_by="tp", labels=["clonotype_1"])
+    )
+    assert found["finding the cells of the clones named"] == (
+        clone_operations._NAMED_CELL_BYTES * 8 + NUMPY_STEP_BYTES
+    )
+    assert found["finding the strata of the 6 cells of the clones named"] == (
+        8 + clone_operations._NAMED_PART_BYTES
+    ) * 6 + clone_operations._cell_strata_bytes(6, 1)
+    # Counted by clonotype, each of the eight cells' receptor types is held
+    # while each of their eight counted chains is coded within its type.
+    found = charged(lambda: store.repertoire.gene_usage(together, count="clonotypes"))
+    assert found["each cell's receptor type"] == 8 * 8
+    assert found["each chain's clonotype within its receptor type"] == 16 * 8
 
 
 def test_summaries_of_clonotypes_follow_a_cell_selection(tmp_path) -> None:

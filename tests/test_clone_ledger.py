@@ -131,26 +131,79 @@ def test_each_cell_takes_the_stratum_of_its_labels_in_every_column_kept_apart() 
     ]
 
 
-@pytest.mark.parametrize("n_pairs", [10_000, 400_000])
-def test_counting_the_clones_tested_in_each_stratum_holds_what_fate_bias_charges(
+@pytest.mark.parametrize("n_pairs", [40_000, 400_000])
+def test_coding_each_pairs_part_holds_what_fate_bias_and_tracking_charge(
     n_pairs,
 ) -> None:
-    from cytearc.utils.arrays import sorted_unique
-
     _keys, strata = _receptor_type_keys()
     pair_codes = np.arange(n_pairs, dtype=np.int64) // 3
     pair_fates = np.arange(n_pairs, dtype=np.int64) % 8
+    # Each clone's three pairs lie in three strata, so each is a part; its
+    # code counts the clone by the strata and one more, as tracking codes it.
+    assert clone_operations._tested_parts(pair_codes, pair_fates, strata) == n_pairs
+    parts = clone_operations._pair_parts(pair_codes, pair_fates, strata, 5)
+    assert (parts // 5).tolist() == pair_codes.tolist()
+    assert (parts % 5).tolist() == strata[pair_fates].tolist()
+    # Each charge is 1.20 to 1.29 times the traced peak of its step: the
+    # count of the clones tested, and the codes alone, which tracking keeps.
+    for per_pair, step in (
+        (
+            clone_operations._PART_BYTES_PER_PAIR,
+            lambda: clone_operations._tested_parts(pair_codes, pair_fates, strata),
+        ),
+        (
+            clone_operations._PART_CODE_BYTES_PER_PAIR,
+            lambda: clone_operations._pair_parts(pair_codes, pair_fates, strata, 5),
+        ),
+    ):
+        stated = per_pair * n_pairs + NUMPY_STEP_BYTES
+        peak = _warm_peak(step)
+        assert peak <= stated <= 1.5 * peak, (peak, stated)
 
-    def count() -> int:
-        return len(
-            sorted_unique(pair_codes * (int(strata.max()) + 1) + strata[pair_fates])
-        )
 
-    # Each clone's three pairs lie in three strata.
-    assert count() == n_pairs
-    stated = clone_operations._PART_BYTES_PER_PAIR * n_pairs + NUMPY_STEP_BYTES
-    peak = _warm_peak(count)
-    # The charge is 1.29 to 1.35 times the peak as traced.
+@pytest.mark.parametrize("n_cells", [40_000, 400_000])
+def test_finding_the_parts_of_named_clones_holds_what_tracking_charges(
+    n_cells,
+) -> None:
+    from cytearc.storage.refs import ArtifactRef
+    from cytearc.utils.memory_budget import MemoryLedger
+    from tests.memory_helpers import audited
+
+    keys, strata = _receptor_type_keys()
+    labels = np.asarray(["BCR", "TCR", "ambiguous", "multichain"], dtype=object)
+    unsaved = ArtifactRef(scope="datastore", kind="clonotypes", artifact_id="f" * 64)
+    # Clones of four cells, one of each receptor type; every other clone is
+    # named.
+    source = clone_operations._CloneInput(
+        ref=unsaved,
+        cell_selection=unsaved,
+        codes=np.arange(n_cells, dtype=np.int64) // 4,
+        clone_ids=None,
+        kept_apart=(("receptor_type", labels[np.arange(n_cells) % 4]),),
+        nbytes=0,
+    )
+    named = np.arange(0, n_cells // 4, 2, dtype=np.int64)
+
+    def run() -> np.ndarray:
+        ledger = MemoryLedger(1 << 40, "Following the clones")
+        return clone_operations._named_parts(source, keys, strata, named, 5, ledger)
+
+    # Each named clone is followed once in each of its four types.
+    assert run().tolist() == [
+        clone * 5 + stratum for clone in named.tolist() for stratum in range(4)
+    ]
+    # From each charge to the next, what is traced stays within the plan.
+    _result, overruns = audited(run)
+    assert overruns == [], overruns
+    # The larger charge, of the named clones' cells, is 1.22 and 1.24 times
+    # the traced peak.
+    n_named_cells = 4 * len(named)
+    stated = max(
+        clone_operations._NAMED_CELL_BYTES * n_cells + NUMPY_STEP_BYTES,
+        (8 + clone_operations._NAMED_PART_BYTES) * n_named_cells
+        + clone_operations._cell_strata_bytes(n_named_cells, 1),
+    )
+    peak = _warm_peak(run)
     assert peak <= stated <= 1.5 * peak, (peak, stated)
 
 

@@ -400,8 +400,9 @@ class CloneTracking:
         group_keys: One row per group, indexed by its name, ``group``, with
             its label in each key column, as :class:`CloneOverlap` holds them.
         clones: The clone artifact, such as a ``clones`` artifact.
-        tracked: The chosen clone labels, largest first, a clone's once for
-            each label kept apart that it is followed in.
+        tracked: The chosen clone labels, the largest clone first, a clone's
+            once for each label kept apart that it is followed in, in the
+            order of those labels.
         group_by: The cell metadata columns of the groups.
         groups: The label artifact of the groups, or None.
         cell_selection: The cells kept, or None for every cell.

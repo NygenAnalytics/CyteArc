@@ -245,10 +245,12 @@ _BYTES_PER_CLONE_COUNT = 40
 _TRACK_BYTES_PER_ROW = 106
 # Each pair of a fate and a clone holds its fate, clone code and cells.
 _BYTES_PER_FATE_PAIR = 24
-# Counting the clones tested within strata holds, for each pair of a fate
-# and a clone, its clone within its fate's stratum, the sorted copy and the
-# flags of its distinct values: 23.3 bytes a pair as traced on 10,000 to
-# 1,000,000 pairs.
+# Coding each pair of a group and a clone by its clone within its group's
+# stratum holds the code and each pair's stratum, 16 bytes a pair as traced
+# on 10,000 to 400,000 pairs; counting the clones tested in each stratum
+# also holds the codes' sorted copy and the flags of their distinct values,
+# 25 bytes a pair.
+_PART_CODE_BYTES_PER_PAIR = 20
 _PART_BYTES_PER_PAIR = 30
 # Finding each cell's stratum holds its code among the groups' labels and its
 # stratum, and the flag of each label that no group holds, and while each
@@ -257,6 +259,14 @@ _PART_BYTES_PER_PAIR = 30
 # traced on 10,000 to 1,000,000 cells.
 _STRATUM_BYTES_PER_CELL = 18
 _STRATUM_BYTES_PER_COLUMN = 2
+# Finding the cells of the clones that tracking names holds each cell's place
+# among them, the clone found there and whether it is the cell's own, 17
+# bytes a cell as traced; and each of their cells holds, beside its labels
+# and stratum, its position, its part's code, the product it is computed from
+# and their sorted copy and flags, 44.5 bytes a cell of one column as traced
+# with those of its labels and stratum, on 20,000 to 400,000 such cells.
+_NAMED_CELL_BYTES = 20
+_NAMED_PART_BYTES = 26
 # Writing the fate bias builds, for each early cell, a reference to its
 # dominant fate's name, its codes as int32, and the mask and arrays that pick
 # the names, beside what the writer holds.
@@ -2241,7 +2251,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         A clonotype that spans receptor types, as
         ``within_receptor_type=False`` allows, is followed once in each, its
         cells of each type as a clonotype of that type, as every summary
-        counts it: it is chosen in a type where it holds the most cells, and
+        counts it: each type of it is chosen where it is among a group's
+        ``top_n``, with ties going to the larger clonotype as a whole, and
         named in ``labels``, it is followed in each type of its cells.
         Nothing is saved.
 
@@ -2312,9 +2323,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         radix = n_strata + 1
         ledger.peak(
             "coding each pair's clone within its stratum",
-            _PART_BYTES_PER_PAIR * len(pair_codes) + NUMPY_STEP_BYTES,
+            _PART_CODE_BYTES_PER_PAIR * len(pair_codes) + NUMPY_STEP_BYTES,
         )
-        pair_parts = pair_codes * radix + strata[pair_groups]
+        pair_parts = _pair_parts(pair_codes, pair_groups, strata, radix)
         ledger.hold("each pair's clone within its stratum", pair_parts.nbytes)
         if labels is None:
             chosen = top_clones(
@@ -2630,10 +2641,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         cells that it leaves out: ``cellsWithoutClone``, the late cells
         without a clone, ``cellsWithoutGroup``, those with a clone but no
         fate, the fates in ``groups``, ``earlyCellsWithoutLateCells``, the
-        early cells with a clone whose clone has no late cell with a fate,
+        early cells with a clone whose clone has no late cell with a fate of
+        the early cell's receptor type, for clonotypes,
         ``earlyCellsWithTiedFates``, those whose clone's late cells tie
         between fates, and ``testedClones``, the clones tested, a clonotype
-        once in each receptor type that it spans.
+        once in each receptor type of its late cells.
 
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
@@ -2862,9 +2874,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "counting the clones tested in each stratum",
                 _PART_BYTES_PER_PAIR * len(pair_codes) + NUMPY_STEP_BYTES,
             )
-            n_tested = len(
-                sorted_unique(pair_codes * (int(strata.max()) + 1) + strata[pair_fates])
-            )
+            n_tested = _tested_parts(pair_codes, pair_fates, strata)
         n_late_counted = int(pair_cells.sum())
         _early, early_codes, early_kept = self._measured_clone_cells(
             source, early, ledger
@@ -3146,6 +3156,32 @@ def _fate_bias_write_bytes(
     )
 
 
+def _pair_parts(
+    pair_codes: np.ndarray, pair_groups: np.ndarray, strata: np.ndarray, radix: int
+) -> np.ndarray:
+    """Each pair's part, its clone within its group's stratum, coded by the clone and then the stratum.
+
+    ``radix`` is at least the number of strata; a part's code divided by it
+    is the clone's.
+    """
+    # The product is a new array, to which each pair's stratum is added in
+    # place, so the codes hold the same whatever NumPy does with temporaries.
+    parts: np.ndarray = pair_codes * radix
+    parts += strata[pair_groups]
+    return parts
+
+
+def _tested_parts(
+    pair_codes: np.ndarray, pair_fates: np.ndarray, strata: np.ndarray
+) -> int:
+    """The parts that fate bias tests: each clone once in each stratum of its late cells' fates."""
+    return len(
+        sorted_unique(
+            _pair_parts(pair_codes, pair_fates, strata, int(strata.max()) + 1)
+        )
+    )
+
+
 def _cell_strata_bytes(n_cells: int, n_columns: int) -> int:
     """What :func:`_cell_strata` holds for ``n_cells`` cells of ``n_columns`` columns kept apart."""
     return (
@@ -3257,8 +3293,8 @@ def _named_parts(
     # Each cell's place among the named clones, the named clone found there
     # and whether it is the cell's, and then the positions of those cells.
     ledger.peak(
-        f"finding the cells of {len(named)} named clones",
-        17 * len(source.codes) + NUMPY_STEP_BYTES,
+        "finding the cells of the clones named",
+        _NAMED_CELL_BYTES * len(source.codes) + NUMPY_STEP_BYTES,
     )
     at = np.searchsorted(named, source.codes)
     np.minimum(at, len(named) - 1, out=at)
@@ -3268,8 +3304,9 @@ def _named_parts(
     # The cells' labels and strata, and the parts they give with their sorted
     # copy and flags.
     ledger.peak(
-        f"finding the strata of {len(cells)} cells of the named clones",
-        (8 * n_columns + 48) * len(cells) + _cell_strata_bytes(len(cells), n_columns),
+        f"finding the strata of the {len(cells)} cells of the clones named",
+        (8 * n_columns + _NAMED_PART_BYTES) * len(cells)
+        + _cell_strata_bytes(len(cells), n_columns),
     )
     kept = [
         (name, np.asarray(labels, dtype=object)[cells])
