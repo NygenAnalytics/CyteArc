@@ -443,15 +443,9 @@ def test_the_legend_lists_the_clones_tall_enough_to_see(random_tree) -> None:
 
 @pytest.mark.slow
 @pytest.mark.parametrize("by", ["time", "depth"])
-@pytest.mark.parametrize(
-    ("max_leaves", "at_most"),
-    # Ten wedges leave the budget to the nodes' arrays, 1.14 times the traced
-    # peak; a thousand to the drawing, whose Matplotlib objects are charged
-    # from above, 1.34 times it.
-    [(10, 1.3), (1_000, 1.5)],
-)
+@pytest.mark.parametrize("max_leaves", [10, 1_000])
 def test_the_figure_runs_within_the_smallest_budget_it_accepts(
-    random_tree, by, max_leaves, at_most
+    random_tree, by, max_leaves
 ) -> None:
     clones = random_tree.clones[by]
 
@@ -461,9 +455,10 @@ def test_the_figure_runs_within_the_smallest_budget_it_accepts(
     # The kernels compile and Matplotlib loads its fonts before any trace.
     draw(random_tree.store)
     # The budget that runs it bounds its traced peak, one byte less is
-    # refused naming it, and it is not far above the peak.
+    # refused naming it, and it is not far above the peak: 1.13 to 1.14
+    # times it at both caps, as measured.
     budget, refusals, _result = check_budget(
-        random_tree.store, draw, at_most=at_most, max_refusals=40
+        random_tree.store, draw, at_most=1.3, max_refusals=40
     )
     assert refusals
     # Every charge bounds what is held until the next.
