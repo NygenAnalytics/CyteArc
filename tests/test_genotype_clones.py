@@ -414,6 +414,22 @@ def test_within_may_name_a_column_of_the_loaded_clones(store, tmp_path) -> None:
 
 
 @pytest.mark.parametrize("method", ["likelihood", "exact"])
+def test_genotypes_without_a_known_call_give_no_clones(store, tmp_path, method) -> None:
+    # Above every cell's UMIs, each call is missing or filtered: no cell
+    # takes part, so no clone is called and no rate is estimated.
+    counts = store.artifacts.inspect(_genotypes(store, tmp_path)).input_ref("counts")
+    unread = store.variants.genotypes(
+        counts, method="threshold", min_mutant_umis=1, min_umis=50
+    )
+    clones = store.variants.genotype_clones(unread, method=method)
+    assert _clones(store, clones) == {}
+    diagnostics = store.artifacts.inspect(clones).diagnostics
+    assert (diagnostics["mutantCells"], diagnostics["ambiguousCells"]) == (0, 0)
+    assert diagnostics["dropoutProbability"] is None
+    assert diagnostics["errorProbability"] is None
+
+
+@pytest.mark.parametrize("method", ["likelihood", "exact"])
 def test_genotype_clones_refuse_a_budget_too_small_before_writing(
     store, tmp_path, method
 ) -> None:

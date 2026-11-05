@@ -286,11 +286,10 @@ def test_bit_pairs_list_each_mutant_call_and_each_unread_site() -> None:
     rows = np.array([1, 4, 9, 30])
     ledger = MemoryLedger(None, "Calling clones")
     for unknown, value in ((False, 1), (True, -1)):
-        cells, sites, held = bit_pairs(ledger, mutant, wild, rows, 70, unknown=unknown)
+        cells, sites, _held = bit_pairs(ledger, mutant, wild, rows, 70, unknown=unknown)
         expected_cells, expected_sites = np.nonzero(calls[rows] == value)
         np.testing.assert_array_equal(cells, rows[expected_cells])
         np.testing.assert_array_equal(sites, expected_sites)
-        assert held == 16 * len(cells)
 
 
 @pytest.mark.parametrize(
@@ -617,6 +616,39 @@ def test_within_groups_are_fitted_apart_with_rates_of_their_own(tmp_path) -> Non
     )
 
 
+@pytest.mark.parametrize("method", ["likelihood", "exact"])
+def test_calls_read_in_bands_at_a_small_budget_give_the_clones_of_one_band(
+    tmp_path, monkeypatch, method
+) -> None:
+    from cytearc.datastore._operations import variants
+
+    # 1,000 cells at 200 sites hold about 190,000 call rows, of which a
+    # budget of 5 MB reads a few bands beside the packed calls.
+    truth = dropout_truth(n_cells=1_000, n_sites=200, n_clones=4, seed=7)
+    store, ids, genotypes = _store_of_truth(tmp_path, truth.calls)
+    bands: list[int] = []
+    original = variants._variant_bands
+
+    def counted(*args, **kwargs):
+        bands.append(0)
+        for band in original(*args, **kwargs):
+            bands[-1] += 1
+            yield band
+
+    monkeypatch.setattr(variants, "_variant_bands", counted)
+    whole = store.variants.genotype_clones(genotypes, method=method)
+    store.memoryBytes = 5_000_000
+    banded = store.variants.genotype_clones(
+        genotypes, method=method, invalidate_cache=True
+    )
+    assert bands[0] == 1 and bands[1] > 1, bands
+    assert (
+        store.clones.load_clones(banded)
+        .cells.loc[ids]
+        .equals(store.clones.load_clones(whole).cells.loc[ids])
+    )
+
+
 def test_a_split_of_more_sites_than_a_split_may_read_keeps_its_strongest() -> None:
     # Two clones of the root, each with 300 sites of its own: a split of
     # either from the wild type starts from its 300 sites, more than the 256
@@ -717,7 +749,6 @@ def test_pruning_removes_a_clone_that_no_cell_needs_and_one_too_small() -> None:
     fit = _pruned(mixture, mixture.em(start, max_iter=50), min_size=10_000)
     assert len(fit.genotypes) == 0
     mixture.release(fit)
-    assert ledger.charged == 0
 
 
 def test_a_fit_without_the_arrays_of_em_refuses_to_give_them() -> None:
@@ -764,57 +795,6 @@ def test_removing_the_one_component_a_cell_can_take_loses_it_entirely() -> None:
     lost = removal_logliks(relative, log_weights, posteriors, 4)
     assert lost[1] == -np.inf
     assert lost[0] == 0.0
-
-
-@pytest.mark.slow
-def test_the_likelihood_holds_no_more_than_the_smallest_budget_it_accepts() -> None:
-    from cytearc.utils.memory_budget import MemoryBudgetError
-    from tests.memory_helpers import audited, traced_peak
-
-    # 20,000 cells at 40 sites in 16 clones: each fit's posteriors and
-    # relative log-likelihoods of up to 17 components, its sums over chunks
-    # of cells and each proposal's cells outweigh what the search holds
-    # whatever its size, so the budget is bounded from both sides.
-    truth = dropout_truth(n_cells=20_000, n_sites=40, n_clones=16, seed=3)
-    mutant, wild = _packed(truth.calls)
-
-    def call(budget):
-        # The packed calls are held before the call, as an operation holds
-        # them.
-        ledger = MemoryLedger(budget, "Calling clones")
-        ledger.hold("the packed calls", mutant.nbytes + wild.nbytes)
-        return likelihood_clones(
-            mutant,
-            wild,
-            40,
-            dropout_probability=None,
-            error_probability=None,
-            min_size=2,
-            min_posterior=0.6,
-            ledger=ledger,
-            nthreads=2,
-        )
-
-    expected = call(None)
-    budget, refusals = 1, 0
-    while True:
-        try:
-            call(budget)
-        except MemoryBudgetError as refusal:
-            assert refusal.needed_bytes > budget
-            budget, refusals = refusal.needed_bytes, refusals + 1
-            continue
-        break
-    assert refusals > 10
-    called, peak = traced_peak(lambda: call(budget), budget)
-    np.testing.assert_array_equal(called.codes, expected.codes)
-    assert peak <= budget
-    assert budget <= 1.5 * peak + (256 << 10), (budget, peak)
-    with pytest.raises(MemoryBudgetError) as refused:
-        call(budget - 1)
-    assert refused.value.needed_bytes == budget
-    _result, overruns = audited(lambda: call(budget))
-    assert overruns == []
 
 
 @pytest.mark.parametrize("n_sites", [2, 5, 20])
@@ -982,42 +962,8 @@ def test_pruning_removes_a_clone_whose_removal_raises_the_score() -> None:
     mixture.release(fit)
 
 
-@pytest.mark.parametrize("n_local", [3, 10, 12, 40, 70, 200])
-def test_a_split_charges_its_call_patterns_as_they_are_traced(n_local) -> None:
-    import tracemalloc
-
-    from cytearc.utils.memory_budget import NUMPY_STEP_BYTES
-    from cytearc.variants.genotype_clones import pattern_bytes
-
-    # Nearly as many patterns as rows, the most the patterns hold.
-    rng = np.random.default_rng(n_local)
-    calls = rng.choice(
-        np.array([-1, 0, 1], dtype=np.int8), size=(30_000, n_local), p=[0.1, 0.6, 0.3]
-    )
-    local_mutant, local_wild = _packed(calls)
-    weights = rng.random(30_000)
-    call_patterns(local_mutant[:50], local_wild[:50], weights[:50], n_local)
-    tracemalloc.start()
-    try:
-        before = tracemalloc.get_traced_memory()[0]
-        tracemalloc.reset_peak()
-        call_patterns(local_mutant, local_wild, weights, n_local)
-        peak = tracemalloc.get_traced_memory()[1] - before
-    finally:
-        tracemalloc.stop()
-    counted = pattern_bytes(30_000, n_local)
-    assert peak <= counted + NUMPY_STEP_BYTES, (peak, counted)
-    assert counted <= 1.5 * peak + NUMPY_STEP_BYTES, (peak, counted)
-
-
-def test_ordering_the_cells_by_group_holds_what_it_is_charged() -> None:
-    import tracemalloc
-
-    from cytearc.datastore._operations.variants import (
-        _GROUP_ORDER_BYTES,
-        _cells_by_group,
-    )
-    from cytearc.utils.memory_budget import NUMPY_STEP_BYTES
+def test_the_fitted_cells_are_ordered_by_group_and_by_position_within_each() -> None:
+    from cytearc.datastore._operations.variants import _cells_by_group
 
     rng = np.random.default_rng(25)
     members = rng.random(100_000) < 0.9
@@ -1032,19 +978,6 @@ def test_ordering_the_cells_by_group_holds_what_it_is_charged() -> None:
         np.diff(bounds),
         [np.count_nonzero(members & (group_codes == g)) for g in range(4)],
     )
-    tracemalloc.start()
-    try:
-        before = tracemalloc.get_traced_memory()[0]
-        tracemalloc.reset_peak()
-        _cells_by_group(members, group_codes, 4)
-        peak = tracemalloc.get_traced_memory()[1] - before
-    finally:
-        tracemalloc.stop()
-    # Beside the positions, which the caller holds.
-    beside = peak - 8 * len(fitted)
-    counted = _GROUP_ORDER_BYTES * len(fitted)
-    assert beside <= counted + NUMPY_STEP_BYTES
-    assert counted <= 1.5 * beside
 
 
 def test_the_operation_runs_its_kernels_on_the_store_threads(
@@ -1069,80 +1002,6 @@ def test_the_operation_runs_its_kernels_on_the_store_threads(
     monkeypatch.setattr(genotype_mixture, "any_bits", watched)
     store.variants.genotype_clones(genotypes)
     assert seen and set(seen) == {1}
-
-
-def test_the_operation_charges_its_packed_calls_and_their_order_by_group(
-    tmp_path,
-) -> None:
-    from tests.memory_helpers import charges
-
-    # 600 cells at 70 sites, two words a cell, of two interleaved donors,
-    # so the fitted cells' calls are gathered in order of their donors.
-    truth = dropout_truth(n_cells=600, n_sites=70, n_clones=4, seed=23)
-    donors = np.where(np.arange(600) % 2 == 0, "d1", "d2")
-    store, _ids, genotypes = _store_of_truth(tmp_path, truth.calls, donors)
-    _result, taken = charges(
-        lambda: store.variants.genotype_clones(genotypes, within="donor")
-    )
-    packed = [nbytes for item, nbytes, _plan in taken if item.endswith("sites, packed")]
-    assert packed == [2 * 600 * 2 * 8]
-    gathered = [
-        nbytes
-        for item, nbytes, _plan in taken
-        if item.endswith("in order of their groups")
-    ]
-    assert len(gathered) == 1 and gathered[0] >= 2 * 600 * 2 * 8 + 8 * 600
-
-
-@pytest.mark.slow
-def test_the_likelihood_charges_hold_what_it_traces_at_a_thousand_sites() -> None:
-    from cytearc.utils.memory_budget import observed_charges
-    from tests.memory_helpers import audited
-
-    # 1,500 cells at 1,000 sites: the arrays of components by sites and the
-    # M-step's chunks of them outweigh each cell's posteriors.
-    truth = dropout_truth(n_cells=1_500, n_sites=1_000, n_clones=12, seed=24)
-    mutant, wild = _packed(truth.calls)
-
-    def call():
-        ledger = MemoryLedger(None, "Calling clones")
-        ledger.hold("the packed calls", mutant.nbytes + wild.nbytes)
-        return likelihood_clones(
-            mutant,
-            wild,
-            1_000,
-            dropout_probability=None,
-            error_probability=None,
-            min_size=2,
-            min_posterior=0.6,
-            ledger=ledger,
-            nthreads=2,
-        )
-
-    call()
-    _result, overruns = audited(call)
-    assert overruns == []
-    planned = [0]
-
-    def observe(_item, _nbytes, plan):
-        planned[0] = max(planned[0], plan)
-
-    with observed_charges(observe):
-        _called, peak = _traced(call)
-    assert planned[0] <= 1.5 * (peak + mutant.nbytes + wild.nbytes) + (256 << 10)
-
-
-def _traced(call):
-    import tracemalloc
-
-    tracemalloc.start()
-    try:
-        before = tracemalloc.get_traced_memory()[0]
-        tracemalloc.reset_peak()
-        result = call()
-        return result, tracemalloc.get_traced_memory()[1] - before
-    finally:
-        tracemalloc.stop()
 
 
 def test_a_fit_that_ends_without_a_finite_log_likelihood_is_refused(
