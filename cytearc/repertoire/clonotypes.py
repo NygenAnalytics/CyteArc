@@ -875,8 +875,8 @@ def assign_clonotype_clusters(
 _NONE = np.iinfo(np.int64).max
 #: The memory that a clonotype cluster search holds beyond the clonotypes and
 #: the pairs of chains it finds, at most: the encoded junctions, one pass of
-#: variant keys with the candidate pairs that share them, and one chunk of
-#: candidate pairs of cells.
+#: variant keys with the pairs within the distance that it finds, and one
+#: chunk of candidate pairs of cells.
 CLUSTER_SEARCH_BYTES = 512 * 2**20
 # The bytes that each pair of chains within max_distance holds while the cells
 # are linked: its two codes, and its codes in both directions among those

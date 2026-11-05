@@ -514,12 +514,21 @@ def test_a_budget_below_the_pairs_found_raises_memory_error(
     # position pair with each other; variants at two positions are two
     # substitutions or edits apart.
     assert len(expected) == 36 + 4 * 9 * 8 // 2
-    needed = (
-        _encoding_bytes(_VARIANTS)
-        + _group_bytes(_VARIANTS)
-        + 32 * len(expected)
-        + _PAIR_ARRAYS
-    )
+    held = _encoding_bytes(_VARIANTS) + _group_bytes(_VARIANTS)
+    # Joined and placed among all texts, the pairs hold 32 bytes each.
+    needed = held + 32 * len(expected) + _PAIR_ARRAYS
+    if path == "keyed" and metric == "hamming":
+        # Keys find the pairs in 4 runs of 10 texts, one for each position of
+        # the variants, which outgrow the buffer of the pairs found as it
+        # doubles: 59.5 kB holds the encoded texts and the keys of a pass,
+        # but not the buffer, and a megabyte finds every pair.
+        with pytest.raises(
+            MemoryError, match="for the pairs within max_distance, more than the"
+        ):
+            neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(59_500))
+        found = neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(2**20))
+        assert _pairs(*found) == expected
+        return
     with pytest.raises(MemoryError, match="for the pairs found, more than the"):
         neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(needed - 1))
     roomy = neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(needed + 2**20))
@@ -584,58 +593,47 @@ def test_the_encoded_texts_must_fit_the_budget() -> None:
         neighbor_pairs(wide, "hamming", 1, ledger=budgeted(enough_for_latin))
 
 
-def test_the_keys_and_candidate_pairs_of_a_pass_must_fit_the_budget(
+def test_the_pairs_of_one_run_must_fit_the_budget_beside_the_keys(
     monkeypatch,
 ) -> None:
     _force(monkeypatch, "keyed")
-    # Every variant at position 0 shares the key that masks it: 9 texts, 36
-    # candidate pairs, all within one substitution. The keys of the 9 texts
-    # number 9 * 12, beside the 12 of one text's scratch space; the
-    # candidates need 8 bytes each beside them.
+    # Every variant at position 0 shares the key that masks it: 9 texts and
+    # 36 pairs within one substitution, found in one run, which outgrow the
+    # buffer of the pairs found as it doubles. 52.3 kB holds the encoded
+    # texts and the keys of the pass, but not the buffer, and a megabyte
+    # finds every pair.
     texts = [letter + _BASE[1:] for letter in "PQRSTVWYC"]
-    held = _encoding_bytes(texts) + _group_bytes(texts) + 8 * len(_BASE)
-    keys = 8 * len(texts) * len(_BASE)
-    with pytest.raises(MemoryError, match="the variant keys of one pass"):
-        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(held + keys - 1))
-    with pytest.raises(MemoryError, match="the candidate pairs of texts"):
-        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(held + keys + 8 * 36 - 1))
-    # Joined, the 36 pairs need 32 bytes each and their arrays 384, beside
-    # the 192 of the array the pass kept: more than the keys and candidates.
-    budget = held + 32 * 36 + 192 + _PAIR_ARRAYS
-    with pytest.raises(MemoryError, match="the pairs found"):
-        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget - 1))
-    found = neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget))
+    with pytest.raises(MemoryError, match="the pairs within max_distance"):
+        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(52_300))
+    found = neighbor_pairs(texts, "hamming", 1, ledger=budgeted(2**20))
     assert _pairs(*found) == _expected(texts, "hamming", 1)
-    # Of two texts, whose 24 letters joined fit beside the encoded texts, the
-    # scratch space of one text's 12 keys is checked first.
-    two = texts[:2]
-    held = _encoding_bytes(two) + _group_bytes(two)
-    with pytest.raises(MemoryError, match="the variant keys of one text"):
-        neighbor_pairs(two, "hamming", 1, ledger=budgeted(held + 8 * len(_BASE) - 1))
+    # Two of them are one pair.
+    two = neighbor_pairs(texts[:2], "hamming", 1, ledger=budgeted(2**20))
+    assert _pairs(*two) == {(0, 1)}
 
 
 @pytest.mark.parametrize(
-    ("text", "binding"),
+    ("text", "budget"),
     [
         # Copies of a text of 5 letters share its 5 keys: 10 copies yield 50
-        # keys and 5 * 45 candidate pairs, of 45 distinct pairs. Copying the
-        # pairs kept, and their array, beside the candidates takes the most.
-        ("CASSF", 8 * 225 + 8 * 45 + 192),
-        # Of 2 letters: 20 keys, 90 candidates and 45 pairs, which take the
-        # most once joined, 32 bytes each, with the array the pass kept and
-        # the two arrays of the pairs.
-        ("CA", 32 * 45 + 192 + 2 * 192),
+        # keys, in 5 runs of 10 that find 45 pairs each, 225 of 45 distinct
+        # pairs.
+        ("CASSF", 38_000),
+        # Of 2 letters: 20 keys in 2 runs that find 90 pairs.
+        ("CA", 30_800),
     ],
 )
-def test_the_pairs_kept_from_a_pass_must_fit_the_budget(
-    monkeypatch, text, binding
+def test_the_pairs_found_in_a_pass_must_fit_the_budget(
+    monkeypatch, text, budget
 ) -> None:
     _force(monkeypatch, "keyed")
     texts = [text] * 10
-    budget = _encoding_bytes(texts) + _group_bytes(texts) + 8 * len(text) + binding
-    with pytest.raises(MemoryError, match="for the pairs found"):
-        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget - 1))
-    found = neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget))
+    # The budget holds the encoded texts, their packed codes and their keys,
+    # but not the buffer of the pairs found as it doubles, and a megabyte
+    # finds every pair once.
+    with pytest.raises(MemoryError, match="for the pairs within max_distance"):
+        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget))
+    found = neighbor_pairs(texts, "hamming", 1, ledger=budgeted(2**20))
     assert _pairs(*found) == set(itertools.combinations(range(10), 2))
 
 
@@ -845,7 +843,7 @@ def test_every_split_into_segments_finds_the_same_pairs(
 def test_the_segments_cut_the_keys_of_long_barcodes() -> None:
     rng = np.random.default_rng(31)
     codes = rng.integers(0, 4, size=(100_000, 28)).astype(np.uint8)
-    segments = sequences._hamming_segments(codes, 3, 1 << 34)
+    segments = segments_within_three = sequences._hamming_segments(codes, 3, 1 << 34)
     # Five segments of five or six bases make ten keys per barcode, and two
     # random barcodes rarely agree on the eleven bases a key keeps; masking
     # positions would make 3,276.
@@ -856,8 +854,9 @@ def test_the_segments_cut_the_keys_of_long_barcodes() -> None:
     alike = np.zeros((2_000, 28), dtype=np.uint8)
     alike[:, -1] = rng.integers(0, 4, size=2_000)
     assert sequences._hamming_segments(alike, 1, 1 << 34) in (0, 28)
-    # Candidates that would not fit the room leave a choice out.
-    assert sequences._hamming_segments(codes, 3, 0) == 0
+    # Candidates are compared as their keys are read and never held, so the
+    # room left chooses the segments only through the passes of keys.
+    assert sequences._hamming_segments(codes, 3, 0) == segments_within_three
     # Within 5 substitutions, keys keep 1 to 3 of 6 to 8 segments: at most 56
     # keys a barcode, where masking positions would make 98,280.
     segments = sequences._hamming_segments(codes, 5, 1 << 34)
@@ -963,6 +962,100 @@ def test_partial_cloneids_find_every_pair_by_their_unknown_positions(
     assert any((i in partial) != (j in partial) for i, j in expected)
     if min_compared <= 20:
         assert any(i in partial and j in partial for i, j in expected)
+
+
+def _segment_choices(length: int, limit: int) -> list[int]:
+    """The segments whose keys mask or keep at most three of them, a few of each."""
+    return [
+        segments
+        for segments in range(limit + 1, length + 1)
+        if min(limit, segments - limit) <= 3
+    ][:4] + ([length] if limit <= 3 else [])
+
+
+@pytest.mark.parametrize("cutoff", range(6))
+def test_keys_find_every_pair_of_cut_cloneids_within_each_distance(
+    monkeypatch, cutoff
+) -> None:
+    # CloneIDs of 24 bases, some cut at one end or with a deletion, within 0
+    # to 5 mismatches on the bases both hold, through keys of several
+    # segment counts. The buffers of the pairs found and of the rows of a
+    # run start at one, so every run outgrows them and is read again.
+    rng = np.random.default_rng(40 + cutoff)
+    texts = _cloneids(rng, 40, length=24)
+    blocks = rng.integers(0, 2, size=len(texts))
+    expected = {
+        (i, j)
+        for i, j in itertools.combinations(range(len(texts)), 2)
+        if blocks[i] == blocks[j] and _known_within(texts[i], texts[j], cutoff, 12)
+    }
+    assert expected
+    monkeypatch.setattr(sequences, "_KEY_NS", 0.0)
+    monkeypatch.setattr(sequences, "_RUN_ROWS", 1)
+    monkeypatch.setattr(sequences, "_MIN_FOUND_PAIRS", 1)
+    monkeypatch.setattr(sequences, "_FOUND_SHARE", 10**9)
+    for chosen in _segment_choices(24, cutoff):
+        monkeypatch.setattr(
+            sequences,
+            "_hamming_segments",
+            lambda codes, limit, room, split=0, chosen=chosen: (
+                chosen if limit == cutoff and chosen <= codes.shape[1] else 0
+            ),
+        )
+        found = neighbor_pairs(
+            texts, "hamming", cutoff, blocks, unknown="-0", min_compared=12
+        )
+        assert _pairs(*found) == expected, chosen
+
+
+@pytest.mark.parametrize("n_codes", [1, 2, 4, 5, 16, 17, 60])
+def test_packed_rows_differ_in_a_lane_wherever_their_codes_differ(n_codes) -> None:
+    # Rows of 1 to 70 codes drawn from n_codes values pack 2, 4 or 8 bits to
+    # a code, across words: the lanes in which two rows differ are the
+    # positions where their codes differ, and the padding after the last
+    # position never differs.
+    rng = np.random.default_rng(n_codes)
+    for width in (1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 70):
+        values = rng.choice(256, size=n_codes, replace=False).astype(np.uint8)
+        codes = values[rng.integers(0, n_codes, size=(60, width))]
+        # Pairs of rows that differ at a few positions, and at every one.
+        codes[1::2] = codes[::2]
+        changed = rng.random(codes[1::2].shape) < 0.15
+        codes[1::2][changed] = values[rng.integers(0, n_codes, size=changed.sum())]
+        ranks, lane, n_words = sequences._packing(codes)
+        # The lanes follow the codes that the rows hold, ranked.
+        held = len(np.unique(codes))
+        assert lane == (2 if held <= 4 else 4 if held <= 16 else 8)
+        assert n_words == -(-width * lane // 64)
+        packed = sequences._packed_rows(codes, ranks, lane, n_words)
+        for first, second in [(row, row + 1) for row in range(0, 60, 2)] + [(0, 59)]:
+            lanes = sum(
+                sequences._lane_mismatches(
+                    np.uint64(packed[first, word] ^ packed[second, word]), lane
+                )
+                for word in range(n_words)
+            )
+            assert lanes == int(np.sum(codes[first] != codes[second])), (width, first)
+
+
+def test_the_search_is_the_same_on_one_thread_and_on_four() -> None:
+    from cytearc.utils.numba import numba_threads
+
+    rng = np.random.default_rng(41)
+    texts = _cloneids(rng, 300, length=28)
+    found = []
+    for threads in (1, 4):
+        with numba_threads(threads):
+            found.append(
+                (
+                    neighbor_pairs(texts, "hamming", 5, unknown="-0", min_compared=20),
+                    neighbor_pairs(texts, "levenshtein", 2),
+                )
+            )
+    for one, four in zip(*found, strict=True):
+        np.testing.assert_array_equal(one[0], four[0])
+        np.testing.assert_array_equal(one[1], four[1])
+        assert len(one[0])
 
 
 @pytest.mark.parametrize("path", ["keyed", "pairwise"])

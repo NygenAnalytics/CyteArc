@@ -7,6 +7,8 @@ TREX's documented rules.
 """
 
 import itertools
+import os
+import time
 
 import networkx as nx
 import numpy as np
@@ -264,6 +266,301 @@ def test_the_graph_matches_every_pair_compared_by_python_sets() -> None:
         if shared and shared / len(node_rows[a] | node_rows[b]) >= 0.4:
             expected.add((a, b))
     assert found == expected and expected
+
+
+# Without unknown items each node meets only the nodes that share an item of
+# its prefix, its items that the fewest nodes hold.
+
+
+def _sparse_product_edges(
+    nodes, similarity, inclusive, across=None, modalities=None
+) -> list:
+    """The edges of the sparse product, which meets every pair of nodes that shares an item.
+
+    The product's kernel is the one that nodes with unknown items take.
+    """
+    n_nodes = nodes.n_nodes
+    indptr = np.asarray(nodes.sets.indptr, dtype=np.int64)
+    item_indptr, item_nodes, codes = calling._items_by_group(nodes, 0)
+    arguments = (
+        indptr,
+        codes,
+        item_indptr,
+        item_nodes,
+        np.diff(indptr),
+        np.zeros(n_nodes + 1, dtype=np.int64),
+        np.empty(0, dtype=np.int64),
+        similarity,
+        similarity if across is None else across,
+        np.zeros(n_nodes, dtype=np.int64) if modalities is None else modalities,
+        inclusive,
+    )
+    empty = np.empty(0, dtype=np.int64)
+    count = calling._jaccard_pairs(*arguments, empty, empty, False)
+    first = np.empty(count, dtype=np.int64)
+    second = np.empty(count, dtype=np.int64)
+    calling._jaccard_pairs(*arguments, first, second, True)
+    return _pairs(Edges(first=first, second=second))
+
+
+def _shared_indices(nodes, rows) -> list[tuple[int, int, float]]:
+    """Each pair of nodes of a group that share an item, in order, with the Jaccard index of their sets as Python's sets give it."""
+    node_rows = [set(rows[cell]) for cell in nodes.first_cells.tolist()]
+    indices = []
+    for a, b in itertools.combinations(range(nodes.n_nodes), 2):
+        shared = len(node_rows[a] & node_rows[b])
+        if nodes.groups[a] == nodes.groups[b] and shared:
+            indices.append((a, b, shared / len(node_rows[a] | node_rows[b])))
+    return indices
+
+
+def _linked(indices, similarity, inclusive, across=None, modalities=None) -> list:
+    """The pairs whose index passes the similarity of their modalities."""
+    linked = []
+    for a, b, index in indices:
+        limit = similarity
+        if across is not None and not (
+            modalities[a] >= 0 and modalities[a] == modalities[b]
+        ):
+            limit = across
+        if index >= limit if inclusive else index > limit:
+            linked.append((a, b))
+    return linked
+
+
+def _force_way(monkeypatch, way: str) -> None:
+    """Make jaccard_edges meet the nodes through the prefixes, or through every item, whichever it is told."""
+    if way != "chosen":
+        monkeypatch.setattr(
+            calling, "_prefixes_are_faster", lambda *steps: way == "prefixes"
+        )
+
+
+@pytest.mark.parametrize("way", ["chosen", "prefixes", "product"])
+@pytest.mark.parametrize("giant_share", [0.0, 0.5, 0.95])
+def test_prefixes_give_the_sparse_products_edges_in_order(
+    monkeypatch, giant_share, way
+) -> None:
+    # Items drawn with Zipf frequencies give many items held by equally many
+    # nodes, whose ranks tie; about one cell in seven holds no item and joins
+    # no node; and one item that a share of the cells hold, as the barcode
+    # that correction merged many into, enters almost no prefix. Every
+    # similarity, strict or inclusive, within and across modalities, gives
+    # the edges of the sparse product and of Python's sets, in the same
+    # order, through the prefixes or every item.
+    _force_way(monkeypatch, way)
+    rng = np.random.default_rng(int(100 * giant_share))
+    rows = []
+    for _ in range(700):
+        row = set(np.minimum(rng.zipf(1.4, size=int(rng.integers(0, 7))), 60).tolist())
+        if row and rng.random() < giant_share:
+            row.add(61)
+        rows.append(sorted(row))
+    groups = rng.integers(0, 3, size=len(rows))
+    nodes = identical_sets(_sets(rows), groups=groups)
+    indices = _shared_indices(nodes, rows)
+    modalities = rng.integers(-1, 3, size=nodes.n_nodes)
+    held = np.bincount(nodes.sets.items)
+    assert len(set(held[held > 0].tolist())) < len(held[held > 0])
+    linked = 0
+    for similarity in (0.0, 0.25, 1 / 3, 0.5, 2 / 3, 0.7, 0.75, 0.9, 1.0):
+        for inclusive in (False, True):
+            found = _pairs(jaccard_edges(nodes, similarity, inclusive=inclusive))
+            assert found == _sparse_product_edges(nodes, similarity, inclusive)
+            assert found == _linked(indices, similarity, inclusive)
+            linked += len(found)
+    for within, across in ((0.7, 0.5), (0.5, 0.7), (0.6, 0.0)):
+        found = _pairs(
+            jaccard_edges(
+                nodes, within, inclusive=False, across=across, modalities=modalities
+            )
+        )
+        assert found == _sparse_product_edges(nodes, within, False, across, modalities)
+        assert found == _linked(indices, within, False, across, modalities)
+        linked += len(found)
+    assert 0 < linked < 21 * len(indices)
+
+
+@pytest.mark.parametrize("pair_first", [True, False])
+def test_a_pair_at_the_similarity_whose_bound_rounds_up_is_linked(
+    monkeypatch, pair_first
+) -> None:
+    # 7 shared of 25 items is 0.28 in floating point, but 0.28 * 25 is
+    # 7.000000000000001: a bound of the overlap rounded up from it would keep
+    # 18 of the larger set's 25 items, which miss the 7 it shares, its most
+    # common. The 7 shared items' three other holders make them so.
+    _force_way(monkeypatch, "prefixes")
+    assert 7 / 25 == 0.28 and 0.28 * 25 > 7
+    larger = list(range(18)) + list(range(100, 107))
+    shared = list(range(100, 107))
+    others = [shared + [200 + other] for other in range(3)]
+    rows = ([larger, shared] if pair_first else [shared, larger]) + others
+    nodes = identical_sets(_sets(rows))
+    indices = _shared_indices(nodes, rows)
+    for inclusive in (True, False):
+        found = _pairs(jaccard_edges(nodes, 0.28, inclusive=inclusive))
+        assert found == _linked(indices, 0.28, inclusive)
+        assert ((0, 1) in found) is inclusive
+
+
+def test_nodes_with_unknown_items_meet_every_node_that_shares_an_item(
+    monkeypatch,
+) -> None:
+    # With unknown items the index leaves items out of its denominator, so
+    # the prefixes' bound does not hold and the sparse product of the sets
+    # and their unknown items runs; an empty set of unknown items leaves the
+    # plain index, which may take the prefixes.
+    rows = [[1, 2, 3], [1, 2], [1, 4], [2, 3]]
+    unknown_rows = [[], [3], [], [1]]
+
+    def refused(*args, **kwargs):
+        raise AssertionError("the prefixes ran")
+
+    monkeypatch.setattr(calling, "_edges_without_unknown", refused)
+    sets, unknown = _unknown_sets(rows, unknown_rows)
+    nodes = identical_sets(sets, unknown=unknown)
+    # Cells 1 and 2, 1 and 4, and 2 and 4 agree on every item that both
+    # know, an index of 1, where the plain index would be 2/3, 2/3 and 1/3;
+    # cell 3 shares a quarter of cell 1's items and a third of cell 2's.
+    assert _pairs(jaccard_edges(nodes, 0.6, inclusive=False)) == [
+        (0, 1),
+        (0, 3),
+        (1, 3),
+    ]
+    nothing = _sets([[] for _ in rows])
+    for unknown_sets in (None, nothing):
+        nodes = identical_sets(sets, unknown=unknown_sets)
+        with pytest.raises(AssertionError, match="the prefixes ran"):
+            jaccard_edges(nodes, 0.6, inclusive=False)
+
+
+def test_an_item_that_most_nodes_hold_enters_only_the_prefix_of_its_own_set() -> None:
+    # 100,000 cells of 1 to 5 items of their own, nine in ten also holding
+    # one item, as the barcode that correction merged many into: at a
+    # similarity of 0.7 the item lies only in the prefix of the node whose
+    # set is that item alone, so no node meets the 90,000 others through it,
+    # which every pair of them would cost the sparse product.
+    rng = np.random.default_rng(23)
+    n_cells = 100_000
+    sizes = rng.integers(1, 6, size=n_cells)
+    cells = np.repeat(np.arange(n_cells), sizes)
+    items = np.arange(len(cells)) + 1
+    giant = np.flatnonzero(rng.random(n_cells) < 0.9)
+    sets = cell_sets(
+        np.concatenate([cells, giant, [n_cells]]),
+        np.concatenate([items, np.zeros(len(giant), dtype=np.int64), [0]]),
+        n_cells + 1,
+    )
+    nodes = identical_sets(sets)
+    item_indptr, _item_nodes, codes = calling._items_by_group(nodes, 0)
+    indptr = np.asarray(nodes.sets.indptr)
+    n_prefix, largest, most = calling._prefix_shape(indptr, item_indptr, 0.7)
+    ranks = calling._item_ranks(item_indptr, most)
+    in_prefix = calling._prefix_flags(indptr, codes, ranks, 0.7, largest)
+    prefix_indptr = calling._prefix_counts(codes, in_prefix, len(item_indptr) - 1)
+    prefix_nodes = calling._prefix_nodes(indptr, codes, in_prefix, prefix_indptr)
+    # Code 0 is the shared item; the node of the last cell holds it alone.
+    assert most == len(giant) + 1
+    assert prefix_nodes[prefix_indptr[0] : prefix_indptr[1]].tolist() == [
+        nodes.cell_nodes[n_cells]
+    ]
+    assert n_prefix == int(in_prefix.sum()) < len(codes) // 2
+    # Meeting the nodes through the prefixes takes far fewer steps, so the
+    # graph follows them.
+    every, prefixes = calling._meeting_steps(item_indptr, prefix_indptr)
+    assert calling._prefixes_are_faster(every, prefixes, len(codes) / nodes.n_nodes)
+    assert prefixes * 1_000 < every
+    # Two sets that share only that item share at most a third of their
+    # items, so nothing links; the sparse product would visit the 4 billion
+    # pairs of the item's nodes twice, minutes even compiled.
+    started = time.process_time()
+    assert len(jaccard_edges(nodes, 0.7, inclusive=False)) == 0
+    if os.environ.get("NUMBA_DISABLE_JIT") != "1":
+        assert time.process_time() - started < 10
+
+
+def _tag_rows(rng, n_cells: int, low: int, high: int, pool: int) -> list[list[int]]:
+    """Clones of 10 cells that each keep most of their clone's ``low`` to ``high`` tags, and an ambient tag or two."""
+    rows = []
+    for _clone in range(n_cells // 10):
+        tags = rng.choice(pool, size=int(rng.integers(low, high + 1)), replace=False)
+        for _cell in range(10):
+            kept = tags[rng.random(len(tags)) < rng.uniform(0.6, 0.9)]
+            extra = rng.integers(0, pool, size=int(rng.integers(1, 3)))
+            rows.append(sorted(set(kept.tolist()) | set(extra.tolist())))
+    return rows
+
+
+def test_the_graph_meets_the_nodes_the_way_that_takes_fewer_steps(monkeypatch) -> None:
+    # One item that nine sets in ten hold makes the sparse product visit
+    # every pair of them, so the prefixes, which leave it out, take fewer
+    # steps; CellTag-multi's sets of 10 to 20 tags, each held by a clone's
+    # few cells, keep most of their tags in their prefixes at a similarity
+    # of 0.5, and at 0 every tag, so the sparse product takes fewer.
+    ways = []
+    original = calling._prefixes_are_faster
+
+    def recorded(every, prefixes, mean_size):
+        ways.append(original(every, prefixes, mean_size))
+        return ways[-1]
+
+    monkeypatch.setattr(calling, "_prefixes_are_faster", recorded)
+    rng = np.random.default_rng(31)
+    giant = [
+        [0] * (rng.random() < 0.9) + [1 + 3 * cell, 2 + 3 * cell]
+        for cell in range(5_000)
+    ]
+    jaccard_edges(identical_sets(_sets(giant)), 0.7, inclusive=False)
+    tags = identical_sets(_sets(_tag_rows(rng, 5_000, 10, 20, 3_000)))
+    modalities = rng.integers(0, 2, size=tags.n_nodes)
+    jaccard_edges(tags, 0.6, inclusive=False, across=0.5, modalities=modalities)
+    jaccard_edges(tags, 0.0, inclusive=False)
+    assert ways == [True, False, False]
+
+
+@pytest.mark.slow
+def test_sets_of_many_tags_link_as_soon_as_through_every_item() -> None:
+    # On 30,000 cells of CellTag-multi's sets, the prefixes would compare
+    # each pair of a clone over the whole of both sets, about three times
+    # the steps of the sparse product, which jaccard_edges takes instead.
+    rng = np.random.default_rng(37)
+    nodes = identical_sets(_sets(_tag_rows(rng, 30_000, 10, 20, 3_000)))
+    modalities = rng.integers(0, 2, size=nodes.n_nodes)
+
+    def cost(call) -> float:
+        timings = []
+        for _ in range(2):
+            started = time.process_time()
+            call()
+            timings.append(time.process_time() - started)
+        return min(timings)
+
+    options = {"inclusive": False, "across": 0.5, "modalities": modalities}
+    chosen = cost(lambda: jaccard_edges(nodes, 0.6, **options))
+    product = cost(lambda: _sparse_product_edges(nodes, 0.6, False, 0.5, modalities))
+    assert chosen < 1.5 * product, (chosen, product)
+
+
+def test_the_graph_is_the_same_on_one_thread_and_on_four() -> None:
+    from cytearc.utils.numba import numba_threads
+
+    rng = np.random.default_rng(29)
+    rows = [
+        sorted(rng.choice(40, size=int(rng.integers(1, 6)), replace=False).tolist())
+        for _ in range(3_000)
+    ]
+    sets = _sets(rows)
+    options = {"method": "jaccard", "similarity": 0.5, "inclusive": False}
+    with numba_threads(1):
+        one = set_clones(sets, prune=True, doublets=True, **options)
+        one_edges = jaccard_edges(identical_sets(sets), 0.3, inclusive=True)
+    with numba_threads(4):
+        four = set_clones(sets, prune=True, doublets=True, **options)
+        four_edges = jaccard_edges(identical_sets(sets), 0.3, inclusive=True)
+    np.testing.assert_array_equal(one.codes, four.codes)
+    np.testing.assert_array_equal(one.doublets, four.doublets)
+    assert (one.n_edges, one.n_pruned) == (four.n_edges, four.n_pruned)
+    assert _pairs(one_edges) == _pairs(four_edges) and len(one_edges)
 
 
 # TREX's pruning.

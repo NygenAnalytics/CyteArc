@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cytearc.clones import calling
+from cytearc.clones import calling, sequences
 from cytearc.clones.assignments import ranked_clone_labels
 from cytearc.clones.calling import cell_sets, identical_sets, set_clones
 from cytearc.datastore._operations import clones as clone_operations
@@ -65,6 +65,132 @@ def test_removing_doublets_from_a_chain_of_nodes_keeps_its_edges() -> None:
         ledger=MemoryLedger(None, "x"),
     )
     assert clones.n_edges == 99_999
+
+
+def _prefix_rows(shape: str) -> tuple[list[list[int]], np.ndarray | None]:
+    """Sets of each shape the graph takes, and the cells' groups."""
+    rng = np.random.default_rng(len(shape))
+    if shape == "one item most cells hold":
+        # TREX after correction: 1 to 5 barcodes of their own, and in nine
+        # cells of ten the barcode that most merged into.
+        rows = [
+            [0] * (rng.random() < 0.9) + list(range(5 * cell + 1, 5 * cell + 2 + size))
+            for cell, size in enumerate(rng.integers(0, 5, size=60_000).tolist())
+        ]
+        return rows, None
+    if shape == "one node meets many":
+        # A set of 40,000 tags, each shared with one set of two that also
+        # holds the barcode that most hold: at 0.7 its prefix keeps 12,000
+        # tags, and filling the edges sorts the 12,000 nodes it meets.
+        hub = list(range(1, 40_001))
+        return [hub] + [[0, tag] for tag in hub], None
+    # Clones of 10 cells each lose some of their clone's tags, so cells of a
+    # clone link: CellTag's 4 to 12 tags of 3,000, or 40 of 400, whose
+    # nodes meet many others and sort their ranks with a copy.
+    n_tags, pool, n_cells = (
+        (8, 3_000, 60_000) if shape == "celltag" else (40, 400, 3_000)
+    )
+    rows = []
+    for clone in range(n_cells // 10):
+        tags = rng.choice(
+            pool,
+            size=int(rng.integers(n_tags // 2, 3 * n_tags // 2 + 1)),
+            replace=False,
+        )
+        for _cell in range(10):
+            kept = tags[rng.random(len(tags)) < 0.85]
+            rows.append(sorted(set(kept.tolist()) | {int(rng.integers(0, pool))}))
+    groups = rng.integers(0, 4, size=n_cells) if shape == "celltag" else None
+    return rows, groups
+
+
+@pytest.mark.parametrize(
+    ("shape", "similarity", "way"),
+    [
+        ("one item most cells hold", 0.7, "prefixes"),
+        ("one node meets many", 0.7, "prefixes"),
+        ("celltag", 0.7, "product"),
+        pytest.param("celltag", 0.7, "prefixes", marks=pytest.mark.slow),
+        pytest.param("large sets", 0.5, "prefixes", marks=pytest.mark.slow),
+        pytest.param("large sets", 0.5, "product", marks=pytest.mark.slow),
+    ],
+)
+def test_the_graph_links_the_nodes_of_each_shape_either_way(
+    monkeypatch, shape, similarity, way
+) -> None:
+    monkeypatch.setattr(
+        calling, "_prefixes_are_faster", lambda *steps: way == "prefixes"
+    )
+    rows, groups = _prefix_rows(shape)
+    cells = np.repeat(np.arange(len(rows)), [len(row) for row in rows])
+    sets = cell_sets(
+        cells, np.concatenate([np.asarray(row) for row in rows]), len(rows)
+    )
+    nodes = identical_sets(sets, groups)
+    edges = calling.jaccard_edges(
+        nodes, similarity, inclusive=False, ledger=MemoryLedger(None, "x")
+    )
+    if "one" in shape:
+        # Two sets share at most the item that most hold, or one of the
+        # hub's tags beside it, so none reaches 0.7: a half at most.
+        assert len(edges) == 0
+    else:
+        assert len(edges) > 1_000
+
+
+def _keyed_inputs(shape: str) -> tuple[np.ndarray, np.ndarray, int, bool, int, int]:
+    """Texts of each shape the keyed search takes: codes, lengths, limit, edits, segments and split."""
+    rng = np.random.default_rng(len(shape))
+    if shape == "edits":
+        amino = np.frombuffer(b"ACDEFGHIKLMNPQRSTVWY", dtype=np.uint8)
+        lengths = rng.integers(10, 17, size=30_000)
+        codes = np.zeros((30_000, 16), dtype=np.uint8)
+        for row, length in enumerate(lengths.tolist()):
+            codes[row, :length] = amino[rng.integers(0, 20, size=length)]
+        # A fifth of them one substitution from another.
+        codes[::5] = codes[1::5]
+        codes[::5, 3] = amino[rng.integers(0, 20, size=len(codes[::5]))]
+        lengths[::5] = lengths[1::5]
+        return codes, lengths.astype(np.int64), 1, True, 0, 0
+    if shape == "copies":
+        # 300 copies of a text share each of its 5 keys: runs of 300 keys
+        # outgrow the rows of a run, and their 224,250 pairs the buffer.
+        codes = np.frombuffer(b"CASSF" * 300, dtype=np.uint8).reshape(300, 5).copy()
+        return codes, np.full(300, 5, dtype=np.int64), 1, False, 5, 0
+    if shape == "letters":
+        # 300 copies of one letter share its one key: the buffer doubles to
+        # 65,536 for their 44,850 pairs, each found once, so copying the
+        # pairs out of the buffer holds more than its last growth did.
+        codes = np.full((300, 1), ord("A"), dtype=np.uint8)
+        return codes, np.ones(300, dtype=np.int64), 1, False, 1, 0
+    bases = np.frombuffer(b"ACGT", dtype=np.uint8)
+    codes = bases[rng.integers(0, 4, size=(40_000, 28))]
+    variants = codes[rng.integers(0, 40_000, size=10_000)]
+    changed = rng.random(variants.shape) < 0.1
+    variants[changed] = bases[rng.integers(0, 4, size=int(changed.sum()))]
+    codes = np.ascontiguousarray(np.vstack([codes, variants]))
+    lengths = np.full(len(codes), 28, dtype=np.int64)
+    split = 30_000 if shape == "split" else 0
+    return codes, lengths, 5, False, 7, split
+
+
+@pytest.mark.parametrize("shape", ["barcodes", "split", "copies", "letters", "edits"])
+def test_the_keyed_search_finds_the_pairs_of_each_shape(shape) -> None:
+    codes, lengths, limit, edits, segments, split = _keyed_inputs(shape)
+    first, _second = sequences._keyed_pairs(
+        codes,
+        lengths,
+        limit,
+        edits,
+        sequences._zobrist_table(codes.shape[1]),
+        MemoryLedger(None, "x"),
+        segments,
+        split,
+    )
+    assert len(first)
+    if shape in ("copies", "letters"):
+        # Every pair of copies, which the buffer doubled to hold.
+        assert len(first) == 300 * 299 // 2
 
 
 # The labels of clones ranked by size.
