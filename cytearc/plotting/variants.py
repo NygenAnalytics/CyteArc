@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..clones.assignments import WITHIN_TYPE_CLONE
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import bool_argument, integer_argument, quoted_value
 from ..utils.arrays import sorted_unique
@@ -508,8 +509,9 @@ def allele_frequencies(
     0 to 1. With ``clones``, such as one from ``ds.variants.frequency_clones``,
     the cells with a clone are drawn ordered by clone, largest first, under
     a bar of clone colours whose legend names the clones as their artifact
-    does; without it, the cells that the statistics covered are drawn in
-    their order. A cell that was not covered at a variant's site has no
+    does, and clonotypes across receptor types by each cell's clonotype
+    within its type, as the clone summaries measure them; without it, the
+    cells that the statistics covered are drawn in their order. A cell that was not covered at a variant's site has no
     allele frequency and is drawn in the grey of no value, apart from a
     frequency of 0. At most ``max_cells`` cells are drawn, chosen evenly
     along the order so that each clone keeps its share, and the axis says
@@ -538,14 +540,19 @@ def allele_frequencies(
     names = None
     if clones is not None:
         clone_cells = store_method(store, "clones.load_clones")(clones).cells
-        codes = np.asarray(clone_cells["clone"].cat.codes, dtype=np.int64)
+        # Clonotypes across receptor types are drawn, as every summary measures
+        # them, by each cell's clonotype within its type.
+        measured = clone_cells[
+            WITHIN_TYPE_CLONE if WITHIN_TYPE_CLONE in clone_cells else "clone"
+        ]
+        codes = np.asarray(measured.cat.codes, dtype=np.int64)
         held = codes >= 0
         if not held.any():
             raise ValueError("No cell has a clone, so there is nothing to plot")
         names = clone_names(store, clones)
         order = np.flatnonzero(held)[np.argsort(codes[held], kind="stable")]
         cell_ids = clone_cells.index.to_numpy(dtype=object)[order]
-        cell_clones = clone_cells["clone"].astype(object).to_numpy(dtype=object)[order]
+        cell_clones = measured.astype(object).to_numpy(dtype=object)[order]
     else:
         listed = load_counts(
             selection.counts, sites=[], cell_selection=selection.cell_selection
