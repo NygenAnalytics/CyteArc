@@ -187,7 +187,7 @@ _CLONE_REFERENCES = Path(__file__).parent / "visual" / "clones"
 @pytest.mark.slow
 @pytest.mark.visual
 def test_clone_figures_match_visual_references(tmp_path):
-    """Each clone, repertoire, lineage and variant figure of the truth, and its clonotypes' abundance.
+    """Each clone, repertoire, lineage, phylogeny and variant figure of the truth, and its clonotypes' abundance.
 
     A figure without a reference writes one into ``tests/visual/clones`` and
     fails, so that a new figure's reference is reviewed before it is
@@ -202,6 +202,7 @@ def test_clone_figures_match_visual_references(tmp_path):
         clone_figure_calls,
         import_truth_clones,
         import_truth_lineage,
+        import_truth_phylogeny,
         import_truth_receptors,
         import_truth_variants,
         repertoire_figure_calls,
@@ -227,6 +228,12 @@ def test_clone_figures_match_visual_references(tmp_path):
     reads.mkdir()
     figures.update(
         variant_figure_calls(store, import_truth_variants(store, truth, reads))
+    )
+    # The truth's phylogeny drawn at five wedges: four clones and a grey
+    # wedge of the other four.
+    _phylogeny, cut = import_truth_phylogeny(store, truth, tmp_path)
+    figures["phylogeny"] = lambda **options: store.plots.phylogeny(
+        cut, max_leaves=5, **options
     )
     expected = {f"{name}.png" for name in figures}
     assert {path.name for path in _CLONE_REFERENCES.glob("*.png")} <= expected

@@ -2965,6 +2965,35 @@ def newick_text(tree: TruthTree, *, stem: float | None = None) -> str:
     return texts[0] + ";"
 
 
+def random_newick(names: Sequence[str], rng: np.random.Generator) -> str:
+    """Newick text of a random tree over the leaves ``names``, on one line.
+
+    Groups of two to five, now and then 67, merge until one is left, each
+    internal node named ``n`` and its number, with lengths that make every
+    leaf end at the root's height.
+    """
+    texts = list(names)
+    heights = [0.0] * len(texts)
+    node = 0
+    while len(texts) > 1:
+        size = min(int(rng.choice([2, 2, 2, 3, 5, 67])), len(texts))
+        picked = sorted(rng.choice(len(texts), size=size, replace=False).tolist())
+        height = max(heights[at] for at in picked) + 1.0
+        merged = (
+            "("
+            + ",".join(f"{texts[at]}:{height - heights[at]:g}" for at in picked)
+            + f")n{node}"
+        )
+        node += 1
+        for at in reversed(picked):
+            texts[at], heights[at] = texts[-1], heights[-1]
+            texts.pop()
+            heights.pop()
+        texts.append(merged)
+        heights.append(height)
+    return texts[0] + ";"
+
+
 def write_newick(
     trees: Sequence[TruthTree], path: Path, *, compress: bool = False
 ) -> Path:

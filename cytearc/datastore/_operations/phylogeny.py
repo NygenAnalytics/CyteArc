@@ -9,7 +9,7 @@ reads. Parsing lives in :mod:`cytearc.readers.phylogeny` and the cutting in
 
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -22,9 +22,11 @@ from ...clones.assignments import CloneAssignment, ranked_clones
 from ...clones.phylogeny import (
     TREE_SEPARATOR,
     CellPhylogeny,
+    CollapsedPhylogeny,
     PhylogenyCut,
     clade_roots,
     clade_labels,
+    collapse_phylogeny,
     collapsed_depths,
     leaf_time_ranges,
     node_times,
@@ -36,6 +38,7 @@ from ...metadata.rows import (
     read_array_rows_chunkwise,
     read_text_rows,
     read_whole,
+    read_whole_text,
     text_width,
 )
 from ...metadata.selection import (
@@ -69,11 +72,11 @@ from ...storage.diagnostics import (
 from ...storage.layout import column_chunk_rows
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import bool_argument, quoted_value
+from ...utils.arguments import bool_argument, integer_argument, quoted_value
 from ...utils.arrays import sort_categories, sorted_unique
 from ...utils.digest import path_sha256
 from ...utils.logging import logger
-from ...utils.memory_budget import MemoryLedger, fixed_text_bytes
+from ...utils.memory_budget import MemoryLedger, fixed_text_bytes, object_array_bytes
 from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
@@ -938,6 +941,195 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             f"{_cut_text(cut, unit)}"
         )
         return planned.ref
+
+    @validation_scoped
+    def _phylogeny_figure(
+        self,
+        clones: ArtifactRef,
+        *,
+        tree: str | None,
+        max_leaves: int,
+        drawing_bytes: Callable[[pd.DataFrame], int],
+    ) -> CollapsedPhylogeny:
+        """Collapse the phylogeny that clones were cut from to at most ``max_leaves`` wedges, for its figure.
+
+        The phylogeny and the cut come from the clones' provenance. Each
+        node's parent, cell and, for a cut at a time, time are read whole,
+        with each tree's offsets and name and each cell's clone, and
+        :func:`~cytearc.clones.phylogeny.collapse_phylogeny` collapses them;
+        only the labels of the clones drawn are read. The phylogeny's table
+        of nodes is never built.
+
+        Args:
+            clones: Clones cut from a phylogeny by
+                :meth:`~cytearc.datastore.namespaces.ClonesAccessor.phylogeny_clones`.
+            tree: The name of the one tree to draw, or None for every tree.
+            max_leaves: The most wedges to draw, at least 1.
+            drawing_bytes: What drawing the rows of the collapsed trees
+                holds, which the ledger checks last, once the collapse is let
+                go.
+
+        Raises:
+            TypeError: If ``clones`` is not an ArtifactRef, ``tree`` is not
+                text or ``max_leaves`` not an integer.
+            ValueError: If ``clones`` are not a ``clones`` artifact cut from
+                a phylogeny, ``max_leaves`` is below 1, ``tree`` names no
+                tree of the phylogeny or one without cells, or the clones
+                are not those of the cut.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the clones or their phylogeny are incomplete.
+            MemoryError: If a read, the collapse or the drawing does not fit
+                the memory budget.
+        """
+        if not isinstance(clones, ArtifactRef):
+            raise TypeError("clones must be an ArtifactRef")
+        if clones.kind != PhylogenyCloneArguments.artifact_kind:
+            raise ValueError(
+                "A phylogeny figure draws clones cut from a phylogeny by "
+                f"ds.clones.phylogeny_clones, not a {quoted_value(clones.kind)} artifact"
+            )
+        clone_group = self._clone_group(clones)
+        status = inspect_artifact(self.zw, clones)
+        if status.operation != PhylogenyCloneArguments.operation:
+            raise ValueError(
+                "A phylogeny figure draws clones cut from a phylogeny by "
+                "ds.clones.phylogeny_clones, not clones that "
+                f"{quoted_value(status.operation)} saved"
+            )
+        max_leaves = integer_argument(max_leaves, "max_leaves", minimum=1)
+        if tree is not None and not isinstance(tree, str):
+            raise TypeError("tree must be the name of a tree of the phylogeny, or None")
+        parameters = status.parameters or {}
+        cut = phylogeny_cut(parameters.get("time"), parameters.get("depth"))
+        phylogeny = status.input_ref("phylogeny")
+        group = self._phylogeny_group(phylogeny)
+        unit = group.attrs.get("time_unit")
+        n_nodes = int(as_zarr_array(group["parent"], name="parent").shape[0])
+        n_cells = plan_cell_selection_read(
+            self.zw, self._phylogeny_cells(phylogeny)
+        ).cells
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Drawing the phylogeny of {n_nodes} nodes",
+            codec_threads=self.nthreads,
+        )
+        tree_names = read_whole_text(
+            ledger, group, "tree_names", item="the trees' names"
+        )
+        offsets = read_codes(ledger, group, "tree_offsets", item="each tree's nodes")
+        begin, end = 0, n_nodes
+        if tree is not None:
+            found = np.flatnonzero(tree_names == tree)
+            if not len(found):
+                shown = ", ".join(
+                    quoted_value(name) for name in tree_names[:5].tolist()
+                )
+                more = len(tree_names) - 5
+                raise ValueError(
+                    f"tree {quoted_value(tree)} names no tree of the phylogeny, "
+                    f"whose trees are {shown}"
+                    + (f" and {more} more" if more > 0 else "")
+                )
+            begin, end = int(offsets[found[0]]), int(offsets[found[0] + 1])
+        elif len(tree_names) > 1:
+            ledger.remedy = "draw one tree with tree="
+        parent = read_codes(ledger, group, "parent", item="each node's parent")
+        cells = read_codes(ledger, group, "cells", item="each node's cell")
+        times = (
+            read_whole(ledger, group, "time", item="each node's time")
+            if cut.time is not None
+            else None
+        )
+        codes = read_codes(ledger, clone_group, "codes", item="each cell's clone")
+        if len(codes) != n_cells:
+            raise ValueError(
+                f"The clones code {len(codes)} cells, but their phylogeny's "
+                f"selection holds {n_cells}"
+            )
+        read_bytes = (
+            parent.nbytes
+            + cells.nbytes
+            + codes.nbytes
+            + (0 if times is None else times.nbytes)
+        )
+        if tree is not None:
+            # The tree's own nodes, each parent counted from its root.
+            n_tree = end - begin
+            copies = ledger.hold(
+                f"the {n_tree} nodes of the tree",
+                8 * n_tree * (2 if times is None else 3),
+            )
+            ledger.peak(f"the {n_tree} nodes of the tree", n_tree)
+            tree_parent = parent[begin:end] - begin
+            tree_parent[tree_parent < 0] = -1
+            tree_cells = cells[begin:end].copy()
+            tree_times = None if times is None else times[begin:end].copy()
+            whole_bytes = (
+                parent.nbytes + cells.nbytes + (0 if times is None else times.nbytes)
+            )
+            del parent, cells, times
+            ledger.release(whole_bytes)
+            parent, cells, times = tree_parent, tree_cells, tree_times
+            read_bytes += copies - whole_bytes
+            tree_offsets = np.asarray([0, n_tree], dtype=np.int64)
+        else:
+            tree_offsets = offsets
+        nodes = collapse_phylogeny(
+            parent,
+            times,
+            cells,
+            codes,
+            tree_offsets,
+            cut=cut,
+            max_leaves=max_leaves,
+            ledger=ledger,
+        )
+        del parent, cells, times, codes
+        ledger.release(read_bytes)
+        n_rows = len(nodes)
+        # The labels of the clones drawn, and each row's clone's label and
+        # tree's name, beside the rows.
+        row_codes = nodes["clone"].to_numpy()
+        codes_drawn = sorted_unique(row_codes[row_codes >= 0])
+        labels = read_text_rows(
+            ledger,
+            as_zarr_array(clone_group["clone_ids"], name="clone_ids"),
+            codes_drawn,
+            item=f"the labels of the {len(codes_drawn)} clones drawn",
+        )
+        ledger.hold(
+            f"the labels of the {n_rows} rows drawn",
+            # Two arrays of labels, and the positions that find them.
+            2 * object_array_bytes(n_rows) + 2 * 8 * n_rows,
+        )
+        one = row_codes >= 0
+        clone_ids = np.full(n_rows, None, dtype=object)
+        clone_ids[one] = labels[np.searchsorted(codes_drawn, row_codes[one])]
+        positions = nodes["tree"].to_numpy()
+        named = positions >= 0
+        names = tree_names if tree is None else np.asarray([tree], dtype=object)
+        row_trees = np.full(n_rows, None, dtype=object)
+        row_trees[named] = names[positions[named]]
+        top = nodes["parent"].to_numpy() < 0
+        n_trees = int(nodes["n_trees"].to_numpy()[top].sum())
+        n_clones = int(nodes["n_clones"].to_numpy()[top].sum())
+        offset_bytes = offsets.nbytes
+        del offsets, positions
+        ledger.release(offset_bytes)
+        ledger.peak(f"drawing {n_rows} rows of the phylogeny", drawing_bytes(nodes))
+        return CollapsedPhylogeny(
+            nodes=nodes,
+            tree_names=row_trees,
+            clone_ids=clone_ids,
+            clones=clones,
+            phylogeny=phylogeny,
+            cut=cut,
+            time_unit=None if unit is None else str(unit),
+            tree=tree,
+            n_trees=n_trees,
+            n_clones=n_clones,
+            max_leaves=max_leaves,
+        )
 
 
 def _cut_rules(cut: PhylogenyCut, unit: Any) -> tuple[DiagnosticRule, ...]:

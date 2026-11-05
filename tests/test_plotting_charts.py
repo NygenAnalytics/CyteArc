@@ -16,6 +16,7 @@ from cytearc.plotting._charts import (
     draw_histograms,
     draw_lines,
     draw_matrix,
+    draw_tree,
     legend_of,
     log_values,
     pair_matrix,
@@ -1234,3 +1235,184 @@ def test_side_legends_fit_the_row_of_their_panel() -> None:
         finally:
             plt.close(figure)
     assert columns(5.2) == 1 and columns(2.6) > 1
+
+
+def _tree() -> pd.DataFrame:
+    """A node opened at x 0 over three wedges, stacked from the top.
+
+    A spans 0 to 4 cells from x 1 to 3; B, one leaf at x 2, spans 4 to 5; C
+    spans 5 to 6 from x 1.5 to 3. Each branch starts at the opened node.
+    """
+    return pd.DataFrame(
+        {
+            "parent": [-1, 0, 0, 0],
+            "wedge": [False, True, True, True],
+            "x": [0.0, 1.0, 2.0, 1.5],
+            "start": [0.0, 0.0, 0.0, 0.0],
+            "end": [3.0, 3.0, 2.0, 3.0],
+            "y": [3.75, 2.0, 4.5, 5.5],
+            "low": [0.0, 0.0, 4.0, 5.0],
+            "high": [6.0, 4.0, 5.0, 6.0],
+        }
+    )
+
+
+TREE_KINDS = np.asarray(["", "s1", "s2", "s3"], dtype=object)
+
+
+def _paths(ax, *, filled: bool) -> list:
+    from matplotlib.patches import PathPatch
+
+    return [
+        patch
+        for patch in ax.patches
+        if isinstance(patch, PathPatch) and patch.get_fill() == filled
+    ]
+
+
+def _draw_tree(ax, **options):
+    return draw_tree(
+        ax,
+        _tree(),
+        categories=TREE_KINDS,
+        colors=SEGMENTS,
+        line_color="#333333",
+        x_label="Time (days)",
+        **options,
+    )
+
+
+def test_a_tree_draws_a_branch_to_each_node_and_joins_each_opened_nodes_children(
+    ax,
+) -> None:
+    _draw_tree(ax)
+    (lines,) = _paths(ax, filled=False)
+    vertices = lines.get_path().vertices.tolist()
+    # From each branch's start to its node, then the line at the opened node
+    # from its first child's middle to its last's.
+    assert vertices == [
+        [0.0, 2.0],
+        [1.0, 2.0],
+        [0.0, 4.5],
+        [2.0, 4.5],
+        [0.0, 5.5],
+        [1.5, 5.5],
+        [0.0, 2.0],
+        [0.0, 5.5],
+    ]
+    assert lines.get_path().codes.tolist() == [1, 2] * 4
+    assert to_hex(lines.get_edgecolor()) == "#333333"
+
+
+def test_a_wedge_is_a_triangle_to_nine_tenths_of_its_slot_in_its_colour(ax) -> None:
+    _draw_tree(ax)
+    wedges = {
+        to_hex(patch.get_facecolor()): patch.get_path().vertices.tolist()
+        for patch in _paths(ax, filled=True)
+    }
+    # A, of four cells from 0, narrows to 0.2 and 3.8 at its base; C, of one
+    # cell from 5, to 5.05 and 5.95; B is a leaf, drawn as a point.
+    assert set(wedges) == {RED, BLUE}
+    np.testing.assert_allclose(
+        wedges[RED], [[1.0, 2.0], [3.0, 0.2], [3.0, 3.8], [1.0, 2.0]]
+    )
+    np.testing.assert_allclose(
+        wedges[BLUE], [[1.5, 5.5], [3.0, 5.05], [3.0, 5.95], [1.5, 5.5]]
+    )
+    (points,) = ax.collections
+    assert points.get_offsets().tolist() == [[2.0, 4.5]]
+    assert [to_hex(color) for color in points.get_facecolors()] == [GREEN]
+    # The y axis runs down from the top, without ticks, over every cell.
+    assert ax.get_ylim() == (6.0, 0.0)
+    assert not len(ax.get_yticks())
+    low, high = ax.get_xlim()
+    assert low <= 0.0 and high >= 3.0
+
+
+def test_a_tree_writes_its_texts_at_their_wedges_and_draws_the_cut(ax) -> None:
+    drawn = _draw_tree(
+        ax,
+        texts=np.asarray(["", "", "a leaf", "2 clones"], dtype=object),
+        cut=0.5,
+        title="A tree",
+        legend_title="Clone",
+    )
+    texts = {text.get_text(): text for text in ax.texts}
+    assert set(texts) == {"a leaf", "2 clones"}
+    # Inside a wedge's base, or beside a point.
+    assert texts["2 clones"].xy == (3.0, 5.5)
+    assert texts["2 clones"].get_horizontalalignment() == "right"
+    assert texts["a leaf"].xy == (2.0, 4.5)
+    assert texts["a leaf"].get_horizontalalignment() == "left"
+    (cut,) = ax.get_lines()
+    assert cut.get_linestyle() == "--" and list(cut.get_xdata()) == [0.5, 0.5]
+    assert ax.get_xlabel() == "Time (days)" and ax.get_title() == "A tree"
+    assert drawn is not None and drawn.legend.label == "Clone"
+    assert drawn.scale.order == ("s1", "s2", "s3")
+
+
+def test_a_tree_legend_lists_the_categories_of_its_wedges_and_at_most_80(ax) -> None:
+    n = 120
+    nodes = pd.DataFrame(
+        {
+            "parent": np.full(n, -1),
+            "wedge": np.ones(n, dtype=bool),
+            "x": np.zeros(n),
+            "start": np.zeros(n),
+            "end": np.ones(n),
+            "y": np.arange(n) + 0.5,
+            "low": np.arange(n, dtype=float),
+            "high": np.arange(n) + 1.0,
+        }
+    )
+    names = [f"c{index}" for index in range(n + 5)]
+    # Five categories of the scale are drawn by no wedge.
+    scale = CategoricalScale(order=tuple(names), palette={name: RED for name in names})
+    drawn = draw_tree(
+        ax,
+        nodes,
+        categories=np.asarray(names[:n], dtype=object),
+        colors=scale,
+        line_color="#333333",
+        x_label="Time",
+        legend_title="Clone",
+    )
+    from matplotlib.legend import Legend
+
+    (legend,) = [child for child in ax.get_children() if isinstance(child, Legend)]
+    assert legend.get_title().get_text() == "Clone (80 of 120)"
+    assert len(legend.get_texts()) == LEGEND_SIDE_MAX_ENTRIES
+    assert drawn == legend_of(scale, names[:n], "Clone")
+    # Without a legend title, none is drawn or reported.
+    plain = draw_tree(
+        ax,
+        nodes,
+        categories=np.asarray(names[:n], dtype=object),
+        colors=scale,
+        line_color="#333333",
+        x_label="Time",
+    )
+    assert plain is None
+
+
+def test_trees_refuse_what_they_cannot_draw(ax) -> None:
+    options = {"colors": SEGMENTS, "line_color": "#333333", "x_label": "Time"}
+    with pytest.raises(ValueError, match="needs a node"):
+        draw_tree(ax, _tree().iloc[:0], categories=TREE_KINDS[:0], **options)
+    with pytest.raises(ValueError, match="no colour to 's9'"):
+        draw_tree(
+            ax,
+            _tree(),
+            categories=np.asarray(["", "s1", "s9", "s3"], dtype=object),
+            **options,
+        )
+    with pytest.raises(ValueError, match="one category and one text for each row"):
+        draw_tree(ax, _tree(), categories=TREE_KINDS[:3], **options)
+    with pytest.raises(ValueError, match="one category and one text for each row"):
+        draw_tree(
+            ax,
+            _tree(),
+            categories=TREE_KINDS,
+            texts=np.asarray(["", ""], dtype=object),
+            **options,
+        )

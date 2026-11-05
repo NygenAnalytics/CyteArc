@@ -13,6 +13,7 @@ import pytest
 
 from tests.clone_truth import (
     DARLIN_ARRAYS,
+    PHYLOGENY_CUT_TIME,
     SAMPLES,
     AlleleCallingTruth,
     CallingTruth,
@@ -20,11 +21,13 @@ from tests.clone_truth import (
     ReceptorTruth,
     barcode_truth,
     recorder_truth,
+    truth_phylogeny,
     write_bartab_counts,
     write_carlin_pair,
     write_cellranger_contigs,
     write_celltag_reads,
     write_cospar,
+    write_newick,
     write_petracer_characters,
     write_pycashier,
     write_trex_molecules,
@@ -154,6 +157,25 @@ def import_truth_clones(
     selection = every_cell(store) if cell_selection is None else cell_selection
     with pytest.warns(UserWarning, match="match no cell of the store"):
         return store.clones.import_clones(path, cell_selection=selection)
+
+
+def import_truth_phylogeny(
+    store: "DataStore", truth: CloneTruth, folder: Path
+) -> tuple["ArtifactRef", "ArtifactRef"]:
+    """Import the truth's phylogeny and cut it at time 1, into the truth's clones.
+
+    The tree's leaves also name barcodes outside the store, about which the
+    import warns.
+
+    Returns:
+        The phylogeny and its clones.
+    """
+    path = write_newick([truth_phylogeny(truth)], folder / "truth_tree.nwk")
+    with pytest.warns(UserWarning, match="match no cell of the store"):
+        phylogeny = store.clones.import_phylogeny(
+            path, cell_selection=every_cell(store), time_unit="days"
+        )
+    return phylogeny, store.clones.phylogeny_clones(phylogeny, time=PHYLOGENY_CUT_TIME)
 
 
 #: The clone figures, by the name of the plot that draws each.

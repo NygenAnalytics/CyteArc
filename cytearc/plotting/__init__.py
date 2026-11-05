@@ -72,6 +72,7 @@ if TYPE_CHECKING:
         mapping_score as mapping_score,
     )
     from .modality_weights import modality_weights as modality_weights
+    from .phylogenies import phylogeny as phylogeny
     from .perturbation import (
         association_calibration as association_calibration,
         association_volcano as association_volcano,
@@ -162,6 +163,7 @@ __all__ = [
     "mixscape",
     "modality_weights",
     "perturbation_clusters",
+    "phylogeny",
     "pseudotime_heatmap",
     "qc",
     "receptor_qc",
@@ -239,6 +241,7 @@ __getattr__, __dir__ = _lazy_facade(
         "mixscape": ".perturbation",
         "modality_weights": ".modality_weights",
         "perturbation_clusters": ".perturbation",
+        "phylogeny": ".phylogenies",
         "pseudotime_heatmap": ".heatmaps",
         "qc": ".diagnostics",
         "receptor_qc": ".repertoire",

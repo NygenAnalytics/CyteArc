@@ -17,6 +17,7 @@ from matplotlib.legend import Legend
 
 import cytearc.plotting.clones as clone_plots
 import cytearc.plotting.lineage_barcodes as barcode_plots
+import cytearc.plotting.phylogenies as phylogeny_plots
 import cytearc.plotting.recorder_alleles as recorder_plots
 import cytearc.plotting.variants as variant_plots
 from cytearc.metadata.artifacts import categorical_display
@@ -35,6 +36,7 @@ from tests.clone_helpers import (
     every_cell,
     import_truth_clones,
     import_truth_lineage,
+    import_truth_phylogeny,
     import_truth_receptors,
     import_truth_variants,
     repertoire_figure_calls,
@@ -2027,3 +2029,119 @@ def test_the_layout_panel_draws_the_cells_where_embedding_draws_them(
     finally:
         figure.close()
         reference.close()
+
+
+# The figure of a phylogeny keeps the same conventions, on the truth's
+# phylogeny cut at time 1 and drawn at five wedges, one of several clones.
+
+
+@pytest.fixture(scope="module")
+def phylogeny(tmp_path_factory) -> SimpleNamespace:
+    folder = tmp_path_factory.mktemp("phylogeny_figure_conventions")
+    store = write_truth_store(folder / "store.zarr", TRUTH)
+    tree, clones = import_truth_phylogeny(store, TRUTH, folder)
+    return SimpleNamespace(
+        store=store,
+        tree=tree,
+        clones=clones,
+        draw=lambda **options: store.plots.phylogeny(clones, max_leaves=5, **options),
+    )
+
+
+def _tree_colors(ax) -> set[str]:
+    """The colours that a tree's panel fills: its wedges and points."""
+    colors = {to_hex(patch.get_facecolor()) for patch in ax.patches if patch.get_fill()}
+    for collection in ax.collections:
+        colors |= {to_hex(color) for color in collection.get_facecolors()}
+    return colors
+
+
+def test_every_phylogeny_figure_is_checked() -> None:
+    assert phylogeny_plots.__all__ == ["phylogeny"]
+
+
+def test_the_phylogeny_legend_is_reported_with_its_scale_and_agrees_with_the_drawing(
+    phylogeny,
+) -> None:
+    result = phylogeny.draw(show=False)
+    try:
+        assert [legend.kind for legend in result.legends] == ["categorical"]
+        assert len(result.scales) == 1
+        parts = _shared_legend_parts(result)
+        assert parts is not None and len(parts) == 1
+        (legend,), (scale,) = result.legends, result.scales
+        (artist,) = _drawn_legends(result.figure)
+        assert artist.get_title().get_text() == legend.label == "Clone"
+        labels = [category_label(scale, value) for value in scale.order]
+        assert [text.get_text() for text in artist.get_texts()] == labels
+        assert labels == ["Several clones", "1", "2", "3", "4"]
+        colors = [to_hex(handle.get_facecolor()) for handle in artist.legend_handles]
+        assert colors == [scale.palette[value] for value in scale.order]
+        assert set(colors) <= _tree_colors(artist.axes)
+        assert result.provenance.notes == ("phylogeny",)
+        assert result.provenance.extras["clones"] == phylogeny.clones.to_dict()
+        assert result.provenance.extras["phylogeny"] == phylogeny.tree.to_dict()
+    finally:
+        result.close()
+
+
+def test_a_hidden_phylogeny_legend_is_still_reported(phylogeny) -> None:
+    shown = phylogeny.draw(show=False)
+    hidden = phylogeny.draw(show=False, show_legend=False)
+    try:
+        assert hidden.legends == shown.legends
+        assert hidden.scales == shown.scales
+        assert not _drawn_legends(hidden.figure)
+    finally:
+        shown.close()
+        hidden.close()
+
+
+def test_the_phylogeny_draws_in_a_composite_with_its_legend_once(phylogeny) -> None:
+    figure = plt.figure(figsize=(8, 4), layout="constrained")
+    try:
+        result = phylogeny.draw(target={"tree": figure.subplots(1, 1)}, show=False)
+        composite = compose_results(figure, [result])
+        figure.canvas.draw()
+        legends = list(figure.legends) + _drawn_legends(figure)
+        assert len(legends) == 1
+        assert len(composite.legends) == 1
+    finally:
+        plt.close(figure)
+
+
+@pytest.mark.parametrize("theme", ["notebook", "dark"])
+def test_the_phylogeny_takes_its_themes_background(phylogeny, theme) -> None:
+    result = phylogeny.draw(theme=theme, show=False)
+    try:
+        alpha = 1.0 if theme == "notebook" else 0.0
+        assert result.figure.patch.get_alpha() == alpha
+        assert {ax.patch.get_alpha() for ax in result.figure.axes} == {alpha}
+        # The tree's lines and the counts take the theme's foreground.
+        from cytearc.plotting._style import foreground_color
+
+        ax = result.figure.axes[0]
+        lines = [patch for patch in ax.patches if not patch.get_fill()]
+        assert [to_hex(patch.get_edgecolor()) for patch in lines] == [
+            foreground_color(theme)
+        ]
+        assert {to_hex(text.get_color()) for text in ax.texts} == {
+            foreground_color(theme)
+        }
+    finally:
+        result.close()
+
+
+def test_the_phylogeny_lists_its_clones_by_id_and_label_within_the_page(
+    phylogeny,
+) -> None:
+    result = phylogeny.draw(show=False)
+    try:
+        nodes = result.tables["nodes"]
+        assert {"clone", "label"} <= set(nodes.columns)
+        listed = nodes[nodes["n_clones"] == 1]
+        assert listed["clone"].tolist() == ["1", "2", "3", "4"]
+        assert listed["label"].tolist() == listed["clone"].tolist()
+        assert result.figure.get_size_inches()[0] <= MAX_FIGURE_WIDTH_INCHES
+    finally:
+        result.close()
