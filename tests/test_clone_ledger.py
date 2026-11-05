@@ -83,7 +83,7 @@ def _bounded_intervals(
 
 
 def _prefix_rows(shape: str) -> tuple[list[list[int]], np.ndarray | None]:
-    """Sets of each shape the prefixes take, and the cells' groups."""
+    """Sets of each shape the graph takes, and the cells' groups."""
     rng = np.random.default_rng(len(shape))
     if shape == "one item most cells hold":
         # TREX after correction: 1 to 5 barcodes of their own, and in nine
@@ -93,6 +93,12 @@ def _prefix_rows(shape: str) -> tuple[list[list[int]], np.ndarray | None]:
             for cell, size in enumerate(rng.integers(0, 5, size=60_000).tolist())
         ]
         return rows, None
+    if shape == "one node meets many":
+        # A set of 40,000 tags, each shared with one set of two that also
+        # holds the barcode that most hold: at 0.7 its prefix keeps 12,000
+        # tags, and filling the edges sorts the 12,000 nodes it meets.
+        hub = list(range(1, 40_001))
+        return [hub] + [[0, tag] for tag in hub], None
     # Clones of 10 cells each lose some of their clone's tags, so cells of a
     # clone link: CellTag's 4 to 12 tags of 3,000, or 40 of 400, whose
     # nodes meet many others and sort their ranks with a copy.
@@ -114,13 +120,26 @@ def _prefix_rows(shape: str) -> tuple[list[list[int]], np.ndarray | None]:
 
 
 @pytest.mark.parametrize(
-    ("shape", "similarity"),
-    [("one item most cells hold", 0.7), ("celltag", 0.7), ("large sets", 0.5)],
+    ("shape", "similarity", "way"),
+    [
+        ("one item most cells hold", 0.7, "prefixes"),
+        ("one node meets many", 0.7, "prefixes"),
+        ("celltag", 0.7, "product"),
+        pytest.param("celltag", 0.7, "prefixes", marks=pytest.mark.slow),
+        pytest.param("large sets", 0.5, "prefixes", marks=pytest.mark.slow),
+        pytest.param("large sets", 0.5, "product", marks=pytest.mark.slow),
+    ],
 )
-def test_the_prefixes_hold_each_step_within_its_plan(shape, similarity) -> None:
+def test_the_graph_holds_each_step_within_its_plan(
+    monkeypatch, shape, similarity, way
+) -> None:
     # Coding the items within their groups, choosing each node's prefix,
-    # meeting the nodes it reaches and filling the edges are each charged
-    # before they allocate, and none overstates what it holds by half.
+    # meeting the nodes through the prefixes or through every item, and
+    # filling the edges are each charged before they allocate, and none
+    # overstates what it holds by half.
+    monkeypatch.setattr(
+        calling, "_prefixes_are_faster", lambda *steps: way == "prefixes"
+    )
     rows, groups = _prefix_rows(shape)
     cells = np.repeat(np.arange(len(rows)), [len(row) for row in rows])
     sets = cell_sets(
@@ -135,10 +154,15 @@ def test_the_prefixes_hold_each_step_within_its_plan(shape, similarity) -> None:
 
     edges = call()
     _result, intervals = interval_peaks(call)
+    meeting = (
+        "the nodes that the prefixes reach"
+        if way == "prefixes"
+        else "the nodes that share an item"
+    )
     steps = {
         "the lists of each item's nodes",
         "the prefixes of the nodes' sets",
-        "the nodes that the prefixes reach",
+        meeting,
     }
     chosen = _bounded_intervals(
         intervals,
@@ -147,7 +171,7 @@ def test_the_prefixes_hold_each_step_within_its_plan(shape, similarity) -> None:
     assert {item for item, _planned, _traced in chosen} == steps | {
         f"the {len(edges)} edges of the graph"
     }
-    assert shape == "one item most cells hold" or len(edges) > 1_000
+    assert ("one" in shape) or len(edges) > 1_000
 
 
 def _keyed_inputs(shape: str) -> tuple[np.ndarray, np.ndarray, int, bool, int, int]:
@@ -169,6 +193,12 @@ def _keyed_inputs(shape: str) -> tuple[np.ndarray, np.ndarray, int, bool, int, i
         # outgrow the rows of a run, and their 224,250 pairs the buffer.
         codes = np.frombuffer(b"CASSF" * 300, dtype=np.uint8).reshape(300, 5).copy()
         return codes, np.full(300, 5, dtype=np.int64), 1, False, 5, 0
+    if shape == "letters":
+        # 300 copies of one letter share its one key: the buffer doubles to
+        # 65,536 for their 44,850 pairs, each found once, so copying the
+        # pairs out of the buffer holds more than its last growth did.
+        codes = np.full((300, 1), ord("A"), dtype=np.uint8)
+        return codes, np.ones(300, dtype=np.int64), 1, False, 1, 0
     bases = np.frombuffer(b"ACGT", dtype=np.uint8)
     codes = bases[rng.integers(0, 4, size=(40_000, 28))]
     variants = codes[rng.integers(0, 40_000, size=10_000)]
@@ -180,12 +210,14 @@ def _keyed_inputs(shape: str) -> tuple[np.ndarray, np.ndarray, int, bool, int, i
     return codes, lengths, 5, False, 7, split
 
 
-@pytest.mark.parametrize("shape", ["barcodes", "split", "copies", "edits"])
+@pytest.mark.parametrize("shape", ["barcodes", "split", "copies", "letters", "edits"])
 def test_each_step_of_the_keyed_search_holds_what_it_charges(shape) -> None:
     # The packed codes of the texts, the keys of a pass, the buffer of the
-    # pairs that it finds and the rows of a run, while they grow, are each
-    # charged before they are made and none overstates what it holds by
-    # half; the search is called alone, so its ledger holds nothing else.
+    # pairs that it finds and the rows of a run, while they grow, and the
+    # pairs copied out of the buffer, or under edits the candidate pairs,
+    # are each charged before they are made and none overstates what it
+    # holds by half; the search is called alone, so its ledger holds
+    # nothing else.
     codes, lengths, limit, edits, segments, split = _keyed_inputs(shape)
     table = sequences._zobrist_table(codes.shape[1])
 
@@ -203,23 +235,25 @@ def test_each_step_of_the_keyed_search_holds_what_it_charges(shape) -> None:
 
     first, _second = call()
     _result, intervals = interval_peaks(call)
-    steps = {
-        "the packed codes of the texts",
-        "the variant keys of one pass",
-        "the pairs within max_distance",
-        "the packed codes of a run of keys",
-    }
-    chosen = _bounded_intervals(intervals, lambda item: item in steps)
-    held = {item for item, _planned, _traced in chosen}
-    assert held == steps - (
-        {"the packed codes of the texts", "the packed codes of a run of keys"}
+    steps = (
+        {
+            "the variant keys of one pass",
+            "the candidate pairs of texts that share variant keys",
+        }
         if edits
-        else set()
-        if shape == "copies"
-        else {"the packed codes of a run of keys"}
+        else {
+            "the packed codes of the texts",
+            "the variant keys of one pass",
+            "the pairs within max_distance",
+        }
+        | ({"the packed codes of a run of keys"} if shape == "copies" else set())
     )
+    chosen = _bounded_intervals(
+        intervals, lambda item: item in steps or item == "the pairs found"
+    )
+    assert {item for item, _planned, _traced in chosen} == steps | {"the pairs found"}
     assert len(first)
-    if shape == "copies":
+    if shape in ("copies", "letters"):
         # Every pair of copies, which the buffer doubled to hold.
         assert len(first) == 300 * 299 // 2
         assert sum(item == "the pairs within max_distance" for item, *_ in chosen) > 5

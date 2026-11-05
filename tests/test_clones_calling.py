@@ -328,14 +328,27 @@ def _linked(indices, similarity, inclusive, across=None, modalities=None) -> lis
     return linked
 
 
+def _force_way(monkeypatch, way: str) -> None:
+    """Make jaccard_edges meet the nodes through the prefixes, or through every item, whichever it is told."""
+    if way != "chosen":
+        monkeypatch.setattr(
+            calling, "_prefixes_are_faster", lambda *steps: way == "prefixes"
+        )
+
+
+@pytest.mark.parametrize("way", ["chosen", "prefixes", "product"])
 @pytest.mark.parametrize("giant_share", [0.0, 0.5, 0.95])
-def test_prefixes_give_the_sparse_products_edges_in_order(giant_share) -> None:
+def test_prefixes_give_the_sparse_products_edges_in_order(
+    monkeypatch, giant_share, way
+) -> None:
     # Items drawn with Zipf frequencies give many items held by equally many
-    # nodes, whose ranks tie; a fifth of the cells hold no item and join no
-    # node; and one item that a share of the cells hold, as the barcode that
-    # correction merged many into, enters almost no prefix. Every similarity,
-    # strict or inclusive, within and across modalities, gives the edges of
-    # the sparse product and of Python's sets, in the same order.
+    # nodes, whose ranks tie; about one cell in seven holds no item and joins
+    # no node; and one item that a share of the cells hold, as the barcode
+    # that correction merged many into, enters almost no prefix. Every
+    # similarity, strict or inclusive, within and across modalities, gives
+    # the edges of the sparse product and of Python's sets, in the same
+    # order, through the prefixes or every item.
+    _force_way(monkeypatch, way)
     rng = np.random.default_rng(int(100 * giant_share))
     rows = []
     for _ in range(700):
@@ -369,11 +382,14 @@ def test_prefixes_give_the_sparse_products_edges_in_order(giant_share) -> None:
 
 
 @pytest.mark.parametrize("pair_first", [True, False])
-def test_a_pair_at_the_similarity_whose_bound_rounds_up_is_linked(pair_first) -> None:
+def test_a_pair_at_the_similarity_whose_bound_rounds_up_is_linked(
+    monkeypatch, pair_first
+) -> None:
     # 7 shared of 25 items is 0.28 in floating point, but 0.28 * 25 is
     # 7.000000000000001: a bound of the overlap rounded up from it would keep
     # 18 of the larger set's 25 items, which miss the 7 it shares, its most
     # common. The 7 shared items' three other holders make them so.
+    _force_way(monkeypatch, "prefixes")
     assert 7 / 25 == 0.28 and 0.28 * 25 > 7
     larger = list(range(18)) + list(range(100, 107))
     shared = list(range(100, 107))
@@ -391,15 +407,16 @@ def test_nodes_with_unknown_items_meet_every_node_that_shares_an_item(
     monkeypatch,
 ) -> None:
     # With unknown items the index leaves items out of its denominator, so
-    # the prefixes' bound does not hold and the sparse product runs; an
-    # empty set of unknown items leaves the plain index, which prefixes find.
+    # the prefixes' bound does not hold and the sparse product of the sets
+    # and their unknown items runs; an empty set of unknown items leaves the
+    # plain index, which may take the prefixes.
     rows = [[1, 2, 3], [1, 2], [1, 4], [2, 3]]
     unknown_rows = [[], [3], [], [1]]
 
     def refused(*args, **kwargs):
         raise AssertionError("the prefixes ran")
 
-    monkeypatch.setattr(calling, "_prefix_edges", refused)
+    monkeypatch.setattr(calling, "_edges_without_unknown", refused)
     sets, unknown = _unknown_sets(rows, unknown_rows)
     nodes = identical_sets(sets, unknown=unknown)
     # Cells 1 and 2, 1 and 4, and 2 and 4 agree on every item that both
@@ -439,15 +456,20 @@ def test_an_item_that_most_nodes_hold_enters_only_the_prefix_of_its_own_set() ->
     indptr = np.asarray(nodes.sets.indptr)
     n_prefix, largest, most = calling._prefix_shape(indptr, item_indptr, 0.7)
     ranks = calling._item_ranks(item_indptr, most)
-    in_prefix, prefix_indptr, prefix_nodes = calling._set_prefixes(
-        indptr, codes, ranks, 0.7, n_prefix, largest
-    )
+    in_prefix = calling._prefix_flags(indptr, codes, ranks, 0.7, largest)
+    prefix_indptr = calling._prefix_counts(codes, in_prefix, len(item_indptr) - 1)
+    prefix_nodes = calling._prefix_nodes(indptr, codes, in_prefix, prefix_indptr)
     # Code 0 is the shared item; the node of the last cell holds it alone.
     assert most == len(giant) + 1
     assert prefix_nodes[prefix_indptr[0] : prefix_indptr[1]].tolist() == [
         nodes.cell_nodes[n_cells]
     ]
-    assert n_prefix < len(codes) // 2
+    assert n_prefix == int(in_prefix.sum()) < len(codes) // 2
+    # Meeting the nodes through the prefixes takes far fewer steps, so the
+    # graph follows them.
+    every, prefixes = calling._meeting_steps(item_indptr, prefix_indptr)
+    assert calling._prefixes_are_faster(every, prefixes, len(codes) / nodes.n_nodes)
+    assert prefixes * 1_000 < every
     # Two sets that share only that item share at most a third of their
     # items, so nothing links; the sparse product would visit the 4 billion
     # pairs of the item's nodes twice, minutes even compiled.
@@ -455,6 +477,68 @@ def test_an_item_that_most_nodes_hold_enters_only_the_prefix_of_its_own_set() ->
     assert len(jaccard_edges(nodes, 0.7, inclusive=False)) == 0
     if os.environ.get("NUMBA_DISABLE_JIT") != "1":
         assert time.process_time() - started < 10
+
+
+def _tag_rows(rng, n_cells: int, low: int, high: int, pool: int) -> list[list[int]]:
+    """Clones of 10 cells that each keep most of their clone's ``low`` to ``high`` tags, and an ambient tag or two."""
+    rows = []
+    for _clone in range(n_cells // 10):
+        tags = rng.choice(pool, size=int(rng.integers(low, high + 1)), replace=False)
+        for _cell in range(10):
+            kept = tags[rng.random(len(tags)) < rng.uniform(0.6, 0.9)]
+            extra = rng.integers(0, pool, size=int(rng.integers(1, 3)))
+            rows.append(sorted(set(kept.tolist()) | set(extra.tolist())))
+    return rows
+
+
+def test_the_graph_meets_the_nodes_the_way_that_takes_fewer_steps(monkeypatch) -> None:
+    # One item that nine sets in ten hold makes the sparse product visit
+    # every pair of them, so the prefixes, which leave it out, take fewer
+    # steps; CellTag-multi's sets of 10 to 20 tags, each held by a clone's
+    # few cells, keep most of their tags in their prefixes at a similarity
+    # of 0.5, and at 0 every tag, so the sparse product takes fewer.
+    ways = []
+    original = calling._prefixes_are_faster
+
+    def recorded(every, prefixes, mean_size):
+        ways.append(original(every, prefixes, mean_size))
+        return ways[-1]
+
+    monkeypatch.setattr(calling, "_prefixes_are_faster", recorded)
+    rng = np.random.default_rng(31)
+    giant = [
+        [0] * (rng.random() < 0.9) + [1 + 3 * cell, 2 + 3 * cell]
+        for cell in range(5_000)
+    ]
+    jaccard_edges(identical_sets(_sets(giant)), 0.7, inclusive=False)
+    tags = identical_sets(_sets(_tag_rows(rng, 5_000, 10, 20, 3_000)))
+    modalities = rng.integers(0, 2, size=tags.n_nodes)
+    jaccard_edges(tags, 0.6, inclusive=False, across=0.5, modalities=modalities)
+    jaccard_edges(tags, 0.0, inclusive=False)
+    assert ways == [True, False, False]
+
+
+@pytest.mark.slow
+def test_sets_of_many_tags_link_as_soon_as_through_every_item() -> None:
+    # On 30,000 cells of CellTag-multi's sets, the prefixes would compare
+    # each pair of a clone over the whole of both sets, about three times
+    # the steps of the sparse product, which jaccard_edges takes instead.
+    rng = np.random.default_rng(37)
+    nodes = identical_sets(_sets(_tag_rows(rng, 30_000, 10, 20, 3_000)))
+    modalities = rng.integers(0, 2, size=nodes.n_nodes)
+
+    def cost(call) -> float:
+        timings = []
+        for _ in range(2):
+            started = time.process_time()
+            call()
+            timings.append(time.process_time() - started)
+        return min(timings)
+
+    options = {"inclusive": False, "across": 0.5, "modalities": modalities}
+    chosen = cost(lambda: jaccard_edges(nodes, 0.6, **options))
+    product = cost(lambda: _sparse_product_edges(nodes, 0.6, False, 0.5, modalities))
+    assert chosen < 1.5 * product, (chosen, product)
 
 
 def test_the_graph_is_the_same_on_one_thread_and_on_four() -> None:

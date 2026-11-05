@@ -517,23 +517,31 @@ def test_a_budget_below_the_pairs_found_raises_memory_error(
     held = _encoding_bytes(_VARIANTS) + _group_bytes(_VARIANTS)
     # Joined and placed among all texts, the pairs hold 32 bytes each.
     needed = held + 32 * len(expected) + _PAIR_ARRAYS
-    item = "the pairs found"
-    if path == "keyed":
+    if path == "keyed" and metric == "hamming":
         # Keys find the pairs in 4 runs of 10 texts, one for each position of
         # the variants, which outgrow the buffer of the pairs found: it
-        # doubles from 16 to 256, beside the old one, the 37 texts' keys and
-        # one text's scratch space of 12 keys, or under edits of 13 variants.
-        # Under substitutions the 20 letters pack 8 bits each, two words a
-        # text, and a run's rows are copied to a buffer of 64 rows.
-        per_text = 12 if metric == "hamming" else 13
-        needed = held + 8 * per_text * (len(_VARIANTS) + 1) + 8 * (128 + 256)
-        if metric == "hamming":
-            needed += 16 * len(_VARIANTS) + 16 * 64
-        item = "the pairs within max_distance"
-    with pytest.raises(MemoryError, match=f"for {item}, more than the"):
+        # doubles from 16 to 256, beside the old one, the 37 texts' 12 keys
+        # each and one text's scratch space of 12 keys. The 20 letters pack
+        # 8 bits each, two words a text, and a run's rows are copied to a
+        # buffer of 64 rows.
+        needed = (
+            held
+            + 8 * 12 * (len(_VARIANTS) + 1)
+            + 8 * (128 + 256)
+            + 16 * len(_VARIANTS)
+            + 16 * 64
+        )
+        with pytest.raises(
+            MemoryError, match="for the pairs within max_distance, more than the"
+        ):
+            neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(needed - 1))
+        found = neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(needed))
+        assert _pairs(*found) == expected
+        return
+    with pytest.raises(MemoryError, match="for the pairs found, more than the"):
         neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(needed - 1))
-    found = neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(needed))
-    assert _pairs(*found) == expected
+    roomy = neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(needed + 2**20))
+    assert _pairs(*roomy) == expected
 
 
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])

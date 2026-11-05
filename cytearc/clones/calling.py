@@ -13,13 +13,14 @@ mark:
 - a Jaccard graph: two nodes of a group whose sets share an item are linked
   when the Jaccard index of their sets, the items they share over the items
   either holds that both know, exceeds a similarity, or reaches it when
-  ``inclusive``. Each node meets only the nodes that share an item of its
-  prefix, the items of its set that the fewest nodes hold, as many as a
-  linked pair's overlap allows, so an item that most nodes hold, such as the
-  barcode that correction merged many into, is followed almost never. With
-  unknown items, the intersections come from the sparse product of the
-  nodes-by-items matrix with its transpose, row by row. Either way, nodes
-  that share no item are never compared;
+  ``inclusive``. Where it takes fewer steps, each node meets only the nodes
+  that share an item of its prefix, the items of its set that the fewest
+  nodes hold, as many as a linked pair's overlap requires, so an item that
+  most nodes hold, such as the barcode that correction merged many into, is
+  followed almost never; otherwise, and with unknown items, the
+  intersections come from the sparse product of the nodes-by-items matrix
+  with its transpose, row by row. Either way, nodes that share no item are
+  never compared;
 - or links through any item that two nodes share, which joins the nodes of
   each item without listing every pair of them;
 - pruning, as TREX does: edges whose two ends share no neighbour are removed
@@ -703,30 +704,22 @@ def _item_ranks(item_indptr: np.ndarray, most: int) -> np.ndarray:
 
 
 @njit(cache=True)
-def _set_prefixes(
+def _prefix_flags(
     indptr: np.ndarray,
     items: np.ndarray,
     ranks: np.ndarray,
     lowest: float,
-    n_prefix: int,
     largest: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Each node's prefix, and the nodes whose prefix holds each item code.
+) -> np.ndarray:
+    """Whether each item of each node lies in the node's prefix.
 
     A node's prefix is its items of lowest rank, as many as
-    :func:`_prefix_length` gives for its size. ``n_prefix`` is the items of
-    every prefix and ``largest`` the most items of a node.
-
-    Returns:
-        Whether each item of each node lies in its prefix, and the pointers
-        and nodes of each code's list of the nodes whose prefix holds it,
-        ascending.
+    :func:`_prefix_length` gives for its size; ``largest`` is the most items
+    of a node.
     """
-    n_nodes = len(indptr) - 1
-    n_codes = len(ranks)
     in_prefix = np.zeros(len(items), dtype=np.bool_)
     scratch = np.empty(largest, dtype=np.int64)
-    for node in range(n_nodes):
+    for node in range(len(indptr) - 1):
         start = indptr[node]
         size = indptr[node + 1] - start
         length = _prefix_length(size, lowest)
@@ -752,21 +745,73 @@ def _set_prefixes(
         for at in range(start, start + size):
             if ranks[items[at]] <= last:
                 in_prefix[at] = True
+    return in_prefix
+
+
+@njit(cache=True)
+def _prefix_counts(
+    items: np.ndarray, in_prefix: np.ndarray, n_codes: int
+) -> np.ndarray:
+    """The pointers of each item code's list of the nodes whose prefix holds it."""
     prefix_indptr = np.zeros(n_codes + 1, dtype=np.int64)
     for at in range(len(items)):
         if in_prefix[at]:
             prefix_indptr[items[at] + 1] += 1
     for code in range(n_codes):
         prefix_indptr[code + 1] += prefix_indptr[code]
-    prefix_nodes = np.empty(n_prefix, dtype=np.int64)
+    return prefix_indptr
+
+
+@njit(cache=True)
+def _prefix_nodes(
+    indptr: np.ndarray,
+    items: np.ndarray,
+    in_prefix: np.ndarray,
+    prefix_indptr: np.ndarray,
+) -> np.ndarray:
+    """The nodes of each item code's list of the prefixes that hold it, ascending."""
+    prefix_nodes = np.empty(prefix_indptr[-1], dtype=np.int64)
     filled = prefix_indptr[:-1].copy()
-    for node in range(n_nodes):
+    for node in range(len(indptr) - 1):
         for at in range(indptr[node], indptr[node + 1]):
             if in_prefix[at]:
                 code = items[at]
                 prefix_nodes[filled[code]] = node
                 filled[code] += 1
-    return in_prefix, prefix_indptr, prefix_nodes
+    return prefix_nodes
+
+
+@njit(cache=True)
+def _meeting_steps(
+    item_indptr: np.ndarray, prefix_indptr: np.ndarray
+) -> tuple[float, float]:
+    """The steps of meeting the nodes through every item and through the prefixes alone.
+
+    Each node of an item's list visits the whole list, so each way takes the
+    sum of its lists' squared lengths.
+    """
+    every = 0.0
+    prefixes = 0.0
+    for code in range(len(item_indptr) - 1):
+        held = float(item_indptr[code + 1] - item_indptr[code])
+        reached = float(prefix_indptr[code + 1] - prefix_indptr[code])
+        every += held * held
+        prefixes += reached * reached
+    return every, prefixes
+
+
+def _prefixes_are_faster(every: float, prefixes: float, mean_size: float) -> bool:
+    """Whether the prefixes link the nodes in fewer steps than the sparse product.
+
+    The sparse product's steps are those of meeting the nodes through every
+    item, ``every``. The prefixes take those of meeting them through the
+    prefixes, ``prefixes``, and compare each pair they meet, at most half as
+    many pairs, over the two whole sets, twice the mean set's items each: so
+    a prefix that holds most of a set's items, at a low similarity or among
+    many items each held by a few sets, costs more than the product, and one
+    that leaves out an item most sets hold costs far less.
+    """
+    return prefixes * (1.0 + mean_size) < every
 
 
 @njit(cache=True)
@@ -880,14 +925,18 @@ def jaccard_edges(
     neither, so the index compares the items both know, and a similarity
     of 1 with ``inclusive`` links the nodes that agree wherever both know.
 
-    Without unknown items, each node meets only the nodes that share an item
-    of its prefix: its items that the fewest nodes of the group hold, as
-    many as the lower of the two similarities allows a linked pair to leave
-    unshared, the prefix filtering of exact set-similarity joins. Every pair
-    met is compared over the two whole sets, so the edges are those of every
-    pair that shares an item, in the same order. With unknown items, the
-    index's denominator leaves out items unknown to the other node, so that
-    bound does not hold, and every node meets every node that shares an item.
+    Without unknown items, each node can meet only the nodes that share an
+    item of its prefix: its items that the fewest nodes of the group hold,
+    one more than a pair linked at the lower of the two similarities can
+    leave unshared, the prefix filter of exact set-similarity joins. Every
+    pair met is compared over the two whole sets, so the edges are those of
+    every pair that shares an item, in the same order. The prefixes are
+    followed where that takes fewer steps than meeting every node that
+    shares an item, as when one item sits in most sets, and not where a
+    prefix holds most of a set, at a low similarity or among many items each
+    held by a few sets. With unknown items, the index's denominator leaves
+    out items unknown to the other node, so that bound does not hold, and
+    every node meets every node that shares an item.
 
     Args:
         nodes: The nodes of :func:`identical_sets`.
@@ -934,7 +983,7 @@ def jaccard_edges(
     indptr = np.asarray(nodes.sets.indptr, dtype=np.int64)
     n_items = len(nodes.sets.items)
     if nodes.unknown is None or not len(nodes.unknown.items):
-        return _prefix_edges(
+        return _edges_without_unknown(
             nodes, indptr, within, other, node_modalities, bool(inclusive), ledger
         )
     unknown_indptr = np.asarray(nodes.unknown.indptr, dtype=np.int64)
@@ -974,7 +1023,7 @@ def jaccard_edges(
     return Edges(first=first, second=second)
 
 
-def _prefix_edges(
+def _edges_without_unknown(
     nodes: SetNodes,
     indptr: np.ndarray,
     within: float,
@@ -983,10 +1032,12 @@ def _prefix_edges(
     inclusive: bool,
     ledger: MemoryLedger,
 ) -> Edges:
-    """The edges of :func:`jaccard_edges` between nodes without unknown items, met through their prefixes.
+    """The edges of :func:`jaccard_edges` between nodes without unknown items.
 
-    Each step is charged beside the nodes' modalities, which the caller made
-    and holds until the edges are returned.
+    The nodes meet through their prefixes or, where the prefixes cost more,
+    through every item they share, which give the same edges in the same
+    order. Each step is charged beside the nodes' modalities, which the
+    caller made and holds until the edges are returned.
     """
     n_nodes = nodes.n_nodes
     n_items = len(nodes.sets.items)
@@ -997,53 +1048,95 @@ def _prefix_edges(
         modality_bytes + _ITEM_CODE_BYTES * n_items + _ITEM_CODE_NODE_BYTES * n_nodes,
     )
     item_indptr, item_nodes, codes = _items_by_group(nodes, 0)
-    del item_nodes
     n_codes = len(item_indptr) - 1
     lowest = min(within, across)
     n_prefix, largest, most_holders = _prefix_shape(indptr, item_indptr, lowest)
-    # The codes and their pointers stay while each code's rank is counted,
-    # and the ranks while the prefixes are chosen: each node's flags, the
-    # lists of each code's nodes with their pointers and the places they are
-    # filled at, and one node's ranks with their sorted copy.
-    coded = modality_bytes + 8 * n_items + 8 * (n_codes + 1)
-    prefixes = n_items + 8 * (n_codes + 1) + 8 * n_prefix
-    choosing = 8 * n_codes + 8 * largest * (2 if largest > 16 else 1)
+    # The codes and the lists of each code's nodes stay while each code's
+    # rank is counted, then each node's flags of its prefix are chosen, with
+    # one node's ranks and their sorted copy, and the prefixes of each code
+    # are counted.
+    coded = modality_bytes + 16 * n_items + 8 * (n_codes + 1)
+    choosing = 8 * largest * (2 if largest > 16 else 1)
     _peak(
         ledger,
         "the prefixes of the nodes' sets",
-        coded + 8 * n_codes + max(8 * (most_holders + 2), prefixes + choosing),
+        coded
+        + max(
+            8 * n_codes + 8 * (most_holders + 2),
+            8 * n_codes + n_items + choosing,
+            n_items + 8 * (n_codes + 1),
+        ),
     )
     ranks = _item_ranks(item_indptr, most_holders)
-    in_prefix, prefix_indptr, prefix_nodes = _set_prefixes(
-        indptr, codes, ranks, lowest, n_prefix, largest
-    )
-    del ranks, item_indptr
-    # Each node then meets the nodes its prefix reaches, marking each and
-    # listing those it touched.
-    kept = modality_bytes + 8 * n_items + prefixes
-    _peak(ledger, "the nodes that the prefixes reach", kept + 16 * n_nodes)
+    in_prefix = _prefix_flags(indptr, codes, ranks, lowest, largest)
+    del ranks
+    prefix_indptr = _prefix_counts(codes, in_prefix, n_codes)
+    every, prefixes = _meeting_steps(item_indptr, prefix_indptr)
     empty = np.empty(0, dtype=np.int64)
-    arguments = (
+    if _prefixes_are_faster(every, prefixes, n_items / max(n_nodes, 1)):
+        del item_indptr, item_nodes
+        # Each code's list of the prefixes that hold it is filled, then each
+        # node meets the nodes its prefix reaches, marking each and listing
+        # those it touched.
+        kept = modality_bytes + 9 * n_items + 8 * (n_codes + 1) + 8 * n_prefix
+        _peak(
+            ledger,
+            "the nodes that the prefixes reach",
+            kept + max(8 * n_codes, 16 * n_nodes),
+        )
+        prefix_nodes = _prefix_nodes(indptr, codes, in_prefix, prefix_indptr)
+        arguments = (
+            indptr,
+            codes,
+            in_prefix,
+            prefix_indptr,
+            prefix_nodes,
+            within,
+            across,
+            modalities,
+            inclusive,
+        )
+        n_edges, most_met = _prefix_jaccard_pairs(*arguments, empty, empty, False)
+        # Filling the edges sorts the nodes each node met, a copy of the most.
+        _peak(
+            ledger,
+            f"the {n_edges} edges of the graph",
+            kept + 16 * n_nodes + 8 * most_met + _EDGE_BYTES * n_edges,
+        )
+        first = np.empty(n_edges, dtype=np.int64)
+        second = np.empty(n_edges, dtype=np.int64)
+        _prefix_jaccard_pairs(*arguments, first, second, True)
+        return Edges(first=first, second=second)
+    del in_prefix, prefix_indptr
+    # Each node meets every node that shares an item, beside each node's size
+    # and empty sets of unknown items, counting its intersections and listing
+    # those it touched; filling the edges sorts them, at most every node.
+    kept = coded + 8 * n_nodes + 8 * (n_nodes + 1)
+    _peak(ledger, "the nodes that share an item", kept + 16 * n_nodes)
+    sizes = np.diff(indptr)
+    no_unknown = np.zeros(n_nodes + 1, dtype=np.int64)
+    arguments_of_items = (
         indptr,
         codes,
-        in_prefix,
-        prefix_indptr,
-        prefix_nodes,
+        item_indptr,
+        item_nodes,
+        sizes,
+        no_unknown,
+        empty,
         within,
         across,
         modalities,
         inclusive,
     )
-    n_edges, most_met = _prefix_jaccard_pairs(*arguments, empty, empty, False)
-    # Filling the edges sorts the nodes each node met, a copy of the most.
+    n_edges = _jaccard_pairs(*arguments_of_items, empty, empty, False)
     _peak(
         ledger,
         f"the {n_edges} edges of the graph",
-        kept + 16 * n_nodes + 8 * most_met + _EDGE_BYTES * n_edges,
+        kept + 24 * n_nodes + _EDGE_BYTES * n_edges,
     )
     first = np.empty(n_edges, dtype=np.int64)
     second = np.empty(n_edges, dtype=np.int64)
-    _prefix_jaccard_pairs(*arguments, first, second, True)
+    _jaccard_pairs(*arguments_of_items, first, second, True)
     return Edges(first=first, second=second)
 
 

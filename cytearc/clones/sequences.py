@@ -15,8 +15,9 @@ optionally, a block per text, such as its gene calls or its sample, so that
 only the texts of one block are compared. It returns the positions of every
 pair within the distance and charges what it holds while it searches to the
 caller's memory ledger: the encoded texts, the variant keys of one pass with
-the pairs within the distance that it finds, and the pairs found. A search
-that would need more than the ledger's budget is refused before it allocates.
+the pairs within the distance that it finds, or under ``levenshtein`` the
+candidate pairs that share them, and the pairs found. A search that would
+need more than the ledger's budget is refused before it allocates.
 
 Every pair is found in one of two ways, whichever is estimated to take less
 time for the texts of each length, or under ``levenshtein`` for those of each
@@ -95,16 +96,18 @@ _MASK_TEXT_BYTES = 48
 # The bytes of a pair while a compiled loop collects it: two buffers that
 # double as they fill, and the copies returned.
 _LOOP_PAIR_BYTES = 32
-# The bytes of a variant key, and of a 64-bit word of a text's codes packed
-# side by side, which each text and each row of a run of keys holds under
-# substitutions.
+# The bytes of a variant key; of a 64-bit word of a text's codes packed side
+# by side, which each text and each row of a run of keys holds under
+# substitutions; and of a candidate pair of texts that share a deletion
+# variant, which edits write and sort before they check it.
 _KEY_BYTES = 8
 _WORD_BYTES = 8
-# The pairs within the distance that a pass finds are written to a buffer of
-# 8 bytes a pair, which starts at a 64th of the pass's keys, and at
-# _MIN_FOUND_PAIRS, and doubles while the old buffer is copied into the new.
-# Under substitutions the packed rows of a run of keys are copied to a buffer
-# of _RUN_ROWS rows, which grows as the pairs' buffer does.
+_CANDIDATE_BYTES = 8
+# Under substitutions, the pairs within the distance that a pass finds are
+# written to a buffer of 8 bytes a pair, which starts at a 64th of the pass's
+# keys, and at _MIN_FOUND_PAIRS, and doubles while the old buffer is copied
+# into the new. The packed rows of a run of keys are copied to a buffer of
+# _RUN_ROWS rows, which doubles, or grows to the run that outgrew it.
 _FOUND_SHARE = 64
 _MIN_FOUND_PAIRS = 16
 _FOUND_CODE_BYTES = 8
@@ -390,7 +393,8 @@ def _edit_pairs(
 # of the texts of lengths within max_distance), or the keys that the texts
 # yield, each at the cost below in nanoseconds. A key costs its hash and its
 # share of the sort, of pairing the texts that share it and of checking them:
-# 25 to 50 ns, more as the keys grow from 100,000 to 50 million. A comparison
+# 25 to 50 ns, more as the keys grow from 100,000 to 50 million, as measured
+# when the candidate pairs of substitutions were written, sorted and checked. A comparison
 # of substitutions costs 2 to 5 ns; one of edits about 90 ns plus 70 ns for
 # each edit of max_distance, and several times more between similar texts, such
 # as those of one B cell clone, which fill the whole band. Measured on one core
@@ -400,8 +404,10 @@ def _edit_pairs(
 # longer than the faster way for each length within 1 to 3 substitutions.
 _KEY_NS = 40.0
 _PAIR_NS = 3.5
-# A candidate pair of texts that share a key by chance costs its comparison,
-# made while its run of keys is read.
+# A candidate pair of texts that share a key by chance cost 30 ns to write,
+# sort and check. Compared as its run of keys is read, it costs about 7 ns,
+# so this weight leads the search to choose more segments than the fewest
+# that would find its pairs soonest.
 _CANDIDATE_NS = 30.0
 # The segments of masked keys tried beyond the fewest that the limit allows,
 # besides one segment per position.
@@ -412,7 +418,8 @@ _EDIT_CUTOFF_NS = 70.0
 # Keys hashed and sorted in one pass, 8 bytes each, 128 MiB in all, or fewer
 # when the memory left is smaller; more keys are split by their hash into
 # passes of at most this many, counted in one pass over the texts. A pass also
-# holds the pairs within the distance that it finds.
+# holds the pairs within the distance that it finds, or under edits the
+# candidate pairs of texts that share its keys.
 _KEYS_PER_PASS = 1 << 24
 # The seed of the random codes that hash the keys, fixed so that the keys,
 # and the time a search takes, never vary. The pairs never depend on them:
@@ -682,23 +689,19 @@ def _near_run_pairs(
     limit: int,
     packed: np.ndarray,
     lane: int,
-    codes: np.ndarray,
-    lengths: np.ndarray,
-    edits: bool,
     run_rows: np.ndarray,
     out: np.ndarray,
     at: int,
     start: int,
 ) -> tuple[int, int, int]:
-    """Write the pairs within ``limit`` of each run of keys with equal hashes, from the run at ``start``.
+    """Write the pairs within ``limit`` substitutions of each run of keys with equal hashes, from the run at ``start``.
 
     The keys are sorted, so the rows of a run ascend and a row that a run
     repeats is paired once. With a ``split`` above 0, only the rows below it
     pair, with those at or above it. Each pair is compared as its run is
-    read: under substitutions on the packed rows of ``packed``, ``lane``
-    bits to a code, which the run's rows copy side by side to ``run_rows``
-    in the order of its keys, and with ``edits`` on the rows of ``codes``. A
-    pair within ``limit`` is written to ``out`` from ``at`` as
+    read, on the rows of ``packed``, ``lane`` bits to a code, which the
+    run's rows copy side by side to ``run_rows`` in the order of its keys.
+    A pair within ``limit`` is written to ``out`` from ``at`` as
     ``first * n_rows + second``, once for each run whose key its texts share.
 
     Returns:
@@ -711,7 +714,6 @@ def _near_run_pairs(
     shift = np.uint64(bits)
     low = np.uint64((1 << bits) - 1)
     n_words = packed.shape[1]
-    scratch = np.empty((2, codes.shape[1] + 1), dtype=np.int64)
     n_keys = len(keys)
     capacity = len(out)
     while start < n_keys:
@@ -722,13 +724,12 @@ def _near_run_pairs(
         if end - start == 1:
             start = end
             continue
-        if not edits:
-            if end - start > run_rows.shape[0]:
-                return at, start, end - start
-            for key in range(start, end):
-                row = np.int64(keys[key] & low)
-                for word in range(n_words):
-                    run_rows[key - start, word] = packed[row, word]
+        if end - start > run_rows.shape[0]:
+            return at, start, end - start
+        for key in range(start, end):
+            row = np.int64(keys[key] & low)
+            for word in range(n_words):
+                run_rows[key - start, word] = packed[row, word]
         # The rows of the run at or above the split follow those below it.
         middle = end - 1
         if split:
@@ -739,38 +740,105 @@ def _near_run_pairs(
         for left in range(start, middle):
             if left > start and keys[left] == keys[left - 1]:
                 continue
-            first = np.int64(keys[left] & low)
+            first = np.int64(keys[left] & low) * n_rows
             for right in range(middle if split else left + 1, end):
                 if keys[right] == keys[right - 1]:
                     continue
-                second = np.int64(keys[right] & low)
-                if edits:
-                    near = _within_edits(
-                        codes[first],
-                        lengths[first],
-                        codes[second],
-                        lengths[second],
-                        limit,
-                        scratch,
+                mismatches = 0
+                for word in range(n_words):
+                    differ = (
+                        run_rows[left - start, word] ^ run_rows[right - start, word]
                     )
-                else:
-                    mismatches = 0
-                    for word in range(n_words):
-                        differ = (
-                            run_rows[left - start, word] ^ run_rows[right - start, word]
-                        )
-                        if differ:
-                            mismatches += _lane_mismatches(differ, lane)
-                            if mismatches > limit:
-                                break
-                    near = mismatches <= limit
-                if near:
+                    if differ:
+                        mismatches += _lane_mismatches(differ, lane)
+                        if mismatches > limit:
+                            break
+                if mismatches <= limit:
                     if at == capacity:
                         return run_at, start, 0
-                    out[at] = first * n_rows + second
+                    out[at] = first + np.int64(keys[right] & low)
                     at += 1
         start = end
     return at, start, 0
+
+
+@njit(cache=True)
+def _run_pairs(
+    keys: np.ndarray, bits: int, n_rows: int, out: np.ndarray, split: int
+) -> int:
+    """Pair the rows of each run of keys with equal hashes; return how many pairs.
+
+    The keys are sorted, so the rows of a run ascend and a row that a run
+    repeats is paired once. With a ``split`` above 0, only the rows below it
+    pair, with those at or above it. A pair is written as
+    ``first * n_rows + second``; with an empty output, the pairs are only
+    counted.
+    """
+    shift = np.uint64(bits)
+    low = np.uint64((1 << bits) - 1)
+    write = len(out) > 0
+    at = 0
+    start = 0
+    n_keys = len(keys)
+    while start < n_keys:
+        value = keys[start] >> shift
+        end = start + 1
+        while end < n_keys and keys[end] >> shift == value:
+            end += 1
+        # The rows of the run at or above the split follow those below it.
+        middle = end - 1
+        if split:
+            middle = start
+            while middle < end and np.int64(keys[middle] & low) < split:
+                middle += 1
+        for left in range(start, middle):
+            if left > start and keys[left] == keys[left - 1]:
+                continue
+            first = np.int64(keys[left] & low) * n_rows
+            for right in range(middle if split else left + 1, end):
+                if keys[right] != keys[right - 1]:
+                    if write:
+                        out[at] = first + np.int64(keys[right] & low)
+                    at += 1
+        start = end
+    return at
+
+
+@njit(cache=True)
+def _check_edit_pairs(
+    codes: np.ndarray,
+    lengths: np.ndarray,
+    pairs: np.ndarray,
+    n_rows: int,
+    limit: int,
+) -> int:
+    """Keep each distinct pair within ``limit`` edits.
+
+    The pairs are sorted codes ``first * n_rows + second``, so a pair whose
+    texts share several deletion variants is checked once; those kept move
+    to the front, and their number is returned.
+    """
+    rows = np.empty((2, codes.shape[1] + 1), dtype=np.int64)
+    kept = 0
+    previous = -1
+    for at in range(len(pairs)):
+        pair = pairs[at]
+        if pair == previous:
+            continue
+        previous = pair
+        first = pair // n_rows
+        second = pair - first * n_rows
+        if _within_edits(
+            codes[first],
+            lengths[first],
+            codes[second],
+            lengths[second],
+            limit,
+            rows,
+        ):
+            pairs[kept] = pair
+            kept += 1
+    return kept
 
 
 @njit(cache=True)
@@ -820,25 +888,23 @@ def _near_pairs(
     limit: int,
     packed: np.ndarray,
     lane: int,
-    codes: np.ndarray,
-    lengths: np.ndarray,
-    edits: bool,
 ) -> tuple[np.ndarray, int]:
-    """The pairs within ``limit`` that the runs of one pass's sorted ``keys`` find.
+    """The pairs within ``limit`` substitutions that the runs of one pass's sorted ``keys`` find.
 
     The pairs are written to a buffer that starts at a ``_FOUND_SHARE``-th of
-    the keys, and under substitutions the packed rows of each run are copied
-    side by side to a buffer of ``_RUN_ROWS`` rows; either doubles, or grows
-    to the run that outgrew it, which is then read again. Each buffer is
-    charged beside ``key_bytes``, the buffer of the pass's keys, before it is
-    made, and the old one beside it while it is copied.
+    the keys, and at ``_MIN_FOUND_PAIRS``, and doubles while they outgrow it;
+    the packed rows of each run are copied side by side to a buffer of
+    ``_RUN_ROWS`` rows, which doubles, or grows to the run that outgrew it.
+    The run that outgrew a buffer is read again. Each buffer is charged
+    beside ``key_bytes``, the buffer of the pass's keys, before it is made,
+    and the old one beside it while it is replaced.
 
     Returns:
         The buffer of pairs and the pairs written to its front.
     """
     n_words = packed.shape[1]
     capacity = max(len(keys) // _FOUND_SHARE, _MIN_FOUND_PAIRS)
-    run_capacity = 0 if edits else _RUN_ROWS
+    run_capacity = _RUN_ROWS
     row_bytes = _WORD_BYTES * n_words
     _check(
         ledger,
@@ -850,20 +916,7 @@ def _near_pairs(
     at = start = 0
     while True:
         at, start, run_keys = _near_run_pairs(
-            keys,
-            bits,
-            n_rows,
-            split,
-            limit,
-            packed,
-            lane,
-            codes,
-            lengths,
-            edits,
-            run_rows,
-            out,
-            at,
-            start,
+            keys, bits, n_rows, split, limit, packed, lane, run_rows, out, at, start
         )
         if start == len(keys):
             return out, at
@@ -913,21 +966,23 @@ def _keyed_pairs(
     those at or above it.
 
     A key holds its hash with the row in the low bits, so one sort in place
-    brings the rows of each hash together, ascending. Each run of keys of one
-    hash is read once, every pair of its rows compared as it is read, and
-    only the pairs within ``limit`` are written. Under substitutions each row
-    is packed 2 bits to a code when the rows hold at most 4 distinct codes,
-    such as bases, 4 bits for up to 16 and 8 beyond, and each key's packed
-    row is gathered in the order of the keys, so the rows of a run lie side
-    by side and a comparison takes a few word operations; under edits, the
-    banded edit distance compares each pair. Keys are split by their hash
+    brings the rows of each hash together, ascending. Under substitutions,
+    each run of keys of one hash is read once, every pair of its rows
+    compared as it is read, and only the pairs within ``limit`` are written:
+    each row is packed 2 bits to a code when the rows hold at most 4
+    distinct codes, such as bases, 4 bits for up to 16 and 8 beyond, and
+    the packed rows of a run are copied side by side in the order of its
+    keys, so a comparison takes a few word operations. Under edits, texts
+    within ``limit`` share several deletion variants, so the candidate pairs
+    of each run are written and sorted, and each distinct pair is checked
+    once by the banded edit distance. Keys are split by their hash
     into passes of at most ``_KEYS_PER_PASS``, or fewer when the memory left
     is smaller, so the keys held at once stay bounded however many the texts
     yield: one pass over the texts counts the keys of every pass, and each
     pass hashes them again and keeps its own. The packed rows, the keys of a
-    pass with their rows, the pairs it finds and the pairs kept are charged
-    to ``ledger`` before they are allocated, and the pairs returned stay
-    charged to it as :class:`_Found` keeps them.
+    pass with the pairs that it finds or its candidate pairs, and the pairs
+    kept are charged to ``ledger`` before they are allocated, and the pairs
+    returned stay charged to it as :class:`_Found` keeps them.
     """
     n_rows = len(lengths)
     bits = max(int(n_rows - 1).bit_length(), 1)
@@ -956,9 +1011,11 @@ def _keyed_pairs(
     # run.
     lane = 8
     packed = np.zeros((0, 1), dtype=np.uint64)
+    packed_bytes = 0
     if not deletions:
         ranks, lane, n_words = _packing(codes)
-        _hold(ledger, _WORD_BYTES * n_words * n_rows, "the packed codes of the texts")
+        packed_bytes = _WORD_BYTES * n_words * n_rows
+        _hold(ledger, packed_bytes, "the packed codes of the texts")
         packed = _packed_rows(codes, ranks, lane, n_words)
         del ranks
     # The scratch space of one text's keys, held while the search runs.
@@ -1006,35 +1063,52 @@ def _keyed_pairs(
         )
         keys = keys[:written]
         keys.sort()
-        # The slice of the keys written keeps the whole buffer of the pass.
-        out, n_found = _near_pairs(
-            ledger,
-            _KEY_BYTES * size,
-            keys,
-            bits,
-            n_rows,
-            split,
-            limit,
-            packed,
-            lane,
-            codes,
-            lengths,
-            deletions,
-        )
-        del keys
-        # A pair whose texts share several keys of the pass is found under
-        # each; the pairs are sorted in place and made distinct.
-        pairs = out[:n_found]
-        pairs.sort()
-        kept = _distinct_sorted(pairs)
-        # The pairs kept are copied out while the buffer is still held.
+        if deletions:
+            # Texts within the edits share several deletion variants, so the
+            # candidate pairs are written and sorted, and each distinct pair
+            # is checked once by the edit distance.
+            n_candidates = _run_pairs(keys, bits, n_rows, no_counts, split)
+            # The slice of the keys written keeps the whole buffer of the pass.
+            _check(
+                ledger,
+                _KEY_BYTES * size + _CANDIDATE_BYTES * n_candidates,
+                "the candidate pairs of texts that share variant keys",
+            )
+            pairs = np.empty(n_candidates, dtype=np.int64)
+            _run_pairs(keys, bits, n_rows, pairs, split)
+            del keys
+            pairs.sort()
+            kept = _check_edit_pairs(codes, lengths, pairs, n_rows, limit)
+            held_pairs = _CANDIDATE_BYTES * n_candidates
+        else:
+            # The slice of the keys written keeps the whole buffer of the pass.
+            pairs, n_found = _near_pairs(
+                ledger,
+                _KEY_BYTES * size,
+                keys,
+                bits,
+                n_rows,
+                split,
+                limit,
+                packed,
+                lane,
+            )
+            del keys
+            # A pair whose texts share several keys of the pass is found under
+            # each; the pairs are sorted in place and made distinct.
+            held_pairs = _FOUND_CODE_BYTES * len(pairs)
+            found_pairs = pairs[:n_found]
+            found_pairs.sort()
+            kept = _distinct_sorted(found_pairs)
+            del found_pairs
+        # The pairs kept are copied out while the pass's pairs are still held.
         _check(
             ledger,
-            _FOUND_CODE_BYTES * len(out) + _KEPT_PAIR_BYTES * kept + _ARRAY_BYTES,
+            held_pairs + _KEPT_PAIR_BYTES * kept + _ARRAY_BYTES,
             "the pairs found",
         )
         found.append(pairs[:kept].copy())
-        del out, pairs
+        del pairs
         n_kept += kept
         _charge_to(
             ledger,
@@ -1042,6 +1116,7 @@ def _keyed_pairs(
             "the pairs found",
         )
     del packed
+    ledger.release(packed_bytes)
     # The two arrays of the pairs are then held until the search returns.
     _check(ledger, _JOINED_PAIR_BYTES * n_kept + 2 * _ARRAY_BYTES, "the pairs found")
     if n_parts == 1:
@@ -1772,13 +1847,14 @@ def neighbor_pairs(
             text, with 2 KiB of hash codes for each position of the longest
             and ``NUMPY_STEP_BYTES`` for its sorts and smaller arrays; 48 bytes for each
             length of each block; the variant keys of one pass, 8 bytes
-            each, and under substitutions the codes of the texts of a length
+            each; under substitutions the codes of the texts of a length
             packed 2, 4 or 8 bits each, 8 bytes for each 64-bit word of a
             text, with those of a run of keys copied to a buffer of at least
-            64 rows; the pairs within max_distance that a pass finds, 8
-            bytes each in a buffer that starts at a 64th of its keys and
-            doubles, the old buffer held while it is copied, and 8 bytes for
-            each of them, made distinct, until the passes are joined; and 32
+            64 rows, and the pairs within max_distance that a pass finds, 8
+            bytes each in a buffer that starts at a 64th of its keys, and at
+            16, and doubles, the old buffer held while it is copied; under
+            edits the candidate pairs of a pass, 8 bytes each; 8 bytes for
+            each pair a pass keeps, until the passes are joined; and 32
             bytes for each pair it finds, counted once for each pass of keys
             that finds it, with 384 for the arrays of each length or block
             that has pairs. With ``unknown`` or
@@ -1802,8 +1878,9 @@ def neighbor_pairs(
             ``unknown`` or ``min_compared`` is given with a metric other than
             ``hamming``.
         MemoryBudgetError: If the search would pass the ledger's budget: the
-            encoded texts, the keys of one pass or the pairs that it finds,
-            or the pairs within ``max_distance`` need more.
+            encoded texts, the keys of one pass or the pairs or candidate
+            pairs that it holds, or the pairs within ``max_distance`` need
+            more.
     """
     max_distance, min_compared = _search_arguments(
         metric, max_distance, unknown, min_compared
