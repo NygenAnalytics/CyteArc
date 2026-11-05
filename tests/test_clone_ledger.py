@@ -101,8 +101,8 @@ def test_finding_each_cells_stratum_holds_what_fate_bias_charges(n_cells) -> Non
     assert found.tolist() == ([0, 1, 2, 3, -1] * n_cells)[:n_cells]
     stated = clone_operations._cell_strata_bytes(n_cells, 1)
     peak = _warm_peak(lambda: clone_operations._cell_strata(keys, strata, kept))
-    # The charge is 1.28 to 1.35 times the peak as traced, whether or not
-    # pandas stores text with pyarrow, since the labels stay Python strings.
+    # The charge is 1.18 to 1.31 times the peak as traced; the labels stay
+    # the Python strings that they are compared as.
     assert peak <= stated <= 1.5 * peak, (peak, stated)
 
 

@@ -1104,8 +1104,8 @@ def test_fate_bias_tests_a_clonotype_once_in_each_receptor_type_it_spans(
     ].astype(object).values.tolist() == [
         ["clonotype_1", "BCR", "x, BCR", 1, 1, 1],
         ["clonotype_1", "TCR", "x, TCR", 1, 2, 2],
-        ["clonotype_1", "TCR", "y, TCR", 1, 2, 0],
         ["clonotype_1", "ambiguous", "y, ambiguous", 0, 1, 1],
+        ["clonotype_1", "TCR", "y, TCR", 1, 2, 0],
         ["clonotype_2", "TCR", "x, TCR", 1, 1, 0],
         ["clonotype_2", "TCR", "y, TCR", 1, 1, 1],
     ]

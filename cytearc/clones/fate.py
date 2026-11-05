@@ -912,7 +912,8 @@ def fate_bias_tables(
         fractions: Each early cell's share of its clone's late cells in each
             fate.
         clone_ids: The label of each clone code.
-        clones: The codes of the clones with a late cell.
+        clones: The code of each clone tested, a clone once in each stratum
+            that it was tested in.
         clone_cells: Their late cells in each fate.
         clone_early_cells: Their early cells.
         p_values: Their p-values in each fate, NaN for fates not tested.
@@ -922,10 +923,10 @@ def fate_bias_tables(
     Returns:
         One row per early cell, indexed by ID: ``clone``, ``n_late_cells``
         and ``fate``; one row per early cell, indexed by ID, and one column
-        per fate, named by the fate, of its share; and one row per clone and
-        fate of its stratum, by clone code and then fate: ``clone``,
-        ``fate``, ``n_early_cells``, ``n_late_cells``, ``n_cells``,
-        ``fraction``, ``p_value`` and ``q_value``.
+        per fate, named by the fate, of its share; and one row per clone
+        tested and fate of its stratum, by clone code and then fate:
+        ``clone``, ``fate``, ``n_early_cells``, ``n_late_cells``,
+        ``n_cells``, ``fraction``, ``p_value`` and ``q_value``.
 
     Raises:
         ValueError: If ``fates`` does not hold one text name for each column
@@ -949,6 +950,11 @@ def fate_bias_tables(
         columns=pd.Index([str(name) for name in names.tolist()]),
     )
     rows, columns = np.nonzero(~np.isnan(np.asarray(p_values)))
+    # A clone tested in several strata has rows in the fates of each, which
+    # follow the clone and then the fates' order.
+    order = np.lexsort((columns, np.asarray(clones, dtype=np.int64)[rows]))
+    rows, columns = rows[order], columns[order]
+    del order
     clone_late = np.asarray(clone_cells).sum(axis=1)
     table = pd.DataFrame(
         {
@@ -1040,7 +1046,11 @@ class CloneFateBias:
             ``n_early_cells``, ``n_late_cells``, ``n_cells`` (its late cells in
             the fate), ``fraction``, ``p_value`` of the one-sided Fisher test and
             ``q_value``, adjusted by Benjamini and Hochberg's method within
-            the fate.
+            the fate. A clone that spans the labels kept apart, such as a
+            clonotype of two receptor types, is tested once in each, so its
+            label repeats: each fate holds one such label, which
+            ``group_keys`` gives it, and the row's early and late cells are
+            the clone's of that label.
         fates: One row per fate: ``fate`` and ``n_late_cells``, those without
             a clone included unless the clones keep labels apart.
         group_keys: One row per fate, indexed by its name, ``fate``, with its

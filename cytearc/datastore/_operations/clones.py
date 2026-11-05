@@ -250,13 +250,13 @@ _BYTES_PER_FATE_PAIR = 24
 # flags of its distinct values: 23.3 bytes a pair as traced on 10,000 to
 # 1,000,000 pairs.
 _PART_BYTES_PER_PAIR = 30
-# Finding each cell's stratum holds its code among the groups' labels, the
-# code's place among the strata and its stratum, beside the flag of each
-# label that no group holds, and while each column kept apart is coded its
-# place among the column's labels: 25 bytes a cell of one column, as traced
-# on 10,000 to 1,000,000 cells.
-_STRATUM_BYTES_PER_CELL = 24
-_STRATUM_BYTES_PER_COLUMN = 8
+# Finding each cell's stratum holds its code among the groups' labels and its
+# stratum, and the flag of each label that no group holds, and while each
+# column kept apart is coded the flags of the cells whose label is found and
+# of those that hold the label compared: 17 bytes a cell of one column, as
+# traced on 10,000 to 1,000,000 cells.
+_STRATUM_BYTES_PER_CELL = 18
+_STRATUM_BYTES_PER_COLUMN = 2
 # Writing the fate bias builds, for each early cell, a reference to its
 # dominant fate's name, its codes as int32, and the mask and arrays that pick
 # the names, beside what the writer holds.
@@ -2950,8 +2950,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Returns:
             The fate bias, with one row per early cell, its shares of the
-            fates in a table of their own, one row per clone with late cells
-            and fate of its stratum, one per fate, and the fates' labels in
+            fates in a table of their own, one row per clone tested and fate
+            of its stratum, a clonotype tested in several receptor types in
+            the fates of each, one per fate, and the fates' labels in
             ``group_keys``.
 
         Raises:
@@ -3176,27 +3177,32 @@ def _cell_strata(
     cell_codes = np.zeros(n_cells, dtype=np.int64)
     unheld = np.zeros(n_cells, dtype=bool)
     group_codes = np.zeros(len(keys), dtype=np.int64)
+    n_codes = 1
     for name, labels in kept:
-        # The cells' labels are coded among the groups' few labels; an explicit
-        # object dtype keeps them the Python strings charged, whether or not
-        # pandas stores text with pyarrow.
-        groups_labels = keys[name].to_numpy(dtype=object)
-        names = pd.Index(pd.unique(groups_labels), dtype=object)
-        at = names.get_indexer(pd.Index(labels, dtype=object))
-        unheld |= at < 0
+        # Each cell's label is coded among the groups' few labels, one
+        # comparison of the cells' Python strings with each label at a time.
+        group_labels = [str(label) for label in keys[name].tolist()]
+        names = sorted(set(group_labels))
         cell_codes *= len(names)
-        cell_codes += at
-        del at
-        group_codes = group_codes * len(names) + names.get_indexer(groups_labels)
-    # Each group's labels name its stratum, so each code has one.
-    lookup = pd.Series(strata, index=group_codes).groupby(level=0).first()
-    at = lookup.index.get_indexer(cell_codes)
+        found = np.zeros(n_cells, dtype=bool)
+        for code, label in enumerate(names):
+            same = np.asarray(labels, dtype=object) == label
+            np.add(cell_codes, code, out=cell_codes, where=same)
+            found |= same
+            del same
+        unheld |= ~found
+        del found
+        group_codes = group_codes * len(names) + np.asarray(
+            [names.index(label) for label in group_labels], dtype=np.int64
+        )
+        n_codes *= len(names)
+    # Each group's labels name its stratum, so each code names one at most.
+    lookup = np.full(n_codes, -1, dtype=np.int64)
+    lookup[group_codes] = strata
+    cell_strata: np.ndarray = lookup[cell_codes]
     del cell_codes
-    at[unheld] = -1
-    del unheld
-    found: np.ndarray = lookup.to_numpy(dtype=np.int64)[at]
-    found[at < 0] = -1
-    return found
+    cell_strata[unheld] = -1
+    return cell_strata
 
 
 def _kept_apart_strata(source: _CloneInput, keys: pd.DataFrame) -> np.ndarray | None:

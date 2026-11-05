@@ -700,6 +700,35 @@ def test_fate_bias_tests_a_clone_once_in_each_stratum_of_its_late_cells() -> Non
         [[nan, nan, 1, 1 / 3], [1, 19 / 20, nan, nan], [1, 2 / 5, nan, nan]],
         rtol=1e-12,
     )
+    # The table repeats clone 0 for each stratum, its rows by clone and then
+    # fate, each with the early and late cells of the part that it tests.
+    _cells, _shares, table = fate_bias_tables(
+        np.array([f"e{i}" for i in range(7)]),
+        codes=early,
+        dominant=result.dominant,
+        late_cells=result.late_cells,
+        fractions=result.fractions,
+        clone_ids=np.array(["c0", "c1"], dtype=object),
+        clones=result.clones,
+        clone_cells=result.clone_cells,
+        clone_early_cells=result.clone_early_cells,
+        p_values=result.p_values,
+        q_values=result.q_values,
+        fates=["x, T", "y, T", "x, B", "y, B"],
+    )
+    assert table[["clone", "fate", "n_early_cells", "n_late_cells", "n_cells"]].astype(
+        object
+    ).values.tolist() == [
+        ["c0", "x, T", 1, 3, 2],
+        ["c0", "y, T", 1, 3, 1],
+        ["c0", "x, B", 2, 2, 0],
+        ["c0", "y, B", 2, 2, 2],
+        ["c1", "x, T", 1, 2, 0],
+        ["c1", "y, T", 1, 2, 2],
+    ]
+    np.testing.assert_allclose(
+        table["p_value"], [1 / 2, 19 / 20, 1, 1 / 3, 1, 1 / 5], rtol=1e-12
+    )
     # Without the early cells' strata, a clone of two strata has no one
     # stratum whose fates its early cells take.
     with pytest.raises(ValueError, match="pass early_strata"):
