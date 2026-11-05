@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..clones.phylogeny import CollapsedPhylogeny
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import bool_argument, integer_argument
 from ..utils.arrays import sorted_unique
@@ -35,32 +36,35 @@ __all__ = ["phylogeny"]
 _MAX_LEAVES = 100
 # A clone takes a colour of a palette without greys by its rank among the
 # cut's clones, the largest first, so it keeps its colour whatever else is
-# drawn; a wedge of several clones is grey, and cells without a clone take
-# the missing grey.
+# drawn; a wedge whose cells are not all in one clone is grey, and a wedge of
+# cells in no clone takes the missing grey.
 _CLONE_COLORS = tuple(
     color
     for color in CUSTOM_PALETTES[20]
     if len({color[1:3], color[3:5], color[5:7]}) > 1
 )
-_SEVERAL_CLONES_COLOR = "#969696"
-_SEVERAL = -2
+_MIXED_COLOR = "#969696"
+_MIXED = -2
 _NO_CLONE = -1
 _PANEL_INCHES = (MAX_FIGURE_WIDTH_INCHES, 5.0)
 # Where each row stands: its position, branch, end, middle and extent.
 _PLACES = ("x", "start", "end", "y", "low", "high")
 
 
-def _kinds(nodes: pd.DataFrame) -> np.ndarray:
-    """Each row's colour category: its one clone's code, several clones or none."""
+def _kinds(collapsed: CollapsedPhylogeny) -> np.ndarray:
+    """Each row's colour category: its clone's code where all its cells are in that clone, none where none are in a clone, and mixed otherwise.
+
+    A row of one clone whose other cells end before the cut is mixed, so the
+    clone's colour never stands for cells outside it.
+    """
+    nodes = collapsed.nodes
     n_clones = nodes["n_clones"].to_numpy(dtype=np.int64)
-    codes = nodes["clone"].to_numpy(dtype=np.int64)
-    return np.where(n_clones >= 2, _SEVERAL, np.where(n_clones == 1, codes, _NO_CLONE))
-
-
-def _counted(nodes: pd.DataFrame) -> np.ndarray:
-    """Whether each row is a tall wedge of several clones or trees, which says how many it holds."""
-    grouped = (nodes["n_clones"].to_numpy() >= 2) | (nodes["n_trees"].to_numpy() > 1)
-    return np.asarray(_tall(nodes) & grouped, dtype=bool)
+    whole = (n_clones == 1) & (nodes["n_cells"].to_numpy() == collapsed.clone_sizes)
+    return np.where(
+        whole,
+        nodes["clone"].to_numpy(dtype=np.int64),
+        np.where(n_clones == 0, _NO_CLONE, _MIXED),
+    )
 
 
 def _tall(nodes: pd.DataFrame) -> np.ndarray:
@@ -72,27 +76,34 @@ def _tall(nodes: pd.DataFrame) -> np.ndarray:
     )
 
 
-def _listed(nodes: pd.DataFrame) -> np.ndarray:
-    """The categories that the legend lists: the greys drawn, then each tall wedge's one clone, the largest first.
+def _counted(collapsed: CollapsedPhylogeny, kinds: np.ndarray) -> np.ndarray:
+    """Whether each row is a tall wedge that says what it holds: a mixed wedge, or a group of trees."""
+    trees = collapsed.nodes["n_trees"].to_numpy() > 1
+    return np.asarray(_tall(collapsed.nodes) & ((kinds == _MIXED) | trees), dtype=bool)
+
+
+def _listed(collapsed: CollapsedPhylogeny, kinds: np.ndarray) -> np.ndarray:
+    """The categories that the legend lists: the greys drawn, then the clone of each tall wedge, the largest first.
 
     Where no wedge of one clone is tall enough, the legend lists the largest
     clone drawn, so it lists one at least.
     """
-    kinds = _kinds(nodes)
-    drawn = kinds[nodes["wedge"].to_numpy(dtype=bool)]
-    greys = [kind for kind in (_SEVERAL, _NO_CLONE) if (drawn == kind).any()]
-    clones = sorted_unique(kinds[_tall(nodes) & (kinds >= 0)])
+    wedge = collapsed.nodes["wedge"].to_numpy(dtype=bool)
+    drawn = kinds[wedge]
+    greys = [kind for kind in (_MIXED, _NO_CLONE) if (drawn == kind).any()]
+    clones = sorted_unique(kinds[_tall(collapsed.nodes) & (kinds >= 0)])
     if not len(clones) and (drawn >= 0).any():
         clones = np.asarray([drawn[drawn >= 0].min()])
     return np.asarray([*greys, *clones.tolist()], dtype=np.int64)
 
 
-def _drawing_bytes(nodes: pd.DataFrame) -> int:
-    """What drawing the collapsed ``nodes`` holds: their rows, legend entries and texts."""
+def _drawing_bytes(collapsed: CollapsedPhylogeny) -> int:
+    """What drawing ``collapsed`` holds: its rows, legend entries and texts."""
+    kinds = _kinds(collapsed)
     return tree_drawing_bytes(
-        len(nodes),
-        n_entries=len(_listed(nodes)),
-        n_texts=int(np.count_nonzero(_counted(nodes))),
+        len(collapsed.nodes),
+        n_entries=len(_listed(collapsed, kinds)),
+        n_texts=int(np.count_nonzero(_counted(collapsed, kinds))),
     )
 
 
@@ -124,24 +135,27 @@ def phylogeny(
     ``max_leaves`` wedges are drawn: its child of the most cells is drawn
     alone and its other children as one wedge until they open in turn, so a
     polytomy opens one child at a time. A clade of the cut is one clone and
-    never opens, so a cut into fewer clades than ``max_leaves`` draws them
-    all. A clade is drawn from its first branching, and leaves that name no
-    cell of the phylogeny's selection are left out.
+    never opens, nor does a leaf that ends before the cut, so where the trees
+    hold no more of these than ``max_leaves``, every clone is drawn alone. A
+    clade is drawn from its first branching, and leaves that name no cell of
+    the phylogeny's selection are left out.
 
     The trees run from their roots at the left, each wedge as tall as its
-    cells and stacked from the top, the most cells first. A wedge of one
-    clone takes that clone's colour, by its rank among the cut's clones; a
-    wedge of several is grey and says how many it holds where it is tall
-    enough, at least a fortieth of the height; and cells whose leaves end
-    before the cut, in no clone, take the missing grey. The x axis is time
-    for a cut at a time and branchings below the root, single-child nodes
-    merged, for a cut at a depth, with the cut as a dashed line. A forest of
-    more trees than ``max_leaves`` draws its largest trees and the others as
-    one grey wedge that says how many trees it holds; ``tree`` draws one tree
-    alone. The legend lists the greys drawn and then, the largest first, the
-    clones whose wedges are at least a fortieth of the height, or the
-    largest clone drawn when none is, and its title says how many of the
-    clones drawn it lists.
+    cells and stacked from the top, the most cells first. A wedge whose
+    cells are all in one clone takes that clone's colour, by its rank among
+    the cut's clones; a wedge whose cells all end before the cut, in no
+    clone, takes the missing grey; and every other wedge, of several clones
+    or of a clone and cells before the cut, is grey, "Mixed" in the legend,
+    and says how many clones it holds where it is tall enough, at least a
+    fortieth of the height. The x axis is time for a cut at a time and
+    branchings below the root, single-child nodes merged, for a cut at a
+    depth, with the cut as a dashed line. A forest of more trees than
+    ``max_leaves`` draws its largest trees and the others as one grey wedge
+    that says how many trees it holds; ``tree`` draws one tree alone. The
+    legend lists the greys drawn and then, the largest first, the clones
+    whose wedges are at least a fortieth of the height, or the largest clone
+    drawn when none is, and its title says how many of the greys and clones
+    drawn it lists when it leaves some out.
 
     Tables: ``nodes``, one row per node or group drawn, in drawing order:
     ``tree``, ``node`` (its position in its tree, as the phylogeny's
@@ -179,8 +193,9 @@ def phylogeny(
     wedge = nodes["wedge"].to_numpy(dtype=bool)
     n_clones = nodes["n_clones"].to_numpy(dtype=np.int64)
     codes = nodes["clone"].to_numpy(dtype=np.int64)
-    kinds = _kinds(nodes)
-    # Each clone drawn, the largest first, labelled as figures label clones.
+    kinds = _kinds(collapsed)
+    # Each clone that a row holds alone, the largest first, labelled as
+    # figures label clones.
     one = n_clones == 1
     drawn_codes, first, at = np.unique(
         codes[one], return_index=True, return_inverse=True
@@ -192,25 +207,36 @@ def phylogeny(
     row_labels[one] = drawn_labels[at]
     code_list = drawn_codes.tolist()
     colors = CategoricalScale(
-        order=tuple(_listed(nodes).tolist()),
+        order=tuple(_listed(collapsed, kinds).tolist()),
         palette={
-            _SEVERAL: _SEVERAL_CLONES_COLOR,
+            _MIXED: _MIXED_COLOR,
             _NO_CLONE: NO_VALUE_COLOR,
             **{code: _CLONE_COLORS[code % len(_CLONE_COLORS)] for code in code_list},
         },
         labels={
-            _SEVERAL: f"Several {names.plural}",
+            _MIXED: "Mixed",
             _NO_CLONE: f"No {names.singular}",
             **dict(zip(code_list, drawn_labels.tolist(), strict=True)),
         },
     )
-    # A tall wedge of several clones or trees says how many it holds.
-    counted = np.flatnonzero(_counted(nodes))
+    # A tall wedge of mixed cells or of several trees says what it holds.
+    counted = np.flatnonzero(_counted(collapsed, kinds))
     trees = nodes["n_trees"].to_numpy(dtype=np.int64)
     texts = np.full(len(nodes), "", dtype=object)
     texts[counted] = [
-        (f"{trees[row]:,} trees, " if trees[row] > 1 else "")
-        + f"{n_clones[row]:,} {names.plural}"
+        ", ".join(
+            [
+                *([f"{trees[row]:,} trees"] if trees[row] > 1 else []),
+                *(
+                    [
+                        f"{n_clones[row]:,} "
+                        + (names.singular if n_clones[row] == 1 else names.plural)
+                    ]
+                    if kinds[row] == _MIXED
+                    else []
+                ),
+            ]
+        )
         for row in counted.tolist()
     ]
     # The table of the figure, once, its texts as objects with None where a

@@ -921,6 +921,8 @@ def collapse_phylogeny(
             f"cells and trees that end at {offsets[-1] if len(offsets) else None}"
         )
     roots = offsets[:-1]
+    # The check holds each tree's gap to the next and its root's parent.
+    ledger.peak("checking the trees", 24 * len(offsets) + NUMPY_STEP_BYTES)
     if (np.diff(offsets) <= 0).any() or (parent[roots] >= 0).any():
         raise ValueError(
             "Each tree of the phylogeny must hold a node and start at its root"
@@ -967,6 +969,7 @@ def collapse_phylogeny(
             "names a cell, a cell in a clade of the cut has no clone or one "
             "outside has, or a clade holds two clones"
         )
+    ledger.peak("each tree's cells", 8 * len(roots) + NUMPY_STEP_BYTES)
     total = int(n_cells[roots].sum())
     if not total:
         raise ValueError(
@@ -1089,6 +1092,8 @@ class CollapsedPhylogeny:
             by size among the cut's clones.
         tree_names: Each row's tree's name, None for a group of trees.
         clone_ids: Each row's one clone's label, None for none or several.
+        clone_sizes: The cells of each row's one clone, 0 for none or
+            several, so a row whose cells are all in its clone holds as many.
         clones: The clones drawn.
         phylogeny: The phylogeny they were cut from.
         cut: Where the clones were cut.
@@ -1102,6 +1107,7 @@ class CollapsedPhylogeny:
     nodes: pd.DataFrame = field(repr=False)
     tree_names: np.ndarray = field(repr=False)
     clone_ids: np.ndarray = field(repr=False)
+    clone_sizes: np.ndarray = field(repr=False)
     clones: ArtifactRef
     phylogeny: ArtifactRef
     cut: PhylogenyCut

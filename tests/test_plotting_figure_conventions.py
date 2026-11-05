@@ -2074,7 +2074,7 @@ def test_the_phylogeny_legend_is_reported_with_its_scale_and_agrees_with_the_dra
         assert artist.get_title().get_text() == legend.label == "Clone"
         labels = [category_label(scale, value) for value in scale.order]
         assert [text.get_text() for text in artist.get_texts()] == labels
-        assert labels == ["Several clones", "1", "2", "3", "4"]
+        assert labels == ["Mixed", "1", "2", "3", "4"]
         colors = [to_hex(handle.get_facecolor()) for handle in artist.legend_handles]
         assert colors == [scale.palette[value] for value in scale.order]
         assert set(colors) <= _tree_colors(artist.axes)

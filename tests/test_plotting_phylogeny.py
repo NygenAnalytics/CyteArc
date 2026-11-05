@@ -20,7 +20,7 @@ from matplotlib.colors import to_hex
 from matplotlib.legend import Legend
 from matplotlib.patches import PathPatch
 
-from cytearc.plotting._style import CUSTOM_PALETTES, NO_VALUE_COLOR
+from cytearc.plotting._style import CUSTOM_PALETTES, NO_VALUE_COLOR, category_label
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
     every_cell,
@@ -46,12 +46,13 @@ TRUTH = clone_truth()
 # The truth's clones, largest first: their labels and cells.
 LABELS = [str(clone + 1) for clone in range(TRUTH.n_clones)]
 SIZES = [9, 6, 5, 4, 3, 2, 2, 1]
-# Clones take the colours of the 20-colour palette without its greys, by rank.
+# Clones take the colours of the 20-colour palette without its two greys,
+# by rank.
 CLONE_COLORS = [
-    color
-    for color in CUSTOM_PALETTES[20]
-    if len({color[1:3], color[3:5], color[5:7]}) > 1
+    color for color in CUSTOM_PALETTES[20] if color not in ("#7f7f7f", "#c7c7c7")
 ]
+assert len(CLONE_COLORS) == 18
+MIXED = "#969696"
 
 
 @pytest.fixture(scope="module")
@@ -60,7 +61,7 @@ def truth(tmp_path_factory) -> SimpleNamespace:
     store = write_truth_store(folder / "store.zarr", TRUTH)
     phylogeny, clones = import_truth_phylogeny(store, TRUTH, folder)
     with warnings.catch_warnings():
-        # Two cells of the truth end before depth 2.
+        # One cell of the truth ends before depth 2.
         warnings.simplefilter("ignore")
         by_depth = store.clones.phylogeny_clones(phylogeny, depth=2)
     # The truth's forest, one tree per clone, and a ninth tree whose leaves
@@ -78,6 +79,42 @@ def truth(tmp_path_factory) -> SimpleNamespace:
         forest = store.clones.import_phylogeny(
             forest_path, cell_selection=every_cell(store), time_unit="days"
         )
+    ids = [str(cell) for cell in TRUTH.cell_ids]
+    # Three trees cut at time 0.5: five leaves past the cut, one clone each;
+    # a leaf before the cut beside one past it; and two leaves before it.
+    mixed_path = write_newick(
+        [
+            TruthTree("t1", ("r", *ids[:5]), (-1, 0, 0, 0, 0, 0), (0.0,) + (1.0,) * 5),
+            TruthTree("t2", ("r", ids[5], ids[6]), (-1, 0, 0), (0.0, 0.2, 1.0)),
+            TruthTree("t3", ("r", ids[7], ids[8]), (-1, 0, 0), (0.0, 0.2, 0.2)),
+        ],
+        folder / "mixed_forest.nwk",
+    )
+    # A clade of 39 cells and a leaf of one below the root: the leaf's wedge
+    # is a fortieth of the height.
+    forty_path = write_newick(
+        [
+            TruthTree(
+                "forty",
+                ("r", "c", *ids[:39], ids[39]),
+                (-1, 0, *[1] * 39, 0),
+                (0.0, 1.0, *[2.0] * 39, 2.0),
+            )
+        ],
+        folder / "forty.nwk",
+    )
+    with warnings.catch_warnings():
+        # Cells of the mixed forest end before its cut.
+        warnings.simplefilter("ignore")
+        mixed, forty = (
+            store.clones.phylogeny_clones(
+                store.clones.import_phylogeny(
+                    path, cell_selection=every_cell(store), time_unit="days"
+                ),
+                time=0.5,
+            )
+            for path in (mixed_path, forty_path)
+        )
     return SimpleNamespace(
         store=store,
         folder=folder,
@@ -85,6 +122,8 @@ def truth(tmp_path_factory) -> SimpleNamespace:
         clones=clones,
         by_depth=by_depth,
         forest=store.clones.phylogeny_clones(forest, depth=0),
+        mixed=mixed,
+        forty=forty,
     )
 
 
@@ -174,14 +213,71 @@ def test_a_clade_of_several_clones_is_grey_and_says_how_many(truth, drawn) -> No
     legend = next(artist for artist in ax.get_children() if isinstance(artist, Legend))
     labels = [text.get_text() for text in legend.get_texts()]
     assert legend.get_title().get_text() == "Clone"
-    assert labels == ["Several clones", "1", "2", "3", "4"]
+    assert labels == ["Mixed", "1", "2", "3", "4"]
     scale = result.scales[0]
     # A clone's colour comes from its rank, the largest first.
     assert [scale.palette[value] for value in scale.order] == [
-        "#969696",
+        MIXED,
         *CLONE_COLORS[:4],
     ]
-    assert sorted(_wedge_colors(ax)) == sorted(["#969696", *CLONE_COLORS[:4]])
+    assert sorted(_wedge_colors(ax)) == sorted([MIXED, *CLONE_COLORS[:4]])
+    # At seven wedges the last holds the two smallest clones, mixed too.
+    seven = drawn(truth.clones, max_leaves=7)
+    assert _wedges(seven)["n_clones"].tolist() == [1] * 6 + [2]
+    assert [text.get_text() for text in seven.figure.axes[0].texts] == ["2 clones"]
+
+
+def test_a_wedge_takes_a_clones_colour_only_when_all_its_cells_are_in_it(
+    truth, drawn
+) -> None:
+    # The second tree of the mixed forest drawn as one wedge holds its one
+    # clone and a cell before the cut: grey, saying it holds one clone.
+    whole = drawn(truth.mixed, tree="mixed_forest_2", max_leaves=1)
+    (row,) = whole.tables["nodes"].to_dict("records")
+    # Every node of the tree has a name, so the clone takes its leaf's.
+    assert (row["n_cells"], row["n_clones"], row["label"]) == (
+        2,
+        1,
+        f"mixed_forest_2/{TRUTH.cell_ids[6]}",
+    )
+    ax = whole.figure.axes[0]
+    assert _wedge_colors(ax) == [MIXED]
+    assert [text.get_text() for text in ax.texts] == ["1 clone"]
+    assert whole.legends[0].label == "Clone"
+    assert [
+        category_label(whole.scales[0], value) for value in whole.scales[0].order
+    ] == ["Mixed"]
+    # Opened, the cell before the cut is a point of the missing grey and the
+    # clone a wedge of its colour.
+    opened = drawn(truth.mixed, tree="mixed_forest_2", max_leaves=10)
+    wedges = _wedges(opened)
+    assert wedges[["n_cells", "n_clones"]].values.tolist() == [[1, 0], [1, 1]]
+    points = opened.figure.axes[0].collections[0]
+    assert [to_hex(color) for color in points.get_facecolors()] == [
+        NO_VALUE_COLOR,
+        CLONE_COLORS[5],
+    ]
+    # The second and third trees together hold one clone and three cells
+    # before the cut: one grey wedge of two trees.
+    grouped = drawn(truth.mixed, max_leaves=2)
+    nodes = grouped.tables["nodes"]
+    assert nodes[["tree", "n_cells", "n_clones", "n_trees"]].values.tolist() == [
+        ["mixed_forest_1", 5, 5, 1],
+        [None, 4, 1, 2],
+    ]
+    texts = [text.get_text() for text in grouped.figure.axes[0].texts]
+    assert texts == ["5 clones", "2 trees, 1 clone"]
+    assert _wedge_colors(grouped.figure.axes[0]) == [MIXED]
+
+
+def test_a_wedge_a_fortieth_of_the_height_is_listed(truth, drawn) -> None:
+    result = drawn(truth.forty)
+    wedges = _wedges(result)
+    assert wedges["n_cells"].tolist() == [39, 1]
+    assert (wedges["high"] - wedges["low"]).tolist() == [39.0, 1.0]
+    # The one cell is a fortieth of the forty, tall enough to list.
+    assert result.legends[0].label == "Clone"
+    assert len(result.scales[0].order) == 2
 
 
 def test_a_clone_keeps_its_colour_whatever_else_is_drawn(truth, drawn) -> None:
@@ -264,6 +360,8 @@ def test_a_forest_of_more_trees_than_the_cap_draws_its_smallest_as_one(
     assert nodes["n_clones"].tolist() == [1, 1, 6]
     texts = [text.get_text() for text in result.figure.axes[0].texts]
     assert texts == ["6 trees, 6 clones"]
+    # Cut at depth 0, the cut stands at the root.
+    assert _cut_lines(result.figure.axes[0]) == [0.0]
     # Every tree drawn alone fits a larger cap.
     every = drawn(truth.forest, max_leaves=8)
     assert every.tables["nodes"]["tree"].tolist() == [
@@ -372,6 +470,8 @@ def test_a_caterpillar_30000_levels_deep_is_drawn_without_recursion(tmp_path) ->
         assert len(_wedges(every)) == depth + 1
         assert nodes.loc[~nodes["wedge"], "x"].max() == depth - 1
         assert every.legends[0].label == f"Clone (1 of {depth + 1})"
+        # The largest clone, the first by rank.
+        assert every.scales[0].order == (0,)
     finally:
         every.close()
 
@@ -397,6 +497,18 @@ def random_tree(tmp_path_factory) -> SimpleNamespace:
         tree, cell_selection=every_cell(store), time_unit="days"
     )
     height = float(store.clones.load_phylogeny(phylogeny).nodes["time"].max())
+    # The other 10,000 cells as a forest of two trees, of 6,000 and 4,000.
+    forest_path = folder / "forest.nwk"
+    forest_path.write_text(
+        random_newick(ids[20_000:26_000], rng)
+        + "\n"
+        + random_newick(ids[26_000:], rng)
+        + "\n"
+    )
+    forest = store.clones.import_phylogeny(
+        forest_path, cell_selection=every_cell(store), time_unit="days"
+    )
+    lowest = float(store.clones.load_phylogeny(forest).trees["latest_leaf_time"].min())
     with warnings.catch_warnings():
         # Leaves of fewer than three branchings end before the depth.
         warnings.simplefilter("ignore")
@@ -406,6 +518,7 @@ def random_tree(tmp_path_factory) -> SimpleNamespace:
         clones={
             "time": store.clones.phylogeny_clones(phylogeny, time=height / 2),
             "depth": by_depth,
+            "tree": store.clones.phylogeny_clones(forest, time=lowest / 2),
         },
     )
 
@@ -420,7 +533,7 @@ def test_the_legend_lists_the_clones_tall_enough_to_see(random_tree) -> None:
         thin = wedges[(wedges["n_clones"] == 1) & ~wedges.index.isin(listed.index)]
         # Some clones are too thin to list, and every grey is listed first.
         assert len(listed) and len(thin)
-        greys = ["Several clones"] if (wedges["n_clones"] >= 2).any() else []
+        greys = ["Mixed"] if (wedges["n_clones"] >= 2).any() else []
         greys += ["No clone"] if (wedges["n_clones"] == 0).any() else []
         legend = next(
             artist
@@ -442,26 +555,37 @@ def test_the_legend_lists_the_clones_tall_enough_to_see(random_tree) -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("by", ["time", "depth"])
+@pytest.mark.parametrize(
+    ("case", "at_most"),
+    # A cut of the one tree at a time or a depth leaves the budget to the
+    # nodes' arrays, 1.13 to 1.15 times the traced peak, as measured. One
+    # tree of a forest reads the whole forest's arrays, whose reads' charges
+    # set the budget of its small collapse, 1.36 times the peak at ten
+    # wedges.
+    [("time", 1.3), ("depth", 1.3), ("tree", 1.7)],
+)
 @pytest.mark.parametrize("max_leaves", [10, 1_000])
 def test_the_figure_runs_within_the_smallest_budget_it_accepts(
-    random_tree, by, max_leaves
+    random_tree, case, at_most, max_leaves
 ) -> None:
-    clones = random_tree.clones[by]
+    clones = random_tree.clones[case]
+    options = {"tree": "forest_1"} if case == "tree" else {}
 
     def draw(store) -> None:
-        store.plots.phylogeny(clones, max_leaves=max_leaves, show=False).close()
+        store.plots.phylogeny(
+            clones, max_leaves=max_leaves, show=False, **options
+        ).close()
 
     # The kernels compile and Matplotlib loads its fonts before any trace.
     draw(random_tree.store)
     # The budget that runs it bounds its traced peak, one byte less is
-    # refused naming it, and it is not far above the peak: 1.13 to 1.14
-    # times it at both caps, as measured.
+    # refused naming it, and it is not far above the peak.
     budget, refusals, _result = check_budget(
-        random_tree.store, draw, at_most=1.3, max_refusals=40
+        random_tree.store, draw, at_most=at_most, max_refusals=40
     )
     assert refusals
-    # Every charge bounds what is held until the next.
+    # Every charge bounds what is held until the next, the copies of one
+    # tree's nodes included.
     saved = random_tree.store.memoryBytes
     random_tree.store.memoryBytes = budget
     try:

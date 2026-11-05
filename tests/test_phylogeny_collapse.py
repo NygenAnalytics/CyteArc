@@ -368,6 +368,58 @@ def test_the_clade_of_the_most_cells_opens_first() -> None:
     assert frame["parent"].tolist() == [-1, 0, 1, 1, 0, 4, 4]
 
 
+def test_a_group_ties_by_its_largest_clade_not_by_the_node_opened() -> None:
+    # Below the root, X at time 0.1 holds X1, above the cut with the leaves
+    # X1a and X1b, and the leaves X2 and X3; Y at time 0.1 holds two leaves.
+    # Every leaf ends at time 2, past the cut at 0.5.
+    tree = [
+        (-1, 0.0, False),  # 0 root
+        (0, 0.1, False),  # 1 X
+        (1, 0.2, False),  # 2 X1
+        (2, 2.0, True),  # 3 X1a
+        (2, 2.0, True),  # 4 X1b
+        (1, 2.0, True),  # 5 X2
+        (1, 2.0, True),  # 6 X3
+        (0, 0.1, False),  # 7 Y
+        (7, 2.0, True),
+        (7, 2.0, True),
+    ]
+    parent, times, cells, offsets = _forest([tree])
+    codes = np.arange(6)
+    # At three wedges X1 is drawn alone, X2 and X3 as one group, and Y: each
+    # of two cells. The fourth opens X1, which ties the group and Y and comes
+    # first in the tree; the group ties by X2, its largest clade, which comes
+    # after X1, not by X, which comes before it.
+    frame = collapse_phylogeny(
+        parent, times, cells, codes, offsets, cut=AT_TIME, max_leaves=4
+    )
+    assert frame.loc[~frame["wedge"], "node"].tolist() == [0, 1, 2]
+    assert _wedges(frame) == [(3, 1, 1, 1), (4, 1, 1, 1), (-1, 2, 2, 2), (7, 2, 2, 1)]
+
+
+def test_the_rows_that_the_cap_allows_are_bounded_by_the_cells() -> None:
+    parent, times, cells, offsets = _forest([POLYTOMY])
+    # A cap far above the ten cells sizes the opening by the cells: a
+    # billion wedges would need 178 GB.
+    ledger = budgeted(10**6)
+    _found, taken = charges(
+        lambda: collapse_phylogeny(
+            parent,
+            times,
+            cells,
+            POLYTOMY_CODES,
+            offsets,
+            cut=AT_TIME,
+            max_leaves=10**9,
+            ledger=ledger,
+        )
+    )
+    (opening,) = [
+        nbytes for item, nbytes, _planned in taken if item.startswith("opening")
+    ]
+    assert opening < 10_000
+
+
 def test_the_last_clade_of_a_group_opens_in_its_turn() -> None:
     # Below the root, the clade A of five cells and B of three at time 1, and
     # X at time 0.2, above the cut, over the clades X1 and X2 of one cell.

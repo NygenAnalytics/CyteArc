@@ -36,6 +36,7 @@ from ...clones.phylogeny import (
 from ...metadata.arguments import PhylogenyCloneArguments, PhylogenyImportArguments
 from ...metadata.rows import (
     read_array_rows_chunkwise,
+    read_rows,
     read_text_rows,
     read_whole,
     read_whole_text,
@@ -76,7 +77,12 @@ from ...utils.arguments import bool_argument, integer_argument, quoted_value
 from ...utils.arrays import sort_categories, sorted_unique
 from ...utils.digest import path_sha256
 from ...utils.logging import logger
-from ...utils.memory_budget import MemoryLedger, fixed_text_bytes, object_array_bytes
+from ...utils.memory_budget import (
+    NUMPY_STEP_BYTES,
+    MemoryLedger,
+    fixed_text_bytes,
+    object_array_bytes,
+)
 from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
@@ -138,6 +144,10 @@ _CUT_BYTES_PER_CELL = 56
 # Loading a phylogeny holds, for each node, its tree, position, parent, time,
 # depth and leaf columns, and the slots of its name and cell.
 _LOAD_BYTES_PER_NODE = 160
+# A step of the figure that works on each row drawn, such as finding the
+# clones drawn or counting what the rows draw, holds at most this many bytes
+# a row in masks, positions and categories at once.
+_FIGURE_STEP_BYTES_PER_ROW = 64
 # A fixed allowance for opening files and stores and for each tree.
 _FIXED_BYTES = 4 << 20
 _BYTES_PER_TREE = 2_000
@@ -949,7 +959,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         *,
         tree: str | None,
         max_leaves: int,
-        drawing_bytes: Callable[[pd.DataFrame], int],
+        drawing_bytes: Callable[[CollapsedPhylogeny], int],
     ) -> CollapsedPhylogeny:
         """Collapse the phylogeny that clones were cut from to at most ``max_leaves`` wedges, for its figure.
 
@@ -957,17 +967,17 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         node's parent, cell and, for a cut at a time, time are read whole,
         with each tree's offsets and name and each cell's clone, and
         :func:`~cytearc.clones.phylogeny.collapse_phylogeny` collapses them;
-        only the labels of the clones drawn are read. The phylogeny's table
-        of nodes is never built.
+        only the labels and sizes of the clones drawn are read. The
+        phylogeny's table of nodes is never built.
 
         Args:
             clones: Clones cut from a phylogeny by
                 :meth:`~cytearc.datastore.namespaces.ClonesAccessor.phylogeny_clones`.
             tree: The name of the one tree to draw, or None for every tree.
             max_leaves: The most wedges to draw, at least 1.
-            drawing_bytes: What drawing the rows of the collapsed trees
-                holds, which the ledger checks last, once the collapse is let
-                go.
+            drawing_bytes: What drawing the collapsed trees holds, which
+                the ledger checks last, once the collapse is let go; while it
+                counts, it may hold 64 bytes for each row.
 
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef, ``tree`` is not
@@ -1019,6 +1029,8 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         offsets = read_codes(ledger, group, "tree_offsets", item="each tree's nodes")
         begin, end = 0, n_nodes
         if tree is not None:
+            # Each tree's name is compared with the one asked for.
+            ledger.peak("finding the tree", len(tree_names) + NUMPY_STEP_BYTES)
             found = np.flatnonzero(tree_names == tree)
             if not len(found):
                 shown = ", ".join(
@@ -1031,8 +1043,6 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
                     + (f" and {more} more" if more > 0 else "")
                 )
             begin, end = int(offsets[found[0]]), int(offsets[found[0] + 1])
-        elif len(tree_names) > 1:
-            ledger.remedy = "draw one tree with tree="
         parent = read_codes(ledger, group, "parent", item="each node's parent")
         cells = read_codes(ledger, group, "cells", item="each node's cell")
         times = (
@@ -1053,27 +1063,31 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             + (0 if times is None else times.nbytes)
         )
         if tree is not None:
-            # The tree's own nodes, each parent counted from its root.
+            # The tree's own nodes, each parent counted from its root, in
+            # place of the whole arrays, which go once they are copied.
             n_tree = end - begin
             copies = ledger.hold(
                 f"the {n_tree} nodes of the tree",
                 8 * n_tree * (2 if times is None else 3),
             )
             ledger.peak(f"the {n_tree} nodes of the tree", n_tree)
-            tree_parent = parent[begin:end] - begin
-            tree_parent[tree_parent < 0] = -1
-            tree_cells = cells[begin:end].copy()
-            tree_times = None if times is None else times[begin:end].copy()
             whole_bytes = (
                 parent.nbytes + cells.nbytes + (0 if times is None else times.nbytes)
             )
-            del parent, cells, times
+            rebased = parent[begin:end] - begin
+            rebased[rebased < 0] = -1
+            parent = rebased
+            del rebased
+            cells = cells[begin:end].copy()
+            times = None if times is None else times[begin:end].copy()
             ledger.release(whole_bytes)
-            parent, cells, times = tree_parent, tree_cells, tree_times
             read_bytes += copies - whole_bytes
             tree_offsets = np.asarray([0, n_tree], dtype=np.int64)
         else:
             tree_offsets = offsets
+            if len(tree_names) > 1:
+                # Drawing one tree collapses and draws its nodes alone.
+                ledger.remedy = "draw one tree with tree="
         nodes = collapse_phylogeny(
             parent,
             times,
@@ -1087,24 +1101,44 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         del parent, cells, times, codes
         ledger.release(read_bytes)
         n_rows = len(nodes)
-        # The labels of the clones drawn, and each row's clone's label and
-        # tree's name, beside the rows.
+        # The clones drawn, their labels and sizes, and each row's clone's
+        # label and size and its tree's name, beside the rows.
         row_codes = nodes["clone"].to_numpy()
+        ledger.peak(
+            f"finding the clones of {n_rows} rows",
+            _FIGURE_STEP_BYTES_PER_ROW * n_rows + NUMPY_STEP_BYTES,
+        )
         codes_drawn = sorted_unique(row_codes[row_codes >= 0])
+        drawn_bytes = ledger.hold(
+            f"the {len(codes_drawn)} clones drawn", codes_drawn.nbytes
+        )
         labels = read_text_rows(
             ledger,
             as_zarr_array(clone_group["clone_ids"], name="clone_ids"),
             codes_drawn,
             item=f"the labels of the {len(codes_drawn)} clones drawn",
         )
+        sizes = read_rows(
+            ledger,
+            as_zarr_array(clone_group["clone_sizes"], name="clone_sizes"),
+            codes_drawn,
+            item=f"the sizes of the {len(codes_drawn)} clones drawn",
+        )
         ledger.hold(
-            f"the labels of the {n_rows} rows drawn",
-            # Two arrays of labels, and the positions that find them.
-            2 * object_array_bytes(n_rows) + 2 * 8 * n_rows,
+            f"each of the {n_rows} rows' clone and tree",
+            # Each row's clone's label and size, and its tree's name.
+            2 * object_array_bytes(n_rows) + 8 * n_rows,
+        )
+        ledger.peak(
+            f"each of the {n_rows} rows' clone and tree",
+            _FIGURE_STEP_BYTES_PER_ROW * n_rows + NUMPY_STEP_BYTES,
         )
         one = row_codes >= 0
+        at = np.searchsorted(codes_drawn, row_codes[one])
         clone_ids = np.full(n_rows, None, dtype=object)
-        clone_ids[one] = labels[np.searchsorted(codes_drawn, row_codes[one])]
+        clone_ids[one] = labels[at]
+        clone_sizes = np.zeros(n_rows, dtype=np.int64)
+        clone_sizes[one] = sizes[at]
         positions = nodes["tree"].to_numpy()
         named = positions >= 0
         names = tree_names if tree is None else np.asarray([tree], dtype=object)
@@ -1113,14 +1147,14 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         top = nodes["parent"].to_numpy() < 0
         n_trees = int(nodes["n_trees"].to_numpy()[top].sum())
         n_clones = int(nodes["n_clones"].to_numpy()[top].sum())
-        offset_bytes = offsets.nbytes
-        del offsets, positions
-        ledger.release(offset_bytes)
-        ledger.peak(f"drawing {n_rows} rows of the phylogeny", drawing_bytes(nodes))
-        return CollapsedPhylogeny(
+        let_go = offsets.nbytes + drawn_bytes + sizes.nbytes
+        del offsets, positions, named, one, at, codes_drawn, sizes, top
+        ledger.release(let_go)
+        collapsed = CollapsedPhylogeny(
             nodes=nodes,
             tree_names=row_trees,
             clone_ids=clone_ids,
+            clone_sizes=clone_sizes,
             clones=clones,
             phylogeny=phylogeny,
             cut=cut,
@@ -1130,6 +1164,13 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             n_clones=n_clones,
             max_leaves=max_leaves,
         )
+        # What the figure draws is counted from the rows, then checked.
+        ledger.peak(
+            f"counting what {n_rows} rows draw",
+            _FIGURE_STEP_BYTES_PER_ROW * n_rows + NUMPY_STEP_BYTES,
+        )
+        ledger.peak(f"drawing {n_rows} rows of the phylogeny", drawing_bytes(collapsed))
+        return collapsed
 
 
 def _cut_rules(cut: PhylogenyCut, unit: Any) -> tuple[DiagnosticRule, ...]:
