@@ -11,11 +11,9 @@ words the refusal of a step that has none.
 
 The shared costs below give the bytes of the structures that many steps
 build: Python strings, fixed-width text, object arrays, sorts and hash
-tables. ``tests/test_memory_costs.py`` bounds each one from both sides.
+tables.
 """
 
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
@@ -28,7 +26,6 @@ __all__ = [
     "hash_table_bytes",
     "memory_refusal",
     "object_array_bytes",
-    "observed_charges",
     "python_text_bytes",
     "refusal_words",
     "sort_bytes",
@@ -151,29 +148,6 @@ def refusal_words(error: MemoryBudgetError) -> str:
     return str(error).removesuffix(f" It needs at least {error.needed_bytes} bytes.")
 
 
-#: Called at each charge and release of any ledger while a test observes
-#: them, as :func:`observed_charges` describes; None otherwise.
-_observer: Callable[[str, int, int], None] | None = None
-
-
-@contextmanager
-def observed_charges(observer: Callable[[str, int, int], None]) -> Iterator[None]:
-    """Call ``observer`` at each charge and release of every ledger in this context.
-
-    ``observer(item, nbytes, planned)`` gets the item of the charge, or ``"a
-    release"``, its bytes, and ``planned``, the bytes that the ledger allows
-    from then until its next charge: what it holds and, for a transient peak,
-    that peak. An audit compares the traced peak of each interval with what
-    was planned for it. Production code runs no observer.
-    """
-    global _observer
-    previous, _observer = _observer, observer
-    try:
-        yield
-    finally:
-        _observer = previous
-
-
 class MemoryLedger:
     """What one call holds, charged against its memory budget before each step.
 
@@ -269,15 +243,12 @@ class MemoryLedger:
         nbytes = _bytes(nbytes)
         self.refuse_beyond(item, self.held_bytes + nbytes, remedy)
         self.charged += nbytes
-        self._observe(item, nbytes, self.held_bytes)
         return nbytes
 
     def peak(self, item: str, nbytes: int, *, remedy: str | None = None) -> None:
         """Check that ``nbytes`` more, which a step builds and lets go, fit beside what is held."""
         nbytes = _bytes(nbytes)
-        needed = self.held_bytes + nbytes
-        self.refuse_beyond(item, needed, remedy)
-        self._observe(item, nbytes, needed)
+        self.refuse_beyond(item, self.held_bytes + nbytes, remedy)
 
     def release(self, nbytes: int) -> None:
         """Let go of ``nbytes`` that :meth:`hold` charged, once they are freed."""
@@ -287,7 +258,6 @@ class MemoryLedger:
                 f"Releasing {nbytes} bytes, more than the {self.charged} bytes charged"
             )
         self.charged -= nbytes
-        self._observe("a release", nbytes, self.held_bytes)
 
     def leave(self, nbytes: int) -> None:
         """Record what the read or write that just ended may still hold, in place of the last one's.
@@ -295,10 +265,6 @@ class MemoryLedger:
         The read's own charge planned for it, so the next charge counts it.
         """
         self.left = _bytes(nbytes)
-
-    def _observe(self, item: str, nbytes: int, planned: int) -> None:
-        if _observer is not None:
-            _observer(item, nbytes, planned)
 
 
 #: What a step of NumPy calls holds whatever its size: the objects of the
