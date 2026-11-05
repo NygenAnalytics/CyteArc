@@ -18,19 +18,19 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationEfficiency
 from cytearc.perturbation import efficiency as efficiency_module
 from cytearc.perturbation.efficiency import (
+    target_feature_bytes,
     efficiency_arrays,
     efficiency_memory_bytes,
     target_features,
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
 from tests.perturbation_helpers import fixed_labels, write_screen
-from cytearc.storage.validation_scope import validation_scope
 from tests.memory_helpers import (
-    ZARR_READS,
+    audit_at,
+    audited_least,
     at_budget,
-    audited,
     check_budget,
-    hold_finished_reads,
+    cost_bound,
     refusal_naming,
 )
 from tests.storage_helpers import (
@@ -639,12 +639,44 @@ def test_efficiency_holds_no_more_than_the_budget_it_names(
     assert table["status"].iloc[0] == "tested"
     # From each charge to the next, the call holds no more than its ledger
     # planned, with each read's work held until the next read ends.
-    store = open_store(path, mem_budget=budget)
-    with validation_scope():
-        measure(store)
-        with hold_finished_reads(*ZARR_READS):
-            _ref, overruns = audited(lambda: measure(store))
-    assert overruns == []
+    audit_at(path, measure, budget)
+    # Loading the table holds no more than its ledger plans either.
+    audited_least(path, lambda store: store.perturbation.load_efficiency(ref))
+
+
+@pytest.mark.parametrize(
+    ("n_features", "id_width", "name_width", "letter", "with_ids"),
+    [
+        (20_000, 15, 8, "A", True),
+        (5_000, 30, 20, "\u00e9", True),
+        (40_000, 12, 6, "\u4e2d", False),
+    ],
+)
+def test_matching_targets_holds_no_more_than_its_cost_states(
+    n_features, id_width, name_width, letter, with_ids
+) -> None:
+    rng = np.random.default_rng(n_features)
+    # IDs of full width and names that repeat, as gene symbols of two loci do.
+    ids = np.asarray([f"ID{index:0{id_width - 2}d}" for index in range(n_features)])
+    names = np.asarray(
+        [
+            f"{letter}{index % (n_features - 100):0{name_width - 1}d}"
+            for index in range(n_features)
+        ]
+    )
+    targets = names[rng.choice(n_features, 300, replace=False)]
+    guide_codes = np.repeat(np.arange(300), 2)
+    guide_ids = (
+        np.asarray(ids[rng.choice(n_features, 600)], dtype=object) if with_ids else None
+    )
+    estimate = target_feature_bytes(len(targets), ids, names, guide_ids)
+    # The match holds what its cost states beside its arguments, and no more
+    # than twice what it holds.
+    cost_bound(
+        estimate,
+        lambda: target_features(targets, guide_codes, guide_ids, ids, names),
+        slack=2.0,
+    )
 
 
 def test_target_features_prefer_one_id_then_one_name() -> None:

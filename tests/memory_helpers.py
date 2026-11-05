@@ -600,6 +600,47 @@ def interval_peaks(
     return result, intervals
 
 
+def audit_at(
+    path: str | Path, call: Callable[[Any], Any], budget: int, **options: Any
+) -> Any:
+    """Check that ``call`` holds no more than its ledgers plan from each charge to the next, on the store at ``path`` opened at ``budget``.
+
+    The store is opened with ``options``, and ``call`` runs once untraced and
+    then under :func:`audited`, with every read's work held until the next
+    read ends, in one validation scope, so that the second run's checks of its
+    inputs are those of a store already open. Every interval must stay within
+    its plan and the audit's allowance.
+
+    Returns:
+        The audited call's result.
+    """
+    from cytearc.storage.validation_scope import validation_scope
+
+    store = open_store(path, mem_budget=budget, **options)
+    with validation_scope():
+        call(store)
+        with hold_finished_reads(*ZARR_READS):
+            result, overruns = audited(lambda: call(store))
+    assert overruns == [], f"Intervals passed their plans: {overruns}"
+    return result
+
+
+def audited_least(path: str | Path, call: Callable[[Any], Any], **options: Any) -> int:
+    """Find the smallest budget that runs ``call`` on the store at ``path`` from its refusals, and audit ``call`` there as :func:`audit_at` does.
+
+    The refusals are followed untraced, up to 100 of them, on stores opened
+    with ``options``.
+
+    Returns:
+        The budget.
+    """
+    budget, _refusals, _result, _peak = budget_that_runs(
+        path, call, max_refusals=100, traced=False, **options
+    )
+    audit_at(path, call, budget, **options)
+    return budget
+
+
 #: The methods through which a read of a stored Zarr array's values goes, by
 #: index or by selection, for :func:`hold_finished_reads` to end a read at
 #: each: those of the synchronous array, and those of its ``async_array``,

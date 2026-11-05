@@ -24,7 +24,7 @@ from cytearc.perturbation.clusters import (
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
 from tests.perturbation_helpers import fixed_labels, write_screen
-from tests.memory_helpers import refusal_naming
+from tests.memory_helpers import audited_least, refusal_naming
 from tests.storage_helpers import open_store
 
 
@@ -509,4 +509,23 @@ def test_cluster_refuses_inputs_and_budgets_it_cannot_use(shared) -> None:
         ).perturbation.load_clusters(clusters),
         "Reading the distances between 12 profiles holds about",
         start=10_000,
+    )
+
+
+def test_clustering_and_loading_clusters_hold_no_more_than_their_ledgers_plan(
+    shared,
+) -> None:
+    store, profiles = shared.store, shared.profiles
+    clusters = store.perturbation.cluster(profiles, min_cluster_size=3)
+    # At the least budget that runs each, every interval from one charge to
+    # the next holds no more than the ledger planned, with each read's work
+    # held until the next read ends.
+    audited_least(
+        store.zarr_loc,
+        lambda budgeted: budgeted.perturbation.cluster(
+            profiles, min_cluster_size=3, invalidate_cache=True
+        ),
+    )
+    audited_least(
+        store.zarr_loc, lambda budgeted: budgeted.perturbation.load_clusters(clusters)
     )

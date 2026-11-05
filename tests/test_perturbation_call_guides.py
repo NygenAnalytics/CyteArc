@@ -8,7 +8,7 @@ write their own stores.
 
 import re
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,7 +31,13 @@ from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.utils.logging import logger
 from tests.perturbation_helpers import record_cell_reads, write_screen
 from cytearc.storage.validation_scope import validation_scope
-from tests.memory_helpers import ZARR_READS, audited, check_budget, hold_finished_reads
+from tests.memory_helpers import (
+    ZARR_READS,
+    audit_at,
+    audited,
+    check_budget,
+    hold_finished_reads,
+)
 from tests.storage_helpers import (
     copy_store,
     open_store,
@@ -654,16 +660,6 @@ def _wide_screen(folder: Path) -> Path:
 _CALLING_AT_MOST = 3.0
 
 
-def _audited_at(path: Path, call: Callable[[DataStore], object], budget: int) -> None:
-    """Check that ``call`` holds no more than its ledger plans at ``budget``, with each read's work held until the next read ends."""
-    store = open_store(path, mem_budget=budget)
-    with validation_scope():
-        call(store)
-        with hold_finished_reads(*ZARR_READS):
-            _ref, overruns = audited(lambda: call(store))
-    assert overruns == []
-
-
 @pytest.mark.slow
 @pytest.mark.parametrize(
     "options",
@@ -702,7 +698,7 @@ def test_call_guides_runs_within_the_budget_that_its_refusals_name(
         # The padded calls of cell0, 80 slots for each of the 4,000 cells, and
         # the 60 characters of the labels count.
         assert budget > 8 * 80 * 4_000
-    _audited_at(path, call, budget)
+    audit_at(path, call, budget)
 
 
 def _distinct_screen(folder: Path) -> Path:
@@ -763,7 +759,7 @@ def test_histogram_refusals_name_a_budget_past_where_they_stopped(tmp_path) -> N
     assert len(refusals) <= 12
     # The budget holds the counts beside histograms of every count.
     assert budget > 16 * 60_000
-    _audited_at(path, call, budget)
+    audit_at(path, call, budget)
 
 
 def test_gaussian_warns_when_most_calls_carry_several_guides(tmp_path) -> None:

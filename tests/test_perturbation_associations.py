@@ -51,7 +51,6 @@ from cytearc.perturbation.p_values import (
 )
 from cytearc.perturbation.random_sets import resampling_keys
 from cytearc.storage.artifacts import ArtifactRef
-from cytearc.storage.validation_scope import validation_scope
 from cytearc.utils.logging import logger
 from cytearc.utils.memory_budget import MemoryLedger
 from tests.perturbation_helpers import (
@@ -63,10 +62,9 @@ from tests.perturbation_helpers import (
     write_screen,
 )
 from tests.memory_helpers import (
-    ZARR_READS,
-    audited,
+    audit_at,
+    audited_least,
     check_budget,
-    hold_finished_reads,
     refusal_naming,
 )
 from tests.storage_helpers import open_store, rechunk_feature_tables
@@ -1847,16 +1845,6 @@ _ASSOCIATION_AT_MOST = 3.0
 _WIDE_CHUNK_AT_MOST = 4.0
 
 
-def _audit(path, run, budget: int) -> None:
-    """Check that ``run`` holds no more than its ledger plans from each charge to the next at ``budget`` on two threads, with each read's work held until the next read ends."""
-    store = open_store(path, mem_budget=budget, nthreads=2)
-    with validation_scope():
-        run(store)
-        with hold_finished_reads(*ZARR_READS):
-            _result, overruns = audited(lambda: run(store))
-    assert overruns == []
-
-
 def test_association_refusals_name_the_budget_that_runs_the_tests(shared) -> None:
     store, labels = shared.store, shared.labels
     features = _every_gene(store)
@@ -1888,7 +1876,13 @@ def test_association_refusals_name_the_budget_that_runs_the_tests(shared) -> Non
         for refusal in refusals
     )
     assert any("over 540 cells holds about" in refusal for refusal in refusals)
-    _audit(store.zarr_loc, run, budget)
+    audit_at(store.zarr_loc, run, budget, nthreads=2)
+    # Loading the tests holds no more than its ledger plans either.
+    audited_least(
+        store.zarr_loc,
+        lambda budgeted: budgeted.perturbation.load_associations(tests),
+        nthreads=2,
+    )
     tight = store.perturbation.load_associations(tests)
     for name in ("discovery", "calibration", "positive"):
         pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
@@ -1931,7 +1925,7 @@ def test_association_refusals_count_the_read_of_a_wide_count_chunk(tmp_path) -> 
         allowance=1 << 20,
         max_refusals=100,
     )
-    _audit(store.zarr_loc, run, budget)
+    audit_at(store.zarr_loc, run, budget, nthreads=2)
     tight = store.perturbation.load_associations(tests)
     for name in ("discovery", "positive"):
         pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))

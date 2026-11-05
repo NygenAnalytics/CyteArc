@@ -35,15 +35,13 @@ from cytearc.perturbation.mixscape import (
 )
 from cytearc.perturbation.signature import normalize_counts
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
-from cytearc.storage.validation_scope import validation_scope
 from cytearc.utils.logging import logger
 from tests.perturbation_helpers import memory_screen, use_python_kernels, write_screen
 from tests.memory_helpers import (
-    ZARR_READS,
-    audited,
+    audit_at,
+    audited_least,
     check_budget,
     follow_refusals,
-    hold_finished_reads,
     refusal_naming,
 )
 from tests.storage_helpers import (
@@ -694,12 +692,13 @@ def test_mixscape_runs_within_the_budget_it_names(memory, monkeypatch) -> None:
     assert all(refusal.startswith("Classifying ") for refusal in refusals)
     # From each charge to the next, the call holds no more than its ledger
     # planned, with each read's work held until the next read ends.
-    store = open_store(memory.path, mem_budget=budget, nthreads=2)
-    with validation_scope():
-        run(store)
-        with hold_finished_reads(*ZARR_READS):
-            _result, overruns = audited(lambda: run(store))
-    assert overruns == []
+    audit_at(memory.path, run, budget, nthreads=2)
+    # Loading the classes holds no more than its ledger plans either.
+    audited_least(
+        memory.path,
+        lambda store: store.perturbation.load_mixscape(classes),
+        nthreads=2,
+    )
 
     # The DE tests read the counts in several bands and the targets are
     # classified in several batches, within the budget that the refusal

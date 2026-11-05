@@ -28,7 +28,6 @@ from cytearc.perturbation.signature import (
     signature_rows,
 )
 from cytearc.storage.artifacts import inspect_artifact
-from cytearc.storage.validation_scope import validation_scope
 from cytearc.utils.logging import logger
 from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 from tests.perturbation_helpers import (
@@ -38,11 +37,9 @@ from tests.perturbation_helpers import (
     write_screen,
 )
 from tests.memory_helpers import (
-    ZARR_READS,
+    audit_at,
     at_budget,
-    audited,
     check_budget,
-    hold_finished_reads,
     refusal_naming,
 )
 from tests.storage_helpers import (
@@ -640,16 +637,6 @@ def memory(tmp_path_factory) -> SimpleNamespace:
 _SIGNATURE_AT_MOST = 3.0
 
 
-def _audit(path, run, budget: int) -> None:
-    """Check that ``run`` holds no more than its ledger plans from each charge to the next at ``budget`` on two threads, with each read's work held until the next read ends."""
-    store = open_store(path, mem_budget=budget, nthreads=2)
-    with validation_scope():
-        run(store)
-        with hold_finished_reads(*ZARR_READS):
-            _result, overruns = audited(lambda: run(store))
-    assert overruns == []
-
-
 @pytest.mark.slow
 def test_signature_runs_within_the_budget_it_names(memory) -> None:
     def run(store: DataStore):
@@ -680,7 +667,7 @@ def test_signature_runs_within_the_budget_it_names(memory) -> None:
         )
         for refusal in refusals
     )
-    _audit(memory.path, run, budget)
+    audit_at(memory.path, run, budget, nthreads=2)
     loaded = open_store(memory.path).perturbation.load_signature(ref)
     pd.testing.assert_frame_equal(loaded.values, memory.whole.values)
     pd.testing.assert_frame_equal(loaded.neighbors, memory.whole.neighbors)
@@ -709,7 +696,7 @@ def test_loading_signatures_stays_within_the_budget_it_names(memory, features) -
         refusal.startswith("Reading the signatures of 4000 cells")
         for refusal in refusals
     )
-    _audit(memory.path, run, budget)
+    audit_at(memory.path, run, budget, nthreads=2)
     expected = (
         memory.whole.values if features is None else memory.whole.values[features]
     )

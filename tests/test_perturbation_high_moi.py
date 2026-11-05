@@ -31,15 +31,12 @@ from tests.perturbation_helpers import (
     use_python_kernels,
     write_screen,
 )
-from cytearc.storage.validation_scope import validation_scope
 from cytearc.utils.memory_budget import MemoryLedger, observed_charges
 from tests.memory_helpers import (
-    ZARR_READS,
-    audited,
+    audit_at,
     budget_that_runs,
     check_budget,
     follow_refusals,
-    hold_finished_reads,
     refusal_naming,
 )
 from tests.storage_helpers import open_store, rechunk_feature_tables
@@ -1545,7 +1542,7 @@ def test_high_moi_checks_the_budget_of_counting_guides_before_reading_them(
     ]
     assert counted == [0, 1]
     assert len(passes) == 2
-    _audit(store.zarr_loc, run, budget)
+    audit_at(store.zarr_loc, run, budget, nthreads=2)
 
 
 def test_high_moi_checks_the_budget_before_the_store_must_be_writable(
@@ -1585,16 +1582,6 @@ _HIGH_MOI_DOINGS = (
 )
 
 
-def _audit(path, run, budget: int) -> None:
-    """Check that ``run`` holds no more than its ledger plans from each charge to the next at ``budget`` on two threads, with each read's work held until the next read ends."""
-    store = open_store(path, mem_budget=budget, nthreads=2)
-    with validation_scope():
-        run(store)
-        with hold_finished_reads(*ZARR_READS):
-            _result, overruns = audited(lambda: run(store))
-    assert overruns == []
-
-
 def test_high_moi_refusals_name_the_budget_that_runs_the_tests(screen) -> None:
     store, labels, genes = screen
     arguments = {"features": genes, "moi": "high", "invalidate_cache": True, **FAST}
@@ -1621,7 +1608,7 @@ def test_high_moi_refusals_name_the_budget_that_runs_the_tests(screen) -> None:
     )
     assert 1 <= len(refusals) <= 24
     assert all(refusal.startswith(_HIGH_MOI_DOINGS) for refusal in refusals)
-    _audit(store.zarr_loc, run, budget)
+    audit_at(store.zarr_loc, run, budget, nthreads=2)
     tight = store.perturbation.load_associations(tests)
     for name in ("discovery", "calibration", "positive"):
         pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
@@ -1716,7 +1703,7 @@ def test_high_moi_stays_within_the_budget_it_names_with_a_few_wide_cells(
     # held about 4 times this budget before its check.
     assert peak <= needed, f"The call held {peak} bytes within a budget of {needed}"
     assert needed <= _HIGH_MOI_AT_MOST * peak + (1 << 20)
-    _audit(store.zarr_loc, run, needed)
+    audit_at(store.zarr_loc, run, needed, nthreads=2)
 
 
 def test_codes_are_read_a_stored_chunk_at_a_time(tmp_path) -> None:

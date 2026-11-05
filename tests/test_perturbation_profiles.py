@@ -30,10 +30,10 @@ from tests.perturbation_helpers import (
     use_python_kernels,
     write_screen,
 )
-from cytearc.storage.validation_scope import validation_scope
 from tests.memory_helpers import (
+    audit_at,
+    audited_least,
     ZARR_READS,
-    audited,
     budget_that_runs,
     follow_refusals,
     hold_finished_reads,
@@ -983,12 +983,13 @@ def test_profiles_run_within_the_budget_they_name(tmp_path) -> None:
     assert named_budget(short.value) == budget
     # From each charge to the next, the call holds no more than its ledger
     # planned, with each read's work held until the next read ends.
-    store = open_store(screen.path, nthreads=2, mem_budget=budget)
-    with validation_scope():
-        run(store)
-        with hold_finished_reads(*ZARR_READS):
-            _ref, overruns = audited(lambda: run(store))
-    assert overruns == []
+    audit_at(screen.path, run, budget, nthreads=2)
+    # Loading the profiles holds no more than its ledger plans either.
+    audited_least(
+        screen.path,
+        lambda store: store.perturbation.load_profiles(profiles),
+        nthreads=2,
+    )
     # The budget counts the chunk that the read before can still hold, and
     # the call held more than the budget less that chunk, so the hold took
     # effect.

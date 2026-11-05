@@ -26,16 +26,14 @@ from cytearc.perturbation.edistance import (
     edistance_memory_bytes,
 )
 from cytearc.storage.artifacts import inspect_artifact
-from cytearc.storage.validation_scope import validation_scope
 from cytearc.utils.logging import logger
 from cytearc.utils.memory_budget import MemoryLedger
 from tests.perturbation_helpers import fixed_labels, use_python_kernels, write_screen
 from tests.memory_helpers import (
-    ZARR_READS,
+    audit_at,
+    audited_least,
     at_budget,
-    audited,
     check_budget,
-    hold_finished_reads,
     refusal_naming,
 )
 from tests.storage_helpers import (
@@ -671,16 +669,6 @@ def large_screen(tmp_path_factory) -> SimpleNamespace:
 _EDISTANCE_AT_MOST = 3.0
 
 
-def _audit(path, measure, budget: int, **options) -> None:
-    """Check that ``measure`` holds no more than its ledger plans from each charge to the next at ``budget``, with each read's work held until the next read ends."""
-    store = open_store(path, mem_budget=budget, **options)
-    with validation_scope():
-        measure(store)
-        with hold_finished_reads(*ZARR_READS):
-            _ref, overruns = audited(lambda: measure(store))
-    assert overruns == []
-
-
 @pytest.mark.slow
 @pytest.mark.parametrize(
     ("n_dims", "nthreads"),
@@ -727,7 +715,7 @@ def test_the_memory_check_bounds_what_the_operation_holds(
         )
         for refusal in refusals
     )
-    _audit(path, measure, budget, nthreads=nthreads)
+    audit_at(path, measure, budget, nthreads=nthreads)
 
 
 @pytest.mark.parametrize(
@@ -782,7 +770,9 @@ def test_one_refusal_names_a_budget_that_runs_for_few_compared_cells(
         )
         for refusal in refusals
     )
-    _audit(path, measure, budget)
+    audit_at(path, measure, budget)
+    # Loading the table holds no more than its ledger plans either.
+    audited_least(path, lambda store: store.perturbation.load_edistance(ref))
     table = open_store(path).perturbation.load_edistance(ref).table
     assert table["n_cells"].iloc[0] == 2
     assert table["n_control_cells"].iloc[0] == 3
