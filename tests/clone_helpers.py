@@ -600,7 +600,6 @@ def write_clone_contigs(
     clone_of: np.ndarray,
     *,
     chains_per_arm: int = 1,
-    ambiguous: np.ndarray | None = None,
 ) -> Path:
     """Write Cell Ranger contig annotations in which each clone has its receptor.
 
@@ -609,21 +608,10 @@ def write_clone_contigs(
     each, the first with the most UMIs. Each cell carries every chain of its
     clone, and a cell of clone -1 has no contig. A clone's junctions spell its
     number in residues, so clonotypes of identical chains are the clones.
-    ``ambiguous`` marks the cells of T cell clones that also carry a heavy
-    chain of their own, of two UMIs, which makes them ambiguous: clonotypes
-    defined within receptor types part them from their clone, and those
-    defined across types keep them in it, as a clonotype of two types.
     """
     residues = "ACDEFGHIKLMNPQRSTVWY"
     rows = []
-    marked = (
-        np.zeros(len(cell_ids), dtype=bool)
-        if ambiguous is None
-        else np.asarray(ambiguous, dtype=bool)
-    )
-    for position, (cell, clone) in enumerate(
-        zip(cell_ids, np.asarray(clone_of).tolist(), strict=True)
-    ):
+    for cell, clone in zip(cell_ids, np.asarray(clone_of).tolist(), strict=True):
         if clone < 0:
             continue
         digits = "".join(residues[clone // 20**power % 20] for power in range(5))
@@ -639,17 +627,6 @@ def write_clone_contigs(
                     f"{locus}J1,{locus}C,true,true,{junction_aa},{junction},100,"
                     f"{9 - chain},ct{clone},ct{clone}_{index}"
                 )
-        if marked[position] and loci == ("TRA", "TRB"):
-            # The heavy chain spells the cell's position, one residue longer
-            # than any clone's junction, so it links no two cells.
-            own = "".join(residues[position // 20**power % 20] for power in range(5))
-            junction_aa = f"CQQ{own}W"
-            junction = "".join(_CODONS[residue] for residue in junction_aa)
-            rows.append(
-                f"{cell},true,{cell}_contig_{index + 1},true,500,IGH,IGHV1,,IGHJ1,"
-                f"IGHC,true,true,{junction_aa},{junction},100,2,ct{clone},"
-                f"ct{clone}_{index + 1}"
-            )
     return write_lines(folder, name, CELLRANGER_HEADER, rows)
 
 
