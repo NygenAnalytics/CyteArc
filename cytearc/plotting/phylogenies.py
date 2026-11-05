@@ -138,8 +138,10 @@ def phylogeny(
     merged, for a cut at a depth, with the cut as a dashed line. A forest of
     more trees than ``max_leaves`` draws its largest trees and the others as
     one grey wedge that says how many trees it holds; ``tree`` draws one tree
-    alone. The legend lists the clones drawn, the largest first, after the
-    greys.
+    alone. The legend lists the greys drawn and then, the largest first, the
+    clones whose wedges are at least a fortieth of the height, or the
+    largest clone drawn when none is, and its title says how many of the
+    clones drawn it lists.
 
     Tables: ``nodes``, one row per node or group drawn, in drawing order:
     ``tree``, ``node`` (its position in its tree, as the phylogeny's
