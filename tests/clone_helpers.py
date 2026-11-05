@@ -906,6 +906,9 @@ def traced_steps(call: Callable[[], object]) -> tuple[list[tuple[str, int]], int
     audit allows. The peak is traced
     as :func:`tests.memory_helpers.traced_peak` traces it, again where it
     passes the largest charge, so ``call`` must compute afresh each time.
+    Both calls run within :func:`tests.memory_helpers.hold_last_pool_work`,
+    so the chunk that a pool thread may still hold after a read, as stored and
+    as decoded, is held on every machine, as a busy one holds it.
 
     Returns:
         Each charge's item and the bytes it states, from the first call, and
@@ -914,7 +917,7 @@ def traced_steps(call: Callable[[], object]) -> tuple[list[tuple[str, int]], int
     import gc
 
     from cytearc.utils.memory_budget import observed_charges
-    from tests.memory_helpers import traced_peak
+    from tests.memory_helpers import hold_last_pool_work, traced_peak
 
     checks: list[tuple[str, int]] = []
     allowance: list[np.ndarray] = []
@@ -937,11 +940,12 @@ def traced_steps(call: Callable[[], object]) -> tuple[list[tuple[str, int]], int
         finally:
             allowance.clear()
 
-    run()
-    found = list(checks)
-    ceiling[0] = max((stated for _what, stated in found), default=0)
-    gc.collect()
-    _result, peak = traced_peak(run, ceiling[0])
+    with hold_last_pool_work():
+        run()
+        found = list(checks)
+        ceiling[0] = max((stated for _what, stated in found), default=0)
+        gc.collect()
+        _result, peak = traced_peak(run, ceiling[0])
     # The traced call makes the charges that the first call made.
     assert checks == found, (checks, found)
     return found, peak

@@ -1219,6 +1219,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             item=f"the states of {n_records} allele records",
         )
         edited_bytes = ledger.hold("the records of edited sites", n_records)
+        # The records of unknown marks are compared apart before they join.
+        ledger.peak("the records of unknown marks", n_records)
         edited = states == MARK
         edited |= states == UNKNOWN_MARK
         state_bytes = states.nbytes
