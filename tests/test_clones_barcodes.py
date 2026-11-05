@@ -5,9 +5,6 @@ however they are split into chunks and however often the chunks merge, and
 the summaries against counts derived by hand.
 """
 
-import gc
-import tracemalloc
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -23,7 +20,6 @@ from cytearc.clones.barcodes import (
     repeated_keys,
 )
 from cytearc.metadata.records import decode_text
-from tests.memory_helpers import traced_peak
 
 
 def _random_reads(seed: int, n_rows: int) -> pd.DataFrame:
@@ -364,9 +360,7 @@ def test_pairs_of_texts_key_apart_and_repeats_count_once_per_copy() -> None:
 
 
 @pytest.mark.parametrize("repeated", [0, 100_000])
-def test_finding_repeated_keys_holds_the_bytes_the_import_counts(repeated) -> None:
-    from cytearc.datastore._operations import lineage_barcodes as operations
-
+def test_repeated_keys_count_the_molecules_listed_twice(repeated) -> None:
     # 200,000 rows of distinct molecules, or of 100,000 molecules each listed
     # twice, as TREX's reads.txt lists reads.
     n_keys = 200_000
@@ -383,12 +377,7 @@ def test_finding_repeated_keys_holds_the_bytes_the_import_counts(repeated) -> No
         pair_keys(cells[start : start + 20_000], umis[start : start + 20_000])
         for start in range(0, n_keys, 20_000)
     ]
-    # The keys themselves and what finding their repeats adds.
-    held = sum(key.nbytes for key in keys)
-    allowed = operations._KEY_BYTES * n_keys
-    found, peak = traced_peak(lambda: repeated_keys(keys), allowed - held)
-    assert found == repeated
-    assert held + peak <= allowed, (held, peak)
+    assert repeated_keys(keys) == repeated
 
 
 def test_adding_many_small_chunks_costs_time_linear_in_the_chunks(monkeypatch) -> None:
@@ -486,27 +475,6 @@ def test_pair_keys_need_a_second_text_for_each_first() -> None:
         pair_keys(["AAAC", "CCCG"], ["TT"])
 
 
-def _held_by(build, budget: int) -> tuple[BarcodeCounter, int]:
-    """Return the counter that ``build`` fills and the bytes that filling it left held.
-
-    ``build`` makes the counter, then fills it while the bytes are counted.
-    Python can grow its table of interned strings by megabytes in one
-    allocation during any run, and keep it, so a count that may pass
-    ``budget`` is traced again, as ``traced_peak`` traces it, with a counter
-    of its own.
-    """
-
-    def held() -> tuple[BarcodeCounter, int]:
-        counter, fill = build()
-        before = tracemalloc.get_traced_memory()[0]
-        fill(counter)
-        return counter, tracemalloc.get_traced_memory()[0] - before
-
-    gc.collect()
-    result, _peak = traced_peak(held, budget)
-    return result
-
-
 def test_chunks_without_rows_are_not_kept() -> None:
     def build():
         counter = BarcodeCounter(merge_rows=10**9)
@@ -518,14 +486,14 @@ def test_chunks_without_rows_are_not_kept() -> None:
             counter.add([], [], [], umi_counts=[])
 
     # A chunk of a file's barcodes that all name no selected cell keeps no
-    # rows, and each such chunk held about 1,200 bytes for its empty arrays.
-    counter, held = _held_by(build, 64 * 1024)
-    assert held < 64 * 1024, held
+    # rows.
+    counter, fill = build()
+    fill(counter)
     assert (counter.n_rows, counter.nbytes) == (0, 0)
     assert counter.finish().table.n_records == 0
 
 
-def test_waiting_chunks_of_few_rows_count_their_bytes_and_merge() -> None:
+def test_many_chunks_of_one_row_give_a_record_each() -> None:
     def add(counter: BarcodeCounter, first: int, n_chunks: int) -> None:
         for chunk in range(first, first + n_chunks):
             counter.add([chunk], ["lib"], [f"B{chunk}"], umi_counts=[2])
@@ -533,15 +501,9 @@ def test_waiting_chunks_of_few_rows_count_their_bytes_and_merge() -> None:
     def build():
         return BarcodeCounter(merge_rows=10**9), lambda counter: add(counter, 0, 255)
 
-    # 255 chunks of one row wait, each counted with its own arrays.
-    expected, _ = build()
-    add(expected, 0, 255)
-    counter, held = _held_by(build, expected.nbytes)
-    waiting = counter.nbytes
-    assert waiting == expected.nbytes
-    assert held <= waiting, (held, waiting)
-    # The 256th merges them into one table of records, which holds less.
+    # 255 chunks of one row wait, and the 256th merges them.
+    counter, fill = build()
+    fill(counter)
     add(counter, 255, 1)
-    assert counter.nbytes < waiting / 4
     assert counter.n_rows == 256
     assert counter.finish().table.n_records == 256

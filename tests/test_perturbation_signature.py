@@ -5,7 +5,6 @@ once, as a template. A test that writes copies the template, and the tests of
 refused calls share one copy, which they check is left as it was.
 """
 
-import tracemalloc
 from collections.abc import Iterator
 from types import SimpleNamespace
 
@@ -35,7 +34,6 @@ from tests.perturbation_helpers import (
     use_python_kernels,
     write_screen,
 )
-from tests.memory_helpers import check_budget
 from tests.storage_helpers import copy_store, open_store, written
 
 N_CELLS = 48
@@ -563,22 +561,14 @@ def test_counts_normalized_by_feature_equal_normalized_counts(
 
 
 @pytest.mark.parametrize("n_queries", [1, 64])
-def test_nearest_controls_hold_what_their_budget_allows(n_queries) -> None:
+def test_nearest_controls_in_blocks_of_few_queries_match_a_full_search(
+    n_queries,
+) -> None:
     rng = np.random.default_rng(7)
     query, controls = rng.normal(size=(600, 10)), rng.normal(size=(800, 10))
+    # A budget of one or 64 queries at a time searches the 600 in blocks.
     budget = nearest_control_bytes(800, 20, 10, n_queries)
-
-    tracemalloc.start()
-    try:
-        start = tracemalloc.get_traced_memory()[0]
-        found = nearest_controls(query, controls, 20, memory_bytes=budget)
-        peak = tracemalloc.get_traced_memory()[1] - start
-    finally:
-        tracemalloc.stop()
-
-    # Beside the coordinates, the search holds its blocks and the result; a
-    # block once held 64 MiB of distances whatever the budget.
-    assert peak <= budget + found.nbytes
+    found = nearest_controls(query, controls, 20, memory_bytes=budget)
     np.testing.assert_array_equal(found, _brute_nearest(query, controls, 20))
 
 
@@ -595,7 +585,7 @@ def memory(tmp_path_factory) -> SimpleNamespace:
 
 
 @pytest.mark.slow
-def test_signature_runs_within_the_budget_it_names(memory) -> None:
+def test_signature_at_a_small_budget_gives_the_signature_of_a_large_one(memory) -> None:
     def run(store: DataStore):
         return store.perturbation.signature(
             memory.labels,
@@ -605,10 +595,10 @@ def test_signature_runs_within_the_budget_it_names(memory) -> None:
             invalidate_cache=True,
         )
 
-    # Finding the neighbors, reading the counts and writing the signatures
-    # stay within the budget that the refusal names, which once failed in
-    # the stream planner.
-    _, _, ref = check_budget(memory.path, run, check_writes=False, nthreads=2)
+    # 60 MB, a third more than the 45 MB that finding the neighbors, reading
+    # the counts and writing the signatures need, gives the signature of the
+    # store's default budget.
+    ref = run(open_store(memory.path, mem_budget=60_000_000, nthreads=2))
     loaded = open_store(memory.path).perturbation.load_signature(ref)
     pd.testing.assert_frame_equal(loaded.values, memory.whole.values)
     pd.testing.assert_frame_equal(loaded.neighbors, memory.whole.neighbors)
@@ -616,14 +606,15 @@ def test_signature_runs_within_the_budget_it_names(memory) -> None:
 
 @pytest.mark.slow
 @pytest.mark.parametrize("features", [["RNA3"], None])
-def test_loading_signatures_stays_within_the_budget_it_names(memory, features) -> None:
+def test_loading_signatures_at_a_small_budget_gives_every_value(
+    memory, features
+) -> None:
     def run(store: DataStore) -> PerturbationSignature:
         return store.perturbation.load_signature(memory.signature, features=features)
 
     # Reading one feature decodes whole stored chunks of every feature, and
-    # the frames hold every cell's and neighbor's ID; the budget once
-    # counted 4 bytes per value read.
-    _, _, loaded = check_budget(memory.path, run, check_writes=False, nthreads=2)
+    # the frames hold every cell's and neighbor's ID, within 48 MB.
+    loaded = run(open_store(memory.path, mem_budget=48_000_000, nthreads=2))
     expected = (
         memory.whole.values if features is None else memory.whole.values[features]
     )

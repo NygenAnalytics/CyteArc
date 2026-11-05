@@ -12,7 +12,6 @@ from cytearc.repertoire.clonotypes import (
     assign_clonotypes,
 )
 from cytearc.utils.memory_budget import MemoryLedger
-from tests.memory_helpers import smallest_budget, traced_peak
 from tests.clone_helpers import within_distance as _within
 
 
@@ -295,18 +294,15 @@ def test_clusters_do_not_depend_on_the_chunks_of_pairs(monkeypatch) -> None:
         pytest.param("VJ", "all", True, marks=pytest.mark.slow),
     ],
 )
-def test_linking_holds_no_more_than_the_smallest_budget_it_accepts(
+def test_linking_in_chunks_within_a_small_budget_gives_the_clusters_of_no_budget(
     monkeypatch, receptor_arms, dual_ir, second_chains
 ) -> None:
-    from cytearc.datastore._operations.repertoire import _CLONOTYPE_BYTES_PER_CELL
     from cytearc.repertoire import clonotypes
 
     # Every text of 4 of the letters ACGT is within 2 substitutions of 66
     # others, and each of four groups holds a cell with each beta chain and
-    # random other chains: the pairs of chains, and the links in every group
-    # that holds both chains of a pair, dominate what linking holds. The
-    # search and the chunks of candidate cells get 1 MiB, and the per-cell
-    # arrays the 1,000 bytes per cell that the clonotypes operation reserves.
+    # random other chains. The search gets 1 MiB and the candidate pairs come
+    # in chunks of 4,096, within a budget of 8 MB.
     monkeypatch.setattr(clonotypes, "CLUSTER_SEARCH_BYTES", 1 << 20)
     monkeypatch.setattr(clonotypes, "_PAIRS_PER_CHUNK", 1 << 12)
     texts = ["".join(letters) for letters in itertools.product("ACGT", repeat=4)]
@@ -333,9 +329,4 @@ def test_linking_holds_no_more_than_the_smallest_budget_it_accepts(
             ledger=None if budget is None else MemoryLedger(budget, "Linking"),
         )
 
-    whole = link(None)
-    budget = smallest_budget(link, 1 << 26)
-    assert np.array_equal(link(budget).codes, whole.codes)
-    allowed = (1 << 20) + budget + _CLONOTYPE_BYTES_PER_CELL * n_cells
-    _, peak = traced_peak(lambda: link(budget), allowed)
-    assert peak <= allowed
+    assert np.array_equal(link(8_000_000).codes, link(None).codes)

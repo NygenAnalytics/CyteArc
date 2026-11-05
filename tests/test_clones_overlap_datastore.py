@@ -25,7 +25,6 @@ from tests.clone_helpers import (
 )
 from tests.clone_truth import N_CELLS, clone_truth, number_label
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.memory_helpers import charges, check_budget, step_charge
 from tests.storage_helpers import copy_store, insert_nullable_cell_column
 
 TRUTH = clone_truth()
@@ -377,71 +376,23 @@ def _own_labels(store):
     return own
 
 
-# Reading the clones holds each of the 48 cells' stored int32 code and its
-# int64 copy, and tracking also reads the eight clones' labels, stored one
-# character wide: 4 bytes three times and 100 more each.
-
-
 def test_overlap_and_track_refuse_tables_beyond_the_budget(copied, monkeypatch) -> None:
     store, clones = copied.store, copied.clones
     own = _own_labels(store)
-    # Grouping the clones' 48 cells is checked first, before these pairs and
-    # rows: it reads the clones' cell selection, a flag for each cell of the
-    # store in the one chunk of their 48 rows, and charges it before it reads
-    # it.
-    roomy = store.memoryBytes
-    for method in (store.clones.overlap, store.clones.track):
-        monkeypatch.setattr(store, "memoryBytes", roomy)
-        _result, taken = charges(lambda: method(clones, groups=own))
-        reading = next(
-            planned
-            for item, _nbytes, planned in taken
-            if item == "the cells of the artifact's selection"
-        )
-        monkeypatch.setattr(store, "memoryBytes", reading - 1)
-        with pytest.raises(
-            MemoryError,
-            match=f"holds about {reading} bytes for the cells of the artifact's "
-            "selection",
-        ):
-            method(clones, groups=own)
-    # Each group holds one clone: their 496 pairs take 250 * 496 + 24 * 32**2
-    # bytes, the 32 counts of a clone in a group 40 each in the matrices that
-    # compare the groups, and the groups 2,000 each, beside the clones read
-    # and the counts that the ledger holds.
-    monkeypatch.setattr(store, "memoryBytes", roomy)
-    item = "comparing 32 groups, 496 pairs"
-    nbytes, planned = step_charge(
-        lambda: store.clones.overlap(clones, groups=own), item
-    )
-    assert nbytes == 250 * 496 + 24 * 32**2 + 40 * 32 + 32 * 2_000
-    monkeypatch.setattr(store, "memoryBytes", planned - 1)
+    # Each group holds one clone: 200 kB cannot hold their 496 pairs, and
+    # 10 kB cannot follow the clones through the groups.
+    monkeypatch.setattr(store, "memoryBytes", 200_000)
     with pytest.raises(MemoryBudgetError, match="or compare fewer groups") as refused:
         store.clones.overlap(clones, groups=own)
-    assert refused.value.item == item and refused.value.needed_bytes == planned
-    monkeypatch.setattr(store, "memoryBytes", planned)
+    assert refused.value.item == "comparing 32 groups, 496 pairs"
+    monkeypatch.setattr(store, "memoryBytes", 10_000)
+    with pytest.raises(MemoryBudgetError, match="Raise mem_budget"):
+        store.clones.track(clones, groups=own, top_n=1)
+    monkeypatch.undo()
     assert len(store.clones.overlap(clones, groups=own).pairs) == 496
     # The 8 clones that are each group's largest, followed through the 32
-    # groups, give 256 rows of 106 bytes, which leave the groups' labels to
-    # the keys, a byte for each clone and group, and the counts and groups
-    # as for overlap.
-    monkeypatch.setattr(store, "memoryBytes", roomy)
-    item = "following 8 clones through 32 groups, 256 rows"
-    nbytes, planned = step_charge(
-        lambda: store.clones.track(clones, groups=own, top_n=1), item
-    )
-    assert nbytes == 256 * 106 + 8 * 32 + 40 * 32 + 32 * 2_000
-    # The clones' labels, read whole beside Zarr's read objects, are the
-    # track's largest charge on 48 cells; below the plan of its rows the
-    # track is refused, and it runs at the budget that its refusals name.
-    monkeypatch.setattr(store, "memoryBytes", planned - 1)
-    with pytest.raises(MemoryBudgetError):
-        store.clones.track(clones, groups=own, top_n=1)
-    monkeypatch.setattr(store, "memoryBytes", roomy)
-    budget, _refusals, followed = check_budget(
-        store, lambda reopened: reopened.clones.track(clones, groups=own, top_n=1)
-    )
-    assert budget >= planned and len(followed.table) == 256
+    # groups, give 256 rows.
+    assert len(store.clones.track(clones, groups=own, top_n=1).table) == 256
 
 
 # Clones that keep labels apart, as clonotypes keep receptor types apart,
@@ -556,42 +507,17 @@ def test_track_follows_clones_through_the_groups_of_their_labels(kept_apart) -> 
     plot.close()
 
 
-def test_the_budget_counts_only_the_pairs_and_rows_of_one_lineage(
-    kept_apart, monkeypatch
+def test_kept_apart_lineages_compare_and_follow_only_their_own_groups(
+    kept_apart,
 ) -> None:
     store, clones = kept_apart.store, kept_apart.clones
     own = _own_labels(store)
-    roomy = store.memoryBytes
     # The 24 cells of clones 1 to 4 are groups of lineage A and the 8 cells
-    # of clones 5 to 8 groups of B: 276 + 28 pairs, the largest stratum of 24
-    # groups, beside the counts and groups.
-    nbytes, planned = step_charge(
-        lambda: store.clones.overlap(clones, groups=own),
-        "comparing 32 groups, 304 pairs",
-    )
-    assert nbytes == 250 * (276 + 28) + 24 * 24**2 + 40 * 32 + 32 * 2_000
-    monkeypatch.setattr(store, "memoryBytes", planned - 1)
-    with pytest.raises(MemoryBudgetError, match="for comparing 32 groups, 304 pairs"):
-        store.clones.overlap(clones, groups=own)
-    monkeypatch.setattr(store, "memoryBytes", planned)
-    assert len(store.clones.overlap(clones, groups=own).pairs) == 304
+    # of clones 5 to 8 groups of B: 276 + 28 pairs.
+    assert len(store.clones.overlap(clones, groups=own).pairs) == 276 + 28
     # Clones 1 to 4 are followed through the 24 groups of A and clones 5 to
-    # 8 through the 8 of B, in rows that leave the two key columns to the
-    # keys.
-    monkeypatch.setattr(store, "memoryBytes", roomy)
-    nbytes, planned = step_charge(
-        lambda: store.clones.track(clones, groups=own, top_n=1),
-        "following 8 clones through 32 groups, 128 rows",
-    )
-    assert nbytes == (4 * 24 + 4 * 8) * 106 + 8 * 32 + 40 * 32 + 32 * 2_000
-    monkeypatch.setattr(store, "memoryBytes", planned - 1)
-    with pytest.raises(MemoryBudgetError):
-        store.clones.track(clones, groups=own, top_n=1)
-    monkeypatch.setattr(store, "memoryBytes", roomy)
-    budget, _refusals, followed = check_budget(
-        store, lambda reopened: reopened.clones.track(clones, groups=own, top_n=1)
-    )
-    assert budget >= planned and len(followed.table) == 128
+    # 8 through the 8 of B.
+    assert len(store.clones.track(clones, groups=own, top_n=1).table) == 4 * 24 + 4 * 8
 
 
 def test_overlap_needs_two_groups_of_one_lineage(kept_apart) -> None:

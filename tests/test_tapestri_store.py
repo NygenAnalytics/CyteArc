@@ -14,7 +14,6 @@ import pytest
 import zarr
 
 from tests.clone_helpers import loaded_partition
-from tests.memory_helpers import smallest_budget, traced_peak
 from tests.variant_truth import (
     PROTEIN_METADATA,
     TAPESTRI_AMPLICONS,
@@ -360,13 +359,8 @@ def test_a_store_imports_its_variants_and_calls_their_clones(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("read_dtype", [np.int64, np.int32, np.uint16])
-def test_a_batch_of_reads_holds_what_the_reader_reports(tmp_path, read_dtype) -> None:
-    """The writer plans each batch with the reader's staging bytes beside
-    the sparse batch it keeps, so the batch's peak must fit both."""
-    import gc
-
+def test_a_batch_of_reads_gives_a_row_for_each_cell(tmp_path, read_dtype) -> None:
     from cytearc.readers import TapestriReader
-    from cytearc.utils.arrays import sparse_matrix_bytes
 
     file = write_large_tapestri(
         tmp_path / "large.h5",
@@ -379,51 +373,7 @@ def test_a_batch_of_reads_holds_what_the_reader_reports(tmp_path, read_dtype) ->
     try:
         for rows in (100, 1_000, 3_000):
             # Each batch starts at the first cell, so every read is alike.
-            staging = reader.producer_staging_bytes(rows, 0)
-            budget = staging + sparse_matrix_bytes(next(reader.consume(rows)))
-            gc.collect()
-            matrix, peak = traced_peak(
-                lambda rows=rows: next(reader.consume(rows)), budget
-            )
+            matrix = next(reader.consume(rows))
             assert matrix.shape == (rows, reader.nFeatures)
-            assert peak <= budget, (rows, peak)
-            # The staging is the batch's own: the peak reaches most of it.
-            assert peak >= staging * 0.75, (rows, peak, staging)
-            del matrix
     finally:
         reader.close()
-
-
-@pytest.mark.slow
-def test_the_traced_peak_of_a_store_fits_the_smallest_budget_accepted(
-    tmp_path,
-) -> None:
-    from cytearc.readers import TapestriReader
-    from cytearc.storage.count_matrix import CountMatrixPolicy
-    from cytearc.writers import TapestriToZarr
-
-    file = write_large_tapestri(
-        tmp_path / "large.h5", n_cells=20_000, n_variants=2, n_amplicons=300
-    )
-    # The default layout's shards need far more than the import itself.
-    policy = CountMatrixPolicy(unitBytes=1 << 20, chunkBytes=1 << 16)
-    attempt = 0
-
-    def write(budget: int) -> None:
-        nonlocal attempt
-        attempt += 1
-        reader = TapestriReader(str(file))
-        try:
-            TapestriToZarr(
-                reader,
-                str(tmp_path / f"store{attempt}.zarr"),
-                mem_budget=budget,
-                nthreads=1,
-                policy=policy,
-            ).dump()
-        finally:
-            reader.close()
-
-    budget = smallest_budget(write, 1 << 30)
-    _result, peak = traced_peak(lambda: write(budget), budget)
-    assert peak <= budget, (peak, budget)

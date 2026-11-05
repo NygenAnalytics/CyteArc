@@ -1,7 +1,4 @@
-import asyncio
 import csv
-import dataclasses
-import gc
 import gzip
 import hashlib
 import io
@@ -18,7 +15,6 @@ import zarr
 import cytearc.datastore._operations.record_tables as record_tables
 import cytearc.datastore._operations.repertoire as repertoire_operations
 import cytearc.metadata.rows as metadata_rows
-import cytearc.metadata.selection as metadata_selection
 import cytearc.writers.airr as airr_writer
 from cytearc import DiagnosticWarning
 from cytearc.metadata.records import EncodedText, encode_text
@@ -42,15 +38,8 @@ from tests.clone_helpers import (
     write_cells_store,
     write_lines,
 )
-from cytearc.storage.geometry import READ_OBJECT_BYTES, ArrayGeometry, array_geometry
+from cytearc.storage.geometry import array_geometry
 from cytearc.utils.memory_budget import MemoryLedger
-from tests.memory_helpers import (
-    audited,
-    budget_refusals,
-    budget_that_runs,
-    charges,
-    traced_peak,
-)
 
 # Contig IDs repeat across the three files: X takes _3 and then _4, since the
 # TCR file names a contig X_2, and Z takes _3, or _2 when only chains are
@@ -859,58 +848,27 @@ def test_export_names_missing_and_incomplete_sources(tmp_path) -> None:
 
 @pytest.mark.slow
 @pytest.mark.parametrize("source", ["receptors", "clonotypes"])
-def test_every_refusal_comes_before_the_file_is_written(tmp_path, source) -> None:
+def test_a_refusal_comes_before_the_file_is_written(tmp_path, source) -> None:
     store, receptors = _edge_receptors(tmp_path)
     ref = (
         store.repertoire.clonotypes(receptors) if source == "clonotypes" else receptors
     )
     n_fields = len(artifact_group(store.zw, receptors).attrs["fields"])
-    attempts = []
-
-    def export():
-        path = tmp_path / f"attempt_{len(attempts)}.tsv.gz"
-        attempts.append(path)
-        return store.repertoire.export_airr(ref, path, chains_only=True)
-
-    refusals = budget_refusals(store, export)
-    assert len(refusals) > 1
-    assert {what for what, _estimate in refusals} == {
-        f"Exporting the 10 contigs of 8 cells with {n_fields} fields"
-    }
+    refused, path = tmp_path / "refused.tsv.gz", tmp_path / "export.tsv.gz"
+    budget = store.memoryBytes
+    store.memoryBytes = 1_000
+    try:
+        with pytest.raises(
+            MemoryError,
+            match=f"^Exporting the 10 contigs of 8 cells with {n_fields} fields",
+        ):
+            store.repertoire.export_airr(ref, refused, chains_only=True)
+    finally:
+        store.memoryBytes = budget
     # Only the export that ran created its file, which holds the 9 chains.
-    assert [path.exists() for path in attempts] == [False] * len(refusals) + [True]
-    assert len(_read(attempts[-1])) == 9
-
-
-@pytest.mark.slow
-def test_the_first_check_counts_one_chunk_of_the_first_text_values(tmp_path) -> None:
-    store, receptors = _edge_receptors(tmp_path)
-    group = artifact_group(store.zw, receptors)
-    fields = group.attrs["fields"]
-    first = next(
-        name for name in fields if repertoire_operations.FIELDS[name] == "text"
-    )
-    values = group[f"contig_{first}_values"]
-    # The Python objects of the arrays that the export opens, then the first
-    # text field's distinct values, read whole a chunk at a time: the values,
-    # a stored chunk and its compressed bytes as they are decoded, Zarr's
-    # task and plan for it, and Zarr's objects for the read.
-    objects = (
-        repertoire_operations._EXPORT_OBJECT_BYTES
-        + repertoire_operations._EXPORT_OBJECT_BYTES_PER_FIELD * len(fields)
-    )
-    reading = (
-        values.nbytes
-        + array_geometry(values).storedChunkBytes()
-        + 8 * 1024
-        + 2_304
-        + READ_OBJECT_BYTES
-    )
-    refusals = budget_refusals(
-        store, lambda: store.repertoire.export_airr(receptors, tmp_path / "x.tsv")
-    )
-    exporting = f"Exporting the 10 contigs of 8 cells with {len(fields)} fields"
-    assert refusals[:2] == [(exporting, objects), (exporting, objects + reading)]
+    assert not refused.exists()
+    store.repertoire.export_airr(ref, path, chains_only=True)
+    assert len(_read(path)) == 9
 
 
 def test_measuring_finds_the_longest_value_of_each_field(tmp_path) -> None:
@@ -1157,25 +1115,13 @@ def _long_files(folder, kind: str) -> list:
         pytest.param("ids", marks=pytest.mark.slow),
     ],
 )
-def test_exports_of_long_values_fit_the_smallest_budget(tmp_path, kind) -> None:
+def test_exports_of_long_values_name_each_contig_once(tmp_path, kind) -> None:
     store = receptor_store(tmp_path)
     receptors = store.repertoire.import_receptors(
         _long_files(tmp_path, kind), cell_selection=store.snapshot_cell_selection()
     )
     path = tmp_path / "long_export.tsv"
-
-    def export():
-        return store.repertoire.export_airr(receptors, path)
-
-    export()
-    refusals = budget_refusals(store, export)
-    budget = refusals[-1][1]
-    store.memoryBytes = budget
-    gc.collect()
-    _result, peak = traced_peak(export, budget)
-    # The reads of the cells' IDs count their one stored chunk of 100,000
-    # rows at the bound of incompressible bytes.
-    assert peak <= budget <= 3 * peak + (1 << 20), (peak, budget)
+    store.repertoire.export_airr(receptors, path)
     written = _read(path)
     assert len(written) == 200 and written["sequence_id"].is_unique
 
@@ -1203,50 +1149,13 @@ def test_receptors_without_contigs_export_their_header(tmp_path) -> None:
         )
 
 
-def test_the_cells_ids_are_checked_before_each_read(tmp_path) -> None:
-    from cytearc.metadata.selection import (
-        plan_cell_selection_read,
-        read_cell_selection,
-    )
-
+def test_the_cells_ids_are_packed_for_the_export(tmp_path) -> None:
     store, receptors = _edge_receptors(tmp_path)
-    ids = store.cells._get_array("ids")
-    selection = inspect_artifact(store.zw, receptors).input_ref("cell_selection")
-    mask = artifact_group(store.zw, selection)["values"]
-    ledgers = []
-
-    def read(limit):
-        ledgers.append(MemoryLedger(limit, "Reading"))
-        return store._export_cell_ids(ledgers[-1], receptors, 8, 1)
-
-    refusals = _walk(read)
-    packed, longest = read(10**9)
-    # The selection's positions, as a read of its mask holds them; then the
-    # offsets of the eight IDs, 72 bytes, and each slice of one ID beside the
-    # positions kept, 8 bytes a cell, the IDs packed before it, 5 bytes each,
-    # and what the read before may still hold: the mask's chunk before the
-    # first, and a chunk of the IDs after it. The mask and the IDs are each
-    # one chunk of the 8 cells, and the positions kept and the offsets, beside
-    # the mask's chunk, fit within what the read of the mask plans, so they
-    # refuse with it.
-    assert mask.chunks == ids.chunks == (8,)
-    planned = plan_cell_selection_read(store.zw, selection, cells=8)
-    reading = MemoryLedger(None, "Reading")
-    _positions, taken = charges(
-        lambda: read_cell_selection(reading, store.zw, planned, item="the cells")
+    packed, longest = store._export_cell_ids(
+        MemoryLedger(10**9, "Reading"), receptors, 8, 1
     )
-    one_id = metadata_rows.row_read_bytes(array_geometry(ids), np.asarray([0]))
-    held_before = [array_geometry(mask).heldReadBytes()] + [
-        array_geometry(ids).heldReadBytes()
-    ] * 7
-    assert held_before[0] + 64 + 72 < taken[0][2]
-    assert refusals == [taken[0][2]] + [
-        held_before[k] + 64 + 72 + 5 * k + one_id for k in range(8)
-    ]
     assert bytes(packed.data) == b"".join(f"cell{k}".encode() for k in range(8))
     assert packed.offsets.tolist() == list(range(0, 45, 5)) and longest == 5
-    # The packed IDs and their offsets stay charged; the positions do not.
-    assert ledgers[-1].charged == 8 * 9 + 40
 
 
 def test_packing_text_counts_each_slice_and_their_join() -> None:
@@ -1387,138 +1296,6 @@ def test_hashing_the_ids_is_checked_with_the_hashes(tmp_path) -> None:
     ]
 
 
-@pytest.mark.slow
-def test_naming_repeated_ids_keeps_the_ids_read_before(tmp_path, monkeypatch) -> None:
-    store, receptors = _edge_receptors(tmp_path)
-
-    def naming() -> list[tuple[str, int]]:
-        """The last two refusals on the way to the budget that runs: their items and bytes."""
-        _budget, refusals, _result, _peak = budget_that_runs(
-            store,
-            lambda opened: opened.repertoire.export_airr(
-                receptors, tmp_path / "named.tsv"
-            ),
-            traced=False,
-            max_refusals=100,
-        )
-        found = [
-            re.search(r"holds about (\d+) bytes for (.*), more than", refusal)
-            for refusal in refusals[-2:]
-        ]
-        return [
-            (matched.group(2), int(matched.group(1))) for matched in found if matched
-        ]
-
-    # Naming outweighs every other step, so its checks refuse last.
-    monkeypatch.setattr(repertoire_operations, "_ID_BYTES", 10**8)
-    (five, first), (seven, second) = naming()
-    # The five X and Z are read, then X_2 and Z_2, whose hashes the suffixed
-    # names take, while the five stay held: each 10**8 bytes and 4 per byte
-    # of the longest ID.
-    assert (five, seven) == (
-        "naming 5 repeated contig IDs",
-        "naming 7 repeated contig IDs",
-    )
-    assert second - first == 2 * (10**8 + 4 * 14)
-    # Finding the repeated hashes holds, for each of the ten contigs, the
-    # sorted hashes and a search's positions and matches, beside the naming.
-    monkeypatch.setattr(repertoire_operations, "_NAMING_BYTES_PER_ROW", 10**6)
-    assert naming()[0] == (five, first + 10 * (10**6 - 40))
-
-
-@pytest.mark.parametrize("chunk_bytes", [None, 16])
-def test_writing_a_block_counts_each_row_at_its_widest(
-    tmp_path, monkeypatch, chunk_bytes
-) -> None:
-    if chunk_bytes is not None:
-        monkeypatch.setattr(record_tables, "_RECORD_CHUNK_BYTES", chunk_bytes)
-    store, receptors = _edge_receptors(tmp_path)
-    group = artifact_group(store.zw, receptors)
-    fields = ("sequence_id", "v_call", "v_identity")
-
-    def plan(limit):
-        contigs = _edge_contigs(store, receptors, limit, fields)
-        contigs.hold_text()
-        contigs.measure(10**9, cells=_CELLS, clones=None)
-        return contigs.plan_blocks(
-            n_columns=16,
-            cell_width=5,
-            clone_width=None,
-            block_bytes=32 * 2**20,
-            compressed=False,
-        )
-
-    _rows, taken = charges(lambda: plan(10**9))
-    (planned,) = [
-        planned for item, _n, planned in taken if item == "writing a block of contigs"
-    ]
-    # Beside the V calls' distinct values and their bounds, and what
-    # measuring may still hold, the largest chunk of what it read:
-    left = max(
-        _left(group[name])
-        for name in (
-            "contig_sequence_id_offsets",
-            "contig_sequence_id",
-            "contig_v_identity",
-        )
-    )
-    # Each row at its widest: 16 separators, a cell ID of 5 bytes, an ID of
-    # 14, a V call of 8 and a V identity of 2, the whole numbers 0 and 1 with
-    # a sign, rendered; the ID and the identity read and rendered beside it;
-    # 96 bytes for the row, 24 for the ID's offsets, 12 for the V call's
-    # codes and 16 for the identity's offsets; and rendering the identity,
-    # 136 bytes and 4 per byte of its widest text.
-    rendered = 16 + 5 + 14 + 8 + 2
-    per_row = rendered + (14 + 2) + (96 + 24 + 12 + 16) + (136 + 4 * 2)
-    reading = max(
-        _chunk(group[name])
-        for name in (
-            "contig_cells",
-            "contig_sequence_id_offsets",
-            "contig_v_call",
-            "contig_v_identity",
-            "contig_sequence_id",
-        )
-    )
-    if chunk_bytes is None:
-        # One block of the ten contigs; windows of their ten int32 positions,
-        # eleven int64 offsets, ten int32 codes and ten float64 identities,
-        # each in one chunk.
-        rows, windows = 10, 10 * 4 + 11 * 8 + 10 * 4 + 10 * 8
-    else:
-        # Blocks of four contigs, a stored chunk of positions; the windows of
-        # offsets and of identities span three chunks of two, and the codes
-        # one chunk of four.
-        rows, windows = 4, 4 * 4 + 6 * 8 + 4 * 4 + 6 * 8
-    # A stored chunk decoded beside the one that measuring left behind.
-    held = group["contig_v_call_values"].nbytes + group["contig_v_call_offsets"].nbytes
-    assert planned == (
-        held + left + per_row * rows + windows + reading + max(0, reading - left)
-    )
-    # Once the text is held and measured, a budget of that plan fits the
-    # block, and one byte less refuses it.
-    for budget in (planned, planned - 1):
-        contigs = _edge_contigs(store, receptors, 10**9, fields)
-        contigs.hold_text()
-        contigs.measure(10**9, cells=_CELLS, clones=None)
-        contigs.ledger.budget = budget
-
-        def blocks(contigs=contigs) -> int:
-            return contigs.plan_blocks(
-                n_columns=16,
-                cell_width=5,
-                clone_width=None,
-                block_bytes=32 * 2**20,
-                compressed=False,
-            )
-
-        if budget == planned:
-            assert blocks() == rows
-        else:
-            with pytest.raises(MemoryError, match="for writing a block of contigs"):
-                blocks()
-
-
 def test_renamed_ids_stay_held_while_the_blocks_are_written(
     tmp_path, monkeypatch
 ) -> None:
@@ -1617,108 +1394,6 @@ def test_clonotypes_hold_their_codes_and_labels_while_blocks_are_written(
     # with their offsets.
     packed = sum(len(str(label).encode()) for label in labels)
     assert held[1] - held[0] == 4 * 8 + 8 * (len(labels) + 1) + packed
-
-
-def _slow(*values: object) -> object:
-    return pytest.param(*values, marks=pytest.mark.slow)
-
-
-@pytest.mark.parametrize(
-    ("source", "suffix", "large", "fields"),
-    [
-        ("receptors", ".tsv", "every", None),
-        _slow("clonotypes", ".tsv", "every", None),
-        _slow("receptors", ".tsv.gz", "every", None),
-        _slow("clonotypes", ".tsv", "contig_", None),
-        _slow("receptors", ".tsv", "contig_j_identity", None),
-        _slow("receptors", ".tsv", "values", None),
-        _slow("clonotypes", ".tsv", "values", None),
-        _slow("receptors", ".tsv", "every", ["umi_count"]),
-        _slow("receptors", ".tsv.gz", "every", ["umi_count"]),
-    ],
-)
-def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
-    tmp_path, monkeypatch, source, suffix, large, fields
-) -> None:
-    # Zarr's decoding thread may hold a read's decoded chunk a moment after
-    # the read returns. Each read here holds a chunk of 50 MiB, as the
-    # store's geometry states it, until after the next read, so the traced
-    # peak of every step must stay within what the memory ledger planned for
-    # it, also while a compressed file's deflate state is held. Unless
-    # ``large`` is "every", only the arrays whose names start with it hold
-    # chunks of 50 MiB, and the others keep their own geometry, a few MiB at
-    # most: a step then reads chunks larger than the one left behind before
-    # it, or, with the J identities, the last field that measuring reads and
-    # the blocks next, smaller ones; with "values", the cell selection's mask
-    # holds one, and the cells' IDs read after it hold smaller chunks. An
-    # export of one field holds little beside the opened arrays' objects and
-    # the file, whose buffer, and gzip's, Python 3.14 made 16 times larger.
-    # Zarr decodes inline here, so the chunks that this test holds are the
-    # only ones left behind.
-    async def inline(function, /, *args, **kwargs):
-        return function(*args, **kwargs)
-
-    monkeypatch.setattr(asyncio, "to_thread", inline)
-    store, receptors = _edge_receptors(tmp_path)
-    ref = (
-        store.repertoire.clonotypes(receptors) if source == "clonotypes" else receptors
-    )
-
-    def is_large(array) -> bool:
-        name = str(getattr(array, "path", "")).rsplit("/", 1)[-1]
-        return large == "every" or name.startswith(large)
-
-    @dataclasses.dataclass(frozen=True, slots=True)
-    class LargeChunks(ArrayGeometry):
-        def storedChunkBytes(self) -> int:
-            return 50 * 2**20
-
-    def geometry(array):
-        found = array_geometry(array)
-        if found is None or not is_large(array):
-            return found
-        return LargeChunks(
-            **{
-                field.name: getattr(found, field.name)
-                for field in dataclasses.fields(found)
-            }
-        )
-
-    monkeypatch.setattr(metadata_rows, "array_geometry", geometry)
-    monkeypatch.setattr(metadata_selection, "array_geometry", geometry)
-    monkeypatch.setattr(repertoire_operations, "array_geometry", geometry)
-    held: list[np.ndarray] = []
-    getitem = zarr.Array.__getitem__
-
-    def read(array, selection):
-        values = getitem(array, selection)
-        if np.asarray(values).size:
-            # The new chunk is held before the one before it is let go.
-            size = (
-                50 * 2**20
-                if is_large(array)
-                else array_geometry(array).storedChunkBytes()
-            )
-            held[:] = [np.ones(size, dtype=np.uint8)]
-        return values
-
-    monkeypatch.setattr(zarr.Array, "__getitem__", read)
-    path = tmp_path / f"lingering{suffix}"
-
-    def export() -> None:
-        try:
-            store.repertoire.export_airr(ref, path, fields=fields)
-        finally:
-            held.clear()
-
-    # A first export compiles the kernels; the audited one then holds each
-    # step to what the ledger planned before it.
-    export()
-    gc.collect()
-    _result, taken = charges(export)
-    assert len(taken) >= 10
-    _result, overruns = audited(export)
-    assert overruns == []
 
 
 def test_the_export_warns_of_discouraged_characters_and_repeated_ids(

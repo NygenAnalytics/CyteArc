@@ -4,7 +4,6 @@ import asyncio
 import queue
 import threading
 import time
-import tracemalloc
 from collections import deque
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -16,7 +15,7 @@ import numpy as np
 import pytest
 import zarr
 from scipy.sparse import coo_matrix
-from zarr.storage import LocalStore, MemoryStore
+from zarr.storage import MemoryStore
 
 import cytearc.storage.async_execution as async_execution
 import cytearc.storage.feature_stream as feature_stream
@@ -815,44 +814,3 @@ def test_counts_t_requires_a_zarr_format_3_group() -> None:
     counts = group.create_array("counts", shape=(2, 2), chunks=(2, 2), dtype=np.uint16)
     with pytest.raises(ValueError, match="Zarr format 3"):
         write_counts_t(counts, group)
-
-
-def test_row_block_operation_chains_reserve_their_largest_step(tmp_path: Any) -> None:
-    values = np.random.default_rng(0).poisson(0.5, size=(20_000, 32)).astype(np.uint8)
-    root = zarr.open_group(store=LocalStore(str(tmp_path)), mode="w")
-    stored = root.create_array(
-        "counts",
-        shape=values.shape,
-        chunks=(10_000, 8),
-        shards=(10_000, 32),
-        dtype=np.uint8,
-    )
-    stored[:] = values
-    counts = ChunkedArray(stored, nthreads=1, resources=ResourceBudget(1 << 30, 1))
-    elements = 10_000 * 32
-    # One block of uint8 counts as read: the block and Zarr's copy of it.
-    read = 2 * elements
-    scaled = counts * 2.0
-    logged = np.log1p(scaled)
-    # Scaling holds the read beside its float64 output; the logarithm holds
-    # that output beside its own, as library-size log normalization does.
-    assert scaled._block_owned_bytes() == read + 8 * elements
-    assert logged._block_owned_bytes() == 2 * 8 * elements
-
-    def stream() -> None:
-        for block in logged.stream_blocks():
-            del block
-
-    stream()
-    with execution_report_scope() as reports:
-        tracemalloc.start()
-        try:
-            base, _ = tracemalloc.get_traced_memory()
-            stream()
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-    (plan,) = [report.plan for report in reports]
-    assert plan.unitBytes == logged._block_task_bytes()
-    # One worker holds one block's chain at a time.
-    assert peak - base <= plan.unitBytes

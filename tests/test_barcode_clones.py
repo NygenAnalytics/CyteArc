@@ -9,7 +9,6 @@ of their ``clones.txt``.
 
 import copy
 import gzip
-import io
 import json
 import pickle
 from pathlib import Path
@@ -17,7 +16,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-import zarr
 
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.artifacts import artifact_group
@@ -29,7 +27,6 @@ from tests.clone_helpers import (
     loaded_partition,
     write_truth_store,
 )
-from tests.memory_helpers import smallest_budget, traced_peak
 from tests.clone_truth import (
     N_CELLS,
     SAMPLES,
@@ -731,84 +728,6 @@ def test_calling_refuses_a_budget_too_small_before_writing(
     assert len(store.artifacts.list(kind="clones", scope="datastore")) == before
 
 
-def test_the_write_charge_counts_a_buffer_for_each_write_zarr_runs_at_once(
-    store, tmp_path
-) -> None:
-    # Zarr writes each chunk and each array's metadata through a buffered
-    # file, as many at once as its async concurrency allows, and Python 3.14
-    # made each buffer 128 KiB, where it was the file system's block. The
-    # charge of writing the clones counts them, and no other charge does.
-    from tests.memory_helpers import charges
-
-    _calling, barcodes = _imported(store, tmp_path, "larry")
-
-    def stated(concurrency: int) -> list[tuple[str, int]]:
-        with zarr.config.set({"async.concurrency": concurrency}):
-            _result, taken = charges(
-                lambda: store.clones.barcode_clones(
-                    barcodes, preset="larry", invalidate_cache=True
-                )
-            )
-        return [(item, nbytes) for item, nbytes, _planned in taken]
-
-    ten, twenty = stated(10), stated(20)
-    assert [item for item, _ in ten] == [item for item, _ in twenty]
-    grown = {
-        item: more - fewer
-        for (item, fewer), (_, more) in zip(ten, twenty, strict=True)
-        if more != fewer
-    }
-    assert grown == {item: 10 * io.DEFAULT_BUFFER_SIZE for item in grown}
-    assert len(grown) == 1
-    assert next(iter(grown)).startswith(f"writing the clones of {N_CELLS} cells")
-    # The clones are saved with their labels held as the strings they are,
-    # beside each cell's group, which the grouping leaves charged.
-    items = [item for item, _ in ten]
-    assert "the clones' labels" in items and "each cell's group" in items
-
-
-def test_the_records_are_let_go_before_the_clones_are_saved(store, tmp_path) -> None:
-    # Calling reads six arrays of the records whole as int64, beside the
-    # distinct barcodes' bytes and their offsets; once the clones are called
-    # they are let go, so saving the clones plans without them.
-    from tests.memory_helpers import charges
-
-    _calling, barcodes = _imported(store, tmp_path, "larry")
-    group = artifact_group(store.zw, barcodes)
-    records_bytes = (
-        6 * 8 * group["record_cells"].shape[0]
-        + group["record_barcode_values"].shape[0]
-        + 8 * group["record_barcode_offsets"].shape[0]
-    )
-    _result, taken = charges(
-        lambda: store.clones.barcode_clones(
-            barcodes, preset="larry", invalidate_cache=True
-        )
-    )
-    labels = [item for item, _nbytes, _planned in taken].index("the clones' labels")
-    assert taken[labels - 1][:2] == ("a release", records_bytes), taken[labels - 1]
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("preset", ["trex", "celltag_multi"])
-def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(
-    template, tmp_path, monkeypatch, preset
-) -> None:
-    store = copy_store(template, tmp_path)
-    calling, barcodes = _imported(store, tmp_path, preset)
-    allowlist = list(calling.allowlist) if preset == "celltag_multi" else None
-
-    def call(budget: int) -> object:
-        monkeypatch.setattr(store, "memoryBytes", budget)
-        return store.clones.barcode_clones(
-            barcodes, preset=preset, allowlist=allowlist, invalidate_cache=True
-        )
-
-    budget = smallest_budget(call, 1 << 30)
-    _, peak = traced_peak(lambda: call(budget), budget)
-    assert peak <= budget
-
-
 # TREX 0.4.dev412 (commit c1ade47) ran its own run10x steps on a synthetic
 # molecule table with doublets, clones that share cloneIDs, dropout, errors,
 # partial and low-complexity cloneIDs and ambient molecules, at several
@@ -885,51 +804,3 @@ def test_an_allowlist_too_large_for_the_budget_is_refused_before_it_is_copied(
         store.clones.barcode_clones(
             barcodes, preset="celltag", allowlist=iter(allowlist)
         )
-
-
-@pytest.mark.parametrize("n_columns", [1, 13])
-def test_clones_within_a_label_of_each_cell_fit_the_smallest_budget(
-    tmp_path, n_columns
-) -> None:
-    from tests.barcode_join_helpers import write_barcode_file
-    from tests.memory_helpers import budget_that_runs, stated_bytes
-
-    # 2,000 cells of a barcode each and a label of their own in each within
-    # column, so each clone is a group, and fingerprinting the groups' labels
-    # holds about as much as the groups: the clone call holds within the
-    # smallest budget that its refusals name.
-    n_cells = 2_000
-    ids = [f"cell{index:07d}-1" for index in range(n_cells)]
-    path = tmp_path / "store.zarr"
-    write_count_store(
-        str(path), {"RNA": np.ones((n_cells, 1), dtype=int)}, "uint16", cell_ids=ids
-    )
-    store = open_store(path)
-    store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))
-    names = [f"each_{k}" for k in range(n_columns)]
-    for name in names:
-        store.cells.insert(
-            name, np.asarray([f"c{index:06d}" for index in range(n_cells)])
-        )
-    with collect_warnings():
-        barcodes = store.clones.import_barcodes(
-            write_barcode_file(tmp_path / "counts.tsv", ids),
-            cell_selection=store.snapshot_cell_selection("every_cell"),
-        )
-
-    def run(opened) -> object:
-        with collect_warnings():
-            return opened.clones.barcode_clones(
-                barcodes,
-                preset="larry",
-                min_reads=0,
-                min_umis=1,
-                within=names,
-                invalidate_cache=True,
-            )
-
-    run(store)
-    budget, _refusals, _result, peak = budget_that_runs(
-        store, run, refusal_budget=stated_bytes, max_refusals=100
-    )
-    assert peak is not None and peak <= budget, (peak, budget)

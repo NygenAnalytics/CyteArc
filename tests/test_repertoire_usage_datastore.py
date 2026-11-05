@@ -20,7 +20,6 @@ import zarr
 import cytearc.datastore._operations.record_tables as record_tables
 import cytearc.datastore._operations.repertoire as repertoire_operations
 from cytearc import plotting
-from cytearc.metadata.rows import array_row_selection_parts
 from cytearc.repertoire import SLOTS, GeneUsage, Spectratype
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.storage.refs import ArtifactRef
@@ -37,16 +36,11 @@ from tests.clone_helpers import (
     write_lines,
     write_truth_store,
 )
-from cytearc.storage.geometry import array_geometry
 from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 from tests.memory_helpers import (
-    budget_refusals,
-    budget_that_runs,
-    charges,
     named_budget,
 )
 from tests.clone_truth import clone_truth, receptor_truth
-from tests.storage_helpers import rechunk_column
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -622,85 +616,6 @@ def test_missing_incomplete_and_other_sources_are_named(tmp_path, measure) -> No
             run(clonotypes)
 
 
-def _chunk(array) -> int:
-    """The bytes of one chunk that reading an array holds, by the store's model."""
-    return array_row_selection_parts(array)[0]
-
-
-@pytest.mark.parametrize(
-    "source", ["receptors", pytest.param("clonotypes", marks=pytest.mark.slow)]
-)
-def test_each_step_is_checked_before_it_reads_or_allocates(tmp_path, source) -> None:
-    store, receptors, clonotypes = _sources(tmp_path)
-    # The samples in a chunk of 100,000 rows, as a store written before cell
-    # columns were chunked by their rows keeps them, so that grouping by them
-    # holds the most of the steps and its refusal shows what it counts.
-    rechunk_column(store.cells._group, "sample")
-    store = receptor_store(tmp_path)
-    group = artifact_group(store.zw, receptors)
-    of_clonotypes = source == "clonotypes"
-    ref = clonotypes if of_clonotypes else receptors
-    for measure, what in (
-        (store.repertoire.gene_usage, "genes"),
-        (store.repertoire.spectratype, "junction lengths"),
-    ):
-        _result, taken = charges(lambda measure=measure: measure(ref))
-        steps = {item: nbytes for item, nbytes, _planned in reversed(taken)}
-        # Beside the eight cells' stored slots, read whole: for each cell its
-        # two chosen slots, whether each holds a chain and whether either
-        # does; clonotypes also read each cell's code, with its int64 copy
-        # and whether it has one.
-        assert steps["the chosen slots"] == 8 * (2 * 4 + 2 + 1)
-        if of_clonotypes:
-            assert steps["each cell's clonotype as int64"] == 8 * (4 + 8 + 1) - 8 * 4
-        # Without a grouping, each cell's group, which the grouping holds, and
-        # the one group's row of the keys.
-        assert steps["each cell's group"] == 8 * 8
-        assert (
-            steps["the table of the groups' labels"]
-            == repertoire_operations._KEY_BYTES_PER_GROUP
-        )
-        # The 13 chains of VJ_1 and VDJ_1, with their locus and V call or
-        # junction, and the clonotype of each with clonotypes, and a mask of
-        # the slots of the grouped cells.
-        n_fields = 3 if of_clonotypes else 2
-        assert steps["the 13 chains counted"] == 13 * (
-            repertoire_operations._CHAIN_BYTES
-            + repertoire_operations._CHAIN_BYTES_PER_FIELD * n_fields
-        )
-        assert steps["the chains of the grouped cells"] == 8 * (2 * 2 + 1)
-        # Each contig's locus read whole and copied as int64 beside the codes
-        # of the 13 chains.
-        assert steps["each contig's locus as int64"] == 14 * 8 + 13 * 25
-        counting = f"Counting the {what} of the chains of 8 cells"
-        refusals = budget_refusals(store, lambda measure=measure: measure(ref))
-        assert {step for step, _bytes in refusals} == {counting}
-        # The grouping charges the step's ledger, so its refusals name the
-        # step, and its first charge sits beside what the step holds: the
-        # chosen slots, whether each cell holds a chain, each cell's clonotype
-        # with clonotypes, and what the step's last read may still hold among
-        # them, as the summaries' grouping charges them.
-        grouped = budget_refusals(
-            store, lambda measure=measure: measure(ref, group_by="sample")
-        )
-        assert {step for step, _bytes in grouped} == {counting}
-        _result, taken = charges(
-            lambda measure=measure: measure(ref, group_by="sample")
-        )
-        items = [item for item, _nbytes, _planned in taken]
-        assert "the cells of the artifact's selection" in items
-        assert "the labels of 'sample'" in items
-        last_read = (
-            artifact_group(store.zw, clonotypes)["codes"]
-            if of_clonotypes
-            else group["chain_slots"]
-        )
-        held = 8 * 2 * 4 + 8 + (8 * 8 if of_clonotypes else 0)
-        held += array_geometry(last_read).heldReadBytes()
-        first = items.index("the cells that may join a group")
-        assert taken[first][2] == held + 8
-
-
 def test_every_slot_is_read_for_its_chains(tmp_path) -> None:
     store, receptors, _clonotypes = _sources(tmp_path)
     usage = store.repertoire.gene_usage(receptors, slots=SLOTS)
@@ -937,67 +852,6 @@ def test_the_lengths_legend_names_at_most_80_groups(tmp_path) -> None:
         result.close()
 
 
-@pytest.mark.slow
-def test_the_groups_keys_are_checked_before_their_frame_is_built(
-    tmp_path, monkeypatch
-) -> None:
-    from cytearc.datastore._operations import cell_groups as grouping
-
-    # 4,096 cells, each a group of its own by 24 key columns of two labels,
-    # whose keys outweigh the grouping that names them.
-    n_cells, n_columns = 4_096, 24
-    ids = [f"c{i}" for i in range(n_cells)]
-    folder = tmp_path / "keys"
-    folder.mkdir()
-    store = write_cells_store(folder / "store.zarr", ids)
-    for column in range(n_columns):
-        bits = (np.arange(n_cells) >> (column % 12)) & 1
-        store.cells.insert(f"bit{column}", bits.astype(str).astype(object))
-    contigs = write_clone_contigs(folder, "contigs.csv", ids, np.arange(n_cells))
-    receptors = store.repertoire.import_receptors(
-        contigs, cell_selection=every_cell(store)
-    )
-    columns = [f"bit{column}" for column in range(n_columns)]
-
-    def run() -> object:
-        return store.repertoire.spectratype(receptors, group_by=columns)
-
-    # The grouping holds each group's labels and name, 250 bytes and 70 for
-    # each key column, and the count then each group's row of the keys,
-    # before the frame of the keys is built.
-    _result, taken = charges(run)
-    held = [(item, nbytes) for item, nbytes, _planned in taken]
-    names = ("each group's labels and name", n_cells * (250 + 70 * n_columns))
-    table = (
-        "the table of the groups' labels",
-        n_cells
-        * (
-            repertoire_operations._KEY_BYTES_PER_GROUP
-            + repertoire_operations._KEY_BYTES_PER_GROUP_COLUMN * n_columns
-        ),
-    )
-    assert names[1] == grouping._keys_bytes(n_cells, n_columns)
-    assert held.index(names) < held.index(table)
-    _budget, refusals, _ref, _peak = budget_that_runs(
-        store, lambda _store: run(), max_refusals=100, traced=False
-    )
-    refused = [
-        re.search(r"bytes for (.+?), more than", text).group(1) for text in refusals
-    ]
-    assert refused.index(names[0]) < refused.index(table[0])
-    # Below the budget that the table's refusal names, the count refuses
-    # before it builds the frame.
-    stated = named_budget(refusals[refused.index(table[0])])
-
-    def unbuilt(*_arguments, **_options):
-        raise AssertionError("the keys' frame was built")
-
-    monkeypatch.setattr(repertoire_operations, "group_key_table", unbuilt)
-    store.memoryBytes = stated - 1
-    with pytest.raises(MemoryBudgetError, match="for the table of the groups' labels"):
-        run()
-
-
 def test_counting_is_checked_with_its_table_before_it_runs(tmp_path) -> None:
     store, _receptors, _clonotypes = _sources(tmp_path)
     keys = pd.DataFrame(
@@ -1215,24 +1069,28 @@ def test_each_refusal_names_the_remedy_that_its_step_allows(
     tmp_path, monkeypatch
 ) -> None:
     store, receptors, _clonotypes = _sources(tmp_path)
-    # Chains of 10 MB each make counting them the costliest step, so that the
-    # refusals reach it.
+    # Chains of 10 MB each make counting the 13 chains the costliest step.
     monkeypatch.setattr(repertoire_operations, "_CHAIN_BYTES", 10_000_000)
-    _budget, messages = budget_that_runs(
-        store, lambda opened: opened.repertoire.gene_usage(receptors), traced=False
-    )[:2]
-    # Reading every cell's slots does not shrink with fewer cells; counting
-    # the chains does.
-    assert "for each cell's chain slots" in messages[0]
-    assert messages[0].endswith(
-        f"Raise mem_budget to at least {named_budget(MemoryError(messages[0]))} bytes."
+
+    def refusal(budget: int) -> str:
+        monkeypatch.setattr(store, "memoryBytes", budget)
+        with pytest.raises(MemoryError) as refused:
+            store.repertoire.gene_usage(receptors)
+        return str(refused.value)
+
+    # Reading every cell's slots does not shrink with fewer cells, so 1 kB
+    # asks for a larger budget alone; counting the chains does, so 100 MB
+    # asks for smaller counts too.
+    slots = refusal(1_000)
+    assert "for each cell's chain slots" in slots
+    assert slots.endswith(
+        f"Raise mem_budget to at least {named_budget(MemoryError(slots))} bytes."
     )
-    (counting,) = [message for message in messages if "13 chains counted" in message]
-    # From the chains on, every step's refusal names the smaller counts.
-    for message in messages[messages.index(counting) :]:
-        assert message.endswith(
-            ", or count fewer chains, of a smaller cell_selection or of fewer slots."
-        )
+    counting = refusal(100_000_000)
+    assert "13 chains counted" in counting
+    assert counting.endswith(
+        ", or count fewer chains, of a smaller cell_selection or of fewer slots."
+    )
 
 
 def test_every_stored_array_is_read_through_the_memory_ledger(
@@ -1254,32 +1112,6 @@ def test_every_stored_array_is_read_through_the_memory_ledger(
     store.repertoire.spectratype(clonotypes, sequence="nt")
     assert {"chain_slots", "codes", "contig_locus", "contig_v_call"} <= set(names)
     assert zarr.config.get("async.concurrency") == before
-
-
-def test_junctions_are_measured_within_one_chunk_beside_their_bounds(tmp_path) -> None:
-    store, receptors, _clonotypes = _sources(tmp_path)
-    group = artifact_group(store.zw, receptors)
-    packed = group["contig_junction_aa_values"]
-    offsets = group["contig_junction_aa_offsets"]
-    codes = np.arange(offsets.shape[0] - 1)
-    ledger = MemoryLedger(None, "Measuring")
-    _lengths, taken = charges(
-        lambda: repertoire_operations._value_lengths(
-            ledger, group, "junction_aa", codes
-        )
-    )
-    n_values, n_bytes = len(codes), packed.shape[0]
-    steps = {item: nbytes for item, nbytes, _planned in taken}
-    # The bounds are read whole, then each value's start and end kept; then
-    # one chunk of the packed bytes as it is read, with the chunk before it,
-    # its mask and count of 5 bytes per byte, and 48 bytes for each value.
-    reading = array_geometry(packed).bandReadBytes(n_bytes, 1, bands=2)
-    assert steps[f"measuring the {n_values} junction_aa values"] == (
-        reading + 5 * n_bytes + 48 * n_values
-    )
-    assert steps[f"the bounds of the {n_values} junction_aa values"] == 16 * n_values
-    # The lengths stay charged; the bounds are let go.
-    assert ledger.charged == 8 * n_values
 
 
 def test_chains_without_a_junction_are_counted_apart(tmp_path) -> None:

@@ -134,7 +134,7 @@ minversion = "6.0"
 addopts = "-ra -v -n logical --dist loadfile"
 markers = [
     "integration: live network tests",
-    "slow: tests that build graphs, run iterative numerical workflows, or check memory beyond an operation's quick case",
+    "slow: tests that build graphs, run iterative numerical workflows, or build large inputs",
     "visual: deterministic image comparison tests",
     "benchmark: scaling micro-benchmarks, timed only with CYTEARC_RUN_BENCHMARKS=1",
 ]

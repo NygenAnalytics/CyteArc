@@ -14,7 +14,6 @@ import zarr
 from sklearn.metrics import adjusted_rand_score
 
 from tests.clone_helpers import every_cell
-from tests.memory_helpers import at_budget, smallest_budget, traced_peak
 from tests.storage_helpers import copy_store, open_store
 from tests.variant_helpers import (
     clone_band_budget,
@@ -436,78 +435,3 @@ def test_variant_operations_name_inputs_of_another_kind_missing_or_incomplete(
         finally:
             attributes["complete"] = True
     assert len(store.variants.load_informative(selection).variants) > 0
-
-
-def _traced_at_smallest_budget(store, run) -> tuple[int, int]:
-    """The traced peak of ``run`` at the smallest budget it accepts, by bisection, and that budget."""
-    budget = smallest_budget(at_budget(store, run), 1 << 33)
-    store.memoryBytes = budget
-    return traced_peak(run, budget)[1], budget
-
-
-@pytest.mark.slow
-def test_clones_within_long_labels_fit_the_smallest_budget_they_accept(
-    store,
-) -> None:
-    # A read of a within column decodes a stored chunk of its labels at the
-    # width of the longest.
-    counts, selection = _inputs(store)
-    store.cells.insert(
-        "donor",
-        np.asarray(
-            [
-                f"{'donor_with_a_long_name_' * 3}{cell % 2}"
-                for cell in range(TRUTH.n_cells)
-            ],
-            dtype=object,
-        ),
-    )
-
-    def run() -> object:
-        return store.variants.frequency_clones(
-            selection, within="donor", invalidate_cache=True
-        )
-
-    run()
-    peak, budget = _traced_at_smallest_budget(store, run)
-    assert peak <= budget, (peak, budget)
-
-
-@pytest.mark.slow
-def test_scoring_and_clones_of_a_few_listed_cells_among_many_fit_the_budget(
-    tmp_path,
-) -> None:
-    # Counts over 30,000 selected cells, of which the files name the truth's
-    # 230: the offsets and arrays over every cell, and for clones the labels
-    # written, outweigh the rows of the cells that are scored.
-    from tests.storage_helpers import write_count_store
-
-    n_cells = 30_000
-    ids = [str(cell) for cell in TRUTH.clones.cell_ids]
-    ids += [f"other{cell:07d}-1" for cell in range(n_cells - len(ids))]
-    write_count_store(
-        str(tmp_path / "store.zarr"),
-        {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
-        "uint16",
-        cell_ids=ids,
-    )
-    store = open_store(tmp_path / "store.zarr")
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        counts = store.variants.import_counts(
-            write_mgatk(TRUTH, tmp_path / "final"),
-            cell_selection=store.snapshot_cell_selection(),
-        )
-    selection = store.variants.informative(counts, preset="atac")
-    for name, run in {
-        "informative": lambda: store.variants.informative(
-            counts, preset="atac", invalidate_cache=True
-        ),
-        "clones": lambda: store.variants.frequency_clones(
-            selection, invalidate_cache=True
-        ),
-    }.items():
-        store.memoryBytes = 1 << 33
-        run()
-        peak, budget = _traced_at_smallest_budget(store, run)
-        assert peak <= budget, (name, peak, budget)

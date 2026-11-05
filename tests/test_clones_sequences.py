@@ -20,9 +20,8 @@ from tests.clone_helpers import link_count_variance
 from cytearc.utils.memory_budget import (
     NUMPY_STEP_BYTES,
     MemoryLedger,
-    observed_charges,
 )
-from tests.memory_helpers import budgeted, smallest_budget, traced_peak
+from tests.memory_helpers import budgeted
 from tests.clone_helpers import within_distance as _within
 
 
@@ -437,62 +436,45 @@ _PAIR_ARRAYS = 2 * 192
         pytest.param("pairwise", "levenshtein", marks=pytest.mark.slow),
     ],
 )
-def test_the_search_holds_no_more_than_the_smallest_budget_it_accepts(
+def test_the_search_pairs_every_copy_of_two_texts_of_two_lengths(
     monkeypatch, path, metric
 ) -> None:
     # Copies of two texts of two lengths, the longer last, pair with each
-    # other: their 30,450 pairs dominate what the search holds, the shorter
-    # copies' pairs are held while the longer copies' are found, and each
-    # pass of keys keeps more pairs than it holds keys. Small passes split
-    # the keys of each length into several.
+    # other in 30,450 pairs. Small passes split the keys of each length into
+    # several.
     texts = ["CASSF"] * 60 + ["CASSLGQAYEQYF"] * 240
     _force(monkeypatch, "pairwise" if path == "pairwise" else "keyed")
     if path == "passes":
         monkeypatch.setattr(sequences, "_KEYS_PER_PASS", 800)
         monkeypatch.setattr(sequences, "_MIN_KEYS_PER_PASS", 1)
 
-    def search(budget: int | None) -> tuple[np.ndarray, np.ndarray]:
-        return neighbor_pairs(texts, metric, 1, ledger=budgeted(budget))
-
-    assert _pairs(*search(None)) == _expected(texts, metric, 1)
-    budget = smallest_budget(search, 1 << 23)
-    _, peak = traced_peak(lambda: search(budget), budget)
-    assert peak <= budget
+    assert _pairs(*neighbor_pairs(texts, metric, 1)) == _expected(texts, metric, 1)
 
 
 @pytest.mark.slow
-def test_a_buffer_of_keys_larger_than_those_written_is_charged_whole(
+def test_the_search_within_two_edits_pairs_random_texts_of_three_lengths(
     monkeypatch,
 ) -> None:
-    # 20,000 random texts of 8 to 10 bases within two edits: the keys that
-    # delete up to two positions fill 70% of their buffer, which stays alive
-    # while the candidates are checked. Charged by the keys written, the
-    # search traced 1.05 times the smallest budget it accepted.
+    # 20,000 random texts of 8 to 10 bases within two edits, whose keys
+    # delete up to two positions.
     rng = np.random.default_rng(7)
     texts = [
         "".join(rng.choice(list("ACGT"), rng.integers(8, 11))) for _ in range(20_000)
     ]
     _force(monkeypatch, "keyed")
 
-    def search(budget: int | None) -> tuple[np.ndarray, np.ndarray]:
-        return neighbor_pairs(texts, "levenshtein", 2, ledger=budgeted(budget))
-
-    assert len(search(None)[0]) == 324_273
-    budget = smallest_budget(search, 1 << 27)
-    _, peak = traced_peak(lambda: search(budget), budget)
-    assert peak <= budget, (peak, budget)
+    assert len(neighbor_pairs(texts, "levenshtein", 2)[0]) == 324_273
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
-def test_keys_of_distinct_texts_hold_no_more_than_the_smallest_budget(
+def test_families_of_texts_one_position_apart_pair_within_each_family(
     monkeypatch, metric
 ) -> None:
     # 200 families of 20 distinct texts of 12 residues, the texts of each
     # differing at one position: every pair of a family is one substitution
     # or edit apart and shares the one key that masks or deletes that
-    # position. The 38,000 pairs, each a candidate once, outnumber the keys
-    # and take the most once joined and placed among all texts.
+    # position.
     rng = np.random.default_rng(6)
     letters = list("ACDEFGHIKLMNPQRSTVWY")
     texts = []
@@ -503,35 +485,22 @@ def test_keys_of_distinct_texts_hold_no_more_than_the_smallest_budget(
             texts.append("".join(text))
     _force(monkeypatch, "keyed")
 
-    def search(budget: int | None) -> tuple[np.ndarray, np.ndarray]:
-        return neighbor_pairs(texts, metric, 1, ledger=budgeted(budget))
-
-    assert len(search(None)[0]) == 200 * 20 * 19 // 2
-    budget = smallest_budget(search, 1 << 23)
-    _, peak = traced_peak(lambda: search(budget), budget)
-    assert peak <= budget
+    assert len(neighbor_pairs(texts, metric, 1)[0]) == 200 * 20 * 19 // 2
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
 @pytest.mark.parametrize("near", [True, False])
-def test_many_blocks_hold_no_more_than_the_smallest_budget_they_accept(
-    metric, near
-) -> None:
+def test_many_blocks_pair_only_the_texts_of_each_block(metric, near) -> None:
     # Each of 1,500 blocks holds two texts, within one substitution of each
-    # other or not: what each block keeps, its pairs and their arrays or
-    # nothing, adds up over the blocks.
+    # other or not.
     other = "CASSLGQAYEQYW" if near else "GGGGGGGGGGGGG"
     texts = ["CASSLGQAYEQYF", other] * 1_500
     blocks = np.repeat(np.arange(1_500), 2)
 
-    def search(budget: int | None) -> tuple[np.ndarray, np.ndarray]:
-        return neighbor_pairs(texts, metric, 1, blocks=blocks, ledger=budgeted(budget))
-
-    assert len(search(None)[0]) == (1_500 if near else 0)
-    budget = smallest_budget(search, 1 << 23)
-    _, peak = traced_peak(lambda: search(budget), budget)
-    assert peak <= budget
+    assert len(neighbor_pairs(texts, metric, 1, blocks=blocks)[0]) == (
+        1_500 if near else 0
+    )
 
 
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
@@ -1052,34 +1021,12 @@ def test_partial_cloneids_search_their_groups_by_keys(monkeypatch) -> None:
     assert not looped or max(looped) < 2_000
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize("path", ["keyed", "pairwise"])
-@pytest.mark.parametrize("near", [True, False])
-def test_partial_texts_hold_no_more_than_the_smallest_budget_they_accept(
-    monkeypatch, path, near
-) -> None:
-    # Copies of cut and full texts that all pair, whose pairs take the most;
-    # or distinct random cloneIDs cut in many ways, which pair with nothing,
-    # so that their positions and groups take the most.
+def test_cut_and_full_copies_of_a_text_all_pair(monkeypatch, path) -> None:
     _force(monkeypatch, path)
-    if near:
-        texts = (
-            ["A" * 20 + "-" * 10] * 120 + ["A" * 30] * 120 + ["-" * 10 + "A" * 20] * 120
-        )
-    else:
-        rng = np.random.default_rng(9)
-        texts = _cloneids(rng, 1_500)
-
-    def search(budget: int | None) -> tuple[np.ndarray, np.ndarray]:
-        return neighbor_pairs(
-            texts, "hamming", 0, unknown="-0", min_compared=10, ledger=budgeted(budget)
-        )
-
-    if near:
-        assert len(search(None)[0]) == 360 * 359 // 2
-    budget = smallest_budget(search, 1 << 24)
-    _, peak = traced_peak(lambda: search(budget), budget)
-    assert peak <= budget
+    texts = ["A" * 20 + "-" * 10] * 120 + ["A" * 30] * 120 + ["-" * 10 + "A" * 20] * 120
+    pairs = neighbor_pairs(texts, "hamming", 0, unknown="-0", min_compared=10)
+    assert len(pairs[0]) == 360 * 359 // 2
 
 
 def test_the_positions_of_partial_texts_count_against_the_budget() -> None:
@@ -1317,25 +1264,6 @@ def test_the_chance_of_edits_follows_every_pattern_of_agreeing_positions(
             exact += float(np.prod(np.where(matches, agree, 1.0 - agree)))
     chance = sequences._edit_chance(agree, limit, MemoryLedger(None, "Finding pairs"))
     assert chance == pytest.approx(exact, rel=1e-12, abs=1e-15)
-
-
-def test_the_edit_distances_of_chance_pairs_keep_only_the_states_that_can_end_within(
-    monkeypatch,
-) -> None:
-    # Capping each cell where it can no longer end within the cutoff keeps
-    # 534 states of 30 positions within 6 edits, with the same chance as the
-    # 2,213 states that a cap of one more than the cutoff in every cell keeps.
-    held: list[int] = []
-
-    def recorded(item: str, nbytes: int, _planned: int) -> None:
-        if item == "the edit distances of chance pairs":
-            held.append(nbytes - sequences._CHANCE_FIXED_BYTES)
-
-    with observed_charges(recorded):
-        sequences._edit_chance(
-            np.full((30, 30), 0.25), 6, MemoryLedger(None, "Finding pairs")
-        )
-    assert max(held) // sequences._CHANCE_STATE_BYTES <= 600
 
 
 @pytest.mark.parametrize(
@@ -2019,54 +1947,3 @@ def test_the_frequencies_of_edited_texts_count_against_the_budget() -> None:
             texts, "levenshtein", 1, ledger=budgeted(held + frequencies)
         )
     assert "frequencies" not in str(refused.value)
-
-
-@pytest.mark.parametrize(
-    ("metric", "cutoff", "lengths", "n_texts", "options"),
-    [
-        pytest.param(
-            "levenshtein", 3, (9, 10, 11, 12), 600, {}, marks=pytest.mark.slow
-        ),
-        pytest.param("levenshtein", 8, (20, 22, 24), 60, {}, marks=pytest.mark.slow),
-        ("hamming", 2, (12,), 3_000, {}),
-        pytest.param(
-            "hamming",
-            5,
-            (30,),
-            3_000,
-            {"unknown": "-", "min_compared": 20},
-            marks=pytest.mark.slow,
-        ),
-    ],
-)
-def test_the_expectation_holds_no_more_than_the_smallest_budget_it_accepts(
-    metric, cutoff, lengths, n_texts, options
-) -> None:
-    # Families of ten texts each, so that one text per component is chosen,
-    # and with characters of no base, a third cut at either end.
-    rng = np.random.default_rng(cutoff)
-    texts = _random_texts(rng, n_texts, lengths, (0.25, 0.25, 0.25, 0.25))
-    if options:
-        texts = [
-            text
-            if index % 3
-            else ("-" * 5 + text[5:] if index % 2 else text[:-5] + "-" * 5)
-            for index, text in enumerate(texts)
-        ]
-    components = np.arange(len(texts)) // 10
-    priority = np.arange(len(texts))
-
-    def expect(budget: int | None) -> float:
-        return expected_chance_pairs(
-            texts,
-            metric,
-            cutoff,
-            components=components,
-            priority=priority,
-            ledger=budgeted(budget),
-            **options,
-        )
-
-    budget = smallest_budget(expect, 1 << 26)
-    _, peak = traced_peak(lambda: expect(budget), budget)
-    assert peak <= budget

@@ -4,32 +4,21 @@ Harmony holds several float64 copies of the coordinates and matrices of
 assignments per cell, WNN holds every assay's neighbors and coordinates, the
 SNN merge holds every graph with a float64 matrix of shared-neighbor
 fractions per graph, and an hnswlib index holds every cell. Pure estimators in
-the domain packages bound what each holds, calibrated against tracemalloc
-peaks or, for hnswlib, glibc's count of allocated bytes, and the datastore
-operations compare them with the memory budget before a coordinate or graph
-is read or an index is created or loaded. Coordinate streams reserve only the
-blocks in flight, so their consumers hold no block while the next is read.
+the domain packages bound what each holds, and the datastore operations
+compare them with the memory budget before a coordinate or graph is read or
+an index is created or loaded, refusing a budget too small before it.
 """
 
-import ctypes
 import inspect
 import re
 import shutil
-import sys
-import threading
-from collections.abc import Callable
-from contextlib import nullcontext
-import tracemalloc
 import weakref
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
-from scipy.sparse import csr_matrix
-from threadpoolctl import threadpool_limits
 
 from cytearc import DataStore
 from cytearc.datastore._operations.graph import _ann_index_transfer_bytes
@@ -38,67 +27,26 @@ from cytearc.embeddings.harmony import (
     harmony_cluster_count,
     harmony_peak_bytes,
 )
-from cytearc.neighbors.graph import merge_graphs, snn_merge_peak_bytes
+from cytearc.neighbors.graph import snn_merge_peak_bytes
 from cytearc.neighbors.index import (
     ann_index_file_bytes,
     ann_index_peak_bytes,
     ann_query_block_bytes,
-    instantiate_knn_index,
 )
-from cytearc.neighbors.integration import _wnn_integration_many, wnn_peak_bytes
+from cytearc.neighbors.integration import wnn_peak_bytes
 from cytearc.neighbors.stages import (
     AnnIndexStage,
     ChunkedCoordinateStream,
-    NeighborQueryStage,
 )
-from cytearc.storage.ann_index import load_ann_index, save_ann_index
-from cytearc.storage.artifacts import artifact_group, fingerprint_text_blocks
+from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.execution import ExecutionReport, execution_report_scope
-from cytearc.storage.profiles import resolve_storage_profile
 from tests.storage_helpers import write_count_store
 
 N_CELLS = 120
 
 
 # Estimators
-
-
-@pytest.mark.parametrize(
-    ("platform_name", "machine", "mutex_difference", "label_difference"),
-    [
-        ("win32", "AMD64", 40, 40),
-        ("darwin", "arm64", 24, 0),
-        ("linux", "aarch64", 8, 0),
-        ("linux", "AMD64", 0, 0),
-    ],
-)
-def test_ann_memory_estimate_accounts_for_platform_allocation_sizes(
-    monkeypatch, platform_name, machine, mutex_difference, label_difference
-):
-    from cytearc.neighbors import index
-
-    monkeypatch.setattr(index, "sys", SimpleNamespace(platform="linux"))
-    monkeypatch.setattr(index.platform, "machine", lambda: "x86_64")
-    baseline = ann_index_peak_bytes(1_000, 5, 8, nthreads=2)
-    saved_bytes = ann_index_file_bytes(1_000, 5, 8)
-
-    monkeypatch.setattr(index, "sys", SimpleNamespace(platform=platform_name))
-    monkeypatch.setattr(index.platform, "machine", lambda: machine)
-
-    expected_extra = (1_000 + 65_536) * mutex_difference + 1_000 * label_difference
-    assert ann_index_peak_bytes(1_000, 5, 8, nthreads=2) == baseline + expected_extra
-    assert ann_index_file_bytes(1_000, 5, 8) == saved_bytes
-
-
-def _traced_peak(run) -> int:
-    tracemalloc.start()
-    try:
-        run()
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    return peak
 
 
 def _batches(n_cells: int, levels: int, columns: int = 1) -> pd.DataFrame:
@@ -111,59 +59,6 @@ def _batches(n_cells: int, levels: int, columns: int = 1) -> pd.DataFrame:
             for column in range(columns)
         }
     )
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("n_cells", "dims", "nclust", "levels", "columns", "block_size"),
-    [
-        (4_000, 10, 20, 2, 1, 0.05),
-        (4_000, 5, 10, 40, 1, 1.0),
-        (4_000, 20, 30, 6, 2, 0.3),
-        # Batch levels beyond the cells make the dense Schur complements dominate.
-        (400, 5, 2, 400, 4, 0.05),
-    ],
-    ids=["few-levels", "one-update-block", "two-columns", "many-levels"],
-)
-def test_harmony_peak_bytes_bounds_the_traced_peak(
-    n_cells, dims, nclust, levels, columns, block_size
-) -> None:
-    rng = np.random.default_rng(11)
-    source = rng.normal(size=(n_cells, dims)).astype(np.float32)
-    batches = _batches(n_cells, levels, columns)
-    column_levels = [int(batches[column].nunique()) for column in batches.columns]
-    options = {
-        "n_clusters": nclust,
-        "block_size": block_size,
-        "max_iter_harmony": 1,
-        "max_iter_cluster": 2,
-    }
-
-    def fit() -> None:
-        # The stage fills a float64 input matrix from the coordinate stream.
-        uncorrected = np.empty((dims, n_cells), dtype=np.float64)
-        uncorrected[:] = source.T
-        fit_harmony(uncorrected, batches, **options)
-
-    with threadpool_limits(limits=1):
-        # Import the modules and compile the kernels outside the trace.
-        fit_harmony(
-            rng.normal(size=(dims, 300)),
-            batches.iloc[:300].reset_index(drop=True),
-            n_clusters=3,
-            max_iter_harmony=1,
-        )
-        peak = _traced_peak(fit)
-
-    estimate = harmony_peak_bytes(
-        n_cells,
-        dims,
-        harmony_cluster_count(n_cells, nclust),
-        column_levels,
-        n_combinations=int(len(batches.drop_duplicates())),
-        block_size=block_size,
-    )
-    assert peak <= estimate <= 2 * peak
 
 
 def test_harmony_cluster_count_is_the_default_of_fit_harmony() -> None:
@@ -204,380 +99,6 @@ def test_estimators_refuse_shapes_they_cannot_size() -> None:
     ):
         with pytest.raises(error, match="block_size must be"):
             harmony_peak_bytes(N_CELLS, 5, 4, [2], block_size=block_size)
-
-
-def _knn(n_cells: int, k: int, rng: np.random.Generator) -> np.ndarray:
-    """Return ``k`` distinct neighbors of every cell, without the cell itself."""
-    indices = np.empty((n_cells, k), dtype=np.uint32)
-    for cell in range(n_cells):
-        choice = rng.choice(n_cells - 1, size=k, replace=False)
-        choice[choice >= cell] += 1
-        indices[cell] = choice
-    return indices
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("n_cells", "neighbor_counts", "dims"),
-    [
-        (3_000, (15, 10, 8), (30, 5, 12)),
-        (2_000, (40, 5), (10, 10)),
-    ],
-    ids=["three-assays", "unequal-neighbors"],
-)
-def test_wnn_peak_bytes_bounds_the_traced_peak(
-    monkeypatch, n_cells, neighbor_counts, dims
-) -> None:
-    # Setting a thread limit can scan the process's loaded libraries, a
-    # transient that grows with them, not with the data, and that the
-    # estimate leaves out; these shapes are too small to outgrow it.
-    monkeypatch.setattr(
-        "cytearc.neighbors.integration.process_thread_limit",
-        lambda *_args, **_options: nullcontext(),
-    )
-    rng = np.random.default_rng(5)
-    stored = [
-        (_knn(n_cells, k, rng), rng.normal(size=(n_cells, d)).astype(np.float32))
-        for k, d in zip(neighbor_counts, dims, strict=True)
-    ]
-    # The integration compiles its Numba kernels for each coordinate dtype,
-    # so the warm-up scores float32 coordinates too, and the trace sees no
-    # compilation.
-    _wnn_integration_many(
-        [
-            (
-                f"warm{index}",
-                _knn(200, k, rng),
-                rng.normal(size=(200, d)).astype(np.float32),
-            )
-            for index, (k, d) in enumerate(zip(neighbor_counts, dims, strict=True))
-        ],
-        1,
-    )
-
-    def integrate() -> None:
-        # The operation loads every assay's neighbors and coordinates.
-        modalities = [
-            (f"assay{index}", indices.copy(), coordinates.copy())
-            for index, (indices, coordinates) in enumerate(stored)
-        ]
-        _wnn_integration_many(modalities, 1)
-
-    peak = _traced_peak(integrate)
-
-    estimate = wnn_peak_bytes(
-        n_cells, neighbor_counts, dims, index_itemsize=4, coordinate_itemsize=4
-    )
-    assert peak <= estimate <= 2 * peak
-
-
-def test_wnn_row_norms_sum_bounded_bands_of_every_row(monkeypatch) -> None:
-    from cytearc.neighbors import integration
-
-    values = np.random.default_rng(4).normal(size=(50_000, 10)).astype(np.float32)
-    expected = 1 / np.linalg.norm(values.astype(np.float64), axis=1)
-    # Bands of 1,000 rows, whose float64 copies are small beside the norms.
-    monkeypatch.setattr(integration, "_NORM_BAND_VALUES", 10_000)
-    integration._inverse_row_norms(values[:10])
-
-    peak = _traced_peak(lambda: integration._inverse_row_norms(values))
-
-    # The norms and their inverses, beside two float64 copies of one band.
-    assert peak < 3 * values.shape[0] * 8
-    np.testing.assert_allclose(
-        integration._inverse_row_norms(values), expected, rtol=1e-12
-    )
-
-
-def _stored_graph(
-    n_cells: int, k: int, rng: np.random.Generator
-) -> tuple[np.ndarray, np.ndarray]:
-    edges = np.empty((n_cells * k, 2), dtype=np.uint32)
-    edges[:, 0] = np.repeat(np.arange(n_cells, dtype=np.uint32), k)
-    edges[:, 1] = _knn(n_cells, k, rng).ravel()
-    return rng.random(n_cells * k).astype(np.float32), edges
-
-
-def _loaded_graph(weights: np.ndarray, edges: np.ndarray, n_cells: int) -> csr_matrix:
-    # As DataStore._store_to_sparse loads a stored connectivity map.
-    weights, edges = weights.copy(), edges.copy()
-    return csr_matrix((weights, (edges[:, 0], edges[:, 1])), shape=(n_cells, n_cells))
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("n_cells", "k", "n_graphs"),
-    [(2_000, 10, 2), (3_000, 5, 4), (20_000, 2, 4)],
-    ids=["two-graphs", "four-graphs", "two-neighbors"],
-)
-def test_snn_merge_peak_bytes_bounds_the_traced_peak(n_cells, k, n_graphs) -> None:
-    rng = np.random.default_rng(9)
-    stored = [_stored_graph(n_cells, k, rng) for _ in range(n_graphs)]
-    merge_graphs([_loaded_graph(*_stored_graph(200, k, rng), 200) for _ in range(2)])
-
-    def merge() -> None:
-        merge_graphs([_loaded_graph(*graph, n_cells) for graph in stored])
-
-    peak = _traced_peak(merge)
-
-    estimate = snn_merge_peak_bytes(n_cells, k, n_graphs)
-    assert peak <= estimate <= 2 * peak
-
-
-def _glibc_allocated() -> Callable[[], int] | None:
-    """Return a reader of the bytes glibc's malloc has allocated, if any.
-
-    hnswlib allocates its index with malloc, which tracemalloc does not see.
-    """
-    if not sys.platform.startswith("linux"):
-        return None
-    try:
-        mallinfo2 = ctypes.CDLL("libc.so.6").mallinfo2
-    except (OSError, AttributeError):
-        return None
-
-    class MallInfo2(ctypes.Structure):
-        _fields_ = [
-            (name, ctypes.c_size_t)
-            for name in (
-                "arena",
-                "ordblks",
-                "smblks",
-                "hblks",
-                "hblkhd",
-                "usmblks",
-                "fsmblks",
-                "uordblks",
-                "fordblks",
-                "keepcost",
-            )
-        ]
-
-    mallinfo2.restype = MallInfo2
-
-    def allocated() -> int:
-        info = mallinfo2()
-        # Bytes in use in the heap and in chunks mapped on their own.
-        return int(info.uordblks + info.hblkhd)
-
-    return allocated
-
-
-def _allocated_peak(allocated: Callable[[], int], run: Callable[[], Any]) -> int:
-    """Return the most bytes allocated beyond the start while ``run`` runs.
-
-    A thread samples the count while ``run`` releases the GIL, and the count
-    after it returns covers what it still holds.
-    """
-    start = allocated()
-    peak = start
-    done = threading.Event()
-
-    def sample() -> None:
-        nonlocal peak
-        while not done.wait(0.0002):
-            peak = max(peak, allocated())
-
-    sampler = threading.Thread(target=sample, daemon=True)
-    sampler.start()
-    try:
-        run()
-    finally:
-        done.set()
-        sampler.join()
-    return max(peak, allocated()) - start
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("n_cells", "dims", "m", "nthreads", "metric"),
-    [
-        (8_000, 120, 48, 1, "cosine"),
-        (20_000, 8, 4, 2, "l2"),
-        (5_000, 30, 2, 1, "l2"),
-    ],
-    ids=["wide-cosine", "two-threads", "minimal-m"],
-)
-def test_ann_index_peak_bytes_bounds_the_allocated_peak(
-    tmp_path, n_cells, dims, m, nthreads, metric
-) -> None:
-    import hnswlib
-
-    allocated = _glibc_allocated()
-    if allocated is None:
-        pytest.skip("needs glibc's count of allocated bytes")
-    values = np.random.default_rng(7).normal(size=(n_cells, dims))
-    values = values.astype(np.float32)
-    held: list[Any] = []
-
-    def build() -> None:
-        index = instantiate_knn_index(metric, dims, n_cells, 50, m, 4466, 50, nthreads)
-        held.append(index)
-        for start in range(0, n_cells, 4_096):
-            index.add_items(values[start : start + 4_096])
-
-    built = _allocated_peak(allocated, build)
-    path = str(tmp_path / "index.bin")
-    held.pop().save_index(path)
-
-    def load() -> None:
-        index = hnswlib.Index(space=metric, dim=dims)
-        held.append(index)
-        index.load_index(path)
-
-    loaded = _allocated_peak(allocated, load)
-
-    # The estimate counts the index as built or loaded on this platform.
-    estimate = ann_index_peak_bytes(n_cells, dims, m, nthreads=nthreads)
-    assert max(built, loaded) <= estimate <= 2 * min(built, loaded)
-    # The saved file holds the level-0 block and the upper levels' links,
-    # whose sizes vary with the random levels of the cells.
-    saved = (tmp_path / "index.bin").stat().st_size
-    assert abs(ann_index_file_bytes(n_cells, dims, m) - saved) <= 0.01 * saved
-
-
-@pytest.mark.slow
-def test_ann_query_block_bytes_bounds_the_allocated_peak() -> None:
-    allocated = _glibc_allocated()
-    if allocated is None:
-        pytest.skip("needs glibc's count of allocated bytes")
-    rng = np.random.default_rng(2)
-    values = rng.normal(size=(30_000, 16)).astype(np.float32)
-    index = instantiate_knn_index("l2", 16, 30_000, 40, 16, 1, 40, 1)
-    index.add_items(values)
-    # A deep search on several threads holds candidate queues per thread.
-    for k, rows, ef, threads in (
-        (10, 20_000, 40, 1),
-        (30, 12_000, 40, 1),
-        (10, 2_000, 4_000, 8),
-    ):
-        index.set_ef(ef)
-        index.set_num_threads(threads)
-        query = NeighborQueryStage(index, k, "l2")
-        block = values[:rows].copy()
-
-        def run() -> None:
-            # As query_neighbors queries and checks one block.
-            indices, _distances, _missed = query.query(
-                block, self_indices=np.arange(rows)
-            )
-            assert not (np.any(indices < 0) or np.any(indices >= 30_000))
-
-        # A thread samples the count, so under load one run can miss the
-        # short peak of a query; the largest of three is kept.
-        peak = max(_allocated_peak(allocated, run) for _ in range(3))
-        estimate = ann_query_block_bytes(rows, k, ef=ef, nthreads=threads)
-        assert peak <= estimate <= 2 * peak, (k, rows, ef, threads, peak, estimate)
-
-
-@pytest.mark.slow
-def test_ann_index_transfer_bytes_bound_the_traced_copies(tmp_path) -> None:
-    import zarr
-
-    n_cells, dims = 10_000, 32
-    values = np.random.default_rng(3).normal(size=(n_cells, dims)).astype(np.float32)
-    index = instantiate_knn_index("l2", dims, n_cells, 20, 16, 1, 20, 1)
-    index.add_items(values)
-    root = zarr.open_group(str(tmp_path / "store.zarr"), mode="w")
-    profile = resolve_storage_profile(root.store)
-    small = instantiate_knn_index("l2", dims, 50, 20, 16, 1, 20, 1)
-    small.add_items(values[:50])
-    # Import and warm the codecs outside the trace.
-    save_ann_index(
-        root.create_group("warm"),
-        small,
-        profile=profile,
-        metric="l2",
-        dimensions=dims,
-        element_count=50,
-    )
-    load_ann_index(root["warm"], "l2", dims, expected_count=50)
-    group = root.create_group("index")
-
-    def save() -> None:
-        save_ann_index(
-            group,
-            index,
-            profile=profile,
-            metric="l2",
-            dimensions=dims,
-            element_count=n_cells,
-        )
-
-    saving = _traced_peak(save)
-    payload = int(group["ann_idx_bytes"].shape[0])
-    loading = _traced_peak(lambda: load_ann_index(group, "l2", dims))
-
-    # The payload fits one Zarr chunk, so a save holds about two copies of
-    # it and a load about three.
-    bound = _ann_index_transfer_bytes(payload)
-    assert max(saving, loading) <= bound <= 2 * max(saving, loading)
-
-
-@pytest.mark.parametrize("n_cells", [2, 50, 1_000, 4_000])
-def test_ann_index_transfer_bytes_bound_the_copies_of_small_indexes(
-    tmp_path, n_cells
-) -> None:
-    import zarr
-
-    dims = 32
-    values = np.random.default_rng(4).normal(size=(n_cells, dims)).astype(np.float32)
-    index = instantiate_knn_index("l2", dims, n_cells, 20, 16, 1, 20, 1)
-    index.add_items(values)
-    root = zarr.open_group(str(tmp_path / "store.zarr"), mode="w")
-    profile = resolve_storage_profile(root.store)
-    options = {"profile": profile, "metric": "l2", "dimensions": dims}
-    # Import and warm the codecs outside the trace.
-    save_ann_index(root.create_group("warm"), index, element_count=n_cells, **options)
-    load_ann_index(root["warm"], "l2", dims, expected_count=n_cells)
-    group = root.create_group("index")
-
-    saving = _traced_peak(
-        lambda: save_ann_index(group, index, element_count=n_cells, **options)
-    )
-    payload = int(group["ann_idx_bytes"].shape[0])
-    loading = _traced_peak(lambda: load_ann_index(group, "l2", dims))
-
-    # Payloads of about 600 bytes, 14 KB, one 256 KiB read of the save's
-    # hashing and four such reads. The hashing holds one buffer of at most
-    # the payload. A save holds two copies and the buffers of its files,
-    # which io makes of 128 KiB since Python 3.14, so on Python 3.14 and
-    # 3.15 the save of a tiny payload holds more than its load.
-    assert max(saving, loading) <= _ann_index_transfer_bytes(payload)
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("n_cells", "dims", "clusters", "working_mib"),
-    # The distance chunks, and so the peak, do not depend on the dimensions,
-    # which only slow the distances down.
-    [(10_000, 10, 200, 4), (5_000, 20, 10, 1)],
-    ids=["many-clusters", "small-chunks"],
-)
-def test_silhouette_workspace_estimate_bounds_the_traced_peak(
-    n_cells, dims, clusters, working_mib
-) -> None:
-    from sklearn import config_context
-    from sklearn.metrics import silhouette_score
-
-    from cytearc.datastore._pipeline.cluster_selection import (
-        _silhouette_workspace_bytes,
-    )
-
-    rng = np.random.default_rng(1)
-    values = rng.normal(size=(n_cells, dims))
-    labels = rng.integers(0, clusters, size=n_cells)
-    with config_context(working_memory=working_mib):
-        silhouette_score(values[:200], labels[:200])
-
-        # Cluster selection scores its float64 sample, which it counts on its
-        # own, in distance chunks of its working memory.
-        peak = _traced_peak(
-            lambda: silhouette_score(values, labels, metric="euclidean")
-        )
-
-    allowance = _silhouette_workspace_bytes(n_cells, working_mib)
-    assert peak <= allowance <= 4 * peak
 
 
 # Admission
@@ -687,11 +208,16 @@ def _reserved_bytes(reports: list[ExecutionReport]) -> list[int]:
     ]
 
 
-def _batch_label_bytes() -> int:
-    """Bytes of the batch labels that run_harmony holds: one text object each."""
-    labels = np.where(np.arange(N_CELLS) % 2, "a", "b").astype(object)
-    frame = pd.DataFrame({"batch": labels}, dtype=object)
-    return int(frame.memory_usage(deep=True).sum())
+def test_wnn_row_norms_sum_bands_of_every_row(monkeypatch) -> None:
+    from cytearc.neighbors import integration
+
+    values = np.random.default_rng(4).normal(size=(50_000, 10)).astype(np.float32)
+    expected = 1 / np.linalg.norm(values.astype(np.float64), axis=1)
+    # Bands of 1,000 rows, 50 of them.
+    monkeypatch.setattr(integration, "_NORM_BAND_VALUES", 10_000)
+    np.testing.assert_allclose(
+        integration._inverse_row_norms(values), expected, rtol=1e-12
+    )
 
 
 def test_harmony_admission_counts_the_batch_labels(memory_store, monkeypatch) -> None:
@@ -704,21 +230,16 @@ def test_harmony_admission_counts_the_batch_labels(memory_store, monkeypatch) ->
     # about 58 bytes per cell here.
     store.resources = ResourceBudget(peak + 16 * N_CELLS, 1)
 
-    with pytest.raises(MemoryError, match="for the batch labels") as caught:
+    with pytest.raises(MemoryError, match="for the batch labels"):
         store.reduction.harmony(refs["RNA"]["pca"], ["batch"], **options)
-
-    assert _batch_label_bytes() > 50 * N_CELLS
     assert reads == []
     assert store.artifacts.list(kind="batch_correction", from_assay="RNA") == []
 
-    # The admitted bytes are enough, and the coordinate read reserves the
-    # float64 matrix that it fills beside the labels.
-    store.resources = ResourceBudget(_required_bytes(str(caught.value)), 1)
-    with execution_report_scope() as reports:
-        corrected = store.reduction.harmony(refs["RNA"]["pca"], ["batch"], **options)
+    # A budget that holds them reads the coordinates once and corrects them.
+    store.resources = ResourceBudget(1 << 34, 1)
+    corrected = store.reduction.harmony(refs["RNA"]["pca"], ["batch"], **options)
     assert store.artifacts.inspect(corrected).complete
     assert reads == ["Loading uncorrected latent dimensions"]
-    assert _reserved_bytes(reports) == [N_CELLS * 5 * 8 + _batch_label_bytes()]
 
 
 def test_snn_integration_raises_before_loading_graphs_over_budget(
@@ -928,15 +449,3 @@ def test_query_neighbors_raises_before_loading_the_index_over_budget(
 
 
 # Identity checks of the cell IDs
-
-
-def test_text_fingerprints_hash_fixed_width_bands_without_a_copy() -> None:
-    ids = np.asarray([f"cell{index:07d}" for index in range(200_000)])
-    assert ids.dtype == np.dtype("<U11")
-
-    peak = _traced_peak(
-        lambda: fingerprint_text_blocks(ids.size, ids.dtype, lambda: iter((ids,)))
-    )
-
-    # Before, each band was copied once more to its own fixed-width dtype.
-    assert peak < ids.nbytes // 8

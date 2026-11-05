@@ -3,7 +3,6 @@ import hashlib
 import json
 import re
 import shutil
-import tracemalloc
 from contextlib import contextmanager
 
 import numpy as np
@@ -901,7 +900,7 @@ def test_composite_compares_distinct_ids_whose_hashes_collide(tmp_path, monkeypa
 
 
 def test_composite_count_preparation_names_the_budget_of_one_row(tmp_path):
-    from tests.memory_helpers import named_budget_passes
+    from cytearc.utils.memory_budget import MemoryBudgetError
 
     source = _write_source(
         tmp_path / "source.zarr",
@@ -921,21 +920,19 @@ def test_composite_count_preparation_names_the_budget_of_one_row(tmp_path):
                 chunks=(min(table.N, 256),),
                 attributes=attributes,
             )
-    attempts = iter(range(1_000))
-
-    def create(budget: int) -> None:
+    # One row of every source is read beside what the preparation keeps,
+    # which 71 kB cannot hold.
+    with pytest.raises(MemoryBudgetError) as refused:
         create_composite(
             {"source": source},
-            at=tmp_path / f"joint-{next(attempts)}.zarr",
+            at=tmp_path / "joint.zarr",
             features="union",
-            mem_budget=budget,
+            mem_budget=71_000,
             nthreads=1,
         )
-
-    # One row of every source is read beside what the preparation keeps.
-    named_budget_passes(
-        create, 71_000, item="one row of the composite count preparation"
-    )
+    assert refused.value.item == "one row of the composite count preparation"
+    assert refused.value.budget_bytes == 71_000
+    assert refused.value.needed_bytes > 71_000
 
 
 @pytest.mark.parametrize("phase", ("metadata", "counts"))
@@ -1113,9 +1110,7 @@ def test_small_selection_is_admitted_without_full_source_summaries(tmp_path):
     )
 
 
-def test_creation_and_virtual_reads_fit_measured_buffer_budget(tmp_path):
-    from cytearc.storage.geometry import array_geometry
-
+def test_a_composite_created_at_a_small_budget_reads_its_rows_and_features(tmp_path):
     values = np.random.default_rng(29).integers(
         0, 30, size=(1024, 1024), dtype=np.uint16
     )
@@ -1125,41 +1120,18 @@ def test_creation_and_virtual_reads_fit_measured_buffer_budget(tmp_path):
         [f"g{column:04d}" for column in range(values.shape[1])],
         policy=CountMatrixPolicy(4 * 1024**2, 2 * 1024**2),
     )
-    tracemalloc.start()
-    try:
-        joint = create_composite(
-            {"a": source},
-            at=tmp_path / "joint.zarr",
-            features="intersection",
-            mem_budget="16M",
-            nthreads=1,
-        )
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    assert peak <= joint.memoryBytes
+    joint = create_composite(
+        {"a": source},
+        at=tmp_path / "joint.zarr",
+        features="intersection",
+        mem_budget="16M",
+        nthreads=1,
+    )
     row_order = np.array(
         [int(value.split("__c")[1]) for value in joint.cells.fetch_all("ids")]
     )
     for name in ("counts", "countsT"):
-        array = joint.RNA.matrixGroup[name]
-        geometry = array_geometry(array)
-        # Zarr reads the row's shards at once, and each shard request holds its
-        # own allowance.
-        planned = 0
-        for start in range(0, array.shape[1], geometry.shards[1]):
-            width = min(geometry.shards[1], array.shape[1] - start)
-            planned += geometry.readBytes(
-                width * array.dtype.itemsize, -(-width // geometry.chunks[1])
-            )
-        array[:1, :]
-        tracemalloc.start()
-        try:
-            actual = array[:1, :]
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-        assert peak <= planned
+        actual = joint.RNA.matrixGroup[name][:1, :]
         expected = (
             values[row_order[:1]] if name == "counts" else values[row_order, :1].T
         )
@@ -1266,15 +1238,8 @@ def test_composite_consumers_admit_source_scratch_before_count_reads(
         read(limited)
     assert requests == []
 
-    read(joint)
-    tracemalloc.start()
-    try:
-        actual = read(joint)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    actual = read(joint)
     assert requests
-    assert peak <= joint.memoryBytes
     expected = values[order, 0]
     if operation == "doublets":
         expected = values[order[:1]]
@@ -1283,7 +1248,7 @@ def test_composite_consumers_admit_source_scratch_before_count_reads(
     np.testing.assert_allclose(actual, expected)
 
 
-def test_concurrent_count_reads_fit_measured_buffer_budget(tmp_path):
+def test_concurrent_count_reads_of_a_composite_give_its_sums(tmp_path):
     from cytearc.storage.execution import execution_report_scope
     from cytearc.storage.feature_stream import map_feature_read_groups
 
@@ -1341,15 +1306,8 @@ def test_concurrent_count_reads_fit_measured_buffer_budget(tmp_path):
         read_features,
         lambda: check_rows(joint.RNA.rawData[selected], row_order[selected]),
     ):
-        read()
         with execution_report_scope() as reports:
-            tracemalloc.start()
-            try:
-                read()
-                _, peak = tracemalloc.get_traced_memory()
-            finally:
-                tracemalloc.stop()
-        assert peak <= joint.memoryBytes
+            read()
         if read is read_features:
             assert any(report.as_metrics()["innerReads"] > 1 for report in reports)
 

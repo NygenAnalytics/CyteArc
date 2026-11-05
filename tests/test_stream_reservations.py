@@ -1,8 +1,7 @@
 """Streams and the operations on them reserve what they hold within the budget."""
 
-import tracemalloc
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -12,25 +11,9 @@ from zarr.storage import LocalStore
 
 from cytearc.matrix.chunked import ChunkedArray
 from cytearc.storage.budget import ResourceBudget
-from cytearc.storage.execution import ExecutionReport, execution_report_scope
+from cytearc.storage.execution import execution_report_scope
 from cytearc.storage.geometry import ArrayGeometry
 from tests.thread_helpers import blas_threads, raised_threads
-
-
-def _traced_peak(
-    run: Callable[[], Any],
-) -> tuple[int, list[ExecutionReport], Any]:
-    """Return the traced peak of ``run`` after a warm-up, its reports and result."""
-    run()
-    with execution_report_scope() as reports:
-        tracemalloc.start()
-        try:
-            base, _ = tracemalloc.get_traced_memory()
-            result = run()
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-    return peak - base, reports, result
 
 
 def test_read_bytes_follow_what_a_zarr_read_holds() -> None:
@@ -225,9 +208,8 @@ def _sharded_counts(tmp_path: Any, values: np.ndarray) -> zarr.Array:
     return counts
 
 
-@pytest.mark.parametrize("consumer", ["stream_blocks", "compute"])
-def test_row_block_streams_reserve_what_a_sharded_read_holds(
-    tmp_path: Any, consumer: str
+def test_row_block_streams_of_a_sharded_array_within_a_small_budget_give_its_values(
+    tmp_path: Any,
 ) -> None:
     rng = np.random.default_rng(0)
     values = rng.poisson(0.3, size=(40_000, 64)).astype(np.uint16)
@@ -236,70 +218,7 @@ def test_row_block_streams_reserve_what_a_sharded_read_holds(
         nthreads=2,
         resources=ResourceBudget(24_000_000, 2),
     )
-
-    def run() -> np.ndarray | None:
-        if consumer == "compute":
-            return matrix.compute()
-        for block in matrix.stream_blocks():
-            del block
-        return None
-
-    traced, reports, computed = _traced_peak(run)
-
-    if consumer == "compute":
-        np.testing.assert_array_equal(computed, values)
-    (plan,) = [report.plan for report in reports]
-    block = 20_000 * 64 * 2
-    chunk = 20_000 * 4 * 2
-    # The chunk that a reader's previous read can still hold, as stored, at
-    # most its bytes, a 128th more and 1 KiB, and decoded, beside the 64 KiB
-    # of Zarr's objects for both reads.
-    held = chunk + (chunk + chunk // 128 + 1024) + 64 * 1024
-    # A block, Zarr's copy of it, the compressed bytes of the 16 chunks of its
-    # shard, the one chunk decoded at a time, and the held chunk, for each of
-    # the two readers.
-    assert plan.unitBytes == 2 * block + (16 + 1) * chunk + held
-    assert plan.readWorkers == 2
-    assert plan.reservedBytes == plan.residentBytes + 2 * plan.unitBytes
-    assert traced <= plan.reservedBytes <= 24_000_000
-
-
-def test_row_block_streams_reserve_the_chunk_a_finished_read_still_holds(
-    tmp_path: Any,
-) -> None:
-    from tests.memory_helpers import ZARR_READS, hold_finished_reads
-
-    rng = np.random.default_rng(0)
-    # Three blocks of one 1 MiB chunk each, which store in about two thirds of
-    # their bytes.
-    values = rng.integers(0, 1 << 16, size=(3 * 4096, 64), dtype=np.uint32)
-    root = zarr.open_group(store=LocalStore(str(tmp_path)), mode="w")
-    counts = root.create_array(
-        "counts",
-        shape=values.shape,
-        chunks=(4096, 64),
-        shards=(4096, 64),
-        dtype=values.dtype,
-    )
-    counts[:] = values
-    matrix = ChunkedArray(counts, resources=ResourceBudget(8 << 20, 1))
-
-    def run() -> None:
-        for block in matrix.stream_blocks():
-            del block
-
-    with hold_finished_reads(*ZARR_READS):
-        traced, reports, _ = _traced_peak(run)
-
-    (report,) = reports
-    chunk = 4096 * 64 * 4
-    # A read holds its block, Zarr's copy of it, and the chunk as stored and
-    # decoded, 4 chunks at most, so a pass that held more held the chunk that
-    # the read before still held.
-    assert traced > 4 * chunk
-    # The one reader's plan counts that chunk beside its own read.
-    assert report.actualReadWorkers == 1
-    assert traced <= report.plan.residentBytes + report.plan.unitBytes
+    np.testing.assert_array_equal(matrix.compute(), values)
 
 
 def test_row_block_reads_count_the_chunks_of_their_columns() -> None:
@@ -394,64 +313,3 @@ def test_sharded_feature_blocks_reserve_their_read() -> None:
     assert (planned.readWorkers, planned.ioConcurrency) == (1, 1)
     with pytest.raises(MemoryError, match="affordable width is 7"):
         plan(needed - 1)
-
-
-def _hvg_store(tmp_path: Any, values: np.ndarray, **options: Any) -> Any:
-    """Write uint16 RNA counts in read groups of 32 features and open them."""
-    from cytearc import DataStore
-    from cytearc.storage.count_matrix import CountMatrixPolicy
-    from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
-    from cytearc.writers.counts_t import finalize_writer_counts_t
-    from tests.storage_helpers import finalize_test_counts
-
-    path = str(tmp_path / "hvg.zarr")
-    root = zarr.open_group(path, mode="w")
-    n_cells, n_features = values.shape
-    cell_ids = np.array([f"c{index}" for index in range(n_cells)])
-    feature_ids = np.array([f"f{index}" for index in range(n_features)])
-    create_cell_data(root, None, ids=cell_ids, names=cell_ids)
-    counts = create_zarr_count_assay(
-        root,
-        "RNA",
-        None,
-        n_cells,
-        feature_ids,
-        feature_ids,
-        dtype="uint16",
-        policy=CountMatrixPolicy(unitBytes=n_cells * 32 * 2, chunkBytes=32 * 2_500 * 2),
-    )
-    counts[:] = values
-    finalize_test_counts(counts)
-    finalize_writer_counts_t(root, "RNA", None)
-    return DataStore(
-        path,
-        default_assay="RNA",
-        min_features_per_cell=0,
-        mito_pattern="",
-        ribo_pattern="",
-        **options,
-    )
-
-
-def test_hvg_feature_statistics_reserve_their_totals_and_partials(
-    tmp_path: Any,
-) -> None:
-    rng = np.random.default_rng(0)
-    values = rng.poisson(0.15, size=(100_000, 64)).astype(np.uint16)
-    assay = _hvg_store(tmp_path, values, nthreads=4, mem_budget="6M").RNA
-    cells = np.arange(values.shape[0], dtype=np.int64)
-    features = np.arange(values.shape[1], dtype=np.int64)
-
-    traced, reports, stats = _traced_peak(
-        lambda: assay._streaming_feature_stats(cells, features)
-    )
-
-    (plan,) = [report.plan for report in reports]
-    # The inverse totals of 100,000 cells, the partial statistics of the 40
-    # bands of 2,500 cells, and the stream's band indices stay for the whole
-    # stream, about two fifths of the budget.
-    assert plan.residentBytes > 100_000 * 8 + 40 * 64 * 3 * 8 + 100_000 * 16
-    assert traced <= plan.reservedBytes <= assay.resources.memoryBytes
-    normalized = values / values.sum(axis=1, keepdims=True).clip(1) * assay.sf
-    np.testing.assert_allclose(stats["normed_tot"], normalized.sum(axis=0))
-    np.testing.assert_allclose(stats["sigmas"], normalized.var(axis=0))

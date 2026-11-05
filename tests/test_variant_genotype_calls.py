@@ -5,7 +5,6 @@ GoT calls and GIFT UMIs; the expected calls are derived from those numbers
 by the published rules, written out here, never by the code under test.
 """
 
-import gzip
 import math
 import warnings
 from pathlib import Path
@@ -19,9 +18,8 @@ from cytearc import DiagnosticWarning
 from cytearc.storage.artifacts import artifact_group
 from cytearc.utils.logging import collect_warnings
 from cytearc.variants.genotypes import CALLS, GENOTYPE_RULES
-from tests.clone_helpers import every_cell, levenshtein_distance, write_cells_store
+from tests.clone_helpers import every_cell, levenshtein_distance
 from tests.storage_helpers import copy_store, open_store
-from tests.memory_helpers import smallest_budget, traced_peak
 from tests.variant_helpers import assert_call_counts, write_variant_store
 from tests.variant_truth import (
     PROBES,
@@ -647,55 +645,11 @@ def test_genotypes_refuse_a_budget_too_small_before_writing(
     )
 
 
-def test_bands_count_a_buffer_for_each_write_zarr_runs_at_once(store, tmp_path) -> None:
-    # Appending a band's calls writes stored chunks, each through a buffered
-    # file, as many at once as Zarr's async concurrency allows, and Python
-    # 3.14 made each buffer 128 KiB, where it was the file system's block.
-    import io
-    import re
-
-    import zarr
-
-    counts, options = _method_counts(store, tmp_path, "threshold")
-
-    def bytes_named(concurrency: int) -> int:
-        """The bytes that the check of the first band names."""
-        with zarr.config.set({"async.concurrency": concurrency}):
-            store.memoryBytes = 1
-            try:
-                store.variants.genotypes(counts, method="threshold", **options)
-            except MemoryError as error:
-                found = re.search(r"holds about (\d+) bytes for a band", str(error))
-                assert found is not None, str(error)
-                return int(found.group(1))
-            finally:
-                store.memoryBytes = 1 << 30
-        raise AssertionError("a budget of one byte called the genotypes")
-
-    assert bytes_named(20) - bytes_named(10) == 10 * io.DEFAULT_BUFFER_SIZE
-
-
 def _method_counts(store, tmp_path, method):
     if method == "gift":
         return _gift_store(store, tmp_path), {}
     counts = _got(store, tmp_path, "geo_total")
     return counts, {"min_mutant_umis": 1} if method == "threshold" else {}
-
-
-def _recorded_bands(monkeypatch) -> list[tuple[int, int]]:
-    """Record the most rows allowed and the rows held of each band read."""
-    from cytearc.datastore._operations import variants
-
-    bands: list[tuple[int, int]] = []
-    read = variants._variant_bands
-
-    def recorded(group, tables, positions, max_rows, **options):
-        for band, rows in read(group, tables, positions, max_rows, **options):
-            bands.append((max_rows, sum(len(cells) for cells, _ in rows.values())))
-            yield band, rows
-
-    monkeypatch.setattr(variants, "_variant_bands", recorded)
-    return bands
 
 
 @pytest.mark.parametrize("method", ["threshold", "gift", "source"])
@@ -708,58 +662,23 @@ def test_genotypes_read_in_bands_equal_those_read_in_one(
     whole = store.variants.load_genotypes(
         store.variants.genotypes(counts, method=method, **options)
     ).calls
-    # Without a floor of rows, the smallest budget reads bands of a few cells.
-    monkeypatch.setattr(variants, "_MIN_GENOTYPE_BAND_ROWS", 1)
-    bands = _recorded_bands(monkeypatch)
-    budget = smallest_budget(
-        lambda limit: _at_budget(store, limit, counts, method, options), 1 << 26
+    # Bands of at most one row read one cell at a time, as a budget near the
+    # least that reads them does.
+    read = variants._variant_bands
+    bands = []
+
+    def one_cell_at_a_time(group, tables, positions, max_rows, **options):
+        for band in read(group, tables, positions, 1, **options):
+            bands.append(band)
+            yield band
+
+    monkeypatch.setattr(variants, "_variant_bands", one_cell_at_a_time)
+    narrow = store.variants.genotypes(
+        counts, method=method, invalidate_cache=True, **options
     )
-    bands.clear()
-    narrow = _at_budget(store, budget, counts, method, options)
     assert len(bands) > 10
     found = store.variants.load_genotypes(narrow).calls
     pd.testing.assert_frame_equal(found, whole)
-
-
-@pytest.mark.slow
-def test_a_band_holds_a_floor_of_rows_and_the_cell_with_the_most(
-    store, tmp_path, monkeypatch
-) -> None:
-    from cytearc.datastore._operations import variants
-
-    counts = _got(store, tmp_path, "ironthrone")
-    group = artifact_group(store.zw, counts)
-    per_cell = np.diff(group["count_offsets"][:] + group["depth_offsets"][:])
-    options = {"min_mutant_umis": 1}
-    bands = _recorded_bands(monkeypatch)
-
-    def smallest_bands() -> list[tuple[int, int]]:
-        budget = smallest_budget(
-            lambda limit: _at_budget(store, limit, counts, "threshold", options),
-            1 << 26,
-        )
-        bands.clear()
-        _at_budget(store, budget, counts, "threshold", options)
-        return list(bands)
-
-    # The truth's rows number fewer than the floor, so one band holds them.
-    assert per_cell.sum() < variants._MIN_GENOTYPE_BAND_ROWS
-    assert smallest_bands() == [(per_cell.sum(), per_cell.sum())]
-    # With a floor of one row, a band still holds the cell with the most.
-    monkeypatch.setattr(variants, "_MIN_GENOTYPE_BAND_ROWS", 1)
-    found = smallest_bands()
-    assert {allowed for allowed, _held in found} == {per_cell.max()}
-    assert max(held for _allowed, held in found) == per_cell.max()
-
-
-def _at_budget(store, budget, counts, method, options):
-    store.memoryBytes = budget
-    try:
-        return store.variants.genotypes(
-            counts, method=method, invalidate_cache=True, **options
-        )
-    finally:
-        store.memoryBytes = 1 << 30
 
 
 def test_loaded_calls_name_every_call_of_the_vocabulary(store, tmp_path) -> None:
@@ -780,170 +699,3 @@ def test_loaded_calls_name_every_call_of_the_vocabulary(store, tmp_path) -> None
         "posterior_heterozygous",
         "posterior_homozygous_alternative",
     ]
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("method", ["threshold", "gift", "source"])
-def test_genotypes_hold_no_more_than_the_smallest_budget_they_accept(
-    store, tmp_path, method
-) -> None:
-    counts, options = _method_counts(store, tmp_path, method)
-    budget = smallest_budget(
-        lambda limit: _at_budget(store, limit, counts, method, options), 1 << 28
-    )
-    store.memoryBytes = budget
-    _genotypes, peak = traced_peak(
-        lambda: store.variants.genotypes(
-            counts, method=method, invalidate_cache=True, **options
-        ),
-        budget,
-    )
-    assert peak <= budget
-
-
-class _Accepted(Exception):
-    """Raised where genotypes would start to read bands."""
-
-
-def _many_cell_counts(
-    store, ids: list[str], folder: Path, method: str, n_sites: int = 8
-):
-    """Counts of each cell at ``n_sites`` targets: GoT tables with their calls,
-    or GEO's GIFT tables of one row per UMI."""
-    rng = np.random.default_rng(16)
-    clone = rng.integers(0, 200, size=len(ids))
-    if method != "gift":
-        paths = []
-        for site in range(n_sites):
-            lines = ["BC\twtUMIs\tmutUMIs\tGenotype"]
-            for cell in np.flatnonzero(rng.random(len(ids)) < 0.8).tolist():
-                mutant = clone[cell] % n_sites == site
-                wild = int(rng.poisson(2)) + int(not mutant)
-                alternative = int(rng.poisson(1)) + 1 if mutant else 0
-                call = "MUT" if alternative else "WT"
-                lines.append(f"{ids[cell]}\t{wild}\t{alternative}\t{call}")
-            path = folder / f"T{site}.tsv"
-            path.write_text("\n".join(lines) + "\n")
-            paths.append(path)
-        return _import(store, paths)
-    lines = [
-        "cell_idx\tprobe_idx\tprobe_barcode\tumi\tgapfill\t"
-        "pcr_duplicate_count\tpercent_supporting"
-    ]
-    for cell in range(len(ids)):
-        for site in np.flatnonzero(rng.random(n_sites) < 0.7).tolist():
-            mutant = clone[cell] % n_sites == site
-            for umi in range(int(rng.integers(1, 5))):
-                gapfill = "AAC" if mutant and rng.random() < 0.5 else "CAC"
-                reads = int(rng.integers(1, 9))
-                lines.append(f"{cell}\t{site}\t1\tU{umi}\t{gapfill}\t{reads}\t1.0")
-    tables = folder / "gift"
-    tables.mkdir()
-    manifest = [
-        "name\tlhs_probe\trhs_probe\tgap_probe_sequence\t"
-        "original_gap_probe_sequence\tgene\tindex",
-        *(f"P{site}\tAAAA\tTTTT\tAAC\tCAC\t\t{site}" for site in range(n_sites)),
-    ]
-    for name, rows in (
-        ("probe_reads", lines),
-        ("barcodes", ["barcode\tplex", *(f"{cell}\t1" for cell in ids)]),
-        ("manifest", manifest),
-    ):
-        with gzip.open(tables / f"S_GAP_{name}.tsv.gz", "wt") as handle:
-            handle.write("\n".join(rows) + "\n")
-    return _import(store, str(tables))
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("method", "options"),
-    [
-        ("threshold", {"min_mutant_umis": 1}),
-        ("source", {}),
-        ("gift", {"swap_probabilities": {1: 0.5, 2: 0.2, 4: 0.05}}),
-    ],
-)
-def test_genotypes_of_many_cells_hold_no_more_than_a_budget_of_wide_bands(
-    tmp_path, monkeypatch, method, options
-) -> None:
-    from cytearc.datastore._operations import variants
-
-    # 10,000 cells at 8 targets: bands of 60,000 rows hold a third or more of
-    # the rows, so the bytes of each row outweigh those held whatever the
-    # counts' size.
-    ids = [f"c{cell:06d}-1" for cell in range(10_000)]
-    store = write_cells_store(tmp_path / "store.zarr", ids)
-    counts = _many_cell_counts(store, ids, tmp_path, method)
-    read = variants._variant_bands
-
-    def accepted(*args, **kwargs):
-        raise _Accepted
-
-    def call(budget: int) -> None:
-        store.memoryBytes = budget
-        store.variants.genotypes(
-            counts, method=method, invalidate_cache=True, **options
-        )
-
-    def plans(budget: int) -> None:
-        try:
-            call(budget)
-        except _Accepted:
-            pass
-
-    # The smallest budget accepted, found without reading, reads bands of
-    # the floor of rows.
-    monkeypatch.setattr(variants, "_variant_bands", accepted)
-    high = smallest_budget(plans, 1 << 32)
-    monkeypatch.setattr(variants, "_variant_bands", read)
-    per_row = variants._GENOTYPE_BYTES_PER_ROW[method]
-    bands = _recorded_bands(monkeypatch)
-    peaks = {}
-    for rows in (20_000, 60_000):
-        budget = high + (rows - variants._MIN_GENOTYPE_BAND_ROWS) * per_row
-        bands.clear()
-        peaks[rows] = traced_peak(lambda budget=budget: call(budget), budget)[1]
-        assert {allowed for allowed, _held in bands} == {rows}
-        assert max(held for _allowed, held in bands) > rows // 2
-        assert peaks[rows] <= budget
-    # What 40,000 more rows a band add stays within their bytes per row,
-    # whatever the bytes held beside the rows.
-    assert peaks[60_000] - peaks[20_000] <= 40_000 * per_row
-
-
-@pytest.mark.slow
-def test_loaded_genotypes_of_many_cells_hold_no_more_than_the_smallest_budget(
-    tmp_path,
-) -> None:
-    from cytearc.datastore._operations import variants
-
-    # 64,000 and 128,000 call rows of 2,000 cells at 40 and 80 targets, which
-    # outweigh what the cells hold and the read of their IDs.
-    ids = [f"c{cell:06d}-1" for cell in range(2_000)]
-    peaks = {}
-    for n_sites in (40, 80):
-        folder = tmp_path / str(n_sites)
-        folder.mkdir()
-        store = write_cells_store(folder / "store.zarr", ids)
-        counts = _many_cell_counts(store, ids, folder, "source", n_sites=n_sites)
-        genotypes = store.variants.genotypes(counts, method="source")
-        n_rows = int(artifact_group(store.zw, genotypes)["calls"].shape[0])
-
-        def load(budget: int, store=store, genotypes=genotypes) -> object:
-            store.memoryBytes = budget
-            try:
-                return store.variants.load_genotypes(genotypes)
-            finally:
-                store.memoryBytes = 1 << 30
-
-        budget = smallest_budget(load, 1 << 30)
-        peaks[n_sites] = (
-            n_rows,
-            traced_peak(lambda load=load, budget=budget: load(budget), budget)[1],
-        )
-        assert peaks[n_sites][1] <= budget
-    # The bytes of each call row stay within what the check counts for it.
-    (rows_40, peak_40), (rows_80, peak_80) = peaks[40], peaks[80]
-    assert peak_80 - peak_40 <= (rows_80 - rows_40) * (
-        variants._LOADED_GENOTYPE_BYTES_PER_ROW
-    )

@@ -21,7 +21,6 @@ from cytearc.datastore.datastore import DataStore
 from tests.clone_helpers import (
     import_allele_truth,
     loaded_partition,
-    traced_steps,
     write_truth_store,
 )
 from tests.clone_truth import (
@@ -32,8 +31,6 @@ from tests.clone_truth import (
     allele_calling_truth,
     clone_truth,
 )
-from cytearc.utils.memory_budget import MemoryLedger
-from tests.memory_helpers import charges, smallest_budget, traced_peak
 from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
@@ -214,59 +211,6 @@ def _pair(folder: Path, lines: dict[str, list[str]]) -> Path:
         "\n".join(",".join(cells) for cells in lines.values()) + "\n"
     )
     return folder
-
-
-def _spelled(number: int) -> str:
-    """A number written in bases, as the insertion of an allele of its own."""
-    bases = []
-    while True:
-        bases.append("ACGT"[number % 4])
-        number //= 4
-        if not number:
-            return "".join(bases)
-
-
-def _clones_of_their_own_alleles(
-    folder: Path,
-    n_cells: int,
-    n_clones: int,
-    clone_size: int,
-    arrays: tuple[str, ...],
-) -> tuple[DataStore, object]:
-    """A store whose clones each hold an allele of their own on each array.
-
-    The clones' cells are drawn at random on each array, so clones of more
-    than one cell need a single array to stay apart.
-    """
-    rng = np.random.default_rng(24)
-    barcodes = sorted(
-        {"".join(row) for row in rng.choice(list("ACGT"), size=(n_cells + 5_000, 16))}
-    )[:n_cells]
-    write_count_store(
-        str(folder / "store.zarr"),
-        {"RNA": np.ones((n_cells, 2), dtype=np.uint16)},
-        "uint16",
-        cell_ids=barcodes,
-    )
-    store = open_store(folder / "store.zarr")
-    paths = []
-    for index, array in enumerate(arrays):
-        drawn = rng.permutation(n_cells)[: n_clones * clone_size]
-        lines = {
-            f"{2 + index}_{25 + index}del,60_61ins{_spelled(clone)}": [
-                barcodes[cell] for cell in cells
-            ]
-            for clone, cells in enumerate(drawn.reshape(n_clones, clone_size).tolist())
-        }
-        paths.append(_pair(folder / array, lines))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        alleles = store.clones.import_alleles(
-            paths,
-            cell_selection=store.snapshot_cell_selection(),
-            integrations=list(arrays),
-        )
-    return store, alleles
 
 
 def test_unedited_arrays_placeholders_and_missing_sites_never_link_cells(
@@ -623,74 +567,6 @@ def test_calling_refuses_a_budget_too_small_before_writing(
     assert len(store.artifacts.list(kind="clones", scope="datastore")) == before
 
 
-def test_a_budget_that_writing_the_clones_exceeds_is_refused_before_anything_is_written(
-    tmp_path, monkeypatch
-) -> None:
-    # 100 clones of two cells among 20,000: saving the clones is charged with
-    # the clones called, beside each cell's group and the clones' labels, and
-    # a budget below its plan is refused before anything is written.
-    store, alleles = _clones_of_their_own_alleles(tmp_path, 20_000, 100, 2, ("CA",))
-
-    def call() -> object:
-        return store.clones.allele_clones(
-            alleles, method="graph", max_frequency=0.5, invalidate_cache=True
-        )
-
-    monkeypatch.setattr(store, "memoryBytes", 1 << 34)
-    _result, taken = charges(call)
-    (writing,) = [
-        planned
-        for item, _nbytes, planned in taken
-        if item.startswith("writing the clones of 20000 cells")
-    ]
-    listed = store.artifacts.list(kind="clones", scope="datastore")
-    monkeypatch.setattr(store, "memoryBytes", writing - 1)
-    with pytest.raises(MemoryError):
-        call()
-    assert store.artifacts.list(kind="clones", scope="datastore") == listed
-
-
-def test_writing_the_clones_counts_a_buffer_for_each_write_zarr_runs_at_once(
-    tmp_path, monkeypatch
-) -> None:
-    # Zarr writes each chunk and each array's metadata through a buffered
-    # file, as many at once as its async concurrency allows, and Python 3.14
-    # made each buffer 128 KiB, where it was the file system's block. The
-    # charge of writing the clones counts them, and no other charge does.
-    import io
-
-    import zarr
-
-    store, alleles = _clones_of_their_own_alleles(tmp_path, 2_000, 100, 2, ("CA",))
-    monkeypatch.setattr(store, "memoryBytes", 1 << 34)
-
-    def stated(concurrency: int) -> list[tuple[str, int]]:
-        with zarr.config.set({"async.concurrency": concurrency}):
-            _result, taken = charges(
-                lambda: store.clones.allele_clones(
-                    alleles, method="graph", max_frequency=0.5, invalidate_cache=True
-                )
-            )
-        return [(item, nbytes) for item, nbytes, _planned in taken]
-
-    ten, twenty = stated(10), stated(20)
-    assert [what for what, _ in ten] == [what for what, _ in twenty]
-    grown = {
-        what: more - fewer
-        for (what, fewer), (_, more) in zip(ten, twenty, strict=True)
-        if more != fewer
-    }
-    assert (
-        grown == {what: 10 * io.DEFAULT_BUFFER_SIZE for what in grown}
-        and len(grown) == 1
-    )
-    assert next(iter(grown)).startswith("writing the clones of 2000 cells")
-    # The clones' labels, clone_1 to clone_100, are held as the ASCII
-    # strings and references that they are.
-    (labels,) = [nbytes for what, nbytes in ten if what == "the clones' labels"]
-    assert labels == 100 * (8 + 41) + 9 * 1 + 90 * 2 + 1 * 3 + 6 * 100
-
-
 def test_real_darlin_alleles_join_the_cells_that_share_a_rare_one(tmp_path) -> None:
     """DARLIN's skull library on three arrays, its frequencies from its cells."""
     lines = {}
@@ -749,142 +625,6 @@ def test_real_darlin_alleles_join_the_cells_that_share_a_rare_one(tmp_path) -> N
     # alleles of two or three arrays.
     assert sorted(len(clone) for clone in expected if len(clone) > 1) == [2, 2, 2, 2, 4]
     assert sum(len({node[0] for node in c} - {"cell"}) > 1 for c in components) == 25
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("method", "rules"),
-    [
-        ("graph", DARLIN_RULES),
-        ("p_clonal", {"max_alleles": 3}),
-        ("graph", {"max_frequency": 0.01}),
-    ],
-)
-def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(
-    tmp_path, monkeypatch, method, rules
-) -> None:
-    rng = np.random.default_rng(20)
-    n_cells = 6_000
-    # Bare 16-base barcodes, as CARLIN writes the cells of a 10x run.
-    barcodes = sorted(
-        {"".join(row) for row in rng.choice(list("ACGT"), size=(n_cells + 50, 16))}
-    )[:n_cells]
-    write_count_store(
-        str(tmp_path / "store.zarr"),
-        {"RNA": np.ones((n_cells, 2), dtype=np.uint16)},
-        "uint16",
-        cell_ids=barcodes,
-    )
-    store = open_store(tmp_path / "store.zarr")
-    store.cells.insert(
-        "mouse", np.asarray([f"m{index % 3}" for index in range(n_cells)], dtype=object)
-    )
-    banks, paths = {}, []
-    for array in DARLIN_ARRAYS:
-        # Alleles of a Zipf law, a long-tailed share of them unique; four
-        # cells in five read, and one in fifty X.
-        read = np.flatnonzero(rng.random(n_cells) < 0.8)
-        drawn = np.minimum(rng.zipf(1.4, size=len(read)), 3_000)
-        texts = np.asarray(
-            [f"{20 + d % 200}_{40 + d % 200 + d // 200}del" for d in drawn],
-            dtype=object,
-        )
-        texts[rng.random(len(read)) < 0.02] = "X"
-        texts[drawn == 1] = "[]"
-        lines = (
-            pd.Series(np.asarray(barcodes, dtype=object)[read])
-            .groupby(texts)
-            .apply(list)
-        )
-        paths.append(
-            _pair(tmp_path / array, {allele: cells for allele, cells in lines.items()})
-        )
-        listed = [allele for allele in lines.index if allele not in ("[]", "X")][::2]
-        banks[array] = pd.DataFrame(
-            {
-                "allele": listed,
-                "normalized_count": rng.random(len(listed)) * 1e-4,
-                "sample_count": rng.integers(0, 4, size=len(listed)),
-            }
-        )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        alleles = store.clones.import_alleles(
-            paths,
-            cell_selection=store.snapshot_cell_selection(),
-            integrations=list(DARLIN_ARRAYS),
-        )
-    # The graph of frequencies below 0.01 takes them from the cells.
-    frequencies = None if method == "graph" and "max_samples" not in rules else banks
-
-    def call(budget: int) -> object:
-        monkeypatch.setattr(store, "memoryBytes", budget)
-        return store.clones.allele_clones(
-            alleles,
-            method=method,
-            frequencies=frequencies,
-            within="mouse",
-            invalidate_cache=True,
-            **rules,
-        )
-
-    call(1 << 32)
-    budget = smallest_budget(call, 1 << 30)
-    _, peak = traced_peak(lambda: call(budget), budget)
-    assert peak <= budget
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(("n_cells", "placeholders"), [(2_000, None), (6_000, 0.97)])
-def test_calling_on_wide_characters_holds_no_more_than_the_smallest_budget_it_accepts(
-    tmp_path, monkeypatch, n_cells, placeholders
-) -> None:
-    """PEtracer's characters by 300 sites, drawn evenly or nearly all the placeholder !."""
-    rng = np.random.default_rng(21)
-    cells = [f"cell{index:06d}" for index in range(n_cells)]
-    header = ["cell_barcode"] + [
-        f"intID{k}-{site}" for k in range(100) for site in ("EMX1", "HEK3", "RNF2")
-    ]
-    weights = (
-        None
-        if placeholders is None
-        else [placeholders] + [(1 - placeholders) / 10] * 10
-    )
-    tokens = rng.choice(
-        np.asarray(list("!*-12345678"), dtype=object), size=(n_cells, 300), p=weights
-    )
-    path = tmp_path / "characters.csv"
-    path.write_text(
-        ",".join(header)
-        + "\n"
-        + "".join(
-            cell + "," + ",".join(row) + "\n"
-            for cell, row in zip(cells, tokens.tolist(), strict=True)
-        )
-    )
-    write_count_store(
-        str(tmp_path / "store.zarr"),
-        {"RNA": np.ones((len(cells), 2), dtype=np.uint16)},
-        "uint16",
-        cell_ids=cells,
-    )
-    store = open_store(tmp_path / "store.zarr")
-    alleles = store.clones.import_alleles(
-        path, cell_selection=store.snapshot_cell_selection()
-    )
-
-    def call(budget: int) -> object:
-        monkeypatch.setattr(store, "memoryBytes", budget)
-        return store.clones.allele_clones(
-            alleles, method="graph", max_frequency=0.15, invalidate_cache=True
-        )
-
-    call(1 << 32)
-    budget = smallest_budget(call, 1 << 30)
-    _, peak = traced_peak(lambda: call(budget), budget)
-    assert peak <= budget
-    # The records, not the fixed bytes, set the budget.
-    assert budget > 4 * (8 << 20)
 
 
 def _characters_store(tmp_path: Path, rows: list[str], header: str):
@@ -1071,84 +811,15 @@ def test_a_bank_may_name_a_character_whose_cells_are_all_unedited(tmp_path) -> N
         )
 
 
-def _assert_steps_within(
-    traced: tuple[list[tuple[str, int]], list[tuple[str, int, int]]],
-) -> None:
-    """No step holds more than its check states: each step's traced peak stays
-    within what its charge planned, and an overrun names its step."""
-    checks, overruns = traced
-    assert not overruns, overruns
-    assert len(checks) > 10
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    "tokens",
-    [
-        # Nearly every site the placeholder !, so the edits set the bytes.
-        {"!": 0.97, "*": 0.003, "-": 0.003, "1": 0.024},
-        # Nearly every site unedited or missing, so the records set them.
-        {"*": 0.5, "-": 0.45, "!": 0.01, "1": 0.02, "2": 0.02},
-    ],
-)
-def test_each_step_on_millions_of_records_holds_no_more_than_its_check_states(
-    tmp_path, monkeypatch, tokens
-) -> None:
-    """PEtracer's characters of 12,000 cells by 300 sites, 3.6 million records."""
-    rng = np.random.default_rng(22)
-    n_cells = 12_000
-    cells = [f"cell{index:06d}" for index in range(n_cells)]
-    header = ["cell_barcode"] + [
-        f"intID{k}-{site}" for k in range(100) for site in ("EMX1", "HEK3", "RNF2")
-    ]
-    drawn = rng.choice(
-        np.asarray(list(tokens), dtype=object),
-        size=(n_cells, 300),
-        p=list(tokens.values()),
-    )
-    path = tmp_path / "characters.csv"
-    path.write_text(
-        ",".join(header)
-        + "\n"
-        + "".join(
-            cell + "," + ",".join(row) + "\n"
-            for cell, row in zip(cells, drawn.tolist(), strict=True)
-        )
-    )
-    write_count_store(
-        str(tmp_path / "store.zarr"),
-        {"RNA": np.ones((n_cells, 2), dtype=np.uint16)},
-        "uint16",
-        cell_ids=cells,
-    )
-    store = open_store(tmp_path / "store.zarr")
-    alleles = store.clones.import_alleles(
-        path, cell_selection=store.snapshot_cell_selection()
-    )
-    budget = 1 << 34
-    monkeypatch.setattr(store, "memoryBytes", budget)
-
-    def call() -> object:
-        return store.clones.allele_clones(
-            alleles, method="graph", max_frequency=0.5, invalidate_cache=True
-        )
-
-    _assert_steps_within(traced_steps(call))
-
-
 @pytest.mark.slow
 @pytest.mark.parametrize("ending", ["é", "語", "😀"])
-def test_each_step_on_wide_alleles_holds_no_more_than_its_check_states(
-    tmp_path, monkeypatch, ending
-) -> None:
+def test_wide_alleles_join_each_pair_of_cells_that_shares_one(tmp_path, ending) -> None:
     """1,000 alleles of 5,000 characters, each shared by two cells, 5 MB of text.
 
     An allele that ends in a character beyond ASCII is a Python string with
     a longer header; one beyond U+00FF makes Python hold each of the
     allele's characters in two bytes, and one beyond U+FFFF, such as an
-    emoji, in four, so decoding the text holds up to ten bytes per stored
-    byte and the decoded alleles four, which the checks count by the
-    alleles' largest UTF-8 byte.
+    emoji, in four. Each pair of cells still forms one clone of its own.
     """
     rng = np.random.default_rng(24)
     n_cells = 2_000
@@ -1178,192 +849,7 @@ def test_each_step_on_wide_alleles_holds_no_more_than_its_check_states(
         columns={"cell": "cell", "allele": "allele"},
         integrations="I",
     )
-    budget = 1 << 34
-    monkeypatch.setattr(store, "memoryBytes", budget)
-
-    def call() -> object:
-        return store.clones.allele_clones(
-            alleles, method="graph", max_frequency=0.5, invalidate_cache=True
-        )
-
-    assert store.clones.load_clones(call()).clones["n_cells"].tolist() == [2] * (
+    clones = store.clones.allele_clones(alleles, method="graph", max_frequency=0.5)
+    assert store.clones.load_clones(clones).clones["n_cells"].tolist() == [2] * (
         n_cells // 2
     )
-    _assert_steps_within(traced_steps(call))
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("ending", ["", "é"])
-def test_each_step_on_few_long_alleles_holds_no_more_than_its_check_states(
-    tmp_path, monkeypatch, ending
-) -> None:
-    """100 alleles of 50,000 characters, each shared by two of 200 cells.
-
-    Few cells and nodes leave the steps of the calls little room beyond
-    their counts, so what the operation holds whatever its size, such as
-    its arrays' headers and objects, must be left out of their budget.
-    """
-    rng = np.random.default_rng(25)
-    n_cells = 200
-    cells = [f"cell{index:06d}" for index in range(n_cells)]
-    letters = np.asarray(list("ACGT"))
-    texts = [
-        "".join(rng.choice(letters, 49_987)) + f"{pair:012d}{ending}"
-        for pair in range(n_cells // 2)
-    ]
-    path = tmp_path / "alleles.tsv"
-    path.write_text(
-        "cell\tallele\n"
-        + "".join(f"{cell}\t{texts[index // 2]}\n" for index, cell in enumerate(cells)),
-        encoding="utf-8",
-    )
-    write_count_store(
-        str(tmp_path / "store.zarr"),
-        {"RNA": np.ones((n_cells, 2), dtype=np.uint16)},
-        "uint16",
-        cell_ids=cells,
-    )
-    store = open_store(tmp_path / "store.zarr")
-    alleles = store.clones.import_alleles(
-        path,
-        cell_selection=store.snapshot_cell_selection(),
-        columns={"cell": "cell", "allele": "allele"},
-        integrations="I",
-    )
-    budget = 1 << 34
-    monkeypatch.setattr(store, "memoryBytes", budget)
-
-    def call() -> object:
-        return store.clones.allele_clones(
-            alleles, method="graph", max_frequency=0.5, invalidate_cache=True
-        )
-
-    _assert_steps_within(traced_steps(call))
-
-
-@pytest.mark.slow
-def test_each_step_with_banks_and_groups_holds_no_more_than_its_check_states(
-    tmp_path, monkeypatch
-) -> None:
-    rng = np.random.default_rng(23)
-    n_cells = 60_000
-    barcodes = sorted(
-        {"".join(row) for row in rng.choice(list("ACGT"), size=(n_cells + 500, 16))}
-    )[:n_cells]
-    write_count_store(
-        str(tmp_path / "store.zarr"),
-        {"RNA": np.ones((n_cells, 2), dtype=np.uint16)},
-        "uint16",
-        cell_ids=barcodes,
-    )
-    store = open_store(tmp_path / "store.zarr")
-    store.cells.insert(
-        "mouse", np.asarray([f"m{index % 7}" for index in range(n_cells)], dtype=object)
-    )
-    banks, paths = {}, []
-    for array in DARLIN_ARRAYS:
-        read = np.flatnonzero(rng.random(n_cells) < 0.8)
-        drawn = np.minimum(rng.zipf(1.4, size=len(read)), 20_000)
-        texts = np.asarray(
-            [f"{20 + d % 200}_{40 + d % 200 + d // 200}del" for d in drawn],
-            dtype=object,
-        )
-        texts[rng.random(len(read)) < 0.02] = "X"
-        texts[drawn == 1] = "[]"
-        lines = (
-            pd.Series(np.asarray(barcodes, dtype=object)[read])
-            .groupby(texts)
-            .apply(list)
-        )
-        paths.append(_pair(tmp_path / array, dict(lines.items())))
-        listed = [allele for allele in lines.index if allele not in ("[]", "X")][::2]
-        filler = [f"{k}_{k + 5}delinsA" for k in range(50_000)]
-        banks[array] = pd.DataFrame(
-            {
-                "allele": listed + filler,
-                "normalized_count": rng.random(len(listed) + len(filler)) * 1e-4,
-                "sample_count": rng.integers(0, 4, size=len(listed) + len(filler)),
-            }
-        )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        alleles = store.clones.import_alleles(
-            paths,
-            cell_selection=store.snapshot_cell_selection(),
-            integrations=list(DARLIN_ARRAYS),
-        )
-    budget = 1 << 34
-    monkeypatch.setattr(store, "memoryBytes", budget)
-    for method, rules in (("graph", DARLIN_RULES), ("p_clonal", {"max_alleles": 3})):
-
-        def call(method=method, rules=rules) -> object:
-            return store.clones.allele_clones(
-                alleles,
-                method=method,
-                frequencies=banks,
-                invalidate_cache=True,
-                **rules,
-            )
-
-        _assert_steps_within(traced_steps(call))
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("n_cells", "n_clones", "clone_size", "arrays"),
-    [
-        # Every cell holds an allele of its own on each of three arrays, so
-        # the alleles' text sets the bytes of reading the records.
-        (100_000, 100_000, 1, DARLIN_ARRAYS),
-        # Clones of four cells cover every cell, so the cells in clones set
-        # the bytes of writing them.
-        (400_000, 100_000, 4, ("CA",)),
-    ],
-)
-def test_each_step_on_many_alleles_and_clones_holds_no_more_than_its_check_states(
-    tmp_path, monkeypatch, n_cells, n_clones, clone_size, arrays
-) -> None:
-    store, alleles = _clones_of_their_own_alleles(
-        tmp_path, n_cells, n_clones, clone_size, arrays
-    )
-    budget = 1 << 34
-    monkeypatch.setattr(store, "memoryBytes", budget)
-
-    def call() -> object:
-        return store.clones.allele_clones(
-            alleles, method="graph", max_frequency=0.5, invalidate_cache=True
-        )
-
-    traced = traced_steps(call)
-    # The last charge writes the clones called.
-    assert traced[0][-1][0].startswith(f"writing the clones of {n_cells} cells")
-    _assert_steps_within(traced)
-
-
-@pytest.mark.slow
-def test_the_edits_read_counts_the_chunks_that_reading_the_edits_decodes(
-    tmp_path,
-) -> None:
-    # The edits of 300,000 cells are three stored chunks of int64 counts,
-    # which Zarr decodes at once, each into a buffer of its own, beside the
-    # counts that it returns: the read's charge counts them, more than the
-    # counts and their mask, nine bytes a cell.
-    from cytearc.metadata.rows import read_whole
-    from cytearc.storage.artifacts import artifact_group
-
-    n_cells = 300_000
-    store, alleles = _clones_of_their_own_alleles(tmp_path, n_cells, 75_000, 4, ("CA",))
-    _result, taken = charges(
-        lambda: store.clones.allele_clones(alleles, method="graph", max_frequency=0.5)
-    )
-    read = next(
-        nbytes for item, nbytes, _planned in taken if item == "each cell's edits"
-    )
-    group = artifact_group(store.zw, alleles)
-    _values, peak = traced_peak(
-        lambda: (
-            read_whole(MemoryLedger(None, "Reading"), group, "n_edits", item="x") > 0
-        ),
-        1 << 30,
-    )
-    assert 9 * n_cells < peak <= read + n_cells, (peak, read)

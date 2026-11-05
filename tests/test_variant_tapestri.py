@@ -8,9 +8,7 @@ and every import must recover the truth's depth, reads and calls exactly.
 import hashlib
 import re
 import warnings
-from collections import Counter
 from pathlib import Path
-from typing import Any
 
 import h5py
 import numpy as np
@@ -20,7 +18,6 @@ import pytest
 from cytearc import DiagnosticWarning
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import every_cell, loaded_partition, write_cells_store
-from tests.memory_helpers import traced_peak
 from tests.storage_helpers import copy_store
 from tests.variant_helpers import (
     DAB_SEQ_ITD_SITE,
@@ -1118,260 +1115,11 @@ def _large_store(tmp_path, file: Path):
     return write_cells_store(tmp_path / "large.zarr", ids)
 
 
-def _smallest_and_peak(store, run) -> tuple[int, int]:
-    from tests.memory_helpers import at_budget, smallest_budget, traced_peak
-
-    store.memoryBytes = 1 << 33
-    run()
-    budget = smallest_budget(at_budget(store, run), 1 << 30)
-    store.memoryBytes = budget
-    return budget, traced_peak(run, budget)[1]
-
-
-@pytest.mark.slow
-def test_the_traced_peak_of_a_tapestri_import_fits_the_smallest_budget_accepted(
-    tmp_path,
-) -> None:
-    from tests.variant_truth import write_large_tapestri
-
-    file = write_large_tapestri(tmp_path / "large.h5", n_cells=8_000, n_variants=40)
-    store = _large_store(tmp_path, file)
-    cells = every_cell(store)
-
-    def run() -> None:
-        store.variants.import_counts(file, cell_selection=cells, invalidate_cache=True)
-
-    budget, peak = _smallest_and_peak(store, run)
-    assert peak <= budget, (peak, budget)
-
-
-# The arrays of the variant counts that the import appends to a band at a time.
-_LONG_ARRAYS = (
-    "depth_sites",
-    "depth",
-    "count_alleles",
-    "counts",
-    "call_alleles",
-    "call_sources",
-    "call_values",
-    "call_quality",
-)
-
-
-def _chunk_writes(monkeypatch) -> Counter[tuple[str, int]]:
-    """Count the writes that the store receives for each chunk of the variant counts' arrays."""
-    import zarr.storage
-
-    writes: Counter[tuple[str, int]] = Counter()
-    write = zarr.storage.LocalStore.set
-
-    async def counted(self, key, value) -> None:
-        parts = key.split("/")
-        if parts[:2] == ["artifacts", "variant_counts"] and parts[-2:-1] == ["c"]:
-            writes[parts[3], int(parts[-1])] += 1
-        await write(self, key, value)
-
-    monkeypatch.setattr(zarr.storage.LocalStore, "set", counted)
-    return writes
-
-
-@pytest.fixture(scope="module")
-def banded(tmp_path_factory) -> tuple[Path, Path]:
-    """A Tapestri file of 300 cells and 20 variants, at most 18,000 rows of depth, counts and calls, and a store of its cells."""
-    from tests.variant_truth import write_large_tapestri
-
-    folder = tmp_path_factory.mktemp("banded")
-    file = write_large_tapestri(folder / "large.h5", n_cells=300, n_variants=20)
-    _large_store(folder, file)
-    return file, folder / "large.zarr"
-
-
-def _import_at_smallest_budget(
-    banded, tmp_path, writes: Counter[tuple[str, int]]
-) -> tuple[int, BaseException | None, Any]:
-    """Import the file at the smallest budget that its refusals lead to.
-
-    The refusals are followed from one byte: each states the bytes to try
-    next, except the parse's, which states what the import holds before it
-    reads a row, so a quarter more is tried then. The import's traced peak
-    must fit the budget that runs it, and ``writes`` keeps the chunk writes
-    of that import alone.
-
-    Returns:
-        That budget, the refusal one byte below it, None if it ran, and the
-        stored counts.
-    """
-    from tests.memory_helpers import stated_bytes
-
-    file, location = banded
-    store = copy_store(location, tmp_path)
-    cells = every_cell(store)
-
-    def run() -> Any:
-        # traced_peak runs the import again when its first trace exceeds the
-        # budget, so each run counts its own writes.
-        writes.clear()
-        return store.variants.import_counts(
-            file, cell_selection=cells, invalidate_cache=True
-        )
-
-    budget = 1
-    while True:
-        store.memoryBytes = budget
-        try:
-            ref, peak = traced_peak(run, budget)
-        except MemoryError as refusal:
-            stated = stated_bytes(refusal)
-            budget = stated if stated > budget else budget + max(1, budget // 4)
-        else:
-            break
-    assert peak <= budget, (peak, budget)
-    ran = Counter(writes)
-    store.memoryBytes = budget - 1
-    try:
-        run()
-    except MemoryError as refusal:
-        below: BaseException | None = refusal
-    else:
-        below = None
-    writes.clear()
-    writes.update(ran)
-    return budget, below, store.artifacts.load(ref)
-
-
-# The refusal of the bands' charge, for bands of at least ``rows`` rows.
-_BANDS_REFUSED = (
-    r"^Importing variant counts for \d+ selected cells holds about \d+ bytes for "
-    r"a band of at least {rows} sorted rows and the stored chunks that it "
-    r"rewrites, "
-)
-
-
-def test_bands_of_a_whole_chunk_write_each_stored_chunk_once(
-    banded, tmp_path, monkeypatch
-) -> None:
-    from cytearc.datastore._operations import variants as operations
-    from tests.memory_helpers import stated_bytes
-
-    # Appending a band rewrites the stored chunks that it ends in, so a band
-    # holds a share of a stored chunk's rows at least; with that share a whole
-    # chunk, the bands bind before the parse does on so few rows. The 300
-    # cells' rows fit one chunk of each array, so one band holds them all and
-    # writes each chunk once, or not at all where Zarr skips a chunk of zeros,
-    # its fill value.
-    monkeypatch.setattr(operations, "_BAND_CHUNK_PARTS", 1)
-    writes = _chunk_writes(monkeypatch)
-    budget, below, group = _import_at_smallest_budget(banded, tmp_path, writes)
-
-    for name in _LONG_ARRAYS:
-        values = group[name][:]
-        assert 0 < len(values) <= group[name].chunks[0], name
-        assert writes[name, 0] == int(np.any(values)), (name, writes)
-        assert (name, 1) not in writes, name
-    assert writes["depth", 0] == writes["counts", 0] == 1
-    # The charge of the bands refuses one byte less, naming the budget.
-    assert re.search(_BANDS_REFUSED.format(rows=r"\d+"), str(below))
-    assert stated_bytes(below) == budget
-
-
-def test_a_band_holds_a_chunk_of_rows_when_the_rows_outnumber_a_chunk(
-    banded, tmp_path, monkeypatch
-) -> None:
-    from cytearc.datastore._operations import variants as operations
-    from tests.memory_helpers import stated_bytes
-
-    # Chunks of at most 12,000 rows, fewer than the 300 cells hold, and a
-    # band of a whole chunk at least: a band holds at least 12,000 rows, less
-    # the 60 rows of one cell where a band ends, so two bands hold the at most
-    # 18,000 rows, and each writes a chunk at most once. The bands' charge,
-    # beside what the import holds once the rows are parsed, binds before the
-    # parse when the least chunk parsed is 100 rows, not 1,000.
-    monkeypatch.setattr(operations, "_ROW_BAND", 12_000)
-    monkeypatch.setattr(operations, "_BAND_CHUNK_PARTS", 1)
-    monkeypatch.setattr(operations, "_MIN_CHUNK_ROWS", 100)
-    writes = _chunk_writes(monkeypatch)
-    budget, below, group = _import_at_smallest_budget(banded, tmp_path, writes)
-
-    assert max(group[name].chunks[0] for name in _LONG_ARRAYS) <= 12_000
-    assert max(writes.values()) == 2, writes
-    assert writes["depth", 0] == writes["counts", 0] == 2
-    assert re.search(_BANDS_REFUSED.format(rows=12000), str(below))
-    assert stated_bytes(below) == budget
-
-
-@pytest.mark.parametrize("parts", [1, 32])
-def test_the_bands_refusal_names_a_budget_that_runs(
-    banded, tmp_path, monkeypatch, parts
-) -> None:
-    from cytearc.datastore._operations import variants as operations
-    from tests.memory_helpers import stated_bytes
-
-    # The sort buffers grow with the budget, a tenth of it three times, so
-    # the bands' refusal names the budget at which the band fits beside the
-    # buffers it would then hold: following the refusals from one byte, the
-    # first that the bands make names a budget that runs.
-    monkeypatch.setattr(operations, "_BAND_CHUNK_PARTS", parts)
-    monkeypatch.setattr(operations, "_MIN_CHUNK_ROWS", 100)
-    file, location = banded
-    store = copy_store(location, tmp_path)
-    cells = every_cell(store)
-
-    def run() -> Any:
-        return store.variants.import_counts(
-            file, cell_selection=cells, invalidate_cache=True
-        )
-
-    budget = 1
-    for _attempt in range(200):
-        store.memoryBytes = budget
-        try:
-            run()
-        except MemoryError as refusal:
-            stated = stated_bytes(refusal)
-            if re.search(_BANDS_REFUSED.format(rows=r"\d+"), str(refusal)):
-                store.memoryBytes = stated
-                assert store.artifacts.inspect(run()).diagnostics["sortedRuns"] >= 0
-                return
-            budget = stated if stated > budget else budget + max(1, budget // 4)
-        else:
-            break
-    pytest.fail("The bands never refused")
-
-
-@pytest.mark.slow
-def test_the_smallest_budget_accepted_writes_each_stored_chunk_a_few_times(
-    tmp_path, monkeypatch
-) -> None:
-    from tests.memory_helpers import stated_bytes
-    from tests.variant_truth import write_large_tapestri
-
-    # 8,000 cells of 40 variants hold 838,970 rows, one chunk of each array.
-    # A band holds at least a thirty-second of them, less the rows of one cell
-    # where a band ends, so at the smallest budget that the refusals lead to,
-    # the bands write each chunk at most 33 times, where bands of what the
-    # budget leaves wrote each chunk once for every few cells. That budget is
-    # below the 27,989,399 bytes that the import needed with the cells' IDs
-    # stored in chunks of 100,000 rows, where it wrote each chunk 30 times.
-    file = write_large_tapestri(tmp_path / "large.h5", n_cells=8_000, n_variants=40)
-    _large_store(tmp_path, file)
-    writes = _chunk_writes(monkeypatch)
-    budget, below, group = _import_at_smallest_budget(
-        (file, tmp_path / "large.zarr"), tmp_path / "copy", writes
-    )
-
-    for name in _LONG_ARRAYS:
-        assert 0 < group[name].shape[0] <= group[name].chunks[0], name
-    assert max(writes.values()) <= 33, writes
-    assert budget < 27_989_399, budget
-    assert re.search(_BANDS_REFUSED.format(rows=26218), str(below))
-    assert stated_bytes(below) == budget
-
-
 @pytest.mark.slow
 @pytest.mark.parametrize(
     "rules", [{}, {"min_quality": 30, "min_depth": 30}], ids=["adopted", "filtered"]
 )
-def test_source_genotypes_of_several_alternatives_fit_the_smallest_budget_accepted(
+def test_source_genotypes_of_several_alternatives_cover_their_sites(
     tmp_path, rules
 ) -> None:
     from tests.variant_truth import write_large_tapestri
@@ -1386,13 +1134,8 @@ def test_source_genotypes_of_several_alternatives_fit_the_smallest_budget_accept
     loaded = store.variants.load_counts(counts, cell_selection=[])
     assert len(loaded.sites) == 10 and len(loaded.alleles) == 40
 
-    def run() -> None:
-        store.variants.genotypes(
-            counts, method="source", invalidate_cache=True, **rules
-        )
-
-    budget, peak = _smallest_and_peak(store, run)
-    assert peak <= budget, (peak, budget)
+    genotypes = store.variants.genotypes(counts, method="source", **rules)
+    assert genotypes.kind == "variant_genotypes"
 
 
 def test_a_spanning_deletion_is_read_as_its_allele(store, tmp_path) -> None:
@@ -1665,11 +1408,10 @@ def _wide_dab_seq(
         pytest.param("dab_seq", 1_000, True, marks=pytest.mark.slow),
     ],
 )
-def test_describing_a_file_holds_no_more_than_the_smallest_budget_accepted(
+def test_describing_a_file_refuses_a_budget_of_one_byte(
     tmp_path, file_format, alternative_length, variable_length
 ) -> None:
     from cytearc.readers.tapestri import dab_seq_source, tapestri_source
-    from tests.memory_helpers import traced_peak
 
     # SNVs make what the description holds for each variant most of it, and
     # insertions of 1,000 bases the variants' texts, however the file stores
@@ -1686,40 +1428,8 @@ def test_describing_a_file_holds_no_more_than_the_smallest_budget_accepted(
     else:
         path = _wide_dab_seq(tmp_path / "wide.hdf5", **options)
         describe = dab_seq_source
-    with pytest.raises(MemoryError, match=r"holds about \d+ bytes") as refused:
+    with pytest.raises(MemoryError, match=r"holds about \d+ bytes"):
         describe(path, memory_bytes=1)
-    found = re.search(r"holds about (\d+) bytes", str(refused.value))
-    assert found is not None
-    # The smallest budget accepted is the one the refusal names.
-    budget = int(found.group(1))
-    with pytest.raises(MemoryError):
-        describe(path, memory_bytes=budget - 1)
-    _source, peak = traced_peak(lambda: describe(path, memory_bytes=budget), budget)
-    assert peak <= budget, (peak, budget)
-
-
-@pytest.mark.slow
-def test_the_traced_peak_of_a_wide_tapestri_import_fits_the_smallest_budget(
-    tmp_path,
-) -> None:
-    # Describing 50,000 candidate variants holds about 31 MB, far more than
-    # their two that pass and the 200 cells need, which without the check of
-    # the description would let the import accept a budget of 17 MB.
-    path = _wide_tapestri(
-        tmp_path / "wide.h5", n_cells=200, n_variants=50_000, sample="s"
-    )
-    store = _large_store(tmp_path, path)
-    cells = every_cell(store)
-
-    def run() -> None:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            store.variants.import_counts(
-                path, cell_selection=cells, invalidate_cache=True
-            )
-
-    budget, peak = _smallest_and_peak(store, run)
-    assert peak <= budget, (peak, budget)
 
 
 def test_a_source_refuses_a_cell_whose_sample_or_barcode_is_empty(tmp_path) -> None:

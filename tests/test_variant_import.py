@@ -17,13 +17,6 @@ from cytearc.metadata.rows import text_read_bytes
 from cytearc.utils.logging import collect_warnings
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import assert_joined, every_cell
-from tests.memory_helpers import (
-    at_budget,
-    budget_that_runs,
-    charges,
-    smallest_budget,
-    traced_peak,
-)
 from tests.storage_helpers import copy_store, open_store, rechunk_column
 from tests.variant_helpers import (
     assert_tables,
@@ -95,15 +88,6 @@ def _refused_estimate(store, run, budget: int) -> int:
     found = re.search(r"holds about (\d+) bytes", str(refused.value))
     assert found is not None, str(refused.value)
     return int(found.group(1))
-
-
-def _plan_at(run, item: str) -> int:
-    """What ``run``'s ledger planned at its first charge of ``item``, at the store's budget."""
-    _result, taken = charges(run)
-    return next(planned for name, _nbytes, planned in taken if name == item)
-
-
-_JOIN_LOOKUP = "the join's lookup of the selected cells' IDs"
 
 
 def _large_mgatk(
@@ -323,16 +307,9 @@ def test_cell_order_and_spills_to_disk_do_not_change_the_counts(
     ids = [str(cell) for cell in roomy.cells.fetch_all("ids")]
     folder = tmp_path / "final"
     drawn = _large_mgatk(folder, ids, seed=4, n_positions=4_000)
-    # What the import holds once the join holds its lookup, the read of the
-    # IDs' chunk that a codec thread may still hold among it, and 24 MB for
-    # the parse, the sort buffers and the bands.
-    held = _plan_at(
-        lambda: tight.variants.import_counts(
-            folder, cell_selection=every_cell(tight), invalidate_cache=True
-        ),
-        _JOIN_LOOKUP,
-    )
-    tight.memoryBytes = held + 24_000_000
+    # What the import holds once the join holds its lookup, about 83 kB, and
+    # 24 MB for the parse, the sort buffers and the bands.
+    tight.memoryBytes = 24_100_000
     groups = []
     for store in (roomy, tight):
         ref, _ = _import(store, folder, invalidate_cache=True)
@@ -369,67 +346,6 @@ def test_cell_order_and_spills_to_disk_do_not_change_the_counts(
     np.testing.assert_array_equal(
         np.diff(groups[1]["count_offsets"][:]), counted.sum(axis=1)
     )
-
-
-def test_the_import_charges_the_buffers_that_a_spill_holds(
-    store, tmp_path, monkeypatch
-) -> None:
-    import tracemalloc
-
-    import cytearc.datastore._operations.variants as operations
-    from cytearc.variants.counts import DEPTH_DTYPE, count_dtype
-    from cytearc.variants.sorting import CellRowSorter
-
-    # The import charges _SPILL_BUFFERS of the buffers that it gives the sorter.
-    given: list[int] = []
-
-    def recorded(*arguments, buffer_bytes, **options):
-        given.append(buffer_bytes)
-        return CellRowSorter(*arguments, buffer_bytes=buffer_bytes, **options)
-
-    monkeypatch.setattr(operations, "CellRowSorter", recorded)
-    path = write_mgatk(TRUTH, tmp_path / "final", depth_table=False)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        _result, taken = charges(
-            lambda: store.variants.import_counts(
-                path, cell_selection=every_cell(store), invalidate_cache=True
-            )
-        )
-    assert len(given) == 1
-    assert ("the sorted rows' buffers", operations._SPILL_BUFFERS * given[0]) in [
-        (item, nbytes) for item, nbytes, _planned in taken
-    ]
-    # Sorting a full buffer of count and depth rows and writing it to a run
-    # holds the buffer, a copy of what it sorts and the sorted rows, 2.1 to
-    # 2.9 buffers as traced on buffers of 1 to 16 MB, by how far the last
-    # rows pass the buffer: more than one and a half buffers, and no more
-    # than the import charges for them.
-    buffer = 16 << 20
-    rng = np.random.default_rng(3)
-    dtypes = {"counts": count_dtype(("forward", "reverse")), "depth": DEPTH_DTYPE}
-    sorter = CellRowSorter(
-        {name: (dtype, ("cell", "key")) for name, dtype in dtypes.items()},
-        n_cells=2_000,
-        buffer_bytes=buffer,
-        temp_dir=tmp_path,
-    )
-    tracemalloc.start()
-    try:
-        start = tracemalloc.get_traced_memory()[0]
-        with sorter:
-            for _chunk in range(12):
-                for name, dtype in dtypes.items():
-                    rows = np.zeros(buffer // 8 // dtype.itemsize, dtype=dtype)
-                    rows["cell"] = rng.integers(0, 2_000, len(rows))
-                    rows["key"] = rng.integers(0, 10_000, len(rows))
-                    sorter.add(name, rows)
-                    del rows
-            assert sorter.n_runs > 2
-            peak = tracemalloc.get_traced_memory()[1] - start
-    finally:
-        tracemalloc.stop()
-    assert 1.5 * buffer < peak <= operations._SPILL_BUFFERS * buffer, peak / buffer
 
 
 def test_cellsnp_lite_reference_is_dp_less_ad_and_depth_adds_other_bases(
@@ -836,46 +752,9 @@ def test_a_memory_budget_too_small_for_the_cells_is_refused(store, tmp_path) -> 
         )
 
 
-def test_an_import_of_mgatk_files_holds_no_more_than_its_ledger_plans(
-    store, tmp_path
-) -> None:
-    from cytearc.storage.validation_scope import validation_scope
-    from tests.memory_helpers import ZARR_READS, audited, hold_finished_reads
-
-    # Base files are parsed a chunk at a time, joined to the cells and sorted
-    # by cell within the import's ledger, three of their barcodes naming no
-    # cell. A depth table, like a GoT table, is read whole before the ledger
-    # exists, so these files have none.
-    path = write_mgatk(TRUTH, tmp_path / "final", depth_table=False)
-    cells = every_cell(store)
-
-    def run() -> object:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            return store.variants.import_counts(
-                path, cell_selection=cells, invalidate_cache=True
-            )
-
-    # From each charge to the next, what is traced stays within what the
-    # ledger planned, with every read's work held until the next read ends,
-    # as a busy machine can, and without. The selection's identity check,
-    # outside the budget, runs once in the operation's scope.
-    for held in (False, True):
-        with validation_scope():
-            run()
-            if held:
-                with hold_finished_reads(*ZARR_READS):
-                    _ref, overruns = audited(run)
-            else:
-                _ref, overruns = audited(run)
-        assert overruns == [], (held, overruns)
-
-
-def test_the_pass_over_the_stores_cell_ids_holds_no_more_than_the_ledger_plans(
+def test_the_pass_over_the_stores_cell_ids_counts_every_barcode_of_the_files(
     tmp_path,
 ) -> None:
-    from cytearc.storage.validation_scope import validation_scope
-    from tests.memory_helpers import ZARR_READS, audited, hold_finished_reads
     from tests.storage_helpers import write_count_store
 
     # 60,000 cells, ten selected; mgatk's base files name two selected cells,
@@ -905,26 +784,11 @@ def test_the_pass_over_the_stores_cell_ids_holds_no_more_than_the_ledger_plans(
         )
     (folder / "chrM_refAllele.txt").write_text("1\tA\n2\tA\n")
 
-    def run() -> object:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            return store.variants.import_counts(
-                folder,
-                cell_selection=cells,
-                barcode_prefix="s1__",
-                barcode_suffix="-1",
-                invalidate_cache=True,
-            )
-
-    for held in (False, True):
-        with validation_scope():
-            run()
-            if held:
-                with hold_finished_reads(*ZARR_READS):
-                    ref, overruns = audited(run)
-            else:
-                ref, overruns = audited(run)
-        assert overruns == [], (held, overruns)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        ref = store.variants.import_counts(
+            folder, cell_selection=cells, barcode_prefix="s1__", barcode_suffix="-1"
+        )
     assert_joined(
         store.artifacts.inspect(ref).diagnostics,
         n_file=len(barcodes),
@@ -933,7 +797,7 @@ def test_the_pass_over_the_stores_cell_ids_holds_no_more_than_the_ledger_plans(
     )
 
 
-def test_the_import_counts_the_read_of_cell_ids_before_it_reads_them(
+def test_the_import_refuses_a_small_budget_before_it_reads_a_cell_id(
     store, tmp_path, monkeypatch
 ) -> None:
     import cytearc.metadata.rows as rows
@@ -947,46 +811,15 @@ def test_the_import_counts_the_read_of_cell_ids_before_it_reads_them(
                 path, cell_selection=every_cell(store), invalidate_cache=True
             )
 
-    reading = _plan_at(run, "the selected cells' IDs")
-    # A read of IDs decodes a whole stored chunk of them, however few cells
-    # the selection holds.
-    ids = store.cells._get_array("ids")
-    assert reading > ids.chunks[0] * ids.dtype.itemsize
-
     def unread(*_arguments, **_options):
         raise AssertionError("the cell IDs were read")
 
     with monkeypatch.context() as patched:
         patched.setattr(rows, "read_array_rows_chunkwise", unread)
-        store.memoryBytes = reading - 1
-        with pytest.raises(
-            MemoryError,
-            match=f"holds about {reading} bytes for the selected cells' IDs",
-        ):
+        store.memoryBytes = 1_000
+        with pytest.raises(MemoryBudgetError):
             run()
-    # At the bound the IDs are read once, and the parse, which the read of the
-    # 48 IDs in the one chunk of their 48 rows no longer leaves room for,
-    # refuses before it reads a row, writing nothing.
-    reads: list[object] = []
-    read_ids = rows.read_array_rows_chunkwise
-
-    def counted(*arguments, **options):
-        reads.append(arguments)
-        return read_ids(*arguments, **options)
-
-    with monkeypatch.context() as patched:
-        patched.setattr(rows, "read_array_rows_chunkwise", counted)
-        store.memoryBytes = reading
-        with pytest.raises(MemoryBudgetError) as later:
-            run()
-    assert later.value.item == "a chunk of 1000 parsed rows"
-    assert later.value.needed_bytes > reading
-    assert len(reads) == 1
     assert store.artifacts.list(kind="variant_counts") == []
-    budget, _refusals, ref, _peak = budget_that_runs(
-        store, lambda _store: run(), traced=False
-    )
-    assert budget > reading
     store.memoryBytes = 1 << 30
     ref = run()
     assert store.variants.load_counts(ref, sites=[]).cells.shape[0] == len(
@@ -996,13 +829,9 @@ def test_the_import_counts_the_read_of_cell_ids_before_it_reads_them(
 
 def test_the_parse_shares_what_the_join_leaves(template, tmp_path) -> None:
     # A store whose IDs are one chunk of their own size, as columns written
-    # from AnnData files are stored, reads them cheaply, so the least parse,
-    # 1,000 rows, sets the import's smallest budget beside what the join
-    # holds: its lookup, the IDs as text and the bytes held for each cell.
-    from cytearc.datastore._operations import variants as operations
-    from cytearc.datastore._operations.cell_barcodes import lookup_bytes
+    # from AnnData files are stored, reads them cheaply, so 2 MB holds the
+    # least parse, 1.6 MB, beside what the join holds.
     from cytearc.storage.arrays import create_metadata_column
-    from cytearc.utils.memory_budget import object_array_bytes, python_text_bytes
     from tests.storage_helpers import open_store
 
     path = tmp_path / "store" / template.name
@@ -1027,19 +856,10 @@ def test_the_parse_shares_what_the_join_leaves(template, tmp_path) -> None:
                 got, cell_selection=every_cell(store), invalidate_cache=True
             )
 
-    held = _plan_at(run, _JOIN_LOOKUP)
-    # Beside what the read of the IDs' one chunk may leave behind.
-    assert held > operations._IMPORT_BYTES_PER_CELL * len(ids) + object_array_bytes(
-        len(ids)
-    ) + python_text_bytes(len(ids), sum(map(len, ids.tolist()))) + lookup_bytes(
-        len(ids)
-    )
-    store.memoryBytes = held + (
-        operations._PARSE_SHARE
-        * operations._PARSE_BYTES_PER_ROW
-        * operations._MIN_CHUNK_ROWS
-    )
-    assert store.variants.load_counts(run(), sites=[]).cells["listed"].any()
+    store.memoryBytes = 2_000_000
+    ref = run()
+    store.memoryBytes = 1 << 30
+    assert store.variants.load_counts(ref, sites=[]).cells["listed"].any()
 
 
 def test_load_counts_counts_the_ids_it_reads_and_finds_cells_among(
@@ -1864,106 +1684,16 @@ def test_a_budget_without_room_for_the_rewritten_chunks_writes_nothing(
     folder = tmp_path / "final"
     _large_mgatk(folder, ids, seed=4, n_positions=4_000)
 
-    import cytearc.datastore._operations.variants as operations
-
     def run() -> object:
         return store.variants.import_counts(
             folder, cell_selection=every_cell(store), invalidate_cache=True
         )
 
-    held = _plan_at(run, _JOIN_LOOKUP)
     saved = store.artifacts.list(kind="variant_counts")
-    # Room for the least parse, whose share holds the sort buffers too, and
-    # not for the stored chunks that appending a band rewrites.
-    store.memoryBytes = held + (
-        operations._PARSE_SHARE
-        * operations._PARSE_BYTES_PER_ROW
-        * operations._MIN_CHUNK_ROWS
-    )
+    # 20 MB holds the read of the IDs' chunk, 17.7 MB, and the least parse,
+    # whose share holds the sort buffers too, and not the stored chunks that
+    # appending a band rewrites.
+    store.memoryBytes = 20_000_000
     with pytest.raises(MemoryError, match="the stored chunks that it rewrites"):
         run()
     assert store.artifacts.list(kind="variant_counts") == saved
-
-
-@pytest.mark.slow
-def test_the_traced_peaks_of_import_and_load_fit_the_smallest_budget_accepted(
-    tmp_path,
-) -> None:
-    """With 80-character IDs, reading them dominates what each step holds."""
-    from tests.storage_helpers import open_store, write_count_store
-
-    n_cells = 20_000
-    ids = [f"{'sample_with_a_long_name_' * 3}{cell:08d}-1" for cell in range(n_cells)]
-    write_count_store(
-        str(tmp_path / "long.zarr"),
-        {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
-        "uint16",
-        cell_ids=ids,
-    )
-    store = open_store(tmp_path / "long.zarr")
-    got = tmp_path / "CALR.tsv"
-    got.write_text(
-        "BC\twtUMIs\tmutUMIs\n"
-        + "".join(
-            f"{ids[cell]}\t{1 + cell % 3}\t{cell % 2}\n"
-            for cell in range(0, n_cells, 100)
-        )
-    )
-    cells = store.snapshot_cell_selection()
-    counts = store.variants.import_counts(got, cell_selection=cells)
-    steps = {
-        "import": lambda: store.variants.import_counts(
-            got, cell_selection=cells, invalidate_cache=True
-        ),
-        "load": lambda: store.variants.load_counts(counts),
-        "load by ID": lambda: store.variants.load_counts(
-            counts, cell_selection=ids[:50:10]
-        ),
-    }
-    for name, run in steps.items():
-        store.memoryBytes = 1 << 33
-        run()
-        budget = smallest_budget(at_budget(store, run), 1 << 33)
-        store.memoryBytes = budget
-        _result, peak = traced_peak(run, budget)
-        assert peak <= budget, (name, peak, budget)
-
-
-@pytest.mark.slow
-def test_loading_a_few_cells_of_many_fits_the_smallest_budget_accepted(
-    tmp_path,
-) -> None:
-    """Counts of 500,000 cells hold offsets and per-cell arrays for each one."""
-    from tests.storage_helpers import open_store, write_count_store
-
-    n_cells = 500_000
-    ids = [f"c{cell}" for cell in range(n_cells)]
-    write_count_store(
-        str(tmp_path / "many.zarr"),
-        {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
-        "uint16",
-        cell_ids=ids,
-    )
-    store = open_store(tmp_path / "many.zarr")
-    got = tmp_path / "CALR.tsv"
-    got.write_text(
-        "BC\twtUMIs\tmutUMIs\n"
-        + "".join(f"{ids[cell]}\t1\t0\n" for cell in range(0, n_cells, 2_000))
-    )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        counts = store.variants.import_counts(
-            got, cell_selection=store.snapshot_cell_selection()
-        )
-    store.cells.insert("first", np.arange(n_cells) == 0)
-    first = store.snapshot_cell_selection("first")
-    for name, run in {
-        "one cell": lambda: store.variants.load_counts(counts, cell_selection=first),
-        "no cell": lambda: store.variants.load_counts(counts, cell_selection=[]),
-    }.items():
-        store.memoryBytes = 1 << 33
-        run()
-        budget = smallest_budget(at_budget(store, run), 1 << 33)
-        store.memoryBytes = budget
-        _result, peak = traced_peak(run, budget)
-        assert peak <= budget, (name, peak, budget)

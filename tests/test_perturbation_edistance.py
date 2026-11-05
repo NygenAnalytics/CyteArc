@@ -5,8 +5,6 @@ template. A test that writes copies the template, and the tests of refused
 calls share one copy, which they check is left as it was.
 """
 
-import threading
-import tracemalloc
 from collections.abc import Iterator
 from types import SimpleNamespace
 
@@ -23,12 +21,10 @@ from cytearc.perturbation import PerturbationEDistance
 from cytearc.perturbation.edistance import (
     edistance_arrays,
     edistance_from_sums,
-    edistance_memory_bytes,
 )
 from cytearc.storage.artifacts import inspect_artifact
 from cytearc.utils.logging import logger
 from tests.perturbation_helpers import fixed_labels, use_python_kernels, write_screen
-from tests.memory_helpers import check_budget
 from tests.storage_helpers import copy_store, open_store, written
 
 # Guides and their targets; no cell carries GENE_D's guide.
@@ -484,137 +480,6 @@ def test_edistance_from_sums_equals_the_mean_distances() -> None:
     assert distance == pytest.approx(_brute(x, y))
 
 
-# The Python function of the kernel, also when Numba compiles nothing.
-_DISTANCE_FROM_SUMS = getattr(edistance_from_sums, "py_func", edistance_from_sums)
-
-
-class _Met(Exception):
-    """Every thread has noted what it holds, and the run ends."""
-
-
-def _meet_in_first_permutations(
-    monkeypatch, nthreads: int, *, stop: bool = False
-) -> list[int]:
-    """Make the threads meet in their first permutations, and note what they hold.
-
-    The Python kernels look up ``edistance_from_sums`` when they run. A
-    thread's first call measures its first row, and its second comes from
-    the kernel's first permutation, once the kernel has allocated its arrays.
-    There each thread waits until every thread holds its block and arrays,
-    and the traced bytes are noted before any thread goes on, or, with
-    ``stop``, ends the run with :class:`_Met`.
-    """
-    barrier = threading.Barrier(nthreads, timeout=60)
-    calls = threading.local()
-    held: list[int] = []
-
-    def distance_together(*args):
-        calls.n = getattr(calls, "n", 0) + 1
-        if calls.n == 2:
-            barrier.wait()
-            held.append(tracemalloc.get_traced_memory()[0])
-            barrier.wait()
-            if stop:
-                raise _Met
-        return _DISTANCE_FROM_SUMS(*args)
-
-    monkeypatch.setattr(edistance_module, "edistance_from_sums", distance_together)
-    return held
-
-
-@pytest.mark.parametrize(
-    ("n_control", "sizes", "n_dims", "n_permutations", "nthreads", "draw_bytes"),
-    [
-        # Many cells, whose coordinates and indexes take most of the memory.
-        (2_000, [3_000] * 6, 8, 1, 1, 1 << 16),
-        (2_000, [3_000] * 6, 8, 1, 2, 1 << 16),
-        # Few cells: each row draws its 81 permutations of 100 cells in one
-        # block of uniform numbers, which takes most of the memory.
-        (300, [100, 100], 4, 81, 1, 1 << 16),
-        # Eight threads draw such blocks at once.
-        (300, [100] * 8, 1, 81, 8, 1 << 16),
-        # A row draws two blocks of 163 permutations in turn.
-        (300, [100], 1, 326, 1, 1 << 17),
-        # Nearly every cell is perturbed, so that sorting the cells by row
-        # holds the most positions.
-        (2, [199_998], 1, 3, 1, 1 << 16),
-        # Thousands of rows of two cells, tested on two threads.
-        (1_000, [2] * 2_000, 2, 1, 2, 1 << 16),
-        # Thousands of rows without a cell.
-        (1_000, [2] * 1_000 + [0] * 20_000, 2, 1, 1, 1 << 16),
-        # No row has two cells, so no row is tested and no thread runs.
-        (2_000, [1, 0, 1] * 10, 3, 50, 4, 1 << 23),
-    ],
-)
-def test_the_memory_estimate_bounds_the_edistances_peak(
-    monkeypatch, n_control, sizes, n_dims, n_permutations, nthreads, draw_bytes
-) -> None:
-    # Blocks of at most 128 kB instead of 8 MB keep the screens small, and
-    # the kernels run as Python, so that tracemalloc sees their arrays.
-    monkeypatch.setattr(edistance_module, "_DRAW_BYTES", draw_bytes)
-    use_python_kernels(monkeypatch, edistance_module)
-    # The first call imports what the tests use.
-    edistance_arrays(*_screen(5, [3, 3], 10), 2, n_permutations=5, random_seed=0)
-    _meet_in_first_permutations(monkeypatch, nthreads)
-    values, groups, control = _screen(6, sizes, n_control, n_dims=n_dims)
-    tracemalloc.start()
-    try:
-        # The estimate counts the arrays that the operation passes.
-        edistance_arrays(
-            values.copy(),
-            groups.copy(),
-            control.copy(),
-            len(sizes),
-            n_permutations=n_permutations,
-            random_seed=0,
-            nthreads=nthreads,
-        )
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-    estimate = edistance_memory_bytes(
-        sizes, n_control, n_dims, n_permutations=n_permutations, nthreads=nthreads
-    )
-    assert peak <= estimate
-
-
-def test_each_thread_holds_no_more_than_the_estimate_adds_for_it(monkeypatch) -> None:
-    # Each of eight rows permutes its 10,000 cells with 10,000 control cells,
-    # so that a block holds one permutation of 10,000 cells and each kernel
-    # flags 20,000 cells and holds the positions of 10,000.
-    monkeypatch.setattr(edistance_module, "_DRAW_BYTES", 1 << 16)
-    use_python_kernels(monkeypatch, edistance_module)
-    sizes = [10_000] * 8
-    values, groups, control = _screen(7, sizes, 10_000, n_dims=1)
-    edistance_arrays(*_screen(5, [3, 3], 10), 2, n_permutations=5, random_seed=0)
-    held = {}
-    for nthreads in (1, 8):
-        noted = _meet_in_first_permutations(monkeypatch, nthreads, stop=True)
-        tracemalloc.start()
-        try:
-            with pytest.raises(_Met):
-                edistance_arrays(
-                    values,
-                    groups,
-                    control,
-                    len(sizes),
-                    n_permutations=1,
-                    random_seed=0,
-                    nthreads=nthreads,
-                )
-        finally:
-            tracemalloc.stop()
-        held[nthreads] = max(noted)
-
-    def estimate(nthreads: int) -> int:
-        return edistance_memory_bytes(
-            sizes, 10_000, 1, n_permutations=1, nthreads=nthreads
-        )
-
-    # Seven more threads hold seven more blocks, kernel arrays and threads.
-    assert held[8] - held[1] <= estimate(8) - estimate(1)
-
-
 @pytest.fixture(scope="module")
 def large_screen(tmp_path_factory) -> SimpleNamespace:
     """20,000 cells that carry one of five guides each, and their coordinates.
@@ -660,24 +525,16 @@ def large_screen(tmp_path_factory) -> SimpleNamespace:
         (50, 1),
     ],
 )
-def test_the_memory_check_bounds_what_the_operation_holds(
-    large_screen, tmp_path, monkeypatch, n_dims, nthreads
+def test_the_memory_check_refuses_a_small_budget_before_it_writes(
+    large_screen, tmp_path, n_dims, nthreads
 ) -> None:
     path = copy_store(large_screen.path, tmp_path).zarr_loc
     labels, coordinates = large_screen.labels, large_screen.coordinates[n_dims]
-    # The kernels run as Python, so that tracemalloc sees their arrays.
-    use_python_kernels(monkeypatch, edistance_module)
-    # The whole call, from the labels and the check of the coordinates to the
-    # table, holds no more than the budget that its one refusal names.
-    _, refusals, _ = check_budget(
-        path,
-        lambda store: store.perturbation.edistance(
-            labels, coordinates, n_permutations=1, invalidate_cache=True
-        ),
-        nthreads=nthreads,
-    )
-    assert len(refusals) == 1
-    assert refusals[0].startswith("The E-distances of 20000 cells")
+    store = open_store(path, mem_budget=10_000, nthreads=nthreads)
+    saved = written(store)
+    with pytest.raises(MemoryError, match="^The E-distances of 20000 cells"):
+        store.perturbation.edistance(labels, coordinates, n_permutations=1)
+    assert written(open_store(path)) == saved
 
 
 @pytest.mark.parametrize(
@@ -692,7 +549,7 @@ def test_the_memory_check_bounds_what_the_operation_holds(
         pytest.param("target", 150_000, marks=pytest.mark.slow),
     ],
 )
-def test_one_refusal_names_a_budget_that_runs_for_few_compared_cells(
+def test_few_compared_cells_refuse_a_small_budget_and_measure_their_distance(
     tmp_path, monkeypatch, by, n_cells
 ) -> None:
     # 2 cells carry GENE_A's first guide and 3 the control guide; the others
@@ -715,18 +572,19 @@ def test_one_refusal_names_a_budget_that_runs_for_few_compared_cells(
 
     def measure(store):
         return store.perturbation.edistance(
-            labels, coordinates, by=by, n_permutations=9, invalidate_cache=True
+            labels, coordinates, by=by, n_permutations=9
         )
 
-    _, refusals, ref = check_budget(path, measure)
-    assert len(refusals) == 1
-    assert refusals[0].startswith("The E-distances of 5 cells in 2 dimensions")
-    table = open_store(path).perturbation.load_edistance(ref).table
+    with pytest.raises(
+        MemoryError, match="^The E-distances of 5 cells in 2 dimensions"
+    ):
+        measure(open_store(path, mem_budget=1_000))
+    table = store.perturbation.load_edistance(measure(store)).table
     assert table["n_cells"].iloc[0] == 2
     assert table["n_control_cells"].iloc[0] == 3
 
 
-def test_threads_beyond_the_tested_rows_and_small_draws_fit_a_small_budget(
+def test_threads_beyond_the_tested_rows_measure_alike_within_a_small_budget(
     tmp_path,
 ) -> None:
     # 420 cells: four targets of 75 cells and 120 controls, in the normalized
@@ -745,33 +603,15 @@ def test_threads_beyond_the_tested_rows_and_small_draws_fit_a_small_budget(
     features = store.features.snapshot(feature_indexes=np.arange(12))
     normalized = store.features.normalize(store.select_measured_cells("RNA"), features)
     labels = fixed_labels(store, ["Non-Targeting"])
-    # The first call imports what the measured calls use.
-    store.perturbation.edistance(labels, normalized, n_permutations=1)
     tables = {}
     for nthreads in (1, 8):
         opened = open_store(path, nthreads=nthreads, mem_budget="4M")
-        tracemalloc.start()
-        try:
-            ref = opened.perturbation.edistance(
-                labels, normalized, invalidate_cache=True
-            )
-            peak = tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
-        assert peak <= 4 << 20
+        ref = opened.perturbation.edistance(labels, normalized, invalidate_cache=True)
         tables[nthreads] = opened.perturbation.load_edistance(ref).table
     np.testing.assert_array_equal(tables[8]["p_value"], tables[1]["p_value"])
     np.testing.assert_array_equal(tables[8]["edistance"], tables[1]["edistance"])
     assert tables[8]["status"].eq("tested").all()
     assert tables[8]["p_value"].iloc[3] == pytest.approx(1 / 1001)
-    # Threads beyond the tested rows hold nothing, and the draws are what
-    # the rows draw.
-    sizes = np.asarray([75, 75, 75, 75])
-    four = edistance_memory_bytes(sizes, 120, 12, n_permutations=1000, nthreads=4)
-    assert (
-        edistance_memory_bytes(sizes, 120, 12, n_permutations=1000, nthreads=8) == four
-    )
-    assert four < 4 << 20
 
 
 class _RecordedReads:

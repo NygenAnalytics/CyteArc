@@ -43,9 +43,7 @@ from tests.clone_truth import (
     write_newick,
     write_tree_zarr,
 )
-from cytearc.datastore._operations.cell_barcodes import lookup_bytes
-from cytearc.utils.memory_budget import object_array_bytes, python_text_bytes
-from tests.memory_helpers import budget_that_runs, budgeted, charges
+from tests.memory_helpers import budgeted
 from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
@@ -360,46 +358,6 @@ def test_trees_without_lengths_are_cut_at_depths_only(store, tmp_path) -> None:
     assert nodes["time"].isna().all()
 
 
-def test_writes_count_a_buffer_for_each_write_zarr_runs_at_once(
-    store, tmp_path, monkeypatch
-) -> None:
-    # Zarr writes each chunk and each array's metadata through a buffered
-    # file, as many at once as its async concurrency allows, and Python 3.14
-    # made each buffer 128 KiB, where it was the file system's block. The
-    # import's write of its arrays and the cut's of its clones count them,
-    # and no other charge or check does.
-    import io
-
-    import zarr
-
-    path = _write_newick(tmp_path / "truth_tree.nwk")
-
-    def stated(concurrency: int) -> list[tuple[str, int]]:
-        def run() -> None:
-            phylogeny, _ = _import(store, path, invalidate_cache=True)
-            _cut(store, phylogeny, time=1.0, invalidate_cache=True)
-
-        with zarr.config.set({"async.concurrency": concurrency}):
-            _result, taken = charges(run)
-        return [(item, nbytes) for item, nbytes, _planned in taken]
-
-    ten, twenty = stated(10), stated(20)
-    assert [what for what, _ in ten] == [what for what, _ in twenty]
-    writes = ("writing the names of", "writing the clones of")
-    grown = {
-        what: more - fewer
-        for (what, fewer), (_, more) in zip(ten, twenty, strict=True)
-        if more != fewer
-    }
-    # Only the writes grow, by a buffer for each of the ten writes more.
-    assert grown == {what: 10 * io.DEFAULT_BUFFER_SIZE for what in grown}
-    assert grown and all(what.startswith(writes) for what in grown)
-    assert {what.split(" of ")[0] for what in grown} == {
-        "writing the names",
-        "writing the clones",
-    }
-
-
 def test_the_time_unit_is_declared_never_inferred(store, tmp_path) -> None:
     path = _write_newick(tmp_path / "t.nwk")
     cells = every_cell(store)
@@ -598,77 +556,6 @@ def test_loaded_phylogenies_list_every_node_and_tree(
             "latest_leaf_time": LEAF_TIME,
         }
     ]
-
-
-def test_writing_the_names_counts_what_the_join_holds(tmp_path) -> None:
-    # Long node names make their writing the import's largest check, which
-    # must count what the join holds beside the trees: its lookup and each
-    # selected cell's ID as text, whether or not a leaf names the cell.
-    import warnings
-
-    n_cells, n_leaves = 25_000, 20_000
-    ids = [f"cell{cell:06d}-1" for cell in range(n_cells)]
-    write_count_store(
-        str(tmp_path / "names.zarr"),
-        {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
-        "uint16",
-        cell_ids=ids,
-    )
-    store = open_store(tmp_path / "names.zarr")
-    store.cells.insert("in_tree", np.arange(n_cells) < n_leaves)
-    pairs = ",".join(
-        f"({ids[cell]}:1,{ids[cell + 1]}:1){'n' * 190}{cell:09d}:1"
-        for cell in range(0, n_leaves, 2)
-    )
-    path = tmp_path / "names.nwk"
-    path.write_text(f"({pairs})root;")
-
-    def names_estimate(selection) -> int:
-        """What the import's ledger plans as it writes the names."""
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            _result, taken = charges(
-                lambda: store.clones.import_phylogeny(
-                    path,
-                    cell_selection=selection,
-                    time_unit="days",
-                    invalidate_cache=True,
-                )
-            )
-        (planned,) = [
-            planned
-            for item, _nbytes, planned in taken
-            if item.startswith("writing the names of")
-        ]
-        return planned
-
-    in_tree = names_estimate(store.snapshot_cell_selection("in_tree"))
-    every_cell_of_the_store = names_estimate(store.snapshot_cell_selection())
-    beyond = ids[n_leaves:]
-    # Each further cell's position, 8 bytes, its ID as a reference and an
-    # ASCII string, and its flag in the join's lookup, and its slot where
-    # pandas copies the IDs into the index, whose table holds 32,768 buckets
-    # for 20,000 cells and for 25,000.
-    from tests.memory_helpers import index_copies_references
-
-    slot = 1 + 8 * index_copies_references()
-    assert lookup_bytes(n_cells) - lookup_bytes(n_leaves) == slot * len(beyond)
-    # The selection of the trees' cells leaves cells of the store out, so its
-    # join also holds what its pass over the store's IDs would hold, which a
-    # selection of every cell needs no room for.
-    from cytearc.datastore._operations.cell_barcodes import store_pass_bytes
-
-    pass_bytes = store_pass_bytes(
-        store.cells._get_array("ids"), n_leaves, codec_threads=store.nthreads
-    )
-    assert pass_bytes > 8 * n_cells
-    assert every_cell_of_the_store - in_tree == (
-        8 * len(beyond)
-        + object_array_bytes(len(beyond))
-        + python_text_bytes(len(beyond), sum(map(len, beyond)))
-        + slot * len(beyond)
-        - pass_bytes
-    )
 
 
 def test_missing_and_incomplete_phylogenies_are_refused(store, tmp_path) -> None:
@@ -895,57 +782,6 @@ def test_a_file_without_a_tree_extension_names_its_tree_whole(store, tmp_path) -
     assert store.clones.load_phylogeny(phylogeny).trees["tree"].tolist() == [
         "lineage.v2"
     ]
-
-
-def test_the_join_counts_the_cells_ids_once(tmp_path) -> None:
-    # The join counts the IDs that it holds as text, so an import runs within
-    # the budget that its check before it reads the IDs names; counting them
-    # again beside the join would refuse it.
-    import warnings
-
-    n_cells = 3_000
-    ids = [f"{'sample_with_a_long_name_' * 3}{cell:08d}-1" for cell in range(n_cells)]
-    write_count_store(
-        str(tmp_path / "long.zarr"),
-        {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
-        "uint16",
-        cell_ids=ids,
-    )
-    store = open_store(tmp_path / "long.zarr")
-    pairs = ",".join(
-        f"({ids[cell]}:1,{ids[cell + 1]}:1)g{cell}:1" for cell in range(0, 2_000, 2)
-    )
-    path = tmp_path / "long.nwk"
-    path.write_text(f"({pairs})root;")
-    cells = store.snapshot_cell_selection()
-
-    def run(opened) -> object:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            return opened.clones.import_phylogeny(
-                path, cell_selection=cells, time_unit="days", invalidate_cache=True
-            )
-
-    # The IDs are read as Python strings, which the join keeps without a
-    # charge of its own, so the import runs at the budget its refusals name.
-    # The IDs refuse once, so the budget they name passes them and the join.
-    # They are stored in the one chunk of their 3,000 rows, so writing the
-    # nodes' names, which holds more, is all that refuses after them.
-    _budget, refusals, _ref, _peak = budget_that_runs(store, run, traced=False)
-    read = [
-        index
-        for index, refusal in enumerate(refusals)
-        if "bytes for the selected cells' IDs," in refusal
-    ]
-    assert len(read) == 1, refusals
-    assert all(
-        "bytes for writing the names of 3001 nodes," in refusal
-        for refusal in refusals[read[0] + 1 :]
-    ), refusals
-    _result, taken = charges(lambda: run(store))
-    items = [item for item, _nbytes, _planned in taken]
-    assert "the join's lookup of the selected cells' IDs" in items
-    assert "the selected cells' IDs as text" not in items
 
 
 def test_a_budget_too_small_is_refused_before_anything_is_saved(

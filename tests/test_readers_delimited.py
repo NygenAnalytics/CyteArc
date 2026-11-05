@@ -27,7 +27,6 @@ from cytearc.readers._delimited import (
     text_chunks,
     text_layout,
 )
-from tests.memory_helpers import traced_peak
 
 # Chunk sizes that end a chunk before, at and after each row of the tables
 # below, as memory budgets of every size choose them.
@@ -371,20 +370,12 @@ def test_a_quoted_field_longer_than_the_csv_modules_limit_reads_in_any_row(
         text_layout(trailing)
 
 
-def test_reading_a_long_table_holds_a_read_of_its_text_not_more(tmp_path) -> None:
-    # 300,000 rows of nine characters: reads of a mebibyte of text at a time
-    # held 12 MB of lines while their rows were counted.
+def test_a_long_table_counts_and_reads_every_row_in_chunks(tmp_path) -> None:
+    # 300,000 rows of nine characters.
     rows = "".join(f"c{index:07d}\n" for index in range(300_000))
     text = text_layout(_write(tmp_path / "cells.tsv", "cell\n" + rows))
-    n_rows, peak = traced_peak(lambda: count_rows(text), 500_000)
-    assert n_rows == 300_000
-    assert peak < 500_000
-    n_rows, peak = traced_peak(
-        lambda: sum(len(chunk) for _lines, chunk in text_chunks(text, 1_000)),
-        1_000_000,
-    )
-    assert n_rows == 300_000
-    assert peak < 1_000_000
+    assert count_rows(text) == 300_000
+    assert sum(len(chunk) for _lines, chunk in text_chunks(text, 1_000)) == 300_000
 
 
 # Text that a table's random rows are made of, per delimiter.

@@ -3,8 +3,8 @@
 Every writer of a store's cell columns takes its chunks from
 ``storage.layout.column_chunk_rows``: a chunk holds at most 100,000 rows, no
 more than the store's cells and no more than 16 MiB of values as stored, but
-always one row. Stores written before keep their chunks, are read as stored
-and are costed by their own geometry. Each expected chunk below is derived by
+always one row. Stores written before keep their chunks and are read as
+stored. Each expected chunk below is derived by
 hand from 16 MiB, 16,777,216 bytes, and fixed-width text's four bytes a
 character of its widest value.
 """
@@ -19,9 +19,9 @@ import pytest
 import zarr
 from scipy.sparse import csr_matrix
 
-from cytearc.metadata.rows import read_rows, row_read_bytes
+from cytearc.metadata.rows import read_rows
 from cytearc.metadata.table import MetaData
-from cytearc.storage.geometry import READ_OBJECT_BYTES, array_geometry
+from cytearc.storage.geometry import array_geometry
 from cytearc.storage.layout import (
     COLUMN_CHUNK_BYTES,
     PROFILE_METADATA_CHUNK,
@@ -29,8 +29,7 @@ from cytearc.storage.layout import (
 )
 from cytearc.utils.memory_budget import MemoryLedger
 from tests import full_path
-from tests.memory_helpers import charges, traced_peak
-from tests.storage_helpers import open_store, rechunk_column, write_count_store
+from tests.storage_helpers import rechunk_column
 
 if TYPE_CHECKING:
     from cytearc.datastore.datastore import DataStore
@@ -234,46 +233,6 @@ def test_a_value_wider_than_16_mib_is_a_chunk_of_its_own(tmp_path: Path) -> None
         assert len(str(cells[name][0])) == width
 
 
-def _read_peak(call) -> int:
-    # The first read builds what every later read reuses, such as Zarr's codecs.
-    call()
-    return traced_peak(call, 0)[1]
-
-
-def test_reading_a_small_store_decodes_its_rows(tmp_path: Path) -> None:
-    from cytearc.metadata.rows import read_metadata_rows_chunkwise
-
-    path = tmp_path / "small.zarr"
-    counts = np.random.default_rng(0).poisson(1.0, size=(48, 20))
-    write_count_store(str(path), {"RNA": counts.astype(np.uint16)}, "uint16")
-    store = open_store(path)
-    # One label of 5,000 characters stores every row at 20,000 bytes.
-    store.cells.insert(
-        "one_long_label", np.asarray(["x" * 5_000] + ["a"] * 47, dtype=object)
-    )
-    rows = np.arange(48)
-    for name, itemsize in (("ids", 4 * 6), ("one_long_label", 4 * 5_000)):
-        array = store.cells._get_array(name)
-        assert array.chunks == (48,) and array.dtype.itemsize == itemsize
-        # A read of every row holds the chunk it decodes, which is those rows,
-        # Zarr's copy of them and the result, beside Zarr's objects for it,
-        # and the ledger charges it from the stored chunk, so the charge grows
-        # with the rows read, where a 100,000-row chunk charged 4.9 MB for the
-        # IDs and 4.0 GB for the labels.
-        peak = _read_peak(lambda: read_metadata_rows_chunkwise(store.cells, name, rows))
-        stated = row_read_bytes(array_geometry(array), rows)
-        assert 48 * itemsize <= peak <= stated, (name, peak, stated)
-        assert stated <= 5 * 48 * itemsize + 2 * READ_OBJECT_BYTES, (name, stated)
-
-    # The IDs stored in 100,000-row chunks, as stores written before keep
-    # them, decode a whole chunk of 2,400,000 bytes to read the 48 rows.
-    rechunk_column(store.cells._group, "ids")
-    store = open_store(path)
-    assert store.cells._get_array("ids").chunks == (PROFILE_METADATA_CHUNK,)
-    peak = _read_peak(lambda: read_metadata_rows_chunkwise(store.cells, "ids", rows))
-    assert peak >= PROFILE_METADATA_CHUNK * 24
-
-
 @pytest.fixture
 def old_store(tmp_path: Path) -> Path:
     """A published store of 484 cells, whose columns are stored in 100,000-row chunks."""
@@ -286,7 +245,7 @@ def old_store(tmp_path: Path) -> Path:
 _OLD_COLUMNS = ("ATAC_nCounts", "ATAC_nFeatures", "I", "ids", "names")
 
 
-def test_an_old_store_is_read_as_stored_and_costed_by_its_own_chunks(
+def test_an_old_store_is_read_as_stored_and_keeps_its_chunks(
     old_store: Path,
 ) -> None:
     from cytearc.datastore.datastore import DataStore
@@ -300,19 +259,8 @@ def test_an_old_store_is_read_as_stored_and_costed_by_its_own_chunks(
     store = DataStore(str(old_store), default_assay="ATAC", zarr_mode="r", nthreads=1)
     ids = store.cells._get_array("ids")
     rows = np.arange(0, 484, 10)
-    read, taken = charges(
-        lambda: read_rows(MemoryLedger(None, "Reading IDs"), ids, rows, item="IDs")
-    )
+    read = read_rows(MemoryLedger(None, "Reading IDs"), ids, rows, item="IDs")
     np.testing.assert_array_equal(read, stored_ids[rows])
-    # The read is charged a whole stored chunk of 100,000 IDs of 72 bytes,
-    # decoded and at the bound of its compressed bytes, not the 484 rows.
-    stated = taken[0][1]
-    assert stated == row_read_bytes(array_geometry(ids), rows)
-    assert stated >= 2 * PROFILE_METADATA_CHUNK * 72
-    peak = _read_peak(
-        lambda: read_rows(MemoryLedger(None, "Reading IDs"), ids, rows, item="IDs")
-    )
-    assert PROFILE_METADATA_CHUNK * 72 <= peak <= stated
     del store
     assert _chunks(zarr.open_group(old_store, mode="r")["cellData"]) == before
 

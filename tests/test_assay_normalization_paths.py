@@ -404,6 +404,33 @@ def test_renormalized_subset_rejects_a_budget_that_only_fits_its_writer(
         write_renorm_subset_to_zarr(rna, cells, features, destination, "normalized", 1)
 
 
+def test_a_producer_beside_its_writer_refuses_a_budget_too_small_for_one_unit(
+    store: DataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rna = store.RNA
+    cells = np.arange(rna.cells.N)
+    features = np.array([0, 2, 5])
+    destination = zarr.open_group(store=MemoryStore(), mode="w")
+    writer = plan_dense_write(
+        normed_array_spec(
+            len(cells),
+            len(features),
+            profile=resolve_storage_profile(destination.store),
+        ),
+        ResourceBudget(1024**3, 1),
+        1,
+        io=StorageIoPolicy(readWorkers=1, computeWorkers=1, writeWorkers=1),
+    )
+    # 1,000 bytes beside what one serial writer reserves cannot hold one unit
+    # of the producer, which names the writer beside it.
+    monkeypatch.setattr(
+        rna, "resources", ResourceBudget(writer.reservedBytes + 1_000, 1)
+    )
+    with pytest.raises(MemoryError, match="Beside the writer of the normalized values"):
+        write_renorm_subset_to_zarr(rna, cells, features, destination, "normalized", 1)
+
+
 def test_reduction_rejects_normalized_data_copied_from_another_dataset(
     tmp_path,
 ) -> None:
@@ -603,39 +630,3 @@ def test_aggregated_ordering_caps_window_and_bins_at_the_cell_count(
         "Reducing window_size from 50 to 5 for the selected cell count",
         "Reducing chunk_size from 20 to 5 for the selected cell count",
     ]
-
-
-def test_renormalized_subset_follows_its_refusals_to_the_budget_that_writes_it(
-    store: DataStore,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests.memory_helpers import follow_refusals
-
-    rna = store.RNA
-    cells = np.arange(rna.cells.N)
-    features = np.array([0, 2, 5])
-    writer = plan_dense_write(
-        normed_array_spec(
-            len(cells),
-            len(features),
-            profile=resolve_storage_profile(MemoryStore()),
-        ),
-        ResourceBudget(1024**3, 1),
-        1,
-        io=StorageIoPolicy(readWorkers=1, computeWorkers=1, writeWorkers=1),
-    )
-
-    def write(budget: int) -> None:
-        monkeypatch.setattr(rna, "resources", ResourceBudget(budget, 1))
-        destination = zarr.open_group(store=MemoryStore(), mode="w")
-        write_renorm_subset_to_zarr(rna, cells, features, destination, "normalized", 1)
-
-    # From a budget that only its writer fits, the producer's refusals name
-    # budgets beside the writer, which grows with the budget.
-    _budget, refusals = follow_refusals(write, start=writer.reservedBytes)
-    assert refusals[0].item == "the producer of normalized values beside its writer"
-    assert refusals[0].needed_bytes == writer.reservedBytes + 1
-    # The producer's own refusals then name the budget beside its writer.
-    assert len(refusals) > 1
-    for later in refusals[1:]:
-        assert "Beside the writer of the normalized values" in str(later)

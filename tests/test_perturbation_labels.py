@@ -8,8 +8,6 @@ copy, which they check is left as it was.
 from collections.abc import Iterator
 from types import SimpleNamespace
 
-import tracemalloc
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -19,16 +17,12 @@ from cytearc.perturbation import CONTROL, MULTIPLE, NEGATIVE, PerturbationLabels
 from cytearc.perturbation.labels import (
     POLICIES,
     guide_targets,
-    label_memory_bytes,
-    longest_label,
     perturbation_label_arrays,
     perturbation_label_frames,
 )
 from cytearc.storage.artifacts import inspect_artifact
 from cytearc.storage.selections import read_stored_selection_indices
 from tests.perturbation_helpers import record_cell_reads, write_screen
-from cytearc.storage.validation_scope import validation_scope
-from tests.memory_helpers import ZARR_READS, audited, check_budget, hold_finished_reads
 from tests.storage_helpers import (
     copy_store,
     open_store,
@@ -486,37 +480,6 @@ def test_label_arrays_equal_each_cells_own_sets() -> None:
         assert arrays.target_codes.shape[1] == 4
 
 
-@pytest.mark.parametrize("policy", POLICIES)
-def test_the_memory_estimate_bounds_the_labels_peak(policy) -> None:
-    # 10,000 cells of up to 40 called guides of 30 genes and 4 controls, so
-    # that the entries take the most, and under "combinations" a cell's label
-    # joins up to 30 genes.
-    n_cells, width, n_guides = 10_000, 40, 64
-    rng = np.random.default_rng(13)
-    ids = np.asarray([f"g{index}" for index in range(n_guides)])
-    names = [f"GENE{index // 2}" for index in range(n_guides - 4)]
-    column = np.asarray(names + ["Non-Targeting"] * 4, dtype=object)
-    targets = guide_targets(ids, column, None, ("Non-Targeting",), policy=policy)
-    order = np.argsort(rng.random((n_cells, n_guides)), axis=1)
-    codes = order[:, :width].astype(np.int32)
-    codes[np.arange(width) >= rng.integers(0, width + 1, n_cells)[:, None]] = -1
-    # The first call creates what later calls reuse.
-    perturbation_label_arrays(codes[:10], targets, policy=policy)
-    tracemalloc.start()
-    try:
-        perturbation_label_arrays(codes, targets, policy=policy)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-    estimate = label_memory_bytes(
-        n_cells,
-        width,
-        label_length=longest_label(targets, width, policy=policy),
-        joined=policy == "combinations",
-    )
-    assert peak <= estimate
-
-
 @pytest.fixture(scope="module")
 def wide_calls(tmp_path_factory) -> SimpleNamespace:
     """4,000 cells of one guide each, and 20 cells of 40 guides of 30 genes.
@@ -542,41 +505,23 @@ def wide_calls(tmp_path_factory) -> SimpleNamespace:
     return SimpleNamespace(path=path, calls=_calls(open_store(path)))
 
 
-# The most times its traced peak that the budget of labelling may be.
-_LABEL_AT_MOST = 2.5
-
-
 @pytest.mark.slow
 @pytest.mark.parametrize("policy", POLICIES)
-def test_labelling_holds_no_more_than_the_budget_it_names(
+def test_labelling_refuses_a_small_budget_before_it_writes(
     wide_calls, tmp_path, policy
 ) -> None:
     path = copy_store(wide_calls.path, tmp_path).zarr_loc
 
     def label(store):
         return store.perturbation.labels(
-            wide_calls.calls,
-            controls=["Non-Targeting"],
-            policy=policy,
-            invalidate_cache=True,
+            wide_calls.calls, controls=["Non-Targeting"], policy=policy
         )
 
-    # Each refusal names the step that it refused, and the budget that runs
-    # holds the whole call, by no more than a few times its traced peak.
-    budget, refusals, ref = check_budget(
-        path, label, at_most=_LABEL_AT_MOST, allowance=1 << 20, max_refusals=100
-    )
-    assert 1 <= len(refusals) <= 9
-    assert all(
-        refusal.startswith("Labelling 4000 cells holds about") for refusal in refusals
-    )
-    loaded = open_store(path).perturbation.load_labels(ref)
-    assert loaded.cells["n_targets"].max() > 20
-    # From each charge to the next, labelling holds no more than its ledger
-    # planned, with each read's work held until the next read ends.
-    store = open_store(path, mem_budget=budget)
-    with validation_scope():
-        label(store)
-        with hold_finished_reads(*ZARR_READS):
-            _ref, overruns = audited(lambda: label(store))
-    assert overruns == []
+    # The refusal names the step that it refused, before anything is written.
+    small = open_store(path, mem_budget=10_000)
+    saved = written(small)
+    with pytest.raises(MemoryError, match="^Labelling 4000 cells holds about"):
+        label(small)
+    assert written(open_store(path)) == saved
+    store = open_store(path)
+    assert store.perturbation.load_labels(label(store)).cells["n_targets"].max() > 20

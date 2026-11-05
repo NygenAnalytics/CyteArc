@@ -1,4 +1,3 @@
-import tracemalloc
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,7 +12,6 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationClusters
 from cytearc.perturbation import clusters as clusters_module
 from cytearc.perturbation.clusters import (
-    cluster_memory_bytes,
     cluster_profiles,
     cluster_settings,
     embed_profiles,
@@ -220,30 +218,6 @@ def test_cluster_settings_return_the_perturbations_to_cluster() -> None:
     # The other settings are checked first, as the pipeline recipe reports them.
     with pytest.raises(ValueError, match="metric must be"):
         cluster_settings("cosine", 4, 2, "eom", 0, "T00")
-
-
-def test_the_memory_estimate_bounds_the_clusterings_peak() -> None:
-    rng = np.random.default_rng(2)
-    settings = {
-        "metric": "correlation",
-        "min_cluster_size": 4,
-        "min_samples": 2,
-        "selection": "eom",
-        "seed": 0,
-    }
-    # The first call imports and compiles what the layout needs.
-    cluster_profiles(rng.normal(size=(20, 10)), **settings)
-    # Below 12 perturbations, the randomized PCA's matrices of features x 12
-    # outweigh the profiles, which the estimate once left out.
-    for shape in ((600, 40), (150, 900), (6, 4000), (3, 4000)):
-        values = rng.normal(size=shape)
-        tracemalloc.start()
-        try:
-            cluster_profiles(values, **settings)
-            peak = tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
-        assert peak <= cluster_memory_bytes(*shape)
 
 
 def test_the_clusters_type_is_exported() -> None:

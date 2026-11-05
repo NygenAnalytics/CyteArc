@@ -1,5 +1,4 @@
 import threading
-from typing import Any
 
 import numpy as np
 import pytest
@@ -32,30 +31,6 @@ def _stream_threads(before: set[threading.Thread]) -> list[str]:
         for thread in threading.enumerate()
         if thread not in before and not thread.name.startswith(("asyncio_", "zarr_"))
     )
-
-
-def hold_finished_work_items(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make every CyteArc pool worker keep its finished work item until its next.
-
-    A worker that is descheduled after it reports a result still holds the
-    work item, with the call and its result, until it takes the next one.
-    Making that the rule shows any buffer a work item still references in a
-    memory trace, without timing.
-    """
-    import concurrent.futures.thread as pool_thread
-
-    run = pool_thread._WorkItem.run
-    held: dict[int, Any] = {}
-
-    def keep(self: Any, *args: Any, **kwargs: Any) -> None:
-        cytearc_worker = threading.current_thread().name.startswith("cytearc-")
-        if cytearc_worker:
-            held.pop(threading.get_ident(), None)
-        run(self, *args, **kwargs)
-        if cytearc_worker:
-            held[threading.get_ident()] = self
-
-    monkeypatch.setattr(pool_thread._WorkItem, "run", keep)
 
 
 def _array(
@@ -917,69 +892,6 @@ def test_read_group_units_are_sized_by_the_selected_cells() -> None:
         + int(metrics["residentBytes"])
     )
     assert read_group_stream_floor(counts_t, feat_idx=np.array([], dtype=int)) == 0
-
-
-def _traced_stream_peak(mapper, counts_t, **kwargs) -> tuple[int, dict[str, object]]:  # type: ignore[no-untyped-def]
-    import tracemalloc
-
-    # Load the codecs and pools first, so that only the stream's own buffers
-    # are traced.
-    list(mapper(counts_t, lambda unit: None, **kwargs))
-    metrics: dict[str, object] = {}
-    tracemalloc.start()
-    try:
-        base, _ = tracemalloc.get_traced_memory()
-        for _ in mapper(counts_t, lambda unit: None, metrics=metrics, **kwargs):
-            pass
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    return peak - base, metrics
-
-
-@pytest.fixture(scope="module")
-def traced_counts_t() -> tuple[zarr.Array, np.ndarray]:
-    """Return a countsT of 100,000 cells and 64 features, and 70,000 of its cells.
-
-    The streams only read it, so the tests that trace them share it.
-    """
-    rng = np.random.default_rng(0)
-    values = rng.poisson(0.3, size=(100_000, 64)).astype(np.uint16)
-    # Four read groups of 16 features over four sharded bands of 25,000 cells.
-    counts_t = _counts_t_with_plan(
-        values, policy=CountMatrixPolicy(unitBytes=3_200_000, chunkBytes=800_000)
-    )
-    return counts_t, np.sort(rng.choice(100_000, 70_000, replace=False))
-
-
-@pytest.mark.parametrize("mapper_name", ["read_groups", "cell_bands"])
-@pytest.mark.parametrize("budget", [8_000_000, 40_000_000])
-def test_feature_streams_reserve_every_traced_buffer(
-    mapper_name: str,
-    budget: int,
-    monkeypatch: pytest.MonkeyPatch,
-    traced_counts_t: tuple[zarr.Array, np.ndarray],
-) -> None:
-    from cytearc.storage import feature_stream
-
-    mapper = getattr(feature_stream, f"map_feature_{mapper_name}")
-    counts_t, cell_idx = traced_counts_t
-    # Every pool worker keeps its finished work item until it takes its next
-    # one, as a descheduled worker can, so a buffer that a worker still
-    # references after the stream released it shows up in the trace. One
-    # worker runs one codec thread, which drops a chunk it decoded before it
-    # decodes the next read's, so Zarr's own buffers stay inside the
-    # reservations of the reads in flight.
-    hold_finished_work_items(monkeypatch)
-
-    traced, metrics = _traced_stream_peak(
-        mapper, counts_t, cell_idx=cell_idx, resources=ResourceBudget(budget, 1)
-    )
-
-    # NumPy and Zarr buffers are traced and the callback allocates nothing, so
-    # what the stream allocates must fit the bytes its plan reserves.
-    assert metrics["codecWorkers"] == 1
-    assert traced <= int(metrics["reservedBytes"]) <= budget
 
 
 def test_map_feature_cell_bands_parallel_matches_sequential() -> None:

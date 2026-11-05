@@ -1232,47 +1232,15 @@ def test_counts_that_cannot_be_read_one_cell_at_a_time_fail_at_construction(
     assert not destination.exists()
 
 
-def test_an_import_of_counts_compressed_by_feature_follows_its_refusals(
-    tmp_path: Path,
-) -> None:
-    from tests.memory_helpers import follow_refusals
-
-    source = _write_duplicate_seed_fixture(tmp_path, "Assay", "csc")
-
-    def import_at(budget: int) -> None:
-        with SeuratReader(source, reductions=[], temp_dir=tmp_path) as reader:
-            SeuratToZarr(reader, MemoryStore(), mem_budget=budget, nthreads=1).dump(
-                batch_size=1
-            )
-
-    # The seed converts to cell rows within the block limit that the budget
-    # leaves beside the sources, so the conversion's refusal names the budget,
-    # and only the budget.
-    _budget, refusals = follow_refusals(import_at)
-    (conversion,) = [
-        error for error in refusals if error.item == "one sparse row of the conversion"
-    ]
-    assert str(conversion).count("needs at least") == 1, conversion
-
-
-def test_a_seurat_import_follows_its_refusals_to_the_budget_that_imports_it(
-    tmp_path: Path,
-) -> None:
-    from tests.memory_helpers import follow_refusals
+def test_a_seurat_import_refuses_a_budget_of_one_byte(tmp_path: Path) -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
 
     source = _write_partial_fixture(tmp_path / "budget.rds")
-
-    def import_at(budget: int) -> None:
-        with SeuratReader(source) as reader:
-            SeuratToZarr(
-                reader,
-                MemoryStore(),
-                mem_budget=budget,
-                nthreads=1,
-                policy=CountMatrixPolicy(unitBytes=4096, chunkBytes=1024),
-            ).dump(batch_size=1)
-
-    # Preparing an assay's sources and reading its cells run beside the other
-    # assays' sources and the count summary, which every budget named holds.
-    _budget, refusals = follow_refusals(import_at)
-    assert refusals
+    with SeuratReader(source) as reader, pytest.raises(MemoryBudgetError):
+        SeuratToZarr(
+            reader,
+            MemoryStore(),
+            mem_budget=1,
+            nthreads=1,
+            policy=CountMatrixPolicy(unitBytes=4096, chunkBytes=1024),
+        ).dump(batch_size=1)

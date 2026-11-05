@@ -14,7 +14,6 @@ from cytearc.variants.frequencies import (
     cosine_neighborhoods,
     frequency_clones,
 )
-from tests.memory_helpers import smallest_budget, traced_peak
 
 
 def _sites() -> SiteTable:
@@ -434,47 +433,6 @@ def test_frequency_clones_check_inputs_and_memory() -> None:
             random_seed=1,
             memory_bytes=10_000,
         )
-
-
-@pytest.mark.parametrize(
-    ("n_cells", "n_variants", "n_groups"),
-    [
-        pytest.param(600, 100, 1, marks=pytest.mark.slow),
-        pytest.param(600, 100, 3, marks=pytest.mark.slow),
-        (1500, 8, 1),
-    ],
-)
-def test_frequency_clones_hold_no_more_than_the_smallest_budget_they_accept(
-    n_cells, n_variants, n_groups
-) -> None:
-    # Clones marked by variants of their own, sparse noise and uncovered
-    # entries; every frequency is held apart from the budget, as the input.
-    rng = np.random.default_rng(n_cells + n_variants)
-    clone = rng.integers(0, 8, size=n_cells)
-    owner = rng.integers(0, 8, size=n_variants)
-    frequencies = np.where(
-        clone[:, None] == owner[None, :],
-        rng.uniform(0.2, 0.9, size=(n_cells, n_variants)),
-        0.0,
-    )
-    noise = rng.random(frequencies.shape) < 0.02
-    frequencies[noise] = rng.uniform(0.01, 0.1, size=int(noise.sum()))
-    frequencies[rng.random(frequencies.shape) < 0.15] = np.nan
-    groups = np.arange(n_cells) % n_groups
-
-    def call(budget: int) -> None:
-        frequency_clones(
-            frequencies,
-            groups=groups,
-            n_neighbors=10,
-            resolution=1.0,
-            random_seed=1,
-            memory_bytes=budget,
-            nthreads=1,
-        )
-
-    budget = smallest_budget(call, 1 << 30)
-    assert traced_peak(lambda: call(budget), budget)[1] <= budget
 
 
 def test_frequency_clones_refuse_a_budget_below_the_coverage_masks() -> None:

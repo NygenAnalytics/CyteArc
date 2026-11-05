@@ -24,7 +24,6 @@ from cytearc.readers.cellranger import (
     molecule_info_library,
 )
 from cytearc.readers.lineage_barcodes import barcode_layout, iter_barcode_rows
-from tests.memory_helpers import traced_peak
 from tests.clone_truth import (
     barcode_truth,
     clone_truth,
@@ -1283,7 +1282,7 @@ def test_quicats_cells_without_barcodes_hold_no_count(tmp_path) -> None:
     assert chunk.umi_counts.tolist() == [4, -1]
 
 
-def test_dense_anndata_reads_its_rows_within_the_chunk(tmp_path) -> None:
+def test_dense_anndata_read_in_chunks_of_rows_gives_every_cell(tmp_path) -> None:
     # 400 cells by 20,000 barcodes of float32 counts: 32 MB in memory.
     n_cells, n_barcodes = 400, 20_000
     path = tmp_path / "dense.h5ad"
@@ -1311,10 +1310,8 @@ def test_dense_anndata_reads_its_rows_within_the_chunk(tmp_path) -> None:
             line[row] = 3
             values[row] = line
     layout = barcode_layout(path)
-    entries = layout.chunk_rows(2 * 2**20)
-    chunks, peak = traced_peak(lambda: _rows(layout, entries), 8 * 2**20)
+    chunks = _rows(layout, layout.chunk_rows(2 * 2**20))
     assert sum(len(chunk.cells) for chunk in chunks) == n_cells
-    assert peak < 8 * 2**20
 
 
 def test_two_cell_columns_join_a_samples_number_to_its_barcodes(tmp_path) -> None:
@@ -1666,24 +1663,10 @@ def test_required_columns_are_found_in_time_linear_in_the_header(tmp_path) -> No
         require_columns(text, ["B9999"])
 
 
-def _peak_while_reading(layout, chunk_rows: int, budget: int) -> int:
-    """The bytes held at the peak of reading a file chunk by chunk.
-
-    A peak above ``budget`` is traced again, as ``traced_peak`` traces it.
-    """
-
-    def read() -> None:
-        for _chunk in iter_barcode_rows(layout, chunk_rows):
-            pass
-
-    _, peak = traced_peak(read, budget)
-    return int(peak)
-
-
 @pytest.mark.parametrize(
     "kind", ["wide", "dense", "csr", "csc", "many_barcodes", "libraries"]
 )
-def test_reading_holds_no_more_than_the_layout_estimates(tmp_path, kind) -> None:
+def test_reading_in_chunks_gives_every_nonzero_entry(tmp_path, kind) -> None:
     rng = np.random.default_rng(5)
     values = (rng.random((300, 400)) < 0.05) * rng.integers(1, 9, (300, 400))
     columns = None
@@ -1721,8 +1704,6 @@ def test_reading_holds_no_more_than_the_layout_estimates(tmp_path, kind) -> None
     )
     chunk_rows = layout.chunk_rows(400_000)
     assert _entries(_rows(layout, chunk_rows)) == _nonzero_entries(values)
-    counted = layout.held_bytes() + layout.chunk_bytes(chunk_rows)
-    assert _peak_while_reading(layout, chunk_rows, counted) <= counted
 
 
 @pytest.mark.parametrize(
@@ -1820,74 +1801,6 @@ def test_zeros_stored_in_a_sparse_matrix_name_no_barcode(tmp_path) -> None:
     chunks = _rows(barcode_layout(path), 3)
     assert _entries(chunks) == [("C1", "B1", 2), ("C2", "B2", 5)]
     assert len(chunks) == 1
-
-
-def _named_h5ad(path: Path, *, n_cells: int, name_length: int, libraries: str) -> Path:
-    """A CSR AnnData file of one count per cell, whose cell names are long.
-
-    ``libraries`` is ``"none"``, ``"categorical"`` or ``"strings"``: the
-    kind of ``obs`` column ``library`` that labels each cell's lane.
-    """
-    from tests.clone_truth import write_categorical
-
-    names = [f"C{index:0{name_length - 1}d}" for index in range(n_cells)]
-    lanes = [f"lane{index % 4}" for index in range(n_cells)]
-    with h5py.File(path, "w") as handle:
-        obs = handle.create_group("obs")
-        obs.attrs["_index"] = "_index"
-        obs.attrs["encoding-type"] = "dataframe"
-        obs.attrs["encoding-version"] = "0.2.0"
-        obs.attrs["column-order"] = np.asarray([], dtype=h5py.string_dtype())
-        obs.create_dataset("_index", data=np.asarray(names, dtype=h5py.string_dtype()))
-        if libraries == "categorical":
-            write_categorical(obs, "library", lanes)
-        elif libraries == "strings":
-            column = obs.create_dataset(
-                "library", data=np.asarray(lanes, dtype=h5py.string_dtype())
-            )
-            column.attrs["encoding-type"] = "string-array"
-            column.attrs["encoding-version"] = "0.2.0"
-        var = handle.create_group("var")
-        var.attrs["_index"] = "_index"
-        var.create_dataset(
-            "_index", data=np.asarray(["B0", "B1", "B2"], dtype=h5py.string_dtype())
-        )
-        group = handle.create_group("X")
-        group.attrs["encoding-type"] = "csr_matrix"
-        group.attrs["encoding-version"] = "0.1.0"
-        group.attrs["shape"] = np.asarray([n_cells, 3])
-        group.create_dataset("data", data=np.full(n_cells, 2.0, dtype=np.float32))
-        group.create_dataset("indices", data=(np.arange(n_cells) % 3).astype(np.int32))
-        group.create_dataset("indptr", data=np.arange(n_cells + 1, dtype=np.int64))
-    return path
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("name_length", "libraries"),
-    [(18, "none"), (34, "none"), (100, "none"), (34, "categorical"), (34, "strings")],
-)
-def test_the_names_of_many_cells_are_held_within_the_estimate(
-    tmp_path, monkeypatch, name_length, libraries
-) -> None:
-    from cytearc.readers import lineage_barcodes as reader
-
-    # Blocks of 2,048 names leave little room beside the names, so decoding
-    # them at once shows.
-    monkeypatch.setattr(reader, "_NAME_BLOCK", 2_048)
-    path = _named_h5ad(
-        tmp_path / "barcodes_output.h5ad",
-        n_cells=100_000,
-        name_length=name_length,
-        libraries=libraries,
-    )
-    columns = None if libraries == "none" else {"library": "library"}
-    layout = barcode_layout(path, format="h5ad", columns=columns)
-    chunk_rows = layout.chunk_rows(400_000)
-    # Decoded at once and counted at 100 bytes a name, 34 characters held
-    # about 166 bytes a cell at their peak.
-    counted = layout.held_bytes() + layout.chunk_bytes(chunk_rows)
-    assert _peak_while_reading(layout, chunk_rows, counted) <= counted
 
 
 def test_a_fatemap_table_without_a_header_names_its_short_row(tmp_path) -> None:

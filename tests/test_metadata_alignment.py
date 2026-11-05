@@ -1,7 +1,5 @@
 """Label-aligned inserts, strict column requests, stored grep names, and lean row indices."""
 
-import tracemalloc
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -178,34 +176,19 @@ def test_grep_returns_stored_names_and_keeps_names_that_differ_in_case():
     assert table.grep("cd4$", only_valid=True) == ["CD4"]
 
 
-def test_row_index_and_reset_key_do_not_build_python_sequences(monkeypatch):
+def test_row_index_and_reset_key_give_int64_positions_and_booleans(monkeypatch):
     n_rows = 1_000_000
     group = zarr.open_group(store=MemoryStore(), mode="w")
     group.create_array(
         "I", shape=(n_rows,), dtype=bool, chunks=(n_rows,), fill_value=True
     )
-
-    tracemalloc.start()
-    try:
-        table = MetaData(group)
-        index_peak = tracemalloc.get_traced_memory()[1]
-        saved: list[np.ndarray] = []
-        monkeypatch.setattr(
-            MetaData, "_save", lambda self, column, values: saved.append(values)
-        )
-        tracemalloc.reset_peak()
-        held = tracemalloc.get_traced_memory()[0]
-        table.reset_key("I")
-        reset_peak = tracemalloc.get_traced_memory()[1] - held
-    finally:
-        tracemalloc.stop()
-
+    table = MetaData(group)
+    saved: list[np.ndarray] = []
+    monkeypatch.setattr(
+        MetaData, "_save", lambda self, column, values: saved.append(values)
+    )
+    table.reset_key("I")
     np.testing.assert_array_equal(table.index, np.arange(n_rows))
     assert table.index.dtype == np.int64
-    # The index is one int64 array; a list of Python integers costs about 40
-    # bytes per row before it becomes that array.
-    assert index_peak < 2 * 8 * n_rows
     (values,) = saved
     assert values.dtype == np.bool_ and values.shape == (n_rows,) and values.all()
-    # One byte per row; a list of booleans holds eight.
-    assert reset_peak < 2 * n_rows

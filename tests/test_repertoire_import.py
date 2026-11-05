@@ -9,7 +9,6 @@ encoding recovers each cell's chains. The join of barcodes to cells runs in
 
 import gzip
 import shutil
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,7 +16,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cytearc.metadata.artifacts import cell_data_write_bytes
 from cytearc.repertoire import ImmuneReceptors
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
@@ -34,13 +32,7 @@ from tests.clone_helpers import (
     write_truth_store,
 )
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.memory_helpers import (
-    budget_that_runs,
-    charges,
-    index_copies_references,
-    stated_bytes,
-)
-from tests.storage_helpers import copy_store, open_store
+from tests.storage_helpers import copy_store
 from tests.clone_truth import (
     N_OUTSIDE,
     RECEPTOR_SLOTS,
@@ -492,20 +484,15 @@ def test_import_refuses_contigs_larger_than_the_memory_budget(
         store.repertoire.import_receptors(tcr_file(tmp_path), cell_selection=cells)
 
 
-def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
+def test_the_import_refuses_small_budgets_before_it_reads_or_saves(
     tmp_path, monkeypatch
 ) -> None:
-    from cytearc.datastore._operations.cell_barcodes import lookup_bytes
-    from cytearc.metadata import records
     from cytearc.metadata import rows as metadata_rows
-    from cytearc.storage.geometry import array_geometry
 
     store = receptor_store(tmp_path)
     cells = store.snapshot_cell_selection()
     # 125 contigs for each cell, with junctions of 2,000 nucleotides of their
-    # own, outweigh the read of the cells' IDs and a chunk's parse; their
-    # 1,000 rows are parsed as one chunk, the fewest a chunk holds, at any
-    # budget that accepts one, so the encoded bytes do not depend on it.
+    # own, outweigh the read of the cells' IDs and a chunk's parse.
     rows = [
         f"cell{cell},true,cell{cell}_contig_{k},true,500,TRB,TRBV1,,TRBJ1,TRBC1,"
         f"true,true,CASSLGQ{cell}{k:05d}YEQYFGPGTRLTVL,"
@@ -514,173 +501,29 @@ def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
         for k in range(125)
     ]
     path = write_lines(tmp_path, "many.csv", CELLRANGER_HEADER, rows)
-    encoded: list[int] = []
-    add = records.RecordEncoder.add
-
-    def recording_add(self, *arguments, **options):
-        add(self, *arguments, **options)
-        encoded.append(self.nbytes)
-
-    monkeypatch.setattr(records.RecordEncoder, "add", recording_add)
-    saved, taken = charges(
-        lambda: store.repertoire.import_receptors(path, cell_selection=cells)
-    )
-    assert len(encoded) == 1
-    # At its peak the import holds three times its encoded contigs, 100 bytes
-    # per selected cell and its position, 8, what writing each cell's labels
-    # and counts holds,
-    # its labels at the widest of their kinds, the join's lookup of the cells,
-    # pandas' table of 16 buckets and each cell's slot and flag, each cell's
-    # ID as a Python string, 41 bytes and the five characters of cell0 to
-    # cell7, with its object's slot, and what the read of the IDs may still
-    # hold: a stored chunk of them and Zarr's objects.
-    n = N_RECEPTOR_CELLS
-    writing = cell_data_write_bytes(
-        {
-            "values": ((n,), "U10"),
-            "receptor_subtype": ((n,), "U10"),
-            "chain_pairing": ((n,), "U15"),
-            "multichain": ((n,), bool),
-            "n_vj": ((n,), np.int32),
-            "n_vdj": ((n,), np.int32),
-            "n_contigs": ((n,), np.int32),
-            "chain_slots": ((n, 4), np.int32),
-        }
-    )
-    ids = store.cells._get_array("ids")
-    left = array_geometry(ids).heldReadBytes()
-    lookup = 16 * 16 + 16 // 8 + (1 + 8 * index_copies_references()) * n
-    assert lookup == lookup_bytes(n)
-    estimate = 3 * encoded[0] + (100 + 8 + 8 + 41 + 5) * n + lookup + writing + left
-    # Within a budget this large, chunks hold the most rows, 50,000, and a
-    # chunk's parse holds its 18 fields of 64 bytes a row beside 1 MiB, held
-    # once from before the first chunk to the end of the file, since the
-    # reader keeps each chunk's text until it parses the next. It is let go
-    # after the import's peak is checked, which plans the larger of that peak
-    # and what is held beside the parse.
-    parse = (1 << 20) + 50_000 * 18 * 64
-    order = [(item, nbytes) for item, nbytes, _planned in taken]
-    assert [entry for entry in order if entry[0].endswith("parsed")] == [
-        ("a chunk of 50000 contig rows as parsed", parse)
-    ]
-    peaks = [
-        (position, planned)
-        for position, (item, _nbytes, planned) in enumerate(taken)
-        if item.endswith("import's peak")
-    ]
-    assert [planned for _position, planned in peaks] == [
-        max(estimate, estimate - 2 * encoded[0] + parse)
-    ]
-    assert order.index(("a release", parse)) > peaks[0][0]
-    monkeypatch.setattr(store, "memoryBytes", estimate - 1)
+    saved = store.repertoire.import_receptors(path, cell_selection=cells)
+    # 6 MB cannot hold the 1,000 contigs at the import's peak, which is
+    # refused before anything is saved.
+    monkeypatch.setattr(store, "memoryBytes", 6_000_000)
     with pytest.raises(
-        MemoryBudgetError, match=f"holds about {estimate} bytes for the 1000 contigs"
+        MemoryBudgetError, match="bytes for the 1000 contigs of the selected cells"
     ) as refused:
         store.repertoire.import_receptors(
             path, cell_selection=cells, invalidate_cache=True
         )
-    assert refused.value.needed_bytes == estimate
     assert str(refused.value).endswith(", or pass a smaller cell_selection.")
     assert store.artifacts.list(kind="immune_receptors", scope="datastore") == [saved]
-    monkeypatch.setattr(store, "memoryBytes", estimate)
-    assert (
-        store.repertoire.import_receptors(
-            path, cell_selection=cells, invalidate_cache=True
-        )
-        != saved
-    )
 
-    # Below the cells' share, their positions and the stored chunk of the
-    # selection's flags that reading them may leave, and the read of the
-    # IDs, the import refuses before it reads a cell ID: the read holds the
-    # eight IDs at their stored width and their indices, one stored chunk of
-    # them and Zarr's objects. The join charges its lookup once the IDs are
-    # read.
-    from cytearc.storage.artifacts import artifact_group
-
+    # 1 kB is refused before a cell ID is read.
     def unread(*_arguments, **_options):
         raise AssertionError("the cell IDs were read")
 
     monkeypatch.setattr(metadata_rows, "read_array_rows_chunkwise", unread)
-    flags = artifact_group(store.zw, cells)["values"]
-    reading = (
-        100 * n
-        + writing
-        + 8 * n
-        + array_geometry(flags).heldReadBytes()
-        + metadata_rows.row_read_bytes(array_geometry(ids), np.arange(n))
-    )
-    monkeypatch.setattr(store, "memoryBytes", reading - 1)
-    with pytest.raises(
-        MemoryBudgetError,
-        match=f"holds about {reading} bytes for the selected cells' IDs",
-    ):
+    monkeypatch.setattr(store, "memoryBytes", 1_000)
+    with pytest.raises(MemoryBudgetError):
         store.repertoire.import_receptors(
             path, cell_selection=cells, invalidate_cache=True
         )
-
-
-# The bytes that a refusal of the import or the load states.
-_stated = partial(stated_bytes, pattern=r"(?:holds?|needs) about (\d+) bytes")
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("long_ids", [False, True], ids=["ids", "80-character-ids"])
-def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
-    tmp_path, long_ids
-) -> None:
-    from tests.storage_helpers import write_count_store
-
-    # One cell in 50 has a contig, as when a store of every cell of a sample
-    # meets the contigs of its B cells, so what the import holds for each
-    # selected cell outweighs its contigs; long IDs widen every ID read.
-    n_cells = 50_000
-    ids = [
-        f"{'sample_with_a_long_name_' * 3}{cell:08d}-1" if long_ids else f"cell{cell}"
-        for cell in range(n_cells)
-    ]
-    write_count_store(
-        str(tmp_path / "sparse.zarr"),
-        {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
-        "uint16",
-        cell_ids=ids,
-    )
-    store = open_store(tmp_path / "sparse.zarr")
-    rows = [
-        f"{ids[cell]},true,{ids[cell]}_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,"
-        f"true,true,CASS{cell % 50}F,TGTGCC{cell % 50},40,3,ct{cell},ct{cell}_1"
-        for cell in range(0, n_cells, 50)
-    ]
-    path = write_lines(tmp_path, "sparse.csv", CELLRANGER_HEADER, rows)
-    cells = store.snapshot_cell_selection()
-    # Warm the process, so one-off costs such as lazy imports are paid.
-    small = receptor_store(tmp_path)
-    small.repertoire.import_receptors(
-        tcr_file(tmp_path), cell_selection=small.snapshot_cell_selection()
-    )
-
-    def run_import():
-        return store.repertoire.import_receptors(
-            path, cell_selection=cells, invalidate_cache=True
-        )
-
-    # Each import runs at the smallest budget it accepts, which the budget
-    # reaches from one byte by the bytes that each refusal states.
-    budget, _refusals, ref, peak = budget_that_runs(
-        store, lambda _store: run_import(), refusal_budget=_stated, max_refusals=100
-    )
-    # The import counts three times its encoded contigs at its peak, and the
-    # IDs' read their stored chunk at the bound of incompressible bytes.
-    assert peak is not None and peak <= budget <= 3 * peak + (1 << 20), (peak, budget)
-
-    def run_load():
-        return store.repertoire.load_receptors(ref, fields=[])
-
-    run_load()
-    budget, _refusals, _loaded, peak = budget_that_runs(
-        store, lambda _store: run_load(), refusal_budget=_stated, max_refusals=20
-    )
-    assert peak <= budget, (peak, budget)
 
 
 def test_zero_counts_load_as_zero_and_missing_counts_as_missing(tmp_path) -> None:

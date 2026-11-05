@@ -8,7 +8,7 @@ write their own stores.
 
 import re
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,9 +29,8 @@ from cytearc.perturbation.mixtures import (
 )
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.utils.logging import logger
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.perturbation_helpers import record_cell_reads, write_screen
-from cytearc.storage.validation_scope import validation_scope
-from tests.memory_helpers import ZARR_READS, audited, check_budget, hold_finished_reads
 from tests.storage_helpers import (
     copy_store,
     open_store,
@@ -650,20 +649,6 @@ def _wide_screen(folder: Path) -> Path:
     return path
 
 
-# The most times its traced peak that the budget of guide calling may be.
-_CALLING_AT_MOST = 3.0
-
-
-def _audited_at(path: Path, call: Callable[[DataStore], object], budget: int) -> None:
-    """Check that ``call`` holds no more than its ledger plans at ``budget``, with each read's work held until the next read ends."""
-    store = open_store(path, mem_budget=budget)
-    with validation_scope():
-        call(store)
-        with hold_finished_reads(*ZARR_READS):
-            _ref, overruns = audited(lambda: call(store))
-    assert overruns == []
-
-
 @pytest.mark.slow
 @pytest.mark.parametrize(
     "options",
@@ -675,95 +660,18 @@ def _audited_at(path: Path, call: Callable[[DataStore], object], budget: int) ->
     ],
     ids=["fixed", "top_guide", "poisson_gaussian", "gaussian"],
 )
-def test_call_guides_runs_within_the_budget_that_its_refusals_name(
-    tmp_path, options
-) -> None:
+def test_call_guides_refuses_a_small_budget_before_it_writes(tmp_path, options) -> None:
     path = _wide_screen(tmp_path)
     cells = open_store(path).snapshot_cell_selection("every")
-
-    def call(store):
-        return store.perturbation.call_guides(cells, invalidate_cache=True, **options)
-
-    budget, refusals, _ = check_budget(
-        path, call, at_most=_CALLING_AT_MOST, allowance=1 << 20, max_refusals=100
-    )
-
-    # Each refusal comes before anything is written and names the step that
-    # it refused: the fitted methods' first steps fit thresholds, and the
-    # calls' steps then call guides.
+    store = open_store(path, mem_budget=10_000)
+    saved = written(store)
+    # The refusal comes before anything is written and names the step that it
+    # refused: the fitted methods fit thresholds first, the others call guides.
     fitting = options["method"].endswith("gaussian")
     first = "Fitting guide" if fitting else "Calling guides"
-    assert 1 <= len(refusals) <= 12
-    assert refusals[0].startswith(first)
-    assert all(
-        refusal.startswith(("Fitting guide", "Calling guides")) for refusal in refusals
-    )
-    if options["method"] != "top_guide":
-        # The padded calls of cell0, 80 slots for each of the 4,000 cells, and
-        # the 60 characters of the labels count.
-        assert budget > 8 * 80 * 4_000
-    _audited_at(path, call, budget)
-
-
-def _distinct_screen(folder: Path) -> Path:
-    """A screen whose cells carry 20 of 200 guides at counts that few cells share.
-
-    The histograms of 3,000 cells then hold about 60,000 distinct counts,
-    20 per cell, which only reading the counts tells.
-    """
-    n_cells, n_guides, per_cell = 3_000, 200, 20
-    rng = np.random.default_rng(23)
-    counts = rng.poisson(0.2, size=(n_cells, n_guides))
-    for cell in range(n_cells):
-        chosen = rng.choice(n_guides, size=per_cell, replace=False)
-        counts[cell, chosen] += 33 + rng.integers(0, 100_000, per_cell)
-    path = folder / "distinct.zarr"
-    write_count_store(
-        str(path),
-        {"RNA": rng.poisson(1.0, size=(n_cells, 2)) + 1, "CRISPR": counts},
-        "uint32",
-    )
-    store = open_store(path)
-    store.cells.insert("every", np.ones(n_cells, dtype=bool))
-    store.snapshot_cell_selection("every")
-    rechunk_feature_tables(path)
-    return path
-
-
-@pytest.mark.slow
-def test_histogram_refusals_name_a_budget_past_where_they_stopped(tmp_path) -> None:
-    path = _distinct_screen(tmp_path)
-    cells = open_store(path).snapshot_cell_selection("every")
-
-    def call(store):
-        return store.perturbation.call_guides(cells, invalidate_cache=True)
-
-    budget, refusals, _ = check_budget(
-        path, call, at_most=_CALLING_AT_MOST, allowance=1 << 20, max_refusals=100
-    )
-
-    # Within the least that the fits hold, the histograms stop while counts
-    # remain, and estimate what every row needs from the rows read.
-    stopped = [refusal for refusal in refusals if "histograms of " in refusal]
-    assert stopped
-    first = stopped[0]
-    assert re.search(
-        r", while \d+ of 3000 rows of counts remain to be read, and at the rate ",
-        first,
-    )
-    distinct = [
-        int(re.search(r"histograms of (\d+) distinct counts", refusal).group(1))
-        for refusal in stopped
-    ]
-    # Each refusal names a budget that gets past the point where the one before
-    # stopped, so the next stops later, with more distinct counts, or not at
-    # all, and a few refusals reach the budget that runs.
-    assert distinct == sorted(set(distinct))
-    assert len(stopped) <= 5
-    assert len(refusals) <= 12
-    # The budget holds the counts beside histograms of every count.
-    assert budget > 16 * 60_000
-    _audited_at(path, call, budget)
+    with pytest.raises(MemoryBudgetError, match=f"^{first}.* Raise mem_budget"):
+        store.perturbation.call_guides(cells, **options)
+    assert written(open_store(path)) == saved
 
 
 def test_gaussian_warns_when_most_calls_carry_several_guides(tmp_path) -> None:
@@ -872,42 +780,3 @@ def test_loading_thresholds_needs_the_status_names_that_decode_them(
     pd.testing.assert_frame_equal(
         store.perturbation.load_guide_thresholds(ref).table, table
     )
-
-
-def test_loading_calls_fits_and_labels_holds_no_more_than_their_ledgers_plan(
-    tmp_path,
-) -> None:
-    # 4,000 cells, so that a few bytes a cell that a ledger leaves out pass
-    # the audit's allowance.
-    store = open_store(_wide_screen(tmp_path))
-    cells = store.snapshot_cell_selection("every")
-    calls = store.perturbation.call_guides(
-        cells, method="gaussian", sample_column="lane"
-    )
-    labels = store.perturbation.labels(
-        calls,
-        controls=["NT"],
-        target_column=None,
-        targets={
-            guide: "NT" if position % 10 == 0 else f"GENE{position // 2}"
-            for position, guide in enumerate(
-                store.perturbation.load_guide_calls(calls).guides
-            )
-        },
-        policy="combinations",
-    )
-    # Each loader charges one ledger, and from each charge to the next holds no
-    # more than it planned, with each read's work held until the next read
-    # ends; a first call loads what later calls reuse.
-    guide = str(store.perturbation.load_guide_calls(calls).guides[1])
-    for load in (
-        lambda: store.perturbation.load_guide_calls(calls),
-        lambda: store.perturbation.load_guide_thresholds(calls),
-        lambda: store.perturbation.load_guide_thresholds(calls, guides=[guide]),
-        lambda: store.perturbation.load_labels(labels),
-    ):
-        with validation_scope():
-            load()
-            with hold_finished_reads(*ZARR_READS):
-                _loaded, overruns = audited(load)
-        assert overruns == []

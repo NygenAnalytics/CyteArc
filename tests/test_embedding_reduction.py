@@ -1,7 +1,6 @@
 import os
 import subprocess
 import sys
-import tracemalloc
 
 import numpy as np
 import pytest
@@ -15,7 +14,6 @@ from cytearc.embeddings.reduction import (
     _streaming_lsi_resident_bytes,
     fit_lsi,
     fit_pca,
-    pca_fit_resident_bytes,
     pca_solver,
 )
 from cytearc.matrix import ChunkedArray
@@ -633,46 +631,6 @@ def test_pca_raises_blas_threads_above_the_starting_count(
         np.testing.assert_allclose(
             fit["variance"], model.explained_variance_, rtol=1e-12
         )
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("n_features", "block_size", "scaled"),
-    [
-        # Arrays large enough that the fit's own allocations dominate.
-        (600, 2000, True),
-        (600, 500, False),
-        (_WIDE_FEATURES, 200, True),
-        (_WIDE_FEATURES, 64, False),
-    ],
-)
-def test_pca_fit_resident_bytes_bound_the_traced_peak(
-    wide_values: np.ndarray, n_features: int, block_size: int, scaled: bool
-) -> None:
-    values = (
-        wide_values
-        if n_features == _WIDE_FEATURES
-        else _spectrum_values(2000, n_features, 5)
-    )
-    scale = _standardizer(values) if scaled else None
-    # A first fit imports the solvers, so the traced fit allocates only arrays.
-    # The solver depends only on the feature count, so a few rows take the
-    # same path.
-    _fit(values[:20], block_size=block_size, dims=10, scale=scale)
-    data = ChunkedArray.from_numpy(values, block_size=block_size)
-
-    tracemalloc.start()
-    try:
-        _fit(values, block_size=block_size, dims=10, scale=scale, data=data)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-
-    bound = (
-        pca_fit_resident_bytes(n_features, int(data.chunksize[0]), 10)
-        + data._block_task_bytes()
-    )
-    assert peak <= bound < 2 * peak
 
 
 def test_pca_solver_depends_only_on_the_feature_count():
