@@ -38,7 +38,7 @@ cost grows with the number of chains, not with the number of pairs of cells.
 These functions work on encoded chains and never touch storage.
 """
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -50,7 +50,7 @@ from scipy.sparse.csgraph import connected_components
 from ..clones.sequences import DISTANCE_METRICS, neighbor_pairs
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import unique_inverse, unique_rows
-from ..utils.memory_budget import MemoryLedger
+from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
 from ..utils.numba import njit
 from .chains import SLOTS
 
@@ -70,6 +70,7 @@ __all__ = [
     "clonotype_nouns",
     "representative_cells",
     "shared_text",
+    "within_type_parts",
 ]
 
 #: The values of ``receptor_arms``.
@@ -93,6 +94,142 @@ def clonotype_labels(n_clonotypes: int) -> np.ndarray:
         [f"clonotype_{rank}" for rank in range(1, int(n_clonotypes) + 1)],
         dtype=object,
     )
+
+
+# Finding each clonotype within a type's clonotype and type holds, for each
+# cell, whether it has one, its clonotype within its type and in turn its
+# clonotype or type and the one gathered back to check them, and for each
+# clonotype within a type both found; then, for each, whether its clonotype
+# holds others, from each clonotype's count, and the text it adds; and,
+# beside each one's clonotype, type and text, for each of those of
+# clonotypes that span types, its place in their order, its key, run and
+# number, beside the lists they are named from and their text.
+_WITHIN_TYPE_BYTES_PER_CELL = 30
+_WITHIN_TYPE_BYTES_PER_PART = 20
+_ALONE_BYTES_PER_PART = 48
+_FOUND_BYTES_PER_PART = 24
+_SPANNING_BYTES_PER_PART = 240
+
+
+def within_type_parts(
+    codes: np.ndarray,
+    codes_within_type: np.ndarray,
+    types: np.ndarray,
+    type_names: Sequence[str],
+    *,
+    ledger: MemoryLedger | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Name each clonotype within a receptor type as a part of a clonotype across types.
+
+    Clonotypes defined across receptor types can join clonotypes that the
+    types keep apart, such as the T cells and the ambiguous cell of one
+    clone, and cells of two types, such as doublets, can join two clonotypes
+    of one type. Each clonotype within a type lies within one clonotype
+    across types, and every clone summary measures it as a clonotype of its
+    own, labelled by its clonotype across types and, where that clonotype
+    holds others, by its type, and by its number where its type holds
+    several: ``clonotype_1 (TCR 2)`` is clonotype_1's second clonotype of T
+    cells, and ``clonotype_1 (BCR)`` its only one of B cells.
+
+    Args:
+        codes: Each cell's clonotype across receptor types, -1 for none.
+        codes_within_type: Each cell's clonotype within its receptor type,
+            from 0 by rank, -1 for none.
+        types: Each cell's receptor type, a position in ``type_names``.
+        type_names: The receptor types' names.
+        ledger: A memory ledger that each step is charged to before it
+            allocates; the arrays returned and the texts added are the
+            caller's to charge.
+
+    Returns:
+        For each clonotype within a type, by code: its clonotype across
+        types, and the text that its label adds to that clonotype's: nothing
+        where the clonotype across types holds no other, else its type and,
+        where the type holds several, its number among them from 1 in the
+        order of their codes, in parentheses after a space.
+
+    Raises:
+        ValueError: If the arrays do not align, a cell has a clonotype in one
+            and not the other, or the cells of a clonotype within a type lie
+            in two clonotypes across types or have two types.
+    """
+    codes = np.asarray(codes, dtype=np.int64)
+    within = np.asarray(codes_within_type, dtype=np.int64)
+    types = np.asarray(types, dtype=np.int64)
+    if codes.ndim != 1 or within.shape != codes.shape or types.shape != codes.shape:
+        raise ValueError("codes, codes_within_type and types must align")
+    has = within >= 0
+    if not np.array_equal(has, codes >= 0):
+        raise ValueError(
+            "A cell has a clonotype across receptor types and none within its "
+            "type, or one within and none across"
+        )
+    n_parts = int(within.max(initial=-1)) + 1
+    if ledger is not None:
+        ledger.peak(
+            f"finding the clonotype and type of {n_parts} clonotypes within types",
+            _WITHIN_TYPE_BYTES_PER_CELL * len(within)
+            + _WITHIN_TYPE_BYTES_PER_PART * n_parts
+            + NUMPY_STEP_BYTES,
+        )
+    # Each clonotype within a type takes the clonotype and type of its cells,
+    # which must all agree.
+    parts = within[has]
+    clonotypes = np.full(n_parts, -1, dtype=np.int64)
+    part_types = np.full(n_parts, -1, dtype=np.int64)
+    for found, cells in ((clonotypes, codes), (part_types, types)):
+        values = cells[has]
+        found[parts] = values
+        if not np.array_equal(found[parts], values):
+            raise ValueError(
+                "The cells of a clonotype within a receptor type lie in two "
+                "clonotypes across types or have two receptor types"
+            )
+        del values
+    del has, parts
+    if (clonotypes < 0).any():
+        raise ValueError("A clonotype within a receptor type holds no cell")
+    # A clonotype within a type that is its clonotype's only one adds
+    # nothing; the others add their type, and their number where their
+    # clonotype holds several of their type, numbered in the order of their
+    # codes.
+    if ledger is not None:
+        ledger.peak(
+            f"finding which of {n_parts} clonotypes within types share a clonotype",
+            _ALONE_BYTES_PER_PART * n_parts + NUMPY_STEP_BYTES,
+        )
+    alone = np.bincount(clonotypes)[clonotypes] == 1
+    added = np.full(n_parts, "", dtype=object)
+    spanning = np.flatnonzero(~alone)
+    del alone
+    if len(spanning):
+        if ledger is not None:
+            ledger.peak(
+                f"numbering {len(spanning)} clonotypes within types of clonotypes "
+                "that span types",
+                _FOUND_BYTES_PER_PART * n_parts
+                + _SPANNING_BYTES_PER_PART * len(spanning)
+                + NUMPY_STEP_BYTES,
+            )
+        order = spanning[
+            np.lexsort((spanning, part_types[spanning], clonotypes[spanning]))
+        ]
+        keys = clonotypes[order] * (len(type_names) + 1) + part_types[order]
+        starts = np.flatnonzero(np.diff(keys, prepend=-1) != 0)
+        lengths = np.diff(starts, append=len(order))
+        run = np.repeat(np.arange(len(starts)), lengths)
+        numbers = np.arange(len(order)) - starts[run] + 1
+        several = lengths[run] > 1
+        names = [str(name) for name in type_names]
+        for part, kind, number, split in zip(
+            order.tolist(),
+            part_types[order].tolist(),
+            numbers.tolist(),
+            several.tolist(),
+            strict=True,
+        ):
+            added[part] = f" ({names[kind]} {number})" if split else f" ({names[kind]})"
+    return clonotypes, added
 
 
 def clonotype_nouns(metric: str) -> tuple[str, str]:

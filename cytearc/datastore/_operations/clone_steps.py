@@ -15,6 +15,7 @@ import numpy as np
 import zarr
 
 from ...clones.assignments import ranked_clone_label_bytes, ranked_clone_labels
+from ...metadata.arguments import ClonotypeArguments
 from ...metadata.rows import read_text_rows, read_whole
 from ...metadata.selection import (
     CellSelectionRead,
@@ -25,13 +26,20 @@ from ...storage.artifacts import ArtifactRef, inspect_artifact
 from ...utils.memory_budget import MemoryLedger
 
 __all__ = [
+    "CODES_WITHIN_TYPE",
     "artifact_cell_ids",
     "files_text",
     "hold_ranked_clone_labels",
+    "measured_within_types",
     "plan_artifact_cells",
     "read_codes",
     "text_file_write_bytes",
 ]
+
+#: The array in which clonotypes defined across receptor types save each
+#: cell's clonotype within its receptor type, as ``within_receptor_type=True``
+#: codes it, -1 for none, which every clone summary measures.
+CODES_WITHIN_TYPE = "codes_within_type"
 
 # What writing a text file holds whatever its rows: the writer's objects and
 # one of io's default buffers, 138 to 143 KB as traced on Python 3.13, whose
@@ -55,6 +63,36 @@ def text_file_write_bytes(compressed: bool) -> int:
 def files_text(noun: str, n_files: int) -> str:
     """The words for the files of an import in its messages, such as "the clone files"."""
     return f"the {noun} file" if n_files == 1 else f"the {noun} files"
+
+
+def measured_within_types(clones: ArtifactRef, status: Any, group: zarr.Group) -> bool:
+    """Whether the clone summaries measure a clone artifact by each cell's clonotype within its receptor type.
+
+    Clonotypes defined across receptor types are measured so, by the codes
+    that they save in ``CODES_WITHIN_TYPE``, so their summaries equal those
+    of clonotypes defined within types.
+
+    Args:
+        clones: The clone artifact.
+        status: Its record, as ``inspect_artifact`` gives it.
+        group: Its group.
+
+    Raises:
+        ValueError: If clonotypes defined across receptor types were saved
+            without each cell's clonotype within its type.
+    """
+    if clones.kind != ClonotypeArguments.artifact_kind or (status.parameters or {}).get(
+        "within_receptor_type", True
+    ):
+        return False
+    if CODES_WITHIN_TYPE not in group:
+        raise ValueError(
+            "clonotypes was defined across receptor types by an earlier version "
+            "of CyteArc, without each cell's clonotype within its receptor type, "
+            "which the clone summaries measure; define the clonotypes again with "
+            "ds.repertoire.clonotypes, which saves it"
+        )
+    return True
 
 
 def read_codes(

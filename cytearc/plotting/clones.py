@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..clones.assignments import WITHIN_TYPE_CLONE
 from ..clones.diversity import INDEX_COLUMNS, ClonalDiversity, Rarefaction
 from ..clones.expansion import DEFAULT_RANK_SPLITS, rank_window_labels, rank_windows
 from ..clones.fate import CloneCoupling, dominant_fates
@@ -137,23 +138,6 @@ def _kept_apart_labels(
     return [(column, np.asarray(cells[column], dtype=object)) for column in columns]
 
 
-def _group_kept_labels(
-    group_keys: pd.DataFrame, n_grouping: int
-) -> list[tuple[str, ...]]:
-    """Each group's labels in the columns that the clones keep apart, as text.
-
-    They are the key columns after the ``n_grouping`` of the grouping; a
-    group of clones that keep no labels apart has none.
-    """
-    columns = list(group_keys.columns[n_grouping:])
-    if not columns:
-        return [()] * len(group_keys)
-    return [
-        tuple(str(label) for label in row)
-        for row in group_keys[columns].itertuples(index=False, name=None)
-    ]
-
-
 @close_figures_on_error
 def clone_abundance(
     store: Any,
@@ -195,10 +179,9 @@ def clone_abundance(
     group, with one legend of the groups. Cells without a group are left
     out. Clonotypes are counted within each receptor type, as every clone
     summary counts them, so their groups are the receptor types, or each
-    group's receptor types, named like ``"s1, TCR"``, and a clonotype that
-    spans receptor types is a clonotype of each in both panels, whose label
-    also names the type where the second panel draws two of its types, such
-    as ``CASSA (TCR)``.
+    group's receptor types, named like ``"s1, TCR"``; clonotypes defined
+    across receptor types are counted by each cell's clonotype within its
+    type, labelled with the type, such as ``CASSA (TCR 2)``.
 
     Tables: ``sizes`` (``group``, ``clone_size``, ``n_clones``) and ``top``,
     one row per clone drawn and group, the largest clone first, zeros
@@ -231,7 +214,13 @@ def clone_abundance(
         kept_apart=_kept_apart_labels(loaded.cells, loaded.kept_apart),
         n_cells=len(loaded.cells),
     )
-    codes = np.asarray(loaded.cells["clone"].cat.codes, dtype=np.int64)
+    # Clonotypes across receptor types are drawn, as every summary measures
+    # them, by each cell's clonotype within its type.
+    measured = loaded.cells[
+        WITHIN_TYPE_CLONE if WITHIN_TYPE_CLONE in loaded.cells else "clone"
+    ]
+    identifiers = measured.cat.categories.to_numpy(dtype=object)
+    codes = np.asarray(measured.cat.codes, dtype=np.int64)
     cell_group = plotted.codes
     keep = (codes >= 0) & (cell_group >= 0)
     if not keep.any():
@@ -240,29 +229,15 @@ def clone_abundance(
             if (codes >= 0).any()
             else "No cell has a clone, so there is nothing to plot"
         )
-    # Each cell's part of its clone, the clone within its labels kept apart,
-    # as every clone summary counts it, coded by the clone and then by the
-    # labels.
-    kept_categories = [
-        loaded.cells[column].cat.categories.astype(str).tolist()
-        for column in loaded.kept_apart
-    ]
-    n_kept = int(np.prod([len(names) for names in kept_categories], dtype=np.int64))
-    parts = codes.copy()
-    for column, names in zip(loaded.kept_apart, kept_categories, strict=True):
-        parts = parts * len(names) + np.asarray(
-            loaded.cells[column].cat.codes, dtype=np.int64
-        )
-    # Each part's cells in each group, from the codes alone.
-    n_parts = len(loaded.clones) * n_kept
+    # Each clone's cells in each group, from the codes alone.
+    n_clones = len(identifiers)
     pairs, pair_cells = np.unique(
-        cell_group[keep] * n_parts + parts[keep], return_counts=True
+        cell_group[keep] * n_clones + codes[keep], return_counts=True
     )
-    del parts
-    held = sorted_unique(pairs // n_parts)
+    held = sorted_unique(pairs // n_clones)
     group_order = [plotted.names[code] for code in held.tolist()]
-    pair_groups = np.searchsorted(held, pairs // n_parts)
-    pair_codes = pairs % n_parts
+    pair_groups = np.searchsorted(held, pairs // n_clones)
+    pair_codes = pairs % n_clones
     width = int(pair_cells.max()) + 1
     size_keys, size_counts = np.unique(
         pair_groups * width + pair_cells, return_counts=True
@@ -274,32 +249,18 @@ def clone_abundance(
             "n_clones": size_counts.astype(np.int64),
         }
     )
-    totals = np.bincount(pair_codes, weights=pair_cells, minlength=n_parts)
+    totals = np.bincount(pair_codes, weights=pair_cells, minlength=n_clones)
     present = np.flatnonzero(totals > 0)
-    # The largest parts, ties in the clones' rank order and then the labels'.
+    # The largest clones, ties in the clones' rank order.
     chosen = present[np.lexsort((present, -totals[present]))[:max_clones]]
-    rows = np.full(n_parts, -1, dtype=np.int64)
+    rows = np.full(n_clones, -1, dtype=np.int64)
     rows[chosen] = np.arange(len(chosen))
     taken = rows[pair_codes] >= 0
     matrix = np.zeros((len(chosen), len(group_order)), dtype=np.int64)
     matrix[rows[pair_codes[taken]], pair_groups[taken]] = pair_cells[taken]
-    ids = loaded.clones["clone"].to_numpy(dtype=object)[chosen // n_kept]
-    # Each chosen part's labels kept apart, from the last column's code up.
-    kept: list[list[str]] = [[] for _part in chosen.tolist()]
-    remaining = chosen % n_kept
-    for names_of_column in reversed(kept_categories):
-        for labels, code in zip(
-            kept, (remaining % len(names_of_column)).tolist(), strict=True
-        ):
-            labels.insert(0, names_of_column[code])
-        remaining = remaining // len(names_of_column)
+    ids = identifiers[chosen]
     names = clone_names(store, clones)
-    clone_labels = np.asarray(
-        names.labels(
-            ids, [tuple(labels) for labels in kept] if loaded.kept_apart else None
-        ),
-        dtype=object,
-    )
+    clone_labels = np.asarray(names.labels(ids), dtype=object)
     # One row per clone drawn and group, zeros included, so the groups are
     # values of the table, whatever their names.
     top_table = pd.DataFrame(
@@ -1002,9 +963,7 @@ def clone_tracking(
     for a clonotype with its representative's junction, such as ``CASSA``,
     and also its number where two of the clonotypes followed share a
     junction, such as ``CASSA 1`` and ``CASSA 3``, as ``clone_abundance``
-    labels the largest clones. A clonotype that spans receptor types, which
-    ``ds.clones.track`` follows once in each, draws a line for each, whose
-    label also names the type where it draws two, such as ``CASSA (TCR)``. Groups are placed by their labels in the
+    labels the largest clones. Groups are placed by their labels in the
     ``group_by`` columns and the ``groups`` artifact, joined by commas;
     ``order`` lists those names from left to right, or values whose text is
     the name, such as time points as integers, and by default the names
@@ -1040,61 +999,24 @@ def clone_tracking(
     if not tracking.tracked:
         raise ValueError("The tracking follows no clone, so there is nothing to plot")
     names = clone_names(store, tracking.clones)
-    group_keys = tracking.group_keys
-    n_grouping = len(tracking.group_by) + (tracking.groups is not None)
-    kept_columns = list(group_keys.columns[n_grouping:])
-    # Each row follows a clone's part in the labels kept apart of its group,
-    # the key columns after the grouping's, and each part draws a line.
-    group_kept = dict(
-        zip(
-            (str(group) for group in group_keys.index.tolist()),
-            _group_kept_labels(group_keys, n_grouping),
-            strict=True,
-        )
-    )
-    row_parts = [
-        (str(clone), group_kept[str(group)])
-        for clone, group in zip(
-            tracking.table["clone"].tolist(),
-            tracking.table["group"].tolist(),
-            strict=True,
-        )
-    ]
-    # The tracking lists a clone once for each part it follows, in the order
-    # of the rows; a clone followed through no group draws no line.
-    parts_of: dict[str, list[tuple[str, ...]]] = {}
-    for clone, kept in row_parts:
-        found = parts_of.setdefault(clone, [])
-        if kept not in found:
-            found.append(kept)
-    listed: dict[str, int] = {}
-    tracked_parts = []
-    for clone in tracking.tracked:
-        found = parts_of.get(clone, [])
-        at = listed.get(clone, 0)
-        listed[clone] = at + 1
-        tracked_parts.append((clone, found[at] if at < len(found) else ()))
     # Every followed clone is labelled at once, so that the junctions which
     # two followed clonotypes share are found among the lines of this figure.
     line_labels = dict(
-        zip(
-            tracked_parts,
-            names.labels(
-                [clone for clone, _kept in tracked_parts],
-                [kept for _clone, kept in tracked_parts] if kept_columns else None,
-            ),
-            strict=True,
-        )
+        zip(tracking.tracked, names.labels(tracking.tracked), strict=True)
     )
     cells = tracking.table.copy(deep=False)
     cells.insert(
         1,
         "label",
-        np.asarray([line_labels[part] for part in row_parts], dtype=object),
+        np.asarray(
+            [line_labels[clone] for clone in cells["clone"].tolist()], dtype=object
+        ),
     )
     # Groups that differ only in labels that the clones keep apart share a
     # position, named by their labels in the grouping columns alone: the
     # group_by columns and the label artifact's kind, the first key columns.
+    group_keys = tracking.group_keys
+    n_grouping = len(tracking.group_by) + (tracking.groups is not None)
     group_names = [str(group) for group in group_keys.index.tolist()]
     position_of = dict(zip(group_names, group_names, strict=True))
     if n_grouping:
@@ -1117,7 +1039,7 @@ def clone_tracking(
         if sorted(positions) != sorted(map(str, present)):
             raise ValueError(f"order must list the groups {present}")
     # The clones' colours, in the order they were chosen, the largest first.
-    labels = [line_labels[part] for part in tracked_parts]
+    labels = [line_labels[clone] for clone in tracking.tracked]
     colors = CategoricalScale(
         order=tuple(labels),
         palette=dict(zip(labels, palette_for_n(len(labels)), strict=True)),
@@ -1328,10 +1250,7 @@ def clone_fate_bias(
     ``n_early_cells``, ``n_late_cells``), and ``fates``, one row per clone
     drawn and fate, zeros included (``clone``, ``label``, ``fate``,
     ``n_cells``, the clone's late cells in the fate). Fates are values of the
-    tables, so a fate may take any name. A clonotype that spans receptor
-    types, which ``fate_bias`` tests once in each, draws a bar for each,
-    whose label also names the type where it draws two, such as
-    ``CASSA (TCR)``, and its ``clone`` repeats in the tables.
+    tables, so a fate may take any name.
 
     Raises:
         TypeError: If an argument has the wrong type, or the store does not
@@ -1358,43 +1277,24 @@ def clone_fate_bias(
         )
     clone_codes = np.asarray(rows["clone"].cat.codes, dtype=np.int64)
     fate_codes = np.asarray(rows["fate"].cat.codes, dtype=np.int64)
-    # Each fate's labels in the columns that the clones keep apart, the key
-    # columns after the grouping's: a clone is tested once for each, as its
-    # part there, so each part draws a bar of its own.
-    n_grouping = len(loaded.group_by) + (loaded.groups is not None)
-    kept_columns = list(loaded.group_keys.columns[n_grouping:])
-    fate_kept = _group_kept_labels(loaded.group_keys, n_grouping)
-    kept_labels = sorted(set(fate_kept))
-    fate_parts = np.asarray(
-        [kept_labels.index(row) for row in fate_kept], dtype=np.int64
-    )
-    # One row per part, in the order of the clone codes and then of the
-    # labels kept apart, with its late cells in each fate.
-    codes, at = np.unique(
-        clone_codes * len(kept_labels) + fate_parts[fate_codes], return_inverse=True
-    )
+    # One row per clone, in the order of the clone codes, with its late cells
+    # in each fate.
+    codes, at = np.unique(clone_codes, return_inverse=True)
     cells = np.zeros((len(codes), len(fate_names)), dtype=np.int64)
     np.add.at(cells, (at.reshape(-1), fate_codes), rows["n_cells"].to_numpy(np.int64))
     early_cells = np.zeros(len(codes), dtype=np.int64)
     early_cells[at.reshape(-1)] = rows["n_early_cells"].to_numpy(np.int64)
     late_cells = cells.sum(axis=1)
     dominant = dominant_fates(cells)
-    # The parts with the most late cells, ties to the lower code, the larger
+    # The clones with the most late cells, ties to the lower code, the larger
     # clone overall, drawn by dominant fate and then by late cells.
     chosen = np.lexsort((codes, -late_cells))[:max_clones]
     rank = np.where(dominant[chosen] >= 0, dominant[chosen], len(fate_names))
     chosen = chosen[np.lexsort((codes[chosen], -late_cells[chosen], rank))]
-    ids = rows["clone"].cat.categories.to_numpy(dtype=object)[
-        codes[chosen] // len(kept_labels)
-    ]
+    ids = rows["clone"].cat.categories.to_numpy(dtype=object)[codes[chosen]]
     shown_ids = [str(clone) for clone in ids.tolist()]
     names = clone_names(store, loaded.clones)
-    shown_labels = names.labels(
-        ids,
-        [kept_labels[part] for part in (codes[chosen] % len(kept_labels)).tolist()]
-        if kept_columns
-        else None,
-    )
+    shown_labels = names.labels(ids)
     fate_index = pd.Index(fate_names)
     table = pd.DataFrame(
         {

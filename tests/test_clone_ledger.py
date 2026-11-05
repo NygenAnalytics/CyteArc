@@ -74,137 +74,153 @@ def test_ranked_labels_name_each_clone_by_its_rank(n_clones) -> None:
     assert labels.tolist() == [f"clone_{rank}" for rank in range(1, n_clones + 1)]
 
 
-# The labels that clonotypes keep apart.
+# Clonotypes across receptor types, and the steps of fate bias and tracking
+# that a busy machine's held chunks showed short at 40,000 cells.
 
 
-def _receptor_type_keys():
-    """Eight fates, of two cell types in each of four receptor types, and their strata."""
+def _receptor_type_input(n_cells: int) -> Any:
+    """Clonotypes of three cells each, of four receptor types in turn, and their groups' strata."""
     import pandas as pd
 
-    keys = pd.DataFrame(
-        {
-            "cell_type": np.repeat(["a", "b"], 4),
-            "receptor_type": np.tile(["BCR", "TCR", "ambiguous", "multichain"], 2),
-        },
-        index=[f"f{i}" for i in range(8)],
-    )
-    return keys, np.asarray([0, 1, 2, 3] * 2, dtype=np.int64)
-
-
-@pytest.mark.parametrize("n_cells", [10_000, 400_000])
-def test_finding_each_cells_stratum_holds_what_fate_bias_charges(n_cells) -> None:
-    keys, strata = _receptor_type_keys()
-    labels = np.asarray(["BCR", "TCR", "ambiguous", "multichain", None], dtype=object)
-    kept = (("receptor_type", labels[np.arange(n_cells) % 5]),)
-    found = clone_operations._cell_strata(keys, strata, kept)
-    # Each cell takes its receptor type's stratum, and a cell without one none.
-    assert found.tolist() == ([0, 1, 2, 3, -1] * n_cells)[:n_cells]
-    stated = clone_operations._cell_strata_bytes(n_cells, 1)
-    peak = _warm_peak(lambda: clone_operations._cell_strata(keys, strata, kept))
-    # The charge is 1.18 to 1.31 times the peak as traced; the labels stay
-    # the Python strings that they are compared as.
-    assert peak <= stated <= 1.5 * peak, (peak, stated)
-
-
-def test_each_cell_takes_the_stratum_of_its_labels_in_every_column_kept_apart() -> None:
-    import pandas as pd
-
-    # Groups of two columns kept apart; the strata follow the pairs of labels.
-    keys = pd.DataFrame(
-        {"first": ["p", "p", "q"], "second": ["u", "v", "v"]}, index=["g0", "g1", "g2"]
-    )
-    strata = np.asarray([2, 0, 1], dtype=np.int64)
-    kept = (
-        ("first", np.asarray(["p", "q", "q", None, "p", "r"], dtype=object)),
-        ("second", np.asarray(["v", "v", "u", "v", "u", "u"], dtype=object)),
-    )
-    # (p, v), (q, v) and (p, u) are groups' labels; (q, u) no group's, though
-    # both of its labels are; a missing label and a label of no group give
-    # none either.
-    assert clone_operations._cell_strata(keys, strata, kept).tolist() == [
-        0,
-        1,
-        -1,
-        -1,
-        2,
-        -1,
-    ]
-
-
-@pytest.mark.parametrize("n_pairs", [40_000, 400_000])
-def test_coding_each_pairs_part_holds_what_fate_bias_and_tracking_charge(
-    n_pairs,
-) -> None:
-    _keys, strata = _receptor_type_keys()
-    pair_codes = np.arange(n_pairs, dtype=np.int64) // 3
-    pair_fates = np.arange(n_pairs, dtype=np.int64) % 8
-    # Each clone's three pairs lie in three strata, so each is a part; its
-    # code counts the clone by the strata and one more, as tracking codes it.
-    assert clone_operations._tested_parts(pair_codes, pair_fates, strata) == n_pairs
-    parts = clone_operations._pair_parts(pair_codes, pair_fates, strata, 5)
-    assert (parts // 5).tolist() == pair_codes.tolist()
-    assert (parts % 5).tolist() == strata[pair_fates].tolist()
-    # Each charge is 1.20 to 1.29 times the traced peak of its step: the
-    # count of the clones tested, and the codes alone, which tracking keeps.
-    for per_pair, step in (
-        (
-            clone_operations._PART_BYTES_PER_PAIR,
-            lambda: clone_operations._tested_parts(pair_codes, pair_fates, strata),
-        ),
-        (
-            clone_operations._PART_CODE_BYTES_PER_PAIR,
-            lambda: clone_operations._pair_parts(pair_codes, pair_fates, strata, 5),
-        ),
-    ):
-        stated = per_pair * n_pairs + NUMPY_STEP_BYTES
-        peak = _warm_peak(step)
-        assert peak <= stated <= 1.5 * peak, (peak, stated)
-
-
-@pytest.mark.parametrize("n_cells", [40_000, 400_000])
-def test_finding_the_parts_of_named_clones_holds_what_tracking_charges(
-    n_cells,
-) -> None:
     from cytearc.storage.refs import ArtifactRef
-    from cytearc.utils.memory_budget import MemoryLedger
-    from tests.memory_helpers import audited
 
-    keys, strata = _receptor_type_keys()
     labels = np.asarray(["BCR", "TCR", "ambiguous", "multichain"], dtype=object)
     unsaved = ArtifactRef(scope="datastore", kind="clonotypes", artifact_id="f" * 64)
-    # Clones of four cells, one of each receptor type; every other clone is
-    # named.
+    codes = np.where(np.arange(n_cells) % 9 == 0, -1, np.arange(n_cells) // 3)
     source = clone_operations._CloneInput(
         ref=unsaved,
         cell_selection=unsaved,
-        codes=np.arange(n_cells, dtype=np.int64) // 4,
+        codes=codes,
         clone_ids=None,
         kept_apart=(("receptor_type", labels[np.arange(n_cells) % 4]),),
         nbytes=0,
     )
-    named = np.arange(0, n_cells // 4, 2, dtype=np.int64)
-
-    def run() -> np.ndarray:
-        ledger = MemoryLedger(1 << 40, "Following the clones")
-        return clone_operations._named_parts(source, keys, strata, named, 5, ledger)
-
-    # Each named clone is followed once in each of its four types.
-    assert run().tolist() == [
-        clone * 5 + stratum for clone in named.tolist() for stratum in range(4)
-    ]
-    # From each charge to the next, what is traced stays within the plan.
-    _result, overruns = audited(run)
-    assert overruns == [], overruns
-    # The larger charge, of the named clones' cells, is 1.22 and 1.24 times
-    # the traced peak.
-    n_named_cells = 4 * len(named)
-    stated = max(
-        clone_operations._NAMED_CELL_BYTES * n_cells + NUMPY_STEP_BYTES,
-        (8 + clone_operations._NAMED_PART_BYTES) * n_named_cells
-        + clone_operations._cell_strata_bytes(n_named_cells, 1),
+    keys = pd.DataFrame(
+        {"receptor_type": labels.tolist()}, index=[f"g{i}" for i in range(4)]
     )
-    peak = _warm_peak(run)
+    return source, keys, np.arange(4, dtype=np.int64)
+
+
+def _parts_of_clonotypes(n_cells: int, per_part: int, spanning: float) -> tuple:
+    """Cells of clonotypes within types, a share of which pair up into clonotypes of two types."""
+    rng = np.random.default_rng(per_part)
+    within = rng.integers(0, n_cells // per_part, n_cells)
+    within[::50] = -1
+    present = np.unique(within[within >= 0])
+    within = np.where(within >= 0, np.searchsorted(present, within), -1)
+    n_parts = len(present)
+    n_pairs = int(spanning * n_parts / 2)
+    part_clonotype = np.concatenate(
+        [np.repeat(np.arange(n_pairs), 2), np.arange(n_pairs, n_parts - n_pairs)]
+    )
+    part_type = np.concatenate(
+        [np.tile([0, 1], n_pairs), np.ones(n_parts - 2 * n_pairs, dtype=np.int64)]
+    )
+    shuffled = rng.permutation(n_parts)
+    part_clonotype, part_type = part_clonotype[shuffled], part_type[shuffled]
+    at = np.maximum(within, 0)
+    codes = np.where(within >= 0, part_clonotype[at], -1)
+    types = np.where(within >= 0, part_type[at], 2)
+    return codes, within, types
+
+
+@pytest.mark.parametrize(
+    ("n_cells", "per_part", "spanning"),
+    [(40_000, 3, 0.1), (400_000, 1, 0.0), (400_000, 10, 0.5), (200_000, 1, 1.0)],
+    ids=["a tenth spanning", "none spanning", "half spanning", "all spanning"],
+)
+def test_naming_clonotypes_within_types_holds_what_each_step_charges(
+    n_cells, per_part, spanning
+) -> None:
+    from cytearc.repertoire.clonotypes import within_type_parts
+    from cytearc.utils.memory_budget import MemoryLedger
+    from tests.memory_helpers import interval_peaks
+
+    codes, within, types = _parts_of_clonotypes(n_cells, per_part, spanning)
+
+    def run() -> tuple:
+        ledger = MemoryLedger(1 << 40, "Naming clonotypes within types")
+        return within_type_parts(
+            codes, within, types, ["BCR", "TCR", "no IR"], ledger=ledger
+        )
+
+    clonotypes, added = run()
+    # Each clonotype within a type takes its cells' clonotype, and adds a
+    # text where its clonotype holds another.
+    assert (clonotypes[within[within >= 0]] == codes[codes >= 0]).all()
+    shared = np.bincount(clonotypes)[clonotypes] > 1
+    assert [bool(text) for text in added.tolist()] == shared.tolist()
+    _result, intervals = interval_peaks(run)
+    assert len(intervals) == (3 if shared.any() else 2)
+    # Each step plans 1.18 to 1.62 times what it traced.
+    for item, planned, traced in intervals:
+        assert traced <= planned <= 2 * traced, (item, planned, traced)
+
+
+@pytest.mark.parametrize("n_cells", [40_000, 400_000])
+def test_clearing_the_labels_of_cells_without_a_clone_holds_what_fate_bias_charges(
+    n_cells,
+) -> None:
+    source, _keys, _strata = _receptor_type_input(n_cells)
+    labels = source.kept_apart[0][1]
+    cleared = clone_operations._cleared_labels(source.codes, source.kept_apart)
+    # A cell without a clone loses its label, and the labels given stay.
+    expected = np.where(source.codes < 0, None, labels)
+    assert cleared[0][1].tolist() == expected.tolist()
+    assert labels[0] == "BCR" and source.codes[0] == -1
+    stated = clone_operations._cleared_label_bytes(n_cells, 1)
+    peak = _warm_peak(
+        lambda: clone_operations._cleared_labels(source.codes, source.kept_apart)
+    )
+    # The charge is 1.34 and 1.40 times the traced peak.
+    assert peak <= stated <= 1.6 * peak, (peak, stated)
+
+
+@pytest.mark.parametrize("n_cells", [40_000, 400_000])
+def test_finding_the_first_cells_of_named_clones_holds_what_tracking_charges(
+    n_cells,
+) -> None:
+    source, keys, strata = _receptor_type_input(n_cells)
+    # Clone 5 starts at cell 15, of BCR, clone 77 at cell 231, of TCR, and the
+    # last clone at a cell of its type.
+    chosen = np.asarray([5, 77, n_cells // 3 - 2], dtype=np.int64)
+    first = 3 * chosen
+    first[first % 9 == 0] += 1
+    found = clone_operations._fallback_strata(source, keys, strata, chosen)
+    assert found.tolist() == (first % 4).tolist()
+    stated = clone_operations._FIRST_CELL_BYTES * n_cells + NUMPY_STEP_BYTES
+    peak = _warm_peak(
+        lambda: clone_operations._fallback_strata(source, keys, strata, chosen)
+    )
+    # The charge is 1.25 and 1.29 times the traced peak.
     assert peak <= stated <= 1.5 * peak, (peak, stated)
+
+
+@pytest.mark.parametrize(("n_cells", "n_groups"), [(40_000, 24), (400_000, 2_000)])
+def test_choosing_and_finding_the_clones_followed_hold_what_tracking_charges(
+    n_cells, n_groups
+) -> None:
+    from cytearc.clones.groups import pair_counts
+    from cytearc.clones.overlap import top_clones, tracking_reach
+
+    rng = np.random.default_rng(0)
+    pair_groups, pair_codes, pair_cells = pair_counts(
+        rng.integers(0, n_groups, n_cells), rng.integers(0, n_cells // 4, n_cells)
+    )
+    chosen = top_clones(pair_groups, pair_codes, pair_cells, n_groups, 5)
+    strata = np.arange(n_groups) % 2
+    unheld = np.full(len(chosen), -1, dtype=np.int64)
+    stated = (
+        clone_operations._BYTES_PER_CLONE_COUNT * len(pair_cells) + NUMPY_STEP_BYTES
+    )
+    # The charge is 1.21 times choosing's traced peak and 1.54 to 1.57 times
+    # finding the chosen clones' counts.
+    for step in (
+        lambda: top_clones(pair_groups, pair_codes, pair_cells, n_groups, 5),
+        lambda: tracking_reach(pair_groups, pair_codes, chosen, strata, unheld),
+    ):
+        peak = _warm_peak(step)
+        assert peak <= stated <= 1.8 * peak, (peak, stated)
 
 
 # Clones of a cell metadata column.
