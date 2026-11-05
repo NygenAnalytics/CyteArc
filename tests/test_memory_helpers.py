@@ -24,7 +24,6 @@ from tests.memory_helpers import (
     check_budget,
     cost_bound,
     hold_finished_reads,
-    hold_last_pool_work,
     named_budget,
     smallest_budget,
     stated_bytes,
@@ -530,26 +529,6 @@ def test_each_read_is_held_until_the_next_read_ends() -> None:
         assert pool_thread._WorkItem.run is run
         # Outside it, a pool thread lets go of its finished work.
         assert _gone(_finished(pool))
-
-
-def test_the_work_that_finished_last_on_any_pool_is_held_until_another_finishes() -> (
-    None
-):
-    run = pool_thread._WorkItem.run
-    with ThreadPoolExecutor(1) as one, ThreadPoolExecutor(1) as other:
-        with hold_last_pool_work():
-            first = _finished(one)
-            # No work has finished since, so the first stays held.
-            assert not _gone(first, seconds=0.2)
-            second = _finished(other)
-            # Work that finishes on another pool takes its place.
-            assert _gone(first)
-            assert not _gone(second, seconds=0.2)
-        # Leaving the context lets go of the work it held.
-        assert _gone(second)
-        assert pool_thread._WorkItem.run is run
-        # Outside it, a pool thread lets go of its finished work.
-        assert _gone(_finished(one))
 
 
 def test_work_that_finishes_after_its_read_ended_is_held_until_the_next_one_ends() -> (

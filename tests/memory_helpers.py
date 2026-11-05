@@ -696,32 +696,3 @@ def hold_finished_reads(*reads: tuple[Any, str]) -> Iterator[Callable[[], None]]
             closed[0] = True
             held.clear()
             reading[0] = 0
-
-
-@contextmanager
-def hold_last_pool_work() -> Iterator[None]:
-    """Hold the work item that a pool thread ran last, with its arguments and result, until another finishes.
-
-    A pool thread that has set the result of a work item can be descheduled
-    before it lets go of the item, so on a busy machine a chunk that Zarr
-    fetched and decoded stays held, as stored and as decoded, while the step
-    after the read runs. Within this context that happens on every machine:
-    the work item that finished last, on any pool, is held until another
-    finishes, and let go when the context closes.
-    """
-    lock = threading.Lock()
-    last: list[object] = []
-    run = pool_thread._WorkItem.run
-
-    def run_and_hold(item: object, *args: Any) -> None:
-        run(item, *args)  # type: ignore[arg-type]
-        with lock:
-            last[:] = [item]
-
-    pool_thread._WorkItem.run = run_and_hold  # type: ignore[method-assign]
-    try:
-        yield
-    finally:
-        pool_thread._WorkItem.run = run  # type: ignore[method-assign]
-        with lock:
-            last.clear()

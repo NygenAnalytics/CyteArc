@@ -24,7 +24,6 @@ from cytearc.clones.allele_clones import (
     clonal_p_values,
 )
 from tests.clone_helpers import traced_steps
-from tests.memory_helpers import AUDIT_ALLOWANCE
 from tests.memory_helpers import budgeted, smallest_budget, traced_peak
 
 _TEXTS = ("a", "b", "c", "d", "e", "f", "g", "h")
@@ -973,8 +972,6 @@ def test_each_step_on_two_million_edits_holds_no_more_than_its_check_states(
             ledger=budgeted(budget),
         )
 
-    checks, peak = traced_steps(call)
-    # Each step holds its shortfall from the largest check beside it.
-    ceiling = max(stated for _what, stated in checks)
-    assert peak <= ceiling + AUDIT_ALLOWANCE, (peak - ceiling, checks)
+    checks, overruns = traced_steps(call)
+    assert not overruns, overruns
     assert len(checks) > 10

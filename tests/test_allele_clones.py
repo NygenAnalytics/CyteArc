@@ -33,7 +33,7 @@ from tests.clone_truth import (
     clone_truth,
 )
 from cytearc.utils.memory_budget import MemoryLedger
-from tests.memory_helpers import AUDIT_ALLOWANCE, charges, smallest_budget, traced_peak
+from tests.memory_helpers import charges, smallest_budget, traced_peak
 from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
@@ -1071,12 +1071,13 @@ def test_a_bank_may_name_a_character_whose_cells_are_all_unedited(tmp_path) -> N
         )
 
 
-def _assert_steps_within(traced: tuple[list[tuple[str, int]], int]) -> None:
-    """No step holds more than its check states: the traced peak, which holds each
-    step's shortfall from the largest check beside it, stays within the largest."""
-    checks, peak = traced
-    ceiling = max(stated for _what, stated in checks)
-    assert peak <= ceiling + AUDIT_ALLOWANCE, (peak - ceiling, checks)
+def _assert_steps_within(
+    traced: tuple[list[tuple[str, int]], list[tuple[str, int, int]]],
+) -> None:
+    """No step holds more than its check states: each step's traced peak stays
+    within what its charge planned, and an overrun names its step."""
+    checks, overruns = traced
+    assert not overruns, overruns
     assert len(checks) > 10
 
 

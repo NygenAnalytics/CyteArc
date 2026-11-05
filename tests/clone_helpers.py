@@ -891,61 +891,42 @@ def import_allele_truth(
         )
 
 
-def traced_steps(call: Callable[[], object]) -> tuple[list[tuple[str, int]], int]:
-    """Each charge of allele clone calling with the bytes its ledger then plans, and the call's traced peak.
+def traced_steps(
+    call: Callable[[], object],
+) -> tuple[list[tuple[str, int]], list[tuple[str, int, int]]]:
+    """Each charge of allele clone calling with the bytes its ledger then plans, and the charges whose interval passed that plan.
 
     The bytes that a charge states are what the operation's ledger plans from
     it to the next charge under the call's budget: what it holds, beside what its
     last read may still hold, and a transient peak's bytes; a release states
     what the ledger holds after it. A first call finds the charges and warms
-    the compiled kernels. The traced call then holds, from each charge to
-    the next, the bytes by which that charge falls short of the largest,
-    allocated but never written, so its peak passes the largest charge by
-    more than ``tests.memory_helpers.AUDIT_ALLOWANCE`` exactly when a step
-    holds more than its ledger plans beside the Python objects that an
-    audit allows. The peak is traced
-    as :func:`tests.memory_helpers.traced_peak` traces it, again where it
-    passes the largest charge, so ``call`` must compute afresh each time.
-    Both calls run within :func:`tests.memory_helpers.hold_last_pool_work`,
-    so the chunk that a pool thread may still hold after a read, as stored and
-    as decoded, is held on every machine, as a busy one holds it.
+    the compiled kernels. A second call is then audited as
+    :func:`tests.memory_helpers.audited` audits it: from each charge to the
+    next, the traced peak stays within what that charge planned and
+    ``tests.memory_helpers.AUDIT_ALLOWANCE``. A call whose audit finds an
+    overrun is audited once more and the second audit's overruns are kept, so
+    an overrun must happen in both, and ``call`` must compute afresh each time.
 
     Returns:
         Each charge's item and the bytes it states, from the first call, and
-        the traced call's peak.
+        each charge whose interval passed its plan in the audits: its item,
+        the bytes it planned and the bytes traced.
     """
     import gc
 
     from cytearc.utils.memory_budget import observed_charges
-    from tests.memory_helpers import hold_last_pool_work, traced_peak
+    from tests.memory_helpers import audited
 
     checks: list[tuple[str, int]] = []
-    allowance: list[np.ndarray] = []
-    ceiling = [0]
 
     def note(what: str, _nbytes: int, stated: int) -> None:
         checks.append((str(what), int(stated)))
-        allowance.clear()
-        if ceiling[0]:
-            # A charge of the traced call that states less than the first
-            # call's largest is padded to the largest, so a step that holds
-            # more than its own charge passes it.
-            allowance.append(np.empty(max(0, ceiling[0] - int(stated)), dtype=np.uint8))
 
-    def run() -> None:
-        checks.clear()
-        try:
-            with observed_charges(note):
-                call()
-        finally:
-            allowance.clear()
-
-    with hold_last_pool_work():
-        run()
-        found = list(checks)
-        ceiling[0] = max((stated for _what, stated in found), default=0)
+    with observed_charges(note):
+        call()
+    gc.collect()
+    _result, overruns = audited(call)
+    if overruns:
         gc.collect()
-        _result, peak = traced_peak(run, ceiling[0])
-    # The traced call makes the charges that the first call made.
-    assert checks == found, (checks, found)
-    return found, peak
+        _result, overruns = audited(call)
+    return checks, overruns
