@@ -7,6 +7,7 @@ merges or refuses is derived by hand from the rule's published statement.
 import numpy as np
 import pytest
 
+from cytearc.clones.assignments import ranked_clone_labels
 from cytearc.clones import barcode_clones
 from cytearc.clones.barcode_clones import (
     BARCODE_PRESETS,
@@ -14,7 +15,6 @@ from cytearc.clones.barcode_clones import (
     allowlist_texts,
     barcode_call_settings,
     barcode_clone_calls,
-    clone_labels,
 )
 from cytearc.clones.sequences import expected_chance_pairs, neighbor_pairs
 from cytearc.metadata.records import pack_text
@@ -23,7 +23,7 @@ from tests.clone_helpers import (
     levenshtein_distance,
     link_count_variance,
 )
-from tests.memory_helpers import smallest_budget, traced_peak
+from tests.memory_helpers import budgeted, smallest_budget, traced_peak
 
 
 def _largest_share(called: "barcode_clones.BarcodeClones") -> float:
@@ -337,7 +337,8 @@ def test_an_allowlist_holds_distinct_text() -> None:
 
 
 def test_clones_are_labelled_by_rank() -> None:
-    assert clone_labels(3).tolist() == ["clone_1", "clone_2", "clone_3"]
+    assert ranked_clone_labels(3).tolist() == ["clone_1", "clone_2", "clone_3"]
+    assert ranked_clone_labels(0).tolist() == []
 
 
 # Molecule filters.
@@ -762,9 +763,9 @@ def test_the_expectation_may_hold_what_the_search_could(monkeypatch) -> None:
     rooms = {}
 
     def recorded(name, function):
-        def call(*args, max_bytes=None, **kwargs):
-            rooms[name] = max_bytes
-            return function(*args, max_bytes=max_bytes, **kwargs)
+        def call(*args, ledger=None, **kwargs):
+            rooms[name] = ledger.room
+            return function(*args, ledger=ledger, **kwargs)
 
         return call
 
@@ -785,7 +786,7 @@ def test_the_expectation_may_hold_what_the_search_could(monkeypatch) -> None:
         3,
         groups=np.zeros(3, dtype=np.int64),
         settings=barcode_call_settings(method="sets", max_distance=1, metric="hamming"),
-        max_bytes=budget,
+        ledger=budgeted(budget),
     )
     assert calls.diagnostics["mergedBarcodes"] == 1
     assert rooms["expectation"] == rooms["search"] < budget
@@ -874,11 +875,11 @@ def test_counting_the_distinct_barcodes_without_correction_checks_the_budget() -
     counting = 40 * 3 + 18 * 12 + 48 * 12
     with pytest.raises(MemoryError, match="counting the distinct barcodes of 12"):
         barcode_clone_calls(
-            records, 3, groups=groups, settings=settings, max_bytes=counting - 1
+            records, 3, groups=groups, settings=settings, ledger=budgeted(counting - 1)
         )
     with pytest.raises(MemoryError) as refused:
         barcode_clone_calls(
-            records, 3, groups=groups, settings=settings, max_bytes=counting
+            records, 3, groups=groups, settings=settings, ledger=budgeted(counting)
         )
     assert "counting the distinct" not in str(refused.value)
 
@@ -1339,7 +1340,7 @@ def test_calls_hold_no_more_than_the_smallest_budget_they_accept(
 
     def call(budget: int) -> object:
         return barcode_clone_calls(
-            records, 4_000, groups=groups, settings=settings, max_bytes=budget
+            records, 4_000, groups=groups, settings=settings, ledger=budgeted(budget)
         )
 
     budget = smallest_budget(call, 1 << 30)

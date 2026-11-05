@@ -636,7 +636,9 @@ def _table_labels(values: pd.Series, format: str) -> np.ndarray:
     return np.asarray(labels)
 
 
-def _iter_table_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows]:
+def _iter_table_rows(
+    layout: CloneLayout, chunk_rows: int, chunk_chars: int | None
+) -> Iterator[CloneRows]:
     text = layout._text
     assert text is not None
     index = {name: position for position, name in enumerate(text.names)}
@@ -645,7 +647,7 @@ def _iter_table_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows
     probability_position = (
         index[layout.probability] if layout.probability is not None else None
     )
-    for lines, chunk in text_chunks(text, chunk_rows):
+    for lines, chunk in text_chunks(text, chunk_rows, chunk_chars=chunk_chars):
         barcodes = joined_columns(chunk, cell_positions, CELL_ID_SEPARATOR)
         _refuse_cellless(barcodes, lines, layout.path, layout.cell)
         probabilities = None
@@ -702,12 +704,17 @@ def _iter_h5ad_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows]
             )
 
 
-def iter_clone_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows]:
+def iter_clone_rows(
+    layout: CloneLayout, chunk_rows: int, *, chunk_chars: int | None = None
+) -> Iterator[CloneRows]:
     """Yield the rows of a clone table or AnnData file in chunks.
 
     Args:
         layout: The layout of a file whose format is not a matrix.
-        chunk_rows: The rows of each chunk.
+        chunk_rows: The most rows of each chunk.
+        chunk_chars: The most characters of a table's chunk, past the row it
+            ends in, or None for chunks bounded by their rows alone. An
+            AnnData file's chunks are bounded by their rows.
 
     Raises:
         ValueError: If the layout is a matrix, a row has no cell barcode, a
@@ -720,11 +727,16 @@ def iter_clone_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows]
     if layout.format in _H5AD_FORMATS:
         yield from _iter_h5ad_rows(layout, chunk_rows)
     else:
-        yield from _iter_table_rows(layout, chunk_rows)
+        yield from _iter_table_rows(layout, chunk_rows, chunk_chars)
 
 
-def matrix_cells(layout: CloneLayout, chunk_rows: int) -> Iterator[np.ndarray]:
+def matrix_cells(
+    layout: CloneLayout, chunk_rows: int, *, chunk_chars: int | None = None
+) -> Iterator[np.ndarray]:
     """Yield the barcodes of a clone matrix's cells in chunks, in matrix order.
+
+    A chunk holds at most ``chunk_rows`` cells, and at most ``chunk_chars``
+    characters of a cell list's text, past the row it ends in, when given.
 
     Raises:
         ValueError: If the layout is not a matrix, or a cell has no barcode.
@@ -742,7 +754,7 @@ def matrix_cells(layout: CloneLayout, chunk_rows: int) -> Iterator[np.ndarray]:
     assert text is not None
     index = {name: position for position, name in enumerate(text.names)}
     positions = [index[name] for name in layout.cell] if layout.cell else [0]
-    for lines, chunk in text_chunks(text, chunk_rows):
+    for lines, chunk in text_chunks(text, chunk_rows, chunk_chars=chunk_chars):
         barcodes = joined_columns(chunk, positions, CELL_ID_SEPARATOR)
         _refuse_cellless(barcodes, lines, f"The cell list {text.path}", layout.cell)
         yield barcodes

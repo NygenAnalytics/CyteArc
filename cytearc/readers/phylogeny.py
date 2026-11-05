@@ -39,6 +39,7 @@ import numpy as np
 from ..utils.files import GZIP_SIGNATURE, HDF5_SIGNATURE, file_signature, open_binary
 from ..utils.numba import njit
 from ..utils.arguments import quoted_value
+from ..utils.memory_budget import MemoryLedger
 from ._treedata import (
     TreeGraph,
     h5td_tree_bytes,
@@ -236,18 +237,6 @@ class FileTrees:
         )
 
 
-def _memory_error(what: str, held: int, memory_bytes: int) -> MemoryError:
-    return MemoryError(
-        f"{what} holds about {held} bytes, more than the memory budget of "
-        f"{memory_bytes} bytes. Raise mem_budget."
-    )
-
-
-def _check(what: str, held: int, memory_bytes: int) -> None:
-    if held > memory_bytes:
-        raise _memory_error(what, held, memory_bytes)
-
-
 def tree_container(path: Path) -> str:
     """Return how a tree file holds its trees, from its bytes.
 
@@ -374,31 +363,27 @@ def tree_file_layout(
     return _newick_layout(resolved, "gzip" if container == "gzip" else None)
 
 
-def read_trees(
-    layout: TreeFileLayout, *, memory_bytes: int, held_bytes: int = 0
-) -> FileTrees:
+def read_trees(layout: TreeFileLayout, *, ledger: MemoryLedger) -> FileTrees:
     """Read the trees of one file.
 
     Args:
         layout: The file, from :func:`tree_file_layout`.
-        memory_bytes: The memory budget.
-        held_bytes: Bytes that the caller holds beside the read.
+        ledger: The caller's memory ledger, which each step of the read is
+            checked against beside what it holds.
 
     Raises:
         ValueError: If the file is not well-formed, a tree is not a tree, or
             the file holds no tree.
-        MemoryError: If reading the trees does not fit the memory budget.
+        MemoryBudgetError: If reading the trees does not fit the ledger's
+            budget.
     """
-    _check(
-        f"Reading the trees of {quoted_value(layout.path)}",
-        held_bytes + layout.read_bytes,
-        memory_bytes,
-    )
+    held_bytes = ledger.held_bytes
+    ledger.peak(f"reading the trees of {quoted_value(layout.path)}", layout.read_bytes)
     if layout.format == "newick":
-        return _read_newick(layout, memory_bytes=memory_bytes, held_bytes=held_bytes)
+        return _read_newick(layout, ledger=ledger)
 
     def check(what: str, held: int) -> None:
-        _check(what, held, memory_bytes)
+        ledger.refuse_beyond(what, held)
 
     if layout.container == "hdf5":
         graphs = h5td_tree_graphs(layout.path, check=check, held_bytes=held_bytes)
@@ -651,9 +636,7 @@ def _batches(n_values: int) -> Iterator[slice]:
         yield slice(start, min(start + _BATCH, n_values))
 
 
-def _read_newick(
-    layout: TreeFileLayout, *, memory_bytes: int, held_bytes: int
-) -> FileTrees:
+def _read_newick(layout: TreeFileLayout, *, ledger: MemoryLedger) -> FileTrees:
     text = _read_text(layout)
     skip = len(_BYTE_ORDER_MARK) if text.startswith(_BYTE_ORDER_MARK) else 0
     bound = layout.max_nodes
@@ -699,14 +682,13 @@ def _read_newick(
         n_named += int(np.count_nonzero(named))
         label_bytes += int(np.sum((label_end[batch] - label_start[batch])[named]))
     ascii_text = layout.ascii_text
-    _check(
-        f"Reading the names and branch lengths of {n_nodes} nodes of {quoted_value(layout.path)}",
-        held_bytes
-        + layout.read_bytes
+    ledger.peak(
+        f"reading the names and branch lengths of {n_nodes} nodes of "
+        f"{quoted_value(layout.path)}",
+        layout.read_bytes
         + _TREE_BYTES_PER_NODE * n_nodes
         + (_ASCII_NAME_BYTES if ascii_text else _TEXT_NAME_BYTES) * n_named
         + (1 if ascii_text else 4) * label_bytes,
-        memory_bytes,
     )
     names = np.full(n_nodes, "", dtype=object)
     lengths = np.full(n_nodes, np.nan)

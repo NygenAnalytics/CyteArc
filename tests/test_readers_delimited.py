@@ -462,9 +462,10 @@ def test_rows_lines_and_fields_match_pandas_reading_the_text_itself(
     tmp_path, monkeypatch
 ) -> None:
     """Random tables of quotes, doubled quotes, delimiters, spaces and line
-    ends read alike through the rows, at every chunk and read size, and as
-    pandas reads their text whole: each row's first line, its values, and
-    the first row of another number of fields than three, which is refused."""
+    ends read alike through the rows, at every chunk and read size, with or
+    without a bound on a chunk's characters, and as pandas reads their text
+    whole: each row's first line, its values, and the first row of another
+    number of fields than three, which is refused."""
     rng = random.Random(11)
     path = tmp_path / "t.txt"
     checked = 0
@@ -483,10 +484,19 @@ def test_rows_lines_and_fields_match_pandas_reading_the_text_itself(
         results = []
         for read_characters in (1, delimited._READ_CHARACTERS):
             monkeypatch.setattr(delimited, "_READ_CHARACTERS", read_characters)
-            for chunk_rows in (1, 2, 1000):
+            for chunk_rows, chunk_chars in (
+                (1, None),
+                (2, None),
+                (1000, None),
+                (1000, 1),
+                (1000, 7),
+                (2, 7),
+            ):
                 rows, error = [], None
                 try:
-                    for lines, chunk in text_chunks(layout, chunk_rows):
+                    for lines, chunk in text_chunks(
+                        layout, chunk_rows, chunk_chars=chunk_chars
+                    ):
                         rows += zip(lines.tolist(), chunk.values.tolist(), strict=True)
                 except ValueError as refusal:
                     error = str(refusal).removeprefix(f"{path} is malformed: ")
@@ -512,6 +522,39 @@ def test_rows_lines_and_fields_match_pandas_reading_the_text_itself(
             ), text
     # Most tables are checked against pandas' own rows.
     assert checked > 100
+
+
+def test_a_chunk_holds_rows_of_at_most_its_characters_past_the_row_it_ends_in(
+    tmp_path,
+) -> None:
+    # Short rows, then rows seven times longer, then a row longer than a
+    # chunk's characters, which comes alone; each chunk's rows hold at most
+    # 40 characters, past the row that reaches them, and every row comes
+    # once, in order, with its line.
+    body = [f"c{i},{i}\n" for i in range(20)] + [
+        f"{'x' * 30}{i},{i}\n" for i in range(9)
+    ]
+    body.append(f"{'y' * 100},1\n")
+    path = _write(tmp_path / "t.csv", "cell,clone\n" + "".join(body))
+    chunks = list(text_chunks(text_layout(path), 1000, chunk_chars=40))
+    sizes = [len(chunk) for _lines, chunk in chunks]
+    for _lines, chunk in chunks:
+        widths = [len(f"{cell},{clone}\n") for cell, clone in chunk.values.tolist()]
+        assert sum(widths[:-1]) <= 40, widths
+    assert sizes[-1] == 1 and len(chunks[-1][1].iloc[0, 0]) == 100
+    # Eight short rows of five characters reach 40, and the ninth passes
+    # them; the long rows of 34 characters come two to a chunk.
+    assert sizes[0] == 9 and max(sizes[3:-1]) == 2, sizes
+    rows = [row for _lines, chunk in chunks for row in chunk.values.tolist()]
+    assert rows == [line.rstrip("\n").split(",") for line in body]
+    assert np.concatenate([lines for lines, _chunk in chunks]).tolist() == list(
+        range(2, 2 + len(body))
+    )
+    # The chunks hold Python strings whether or not pandas stores text with
+    # pyarrow, which the importers charge.
+    assert all(chunk[0].dtype == object for _lines, chunk in chunks)
+    with pytest.raises(ValueError, match="chunk_chars must be at least 1, not 0"):
+        next(text_chunks(text_layout(path), 1000, chunk_chars=0))
 
 
 def test_the_tokenizer_splits_rows_and_joins_their_lines_as_the_csv_module_does() -> (

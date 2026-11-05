@@ -23,6 +23,7 @@ from cytearc.readers.phylogeny import (
     read_trees,
     tree_file_layout,
 )
+from tests.memory_helpers import budgeted
 
 DATA = Path(__file__).parent / "data" / "phylogenies"
 NAN = float("nan")
@@ -38,7 +39,7 @@ def _write(tmp_path: Path, text: str | bytes, name: str = "tree.nwk") -> Path:
 
 
 def _read(path: Path, **options: object) -> FileTrees:
-    return read_trees(tree_file_layout(path, **options), memory_bytes=10**9)
+    return read_trees(tree_file_layout(path, **options), ledger=budgeted(10**9))
 
 
 def _parse(tmp_path: Path, text: str | bytes) -> FileTrees:
@@ -241,7 +242,7 @@ def test_nexus_files_are_refused_before_they_are_read(tmp_path) -> None:
 def test_the_layout_bounds_the_nodes_and_counts_the_text(tmp_path) -> None:
     text = "('a,b':1,[c,d](C,D):1);(E,F);"
     layout = tree_file_layout(_write(tmp_path, text))
-    trees = read_trees(layout, memory_bytes=10**9)
+    trees = read_trees(layout, ledger=budgeted(10**9))
     assert layout.format == "newick" and layout.container is None
     assert layout.n_text_bytes == len(text.encode())
     # Marks in quotes and comments count too, so the bound holds every node.
@@ -255,21 +256,22 @@ def test_a_file_that_grows_after_its_layout_is_refused(tmp_path) -> None:
     layout = tree_file_layout(path)
     path.write_text("(A,B,C);")
     with pytest.raises(ValueError, match="changed while it was read"):
-        read_trees(layout, memory_bytes=10**9)
+        read_trees(layout, ledger=budgeted(10**9))
 
 
 def test_reading_refuses_a_budget_too_small_before_it_reads(tmp_path) -> None:
     layout = tree_file_layout(_write(tmp_path, "((A:1,B:2)C:3,D:4)E;"))
     with pytest.raises(
         MemoryError,
-        match=r"holds about \d+ bytes, more than the memory budget of 100 bytes",
+        match=r"holds about \d+ bytes for reading the trees of .*, more than the "
+        r"memory budget of 100 bytes",
     ):
-        read_trees(layout, memory_bytes=100)
+        read_trees(layout, ledger=budgeted(100))
     # The names are counted once the scan has found them.
     long_names = "(" + ",".join("x" * 4000 + str(i) for i in range(50)) + ");"
     layout = tree_file_layout(_write(tmp_path, long_names, "long.nwk"))
     with pytest.raises(MemoryError, match="names and branch lengths of 51 nodes"):
-        read_trees(layout, memory_bytes=layout.read_bytes + 100)
+        read_trees(layout, ledger=budgeted(layout.read_bytes + 100))
 
 
 @pytest.mark.parametrize("format", [None, *FORMATS])
@@ -325,7 +327,7 @@ def test_treedata_written_by_treedata_reads_with_node_times(tmp_path) -> None:
             "treedata",
             "zarr" if name.endswith("zarr") else "hdf5",
         )
-        trees = read_trees(layout, memory_bytes=10**9)
+        trees = read_trees(layout, ledger=budgeted(10**9))
         assert trees.tree_keys == ("tree",)
         assert trees.names[:3].tolist() == ["root", "founder", "1"]
         assert trees.parent[:3].tolist() == [-1, 0, 1]
@@ -547,7 +549,7 @@ def test_zarr_columns_read_as_numbers_or_json_text(tmp_path) -> None:
     )
     layout = tree_file_layout(path)
     assert (layout.container, layout.max_nodes) == ("zarr", 3)
-    trees = read_trees(layout, memory_bytes=10**9)
+    trees = read_trees(layout, ledger=budgeted(10**9))
     assert trees.names.tolist() == ["r", "a", "b"]
     times = node_times(trees.parent, trees.length, trees.time, trees.tree_offsets)
     assert times.tolist() == [0.0, 1.5, 2.0]
@@ -613,8 +615,8 @@ def test_zarr_text_is_counted_as_it_is_read(tmp_path) -> None:
         {"t": {"nodes": names, "edges": [[names[0], name] for name in names[1:]]}},
     )
     layout = tree_file_layout(path)
-    with pytest.raises(MemoryError, match=re.escape("Reading the tree 't' of")):
-        read_trees(layout, memory_bytes=layout.read_bytes + 10_000)
+    with pytest.raises(MemoryError, match=re.escape("for reading the tree 't' of")):
+        read_trees(layout, ledger=budgeted(layout.read_bytes + 10_000))
     assert _read(path).n_nodes == 20
 
 
@@ -644,7 +646,7 @@ def test_text_that_cannot_be_read_or_changes_size_is_refused(tmp_path) -> None:
     layout = tree_file_layout(path)
     path.write_text("(A,B);")
     with pytest.raises(ValueError, match="changed while it was read"):
-        read_trees(layout, memory_bytes=10**9)
+        read_trees(layout, ledger=budgeted(10**9))
 
 
 def test_layouts_bound_names_of_other_text_by_four_bytes_a_byte(tmp_path) -> None:
@@ -707,7 +709,7 @@ def test_a_file_rewritten_at_the_same_size_is_refused_not_overrun(
     path.write_text(after)
     assert path.stat().st_size == layout.n_text_bytes
     with pytest.raises(ValueError, match="changed while it was read"):
-        read_trees(layout, memory_bytes=10**9)
+        read_trees(layout, ledger=budgeted(10**9))
 
 
 def test_a_damaged_gzip_stream_is_refused_as_unreadable(tmp_path) -> None:
@@ -722,7 +724,7 @@ def test_a_damaged_gzip_stream_is_refused_as_unreadable(tmp_path) -> None:
     layout = tree_file_layout(path)
     path.write_bytes(bytes(packed))
     with pytest.raises(ValueError, match="cannot be read"):
-        read_trees(layout, memory_bytes=10**9)
+        read_trees(layout, ledger=budgeted(10**9))
 
 
 def test_a_label_after_a_length_or_a_group_after_a_group_is_refused(tmp_path) -> None:
@@ -758,7 +760,7 @@ def test_stores_of_treedata_before_0_3_are_refused_before_they_are_read(
     root = zarr.open_group(path, mode="w", zarr_format=2)
     root.create_array("obst", shape=(), dtype=str)
     with pytest.raises(ValueError, match="changed while it was read"):
-        read_trees(layout, memory_bytes=10**9)
+        read_trees(layout, ledger=budgeted(10**9))
 
 
 def test_files_of_the_earliest_treedata_name_their_layout(tmp_path) -> None:

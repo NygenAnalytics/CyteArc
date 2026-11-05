@@ -21,20 +21,54 @@ import pandas as pd
 
 from ..utils.arrays import sort_categories, sort_categories_bytes
 from ..utils.arguments import quoted_value
-from ..utils.memory_budget import MemoryLedger
+from ..utils.memory_budget import (
+    NUMPY_STEP_BYTES,
+    MemoryLedger,
+    hash_table_bytes,
+    object_array_bytes,
+    python_text_bytes,
+)
 
 __all__ = [
+    "CLONE_ASSIGNMENT_ROW_BYTES",
     "MULTIPLE_POLICIES",
     "MultiplePolicy",
     "CloneAssigner",
     "CloneAssignment",
     "Clones",
+    "clone_assignment_bytes",
     "clone_frames",
     "clone_label_texts",
+    "ranked_clone_label_bytes",
+    "ranked_clone_labels",
     "ranked_clones",
 ]
 
 type MultiplePolicy = Literal["error", "drop"]
+
+#: The text before each rank of :func:`ranked_clone_labels`.
+_RANKED_PREFIX = "clone_"
+
+
+def ranked_clone_labels(n_clones: int) -> np.ndarray:
+    """Name clones by rank, as an object array: ``clone_1`` is the largest."""
+    return np.asarray(
+        [f"{_RANKED_PREFIX}{rank}" for rank in range(1, n_clones + 1)], dtype=object
+    )
+
+
+def ranked_clone_label_bytes(n_clones: int) -> int:
+    """The bytes of :func:`ranked_clone_labels`: an ASCII string and a reference for each clone."""
+    n_clones = int(n_clones)
+    digits = 0
+    width, start = 1, 1
+    while start <= n_clones:
+        end = min(n_clones, 10 * start - 1)
+        digits += width * (end - start + 1)
+        width, start = width + 1, 10 * start
+    characters = len(_RANKED_PREFIX) * n_clones + digits
+    return object_array_bytes(n_clones) + python_text_bytes(n_clones, characters)
+
 
 #: The values of ``multiple``: what to do with a cell given two clones.
 MULTIPLE_POLICIES: tuple[str, ...] = ("error", "drop")
@@ -48,6 +82,17 @@ _INTEGER_DIGITS = 15
 # probability of its clone.
 _CELL_BYTES = 9
 _PROBABILITY_BYTES = 8
+# Bytes that CloneAssigner.add holds for each row it is given, beside its
+# arguments and the labels it keeps: the masks of the rows kept, their cells
+# and labels, the labels' positions and codes, the rows' order and their
+# sorted copies, and the first row, the length, the cell and the clone of
+# each cell's rows. Traced at 50 to 63 bytes a row beside pandas' hash table
+# of the labels, on 20,000 to 1,000,000 rows of one label or of 6,000.
+_ASSIGNMENT_BYTES_PER_ROW = 76
+#: The most bytes that CloneAssigner.add holds for each row, beside its
+#: arguments and the labels it keeps: what it works with, and pandas' hash
+#: table of the labels at its emptiest, 42 bytes a row.
+CLONE_ASSIGNMENT_ROW_BYTES = _ASSIGNMENT_BYTES_PER_ROW + 42
 # Bytes of each distinct clone label beside its text: its entry in the table
 # that finds its code, its code and its slots in the lists of labels and of
 # their sources. Traced at 90 bytes, and 111 while the table grows, on up to
@@ -258,6 +303,18 @@ class CloneAssignment:
         return sizes
 
 
+def clone_assignment_bytes(n_rows: int) -> int:
+    """The most bytes that :meth:`CloneAssigner.add` holds for ``n_rows`` rows, beside its arguments and the labels it keeps.
+
+    What it works with for each row, pandas' hash table of the rows' labels,
+    which pandas sizes for every row, and what a step of NumPy calls holds.
+    """
+    n_rows = int(n_rows)
+    return (
+        _ASSIGNMENT_BYTES_PER_ROW * n_rows + hash_table_bytes(n_rows) + NUMPY_STEP_BYTES
+    )
+
+
 class CloneAssigner:
     """Gather each cell's clone from rows given chunk by chunk.
 
@@ -273,7 +330,10 @@ class CloneAssigner:
     clone when it starts, each cell's probability once a source gives one,
     and each new label, its text and its entries, before it is kept; and
     what ranking the clones holds before :meth:`finish` ranks them. What
-    each chunk of rows holds is the caller's to charge.
+    each chunk of rows holds is the caller's to charge, and what
+    :meth:`add` works with too: :func:`clone_assignment_bytes` states it, as
+    ``from_column`` charges it, and a clone file's parsed rows count it in
+    what each row holds.
 
     Args:
         cell_ids: The IDs of the cells, which errors name.

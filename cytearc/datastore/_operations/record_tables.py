@@ -33,10 +33,9 @@ from ...metadata.records import (
     decode_ragged,
     decode_text,
 )
-from ...storage.types import as_zarr_array
+from ...storage.types import read_array
 
 __all__ = [
-    "read_array",
     "record_arrays",
     "record_chunk_lengths",
     "stored_column",
@@ -75,11 +74,6 @@ def record_chunk_lengths(arrays: Mapping[str, np.ndarray]) -> dict[str, int]:
         name: max(1, _RECORD_CHUNK_BYTES // max(1, values.dtype.itemsize))
         for name, values in arrays.items()
     }
-
-
-def read_array(group: zarr.Group, name: str) -> np.ndarray:
-    """Read a whole array of an artifact's group."""
-    return np.asarray(as_zarr_array(group[name], name=name)[:])
 
 
 def stored_text(group: zarr.Group, prefix: str, name: str) -> EncodedText:

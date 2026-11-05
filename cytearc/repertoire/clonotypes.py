@@ -429,11 +429,10 @@ def assign_clonotype_clusters(
 
     Raises:
         ValueError: If an option is unknown or the arrays do not align.
-        MemoryError: If the search for the pairs of chains within ``max_distance``
-            would hold more than ``CLUSTER_SEARCH_BYTES`` and the ledger's room
-            together.
-        MemoryBudgetError: If the pairs and links would pass the ledger's
-            budget.
+        MemoryBudgetError: If the search for the pairs of chains within
+            ``max_distance`` would hold more than ``CLUSTER_SEARCH_BYTES`` and
+            the ledger's room together, or the pairs and links would pass the
+            ledger's budget.
     """
     if metric not in DISTANCE_METRICS:
         raise ValueError(f"metric must be one of {', '.join(DISTANCE_METRICS)}")
@@ -469,11 +468,7 @@ def assign_clonotype_clusters(
         metric,
         int(max_distance),
         blocks=blocks,
-        max_bytes=(
-            None
-            if ledger is None or ledger.room is None
-            else CLUSTER_SEARCH_BYTES + ledger.room
-        ),
+        ledger=_search_ledger(ledger),
     )
     n_pairs = len(low)
     reserve(
@@ -762,6 +757,30 @@ _LINK_BYTES = 32
 # Candidate pairs checked at once: two arrays of this many int64 values and
 # the checks' temporaries, about 150 MB together.
 _PAIRS_PER_CHUNK = 1 << 21
+
+
+def _search_ledger(ledger: MemoryLedger | None) -> MemoryLedger | None:
+    """A ledger for the search for near chains: the caller's, with the search's reservation free to use.
+
+    It holds what the caller holds less ``CLUSTER_SEARCH_BYTES``, which the
+    caller holds for the search, so that the search may use them beside the
+    caller's room and a refusal names the caller's whole budget. A caller
+    that holds less than the reservation gives the search the reservation
+    beside its room, a budget of their sum.
+    """
+    if ledger is None or ledger.budget is None:
+        return None
+    beside = ledger.held_bytes - CLUSTER_SEARCH_BYTES
+    budget = ledger.budget if beside >= 0 else CLUSTER_SEARCH_BYTES + (ledger.room or 0)
+    search = MemoryLedger(
+        budget,
+        ledger.doing,
+        remedy=ledger.remedy,
+        codec_threads=ledger.codec_threads,
+    )
+    if beside > 0:
+        search.hold("what clustering holds beside the search", beside)
+    return search
 
 
 @njit(cache=True)

@@ -24,7 +24,7 @@ from ...clones.phylogeny import (
     CellPhylogeny,
     PhylogenyCut,
     clade_roots,
-    clone_labels,
+    clade_labels,
     collapsed_depths,
     leaf_time_ranges,
     node_times,
@@ -34,13 +34,13 @@ from ...clones.phylogeny import (
 from ...metadata.arguments import PhylogenyCloneArguments, PhylogenyImportArguments
 from ...metadata.rows import (
     read_array_rows_chunkwise,
-    read_metadata_rows_chunkwise,
     read_text_rows,
+    read_whole,
     text_width,
 )
 from ...metadata.selection import (
     CellSelectionRead,
-    cell_selection_indices,
+    plan_cell_selection_read,
     read_cell_selection,
 )
 from ...storage.artifact_writer import (
@@ -67,7 +67,7 @@ from ...storage.diagnostics import (
     warn_diagnostics,
 )
 from ...storage.layout import column_chunk_rows
-from ...storage.types import as_zarr_array
+from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sort_categories, sorted_unique
@@ -80,7 +80,8 @@ from .cell_barcodes import (
     barcode_files,
     unmatched_barcode_rules,
 )
-from .clone_artifacts import clone_write_bytes, plan_clones, write_clones
+from .clone_artifacts import plan_clones, write_clones
+from .clone_steps import files_text, read_codes
 
 if TYPE_CHECKING:
     from ...readers.phylogeny import FileTrees, TreeFileLayout
@@ -115,20 +116,16 @@ _JOIN_BYTES_PER_LEAF = 300
 # length, given time, cell and whether it is a leaf, its file's cell beside
 # it, and while times resolve each node's tree and whether it has a time.
 _FOREST_BYTES_PER_NODE = 88
-# Reading a cell's ID holds it at its stored width, four bytes a character,
-# and as a Python string of at most 80 bytes and four a character; and the
-# read decodes a whole stored chunk of the column, and its compressed copy.
-_ID_BYTES_PER_CELL = 88
-_ID_CHUNK_COPIES = 2
 # A node name is written at the width of the longest, four bytes a character,
 # in the chunks of a new store's columns; writing a chunk holds the block of
 # names, Zarr's chunk and its compressed copy.
 _NAME_WRITE_COPIES = 3
 # Reading a chunk of names holds its compressed and its decoded bytes.
 _NAME_READ_COPIES = 2
-# Reading a phylogeny for a cut holds, for each node, its parent, time, cell,
-# clade root, depth, the count of its children and the masks of the cut.
-_CUT_BYTES_PER_NODE = 64
+# Cutting a phylogeny holds, for each node beside its parent, cell and time,
+# which their reads charge, its clade root, depth, the count of its children
+# and the masks of the cut.
+_CUT_BYTES_PER_NODE = 40
 # Each clone holds its root, its label as a Python string beside its stored
 # name, and its place in ranking the clones by size and label.
 _CUT_BYTES_PER_CLONE = 600
@@ -263,40 +260,7 @@ def _write_numbers(group: zarr.Group, name: str, values: np.ndarray) -> None:
     output[...] = values
 
 
-def _read(group: zarr.Group, name: str) -> np.ndarray:
-    return np.asarray(as_zarr_array(group[name], name=name)[...])
-
-
-def _files_text(n_files: int) -> str:
-    return "the tree file" if n_files == 1 else "the tree files"
-
-
 class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
-    def _phylogeny_cell_ids(self, cell_index: np.ndarray) -> np.ndarray:
-        return np.asarray(
-            read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
-        )
-
-    def _phylogeny_id_bytes(self, n_cells: int) -> int:
-        """What reading ``n_cells`` cell IDs holds, at their stored width.
-
-        The IDs are read a stored chunk at a time, and a chunk may hold many
-        more rows than the cells read.
-        """
-        ids = self.cells._get_array("ids")
-        itemsize = int(ids.dtype.itemsize)
-        chunk_rows = int(ids.chunks[0]) if ids.chunks else int(ids.shape[0])
-        return n_cells * (_ID_BYTES_PER_CELL + 2 * itemsize) + (
-            _ID_CHUNK_COPIES * chunk_rows * itemsize
-        )
-
-    def _check_phylogeny_budget(self, what: str, held: int) -> None:
-        if held > self.memoryBytes:
-            raise MemoryError(
-                f"{what} holds about {held} bytes, more than the memory budget of "
-                f"{self.memoryBytes} bytes. Raise mem_budget."
-            )
-
     def _join_leaves(
         self,
         join: CellBarcodeJoin,
@@ -356,9 +320,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         )
         read: list[FileTrees] = []
         for layout in layouts:
-            trees = read_trees(
-                layout, memory_bytes=self.memoryBytes, held_bytes=ledger.held_bytes
-            )
+            trees = read_trees(layout, ledger=ledger)
             ledger.hold("the trees read", trees.held_bytes)
             read.append(trees)
         n_nodes = sum(trees.n_nodes for trees in read)
@@ -611,8 +573,8 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             required_attributes=("time_unit",),
             reuse_validator=_has_forest,
         )
-        files_text = _files_text(len(files))
-        warnings = unmatched_barcode_rules(files_text)
+        tree_files = files_text("tree", len(files))
+        warnings = unmatched_barcode_rules(tree_files)
         if planned.reused:
             # Saved trees warn as they did when they were imported.
             warn_diagnostics(
@@ -631,11 +593,11 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             examples = [*join.unmatched_examples, *join.unselected_examples]
             if not examples:
                 raise ValueError(
-                    f"No leaf of {files_text} names a selected cell, since no "
+                    f"No leaf of {tree_files} names a selected cell, since no "
                     "leaf has a name; name the leaves by their cells' barcodes"
                 )
             raise ValueError(
-                f"No leaf of {files_text} names a selected cell, for example "
+                f"No leaf of {tree_files} names a selected cell, for example "
                 + ", ".join(quoted_value(value) for value in examples[:EXAMPLES])
                 + ". Check barcode_prefix, barcode_suffix, barcode_pattern and "
                 "cell_selection."
@@ -730,7 +692,6 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         n_nodes = int(names_array.shape[0])
         width = text_width(names_array)
         selection = self._phylogeny_cells(phylogeny)
-        cell_index = cell_selection_indices(self.zw, selection)
         in_no_tree = inspect_artifact(self.zw, phylogeny).diagnostics["cellsInNoTree"]
         if isinstance(in_no_tree, bool) or not isinstance(in_no_tree, int):
             raise ValueError(
@@ -738,37 +699,44 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
                 f"{quoted_value(in_no_tree)}; call ds.clones.import_phylogeny again "
                 "with the same arguments, which imports the trees anew"
             )
-        n_named = len(cell_index) - in_no_tree
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Loading the phylogeny of {n_nodes} nodes",
+            codec_threads=self.nthreads,
+        )
+        cell_index = read_cell_selection(
+            ledger,
+            self.zw,
+            plan_cell_selection_read(self.zw, selection),
+            item="the positions of the phylogeny's cells",
+        )
         # Names are read a stored chunk at a time: its bytes and their copy.
         rows = max(1, int(names_array.chunks[0]))
-        held = (
-            _FIXED_BYTES
-            + _LOAD_BYTES_PER_NODE * n_nodes
-            + self._phylogeny_id_bytes(n_named)
-            + 8 * len(cell_index)
-            + rows * (8 + _NAME_READ_COPIES * 4 * width)
+        ledger.hold(
+            f"the tables of {n_nodes} nodes",
+            _LOAD_BYTES_PER_NODE * n_nodes + rows * (8 + _NAME_READ_COPIES * 4 * width),
         )
-        self._check_phylogeny_budget(f"Loading the phylogeny of {n_nodes} nodes", held)
-        cells = _read(group, "cells")
+        cells = read_array(group, "cells")
         names = np.empty(n_nodes, dtype=object)
-        name_bytes = 0
         for start in range(0, n_nodes, rows):
             block = np.asarray(names_array[start : start + rows]).tolist()
-            name_bytes += sum(map(sys.getsizeof, block))
-            self._check_phylogeny_budget(
-                f"Loading the names of {n_nodes} nodes", held + name_bytes
-            )
+            ledger.hold(f"the names of {n_nodes} nodes", sum(map(sys.getsizeof, block)))
             names[start : start + len(block)] = block
         cell_ids = np.full(n_nodes, None, dtype=object)
         named = np.flatnonzero(cells >= 0)
-        cell_ids[named] = self._phylogeny_cell_ids(cell_index[cells[named]])
+        cell_ids[named] = read_text_rows(
+            ledger,
+            self.cells._get_array("ids"),
+            cell_index[cells[named]],
+            item="the IDs of the trees' cells",
+        )
         nodes, trees = phylogeny_frames(
-            parent=_read(group, "parent"),
-            times=_read(group, "time"),
+            parent=read_array(group, "parent"),
+            times=read_array(group, "time"),
             names=names,
             cell_ids=cell_ids,
-            tree_offsets=_read(group, "tree_offsets"),
-            tree_names=_read(group, "tree_names").astype(object),
+            tree_offsets=read_array(group, "tree_offsets"),
+            tree_names=read_array(group, "tree_names").astype(object),
         )
         unit = group.attrs.get("time_unit")
         return CellPhylogeny(
@@ -858,7 +826,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             depth=cut.depth,
             invalidate_cache=invalidate_cache,
         )
-        n_cells = len(cell_selection_indices(self.zw, selection))
+        n_cells = plan_cell_selection_read(self.zw, selection).cells
         planned = plan_clones(
             self.zw,
             arguments,
@@ -877,14 +845,22 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         names_array = as_zarr_array(group["names"], name="names")
         n_nodes = int(names_array.shape[0])
         width = text_width(names_array)
-        held = _FIXED_BYTES + _CUT_BYTES_PER_NODE * n_nodes
-        self._check_phylogeny_budget(f"Cutting the phylogeny of {n_nodes} nodes", held)
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Cutting the phylogeny into the clones of {n_cells} cells",
+            codec_threads=self.nthreads,
+        )
         self._require_writable(arguments.operation)
-        parent = _read(group, "parent")
-        cells = _read(group, "cells")
-        tree_offsets = _read(group, "tree_offsets")
+        parent = read_codes(ledger, group, "parent", item="each node's parent")
+        cells = read_codes(ledger, group, "cells", item="each node's cell")
+        tree_offsets = read_codes(
+            ledger, group, "tree_offsets", item="each tree's nodes"
+        )
+        ledger.hold(
+            f"cutting the phylogeny of {n_nodes} nodes", _CUT_BYTES_PER_NODE * n_nodes
+        )
         if cut.time is not None:
-            times = _read(group, "time")
+            times = read_whole(ledger, group, "time", item="each node's time")
             n_timeless = int(np.count_nonzero(np.isnan(times)))
             if n_timeless:
                 nodes = (
@@ -895,7 +871,9 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
                 )
                 raise ValueError(f"{nodes} has no length; cut it at a depth instead")
             past = times >= cut.time
+            time_bytes = times.nbytes
             del times
+            ledger.release(time_bytes)
         else:
             past = collapsed_depths(parent) >= cut.depth
         roots = clade_roots(parent, past)
@@ -912,26 +890,23 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             )
         clones, by_cell = np.unique(cell_roots[assigned], return_inverse=True)
         n_clones = len(clones)
-        tree_names = _read(group, "tree_names").astype(object)
+        tree_names = read_array(group, "tree_names").astype(object)
         # A label is a name or a position, after its tree's name and "/".
         label_width = max(width, len(f"node{n_nodes}"))
         if len(tree_names) > 1:
             label_width += 1 + max(map(len, tree_names.tolist()))
         # The clones are labelled and then saved.
-        held += (
+        ledger.hold(
+            f"labelling {n_clones} clones of {n_cells} cells",
             n_clones * (_CUT_BYTES_PER_CLONE + 8 * (1 + label_width))
             + n_cells * _CUT_BYTES_PER_CELL
-            + max(1, int(names_array.chunks[0])) * _NAME_READ_COPIES * 4 * width
+            + max(1, int(names_array.chunks[0])) * _NAME_READ_COPIES * 4 * width,
         )
-        self._check_phylogeny_budget(
-            f"Labelling {n_clones} clones of {n_cells} cells",
-            held + clone_write_bytes(n_cells, n_clones, label_width),
-        )
-        labels = clone_labels(
+        labels = clade_labels(
             clones,
             tree_offsets=tree_offsets,
             tree_names=tree_names,
-            unique_names=_read(group, "tree_unique_names"),
+            unique_names=read_array(group, "tree_unique_names"),
             names=np.asarray(read_array_rows_chunkwise(names_array, clones)).tolist(),
         )
         codes = np.full(n_cells, -1, dtype=np.int64)
@@ -941,12 +916,6 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             "n_clones": len(clone_ids),
             "time_unit": None if unit is None else str(unit),
         }
-        saving = MemoryLedger(
-            self.memoryBytes,
-            f"Cutting the phylogeny into the clones of {n_cells} cells",
-            codec_threads=self.nthreads,
-        )
-        saving.hold("the cut, its clones' labels and each cell's clone", held)
         write_clones(
             self.zw,
             planned,
@@ -958,7 +927,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
                 n_cells_in_several_clones=0,
             ),
             attributes,
-            ledger=saving,
+            ledger=ledger,
             diagnostics={"cellsBeforeCut": n_before},
         )
         warn_diagnostics(

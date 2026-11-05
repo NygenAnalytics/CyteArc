@@ -35,7 +35,7 @@ __all__ = [
     "CellPhylogeny",
     "PhylogenyCut",
     "clade_roots",
-    "clone_labels",
+    "clade_labels",
     "collapsed_depths",
     "leaf_time_ranges",
     "node_times",
@@ -208,7 +208,7 @@ def clade_roots(parent: np.ndarray, past_cut: np.ndarray) -> np.ndarray:
     )
 
 
-def clone_labels(
+def clade_labels(
     roots: np.ndarray,
     *,
     tree_offsets: np.ndarray,

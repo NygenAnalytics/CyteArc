@@ -25,8 +25,9 @@ from cytearc.clones.calling import (
     pruned_edges,
     set_clones,
 )
+from cytearc.utils.memory_budget import NUMPY_STEP_BYTES, MemoryBudgetError
 from tests.clone_helpers import clone_partition
-from tests.memory_helpers import smallest_budget, traced_peak
+from tests.memory_helpers import budgeted, smallest_budget, traced_peak
 
 
 def _sets(rows: list[list[int]]) -> CellSets:
@@ -508,7 +509,7 @@ def test_a_node_is_ambiguous_when_two_neighbours_disagree_where_it_does_not_know
     assert not ambiguous_nodes(plain, _edges([(0, 1)])).any()
     assert not ambiguous_nodes(nodes, _edges([])).any()
     with pytest.raises(MemoryError, match="lists of neighbours"):
-        ambiguous_nodes(nodes, edges, max_bytes=100)
+        ambiguous_nodes(nodes, edges, ledger=budgeted(100))
 
 
 def test_random_sets_flag_the_ambiguous_nodes_found_pair_by_pair() -> None:
@@ -954,7 +955,7 @@ def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(options) -> N
     groups = np.arange(20_000) % 4
 
     def call(budget: int) -> object:
-        return set_clones(sets, groups=groups, max_bytes=budget, **options)
+        return set_clones(sets, groups=groups, ledger=budgeted(budget), **options)
 
     budget = smallest_budget(call, 1 << 30)
     _, peak = traced_peak(lambda: call(budget), budget)
@@ -968,7 +969,7 @@ def test_components_of_many_edges_hold_no_more_than_the_budget_they_accept() -> 
     edges = Edges(first=first.astype(np.int64), second=second.astype(np.int64))
 
     def call(budget: int) -> object:
-        return connected_components(1_000, edges, max_bytes=budget)
+        return connected_components(1_000, edges, ledger=budgeted(budget))
 
     budget = smallest_budget(call, 1 << 30)
     assert budget < 200_000
@@ -992,7 +993,7 @@ def test_unknown_items_and_shared_links_hold_no_more_than_their_budget() -> None
     ):
 
         def call(budget: int) -> object:
-            return set_clones(sets, groups=groups, max_bytes=budget, **options)
+            return set_clones(sets, groups=groups, ledger=budgeted(budget), **options)
 
         budget = smallest_budget(call, 1 << 30)
         _, peak = traced_peak(lambda: call(budget), budget)
@@ -1009,17 +1010,17 @@ def test_sets_of_narrower_integers_count_their_int64_copies() -> None:
     enough = (
         calling._IDENTITY_CELL_BYTES * sets.n_cells
         + calling._NODE_ITEM_BYTES * 3
-        + calling._FIXED_BYTES
+        + NUMPY_STEP_BYTES
     )
-    assert identical_sets(sets, max_bytes=enough).n_nodes == 2
+    assert identical_sets(sets, ledger=budgeted(enough)).n_nodes == 2
     with pytest.raises(MemoryError, match="the sets' hashes"):
-        identical_sets(narrow, max_bytes=enough)
+        identical_sets(narrow, ledger=budgeted(enough))
     copies = 8 * (len(narrow.items) + narrow.n_cells + 1)
-    nodes = identical_sets(narrow, max_bytes=enough + copies)
+    nodes = identical_sets(narrow, ledger=budgeted(enough + copies))
     assert nodes.cell_nodes.tolist() == identical_sets(sets).cell_nodes.tolist()
 
     def call(budget: int) -> object:
-        return identical_sets(narrow, max_bytes=budget)
+        return identical_sets(narrow, ledger=budgeted(budget))
 
     budget = smallest_budget(call, 1 << 30)
     _, peak = traced_peak(lambda: call(budget), budget)
@@ -1028,11 +1029,12 @@ def test_sets_of_narrower_integers_count_their_int64_copies() -> None:
 
 def test_a_budget_too_small_refuses_before_allocating() -> None:
     sets = _random_sets(2_000)
-    with pytest.raises(MemoryError, match="Raise the memory budget"):
-        set_clones(sets, method="sets", max_bytes=10_000)
-    with pytest.raises(MemoryError, match="the sets of the cells"):
-        cell_sets(np.arange(1000), np.arange(1000), 1000, max_bytes=1000)
-    with pytest.raises(ValueError, match="max_bytes must be at least 0"):
-        set_clones(sets, method="sets", max_bytes=-1)
-    with pytest.raises(TypeError, match="max_bytes must be an integer"):
-        set_clones(sets, method="sets", max_bytes=1.5)
+    with pytest.raises(
+        MemoryBudgetError, match="or call clones within smaller groups"
+    ) as refused:
+        set_clones(sets, method="sets", ledger=budgeted(10_000))
+    assert refused.value.budget_bytes == 10_000
+    with pytest.raises(MemoryBudgetError, match="the sets of the cells"):
+        cell_sets(np.arange(1000), np.arange(1000), 1000, ledger=budgeted(1000))
+    with pytest.raises(TypeError, match="ledger must be a MemoryLedger or None"):
+        set_clones(sets, method="sets", ledger=10_000)  # type: ignore[arg-type]

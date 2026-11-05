@@ -29,9 +29,10 @@ mark:
 by their first cell, components by their first node, and clones by size,
 largest first, then by their first cell, so every result follows from the
 sets and the order of the cells alone, whatever order the items arrived in
-and however many threads run. Each step checks the bytes it allocates against
-its ``max_bytes`` before allocating them and raises :class:`MemoryError` when
-they do not fit. These functions never touch storage.
+and however many threads run. Each step charges the bytes it allocates to
+the caller's memory ledger before allocating them, which refuses them with a
+:class:`~cytearc.utils.memory_budget.MemoryBudgetError` beyond its budget.
+These functions never touch storage.
 """
 
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ import numpy as np
 from ..utils.arguments import bool_argument, quoted_value
 from ..utils.arrays import unique_inverse
 from ..utils.digest import mix64
+from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
 from ..utils.numba import njit
 
 __all__ = [
@@ -65,9 +67,16 @@ type CallingMethod = Literal["sets", "jaccard", "shared"]
 #: The ways of grouping sets into clones: identical sets alone, a Jaccard
 #: graph over them, or links through any item two sets share.
 CALLING_METHODS: tuple[str, ...] = ("sets", "jaccard", "shared")
-# Bytes of each item of a set while sets are built from pairs: the cell and
-# item of the pair, their order and the copies sorted.
-_PAIR_BYTES = 48
+# Bytes of each item of a set while sets are built from pairs: the order of
+# the pairs, their sorted cells and items and the flags of new pairs, 19 to
+# 25 as traced on 60,000 to 2,000,000 pairs; and while a cell's items and
+# unknown items are joined, the pairs of both joined, their order and sorted
+# copies.
+_PAIR_BYTES = 28
+_JOINED_PAIR_BYTES = 48
+# Bytes of each cell of the sets built: its pointer, and its count of items
+# while the pointers are summed.
+_SET_CELL_BYTES = 16
 # Bytes of each cell while identical sets are found: its two hashes, size and
 # group with their sorted copies and order, the comparisons of neighbours in
 # that order, its run, its node and their order, and its node's first cell,
@@ -76,9 +85,10 @@ _PAIR_BYTES = 48
 _IDENTITY_CELL_BYTES = 180
 _NODE_ITEM_BYTES = 16
 # Bytes that the nodes hold once found: each cell's node, each node's first
-# cell, size, group, pointer and presence, and each of its items.
+# cell, size, group and pointer and its flags of whether it remains and
+# whether it is ambiguous, and each of its items.
 _HELD_CELL_BYTES = 8
-_NODE_BYTES = 41
+_NODE_BYTES = 42
 _HELD_ITEM_BYTES = 8
 # Bytes of each item of a node while the Jaccard graph is built: the group of
 # its entry, its code within the group, the transposed lists and their order;
@@ -99,32 +109,30 @@ _ADJACENCY_NODE_BYTES = 48
 # cell, its doublet flag, component, clone and the masks that place them.
 _COMPONENT_NODE_BYTES = 80
 _CLONE_CELL_BYTES = 40
-# Bytes that each step holds whatever its size: the buffers of NumPy's sorts
-# and the objects of its arrays.
-_FIXED_BYTES = 1 << 16
+# Bytes of each component while the clones are numbered: its size, whether it
+# is kept, its order and its rank.
+_CLONE_COMPONENT_BYTES = 48
 # Item codes with unknown items stay below this, so that their doubled codes
 # fit 64 bits.
 _MAX_UNKNOWN_CODE = 1 << 61
 
 
-def _check(needed: int, max_bytes: int | None, what: str) -> None:
-    """Raise MemoryError if ``needed`` bytes exceed ``max_bytes``."""
-    if max_bytes is not None and needed > max_bytes:
-        raise MemoryError(
-            f"Calling clones from sets holds about {needed} bytes for {what}, more "
-            f"than the {max_bytes} bytes it may hold. Raise the memory budget, or "
-            "call clones within smaller groups."
-        )
+#: What a refusal of a calling step suggests beside a larger budget.
+_REMEDY = "call clones within smaller groups"
 
 
-def _max_bytes(value: int | None) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool | np.bool_) or not isinstance(value, int | np.integer):
-        raise TypeError("max_bytes must be an integer or None")
-    if value < 0:
-        raise ValueError("max_bytes must be at least 0")
-    return int(value)
+def _ledger(ledger: MemoryLedger | None) -> MemoryLedger:
+    """The caller's ledger, or one without a budget for a call without one."""
+    if ledger is None:
+        return MemoryLedger(None, "Calling clones from sets")
+    if not isinstance(ledger, MemoryLedger):
+        raise TypeError("ledger must be a MemoryLedger or None")
+    return ledger
+
+
+def _peak(ledger: MemoryLedger, item: str, nbytes: int) -> None:
+    """Check that a step's ``nbytes``, and NumPy's objects and sort buffers, fit beside what the ledger holds."""
+    ledger.peak(item, nbytes + NUMPY_STEP_BYTES, remedy=_REMEDY)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +173,11 @@ class CellSets:
         return len(self.indptr) - 1
 
     @property
+    def nbytes(self) -> int:
+        """The bytes of the sets' pointers and items."""
+        return int(np.asarray(self.indptr).nbytes + np.asarray(self.items).nbytes)
+
+    @property
     def sizes(self) -> np.ndarray:
         """The items of each cell, as int64."""
         return np.diff(np.asarray(self.indptr, dtype=np.int64))
@@ -175,7 +188,7 @@ def cell_sets(
     items: np.ndarray,
     n_cells: int,
     *,
-    max_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> CellSets:
     """Build each cell's set from pairs of a cell and an item, repeats merged.
 
@@ -183,27 +196,38 @@ def cell_sets(
         cells: Each pair's cell, a position below ``n_cells``.
         items: Each pair's item code, at least 0.
         n_cells: The cells, including those without an item.
-        max_bytes: The most bytes the build may hold, or None.
+        ledger: The caller's memory ledger, which the build is charged to;
+            None for no limit.
 
     Raises:
         ValueError: If the arrays differ in length or hold a cell or item out
             of range.
-        MemoryError: If the build does not fit ``max_bytes``.
+        MemoryBudgetError: If the build does not fit the ledger's budget.
     """
-    limit = _max_bytes(max_bytes)
-    cell_codes = np.asarray(cells, dtype=np.int64).reshape(-1)
-    item_codes = np.asarray(items, dtype=np.int64).reshape(-1)
-    if len(cell_codes) != len(item_codes):
+    ledger = _ledger(ledger)
+    given_cells = np.asarray(cells).reshape(-1)
+    given_items = np.asarray(items).reshape(-1)
+    if len(given_cells) != len(given_items):
         raise ValueError("Each pair needs one cell and one item")
+    # The pairs become int64 where they are not, and the sets keep each
+    # cell's pointer beside the count of its items.
+    copies = sum(
+        8 * len(codes)
+        for codes in (given_cells, given_items)
+        if codes.dtype != np.int64
+    )
+    _peak(
+        ledger,
+        "the sets of the cells",
+        _PAIR_BYTES * len(given_cells) + copies + _SET_CELL_BYTES * (n_cells + 1),
+    )
+    cell_codes = given_cells.astype(np.int64, copy=False)
+    item_codes = given_items.astype(np.int64, copy=False)
+    del given_cells, given_items
     if len(cell_codes) and (cell_codes.min() < 0 or cell_codes.max() >= n_cells):
         raise ValueError(f"cells must be positions below {n_cells}")
     if len(item_codes) and item_codes.min() < 0:
         raise ValueError("item codes must be at least 0")
-    _check(
-        _PAIR_BYTES * len(cell_codes) + 8 * (n_cells + 1) + _FIXED_BYTES,
-        limit,
-        "the sets of the cells",
-    )
     order = np.lexsort((item_codes, cell_codes))
     cell_codes = cell_codes[order]
     item_codes = item_codes[order]
@@ -288,7 +312,7 @@ def _verified_runs(
     return verified
 
 
-def _unknown_sets(sets: CellSets, unknown: CellSets, limit: int | None) -> CellSets:
+def _unknown_sets(sets: CellSets, unknown: CellSets, ledger: MemoryLedger) -> CellSets:
     """Each cell's items and unknown items as one set, of even and odd codes.
 
     An item ``i`` that the cell holds is coded ``2 * i`` and one unknown
@@ -305,10 +329,10 @@ def _unknown_sets(sets: CellSets, unknown: CellSets, limit: int | None) -> CellS
             raise ValueError(
                 f"{name} codes must stay below {_MAX_UNKNOWN_CODE} with unknown items"
             )
-    _check(
-        _PAIR_BYTES * (n_held + n_unknown) + 8 * (n_cells + 1) + _FIXED_BYTES,
-        limit,
+    _peak(
+        ledger,
         "the cells' items and unknown items",
+        _JOINED_PAIR_BYTES * (n_held + n_unknown) + _SET_CELL_BYTES * (n_cells + 1),
     )
     cells = np.concatenate(
         [
@@ -341,7 +365,7 @@ def identical_sets(
     groups: np.ndarray | None = None,
     *,
     unknown: CellSets | None = None,
-    max_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> SetNodes:
     """Group the cells of each group whose sets are equal into nodes.
 
@@ -358,17 +382,16 @@ def identical_sets(
             of two groups never share a node. None puts every cell in one.
         unknown: Each cell's unknown items, such as the sites that no read
             covered, none of them among its items; None for none.
-        max_bytes: The most bytes the grouping may hold, or None.
+        ledger: The caller's memory ledger, which the grouping is charged to;
+            None for no limit.
 
     Raises:
         ValueError: If ``groups`` does not hold one integer code per cell, or
             ``unknown`` one set per cell without the cell's items.
-        MemoryError: If the grouping does not fit ``max_bytes``.
+        MemoryBudgetError: If the grouping does not fit the ledger's budget.
     """
-    limit = _max_bytes(max_bytes)
+    ledger = _ledger(ledger)
     n_cells = sets.n_cells
-    group_codes = _group_codes(groups, n_cells)
-    held_sizes = sets.sizes
     # Sets of other integer types are copied as int64, and the joined sets of
     # items and unknown items are held while the nodes are found.
     copied = 0
@@ -379,14 +402,12 @@ def identical_sets(
         copied = 8 * (len(sets.items) + n_cells + 1)
     keyed = sets
     if unknown is not None:
-        keyed = _unknown_sets(sets, unknown, limit)
+        keyed = _unknown_sets(sets, unknown, ledger)
         copied = 8 * (len(keyed.items) + n_cells + 1)
+    _peak(ledger, "the sets' hashes", _IDENTITY_CELL_BYTES * n_cells + copied)
+    group_codes = _group_codes(groups, n_cells)
+    held_sizes = sets.sizes
     sizes = keyed.sizes
-    _check(
-        _IDENTITY_CELL_BYTES * n_cells + copied + _FIXED_BYTES,
-        limit,
-        "the sets' hashes",
-    )
     indptr = np.asarray(keyed.indptr, dtype=np.int64)
     items = np.asarray(keyed.items, dtype=np.int64)
     first_hash, second_hash = _set_hashes(indptr, items)
@@ -426,13 +447,12 @@ def identical_sets(
     cell_nodes[order] = rank[inverse]
     first_cells = firsts[by_first]
     n_nodes = len(first_cells)
-    _check(
+    _peak(
+        ledger,
+        "the nodes' sets",
         _IDENTITY_CELL_BYTES * n_cells
         + copied
-        + _NODE_ITEM_BYTES * int(sizes[first_cells].sum())
-        + _FIXED_BYTES,
-        limit,
-        "the nodes' sets",
+        + _NODE_ITEM_BYTES * int(sizes[first_cells].sum()),
     )
     del indptr, items, keyed
     node_sets = _node_rows(sets, first_cells)
@@ -529,6 +549,10 @@ class Edges:
 
     def kept(self, keep: np.ndarray) -> "Edges":
         return Edges(first=self.first[keep], second=self.second[keep])
+
+    @property
+    def nbytes(self) -> int:
+        return int(self.first.nbytes + self.second.nbytes)
 
 
 @njit(cache=True)
@@ -628,7 +652,7 @@ def jaccard_edges(
     inclusive: bool,
     across: float | None = None,
     modalities: np.ndarray | None = None,
-    max_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> Edges:
     """Link the nodes of each group whose sets are similar enough.
 
@@ -653,17 +677,20 @@ def jaccard_edges(
             code, -1 for a node whose cells come from several: ``similarity``
             applies between two nodes of one and the same modality, and
             ``across`` between any others.
-        max_bytes: The most bytes the graph may hold, or None.
+        ledger: The caller's memory ledger, which the graph is charged to;
+            None for no limit.
 
     Raises:
         ValueError: If a similarity lies outside 0 to 1, or ``modalities``
             is missing or does not hold one code per node.
-        MemoryError: If the graph does not fit ``max_bytes``.
+        MemoryBudgetError: If the graph does not fit the ledger's budget.
     """
-    limit = _max_bytes(max_bytes)
+    ledger = _ledger(ledger)
     within = _similarity(similarity, "similarity")
     inclusive = bool_argument(inclusive, "inclusive")
     n_nodes = nodes.n_nodes
+    # Each node's modality as int64, held while the graph is built.
+    _peak(ledger, "the nodes' modalities", 8 * n_nodes)
     if across is None:
         if modalities is not None:
             raise ValueError("modalities apply only with a similarity across them")
@@ -691,10 +718,9 @@ def jaccard_edges(
     graph_bytes = (
         _GRAPH_ITEM_BYTES * n_items
         + _GRAPH_UNKNOWN_BYTES * n_unknown
-        + _GRAPH_NODE_BYTES * n_nodes
-        + _FIXED_BYTES
+        + (_GRAPH_NODE_BYTES + 8) * n_nodes
     )
-    _check(graph_bytes, limit, "the lists of each item's nodes")
+    _peak(ledger, "the lists of each item's nodes", graph_bytes)
     item_indptr, item_nodes, codes = _items_by_group(nodes, n_unknown)
     local = codes[:n_items]
     unknown_local = codes[n_items:]
@@ -715,10 +741,8 @@ def jaccard_edges(
         bool(inclusive),
     )
     n_edges = _jaccard_pairs(*arguments, empty, empty, False)
-    _check(
-        graph_bytes + _EDGE_BYTES * n_edges,
-        limit,
-        f"the {n_edges} edges of the graph",
+    _peak(
+        ledger, f"the {n_edges} edges of the graph", graph_bytes + _EDGE_BYTES * n_edges
     )
     first = np.empty(n_edges, dtype=np.int64)
     second = np.empty(n_edges, dtype=np.int64)
@@ -777,7 +801,7 @@ def _items_by_group(
     return item_indptr, item_nodes, codes
 
 
-def _shared_item_edges(nodes: SetNodes, *, max_bytes: int | None) -> Edges:
+def _shared_item_edges(nodes: SetNodes, *, ledger: MemoryLedger) -> Edges:
     """Edges that join the nodes of each item of a group into one component.
 
     Each node of an item's list is linked to the next, so the components are
@@ -785,13 +809,12 @@ def _shared_item_edges(nodes: SetNodes, *, max_bytes: int | None) -> Edges:
     the pairs of that graph.
     """
     n_items = len(nodes.sets.items)
-    _check(
+    _peak(
+        ledger,
+        "the lists of each item's nodes",
         _GRAPH_ITEM_BYTES * n_items
         + _GRAPH_NODE_BYTES * nodes.n_nodes
-        + _EDGE_BYTES * n_items
-        + _FIXED_BYTES,
-        max_bytes,
-        "the lists of each item's nodes",
+        + _EDGE_BYTES * n_items,
     )
     item_indptr, item_nodes, _codes = _items_by_group(nodes, 0)
     del _codes
@@ -812,9 +835,7 @@ def _neighbours(n_nodes: int, edges: Edges) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _adjacency_bytes(n_nodes: int, n_edges: int) -> int:
-    return (
-        _ADJACENCY_EDGE_BYTES * n_edges + _ADJACENCY_NODE_BYTES * n_nodes + _FIXED_BYTES
-    )
+    return _ADJACENCY_EDGE_BYTES * n_edges + _ADJACENCY_NODE_BYTES * n_nodes
 
 
 @njit(cache=True)
@@ -848,7 +869,7 @@ def _bridges(
 
 
 def pruned_edges(
-    n_nodes: int, edges: Edges, *, max_bytes: int | None = None
+    n_nodes: int, edges: Edges, *, ledger: MemoryLedger | None = None
 ) -> tuple[Edges, int]:
     """Remove the edges whose ends share no neighbour, as TREX removes bridges.
 
@@ -859,14 +880,20 @@ def pruned_edges(
     component. Every edge is judged on the graph as given, then the removed
     ones go together.
 
+    Args:
+        n_nodes: The nodes.
+        edges: The edges.
+        ledger: The caller's memory ledger, which the lists of neighbours are
+            charged to; None for no limit.
+
     Returns:
         The edges kept, in their order, and the number removed.
 
     Raises:
-        MemoryError: If the lists of neighbours do not fit ``max_bytes``.
+        MemoryBudgetError: If the lists of neighbours do not fit the ledger's budget.
     """
-    limit = _max_bytes(max_bytes)
-    _check(_adjacency_bytes(n_nodes, len(edges)), limit, "the lists of neighbours")
+    ledger = _ledger(ledger)
+    _peak(ledger, "the lists of neighbours", _adjacency_bytes(n_nodes, len(edges)))
     indptr, neighbours = _neighbours(n_nodes, edges)
     removed = _bridges(edges.first, edges.second, indptr, neighbours)
     return edges.kept(~removed), int(np.count_nonzero(removed))
@@ -913,7 +940,7 @@ def local_cut_vertices(
     edges: Edges,
     eligible: np.ndarray,
     *,
-    max_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> np.ndarray:
     """Find the nodes whose neighbours fall apart once the node is removed.
 
@@ -928,13 +955,13 @@ def local_cut_vertices(
 
     Raises:
         ValueError: If ``eligible`` does not hold one flag per node.
-        MemoryError: If the lists of neighbours do not fit ``max_bytes``.
+        MemoryBudgetError: If the lists of neighbours do not fit the ledger's budget.
     """
-    limit = _max_bytes(max_bytes)
+    ledger = _ledger(ledger)
     flags = np.asarray(eligible, dtype=bool)
     if flags.shape != (n_nodes,):
         raise ValueError("eligible must hold one flag per node")
-    _check(_adjacency_bytes(n_nodes, len(edges)), limit, "the lists of neighbours")
+    _peak(ledger, "the lists of neighbours", _adjacency_bytes(n_nodes, len(edges)))
     indptr, neighbours = _neighbours(n_nodes, edges)
     return np.flatnonzero(_cut_vertices(indptr, neighbours, flags)).astype(np.int64)
 
@@ -987,7 +1014,7 @@ def _ambiguous(
 
 
 def ambiguous_nodes(
-    nodes: SetNodes, edges: Edges, *, max_bytes: int | None = None
+    nodes: SetNodes, edges: Edges, *, ledger: MemoryLedger | None = None
 ) -> np.ndarray:
     """Find the nodes whose sets agree with two nodes that disagree.
 
@@ -1004,13 +1031,13 @@ def ambiguous_nodes(
         Whether each node is ambiguous.
 
     Raises:
-        MemoryError: If the lists of neighbours do not fit ``max_bytes``.
+        MemoryBudgetError: If the lists of neighbours do not fit the ledger's budget.
     """
-    limit = _max_bytes(max_bytes)
+    ledger = _ledger(ledger)
     n_nodes = nodes.n_nodes
     if nodes.unknown is None or not len(edges):
         return np.zeros(n_nodes, dtype=bool)
-    _check(_adjacency_bytes(n_nodes, len(edges)), limit, "the lists of neighbours")
+    _peak(ledger, "the lists of neighbours", _adjacency_bytes(n_nodes, len(edges)))
     indptr, neighbours = _neighbours(n_nodes, edges)
     return np.asarray(
         _ambiguous(
@@ -1064,7 +1091,7 @@ def connected_components(
     edges: Edges,
     present: np.ndarray | None = None,
     *,
-    max_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> np.ndarray:
     """Number the connected components of a graph by their lowest node.
 
@@ -1073,7 +1100,8 @@ def connected_components(
         edges: The edges, between present nodes.
         present: The nodes that remain, or None for all; a node removed,
             such as a doublet, belongs to no component.
-        max_bytes: The most bytes the components may hold, or None.
+        ledger: The caller's memory ledger, which the components is charged to;
+            None for no limit.
 
     Returns:
         Each node's component as int64, numbered in the order of each
@@ -1082,13 +1110,13 @@ def connected_components(
     Raises:
         ValueError: If ``present`` does not hold one flag per node, or an edge
             touches a node removed.
-        MemoryError: If the components do not fit ``max_bytes``.
+        MemoryBudgetError: If the components do not fit the ledger's budget.
     """
-    limit = _max_bytes(max_bytes)
+    ledger = _ledger(ledger)
     kept = np.ones(n_nodes, dtype=bool) if present is None else np.asarray(present)
     if kept.shape != (n_nodes,):
         raise ValueError("present must hold one flag per node")
-    _check(_COMPONENT_NODE_BYTES * n_nodes + _FIXED_BYTES, limit, "the components")
+    _peak(ledger, "the components", _COMPONENT_NODE_BYTES * n_nodes)
     kept = kept.astype(bool)
     if _touches_removed(kept, edges.first, edges.second):
         raise ValueError("An edge touches a node that was removed")
@@ -1134,6 +1162,14 @@ class SetClones:
     def n_clones(self) -> int:
         return len(self.sizes)
 
+    @property
+    def nbytes(self) -> int:
+        """The bytes of the clones' arrays, which :func:`set_clones` leaves charged to its ledger."""
+        return sum(
+            array.nbytes
+            for array in (self.codes, self.sizes, self.doublets, self.ambiguous)
+        )
+
 
 def set_clones(
     sets: CellSets,
@@ -1149,7 +1185,7 @@ def set_clones(
     doublets: bool = False,
     ambiguous: bool = False,
     min_size: int = 1,
-    max_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
 ) -> SetClones:
     """Call clones from the cells' sets, within each group.
 
@@ -1183,15 +1219,17 @@ def set_clones(
         doublets: For ``"jaccard"``, remove TREX's doublets.
         ambiguous: For ``"jaccard"``, remove the ambiguous nodes.
         min_size: The fewest cells of a clone.
-        max_bytes: The most bytes the calling may hold, or None.
+        ledger: The caller's memory ledger, which each step is charged to;
+            None for no limit. The clones returned stay charged to it, their
+            ``nbytes``, for the caller to release once it lets them go.
 
     Raises:
         TypeError: If an option has the wrong type.
         ValueError: If an option is unknown, missing for the method or given
             to a method that does not use it.
-        MemoryError: If a step does not fit ``max_bytes``.
+        MemoryBudgetError: If a step does not fit the ledger's budget.
     """
-    limit = _max_bytes(max_bytes)
+    ledger = _ledger(ledger)
     if method not in CALLING_METHODS:
         raise ValueError(f"method must be one of {', '.join(CALLING_METHODS)}")
     flags = tuple(
@@ -1235,72 +1273,93 @@ def set_clones(
     elif similarity is None or inclusive is None:
         raise ValueError("method='jaccard' needs a similarity and inclusive")
     n_cells = sets.n_cells
-    nodes = identical_sets(sets, groups, unknown=unknown, max_bytes=limit)
+    nodes = identical_sets(sets, groups, unknown=unknown, ledger=ledger)
     n_nodes = nodes.n_nodes
     # The nodes are held until the clones are numbered: each cell's node, and
-    # each node's first cell, size, group, set and presence.
-    held = (
+    # each node's first cell, size, group, set and whether it remains and is
+    # ambiguous.
+    nodes_bytes = ledger.hold(
+        "the nodes",
         _HELD_CELL_BYTES * n_cells
         + _NODE_BYTES * n_nodes
         + _HELD_ITEM_BYTES * len(nodes.sets.items)
-        + (0 if nodes.unknown is None else _HELD_ITEM_BYTES * len(nodes.unknown.items))
+        + (
+            0
+            if nodes.unknown is None
+            else _HELD_ITEM_BYTES * (len(nodes.unknown.items) + n_nodes + 1)
+        ),
     )
     present = np.ones(n_nodes, dtype=bool)
     unclear = np.zeros(n_nodes, dtype=bool)
     edges = Edges(np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64))
+    edge_bytes = 0
     n_edges = n_pruned = 0
     removed_rounds: list[int] = []
     if method == "shared":
-        edges = _shared_item_edges(
-            nodes, max_bytes=None if limit is None else limit - held
-        )
-        held += _EDGE_BYTES * len(edges)
+        edges = _shared_item_edges(nodes, ledger=ledger)
+        edge_bytes = ledger.hold("the graph's edges", edges.nbytes)
     if method == "jaccard":
         assert similarity is not None and inclusive is not None
         node_modalities = None
         if across is not None:
+            # Each cell's node and modality, and each node's lowest and
+            # highest, while the nodes' modalities are found.
+            _peak(ledger, "the nodes' modalities", 17 * n_cells + 24 * n_nodes)
             node_modalities = _node_modalities(nodes, modalities, n_cells)
-        room = None if limit is None else limit - held
+            ledger.hold("the nodes' modalities", node_modalities.nbytes)
         edges = jaccard_edges(
             nodes,
             similarity,
             inclusive=bool(inclusive),
             across=across,
             modalities=node_modalities,
-            max_bytes=room,
+            ledger=ledger,
         )
+        if node_modalities is not None:
+            modality_bytes = node_modalities.nbytes
+            del node_modalities
+            ledger.release(modality_bytes)
+        else:
+            del node_modalities
         n_edges = len(edges)
-        held += _EDGE_BYTES * n_edges
-        room = None if limit is None else limit - held
+        edge_bytes = ledger.hold("the graph's edges", edges.nbytes)
         if ambiguous:
-            unclear = ambiguous_nodes(nodes, edges, max_bytes=room)
+            unclear = ambiguous_nodes(nodes, edges, ledger=ledger)
             present &= ~unclear
-            edges = edges.kept(present[edges.first] & present[edges.second])
+            edges, kept_bytes = _kept_edges(ledger, edges, present)
+            ledger.release(edge_bytes)
+            edge_bytes = kept_bytes
         rounds = 2 if doublets else 1
         for _round in range(rounds):
             if prune:
-                edges, removed = pruned_edges(n_nodes, edges, max_bytes=room)
+                pruned, removed = pruned_edges(n_nodes, edges, ledger=ledger)
+                kept_bytes = ledger.hold("the graph's edges", pruned.nbytes)
+                edges = pruned
+                del pruned
+                ledger.release(edge_bytes)
+                edge_bytes = kept_bytes
                 n_pruned += removed
             if doublets:
                 cut = local_cut_vertices(
-                    n_nodes, edges, present & (nodes.cell_counts == 1), max_bytes=room
+                    n_nodes, edges, present & (nodes.cell_counts == 1), ledger=ledger
                 )
                 removed_rounds.append(len(cut))
                 present[cut] = False
-                edges = edges.kept(present[edges.first] & present[edges.second])
-    components = connected_components(
-        n_nodes,
-        edges,
-        present,
-        max_bytes=None if limit is None else limit - held,
-    )
+                del cut
+                edges, kept_bytes = _kept_edges(ledger, edges, present)
+                ledger.release(edge_bytes)
+                edge_bytes = kept_bytes
+    components = connected_components(n_nodes, edges, present, ledger=ledger)
+    component_bytes = ledger.hold("the nodes' components", components.nbytes)
     del edges
-    # Numbering the clones holds each node's component beside the nodes, and
-    # the arrays of each cell.
-    _check(
-        held + 8 * n_nodes + _CLONE_CELL_BYTES * n_cells + _FIXED_BYTES,
-        limit,
+    ledger.release(edge_bytes)
+    n_components = int(components.max()) + 1 if np.any(components >= 0) else 0
+    # Numbering the clones holds the arrays of each cell, and the sizes,
+    # order and rank of each component.
+    _peak(
+        ledger,
         "the cells' clones",
+        _CLONE_CELL_BYTES * n_cells + _CLONE_COMPONENT_BYTES * n_components,
     )
     doublet = np.zeros(n_cells, dtype=bool)
     removed_unclear = np.zeros(n_cells, dtype=bool)
@@ -1311,7 +1370,6 @@ def set_clones(
     cell_components = np.full(n_cells, -1, dtype=np.int64)
     cell_components[has_node] = components[nodes.cell_nodes[has_node]]
     in_component = cell_components >= 0
-    n_components = int(components.max()) + 1 if np.any(components >= 0) else 0
     component_sizes = np.bincount(cell_components[in_component], minlength=n_components)
     # Components are numbered by their lowest node, which holds their first
     # cell, so ranking by size and then component orders ties by first cell.
@@ -1322,7 +1380,7 @@ def set_clones(
     codes = np.full(n_cells, -1, dtype=np.int64)
     codes[in_component] = rank[cell_components[in_component]]
     n_small = int(np.count_nonzero(in_component & (codes < 0)))
-    return SetClones(
+    called = SetClones(
         codes=codes,
         sizes=component_sizes[order].astype(np.int64),
         doublets=doublet,
@@ -1334,6 +1392,24 @@ def set_clones(
         n_small_cells=n_small,
         n_ambiguous_nodes=int(np.count_nonzero(unclear)),
     )
+    # The clones are held once what numbering them built is let go.
+    del has_node, cell_components, in_component, component_sizes, kept, order
+    del rank, codes, doublet, removed_unclear
+    ledger.hold("the cells' clones", called.nbytes)
+    del nodes, components, present, unclear
+    ledger.release(component_bytes)
+    ledger.release(nodes_bytes)
+    return called
+
+
+def _kept_edges(
+    ledger: MemoryLedger, edges: Edges, present: np.ndarray
+) -> tuple[Edges, int]:
+    """The edges between nodes that remain, held on ``ledger`` beside ``edges``, which the caller lets go."""
+    # Each edge's two flags and their conjunction, and the edges kept.
+    ledger.peak("the edges kept", (_EDGE_BYTES + 3) * len(edges), remedy=_REMEDY)
+    kept = edges.kept(present[edges.first] & present[edges.second])
+    return kept, ledger.hold("the graph's edges", kept.nbytes)
 
 
 def _node_modalities(

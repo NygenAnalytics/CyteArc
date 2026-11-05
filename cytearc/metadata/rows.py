@@ -21,6 +21,7 @@ from ..storage.partition import (
     partition_indices,
     row_band,
 )
+from ..storage.content_stamps import stored_content_stamp, stored_content_stamp_bytes
 from ..storage.types import as_zarr_array, read_array
 from ..utils.memory_budget import (
     MemoryLedger,
@@ -333,6 +334,46 @@ def read_text_rows(
     if np.dtype(array.dtype).kind != "U":
         raise TypeError(f"{item} must be stored as text, not as {array.dtype}")
     stored = read_rows(ledger, array, rows, item=item)
+    values = _strings_of(ledger, stored, item)
+    stored_bytes = stored.nbytes
+    del stored
+    ledger.release(stored_bytes)
+    return values
+
+
+def read_whole_text(
+    ledger: MemoryLedger, group: zarr.Group, name: str, *, item: str
+) -> np.ndarray:
+    """Read the whole text array ``name`` of ``group`` as Python strings, keeping them charged as ``item``.
+
+    The array is read at its stored width through :func:`read_whole`, then
+    its strings are charged and made as :func:`read_text_rows` makes them,
+    and the stored values are let go.
+
+    Returns:
+        An object array of one string for each value.
+
+    Raises:
+        MemoryBudgetError: If the read or the strings would pass the budget.
+        TypeError: If the array does not store fixed-width text.
+    """
+    array = as_zarr_array(group[name], name=name)
+    if np.dtype(array.dtype).kind != "U":
+        raise TypeError(f"{item} must be stored as text, not as {array.dtype}")
+    stored = read_whole(ledger, group, name, item=item)
+    values = _strings_of(ledger, stored, item)
+    stored_bytes = stored.nbytes
+    del stored
+    ledger.release(stored_bytes)
+    return values
+
+
+def _strings_of(ledger: MemoryLedger, stored: np.ndarray, item: str) -> np.ndarray:
+    """``stored``, fixed-width text that the ledger holds, as Python strings charged beside it.
+
+    The caller lets go of the stored text, and releases its charge, once it
+    drops its own reference to it.
+    """
     # Each value's length, while the characters are counted.
     ledger.peak(item, 8 * len(stored))
     characters = int(np.char.str_len(stored).sum()) if len(stored) else 0
@@ -342,11 +383,7 @@ def read_text_rows(
         object_array_bytes(len(stored))
         + python_text_bytes(len(stored), characters, widest=widest),
     )
-    values = stored.astype(object)
-    stored_bytes = stored.nbytes
-    del stored
-    ledger.release(stored_bytes)
-    return values
+    return stored.astype(object)
 
 
 def read_metadata_rows(
@@ -428,6 +465,33 @@ def metadata_column_fingerprint(metadata: _RowReadableMetaData, column: str) -> 
                 np.asarray(missing[start : start + 65_536], dtype=bool).tobytes()
             )
     return digest.hexdigest()
+
+
+def metadata_column_stamp(metadata: _RowReadableMetaData, column: str) -> str:
+    """Stamp one metadata column by its stored chunks and those of its missing mask.
+
+    The digest covers the column's stored objects, as
+    :func:`~cytearc.storage.content_stamps.stored_content_stamp` reads them
+    without decoding them, and whether it has a missing mask and that mask's
+    objects, so an edit to the values, their dtype or which are missing
+    changes it. Values written again with other chunks or codecs change it
+    too.
+    """
+    digest = hashlib.sha256(stored_content_stamp(metadata._get_array(column)))
+    missing = metadata_missing_mask(metadata, column)
+    digest.update(b"missing:none" if missing is None else b"missing:present")
+    if missing is not None:
+        digest.update(stored_content_stamp(missing))
+    return digest.hexdigest()
+
+
+def metadata_column_stamp_bytes(metadata: _RowReadableMetaData, column: str) -> int:
+    """The most bytes that :func:`metadata_column_stamp` holds: the larger of its two stamps, made in turn."""
+    missing = metadata_missing_mask(metadata, column)
+    return max(
+        stored_content_stamp_bytes(metadata._get_array(column)),
+        0 if missing is None else stored_content_stamp_bytes(missing),
+    )
 
 
 def read_metadata_missing_rows(

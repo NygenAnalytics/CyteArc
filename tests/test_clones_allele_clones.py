@@ -24,7 +24,7 @@ from cytearc.clones.allele_clones import (
     clonal_p_values,
 )
 from tests.clone_helpers import traced_steps
-from tests.memory_helpers import smallest_budget, traced_peak
+from tests.memory_helpers import budgeted, smallest_budget, traced_peak
 
 _TEXTS = ("a", "b", "c", "d", "e", "f", "g", "h")
 
@@ -669,7 +669,7 @@ def test_a_budget_too_small_is_refused_with_the_bytes_it_needs() -> None:
     settings = allele_call_settings("graph", max_frequency=1.0)
     with pytest.raises(MemoryError, match=r"holds about \d+ bytes for the cells, more"):
         allele_clone_calls(
-            observations, 2, groups=None, settings=settings, max_bytes=100
+            observations, 2, groups=None, settings=settings, ledger=budgeted(100)
         )
 
 
@@ -933,7 +933,7 @@ def test_calls_hold_no_more_than_the_smallest_budget_they_accept(
             groups=groups,
             settings=settings,
             banks=banks,
-            max_bytes=budget,
+            ledger=budgeted(budget),
         )
 
     # Compiled kernels are warmed before anything is traced.
@@ -969,11 +969,9 @@ def test_each_step_on_two_million_edits_holds_no_more_than_its_check_states(
             groups=groups,
             settings=settings,
             banks=banks,
-            max_bytes=budget,
+            ledger=budgeted(budget),
         )
 
-    checks, peak = traced_steps(monkeypatch, call, budget)
-    # Each step holds its shortfall from the largest check beside it.
-    ceiling = max(stated for _what, stated in checks)
-    assert peak <= ceiling, (peak - ceiling, checks)
+    checks, overruns = traced_steps(call)
+    assert not overruns, overruns
     assert len(checks) > 10

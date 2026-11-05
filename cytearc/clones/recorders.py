@@ -59,6 +59,7 @@ import pandas as pd
 from ..metadata.records import INTEGER, TEXT, EncodedText, FieldKind, RecordTable
 from ..utils.arrays import sort_categories, sorted_unique
 from ..utils.arguments import quoted_value
+from ..utils.memory_budget import MemoryLedger
 
 __all__ = [
     "FIELDS",
@@ -994,8 +995,7 @@ def character_matrix(
     table: RecordTable,
     *,
     unknown: str = "state",
-    memory_bytes: int | None = None,
-    held_bytes: int = 0,
+    ledger: MemoryLedger | None = None,
 ) -> CharacterMatrix:
     """Turn allele records into a cells by characters matrix of integer states.
 
@@ -1012,14 +1012,15 @@ def character_matrix(
         unknown: ``"state"`` gives each distinct unknown mark of a character
             a state of its own, after the marks; ``"missing"`` writes unknown
             marks as missing.
-        memory_bytes: The memory budget, or None for no limit.
-        held_bytes: The bytes that the caller holds beside the matrix's
-            codes, 4 per cell and character.
+        ledger: The caller's memory ledger, which holds what the caller
+            holds and is charged the matrix's codes, 4 bytes per cell and
+            character, before they are allocated; they stay charged to it.
+            None for no limit.
 
     Raises:
         ValueError: If ``unknown`` is not one of ``UNKNOWN_POLICIES``.
-        MemoryError: If the codes and ``held_bytes`` would pass
-            ``memory_bytes``, before the codes are allocated.
+        MemoryBudgetError: If the codes would pass the ledger's budget,
+            before they are allocated.
     """
     if unknown not in UNKNOWN_POLICIES:
         raise ValueError(
@@ -1150,12 +1151,11 @@ def character_matrix(
     # character.
     with_state = np.flatnonzero(record_codes >= 0)
     exported_cells = sorted_unique(cells[with_state])
-    held = int(held_bytes) + 4 * len(exported_cells) * len(ranked_names)
-    if memory_bytes is not None and held > memory_bytes:
-        raise MemoryError(
-            f"Exporting the character matrix of {len(exported_cells)} cells by "
-            f"{len(ranked_names)} characters holds about {held} bytes, more than "
-            f"the memory budget of {memory_bytes} bytes. Raise mem_budget."
+    if ledger is not None:
+        ledger.hold(
+            f"the character matrix of {len(exported_cells)} cells by "
+            f"{len(ranked_names)} characters",
+            4 * len(exported_cells) * len(ranked_names),
         )
     codes = np.full((len(exported_cells), len(ranked_names)), -1, dtype=np.int32)
     codes[

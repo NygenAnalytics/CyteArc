@@ -32,7 +32,8 @@ from tests.clone_truth import (
     allele_calling_truth,
     clone_truth,
 )
-from tests.memory_helpers import smallest_budget, traced_peak
+from cytearc.utils.memory_budget import MemoryLedger
+from tests.memory_helpers import charges, smallest_budget, traced_peak
 from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
@@ -622,13 +623,12 @@ def test_calling_refuses_a_budget_too_small_before_writing(
     assert len(store.artifacts.list(kind="clones", scope="datastore")) == before
 
 
-def test_a_budget_that_only_writing_the_clones_exceeds_is_refused_before_calling(
+def test_a_budget_that_writing_the_clones_exceeds_is_refused_before_anything_is_written(
     tmp_path, monkeypatch
 ) -> None:
-    import cytearc.datastore._operations.recorder_alleles as operations
-
-    # 100 clones of two cells among 20,000: writing the clones, as if every
-    # cell were a clone of its own, needs more than any other step.
+    # 100 clones of two cells among 20,000: saving the clones is charged with
+    # the clones called, beside each cell's group and the clones' labels, and
+    # a budget below its plan is refused before anything is written.
     store, alleles = _clones_of_their_own_alleles(tmp_path, 20_000, 100, 2, ("CA",))
 
     def call() -> object:
@@ -636,23 +636,18 @@ def test_a_budget_that_only_writing_the_clones_exceeds_is_refused_before_calling
             alleles, method="graph", max_frequency=0.5, invalidate_cache=True
         )
 
-    budget = 1 << 34
-    monkeypatch.setattr(store, "memoryBytes", budget)
-    # Every step but writing fits the most bytes that any of them states.
-    checks, _peak = traced_steps(monkeypatch, call, budget)
-    fitting = max(
-        stated for what, stated in checks if not what.endswith("as they are written")
-    )
-    entered: list[object] = []
-    monkeypatch.setattr(
-        operations, "allele_clone_calls", lambda *args, **kwargs: entered.append(args)
-    )
-    monkeypatch.setattr(store, "memoryBytes", fitting)
-    with pytest.raises(
-        MemoryError, match="for the clones of 20000 cells as they are written, more"
-    ):
+    monkeypatch.setattr(store, "memoryBytes", 1 << 34)
+    _result, taken = charges(call)
+    (writing,) = [
+        planned
+        for item, _nbytes, planned in taken
+        if item.startswith("writing the clones of 20000 cells")
+    ]
+    listed = store.artifacts.list(kind="clones", scope="datastore")
+    monkeypatch.setattr(store, "memoryBytes", writing - 1)
+    with pytest.raises(MemoryError):
         call()
-    assert entered == []
+    assert store.artifacts.list(kind="clones", scope="datastore") == listed
 
 
 def test_writing_the_clones_counts_a_buffer_for_each_write_zarr_runs_at_once(
@@ -660,63 +655,40 @@ def test_writing_the_clones_counts_a_buffer_for_each_write_zarr_runs_at_once(
 ) -> None:
     # Zarr writes each chunk and each array's metadata through a buffered
     # file, as many at once as its async concurrency allows, and Python 3.14
-    # made each buffer 128 KiB, where it was the file system's block. Both
-    # checks of writing the clones count them, and no other check does.
+    # made each buffer 128 KiB, where it was the file system's block. The
+    # charge of writing the clones counts them, and no other charge does.
     import io
 
     import zarr
 
-    import cytearc.datastore._operations.recorder_alleles as operations
-
     store, alleles = _clones_of_their_own_alleles(tmp_path, 2_000, 100, 2, ("CA",))
     monkeypatch.setattr(store, "memoryBytes", 1 << 34)
-    check = operations._check_calling
 
     def stated(concurrency: int) -> list[tuple[str, int]]:
-        found: list[tuple[str, int]] = []
-
-        def recorded(needed: int, budget: int, what: str) -> None:
-            found.append((what, needed))
-            check(needed, budget, what)
-
-        with monkeypatch.context() as patched:
-            patched.setattr(operations, "_check_calling", recorded)
-            with zarr.config.set({"async.concurrency": concurrency}):
-                store.clones.allele_clones(
+        with zarr.config.set({"async.concurrency": concurrency}):
+            _result, taken = charges(
+                lambda: store.clones.allele_clones(
                     alleles, method="graph", max_frequency=0.5, invalidate_cache=True
                 )
-        return found
+            )
+        return [(item, nbytes) for item, nbytes, _planned in taken]
 
     ten, twenty = stated(10), stated(20)
     assert [what for what, _ in ten] == [what for what, _ in twenty]
-    grown = {what: more - fewer for (what, fewer), (_, more) in zip(ten, twenty)}
-    assert grown == {
-        what: 10 * io.DEFAULT_BUFFER_SIZE if what.endswith("as they are written") else 0
-        for what in grown
+    grown = {
+        what: more - fewer
+        for (what, fewer), (_, more) in zip(ten, twenty, strict=True)
+        if more != fewer
     }
-    assert sum(what.endswith("as they are written") for what in grown) == 2
-    # Before reading, saving is checked as if every cell were a clone of its
-    # own: 16 bytes per cell for its group and edits, 8 for the calls' rare
-    # alleles, each clone's label as a Python string at the size of the
-    # longest, what saving that many clones holds, and 8 MiB whatever the
-    # size.
-    import sys
-
-    from cytearc.datastore._operations.clone_artifacts import clone_write_bytes
-
-    longest = "clone_2000"
-    with zarr.config.set({"async.concurrency": 10}):
-        saving = clone_write_bytes(
-            2_000, 2_000, len(longest), source_arrays={"n_alleles": np.int32}
-        )
-    (before_reading,) = [
-        needed
-        for what, needed in ten
-        if what == "the clones of 2000 cells as they are written"
-    ]
-    assert before_reading == (16 + 8 + sys.getsizeof(longest)) * 2_000 + saving + (
-        8 << 20
+    assert (
+        grown == {what: 10 * io.DEFAULT_BUFFER_SIZE for what in grown}
+        and len(grown) == 1
     )
+    assert next(iter(grown)).startswith("writing the clones of 2000 cells")
+    # The clones' labels, clone_1 to clone_100, are held as the ASCII
+    # strings and references that they are.
+    (labels,) = [nbytes for what, nbytes in ten if what == "the clones' labels"]
+    assert labels == 100 * (8 + 41) + 9 * 1 + 90 * 2 + 1 * 3 + 6 * 100
 
 
 def test_real_darlin_alleles_join_the_cells_that_share_a_rare_one(tmp_path) -> None:
@@ -1099,12 +1071,13 @@ def test_a_bank_may_name_a_character_whose_cells_are_all_unedited(tmp_path) -> N
         )
 
 
-def _assert_steps_within(traced: tuple[list[tuple[str, int]], int]) -> None:
-    """No step holds more than its check states: the traced peak, which holds each
-    step's shortfall from the largest check beside it, stays within the largest."""
-    checks, peak = traced
-    ceiling = max(stated for _what, stated in checks)
-    assert peak <= ceiling, (peak - ceiling, checks)
+def _assert_steps_within(
+    traced: tuple[list[tuple[str, int]], list[tuple[str, int, int]]],
+) -> None:
+    """No step holds more than its check states: each step's traced peak stays
+    within what its charge planned, and an overrun names its step."""
+    checks, overruns = traced
+    assert not overruns, overruns
     assert len(checks) > 10
 
 
@@ -1160,7 +1133,7 @@ def test_each_step_on_millions_of_records_holds_no_more_than_its_check_states(
             alleles, method="graph", max_frequency=0.5, invalidate_cache=True
         )
 
-    _assert_steps_within(traced_steps(monkeypatch, call, budget))
+    _assert_steps_within(traced_steps(call))
 
 
 @pytest.mark.slow
@@ -1216,7 +1189,7 @@ def test_each_step_on_wide_alleles_holds_no_more_than_its_check_states(
     assert store.clones.load_clones(call()).clones["n_cells"].tolist() == [2] * (
         n_cells // 2
     )
-    _assert_steps_within(traced_steps(monkeypatch, call, budget))
+    _assert_steps_within(traced_steps(call))
 
 
 @pytest.mark.slow
@@ -1265,7 +1238,7 @@ def test_each_step_on_few_long_alleles_holds_no_more_than_its_check_states(
             alleles, method="graph", max_frequency=0.5, invalidate_cache=True
         )
 
-    _assert_steps_within(traced_steps(monkeypatch, call, budget))
+    _assert_steps_within(traced_steps(call))
 
 
 @pytest.mark.slow
@@ -1332,7 +1305,7 @@ def test_each_step_with_banks_and_groups_holds_no_more_than_its_check_states(
                 **rules,
             )
 
-        _assert_steps_within(traced_steps(monkeypatch, call, budget))
+        _assert_steps_within(traced_steps(call))
 
 
 @pytest.mark.slow
@@ -1361,40 +1334,36 @@ def test_each_step_on_many_alleles_and_clones_holds_no_more_than_its_check_state
             alleles, method="graph", max_frequency=0.5, invalidate_cache=True
         )
 
-    traced = traced_steps(monkeypatch, call, budget)
-    written = f"the {n_clones} clones of {n_cells} cells as they are written"
-    assert traced[0][-1][0] == written
+    traced = traced_steps(call)
+    # The last charge writes the clones called.
+    assert traced[0][-1][0].startswith(f"writing the clones of {n_cells} cells")
     _assert_steps_within(traced)
 
 
 @pytest.mark.slow
-def test_the_edits_check_counts_the_chunks_that_reading_the_edits_decodes(
-    tmp_path, monkeypatch
+def test_the_edits_read_counts_the_chunks_that_reading_the_edits_decodes(
+    tmp_path,
 ) -> None:
     # The edits of 300,000 cells are three stored chunks of int64 counts,
     # which Zarr decodes at once, each into a buffer of its own, beside the
-    # counts that it returns: more than the counts and their mask, nine bytes
-    # a cell.
-    import cytearc.datastore._operations.recorder_alleles as operations
-    from cytearc.datastore._operations.record_tables import read_array
+    # counts that it returns: the read's charge counts them, more than the
+    # counts and their mask, nine bytes a cell.
+    from cytearc.metadata.rows import read_whole
     from cytearc.storage.artifacts import artifact_group
-    from cytearc.storage.geometry import READ_OBJECT_BYTES
 
     n_cells = 300_000
     store, alleles = _clones_of_their_own_alleles(tmp_path, n_cells, 75_000, 4, ("CA",))
-    stated: dict[str, int] = {}
-    check = operations._check_calling
-
-    def noted(needed: int, budget: int, what: str) -> None:
-        stated[what] = needed
-        check(needed, budget, what)
-
-    monkeypatch.setattr(operations, "_check_calling", noted)
-    store.clones.allele_clones(alleles, method="graph", max_frequency=0.5)
+    _result, taken = charges(
+        lambda: store.clones.allele_clones(alleles, method="graph", max_frequency=0.5)
+    )
+    read = next(
+        nbytes for item, nbytes, _planned in taken if item == "each cell's edits"
+    )
     group = artifact_group(store.zw, alleles)
-
-    _result, peak = traced_peak(lambda: read_array(group, "n_edits") > 0, 1 << 30)
-
-    edits = stated[f"the edits of {n_cells} cells"] - operations._FIXED_BYTES
-    # Zarr's objects for the read are the fixed bytes' to cover.
-    assert 9 * n_cells < peak <= edits + READ_OBJECT_BYTES, (peak, edits)
+    _values, peak = traced_peak(
+        lambda: (
+            read_whole(MemoryLedger(None, "Reading"), group, "n_edits", item="x") > 0
+        ),
+        1 << 30,
+    )
+    assert 9 * n_cells < peak <= read + n_cells, (peak, read)

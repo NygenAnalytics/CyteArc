@@ -13,10 +13,10 @@ texts within a distance, found exactly, under one of scirpy's distances:
 :func:`neighbor_pairs` takes the texts, a metric, the largest distance and,
 optionally, a block per text, such as its gene calls or its sample, so that
 only the texts of one block are compared. It returns the positions of every
-pair within the distance and holds at most ``max_bytes`` while it searches:
-the encoded texts, the variant keys and candidate pairs of one pass, and the
-pairs it finds. A search that would need more raises :class:`MemoryError`
-before it allocates.
+pair within the distance and charges what it holds while it searches to the
+caller's memory ledger: the encoded texts, the variant keys and candidate
+pairs of one pass, and the pairs it finds. A search that would need more than
+the ledger's budget is refused before it allocates.
 
 Every pair is found in one of two ways, whichever is estimated to take less
 time for the texts of each length, or under ``levenshtein`` for those of each
@@ -55,6 +55,7 @@ import numpy as np
 
 from ..utils.arguments import integer_argument
 from ..utils.arrays import sorted_unique, unique_inverse
+from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
 from ..utils.numba import njit
 
 __all__ = [
@@ -71,9 +72,6 @@ DISTANCE_METRICS: tuple[str, ...] = ("hamming", "normalized_hamming", "levenshte
 #: expected by chance under ``levenshtein``, whose cost grows about eightfold
 #: with every two edits more.
 MAX_CHANCE_EDITS = 8
-# The bytes that a search of two or more texts holds whatever they are: the
-# buffers of its sorts, its random generator and the objects of its arrays.
-_FIXED_BYTES = 1 << 16
 # The bytes of an array's object beside its values, for the arrays that each
 # length or block, and each pass of keys, keeps until the search returns.
 _ARRAY_BYTES = 192
@@ -114,6 +112,8 @@ _KEY_SHARE = 4
 _MIN_KEYS_PER_PASS = 1 << 20
 # The room of a search without a limit: more bytes than any machine holds.
 _UNLIMITED = 2**62
+#: What a refusal of a search suggests beside a larger budget.
+_REMEDY = "lower max_distance, or compare fewer texts at once or within smaller blocks"
 # The pairs expected by chance hold, for each position of the texts of one
 # length in a block, the frequency of each of 256 codes, and their chance of
 # agreeing: under levenshtein for each pair of positions of two lengths, and
@@ -154,38 +154,42 @@ def _rounded_percent(mismatches: int, length: int) -> int:
     return (200 * mismatches + length) // (2 * length)
 
 
-@dataclass(slots=True)
-class _Memory:
-    """The bytes that a search holds and the most it may hold, None for no limit."""
+def _ledger(ledger: MemoryLedger | None) -> MemoryLedger:
+    """The caller's ledger, or one without a budget for a search without one."""
+    if ledger is None:
+        return MemoryLedger(None, "Finding the pairs of texts within max_distance")
+    if not isinstance(ledger, MemoryLedger):
+        raise TypeError("ledger must be a MemoryLedger or None")
+    return ledger
 
-    limit: int | None
-    held: int = 0
 
-    @property
-    def room(self) -> int:
-        """The bytes the search may still allocate."""
-        if self.limit is None:
-            return _UNLIMITED
-        return max(0, self.limit - self.held)
+def _room(ledger: MemoryLedger) -> int:
+    """The bytes the search may still allocate, more than any machine holds without a budget."""
+    room = ledger.room
+    return _UNLIMITED if room is None else room
 
-    def check(self, needed: int, what: str) -> None:
-        """Raise MemoryError if ``needed`` more bytes would exceed the limit."""
-        if self.limit is not None and self.held + needed > self.limit:
-            self.exceeded(needed, what)
 
-    def exceeded(self, needed: int, what: str) -> None:
-        """Raise MemoryError for ``needed`` more bytes than the search may hold."""
-        allowed = (
-            "more than one search can count"
-            if self.limit is None
-            else f"more than the {self.limit} bytes it may hold"
-        )
-        raise MemoryError(
-            "Finding the pairs of texts within max_distance needs about "
-            f"{self.held + needed} bytes for {what}, {allowed}. Lower "
-            "max_distance, compare fewer texts at once or within smaller blocks, or "
-            "raise the memory budget."
-        )
+def _check(ledger: MemoryLedger, needed: int, what: str) -> None:
+    """Refuse ``needed`` more bytes for ``what`` that would pass the ledger's budget."""
+    ledger.peak(what, needed, remedy=_REMEDY)
+
+
+def _found_bytes(n_pairs: int) -> int:
+    """What the pairs of a length or block hold until the search returns: ``_FOUND_PAIR_BYTES`` each and their two arrays, nothing for none."""
+    return _FOUND_PAIR_BYTES * n_pairs + 2 * _ARRAY_BYTES if n_pairs else 0
+
+
+def _hold(ledger: MemoryLedger, nbytes: int, what: str) -> None:
+    """Charge ``nbytes`` that the search keeps for ``what``."""
+    ledger.hold(what, nbytes, remedy=_REMEDY)
+
+
+def _charge_to(ledger: MemoryLedger, charged: int, what: str) -> None:
+    """Hold or let go of what the search keeps, so that the ledger's charges come to ``charged``."""
+    if charged >= ledger.charged:
+        _hold(ledger, charged - ledger.charged, what)
+    else:
+        ledger.release(ledger.charged - charged)
 
 
 @njit(cache=True)
@@ -698,7 +702,7 @@ def _keyed_pairs(
     limit: int,
     deletions: bool,
     table: np.ndarray,
-    memory: _Memory,
+    ledger: MemoryLedger,
     segments: int = 0,
     split: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -715,8 +719,9 @@ def _keyed_pairs(
     left is smaller, so the keys held at once stay bounded however many the
     texts yield: one pass over the texts counts the keys of every pass, and
     each pass hashes them again and keeps its own. The keys and candidate
-    pairs of a pass, and the pairs kept, are checked against ``memory``
-    before they are allocated.
+    pairs of a pass, and the pairs kept, are charged to ``ledger`` before
+    they are allocated, and the pairs returned stay charged to it as
+    :class:`_Found` keeps them.
     """
     n_rows = len(lengths)
     bits = max(int(n_rows - 1).bit_length(), 1)
@@ -735,17 +740,17 @@ def _keyed_pairs(
     )
     keys_per_pass = min(
         _KEYS_PER_PASS,
-        max(_MIN_KEYS_PER_PASS, memory.room // (_KEY_SHARE * _KEY_BYTES)),
+        max(_MIN_KEYS_PER_PASS, _room(ledger) // (_KEY_SHARE * _KEY_BYTES)),
     )
     n_parts = max(1, -(-total // keys_per_pass))
     no_keys = np.empty(0, dtype=np.uint64)
     no_counts = np.empty(0, dtype=np.int64)
-    entry = memory.held
+    entry = ledger.charged
     # The scratch space of one text's keys, held while the search runs.
     scratch = _key_count(len(per_length) - 1, limit, deletions, parts)
-    memory.check(_KEY_BYTES * scratch, "the variant keys of one text")
+    _check(ledger, _KEY_BYTES * scratch, "the variant keys of one text")
     hashes = np.empty(scratch, dtype=np.uint64)
-    memory.held += _KEY_BYTES * scratch
+    _hold(ledger, _KEY_BYTES * scratch, "the variant keys of one text")
     sizes = np.full(1, total, dtype=np.int64)
     if n_parts > 1:
         sizes = np.zeros(n_parts, dtype=np.int64)
@@ -763,12 +768,12 @@ def _keyed_pairs(
             no_keys,
             bounds,
         )
-    held = memory.held
+    held = ledger.charged
     found = []
     n_kept = 0
     for part in range(n_parts):
         size = int(sizes[part])
-        memory.check(_KEY_BYTES * size, "the variant keys of one pass")
+        _check(ledger, _KEY_BYTES * size, "the variant keys of one pass")
         keys = np.empty(size, dtype=np.uint64)
         written = _variant_keys(
             codes,
@@ -787,8 +792,10 @@ def _keyed_pairs(
         keys = keys[:written]
         keys.sort()
         n_candidates = _run_pairs(keys, bits, n_rows, no_counts, split)
-        memory.check(
-            _KEY_BYTES * written + _CANDIDATE_BYTES * n_candidates,
+        # The slice of the keys written keeps the whole buffer of the pass.
+        _check(
+            ledger,
+            _KEY_BYTES * size + _CANDIDATE_BYTES * n_candidates,
             "the candidate pairs of texts that share variant keys",
         )
         pairs = np.empty(n_candidates, dtype=np.int64)
@@ -797,16 +804,21 @@ def _keyed_pairs(
         pairs.sort()
         kept = _check_pairs(codes, lengths, pairs, n_rows, limit, deletions)
         # The pairs kept are copied out while the candidates are still held.
-        memory.check(
+        _check(
+            ledger,
             _CANDIDATE_BYTES * n_candidates + _KEPT_PAIR_BYTES * kept + _ARRAY_BYTES,
             "the pairs found",
         )
         found.append(pairs[:kept].copy())
         del pairs
         n_kept += kept
-        memory.held = held + _KEPT_PAIR_BYTES * n_kept + _ARRAY_BYTES * len(found)
+        _charge_to(
+            ledger,
+            held + _KEPT_PAIR_BYTES * n_kept + _ARRAY_BYTES * len(found),
+            "the pairs found",
+        )
     # The two arrays of the pairs are then held until the search returns.
-    memory.check(_JOINED_PAIR_BYTES * n_kept + 2 * _ARRAY_BYTES, "the pairs found")
+    _check(ledger, _JOINED_PAIR_BYTES * n_kept + 2 * _ARRAY_BYTES, "the pairs found")
     if n_parts == 1:
         near = found[0]
     else:
@@ -815,8 +827,11 @@ def _keyed_pairs(
         found.clear()
         near = sorted_unique(merged)
         del merged
-    memory.held = entry
-    return np.divmod(near, n_rows)
+    # The pairs returned stay charged as the pairs found.
+    first, second = np.divmod(near, n_rows)
+    del near
+    _charge_to(ledger, entry + _found_bytes(len(first)), "the pairs found")
+    return first, second
 
 
 def _texts(texts: Any) -> list[str]:
@@ -847,7 +862,7 @@ def _blocks(blocks: Any, n_texts: int) -> np.ndarray:
 
 
 def _encoded(
-    texts: list[str], memory: _Memory
+    texts: list[str], ledger: MemoryLedger
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Encode texts as a padded matrix of character codes and their lengths.
 
@@ -855,7 +870,7 @@ def _encoded(
     point. Texts with other characters code each distinct character by its
     rank instead, which allows 256 of them, and the sorted code points of
     those characters are returned, None for texts coded by code point. The
-    memory the encoding needs is checked before it is allocated, and the
+    memory the encoding needs is charged before it is allocated, and the
     matrix and the per-text arrays of the search are held.
     """
     lengths = np.fromiter(map(len, texts), dtype=np.int64, count=len(texts))
@@ -867,10 +882,10 @@ def _encoded(
     # until the search returns; fewer than two texts are never compared.
     held = 3 * len(texts) * width + _TEXT_BYTES * len(texts)
     if len(texts) > 1:
-        held += _table_bytes(width) + _FIXED_BYTES
+        held += _table_bytes(width) + NUMPY_STEP_BYTES
     what = "the encoded texts"
     # Joined, the texts take a byte per character, and their codes another.
-    memory.check(held + 2 * characters, what)
+    _check(ledger, held + 2 * characters, what)
     joined = "".join(texts)
     coding = None
     try:
@@ -879,7 +894,7 @@ def _encoded(
         # Four bytes per character joined and as code points, and about 32
         # while the characters are ranked. A lone surrogate is a character
         # like any other.
-        memory.check(held + 40 * characters, what)
+        _check(ledger, held + 40 * characters, what)
         wide = np.frombuffer(
             joined.encode("utf-32-le", "surrogatepass"), dtype=np.uint32
         )
@@ -891,7 +906,7 @@ def _encoded(
     del joined
     matrix = np.zeros((len(texts), width), dtype=np.uint8)
     matrix[np.arange(width) < lengths[:, None]] = points
-    memory.held += held
+    _hold(ledger, held, what)
     return matrix, lengths, coding
 
 
@@ -986,7 +1001,7 @@ def _chance_pairs(n_texts: int, split: int, chances: np.ndarray) -> float:
     return n_texts * (n_texts - 1) / 2 * (within - identical) / (1.0 - identical)
 
 
-def _edit_chance(agree: np.ndarray, limit: int, memory: _Memory) -> float:
+def _edit_chance(agree: np.ndarray, limit: int, ledger: MemoryLedger) -> float:
     """The chance that two texts are within ``limit`` edits.
 
     The texts have the lengths of ``agree``'s rows and columns, and the
@@ -1032,7 +1047,8 @@ def _edit_chance(agree: np.ndarray, limit: int, memory: _Memory) -> float:
             if column == 0:
                 keys = keys + (min(row, int(caps[cell])) - digit) * powers[cell]
                 continue
-            memory.check(
+            _check(
+                ledger,
                 _CHANCE_STATE_BYTES * len(keys) + _CHANCE_FIXED_BYTES,
                 "the edit distances of chance pairs",
             )
@@ -1091,7 +1107,7 @@ def _edit_chance_pairs(
     lengths: list[int],
     limit: int,
     components: np.ndarray,
-    memory: _Memory,
+    ledger: MemoryLedger,
 ) -> float:
     """The pairs of a block's texts expected within ``limit`` edits by chance.
 
@@ -1110,8 +1126,8 @@ def _edit_chance_pairs(
     # the chosen texts of one component in two lengths are copied, and one
     # position of one compared with every position of the other.
     counting = _COUNTED_CODE_BYTES * most + _FREQUENCY_BYTES + 3 * most * longest
-    memory.check(held + counting, "the frequencies of the texts' characters")
-    memory.held += held
+    _check(ledger, held + counting, "the frequencies of the texts' characters")
+    _hold(ledger, held, "the frequencies of the texts' characters")
     counts = []
     for rows, length in zip(chosen, lengths, strict=True):
         tally = np.zeros((length, 256), dtype=np.float64)
@@ -1149,7 +1165,7 @@ def _edit_chance_pairs(
                 )
             del codes_first, codes_second
             agree /= apart
-            chance = _edit_chance(agree, limit, memory)
+            chance = _edit_chance(agree, limit, ledger)
             n_first, n_second = len(groups[first]), len(groups[second])
             if first != second:
                 expected += n_first * n_second * chance
@@ -1165,7 +1181,7 @@ def _edit_chance_pairs(
                     * max(0.0, chance - identical)
                     / (1.0 - identical)
                 )
-    memory.held -= held
+    ledger.release(held)
     return expected
 
 
@@ -1263,38 +1279,41 @@ def _edits_keyed(sizes: np.ndarray, lengths: np.ndarray, limit: int) -> bool:
 
 @dataclass(slots=True)
 class _Found:
-    """The pairs found so far, each holding ``_FOUND_PAIR_BYTES`` of ``memory``.
+    """The pairs found so far, each holding ``_FOUND_PAIR_BYTES`` of ``ledger``.
 
     The pairs of each length or block that has any are kept as two arrays,
     which hold ``_ARRAY_BYTES`` each beside their values.
     """
 
-    memory: _Memory
+    ledger: MemoryLedger
     firsts: list[np.ndarray]
     seconds: list[np.ndarray]
 
     def most(self) -> int:
         """The most pairs that a compiled loop may collect in the memory left."""
-        return max(0, self.memory.room - 2 * _ARRAY_BYTES) // _LOOP_PAIR_BYTES
+        return max(0, _room(self.ledger) - 2 * _ARRAY_BYTES) // _LOOP_PAIR_BYTES
 
     def add(self, first: np.ndarray, second: np.ndarray) -> None:
-        """Keep the pairs of a length or block, if it has any."""
+        """Keep the pairs of a length or block, if it has any, which the search that found them charged."""
         if not len(first):
             return
-        self.memory.held += _FOUND_PAIR_BYTES * len(first) + 2 * _ARRAY_BYTES
         self.firsts.append(first)
         self.seconds.append(second)
 
     def looped(
         self, found: tuple[np.ndarray, np.ndarray, bool]
     ) -> tuple[np.ndarray, np.ndarray]:
-        """The pairs of a compiled loop; MemoryError if they outgrew the memory left."""
+        """The pairs of a compiled loop, refused if they outgrew the memory left."""
         first, second, complete = found
         if not complete:
-            self.memory.exceeded(
+            # A loop stops short only within a budget, which refuses the pairs.
+            _check(
+                self.ledger,
                 _LOOP_PAIR_BYTES * (self.most() + 1) + 2 * _ARRAY_BYTES,
                 "the pairs found",
             )
+            raise AssertionError("A search without a budget stopped collecting pairs")
+        _hold(self.ledger, _found_bytes(len(first)), "the pairs found")
         return first, second
 
 
@@ -1302,7 +1321,7 @@ def _substitution_pairs(
     codes: np.ndarray,
     limit: int,
     table: np.ndarray,
-    memory: _Memory,
+    ledger: MemoryLedger,
     found: _Found,
     split: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -1312,10 +1331,10 @@ def _substitution_pairs(
     below it pair, with those at or above it.
     """
     limit = min(limit, codes.shape[1])
-    if segments := _hamming_segments(codes, limit, memory.room, split):
+    if segments := _hamming_segments(codes, limit, _room(ledger), split):
         lengths = np.full(len(codes), codes.shape[1], dtype=np.int64)
         return _keyed_pairs(
-            codes, lengths, limit, False, table, memory, segments, split
+            codes, lengths, limit, False, table, ledger, segments, split
         )
     return found.looped(_hamming_pairs(_words(codes), limit, found.most(), split))
 
@@ -1384,7 +1403,7 @@ def _partial_pairs(
     min_compared: int,
     unknown: np.ndarray,
     table: np.ndarray,
-    memory: _Memory,
+    ledger: MemoryLedger,
     found: _Found,
 ) -> None:
     """Find the pairs of texts of one length that may hold characters of no base.
@@ -1399,8 +1418,7 @@ def _partial_pairs(
     """
     n_words = max(-(-length // 64), 1)
     held = len(members) * (_MASK_TEXT_BYTES + 16 * n_words)
-    memory.check(held, "the positions where the texts hold no base")
-    memory.held += held
+    _hold(ledger, held, "the positions where the texts hold no base")
     order, starts, ends, group_masks = _mask_groups(
         matrix, members, length, unknown, min_compared
     )
@@ -1417,33 +1435,27 @@ def _partial_pairs(
         elif len(rows) < 2:
             continue
         codes = matrix[np.ix_(rows, columns)]
-        first, second = _substitution_pairs(codes, limit, table, memory, found, split)
+        first, second = _substitution_pairs(codes, limit, table, ledger, found, split)
         del codes
         first, second = _ordered(rows[first], rows[second])
         found.add(first, second)
-    memory.held -= held
+    ledger.release(held)
 
 
 def _search_arguments(
     metric: str,
     max_distance: Any,
-    max_bytes: Any,
     unknown: Any,
     min_compared: Any,
-) -> tuple[int, int | None, int]:
+) -> tuple[int, int]:
     """Check the arguments that a search and its expectation share.
 
     Returns:
-        The max_distance, the most bytes or None, and the fewest positions compared.
+        The max_distance and the fewest positions compared.
     """
     if metric not in DISTANCE_METRICS:
         raise ValueError(f"metric must be one of {', '.join(DISTANCE_METRICS)}")
     max_distance = integer_argument(max_distance, "max_distance", minimum=0)
-    limit_bytes = (
-        None
-        if max_bytes is None
-        else integer_argument(max_bytes, "max_bytes", minimum=0)
-    )
     if not isinstance(unknown, str):
         raise TypeError("unknown must be text, the characters that hold no base")
     min_compared = integer_argument(min_compared, "min_compared", minimum=0)
@@ -1452,15 +1464,15 @@ def _search_arguments(
             "unknown and min_compared apply to metric='hamming' only, which "
             "compares texts position by position"
         )
-    return max_distance, limit_bytes, min_compared
+    return max_distance, min_compared
 
 
 def _length_groups(
-    block_codes: np.ndarray, lengths: np.ndarray, memory: _Memory
+    block_codes: np.ndarray, lengths: np.ndarray, ledger: MemoryLedger
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Order the texts by block and length, so that each group's are a slice.
 
-    Each group of one length and block holds ``_GROUP_BYTES`` of ``memory``.
+    Each group of one length and block holds ``_GROUP_BYTES`` of ``ledger``.
 
     Returns:
         The order of the texts, each group's start, end and length in it, and
@@ -1472,8 +1484,8 @@ def _length_groups(
     ordered = group_keys[order]
     first_of_group = np.concatenate([[True], ordered[1:] != ordered[:-1]])
     n_groups = int(np.count_nonzero(first_of_group))
-    memory.check(_GROUP_BYTES * n_groups, "the lengths and blocks of the texts")
-    memory.held += _GROUP_BYTES * n_groups
+    _check(ledger, _GROUP_BYTES * n_groups, "the lengths and blocks of the texts")
+    _hold(ledger, _GROUP_BYTES * n_groups, "the lengths and blocks of the texts")
     starts = np.flatnonzero(first_of_group)
     del first_of_group
     ends = np.append(starts[1:], len(order))
@@ -1498,7 +1510,7 @@ def neighbor_pairs(
     max_distance: int,
     blocks: Any = None,
     *,
-    max_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
     unknown: str = "",
     min_compared: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -1530,10 +1542,12 @@ def neighbor_pairs(
         blocks: Each text's block as an integer code, such as its gene calls
             or its sample; only texts of one block are compared. None
             compares all.
-        max_bytes: The most bytes the search may hold: the encoded texts,
+        ledger: The caller's memory ledger, which the search charges before
+            it allocates, and leaves the pairs returned charged to, 16 bytes
+            each, for the caller to release: the encoded texts,
             about three times their longest length and 72 bytes more per
             text, with 2 KiB of hash codes for each position of the longest
-            and 64 KiB for its sorts and smaller arrays; 48 bytes for each
+            and ``NUMPY_STEP_BYTES`` for its sorts and smaller arrays; 48 bytes for each
             length of each block; the variant keys and candidate pairs of one
             pass, 8 bytes each, and 8 more for each candidate within the
             max_distance; and 32 bytes for each pair it finds, counted once for
@@ -1551,35 +1565,38 @@ def neighbor_pairs(
 
     Raises:
         TypeError: If ``texts`` is not a one-dimensional sequence of str,
-            ``blocks`` not one of integer codes, or ``max_distance`` or
-            ``max_bytes`` not an integer.
-        ValueError: If the metric is unknown, ``max_distance``, ``max_bytes`` or
+            ``blocks`` not one of integer codes, ``max_distance`` not an
+            integer, or ``ledger`` not a memory ledger.
+        ValueError: If the metric is unknown, ``max_distance`` or
             ``min_compared`` is negative, ``blocks`` does not hold one block
             per text, the texts hold more than 256 distinct characters, or
             ``unknown`` or ``min_compared`` is given with a metric other than
             ``hamming``.
-        MemoryError: If the search would hold more than ``max_bytes``: the
+        MemoryBudgetError: If the search would pass the ledger's budget: the
             encoded texts, the keys or candidate pairs of one pass, or the
             pairs within ``max_distance`` need more.
     """
-    max_distance, limit_bytes, min_compared = _search_arguments(
-        metric, max_distance, max_bytes, unknown, min_compared
+    max_distance, min_compared = _search_arguments(
+        metric, max_distance, unknown, min_compared
     )
     values = _texts(texts)
     n_texts = len(values)
     block_codes = _blocks(blocks, n_texts)
-    memory = _Memory(limit_bytes)
-    matrix, lengths, coding = _encoded(values, memory)
+    ledger = _ledger(ledger)
+    entry = ledger.charged
+    matrix, lengths, coding = _encoded(values, ledger)
     partial = bool(unknown) or min_compared > 0
     unknown_codes = _unknown_table(unknown, coding)
     empty = np.empty(0, dtype=np.int64)
     if n_texts < 2:
+        del matrix, lengths, coding
+        ledger.release(ledger.charged - entry)
         return empty, empty.copy()
     table = _zobrist_table(matrix.shape[1])
     order, starts, ends, group_lengths, ranks = _length_groups(
-        block_codes, lengths, memory
+        block_codes, lengths, ledger
     )
-    found = _Found(memory, [], [])
+    found = _Found(ledger, [], [])
     # The positions of the pairs among the members of a length or block are
     # replaced in turn by their positions among all texts, so that no copy of
     # them outlives the pairs found.
@@ -1594,7 +1611,7 @@ def neighbor_pairs(
             sizes = ends[low:high] - starts[low:high]
             if _edits_keyed(sizes, group_lengths[low:high], limit):
                 first, second = _keyed_pairs(
-                    matrix[members], lengths[members], limit, True, table, memory
+                    matrix[members], lengths[members], limit, True, table, ledger
                 )
                 first = members[first]
                 second = members[second]
@@ -1648,21 +1665,31 @@ def neighbor_pairs(
                         min_compared,
                         unknown_codes,
                         table,
-                        memory,
+                        ledger,
                         found,
                     )
                 continue
             first, second = _substitution_pairs(
-                matrix[members, :length], limit, table, memory, found
+                matrix[members, :length], limit, table, ledger, found
             )
             first = members[first]
             second = members[second]
             found.add(first, second)
     if not found.firsts:
-        return empty, empty.copy()
-    if len(found.firsts) == 1:
-        return found.firsts[0], found.seconds[0]
-    return np.concatenate(found.firsts), np.concatenate(found.seconds)
+        first, second = empty, empty.copy()
+    elif len(found.firsts) == 1:
+        first, second = found.firsts[0], found.seconds[0]
+    else:
+        first, second = np.concatenate(found.firsts), np.concatenate(found.seconds)
+    del found, matrix, lengths, coding, table, order, starts, ends
+    del group_lengths, ranks, unknown_codes, block_codes
+    # The texts and the members of the last length or block, a view that
+    # keeps the order alive, go before what the search held is let go.
+    values = []
+    members = texts_of = partners = empty
+    # The pairs returned stay charged, for the caller to keep or let go.
+    _charge_to(ledger, entry + first.nbytes + second.nbytes, "the pairs found")
+    return first, second
 
 
 def _component_arguments(
@@ -1749,7 +1776,7 @@ def _partial_chance_pairs(
     unknown: np.ndarray,
     components: np.ndarray,
     priority: np.ndarray,
-    memory: _Memory,
+    ledger: MemoryLedger,
 ) -> float:
     """The pairs of texts of one length expected within ``limit`` by chance.
 
@@ -1763,12 +1790,12 @@ def _partial_chance_pairs(
     """
     n_words = max(-(-length // 64), 1)
     held = len(members) * (_MASK_TEXT_BYTES + 16 * n_words)
-    memory.check(held, "the positions where the texts hold no base")
-    memory.held += held
+    _hold(ledger, held, "the positions where the texts hold no base")
     order, starts, ends, group_masks = _mask_groups(
         matrix, members, length, unknown, min_compared
     )
-    memory.check(
+    _check(
+        ledger,
         _LIBRARY_ROW_BYTES * len(order) + 2 * _FREQUENCY_BYTES * length,
         "the characters of one text per component",
     )
@@ -1787,7 +1814,7 @@ def _partial_chance_pairs(
             holding[position] * (holding[position] - 1.0)
         )
     del counts, holding
-    memory.held += (_AGREEMENT_BYTES + 1) * length
+    _hold(ledger, (_AGREEMENT_BYTES + 1) * length, "the agreement of the positions")
     expected = 0.0
     for first_group, second_group, columns in _group_pairs(
         group_masks, length, min_compared
@@ -1804,7 +1831,7 @@ def _partial_chance_pairs(
             n_texts = n_first + int(ends[second_group] - starts[second_group])
         chances = _mismatch_chances(1.0 - agreement[columns], min(limit, len(columns)))
         expected += _chance_pairs(n_texts, split, chances)
-    memory.held -= held + (_AGREEMENT_BYTES + 1) * length
+    ledger.release(held + (_AGREEMENT_BYTES + 1) * length)
     return expected
 
 
@@ -1816,7 +1843,7 @@ def expected_chance_pairs(
     *,
     components: Any = None,
     priority: Any = None,
-    max_bytes: int | None = None,
+    ledger: MemoryLedger | None = None,
     unknown: str = "",
     min_compared: int = 0,
 ) -> float:
@@ -1872,7 +1899,8 @@ def expected_chance_pairs(
         priority: Each text's rank within its component, a finite number,
             higher first, of equal ranks the later text first, or None for
             ranks by position.
-        max_bytes: The most bytes it may hold: the encoded texts, as
+        ledger: The caller's memory ledger, which the expectation charges
+            before it allocates and lets go of on return: the encoded texts, as
             :func:`neighbor_pairs` counts them, and 48 bytes for each length
             of each block; while one text per component of a length is
             chosen, 57 bytes and its length for each text, with 4 KiB; with
@@ -1900,10 +1928,10 @@ def expected_chance_pairs(
             per text, ``priority`` holds a number that is not finite or comes
             without ``components``, or ``max_distance`` under ``levenshtein`` is
             above ``MAX_CHANCE_EDITS``.
-        MemoryError: If it would hold more than ``max_bytes``.
+        MemoryBudgetError: If it would pass the ledger's budget.
     """
-    max_distance, limit_bytes, min_compared = _search_arguments(
-        metric, max_distance, max_bytes, unknown, min_compared
+    max_distance, min_compared = _search_arguments(
+        metric, max_distance, unknown, min_compared
     )
     if metric == "levenshtein" and max_distance > MAX_CHANCE_EDITS:
         raise ValueError(
@@ -1917,14 +1945,45 @@ def expected_chance_pairs(
     n_texts = len(values)
     block_codes = _blocks(blocks, n_texts)
     component_codes, ranks_of = _component_arguments(components, priority, n_texts)
-    memory = _Memory(limit_bytes)
-    matrix, lengths, coding = _encoded(values, memory)
+    ledger = _ledger(ledger)
+    entry = ledger.charged
+    try:
+        return _expected_pairs(
+            values,
+            metric,
+            max_distance,
+            block_codes,
+            component_codes,
+            ranks_of,
+            ledger,
+            unknown,
+            min_compared,
+        )
+    finally:
+        # What the expectation held is let go with its frames.
+        ledger.release(ledger.charged - entry)
+
+
+def _expected_pairs(
+    values: list[str],
+    metric: str,
+    max_distance: int,
+    block_codes: np.ndarray,
+    component_codes: np.ndarray,
+    ranks_of: np.ndarray,
+    ledger: MemoryLedger,
+    unknown: str,
+    min_compared: int,
+) -> float:
+    """The pairs expected by chance, of :func:`expected_chance_pairs`'s checked arguments."""
+    n_texts = len(values)
+    matrix, lengths, coding = _encoded(values, ledger)
     if n_texts < 2:
         return 0.0
     unknown_codes = _unknown_table(unknown, coding)
     partial = bool(unknown) or min_compared > 0
     order, starts, ends, group_lengths, block_ranks = _length_groups(
-        block_codes, lengths, memory
+        block_codes, lengths, ledger
     )
     expected = 0.0
     if metric == "levenshtein":
@@ -1934,7 +1993,8 @@ def expected_chance_pairs(
             if len(members) < 2:
                 continue
             groups = [order[starts[group] : ends[group]] for group in range(low, high)]
-            memory.check(
+            _check(
+                ledger,
                 _REPRESENTATIVE_ROW_BYTES * len(members),
                 "the representatives of the components",
             )
@@ -1948,7 +2008,7 @@ def expected_chance_pairs(
                 group_lengths[low:high].tolist(),
                 limit,
                 component_codes,
-                memory,
+                ledger,
             )
         return expected
     for group in range(len(starts)):
@@ -1973,12 +2033,13 @@ def expected_chance_pairs(
                     unknown_codes,
                     component_codes,
                     ranks_of,
-                    memory,
+                    ledger,
                 )
             continue
         # The representatives, their characters and the count of one position
         # with its copy less one.
-        memory.check(
+        _check(
+            ledger,
             (_REPRESENTATIVE_ROW_BYTES + length + _COUNTED_CODE_BYTES) * len(members)
             + 2 * _FREQUENCY_BYTES,
             "the representatives of the components",

@@ -591,6 +591,28 @@ def test_grouping_many_cells_holds_no_more_than_each_charge_plans(
     assert peak <= planned <= 2 * peak + 256 * 1024, (peak, planned)
 
 
+def test_four_byte_labels_of_a_label_artifact_run_within_their_budget(many) -> None:
+    # 20,000 cells of 500 labels of 30 characters beyond U+FFFF: each cell's
+    # label becomes a Python string of four bytes a character, which the
+    # grouping charges before it codes the labels.
+    labels = many.snapshot_cluster_labels(
+        "emoji", cell_selection=many.snapshot_cell_selection("every_cell")
+    )
+    _budget, peak, _refusals = _smallest(many, groups=labels)
+    assert peak > 20_000 * 4 * 30
+    # The strings are charged as the sizes Python gives them, beside their
+    # references.
+    texts = ["\U0001f600" * 30 + f"{index % 500:03d}" for index in range(20_000)]
+    held = sum(map(sys.getsizeof, texts)) + 8 * len(texts)
+    _result, taken = charges(lambda: _group(many, groups=labels))
+    (charged,) = [
+        nbytes
+        for item, nbytes, _planned in taken
+        if item == "the labels of the groups artifact"
+    ]
+    assert held <= charged <= held + 1024, (held, charged)
+
+
 def test_kept_apart_labels_follow_the_rows_that_join_groups(store) -> None:
     rows = np.asarray([False, True, True, False, True, True, False, False])
     kinds = np.asarray(["B", "T", "B", "B", "T", "T", "B", "T"], dtype=object)

@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from cytearc.readers.phylogeny import read_trees, tree_file_layout
-from tests.memory_helpers import budget_that_runs, stated_bytes
+from tests.memory_helpers import budget_that_runs, budgeted, stated_bytes
 from tests.storage_helpers import open_store, write_count_store
 
 pytestmark = pytest.mark.slow
@@ -162,12 +162,12 @@ def data(tmp_path_factory) -> SimpleNamespace:
         tree = small / f"clone_{index}.nwk"
         tree.write_text(_random_tree(ids[index * 50 : index * 50 + 50], rng))
         files.append(tree)
-    trees = read_trees(tree_file_layout(big), memory_bytes=10**10)
+    trees = read_trees(tree_file_layout(big), ledger=budgeted(10**10))
     # Every leaf ends at the root's height, the length of its longest path.
     leaf_time = float(
         np.nansum(trees.length[_path_to_root(trees, len(trees.parent) - 1)])
     )
-    wide_trees = read_trees(tree_file_layout(wide), memory_bytes=10**10)
+    wide_trees = read_trees(tree_file_layout(wide), ledger=budgeted(10**10))
     wide_leaf_time = float(
         np.nansum(
             wide_trees.length[_path_to_root(wide_trees, len(wide_trees.parent) - 1)]
@@ -332,7 +332,7 @@ def test_a_59_megabyte_tree_on_one_line_parses_within_its_budget(tmp_path) -> No
         assert handle.read().count(b"\n") == 0
     layout = tree_file_layout(path)
     # The backbone is about 38,000 groups deep, which recursion could not read.
-    trees = read_trees(layout, memory_bytes=10**11)
+    trees = read_trees(layout, ledger=budgeted(10**11))
     assert int(trees.leaf.sum()) == 1_280_000
     depth = np.zeros(trees.n_nodes, dtype=np.int64)
     for node in range(1, trees.n_nodes):
@@ -342,7 +342,7 @@ def test_a_59_megabyte_tree_on_one_line_parses_within_its_budget(tmp_path) -> No
     # The budget climbs from one byte to the bytes that each refusal states.
     budget, _refusals, trees, peak = budget_that_runs(
         lambda budget: budget,
-        lambda budget: read_trees(layout, memory_bytes=budget),
+        lambda budget: read_trees(layout, ledger=budgeted(budget)),
         refusal_budget=stated_bytes,
     )
     print(f"59 MB tree: peak {peak} budget {budget} ratio {peak / budget:.2f}")

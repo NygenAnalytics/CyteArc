@@ -960,7 +960,7 @@ def _parse_json_trees(
     width = 1 if largest < 0xC4 else 2 if largest < 0xF0 else 4
     # Each node and edge is an object of the JSON, so the objects bound them.
     check(
-        f"Parsing the trees of {quoted_value(path)}",
+        f"parsing the trees of {quoted_value(path)}",
         held_bytes
         + len(raw)
         + 2 * width * n_characters
@@ -1110,7 +1110,7 @@ def _zarr_graph(
             f"The tree {quoted_value(key)} of the TreeData store {quoted_value(path)} has no 'edges' "
             "array of source and target pairs"
         )
-    what = f"Reading the tree {quoted_value(key)} of {quoted_value(path)}"
+    what = f"reading the tree {quoted_value(key)} of {quoted_value(path)}"
     nodes, held = _zarr_texts(nodes_array, what, check=check, held_bytes=held_bytes)
     edges, edge_held = _zarr_texts(
         edges_array, what, check=check, held_bytes=held_bytes + held

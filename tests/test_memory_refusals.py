@@ -1,4 +1,4 @@
-"""Every memory refusal outside the clone stack and the screen operations is a MemoryBudgetError.
+"""Every memory refusal outside the variant operations and the screen operations is a MemoryBudgetError.
 
 A refusal's ``needed_bytes`` is the smallest memory budget that passes the
 step it refused, in the terms of the call's whole budget, ``budget_bytes``
@@ -7,7 +7,7 @@ passes that step, one byte less is refused again, and a call followed from a
 budget of one byte through the budgets that its refusals name ends with a
 budget that runs it. Each family of master's checks and planners is followed
 that way here, and a guard keeps the built-in ``MemoryError`` out of every
-module but those of the stack and the screen operations.
+module but those of the variant operations and the screen operations.
 """
 
 import ast
@@ -30,24 +30,11 @@ from tests.memory_helpers import follow_refusals, named_budget_passes
 
 CYTEARC_ROOT = Path(cytearc.__file__).parent
 
-#: The modules of the clone stack and of the screen operations that still
+#: The modules of the variant operations and of the screen operations that still
 #: build the built-in MemoryError, with the number that each builds, so that
 #: a module whose refusals move to MemoryBudgetError lowers its count and
 #: leaves the list at none. Every other module refuses with MemoryBudgetError.
 PLAIN_MEMORY_ERRORS = {
-    # Clone import, clone summaries, lineage barcodes, recorder alleles and
-    # phylogenies. Their shared join, grouping and clone writer refuse through
-    # the caller's ledger.
-    "clones/allele_clones.py": 1,
-    "clones/barcode_clones.py": 1,
-    "clones/calling.py": 1,
-    "clones/recorders.py": 1,
-    "clones/sequences.py": 1,
-    "datastore/_operations/clones.py": 13,
-    "datastore/_operations/lineage_barcodes.py": 3,
-    "datastore/_operations/phylogeny.py": 1,
-    "datastore/_operations/recorder_alleles.py": 4,
-    "readers/phylogeny.py": 1,
     # Variant counts, genotypes and frequency clones, with the shared-neighbour
     # graph that frequency clones build.
     "datastore/_operations/variants.py": 10,
@@ -108,7 +95,9 @@ def catch(call):
     assert plain_memory_errors(source) == [4, 5, 7]
 
 
-def test_refusals_outside_the_stack_and_the_screen_raise_memory_budget_error() -> None:
+def test_refusals_outside_the_variants_and_the_screen_raise_memory_budget_error() -> (
+    None
+):
     found = {
         module: lines
         for module, source in _modules().items()
