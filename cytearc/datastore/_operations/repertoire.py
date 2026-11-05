@@ -2305,9 +2305,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         the repeated IDs' new names, and until it has named the repeated IDs,
         a hash of each contig's ID. Every stored array is read a chunk at a
         time, and what each step reads and holds is checked against the
-        memory budget before the step runs, all before the file is written;
-        each check counts the stored chunk read last, which Zarr may still
-        hold a moment after its read returns.
+        memory budget before the step runs, all before the file is written.
 
         Args:
             source: An ``immune_receptors`` or ``clonotypes`` artifact.

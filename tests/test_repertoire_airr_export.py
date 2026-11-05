@@ -1575,8 +1575,10 @@ def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
 
     # The codes of the two V calls that hold a tab, one of them two, stay
     # held, then the span is checked as without such values; once both fit,
-    # measuring finds the three values.
-    refusals, _ = climb_refusals(run)
+    # measuring finds the three values. The climb starts at the bytes that
+    # the held text takes, so that the codes refuse by their own charge.
+    held = contigs_within(10**9).ledger.held_bytes
+    refusals, _ = climb_refusals(run, start=held)
     assert [error.item for error in refusals] == [
         "the codes of the v_call values that the format forbids",
         "measuring the widest value of each field",

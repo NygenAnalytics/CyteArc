@@ -31,7 +31,11 @@ from ...clones.recorders import (
     records_in_line_order,
 )
 from ...metadata.arguments import AlleleCloneArguments, RecorderAlleleImportArguments
-from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
+from ...metadata.artifacts import (
+    cell_data_write_bytes,
+    plan_cell_data_artifact,
+    write_cell_data_artifact,
+)
 from ...metadata.records import RecordEncoder, RecordTable, pack_text, unpack_text
 from ...metadata.rows import (
     read_whole,
@@ -411,11 +415,11 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         # Writing holds a copy of the records and, for each, its cells' and
         # files' int32 copies and its states' int8 copy and the keys that
         # count each cell's integrations.
-        ledger.peak(
-            f"writing the {table.n_records} records",
-            table.nbytes + _WRITE_BYTES_PER_RECORD * table.n_records,
+        writing = table.nbytes + _WRITE_BYTES_PER_RECORD * table.n_records
+        ledger.peak(f"writing the {table.n_records} records", writing)
+        self._write_alleles(
+            planned, table, n_cells, attributes, diagnostics, ledger, writing
         )
-        self._write_alleles(planned, table, n_cells, attributes, diagnostics)
         warn_diagnostics(
             arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
         )
@@ -678,18 +682,35 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         n_cells: int,
         attributes: Mapping[str, Any],
         diagnostics: Mapping[str, Any],
+        ledger: MemoryLedger,
+        writing: int,
     ) -> None:
+        """Write the records and each cell's summaries, beside the ``writing`` bytes that building them holds.
+
+        The chunks that Zarr encodes from the arrays are charged to ``ledger``
+        once the arrays are built, before anything is written.
+        """
         summaries = cell_summaries(table, n_cells)
         arrays = record_arrays(table, _RECORDS)
         # A state fits a byte.
         arrays[f"{_RECORDS}_state"] = np.asarray(
             arrays[f"{_RECORDS}_state"], dtype=np.int8
         )
+        stored = {**summaries, **arrays}
+        chunk_lengths = record_chunk_lengths(arrays)
+        ledger.peak(
+            f"writing the {table.n_records} records",
+            writing
+            + cell_data_write_bytes(
+                {name: (values.shape, values.dtype) for name, values in stored.items()},
+                chunk_lengths=chunk_lengths,
+            ),
+        )
         write_cell_data_artifact(
             self.zw,
             planned,
-            {**summaries, **arrays},
-            chunk_lengths=record_chunk_lengths(arrays),
+            stored,
+            chunk_lengths=chunk_lengths,
             attributes={
                 "fields": list(FIELDS),
                 "states": list(STATES),

@@ -18,7 +18,7 @@ from cytearc.repertoire.clonotypes import METRICS
 from tests.clone_helpers import levenshtein_distance as _levenshtein
 from tests.clone_helpers import link_count_variance
 from cytearc.utils.memory_budget import MemoryLedger
-from tests.memory_helpers import budgeted, climb_refusals
+from tests.memory_helpers import budgeted, climb_refusals, named_budget
 from tests.clone_helpers import within_distance as _within
 
 
@@ -520,15 +520,34 @@ def test_pairs_found_hold_memory_while_later_lengths_are_searched(
     # Two families of near variants, of 8 and 12 letters, more than one edit
     # apart: the shorter family's 36 pairs are found first and held while the
     # longer family's 180 pairs are collected, the last step that refuses.
+    # Nine texts of 8 letters that pair with none take the shorter family's
+    # place, so the budgets differ by what the 36 pairs hold, at least the
+    # two int64 positions of each.
     short = [letter + "CDEFGHIK"[1:] for letter in "PQRSTVWYC"]
-    texts = short + _VARIANTS
-    expected = _expected(texts, metric, 1)
-    assert len(expected) == 36 + 180
-    refusals, found = climb_refusals(
-        lambda budget: neighbor_pairs(texts, metric, 1, ledger=budgeted(budget))
-    )
-    assert "for the pairs found" in str(refusals[-1])
-    assert _pairs(*found) == expected
+    apart = [
+        "PQRSTVWY",
+        "QRSTVWYP",
+        "RSTVWYPQ",
+        "STVWYPQR",
+        "TVWYPQRS",
+        "VWYPQRST",
+        "WYPQRSTV",
+        "YPQRSTVW",
+        "CDCDCDCD",
+    ]
+    named = {}
+    for first in (short, apart):
+        texts = first + _VARIANTS
+        refusals, found = climb_refusals(
+            lambda budget, texts=texts: neighbor_pairs(
+                texts, metric, 1, ledger=budgeted(budget)
+            )
+        )
+        assert "for the pairs found" in str(refusals[-1])
+        assert _pairs(*found) == _expected(texts, metric, 1)
+        named[len(found[0])] = refusals[-1].needed_bytes
+    assert sorted(named) == [180, 36 + 180]
+    assert named[36 + 180] - named[180] >= 16 * 36
 
 
 def test_the_hash_codes_of_long_texts_count_against_the_budget() -> None:
@@ -555,6 +574,14 @@ def test_the_encoded_texts_must_fit_the_budget() -> None:
     one = ["CASSLGQAYEQYF"]
     codes = 8 * 257 * len(one[0])
     assert len(neighbor_pairs(one, "hamming", 1, ledger=budgeted(codes - 1))[0]) == 0
+    # Texts beyond Latin-1 take more bytes per character while they are coded:
+    # the budget that encodes two Latin texts refuses two of the same lengths
+    # beyond it.
+    with pytest.raises(MemoryError, match="for the encoded texts") as refused:
+        neighbor_pairs(["abc", "abd"], "hamming", 1, ledger=budgeted(1))
+    encodes_latin = named_budget(refused.value)
+    with pytest.raises(MemoryError, match="for the encoded texts"):
+        neighbor_pairs(["αβγ", "αβδ"], "hamming", 1, ledger=budgeted(encodes_latin))
 
 
 def test_the_pairs_of_one_run_must_fit_the_budget_beside_the_keys(

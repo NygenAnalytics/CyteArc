@@ -128,26 +128,27 @@ def test_document_frequency_reserves_decode_bytes_when_fitting_blocks() -> None:
     from cytearc.assay.normalization import stream_document_frequency
 
     values = np.arange(48, dtype=np.uint16).reshape(12, 4)
-    stored = zarr.array(values, chunks=(4, 4))
 
-    def frequency(budget: int) -> tuple[np.ndarray, Any]:
+    def frequency(chunks: tuple[int, int], budget: int) -> Any:
+        stored = zarr.array(values, chunks=chunks)
         matrix = ChunkedArray(stored, rows=np.arange(12), block_size=12)
         with execution_report_scope() as reports:
             counted, _ = stream_document_frequency(
                 matrix, memory_bytes=budget, nthreads=1, msg="", operation="Frequency"
             )
+        np.testing.assert_array_equal(counted, np.count_nonzero(values, axis=0))
         (report,) = reports
-        return counted, report
+        return report
 
-    # A block of every row reads once; a byte less than it reserves reads the
-    # rows in several blocks, each reserved with its decode within the budget.
-    _, whole = frequency(1 << 20)
-    assert whole.unitsCompleted == 1
-    budget = whole.plan.reservedBytes - 1
-    counted, report = frequency(budget)
-    np.testing.assert_array_equal(counted, np.count_nonzero(values, axis=0))
-    assert report.plan.reservedBytes <= budget
-    assert report.unitsCompleted > 1
+    # Stored in one chunk of all 12 rows, a block's read decodes six times
+    # what it decodes in chunks of two rows, so the budget of one block of
+    # every row in the smaller chunks reads the larger ones in several
+    # blocks, each reserved with its decode within the budget.
+    budget = frequency((2, 4), 1 << 20).plan.reservedBytes
+    assert frequency((2, 4), budget).unitsCompleted == 1
+    larger = frequency((12, 4), budget)
+    assert larger.unitsCompleted > 1
+    assert larger.plan.reservedBytes <= budget
 
 
 @pytest.mark.parametrize("budget", [255, 267])

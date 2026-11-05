@@ -423,6 +423,24 @@ def test_frequency_clones_check_inputs_and_memory() -> None:
             )
 
 
+def test_frequency_clones_refuse_a_partition_beyond_the_budget(monkeypatch) -> None:
+    import cytearc.clustering.leiden as leiden
+
+    # The Leiden backend's estimate for the cells that join is checked against
+    # the budget before Leiden runs, here an estimate far beyond it.
+    monkeypatch.setattr(leiden, "native_leiden_peak_bytes", lambda *_args: 10**9)
+    with pytest.raises(
+        MemoryError, match="Partitioning the shared-neighbour graph of 2 cells"
+    ):
+        frequency_clones(
+            np.asarray([[0.5, 0.0], [0.6, 0.0], [0.0, 0.7]]),
+            n_neighbors=2,
+            resolution=1.0,
+            random_seed=1,
+            memory_bytes=10_000,
+        )
+
+
 def test_frequency_clones_refuse_a_budget_below_the_coverage_masks() -> None:
     # The similarities of each group of two cells fit, but not the mask of
     # all 500 cells' coverage, a byte per frequency.

@@ -295,9 +295,9 @@ class ChunkedArray:
         That is this matrix's own index arrays and one block of the rows of
         a stored shard, with its decode, and the ``scratch_bytes_per_row``
         that the caller makes of each row, beside the bytes that the caller
-        keeps. A budget of at least
-        the caller's bytes and these runs the stream in whole blocks. A stream
-        given ``memory_bytes`` shrinks its blocks only when the budget leaves
+        keeps. A budget of at least the caller's bytes and these runs the
+        stream in whole blocks. A stream given ``memory_bytes`` shrinks its
+        blocks only when the budget leaves
         less room than this; a smaller block decodes the same chunks again, so
         it saves little memory for much time.
 

@@ -40,7 +40,6 @@ _PARIS_PLATEAU_ARRAYS = (
 _PARIS_DIAGNOSTIC_FIELDS = frozenset(
     field.name for field in fields(ParisClusterDiagnostic)
 )
-_MEMORY_HEADROOM = 1.35
 _CACHED_FIXED_TRANSIENT_BYTES_PER_CELL = 128
 _CACHED_ADAPTIVE_TRANSIENT_BYTES_PER_CELL = 96
 
@@ -166,7 +165,7 @@ def estimate_paris_peak_bytes(
         + plateau_bytes
         + modularity_guard_bytes
     )
-    return int(_MEMORY_HEADROOM * max(load_peak + fit_peak, symmetrize_peak, cut_peak))
+    return int(max(load_peak + fit_peak, symmetrize_peak, cut_peak))
 
 
 def estimate_paris_adaptive_cut_peak_bytes(
@@ -198,7 +197,7 @@ def estimate_paris_adaptive_cut_peak_bytes(
         + plateau_bytes
         + modularity_guard_bytes
     )
-    return int(_MEMORY_HEADROOM * max(load_peak, symmetrize_peak, cut_peak))
+    return int(max(load_peak, symmetrize_peak, cut_peak))
 
 
 def _zarr_array_nbytes(group: zarr.Group, name: str) -> int:
@@ -242,7 +241,7 @@ def estimate_hierarchy_group_peak_bytes(
         transient_bytes = n_cells * _CACHED_ADAPTIVE_TRANSIENT_BYTES_PER_CELL
     else:
         raise ValueError("cut_mode must be 'adaptive' or 'fixed'")
-    return int(_MEMORY_HEADROOM * (hierarchy_bytes + plateau_bytes + transient_bytes))
+    return int(hierarchy_bytes + plateau_bytes + transient_bytes)
 
 
 def _raise_if_over_budget(
@@ -256,7 +255,7 @@ def _raise_if_over_budget(
     budget_gib = budget.memoryBytes / 1024**3
     raise MemoryBudgetError(
         f"{operation} is estimated to require "
-        f"{required_gib:.2f} GiB including headroom, but the active "
+        f"{required_gib:.2f} GiB, but the active "
         f"resource budget is {budget_gib:.2f} GiB. It needs at least "
         f"{estimate} bytes.",
         needed_bytes=estimate,

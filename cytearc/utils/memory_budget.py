@@ -37,10 +37,10 @@ class MemoryBudgetError(MemoryError):
     Attributes:
         needed_bytes: The bytes that the call holds at the step that was
             refused: what it held before and the step's own charge. A budget
-            of at least this many bytes
-            lets the call pass that step, except where a count write's
-            producer hands it a batch beyond the producer's reservation: that
-            refusal names what the write would reserve with the batch.
+            of at least this many bytes lets the call pass that step, except
+            where a count write's producer hands it a batch beyond the
+            producer's reservation: that refusal names what the write would
+            reserve with the batch.
         budget_bytes: The memory budget that the step would pass.
         item: What the step's charge was for, such as ``"the cells' IDs"``.
     """

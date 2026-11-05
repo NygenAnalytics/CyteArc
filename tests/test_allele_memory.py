@@ -69,3 +69,22 @@ def test_a_budget_too_small_refuses_before_anything_is_written(wide) -> None:
     assert (
         set(store.artifacts.list(kind="lineage_alleles", scope="datastore")) == before
     )
+
+
+def test_the_write_counts_the_chunks_that_zarr_encodes_before_it_writes(
+    wide, monkeypatch
+) -> None:
+    import cytearc.datastore._operations.recorder_alleles as recorder_alleles
+
+    store, cells, path, _folder = wide
+    before = set(store.artifacts.list(kind="lineage_alleles", scope="datastore"))
+    # Chunks that Zarr encodes beyond any budget refuse the write of the
+    # records once they are built, before anything is written.
+    monkeypatch.setattr(
+        recorder_alleles, "cell_data_write_bytes", lambda *_args, **_kwargs: 1 << 60
+    )
+    with pytest.raises(MemoryBudgetError, match=r"for writing the \d+ records, more"):
+        _import(store, cells, path)
+    assert (
+        set(store.artifacts.list(kind="lineage_alleles", scope="datastore")) == before
+    )

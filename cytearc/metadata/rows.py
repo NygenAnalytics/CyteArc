@@ -133,6 +133,8 @@ def read_array_rows_chunkwise(array: Any, rows: np.ndarray) -> np.ndarray:
         if values.shape != (block.indices.size, *row_shape):
             raise ValueError("Metadata row selection returned an invalid shape")
         output[block.destinations] = values
+        # A band's rows go before the next band is read.
+        del values
     return output
 
 
