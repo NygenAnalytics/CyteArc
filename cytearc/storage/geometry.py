@@ -10,28 +10,17 @@ import numpy as np
 from .types import array_metadata_shards
 
 __all__ = [
-    "READ_OBJECT_BYTES",
     "ROW_INDEX_BYTES",
     "ROW_KEPT_INDEX_BYTES",
     "ArrayGeometry",
     "array_geometry",
 ]
 
-#: The objects that Zarr makes to read a stored chunk, its tasks, futures,
-#: specs and selections, whatever the chunk's size: about 25 KB, and 35 KB
-#: beside those of the previous read, on Python 3.13 to 3.15.
-READ_OBJECT_BYTES = 64 * 1024
-#: Beside those, a read that plans many chunks at once holds Zarr's
-#: projection and selections of every chunk, about 2,000 to 2,120 bytes each
-#: on 10 to 4,000 chunks, and the task of each chunk it decodes at once,
-#: about 7 KB each.
-_CHUNK_PLAN_BYTES = 2_304
-_DECODE_TASK_BYTES = 8 * 1024
 #: A read of selected rows a band of chunks at a time first orders the rows
 #: by band, which holds each row's position, chunk and place in their order
-#: and a stable sort's buffer, 40 bytes per row as traced on 1,000 to
-#: 250,000 rows; while it reads the bands it keeps each row's position, place
-#: in that order, index in its band and place in the result, as int64.
+#: and a stable sort's buffer; while it reads the bands it keeps each row's
+#: position, place in that order, index in its band and place in the result,
+#: as int64.
 ROW_INDEX_BYTES = 48
 ROW_KEPT_INDEX_BYTES = 32
 
@@ -78,20 +67,6 @@ class ArrayGeometry:
         decoded = self.nominalChunkBytes()
         return decoded + _encoded_chunk_bound(decoded)
 
-    def heldReadBytes(self, threads: int = 1) -> int:
-        """Return what a finished read can still hold beside the next read.
-
-        The thread of Zarr's pool that decoded a chunk lets go of it only when
-        that thread next runs, which on a busy machine can come after the next
-        read has begun. Until then it holds the chunk as stored and decoded,
-        and :data:`READ_OBJECT_BYTES` covers Zarr's objects for the finished
-        read and the next. ``threads`` counts the codec threads that can each
-        still hold a chunk: Zarr's pool spreads a read's chunks over its
-        threads even when it decodes one at a time, so a read of several
-        chunks can leave one on each thread, up to the chunks it decoded.
-        """
-        return max(1, int(threads)) * self.storedChunkBytes() + READ_OBJECT_BYTES
-
     def rowBytes(self) -> int:
         """Return the bytes of one row: one value of every later axis."""
         return math.prod(self.shape[1:]) * self.itemsize
@@ -107,68 +82,38 @@ class ArrayGeometry:
         """Return what reading the whole array at ``concurrency`` holds while it runs, with the result.
 
         An unsharded array is read in one call, which decodes up to
-        ``concurrency`` chunks at once, each as stored and decoded, and plans
-        every chunk at once. A sharded array is read a band of inner chunks
-        at a time, as :meth:`bandReadBytes` counts, so that no fetch takes
-        more than one band of a shard.
+        ``concurrency`` chunks at once, each as stored and decoded. A sharded
+        array is read a band of inner chunks at a time, as
+        :meth:`bandReadBytes` counts, so that no fetch takes more than one
+        band of a shard.
         """
         result = self.shape[0] * self.rowBytes()
         if self.shards is not None:
-            n_bands = -(-self.shape[0] // self.axisChunk(0))
-            return result + self.bandReadBytes(
-                self.axisChunk(0), concurrency, bands=n_bands
-            )
+            return result + self.bandReadBytes(self.axisChunk(0), concurrency)
         n_chunks = -(-self.shape[0] // self.axisChunk(0)) * self.bandChunks()
         decoding = min(max(1, int(concurrency)), max(1, n_chunks))
-        return (
-            result
-            + decoding * (self.storedChunkBytes() + _DECODE_TASK_BYTES)
-            + n_chunks * _CHUNK_PLAN_BYTES
-            + READ_OBJECT_BYTES
-        )
+        return result + decoding * self.storedChunkBytes()
 
-    def bandReadBytes(self, rows: int, concurrency: int, *, bands: int = 1) -> int:
+    def bandReadBytes(self, rows: int, concurrency: int) -> int:
         """Return what reading ``rows`` rows of one band of chunks holds beside the result it fills.
 
         The read holds those rows as Zarr returns them and the band's chunks
         that it decodes at once, each as stored and decoded; a sharded array
         also fills a shard-level copy of the rows and holds the stored bytes
-        of every chunk of the band it fetched. A read of ``bands`` bands, one
-        after another, holds the chunks of the band before beside the next.
+        of every chunk of the band it fetched.
         """
         rows_bytes = max(0, int(rows)) * self.rowBytes()
         touched = self.bandChunks()
         decoding = min(max(1, int(concurrency)), touched)
         if self.shards is None:
-            band = decoding * (self.storedChunkBytes() + _DECODE_TASK_BYTES)
+            band = decoding * self.storedChunkBytes()
         else:
             band = (
                 rows_bytes
                 + touched * self.storedChunkBytes()
-                + decoding * (self.nominalChunkBytes() + _DECODE_TASK_BYTES)
+                + decoding * self.nominalChunkBytes()
             )
-        return (
-            rows_bytes
-            + min(2, max(1, int(bands))) * (band + self.readScratchBytes)
-            + touched * _CHUNK_PLAN_BYTES
-            + READ_OBJECT_BYTES
-        )
-
-    def bandHeldBytes(self, threads: int) -> int:
-        """Return what a finished read of bands of chunks can still hold beside the next read.
-
-        Each of ``threads`` codec threads can still hold a chunk that it
-        decoded, as :meth:`heldReadBytes` counts; a sharded array's last band
-        also keeps the stored bytes of every chunk of the band that its fetch
-        took, since each chunk was decoded from a view of that buffer.
-        """
-        if self.shards is None:
-            return self.heldReadBytes(threads)
-        return (
-            self.bandChunks() * self.storedChunkBytes()
-            + max(1, int(threads)) * self.nominalChunkBytes()
-            + READ_OBJECT_BYTES
-        )
+        return rows_bytes + band + self.readScratchBytes
 
     def readBytes(
         self, resultBytes: int, chunks: int = 1, decodes: int | None = None

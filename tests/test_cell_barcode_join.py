@@ -938,32 +938,6 @@ def test_the_join_reads_the_stores_cell_ids_once_and_only_when_it_needs_them() -
     assert every.n_unmatched_barcodes == 1
 
 
-def test_the_pass_keeps_eight_bytes_for_each_of_the_stores_ids(tmp_path) -> None:
-    import zarr
-
-    from cytearc.datastore._operations.cell_barcodes import store_pass_bytes
-
-    group = zarr.open_group(tmp_path / "ids.zarr", mode="w")
-    arrays = {}
-    for n_ids in (100_000, 100_010):
-        ids = np.asarray([f"s1__{index:09d}-1" for index in range(n_ids)])
-        arrays[n_ids] = group.create_array(
-            f"ids{n_ids}", shape=ids.shape, dtype=ids.dtype, chunks=(50_000,)
-        )
-        arrays[n_ids][:] = ids
-    # Ten more IDs in a band of the same rows add their ten hashes alone.
-    assert (
-        store_pass_bytes(arrays[100_010], 10) - store_pass_bytes(arrays[100_000], 10)
-        == 80
-    )
-    # A read on more threads can leave more chunks behind.
-    assert store_pass_bytes(arrays[100_000], 10, codec_threads=4) >= (
-        store_pass_bytes(arrays[100_000], 10)
-    )
-    # A selection of every cell of the store reads none of them.
-    assert store_pass_bytes(arrays[100_000], 100_000) == 0
-
-
 @pytest.mark.parametrize("order", ["named first", "unnamed first", "two chunks"])
 def test_a_barcode_that_the_pattern_does_not_match_counts_apart_whatever_the_order(
     order,

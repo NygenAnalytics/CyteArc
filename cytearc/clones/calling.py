@@ -48,7 +48,7 @@ import numpy as np
 from ..utils.arguments import bool_argument, quoted_value
 from ..utils.arrays import unique_inverse
 from ..utils.digest import mix64
-from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
+from ..utils.memory_budget import MemoryLedger
 from ..utils.numba import njit
 
 __all__ = [
@@ -73,10 +73,9 @@ type CallingMethod = Literal["sets", "jaccard", "shared"]
 #: graph over them, or links through any item two sets share.
 CALLING_METHODS: tuple[str, ...] = ("sets", "jaccard", "shared")
 # Bytes of each item of a set while sets are built from pairs: the order of
-# the pairs, their sorted cells and items and the flags of new pairs, 19 to
-# 25 as traced on 60,000 to 2,000,000 pairs; and while a cell's items and
-# unknown items are joined, the pairs of both joined, their order and sorted
-# copies.
+# the pairs, their sorted cells and items and the flags of new pairs; and
+# while a cell's items and unknown items are joined, the pairs of both joined,
+# their order and sorted copies.
 _PAIR_BYTES = 28
 _JOINED_PAIR_BYTES = 48
 # Bytes of each cell of the sets built: its pointer, and its count of items
@@ -85,8 +84,8 @@ _SET_CELL_BYTES = 16
 # Bytes of each cell while identical sets are found: its two hashes, size and
 # group with their sorted copies and order, the comparisons of neighbours in
 # that order, its run, its node and their order, and its node's first cell,
-# size, group and pointer, 167 as traced on 5,000 to 50,000 cells; and of
-# each item of a node, the item and the checks of its order, 12 as traced.
+# size, group and pointer; and of each item of a node, the item and the
+# checks of its order.
 _IDENTITY_CELL_BYTES = 180
 _NODE_ITEM_BYTES = 16
 # Bytes that the nodes hold once found: each cell's node, each node's first
@@ -106,8 +105,7 @@ _GRAPH_NODE_BYTES = 40
 # Without unknown items, the graph is built through the nodes' prefixes. Bytes
 # of each item of a node while the items are coded within their groups: the
 # group of its entry, its code, the lists of each code's nodes and their
-# order, 43 as traced on 50,000 to 190,000 nodes of 3 to 20 items; and of each
-# node, the pointers that place its entries.
+# order; and of each node, the pointers that place its entries.
 _ITEM_CODE_BYTES = 48
 _ITEM_CODE_NODE_BYTES = 16
 # A pair linked at an index of at least t shares at least t times the items
@@ -121,8 +119,8 @@ _EDGE_BYTES = 16
 _ADJACENCY_EDGE_BYTES = 80
 _ADJACENCY_NODE_BYTES = 48
 # Bytes of each node while components are found: its root, the roots kept,
-# their order and numbering, and its component, 66 as traced; and of each
-# cell, its doublet flag, component, clone and the masks that place them.
+# their order and numbering, and its component; and of each cell, its doublet
+# flag, component, clone and the masks that place them.
 _COMPONENT_NODE_BYTES = 80
 _CLONE_CELL_BYTES = 40
 # Bytes of each component while the clones are numbered: its size, whether it
@@ -147,8 +145,8 @@ def _ledger(ledger: MemoryLedger | None) -> MemoryLedger:
 
 
 def _peak(ledger: MemoryLedger, item: str, nbytes: int) -> None:
-    """Check that a step's ``nbytes``, and NumPy's objects and sort buffers, fit beside what the ledger holds."""
-    ledger.peak(item, nbytes + NUMPY_STEP_BYTES, remedy=_REMEDY)
+    """Check that a step's ``nbytes`` fit beside what the ledger holds, naming the calling remedy."""
+    ledger.peak(item, nbytes, remedy=_REMEDY)
 
 
 @dataclass(frozen=True, slots=True)

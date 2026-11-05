@@ -13,7 +13,6 @@ from ..storage.arrays import (
     _measured_text_dtype,
     create_streamed_metadata_column,
     create_zarr_dataset,
-    zarr_write_buffer_bytes,
 )
 from ..storage.artifact_writer import (
     ArrayRequirement,
@@ -60,15 +59,6 @@ _CHUNK_ROWS = 100_000
 # The pass that finds the widest value of a text array converts this many
 # values to text at a time.
 _MEASURED_ROWS = 4_096
-# Zarr's objects for each write of a chunk that runs at once, and the
-# transaction, metadata and objects of writing an artifact whatever its size.
-_CHUNK_WRITE_BYTES = 16 << 10
-_WRITE_FIXED_BYTES = 64 << 10
-# headroom_bytes adds a sixteenth of the bytes that a cost counts exactly past
-# the first mebibyte, of which the fixed allowance of a write is a sixteenth
-# already.
-_HEADROOM_SHARE = 16
-_HEADROOM_FREE_BYTES = _HEADROOM_SHARE * _WRITE_FIXED_BYTES
 
 
 def validate_display_metadata(
@@ -303,7 +293,7 @@ def cell_data_write_bytes(
     ``np.dtype("U12")`` for labels of up to 12 characters, whatever dtype the
     caller holds it in. ``chunk_lengths`` is the writer's. Arrays are written
     one after another, in the order given, so the write holds what its
-    costliest array holds beside what the array before it left behind:
+    costliest array holds:
 
     - text, a stored chunk at a time: the chunk's values at the stored width,
       four bytes a character, and the chunk that Zarr encodes from them, a
@@ -311,24 +301,8 @@ def cell_data_write_bytes(
     - numbers, written whole: each chunk that Zarr encodes at once, up to its
       async concurrency of them, and a last chunk of fewer rows twice.
 
-    The thread of Zarr's pool that encoded a chunk keeps what it was given and
-    what it made until that thread next runs, which on a busy machine comes
-    after the next write has begun. So an array of more chunks than Zarr
-    writes at once also holds the chunk before: for text, the block of values
-    it was encoded from and the encoded chunk, which is as large as the block
-    when the text does not compress; for numbers, which Zarr encodes from the
-    caller's array, the encoded chunk. The first chunk of an array holds
-    instead what the last write of the array before it left behind: for
-    text, its last block and encoded chunk, and for numbers, the encoded
-    chunk of each thread that encoded one at once, and a short last chunk's
-    full copy. The chunks of text are counted exactly as they are held, so
-    the cost adds :func:`headroom_bytes` of them. Beside
-    them are Zarr's objects for each write of a chunk that runs at once, its
-    file buffers (:func:`~cytearc.storage.arrays.zarr_write_buffer_bytes`),
-    and a fixed allowance for the artifact's transaction and metadata
-    whatever the size of its arrays. Attributes that grow with the data, and
-    a payload fingerprint, which reads the arrays back after they are
-    written, are left to the caller.
+    Attributes that grow with the data, and a payload fingerprint, which
+    reads the arrays back after they are written, are left to the caller.
 
     Raises:
         TypeError: If ``arrays`` is not a mapping of shapes and dtypes.
@@ -339,7 +313,6 @@ def cell_data_write_bytes(
     if not isinstance(arrays, Mapping):
         raise TypeError("arrays must map each array's name to its shape and dtype")
     costliest = 0
-    left = 0
     for name, spec in arrays.items():
         if not isinstance(spec, tuple) or len(spec) != 2:
             raise TypeError(
@@ -368,33 +341,15 @@ def cell_data_write_bytes(
             )
         if dtype.kind == "U" and len(shape) != 1:
             raise ValueError(f"Text array {name!r} must be one-dimensional")
-        held, left = _array_write_bytes(
-            tuple(int(size) for size in shape),
-            dtype,
-            _chunk_length(name, chunk_lengths),
-            left,
+        costliest = max(
+            costliest,
+            _array_write_bytes(
+                tuple(int(size) for size in shape),
+                dtype,
+                _chunk_length(name, chunk_lengths),
+            ),
         )
-        costliest = max(costliest, held)
-    return _WRITE_FIXED_BYTES + zarr_write_buffer_bytes() + costliest
-
-
-def headroom_bytes(counted: int) -> int:
-    """Return the headroom that a memory cost adds beside ``counted`` bytes it counts exactly.
-
-    The cost of writing text counts the chunks that the write holds, and the
-    cost of saving clones counts the arrays that the save builds and
-    gathers, each exactly as it is held. The headroom is a sixteenth of the
-    bytes past the first mebibyte: the fixed allowance of 64 KiB that a write
-    or a save adds is a sixteenth of the first already.
-
-    Without the headroom, the traced peaks of such writes and saves came
-    within 0.8% of their costs, and within 0.2% of one another on Python
-    3.13, 3.14 and 3.15, with the locked and the lowest direct dependencies,
-    and with the CPU idle and oversubscribed three times over. With it, each
-    of these peaks sits at least 5% under its cost, so a machine that holds a
-    little more than those still fits.
-    """
-    return max(0, int(counted) - _HEADROOM_FREE_BYTES) // _HEADROOM_SHARE
+    return costliest
 
 
 def _chunk_length(name: str, chunk_lengths: Mapping[str, int] | None) -> int:
@@ -410,37 +365,22 @@ def _chunk_rows(n_rows: int, length: int) -> int:
 
 
 def _array_write_bytes(
-    shape: tuple[int, ...], dtype: np.dtype[Any], length: int, before: int
-) -> tuple[int, int]:
-    """What writing one array holds beside it, and what it leaves behind, as :func:`cell_data_write_bytes` counts.
-
-    ``before`` is what the write of the array before it left behind, which
-    its first chunk holds beside it.
-    """
+    shape: tuple[int, ...], dtype: np.dtype[Any], length: int
+) -> int:
+    """What writing one array holds beside it, as :func:`cell_data_write_bytes` counts."""
     n_rows = shape[0]
     if dtype.kind == "U":
         rows = _chunk_rows(n_rows, _CHUNK_ROWS)
-        chunk = dtype.itemsize * rows
-        # A chunk and its encoded copy beside what the array before left
-        # behind, and from the second chunk on the block before and its
-        # encoded copy. Measuring the widest value converts 4,096 values at a
-        # time beside their lengths, which holds less.
-        held = max(2 * chunk + before, 4 * chunk if n_rows > rows else 0)
+        # A chunk and its encoded copy. Measuring the widest value converts
+        # 4,096 values at a time beside their lengths, which holds less.
         partial = n_rows % rows if n_rows > rows else 0
-        return (
-            held + headroom_bytes(held) + dtype.itemsize * partial + _CHUNK_WRITE_BYTES,
-            2 * chunk,
-        )
+        return 2 * dtype.itemsize * rows + dtype.itemsize * partial
     rows = _chunk_rows(n_rows, length)
     chunk = rows * math.prod(shape[1:]) * dtype.itemsize
     n_chunks = -(-n_rows // rows)
     at_once = min(n_chunks, int(zarr.config.get("async.concurrency")))
-    held = 1 if n_chunks > at_once else 0
     partial = 1 if n_rows > rows and n_rows % rows else 0
-    return (
-        (at_once + held + partial) * chunk + at_once * _CHUNK_WRITE_BYTES + before,
-        (at_once + partial) * chunk,
-    )
+    return (at_once + partial) * chunk
 
 
 def _write_text_array(group: zarr.Group, name: str, values: np.ndarray) -> None:

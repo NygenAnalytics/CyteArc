@@ -394,7 +394,8 @@ def test_alleles_without_a_read_site_have_no_matrix(store, tmp_path, truth):
 
 def test_an_export_beyond_the_budget_writes_nothing(store, truth, recorders, tmp_path):
     alleles = _petracer_alleles(store, truth, recorders, tmp_path)
-    store.memoryBytes = 1_000_000
+    # The records and the matrix built from them hold about 200 kB.
+    store.memoryBytes = 50_000
     with pytest.raises(MemoryError, match="Raise mem_budget"):
         store.clones.export_characters(alleles, tmp_path / "out.zarr")
     with pytest.raises(MemoryError, match="Raise mem_budget"):

@@ -1,4 +1,3 @@
-import io
 import os
 import re
 from abc import ABC, abstractmethod
@@ -608,22 +607,18 @@ _SCAN_BYTES = 1 << 15
 #: The most bytes that :func:`protospacer_calls_size` holds while it counts a
 #: file, whatever the file holds: a chunk as read and the flags of its
 #: characters, and the positions of its line ends and its separators, the
-#: line of each separator and the separators of each line, 8 bytes each,
-#: which reach 22 bytes for each byte of a chunk of nothing but line ends and
-#: separators, as traced; the gzip reader's two buffers of compressed and
-#: decompressed bytes, ``io.DEFAULT_BUFFER_SIZE`` each, 128 KiB since Python
-#: 3.14; and the scan's own objects.
-PROTOSPACER_SCAN_BYTES = 24 * _SCAN_BYTES + 2 * io.DEFAULT_BUFFER_SIZE + (64 << 10)
+#: line of each separator and the separators of each line, 8 bytes each, up
+#: to 22 bytes for each byte of a chunk of nothing but line ends and
+#: separators.
+PROTOSPACER_SCAN_BYTES = 24 * _SCAN_BYTES
 # The bytes that read_protospacer_calls holds while it parses, by the size of
-# the file, measured with Python 3.13 and pandas 3.0 and rounded up: for
-# each row, its four fields as Python text, pandas' copies of them, and its
-# lists of calls and UMI counts; for each piece of a list, a feature ID or a
-# UMI count, its text, the flattened copies and its number; for each byte,
-# the text that the pieces copy; and pandas' fixed cost.
+# the file: for each row, its four fields as Python text, pandas' copies of
+# them, and its lists of calls and UMI counts; for each piece of a list, a
+# feature ID or a UMI count, its text, the flattened copies and its number;
+# and for each byte, the text that the pieces copy.
 _PARSE_BYTES_PER_ROW = 640
 _PARSE_BYTES_PER_PIECE = 160
 _PARSE_BYTES_PER_BYTE = 3
-_PARSE_FIXED_BYTES = 1 << 20
 # The bytes that the parsed calls hold: each barcode as Python text and its
 # pointer, and each call's row, UMIs, feature pointer and feature text.
 _PARSED_BYTES_PER_ROW = 64
@@ -677,8 +672,7 @@ class ProtospacerCallsSize:
         """Return the most bytes that :func:`read_protospacer_calls` holds while it parses."""
         pieces = 2 * self.n_rows + self.n_pipes
         return (
-            _PARSE_FIXED_BYTES
-            + _PARSE_BYTES_PER_ROW * self.n_rows
+            _PARSE_BYTES_PER_ROW * self.n_rows
             + _PARSE_BYTES_PER_PIECE * pieces
             + _PARSE_BYTES_PER_BYTE * self.n_bytes
         )

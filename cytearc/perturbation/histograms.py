@@ -49,9 +49,6 @@ _COUNT_MASK = np.uint64(MAX_COUNT)
 # whose cells carry more fill it again.
 _KEYS_PER_CELL = 2
 _MOST_KEYS = 1 << 20
-# The bytes of Python objects and of the sort's scratch that a call holds;
-# about 4 kB in Python 3.13 with NumPy 2.5.
-_CALL_BYTES = 1 << 14
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,8 +150,7 @@ def histogram_bytes(
     the counts tells; with 0 it is the least memory of any call. It covers
     the dense array, the buffer that gathers the counts above
     :data:`DENSE_COUNTS`, two keys per cell and at most 8 MiB but at least two
-    per guide, 16 KiB of Python objects and sorting, and 32 bytes per
-    distinct count: a merge holds the merged larger counts beside the new
+    per guide, and 32 bytes per distinct count: a merge holds the merged larger counts beside the new
     ones, 16 bytes each, and assembling the histograms holds them beside the
     16 bytes of each count of the histograms. The sample codes, as int64,
     belong to the caller.
@@ -173,7 +169,7 @@ def histogram_bytes(
     buffer = 8 * _buffer_keys(n_cells, n_guides)
     # The offsets of the histograms and the cells of each sample.
     assembled = 8 * (n_entries + 1) + 16 * n_samples
-    return dense + buffer + assembled + _CALL_BYTES + 32 * n_distinct
+    return dense + buffer + assembled + 32 * n_distinct
 
 
 def _buffer_keys(n_cells: int, n_guides: int) -> int:
@@ -583,7 +579,7 @@ def guide_count_histograms(
         rows_read=0,
         n_rows=len(codes),
     )
-    held = copied + _CALL_BYTES
+    held = copied
     dense = np.zeros((n_samples, n_guides, DENSE_COUNTS), dtype=np.uint32)
     keys, key_cells = _larger_counts(
         blocks, codes, n_guides, dense, held + dense.nbytes, ledger

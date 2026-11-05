@@ -107,7 +107,6 @@ from ...utils.arrays import sorted_unique
 from ...utils.digest import file_sha256
 from ...utils.logging import logger
 from ...utils.memory_budget import (
-    NUMPY_STEP_BYTES,
     MemoryLedger,
     hash_table_bytes,
     object_array_bytes,
@@ -140,7 +139,6 @@ from .clone_steps import (
     measured_within_types,
     plan_artifact_cells,
     read_codes,
-    text_file_write_bytes,
 )
 
 if TYPE_CHECKING:
@@ -158,10 +156,9 @@ CLONE_EXPORT_DIAGNOSTICS = ("cells",)
 # Bytes of one parsed row of a clone file in its chunk: the headers of its
 # barcode and clone label as Python strings and their places in the chunk's
 # columns, and the barcodes, labels, probabilities and cells that join and
-# assign it; and of each field of the file, which the parser skips. Traced on
-# 200,000 rows of 2 and 5 fields, a row held 117 to 121 bytes beside one
-# byte a character of ASCII text and four of text beyond U+FFFF, which each
-# character of the longest sampled row is counted at.
+# assign it; and of each field of the file, which the parser skips; and of
+# each character of the longest sampled row, at four bytes, the most a
+# character of text takes.
 _PARSED_ROW_BYTES = 128
 _PARSED_FIELD_BYTES = 8
 _PARSED_CHARACTER_BYTES = 4
@@ -169,12 +166,10 @@ _PARSED_CHARACTER_BYTES = 4
 _MIN_CHUNK_ROWS = 1_000
 _MAX_CHUNK_ROWS = 1_000_000
 # Bytes per cell of the tables of loaded clones beside its ID: the clone
-# code, size and probability, the labels kept apart, and the pandas index;
-# with the ID, about 220 bytes per cell, and 230 with the receptor types of
-# clonotypes, as traced on 200,000 cells.
+# code, size and probability, the labels kept apart, and the pandas index.
 _TABLE_BYTES_PER_CELL = 250
 # Bytes per cell of an export beside its ID: its label and its code, and the
-# text of its row, beside what the text writer holds whatever its rows.
+# text of its row.
 _EXPORT_BYTES_PER_CELL = 200
 # Bytes of each clone that a figure labels: its ID as given and as text, its
 # code, and its label, a string of up to four bytes per character, beside the
@@ -199,62 +194,50 @@ _KEPT_APART_COLUMNS: dict[str, tuple[str, ...]] = {
     CloneImportArguments.artifact_kind: (),
     ClonotypeArguments.artifact_kind: (_RECEPTOR_TYPE_COLUMN,),
 }
-# Measuring clonal expansion holds, at its peak, about 230 bytes per cell: the
-# clone and group codes, the clone sizes and frequencies, and the labels as
-# written, as traced on 1,000,000 cells in eight samples, and 281 bytes per
-# cell without a grouping, as traced on 200,000 cells.
+# Measuring clonal expansion holds, at its peak, each cell's clone and group
+# codes, clone size and frequency, and labels as written.
 _EXPANSION_BYTES_PER_CELL = 300
-# The tables of loaded clonal expansion hold about 310 bytes per cell at their
-# peak, with the cell IDs and labels as text, as traced on the same cells,
-# besides the clone labels that they read.
+# The tables of loaded clonal expansion hold, at their peak, each cell's ID
+# and labels as text, beside the clone labels that they read.
 _EXPANSION_TABLE_BYTES_PER_CELL = 500
 # Each group of a summary holds its clone sizes and its rows of the result's
-# tables, 650 bytes for diversity as traced on 179,932 groups.
+# tables.
 _SUMMARY_BYTES_PER_GROUP = 2_000
 # Summarizing the groups' clone sizes holds the counts of each clone's cells
 # in each group and, while it sorts them by group and size into one table, a
-# key and its sorted copy of each, 48 bytes for each count as traced on
-# 800,000 counts in four groups.
+# key and its sorted copy of each.
 _SIZE_TABLE_BYTES_PER_COUNT = 56
 # Each row of the table beyond the first of its group holds its group, size
-# and count, and the temporaries of the measures summed over rows, 92 bytes as
-# traced on one group of 4,000 distinct sizes.
+# and count, and the temporaries of the measures summed over rows.
 _SIZE_TABLE_BYTES_PER_ROW = 128
 # Rarefying a group holds, for each of its sample sizes, the size as passed,
-# how its sample is reached and the whole sizes that it rarefies, 141 bytes as
-# traced on one group of 10,000 one-cell clones at 5,000 sizes.
+# how its sample is reached and the whole sizes that it rarefies.
 _RAREFACTION_BYTES_PER_SIZE = 192
 # Each row of the rarefaction curves: its order, size, method, Hill number,
-# coverage and group, and the table built from them, 121 bytes as traced on
-# 2,000 groups at 40 sizes. The groups' labels stay in their own table.
+# coverage and group, and the table built from them. The groups' labels stay
+# in their own table.
 _CURVE_BYTES_PER_ROW = 128
-# Comparing groups holds, at its peak, about 220 bytes per pair of groups of
-# one stratum, the pairs' indices and their table, and 16 bytes per product of
-# two groups of the largest stratum, as measured on 1,000 and 2,000 groups;
-# 2,000 groups of a million cells, 2 million pairs, traced 374 MiB beyond
-# grouping the cells.
+# Comparing groups holds, at its peak, the indices and table row of each pair
+# of groups of one stratum, and a count for each product of two groups of the
+# largest stratum.
 _OVERLAP_BYTES_PER_PAIR = 250
 _OVERLAP_BYTES_PER_PRODUCT = 24
 # Each count of a clone's cells in a group holds its group, clone code and
 # cells, and its entries in the matrices that compare or follow the groups.
 _BYTES_PER_CLONE_COUNT = 40
 # Following clones holds, for each row of the table, its clone, group, cells
-# and fraction, and a byte for its chosen clone and group. Pandas 2 copies
-# the four columns into one block of each dtype as it builds the table:
-# traced on pandas 2.2.3, 9,020 and 18,040 rows held 1,523,958 and 2,480,836
-# bytes by 13 key columns and 1,103,557 and 2,060,527 by one, 106.1 bytes a
-# row with that byte, against 80.1 on pandas 3. The groups' labels stay in
-# their own table.
+# and fraction, a byte for its chosen clone and group, and the copy of the
+# four columns that pandas makes as it builds the table. The groups' labels
+# stay in their own table.
 _TRACK_BYTES_PER_ROW = 106
 # Each pair of a fate and a clone holds its fate, clone code and cells.
 _BYTES_PER_FATE_PAIR = 24
 # Clearing the labels of the late cells without a clone holds a flag for
-# each late cell and, for each column kept apart, a copy of the labels: 9
-# bytes a late cell of one column, as traced on 20,000 and 400,000 cells.
+# each late cell and, for each column kept apart, a copy of the labels.
 _CLEARING_BYTES_PER_CELL = 2
 _CLEARED_BYTES_PER_COLUMN = 10
 # Finding the first cell of a clone named without a counted cell sorts every
-# cell's clone and holds the sorted codes: 16 bytes a cell, as traced.
+# cell's clone and holds the sorted codes.
 _FIRST_CELL_BYTES = 20
 # Writing the fate bias builds, for each early cell, a reference to its
 # dominant fate's name, its codes as int32, and the mask and arrays that pick
@@ -263,9 +246,7 @@ _BIAS_WRITE_BYTES_PER_CELL = 40
 # The tables of loaded fate bias hold, for each early cell, its ID, clone,
 # fate and late cells and the pandas index, for each of its fractions the
 # value read and its column in the table of fractions, and for each row of
-# the table of clones and fates its clone, fate, counts and tests: at most
-# 113 bytes at their peak as traced on 1 to 3 million rows that also held one
-# to three key columns, which the fates' own table now holds.
+# the table of clones and fates its clone, fate, counts and tests.
 _BIAS_TABLE_BYTES_PER_CELL = 200
 _BIAS_TABLE_BYTES_PER_FRACTION = 24
 _BIAS_TABLE_BYTES_PER_ROW = 160
@@ -1029,12 +1010,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         cell_ids = artifact_cell_ids(
             ledger, self.zw, self.cells._get_array("ids"), planned_cells
         )
-        # Each cell's label and code as written, and its flag, beside the
-        # writer's buffers.
+        # Each cell's label and code as written, and its flag.
         ledger.peak(
-            f"writing the clones of {n_cells} cells",
-            _EXPORT_BYTES_PER_CELL * n_cells
-            + text_file_write_bytes(os.fspath(path).endswith(".gz")),
+            f"writing the clones of {n_cells} cells", _EXPORT_BYTES_PER_CELL * n_cells
         )
         assigned = codes >= 0
         cell_ids = cell_ids[assigned]
@@ -1161,9 +1139,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 ledger.release(read_bytes + code_bytes)
             kept_apart = ((_RECEPTOR_TYPE_COLUMN, labels),)
             del labels
-        # The clones' few labels are read before each cell's code, whose
-        # larger chunk a codec thread may hold after the read: a read of
-        # small chunks need not replace it.
+        # The clones' few labels are read before each cell's code.
         clone_ids = (
             read_whole_text(
                 ledger, group, _CLONE_ID_ARRAYS[clones.kind], item="the clones' labels"
@@ -1303,8 +1279,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             hash_table_bytes(len(own))
             + 8 * len(unknown)
             + len(own)
-            + 9 * len(clonotypes)
-            + NUMPY_STEP_BYTES,
+            + 9 * len(clonotypes),
         )
         named = pd.Index(own, dtype=object).get_indexer(unknown)
         wanted = np.zeros(len(own), dtype=bool)
@@ -1569,19 +1544,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         )
         n_measured = len(measured)
         # Each measured cell's place among the clones' cells, found through
-        # pandas' hash table of their positions and its copy of them, as
-        # traced on 48 to 1,000,000 positions, beside the objects of its
-        # index; and each measured cell's clone and labels.
+        # pandas' hash table of their positions and its copy of them; and
+        # each measured cell's clone and labels.
         ledger.hold(
             "each measured cell's clone and the labels its clone keeps apart",
             (9 + 8 * len(kept_apart)) * n_measured,
         )
         ledger.peak(
             "matching the clones' cells to the measured cells",
-            hash_table_bytes(len(held))
-            + 8 * len(held)
-            + 8 * n_measured
-            + NUMPY_STEP_BYTES,
+            hash_table_bytes(len(held)) + 8 * len(held) + 8 * n_measured,
         )
         at = pd.Index(held).get_indexer(measured)
         found = at >= 0
@@ -2512,11 +2483,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise ValueError("No cell has both a clone and a group")
         assert source.clone_ids is not None
         identifiers = source.clone_ids
-        # Choosing each group's largest clones sorts the counts and ranks them,
-        # 33 bytes a count as traced on 37,000 to 400,000 counts.
+        # Choosing each group's largest clones sorts the counts and ranks them.
         ledger.peak(
             f"choosing the clones to follow among {len(pair_cells)} counts",
-            _BYTES_PER_CLONE_COUNT * len(pair_cells) + NUMPY_STEP_BYTES,
+            _BYTES_PER_CLONE_COUNT * len(pair_cells),
         )
         if labels is None:
             chosen = top_clones(
@@ -2541,10 +2511,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if strata is None:
             strata = np.zeros(len(keys), dtype=np.int64)
         # Finding the counts of the clones followed places each count among
-        # them, 26 bytes a count as traced.
+        # them.
         ledger.peak(
             f"finding the counts of {len(chosen)} clones followed",
-            _BYTES_PER_CLONE_COUNT * len(pair_cells) + NUMPY_STEP_BYTES,
+            _BYTES_PER_CLONE_COUNT * len(pair_cells),
         )
         reach = tracking_reach(
             pair_groups,
@@ -2558,11 +2528,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             # A clone named without a counted cell is followed through the
             # stratum of its first cell's labels, which sorting every cell's
             # clone finds where the clones keep labels apart.
-            ledger.peak(
-                "finding the first cell of each clone named without a counted cell",
-                (_FIRST_CELL_BYTES * len(source.codes) if source.kept_apart else 0)
-                + NUMPY_STEP_BYTES,
-            )
+            if source.kept_apart:
+                ledger.peak(
+                    "finding the first cell of each clone named without a counted cell",
+                    _FIRST_CELL_BYTES * len(source.codes),
+                )
             fallback = _fallback_strata(source, keys, strata, chosen[lone])
             found = fallback >= 0
             reach[lone[found], fallback[found]] = True
@@ -3340,9 +3310,7 @@ def _kept_apart_strata(source: _CloneInput, keys: pd.DataFrame) -> np.ndarray | 
 
 def _cleared_label_bytes(n_cells: int, n_columns: int) -> int:
     """What :func:`_cleared_labels` holds for ``n_cells`` cells of ``n_columns`` columns kept apart."""
-    return (
-        _CLEARING_BYTES_PER_CELL + _CLEARED_BYTES_PER_COLUMN * n_columns
-    ) * n_cells + NUMPY_STEP_BYTES
+    return (_CLEARING_BYTES_PER_CELL + _CLEARED_BYTES_PER_COLUMN * n_columns) * n_cells
 
 
 def _cleared_labels(

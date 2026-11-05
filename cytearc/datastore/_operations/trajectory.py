@@ -205,9 +205,8 @@ def _placement_write_bytes(n_cells: int, n_lineages: int, chunk_rows: int) -> in
     Each of the two float64 arrays is written a whole chunk band of
     ``chunk_rows`` rows at a time through ``_RowBandWriter``, which holds one
     band. While a band is written, Zarr holds what writing a chunk holds, as
-    ``cell_data_write_bytes`` states, beside the encoded chunk that the write
-    before can still hold on a busy machine, and for a last band of fewer
-    rows than a chunk also the full chunk that it pads them into.
+    ``cell_data_write_bytes`` states, and for a last band of fewer rows than
+    a chunk also the full chunk that it pads them into.
     """
     band = chunk_rows * n_lineages * np.dtype(np.float64).itemsize
     write = cell_data_write_bytes(
@@ -215,7 +214,7 @@ def _placement_write_bytes(n_cells: int, n_lineages: int, chunk_rows: int) -> in
         chunk_lengths={"band": chunk_rows},
     )
     padded = band if n_cells % chunk_rows else 0
-    return 2 * band + write + band + padded
+    return 2 * band + write + padded
 
 
 def _validate_normalization_identity(

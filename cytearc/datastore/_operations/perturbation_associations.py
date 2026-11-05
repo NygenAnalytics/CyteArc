@@ -32,7 +32,7 @@ from ...storage.artifact_writer import (
     PlannedArtifact,
 )
 from ...storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
-from ...storage.geometry import READ_OBJECT_BYTES, array_geometry
+from ...storage.geometry import array_geometry
 from ...storage.partition import row_band
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
@@ -116,15 +116,11 @@ def _code_blocks(codes: zarr.Array) -> Iterator[np.ndarray]:
 def _chunk_read_bytes(codes: zarr.Array) -> int:
     """Return what reading one stored chunk of rows of an array of codes holds.
 
-    The read holds the chunk as stored and decoded, the rows it returns, and
-    the objects Zarr makes to run it. The previous chunk, as stored and
-    decoded, can still be held beside them: the thread of Zarr's pool that
-    decoded it lets go of it only when that thread next runs, which on a busy
-    machine can come after the next read has begun.
+    The read holds the chunk as stored and decoded, and the rows it returns.
     """
     stored, _ = array_row_selection_parts(codes)
     row_bytes = int(np.prod(codes.shape[1:], dtype=np.int64)) * codes.dtype.itemsize
-    return 2 * stored + _chunk_rows(codes) * row_bytes + READ_OBJECT_BYTES
+    return stored + _chunk_rows(codes) * row_bytes
 
 
 def _association_warnings(

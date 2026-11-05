@@ -66,9 +66,6 @@ MAX_PERMUTATIONS = 1_000_000
 # yields the same numbers however they are split, so the p-values do not
 # depend on it.
 _DRAW_BYTES = 1 << 23
-# The bytes of Python objects that a thread holds while it tests rows, such
-# as its state and the generator of its row; about 8 kB in Python 3.13.
-_THREAD_BYTES = 1 << 16
 # A permuted distance that falls short of the observed one by less than this
 # share of the pooled cells' mean squared norm reaches it.
 _TIE_TOLERANCE = 1e-9
@@ -219,10 +216,8 @@ def edistance_memory_bytes(
     # positions that sort the cells by row take at most 41 bytes per cell,
     # which also leaves room for a flag per perturbed cell of the rows that
     # the threads test. Each row's bounds, results and adjustment take at
-    # most 128 bytes. Centring the coordinates, and in numpy before 2.3 also
-    # summing them, passes them through a buffer of at most np.getbufsize()
-    # numbers.
-    held = n_cells * (16 * n_dims + 41) + 128 * len(sizes) + 8 * np.getbufsize()
+    # most 128 bytes.
+    held = n_cells * (16 * n_dims + 41) + 128 * len(sizes)
     tested = sizes[sizes >= 2]
     # A thread tests one row at a time, and no more threads run than rows
     # are tested.
@@ -236,8 +231,8 @@ def edistance_memory_bytes(
     draws = min(8 * drawn * n_permutations, max(_DRAW_BYTES, 8 * drawn))
     # Each thread holds one block of uniform numbers, its kernel a flag per
     # control cell, the position of each drawn cell and the sums of the two
-    # groups, and its own Python objects.
-    per_thread = draws + 9 * n_control + 32 * n_dims + _THREAD_BYTES
+    # groups.
+    per_thread = draws + 9 * n_control + 32 * n_dims
     return held + threads * per_thread
 
 

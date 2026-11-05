@@ -129,19 +129,25 @@ def test_document_frequency_reserves_decode_bytes_when_fitting_blocks() -> None:
 
     values = np.arange(48, dtype=np.uint16).reshape(12, 4)
     stored = zarr.array(values, chunks=(4, 4))
-    matrix = ChunkedArray(stored, rows=np.arange(12), block_size=12)
-    # Beside 228 bytes, the 32-byte chunk that the previous read can still
-    # hold, as stored and decoded, with Zarr's objects for both reads.
-    chunk = 4 * 4 * 2
-    budget = 228 + chunk + (chunk + chunk // 128 + 1024) + 64 * 1024
-    with execution_report_scope() as reports:
-        frequency, _ = stream_document_frequency(
-            matrix, memory_bytes=budget, nthreads=1, msg="", operation="Frequency"
-        )
-    np.testing.assert_array_equal(frequency, np.count_nonzero(values, axis=0))
-    (report,) = reports
+
+    def frequency(budget: int) -> tuple[np.ndarray, Any]:
+        matrix = ChunkedArray(stored, rows=np.arange(12), block_size=12)
+        with execution_report_scope() as reports:
+            counted, _ = stream_document_frequency(
+                matrix, memory_bytes=budget, nthreads=1, msg="", operation="Frequency"
+            )
+        (report,) = reports
+        return counted, report
+
+    # A block of every row reads once; a byte less than it reserves reads the
+    # rows in several blocks, each reserved with its decode within the budget.
+    _, whole = frequency(1 << 20)
+    assert whole.unitsCompleted == 1
+    budget = whole.plan.reservedBytes - 1
+    counted, report = frequency(budget)
+    np.testing.assert_array_equal(counted, np.count_nonzero(values, axis=0))
     assert report.plan.reservedBytes <= budget
-    assert report.unitsCompleted == 4
+    assert report.unitsCompleted > 1
 
 
 @pytest.mark.parametrize("budget", [255, 267])
@@ -219,27 +225,6 @@ def test_row_block_streams_of_a_sharded_array_within_a_small_budget_give_its_val
         resources=ResourceBudget(24_000_000, 2),
     )
     np.testing.assert_array_equal(matrix.compute(), values)
-
-
-def test_row_block_reads_count_the_chunks_of_their_columns() -> None:
-    root = zarr.open_group(mode="w")
-    counts = root.create_array(
-        "counts", shape=(100, 40), chunks=(10, 4), shards=(50, 40), dtype=np.uint16
-    )
-    chunk = 10 * 4 * 2
-    # The chunk that the previous read can still hold, as stored and decoded,
-    # with Zarr's objects for both reads, whatever the columns.
-    held = chunk + (chunk + chunk // 128 + 1024) + 64 * 1024
-    full = ChunkedArray(counts, resources=ResourceBudget(1 << 20, 1))
-    # A block of one 50-row shard: five row chunks of ten column chunks each.
-    assert full._max_decode_bytes() == (5 * 10 + 1) * chunk + held
-    assert full._block_owned_bytes() == 2 * 50 * 40 * 2
-    # Five selected columns fall in two column chunks.
-    narrow = full[:, [0, 1, 2, 5, 6]]
-    assert narrow._max_decode_bytes() == (5 * 2 + 1) * chunk + held
-    assert narrow._block_task_bytes() == 2 * 50 * 5 * 2 + (5 * 2 + 1) * chunk + held
-    # A matrix in memory holds no chunk after a read.
-    assert ChunkedArray.from_numpy(np.ones((4, 3)))._block_task_bytes() == 4 * 3 * 8
 
 
 def test_compute_drops_each_block_before_it_asks_for_the_next() -> None:

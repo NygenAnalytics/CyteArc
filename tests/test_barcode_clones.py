@@ -33,6 +33,7 @@ from tests.clone_truth import (
     calling_truth,
     clone_truth,
 )
+from tests.memory_helpers import named_budget
 from tests.storage_helpers import copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
@@ -790,13 +791,17 @@ def test_an_allowlist_too_large_for_the_budget_is_refused_before_it_is_copied(
     store, tmp_path, monkeypatch
 ) -> None:
     calling, barcodes = _imported(store, tmp_path, "celltag")
-    # A fixed-width array's barcodes become Python strings, which count too.
+    # A fixed-width array's barcodes become Python strings, which count too:
+    # 1 kB holds few of the 55 barcodes of 28 bases.
     allowlist = np.asarray(calling.allowlist)
-    needed = 300 * len(allowlist) + len(allowlist) * (allowlist.dtype.itemsize // 4)
-    monkeypatch.setattr(store, "memoryBytes", needed - 1)
-    with pytest.raises(MemoryError, match=f"allowlist of {len(allowlist)} barcodes"):
+    monkeypatch.setattr(store, "memoryBytes", 1_000)
+    with pytest.raises(
+        MemoryError, match=f"allowlist of {len(allowlist)} barcodes"
+    ) as refused:
         store.clones.barcode_clones(barcodes, preset="celltag", allowlist=allowlist)
-    monkeypatch.setattr(store, "memoryBytes", needed)
+    # The budget that the refusal names gets past the allowlist to a later
+    # step.
+    monkeypatch.setattr(store, "memoryBytes", named_budget(refused.value))
     with pytest.raises(MemoryError, match="Raise mem_budget") as raised:
         store.clones.barcode_clones(barcodes, preset="celltag", allowlist=allowlist)
     assert "allowlist" not in str(raised.value)

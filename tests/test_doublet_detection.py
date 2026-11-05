@@ -332,7 +332,8 @@ def test_count_simulated_neighbors_admits_its_index_before_building_it(monkeypat
         raise AssertionError("the index was built before its admission")
 
     monkeypatch.setattr(doublets, "instantiate_knn_index", unbuilt)
-    with pytest.raises(MemoryError, match="operation limit is 1000000 bytes"):
+    # The index of ten cells holds a few kilobytes, more than this budget.
+    with pytest.raises(MemoryError, match="operation limit is 1000 bytes"):
         doublets.count_simulated_neighbors(
             np.zeros((10, 2), dtype=np.float32),
             5,
@@ -340,7 +341,7 @@ def test_count_simulated_neighbors_admits_its_index_before_building_it(monkeypat
             _INDEX,
             random_seed=0,
             workers=1,
-            resources=ResourceBudget(1_000_000, 1),
+            resources=ResourceBudget(1_000, 1),
         )
 
 

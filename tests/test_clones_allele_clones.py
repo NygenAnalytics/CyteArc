@@ -668,7 +668,7 @@ def test_a_budget_too_small_is_refused_with_the_bytes_it_needs() -> None:
     settings = allele_call_settings("graph", max_frequency=1.0)
     with pytest.raises(MemoryError, match=r"holds about \d+ bytes for the cells, more"):
         allele_clone_calls(
-            observations, 2, groups=None, settings=settings, ledger=budgeted(100)
+            observations, 2, groups=None, settings=settings, ledger=budgeted(1)
         )
 
 

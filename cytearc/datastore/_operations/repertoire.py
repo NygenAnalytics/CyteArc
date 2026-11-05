@@ -1,4 +1,3 @@
-import io
 import math
 import os
 from collections.abc import Iterator, Sequence
@@ -143,49 +142,40 @@ _CELL_ARRAYS = (
 _IMPORT_ATTRIBUTES = ("fields",)
 # At its peak, while it orders the contigs, ranks the chains and writes the
 # artifact, an import holds up to three times the bytes of its encoded
-# contigs beside what it holds for each selected cell, as measured on
-# Cell Ranger files with and without region sequences and on AIRR files with
-# sequences and alignments.
+# contigs beside what it holds for each selected cell.
 _PEAK_PER_ENCODED_BYTE = 3
 # Parsing a chunk of a contig file holds its raw text, its split fields and
-# the parsed table, about 55 to 59 bytes for each field of a row as traced on
-# chunks of 10,000 to 50,000 rows of 18 and 31 columns, and objects of about
-# 0.8 MB whatever the chunk's size. Chunks hold 1,000 to 50,000 rows.
+# the parsed table, about 64 bytes for each field of a row. Chunks hold
+# 1,000 to 50,000 rows.
 _PARSE_BYTES_PER_FIELD = 64
-_PARSE_FIXED_BYTES = 1 << 20
 _LEAST_PARSED_ROWS = 1_000
 _MOST_PARSED_ROWS = 50_000
 # Bytes that an import holds for each selected cell beside the join's lookup
 # of cell IDs and their text, which the join counts, the read of the IDs,
 # which text_read_bytes counts, and what writing the cells' arrays holds,
 # which _receptor_write_bytes counts: the selection, and each cell's chain
-# slots, counts and labels, about 70 bytes as their arrays add up and 44 as
-# traced beside the rest at the peak of 50,000 cells of which 1,000 have
-# contigs.
+# slots, counts and labels, about 70 bytes as their arrays add up.
 _IMPORT_BYTES_PER_CELL = 100
 # Bytes that a decoded contig field takes in a table, per contig, besides the
 # text of ragged fields.
 _TABLE_BYTES_PER_FIELD = 64
 # Bytes per cell of the table of cells without its slot fields: the cell IDs,
 # the labels and chain counts as read and as table columns, and the slots.
-# Up to 560 bytes per cell were resident at the peak, on 1,000,000 cells.
 _CELL_TABLE_BYTES_PER_CELL = 700
 # The prefix of the stored contig arrays, such as contig_cells.
 _CONTIGS = "contig"
 # Defining clonotypes holds the chains of every slot, their distinct
-# configurations and keys, and the labels: 340 bytes per cell at the peak, as
-# traced on 1,000,000 simulated cells of about two chains each. Cells with more
-# chains give more keys, so the definition reserves 1,000 bytes per cell,
-# beside the stored code and its int64 copy of each contig's compared field.
+# configurations and keys, and the labels. Cells with more chains give more
+# keys, so the definition reserves 1,000 bytes per cell, beside the stored
+# code and its int64 copy of each contig's compared field.
 _CLONOTYPE_BYTES_PER_CELL = 1_000
 # Loading clonotypes holds, beside the cells' IDs as text, up to 300 bytes per
 # cell: each cell's codes and sizes as read and in the table, and the
 # receptors' slots and types that the representatives are taken from.
 _CLONOTYPE_TABLE_BYTES_PER_CELL = 300
-# Each clonotype holds its label and its row of the tables, 348 bytes while the
-# tables are built, as traced on 50,000 clonotypes of one cell each with two
-# and with four chains, and the codes of its four slots' contigs in each
-# representative field, 32 bytes as held and 96 while the field is decoded.
+# Each clonotype holds its label and its row of the tables while the tables
+# are built, and the codes of its four slots' contigs in each representative
+# field, 32 bytes as held and 96 while the field is decoded.
 _CLONOTYPE_TABLE_BYTES_PER_CLONOTYPE = 700
 # Each representative field's packed text and offsets are read whole, with the
 # bounds of every value, and each value that a representative holds becomes a
@@ -215,28 +205,21 @@ _CLONOTYPE_PARAMETERS = frozenset(
 # Finding the chains of the chosen slots that grouped cells hold holds, for
 # each, its cell, group and clonotype and the codes of its locus and of each
 # counted field, as int64, and while they are found, counted and ordered,
-# sorted and combined copies of them: about 40 bytes and 16 more for each
-# field, the locus and the clonotype among them, as traced on 200,000 cells
-# of two chains each, counting cells and clonotypes.
+# sorted and combined copies of them, with more for each field, the locus
+# and the clonotype among them.
 _CHAIN_BYTES = 64
 _CHAIN_BYTES_PER_FIELD = 24
 # The table of the groups' labels holds each group's name and its label in
-# each key column, beside the groups' labels, which the grouping holds: 75,
-# 190 and 505 bytes at its peak for groups of one, three and thirteen key
-# columns, as traced on 20,000 and 200,000 groups.
+# each key column, beside the groups' labels, which the grouping holds.
 _KEY_BYTES_PER_GROUP = 100
 _KEY_BYTES_PER_GROUP_COLUMN = 40
 # Each row of the table, while it is built: its group, locus and values as
 # codes and as pointers to shared text, its count and fraction, and the
-# order of the rows, and 16 bytes for each column of the table; 114 to 130
-# bytes beside the chains, as traced on 400,000 rows of one and three key
-# columns.
+# order of the rows, and 16 bytes for each column of the table.
 _ROW_BYTES = 120
 _ROW_BYTES_PER_COLUMN = 16
 # Counting each clonotype once holds, for each chain, its row of group,
-# locus, values and clonotype among the distinct rows: 80 bytes beside the
-# counts of cells with one field and 16 more for each field, as traced on
-# 400,000 chains of clonotypes of their own, checked at 16 bytes for each
+# locus, values and clonotype among the distinct rows: 16 bytes for each
 # column of the row and 32 more.
 _ONCE_BYTES_PER_CHAIN = 32
 _ONCE_BYTES_PER_COLUMN = 16
@@ -246,8 +229,6 @@ _RANK_BYTES_PER_VALUE = 17
 # Measuring a junction holds its bounds, its length and the bounds of its
 # part of each chunk it spans, and text beyond ASCII also a mask and a running
 # count of its continuation bytes, as int32, for each byte of the chunk read.
-# On 5,000 to 400,000 junctions of 5 to 906 characters, ASCII or of four bytes
-# each, the traced peak stayed at 0.35 to 0.88 of what the checks count.
 _LENGTH_BYTES_PER_VALUE = 48
 _CONTINUED_BYTES_PER_BYTE = 5
 
@@ -353,13 +334,13 @@ def _encode_contigs(
         fitting = (
             _MOST_PARSED_ROWS
             if room is None
-            else ((room - encoder.nbytes) // 2 - _PARSE_FIXED_BYTES) // per_row
+            else (room - encoder.nbytes) // 2 // per_row
         )
         chunk_rows = min(_MOST_PARSED_ROWS, max(_LEAST_PARSED_ROWS, fitting))
         chunks = _iter_source(source, chunk_rows)
         # The reader keeps a chunk's text until it parses the next, so a
         # chunk's parse stays charged until the file is read.
-        parsing = _PARSE_FIXED_BYTES + chunk_rows * per_row
+        parsing = chunk_rows * per_row
         ledger.hold(f"a chunk of {chunk_rows} contig rows as parsed", parsing)
         while True:
             parsed = next(chunks, None)
@@ -544,7 +525,7 @@ def _value_bounds(
     bound_rows = np.union1d(codes, codes + 1)
     geometry = array_geometry(offsets)
     whole = geometry is None or geometry.wholeReadBytes(1) < row_read_bytes(
-        geometry, bound_rows
+        geometry, len(bound_rows)
     )
     # The bounds as read, or every bound where most values are named, which
     # holds less, then each code's start and end as int64.
@@ -589,12 +570,10 @@ def _decoded_values(
     starts, ends = _value_bounds(ledger, group, name, codes)
     n_bytes = int((ends - starts).sum())
     geometry = array_geometry(values)
-    # A stored chunk of the bytes and its slice as read, with the chunk read
-    # before, the bytes joined, and each value while it is decoded.
+    # A stored chunk of the bytes and its slice as read, the bytes joined,
+    # and each value while it is decoded.
     reading = (
-        0
-        if geometry is None
-        else geometry.bandReadBytes(geometry.axisChunk(0), 1, bands=2)
+        0 if geometry is None else geometry.bandReadBytes(geometry.axisChunk(0), 1)
     )
     ledger.peak(
         f"decoding the {len(codes)} {name} values",
@@ -606,12 +585,6 @@ def _decoded_values(
     np.cumsum(ends - starts, out=lengths[1:])
     with zarr_decoding_threads(ledger.codec_threads):
         joined = _byte_ranges(values, starts, ends)
-    if geometry is not None and len(joined):
-        # The chunks from the first range to the last, each read once, leave
-        # one on each of the ledger's codec threads.
-        step = geometry.axisChunk(0)
-        spanned = (int(ends[-1]) - 1) // step - int(starts[0]) // step + 1
-        ledger.leave(geometry.heldReadBytes(ledger.holding_threads(spanned)))
     # Each value is a string of one byte a character when every byte is
     # ASCII, and of up to four otherwise.
     widest = int(joined.max()) if len(joined) else 0
@@ -716,14 +689,9 @@ def _value_lengths(
     geometry = array_geometry(packed)
     step = max(1, n_bytes if geometry is None else geometry.axisChunk(0))
     starts, ends = _value_bounds(ledger, group, name, codes)
-    # One chunk as it is read, with the chunk read before, and for text beyond
-    # ASCII the block's mask and running count as int32, beside each value's
-    # bounds and length.
-    reading = (
-        0
-        if geometry is None
-        else geometry.bandReadBytes(min(step, n_bytes), 1, bands=2)
-    )
+    # One chunk as it is read, and for text beyond ASCII the block's mask and
+    # running count as int32, beside each value's bounds and length.
+    reading = 0 if geometry is None else geometry.bandReadBytes(min(step, n_bytes), 1)
     ledger.peak(
         f"measuring the {len(codes)} {name} values",
         reading
@@ -750,8 +718,6 @@ def _value_lengths(
         characters = text_lengths(block, parts, np.arange(0, len(parts), 2))
         lengths[begin:stop] -= np.diff(parts)[0::2] - characters
         del block
-    if geometry is not None and len(filled):
-        ledger.leave(geometry.heldReadBytes(ledger.holding_threads(last - first + 1)))
     bounds_bytes = starts.nbytes + ends.nbytes
     del starts, ends, filled
     ledger.release(bounds_bytes)
@@ -2443,10 +2409,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             remedy="pass fields= with fewer fields",
             codec_threads=self.nthreads,
         )
-        ledger.hold(
-            "the export's objects and the file's buffer",
-            _EXPORT_OBJECT_BYTES + _EXPORT_OBJECT_BYTES_PER_FIELD * len(chosen),
-        )
         # A clonotypes artifact's labels replace an imported clone_id.
         contigs = _ExportContigs(
             group,
@@ -2513,7 +2475,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 cell_width=cell_width,
                 clone_width=clone_width if clones is not None else None,
                 block_bytes=block_bytes,
-                compressed=os.fspath(path).endswith(".gz"),
             )
             with AirrRearrangementWriter(path, order, whole=contigs.whole) as writer:
                 for block in contigs.blocks(block_rows, cells, clones, renamed):
@@ -2593,18 +2554,6 @@ _EXPORT_RENDER_BYTES = {TEXT: 0, RAGGED: 0, INTEGER: 9, FLAG: 10, NUMBER: 136}
 # clonotype, its code as gathered and as int64.
 _EXPORT_ROW_BYTES = 96
 _EXPORT_CLONE_BYTES = 12
-# The Python objects of the stored arrays that an export opens, their
-# metadata, codecs and reads, and of the file and a block's columns while it
-# is written: 106 KB with two fields and 247 KB with 22, as traced on Python
-# 3.13. The file's buffer is counted as one of io's default buffers: Python
-# 3.13 buffers the file system's block, 4 KiB on common file systems, and
-# Python 3.14 one default buffer, which it raised from 8 KiB to 128 KiB.
-_EXPORT_OBJECT_BYTES = 120 * 2**10 + io.DEFAULT_BUFFER_SIZE
-_EXPORT_OBJECT_BYTES_PER_FIELD = 8 * 2**10
-# Writing a compressed file holds zlib's deflate state at level 6, about
-# 270 KB as traced, and gzip's buffer of four of io's default buffers, 32 KiB
-# before Python 3.14 and 512 KiB since.
-_GZIP_BYTES = 352 * 2**10 + 4 * io.DEFAULT_BUFFER_SIZE
 # Bytes per contig that measuring a span of contigs holds: a ragged field's
 # offsets, running ends and lengths, or a number field's values and flags.
 _MEASURE_BYTES_PER_ROW = 64
@@ -2636,17 +2585,6 @@ def _even_rows(chunk: int, wanted: int) -> int:
     """Rows of blocks that divide a stored chunk evenly, at most ``wanted``."""
     wanted = max(1, min(chunk, wanted))
     return -(-chunk // -(-chunk // wanted))
-
-
-def _chunk_reads(ledger: MemoryLedger, chunk: int) -> int:
-    """What reads of stored chunks of ``chunk`` bytes, one after another, hold beside what the ledger counts.
-
-    A read holds the chunk that it decodes while the chunk read before it may
-    still be held, so reads hold two chunks at once: the one that the
-    ledger's last read left behind, or one of their own where that is larger,
-    and the one that they decode.
-    """
-    return chunk + max(0, chunk - ledger.left)
 
 
 def _packed_text(
@@ -2879,7 +2817,7 @@ class _ExportContigs:
         chunk = self._read_bytes(read)
         self.ledger.peak(
             "measuring the widest value of each field",
-            _chunk_reads(self.ledger, chunk)
+            chunk
             + self._piece_bytes(ragged)
             + _MEASURE_BYTES_PER_ROW * min(span, self.n_contigs),
         )
@@ -2960,8 +2898,6 @@ class _ExportContigs:
                     largest[name] = max(largest[name], float(np.abs(present).max()))
 
         measure_spans()
-        if self.n_contigs:
-            self.ledger.leave(self._held_bytes(read))
         self._widths.update(longest)
         for name in numbers:
             # A whole number is written as an integer, with its sign.
@@ -3065,9 +3001,7 @@ class _ExportContigs:
         names = ["contig_sequence_id_offsets", "contig_sequence_id"]
         self.ledger.peak(
             "the sequence_id of a contig whose value the format forbids",
-            _chunk_reads(self.ledger, self._read_bytes(names))
-            + 16
-            + self.width("sequence_id"),
+            self._read_bytes(names) + 16 + self.width("sequence_id"),
         )
         start, end = np.asarray(self._array(names[0])[position : position + 2]).tolist()
         return bytes(np.asarray(self._array(names[1])[start:end])).decode("utf-8")
@@ -3099,27 +3033,6 @@ class _ExportContigs:
             (_stored_chunk_bytes(self._array(name)) for name in names), default=0
         )
 
-    def _held_bytes(self, names: list[str]) -> int:
-        """What a pass over the stored chunks of the arrays may leave behind.
-
-        Each of the ledger's codec threads can still hold a chunk of one of
-        them, up to the chunks of the arrays, each counted at the largest.
-        """
-        geometries = [
-            geometry
-            for name in names
-            if (geometry := array_geometry(self._array(name))) is not None
-        ]
-        threads = self.ledger.holding_threads(
-            sum(
-                -(-geometry.shape[0] // geometry.axisChunk(0)) * geometry.bandChunks()
-                for geometry in geometries
-            )
-        )
-        return max(
-            (geometry.heldReadBytes(threads) for geometry in geometries), default=0
-        )
-
     def _id_arrays(self) -> list[tuple[str, int]]:
         windows = [("contig_sequence_id_offsets", 1)]
         if self._chains_only:
@@ -3129,9 +3042,8 @@ class _ExportContigs:
     def id_pass_bytes(self, block_rows: int) -> int:
         """What a pass over the contigs' IDs holds beside their own blocks."""
         windows = self._id_arrays()
-        return self._window_bytes(windows, block_rows) + _chunk_reads(
-            self.ledger,
-            self._read_bytes([name for name, _ in windows] + ["contig_sequence_id"]),
+        return self._window_bytes(windows, block_rows) + self._read_bytes(
+            [name for name, _ in windows] + ["contig_sequence_id"]
         )
 
     def scan(self, block_bytes: int) -> tuple[np.ndarray, int]:
@@ -3161,12 +3073,6 @@ class _ExportContigs:
             )
             hashes[n_rows : n_rows + len(block)] = block
             n_rows += len(block)
-        if self.n_contigs:
-            self.ledger.leave(
-                self._held_bytes(
-                    [name for name, _ in self._id_arrays()] + ["contig_sequence_id"]
-                )
-            )
         return hashes[:n_rows], block_rows
 
     def plan_blocks(
@@ -3176,15 +3082,14 @@ class _ExportContigs:
         cell_width: int,
         clone_width: int | None,
         block_bytes: int,
-        compressed: bool,
     ) -> int:
         """Choose the contigs of a block, and check what writing one holds.
 
         A block holds as many contigs as fit in ``block_bytes`` when each
         field holds its widest value: each row as rendered, the text that it
         reads and renders beside its row, and the bytes of each field and of
-        the rendering of one field. The windows of stored chunks, two chunks'
-        reads and, for a compressed file, its compressor come beside it.
+        the rendering of one field. The windows of stored chunks and a
+        chunk's read come beside it.
 
         Args:
             n_columns: The columns of the file.
@@ -3192,7 +3097,6 @@ class _ExportContigs:
             clone_width: The bytes of the longest clonotype label, or None
                 when no clonotype is written.
             block_bytes: The most bytes that a block's contigs should hold.
-            compressed: Whether the file is gzip-compressed.
 
         Returns:
             The contigs of a block.
@@ -3236,18 +3140,14 @@ class _ExportContigs:
         self.ledger.peak(
             "writing a block of contigs",
             per_row * min(block_rows, self.n_contigs)
-            + (_GZIP_BYTES if compressed else 0)
             + self._window_bytes(windows, block_rows)
-            + _chunk_reads(
-                self.ledger,
-                self._read_bytes(
-                    [name for name, _ in windows]
-                    + [
-                        f"contig_{name}"
-                        for name, kind in zip(self._fields, kinds)
-                        if kind == RAGGED
-                    ]
-                ),
+            + self._read_bytes(
+                [name for name, _ in windows]
+                + [
+                    f"contig_{name}"
+                    for name, kind in zip(self._fields, kinds)
+                    if kind == RAGGED
+                ]
             ),
         )
         return block_rows

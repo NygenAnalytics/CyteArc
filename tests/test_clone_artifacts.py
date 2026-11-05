@@ -1,7 +1,6 @@
 """The ``clones`` artifact as every clone source plans, writes and loads it."""
 
 import dataclasses
-import re
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +9,6 @@ import pytest
 from cytearc.clones.assignments import CloneAssignment, ranked_clones
 from cytearc.datastore._operations.clone_artifacts import (
     SOURCE_ARRAYS,
-    clone_write_bytes,
     plan_clones,
     write_clones,
 )
@@ -19,6 +17,7 @@ from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import every_cell, write_truth_store
 from tests.clone_truth import N_CELLS, clone_truth, number_label
 from cytearc.utils.memory_budget import MemoryLedger
+from tests.memory_helpers import named_budget
 
 TRUTH = clone_truth()
 # A ledger without a budget, which every write of these tests fits.
@@ -166,31 +165,45 @@ def _labelled(width: int, *, probabilities: bool = False) -> CloneAssignment:
 
 
 def test_the_save_check_counts_the_probabilities(store) -> None:
-    # Each cell's probability is held as given and as copied to float64.
+    # Each cell's probability is held as given and as copied to float64, so
+    # the budget that saves the clones without probabilities refuses them
+    # with probabilities.
     planned = _plan(store, _arguments(store))
-    needed = {}
-    for probabilities in (False, True):
-        assignment = _labelled(12, probabilities=probabilities)
-        with pytest.raises(MemoryError) as refused:
-            write_clones(
-                store.zw,
-                planned,
-                assignment,
-                {"n_clones": len(assignment.clone_ids)},
-                ledger=_holding(1, 0),
-            )
-        found = re.search(r"holds about (\d+) bytes", str(refused.value))
-        assert found is not None
-        needed[probabilities] = int(found.group(1))
-    assert needed[True] - needed[False] == 2 * 8 * N_CELLS
+    without, given = _labelled(12), _labelled(12, probabilities=True)
+    with pytest.raises(MemoryError) as refused:
+        write_clones(
+            store.zw,
+            planned,
+            without,
+            {"n_clones": len(without.clone_ids)},
+            ledger=_holding(1, 0),
+        )
+    with pytest.raises(MemoryError, match="Raise mem_budget"):
+        write_clones(
+            store.zw,
+            planned,
+            given,
+            {"n_clones": len(given.clone_ids)},
+            ledger=_holding(named_budget(refused.value), 0),
+        )
+    assert not store.artifacts.inspect(planned.ref).exists
 
 
 def test_a_save_one_byte_over_its_budget_is_refused_before_it_writes(store) -> None:
     arguments = _arguments(store)
     assignment = _assignment()
-    width = max(len(label) for label in assignment.clone_ids.tolist())
-    needed = 5_000 + clone_write_bytes(N_CELLS, len(assignment.clone_ids), width)
     planned = _plan(store, arguments)
+    # Beside 5,000 bytes that the caller holds, the save names the budget
+    # that passes it; a byte less is refused before anything is written.
+    with pytest.raises(MemoryError) as refused:
+        write_clones(
+            store.zw,
+            planned,
+            assignment,
+            {"n_clones": len(assignment.clone_ids)},
+            ledger=_holding(5_001, 5_000),
+        )
+    needed = named_budget(refused.value)
     with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
         write_clones(
             store.zw,

@@ -17,7 +17,7 @@ from cytearc.metadata.rows import text_read_bytes
 from cytearc.utils.logging import collect_warnings
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import assert_joined, every_cell
-from tests.storage_helpers import copy_store, open_store, rechunk_column
+from tests.storage_helpers import copy_store, open_store
 from tests.variant_helpers import (
     assert_tables,
     expected_gift,
@@ -1674,12 +1674,8 @@ def test_got_multi_reads_come_with_every_call_that_has_umis(store, tmp_path) -> 
 def test_a_budget_without_room_for_the_rewritten_chunks_writes_nothing(
     store, tmp_path
 ) -> None:
-    # With the IDs in a chunk of 100,000 rows, as a store written before cell
-    # columns were chunked by their rows keeps them, the rows parse and spill
-    # within the budget that reading the cells' IDs takes, but appending them
+    # The rows parse and spill within a few megabytes, but appending them
     # rewrites chunks of about four times the 536,000 rows' 4-byte values.
-    rechunk_column(store.cells._group, "ids")
-    store = open_store(store.zarr_loc)
     ids = [str(cell) for cell in store.cells.fetch_all("ids")]
     folder = tmp_path / "final"
     _large_mgatk(folder, ids, seed=4, n_positions=4_000)
@@ -1690,10 +1686,10 @@ def test_a_budget_without_room_for_the_rewritten_chunks_writes_nothing(
         )
 
     saved = store.artifacts.list(kind="variant_counts")
-    # 20 MB holds the read of the IDs' chunk, 17.7 MB, and the least parse,
-    # whose share holds the sort buffers too, and not the stored chunks that
-    # appending a band rewrites.
-    store.memoryBytes = 20_000_000
+    # 8 MB holds the least parse, whose share holds the sort buffers too, and
+    # not the stored chunks that appending a band rewrites, which with the
+    # band need about 15 MB; below about 1.6 MB the parse refuses.
+    store.memoryBytes = 8_000_000
     with pytest.raises(MemoryError, match="the stored chunks that it rewrites"):
         run()
     assert store.artifacts.list(kind="variant_counts") == saved

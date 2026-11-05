@@ -55,11 +55,8 @@ _MARKED_POINT_SIZE = 4.0
 _WEDGE_EXTENT = 0.9
 _TREE_LINE_WIDTH = 0.8
 _TREE_POINT_AREA = 9.0
-# What drawing a tree holds: the figure and its panel, 377 to 412 KB as
-# traced; each legend entry, 18 to 28 KB; each text; and for each node drawn
-# its branch, wedge and colour, and the figure's table and labels of it, 330
-# to 390 bytes.
-_TREE_FIXED_BYTES = 448 * 1024
+# What drawing a tree holds: each legend entry; each text; and for each node
+# drawn its branch, wedge and colour, and the figure's table and labels of it.
 _TREE_BYTES_PER_ENTRY = 30 * 1024
 _TREE_BYTES_PER_TEXT = 4 * 1024
 _TREE_BYTES_PER_ROW = 448
@@ -716,8 +713,7 @@ def tree_drawing_bytes(n_rows: int, *, n_entries: int, n_texts: int) -> int:
     say something.
     """
     return (
-        _TREE_FIXED_BYTES
-        + _TREE_BYTES_PER_ENTRY * min(int(n_entries), LEGEND_SIDE_MAX_ENTRIES)
+        _TREE_BYTES_PER_ENTRY * min(int(n_entries), LEGEND_SIDE_MAX_ENTRIES)
         + _TREE_BYTES_PER_TEXT * int(n_texts)
         + _TREE_BYTES_PER_ROW * int(n_rows)
     )

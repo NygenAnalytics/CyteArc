@@ -50,7 +50,7 @@ from scipy.sparse.csgraph import connected_components
 from ..clones.sequences import DISTANCE_METRICS, neighbor_pairs
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import unique_inverse, unique_rows
-from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
+from ..utils.memory_budget import MemoryLedger
 from ..utils.numba import njit
 from .chains import SLOTS
 
@@ -163,8 +163,7 @@ def within_type_parts(
         ledger.peak(
             f"finding the clonotype and type of {n_parts} clonotypes within types",
             _WITHIN_TYPE_BYTES_PER_CELL * len(within)
-            + _WITHIN_TYPE_BYTES_PER_PART * n_parts
-            + NUMPY_STEP_BYTES,
+            + _WITHIN_TYPE_BYTES_PER_PART * n_parts,
         )
     has = within >= 0
     if not np.array_equal(has, codes >= 0):
@@ -196,7 +195,7 @@ def within_type_parts(
     if ledger is not None:
         ledger.peak(
             f"finding which of {n_parts} clonotypes within types share a clonotype",
-            _ALONE_BYTES_PER_PART * n_parts + NUMPY_STEP_BYTES,
+            _ALONE_BYTES_PER_PART * n_parts,
         )
     alone = np.bincount(clonotypes)[clonotypes] == 1
     added = np.full(n_parts, "", dtype=object)
@@ -208,8 +207,7 @@ def within_type_parts(
                 f"numbering {len(spanning)} clonotypes within types of clonotypes "
                 "that span types",
                 _FOUND_BYTES_PER_PART * n_parts
-                + _SPANNING_BYTES_PER_PART * len(spanning)
-                + NUMPY_STEP_BYTES,
+                + _SPANNING_BYTES_PER_PART * len(spanning),
             )
         order = spanning[
             np.lexsort((spanning, part_types[spanning], clonotypes[spanning]))

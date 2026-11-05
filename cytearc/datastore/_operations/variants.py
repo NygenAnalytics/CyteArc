@@ -32,7 +32,7 @@ from ...metadata.selection import (
     plan_cell_selection_read,
     read_cell_selection,
 )
-from ...storage.arrays import create_metadata_column, zarr_write_buffer_bytes
+from ...storage.arrays import create_metadata_column
 from ...storage.artifact_writer import (
     PlannedArtifact,
     artifact_transaction,
@@ -154,16 +154,13 @@ _BAND_SHARE = 2.5
 # which the shares above absorb only in a budget of this size.
 _THREADED_PARSE_BYTES = 1 << 30
 # Every stored long array holds 4-byte values. Appending a band rewrites the
-# chunks it ends in, read, decoded and encoded again: 2 to 4 chunks' bytes
-# at once, as measured on chunks of 1,048,576 rows.
+# chunks it ends in, read, decoded and encoded again: up to 4 chunks' bytes
+# at once.
 _STORED_BYTES = 4
 _REWRITTEN_CHUNKS = 4
 # A band holds at least this share of a stored chunk's rows, or of every
 # row where fewer, so appending bands writes each chunk about 33 times at
 # most, where bands of a few cells would rewrite every chunk once a band.
-# 8,000 Tapestri cells of 40 variants, 838,970 rows in one chunk of each
-# array, then need 18,026,255 bytes, hold 9,976,376 and run in 2 to 3 s;
-# with a whole chunk to a band they need 101,623,601 bytes.
 _BAND_CHUNK_PARTS = 32
 # The rows parsed at once lie in [_MIN_CHUNK_ROWS, _MAX_CHUNK_ROWS].
 _MIN_CHUNK_ROWS = 1_000
@@ -174,7 +171,7 @@ _LOADED_BYTES_PER_ROW = 120
 _LOADED_BYTES_PER_CELL = 200
 # Bytes held for each cell of the counts, loaded or not: its store row and
 # rank, and each table's offsets and each per-cell array, which are read
-# whole one at a time; 32 bytes as traced on 500,000 cells.
+# whole one at a time.
 _LOADED_BYTES_PER_COUNTS_CELL = 40
 # The per-cell arrays of a variant_counts artifact, its canonical one first.
 _CELL_ARRAYS = ("mean_depth", "n_covered_sites", "listed")
@@ -187,8 +184,7 @@ _STATISTIC_BYTES_PER_ROW = 200
 _STATISTIC_BYTES_PER_VARIANT = 240
 # Reading bands holds, for each cell of the counts, chosen or not, each
 # table's offsets and their sum and whether the cell is chosen, and while the
-# cells are chosen its store row and position and whether a file named it:
-# about 40 bytes, as traced on 100,000 and 300,000 cells.
+# cells are chosen its store row and position and whether a file named it.
 _BAND_BYTES_PER_COUNTS_CELL = 48
 # Calling clones holds, for each cell of the counts, its store row, its row
 # among the scored cells and its group, while the frequencies are found and
@@ -210,11 +206,6 @@ _CLONE_CALL_BYTES_PER_CELL = 34
 _SHARED_NEIGHBOR_PRUNE = 1 / 15
 # The attributes that saved variant clones need to be reused.
 _CLONE_ATTRIBUTES = ("n_clones",)
-# Bytes that calling genotypes, or the clones they define, holds whatever the
-# counts: zarr's objects for the arrays that planning, writing and validating
-# the artifact open, the chunk of the cell selection that planning validates,
-# and the garbage that appending bands leaves until Python collects it.
-_GENOTYPE_FIXED_BYTES = 1 << 20
 # A band of genotypes holds at least this many rows, or every row, so that a
 # small budget does not append the calls a few rows at a time.
 _MIN_GENOTYPE_BAND_ROWS = 1_000
@@ -231,11 +222,10 @@ _GENOTYPE_BYTES_PER_ALLELE = 24
 # the depth, counts or calls with their cells, the keys of their cells and
 # sites and their order, and what the method derives per key, the UMIs and
 # calls, the source's labels and the order of its columns, or GIFT's scores
-# and posteriors; at most 110, 129 and 277 bytes as traced between bands of
-# 20,000 and 80,000 rows on two shapes of counts.
+# and posteriors.
 _GENOTYPE_BYTES_PER_ROW = {"threshold": 144, "source": 168, "gift": 360}
 # Bytes per call row of loaded genotypes: its row of the table of calls and
-# the stored arrays read beside it, 174 as traced on 128,000 rows.
+# the stored arrays read beside it.
 _LOADED_GENOTYPE_BYTES_PER_ROW = 220
 # The attributes that saved genotype clones need to be reused: the exact
 # rule's graph sizes, which describe the method, and the clones of each.
@@ -248,8 +238,7 @@ _LIKELIHOOD_CLONE_ATTRIBUTES = ("n_clones",)
 _CALL_BAND_BYTES_PER_CELL = 64
 # Bytes per cell that ordering the likelihood's cells by their within group
 # holds beside their positions: each cell's group, the order of the stable
-# sort and its scratch, and the positions as found beside them reordered,
-# 24 as traced on 90,000 and 180,000 cells of 2, 4 and 50 groups.
+# sort and its scratch, and the positions as found beside them reordered.
 _GROUP_ORDER_BYTES = 32
 # Bytes that numbering genotype clones holds for each cell: each clustered
 # cell's key of group and clone, their sorted copy, first cells and order,
@@ -2126,14 +2115,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         if qualities:
             count_arrays += ["counts_quality_forward", "counts_quality_reverse"]
         tables = {"depth": ("depth_sites", "depth"), "count": tuple(count_arrays)}
-        # The statistics are written beside what Zarr's writes hold in file
-        # buffers.
         held = (
             _STATISTIC_BYTES_PER_VARIANT * sites.n_alleles
             + 16 * sites.n_sites
             + _band_chunk_bytes(group, tables)
             + _BAND_BYTES_PER_COUNTS_CELL * _n_counts_cells(group)
-            + zarr_write_buffer_bytes()
         )
         max_rows = (self.memoryBytes - held) // _STATISTIC_BYTES_PER_ROW
         if max_rows < 1:
@@ -2834,9 +2820,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             }
         # Every cell of the counts holds its offsets while bands are read, and
         # its call counts and offsets as they are written; each allele its
-        # site, rank and gapfill probability; each call label its text;
-        # appending a band rewrites the chunks it ends in; and Zarr's writes
-        # hold their file buffers.
+        # site, rank and gapfill probability; each call label its text; and
+        # appending a band rewrites the chunks it ends in.
         n_alleles = table.n_alleles
         # Each call row's label refers to one of these texts rather than a copy.
         call_value_names = np.asarray(
@@ -2847,13 +2832,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             for names in tables.values()
         )
         held = (
-            _GENOTYPE_FIXED_BYTES
-            + (_BAND_BYTES_PER_COUNTS_CELL + _GENOTYPE_BYTES_PER_CELL) * n_cells
+            (_BAND_BYTES_PER_COUNTS_CELL + _GENOTYPE_BYTES_PER_CELL) * n_cells
             + _GENOTYPE_BYTES_PER_ALLELE * n_alleles
             + sum(map(sys.getsizeof, call_value_names.tolist()))
             + _band_chunk_bytes(group, tables)
             + _REWRITTEN_CHUNKS * min(_ROW_BAND, max(1, most_rows)) * _STORED_BYTES
-            + zarr_write_buffer_bytes()
         )
         site_rank, allele_rank, site_units, max_units = _unit_ranks(
             table, genotyped, unit_alleles
@@ -3043,9 +3026,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         n_rows = int(alleles.shape[0])
         # The call rows are read in steps of at least _MIN_GENOTYPE_BAND_ROWS
         # rows, or all of them, beside the chunks that a step decompresses.
-        held = _GENOTYPE_FIXED_BYTES + _band_chunk_bytes(
-            group, {"call": ("call_alleles", "call_sources")}
-        )
+        held = _band_chunk_bytes(group, {"call": ("call_alleles", "call_sources")})
         step = (self.memoryBytes - held) // _SOURCE_SITE_BYTES_PER_ROW
         fewest = max(1, min(n_rows, _MIN_GENOTYPE_BAND_ROWS))
         if step < fewest:
@@ -3499,10 +3480,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             self.memoryBytes,
             f"Calling clones from the genotypes of {n_cells} cells",
             codec_threads=self.nthreads,
-        )
-        ledger.hold(
-            "Zarr's objects for the arrays that the call opens and writes",
-            _GENOTYPE_FIXED_BYTES,
         )
         site_labels = read_whole(ledger, group, "site_labels", item="the sites' labels")
         chosen = self._chosen_genotype_sites(genotypes, group, site_labels, sites)

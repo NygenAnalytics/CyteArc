@@ -329,11 +329,10 @@ def ensure_zarr_host_ceiling() -> int:
 def zarr_decoding_threads(threads: int) -> Iterator[None]:
     """Decode the Zarr reads that the calling thread makes in this context on a pool of exactly ``threads`` threads.
 
-    A thread of Zarr's codec pool can still hold the last chunk that it
-    fetched or decoded after the read returns, so reads within leave at most
-    ``threads`` such chunks, on any machine. Reads of the same count in
-    flight together, from any thread, share one pool of that many threads;
-    reads of another count, or outside this context, decode on their own.
+    Reads within decode on that many threads on any machine. Reads of the
+    same count in flight together, from any thread, share one pool of that
+    many threads; reads of another count, or outside this context, decode on
+    their own.
     Reads through :class:`AsyncStorageRunner` decode on the runner's pool.
 
     Raises:

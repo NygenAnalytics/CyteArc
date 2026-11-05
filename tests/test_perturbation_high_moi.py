@@ -1454,7 +1454,7 @@ def test_high_moi_refuses_a_budget_without_room_for_one_gene(screen) -> None:
     store, labels, genes = screen
     arguments = {"features": genes, "moi": "high", "invalidate_cache": True, **FAST}
     with pytest.raises(MemoryError, match="^Counting the cells") as counting:
-        open_store(store.zarr_loc, mem_budget=100_000).perturbation.associations(
+        open_store(store.zarr_loc, mem_budget=1_000).perturbation.associations(
             labels, **arguments
         )
     # The budget that counts each guide's and target's cells holds too little

@@ -119,20 +119,6 @@ def test_chunked_arrays_read_virtual_arrays_through_their_reader(virtual):
     assert store.reads == []
 
 
-def test_virtual_array_reads_are_charged_what_their_reader_names(virtual):
-    _, arrays = virtual
-    chunked = ChunkedArray(arrays["virtual"])
-    rows, columns = chunked.chunksize
-    # The reader's scratch for a block, and no chunk that Zarr's pool holds
-    # after a read, since the reader reads the sources itself.
-    assert chunked._max_decode_bytes() == 7 * rows * columns
-    # The stored array of the same layout decodes a 48-byte chunk, beside the
-    # chunk that the previous read can still hold, as stored and decoded,
-    # with Zarr's objects for both reads.
-    held = 48 + (48 + 48 // 128 + 1024) + 64 * 1024
-    assert ChunkedArray(arrays["stored"])._max_decode_bytes() == 48 + held
-
-
 @pytest.mark.parametrize(
     ("rows", "columns", "extent"),
     (

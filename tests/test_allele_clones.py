@@ -558,7 +558,9 @@ def test_calling_refuses_a_budget_too_small_before_writing(
 ) -> None:
     calling, alleles = _imported(store, tmp_path)
     before = len(store.artifacts.list(kind="clones", scope="datastore"))
-    for budget in (10_000, 200_000):
+    # The call needs about 21 kB in all: 1 kB refuses its first step, the
+    # banks, and 5 kB a later one.
+    for budget in (1_000, 5_000):
         monkeypatch.setattr(store, "memoryBytes", budget)
         with pytest.raises(MemoryError, match="Raise mem_budget"):
             store.clones.allele_clones(

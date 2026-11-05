@@ -8,7 +8,6 @@ words for the files of an import. Operation modules may not import each
 other, so each step lives here once.
 """
 
-import io
 from typing import Any
 
 import numpy as np
@@ -34,7 +33,6 @@ __all__ = [
     "measured_within_types",
     "plan_artifact_cells",
     "read_codes",
-    "text_file_write_bytes",
 ]
 
 #: The array in which clonotypes defined across receptor types save each
@@ -45,24 +43,6 @@ CODES_WITHIN_TYPE = "codes_within_type"
 #: representative cell of each clonotype within a receptor type, by its code,
 #: as ``within_receptor_type=True`` chooses it, which names it in figures.
 REPRESENTATIVES_WITHIN_TYPE = "representatives_within_type"
-
-# What writing a text file holds whatever its rows: the writer's objects and
-# one of io's default buffers, 138 to 143 KB as traced on Python 3.13, whose
-# buffer is 8 KiB, and 265 KB on 3.14 and 3.15, whose buffer is 128 KiB; and
-# with gzip, zlib's state of compression at level 6 and the buffers of the
-# gzip file and its text wrapper, up to eight more of io's buffers, 341 to
-# 472 KB in all on 3.13 and 1.45 MB on 3.14 and 3.15.
-_TEXT_FILE_BYTES = 136 * 1024
-_GZIP_STATE_BYTES = 280 * 1024
-_GZIP_BUFFERS = 8
-
-
-def text_file_write_bytes(compressed: bool) -> int:
-    """What writing a text file holds whatever its rows, gzip-compressed when ``compressed``."""
-    plain = _TEXT_FILE_BYTES + io.DEFAULT_BUFFER_SIZE
-    if not compressed:
-        return plain
-    return plain + _GZIP_STATE_BYTES + _GZIP_BUFFERS * io.DEFAULT_BUFFER_SIZE
 
 
 def files_text(noun: str, n_files: int) -> str:

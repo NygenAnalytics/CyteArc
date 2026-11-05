@@ -31,7 +31,7 @@ _LAML_FORBIDDEN = frozenset(",;:()[]'\"\t\r\n ")
 # Bytes that each state of a block of LAML's text takes as it is written:
 # its position among the states, the check of that position, a reference
 # to the state's text, which each state shares, and the reference in the
-# block's rows as lists, 24 in all as traced, beside the row's joined text.
+# block's rows as lists, beside the row's joined text.
 _LAML_BYTES_PER_STATE = 40
 # At most this many cells of LAML's text are written at once.
 _LAML_MAX_BLOCK = 50_000

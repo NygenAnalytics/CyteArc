@@ -29,7 +29,6 @@ from ...perturbation.efficiency import (
     efficiency_settings,
 )
 from ...storage.artifact_writer import ArrayRequirement, AttributeRequirement
-from ...storage.arrays import zarr_write_buffer_bytes
 from ...storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
@@ -565,11 +564,7 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         checking = _cell_selection_check_bytes(
             self, selected_ids=coordinates.kind == "imported_coordinates"
         )
-        # Writing the table also holds Zarr's file buffers.
-        needed = (
-            max(checking, finding, placing, reading, measuring)
-            + zarr_write_buffer_bytes()
-        )
+        needed = max(checking, finding, placing, reading, measuring)
         _require_budget(
             needed,
             self.memoryBytes,

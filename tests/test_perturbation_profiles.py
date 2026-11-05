@@ -29,6 +29,7 @@ from tests.perturbation_helpers import (
     use_python_kernels,
     write_screen,
 )
+from tests.memory_helpers import climb_refusals
 from tests.storage_helpers import insert_nullable_cell_column, open_store
 
 # Tests that check the warning about thin perturbations catch it themselves.
@@ -745,8 +746,9 @@ def test_profiles_read_bands_of_features_that_fit_the_budget(
     monkeypatch.setattr(normalization, "feature_value_blocks", counting)
     with pytest.raises(MemoryError, match="2 targets in 30 features"):
         run(open_store(shared.path, nthreads=2, mem_budget=1000))
-    # 190 kB gives bands of several features.
-    banded = run(open_store(shared.path, nthreads=2, mem_budget=190_000))
+    # 80 kB gives bands of several features: below about 56 kB one feature
+    # does not fit, and from about 140 kB one band holds all 30.
+    banded = run(open_store(shared.path, nthreads=2, mem_budget=80_000))
 
     # Each band reads the control cells, then the profiled cells, and holds
     # several features but not all of them.
@@ -893,27 +895,25 @@ def test_profiles_at_a_small_budget_give_the_profiles_of_a_large_one(tmp_path) -
     screen = memory_screen(tmp_path / "store.zarr")
     features = open_store(screen.path).features.snapshot(feature_indexes=np.arange(40))
 
-    def run(store: DataStore) -> ArtifactRef:
-        return store.perturbation.profiles(
-            screen.labels,
-            features,
-            sample_column="run",
-            min_cells=5,
-            id_column=None,
-            invalidate_cache=True,
-        )
-
-    bands = {}
-    for budget in (None, 15_000_000):
+    def run(budget: int | None) -> tuple[ArtifactRef, int]:
         options = {} if budget is None else {"mem_budget": budget}
         with execution_report_scope() as reports:
-            ref = run(open_store(screen.path, nthreads=2, **options))
-        bands[budget] = len(reports)
-        if budget is None:
-            whole = open_store(screen.path).perturbation.load_profiles(ref)
-    # 15 MB, a little more than the call holds beside one band of features,
+            ref = open_store(screen.path, nthreads=2, **options).perturbation.profiles(
+                screen.labels,
+                features,
+                sample_column="run",
+                min_cells=5,
+                id_column=None,
+                invalidate_cache=True,
+            )
+        return ref, len(reports)
+
+    whole_ref, whole_units = run(None)
+    whole = open_store(screen.path).perturbation.load_profiles(whole_ref)
+    # The budget that the refusals name from 1 MB, the least that runs,
     # streams the counts in more bands than the store's default budget.
-    assert bands[15_000_000] > bands[None]
+    _refusals, (ref, units) = climb_refusals(run, start=1_000_000)
+    assert units > whole_units
     result = open_store(screen.path).perturbation.load_profiles(ref)
     pd.testing.assert_frame_equal(result.values, whole.values)
     pd.testing.assert_frame_equal(result.control_mean, whole.control_mean)

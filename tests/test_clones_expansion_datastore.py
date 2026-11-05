@@ -536,9 +536,10 @@ def test_a_read_only_store_reuses_saved_expansion(copied) -> None:
 def test_expansion_refuses_a_small_budget_before_it_writes(copied, monkeypatch) -> None:
     store, clones = copied.store, copied.clones
     saved = store.clones.expansion(clones)
-    # 10 kB cannot hold each of the 48 cells' clone, and nothing is written.
+    # 100 bytes cannot hold each of the 48 cells' clone, 8 bytes each, and
+    # nothing is written.
     listed = store.artifacts.list(kind="clonal_expansion", scope="datastore")
-    monkeypatch.setattr(store, "memoryBytes", 10_000)
+    monkeypatch.setattr(store, "memoryBytes", 100)
     with pytest.raises(
         MemoryBudgetError, match="for each cell's clone, .* Raise mem_budget"
     ):

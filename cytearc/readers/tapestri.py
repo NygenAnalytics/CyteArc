@@ -109,14 +109,12 @@ _BASES = re.compile(r"[ACGTN]+")
 _ITD_PREFIX = "FLT3-ITD:"
 # Bytes that describing a file holds for each candidate variant beside the
 # copies of its text: its name, alleles and contig as Python text, the parts
-# of its name, and its entries in the lookups of names and positions, as
-# traced at 636 to 668 bytes (Tapestri) and 860 to 1,059 bytes (DAb-seq,
-# whose names it splits further), with room.
+# of its name, and its entries in the lookups of names and positions;
+# DAb-seq's names split further.
 _TAPESTRI_VARIANT_BYTES = 700
 _DAB_SEQ_VARIANT_BYTES = 1_100
 # And for each cell: its barcode, sample and ID as Python text and their
-# entry in the lookup of repeated IDs, 251 bytes as traced with 8-character
-# samples, with room.
+# entry in the lookup of repeated IDs.
 _CELL_BYTES = 300
 # The copies of each text byte that the description holds at once.
 _DESCRIBED_TEXT_COPIES = 2

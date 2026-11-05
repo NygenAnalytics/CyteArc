@@ -43,12 +43,9 @@ _COORDINATE_OPERATIONS = {
     "batch_correction": (frozenset({"run_harmony"}), "Harmony"),
     "normalized": (frozenset({"run_normalization"}), "run_normalization"),
 }
-# sklearn's working memory covers the distance output, not its temporaries.
-# Traced allocations can exceed twice that output size. This coarse allowance
-# leaves room for extra distance buffers and reductions; it is not a bound on
-# native allocations or process memory.
+# sklearn's working memory covers the distance output, not the distance
+# buffers and reductions made beside it, which this factor counts.
 _SILHOUETTE_WORKING_MEMORY_FACTOR = 3
-_SILHOUETTE_FIXED_BYTES = 256 * 1024
 # Labels, encoded labels, cluster counts, norms, scores and reduction vectors.
 _SILHOUETTE_SAMPLE_BYTES = 128
 
@@ -171,8 +168,7 @@ def _silhouette_workspace_bytes(n_rows: int, working_memory_mib: int) -> int:
         min(n_rows * distance_row_bytes, working_memory_mib * 1024**2),
     )
     return (
-        _SILHOUETTE_FIXED_BYTES
-        + n_rows * _SILHOUETTE_SAMPLE_BYTES
+        n_rows * _SILHOUETTE_SAMPLE_BYTES
         + _SILHOUETTE_WORKING_MEMORY_FACTOR * distance_bytes
     )
 
@@ -186,10 +182,7 @@ def _silhouette_working_memory_mib(
     distance_bytes = n_rows * n_rows * np.dtype(np.float64).itemsize
     available = max(
         0,
-        memory_bytes
-        - float64_bytes
-        - _SILHOUETTE_FIXED_BYTES
-        - n_rows * _SILHOUETTE_SAMPLE_BYTES,
+        memory_bytes - float64_bytes - n_rows * _SILHOUETTE_SAMPLE_BYTES,
     )
     workspace_bytes = min(
         1024**3,

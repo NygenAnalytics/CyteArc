@@ -19,7 +19,6 @@ from typing import Any
 import numpy as np
 
 __all__ = [
-    "NUMPY_STEP_BYTES",
     "MemoryBudgetError",
     "MemoryLedger",
     "fixed_text_bytes",
@@ -37,8 +36,8 @@ class MemoryBudgetError(MemoryError):
 
     Attributes:
         needed_bytes: The bytes that the call holds at the step that was
-            refused: what it held before, what its last read may still hold,
-            and the step's own charge. A budget of at least this many bytes
+            refused: what it held before and the step's own charge. A budget
+            of at least this many bytes
             lets the call pass that step, except where a count write's
             producer hands it a batch beyond the producer's reservation: that
             refusal names what the write would reserve with the batch.
@@ -152,10 +151,8 @@ class MemoryLedger:
     """What one call holds, charged against its memory budget before each step.
 
     A step charges what it will keep with :meth:`hold`, which it lets go with
-    :meth:`release`, and what it builds and lets go with :meth:`peak`. A read
-    of a stored array records with :meth:`leave` what Zarr's codec threads
-    may still hold after it returns, which every later charge counts until
-    the next read replaces it. A budget of None never refuses.
+    :meth:`release`, and what it builds and lets go with :meth:`peak`. A
+    budget of None never refuses.
 
     Attributes:
         budget: The memory budget in bytes, or None for none.
@@ -164,14 +161,9 @@ class MemoryLedger:
         remedy: Another way to fit the budget that refusals name, or None;
             a charge can pass its own.
         codec_threads: The threads of Zarr's codec pool that the call's reads
-            decode on: the store's ``nthreads``, whatever the machine. The
-            reads that the ledger charges decode on a pool of exactly this
-            many threads, as ``storage.async_execution.zarr_decoding_threads``
-            gives them. The pool spreads a read's chunks over its threads
-            even one chunk at a time, and each thread can still hold the last
-            chunk it decoded after the read returns.
+            decode on: the store's ``nthreads``, whatever the machine, as
+            ``storage.async_execution.zarr_decoding_threads`` gives them.
         charged: The bytes held by charges not released.
-        left: What the last read or write may still hold.
     """
 
     def __init__(
@@ -201,20 +193,11 @@ class MemoryLedger:
         self.remedy = remedy
         self.codec_threads = codec_threads
         self.charged = 0
-        self.left = 0
-
-    def holding_threads(self, chunks: int) -> int:
-        """The codec threads that can each still hold a chunk after a read that decoded ``chunks`` chunks.
-
-        Each of the call's codec threads can hold the last chunk it decoded,
-        and no read leaves more held chunks than it decoded.
-        """
-        return max(1, min(self.codec_threads, int(chunks)))
 
     @property
     def held_bytes(self) -> int:
-        """The bytes charged and not released, beside what the last read may still hold."""
-        return self.charged + self.left
+        """The bytes charged and not released."""
+        return self.charged
 
     @property
     def room(self) -> int | None:
@@ -258,19 +241,6 @@ class MemoryLedger:
                 f"Releasing {nbytes} bytes, more than the {self.charged} bytes charged"
             )
         self.charged -= nbytes
-
-    def leave(self, nbytes: int) -> None:
-        """Record what the read or write that just ended may still hold, in place of the last one's.
-
-        The read's own charge planned for it, so the next charge counts it.
-        """
-        self.left = _bytes(nbytes)
-
-
-#: What a step of NumPy calls holds whatever its size: the objects of the
-#: arrays it makes and the fixed buffers of its sorts and set operations, at
-#: most 19 KB as traced on 1 to 50 cells in each step of clone calling.
-NUMPY_STEP_BYTES = 24 * 1024
 
 
 def _bytes(nbytes: int) -> int:

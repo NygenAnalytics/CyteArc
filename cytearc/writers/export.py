@@ -1131,8 +1131,8 @@ def _read_cell_values(
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Read an artifact's per-cell array at the rows of the exported cells.
 
-    The read is checked against ``max_bytes``, with a chunk that each of the
-    ``codec_threads`` that decode it can still hold after it.
+    The read is checked against ``max_bytes`` and decodes on ``codec_threads``
+    threads.
     """
     from ..metadata.rows import read_array_rows_chunkwise
     from ..metadata.selection import resolve_cell_aligned_artifact

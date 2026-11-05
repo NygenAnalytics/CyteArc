@@ -577,11 +577,8 @@ def test_streamed_row_blocks_decode_only_as_many_chunks_as_budgeted() -> None:
 
     # A row block spans the four column chunks of one chunk row, so an
     # unbounded read can hold all four decodes at once. The budget affords one
-    # 2048 byte block beside a single 512 byte chunk decode, and the chunk
-    # that the previous read can still hold, as stored and decoded, with
-    # Zarr's objects for both reads, and no more.
-    held = 512 + (512 + 512 // 128 + 1024) + 64 * 1024
-    budgeted = ChunkedArray(array, resources=ResourceBudget(3_000 + held, 4))
+    # 2048 byte block beside a single 512 byte chunk decode, and no more.
+    budgeted = ChunkedArray(array, resources=ResourceBudget(3_000, 4))
     store.reset()
     blocks = list(budgeted.stream_blocks())
 

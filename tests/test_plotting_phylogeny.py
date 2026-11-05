@@ -560,10 +560,11 @@ def test_a_budget_below_the_nodes_arrays_is_refused_before_anything_is_drawn(
 ) -> None:
     clones = random_tree.clones[case]
     options = {"tree": "forest_1"} if case == "tree" else {}
-    # 250 kB holds the trees' names and where each tree's nodes start, but
-    # not each node's parent: one tree of a forest is copied from the
+    # 100 kB holds the trees' names and where each tree's nodes start, about
+    # 1 kB, but not each node's parent, 260 kB for one tree of the forest and
+    # 520 kB for all of them: one tree of a forest is copied from the
     # forest's arrays, which are read whole first.
-    monkeypatch.setattr(random_tree.store, "memoryBytes", 250_000)
+    monkeypatch.setattr(random_tree.store, "memoryBytes", 100_000)
     with pytest.raises(
         MemoryBudgetError,
         match=r"^Drawing the phylogeny of \d+ nodes holds about \d+ bytes for "

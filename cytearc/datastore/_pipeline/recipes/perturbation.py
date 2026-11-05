@@ -32,7 +32,6 @@ from ....utils.memory_budget import (
     python_text_bytes,
 )
 from ..._operations.perturbation_guides import (
-    _CALL_FIXED_BYTES,
     _CELL_CHECK_BYTES_PER_CELL,
     _barcode_ids,
     _guide_positions,
@@ -502,7 +501,6 @@ def _check_call_file_cells(
         f"Checking the call file against the run's {len(rows)} cells",
         codec_threads=store.nthreads,
     )
-    ledger.hold("the call's plans and the store's metadata it opens", _CALL_FIXED_BYTES)
     ids = read_rows(
         ledger, store.cells._get_array("ids"), rows, item="the run's cells' IDs"
     )

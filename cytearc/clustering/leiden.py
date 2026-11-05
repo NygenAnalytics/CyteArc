@@ -17,9 +17,6 @@ _IGRAPH_RNG_LOCK = Lock()
 # of its graphs: the partition, community totals and sizes, refinement and
 # aggregation records, and the strengths of the level's nodes.
 _LEIDEN_NODE_BYTES = 104
-# Python objects a native run holds whatever the graph size, such as its
-# settings and per-level records, measured below 64 KiB.
-_LEIDEN_OBJECT_BYTES = 256 * 1024
 
 
 def native_leiden_peak_bytes(n_nodes: int, union_entries: int) -> int:
@@ -48,7 +45,7 @@ def native_leiden_peak_bytes(n_nodes: int, union_entries: int) -> int:
     nodes = integer_argument(n_nodes, "n_nodes", minimum=1)
     entries = integer_argument(union_entries, "union_entries", minimum=0)
     graph_bytes = 12 * entries + 8 * (nodes + 1)
-    return 3 * graph_bytes + _LEIDEN_NODE_BYTES * nodes + _LEIDEN_OBJECT_BYTES
+    return 3 * graph_bytes + _LEIDEN_NODE_BYTES * nodes
 
 
 def canonical_resolution(value: object) -> float:

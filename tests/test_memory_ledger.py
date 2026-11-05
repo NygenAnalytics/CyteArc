@@ -120,20 +120,6 @@ def test_a_refusal_keeps_its_fields_through_a_pickle() -> None:
     assert str(restored) == str(error)
 
 
-def test_what_a_read_leaves_behind_counts_until_the_next_read_replaces_it() -> None:
-    ledger = MemoryLedger(1_000, "Reading")
-    ledger.hold("the slots", 300)
-    ledger.leave(500)
-    assert ledger.held_bytes == 800 and ledger.room == 200
-    with pytest.raises(MemoryBudgetError, match="holds about 1001 bytes"):
-        ledger.peak("the codes", 201)
-    # The next read's leftover replaces this one's; releases leave it be.
-    ledger.leave(100)
-    assert ledger.held_bytes == 400
-    ledger.release(300)
-    assert (ledger.charged, ledger.left, ledger.room) == (0, 100, 900)
-
-
 def test_releases_and_charges_refuse_what_was_never_charged() -> None:
     ledger = MemoryLedger(100, "Counting")
     ledger.hold("a table", 10)
@@ -346,16 +332,6 @@ def test_a_text_row_read_refuses_values_that_are_not_text(tmp_path) -> None:
         read_text_rows(MemoryLedger(None, "x"), array, np.arange(2), item="the codes")
 
 
-@pytest.mark.parametrize("threads", [1, 4, 16])
-def test_a_read_leaves_a_chunk_on_each_codec_thread_up_to_its_chunks(threads) -> None:
-    # A read of ten chunks leaves one on each codec thread, up to the ten; a
-    # read of one chunk, or of none, leaves one.
-    ledger = MemoryLedger(None, "Reading", codec_threads=threads)
-    assert ledger.holding_threads(10) == min(threads, 10)
-    assert ledger.holding_threads(1) == 1
-    assert ledger.holding_threads(0) == 1
-
-
 def test_a_sharded_array_reads_whole(tmp_path) -> None:
     # Shards of eight chunks of 400 KB that do not compress, read a band at a
     # time.
@@ -424,7 +400,6 @@ def test_a_selection_read_planned_with_its_cells_known_skips_the_check(
     root, ref = _selection_store(tmp_path / "store.zarr", flags)
     checked = plan_cell_selection_read(root, ref)
     unchecked = plan_cell_selection_read(root, ref, cells=int(flags.sum()))
-    assert (checked.checked, unchecked.checked) == (True, False)
     assert unchecked.cells == checked.cells
     for plan in (checked, unchecked):
         positions = read_cell_selection(

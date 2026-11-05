@@ -703,12 +703,12 @@ def test_fate_bias_refuses_a_small_budget_before_it_writes(copied, monkeypatch) 
     early, late = copied.early, copied.late
     n_early, n_late = int(EARLY.sum()), int(LATE.sum())
     # A fate of its own for each late cell, named by three characters, makes
-    # the measurement the largest step, which 200 kB cannot hold; nothing is
-    # written.
+    # the measurement the largest step, about 72 kB, which 40 kB cannot hold
+    # beside the steps before it, about 15 kB at most; nothing is written.
     fates = _own_labels(store, LATE)
     options = {"groups": fates, "early": early, "late": late}
     listed = store.artifacts.list(kind="clone_fate_bias", scope="datastore")
-    monkeypatch.setattr(store, "memoryBytes", 200_000)
+    monkeypatch.setattr(store, "memoryBytes", 40_000)
     with pytest.raises(MemoryBudgetError, match="into fewer fates") as refused:
         store.clones.fate_bias(clones, **options)
     assert refused.value.item == (

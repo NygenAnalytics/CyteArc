@@ -66,9 +66,7 @@ __all__ = [
 #: Each group's labels, a dictionary of its labels by key column, cost this
 #: and this for each key column beside the labels' text, which the codes of
 #: each column name, while they are built from the groups' codes as lists of
-#: numbers and while the groups are named by their labels joined: 288, 368
-#: and 1,048 bytes for groups of one, three and thirteen key columns, as
-#: traced on 20,000 and 200,000 groups.
+#: numbers and while the groups are named by their labels joined.
 GROUPING_BYTES_PER_GROUP = 250
 GROUPING_BYTES_PER_GROUP_COLUMN = 70
 
@@ -83,8 +81,7 @@ def _combining_bytes(n_cells: int, n_columns: int) -> int:
     cell's position among them. Once the last is combined: the stacked codes,
     their copy and the distinct rows, 24 bytes a cell for each column when
     each cell is a group of its own, and 56 a cell for the codes and the
-    rows' representatives. Traced on 20,000 and 200,000 cells of a label of
-    their own, 82, 122 and 345 bytes a cell for one, three and 13 columns.
+    rows' representatives.
     """
     return int(n_cells) * max(17 * n_columns + 70, 24 * n_columns + 56)
 
@@ -163,9 +160,7 @@ class CellGroups:
         characters a group and, for each key column, its name, its label and
         17 more. Python keeps the whole text at the width of its widest
         character, so each character takes 2 bytes for ASCII text, 3 to
-        U+00FF, 5 to U+FFFF and 8 beyond. Traced on 2,000 to 200,000 groups of
-        one to 13 key columns of 7 to 40 characters: 364 to 2,560 bytes a
-        group.
+        U+00FF, 5 to U+FFFF and 8 beyond.
         """
         texts = [text for key in self.keys for item in key.items() for text in item]
         characters = len(self.keys) * (14 + 17 * len(self.key_columns)) + sum(
