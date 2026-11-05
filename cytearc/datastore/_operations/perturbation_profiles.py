@@ -1020,6 +1020,15 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         # The profiles as read, as float64 and centred, and the distances and
         # their symmetric copy.
         profile_values = read_rows(ledger, values, positions, item="the profiles")
+        embedding = read_whole(ledger, group, "embedding", item="the layout")
+        cluster = read_whole(ledger, group, "cluster", item="the clusters")
+        probability = read_whole(ledger, group, "probability", item="the probabilities")
+        profiled_cells = read_whole(
+            ledger, source, "n_cells", item="the perturbations' cells"
+        )
+        order = read_whole(ledger, group, "order", item="the order")
+        # The distances and their symmetric copy, and the profiles as float64
+        # and centred, then the frames, which keep the distances.
         ledger.peak(
             "the distances between the profiles",
             16 * n_clustered * n_clustered + 20 * n_clustered * n_features,
@@ -1029,27 +1038,18 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         with process_thread_limit(self.nthreads, user_api="blas"):
             distances = profile_distances(profile_values, metric)
         index = pd.Index(names.astype(str, copy=False), name="perturbation")
-        embedding = read_whole(ledger, group, "embedding", item="the layout")
         return PerturbationClusters(
             table=pd.DataFrame(
                 {
-                    "cluster": read_whole(
-                        ledger, group, "cluster", item="the clusters"
-                    ),
-                    "probability": read_whole(
-                        ledger, group, "probability", item="the probabilities"
-                    ),
-                    "n_cells": read_whole(
-                        ledger, source, "n_cells", item="the perturbations' cells"
-                    )[positions],
+                    "cluster": cluster,
+                    "probability": probability,
+                    "n_cells": profiled_cells[positions],
                     "x": embedding[:, 0],
                     "y": embedding[:, 1],
                 },
                 index=index,
             ),
-            order=names.astype(str, copy=False)[
-                read_whole(ledger, group, "order", item="the order")
-            ],
+            order=names.astype(str, copy=False)[order],
             distances=pd.DataFrame(distances, index=index, columns=index.copy()),
             metric=metric,
             min_cluster_size=int(parameters["min_cluster_size"]),

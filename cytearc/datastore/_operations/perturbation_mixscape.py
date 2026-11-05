@@ -1407,19 +1407,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             "score": read_whole(ledger, group, "score", item="the scores"),
             "split": read_whole(ledger, group, "splits", item="the cells' splits"),
         }
-        ledger.peak(
-            "the table of cells", _frame_bytes({**cell_columns, "ids": cell_ids})
-        )
-        cell_columns["mixscape_class"] = cell_columns["mixscape_class"].astype(str)
-        cell_columns["global_class"] = cell_columns["global_class"].astype(str)
-        cell_columns["split"] = split_names[cell_columns["split"]]
-        cells = pd.DataFrame(
-            cell_columns, index=pd.Index(cell_ids.astype(str, copy=False), name="ids")
-        )
-        del cell_columns
-        row_splits = split_names[
-            read_whole(ledger, group, "row_splits", item="the rows' splits")
-        ]
+        row_splits = read_whole(ledger, group, "row_splits", item="the rows' splits")
         targets = read_whole(ledger, group, "targets", item="the targets")
         table: dict[str, Any] = {
             "target": targets,
@@ -1447,13 +1435,25 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         feature_ids = _feature_text(ledger, assay, "ids")
         de_features = read_whole(ledger, group, "de_features", item="the DE genes")
         rows = np.repeat(np.arange(len(targets)), np.diff(offsets))
-        # Each DE gene's target and feature as text, then as Python strings in
-        # its table, and its split's reference.
+        # The tables of cells, targets and DE genes: each DE gene's target and
+        # feature as text, then as Python strings in its table, and its
+        # split's reference.
         widths = targets.dtype.itemsize + feature_ids.dtype.itemsize
         ledger.peak(
-            "the tables of targets and DE genes",
-            _frame_bytes(table) + len(rows) * (2 * widths + 3 * 64 + 24),
+            "the tables of cells, targets and DE genes",
+            _frame_bytes({**cell_columns, "ids": cell_ids})
+            + _frame_bytes(table)
+            + len(rows) * (2 * widths + 3 * 64 + 24),
         )
+        cell_columns["mixscape_class"] = cell_columns["mixscape_class"].astype(str)
+        cell_columns["global_class"] = cell_columns["global_class"].astype(str)
+        cell_columns["split"] = split_names[cell_columns["split"]]
+        cells = pd.DataFrame(
+            cell_columns, index=pd.Index(cell_ids.astype(str, copy=False), name="ids")
+        )
+        del cell_columns
+        row_splits = split_names[row_splits]
+        table["split"] = row_splits
         parameters = status.parameters or {}
         split_columns = list(parameters["split_columns"])
         return MixscapeResult(

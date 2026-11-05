@@ -625,17 +625,31 @@ def audit_at(
     return result
 
 
+def _needed_bytes(refusal: BaseException) -> int:
+    """Return the ``needed_bytes`` of a ``MemoryBudgetError``; any other refusal fails."""
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    assert isinstance(refusal, MemoryBudgetError), refusal
+    return refusal.needed_bytes
+
+
 def audited_least(path: str | Path, call: Callable[[Any], Any], **options: Any) -> int:
     """Find the smallest budget that runs ``call`` on the store at ``path`` from its refusals, and audit ``call`` there as :func:`audit_at` does.
 
     The refusals are followed untraced, up to 100 of them, on stores opened
-    with ``options``.
+    with ``options``, each by the ``needed_bytes`` of its ``MemoryBudgetError``,
+    whatever its words, as the reads of cell-aligned artifacts keep their own.
 
     Returns:
         The budget.
     """
     budget, _refusals, _result, _peak = budget_that_runs(
-        path, call, max_refusals=100, traced=False, **options
+        path,
+        call,
+        refusal_budget=_needed_bytes,
+        max_refusals=100,
+        traced=False,
+        **options,
     )
     audit_at(path, call, budget, **options)
     return budget
