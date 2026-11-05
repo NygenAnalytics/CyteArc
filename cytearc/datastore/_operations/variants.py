@@ -3721,7 +3721,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             calls.gather(ledger, fitted)
         # Each cell's clone within its group, from 1, its posterior and its
         # flag, and each group's rates at each site.
-        results_held = ledger.hold(
+        ledger.hold(
             f"the clones of {n_cells} cells",
             17 * n_cells + 16 * n_groups * n_sites,
         )
@@ -3748,6 +3748,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 min_posterior=rules.min_posterior,
                 ledger=ledger,
                 nthreads=self.nthreads,
+            )
+            ledger.peak(
+                f"placing the clones of {stop - first} cells", 41 * (stop - first)
             )
             clustered = result.codes >= 0
             clusters[group_cells[clustered]] = result.codes[clustered] + 1 + offset
@@ -3787,11 +3790,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             probabilities=np.where(assignment.codes >= 0, probability, np.nan),
         )
         del probability
+        # Each cell's code and probability take the place of its clone
+        # within its group and its posterior, which the results' charge
+        # holds, and the clones' sizes and labels come beside them.
         ledger.hold(
-            f"each cell's clone among {len(assignment.clone_ids)}",
-            8 * n_cells + 24 * len(assignment.clone_ids),
+            f"the sizes of {len(assignment.clone_ids)} clones",
+            24 * len(assignment.clone_ids),
         )
-        ledger.release(results_held - 16 * n_groups * n_sites - n_cells)
         return _LikelihoodCall(
             assignment=assignment,
             ambiguous=ambiguous,

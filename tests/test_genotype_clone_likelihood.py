@@ -241,6 +241,9 @@ def test_call_patterns_group_equal_rows_and_sum_their_weights(n_local) -> None:
     calls = calls[rng.integers(0, 40, size=800)]
     weights = rng.random(800)
     weights[:5] = 0.0
+    # A row of zero weight whose pattern no other row has keeps a pattern of
+    # its own, of weight 0.
+    calls[3] = 1
     local_mutant, local_wild = _packed(calls)
     pattern_mutant, pattern_wild, summed, inverse = call_patterns(
         local_mutant, local_wild, weights, n_local
@@ -609,3 +612,203 @@ def test_within_groups_are_fitted_apart_with_rates_of_their_own(tmp_path) -> Non
         alone[0].carried_calls + alone[1].carried_calls
     )
     assert pooled == pytest.approx(expected)
+
+
+def test_a_split_of_more_sites_than_a_split_may_read_keeps_its_strongest() -> None:
+    # Two clones of the root, each with 300 sites of its own: a split of
+    # either from the wild type starts from its 300 sites, more than the 256
+    # a split reads, and keeps those where the seed's cells differ most.
+    rng = np.random.default_rng(17)
+    carried = np.zeros((700, 600), dtype=bool)
+    carried[:300, :300] = True
+    carried[300:600, 300:] = True
+    draw = rng.random(carried.shape)
+    calls = np.where(np.where(carried, draw >= 0.1, draw < 0.005), 1, 0).astype(np.int8)
+    truth = np.repeat([0, 1, -1], [300, 300, 100])
+    called = _call(calls)
+    assert len(called.sizes) == 2
+    assert adjusted_rand_score(truth, called.codes) > 0.95
+    # Each clone carries its own sites.
+    for genotype in called.genotypes:
+        assert genotype[:300].all() != genotype[300:].all()
+
+
+def test_the_search_stops_at_the_most_clones_a_fit_may_hold(monkeypatch) -> None:
+    from cytearc.variants import genotype_clones
+
+    monkeypatch.setattr(genotype_clones, "MAX_CLONES", 3)
+    truth = dropout_truth(n_cells=2_000, n_sites=40, n_clones=8, dropout=0.1, seed=1)
+    called = _call(truth.calls)
+    assert 1 <= len(called.sizes) <= 3
+
+
+def test_proposals_that_no_joint_bound_accepts_end_the_search(monkeypatch) -> None:
+    from cytearc.variants import genotype_clones
+
+    joint = genotype_clones._Search.joint
+
+    def refused(self, fit, stats, splits, edits):
+        delta, *rest = joint(self, fit, stats, splits, edits)
+        return (genotype_clones.MIN_GAIN, *rest)
+
+    monkeypatch.setattr(genotype_clones._Search, "joint", refused)
+    truth = dropout_truth(n_cells=1_500, n_sites=30, n_clones=6, dropout=0.1, seed=4)
+    called = _call(truth.calls)
+    # Every proposal fails, so no round accepts a split: the fit keeps the
+    # first clone, of the sites most cells read mutant, or none.
+    assert called.bound_checks == ()
+    assert len(called.sizes) <= 1
+
+
+def test_drop_empty_removes_repeated_genotypes_and_clones_of_too_few_cells() -> None:
+    from cytearc.variants.genotype_clones import _drop_empty
+
+    genotypes = np.array([[1, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=bool)
+    log_weights = np.log(np.array([0.4, 0.3, 0.2, 0.0999, 0.0001]))
+    rates = SiteRates(np.full(3, 0.1), np.full(3, 0.01), 0.1, 0.01)
+    fit = MixtureFit(genotypes, log_weights, rates, loglik=-5.0)
+    # Of 1,000 cells, the last clone expects 0.1 cells, below two, and the
+    # second repeats the first's genotype.
+    dropped = _drop_empty(fit, 1_000, 2)
+    np.testing.assert_array_equal(dropped.genotypes, genotypes[[0, 2]])
+    expected = np.log(np.array([0.4, 0.3, 0.0999]))
+    np.testing.assert_allclose(
+        dropped.log_weights, expected - np.logaddexp.reduce(expected)
+    )
+    assert (
+        _drop_empty(MixtureFit(genotypes[[0, 2]], log_weights[:3], rates), 1_000, 2)
+        is None
+    )
+
+
+def test_pruning_removes_a_clone_that_no_cell_needs_and_one_too_small() -> None:
+    from cytearc.variants.genotype_clones import _pruned
+
+    truth = dropout_truth(n_cells=1_500, n_sites=30, n_clones=4, dropout=0.1, seed=18)
+    mutant, wild = _packed(truth.calls)
+    ledger = MemoryLedger(None, "Calling clones")
+    mixture = GenotypeMixture(
+        mutant,
+        wild,
+        30,
+        dropout_probability=None,
+        error_probability=None,
+        ledger=ledger,
+    )
+    # The truth's clones beside a clone of sites that no clone carries,
+    # which no cell supports beyond errors.
+    spare = np.zeros((1, 30), dtype=bool)
+    spare[0, np.flatnonzero(~truth.genotypes.any(axis=0))[:3]] = True
+    start = MixtureFit(
+        np.vstack([truth.genotypes, spare]),
+        np.log(np.full(6, 1 / 6)),
+        mixture.initial_rates(),
+    )
+    fit = _pruned(mixture, mixture.em(start, max_iter=50), min_size=2)
+    np.testing.assert_array_equal(
+        np.sort(fit.genotypes.astype(int), axis=0),
+        np.sort(truth.genotypes.astype(int), axis=0),
+    )
+    mixture.release(fit)
+    # A min_size above every clone's cells removes them one at a time.
+    fit = _pruned(mixture, mixture.em(start, max_iter=50), min_size=10_000)
+    assert len(fit.genotypes) == 0
+    mixture.release(fit)
+    assert ledger.charged == 0
+
+
+def test_a_fit_without_the_arrays_of_em_refuses_to_give_them() -> None:
+    from cytearc.variants.genotype_mixture import fit_arrays
+
+    rates = SiteRates(np.full(3, 0.1), np.full(3, 0.01), 0.1, 0.01)
+    with pytest.raises(ValueError, match="run EM on it first"):
+        fit_arrays(MixtureFit(np.zeros((1, 3), dtype=bool), np.zeros(2), rates))
+
+
+def test_a_nested_truth_with_a_held_dropout_rate_keeps_its_subclone() -> None:
+    # A of sites 0 to 2, its subclone A1 adding sites 3 and 4, and B of
+    # sites 5 to 7, read with a dropout of 0.15 that the call holds: the
+    # subclone splits from A, a split of a clone with a parent.
+    rng = np.random.default_rng(19)
+    genotypes = np.zeros((3, 12), dtype=bool)
+    genotypes[0, :3] = genotypes[1, :5] = genotypes[2, 5:8] = True
+    truth = np.repeat([0, 1, 2, -1], [250, 200, 200, 50])
+    carried = np.zeros((700, 12), dtype=bool)
+    carried[truth >= 0] = genotypes[truth[truth >= 0]]
+    draw = rng.random(carried.shape)
+    calls = np.where(np.where(carried, draw >= 0.15, draw < 0.01), 1, 0).astype(np.int8)
+    calls[rng.random(calls.shape) < 0.05] = -1
+    called = _call(calls, dropout_probability=0.15)
+    np.testing.assert_array_equal(called.dropout, np.full(12, 0.15))
+    assert len(called.sizes) == 3
+    assert adjusted_rand_score(truth, called.codes) > 0.9
+    found = {tuple(np.flatnonzero(genotype)) for genotype in called.genotypes}
+    assert found == {(0, 1, 2), (0, 1, 2, 3, 4), (5, 6, 7)}
+    # Both rates held: the same clones, the error held at every site.
+    both = _call(calls, dropout_probability=0.15, error_probability=0.01)
+    np.testing.assert_array_equal(both.error, np.full(12, 0.01))
+    assert adjusted_rand_score(called.codes, both.codes) > 0.95
+
+
+def test_removing_the_one_component_a_cell_can_take_loses_it_entirely() -> None:
+    from cytearc.variants.genotype_mixture import removal_logliks
+
+    # The wild type has no weight, so each cell's only component is the
+    # clone, and removing it leaves the cells nothing: log(1 - 1).
+    relative = np.zeros((3, 2))
+    log_weights = np.array([-np.inf, 0.0])
+    posteriors = np.array([[0.0, 1.0]] * 3)
+    lost = removal_logliks(relative, log_weights, posteriors, 4)
+    assert lost[1] == -np.inf
+    assert lost[0] == 0.0
+
+
+@pytest.mark.slow
+def test_the_likelihood_holds_no_more_than_the_smallest_budget_it_accepts() -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
+    from tests.memory_helpers import audited, traced_peak
+
+    # 20,000 cells at 40 sites in 16 clones: each fit's posteriors and
+    # relative log-likelihoods of up to 17 components, its sums over chunks
+    # of cells and each proposal's cells outweigh what the search holds
+    # whatever its size, so the budget is bounded from both sides.
+    truth = dropout_truth(n_cells=20_000, n_sites=40, n_clones=16, seed=3)
+    mutant, wild = _packed(truth.calls)
+
+    def call(budget):
+        # The packed calls are held before the call, as an operation holds
+        # them.
+        ledger = MemoryLedger(budget, "Calling clones")
+        ledger.hold("the packed calls", mutant.nbytes + wild.nbytes)
+        return likelihood_clones(
+            mutant,
+            wild,
+            40,
+            dropout_probability=None,
+            error_probability=None,
+            min_size=2,
+            min_posterior=0.6,
+            ledger=ledger,
+            nthreads=2,
+        )
+
+    expected = call(None)
+    budget, refusals = 1, 0
+    while True:
+        try:
+            call(budget)
+        except MemoryBudgetError as refusal:
+            assert refusal.needed_bytes > budget
+            budget, refusals = refusal.needed_bytes, refusals + 1
+            continue
+        break
+    assert refusals > 10
+    called, peak = traced_peak(lambda: call(budget), budget)
+    np.testing.assert_array_equal(called.codes, expected.codes)
+    assert peak <= budget
+    assert budget <= 1.5 * peak + (256 << 10), (budget, peak)
+    with pytest.raises(MemoryBudgetError) as refused:
+        call(budget - 1)
+    assert refused.value.needed_bytes == budget
+    _result, overruns = audited(lambda: call(budget))
+    assert overruns == []

@@ -43,6 +43,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ..utils.arguments import quoted_value
 from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
 from ..utils.numba import numba_threads
 from .genotype_mixture import (
@@ -170,7 +171,8 @@ def genotype_clone_rules(
     """
     if not isinstance(method, str) or method not in GENOTYPE_CLONE_METHODS:
         raise ValueError(
-            f"method must be one of {', '.join(GENOTYPE_CLONE_METHODS)}, not {method!r}"
+            f"method must be one of {', '.join(GENOTYPE_CLONE_METHODS)}, not "
+            f"{quoted_value(method)}"
         )
     given = {
         "dropout_probability": dropout_probability,
@@ -338,12 +340,12 @@ def split_fit_bytes(n_rows: int, n_local: int, n_sites: int) -> int:
 def round_bytes(n_cells: int, n_sites: int, n_components: int) -> int:
     """What a round of splits holds beside its fit.
 
-    Each cell's most probable component, the sites' statistics as they are
-    summed over the components, the genotypes' keys and every component's
-    best split.
+    Each cell's most probable component and a mask of a component's cells,
+    the sites' statistics as they are summed over the components, the
+    genotypes' keys and every component's best split.
     """
     return (
-        8 * n_cells
+        9 * n_cells
         + 64 * n_sites
         + 26 * n_components * n_sites
         + n_components * (n_sites // 8 + 128)
@@ -585,11 +587,10 @@ class _Search:
                         clone_mutant - child_mutant, clone_wild - child_wild, parent
                     )
                     remaining[site] = parent[site]
+                # The seed site is among them, since the child flips it.
                 candidates = np.flatnonzero(
                     (child != remaining) | (child != parent) | (remaining != parent)
                 )
-                if site not in candidates:
-                    candidates = np.sort(np.append(candidates, site))
                 if len(candidates) > MAX_SPLIT_SITES:
                     strength = np.abs(child_share - remaining_share)[candidates]
                     strength[candidates == site] = np.inf
@@ -1193,6 +1194,58 @@ def _assigned(
     return component, probability, ambiguous, clone
 
 
+def _pruned(mixture: GenotypeMixture, fit: MixtureFit, min_size: int) -> MixtureFit:
+    """Remove one clone at a time, each followed by EM, while one holds fewer than ``min_size`` of the cells whose most probable component it is, or its removal raises Schwarz's score.
+
+    A clone below ``min_size`` goes first, then the removal of the largest
+    rise, the lowest index among equal ones. ``fit`` holds the arrays of EM,
+    which the fit returned holds in its place.
+    """
+    ledger = mixture.ledger
+    n_cells = mixture.n_cells
+    n_sites = mixture.n_sites
+    while len(fit.genotypes) > 0:
+        score = schwarz_score(fit.loglik, fit.genotypes, n_cells)
+        ledger.peak(
+            f"scoring the removal of {len(fit.genotypes)} clones",
+            prune_bytes(n_cells, n_sites, fit.n_components),
+        )
+        hard = np.argmax(fit_arrays(fit).posteriors, axis=1)
+        sizes = np.bincount(hard, minlength=fit.n_components)[1:]
+        del hard
+        candidates = [
+            (np.inf, index)
+            for index in range(len(fit.genotypes))
+            if sizes[index] < min_size
+        ]
+        if not candidates:
+            deltas = _removal_deltas(fit, n_cells)
+            for index in range(len(fit.genotypes)):
+                removed = np.delete(fit.genotypes, index, axis=0)
+                delta = (
+                    schwarz_score(
+                        fit.loglik + float(deltas[index + 1]), removed, n_cells
+                    )
+                    - score
+                )
+                if delta > 0:
+                    candidates.append((delta, index))
+        if not candidates:
+            break
+        # The largest rise first, the lowest index among equal rises.
+        _delta, index = max(candidates, key=lambda item: (item[0], -item[1]))
+        log_weights = np.delete(fit.log_weights, index + 1)
+        pruned = MixtureFit(
+            np.delete(fit.genotypes, index, axis=0),
+            log_weights - np.logaddexp.reduce(log_weights),
+            fit.rates,
+            fit.loglik,
+        )
+        mixture.release(fit)
+        fit = mixture.em(pruned, max_iter=MAX_ITERATIONS)
+    return fit
+
+
 def likelihood_clones(
     mutant_bits: np.ndarray,
     wild_bits: np.ndarray,
@@ -1316,45 +1369,7 @@ def _search(
     flags = ledger.hold("whether each cell has a mutant call", n_cells)
     has_mutant = np.empty(n_cells, dtype=bool)
     any_bits(mixture.mbits, has_mutant)
-    while len(fit.genotypes) > 0:
-        score = schwarz_score(fit.loglik, fit.genotypes, n_cells)
-        ledger.peak(
-            f"scoring the removal of {len(fit.genotypes)} clones",
-            prune_bytes(n_cells, n_sites, fit.n_components),
-        )
-        hard = np.argmax(fit_arrays(fit).posteriors, axis=1)
-        sizes = np.bincount(hard, minlength=fit.n_components)[1:]
-        del hard
-        candidates = [
-            (np.inf, index)
-            for index in range(len(fit.genotypes))
-            if sizes[index] < min_size
-        ]
-        if not candidates:
-            deltas = _removal_deltas(fit, n_cells)
-            for index in range(len(fit.genotypes)):
-                removed = np.delete(fit.genotypes, index, axis=0)
-                delta = (
-                    schwarz_score(
-                        fit.loglik + float(deltas[index + 1]), removed, n_cells
-                    )
-                    - score
-                )
-                if delta > 0:
-                    candidates.append((delta, index))
-        if not candidates:
-            break
-        # The largest rise first, the lowest index among equal rises.
-        _delta, index = max(candidates, key=lambda item: (item[0], -item[1]))
-        log_weights = np.delete(fit.log_weights, index + 1)
-        pruned = MixtureFit(
-            np.delete(fit.genotypes, index, axis=0),
-            log_weights - np.logaddexp.reduce(log_weights),
-            fit.rates,
-            fit.loglik,
-        )
-        mixture.release(fit)
-        fit = mixture.em(pruned, max_iter=MAX_ITERATIONS)
+    fit = _pruned(mixture, fit, min_size)
     n_clones = len(fit.genotypes)
     ledger.peak(
         f"assigning {n_cells} cells to {n_clones} clones",
