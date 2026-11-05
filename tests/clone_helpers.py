@@ -293,6 +293,126 @@ def repertoire_figure_calls(
     }
 
 
+#: The figures of variant counts, informative variants and genotype calls,
+#: by the name of the plot that draws each.
+VARIANT_FIGURES = (
+    "variant_depth",
+    "variant_statistics",
+    "allele_frequencies",
+    "genotypes",
+)
+
+
+def write_embedding(
+    store: "DataStore", column: str, coordinates: np.ndarray
+) -> "ArtifactRef":
+    """Save an imported embedding at these coordinates of the cells that a column selects."""
+    import hashlib
+
+    from cytearc.embeddings.imported import write_imported_embedding
+    from cytearc.storage.artifacts import fingerprint_array
+
+    values = np.asarray(coordinates, dtype=np.float32)
+    ids = np.asarray(store.cells.fetch_all("ids")).astype(str)
+    rows = np.asarray(store.cells.fetch_all(column), dtype=bool)
+    return write_imported_embedding(
+        store.zw,
+        assay="RNA",
+        dimreduc_key="umap",
+        role="umap",
+        coordinates=values,
+        source_digest=hashlib.sha256(values.tobytes()).digest(),
+        payload_fingerprints={"values": fingerprint_array(values)},
+        source_cell_ids=ids[rows],
+        cell_selection=store.snapshot_cell_selection(column),
+        block_rows=4,
+    )
+
+
+def import_truth_variants(
+    store: "DataStore", truth: CloneTruth, folder: Path
+) -> dict[str, "ArtifactRef"]:
+    """Import the truth's mitochondrial reads and GoT UMIs into its store, with an embedding.
+
+    The reads are mgatk's of ``clone_variant_truth``, scored as informative
+    where two cells or more show a variant, and the clones of their allele
+    frequencies; the UMIs are GoT's of ``genotype_clone_truth``, one target
+    per clone, called by GoT's thresholds; and the embedding of every cell
+    places each clone's cells around a point of its own.
+
+    Returns:
+        The ``counts``, ``informative``, ``clones``, ``genotypes`` and
+        ``layout`` artifacts.
+    """
+    import warnings
+
+    from tests.variant_truth import (
+        clone_variant_truth,
+        genotype_clone_truth,
+        write_genotype_tables,
+        write_mgatk,
+    )
+
+    path = write_mgatk(clone_variant_truth(truth), folder / "mgatk")
+    with warnings.catch_warnings():
+        # The truth's reads include droplets outside the store.
+        warnings.simplefilter("ignore", UserWarning)
+        counts = store.variants.import_counts(path, cell_selection=every_cell(store))
+    informative = store.variants.informative(counts, min_cells=2, min_vmr=0.01)
+    targets = store.variants.import_counts(
+        write_genotype_tables(
+            genotype_clone_truth(truth), truth.cell_ids.tolist(), folder / "got"
+        ),
+        cell_selection=every_cell(store),
+    )
+    rng = np.random.default_rng(7)
+    angles = 2 * np.pi * (truth.clones + 1) / (truth.n_clones + 1)
+    radius = np.where(truth.clones >= 0, 4.0, 0.0)
+    centres = np.column_stack([radius * np.cos(angles), radius * np.sin(angles)])
+    return {
+        "counts": counts,
+        "informative": informative,
+        "clones": store.variants.frequency_clones(informative),
+        "genotypes": store.variants.genotypes(
+            targets, method="threshold", min_mutant_umis=1
+        ),
+        "layout": write_embedding(
+            store, "every_cell", centres + rng.normal(0, 0.8, centres.shape)
+        ),
+    }
+
+
+def variant_figure_calls(
+    store: "DataStore", variants: Mapping[str, "ArtifactRef"]
+) -> dict[str, Callable[..., object]]:
+    """Each variant figure of the truth's store, as a call of display options.
+
+    ``variants`` holds the artifacts of :func:`import_truth_variants`. The
+    depth is grouped by sample, the allele frequencies ordered by the
+    frequency clones, and the calls of the first target grouped by sample
+    and drawn on the embedding.
+    """
+    plots = store.plots
+    return {
+        "variant_depth": lambda **options: plots.variant_depth(
+            variants["counts"], group_by="sample", **options
+        ),
+        "variant_statistics": lambda **options: plots.variant_statistics(
+            variants["informative"], **options
+        ),
+        "allele_frequencies": lambda **options: plots.allele_frequencies(
+            variants["informative"], clones=variants["clones"], **options
+        ),
+        "genotypes": lambda **options: plots.genotypes(
+            variants["genotypes"],
+            sites=["T1"],
+            group_by="sample",
+            layout=variants["layout"],
+            **options,
+        ),
+    }
+
+
 def overlap_reference(x: Mapping[object, int], y: Mapping[object, int]) -> dict:
     """The overlap indices of two groups, from each one's cells of each clone.
 

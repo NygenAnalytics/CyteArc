@@ -1,4 +1,4 @@
-"""The conventions that every clone figure keeps, on the truth's clones and clonotypes."""
+"""The conventions that every clone, repertoire and variant figure keeps, on the truth's experiment."""
 
 import re
 from dataclasses import replace
@@ -18,6 +18,7 @@ from matplotlib.legend import Legend
 import cytearc.plotting.clones as clone_plots
 import cytearc.plotting.lineage_barcodes as barcode_plots
 import cytearc.plotting.recorder_alleles as recorder_plots
+import cytearc.plotting.variants as variant_plots
 from cytearc.metadata.artifacts import categorical_display
 from cytearc.plotting import compose_results
 from cytearc.plotting._figure import _shared_legend_parts, is_colorbar_axes
@@ -29,12 +30,15 @@ from cytearc.plotting._style import (
 from tests.clone_helpers import (
     CLONE_FIGURES,
     REPERTOIRE_FIGURES,
+    VARIANT_FIGURES,
     clone_figure_calls,
     every_cell,
     import_truth_clones,
     import_truth_lineage,
     import_truth_receptors,
+    import_truth_variants,
     repertoire_figure_calls,
+    variant_figure_calls,
     write_cells_store,
     write_clone_contigs,
     write_truth_store,
@@ -1427,3 +1431,599 @@ def test_locus_heatmaps_share_the_largest_fraction_of_any_locus(repertoire) -> N
             assert result.axes["TRA"].get_ylabel() == axis
         finally:
             result.close()
+
+
+# The figures of variant counts, informative variants and genotype calls keep
+# the same conventions, on the truth's mitochondrial reads and GoT UMIs.
+
+
+@pytest.fixture(scope="module")
+def variants(tmp_path_factory) -> SimpleNamespace:
+    folder = tmp_path_factory.mktemp("variant_figure_conventions")
+    store = write_truth_store(folder / "store.zarr", TRUTH)
+    artifacts = import_truth_variants(store, TRUTH, folder)
+    return SimpleNamespace(
+        store=store, calls=variant_figure_calls(store, artifacts), **artifacts
+    )
+
+
+# The input that each figure records under its argument's name, the
+# fixture's artifact it is, and whether the figure records a grouping.
+_VARIANT_INPUTS = {
+    "variant_depth": ("counts", "counts", True),
+    "variant_statistics": ("variants", "informative", False),
+    "allele_frequencies": ("variants", "informative", False),
+    "genotypes": ("genotypes", "genotypes", True),
+}
+# The panels of each variant figure, for drawing it on axes of a caller's.
+_VARIANT_PANELS = {
+    "variant_depth": ["sites", "cells"],
+    "variant_statistics": ["variants"],
+    "allele_frequencies": ["frequencies"],
+    "genotypes": ["calls", "layout"],
+}
+
+
+def _painted_colors(ax) -> set[str]:
+    """The colours that a panel paints: bars, outlines, lines, points and a strip's colours."""
+    colors = {
+        to_hex(patch.get_facecolor() if patch.get_fill() else patch.get_edgecolor())
+        for patch in ax.patches
+    }
+    colors |= {to_hex(line.get_color()) for line in ax.get_lines()}
+    for collection in ax.collections:
+        colors |= {to_hex(color) for color in collection.get_facecolors()}
+    for image in ax.images:
+        colors |= {to_hex(color) for color in getattr(image.get_cmap(), "colors", ())}
+    return colors
+
+
+def _legends_with_insets(figure) -> list[Legend]:
+    """The legends of a figure's panels and of the insets they hold, such as a clone strip."""
+    found = []
+    for ax in figure.axes:
+        for holder in [ax, *ax.child_axes]:
+            found.extend(
+                artist for artist in holder.get_children() if isinstance(artist, Legend)
+            )
+    return found
+
+
+def test_every_variant_figure_is_checked() -> None:
+    assert set(VARIANT_FIGURES) == set(variant_plots.__all__)
+    assert set(_VARIANT_INPUTS) == set(_VARIANT_PANELS) == set(VARIANT_FIGURES)
+
+
+@pytest.mark.parametrize("name", VARIANT_FIGURES)
+def test_variant_legends_are_reported_with_their_scales_and_agree_with_the_drawing(
+    variants, name
+) -> None:
+    result = variants.calls[name](show=False)
+    try:
+        assert result.legends, name
+        assert {legend.kind for legend in result.legends} <= {
+            "categorical",
+            "colorbar",
+        }
+        assert len(result.scales) == len(result.legends)
+        parts = _shared_legend_parts(result)
+        assert parts is not None and len(parts) == len(result.legends)
+        categorical = [
+            (legend, scale)
+            for legend, scale in zip(result.legends, result.scales, strict=True)
+            if legend.kind == "categorical"
+        ]
+        drawn = _legends_with_insets(result.figure)
+        assert len(drawn) == len(categorical)
+        for (legend, scale), artist in zip(categorical, drawn, strict=True):
+            assert artist.get_title().get_text() == legend.label
+            labels = [category_label(scale, value) for value in scale.order]
+            assert [text.get_text() for text in artist.get_texts()] == labels
+            colors = [
+                to_hex(
+                    handle.get_facecolor()
+                    if hasattr(handle, "get_facecolor")
+                    else handle.get_color()
+                )
+                for handle in artist.legend_handles
+            ]
+            assert colors == [scale.palette[value] for value in scale.order]
+            assert set(colors) <= _painted_colors(artist.axes)
+        colorbar_legends = [
+            legend for legend in result.legends if legend.kind == "colorbar"
+        ]
+        colorbars = [ax for ax in result.figure.axes if is_colorbar_axes(ax)]
+        assert len(colorbars) == len(colorbar_legends)
+        for legend, colorbar in zip(colorbar_legends, colorbars, strict=True):
+            assert colorbar.get_ylabel() == legend.label
+            assert colorbar.get_ylim() == pytest.approx(
+                (legend.extras["vmin"], legend.extras["vmax"])
+            )
+        assert result.provenance.notes == (name,)
+        key, ref, grouped = _VARIANT_INPUTS[name]
+        assert result.provenance.extras[key] == getattr(variants, ref).to_dict()
+        if grouped:
+            assert result.provenance.extras["grouping"] == "sample"
+        if name == "allele_frequencies":
+            assert result.provenance.extras["clones"] == variants.clones.to_dict()
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize("name", VARIANT_FIGURES)
+def test_a_hidden_variant_legend_is_still_reported(variants, name) -> None:
+    shown = variants.calls[name](show=False)
+    hidden = variants.calls[name](show=False, show_legend=False)
+    try:
+        assert hidden.legends == shown.legends
+        assert hidden.scales == shown.scales
+        assert not _legends_with_insets(hidden.figure)
+        assert not any(is_colorbar_axes(ax) for ax in hidden.figure.axes)
+    finally:
+        shown.close()
+        hidden.close()
+
+
+def _rows_of_parts(ax) -> list[list[tuple[float, str]]]:
+    """Each horizontal bar's parts with a width, from the left: their widths and colours, top bar first."""
+    bars: dict[float, list[tuple[float, float, str]]] = {}
+    for patch in ax.patches:
+        if patch.get_width() > 0:
+            centre = round(patch.get_y() + patch.get_height() / 2, 6)
+            bars.setdefault(centre, []).append(
+                (patch.get_x(), patch.get_width(), to_hex(patch.get_facecolor()))
+            )
+    return [
+        [(width, color) for _x, width, color in sorted(parts)]
+        for _centre, parts in sorted(bars.items(), reverse=True)
+    ]
+
+
+def test_genotype_bars_draw_their_first_call_at_the_left(variants) -> None:
+    result = variants.store.plots.genotypes(
+        variants.genotypes, group_by="sample", show=False
+    )
+    try:
+        table = result.tables["calls"]
+        scale = result.scales[0]
+        bars = list(dict.fromkeys(zip(table["site"], table["group"], strict=True)))
+        rows = _rows_of_parts(result.axes["calls"])
+        assert len(rows) == len(bars)
+        for parts, (site, group) in zip(rows, bars, strict=True):
+            # From the left, the bar's calls with cells in the legend's
+            # order, each its fraction of the group's cells.
+            counted = table[(table["site"] == site) & (table["group"] == group)]
+            counted = counted.set_index("call")["n_cells"]
+            held = [call for call in scale.order if counted[call] > 0]
+            assert [color for _width, color in parts] == [
+                scale.palette[call] for call in held
+            ]
+            assert [width for width, _color in parts] == pytest.approx(
+                [counted[call] / counted.sum() for call in held]
+            )
+        names = [tick.get_text() for tick in result.axes["calls"].get_yticklabels()]
+        assert names == [f"{site}, {group}" for site, group in bars]
+    finally:
+        result.close()
+
+
+def test_genotype_calls_take_one_palette_with_one_grey_for_no_value(variants) -> None:
+    from cytearc.plotting._contracts import CategoricalScale
+    from cytearc.plotting._style import (
+        GENOTYPE_CALL_SCALE,
+        MUTED_COLOR,
+        NO_VALUE_COLOR,
+        RECORDER_STATE_SCALE,
+    )
+    from cytearc.variants import CALLS
+
+    assert GENOTYPE_CALL_SCALE.order == CALLS
+    assert set(GENOTYPE_CALL_SCALE.palette) == set(CALLS)
+    assert len(set(GENOTYPE_CALL_SCALE.palette.values())) == len(CALLS)
+    # No evidence takes the grey of no value, and evidence that a rule did
+    # not call the muted grey, as the recorder's missing and unedited sites.
+    assert GENOTYPE_CALL_SCALE.palette["missing"] == NO_VALUE_COLOR
+    assert NO_VALUE_COLOR == CategoricalScale().missing_color
+    assert GENOTYPE_CALL_SCALE.palette["filtered"] == MUTED_COLOR
+    assert RECORDER_STATE_SCALE.palette["unedited"] == MUTED_COLOR
+    # Legends name calls in words, and tables keep their tokens.
+    assert GENOTYPE_CALL_SCALE.labels == {
+        "wild_type": "Wild type",
+        "heterozygous": "Heterozygous",
+        "homozygous_alternative": "Homozygous alternative",
+        "alternative_present": "Alternative present",
+        "missing": "Missing",
+        "filtered": "Filtered",
+    }
+    result = variants.calls["genotypes"](show=False)
+    try:
+        (legend,) = _legends_with_insets(result.figure)
+        assert legend.get_title().get_text() == "Call"
+        held = [call for call in CALLS if call in set(result.tables["cells"]["call"])]
+        assert [text.get_text() for text in legend.get_texts()] == [
+            GENOTYPE_CALL_SCALE.labels[call] for call in held
+        ]
+        assert "wild_type" in set(result.tables["calls"]["call"])
+        assert "wild_type" in set(result.tables["cells"]["call"])
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize("name", VARIANT_FIGURES)
+def test_variant_figures_say_fraction_for_a_part_of_a_whole(variants, name) -> None:
+    result = variants.calls[name](show=False)
+    try:
+        texts = _texts(result)
+        assert not [text for text in texts if re.search(r"\bshares?\b", text, re.I)]
+        if name == "genotypes":
+            assert "Fraction of cells" in texts
+    finally:
+        result.close()
+
+
+def test_capped_variant_panels_say_what_they_leave_out(variants) -> None:
+    store = variants.store
+    with_clone = int(
+        store.clones.load_clones(variants.clones).cells["clone"].notna().sum()
+    )
+    capped = store.plots.allele_frequencies(
+        variants.informative, clones=variants.clones, max_cells=10, show=False
+    )
+    whole = variants.calls["allele_frequencies"](show=False)
+    try:
+        assert capped.axes["frequencies"].get_xlabel() == (
+            f"Cells (10 of {with_clone})"
+        )
+        assert len(capped.tables["cells"]) == 10
+        assert whole.axes["frequencies"].get_xlabel() == "Cells"
+    finally:
+        capped.close()
+        whole.close()
+
+
+N_VARIANT_GROUPS = 200
+
+
+@pytest.fixture(scope="module")
+def many_variant_groups(tmp_path_factory) -> SimpleNamespace:
+    """200 cells read at three GoT targets, each cell with a label of its own."""
+    from tests.variant_truth import write_genotype_tables
+
+    folder = tmp_path_factory.mktemp("many_variant_groups")
+    ids = [f"cell{i:03d}" for i in range(N_VARIANT_GROUPS)]
+    store = write_cells_store(folder / "store.zarr", ids)
+    store.cells.insert(
+        "own", np.asarray([f"g{i:03d}" for i in range(N_VARIANT_GROUPS)], dtype=object)
+    )
+    umis = np.random.default_rng(11).integers(0, 4, size=(N_VARIANT_GROUPS, 3, 2))
+    counts = store.variants.import_counts(
+        write_genotype_tables(umis, ids, folder / "got"),
+        cell_selection=every_cell(store),
+    )
+    genotypes = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
+    return SimpleNamespace(store=store, counts=counts, genotypes=genotypes)
+
+
+def test_variant_figures_of_many_groups_stop_at_the_page_width(
+    many_variant_groups, variants
+) -> None:
+    plots = many_variant_groups.store.plots
+    results = [
+        plots.variant_depth(many_variant_groups.counts, group_by="own", show=False),
+        variants.calls["variant_statistics"](show=False),
+        variants.calls["allele_frequencies"](show=False),
+        plots.genotypes(many_variant_groups.genotypes, group_by="own", show=False),
+    ]
+    try:
+        assert [result.provenance.notes[0] for result in results] == list(
+            VARIANT_FIGURES
+        )
+        for result in results:
+            width, height = result.figure.get_size_inches()
+            assert width <= MAX_FIGURE_WIDTH_INCHES, result.provenance.notes
+            assert height <= 22.0, result.provenance.notes
+        # 200 groups' histograms list 80 in their legend and say so, and
+        # 600 bars of three sites and 200 groups name none of them.
+        depth = results[0]
+        assert depth.axes["cells"].get_legend().get_title().get_text() == (
+            "own (80 of 200)"
+        )
+        assert depth.legends[0].label == "own (80 of 200)"
+        assert len(depth.axes["cells"].patches) == N_VARIANT_GROUPS
+        calls = results[3].axes["calls"]
+        assert not calls.get_yticklabels()
+        assert len({round(patch.get_y(), 6) for patch in calls.patches}) == 600
+    finally:
+        for result in results:
+            result.close()
+
+
+@pytest.mark.parametrize("n_groups", [20, 200])
+def test_depth_legends_of_many_groups_fit_beside_their_panel(
+    many_variant_groups, n_groups
+) -> None:
+    store = many_variant_groups.store
+    column = f"every_{n_groups}"
+    if column not in store.cells.columns:
+        store.cells.insert(
+            column,
+            np.asarray(
+                [f"g{cell % n_groups:03d}" for cell in range(N_VARIANT_GROUPS)],
+                dtype=object,
+            ),
+        )
+    result = store.plots.variant_depth(
+        many_variant_groups.counts, group_by=column, show=False
+    )
+    try:
+        figure = result.figure
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        legend = result.axes["cells"].get_legend()
+        box = legend.get_window_extent(renderer)
+        # The legend stands within the figure, in at most four columns, and
+        # leaves both panels room to draw.
+        assert box.y0 >= 0 and box.y1 <= figure.bbox.height
+        assert box.x1 <= figure.bbox.width
+        assert legend._ncols <= 4
+        for ax in result.axes.values():
+            assert ax.get_position().height * figure.get_figheight() >= 1.5
+        assert figure.get_size_inches()[0] == MAX_FIGURE_WIDTH_INCHES
+    finally:
+        result.close()
+
+
+def test_variant_statistics_count_the_variants_they_draw(variants) -> None:
+    result = variants.calls["variant_statistics"](show=False)
+    try:
+        table = result.tables["variants"]
+        shown = table["strand_correlation"].notna()
+        # Variants without a strand correlation are scored but not drawn.
+        assert shown.sum() < len(table)
+        assert result.axes["variants"].get_title() == (
+            f"{int((table['informative'] & shown).sum())} of {int(shown.sum())} "
+            "variants informative"
+        )
+        drawn = sum(len(c.get_offsets()) for c in result.axes["variants"].collections)
+        assert drawn == shown.sum()
+    finally:
+        result.close()
+
+
+def test_variant_figures_with_nothing_to_draw_raise(variants, tmp_path) -> None:
+    import warnings
+
+    store = variants.store
+    if "unlabelled" not in store.cells.columns:
+        insert_nullable_cell_column(
+            store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
+        )
+    store.cells.insert("only_first_cell", np.arange(N_CELLS) == 0, overwrite=True)
+    nobody = tmp_path / "nobody.tsv"
+    nobody.write_text("BC\twtUMIs\tmutUMIs\nnobody\t1\t0\n")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        unnamed = store.variants.import_counts(nobody, cell_selection=every_cell(store))
+    # Scored over one cell, no variant has a strand correlation; and a
+    # threshold no variant passes leaves none informative.
+    one_cell = store.variants.informative(
+        variants.counts,
+        cell_selection=store.snapshot_cell_selection("only_first_cell"),
+        min_vmr=0.0,
+    )
+    none_informative = store.variants.informative(variants.counts, min_vmr=1e9)
+    plots = store.plots
+    empty = [
+        lambda: plots.variant_depth(unnamed, show=False),
+        lambda: plots.variant_statistics(one_cell, show=False),
+        lambda: plots.allele_frequencies(none_informative, show=False),
+        lambda: plots.genotypes(variants.genotypes, group_by="unlabelled", show=False),
+    ]
+    assert len(empty) == len(VARIANT_FIGURES)
+    figures = set(plt.get_fignums())
+    for call in empty:
+        with pytest.raises(ValueError, match="so there is nothing to plot$"):
+            call()
+    assert set(plt.get_fignums()) == figures
+
+
+@pytest.mark.parametrize("name", VARIANT_FIGURES)
+def test_each_variant_figure_draws_in_a_composite_with_its_legends_once(
+    variants, name
+) -> None:
+    panels = _VARIANT_PANELS[name]
+    figure = plt.figure(figsize=(12, 6), layout="constrained")
+    grid = figure.subplots(1, len(panels), squeeze=False)[0]
+    try:
+        result = variants.calls[name](
+            target=dict(zip(panels, grid, strict=True)), show=False
+        )
+        composite = compose_results(figure, [result])
+        figure.canvas.draw()
+        legends = list(figure.legends) + _legends_with_insets(figure)
+        kinds = [legend.kind for legend in result.legends]
+        assert len(legends) == kinds.count("categorical")
+        colorbars = [ax for ax in figure.axes if is_colorbar_axes(ax)]
+        assert len(colorbars) == kinds.count("colorbar")
+        assert len(composite.legends) == len(result.legends)
+    finally:
+        plt.close(figure)
+
+
+@pytest.mark.parametrize("theme", ["notebook", "dark"])
+@pytest.mark.parametrize("name", VARIANT_FIGURES)
+def test_variant_figures_take_their_themes_background(variants, name, theme) -> None:
+    result = variants.calls[name](theme=theme, show=False)
+    try:
+        alpha = 1.0 if theme == "notebook" else 0.0
+        assert result.figure.patch.get_alpha() == alpha
+        assert {ax.patch.get_alpha() for ax in result.figure.axes} == {alpha}
+    finally:
+        result.close()
+
+
+def test_variant_figure_tables_hold_their_records_values(variants) -> None:
+    store = variants.store
+    results = {name: variants.calls[name](show=False) for name in VARIANT_FIGURES}
+    try:
+        # Each site's depth over the cells that the files name, and each
+        # named cell's mean depth in its sample.
+        sites = store.variants.load_counts(variants.counts, cell_selection=[]).sites
+        cells = store.variants.load_counts(variants.counts, sites=[]).cells
+        named = cells[cells["listed"]]
+        depth = results["variant_depth"].tables
+        assert depth["sites"]["site"].tolist() == sites.index.tolist()
+        assert depth["sites"]["position"].tolist() == sites["position"].tolist()
+        np.testing.assert_allclose(
+            depth["sites"]["mean_depth"], sites["depth"] / len(named)
+        )
+        np.testing.assert_allclose(
+            depth["sites"]["covered_fraction"], sites["n_cells"] / len(named)
+        )
+        samples = pd.Series(TRUTH.samples, index=TRUTH.cell_ids)
+        assert depth["cells"]["ids"].tolist() == named.index.tolist()
+        assert depth["cells"]["group"].tolist() == samples[named.index].tolist()
+        np.testing.assert_allclose(depth["cells"]["mean_depth"], named["mean_depth"])
+        assert (
+            depth["cells"]["n_covered_sites"].tolist()
+            == named["n_covered_sites"].tolist()
+        )
+        # The selection's statistics of every variant.
+        scored = store.variants.load_informative(variants.informative)
+        statistics = results["variant_statistics"].tables["variants"]
+        assert statistics["variant"].tolist() == scored.variants.index.tolist()
+        for column in ("vmr", "strand_correlation", "mean_coverage"):
+            np.testing.assert_allclose(statistics[column], scored.variants[column])
+        for column in ("masked", "informative"):
+            assert statistics[column].tolist() == scored.variants[column].tolist()
+        # Each drawn cell's alternative reads over its depth at the site of
+        # each informative variant, NaN where it was not covered, the cells
+        # ordered by clone.
+        frequency_tables = results["allele_frequencies"].tables
+        drawn = frequency_tables["cells"]
+        clones = store.clones.load_clones(variants.clones)
+        with_clone = clones.cells[clones.cells["clone"].notna()]
+        rank = {clone: at for at, clone in enumerate(clones.clones["clone"])}
+        expected_order = sorted(
+            with_clone.index, key=lambda cell: rank[with_clone.loc[cell, "clone"]]
+        )
+        assert drawn["ids"].tolist() == expected_order
+        assert (
+            drawn["clone"].tolist() == with_clone.loc[expected_order, "clone"].tolist()
+        )
+        chosen = scored.variants[scored.variants["informative"]]
+        loaded = store.variants.load_counts(
+            variants.counts,
+            sites=list(dict.fromkeys(chosen["site"])),
+            cell_selection=expected_order,
+        )
+        reads = loaded.depth.astype({"ids": str, "site": str})
+        alternative = loaded.counts.astype({"ids": str, "site": str, "allele": str})
+        variant_of = pd.DataFrame(
+            {
+                "variant": chosen.index.to_numpy(dtype=object),
+                "site": chosen["site"].astype(str).to_numpy(dtype=object),
+                "allele": chosen["alternative"].astype(str).to_numpy(dtype=object),
+            }
+        )
+        expected = (
+            pd.MultiIndex.from_product(
+                [expected_order, chosen.index.tolist()], names=["ids", "variant"]
+            )
+            .to_frame(index=False)
+            .merge(variant_of[["variant", "site"]], on="variant")
+            .merge(reads[["ids", "site", "depth"]], on=["ids", "site"], how="left")
+            .merge(
+                alternative.merge(variant_of, on=["site", "allele"])[
+                    ["ids", "variant", "count"]
+                ],
+                on=["ids", "variant"],
+                how="left",
+            )
+        )
+        expected["frequency"] = np.where(
+            expected["depth"].fillna(0) > 0,
+            expected["count"].fillna(0) / expected["depth"],
+            np.nan,
+        )
+        found = frequency_tables["frequencies"].merge(
+            expected[["ids", "variant", "frequency"]],
+            on=["ids", "variant"],
+            suffixes=("", "_expected"),
+        )
+        assert len(found) == len(frequency_tables["frequencies"]) == len(expected)
+        np.testing.assert_allclose(found["frequency"], found["frequency_expected"])
+        # The first target's calls of each sample's cells, a cell that the
+        # calls do not list there missing, and every cell's call on the
+        # layout.
+        called = store.variants.load_genotypes(variants.genotypes, sites=["T1"])
+        call_of = pd.Series("missing", index=called.cells.index, dtype=object)
+        listed = called.calls.astype({"ids": str, "call": str})
+        call_of[listed["ids"].to_numpy()] = listed["call"].to_numpy()
+        counted = pd.crosstab(samples[call_of.index].to_numpy(), call_of.to_numpy())
+        tables = results["genotypes"].tables
+        for row in tables["calls"].itertuples():
+            held = int(counted.loc[row.group].get(row.call, 0))
+            assert (row.site, row.n_cells) == ("T1", held)
+            assert row.share == pytest.approx(held / counted.loc[row.group].sum())
+        assert tables["cells"]["ids"].tolist() == call_of.index.tolist()
+        assert tables["cells"]["call"].tolist() == call_of.tolist()
+    finally:
+        for result in results.values():
+            result.close()
+
+
+def test_the_layout_panel_draws_the_cells_where_embedding_draws_them(
+    variants,
+) -> None:
+    store = variants.store
+    figure = variants.calls["genotypes"](show=False)
+    reference = store.plots.embedding(
+        layout=variants.layout, color_by="sample", show=False
+    )
+    try:
+        panel = figure.axes["layout"]
+        (points,) = panel.collections
+        (drawn,) = [ax for ax in reference.axes.values() if ax.collections]
+        (embedded,) = drawn.collections
+
+        def rows(collection) -> np.ndarray:
+            offsets = np.asarray(collection.get_offsets(), dtype=np.float64)
+            return offsets[np.lexsort(offsets.T[::-1])]
+
+        # Each cell at the embedding's coordinates, in its window, square and
+        # without ticks, as embedding draws it.
+        np.testing.assert_array_equal(rows(points), rows(embedded))
+        # The cells draw in embedding's seeded shuffle, those without a call
+        # first: each of the two runs keeps embedding's order of its cells.
+        call_of = {
+            (float(x), float(y)): call
+            for x, y, call in figure.tables["cells"][["x", "y", "call"]].itertuples(
+                index=False
+            )
+        }
+        drawn_order = [tuple(map(float, xy)) for xy in points.get_offsets()]
+        embedded_order = [tuple(map(float, xy)) for xy in embedded.get_offsets()]
+        uncalled = [
+            xy for xy in embedded_order if call_of[xy] in ("missing", "filtered")
+        ]
+        called = [xy for xy in embedded_order if xy not in set(uncalled)]
+        assert uncalled and called
+        assert drawn_order == uncalled + called
+        assert not points.get_rasterized()
+        cells = figure.tables["cells"][["x", "y"]].to_numpy(dtype=np.float64)
+        np.testing.assert_allclose(
+            rows(points), cells[np.lexsort(cells.T[::-1])], rtol=1e-6
+        )
+        assert panel.get_xlim() == pytest.approx(drawn.get_xlim())
+        assert panel.get_ylim() == pytest.approx(drawn.get_ylim())
+        assert not panel.get_xticks().size and not panel.get_yticks().size
+        # Point areas follow the panel's size, as an embedding's do.
+        from cytearc.plotting._style import default_point_size, panel_area_inches
+
+        assert points.get_sizes()[0] == pytest.approx(
+            default_point_size(len(cells), panel_area=panel_area_inches(panel))
+        )
+    finally:
+        figure.close()
+        reference.close()

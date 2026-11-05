@@ -118,6 +118,35 @@ RECORDER_STATE_SCALE = CategoricalScale(
         "missing": "Missing",
     },
 )
+# The colours and words of the genotype calls of cytearc.variants.CALLS, in
+# its order: a cell without evidence at a site takes no value's grey, and
+# evidence that a rule did not call the muted grey.
+GENOTYPE_CALL_SCALE = CategoricalScale(
+    order=(
+        "wild_type",
+        "heterozygous",
+        "homozygous_alternative",
+        "alternative_present",
+        "missing",
+        "filtered",
+    ),
+    palette={
+        "wild_type": "#4c78a8",
+        "heterozygous": "#f58518",
+        "homozygous_alternative": "#e45756",
+        "alternative_present": "#b279a2",
+        "missing": NO_VALUE_COLOR,
+        "filtered": MUTED_COLOR,
+    },
+    labels={
+        "wild_type": "Wild type",
+        "heterozygous": "Heterozygous",
+        "homozygous_alternative": "Homozygous alternative",
+        "alternative_present": "Alternative present",
+        "missing": "Missing",
+        "filtered": "Filtered",
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)

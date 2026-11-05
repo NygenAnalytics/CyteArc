@@ -1,4 +1,4 @@
-"""The charts that clone figures draw, on hand-made tables whose drawing is worked out by hand."""
+"""The charts that clone, repertoire and variant figures draw, on hand-made tables whose drawing is worked out by hand."""
 
 import matplotlib
 
@@ -13,8 +13,11 @@ from matplotlib.colors import to_hex, to_rgba
 from cytearc.plotting._charts import (
     capped_counts,
     draw_bars,
+    draw_histograms,
     draw_lines,
     draw_matrix,
+    legend_of,
+    log_values,
     pair_matrix,
 )
 from cytearc.plotting._contracts import CategoricalScale, ColorScale
@@ -919,3 +922,315 @@ def test_capped_counts_refuse_what_they_cannot_count() -> None:
     for values in ([1.9, 2.0], [1.0, np.nan]):
         with pytest.raises(TypeError, match="take whole numbers"):
             capped_counts(np.asarray(values), 3)
+
+
+def _step_heights(patch) -> list[float]:
+    """The height of a step histogram in each bin, read from its outline.
+
+    The outline rises from the first edge and runs along each bin's top,
+    stepping at each edge: its vertices are the edges at the heights before
+    and after them.
+    """
+    return [float(height) for height in patch.get_xy()[1:-1:2, 1]]
+
+
+ONE_SERIES = CategoricalScale(order=("a",), palette={"a": RED})
+
+
+def _histogram_table() -> pd.DataFrame:
+    # Series a holds 1, 2, 2 and 3, and b 2, 3, 3 and 4: over the bins 1 to
+    # 2, 2 to 3 and 3 to 4, the last closed, a counts 1, 2 and 1, b 0, 1
+    # and 3.
+    return pd.DataFrame(
+        {
+            "series": ["b", "a", "a", "b", "a", "b", "a", "b"],
+            "value": [2.0, 1.0, 2.0, 3.0, 2.0, 3.0, 3.0, 4.0],
+        }
+    )
+
+
+def test_histograms_count_each_series_over_bins_they_share(ax) -> None:
+    scale = CategoricalScale(
+        order=("a", "b"), palette={"a": RED, "b": BLUE}, labels={"a": "A", "b": "B"}
+    )
+    drawn = draw_histograms(
+        ax,
+        _histogram_table(),
+        value="value",
+        series="series",
+        colors=scale,
+        bins=3,
+        x_label="Depth",
+        y_label="Cells",
+        title="Depth per cell",
+        legend_title="Sample",
+    )
+    # One outline per series, in the scale's order and colours.
+    first, second = ax.patches
+    assert [to_hex(patch.get_edgecolor()) for patch in ax.patches] == [RED, BLUE]
+    assert not first.get_fill() and not second.get_fill()
+    assert _step_heights(first) == [1.0, 2.0, 1.0]
+    assert _step_heights(second) == [0.0, 1.0, 3.0]
+    assert ax.get_xscale() == "linear"
+    # Counts of cells tick at whole numbers.
+    assert all(float(tick).is_integer() for tick in ax.get_yticks())
+    assert (ax.get_xlabel(), ax.get_ylabel(), ax.get_title()) == (
+        "Depth",
+        "Cells",
+        "Depth per cell",
+    )
+    legend = ax.get_legend()
+    assert legend.get_title().get_text() == "Sample"
+    assert [text.get_text() for text in legend.get_texts()] == ["A", "B"]
+    assert [to_hex(handle.get_color()) for handle in legend.legend_handles] == [
+        RED,
+        BLUE,
+    ]
+    assert drawn is not None and drawn.legend.label == "Sample"
+    assert drawn.scale == scale
+
+
+def test_log_histograms_leave_out_values_they_cannot_place(ax) -> None:
+    # On a log axis, 0, -1 and NaN have no place: 1, 10 and 100 fill two
+    # bins, 1 to 10 and 10 to 100, the last closed.
+    table = pd.DataFrame(
+        {"series": "a", "value": [0.0, -1.0, 1.0, 10.0, 100.0, np.nan, np.inf]}
+    )
+    draw_histograms(
+        ax,
+        table,
+        value="value",
+        series="series",
+        colors=ONE_SERIES,
+        bins=2,
+        log_x=True,
+        x_label="Depth",
+        y_label="Cells",
+    )
+    (patch,) = ax.patches
+    assert _step_heights(patch) == [1.0, 2.0]
+    assert ax.get_xscale() == "log"
+    assert ax.get_legend() is None
+    formatter = ax.xaxis.get_major_formatter()
+    # Plain numbers, never powers of ten, fractions included.
+    assert formatter(0.5) == "0.5" and formatter(10_000) == "10,000"
+    ax.figure.canvas.draw()
+    labels = [tick.get_text() for tick in ax.get_xticklabels() if tick.get_text()]
+    assert {"1", "10", "100"} <= set(labels)
+    assert all(float(label.replace(",", "")) > 0 for label in labels)
+
+
+@pytest.mark.parametrize(
+    ("log_x", "edges"), [(False, [4.5, 5.0, 5.5]), (True, [2.5, 5.0, 10.0])]
+)
+@pytest.mark.parametrize("second", [5.0, float(np.nextafter(5.0, 6.0))])
+def test_histograms_of_one_value_take_bins_around_it(ax, log_x, edges, second) -> None:
+    # Two equal values, or two a step of the last digit apart, which no
+    # bins between them can split.
+    table = pd.DataFrame({"series": "a", "value": [5.0, second]})
+    draw_histograms(
+        ax,
+        table,
+        value="value",
+        series="series",
+        colors=ONE_SERIES,
+        bins=2,
+        log_x=log_x,
+        x_label="",
+        y_label="",
+    )
+    (patch,) = ax.patches
+    outline = patch.get_xy()
+    assert sorted(set(outline[:, 0].round(9))) == pytest.approx(edges)
+    assert _step_heights(patch) == [0.0, 2.0]
+
+
+def test_a_series_without_a_value_draws_a_flat_line_in_the_legend(ax) -> None:
+    scale = CategoricalScale(order=("a", "b"), palette={"a": RED, "b": BLUE})
+    table = pd.DataFrame({"series": ["a", "a"], "value": [1.0, 2.0]})
+    drawn = draw_histograms(
+        ax,
+        table,
+        value="value",
+        series="series",
+        colors=scale,
+        bins=2,
+        x_label="",
+        y_label="",
+        legend_title="Sample",
+    )
+    flat = ax.patches[1]
+    assert to_hex(flat.get_edgecolor()) == BLUE
+    assert set(flat.get_xy()[:, 1]) == {0.0}
+    assert [text.get_text() for text in ax.get_legend().get_texts()] == ["a", "b"]
+    assert drawn is not None and drawn.scale.order == ("a", "b")
+
+
+def test_a_hidden_histogram_legend_is_still_reported(ax) -> None:
+    table = _histogram_table()
+    scale = CategoricalScale(order=("a", "b"), palette={"a": RED, "b": BLUE})
+    options = dict(value="value", series="series", colors=scale, bins=3)
+    hidden = draw_histograms(
+        ax,
+        table,
+        x_label="",
+        y_label="",
+        legend_title="Sample",
+        show_legend=False,
+        **options,
+    )
+    assert ax.get_legend() is None
+    assert hidden is not None and hidden.legend.label == "Sample"
+    assert hidden.scale.order == ("a", "b")
+    assert draw_histograms(ax, table, x_label="", y_label="", **options) is None
+    assert ax.get_legend() is None
+
+
+@pytest.mark.parametrize(
+    ("n_series", "title"), [(80, "Sample"), (81, "Sample (80 of 81)")]
+)
+def test_histogram_legends_list_at_most_80_series(ax, n_series, title) -> None:
+    names = tuple(f"s{at:03d}" for at in range(n_series))
+    scale = CategoricalScale(order=names, palette=dict.fromkeys(names, RED))
+    table = pd.DataFrame({"series": list(names), "value": 1.0})
+    drawn = draw_histograms(
+        ax,
+        table,
+        value="value",
+        series="series",
+        colors=scale,
+        bins=2,
+        x_label="",
+        y_label="",
+        legend_title="Sample",
+    )
+    legend = ax.get_legend()
+    assert legend.get_title().get_text() == title == drawn.legend.label
+    assert [text.get_text() for text in legend.get_texts()] == list(names[:80])
+    assert drawn.scale.order == names[:80]
+    assert len(ax.patches) == n_series
+
+
+def test_histograms_refuse_what_they_cannot_draw(ax) -> None:
+    table = _histogram_table()
+    options = dict(value="value", series="series", x_label="", y_label="")
+    with pytest.raises(ValueError, match="give no colour to 'b'"):
+        draw_histograms(
+            ax,
+            table,
+            colors=CategoricalScale(order=("a",), palette={"a": RED}),
+            bins=3,
+            **options,
+        )
+    scale = CategoricalScale(order=("a", "b"), palette={"a": RED, "b": BLUE})
+    with pytest.raises(ValueError, match="^bins must be at least 1$"):
+        draw_histograms(ax, table, colors=scale, bins=0, **options)
+    with pytest.raises(TypeError, match="^bins must be an integer$"):
+        draw_histograms(ax, table, colors=scale, bins=2.5, **options)
+    nothing = table.assign(value=[0.0, -1.0] * 4)
+    with pytest.raises(ValueError, match="log axis needs a value above 0"):
+        draw_histograms(ax, nothing, colors=scale, bins=3, log_x=True, **options)
+    with pytest.raises(ValueError, match="needs a finite value"):
+        draw_histograms(ax, table.assign(value=np.nan), colors=scale, bins=3, **options)
+
+
+def test_legends_of_a_scale_list_its_first_80_entries() -> None:
+    names = tuple(f"c{at:03d}" for at in range(81))
+    scale = CategoricalScale(
+        order=names,
+        palette={name: RED if at % 2 else BLUE for at, name in enumerate(names)},
+        labels={name: name.upper() for name in names},
+        missing_color=GREEN,
+    )
+    drawn = legend_of(scale, names, "Clone")
+    assert drawn.legend.kind == "categorical"
+    assert drawn.legend.label == "Clone (80 of 81)"
+    assert drawn.scale.order == names[:80]
+    assert drawn.scale.palette == {name: scale.palette[name] for name in names[:80]}
+    assert drawn.scale.labels == {name: name.upper() for name in names[:80]}
+    assert drawn.scale.missing_color == GREEN
+    # Entries in their own order, as a legend lists them.
+    few = legend_of(scale, ["c002", "c001"], "Clone")
+    assert few.legend.label == "Clone" and few.scale.order == ("c002", "c001")
+
+
+def test_log_axes_of_values_read_plain_numbers(ax) -> None:
+    ax.plot([0.2, 3.0, 60.0], [1, 2, 3])
+    ax.set_xscale("log")
+    ax.set_xlim(0.1, 100.0)
+    log_values(ax.xaxis)
+    major = ax.xaxis.get_major_formatter()
+    assert major(0.1) == "0.1" and major(100) == "100" and major(1e6) == "1,000,000"
+    ax.figure.canvas.draw()
+    # Matplotlib versions differ in the ticks they label beyond the limits.
+    labels = [
+        tick.get_text()
+        for tick in [*ax.get_xticklabels(), *ax.get_xticklabels(minor=True)]
+        if tick.get_text() and 0.1 <= tick.get_position()[0] <= 100.0
+    ]
+    # Every decade drawn reads as a plain number, never as a power of ten,
+    # and the ticks between decades of an axis of several are not labelled.
+    assert sorted(labels, key=lambda label: float(label.replace(",", ""))) == [
+        "0.1",
+        "1",
+        "10",
+        "100",
+    ]
+    # Axes down to a millionth and up to a hundred billion, whose labelled
+    # decades Matplotlib versions thin differently, write theirs out too.
+    for low, high in ((1e-6, 0.9), (1e-3, 1e11)):
+        figure, axis = plt.subplots(figsize=(4, 3))
+        try:
+            axis.plot([1, 2], [low, high])
+            axis.set_yscale("log")
+            axis.set_ylim(low, high)
+            log_values(axis.yaxis)
+            figure.canvas.draw()
+            drawn = [
+                tick.get_text()
+                for tick in axis.get_yticklabels()
+                if tick.get_text() and low <= tick.get_position()[1] <= high
+            ]
+            assert not [label for label in drawn if "e" in label], drawn
+            values = sorted(float(label.replace(",", "")) for label in drawn)
+            assert values[0] <= 100 * low and values[-1] >= high / 100, drawn
+            assert all(np.log10(value) == round(np.log10(value)) for value in values)
+        finally:
+            plt.close(figure)
+
+
+def test_side_legends_fit_the_row_of_their_panel() -> None:
+    from matplotlib.patches import Patch
+
+    from cytearc.plotting._figure import side_legend
+    from cytearc.plotting._style import LEGEND_SIDE_MAX_COLUMNS, legend_side_rows
+
+    handles = [Patch(facecolor=RED) for _ in range(20)]
+    labels = [f"g{at:02d}" for at in range(20)]
+
+    def columns(height: float) -> int:
+        rows = legend_side_rows(height, title=True)
+        return min(-(-20 // rows), LEGEND_SIDE_MAX_COLUMNS)
+
+    # A figure of one row gives its panels the figure's height, a grid of
+    # rows each panel its row's, by the rows' ratios, and an inset the
+    # figure's height.
+    for ratios, panel, height in (
+        ([1], 0, 5.2),
+        ([1, 1], 1, 2.6),
+        ([1, 3], 1, 3.9),
+        ([1, 3], 0, 1.3),
+    ):
+        figure, axes = plt.subplots(
+            len(ratios), 1, figsize=(6, 5.2), height_ratios=ratios, squeeze=False
+        )
+        try:
+            legend = side_legend(axes[panel][0], handles, labels, title="Group")
+            assert legend._ncols == columns(height), (ratios, panel)
+            inset = axes[0][0].inset_axes((0.0, 1.0, 1.0, 0.1))
+            assert side_legend(inset, handles, labels, title="Group")._ncols == (
+                columns(5.2)
+            )
+        finally:
+            plt.close(figure)
+    assert columns(5.2) == 1 and columns(2.6) > 1
