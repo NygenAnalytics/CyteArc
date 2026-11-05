@@ -179,6 +179,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "mixscape",
     "modality_weights",
     "perturbation_clusters",
+    "phylogeny",
     "pseudotime_heatmap",
     "qc",
     "receptor_qc",

@@ -694,6 +694,21 @@ class DataStorePlotAccessor:
         """Plot the fates of the clones of early cells, each clone's late cells by fate."""
         return self._forward(PlotResult, "clone_fate_bias", locals())
 
+    def phylogeny(
+        self,
+        clones: ArtifactRef,
+        *,
+        tree: str | None = None,
+        max_leaves: int = 100,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the cell phylogeny that clones were cut from, its clades collapsed to at most ``max_leaves`` wedges."""
+        return self._forward(PlotResult, "phylogeny", locals())
+
     def receptor_qc(
         self,
         receptors: ArtifactRef,

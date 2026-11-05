@@ -9,6 +9,7 @@ that several figures share once.
 
 import functools
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -35,9 +36,11 @@ __all__ = [
     "draw_histograms",
     "draw_lines",
     "draw_matrix",
+    "draw_tree",
     "legend_of",
     "log_values",
     "pair_matrix",
+    "tree_drawing_bytes",
 ]
 
 # Bars fill this share of each item's slot, lines are this wide, and the
@@ -46,6 +49,20 @@ _BAR_EXTENT = 0.8
 _LINE_WIDTH = 1.4
 _POINT_SIZE = 3.5
 _MARKED_POINT_SIZE = 4.0
+# A tree's wedge fills this share of its slot, so that neighbours stay apart,
+# its lines are this wide, and a wedge that ends where it starts, such as one
+# leaf, is a point of this area.
+_WEDGE_EXTENT = 0.9
+_TREE_LINE_WIDTH = 0.8
+_TREE_POINT_AREA = 9.0
+# What drawing a tree holds: the figure and its panel, 377 to 412 KB as
+# traced; each legend entry, 18 to 28 KB; each text; and for each node drawn
+# its branch, wedge and colour, and the figure's table and labels of it, 330
+# to 390 bytes.
+_TREE_FIXED_BYTES = 448 * 1024
+_TREE_BYTES_PER_ENTRY = 30 * 1024
+_TREE_BYTES_PER_TEXT = 4 * 1024
+_TREE_BYTES_PER_ROW = 448
 
 
 def _ordered(scale: CategoricalScale, what: str) -> tuple[list[Any], dict[Any, str]]:
@@ -689,3 +706,230 @@ def capped_counts(values: Any, cap: int) -> pd.Series:
         counts.astype(np.int64),
         index=pd.Index([*(str(count) for count in range(cap)), f"{cap}+"]),
     )
+
+
+def tree_drawing_bytes(n_rows: int, *, n_entries: int, n_texts: int) -> int:
+    """What :func:`draw_tree` holds to draw ``n_rows`` nodes, with the figure it draws in.
+
+    ``n_entries`` counts the categories of the wedges, of which the legend
+    lists at most ``LEGEND_SIDE_MAX_ENTRIES``, and ``n_texts`` the wedges that
+    say something.
+    """
+    return (
+        _TREE_FIXED_BYTES
+        + _TREE_BYTES_PER_ENTRY * min(int(n_entries), LEGEND_SIDE_MAX_ENTRIES)
+        + _TREE_BYTES_PER_TEXT * int(n_texts)
+        + _TREE_BYTES_PER_ROW * int(n_rows)
+    )
+
+
+def draw_tree(
+    ax: Any,
+    nodes: pd.DataFrame,
+    *,
+    categories: np.ndarray,
+    colors: CategoricalScale,
+    line_color: str,
+    x_label: str,
+    texts: np.ndarray | None = None,
+    cut: float | None = None,
+    title: str | None = None,
+    legend_title: str | None = None,
+    show_legend: bool = True,
+) -> Drawn | None:
+    """Draw a collapsed tree: a branch to each node, a wedge for each collapsed clade and the cut as a line.
+
+    ``nodes`` holds one row per node drawn, each after the node it hangs
+    from, as :func:`~cytearc.clones.phylogeny.collapse_phylogeny` places
+    them: ``parent`` (the row it hangs from, -1 for none), ``wedge``
+    (whether it is drawn collapsed), ``x`` (where it stands on the x axis),
+    ``start`` (where its branch starts), ``end`` (its latest leaf), and
+    ``y``, ``low`` and ``high``, its middle and extent down the y axis, which
+    runs from 0 at the top. A node opened joins its children with a line
+    at its ``x``. A wedge runs from its node to a base at ``end`` as tall as
+    nine tenths of its extent, in the colour that the palette of ``colors``
+    gives its category in ``categories``; a wedge that ends where it starts,
+    such as one leaf, is a point. ``texts`` holds what each wedge says at its
+    base, empty for nothing, and ``cut`` draws a dashed line at that ``x``.
+    The categories and texts are arrays aligned with the rows, so a figure
+    of many rows adds no columns to its table to draw them.
+
+    The legend lists the wedges' categories that the scale's order names, in
+    that order and at most ``LEGEND_SIDE_MAX_ENTRIES``; a figure leaves
+    categories out of the order to keep them out of the legend, such as
+    clones too thin to see, and the legend's title says how many of the
+    categories drawn it lists when it leaves some out.
+
+    Returns:
+        The legend of the categories listed, drawn beside the panel when
+        ``show_legend`` is true, and its scale; or None without
+        ``legend_title``.
+
+    Raises:
+        ValueError: If the table is empty, the categories or texts are not
+            one for each row, a wedge's category has no colour, or the
+            scale's order, with a legend title, lists no category drawn.
+    """
+    _, mpl = require_matplotlib()
+    from matplotlib.patches import PathPatch
+    from matplotlib.path import Path
+
+    if nodes.empty:
+        raise ValueError("A tree needs a node to draw")
+    order, palette = _ordered(colors, "wedges")
+    parent = nodes["parent"].to_numpy(dtype=np.int64)
+    x, start, end, y, low, high = (
+        nodes[column].to_numpy(dtype=np.float64)
+        for column in ("x", "start", "end", "y", "low", "high")
+    )
+    wedge = nodes["wedge"].to_numpy(dtype=bool)
+    kinds = np.asarray(categories)
+    if kinds.shape != (len(nodes),) or (
+        texts is not None and np.shape(texts) != (len(nodes),)
+    ):
+        raise ValueError("A tree takes one category and one text for each row")
+    unknown = [
+        value for value in pd.unique(kinds[wedge]).tolist() if value not in palette
+    ]
+    if unknown:
+        raise ValueError(
+            f"The colours of the wedges give no colour to {quoted_value(unknown[0])}"
+        )
+    # Each node's branch from where it starts, and each opened node's line
+    # from its first child to its last, as one path of segments.
+    has_parent = parent >= 0
+    upper = np.full(len(nodes), np.inf)
+    lower = np.full(len(nodes), -np.inf)
+    np.minimum.at(upper, parent[has_parent], y[has_parent])
+    np.maximum.at(lower, parent[has_parent], y[has_parent])
+    branched = start != x
+    joined = ~wedge & np.isfinite(upper)
+    segments = np.concatenate(
+        [
+            np.stack([start, y, x, y], axis=1)[branched],
+            np.stack([x, upper, x, lower], axis=1)[joined],
+        ]
+    ).reshape(-1, 2)
+    # The paths are added as artists, since adding a patch walks each of its
+    # segments to find the panel's limits, which the nodes give.
+    if len(segments):
+        steps = np.tile(
+            np.asarray([Path.MOVETO, Path.LINETO], dtype=Path.code_type),
+            len(segments) // 2,
+        )
+        ax.add_artist(
+            PathPatch(
+                Path(segments, steps),
+                fill=False,
+                edgecolor=line_color,
+                linewidth=_TREE_LINE_WIDTH,
+                capstyle="butt",
+            )
+        )
+    # Each wedge a triangle from its node to its base, one path of a colour's
+    # wedges for each colour.
+    middle = (low + high) / 2
+    spread = (high - low) * _WEDGE_EXTENT / 2
+    wide = wedge & (end != x)
+    outline = np.asarray(
+        [Path.MOVETO, Path.LINETO, Path.LINETO, Path.CLOSEPOLY], dtype=Path.code_type
+    )
+    # Each wedge's colour as a position among the colours, through its
+    # category's position in the palette, which also colours the categories
+    # that the legend leaves out.
+    coloured = list(palette)
+    shades = list(dict.fromkeys(palette[value] for value in coloured))
+    shade_of = {shade: at for at, shade in enumerate(shades)}
+    shading = np.asarray(
+        [shade_of[palette[value]] for value in coloured], dtype=np.int64
+    )[pd.Index(coloured).get_indexer(kinds)]
+    shading[~wide] = -1
+    for at, shade in enumerate(shades):
+        drawn = shading == at
+        if not drawn.any():
+            continue
+        corners = np.stack(
+            [
+                np.stack([x[drawn], middle[drawn]], axis=1),
+                np.stack([end[drawn], middle[drawn] - spread[drawn]], axis=1),
+                np.stack([end[drawn], middle[drawn] + spread[drawn]], axis=1),
+                np.stack([x[drawn], middle[drawn]], axis=1),
+            ],
+            axis=1,
+        ).reshape(-1, 2)
+        ax.add_artist(
+            PathPatch(
+                Path(corners, np.tile(outline, int(drawn.sum()))),
+                facecolor=shade,
+                edgecolor="none",
+            )
+        )
+    flat = wedge & ~wide
+    if flat.any():
+        ax.scatter(
+            x[flat],
+            middle[flat],
+            c=[palette[value] for value in kinds[flat].tolist()],
+            s=_TREE_POINT_AREA,
+            linewidths=0,
+            zorder=3,
+        )
+    if texts is not None:
+        # A text stands inside its wedge's base, or beside a point.
+        said_at = np.asarray(texts, dtype=object)
+        for row in np.flatnonzero(wedge & (said_at != "")).tolist():
+            said = str(said_at[row])
+            if said:
+                ax.annotate(
+                    said,
+                    (end[row], middle[row]),
+                    xytext=(-2, 0) if wide[row] else (4, 0),
+                    textcoords="offset points",
+                    ha="right" if wide[row] else "left",
+                    va="center",
+                    fontsize="x-small",
+                    color=line_color,
+                )
+    if cut is not None:
+        ax.axvline(cut, color=line_color, linestyle="--", linewidth=1.0)
+    ax.update_datalim(
+        [
+            (float(min(start.min(), x.min())), 0.0),
+            (float(max(end.max(), x.max())), float(high.max())),
+        ]
+    )
+    ax.autoscale_view()
+    ax.set_ylim(float(high.max()) or 1.0, 0.0)
+    ax.set_yticks([])
+    ax.spines["left"].set_visible(False)
+    ax.set_xlabel(x_label)
+    if title is not None:
+        ax.set_title(title)
+    if legend_title is None:
+        return None
+    drawn = set(pd.unique(kinds[wedge]).tolist())
+    entries = [value for value in order if value in drawn]
+    if not entries:
+        raise ValueError(
+            "The colours of the wedges list no category that a wedge holds"
+        )
+    # Only the entries that the legend lists get handles, under a title that
+    # counts every category drawn.
+    shown = entries[:LEGEND_SIDE_MAX_ENTRIES]
+    label = (
+        legend_title
+        if len(shown) == len(drawn)
+        else f"{legend_title} ({len(shown)} of {len(drawn)})"
+    )
+    if show_legend:
+        side_legend(
+            ax,
+            [
+                mpl.patches.Patch(facecolor=palette[value], edgecolor="none")
+                for value in shown
+            ],
+            [category_label(colors, value) for value in shown],
+            title=label,
+        )
+    reported = legend_of(colors, entries, legend_title)
+    return Drawn(replace(reported.legend, label=label), reported.scale)

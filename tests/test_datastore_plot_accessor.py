@@ -64,6 +64,7 @@ _STORE_PLOT_METHODS = (
     "mixscape",
     "modality_weights",
     "perturbation_clusters",
+    "phylogeny",
     "pseudotime_heatmap",
     "receptor_qc",
     "recorder_states",
@@ -541,6 +542,7 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             },
         ),
         ("clone_fate_bias", (_FATE_BIAS_REF,), {"max_clones": 12, "normalize": True}),
+        ("phylogeny", (_CLONES_REF,), {"tree": "E7.5-R1-C1", "max_leaves": 7}),
         (
             "receptor_qc",
             (_RECEPTORS_REF,),
@@ -608,7 +610,7 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("tests"))
     elif name == "perturbation_clusters":
         expected_args.append(expected_kwargs.pop("clusters"))
-    elif name == "clone_abundance":
+    elif name in ("clone_abundance", "phylogeny"):
         expected_args.append(expected_kwargs.pop("clones"))
     elif name == "clonal_diversity":
         expected_args.append(expected_kwargs.pop("diversity"))
