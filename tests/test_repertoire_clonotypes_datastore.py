@@ -1002,36 +1002,289 @@ def test_summaries_keep_receptor_types_apart_within_one_clonotype(tmp_path) -> N
         ["a, BCR", "b, BCR", 1.0],
         ["a, TCR", "b, TCR", 1.0],
     ]
-    # Fate bias tests a clonotype in the fates of one receptor type, so it
-    # refuses one whose early and late cells span types, and tests it among
-    # the cells of one type.
-    store.cells.insert("early", np.arange(N_CELLS) % 2 == 0)
-    store.cells.insert("late", np.arange(N_CELLS) % 2 == 1)
-    store.cells.insert("outcome", np.asarray(["x", "x", "y", "y"] * (N_CELLS // 4)))
-    with pytest.raises(ValueError, match="two labels in 'receptor_type'"):
-        store.clones.fate_bias(
-            together,
-            group_by="outcome",
-            early=store.snapshot_cell_selection("early"),
-            late=store.snapshot_cell_selection("late"),
-        )
-    t_cells = np.arange(N_CELLS) < 5
-    store.cells.insert("early_t", t_cells & (np.arange(N_CELLS) % 2 == 0))
-    store.cells.insert("late_t", t_cells & (np.arange(N_CELLS) % 2 == 1))
-    bias = store.clones.load_fate_bias(
-        store.clones.fate_bias(
-            together,
-            group_by="outcome",
-            early=store.snapshot_cell_selection("early_t"),
-            late=store.snapshot_cell_selection("late_t"),
-        )
+
+
+# Beta chains CASSA of cell0 to cell2 and CASSB of cell3 and cell4, heavy
+# chains CARW of cell5 and cell6, and cell7, ambiguous, with CASSA and, of
+# fewer UMIs, CARW: defined across receptor types, one clonotype holds the
+# cells of CASSA, CARW and cell7, of three receptor types, and another those
+# of CASSB.
+SPANNING_ROWS = [
+    f"cell{cell},true,cell{cell}_contig_{contig},true,500,{chain},{chain}V1,,"
+    f"{chain}J1,{chain}C,true,true,{junction_aa},{junction},50,{umis},ct{cell},"
+    f"ct{cell}_{contig}"
+    for cell, contig, chain, junction_aa, junction, umis in (
+        (0, 1, "TRB", "CASSA", "TGTGCCAGCAGCGCC", 5),
+        (1, 1, "TRB", "CASSA", "TGTGCCAGCAGCGCC", 5),
+        (2, 1, "TRB", "CASSA", "TGTGCCAGCAGCGCC", 5),
+        (3, 1, "TRB", "CASSB", "TGTGCCAGCAGCTAC", 5),
+        (4, 1, "TRB", "CASSB", "TGTGCCAGCAGCTAC", 5),
+        (5, 1, "IGH", "CARW", "TGTGCGAGATGG", 5),
+        (6, 1, "IGH", "CARW", "TGTGCGAGATGG", 5),
+        (7, 1, "TRB", "CASSA", "TGTGCCAGCAGCGCC", 5),
+        (7, 2, "IGH", "CARW", "TGTGCGAGATGG", 2),
     )
-    # The late T cells, cell1 and cell3, lie in fates x and y.
+]
+
+
+@pytest.fixture
+def spanning(tmp_path) -> SimpleNamespace:
+    """The clonotypes of ``SPANNING_ROWS`` across and within receptor types, with fates."""
+    store, receptors = clonal_receptors(tmp_path, SPANNING_ROWS)
+    store.cells.insert("early", np.isin(np.arange(N_CELLS), [0, 3, 5]))
+    store.cells.insert("late", np.isin(np.arange(N_CELLS), [1, 2, 4, 6, 7]))
+    store.cells.insert(
+        "outcome", np.asarray(["x", "x", "x", "x", "y", "x", "x", "y"], dtype=object)
+    )
+    store.cells.insert("tp", np.asarray(["a", "b"] * (N_CELLS // 2), dtype=object))
+    return SimpleNamespace(
+        store=store,
+        together=store.repertoire.clonotypes(
+            receptors, receptor_arms="VDJ", within_receptor_type=False
+        ),
+        apart=store.repertoire.clonotypes(receptors, receptor_arms="VDJ"),
+    )
+
+
+def _fate_bias_of(spanning: SimpleNamespace, clonotypes: ArtifactRef) -> ArtifactRef:
+    store = spanning.store
+    return store.clones.fate_bias(
+        clonotypes,
+        group_by="outcome",
+        early=store.snapshot_cell_selection("early"),
+        late=store.snapshot_cell_selection("late"),
+    )
+
+
+def test_fate_bias_tests_a_clonotype_once_in_each_receptor_type_it_spans(
+    spanning,
+) -> None:
+    # Every summary counts a clonotype's cells of each receptor type as one
+    # clonotype of that type, so fate bias follows the early cells of each
+    # type to the clonotype's late cells of that type, and tests them among
+    # the late cells of that type with a clonotype.
+    store, together = spanning.store, spanning.together
+    assert store.clones.load_clones(together).clones["n_cells"].tolist() == [6, 2]
+
+    def measured(clonotypes: ArtifactRef):
+        return store.clones.load_fate_bias(_fate_bias_of(spanning, clonotypes))
+
+    bias = measured(together)
+    # The late cells: cell1 and cell2 of clonotype_1 and cell4 of clonotype_2
+    # are T cells of fates x, x and y, cell6 a B cell of x, cell7 ambiguous of
+    # y.
     assert bias.fates[["fate", "n_late_cells"]].values.tolist() == [
-        ["x, TCR", 1],
+        ["x, BCR", 1],
+        ["x, TCR", 2],
+        ["y, ambiguous", 1],
         ["y, TCR", 1],
     ]
-    assert bias.fractions[["x, TCR", "y, TCR"]].values.tolist() == [[0.5, 0.5]] * 3
+    # cell0 follows clonotype_1's two late T cells, cell5 its late B cell,
+    # and cell3 clonotype_2's late T cell.
+    cells = bias.cells.astype(object)
+    assert cells.values.tolist() == [
+        ["clonotype_1", 2, "x, TCR"],
+        ["clonotype_2", 1, "y, TCR"],
+        ["clonotype_1", 1, "x, BCR"],
+    ]
+    assert bias.fractions.values.tolist() == [
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0, 0.0],
+    ]
+    # clonotype_1 is tested once in each receptor type of its late cells, so
+    # its label repeats, and each fate's receptor type is the part's. Among
+    # the three late T cells with a clonotype, two of fate x: its two late T
+    # cells both of x have the chance C(2, 2) / C(3, 2) = 1/3, and
+    # clonotype_2's one of y has 1/3 too; each part of one late cell holds
+    # its type's only late cell, a chance of 1.
+    rows = bias.clone_fates.join(bias.group_keys, on="fate")
+    assert rows[
+        ["clone", "receptor_type", "fate", "n_early_cells", "n_late_cells", "n_cells"]
+    ].astype(object).values.tolist() == [
+        ["clonotype_1", "BCR", "x, BCR", 1, 1, 1],
+        ["clonotype_1", "TCR", "x, TCR", 1, 2, 2],
+        ["clonotype_1", "TCR", "y, TCR", 1, 2, 0],
+        ["clonotype_1", "ambiguous", "y, ambiguous", 0, 1, 1],
+        ["clonotype_2", "TCR", "x, TCR", 1, 1, 0],
+        ["clonotype_2", "TCR", "y, TCR", 1, 1, 1],
+    ]
+    np.testing.assert_allclose(rows["p_value"], [1, 1 / 3, 1, 1, 1, 1 / 3], rtol=1e-12)
+    # Within each fate of T, Benjamini and Hochberg's adjustment of 1/3 over
+    # two parts gives 2/3.
+    np.testing.assert_allclose(rows["q_value"], [1, 2 / 3, 1, 1, 1, 2 / 3], rtol=1e-12)
+    assert bias.diagnostics == {
+        "cellsWithoutClone": 0,
+        "cellsWithoutGroup": 0,
+        "groups": 4,
+        "earlyCellsWithoutLateCells": 0,
+        "earlyCellsWithTiedFates": 0,
+        "testedClones": 4,
+    }
+    # Defined within receptor types, the parts are clonotypes of their own:
+    # every count and test is the same, under other labels.
+    within = measured(spanning.apart)
+    for table in ("fates", "fractions", "group_keys"):
+        pd.testing.assert_frame_equal(getattr(within, table), getattr(bias, table))
+    pd.testing.assert_frame_equal(
+        within.cells.drop(columns="clone"), bias.cells.drop(columns="clone")
+    )
+    measures = ["fate", "n_early_cells", "n_late_cells", "n_cells", "p_value"]
+    assert sorted(
+        map(tuple, within.clone_fates[measures].astype(object).values.tolist())
+    ) == sorted(map(tuple, bias.clone_fates[measures].astype(object).values.tolist()))
+    assert within.diagnostics == bias.diagnostics
+
+
+def test_the_fates_plot_draws_a_bar_for_each_receptor_type_of_a_clonotype(
+    spanning,
+) -> None:
+    store = spanning.store
+    result = store.plots.clone_fate_bias(
+        _fate_bias_of(spanning, spanning.together), show=False
+    )
+    # clonotype_1 is tested in BCR, TCR and the ambiguous type, each a bar of
+    # its own under the clonotype's junction and the type; by dominant fate
+    # in the fates' order, its parts come before clonotype_2.
+    table = result.tables["clones"]
+    assert table.columns.tolist() == [
+        "clone",
+        "label",
+        "fate",
+        "n_early_cells",
+        "n_late_cells",
+    ]
+    assert table.astype(object).values.tolist() == [
+        ["clonotype_1", "CASSA (BCR)", "x, BCR", 1, 1],
+        ["clonotype_1", "CASSA (TCR)", "x, TCR", 1, 2],
+        ["clonotype_1", "CASSA (ambiguous)", "y, ambiguous", 0, 1],
+        ["clonotype_2", "CASSB", "y, TCR", 1, 1],
+    ]
+    fates = result.tables["fates"]
+    drawn = fates.pivot(index="label", columns="fate", values="n_cells")
+    order = ["x, BCR", "x, TCR", "y, ambiguous", "y, TCR"]
+    assert drawn.loc[table["label"], order].values.tolist() == [
+        [1, 0, 0, 0],
+        [0, 2, 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1],
+    ]
+    ticks = [tick.get_text() for tick in result.axes["fates"].get_xticklabels()]
+    assert ticks == table["label"].tolist()
+    result.close()
+    # Defined within receptor types, the same bars under other labels.
+    within = store.plots.clone_fate_bias(
+        _fate_bias_of(spanning, spanning.apart), show=False
+    )
+    measures = ["fate", "n_early_cells", "n_late_cells"]
+    pd.testing.assert_frame_equal(within.tables["clones"][measures], table[measures])
+    assert within.tables["clones"]["label"].tolist() == [
+        "CARW",
+        "CASSA 1",
+        "CASSA 4",
+        "CASSB",
+    ]
+    within.close()
+
+
+def test_the_largest_clonotypes_and_their_tracks_draw_each_receptor_type_apart(
+    spanning,
+) -> None:
+    store = spanning.store
+    # Without the cells' receptor types apart, clonotype_1 would draw one bar
+    # of six cells; each type is a clonotype of its own, of three, two and one
+    # cells, and clonotype_2's two cells follow clonotype_1's B cells, the
+    # larger clonotype.
+    found = store.plots.clone_abundance(spanning.together, group_by="tp", show=False)
+    expected = store.plots.clone_abundance(spanning.apart, group_by="tp", show=False)
+    top = found.tables["top"]
+    assert top["label"].drop_duplicates().tolist() == [
+        "CASSA (TCR)",
+        "CASSA (BCR)",
+        "CASSB",
+        "CASSA (ambiguous)",
+    ]
+    assert top.groupby("label", sort=False)["n_cells"].sum().tolist() == [3, 2, 2, 1]
+    for name in ("sizes", "top"):
+        columns = [
+            column for column in found.tables[name] if column not in ("clone", "label")
+        ]
+        pd.testing.assert_frame_equal(
+            found.tables[name][columns], expected.tables[name][columns]
+        )
+    found.close()
+    expected.close()
+    # Each part is followed through the groups of its own type, as a line of
+    # its own, in the order of its clonotype and then its type.
+    tracked = store.clones.track(spanning.together, group_by="tp", top_n=2)
+    assert tracked.tracked == ("clonotype_1",) * 3 + ("clonotype_2",)
+    assert tracked.diagnostics["trackedClones"] == 4
+    lines = store.plots.clone_tracking(tracked, show=False)
+    table = lines.tables["tracking"]
+    assert table[["label", "group", "n_cells"]].values.tolist() == [
+        ["CASSA (BCR)", "a, BCR", 1],
+        ["CASSA (BCR)", "b, BCR", 1],
+        ["CASSA (TCR)", "a, TCR", 2],
+        ["CASSA (TCR)", "b, TCR", 1],
+        ["CASSA (ambiguous)", "b, ambiguous", 1],
+        ["CASSB", "a, TCR", 1],
+        ["CASSB", "b, TCR", 1],
+    ]
+    assert len(lines.axes["tracking"].get_lines()) == 4
+    lines.close()
+    within = store.clones.track(spanning.apart, group_by="tp", top_n=2)
+    assert sorted(
+        map(tuple, within.table[["group", "n_cells"]].values.tolist())
+    ) == sorted(map(tuple, tracked.table[["group", "n_cells"]].values.tolist()))
+    assert within.diagnostics == tracked.diagnostics
+    # Named, clonotype_1 is followed in each type of its cells; within the
+    # B cells of a, its ambiguous cell has no group of its type to follow.
+    store.cells.insert("b_cells_of_a", np.isin(np.arange(N_CELLS), [6]))
+    named = store.clones.track(
+        spanning.together,
+        group_by="tp",
+        labels=["clonotype_1"],
+        cell_selection=store.snapshot_cell_selection("b_cells_of_a"),
+    )
+    assert named.tracked == ("clonotype_1",)
+    assert named.table[["clone", "group", "n_cells"]].values.tolist() == [
+        ["clonotype_1", "a, BCR", 1]
+    ]
+
+
+def test_counts_of_clonotypes_count_one_in_each_receptor_type_it_spans(
+    spanning,
+) -> None:
+    store = spanning.store
+    # The primary beta chains, TRBV1, of clonotype_1's T cells, of
+    # clonotype_2 and of the ambiguous cell7, whose beta chain has more UMIs
+    # than its heavy chain, and the heavy chains, IGHV1, of clonotype_1's B
+    # cells: three clonotypes within receptor types use TRBV1 and one IGHV1.
+    usage = store.repertoire.gene_usage(spanning.together, count="clonotypes")
+    assert usage.table[
+        ["locus", "v_call", "n_clonotypes", "fraction"]
+    ].values.tolist() == [
+        ["IGH", "IGHV1", 1, 1.0],
+        ["TRB", "TRBV1", 3, 1.0],
+    ]
+    lengths = store.repertoire.spectratype(spanning.together, count="clonotypes")
+    assert lengths.table[["locus", "length", "n_clonotypes"]].values.tolist() == [
+        ["IGH", 4, 1],
+        ["TRB", 5, 3],
+    ]
+    # Within receptor types, the clonotypes count alike, and cells count as
+    # they do whatever their clonotypes.
+    for count in ("clonotypes", "cells"):
+        for measure in (store.repertoire.gene_usage, store.repertoire.spectratype):
+            pd.testing.assert_frame_equal(
+                measure(spanning.together, count=count, group_by="tp").table,
+                measure(spanning.apart, count=count, group_by="tp").table,
+            )
+    cells = store.repertoire.gene_usage(spanning.together)
+    assert cells.table[["locus", "v_call", "n_cells"]].values.tolist() == [
+        ["IGH", "IGHV1", 2],
+        ["TRB", "TRBV1", 6],
+    ]
 
 
 def test_summaries_of_clonotypes_follow_a_cell_selection(tmp_path) -> None:

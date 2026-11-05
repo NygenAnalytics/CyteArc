@@ -33,10 +33,12 @@ from ...metadata.rows import (
     read_rows,
     read_text_rows,
     read_whole,
+    read_whole_text,
     row_read_bytes,
     text_read_bytes,
 )
 from ...metadata.selection import (
+    category_codes,
     plan_cell_selection_read,
     read_cell_selection,
 )
@@ -1740,7 +1742,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         """Each counted chain of the chosen slots, with its fields' stored codes.
 
         A ``clonotypes`` source counts only cells with a clonotype, and with
-        ``count="clonotypes"`` each clonotype once per group and value. The
+        ``count="clonotypes"`` each clonotype once per group and value, and
+        one that spans receptor types once in each type. The
         cells are grouped through :func:`cell_groups`. Reading the slots and
         the clonotypes, grouping the cells and holding the chains are each
         charged to a memory ledger beside what the earlier steps hold, and so
@@ -1751,7 +1754,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             with its labels in the key columns; for each chain, ``group``,
             ``cell``, the cell's
             row, the stored codes of ``locus`` and of each field, and
-            ``clonotype``, the clonotype code, with a clonotypes source; the
+            ``clonotype``, the clonotype code with a clonotypes source, coded
+            within the cell's receptor type with ``count="clonotypes"``; the
             slots; the ``immune_receptors`` artifact's group; the ledger
             of what the step holds; and the grouping's diagnostics, whose
             ``cellsWithoutClone`` counts the cells kept without a chain in
@@ -1834,6 +1838,22 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             codes_bytes = stored_codes.nbytes
             del stored_codes
             ledger.release(codes_bytes)
+        type_codes = None
+        if codes is not None and count == "clonotypes":
+            # Every clone summary counts a clonotype's cells of each receptor
+            # type as a clonotype of that type, so each is counted once for
+            # each receptor type, the receptors' canonical values, whose text
+            # is let go once each cell's is coded.
+            entry = ledger.charged
+            receptor_types = read_whole_text(
+                ledger, group, "values", item="each cell's receptor type"
+            )
+            type_codes, type_names = category_codes(receptor_types, ledger=ledger)
+            coded = ledger.hold("each cell's receptor type", type_codes.nbytes)
+            read_bytes = ledger.charged - entry - coded
+            del receptor_types
+            ledger.release(read_bytes)
+            n_types = max(len(type_names), 1)
         grouped = cell_groups(
             self.zw,
             self.cells,
@@ -1880,7 +1900,17 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         units = {"group": grouped.codes[cells], "cell": cells}
         for name in ("locus", *fields):
             units[name] = _slot_codes(ledger, group, name, contigs)
-        if codes is not None:
+        if type_codes is not None and codes is not None:
+            # Each chain's clonotype within its cell's receptor type, from the
+            # chains' clonotypes and receptor types.
+            ledger.peak(
+                "each chain's clonotype within its receptor type", 16 * len(cells)
+            )
+            units["clonotype"] = codes[cells] * n_types + type_codes[cells]
+            type_bytes = type_codes.nbytes
+            del type_codes
+            ledger.release(type_bytes)
+        elif codes is not None:
             units["clonotype"] = codes[cells]
         return keys, units, chosen, group, ledger, grouped.diagnostics
 
@@ -1980,10 +2010,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         chain count, or a ``clonotypes`` artifact, whose cells with a
         clonotype count; ``count="clonotypes"`` then counts each clonotype
         once per group and gene instead of each cell, which keeps expanded
-        clones from dominating the shares. The groups are the combinations of
-        the labels of ``group_by`` columns and of a ``groups`` label artifact,
-        among the cells of ``cell_selection``; without either, every cell is
-        one group. Nothing is saved.
+        clones from dominating the shares, and a clonotype that spans
+        receptor types, as ``within_receptor_type=False`` allows, once in each
+        type, as every clone summary counts it. The groups are the
+        combinations of the labels of ``group_by`` columns and of a ``groups``
+        label artifact, among the cells of ``cell_selection``; without
+        either, every cell is one group. Nothing is saved.
 
         Args:
             source: An ``immune_receptors`` or ``clonotypes`` artifact.

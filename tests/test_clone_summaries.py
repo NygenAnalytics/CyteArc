@@ -6,10 +6,12 @@ saved them. The expected values are counted cell by cell from the truth, so
 they never come from the code under test. A pull request that adds a clone
 source adds a row to ``SOURCES``, one to ``KEPT_APART`` when its clones keep
 labels apart or to ``LABELS`` when they keep none, which gives the rule its
-labels follow, or None, and one to ``TRUTHS`` when it cannot save every clone
-of the truth; one that adds a summary adds a test here.
+labels follow, or None, one to ``SPANNING`` when one of its clones can hold
+cells of several labels kept apart, and one to ``TRUTHS`` when it cannot save
+every clone of the truth; one that adds a summary adds a test here.
 """
 
+import itertools
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -92,6 +94,18 @@ def _clonotypes(store: DataStore, folder: Path) -> ArtifactRef:
     # types of their own.
     receptors = import_truth_receptors(store, RECEPTORS, folder)
     return store.repertoire.clonotypes(receptors, receptor_arms="any")
+
+
+def _clonotypes_across_receptor_types(store: DataStore, folder: Path) -> ArtifactRef:
+    # Defined across receptor types, the multichain and ambiguous cells of the
+    # truth's first clone join its T cells in one clonotype, so each clonotype
+    # is one of the truth's clones; every summary counts its cells of each
+    # receptor type as a clonotype of that type, as it counts the clonotypes
+    # defined within types.
+    receptors = import_truth_receptors(store, RECEPTORS, folder)
+    return store.repertoire.clonotypes(
+        receptors, receptor_arms="any", within_receptor_type=False
+    )
 
 
 def _clonotype_clusters(store: DataStore, folder: Path) -> ArtifactRef:
@@ -177,6 +191,7 @@ SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
     "genotype clones": _genotype_clones,
     "allele clones": _allele_clones,
     "phylogeny clones": _phylogeny_clones,
+    "clonotypes across receptor types": _clonotypes_across_receptor_types,
 }
 #: The truth's clones as a source saves them, where it cannot save every one:
 #: variant clones join each cell to the cells that share its variants, so the
@@ -196,7 +211,14 @@ KEPT_APART: dict[str, dict[str, np.ndarray]] = {
             dtype=object
         )
     },
+    "clonotypes across receptor types": {
+        "receptor_type": RECEPTORS.expected["receptor_type"].to_numpy(dtype=object)
+    },
 }
+#: The sources one of whose clones can hold cells of several labels kept
+#: apart, under one label: every summary measures each of its parts, its cells
+#: of one label, as a clone of that label, which the expected values count.
+SPANNING = frozenset({"clonotypes across receptor types"})
 
 
 def _ranked_label(clone: int) -> str:
@@ -252,6 +274,7 @@ def source(request, tmp_path_factory) -> SimpleNamespace:
         store=store,
         clones=SOURCES[request.param](store, folder),
         kept_apart=KEPT_APART.get(request.param, {}),
+        spans=request.param in SPANNING,
         labels=LABELS.get(request.param),
         truth=TRUTHS.get(request.param, TRUTH),
     )
@@ -327,12 +350,22 @@ def _keys(source) -> list[tuple | None]:
     ]
 
 
+def _defined(source, key: tuple) -> tuple:
+    """The clone of ``_keys`` as the source defines it, which one label names.
+
+    A source whose clones span the labels kept apart defines the truth's
+    clone whole, of all its labels; any other defines each of its parts.
+    """
+    return key[:1] if source.spans else key
+
+
 def _source_clones(source) -> tuple[dict[tuple, str], dict[tuple, int]]:
     """The source's label and rank of each clone of ``_keys``.
 
-    They come from the source's cells table, which must give each such clone
-    one label of its own and no label to a cell without a clone; the rank is
-    the clone's place in the source's table of clones, largest first.
+    They come from the source's cells table, which must give each clone as
+    the source defines it one label of its own and no label to a cell without
+    a clone; the rank is the clone's place in the source's table of clones,
+    largest first, so the parts of one clone share both.
     """
     loaded = source.store.clones.load_clones(source.clones)
     # Every source numbers its clones by size, largest first, which the ranks
@@ -341,12 +374,14 @@ def _source_clones(source) -> tuple[dict[tuple, str], dict[tuple, int]]:
     ranks = {str(label): rank for rank, label in enumerate(loaded.clones["clone"])}
     of_cell = loaded.cells["clone"].reindex(TRUTH.cell_ids)
     labels: dict[tuple, str] = {}
+    defined: dict[tuple, str] = {}
     for key, label in zip(_keys(source), of_cell.tolist(), strict=True):
         if key is None:
             assert pd.isna(label)
             continue
         assert labels.setdefault(key, str(label)) == str(label)
-    assert len(set(labels.values())) == len(labels)
+        assert defined.setdefault(_defined(source, key), str(label)) == str(label)
+    assert len(set(defined.values())) == len(defined)
     return labels, {key: ranks[label] for key, label in labels.items()}
 
 
@@ -370,7 +405,7 @@ def test_every_source_records_the_clone_writers_diagnostics(source) -> None:
     status = inspect_artifact(source.store.zw, source.clones)
     loaded = source.store.clones.load_clones(source.clones)
     assert dict(loaded.diagnostics) == status.diagnostics
-    keys = [key for key in _keys(source) if key is not None]
+    keys = [_defined(source, key) for key in _keys(source) if key is not None]
     largest = max(Counter(keys).values())
     assert status.diagnostics["cellsWithClone"] == len(keys)
     assert status.diagnostics["largestCloneShare"] == largest / len(keys)
@@ -511,13 +546,14 @@ def test_track_follows_each_samples_largest_clones(source) -> None:
         assert labels == {(clone,): source.labels(clone) for (clone,) in labels}
     by_group = _group_cells(source, TRUTH.samples)
     kept = _kept_labels(source, TRUTH.samples)
-    # Each group's two largest clones, ties to the larger clone overall.
+    # Each group's two largest clones, ties to the larger clone overall; the
+    # parts of one clone follow the order of their labels kept apart.
     chosen: set[tuple] = set()
     for group, found in by_group.items():
         keys = [(clone, *kept[group]) for clone in found]
         ranked = sorted(keys, key=lambda key: (-found[key[0]], ranks[key]))
         chosen |= set(ranked[:2])
-    order = sorted(chosen, key=ranks.__getitem__)
+    order = sorted(chosen, key=lambda key: (ranks[key], key[1:]))
     assert tracked.tracked == tuple(labels[key] for key in order)
     assert tracked.diagnostics == {
         **_grouping(source, TRUTH.samples),
@@ -534,7 +570,14 @@ def test_track_follows_each_samples_largest_clones(source) -> None:
         for group, found in by_group.items()
         if kept[group] == key[1:]
     )
-    assert tuple(tracked.table["clone"].drop_duplicates()) == tracked.tracked
+    # The rows follow the parts in the order of ``tracked``.
+    runs = [
+        part
+        for part, _rows in itertools.groupby(
+            table[["clone", *source.kept_apart]].itertuples(index=False, name=None)
+        )
+    ]
+    assert tuple(part[0] for part in runs) == tracked.tracked
 
 
 def test_coupling_couples_the_cell_types_that_share_clones(source) -> None:
@@ -991,15 +1034,21 @@ def test_summaries_keep_to_a_cell_selection(source) -> None:
     )
     sizes = overlap.group_sizes
     assert dict(zip(sizes["group"], sizes["n_cells"], strict=True)) == cells_of
-    # The source's largest clone, followed through the cells of d2.
+    # The source's largest clone, followed through the cells of d2: in each of
+    # its labels kept apart that a group of d2 holds, as a clone of its own.
     labels, ranks = _source_clones(source)
-    largest = min(ranks, key=ranks.__getitem__)
+    largest = min(ranks, key=lambda key: (ranks[key], key[1:]))
     tracked = store.clones.track(
         source.clones, labels=[labels[largest]], cell_selection=selection
     )
-    in_d2 = sum(key == largest for key, in_d2 in zip(_keys(source), d2) if in_d2)
+    keys_in_d2 = [key for key, in_d2 in zip(_keys(source), d2) if in_d2]
+    held = {key[1:] for key in keys_in_d2 if key is not None}
+    named = sorted(
+        (key for key in ranks if labels[key] == labels[largest]),
+        key=lambda key: key[1:],
+    )
     assert tracked.table[["clone", "n_cells"]].values.tolist() == [
-        [labels[largest], in_d2]
+        [labels[key], keys_in_d2.count(key)] for key in named if key[1:] in held
     ]
     coupling = store.clones.coupling(
         source.clones, group_by="cell_type", cell_selection=selection, n_permutations=0

@@ -393,18 +393,23 @@ class CloneTracking:
     Attributes:
         table: One row per chosen clone and group, zeros included: ``clone``,
             ``group`` (its labels joined by commas), ``n_cells`` and
-            ``fraction``, the share of the group's cells with a clone.
+            ``fraction``, the share of the group's cells with a clone. A
+            clone that spans the labels kept apart, such as a clonotype of
+            two receptor types, is chosen and followed once for each label,
+            through the groups of that label.
         group_keys: One row per group, indexed by its name, ``group``, with
             its label in each key column, as :class:`CloneOverlap` holds them.
         clones: The clone artifact, such as a ``clones`` artifact.
-        tracked: The chosen clone labels, largest first.
+        tracked: The chosen clone labels, largest first, a clone's once for
+            each label kept apart that it is followed in.
         group_by: The cell metadata columns of the groups.
         groups: The label artifact of the groups, or None.
         cell_selection: The cells kept, or None for every cell.
         diagnostics: The cells that the summary leaves out, by name:
             ``cellsWithoutClone``, the cells without a clone among those
             kept, ``cellsWithoutGroup``, those with a clone but no group,
-            and the ``groups``, and ``trackedClones``, the clones tracked.
+            and the ``groups``, and ``trackedClones``, the clones tracked,
+            as ``tracked`` lists them.
     """
 
     table: pd.DataFrame = field(repr=False)

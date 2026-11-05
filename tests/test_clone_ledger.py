@@ -74,6 +74,86 @@ def test_ranked_labels_name_each_clone_by_its_rank(n_clones) -> None:
     assert labels.tolist() == [f"clone_{rank}" for rank in range(1, n_clones + 1)]
 
 
+# The labels that clonotypes keep apart.
+
+
+def _receptor_type_keys():
+    """Eight fates, of two cell types in each of four receptor types, and their strata."""
+    import pandas as pd
+
+    keys = pd.DataFrame(
+        {
+            "cell_type": np.repeat(["a", "b"], 4),
+            "receptor_type": np.tile(["BCR", "TCR", "ambiguous", "multichain"], 2),
+        },
+        index=[f"f{i}" for i in range(8)],
+    )
+    return keys, np.asarray([0, 1, 2, 3] * 2, dtype=np.int64)
+
+
+@pytest.mark.parametrize("n_cells", [10_000, 400_000])
+def test_finding_each_cells_stratum_holds_what_fate_bias_charges(n_cells) -> None:
+    keys, strata = _receptor_type_keys()
+    labels = np.asarray(["BCR", "TCR", "ambiguous", "multichain", None], dtype=object)
+    kept = (("receptor_type", labels[np.arange(n_cells) % 5]),)
+    found = clone_operations._cell_strata(keys, strata, kept)
+    # Each cell takes its receptor type's stratum, and a cell without one none.
+    assert found.tolist() == ([0, 1, 2, 3, -1] * n_cells)[:n_cells]
+    stated = clone_operations._cell_strata_bytes(n_cells, 1)
+    peak = _warm_peak(lambda: clone_operations._cell_strata(keys, strata, kept))
+    # The charge is 1.28 to 1.35 times the peak as traced, whether or not
+    # pandas stores text with pyarrow, since the labels stay Python strings.
+    assert peak <= stated <= 1.5 * peak, (peak, stated)
+
+
+def test_each_cell_takes_the_stratum_of_its_labels_in_every_column_kept_apart() -> None:
+    import pandas as pd
+
+    # Groups of two columns kept apart; the strata follow the pairs of labels.
+    keys = pd.DataFrame(
+        {"first": ["p", "p", "q"], "second": ["u", "v", "v"]}, index=["g0", "g1", "g2"]
+    )
+    strata = np.asarray([2, 0, 1], dtype=np.int64)
+    kept = (
+        ("first", np.asarray(["p", "q", "q", None, "p", "r"], dtype=object)),
+        ("second", np.asarray(["v", "v", "u", "v", "u", "u"], dtype=object)),
+    )
+    # (p, v), (q, v) and (p, u) are groups' labels; (q, u) no group's, though
+    # both of its labels are; a missing label and a label of no group give
+    # none either.
+    assert clone_operations._cell_strata(keys, strata, kept).tolist() == [
+        0,
+        1,
+        -1,
+        -1,
+        2,
+        -1,
+    ]
+
+
+@pytest.mark.parametrize("n_pairs", [10_000, 400_000])
+def test_counting_the_clones_tested_in_each_stratum_holds_what_fate_bias_charges(
+    n_pairs,
+) -> None:
+    from cytearc.utils.arrays import sorted_unique
+
+    _keys, strata = _receptor_type_keys()
+    pair_codes = np.arange(n_pairs, dtype=np.int64) // 3
+    pair_fates = np.arange(n_pairs, dtype=np.int64) % 8
+
+    def count() -> int:
+        return len(
+            sorted_unique(pair_codes * (int(strata.max()) + 1) + strata[pair_fates])
+        )
+
+    # Each clone's three pairs lie in three strata.
+    assert count() == n_pairs
+    stated = clone_operations._PART_BYTES_PER_PAIR * n_pairs + NUMPY_STEP_BYTES
+    peak = _warm_peak(count)
+    # The charge is 1.29 to 1.35 times the peak as traced.
+    assert peak <= stated <= 1.5 * peak, (peak, stated)
+
+
 # Clones of a cell metadata column.
 
 

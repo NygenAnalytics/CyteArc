@@ -94,6 +94,11 @@ _BIAS_BYTES_PER_EARLY_CELL = 64
 _BIAS_BYTES_PER_FRACTION = 16
 _BIAS_BYTES_PER_CLONE_FATE = 80
 _BIAS_BYTES_PER_FATE = 1_000
+# With each early cell's stratum, the codes of each clone within its strata
+# are let go before the fractions are built: on 200,000 and 400,000 early
+# cells in two to four strata of one to four fates each, the traced peak was
+# at most 0.58 times these bytes, and that of clones of one stratum each did
+# not move.
 
 
 def _checked_method(method: Any) -> int:
@@ -662,9 +667,12 @@ class FateBiasArrays:
     """The fates of the clones of early cells, as :func:`fate_bias` measures them.
 
     Attributes:
-        clones: The codes of the clones with a late cell, ascending.
+        clones: The code of each clone tested, ascending: each clone with a
+            late cell, and with ``early_strata`` each clone once in each
+            stratum of its late cells, the strata in order.
         clone_cells: Each of those clones' late cells in each fate.
-        clone_early_cells: Each of those clones' early cells.
+        clone_early_cells: Each of those clones' early cells, of the stratum
+            tested with ``early_strata``.
         p_values: For each of those clones and each fate of its stratum, the
             one-sided Fisher test of more late cells in the fate than chance;
             NaN for fates of another stratum.
@@ -693,7 +701,8 @@ def fate_bias_bytes(n_early: int, n_tested: int, n_fates: int) -> int:
 
     Args:
         n_early: The early cells.
-        n_tested: The clones with a late cell.
+        n_tested: The clones tested, each clone once in each stratum with
+            ``early_strata``.
         n_fates: The fates.
     """
     return int(
@@ -711,6 +720,7 @@ def fate_bias(
     pair_cells: np.ndarray,
     fate_cells: np.ndarray,
     fate_strata: np.ndarray | None = None,
+    early_strata: np.ndarray | None = None,
 ) -> FateBiasArrays:
     """Follow each early cell's clone to its late cells, and test each clone's fates.
 
@@ -725,6 +735,13 @@ def fate_bias(
     ``clonal_fate_bias`` computes it with ``alternative="less"``. The p-values
     of each fate are adjusted over the clones of its stratum.
 
+    With ``early_strata``, a clone within one stratum is the unit: a clone
+    whose late cells lie in fates of several strata, such as a clonotype of
+    two receptor types, is tested once in each, among the late cells of that
+    stratum, and an early cell's fractions are the shares of its clone's late
+    cells of its own stratum. Without it, each clone's late cells lie in one
+    stratum, whose fates its early cells take.
+
     Args:
         early_clones: Each early cell's clone code, -1 for none.
         pair_fates: The fate of each distinct pair of fate and clone among the
@@ -736,10 +753,14 @@ def fate_bias(
             each pair's cells.
         fate_strata: Each fate's stratum, such as its labels in the columns
             that the clones keep apart, or None for one stratum.
+        early_strata: Each early cell's stratum, a value of ``fate_strata``,
+            or None; an early cell of a value that no fate holds has no late
+            cells.
 
     Raises:
         ValueError: If the arrays do not align, a fate holds fewer late cells
-            than its pairs, or a clone's late cells lie in fates of two
+            than its pairs, ``early_strata`` comes without ``fate_strata``, or
+            without ``early_strata`` a clone's late cells lie in fates of two
             strata.
     """
     from scipy.stats import false_discovery_control, hypergeom
@@ -769,16 +790,37 @@ def fate_bias(
         np.bincount(pair_fates, weights=pair_cells, minlength=n_fates) > fate_cells
     ).any():
         raise ValueError("A fate holds fewer late cells than its pairs of clones")
-    strata = (
-        np.zeros(n_fates, dtype=np.int64)
-        if fate_strata is None
-        else np.unique(np.asarray(fate_strata), return_inverse=True)[1].reshape(-1)
-    ).astype(np.int64)
+    if fate_strata is None:
+        if early_strata is not None:
+            raise ValueError("early_strata needs fate_strata, each fate's stratum")
+        values: np.ndarray = np.zeros(1, dtype=np.int64)
+        strata = np.zeros(n_fates, dtype=np.int64)
+    else:
+        values, strata = np.unique(np.asarray(fate_strata), return_inverse=True)
+        strata = strata.reshape(-1).astype(np.int64)
     if len(strata) != n_fates:
         raise ValueError("fate_strata must hold one stratum per fate")
-    clones, rows = np.unique(pair_clones, return_inverse=True)
+    # Each tested unit's code: the clone's own without early_strata, and with
+    # them the clone's then its stratum's, so the units sort by clone.
+    if early_strata is None:
+        n_strata = 1
+        units = pair_clones
+        early_units = early_clones
+    else:
+        early_strata = np.asarray(early_strata)
+        if early_strata.shape != early_clones.shape:
+            raise ValueError("early_strata must hold one stratum per early cell")
+        n_strata = len(values)
+        units = pair_clones * n_strata + strata[pair_fates]
+        own = pd.Index(values).get_indexer(early_strata)
+        early_units = np.where(
+            (early_clones >= 0) & (own >= 0), early_clones * n_strata + own, -1
+        )
+        del own
+    unit_codes, rows = np.unique(units, return_inverse=True)
+    del units
     rows = rows.reshape(-1)
-    n_tested = len(clones)
+    n_tested = len(unit_codes)
     clone_cells = np.zeros((n_tested, n_fates), dtype=np.int64)
     np.add.at(clone_cells, (rows, pair_fates), pair_cells)
     clone_late = clone_cells.sum(axis=1)
@@ -787,8 +829,12 @@ def fate_bias(
     np.minimum.at(lowest, rows, strata[pair_fates])
     np.maximum.at(highest, rows, strata[pair_fates])
     if (lowest != highest).any():
-        raise ValueError("A clone's late cells lie in fates of two strata")
+        raise ValueError(
+            "A clone's late cells lie in fates of two strata; pass early_strata, "
+            "each early cell's stratum, to test the clone in each"
+        )
     clone_strata = highest
+    clones = unit_codes // n_strata
     population = np.bincount(strata, weights=fate_cells).astype(np.int64)
     tested = strata[None, :] == clone_strata[:, None]
     # A clone without late cells in a fate of its stratum has p = 1.
@@ -809,9 +855,10 @@ def fate_bias(
                 p_values[column, fate], method="bh"
             )
     del tested
-    at = np.searchsorted(clones, early_clones)
-    found = (early_clones >= 0) & (at < n_tested)
-    found[found] = clones[at[found]] == early_clones[found]
+    at = np.searchsorted(unit_codes, early_units)
+    found = (early_units >= 0) & (at < n_tested)
+    found[found] = unit_codes[at[found]] == early_units[found]
+    del early_units
     positions = at[found]
     # Each clone's fractions once, and a row of NaN for the early cells
     # without late clone-mates, gathered into one array of the early cells.
