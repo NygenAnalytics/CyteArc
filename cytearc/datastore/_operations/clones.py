@@ -11,6 +11,7 @@ import pandas as pd
 import zarr
 
 from ...clones.assignments import (
+    WITHIN_TYPE_CLONE,
     CLONE_ASSIGNMENT_ROW_BYTES,
     MULTIPLE_POLICIES,
     CloneAssigner,
@@ -90,7 +91,7 @@ from ...metadata.selection import (
     plan_cell_selection_read,
     read_cell_selection,
 )
-from ...repertoire.clonotypes import clonotype_nouns
+from ...repertoire.clonotypes import clonotype_nouns, within_type_parts
 from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
@@ -133,8 +134,10 @@ from .clone_artifacts import (
     write_clones,
 )
 from .clone_steps import (
+    CODES_WITHIN_TYPE,
     artifact_cell_ids,
     files_text,
+    measured_within_types,
     plan_artifact_cells,
     read_codes,
     text_file_write_bytes,
@@ -245,11 +248,14 @@ _BYTES_PER_CLONE_COUNT = 40
 _TRACK_BYTES_PER_ROW = 106
 # Each pair of a fate and a clone holds its fate, clone code and cells.
 _BYTES_PER_FATE_PAIR = 24
-# Checking that no clone spans the labels that the clones keep apart holds,
-# for each pair of a clone and a fate, its clone and label in a table and its
-# distinct rows, and for each early cell its place and label.
-_KEPT_LABEL_PAIR_BYTES = 48
-_KEPT_LABEL_EARLY_BYTES = 16
+# Clearing the labels of the late cells without a clone holds a flag for
+# each late cell and, for each column kept apart, a copy of the labels: 9
+# bytes a late cell of one column, as traced on 20,000 and 400,000 cells.
+_CLEARING_BYTES_PER_CELL = 2
+_CLEARED_BYTES_PER_COLUMN = 10
+# Finding the first cell of a clone named without a counted cell sorts every
+# cell's clone and holds the sorted codes: 16 bytes a cell, as traced.
+_FIRST_CELL_BYTES = 20
 # Writing the fate bias builds, for each early cell, a reference to its
 # dominant fate's name, its codes as int32, and the mask and arrays that pick
 # the names, beside what the writer holds.
@@ -280,6 +286,9 @@ class _CloneInput:
         nbytes: What reading it left charged to the ledger it was read
             within: the codes, the labels and the kept labels with their
             strings.
+        clonotypes: For clonotypes defined across receptor types, read as
+            the summaries measure them, each clone's clonotype across types
+            by code, when the labels were read; None otherwise.
     """
 
     ref: ArtifactRef
@@ -288,6 +297,7 @@ class _CloneInput:
     clone_ids: np.ndarray | None
     kept_apart: tuple[tuple[str, np.ndarray], ...]
     nbytes: int
+    clonotypes: np.ndarray | None = None
 
 
 def _file_namespace(file: BarcodeFile) -> str:
@@ -839,7 +849,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Clonotypes read as clones too, labelled ``clonotype_1`` and so on,
         and their table of cells also holds each cell's ``receptor_type``,
-        whose labels every clone summary measures apart.
+        whose labels every clone summary measures apart. Clonotypes defined
+        across receptor types also hold each cell's ``within_type_clone``, its
+        clonotype within its receptor type, which every clone summary
+        measures, labelled as the summaries label it, such as
+        ``clonotype_1 (TCR 2)``.
 
         Args:
             clones: A clone artifact: ``clones``, such as one from
@@ -872,9 +886,19 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             codec_threads=self.nthreads,
         )
         # The tables are built beside the codes and kept labels read, the
-        # clone labels and the cells' IDs as text, and a source's own arrays.
-        source = self._read_clone_input(clones, ledger, with_ids=True)
+        # clone labels and the cells' IDs as text, and a source's own arrays;
+        # clonotypes across receptor types are also read as the summaries
+        # read them, within each type.
+        source = self._read_clone_input(
+            clones, ledger, with_ids=True, within_types=False
+        )
         assert source.clone_ids is not None
+        status = inspect_artifact(self.zw, clones)
+        parts = (
+            self._read_clone_input(clones, ledger, with_ids=True)
+            if measured_within_types(clones, status, group)
+            else None
+        )
         cell_ids = artifact_cell_ids(
             ledger, self.zw, self.cells._get_array("ids"), planned_cells
         )
@@ -885,7 +909,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             for name, dtype in SOURCE_ARRAYS.items()
             if name in group
         }
-        ledger.peak(f"the tables of {n_cells} cells", _TABLE_BYTES_PER_CELL * n_cells)
+        ledger.peak(
+            f"the tables of {n_cells} cells",
+            (_TABLE_BYTES_PER_CELL + 8 * (parts is not None)) * n_cells,
+        )
         # Every saved clone holds a cell, so the codes give the clone sizes.
         assigned = source.codes >= 0
         clone_sizes = np.bincount(
@@ -902,7 +929,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             extra=extra,
             kept_apart=dict(source.kept_apart),
         )
-        status = inspect_artifact(self.zw, clones)
+        if parts is not None:
+            assert parts.clone_ids is not None
+            cells[WITHIN_TYPE_CLONE] = pd.Categorical.from_codes(
+                parts.codes, categories=pd.Index(parts.clone_ids)
+            )
         return Clones(
             cells=cells,
             clones=table,
@@ -975,7 +1006,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         )
         # The file is written from the codes and kept labels read, and the
         # clone labels and the cells' IDs as text.
-        source = self._read_clone_input(clones, ledger, with_ids=True)
+        source = self._read_clone_input(
+            clones, ledger, with_ids=True, within_types=False
+        )
         assert source.clone_ids is not None
         codes, clone_ids = source.codes, source.clone_ids
         if format == "cospar":
@@ -1055,7 +1088,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         )
 
     def _read_clone_input(
-        self, clones: ArtifactRef, ledger: MemoryLedger, *, with_ids: bool = False
+        self,
+        clones: ArtifactRef,
+        ledger: MemoryLedger,
+        *,
+        with_ids: bool = False,
+        within_types: bool = True,
     ) -> _CloneInput:
         """Read a clone artifact as every clone summary reads it, within ``ledger``.
 
@@ -1064,14 +1102,20 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         that the summaries accept is read here, with the labels of the groups
         that its clones keep apart: clones keep none, and clonotypes keep each
         cell's receptor type apart, the canonical values of their receptors,
-        so the summaries measure T cells and B cells apart. Each read is
-        charged to ``ledger``, and what the input holds stays charged,
-        ``nbytes`` of it.
+        so the summaries measure T cells and B cells apart. Clonotypes defined
+        across receptor types are read by each cell's clonotype within its
+        type, which they save, as the summaries measure them, unless
+        ``within_types`` is False, as the clones' own loads and exports read
+        them: each such clonotype is labelled as a part of its clonotype
+        across types, by :func:`~cytearc.repertoire.clonotypes.within_type_parts`.
+        Each read is charged to ``ledger``, and what the input holds stays
+        charged, ``nbytes`` of it.
 
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
             ValueError: If it is not a kind of clone artifact that the
-                summaries read.
+                summaries read, or clonotypes defined across receptor types
+                were saved without each cell's clonotype within its type.
             KeyError: If the store holds no such artifact, or not the
                 receptors of the clonotypes.
             RuntimeError: If the artifact or the receptors of the clonotypes
@@ -1080,12 +1124,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         """
         group = self._clone_group(clones)
         # The artifact's record is read before anything is charged.
-        cell_selection = inspect_artifact(self.zw, clones).input_ref("cell_selection")
+        status = inspect_artifact(self.zw, clones)
+        cell_selection = status.input_ref("cell_selection")
         receptor_group = (
             self._clonotype_receptor_group(clones)
             if clones.kind == ClonotypeArguments.artifact_kind
             else None
         )
+        by_type = within_types and measured_within_types(clones, status, group)
         entry = ledger.charged
         kept_apart: tuple[tuple[str, np.ndarray], ...] = ()
         if receptor_group is not None:
@@ -1103,8 +1149,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             labels = np.asarray([*names, None], dtype=object)[codes]
             read_bytes = ledger.charged - entry - coded
             code_bytes = codes.nbytes
-            del receptor_types, codes, names
-            ledger.release(read_bytes + code_bytes)
+            del receptor_types
+            if by_type and with_ids:
+                # The codes name the clonotypes within types, after which
+                # they go.
+                type_codes, type_names = codes, names
+                del codes, names
+                ledger.release(read_bytes)
+            else:
+                del codes, names
+                ledger.release(read_bytes + code_bytes)
             kept_apart = ((_RECEPTOR_TYPE_COLUMN, labels),)
             del labels
         # The clones' few labels are read before each cell's code, whose
@@ -1117,7 +1171,25 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             if with_ids
             else None
         )
-        clone_codes = read_codes(ledger, group, "codes", item="each cell's clone")
+        clonotypes = None
+        if not by_type:
+            clone_codes = read_codes(ledger, group, "codes", item="each cell's clone")
+        elif clone_ids is None:
+            clone_codes = read_codes(
+                ledger,
+                group,
+                CODES_WITHIN_TYPE,
+                item="each cell's clonotype within its receptor type",
+            )
+        else:
+            ids_bytes = ledger.charged - entry - coded
+            clone_codes, clone_ids, clonotypes = self._clonotypes_within_types(
+                ledger, group, clone_ids, type_codes, type_names
+            )
+            # The clonotypes' own labels and the types' codes go once each
+            # clonotype within a type is named.
+            del type_codes
+            ledger.release(ids_bytes + code_bytes)
         return _CloneInput(
             ref=clones,
             cell_selection=cell_selection,
@@ -1125,6 +1197,125 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             clone_ids=clone_ids,
             kept_apart=kept_apart,
             nbytes=ledger.charged - entry,
+            clonotypes=clonotypes,
+        )
+
+    def _clonotypes_within_types(
+        self,
+        ledger: MemoryLedger,
+        group: zarr.Group,
+        clonotype_ids: np.ndarray,
+        type_codes: np.ndarray,
+        type_names: list[str],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Read and name each cell's clonotype within its receptor type, as the summaries measure clonotypes across types.
+
+        Each cell's clonotype across types and within its type are read, and
+        each clonotype within a type is labelled by its clonotype's label and
+        the text that :func:`~cytearc.repertoire.clonotypes.within_type_parts`
+        adds. Each read and step is charged to ``ledger``, which keeps the
+        codes within types, the labels and each one's clonotype charged.
+
+        Returns:
+            Each cell's clonotype within its type, as int64; each such
+            clonotype's label, as a Python string; and its clonotype across
+            types.
+        """
+        across = read_codes(
+            ledger, group, "codes", item="each cell's clonotype across receptor types"
+        )
+        codes = read_codes(
+            ledger,
+            group,
+            CODES_WITHIN_TYPE,
+            item="each cell's clonotype within its receptor type",
+        )
+        n_parts = int(codes.max(initial=-1)) + 1
+        clonotypes, added = within_type_parts(
+            across, codes, type_codes, type_names, ledger=ledger
+        )
+        # Each clonotype within a type, the text its label adds and its
+        # clonotype's label, and the texts of those of clonotypes that span
+        # types, are held until the labels are joined; the codes across types
+        # then go.
+        n_texts = sum(1 for text in added if text)
+        kept = ledger.hold(
+            f"the clonotypes of {n_parts} clonotypes within receptor types",
+            clonotypes.nbytes
+            + 2 * object_array_bytes(n_parts)
+            + python_text_bytes(n_texts, sum(map(len, added)), widest=0x7F),
+        )
+        across_bytes = across.nbytes
+        del across
+        ledger.release(across_bytes)
+        # Each one's clonotype's label is picked, and each label joined as a
+        # Python string of the characters of both.
+        base = clonotype_ids[clonotypes]
+        ledger.hold(
+            f"the labels of {n_parts} clonotypes within receptor types",
+            object_array_bytes(n_parts)
+            + python_text_bytes(
+                n_parts,
+                sum(map(len, base)) + sum(map(len, added)),
+                widest=max((ord(max(label)) for label in base if label), default=0),
+            ),
+        )
+        labels = np.fromiter(
+            (f"{label}{text}" for label, text in zip(base, added, strict=True)),
+            dtype=object,
+            count=n_parts,
+        )
+        del base, added
+        ledger.release(kept - clonotypes.nbytes)
+        return codes, labels, clonotypes
+
+    def _clonotypes_named(
+        self,
+        clones: ArtifactRef,
+        ledger: MemoryLedger,
+        clonotypes: np.ndarray,
+        found: np.ndarray,
+        unknown: list[str],
+    ) -> tuple[np.ndarray, list[str]]:
+        """Add the clonotypes within receptor types of each clonotype named by its own label.
+
+        Args:
+            clones: Clonotypes defined across receptor types.
+            ledger: The operation's ledger, which each step is charged to.
+            clonotypes: Each clonotype within a type's clonotype across types.
+            found: The clonotypes within types named already.
+            unknown: The names that no clonotype within a type takes.
+
+        Returns:
+            The clonotypes within types named, and the names that no
+            clonotype takes either.
+        """
+        group = self._clone_group(clones)
+        entry = ledger.charged
+        own = read_whole_text(
+            ledger, group, "clonotype_ids", item="the clonotypes' own labels"
+        )
+        # pandas' hash table of the labels, each name's place among them, a
+        # flag for each clonotype, and for each clonotype within a type the
+        # flag of its clonotype and its position.
+        ledger.peak(
+            "finding the clonotypes named",
+            hash_table_bytes(len(own))
+            + 8 * len(unknown)
+            + len(own)
+            + 9 * len(clonotypes)
+            + NUMPY_STEP_BYTES,
+        )
+        named = pd.Index(own, dtype=object).get_indexer(unknown)
+        wanted = np.zeros(len(own), dtype=bool)
+        wanted[named[named >= 0]] = True
+        parts = np.flatnonzero(wanted[clonotypes])
+        held = ledger.charged - entry
+        del own, wanted
+        ledger.release(held)
+        return (
+            np.concatenate([found, parts.astype(np.int64)]),
+            [name for name, at in zip(unknown, named.tolist(), strict=True) if at < 0],
         )
 
     def _clone_figure_nouns(self, clones: ArtifactRef) -> tuple[str, str]:
@@ -1158,7 +1349,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         by ``receptor_arms="VJ"`` by the ``VJ_1`` chain first. Where two of
         the clonotypes given share a junction, the label of each also shows
         its number, the rank in its ID, such as ``CAVA 1`` and ``CAVA 3`` for
-        ``clonotype_1`` and ``clonotype_3``. The clonotypes' IDs are read to
+        ``clonotype_1`` and ``clonotype_3``. Clonotypes defined across
+        receptor types are given as their summaries label the clonotypes
+        within receptor types that they measure, such as ``clonotype_1 (TCR
+        2)``, and each is labelled as ``within_receptor_type=True`` labels it,
+        by its own representative's junction, with its number among those
+        where two given share one, then the text that its label adds, such as
+        ``CASSB (TCR 2)``. The clonotypes' IDs, or those labels, are read to
         find those given, and the repertoire operations read the junctions.
 
         Args:
@@ -1173,67 +1370,87 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
             ValueError: If it is not a clone artifact, an ID names no
-                clonotype, or a representative has no junction to show.
+                clonotype, clonotypes across receptor types were saved
+                without each cell's clonotype within its type, or a
+                representative has no junction to show.
             KeyError: If the store holds no such artifact.
             RuntimeError: If the artifact is incomplete.
             MemoryError: If reading the clonotypes' IDs as text and a hash
-                index of them, and 400 bytes for each clone given, or reading
+                index of them, or for clonotypes across receptor types each
+                cell's clonotype within its type and the summaries' labels
+                of those, and 400 bytes for each clone given, or reading
                 their representatives' junctions, a chunk of each array at a
                 time, does not fit the memory budget.
         """
         group = self._clone_group(clones)
-        names = np.asarray([str(name) for name in ids], dtype=object)
-        if clones.kind != ClonotypeArguments.artifact_kind or not len(names):
-            return names
-        n_clonotypes = int(
-            as_zarr_array(group["clonotype_ids"], name="clonotype_ids").shape[0]
-        )
+        given = np.asarray([str(name) for name in ids], dtype=object)
+        if clones.kind != ClonotypeArguments.artifact_kind or not len(given):
+            return given
+        across = measured_within_types(clones, inspect_artifact(self.zw, clones), group)
+        # Across receptor types, every cell's clonotype within its type is
+        # read whatever the clonotypes given, so fewer would not fit.
+        fewer = "label fewer clonotypes"
         ledger = MemoryLedger(
             self.memoryBytes,
             "Labelling clonotypes by their junctions",
-            remedy="label fewer clonotypes",
+            remedy=None if across else fewer,
             codec_threads=self.nthreads,
         )
         # Each clone given, as its ID, code and label, is held throughout.
         ledger.hold(
-            f"the {len(names)} clonotypes labelled", _FIGURE_LABEL_BYTES * len(names)
+            f"the {len(given)} clonotypes labelled",
+            _FIGURE_LABEL_BYTES * len(given),
+            remedy=fewer,
         )
-        # The IDs read as Python strings, and pandas' hash table of them,
-        # which finds those given.
+        # The labels read as Python strings, and pandas' hash table of them,
+        # which finds those given: the IDs, or for clonotypes across receptor
+        # types the summaries' labels of their clonotypes within types.
         entry = ledger.charged
-        stored_ids = read_whole_text(
-            ledger, group, "clonotype_ids", item=f"the IDs of {n_clonotypes} clonotypes"
-        )
+        if across:
+            source = self._read_clone_input(clones, ledger, with_ids=True)
+            assert source.clone_ids is not None
+            stored = source.clone_ids
+            what = f"the labels of {len(stored)} clonotypes within receptor types"
+            del source
+        else:
+            n_clonotypes = int(
+                as_zarr_array(group["clonotype_ids"], name="clonotype_ids").shape[0]
+            )
+            what = f"the IDs of {n_clonotypes} clonotypes"
+            stored = read_whole_text(ledger, group, "clonotype_ids", item=what)
         ledger.peak(
-            f"the index of the IDs of {n_clonotypes} clonotypes",
-            hash_table_bytes(n_clonotypes) + 8 * len(names),
+            f"the index of {what}", hash_table_bytes(len(stored)) + 8 * len(given)
         )
         codes = np.asarray(
-            pd.Index(stored_ids, dtype=object).get_indexer(names), dtype=np.int64
+            pd.Index(stored, dtype=object).get_indexer(given), dtype=np.int64
         )
-        id_bytes = ledger.charged - entry
-        del stored_ids
-        ledger.release(id_bytes)
+        read_bytes = ledger.charged - entry
+        del stored
+        ledger.release(read_bytes)
         if (codes < 0).any():
-            unknown = names[codes < 0].tolist()
+            unknown = given[codes < 0].tolist()
             raise ValueError(f"No clonotype is labelled {unknown[:5]}")
-        junctions = self._representative_junctions(clones, codes, ledger=ledger)
+        junctions = self._representative_junctions(
+            clones, codes, ledger=ledger, within_types=across
+        )
         unnamed = np.asarray([junction is None for junction in junctions.tolist()])
         if unnamed.any():
             raise ValueError(
                 f"The representative cells of the clonotypes "
-                f"{names[unnamed].tolist()[:5]} have no junction amino-acid "
+                f"{given[unnamed].tolist()[:5]} have no junction amino-acid "
                 "sequence in the VDJ_1 or VJ_1 chain that names them"
             )
         # A junction that two of the clonotypes share names each with its
-        # number too.
+        # number too; a clonotype within a type then adds the text that its
+        # label adds to its clonotype's, its type in parentheses.
         distinct = np.unique(codes, return_index=True)[1]
         counted = Counter(junctions[distinct].tolist())
         return np.asarray(
             [
-                f"{junction} {code + 1}" if counted[junction] > 1 else junction
-                for junction, code in zip(
-                    junctions.tolist(), codes.tolist(), strict=True
+                (f"{junction} {code + 1}" if counted[junction] > 1 else junction)
+                + (name[name.index(" (") :] if across and " (" in name else "")
+                for junction, code, name in zip(
+                    junctions.tolist(), codes.tolist(), given.tolist(), strict=True
                 )
             ],
             dtype=object,
@@ -1308,6 +1525,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         source: _CloneInput,
         cell_selection: ArtifactRef | None,
         ledger: MemoryLedger,
+        *,
+        with_kept: bool = True,
     ) -> tuple[ArtifactRef, np.ndarray, tuple[tuple[str, np.ndarray], ...]]:
         """The cells that a saved summary labels, with their clones.
 
@@ -1315,18 +1534,20 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         without one. A selected cell that the clones do not hold has no
         clone. Matching other cells reads both selections and an index of the
         clones' cells within ``ledger``, which keeps each measured cell's
-        clone and kept labels charged.
+        clone and, with ``with_kept``, its kept labels charged.
 
         Returns:
             The cells' selection, each cell's clone code, -1 for none, and
-            the labels that the clones keep apart, aligned to the cells.
+            the labels that the clones keep apart, aligned to the cells, or
+            none without ``with_kept``.
 
         Raises:
             MemoryBudgetError: If matching the clones' cells to other cells
                 does not fit the ledger's budget.
         """
+        kept_apart = source.kept_apart if with_kept else ()
         if cell_selection is None or cell_selection == source.cell_selection:
-            return source.cell_selection, source.codes, source.kept_apart
+            return source.cell_selection, source.codes, kept_apart
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef or None")
         if cell_selection.kind != "cell_selection":
@@ -1353,7 +1574,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         # index; and each measured cell's clone and labels.
         ledger.hold(
             "each measured cell's clone and the labels its clone keeps apart",
-            (9 + 8 * len(source.kept_apart)) * n_measured,
+            (9 + 8 * len(kept_apart)) * n_measured,
         )
         ledger.peak(
             "matching the clones' cells to the measured cells",
@@ -1367,7 +1588,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         codes = np.full(n_measured, -1, dtype=np.int64)
         codes[found] = source.codes[at[found]]
         kept = []
-        for name, labels in source.kept_apart:
+        for name, labels in kept_apart:
             aligned = np.full(n_measured, None, dtype=object)
             aligned[found] = np.asarray(labels, dtype=object)[at[found]]
             kept.append((name, aligned))
@@ -2231,7 +2452,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         groups are those of
         :meth:`~cytearc.datastore.namespaces.ClonesAccessor.overlap`, and a
         clonotype is followed through the groups of its own receptor type.
-        Nothing is saved.
+        Clonotypes that ``within_receptor_type=False`` defines across receptor
+        types are followed, as every summary measures them, by each cell's
+        clonotype within its type, labelled such as ``clonotype_1 (TCR 2)``;
+        a clonotype's own label in ``labels`` follows each of its clonotypes
+        within types. Nothing is saved.
 
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
@@ -2287,6 +2512,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise ValueError("No cell has both a clone and a group")
         assert source.clone_ids is not None
         identifiers = source.clone_ids
+        # Choosing each group's largest clones sorts the counts and ranks them,
+        # 33 bytes a count as traced on 37,000 to 400,000 counts.
+        ledger.peak(
+            f"choosing the clones to follow among {len(pair_cells)} counts",
+            _BYTES_PER_CLONE_COUNT * len(pair_cells) + NUMPY_STEP_BYTES,
+        )
         if labels is None:
             chosen = top_clones(
                 pair_groups, pair_codes, pair_cells, len(keys), int(top_n)
@@ -2296,19 +2527,47 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             unknown = [
                 label for label, at in zip(labels, positions, strict=True) if at < 0
             ]
+            found = positions[positions >= 0].astype(np.int64)
+            if unknown and source.clonotypes is not None:
+                # A clonotype's own label, as load_clones gives it, names each
+                # of its clonotypes within receptor types.
+                found, unknown = self._clonotypes_named(
+                    clones, ledger, source.clonotypes, found, unknown
+                )
             if unknown:
                 raise ValueError(f"No clone is labelled {unknown[:5]}")
-            chosen = sorted_unique(positions.astype(np.int64))
+            chosen = sorted_unique(found)
         strata = _kept_apart_strata(source, keys)
         if strata is None:
             strata = np.zeros(len(keys), dtype=np.int64)
+        # Finding the counts of the clones followed places each count among
+        # them, 26 bytes a count as traced.
+        ledger.peak(
+            f"finding the counts of {len(chosen)} clones followed",
+            _BYTES_PER_CLONE_COUNT * len(pair_cells) + NUMPY_STEP_BYTES,
+        )
         reach = tracking_reach(
             pair_groups,
             pair_codes,
             chosen,
             strata,
-            _fallback_strata(source, keys, strata, chosen),
+            np.full(len(chosen), -1, dtype=np.int64),
         )
+        lone = np.flatnonzero(~reach.any(axis=1))
+        if len(lone):
+            # A clone named without a counted cell is followed through the
+            # stratum of its first cell's labels, which sorting every cell's
+            # clone finds where the clones keep labels apart.
+            ledger.peak(
+                "finding the first cell of each clone named without a counted cell",
+                (_FIRST_CELL_BYTES * len(source.codes) if source.kept_apart else 0)
+                + NUMPY_STEP_BYTES,
+            )
+            fallback = _fallback_strata(source, keys, strata, chosen[lone])
+            found = fallback >= 0
+            reach[lone[found], fallback[found]] = True
+            del fallback, found
+        del lone
         n_rows = int((reach * np.bincount(strata, minlength=reach.shape[1])).sum())
         # The rows, each with its clone, group, cells and fraction, and beside
         # the counts held, their entries in the matrices that follow the
@@ -2372,9 +2631,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         without a clone or a label are left out. Clonotypes are grouped within
         each receptor type, which joins the groups' key columns as
         ``receptor_type``: only groups of one receptor type are coupled, the
-        null shuffles labels within each receptor type, and a clonotype that
-        spans receptor types, as ``within_receptor_type=False`` allows,
-        counts as one clone in each. Nothing is saved.
+        null shuffles labels within each receptor type, and clonotypes across
+        receptor types, as ``within_receptor_type=False`` defines them, are
+        measured by each cell's clonotype within its type. Nothing is saved.
 
         ``method`` names how a pair's coupling is measured from each clone's
         cells in each group, as CoSpar's ``fate_coupling`` measures it:
@@ -2474,8 +2733,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "which the clones keep apart, so no pair of groups can be "
                 "compared"
             )
-        if strata is not None:
-            pair_codes = _clones_by_stratum(pair_codes, strata[pair_groups])
         # Beside the coupling and the counts held: their entries in the
         # matrices that compare the groups, and each group's rows.
         held = _BYTES_PER_CLONE_COUNT * len(
@@ -2586,8 +2843,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         lacks, so it has no fate. The fates of clonotypes therefore name a
         receptor type each, such as ``"Neutrophil, TCR"``, and each clonotype
         is tested among the late cells of its receptor type that have a
-        clonotype. A clonotype whose early and late cells span receptor types,
-        as ``within_receptor_type=False`` allows, is refused.
+        clonotype. Clonotypes that ``within_receptor_type=False`` defines
+        across receptor types are measured, as every summary measures them,
+        by each cell's clonotype within its type, which they save, so each is
+        tested as the clonotypes within types are, under a label such as
+        ``clonotype_1 (TCR 2)``.
 
         The artifact's canonical ``values`` hold each early cell's dominant
         fate, empty for none, so ``ds.select_cells(bias, include=["Neutrophil"])``
@@ -2622,9 +2882,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ValueError: If ``clones`` is not a clone artifact, ``early`` or
                 ``late`` is not a cell selection or selects no cell, a cell is
                 both early and late, the clones give no late cell a clone, no
-                late cell with a clone has a fate,
-                a clone's early and late cells carry two labels that the clones
-                keep apart, fewer than two fates hold a late cell, a column of
+                late cell with a clone has a fate, fewer than two fates hold a
+                late cell, a column of
                 the fates is missing or named twice, two key columns share a
                 name, or two fates get one name.
             KeyError: If the store holds no such ``clones`` artifact, or not the
@@ -2680,15 +2939,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         _late, late_codes, late_kept = self._measured_clone_cells(source, late, ledger)
         # The labels that the clones keep apart belong to the clones, so a late
         # cell without a clone has none, and no fate, whatever label its
-        # source gives it.
-        without_clone = late_codes < 0
-        cleared = []
-        for name, labels in late_kept:
-            kept_labels = np.array(labels, dtype=object)
-            kept_labels[without_clone] = None
-            cleared.append((name, kept_labels))
-        late_kept = tuple(cleared)
-        del cleared
+        # source gives it. Each column's cleared copy is made beside the
+        # labels, which go once the copies replace them, with a flag for each
+        # late cell.
+        ledger.peak(
+            "clearing the labels of the late cells without a clone",
+            _cleared_label_bytes(len(late_codes), len(late_kept)),
+        )
+        late_kept = _cleared_labels(late_codes, late_kept)
         # The clones' codes and their late cells' are held while the late
         # cells are grouped into fates; a late selection of the clones' own
         # cells shares their codes.
@@ -2824,24 +3082,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         del grouped, late_codes, late_kept, counted
         n_tested = len(sorted_unique(pair_codes))
         n_late_counted = int(pair_cells.sum())
-        _early, early_codes, early_kept = self._measured_clone_cells(
-            source, early, ledger
+        # The early cells' clones alone: their labels kept apart are their
+        # clones'.
+        _early, early_codes, _none = self._measured_clone_cells(
+            source, early, ledger, with_kept=False
         )
-        if early_kept:
-            # Each pair's clone and label in a table, its distinct rows and
-            # each early cell's place among them, as traced on 1,000 to
-            # 400,000 pairs: 41 bytes a pair beside pandas' hash table.
-            ledger.peak(
-                "checking the labels that the clones keep apart",
-                hash_table_bytes(len(pair_codes))
-                + _KEPT_LABEL_PAIR_BYTES * len(pair_codes)
-                + _KEPT_LABEL_EARLY_BYTES * len(early_codes)
-                + NUMPY_STEP_BYTES,
-            )
-        _refuse_clones_across_kept_labels(
-            keys, pair_fates, pair_codes, early_codes, early_kept
-        )
-        del early_kept
         width = max(len(str(name)) for name in names.tolist())
         ledger.peak(
             f"measuring the fate bias of {n_early} early cells and {n_tested} "
@@ -3051,30 +3296,6 @@ def _kept_apart(source: _CloneInput) -> list[str]:
     return [name for name, _labels in source.kept_apart]
 
 
-def _clones_by_stratum(codes: np.ndarray, code_strata: np.ndarray) -> np.ndarray:
-    """Code each clone once in each stratum that its counted cells reach.
-
-    Every clone source promises that a clone's cells share the labels that
-    it keeps apart, but clonotypes that ``within_receptor_type=False``
-    defines can hold cells of several receptor types. Such a clone counts as
-    one clone in each stratum, as it counts its cells of each receptor type
-    in that type's groups in the other summaries. The codes come back
-    unchanged when no clone spans two strata, and otherwise in the order of
-    the clones and then of their strata.
-
-    Args:
-        codes: The clone code of each count of a clone in a group.
-        code_strata: The stratum of each count's group.
-    """
-    n_strata = int(code_strata.max()) + 1 if len(code_strata) else 1
-    units, recoded = np.unique(
-        codes.astype(np.int64) * n_strata + code_strata, return_inverse=True
-    )
-    if len(units) == len(sorted_unique(codes)):
-        return codes
-    return recoded.reshape(-1).astype(np.int64)
-
-
 def _fate_bias_write_bytes(
     n_early: int, n_tested: int, n_fates: int, width: int
 ) -> int:
@@ -3100,64 +3321,6 @@ def _fate_bias_write_bytes(
     )
 
 
-def _refuse_clones_across_kept_labels(
-    fates: pd.DataFrame,
-    pair_fates: np.ndarray,
-    pair_codes: np.ndarray,
-    early_codes: np.ndarray,
-    early_kept: tuple[tuple[str, np.ndarray], ...],
-) -> None:
-    """Refuse clones whose early and late cells carry two labels kept apart.
-
-    Fate bias tests a clone in the fates of the labels that its cells share
-    in each column that the clones keep apart. Clonotypes that
-    ``within_receptor_type=False`` defines can hold cells of several receptor
-    types, and such a clonotype has no one receptor type in which to test it.
-
-    Args:
-        fates: One row per fate, with its labels in the key columns.
-        pair_fates: The fate of each count of a clone's late cells in a fate.
-        pair_codes: The clone code of each count.
-        early_codes: Each early cell's clone code, -1 for none.
-        early_kept: Each column that the clones keep apart, with each early
-            cell's label.
-
-    Raises:
-        ValueError: If a clone's late cells lie in fates of two labels of
-            such a column, or an early cell's label differs from that of its
-            clone's late cells.
-    """
-    for column, early_labels in early_kept:
-        # An explicit object dtype keeps the labels as the Python strings
-        # charged, whether or not pandas stores text with pyarrow.
-        late = pd.DataFrame(
-            {
-                "clone": pair_codes,
-                "label": pd.Series(
-                    fates[column].to_numpy(dtype=object)[pair_fates], dtype=object
-                ),
-            }
-        ).drop_duplicates()
-        across = set(late.loc[late["clone"].duplicated(keep=False), "clone"].tolist())
-        late = late.drop_duplicates("clone")
-        at = pd.Index(late["clone"]).get_indexer(early_codes)
-        reached = at >= 0
-        differs = (
-            np.asarray(early_labels, dtype=object)[reached]
-            != (late["label"].to_numpy(dtype=object)[at[reached]])
-        )
-        across |= set(early_codes[reached][differs].tolist())
-        if across:
-            raise ValueError(
-                f"{len(across)} clones hold early or late cells of two labels in "
-                f"{quoted_value(column)}, which the clones keep apart, as clonotypes that "
-                "within_receptor_type=False defines can span receptor types; "
-                "fate bias tests each clone in the fates of one label. Define "
-                "the clonotypes with within_receptor_type=True, or pass early "
-                "and late cells of one receptor type."
-            )
-
-
 def _kept_apart_strata(source: _CloneInput, keys: pd.DataFrame) -> np.ndarray | None:
     """Each group's stratum: its labels in the key columns that the clones keep apart.
 
@@ -3173,6 +3336,31 @@ def _kept_apart_strata(source: _CloneInput, keys: pd.DataFrame) -> np.ndarray | 
     if not columns:
         return None
     return np.asarray(keys.groupby(columns, sort=True).ngroup(), dtype=np.int64)
+
+
+def _cleared_label_bytes(n_cells: int, n_columns: int) -> int:
+    """What :func:`_cleared_labels` holds for ``n_cells`` cells of ``n_columns`` columns kept apart."""
+    return (
+        _CLEARING_BYTES_PER_CELL + _CLEARED_BYTES_PER_COLUMN * n_columns
+    ) * n_cells + NUMPY_STEP_BYTES
+
+
+def _cleared_labels(
+    codes: np.ndarray, kept: tuple[tuple[str, np.ndarray], ...]
+) -> tuple[tuple[str, np.ndarray], ...]:
+    """The labels kept apart of cells, cleared where a cell has no clone.
+
+    The labels that the clones keep apart belong to the clones, so a cell
+    without a clone has none. Each column's labels are copied, so labels that
+    the clones' own input holds stay as they are.
+    """
+    without_clone = codes < 0
+    cleared = []
+    for name, labels in kept:
+        copied = np.array(labels, dtype=object)
+        copied[without_clone] = None
+        cleared.append((name, copied))
+    return tuple(cleared)
 
 
 def _fallback_strata(

@@ -2,8 +2,9 @@
 
 Calling's steps refuse a budget below what they would build before they
 build it, the clones of a metadata column read in blocks at a small budget
-are the clones of one read, and a column's stamp follows its labels and its
-missing mask.
+are the clones of one read, a column's stamp follows its labels and its
+missing mask, and the clonotypes within types of clonotypes across receptor
+types are named, cleared and followed as fate bias and tracking measure them.
 """
 
 from typing import Any
@@ -15,6 +16,7 @@ import pytest
 from cytearc.clones import calling
 from cytearc.clones.assignments import ranked_clone_labels
 from cytearc.clones.calling import cell_sets, identical_sets, set_clones
+from cytearc.datastore._operations import clones as clone_operations
 from cytearc.metadata.rows import metadata_column_stamp
 from cytearc.storage.arrays import MISSING_MASK_PREFIX
 from cytearc.utils.memory_budget import (
@@ -72,6 +74,107 @@ def test_removing_doublets_from_a_chain_of_nodes_keeps_its_edges() -> None:
 def test_ranked_labels_name_each_clone_by_its_rank(n_clones) -> None:
     labels = ranked_clone_labels(n_clones)
     assert labels.tolist() == [f"clone_{rank}" for rank in range(1, n_clones + 1)]
+
+
+# Clonotypes across receptor types, as fate bias and tracking measure them.
+
+
+def _receptor_type_input(n_cells: int) -> Any:
+    """Clonotypes of three cells each, of four receptor types in turn, and their groups' strata."""
+    import pandas as pd
+
+    from cytearc.storage.refs import ArtifactRef
+
+    labels = np.asarray(["BCR", "TCR", "ambiguous", "multichain"], dtype=object)
+    unsaved = ArtifactRef(scope="datastore", kind="clonotypes", artifact_id="f" * 64)
+    codes = np.where(np.arange(n_cells) % 9 == 0, -1, np.arange(n_cells) // 3)
+    source = clone_operations._CloneInput(
+        ref=unsaved,
+        cell_selection=unsaved,
+        codes=codes,
+        clone_ids=None,
+        kept_apart=(("receptor_type", labels[np.arange(n_cells) % 4]),),
+        nbytes=0,
+    )
+    keys = pd.DataFrame(
+        {"receptor_type": labels.tolist()}, index=[f"g{i}" for i in range(4)]
+    )
+    return source, keys, np.arange(4, dtype=np.int64)
+
+
+def _parts_of_clonotypes(n_cells: int, per_part: int, spanning: float) -> tuple:
+    """Cells of clonotypes within types, a share of which pair up into clonotypes of two types."""
+    rng = np.random.default_rng(per_part)
+    within = rng.integers(0, n_cells // per_part, n_cells)
+    within[::50] = -1
+    present = np.unique(within[within >= 0])
+    within = np.where(within >= 0, np.searchsorted(present, within), -1)
+    n_parts = len(present)
+    n_pairs = int(spanning * n_parts / 2)
+    part_clonotype = np.concatenate(
+        [np.repeat(np.arange(n_pairs), 2), np.arange(n_pairs, n_parts - n_pairs)]
+    )
+    part_type = np.concatenate(
+        [np.tile([0, 1], n_pairs), np.ones(n_parts - 2 * n_pairs, dtype=np.int64)]
+    )
+    shuffled = rng.permutation(n_parts)
+    part_clonotype, part_type = part_clonotype[shuffled], part_type[shuffled]
+    at = np.maximum(within, 0)
+    codes = np.where(within >= 0, part_clonotype[at], -1)
+    types = np.where(within >= 0, part_type[at], 2)
+    return codes, within, types
+
+
+@pytest.mark.parametrize(
+    ("n_cells", "per_part", "spanning"),
+    [(40_000, 3, 0.1), (400_000, 1, 0.0), (400_000, 10, 0.5), (200_000, 1, 1.0)],
+    ids=["a tenth spanning", "none spanning", "half spanning", "all spanning"],
+)
+def test_naming_clonotypes_within_types_adds_a_text_where_a_clonotype_holds_several(
+    n_cells, per_part, spanning
+) -> None:
+    from cytearc.repertoire.clonotypes import within_type_parts
+
+    codes, within, types = _parts_of_clonotypes(n_cells, per_part, spanning)
+    clonotypes, added = within_type_parts(
+        codes,
+        within,
+        types,
+        ["BCR", "TCR", "no IR"],
+        ledger=MemoryLedger(1 << 40, "Naming clonotypes within types"),
+    )
+    # Each clonotype within a type takes its cells' clonotype, and adds a
+    # text where its clonotype holds another.
+    assert (clonotypes[within[within >= 0]] == codes[codes >= 0]).all()
+    shared = np.bincount(clonotypes)[clonotypes] > 1
+    assert [bool(text) for text in added.tolist()] == shared.tolist()
+
+
+@pytest.mark.parametrize("n_cells", [40_000, 400_000])
+def test_clearing_the_labels_of_cells_without_a_clone_keeps_the_labels_given(
+    n_cells,
+) -> None:
+    source, _keys, _strata = _receptor_type_input(n_cells)
+    labels = source.kept_apart[0][1]
+    cleared = clone_operations._cleared_labels(source.codes, source.kept_apart)
+    # A cell without a clone loses its label, and the labels given stay.
+    expected = np.where(source.codes < 0, None, labels)
+    assert cleared[0][1].tolist() == expected.tolist()
+    assert labels[0] == "BCR" and source.codes[0] == -1
+
+
+@pytest.mark.parametrize("n_cells", [40_000, 400_000])
+def test_a_named_clone_is_followed_through_the_stratum_of_its_first_cell(
+    n_cells,
+) -> None:
+    source, keys, strata = _receptor_type_input(n_cells)
+    # Clone 5 starts at cell 15, of BCR, clone 77 at cell 231, of TCR, and the
+    # last clone at a cell of its type.
+    chosen = np.asarray([5, 77, n_cells // 3 - 2], dtype=np.int64)
+    first = 3 * chosen
+    first[first % 9 == 0] += 1
+    found = clone_operations._fallback_strata(source, keys, strata, chosen)
+    assert found.tolist() == (first % 4).tolist()
 
 
 # Clones of a cell metadata column.

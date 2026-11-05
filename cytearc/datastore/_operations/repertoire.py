@@ -57,6 +57,7 @@ from ...repertoire.clonotypes import (
     RECEPTOR_ARMS,
     REPRESENTATIVE_FIELDS,
     SEQUENCES,
+    ClonotypeAssignment,
     Clonotypes,
     assign_clonotype_clusters,
     assign_clonotypes,
@@ -108,7 +109,14 @@ from .cell_barcodes import (
 )
 from .cell_groups import cell_groups, group_columns, within_groups
 from .clone_artifacts import clone_diagnostics
-from .clone_steps import artifact_cell_ids, files_text, plan_artifact_cells
+from .clone_steps import (
+    CODES_WITHIN_TYPE,
+    REPRESENTATIVES_WITHIN_TYPE,
+    artifact_cell_ids,
+    files_text,
+    measured_within_types,
+    plan_artifact_cells,
+)
 from .record_tables import (
     record_arrays,
     record_chunk_lengths,
@@ -409,12 +417,18 @@ def _receptor_write_bytes(n_cells: int) -> int:
 
 
 def _clonotype_write_bytes(
-    n_cells: int, columns: tuple[str, ...], within_labels: list[dict[str, str]]
+    n_cells: int,
+    columns: tuple[str, ...],
+    within_labels: list[dict[str, str]],
+    *,
+    within_types: bool = False,
 ) -> int:
     """What writing the arrays of clonotypes holds, as many as there are cells at most.
 
     Each label is counted at the width of the label of the last of as many
     clonotypes as cells, and each ``within`` label at the widest of them.
+    ``within_types`` counts each cell's clonotype within its receptor type,
+    which clonotypes across receptor types write.
     """
     width = len(f"clonotype_{max(1, n_cells)}")
     arrays: dict[str, tuple[tuple[int, ...], Any]] = {
@@ -427,6 +441,9 @@ def _clonotype_write_bytes(
         "n_configurations": ((n_cells,), np.int64),
         "clonotype_within": ((n_cells,), np.int64),
     }
+    if within_types:
+        arrays[CODES_WITHIN_TYPE] = ((n_cells,), np.int32)
+        arrays[REPRESENTATIVES_WITHIN_TYPE] = ((n_cells,), np.int64)
     if columns:
         widest = max(
             (len(key[column]) for key in within_labels for column in columns), default=1
@@ -1197,7 +1214,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         share a clonotype unless ``within_receptor_type`` is False, and cells
         with different labels in the ``within`` cell metadata columns, such as
         the donor, never do. A cell without a receptor, or without a compared
-        sequence among the chains that take part, has no clonotype.
+        sequence among the chains that take part, has no clonotype. Defined
+        across receptor types, the artifact also saves each cell's clonotype
+        within its type, as ``within_receptor_type=True`` defines it, in
+        ``codes_within_type``, which every clone summary measures, so the
+        summaries of clonotypes across types equal those of clonotypes within
+        types, under labels such as ``clonotype_1 (TCR 2)``, and the
+        representative of each, as ``within_receptor_type=True`` chooses it,
+        in ``representatives_within_type``, whose junction names it in
+        figures, such as ``CASSB (TCR 2)``.
 
         ``metric`` links chains whose junctions are similar instead, as
         scirpy's ``define_clonotype_clusters`` does: ``"hamming"`` (at most
@@ -1265,7 +1290,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             MemoryError: If reading the receptor types, grouping the cells
                 by their ``within`` labels, or the definition, 1,000 bytes per
                 cell and 12 per contig and with a distance metric the 512 MiB
-                of the search, does not fit the memory budget; or, with a
+                of the search, does not fit the memory budget, across
+                receptor types beside the clonotypes across types while each
+                cell's clonotype within its type is defined; or, with a
                 distance metric, the junctions that the cells' chains hold,
                 decoded for the search, or the pairs of chains within
                 ``max_distance`` and the links between the chains or arms that
@@ -1338,20 +1365,19 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             ledger, group, "values", item="the cells' receptor types"
         )
         # Whether each cell has a receptor, and its type's code, as hashed and
-        # sorted from a Python string for each cell.
+        # sorted from a Python string for each cell. Clonotypes across
+        # receptor types code the types too, to link each type's cells apart
+        # as well.
         ledger.hold("whether each cell has a receptor", n_cells)
         with_receptor = receptor_type != NO_RECEPTOR
         ledger.hold("each cell's receptor type code", 8 * n_cells)
-        if within_receptor_type:
-            ledger.peak(
-                "coding the cells' receptor types",
-                _coding_bytes(
-                    n_cells, stored_types.dtype.itemsize // 4, len(RECEPTOR_TYPES)
-                ),
-            )
-            _types, type_codes = _sorted_codes(receptor_type)
-        else:
-            type_codes = np.zeros(n_cells, dtype=np.int64)
+        ledger.peak(
+            "coding the cells' receptor types",
+            _coding_bytes(
+                n_cells, stored_types.dtype.itemsize // 4, len(RECEPTOR_TYPES)
+            ),
+        )
+        _types, type_codes = _sorted_codes(receptor_type)
         types_bytes = receptor_type.nbytes
         del receptor_type
         ledger.release(types_bytes)
@@ -1359,10 +1385,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             cell_selection, columns, with_receptor, ledger
         )
         # Each cell's group among the receptor types and the within groups,
-        # beside its within group, which the grouping holds.
-        ledger.hold("each cell's group", 8 * n_cells)
-        groups = np.where(
+        # beside its within group, which the grouping holds; across receptor
+        # types, also its group among the within groups alone.
+        ledger.hold("each cell's group", (8 if within_receptor_type else 16) * n_cells)
+        typed_groups = np.where(
             with_receptor, type_codes * max(1, len(within_labels)) + within_codes, -1
+        )
+        groups = (
+            typed_groups
+            if within_receptor_type
+            else np.where(with_receptor, within_codes, -1)
         )
         arguments = ClonotypeArguments(
             receptors=receptors,
@@ -1392,6 +1424,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 "values": ((n_cells,), None),
                 "codes": ((n_cells,), "i"),
                 "clone_size": ((n_cells,), "i"),
+                # Clonotypes across receptor types save each cell's clonotype
+                # within its type, as within_receptor_type=True defines it,
+                # which every clone summary measures.
+                **(
+                    {}
+                    if within_receptor_type
+                    else {CODES_WITHIN_TYPE: ((n_cells,), "i")}
+                ),
             },
             invalidate_cache=invalidate_cache,
             required_attributes=("n_clonotypes",),
@@ -1401,7 +1441,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         self._require_writable(arguments.operation)
         ledger.hold(
             "writing the clonotypes",
-            _clonotype_write_bytes(n_cells, columns, within_labels),
+            _clonotype_write_bytes(
+                n_cells, columns, within_labels, within_types=not within_receptor_type
+            ),
         )
         ledger.hold(
             "the chains and clonotypes of each cell",
@@ -1417,16 +1459,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         compared = _slot_codes(ledger, group, field_name, slots)
         v_genes = _slot_codes(ledger, group, "v_call", slots) if same_v_gene else None
         j_genes = _slot_codes(ledger, group, "j_call", slots) if same_j_gene else None
-        if metric == "identity":
-            assignment = assign_clonotypes(
-                compared,
-                groups=groups,
-                v_genes=v_genes,
-                j_genes=j_genes,
-                receptor_arms=receptor_arms,
-                dual_ir=dual_ir,
-            )
-        else:
+        if metric != "identity":
             # Only the junctions that the slots compare are decoded, so the
             # contigs that no slot holds, such as non-productive ones, cost
             # nothing, and the slots are coded by their position among them.
@@ -1436,10 +1469,21 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             compared_codes, local = np.unique(compared[present], return_inverse=True)
             compared[present] = local.reshape(-1)
             texts = _decoded_values(ledger, group, field_name, compared_codes)
-            assignment = assign_clonotype_clusters(
+
+        def assigned(grouping: np.ndarray) -> ClonotypeAssignment:
+            if metric == "identity":
+                return assign_clonotypes(
+                    compared,
+                    groups=grouping,
+                    v_genes=v_genes,
+                    j_genes=j_genes,
+                    receptor_arms=receptor_arms,
+                    dual_ir=dual_ir,
+                )
+            return assign_clonotype_clusters(
                 compared,
                 texts,
-                groups=groups,
+                groups=grouping,
                 metric=metric,
                 max_distance=limit,
                 v_genes=v_genes,
@@ -1448,6 +1492,36 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 dual_ir=dual_ir,
                 ledger=ledger,
             )
+
+        assignment = assigned(groups)
+        within_type = None
+        within_representatives = None
+        if not within_receptor_type:
+            # The clonotypes across receptor types are held while each type's
+            # cells are linked apart, as within_receptor_type=True links them,
+            # so every summary can measure each cell's clonotype within its
+            # type, whose code is kept to be written, and its representative,
+            # chosen as within_receptor_type=True chooses it, which names it in
+            # figures.
+            ledger.hold(
+                "the clonotypes across receptor types",
+                assignment.codes.nbytes
+                + assignment.sizes.nbytes
+                + assignment.configurations.nbytes
+                + assignment.configuration_clonotypes.nbytes,
+            )
+            within_assignment = assigned(typed_groups)
+            within_representatives, _configurations = representative_cells(
+                within_assignment
+            )
+            within_type = within_assignment.codes
+            del within_assignment, _configurations
+            ledger.hold(
+                "each cell's clonotype within its receptor type and each one's "
+                "representative",
+                within_type.nbytes + within_representatives.nbytes,
+            )
+        del typed_groups
         labels = clonotype_labels(assignment.n_clonotypes)
         has = assignment.codes >= 0
         values = np.full(n_cells, "", dtype=object)
@@ -1470,6 +1544,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             "n_configurations": n_configurations,
             "clonotype_within": clonotype_within,
         }
+        if within_type is not None and within_representatives is not None:
+            arrays[CODES_WITHIN_TYPE] = within_type.astype(np.int32)
+            arrays[REPRESENTATIVES_WITHIN_TYPE] = within_representatives
         if columns:
             # Each within group's label in each column, row by row, as an
             # array, so opening the artifact reads none of them.
@@ -1511,14 +1588,22 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         return artifact_group(self.zw, clonotypes)
 
     def _representative_junctions(
-        self, clonotypes: ArtifactRef, codes: np.ndarray, *, ledger: MemoryLedger
+        self,
+        clonotypes: ArtifactRef,
+        codes: np.ndarray,
+        *,
+        ledger: MemoryLedger,
+        within_types: bool = False,
     ) -> np.ndarray:
         """The junction amino acids that name some clonotypes in figures.
 
         A clonotype is named by its representative cell's ``VDJ_1`` chain, or
         its ``VJ_1`` chain without one; clonotypes defined by
         ``receptor_arms="VJ"`` by the ``VJ_1`` chain first, which their
-        cells share. Of the receptors, only the representatives' slots and
+        cells share. With ``within_types``, the codes are of the clonotypes
+        within receptor types that clonotypes across types save, each named
+        by its own representative, as ``within_receptor_type=True`` names it.
+        Of the receptors, only the representatives' slots and
         junction codes, the bounds of the junctions they name, a chunk at a
         time or whole where that holds less, and those junctions' bytes are
         read, each array a physical chunk at a time. Each read, and the
@@ -1529,8 +1614,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Args:
             clonotypes: A complete ``clonotypes`` artifact.
             codes: The positions of some of its clonotypes, such as 0 for
-                ``clonotype_1``.
+                ``clonotype_1``, or with ``within_types`` of its clonotypes
+                within receptor types.
             ledger: The caller's memory ledger.
+            within_types: Name clonotypes within receptor types.
 
         Returns:
             Each clonotype's junction, None where the chain that names it
@@ -1546,9 +1633,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if (status.parameters or {}).get("receptor_arms") != "VJ":
             naming = ("VDJ_1", "VJ_1")
         wanted, back = np.unique(np.asarray(codes, dtype=np.int64), return_inverse=True)
+        name = REPRESENTATIVES_WITHIN_TYPE if within_types else "representatives"
         cells = read_rows(
             ledger,
-            as_zarr_array(group["representatives"], name="representatives"),
+            as_zarr_array(group[name], name=name),
             wanted,
             item="their representatives",
         ).astype(np.int64)
@@ -1740,7 +1828,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         """Each counted chain of the chosen slots, with its fields' stored codes.
 
         A ``clonotypes`` source counts only cells with a clonotype, and with
-        ``count="clonotypes"`` each clonotype once per group and value. The
+        ``count="clonotypes"`` each clonotype once per group and value;
+        clonotypes defined across receptor types count by each cell's
+        clonotype within its type. The
         cells are grouped through :func:`cell_groups`. Reading the slots and
         the clonotypes, grouping the cells and holding the chains are each
         charged to a memory ledger beside what the earlier steps hold, and so
@@ -1768,9 +1858,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             raise ValueError("count must be 'cells' or 'clonotypes'")
         if not isinstance(source, ArtifactRef):
             raise TypeError("source must be an ArtifactRef")
+        codes_name = "codes"
         if source.kind == ClonotypeArguments.artifact_kind:
-            clonotype_group: zarr.Group | None = self._clonotype_group(source)
-            receptors = inspect_artifact(self.zw, source).input_ref("receptors")
+            opened = self._clonotype_group(source)
+            clonotype_group: zarr.Group | None = opened
+            status = inspect_artifact(self.zw, source)
+            receptors = status.input_ref("receptors")
+            # Clonotypes across receptor types count each cell's clonotype
+            # within its type, as every clone summary measures them.
+            if measured_within_types(source, status, opened):
+                codes_name = CODES_WITHIN_TYPE
         elif source.kind == ImmuneReceptorImportArguments.artifact_kind:
             if count == "clonotypes":
                 raise ValueError("count='clonotypes' needs a clonotypes artifact")
@@ -1824,7 +1921,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             # The clonotypes' codes, with their int64 copy and the mask of the
             # cells with a clonotype.
             stored_codes = read_whole(
-                ledger, clonotype_group, "codes", item="each cell's clonotype"
+                ledger, clonotype_group, codes_name, item="each cell's clonotype"
             )
             ledger.peak("each cell's clonotype as int64", 9 * n_cells)
             codes = stored_codes.astype(np.int64)
@@ -1980,7 +2077,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         chain count, or a ``clonotypes`` artifact, whose cells with a
         clonotype count; ``count="clonotypes"`` then counts each clonotype
         once per group and gene instead of each cell, which keeps expanded
-        clones from dominating the shares. The groups are the combinations of
+        clones from dominating the shares, and clonotypes defined across
+        receptor types by each cell's clonotype within its type, as every
+        clone summary measures them. The groups are the combinations of
         the labels of ``group_by`` columns and of a ``groups`` label artifact,
         among the cells of ``cell_selection``; without either, every cell is
         one group. Nothing is saved.

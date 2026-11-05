@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..clones.assignments import WITHIN_TYPE_CLONE
 from ..clones.diversity import INDEX_COLUMNS, ClonalDiversity, Rarefaction
 from ..clones.expansion import DEFAULT_RANK_SPLITS, rank_window_labels, rank_windows
 from ..clones.fate import CloneCoupling, dominant_fates
@@ -178,7 +179,10 @@ def clone_abundance(
     group, with one legend of the groups. Cells without a group are left
     out. Clonotypes are counted within each receptor type, as every clone
     summary counts them, so their groups are the receptor types, or each
-    group's receptor types, named like ``"s1, TCR"``.
+    group's receptor types, named like ``"s1, TCR"``; clonotypes defined
+    across receptor types are counted by each cell's clonotype within its
+    type, labelled as the clonotypes within types label its cells, by its
+    own representative's junction, then its type, such as ``CASSB (TCR 2)``.
 
     Tables: ``sizes`` (``group``, ``clone_size``, ``n_clones``) and ``top``,
     one row per clone drawn and group, the largest clone first, zeros
@@ -211,7 +215,13 @@ def clone_abundance(
         kept_apart=_kept_apart_labels(loaded.cells, loaded.kept_apart),
         n_cells=len(loaded.cells),
     )
-    codes = np.asarray(loaded.cells["clone"].cat.codes, dtype=np.int64)
+    # Clonotypes across receptor types are drawn, as every summary measures
+    # them, by each cell's clonotype within its type.
+    measured = loaded.cells[
+        WITHIN_TYPE_CLONE if WITHIN_TYPE_CLONE in loaded.cells else "clone"
+    ]
+    identifiers = measured.cat.categories.to_numpy(dtype=object)
+    codes = np.asarray(measured.cat.codes, dtype=np.int64)
     cell_group = plotted.codes
     keep = (codes >= 0) & (cell_group >= 0)
     if not keep.any():
@@ -221,7 +231,7 @@ def clone_abundance(
             else "No cell has a clone, so there is nothing to plot"
         )
     # Each clone's cells in each group, from the codes alone.
-    n_clones = len(loaded.clones)
+    n_clones = len(identifiers)
     pairs, pair_cells = np.unique(
         cell_group[keep] * n_clones + codes[keep], return_counts=True
     )
@@ -249,7 +259,7 @@ def clone_abundance(
     taken = rows[pair_codes] >= 0
     matrix = np.zeros((len(chosen), len(group_order)), dtype=np.int64)
     matrix[rows[pair_codes[taken]], pair_groups[taken]] = pair_cells[taken]
-    ids = loaded.clones["clone"].to_numpy(dtype=object)[chosen]
+    ids = identifiers[chosen]
     names = clone_names(store, clones)
     clone_labels = np.asarray(names.labels(ids), dtype=object)
     # One row per clone drawn and group, zeros included, so the groups are

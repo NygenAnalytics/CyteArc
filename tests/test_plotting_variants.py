@@ -317,6 +317,102 @@ def test_allele_frequencies_order_cells_by_clone_and_keep_uncovered_apart(
     plt.close(result.figure)
 
 
+def test_allele_frequencies_draw_clonotypes_across_types_by_their_clonotypes_within_types(
+    tmp_path,
+) -> None:
+    import warnings
+
+    import pandas as pd
+
+    from cytearc.plotting import allele_frequencies
+    from tests.clone_helpers import CELLRANGER_HEADER, every_cell, write_lines
+    from tests.variant_helpers import write_variant_store
+    from tests.variant_truth import mito_clone_truth, write_mgatk
+
+    truth = mito_clone_truth()
+    store = write_variant_store(tmp_path / "store.zarr", truth)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        counts = store.variants.import_counts(
+            write_mgatk(truth, tmp_path / "final"), cell_selection=every_cell(store)
+        )
+    selection = store.variants.informative(counts, preset="atac", mask=None)
+    # Beta chains CASSA of the first three cells and CASSB of the next two,
+    # heavy chains CARW of the next two, and the eighth cell, ambiguous, with
+    # CASSA and, of fewer UMIs, CARW: across receptor types, one clonotype
+    # holds the cells of CASSA, CARW and the eighth cell, of three types.
+    ids = [str(cell) for cell in truth.clones.cell_ids[:8]]
+    rows = [
+        f"{ids[cell]},true,{ids[cell]}_contig_{contig},true,500,{chain},{chain}V1,,"
+        f"{chain}J1,{chain}C,true,true,{junction_aa},{junction},50,{umis},ct{cell},"
+        f"ct{cell}_{contig}"
+        for cell, contig, chain, junction_aa, junction, umis in (
+            (0, 1, "TRB", "CASSA", "TGTGCCAGCAGCGCC", 5),
+            (1, 1, "TRB", "CASSA", "TGTGCCAGCAGCGCC", 5),
+            (2, 1, "TRB", "CASSA", "TGTGCCAGCAGCGCC", 5),
+            (3, 1, "TRB", "CASSB", "TGTGCCAGCAGCTAC", 5),
+            (4, 1, "TRB", "CASSB", "TGTGCCAGCAGCTAC", 5),
+            (5, 1, "IGH", "CARW", "TGTGCGAGATGG", 5),
+            (6, 1, "IGH", "CARW", "TGTGCGAGATGG", 5),
+            (7, 1, "TRB", "CASSA", "TGTGCCAGCAGCGCC", 5),
+            (7, 2, "IGH", "CARW", "TGTGCGAGATGG", 2),
+        )
+    ]
+    receptors = store.repertoire.import_receptors(
+        write_lines(tmp_path, "contigs.csv", CELLRANGER_HEADER, rows),
+        cell_selection=every_cell(store),
+    )
+    drawn = {
+        within: allele_frequencies(
+            store,
+            selection,
+            clones=store.repertoire.clonotypes(
+                receptors, receptor_arms="VDJ", within_receptor_type=within
+            ),
+            show=False,
+        )
+        for within in (True, False)
+    }
+    try:
+        apart, together = drawn[True], drawn[False]
+        # Across types, the cells are drawn in the order and with the
+        # frequencies of the clonotypes within types: the three T cells of
+        # CASSA, then of the two clonotypes of two cells the B cells' first,
+        # as the clonotypes within types rank them, and the eighth cell last.
+        pd.testing.assert_frame_equal(
+            together.tables["frequencies"], apart.tables["frequencies"]
+        )
+        order = [ids[cell] for cell in (0, 1, 2, 5, 6, 3, 4, 7)]
+        assert apart.tables["cells"]["ids"].tolist() == order
+        assert together.tables["cells"]["ids"].tolist() == order
+        assert apart.tables["cells"]["clone"].tolist() == (
+            ["clonotype_1"] * 3 + ["clonotype_2"] * 2 + ["clonotype_3"] * 2
+        ) + ["clonotype_4"]
+        assert together.tables["cells"]["clone"].tolist() == (
+            ["clonotype_1 (TCR)"] * 3 + ["clonotype_1 (BCR)"] * 2
+        ) + ["clonotype_2"] * 2 + ["clonotype_1 (ambiguous)"]
+        # Each is named as the clonotypes within types name its cells, by
+        # its representative's junction, numbered where two drawn share one,
+        # then by its type.
+        legends = {
+            within: [
+                text.get_text()
+                for text in result.axes["clones"].get_legend().get_texts()
+            ]
+            for within, result in drawn.items()
+        }
+        assert legends[True] == ["CASSA 1", "CARW", "CASSB", "CASSA 4"]
+        assert legends[False] == [
+            "CASSA 1 (TCR)",
+            "CARW (BCR)",
+            "CASSB",
+            "CASSA 4 (ambiguous)",
+        ]
+    finally:
+        for result in drawn.values():
+            plt.close(result.figure)
+
+
 def test_allele_frequencies_without_clones_draw_the_scored_cells(scored) -> None:
     from cytearc.plotting import allele_frequencies
 

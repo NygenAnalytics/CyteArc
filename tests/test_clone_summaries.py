@@ -6,8 +6,9 @@ saved them. The expected values are counted cell by cell from the truth, so
 they never come from the code under test. A pull request that adds a clone
 source adds a row to ``SOURCES``, one to ``KEPT_APART`` when its clones keep
 labels apart or to ``LABELS`` when they keep none, which gives the rule its
-labels follow, or None, and one to ``TRUTHS`` when it cannot save every clone
-of the truth; one that adds a summary adds a test here.
+labels follow, or None, one to ``SPANNING`` when one of its clones can hold
+cells of several labels kept apart, and one to ``TRUTHS`` when it cannot save
+every clone of the truth; one that adds a summary adds a test here.
 """
 
 from collections import Counter
@@ -23,6 +24,7 @@ from scipy.stats import fisher_exact
 
 import cytearc.metadata.selection as cell_values
 import cytearc.storage.refs as artifact_refs
+from cytearc.clones.assignments import WITHIN_TYPE_CLONE
 from cytearc.clones import (
     ClonalDiversity,
     ClonalExpansion,
@@ -92,6 +94,18 @@ def _clonotypes(store: DataStore, folder: Path) -> ArtifactRef:
     # types of their own.
     receptors = import_truth_receptors(store, RECEPTORS, folder)
     return store.repertoire.clonotypes(receptors, receptor_arms="any")
+
+
+def _clonotypes_across_receptor_types(store: DataStore, folder: Path) -> ArtifactRef:
+    # Defined across receptor types, the multichain and ambiguous cells of the
+    # truth's first clone join its T cells in one clonotype; every summary
+    # measures each cell's clonotype within its type, which the clonotypes
+    # save, so within each type the clonotypes measured are the truth's
+    # clones, as for the clonotypes defined within types.
+    receptors = import_truth_receptors(store, RECEPTORS, folder)
+    return store.repertoire.clonotypes(
+        receptors, receptor_arms="any", within_receptor_type=False
+    )
 
 
 def _clonotype_clusters(store: DataStore, folder: Path) -> ArtifactRef:
@@ -177,6 +191,7 @@ SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
     "genotype clones": _genotype_clones,
     "allele clones": _allele_clones,
     "phylogeny clones": _phylogeny_clones,
+    "clonotypes across receptor types": _clonotypes_across_receptor_types,
 }
 #: The truth's clones as a source saves them, where it cannot save every one:
 #: variant clones join each cell to the cells that share its variants, so the
@@ -196,7 +211,15 @@ KEPT_APART: dict[str, dict[str, np.ndarray]] = {
             dtype=object
         )
     },
+    "clonotypes across receptor types": {
+        "receptor_type": RECEPTORS.expected["receptor_type"].to_numpy(dtype=object)
+    },
 }
+#: The sources one of whose clones can hold cells of several labels kept
+#: apart: they define the truth's clone whole, under one label, and every
+#: summary measures each of its parts, its cells of one label, under a label
+#: of its own.
+SPANNING = frozenset({"clonotypes across receptor types"})
 
 
 def _ranked_label(clone: int) -> str:
@@ -252,6 +275,7 @@ def source(request, tmp_path_factory) -> SimpleNamespace:
         store=store,
         clones=SOURCES[request.param](store, folder),
         kept_apart=KEPT_APART.get(request.param, {}),
+        spans=request.param in SPANNING,
         labels=LABELS.get(request.param),
         truth=TRUTHS.get(request.param, TRUTH),
     )
@@ -328,18 +352,22 @@ def _keys(source) -> list[tuple | None]:
 
 
 def _source_clones(source) -> tuple[dict[tuple, str], dict[tuple, int]]:
-    """The source's label and rank of each clone of ``_keys``.
+    """The source's label and rank of each clone of ``_keys``, as the summaries measure it.
 
     They come from the source's cells table, which must give each such clone
     one label of its own and no label to a cell without a clone; the rank is
-    the clone's place in the source's table of clones, largest first.
+    the clone's place in the source's order of clones, largest first. A
+    source whose clones span the labels kept apart gives each cell's clone
+    within its label, which the summaries measure, beside its own clone.
     """
     loaded = source.store.clones.load_clones(source.clones)
     # Every source numbers its clones by size, largest first, which the ranks
     # and the tracking's ties follow, whatever rule its labels follow.
     assert loaded.clones["n_cells"].is_monotonic_decreasing
-    ranks = {str(label): rank for rank, label in enumerate(loaded.clones["clone"])}
-    of_cell = loaded.cells["clone"].reindex(TRUTH.cell_ids)
+    measured = loaded.cells[WITHIN_TYPE_CLONE if source.spans else "clone"]
+    assert (WITHIN_TYPE_CLONE in loaded.cells) == source.spans
+    ranks = {str(label): rank for rank, label in enumerate(measured.cat.categories)}
+    of_cell = measured.reindex(TRUTH.cell_ids)
     labels: dict[tuple, str] = {}
     for key, label in zip(_keys(source), of_cell.tolist(), strict=True):
         if key is None:
@@ -370,7 +398,11 @@ def test_every_source_records_the_clone_writers_diagnostics(source) -> None:
     status = inspect_artifact(source.store.zw, source.clones)
     loaded = source.store.clones.load_clones(source.clones)
     assert dict(loaded.diagnostics) == status.diagnostics
-    keys = [key for key in _keys(source) if key is not None]
+    # A source whose clones span the labels kept apart defines each of the
+    # truth's clones whole.
+    keys = [
+        key[:1] if source.spans else key for key in _keys(source) if key is not None
+    ]
     largest = max(Counter(keys).values())
     assert status.diagnostics["cellsWithClone"] == len(keys)
     assert status.diagnostics["largestCloneShare"] == largest / len(keys)

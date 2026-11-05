@@ -11,6 +11,7 @@ from cytearc.repertoire.clonotypes import (
     assign_clonotypes,
     clonotype_labels,
     shared_text,
+    within_type_parts,
 )
 from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 
@@ -445,3 +446,43 @@ def test_matching_arms_are_checked_as_they_are_found() -> None:
         assign_clonotype_clusters(sequences, texts, ledger=_ledger(255), **options)
     with pytest.raises(MemoryError, match="for the 4 pairs of chains within"):
         assign_clonotype_clusters(sequences, texts, ledger=_ledger(127), **options)
+
+
+def test_each_clonotype_within_a_type_is_named_as_a_part_of_its_clonotype() -> None:
+    # Clonotype 0 holds two clonotypes of T cells, 0 and 2 within types, and
+    # one of B cells, 1; clonotype 1 holds one of T cells, 3; cell5 has none.
+    codes = np.array([0, 0, 0, 0, 1, -1, 0])
+    within = np.array([0, 2, 1, 0, 3, -1, 2])
+    types = np.array([1, 1, 0, 1, 1, 2, 1])
+    names = ["BCR", "TCR", "no IR"]
+    clonotypes, added = within_type_parts(codes, within, types, names)
+    assert clonotypes.tolist() == [0, 0, 0, 1]
+    # The T cells of clonotype 0 split into two, numbered by their codes; its
+    # B cells hold one, which takes its type alone; clonotype 1 holds one,
+    # which adds nothing.
+    assert added.tolist() == [" (TCR 1)", " (BCR)", " (TCR 2)", ""]
+    # Numbers follow the codes, not the cells' order.
+    swapped = np.where(within == 0, 2, np.where(within == 2, 0, within))
+    assert within_type_parts(codes, swapped, types, names)[1].tolist() == [
+        " (TCR 1)",
+        " (BCR)",
+        " (TCR 2)",
+        "",
+    ]
+    # A clonotype of one type that splits names each of its clonotypes.
+    assert within_type_parts(
+        np.array([0, 0, 0]), np.array([0, 1, 1]), np.array([1, 1, 1]), names
+    )[1].tolist() == [" (TCR 1)", " (TCR 2)"]
+
+
+def test_clonotypes_within_types_that_disagree_with_their_cells_are_refused() -> None:
+    names = ["BCR", "TCR"]
+    for codes, within, types, message in (
+        ([0, 0], [0], [1, 1], "must align"),
+        ([0, 0], [0, -1], [1, 1], "none within its type"),
+        ([0, 1], [0, 0], [1, 1], "two clonotypes across types"),
+        ([0, 0], [0, 0], [0, 1], "two receptor types"),
+        ([0, 0], [0, 2], [1, 1], "holds no cell"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            within_type_parts(np.array(codes), np.array(within), np.array(types), names)

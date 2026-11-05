@@ -33,6 +33,7 @@ __all__ = [
     "CLONE_ASSIGNMENT_ROW_BYTES",
     "MULTIPLE_POLICIES",
     "MultiplePolicy",
+    "WITHIN_TYPE_CLONE",
     "CloneAssigner",
     "CloneAssignment",
     "Clones",
@@ -48,6 +49,10 @@ type MultiplePolicy = Literal["error", "drop"]
 
 #: The text before each rank of :func:`ranked_clone_labels`.
 _RANKED_PREFIX = "clone_"
+#: The column of a :class:`Clones` record of clonotypes defined across
+#: receptor types that holds each cell's clonotype within its receptor type,
+#: which every clone summary measures.
+WITHIN_TYPE_CLONE = "within_type_clone"
 
 
 def ranked_clone_labels(n_clones: int) -> np.ndarray:
@@ -580,7 +585,10 @@ class Clones:
             clones that disagree, which left it without one), for clones
             called from recorder alleles ``n_alleles`` (its distinct rare
             alleles), and each column of ``kept_apart``, a categorical of the
-            cell's labels.
+            cell's labels. Clonotypes defined across receptor types also hold
+            ``within_type_clone``, each cell's clonotype within its receptor
+            type, which every clone summary measures, as a categorical of the
+            labels that the summaries give, such as ``clonotype_1 (TCR 2)``.
         clones: One row per clone, largest first: ``clone`` and ``n_cells``.
         source: The operation that saved the clones, such as
             ``"import_clones"``, ``"call_barcode_clones"``,
