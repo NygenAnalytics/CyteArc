@@ -977,10 +977,13 @@ def test_repertoire_figures_of_many_groups_stop_at_the_page_width(
             width, height = result.figure.get_size_inches()
             assert width <= MAX_FIGURE_WIDTH_INCHES, result.provenance.notes
             assert height <= 22.0, result.provenance.notes
-        # A heatmap of 200 groups names none of them, as no axis names more
-        # than 40 items.
+        # A heatmap of the 160 groups with an alpha chain names every fourth,
+        # as no axis names more than 40 items.
+        usage = results[1].tables["usage"]
+        alpha = sorted(usage.loc[usage["locus"] == "TRA", "group"].unique())
+        assert len(alpha) == 160
         ax = results[1].axes["TRA"]
-        assert not ax.get_xticklabels()
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == alpha[::4]
     finally:
         for result in results:
             result.close()

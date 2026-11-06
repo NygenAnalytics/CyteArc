@@ -1,7 +1,8 @@
 """Charts that the figures of clones, receptors, lineages and variants draw from tidy tables.
 
 Each chart draws one panel. It names at most ``MAX_NAMED_ITEMS`` items on an
-axis, draws a titled legend beside the panel when given a legend title, and
+axis, a heatmap every nth of more, draws a titled legend beside the panel
+when given a legend title, and
 returns what that legend shows with the scale behind it, a :class:`Drawn`,
 which ``finish_plot`` reports so that ``compose_results`` can draw a legend
 that several figures share once.
@@ -602,8 +603,10 @@ def draw_matrix(
     ``missing_color``, and with ``blank_diagonal`` the diagonal is left
     blank and out of the colour limits, so the colours span the other cells.
     A table of at most ``MAX_PRINTED_VALUES`` rows and columns prints each
-    coloured value, dark on light colours and light on dark ones, and one
-    of at most ``MAX_NAMED_ITEMS`` names its rows and columns.
+    coloured value, dark on light colours and light on dark ones. Each axis
+    names its rows or columns, every one up to ``MAX_NAMED_ITEMS`` and
+    otherwise every second, third or nth, so that it names at most
+    ``MAX_NAMED_ITEMS``.
     ``colorbar_beside`` names the panels whose heatmaps share this one's
     scale and limits, beside all of which the colour bar stands; by
     default it stands beside this panel alone.
@@ -636,14 +639,14 @@ def draw_matrix(
         layer = np.zeros((n_rows, n_columns, 4), dtype=np.float64)
         layer[missing] = mpl.colors.to_rgba(color_scale.missing_color)
         ax.imshow(layer)
-    if n_rows <= MAX_NAMED_ITEMS and n_columns <= MAX_NAMED_ITEMS:
-        ax.set_xticks(
-            np.arange(n_columns), [str(name) for name in matrix.columns], rotation=90
-        )
-        ax.set_yticks(np.arange(n_rows), [str(name) for name in matrix.index])
-    else:
-        ax.set_xticks([])
-        ax.set_yticks([])
+    # An axis of more items than it can name names every second, third or
+    # nth, so that at most MAX_NAMED_ITEMS names stand at their usual size.
+    for set_ticks, names, rotation in (
+        (ax.set_xticks, matrix.columns, 90),
+        (ax.set_yticks, matrix.index, 0),
+    ):
+        named = np.arange(0, len(names), max(1, -(-len(names) // MAX_NAMED_ITEMS)))
+        set_ticks(named, [str(names[at]) for at in named], rotation=rotation)
     if n_rows <= MAX_PRINTED_VALUES and n_columns <= MAX_PRINTED_VALUES:
         for row, column in zip(*np.nonzero(colored), strict=True):
             value = values[row, column]

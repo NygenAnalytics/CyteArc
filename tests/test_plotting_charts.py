@@ -665,14 +665,31 @@ def test_heatmaps_print_the_values_of_at_most_12_rows(ax, n_groups) -> None:
     assert len(ax.texts) == (n_groups * (n_groups - 1) if n_groups <= 12 else 0)
 
 
-@pytest.mark.parametrize("n_groups", [MAX_NAMED_ITEMS, MAX_NAMED_ITEMS + 1])
-def test_heatmaps_name_at_most_40_rows(ax, n_groups) -> None:
-    names = [f"g{at}" for at in range(n_groups)]
-    matrix = pd.DataFrame(np.ones((n_groups, n_groups)), index=names, columns=names)
+@pytest.mark.parametrize(
+    ("n_rows", "n_columns", "row_step", "column_step"),
+    [
+        (MAX_NAMED_ITEMS, MAX_NAMED_ITEMS, 1, 1),
+        # A long axis names every nth, at most 40, and leaves the other whole.
+        (MAX_NAMED_ITEMS + 1, 3, 2, 1),
+        (5, 80, 1, 2),
+        (81, 1000, 3, 25),
+    ],
+)
+def test_heatmaps_name_every_nth_item_of_an_axis_of_more_than_40(
+    ax, n_rows, n_columns, row_step, column_step
+) -> None:
+    rows = [f"r{at}" for at in range(n_rows)]
+    columns = [f"c{at}" for at in range(n_columns)]
+    matrix = pd.DataFrame(np.ones((n_rows, n_columns)), index=rows, columns=columns)
     draw_matrix(ax, matrix, color_scale=ColorScale(), value_label="", show_legend=False)
-    named = [tick.get_text() for tick in ax.get_yticklabels()]
-    assert named == (names if n_groups <= 40 else [])
-    assert [tick.get_text() for tick in ax.get_xticklabels()] == named
+    named_rows = [tick.get_text() for tick in ax.get_yticklabels()]
+    named_columns = [tick.get_text() for tick in ax.get_xticklabels()]
+    assert named_rows == rows[::row_step] and len(named_rows) <= MAX_NAMED_ITEMS
+    assert named_columns == columns[::column_step]
+    assert len(named_columns) <= MAX_NAMED_ITEMS
+    # Each name stands at its own row or column.
+    assert ax.get_yticks().tolist() == list(range(0, n_rows, row_step))
+    assert ax.get_xticks().tolist() == list(range(0, n_columns, column_step))
 
 
 def test_a_trees_leaves_stand_over_the_matrixs_columns(ax) -> None:

@@ -1288,8 +1288,11 @@ def test_the_overlap_plot_names_at_most_40_groups(many_groups) -> None:
     plt.close(forty.figure)
     more = _overlap_of_first(many_groups, 41)
     ax = more.axes["matrix"]
-    assert len(ax.get_xticks()) == 0 and len(ax.get_yticks()) == 0
-    assert more.tables["matrix"].index.tolist() == [f"cell{i:03d}" for i in range(41)]
+    # Past 40, every second group is named, in the order drawn.
+    order = more.tables["matrix"].index.tolist()
+    assert sorted(order) == [f"cell{i:03d}" for i in range(41)]
+    assert [tick.get_text() for tick in ax.get_xticklabels()] == order[::2]
+    assert [tick.get_text() for tick in ax.get_yticklabels()] == order[::2]
     plt.close(more.figure)
 
 
@@ -1587,7 +1590,8 @@ def test_the_fates_plot_draws_the_top_clones_and_their_shares(fates_plot) -> Non
 
 def test_the_coupling_plot_names_at_most_40_groups(many_groups) -> None:
     store = many_groups.store
-    for n_first, named in ((40, True), (41, False)):
+    # Past 40 groups, every second is named.
+    for n_first, named in ((40, 40), (41, 21)):
         coupling = store.clones.coupling(
             many_groups.clones,
             group_by="cell",
@@ -1601,7 +1605,11 @@ def test_the_coupling_plot_names_at_most_40_groups(many_groups) -> None:
         assert matrix.loc["cell000", "cell001"] == pytest.approx(1.0)
         assert matrix.loc["cell000", "cell002"] == 0.0
         ax = result.axes["matrix"]
-        assert len(ax.get_xticklabels()) == (n_first if named else 0)
+        order = matrix.index.tolist()
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == (
+            order[:: 1 if n_first <= 40 else 2]
+        )
+        assert len(ax.get_xticklabels()) == named
         assert len(ax.texts) == 0
         plt.close(result.figure)
     # Shown by default: on Agg the owned figure is closed.

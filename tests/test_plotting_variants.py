@@ -1118,7 +1118,7 @@ def test_layout_points_take_the_size_of_their_panel_after_layout(tmp_path) -> No
         result.close()
 
 
-def test_allele_frequencies_of_many_variants_name_none(scored) -> None:
+def test_allele_frequencies_of_many_variants_name_every_nth(scored) -> None:
     from dataclasses import replace
     from types import SimpleNamespace
 
@@ -1144,8 +1144,15 @@ def test_allele_frequencies_of_many_variants_name_none(scored) -> None:
         assert n_variants > 40
         assert result.tables["frequencies"]["variant"].nunique() == n_variants
         assert result.provenance.extras["n_variants"] == n_variants
-        # An axis names at most 40 items, and cells never.
-        assert not ax.get_yticklabels() and not ax.get_xticklabels()
+        # An axis names at most 40 items, here every fourth of the 159
+        # variants, and cells never.
+        step = -(-n_variants // 40)
+        assert step == 4
+        assert ax.get_yticks().tolist() == list(range(0, n_variants, step))
+        named = [label.get_text() for label in ax.get_yticklabels()]
+        assert len(named) == len(range(0, n_variants, step)) <= 40
+        assert set(named) <= set(result.tables["frequencies"]["variant"])
+        assert not ax.get_xticklabels()
     finally:
         result.close()
 
