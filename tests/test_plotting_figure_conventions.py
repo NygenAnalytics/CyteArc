@@ -1435,6 +1435,103 @@ def test_locus_heatmaps_share_the_largest_fraction_of_any_locus(repertoire) -> N
             result.close()
 
 
+def _usage_of_counts(source, counts: dict[str, dict[str, int]], group_by: tuple):
+    """A gene usage record of TRB V genes, ``counts[group][gene]`` cells each."""
+    from cytearc.repertoire import GeneUsage
+
+    rows = [
+        {
+            "group": group,
+            "locus": "TRB",
+            "v_call": gene,
+            "n_cells": n_cells,
+            "fraction": n_cells / sum(genes.values()),
+        }
+        for group, genes in counts.items()
+        for gene, n_cells in genes.items()
+    ]
+    names = pd.Index(list(counts), name="group")
+    return GeneUsage(
+        table=pd.DataFrame(rows),
+        group_keys=pd.DataFrame({"cell_type": list(counts)}, index=names),
+        source=source,
+        genes=("v_call",),
+        level="gene",
+        slots=("VDJ_1",),
+        count="cells",
+        group_by=group_by,
+        groups=None,
+        cell_selection=None,
+        n_cells=sum(sum(genes.values()) for genes in counts.values()),
+        diagnostics={},
+    )
+
+
+def test_gene_usage_draws_the_genes_that_each_group_uses_most(repertoire) -> None:
+    from cytearc import plotting
+
+    # The naive cells use TRBV1 to TRBV5 most, and the MAIT cells TRBV6-4,
+    # which ranks sixth over both groups.
+    common = {"TRBV1": 100, "TRBV2": 90, "TRBV3": 80, "TRBV4": 70, "TRBV5": 60}
+    counts = {
+        "naive": common,
+        "MAIT": {**dict.fromkeys(common, 1), "TRBV6-4": 20},
+    }
+    usage = _usage_of_counts(repertoire.receptors, counts, ("cell_type",))
+    result = plotting.gene_usage(object(), usage, max_genes=3, show=False)
+    try:
+        ax = result.axes["TRB"]
+        # Each group's first gene, then the next best, by their chains over
+        # both groups.
+        genes = [tick.get_text() for tick in ax.get_yticklabels()]
+        assert genes == ["TRBV1", "TRBV2", "TRBV6-4"]
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == ["MAIT", "naive"]
+        assert ax.get_ylabel() == "V gene (3 of 6)"
+        (image,) = ax.images
+        drawn = np.ma.filled(image.get_array(), np.nan)
+        np.testing.assert_allclose(drawn[2], [20 / 25, 0.0])
+        np.testing.assert_allclose(drawn[0], [1 / 25, 100 / 400])
+    finally:
+        result.close()
+    # Without groups, the genes with the most chains are drawn.
+    merged = {gene: common.get(gene, 0) + n for gene, n in counts["MAIT"].items()}
+    alone = _usage_of_counts(repertoire.receptors, {"all cells": merged}, ())
+    result = plotting.gene_usage(object(), alone, max_genes=3, show=False)
+    try:
+        ax = result.axes["TRB"]
+        assert [tick.get_text() for tick in ax.get_yticklabels()] == [
+            "TRBV1",
+            "TRBV2",
+            "TRBV3",
+        ]
+        assert ax.get_ylabel() == "V gene (3 of 6)"
+    finally:
+        result.close()
+
+
+def test_gene_usage_breaks_ties_of_first_genes_by_their_chains(repertoire) -> None:
+    from cytearc import plotting
+
+    # Three groups, each with a gene of its own first, and fewer genes drawn
+    # than groups: the first genes with the most chains over all groups.
+    counts = {
+        "a": {"TRBV1": 5, "TRBV9": 1},
+        "b": {"TRBV2": 30, "TRBV9": 1},
+        "c": {"TRBV3": 20, "TRBV9": 1},
+    }
+    usage = _usage_of_counts(repertoire.receptors, counts, ("cell_type",))
+    result = plotting.gene_usage(object(), usage, max_genes=2, show=False)
+    try:
+        ax = result.axes["TRB"]
+        assert [tick.get_text() for tick in ax.get_yticklabels()] == [
+            "TRBV2",
+            "TRBV3",
+        ]
+        assert ax.get_ylabel() == "V gene (2 of 4)"
+    finally:
+        result.close()
+
+
 # The figures of variant counts, informative variants and genotype calls keep
 # the same conventions, on the truth's mitochondrial reads and GoT UMIs.
 

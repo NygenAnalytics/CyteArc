@@ -341,6 +341,29 @@ def _ranked(rows: pd.DataFrame, field: str, count: str) -> pd.Index:
     )
 
 
+def _shown_genes(
+    rows: pd.DataFrame, ranked: pd.Index, field: str, count: str, max_genes: int
+) -> list[Any]:
+    """The genes of a panel: at most ``max_genes``, those that rank highest in any group.
+
+    Each group ranks its genes by their chains, most first, ties in the
+    order of ``ranked``, the genes by their chains over all groups. Genes
+    are chosen by their best rank in any group, so each group's most used
+    genes are drawn even where they are rare over all groups, ties in the
+    order of ``ranked``, and listed in that order.
+    """
+    overall = pd.Series(np.arange(len(ranked)), index=ranked)
+    within = rows.assign(overall=overall.reindex(rows[field]).to_numpy()).sort_values(
+        ["group", f"n_{count}", "overall"],
+        ascending=[True, False, True],
+        kind="stable",
+    )
+    within["rank"] = within.groupby("group", sort=False).cumcount()
+    best = within.groupby(field)["rank"].min().reindex(ranked).to_numpy()
+    chosen = np.lexsort((np.arange(len(ranked)), best))[:max_genes]
+    return list(ranked[np.sort(chosen)])
+
+
 def _gene_axis(field: str, level: str, shown: int, held: int) -> str:
     """Name an axis of genes, saying how many of how many it draws when capped."""
     name = f"{_SEGMENTS[field]} {level}"
@@ -399,8 +422,10 @@ def gene_usage(
     ``usage`` is the result of ``ds.repertoire.gene_usage`` for one gene
     field, such as ``genes="j_call"``, which sets the groups, the level, the
     slots and what is counted. Each panel holds one locus, such as TRA or
-    TRB, and its ``max_genes`` genes with the most chains over all groups,
-    its axis saying how many of how many it draws when it leaves some out:
+    TRB, and at most ``max_genes`` of its genes: those that rank highest in
+    any group, so each group's most used genes are drawn even where they are
+    rare over all groups, listed by their chains over all groups, its axis
+    saying how many of how many it draws when it leaves some out:
     for groups of ``group_by`` columns or a ``groups`` artifact, a heatmap of
     each gene's fraction of each group's chains of that locus, which names
     the group even where one group holds the locus, the panels of every
@@ -443,7 +468,10 @@ def gene_usage(
     grouped = bool(usage.group_by) or usage.groups is not None
     by_locus = dict(tuple(table.groupby("locus", sort=False)))
     ranked = {locus: _ranked(by_locus[locus], gene, count) for locus in loci}
-    shown = {locus: list(ranked[locus][:max_genes]) for locus in loci}
+    shown = {
+        locus: _shown_genes(by_locus[locus], ranked[locus], gene, count, max_genes)
+        for locus in loci
+    }
     tallest = max(len(genes) for genes in shown.values())
     columns = _LOCUS_HEATMAPS_PER_ROW if grouped else _LOCUS_PANELS_PER_ROW
     if figsize is None and target is None:
