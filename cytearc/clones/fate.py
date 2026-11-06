@@ -71,8 +71,7 @@ _UNIT_INTERVAL = 2.0**-53
 # counts in each group: for each pair of groups its positions, coupling,
 # null and table; for each product of two groups the coupling matrix and the
 # distances of the tree; for each clone counted in a group the matrices of
-# counts, 64 bytes at their peak as traced on a million counts; for
-# each cell with a clone its label; and for each worker of the null its
+# counts; for each cell with a clone its label; and for each worker of the null its
 # shuffled labels, its products and its counts of each group.
 _COUPLING_BYTES_PER_PAIR = 250
 _COUPLING_BYTES_PER_PRODUCT = 40
@@ -87,9 +86,8 @@ _BATCH_BYTES_PER_VALUE = 8
 _BATCH_BYTES = 64 * 1024**2
 # Bytes that measuring fate bias holds for each early cell, besides its
 # fractions, for each of its fractions, for each fate of each clone with late
-# cells, and for each fate. Measuring traced 8.3 to 10.2 bytes per fraction
-# with all it holds, on 20,000 to 100,000 early cells in 50 to 200 fates; the
-# fractions' copy as they are written is the writer's to count.
+# cells, and for each fate; the fractions' copy as they are written is the
+# writer's to count.
 _BIAS_BYTES_PER_EARLY_CELL = 64
 _BIAS_BYTES_PER_FRACTION = 16
 _BIAS_BYTES_PER_CLONE_FATE = 80

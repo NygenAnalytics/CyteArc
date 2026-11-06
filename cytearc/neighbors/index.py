@@ -7,13 +7,8 @@ import numpy as np
 
 from ..utils.arguments import integer_argument
 
-# hnswlib 0.8 keeps one lock per label-operation slot, whatever the cell count.
-_LABEL_OPERATION_LOCKS = 65_536
 # Bytes of malloc's header and rounding at most, per upper-level link list.
 _ALLOCATION_OVERHEAD_BYTES = 24
-# The index's fixed objects, such as its distance space and search pools,
-# and the Python wrapper: an allowance, measured below 16 KiB.
-_ANN_INDEX_OBJECT_BYTES = 64 * 1024
 # Bytes of the header that hnswlib writes before a saved index's cells.
 _ANN_INDEX_HEADER_BYTES = 96
 
@@ -90,11 +85,7 @@ def ann_index_peak_bytes(
         + label_entry_bytes
         + upper
     )
-    return (
-        math.ceil(cells * per_cell)
-        + _LABEL_OPERATION_LOCKS * mutex_bytes
-        + _ANN_INDEX_OBJECT_BYTES
-    )
+    return math.ceil(cells * per_cell)
 
 
 def ann_index_file_bytes(n_cells: int, dims: int, m: int) -> int:

@@ -130,9 +130,6 @@ _GUIDE_CALL_ARRAYS = (
     "guide_codes",
     "guide_umis",
 )
-# The bytes of the Python objects that a guide operation holds beside its
-# arrays: the plans of its artifacts and the store's metadata it opens.
-_CALL_FIXED_BYTES = 1 << 18
 # Checking the guide IDs holds, beside them as Python text, a list and an
 # array of their references and four copies at their fixed width: their text
 # as an array, and the copies and distinct values of the sort that finds a
@@ -160,7 +157,6 @@ _MATCHED_BYTES_PER_CALL = 8 + 1
 # last called it and its label's reference.
 _PADDING_BYTES_PER_CELL = 16
 _PADDING_BYTES_PER_GUIDE = 16
-_PADDING_FIXED_BYTES = 64 << 10
 # Each row of a table of calls or targets holds, beside its cell's ID, its
 # cell and slot as found, ordered and gathered, its value's reference and its
 # UMIs, and their copies in the table.
@@ -172,14 +168,12 @@ _FRAME_BYTES_PER_ENTRY = 128
 _TABLE_BYTES_PER_COUNT = 144
 _TABLE_BYTES_PER_FIT = 160
 # Fitting a guide in a sample holds its cells with UMIs, its most UMIs, the
-# fit's parameters, status and threshold as computed and as kept, beside the
-# fit's own objects. The fits keep each entry's status, threshold and
-# iterations and the columns of their kernel's output, six for the
-# Poisson-Gaussian fit and seven for the two Gaussians.
+# fit's parameters, status and threshold as computed and as kept. The fits
+# keep each entry's status, threshold and iterations and the columns of their
+# kernel's output, six for the Poisson-Gaussian fit and seven for the two
+# Gaussians.
 _FIT_BYTES_PER_ENTRY = 128
-_FIT_FIXED_BYTES = 64 << 10
 _FITTED_BYTES_PER_ENTRY = MappingProxyType({"poisson_gaussian": 72, "gaussian": 88})
-_FITTED_FIXED_BYTES = 16 << 10
 # Saving the calls holds, for each cell, its top guide's reference, whether
 # it has one, the gather of its ID, and its top fraction with its mask.
 _SAVING_BYTES_PER_CELL = 8 + 1 + 8 + 9
@@ -226,7 +220,6 @@ def _padding_bytes(n_cells: int, width: int, n_guides: int) -> int:
         _padded_bytes(n_cells, width)
         + _PADDING_BYTES_PER_CELL * n_cells
         + _PADDING_BYTES_PER_GUIDE * n_guides
-        + _PADDING_FIXED_BYTES
     )
 
 
@@ -255,12 +248,12 @@ def _guide_call_write_bytes(n_cells: int, width: int, guide_ids: np.ndarray) -> 
 
 def _fitting_bytes(n_entries: int) -> int:
     """Return the most bytes that fitting ``n_entries`` guides and samples holds beside the histograms, the fits included."""
-    return _FIT_FIXED_BYTES + _FIT_BYTES_PER_ENTRY * n_entries
+    return _FIT_BYTES_PER_ENTRY * n_entries
 
 
 def _fitted_bytes(method: str, n_entries: int) -> int:
     """Return the bytes that the fits of ``method`` keep for ``n_entries`` guides and samples."""
-    return _FITTED_FIXED_BYTES + _FITTED_BYTES_PER_ENTRY[method] * n_entries
+    return _FITTED_BYTES_PER_ENTRY[method] * n_entries
 
 
 def _label_width(guide_ids: np.ndarray) -> int:
@@ -775,9 +768,9 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
 
         The ledger refuses the store's budget as ``doing``, a text of
         ``n_cells``, the selected cells, such as ``"Calling guides for
-        {n_cells} cells"``, and first holds the call's Python objects and
-        then the guide IDs, which it reads and checks; its later refusals
-        name a smaller cell selection as their remedy.
+        {n_cells} cells"``, and first holds the guide IDs, which it reads and
+        checks; its later refusals name a smaller cell selection as their
+        remedy.
 
         Raises:
             ValueError: If ``cell_selection`` selects no cell, or a guide ID
@@ -792,9 +785,6 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             self.memoryBytes,
             doing.format(n_cells=selection.cells),
             codec_threads=self.nthreads,
-        )
-        ledger.hold(
-            "the call's plans and the store's metadata it opens", _CALL_FIXED_BYTES
         )
         guide_ids = _read_guide_ids(ledger, assay.feats._get_array("ids"))
         # A smaller selection shrinks the steps from here on, not the guides.
@@ -1201,16 +1191,12 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         self, ref: ArtifactRef, *, remedy: str | None = None
     ) -> MemoryLedger:
         """The ledger of a call that reads the artifact ``ref`` within the store's budget, whose refusals name ``remedy``."""
-        ledger = MemoryLedger(
+        return MemoryLedger(
             self.memoryBytes,
             f"Reading the {ref.kind} artifact",
             remedy=remedy,
             codec_threads=self.nthreads,
         )
-        ledger.hold(
-            "the call's plans and the store's metadata it opens", _CALL_FIXED_BYTES
-        )
-        return ledger
 
     def _cell_arrays(
         self, ledger: MemoryLedger, ref: ArtifactRef, names: Sequence[str]
@@ -1402,8 +1388,6 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 int(error.budget_bytes),
                 remedy="pass a smaller cell_selection or fewer samples",
             ) from error
-        # The reader that decoded the last chunk of counts can keep it.
-        ledger.leave(counts._held_read_bytes())
         ledger.release(streaming)
         ledger.hold(
             "the guide count histograms",
@@ -2156,9 +2140,6 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         n_cells, width = (int(size) for size in codes.shape)
         ledger = MemoryLedger(
             self.memoryBytes, f"Labelling {n_cells} cells", codec_threads=self.nthreads
-        )
-        ledger.hold(
-            "the call's plans and the store's metadata it opens", _CALL_FIXED_BYTES
         )
         guide_ids = read_whole(ledger, group, "guides", item="the guide IDs").astype(
             str

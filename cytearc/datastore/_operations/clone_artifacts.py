@@ -22,7 +22,6 @@ from ...graph.arguments import ArgumentRecord
 from ...metadata.arguments import CLONE_DIAGNOSTICS
 from ...metadata.artifacts import (
     cell_data_write_bytes,
-    headroom_bytes,
     plan_cell_data_artifact,
     write_cell_data_artifact,
 )
@@ -68,9 +67,6 @@ SITE_ARRAYS: tuple[str, ...] = (
 )
 # Bytes of a reference to a Python object in an array of objects.
 _REFERENCE_BYTES = 8
-# Python's objects of a save while it gathers the clone sizes, whatever the
-# number of cells, which the writer's own allowance covers once it writes.
-_GATHERING_FIXED_BYTES = 64 << 10
 
 
 class CloneArguments(Protocol):
@@ -161,9 +157,7 @@ def clone_write_bytes(
     clone's, its code as int32 and its clone's size, gathering the sizes
     beside a mask of the cells with a clone and two int64 arrays, and copies
     the clones' sizes and the probabilities; writing them holds what
-    :func:`~cytearc.metadata.artifacts.cell_data_write_bytes` states. What
-    the save builds and gathers is counted exactly as it is held, so the
-    cost adds :func:`~cytearc.metadata.artifacts.headroom_bytes` of it.
+    :func:`~cytearc.metadata.artifacts.cell_data_write_bytes` states.
     ``site_arrays`` maps each array of the sites that the source saves to its
     shape and stored dtype, a text array at its widest value's width, written
     after the clones' arrays from what the caller holds. The labels' text is
@@ -191,10 +185,7 @@ def clone_write_bytes(
         arrays[CLONE_PROBABILITY] = ((n_cells,), np.float64)
     arrays.update({name: ((n_cells,), dtype) for name, dtype in sources.items()})
     arrays.update(dict(site_arrays or {}))
-    return given + max(
-        gathering + headroom_bytes(gathering) + _GATHERING_FIXED_BYTES,
-        built + headroom_bytes(built) + cell_data_write_bytes(arrays),
-    )
+    return given + max(gathering, built + cell_data_write_bytes(arrays))
 
 
 def _stored_dtype(values: np.ndarray) -> np.dtype:

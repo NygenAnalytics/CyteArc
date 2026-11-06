@@ -91,15 +91,12 @@ _CELL_BYTES = 64
 # Each cell's summaries, its barcodes, UMIs, reads and records, as int32,
 # int64, int64 and int32, and what counting them holds beside: each record's
 # cell and pair as int64, their sorted distinct pairs and the counts' weights,
-# and for each cell its sums before they become int64. Traced on 20,000 to
-# 1,000,000 records of 1,000 to 200,000 cells: 33 bytes a record and up to
-# 31 a cell.
+# and for each cell its sums before they become int64.
 _SUMMARY_BYTES_PER_CELL = 24
 _COUNTING_BYTES_PER_RECORD = 40
 _COUNTING_BYTES_PER_CELL = 8
 # Bytes that a loaded record takes at the peak of building the tables: its
-# stored arrays and its row of the table of records, as measured on 5,000,000
-# pairs and 2,000,000 molecules.
+# stored arrays and its row of the table of records.
 _TABLE_BYTES_PER_RECORD = 120
 # Bytes that a loaded distinct barcode, UMI or cell ID takes as a Python
 # string with its entry in the index of its categories.
@@ -120,7 +117,7 @@ _CALLED_RECORD_ARRAYS = (
 # Bytes of each allowlisted barcode while its distinct values are sorted and
 # fingerprinted: the references to its Python string in the lists and the set
 # of distinct barcodes, its packed bytes, and the string itself when a
-# fixed-width array gave it, 294 for barcodes of 28 bases as traced.
+# fixed-width array gave it.
 _ALLOWLIST_BYTES = 300
 
 

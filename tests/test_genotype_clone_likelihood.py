@@ -35,6 +35,7 @@ from cytearc.variants.genotype_mixture import (
     spanning_tree,
 )
 from tests.clone_helpers import every_cell, write_cells_store
+from tests.memory_helpers import climb_refusals
 from tests.variant_truth import (
     DOUBLET_CELL,
     DropoutTruth,
@@ -622,8 +623,8 @@ def test_calls_read_in_bands_at_a_small_budget_give_the_clones_of_one_band(
 ) -> None:
     from cytearc.datastore._operations import variants
 
-    # 1,000 cells at 200 sites hold about 190,000 call rows, of which a
-    # budget of 5 MB reads a few bands beside the packed calls.
+    # 1,000 cells at 200 sites hold about 190,000 call rows, of which the
+    # least budget that runs reads a few bands beside the packed calls.
     truth = dropout_truth(n_cells=1_000, n_sites=200, n_clones=4, seed=7)
     store, ids, genotypes = _store_of_truth(tmp_path, truth.calls)
     bands: list[int] = []
@@ -637,11 +638,17 @@ def test_calls_read_in_bands_at_a_small_budget_give_the_clones_of_one_band(
 
     monkeypatch.setattr(variants, "_variant_bands", counted)
     whole = store.variants.genotype_clones(genotypes, method=method)
-    store.memoryBytes = 5_000_000
-    banded = store.variants.genotype_clones(
-        genotypes, method=method, invalidate_cache=True
-    )
-    assert bands[0] == 1 and bands[1] > 1, bands
+    assert bands == [1]
+
+    def banded_at(budget: int):
+        store.memoryBytes = budget
+        return store.variants.genotype_clones(
+            genotypes, method=method, invalidate_cache=True
+        )
+
+    # From 1 MB, the refusals name the least budget that runs.
+    _refusals, banded = climb_refusals(banded_at, start=1_000_000)
+    assert bands[-1] > 1, bands
     assert (
         store.clones.load_clones(banded)
         .cells.loc[ids]

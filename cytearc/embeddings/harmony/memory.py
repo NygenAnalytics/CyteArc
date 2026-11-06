@@ -53,9 +53,7 @@ def harmony_peak_bytes(
     DataStore fills before the fit, and the fit's own arrays at the largest of
     its phases: encoding the batch design, k-means++ seeding, clustering, and
     correction. Per cell, the dominant terms are ``24 dims + 8 n_clusters`` bytes:
-    the input, original and corrected coordinates, and the assignments. An
-    eighth of the total is added for small temporaries, plus 64 KiB for Python
-    objects.
+    the input, original and corrected coordinates, and the assignments.
 
     Args:
         n_cells: The number of cells.
@@ -135,5 +133,4 @@ def harmony_peak_bytes(
         + 48 * (g + b)
         + 24 * largest * d
     )
-    raw = max(encoding, base + max(seeding, clustering, correction))
-    return raw + raw // 8 + 65536
+    return max(encoding, base + max(seeding, clustering, correction))

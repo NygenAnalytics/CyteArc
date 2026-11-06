@@ -395,13 +395,11 @@ def cluster_memory_bytes(n_perturbations: int, n_features: int) -> int:
     The float64 profiles stay while each step runs. The distances take the
     centred profiles and a copy of the distances that makes them symmetric;
     then, beside the distances, HDBSCAN holds its copy of them with the core
-    distances and its tree, measured at 2.2 copies on Python 3.13 and 2.6
-    on 3.15 and budgeted at 3.2, the linkage holds the
-    condensed distances and its copy, and the layout's PCA up to 5.3 copies
-    of the profiles, measured, with scikit-learn's randomized solver's
-    float64 matrices of features x 12, its 2 components and 10 more,
-    measured at 3.1 copies beside 2 copies of the profiles and budgeted at
-    4; they outweigh the profiles below 12 perturbations.
+    distances and its tree, the linkage holds the condensed distances and
+    its copy, and the layout's PCA holds copies of the profiles beside
+    scikit-learn's randomized solver's float64 matrices of features x 12,
+    its 2 components and 10 more, which outweigh the profiles below 12
+    perturbations.
 
     Args:
         n_perturbations: The perturbations clustered.

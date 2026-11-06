@@ -56,7 +56,7 @@ import numpy as np
 
 from ..utils.arguments import integer_argument
 from ..utils.arrays import sorted_unique, unique_inverse
-from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
+from ..utils.memory_budget import MemoryLedger
 from ..utils.numba import njit
 
 __all__ = [
@@ -139,10 +139,8 @@ _AGREEMENT_BYTES = 8
 _COUNTED_CODE_BYTES = 9
 # Each state of the edit distances of chance pairs while one cell expands:
 # its key and chance, those of its two children, their order, sorted copies
-# and flags, and the states kept, at most 146 bytes as traced at 8 edits;
-# and the small arrays of the cells, up to 25 KiB at 4 edits.
+# and flags, and the states kept.
 _CHANCE_STATE_BYTES = 160
-_CHANCE_FIXED_BYTES = 1 << 15
 # Choosing one text per component holds, for each text, its component and
 # priority, their order, the sorted runs and the texts chosen; taking each
 # position's character of one text per component, with characters of no base,
@@ -1182,7 +1180,7 @@ def _encoded(
     # until the search returns; fewer than two texts are never compared.
     held = 3 * len(texts) * width + _TEXT_BYTES * len(texts)
     if len(texts) > 1:
-        held += _table_bytes(width) + NUMPY_STEP_BYTES
+        held += _table_bytes(width)
     what = "the encoded texts"
     # Joined, the texts take a byte per character, and their codes another.
     _check(ledger, held + 2 * characters, what)
@@ -1349,7 +1347,7 @@ def _edit_chance(agree: np.ndarray, limit: int, ledger: MemoryLedger) -> float:
                 continue
             _check(
                 ledger,
-                _CHANCE_STATE_BYTES * len(keys) + _CHANCE_FIXED_BYTES,
+                _CHANCE_STATE_BYTES * len(keys),
                 "the edit distances of chance pairs",
             )
             # The cells beside, in the row above and to the left in this row,
@@ -1844,9 +1842,8 @@ def neighbor_pairs(
             it allocates, and leaves the pairs returned charged to, 16 bytes
             each, for the caller to release: the encoded texts,
             about three times their longest length and 72 bytes more per
-            text, with 2 KiB of hash codes for each position of the longest
-            and ``NUMPY_STEP_BYTES`` for its sorts and smaller arrays; 48 bytes for each
-            length of each block; the variant keys of one pass, 8 bytes
+            text, with 2 KiB of hash codes for each position of the longest;
+            48 bytes for each length of each block; the variant keys of one pass, 8 bytes
             each; under substitutions the codes of the texts of a length
             packed 2, 4 or 8 bits each, 8 bytes for each 64-bit word of a
             text, with those of a run of keys copied to a buffer of at least

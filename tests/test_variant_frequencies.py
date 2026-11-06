@@ -407,11 +407,11 @@ def test_frequency_clones_check_inputs_and_memory() -> None:
         frequency_clones(
             frequencies, n_neighbors=5, resolution=1.0, random_seed=1, memory_bytes=5000
         )
-    # Enough for the similarities but not for the graph's fixed arrays, then
-    # not for its joins.
+    # Enough for the similarities, about 12 kB, but not for the graph's
+    # fixed arrays, about 21 kB, then not for its joins, which fit about 50 kB.
     for budget, message in (
-        (12_000, "before it holds a join"),
-        (40_000, "graph of 40 cells does not fit"),
+        (16_000, "before it holds a join"),
+        (32_000, "graph of 40 cells does not fit"),
     ):
         with pytest.raises(MemoryError, match=message):
             frequency_clones(
@@ -421,8 +421,14 @@ def test_frequency_clones_check_inputs_and_memory() -> None:
                 random_seed=1,
                 memory_bytes=budget,
             )
-    # Enough for the similarities and the graph, but not for partitioning the
-    # two cells that join, which needs the Leiden backend's fixed 256 KiB.
+
+
+def test_frequency_clones_refuse_a_partition_beyond_the_budget(monkeypatch) -> None:
+    import cytearc.clustering.leiden as leiden
+
+    # The Leiden backend's estimate for the cells that join is checked against
+    # the budget before Leiden runs, here an estimate far beyond it.
+    monkeypatch.setattr(leiden, "native_leiden_peak_bytes", lambda *_args: 10**9)
     with pytest.raises(
         MemoryError, match="Partitioning the shared-neighbour graph of 2 cells"
     ):

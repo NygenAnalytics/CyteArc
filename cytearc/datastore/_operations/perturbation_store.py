@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -256,8 +256,7 @@ def _stream_bytes(counts: Any, scratch_bytes_per_row: int = 0) -> tuple[int, int
     """Return what a budgeted row stream of ``counts`` holds: its least, and with blocks of a stored chunk's rows.
 
     ``ChunkedArray._stream_blocks`` with a memory budget holds the matrix's
-    own arrays, the decode of one stored chunk beside the chunk that the
-    previous read can still hold, and the rows of each block with
+    own arrays, the decode of one stored chunk, and the rows of each block with
     ``scratch_bytes_per_row`` for each, beside the caller's resident bytes.
     It shrinks its blocks to fit, down to one row, and refuses a budget
     without room for that row; this follows its arithmetic. A block of the
@@ -298,14 +297,13 @@ def _count_stream(
     refuses beyond its budget: a smaller block decodes the same chunk again
     for each block, so it would save little memory for much time. The stream
     then reads as many blocks ahead as the room holds, beside
-    ``ledger.held_bytes``. Once the blocks are read, the ledger counts the
-    chunk that the last read can still hold.
+    ``ledger.held_bytes``.
     """
     _least, block = _stream_bytes(counts, scratch_bytes_per_row)
     ledger.peak(item, block)
     room = ledger.room
     ledger.peak(item, block if room is None else max(block, room))
-    blocks: Iterator[np.ndarray] = counts._stream_blocks(
+    blocks: Iterable[np.ndarray] = counts._stream_blocks(
         nthreads=nthreads,
         msg=msg,
         prefetch=None,
@@ -314,19 +312,7 @@ def _count_stream(
         memory_bytes=ledger.budget,
         scratch_bytes_per_row=scratch_bytes_per_row,
     )
-    return _leaving(ledger, blocks, counts._held_read_bytes())
-
-
-def _leaving(
-    ledger: MemoryLedger, blocks: Iterator[np.ndarray], held: int
-) -> Iterator[np.ndarray]:
-    """Yield ``blocks``, then record that the stream's last read may still hold ``held`` bytes.
-
-    The reader that decoded the last chunk of a stream can keep it, as stored
-    and decoded, after the stream ends, as the chunk of a metadata read does.
-    """
-    yield from blocks
-    ledger.leave(held)
+    return blocks
 
 
 def _count_blocks(
@@ -377,9 +363,8 @@ def _count_stream_bytes(
     """Return the bytes that :func:`_count_blocks` holds beside its caller's.
 
     That is the stream's index arrays and one block of the counts of
-    ``features`` over the ``cells`` of a stored chunk, with its decode, the
-    chunk that the previous read can still hold, and the
-    ``scratch_bytes_per_row`` that the caller makes of each row.
+    ``features`` over the ``cells`` of a stored chunk, with its decode, and
+    the ``scratch_bytes_per_row`` that the caller makes of each row.
     """
     held: int = _count_matrix(assay, features, cells).stream_bytes(
         scratch_bytes_per_row

@@ -219,9 +219,7 @@ _HELD_RECORD_BYTES = 18
 # and the flags looked up; the correction, each kept record's count in its
 # library's unit, its block and code, their order and sorted copies, and its
 # entry; and the collapse into pairs, the copies of the kept records' fields,
-# their order and their sorted copies, with each run's sums. The whole call
-# held at most 113 bytes per record of 441,000 molecules and 138 per record of
-# 144,000 pairs, as traced.
+# their order and their sorted copies, with each run's sums.
 _LOOKUP_RECORD_BYTES = 32
 _CORRECTION_RECORD_BYTES = 96
 _PAIRING_RECORD_BYTES = 136
@@ -236,7 +234,7 @@ _FLAG_BYTES = 1
 _ALLOWED_BYTES = 200
 # Counting the distinct barcodes of each block without correction holds, for
 # each kept record, its block and barcode, their key, its sorted copy and its
-# flag, at most 41 bytes as traced.
+# flag.
 _DISTINCT_RECORD_BYTES = 48
 # Each pair of a cell and a barcode is held as its cell, library, barcode,
 # UMIs, reads and kept flag; the pair filters hold its count, its block's

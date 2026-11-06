@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from cytearc.storage.arrays import zarr_write_buffer_bytes
 from tests.clone_helpers import write_truth_store
 from tests.storage_helpers import open_store
 from tests.variant_truth import (
@@ -385,7 +384,6 @@ def band_budget(store: "DataStore", counts, rows: int) -> int:
         240 * n_alleles
         + 16 * n_sites
         + 2 * _widest_chunk_bytes(group, names)
-        + zarr_write_buffer_bytes()
         + 200 * rows
     )
 

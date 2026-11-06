@@ -43,7 +43,7 @@ from dataclasses import dataclass
 import numpy as np
 from numba import prange
 
-from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
+from ..utils.memory_budget import MemoryLedger
 from ..utils.numba import njit
 
 #: Fixed chunks of cells whose sums are added in order, so that results do
@@ -1316,7 +1316,6 @@ def em_iteration_bytes(n_sites: int, n_components: int) -> int:
         + 40 * n_components * words
         + 64 * n_components
         + 128 * n_sites
-        + NUMPY_STEP_BYTES
     )
 
 

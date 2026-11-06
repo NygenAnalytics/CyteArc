@@ -192,8 +192,6 @@ _REFERENCE_BYTES = 8
 # Bytes that a distinct library label takes in the table that codes labels,
 # beside its text.
 _LABEL_ENTRY_BYTES = 120
-# Bytes of the cache of chunks that h5py keeps for each dataset it reads.
-_CHUNK_CACHE_BYTES = 1 << 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,7 +319,7 @@ class _Matrix:
 
     ``chunks`` is the shape of the HDF5 chunks of a dense matrix, or None
     for one stored without chunks or a sparse one, and ``buffer_bytes`` the
-    bytes of the chunk that HDF5 inflates and caches for each dataset read.
+    bytes of the chunk that HDF5 inflates for each dataset read.
     """
 
     encoding: str
@@ -765,11 +763,11 @@ def _matrix(handle: h5py.File, path: str) -> _Matrix:
 
 
 def _buffer_bytes(dataset: h5py.Dataset) -> int:
-    """The bytes of one inflated chunk of a dataset, and of h5py's cache of chunks."""
+    """The bytes of one inflated chunk of a dataset, 0 for a dataset without chunks."""
     if dataset.chunks is None:
-        return _CHUNK_CACHE_BYTES
+        return 0
     elements = int(np.prod(dataset.chunks, dtype=np.int64))
-    return elements * int(dataset.dtype.itemsize) + _CHUNK_CACHE_BYTES
+    return elements * int(dataset.dtype.itemsize)
 
 
 def _name_blocks(table: h5py.Group, path: str, what: str) -> Iterator[list[str]]:

@@ -56,7 +56,6 @@ from ...storage.arrays import (
     MetadataBlock,
     create_streamed_metadata_column,
     create_zarr_dataset,
-    zarr_write_buffer_bytes,
 )
 from ...storage.artifacts import (
     ArtifactRef,
@@ -78,7 +77,6 @@ from ...utils.arrays import sort_categories, sorted_unique
 from ...utils.digest import path_sha256
 from ...utils.logging import logger
 from ...utils.memory_budget import (
-    NUMPY_STEP_BYTES,
     MemoryLedger,
     fixed_text_bytes,
     object_array_bytes,
@@ -148,8 +146,7 @@ _LOAD_BYTES_PER_NODE = 160
 # clones drawn or counting what the rows draw, holds at most this many bytes
 # a row in masks, positions and categories at once.
 _FIGURE_STEP_BYTES_PER_ROW = 64
-# A fixed allowance for opening files and stores and for each tree.
-_FIXED_BYTES = 4 << 20
+# The forest holds this many bytes for each tree beside its nodes.
 _BYTES_PER_TREE = 2_000
 
 
@@ -322,7 +319,6 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             remedy="pass a smaller cell_selection",
             codec_threads=self.nthreads,
         )
-        ledger.hold("the objects that open files, stores and trees", _FIXED_BYTES)
         # Every file's trees are held until the forest is built, so the bound
         # of all of them and the largest peak of one are checked before any is
         # read; the reader checks each file again as it reads.
@@ -639,11 +635,9 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             "n_leaves": int(np.count_nonzero(is_leaf)),
         }
         width = _names_width(forest.names)
-        # The arrays are written beside what Zarr's writes hold in file
-        # buffers.
         ledger.peak(
             f"writing the names of {len(forest.names)} nodes",
-            _write_bytes(width, len(forest.names)) + zarr_write_buffer_bytes(),
+            _write_bytes(width, len(forest.names)),
         )
         with artifact_transaction(self.zw, planned) as group:
             group.attrs.update(attributes)
@@ -1030,7 +1024,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         begin, end = 0, n_nodes
         if tree is not None:
             # Each tree's name is compared with the one asked for.
-            ledger.peak("finding the tree", len(tree_names) + NUMPY_STEP_BYTES)
+            ledger.peak("finding the tree", len(tree_names))
             found = np.flatnonzero(tree_names == tree)
             if not len(found):
                 shown = ", ".join(
@@ -1106,7 +1100,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         row_codes = nodes["clone"].to_numpy()
         ledger.peak(
             f"finding the clones of {n_rows} rows",
-            _FIGURE_STEP_BYTES_PER_ROW * n_rows + NUMPY_STEP_BYTES,
+            _FIGURE_STEP_BYTES_PER_ROW * n_rows,
         )
         codes_drawn = sorted_unique(row_codes[row_codes >= 0])
         drawn_bytes = ledger.hold(
@@ -1131,7 +1125,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         )
         ledger.peak(
             f"each of the {n_rows} rows' clone and tree",
-            _FIGURE_STEP_BYTES_PER_ROW * n_rows + NUMPY_STEP_BYTES,
+            _FIGURE_STEP_BYTES_PER_ROW * n_rows,
         )
         one = row_codes >= 0
         at = np.searchsorted(codes_drawn, row_codes[one])
@@ -1167,7 +1161,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         # What the figure draws is counted from the rows, then checked.
         ledger.peak(
             f"counting what {n_rows} rows draw",
-            _FIGURE_STEP_BYTES_PER_ROW * n_rows + NUMPY_STEP_BYTES,
+            _FIGURE_STEP_BYTES_PER_ROW * n_rows,
         )
         ledger.peak(f"drawing {n_rows} rows of the phylogeny", drawing_bytes(collapsed))
         return collapsed

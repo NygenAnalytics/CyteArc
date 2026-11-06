@@ -40,7 +40,7 @@ from .rows import (
     read_metadata_missing_rows,
     read_metadata_rows,
     read_rows,
-    rows_read_charge,
+    row_read_bytes,
 )
 
 LookupBy = Literal["name", "id", "index"]
@@ -899,15 +899,12 @@ class CellSelectionRead:
         geometry: The geometry of its stored flags, or None when they have
             no chunks.
         rows: The rows of its flags, one for each cell of the store.
-        checked: Whether its identity check ran as the read was planned;
-            otherwise the check runs as the cells are read.
     """
 
     selection: ArtifactRef
     cells: int
     geometry: ArrayGeometry | None
     rows: int
-    checked: bool
 
 
 def plan_cell_selection_read(
@@ -929,7 +926,6 @@ def plan_cell_selection_read(
         cells=n_selected,
         geometry=array_geometry(values),
         rows=int(values.shape[0]),
-        checked=cells is None,
     )
 
 
@@ -943,43 +939,27 @@ def read_cell_selection(
     whole read at the operation's Zarr concurrency does, as
     ``ArrayGeometry.wholeReadBytes`` counts it, beside each selected cell's
     position as found, moved and returned; a stored chunk can outweigh the
-    cells it selects. The read is charged the positions beside what it
-    leaves on each of the ledger's codec threads where that is more, and
-    what it leaves stays charged until the next read. An identity check that
-    runs with the read reads the flags first, so what that read leaves is
-    held beside the read of the positions.
+    cells it selects.
 
     Raises:
         MemoryBudgetError: If the read would pass the ledger's budget.
     """
-    reading, held = _selection_read_parts(ledger, planned)
-    ledger.peak(item, reading)
+    ledger.peak(item, _selection_read_bytes(planned))
     # The flags decode on the ledger's codec threads, as every read that a
-    # ledger charges does, so what this read leaves replaces what the read
-    # before it left.
+    # ledger charges does.
     with zarr_decoding_threads(ledger.codec_threads):
         indices = cell_selection_indices(root, planned.selection)
-    if held:
-        ledger.leave(held)
     ledger.hold(item, indices.nbytes)
     return indices
 
 
-def _selection_read_parts(
-    ledger: MemoryLedger, planned: CellSelectionRead
-) -> tuple[int, int]:
-    """What :func:`read_cell_selection` charges ``ledger`` to read ``planned``'s positions, and what that read leaves on the codec threads."""
+def _selection_read_bytes(planned: CellSelectionRead) -> int:
+    """What :func:`read_cell_selection` charges to read ``planned``'s positions."""
     positions = 3 * _INDEX_BYTES * planned.cells
     geometry = planned.geometry
     if geometry is None:
-        return planned.rows + positions, 0
-    chunks = -(-geometry.shape[0] // geometry.axisChunk(0))
-    held = geometry.heldReadBytes(ledger.holding_threads(chunks))
-    reading = max(
-        geometry.wholeReadBytes(operation_concurrency()) + positions,
-        _INDEX_BYTES * planned.cells + held,
-    ) + (0 if planned.checked else held)
-    return reading, held
+        return planned.rows + positions
+    return geometry.wholeReadBytes(operation_concurrency()) + positions
 
 
 def _selection_count(root: Any, selection: ArtifactRef) -> int:
@@ -1100,11 +1080,10 @@ def resolve_cell_aligned_artifact(
     charges the flags and positions that the read holds, and each array read
     through :func:`~cytearc.metadata.rows.read_rows` at the selected rows,
     the values, their missing mask, and ``caller_reads``, arrays that the
-    caller reads at the same rows. Before anything is read, the rows are
-    charged as the fewest bands of chunks they can span; once the positions
-    are read, and before any array is, as the bands they span. The values,
-    the mask and the positions of the cells stay charged when the read
-    returns. Without a ledger, the read checks no budget.
+    caller reads at the same rows. The rows are charged before anything is
+    read, and again once the positions are read, before any array is. The
+    values, the mask and the positions of the cells stay charged when the
+    read returns. Without a ledger, the read checks no budget.
 
     Raises:
         MemoryBudgetError: If ``ledger`` cannot hold what the read holds.
@@ -1168,38 +1147,27 @@ def resolve_cell_aligned_artifact(
             # One check covers each step of the read before anything is read,
             # so a refusal names the budget that reads it all: each
             # selection's read of its positions, beside the source cells'
-            # positions and what their read leaves when the requested cells
-            # differ, then the places of the requested cells among the
-            # source's as they are found and checked, and the rows, charged
-            # as the fewest bands of chunks they can span, which no rows
-            # undercut, beside the positions kept and what the last
-            # selection's read leaves.
+            # positions when the requested cells differ, then the places of
+            # the requested cells among the source's as they are found and
+            # checked, and the rows beside the positions kept.
             planned_source = plan_cell_selection_read(root, source_selection)
-            source_read, source_left = _selection_read_parts(ledger, planned_source)
+            source_read = _selection_read_bytes(planned_source)
             if same_selection:
-                n_target, left = n_source, source_left
+                n_target = n_source
                 steps = [source_read]
             else:
                 planned_target = plan_cell_selection_read(root, target_selection)
                 n_target = planned_target.cells
-                target_read, target_left = _selection_read_parts(ledger, planned_target)
-                left = target_left
                 steps = [
                     source_read,
-                    _INDEX_BYTES * n_source + source_left + target_read,
-                    _INDEX_BYTES * n_source
-                    + target_left
-                    + (3 * _INDEX_BYTES + 2) * n_target,
+                    _INDEX_BYTES * n_source + _selection_read_bytes(planned_target),
+                    _INDEX_BYTES * n_source + (3 * _INDEX_BYTES + 2) * n_target,
                 ]
-            fewest = sum(
-                rows_read_charge(ledger, array, n_target)[0] for array in row_arrays
+            row_reads = sum(
+                row_read_bytes(array_geometry(array), n_target) for array in row_arrays
             )
-            steps.append(2 * _INDEX_BYTES * n_target + left + fewest)
-            # The first read replaces what the caller's last read left, so
-            # each later step counts only what the reads before it leave.
-            earlier = ledger.left
-            required = max(steps[0], *(step - earlier for step in steps[1:]))
-            _refuse_cell_read(ledger, required, item=item, n_cells=n_target)
+            steps.append(2 * _INDEX_BYTES * n_target + row_reads)
+            _refuse_cell_read(ledger, max(steps), item=item, n_cells=n_target)
 
         positions = f"the cell positions of {item}"
         source_idx = _read_positions(
@@ -1246,15 +1214,9 @@ def resolve_cell_aligned_artifact(
             if budgeted:
                 ledger.release(source_bytes)
     if budgeted:
-        # Every array is read at the rows of the requested cells, which the
-        # read charges by the bands they span.
-        span = (
-            (int(compact_idx.min()), int(compact_idx.max()))
-            if compact_idx.size
-            else None
-        )
+        # Every array is read at the rows of the requested cells.
         required = sum(
-            rows_read_charge(ledger, array, compact_idx.size, span=span)[0]
+            row_read_bytes(array_geometry(array), compact_idx.size)
             for array in row_arrays
         )
         _refuse_cell_read(ledger, required, item=item, n_cells=len(target_idx))

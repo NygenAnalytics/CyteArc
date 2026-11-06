@@ -2,7 +2,6 @@ import csv
 import gzip
 import hashlib
 import io
-import re
 import weakref
 import warnings
 import zlib
@@ -14,7 +13,6 @@ import zarr
 
 import cytearc.datastore._operations.record_tables as record_tables
 import cytearc.datastore._operations.repertoire as repertoire_operations
-import cytearc.metadata.rows as metadata_rows
 import cytearc.writers.airr as airr_writer
 from cytearc import DiagnosticWarning
 from cytearc.metadata.records import EncodedText, encode_text
@@ -38,8 +36,8 @@ from tests.clone_helpers import (
     write_cells_store,
     write_lines,
 )
-from cytearc.storage.geometry import array_geometry
 from cytearc.utils.memory_budget import MemoryLedger
+from tests.memory_helpers import climb_refusals, named_budget
 
 # Contig IDs repeat across the three files: X takes _3 and then _4, since the
 # TCR file names a contig X_2, and Z takes _3, or _2 when only chains are
@@ -965,7 +963,6 @@ def test_the_longest_value_sizes_the_blocks(tmp_path) -> None:
             cell_width=5,
             clone_width=None,
             block_bytes=100_000,
-            compressed=False,
         )
     # One sequence of 20,000 bytes, read and rendered, leaves room for at
     # most two rows of 40,000 bytes in 100,000 bytes; short rows all fit.
@@ -1174,36 +1171,13 @@ def test_packing_text_counts_each_slice_and_their_join() -> None:
             ledgers[-1], array, None, 1, item="the values"
         )
 
-    refusals = _walk(pack)
-    packed, longest = pack(10**9)
-    # The offsets; each slice of one row stored in 4,000 bytes, as a read of
-    # one row holds it, beside the slices packed before it and what the read
-    # before may still hold; and the join, a second copy of every slice.
-    one_row = metadata_rows.row_read_bytes(array_geometry(array), np.asarray([0]))
-    left = array_geometry(array).heldReadBytes()
-    offsets = 8 * 61
-    assert refusals == [
-        offsets,
-        *(offsets + 1_997 * k + (left if k else 0) + one_row for k in range(60)),
-        offsets + 2 * 1_997 * 60 + left,
-    ]
+    refusals, (packed, longest) = climb_refusals(pack)
+    # The offsets are refused first, then each slice as it is packed beside
+    # the slices before it, and then their join, so the climb passes a step
+    # for each slice.
+    assert len(refusals) > 60
     assert bytes(packed.data).decode("utf-8") == "".join(values.tolist())
-    assert longest == 1_997 and ledgers[-1].charged == offsets + 1_997 * 60
-
-
-def _walk(run) -> list[int]:
-    """Each refusal's estimate, from a limit of one byte to one that runs."""
-    refusals = []
-    limit = 1
-    while True:
-        try:
-            run(limit)
-            return refusals
-        except MemoryError as error:
-            found = re.search(r"holds about (\d+) bytes", str(error))
-            assert found is not None and int(found.group(1)) > limit
-            refusals.append(int(found.group(1)))
-            limit = refusals[-1]
+    assert longest == 1_997
 
 
 def _edge_contigs(store, receptors, limit, fields=("sequence_id", "v_call")):
@@ -1216,22 +1190,11 @@ def _edge_contigs(store, receptors, limit, fields=("sequence_id", "v_call")):
     )
 
 
-def _chunk(array) -> int:
-    """The bytes of one chunk that reading an array holds, as stored and decoded."""
-    return array_geometry(array).storedChunkBytes()
-
-
-def _left(array) -> int:
-    """What a finished read of one chunk of an array may still hold beside the next."""
-    return array_geometry(array).heldReadBytes()
-
-
 @pytest.mark.parametrize("wider", [0, 2**20])
 def test_measuring_is_checked_with_a_span_of_contigs(
     tmp_path, monkeypatch, wider
 ) -> None:
     store, receptors = _edge_receptors(tmp_path)
-    group = artifact_group(store.zw, receptors)
     stored = repertoire_operations._stored_chunk_bytes
 
     def model(array):
@@ -1245,35 +1208,25 @@ def test_measuring_is_checked_with_a_span_of_contigs(
 
     monkeypatch.setattr(repertoire_operations, "_stored_chunk_bytes", model)
     fields = ("sequence_id", "sequence", "v_identity", "d_identity")
-    refusals = _walk(
-        lambda limit: _edge_contigs(store, receptors, limit, fields).measure(
-            10**9, cells=_CELLS, clones=None
-        )
-    )
-    # Two stored chunks of the arrays read, one decoded and one held from
-    # the read before; a stored chunk of a ragged field's bytes as read, here
-    # all 40 bytes of the ten IDs, X, X_2, Y and Z, X, Z and Z_2, two of 14
-    # and X, against the 10 of the sequences; and 64 bytes for each of the
-    # ten contigs of the span.
-    reading = max(
-        model(group[name])
-        for name in (
-            "contig_sequence_id_offsets",
-            "contig_sequence_offsets",
-            "contig_sequence_id",
-            "contig_sequence",
-            "contig_v_identity",
-            "contig_d_identity",
-        )
-    )
-    if wider:
-        assert reading == stored(group["contig_sequence_id"]) + wider
-    assert refusals == [2 * reading + 40 + 64 * 10]
+
+    def measured(limit):
+        contigs = _edge_contigs(store, receptors, limit, fields)
+        contigs.measure(10**9, cells=_CELLS, clones=None)
+        return contigs
+
+    refusals, contigs = climb_refusals(measured)
+    # The span is checked once, before it reads, beside a stored chunk of the
+    # arrays it reads, which the larger chunks of the ragged fields' bytes
+    # raise; the longest ID is cell5_contig_1.
+    assert [error.item for error in refusals] == [
+        "measuring the widest value of each field"
+    ]
+    assert refusals[0].needed_bytes > wider
+    assert contigs.width("sequence_id") == 14
 
 
 def test_hashing_the_ids_is_checked_with_the_hashes(tmp_path) -> None:
     store, receptors = _edge_receptors(tmp_path)
-    group = artifact_group(store.zw, receptors)
 
     def scan(limit):
         contigs = _edge_contigs(store, receptors, 10**9, ("sequence_id",))
@@ -1281,19 +1234,15 @@ def test_hashing_the_ids_is_checked_with_the_hashes(tmp_path) -> None:
         contigs.ledger.budget = limit
         return contigs.scan(10**9)
 
-    # Beside what measuring the IDs may still hold, the larger chunk of their
-    # offsets and their bytes and Zarr's objects: the hashes of the ten
-    # contigs, then a block of all ten IDs, 300 bytes and 6 per byte of the
-    # longest, cell5_contig_1, as they are decoded and hashed, the window of
-    # the eleven offsets, and a stored chunk of the IDs' arrays.
-    names = ("contig_sequence_id_offsets", "contig_sequence_id")
-    left = max(_left(group[name]) for name in names)
-    reading = max(_chunk(group[name]) for name in names)
-    hashes = 8 * 10
-    assert _walk(scan) == [
-        left + hashes,
-        left + hashes + (300 + 6 * 14) * 10 + 11 * 8 + reading,
+    # The hashes of the ten contigs are held first, then a block of all ten
+    # IDs is checked as they are decoded and hashed beside the window of
+    # their offsets and a stored chunk of the IDs' arrays.
+    refusals, (hashes, _block_rows) = climb_refusals(scan)
+    assert [error.item for error in refusals] == [
+        "the hashes of the contigs' IDs",
+        "hashing a block of the contigs' IDs",
     ]
+    assert np.array_equal(hashes, scan(10**9)[0]) and len(hashes) == 10
 
 
 def test_renamed_ids_stay_held_while_the_blocks_are_written(
@@ -1612,14 +1561,11 @@ def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
     tmp_path,
 ) -> None:
     store, receptors = _forbidden_receptors(tmp_path)
-    group = artifact_group(store.zw, receptors)
     fields = ("sequence_id", "v_call")
-    base = []
 
     def contigs_within(limit):
         contigs = _edge_contigs(store, receptors, 10**9, fields)
         contigs.hold_text()
-        base[:] = [contigs.ledger.charged, contigs.ledger.left]
         contigs.ledger.budget = limit
         return contigs
 
@@ -1627,48 +1573,29 @@ def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
         with pytest.raises(ValueError, match="3 values of v_call"):
             contigs_within(limit).measure(10**9, cells=_CELLS, clones=None)
 
-    refusals = _walk(run)
-    held, lingering = base
-    reading = max(
-        _chunk(group[name])
-        for name in (
-            "contig_sequence_id_offsets",
-            "contig_sequence_id",
-            "contig_v_call",
-        )
-    )
-    # The codes of the two V calls that hold a tab, one of them two, 8 bytes
-    # each, stay held; then the span, as without such values, but with a
-    # chunk of the V calls' codes, and a stored chunk of IDs, all 61 bytes of
-    # the six, five of 10 bytes and z_con\rtig_1 of 11, and 64 bytes for each
-    # of the six contigs.
-    assert refusals == [
-        held + lingering + 16,
-        held + 16 + lingering + reading + max(0, reading - lingering) + 61 + 64 * 6,
+    # The codes of the two V calls that hold a tab, one of them two, stay
+    # held, then the span is checked as without such values; once both fit,
+    # measuring finds the three values. The climb starts at the bytes that
+    # the held text takes, so that the codes refuse by their own charge.
+    held = contigs_within(10**9).ledger.held_bytes
+    refusals, _ = climb_refusals(run, start=held)
+    assert [error.item for error in refusals] == [
+        "the codes of the v_call values that the format forbids",
+        "measuring the widest value of each field",
     ]
-    # Reading the ID of the V call's first contig, x_contig_1, is checked too:
-    # a stored chunk of the IDs' arrays beside the span's last, 16 bytes of
-    # offsets and the 11 of the longest ID.
+    # Reading the ID of the V call's first contig, x_contig_1, is checked too,
+    # and the budget that its refusal names reads it.
     contigs = contigs_within(10**9)
     with pytest.raises(ValueError):
         contigs.measure(10**9, cells=_CELLS, clones=None)
     contigs.ledger.budget = 1
-    ids = max(
-        _chunk(group[name])
-        for name in ("contig_sequence_id_offsets", "contig_sequence_id")
-    )
-    # What measuring may still hold: the largest chunk of what it read.
-    measured = max(
-        _left(group[name])
-        for name in (
-            "contig_sequence_id_offsets",
-            "contig_sequence_id",
-            "contig_v_call",
-        )
-    )
-    reading_ids = held + 16 + measured + ids + max(0, ids - measured) + 16 + 11
-    with pytest.raises(MemoryError, match=f"holds about {reading_ids} bytes"):
+    with pytest.raises(MemoryError) as refused:
         contigs._contig_id(0)
+    assert refused.value.item == (
+        "the sequence_id of a contig whose value the format forbids"
+    )
+    contigs.ledger.budget = named_budget(refused.value)
+    assert contigs._contig_id(0) == "x_contig_1"
 
 
 def test_rows_are_marked_by_the_value_that_holds_a_forbidden_byte() -> None:

@@ -461,7 +461,8 @@ def test_streamed_doublets_match_materialized_doublets(
     untied = bounds[0] == bounds[1]
     np.testing.assert_array_equal(counted[1][untied], counts_used[untied])
     np.testing.assert_array_equal(repeated.simulated_parents, actual.simulated_parents)
-    with pytest.raises(MemoryError, match="operation limit is 1000000 bytes"):
+    # A budget far below the cells' coordinates and their index refuses.
+    with pytest.raises(MemoryError, match="operation limit is 1000 bytes"):
         doublets.score_synthetic_doublets(
             store.RNA,
             reference,
@@ -470,7 +471,7 @@ def test_streamed_doublets_match_materialized_doublets(
             np.zeros(len(rows), dtype=np.int64),
             feature_indices,
             totals,
-            **(options | {"resources": ResourceBudget(1_000_000, 1)}),
+            **(options | {"resources": ResourceBudget(1_000, 1)}),
         )
 
     # Pair generation is admitted before any pair is drawn.

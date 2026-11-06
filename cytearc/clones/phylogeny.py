@@ -29,7 +29,7 @@ import pandas as pd
 
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import integer_argument, quoted_value
-from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
+from ..utils.memory_budget import MemoryLedger
 from ..utils.numba import njit
 
 __all__ = [
@@ -922,7 +922,7 @@ def collapse_phylogeny(
         )
     roots = offsets[:-1]
     # The check holds each tree's gap to the next and its root's parent.
-    ledger.peak("checking the trees", 24 * len(offsets) + NUMPY_STEP_BYTES)
+    ledger.peak("checking the trees", 24 * len(offsets))
     if (np.diff(offsets) <= 0).any() or (parent[roots] >= 0).any():
         raise ValueError(
             "Each tree of the phylogeny must hold a node and start at its root"
@@ -936,23 +936,19 @@ def collapse_phylogeny(
         if times is None or len(times) != n_nodes:
             raise ValueError("A cut at a time needs each node's time")
         x, time_bytes = _given(ledger, times, np.float64, "each node's time")
-        ledger.peak("checking each node's time", n_nodes + NUMPY_STEP_BYTES)
+        ledger.peak("checking each node's time", n_nodes)
         if np.isnan(x).any():
             raise ValueError("A node of the phylogeny has no time; cut it at a depth")
         limit = cut.time
     elif cut.depth is not None:
         time_bytes = 0
-        ledger.peak(
-            "each node's depth", _DEPTH_PEAK_BYTES_PER_NODE * n_nodes + NUMPY_STEP_BYTES
-        )
+        ledger.peak("each node's depth", _DEPTH_PEAK_BYTES_PER_NODE * n_nodes)
         x = collapsed_depths(parent).astype(np.float64)
         depth_bytes = ledger.hold("each node's depth", 8 * n_nodes)
         limit = float(cut.depth)
     else:
         raise ValueError("The cut needs a time or a depth")
-    ledger.peak(
-        "each node's clade", _CLADE_PEAK_BYTES_PER_NODE * n_nodes + NUMPY_STEP_BYTES
-    )
+    ledger.peak("each node's clade", _CLADE_PEAK_BYTES_PER_NODE * n_nodes)
     past = x >= limit
     in_clade = clade_roots(parent, past) >= 0
     del past
@@ -969,7 +965,7 @@ def collapse_phylogeny(
             "names a cell, a cell in a clade of the cut has no clone or one "
             "outside has, or a clade holds two clones"
         )
-    ledger.peak("each tree's cells", 8 * len(roots) + NUMPY_STEP_BYTES)
+    ledger.peak("each tree's cells", 8 * len(roots))
     total = int(n_cells[roots].sum())
     if not total:
         raise ValueError(
@@ -1043,9 +1039,7 @@ def collapse_phylogeny(
     del kind, node, row_parent, ranks, opened
     ledger.release(opening_bytes)
     # The columns in drawing order, then the table's blocks that copy them.
-    ledger.peak(
-        "the table of the rows", 2 * _TABLE_BYTES_PER_ROW * n_rows + NUMPY_STEP_BYTES
-    )
+    ledger.peak("the table of the rows", 2 * _TABLE_BYTES_PER_ROW * n_rows)
     frame = pd.DataFrame(
         {
             "tree": tree,

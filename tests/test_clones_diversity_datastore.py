@@ -222,9 +222,8 @@ def test_diversity_refuses_other_artifacts_and_large_stores(
         store.clones.diversity(copied.cells)
     with pytest.raises(TypeError, match="clones must be an ArtifactRef"):
         store.clones.rarefaction("clones")
-    # 10 kB cannot hold each of the 48 cells' clone beside what grouping them
-    # holds.
-    monkeypatch.setattr(store, "memoryBytes", 10_000)
+    # 100 bytes cannot hold each of the 48 cells' clone, 8 bytes each.
+    monkeypatch.setattr(store, "memoryBytes", 100)
     with pytest.raises(
         MemoryBudgetError, match="for each cell's clone, .* Raise mem_budget"
     ):

@@ -438,9 +438,6 @@ class KMeansFitMemory:
 # Rows of distances to every centroid that each OpenMP thread of
 # scikit-learn's chunked k-means loops holds.
 _KMEANS_THREAD_CHUNK_ROWS = 256
-# Python objects a k-means fit holds whatever the data size, such as the
-# estimator's state and thread-limit records, measured below 80 KiB.
-_KMEANS_OBJECT_BYTES = 128 * 1024
 
 
 def _kmeans_plusplus_bytes(rows: int, dims: int, clusters: int, itemsize: int) -> int:
@@ -532,14 +529,8 @@ def kmeans_fit_memory(
         )
         labelling = n_rows * (fit_itemsize + 4) + update_rows * (fit_itemsize + 8)
         return KMeansFitMemory(
-            peakBytes=matrix
-            + held
-            + max(seed, steps, labelling)
-            + model
-            + threads
-            + _KMEANS_OBJECT_BYTES,
-            streamResidentBytes=_KMEANS_OBJECT_BYTES
-            + (0 if block >= n_rows else n_rows * dims * itemsize),
+            peakBytes=matrix + held + max(seed, steps, labelling) + model + threads,
+            streamResidentBytes=0 if block >= n_rows else n_rows * dims * itemsize,
         )
     # The seeding sample and its sorted row indices, beside the unsorted
     # indices or the indices of one block's sampled rows.
@@ -573,9 +564,9 @@ def kmeans_fit_memory(
         + model
         + threads
     )
-    resident = max(sampling, updating, labelling) + _KMEANS_OBJECT_BYTES
+    resident = max(sampling, updating, labelling)
     return KMeansFitMemory(
-        peakBytes=max(resident, seed + _KMEANS_OBJECT_BYTES),
+        peakBytes=max(resident, seed),
         streamResidentBytes=resident,
     )
 

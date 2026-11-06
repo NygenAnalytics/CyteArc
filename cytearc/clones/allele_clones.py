@@ -52,7 +52,7 @@ from scipy.special import pdtrc
 
 from ..utils.arguments import float_argument, integer_argument, quoted_value
 from ..utils.arrays import sorted_unique, unique_inverse
-from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
+from ..utils.memory_budget import MemoryLedger
 from .calling import cell_sets, set_clones
 
 __all__ = [
@@ -132,11 +132,6 @@ _NUMBERING_CLONE_BYTES = 24
 # float's precision there, since the Poisson tails underflow near the
 # smallest floats.
 _SERIES_BELOW = 1e-8
-
-
-def _peak(ledger: MemoryLedger, item: str, nbytes: int) -> None:
-    """Check that a step's ``nbytes``, and NumPy's objects and sort buffers, fit beside what the ledger holds."""
-    ledger.peak(item, nbytes + NUMPY_STEP_BYTES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,7 +640,7 @@ def allele_clone_calls(
     """
     if ledger is None:
         ledger = MemoryLedger(None, "Calling clones from recorder alleles")
-    _peak(ledger, "the cells", _GROUP_COPY_BYTES * n_cells)
+    ledger.peak("the cells", _GROUP_COPY_BYTES * n_cells)
     group_codes = _group_codes(groups, n_cells)
     group_bytes = ledger.hold("each cell's group", _GROUP_BYTES * n_cells)
     _check_observations(observations, n_cells)
@@ -672,7 +667,7 @@ def allele_clone_calls(
     # cells of each group with an edit at each character, the M of CARLIN's
     # test, a placeholder's cells among them; then the edits that name an
     # allele.
-    _peak(ledger, "the cells' edits", _OBSERVATION_BYTES * len(observations))
+    ledger.peak("the cells' edits", _OBSERVATION_BYTES * len(observations))
     order = np.lexsort(
         (observations.alleles, observations.characters, observations.cells)
     )
@@ -702,7 +697,7 @@ def allele_clone_calls(
     )
 
     # Each test is an allele of a group at a character.
-    _peak(ledger, "the alleles' tests", _NAMED_BYTES * n_named)
+    ledger.peak("the alleles' tests", _NAMED_BYTES * n_named)
     cell_groups = group_codes[cells]
     order = np.lexsort((alleles, characters, cell_groups))
     starts = _runs(cell_groups[order], characters[order], alleles[order])
@@ -716,7 +711,7 @@ def allele_clone_calls(
     del heads, cell_groups
     n_tests = len(test_groups)
     held_tests = ledger.hold("the alleles' tests", 8 * n_named + 24 * n_tests)
-    _peak(ledger, "the alleles' tests", _TEST_BYTES * n_tests)
+    ledger.peak("the alleles' tests", _TEST_BYTES * n_tests)
     test_cells = np.bincount(tests, minlength=n_tests).astype(np.int64)
     test_observations = edited_cells[
         np.searchsorted(group_characters, test_groups * n_characters + test_characters)
@@ -758,7 +753,7 @@ def allele_clone_calls(
     del test_groups, test_characters, test_alleles
 
     # Cells that share a rare allele link; the components are the clones.
-    _peak(ledger, "the cells' rare alleles", _ITEM_BYTES * n_named)
+    ledger.peak("the cells' rare alleles", _ITEM_BYTES * n_named)
     linked = rare[tests]
     del tests, rare
     linked_cells = cells[linked]
@@ -783,8 +778,7 @@ def allele_clone_calls(
     counts["cellsWithRareAlleles"] = int(np.count_nonzero(n_alleles > 0))
 
     # A clone's alleles are the distinct rare alleles of its cells.
-    _peak(
-        ledger,
+    ledger.peak(
         "the clones",
         _CLONE_ALLELE_BYTES * len(sets.items)
         + _NUMBERING_CELL_BYTES * n_cells
@@ -872,8 +866,7 @@ def _bank_rates(
         chosen = np.flatnonzero(test_characters == character)
         codes, inverse = unique_inverse(test_alleles[chosen])
         texts = observations.allele_texts[codes]
-        _peak(
-            ledger,
+        ledger.peak(
             f"the alleles of {quoted_value(name)} in its bank",
             _LOOKUP_BYTES * len(codes)
             + sum(len(text) for text in texts.tolist())

@@ -1,4 +1,3 @@
-import io
 import math
 import os
 import tempfile
@@ -224,13 +223,8 @@ def _streaming_lsi_block_rows(
     width = min(n_rows, n_features, n_components + n_oversamples)
     accumulator_bytes = _streaming_lsi_accumulator_bytes(n_features, width)
     geometry = array_geometry(array)
-    # The chunk that a block's read decodes, beside the one that the previous
-    # read can still hold.
-    decode_bytes = (
-        0
-        if geometry is None
-        else geometry.nominalChunkBytes() + geometry.heldReadBytes()
-    )
+    # The chunk that a block's read decodes.
+    decode_bytes = 0 if geometry is None else geometry.nominalChunkBytes()
     available = resources.memoryBytes - accumulator_bytes - decode_bytes
     input_itemsize = max(int(np.dtype(array.dtype).itemsize), 1)
     row_bytes = (
@@ -266,13 +260,11 @@ def _reduction_write_bytes(
     from ...storage.sharding import plan_dense_write
 
     # Three blocks of the input, which its one reader reads one after another,
-    # so the chunk that the reader's previous read can still hold counts once,
     # and one block of float64 coordinates, which the checked writer casts
     # into its float32 band.
     producer_bytes = (
         data._resident_bytes()
         + 3 * data._block_task_bytes()
-        - 2 * data._held_read_bytes()
         + data.chunksize[0] * dims * np.dtype(np.float64).itemsize
         + transform_bytes
     )
@@ -572,15 +564,6 @@ def _require_harmony_fit_budget(
     return reading
 
 
-# What one save or load of an ANN index holds whatever its payload: Zarr's
-# metadata, and the buffers of the temporary file and of the files that Zarr
-# reads or writes, two or three of io's default buffers from run to run, which
-# are 8 KiB before Python 3.14 and 128 KiB since. 44 KiB and three and a half
-# buffers bound it: a save of a small payload held up to 112 KB on Python 3.13
-# and 431 KB on 3.14 and 3.15.
-_ANN_INDEX_TRANSFER_FIXED_BYTES = 44 * 1024 + 7 * io.DEFAULT_BUFFER_SIZE // 2
-
-
 def _ann_index_transfer_bytes(payload_bytes: int) -> int:
     """Bytes that copying an ANN index payload through its temporary file holds.
 
@@ -593,13 +576,12 @@ def _ann_index_transfer_bytes(payload_bytes: int) -> int:
     chunks in flight, never more than a load, after hashing its file through
     one buffer of at most 256 KiB and at most the payload. The estimate
     counts one window more than a load holds, a quarter to a third more than
-    the load of a payload of whole chunks or of several, beside what every
-    save or load holds.
+    the load of a payload of whole chunks or of several.
     """
     window = min(int(payload_bytes), ANN_INDEX_IO_BYTES)
     chunk = min(int(payload_bytes), ANN_INDEX_CHUNK_BYTES)
     decoded = -(-window // chunk) * chunk if window else 0
-    return 3 * window + decoded + _ANN_INDEX_TRANSFER_FIXED_BYTES
+    return 3 * window + decoded
 
 
 def _float32_copy_bytes(data: ChunkedArray, dims: int) -> int:

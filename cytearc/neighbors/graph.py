@@ -9,10 +9,6 @@ from ..utils.arguments import integer_argument
 from ..utils.numba import enable_dispatcher_cache, import_umap, njit
 from ..utils.progress import iter_progress
 
-# Python objects a graph load or a connectivity conversion holds whatever the
-# graph size, such as the sparse-matrix wrappers, measured below 64 KiB.
-_GRAPH_OBJECT_BYTES = 256 * 1024
-
 
 @dataclass(frozen=True, slots=True)
 class GraphLoadMemory:
@@ -83,7 +79,7 @@ def graph_load_memory(
     loading = edges * (2 * edge_bytes + weight_bytes + 2 * index_bytes) + directed_bytes
     if not symmetric:
         return GraphLoadMemory(
-            peakBytes=loading + _GRAPH_OBJECT_BYTES,
+            peakBytes=loading,
             heldBytes=directed_bytes,
             maxEntries=edges,
         )
@@ -91,7 +87,7 @@ def graph_load_memory(
     union_bytes = 2 * edges * entry_bytes + pointer_bytes
     if not upper_only:
         return GraphLoadMemory(
-            peakBytes=max(loading, union) + _GRAPH_OBJECT_BYTES,
+            peakBytes=max(loading, union),
             heldBytes=union_bytes,
             maxEntries=2 * edges,
         )
@@ -104,7 +100,7 @@ def graph_load_memory(
         + directed_bytes
     )
     return GraphLoadMemory(
-        peakBytes=max(loading, union, upper) + _GRAPH_OBJECT_BYTES,
+        peakBytes=max(loading, union, upper),
         heldBytes=directed_bytes,
         maxEntries=edges,
     )
@@ -138,7 +134,7 @@ def connectivity_peak_bytes(n_cells: int, n_neighbors: int) -> int:
     smoothing = 4 * cells * (k + 1) + 8 * cells
     memberships = 16 * edges + 8 * cells
     pairs = 12 * edges + 8 * edges + edges
-    return inputs + max(smoothing, memberships, pairs) + _GRAPH_OBJECT_BYTES
+    return inputs + max(smoothing, memberships, pairs)
 
 
 def smooth_knn_chunk(
@@ -385,9 +381,6 @@ def _merge_ranked_rows(
         kept_counts[row] = kept
 
 
-# Python objects a merge holds whatever the data size, such as the per-row
-# candidates and the progress bars, measured below 64 KiB.
-_SNN_OBJECT_BYTES = 256 * 1024
 # Rows whose ranked candidates a merge holds at once.
 _MERGE_BLOCK_ROWS = 4096
 
@@ -422,7 +415,7 @@ def snn_merge_peak_bytes(
     # The int64 rows of the COO graph, with their copy in its index dtype, and
     # the int64 row numbers that they repeat.
     graph = edges * (8 + index_bytes) + cells * 8
-    return held + max(merging, graph) + _SNN_OBJECT_BYTES
+    return held + max(merging, graph)
 
 
 def _checked_neighborhoods(neighborhoods: np.ndarray) -> np.ndarray:

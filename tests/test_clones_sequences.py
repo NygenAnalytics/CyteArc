@@ -17,11 +17,8 @@ from cytearc.clones.sequences import (
 from cytearc.repertoire.clonotypes import METRICS
 from tests.clone_helpers import levenshtein_distance as _levenshtein
 from tests.clone_helpers import link_count_variance
-from cytearc.utils.memory_budget import (
-    NUMPY_STEP_BYTES,
-    MemoryLedger,
-)
-from tests.memory_helpers import budgeted
+from cytearc.utils.memory_budget import MemoryLedger
+from tests.memory_helpers import budgeted, climb_refusals, named_budget
 from tests.clone_helpers import within_distance as _within
 
 
@@ -405,24 +402,9 @@ _VARIANTS = [_BASE] + [
 ]
 
 
-def _encoding_bytes(texts: list[str]) -> int:
-    """The bytes the encoded texts hold, as the search documents them.
-
-    Three bytes for each letter of the longest text and 72 for each text,
-    257 codes of 8 bytes for each position of the longest, and
-    ``NUMPY_STEP_BYTES`` for the sorts and smaller arrays.
-    """
-    width = max(map(len, texts))
-    return len(texts) * (3 * width + 72) + 8 * 257 * width + NUMPY_STEP_BYTES
-
-
-def _group_bytes(texts: list[str]) -> int:
-    """The 48 bytes that the search holds for each length of the texts."""
-    return 48 * len(set(map(len, texts)))
-
-
-# The two arrays that each length or block with pairs keeps, 192 bytes each.
-_PAIR_ARRAYS = 2 * 192
+def _refused_steps(refusals: list[Exception]) -> str:
+    """The messages of a climb's refusals, joined, for matching the steps that they name."""
+    return " | ".join(map(str, refusals))
 
 
 @pytest.mark.parametrize(
@@ -514,25 +496,20 @@ def test_a_budget_below_the_pairs_found_raises_memory_error(
     # position pair with each other; variants at two positions are two
     # substitutions or edits apart.
     assert len(expected) == 36 + 4 * 9 * 8 // 2
-    held = _encoding_bytes(_VARIANTS) + _group_bytes(_VARIANTS)
-    # Joined and placed among all texts, the pairs hold 32 bytes each.
-    needed = held + 32 * len(expected) + _PAIR_ARRAYS
-    if path == "keyed" and metric == "hamming":
-        # Keys find the pairs in 4 runs of 10 texts, one for each position of
-        # the variants, which outgrow the buffer of the pairs found as it
-        # doubles: 59.5 kB holds the encoded texts and the keys of a pass,
-        # but not the buffer, and a megabyte finds every pair.
-        with pytest.raises(
-            MemoryError, match="for the pairs within max_distance, more than the"
-        ):
-            neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(59_500))
-        found = neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(2**20))
-        assert _pairs(*found) == expected
-        return
-    with pytest.raises(MemoryError, match="for the pairs found, more than the"):
-        neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(needed - 1))
-    roomy = neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(needed + 2**20))
-    assert _pairs(*roomy) == expected
+    # From one byte, each refusal names the budget that passes its step: one
+    # of them refuses the pairs, which keys under substitutions find in runs
+    # that outgrow the buffer of the pairs found as it doubles, and the last
+    # budget finds every pair.
+    refusals, found = climb_refusals(
+        lambda budget: neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(budget))
+    )
+    step = (
+        "for the pairs within max_distance"
+        if path == "keyed" and metric == "hamming"
+        else "for the pairs found"
+    )
+    assert step in _refused_steps(refusals)
+    assert _pairs(*found) == expected
 
 
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
@@ -541,24 +518,36 @@ def test_pairs_found_hold_memory_while_later_lengths_are_searched(
 ) -> None:
     _force(monkeypatch, "pairwise")
     # Two families of near variants, of 8 and 12 letters, more than one edit
-    # apart: the shorter family's 36 pairs are found first and hold 32 bytes
-    # each, and their arrays 384, while the longer family's 180 pairs are
-    # collected.
+    # apart: the shorter family's 36 pairs are found first and held while the
+    # longer family's 180 pairs are collected, the last step that refuses.
+    # Nine texts of 8 letters that pair with none take the shorter family's
+    # place, so the budgets differ by what the 36 pairs hold, at least the
+    # two int64 positions of each.
     short = [letter + "CDEFGHIK"[1:] for letter in "PQRSTVWYC"]
-    texts = short + _VARIANTS
-    expected = _expected(texts, metric, 1)
-    assert len(expected) == 36 + 180
-    needed = (
-        _encoding_bytes(texts)
-        + _group_bytes(texts)
-        + 32 * len(expected)
-        + 2 * _PAIR_ARRAYS
-    )
-    with pytest.raises(MemoryError, match="for the pairs found"):
-        neighbor_pairs(texts, metric, 1, ledger=budgeted(needed - 1))
-    assert (
-        _pairs(*neighbor_pairs(texts, metric, 1, ledger=budgeted(needed))) == expected
-    )
+    apart = [
+        "PQRSTVWY",
+        "QRSTVWYP",
+        "RSTVWYPQ",
+        "STVWYPQR",
+        "TVWYPQRS",
+        "VWYPQRST",
+        "WYPQRSTV",
+        "YPQRSTVW",
+        "CDCDCDCD",
+    ]
+    named = {}
+    for first in (short, apart):
+        texts = first + _VARIANTS
+        refusals, found = climb_refusals(
+            lambda budget, texts=texts: neighbor_pairs(
+                texts, metric, 1, ledger=budgeted(budget)
+            )
+        )
+        assert "for the pairs found" in str(refusals[-1])
+        assert _pairs(*found) == _expected(texts, metric, 1)
+        named[len(found[0])] = refusals[-1].needed_bytes
+    assert sorted(named) == [180, 36 + 180]
+    assert named[36 + 180] - named[180] >= 16 * 36
 
 
 def test_the_hash_codes_of_long_texts_count_against_the_budget() -> None:
@@ -568,7 +557,7 @@ def test_the_hash_codes_of_long_texts_count_against_the_budget() -> None:
     with pytest.raises(MemoryError, match="for the encoded texts"):
         neighbor_pairs(texts, "hamming", 1, ledger=budgeted(8 * 257 * 2_000 - 1))
     found = neighbor_pairs(
-        texts, "hamming", 1, ledger=budgeted(_encoding_bytes(texts) + 2**20)
+        texts, "hamming", 1, ledger=budgeted(8 * 257 * 2_000 + 2**20)
     )
     assert _pairs(*found) == {(0, 1)}
 
@@ -576,21 +565,23 @@ def test_the_hash_codes_of_long_texts_count_against_the_budget() -> None:
 def test_the_encoded_texts_must_fit_the_budget() -> None:
     texts = ["CASSLGF", "CASSLGY", "CAVF"]
     with pytest.raises(MemoryError, match="for the encoded texts"):
-        neighbor_pairs(texts, "levenshtein", 1, ledger=budgeted(_encoding_bytes(texts)))
+        neighbor_pairs(texts, "levenshtein", 1, ledger=budgeted(100))
     with pytest.raises(MemoryError, match="for the encoded texts"):
         neighbor_pairs(["A"], "hamming", 1, ledger=budgeted(0))
-    # No text, or one, is never compared, so the codes that hash keys are
-    # neither built nor counted.
+    # No text, or one, is never compared, so the codes that hash keys, 257 of
+    # 8 bytes for each position, are neither built nor counted.
     assert len(neighbor_pairs([], "hamming", 1, ledger=budgeted(0))[0]) == 0
     one = ["CASSLGQAYEQYF"]
-    # Three bytes per letter and 72 for the text, and 2 per letter joined.
-    needed = 3 * len(one[0]) + 72 + 2 * len(one[0])
-    assert len(neighbor_pairs(one, "hamming", 1, ledger=budgeted(needed))[0]) == 0
-    # Texts beyond Latin-1 take more bytes per character while they are coded.
-    wide = ["αβγ", "αβδ"]
-    enough_for_latin = _encoding_bytes(wide) + 2 * 6
+    codes = 8 * 257 * len(one[0])
+    assert len(neighbor_pairs(one, "hamming", 1, ledger=budgeted(codes - 1))[0]) == 0
+    # Texts beyond Latin-1 take more bytes per character while they are coded:
+    # the budget that encodes two Latin texts refuses two of the same lengths
+    # beyond it.
+    with pytest.raises(MemoryError, match="for the encoded texts") as refused:
+        neighbor_pairs(["abc", "abd"], "hamming", 1, ledger=budgeted(1))
+    encodes_latin = named_budget(refused.value)
     with pytest.raises(MemoryError, match="for the encoded texts"):
-        neighbor_pairs(wide, "hamming", 1, ledger=budgeted(enough_for_latin))
+        neighbor_pairs(["αβγ", "αβδ"], "hamming", 1, ledger=budgeted(encodes_latin))
 
 
 def test_the_pairs_of_one_run_must_fit_the_budget_beside_the_keys(
@@ -599,13 +590,14 @@ def test_the_pairs_of_one_run_must_fit_the_budget_beside_the_keys(
     _force(monkeypatch, "keyed")
     # Every variant at position 0 shares the key that masks it: 9 texts and
     # 36 pairs within one substitution, found in one run, which outgrow the
-    # buffer of the pairs found as it doubles. 52.3 kB holds the encoded
-    # texts and the keys of the pass, but not the buffer, and a megabyte
-    # finds every pair.
+    # buffer of the pairs found as it doubles. A budget that holds the
+    # encoded texts and the keys of the pass refuses the buffer, and the
+    # budget that the refusals name finds every pair.
     texts = [letter + _BASE[1:] for letter in "PQRSTVWYC"]
-    with pytest.raises(MemoryError, match="the pairs within max_distance"):
-        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(52_300))
-    found = neighbor_pairs(texts, "hamming", 1, ledger=budgeted(2**20))
+    refusals, found = climb_refusals(
+        lambda budget: neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget))
+    )
+    assert "the pairs within max_distance" in _refused_steps(refusals)
     assert _pairs(*found) == _expected(texts, "hamming", 1)
     # Two of them are one pair.
     two = neighbor_pairs(texts[:2], "hamming", 1, ledger=budgeted(2**20))
@@ -613,27 +605,26 @@ def test_the_pairs_of_one_run_must_fit_the_budget_beside_the_keys(
 
 
 @pytest.mark.parametrize(
-    ("text", "budget"),
+    "text",
     [
         # Copies of a text of 5 letters share its 5 keys: 10 copies yield 50
         # keys, in 5 runs of 10 that find 45 pairs each, 225 of 45 distinct
         # pairs.
-        ("CASSF", 38_000),
+        "CASSF",
         # Of 2 letters: 20 keys in 2 runs that find 90 pairs.
-        ("CA", 30_800),
+        "CA",
     ],
 )
-def test_the_pairs_found_in_a_pass_must_fit_the_budget(
-    monkeypatch, text, budget
-) -> None:
+def test_the_pairs_found_in_a_pass_must_fit_the_budget(monkeypatch, text) -> None:
     _force(monkeypatch, "keyed")
     texts = [text] * 10
-    # The budget holds the encoded texts, their packed codes and their keys,
-    # but not the buffer of the pairs found as it doubles, and a megabyte
-    # finds every pair once.
-    with pytest.raises(MemoryError, match="for the pairs within max_distance"):
-        neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget))
-    found = neighbor_pairs(texts, "hamming", 1, ledger=budgeted(2**20))
+    # A budget that holds the encoded texts, their packed codes and their
+    # keys refuses the buffer of the pairs found as it doubles, and the
+    # budget that the refusals name finds every pair once.
+    refusals, found = climb_refusals(
+        lambda budget: neighbor_pairs(texts, "hamming", 1, ledger=budgeted(budget))
+    )
+    assert "for the pairs within max_distance" in _refused_steps(refusals)
     assert _pairs(*found) == set(itertools.combinations(range(10), 2))
 
 
@@ -658,7 +649,9 @@ def test_the_keys_of_a_pass_follow_the_memory_left(monkeypatch, metric) -> None:
     assert _pairs(*neighbor_pairs(texts, metric, 1)) == expected
     assert set(passes) == {1}
     passes.clear()
-    budget = _encoding_bytes(texts) + 2**20
+    width = max(map(len, texts))
+    # About a megabyte beside the encoded texts and their hash codes.
+    budget = 2**20 + len(texts) * (3 * width + 72) + 8 * 257 * width
     limited = neighbor_pairs(texts, metric, 1, ledger=budgeted(budget))
     assert _pairs(*limited) == expected
     # The texts of a length, or of a block, yield many times 13 keys.
@@ -1123,18 +1116,16 @@ def test_cut_and_full_copies_of_a_text_all_pair(monkeypatch, path) -> None:
 
 
 def test_the_positions_of_partial_texts_count_against_the_budget() -> None:
-    # 600 cut texts that pair with nothing hold their positions, 64 bytes
-    # each, while their groups are searched.
+    # 600 cut texts that pair with nothing hold their positions while their
+    # groups are searched.
     rng = np.random.default_rng(10)
     texts = ["".join(rng.choice(list("ACGT"), size=20)) + "-" * 10 for _ in range(600)]
-    held = _encoding_bytes(texts) + _group_bytes(texts)
-    with pytest.raises(MemoryError, match="where the texts hold no base"):
-        neighbor_pairs(
-            texts, "hamming", 0, unknown="-", ledger=budgeted(held + 64 * 600 - 1)
+    refusals, found = climb_refusals(
+        lambda budget: neighbor_pairs(
+            texts, "hamming", 0, unknown="-", ledger=budgeted(budget)
         )
-    found = neighbor_pairs(
-        texts, "hamming", 0, unknown="-", ledger=budgeted(held + 64 * 600 + 2**20)
     )
+    assert "where the texts hold no base" in _refused_steps(refusals)
     assert len(found[0]) == 0
 
 
@@ -1697,25 +1688,25 @@ def test_the_frequencies_of_cut_texts_are_let_go() -> None:
 
 
 def test_choosing_one_text_per_component_counts_against_the_budget() -> None:
-    # 200 texts of 10 characters hold 48 bytes each while one per component
-    # is chosen, beside their characters and their copy of 9 bytes, with
-    # 4 KiB for one position's count and its copy less one.
+    # 200 texts of 10 characters hold each text's component and priority,
+    # their order and the texts chosen while one per component is chosen.
     rng = np.random.default_rng(6)
     texts = _random_texts(rng, 200, [10], (0.25, 0.25, 0.25, 0.25))
-    held = _encoding_bytes(texts) + _group_bytes(texts)
-    choosing = (48 + 10 + 9) * len(texts) + 2 * 2048
-    with pytest.raises(MemoryError, match="the representatives of the components"):
-        expected_chance_pairs(texts, "hamming", 2, ledger=budgeted(held + choosing - 1))
-    assert expected_chance_pairs(
-        texts, "hamming", 2, ledger=budgeted(held + choosing)
-    ) == pytest.approx(expected_chance_pairs(texts, "hamming", 2), rel=1e-12)
+    refusals, expected = climb_refusals(
+        lambda budget: expected_chance_pairs(
+            texts, "hamming", 2, ledger=budgeted(budget)
+        )
+    )
+    assert "the representatives of the components" in _refused_steps(refusals)
+    assert expected == pytest.approx(
+        expected_chance_pairs(texts, "hamming", 2), rel=1e-12
+    )
 
 
 def test_the_characters_of_one_text_per_component_count_against_the_budget() -> None:
     # 200 texts of 12 characters, every third cut by two, hold their
-    # positions of no base, 64 bytes each, as the search counts them; while
-    # each position's characters are counted, 64 more bytes for each text
-    # and 4 KiB for each position.
+    # positions of no base as the search counts them, and while each
+    # position's characters are counted, more for each text and position.
     rng = np.random.default_rng(7)
     texts = [
         text[:-2] + "--" if index % 3 == 0 else text
@@ -1724,15 +1715,15 @@ def test_the_characters_of_one_text_per_component_count_against_the_budget() -> 
         )
     ]
     search = {"unknown": "-", "min_compared": 9}
-    held = _encoding_bytes(texts) + _group_bytes(texts) + 64 * len(texts)
-    counting = 64 * len(texts) + 4096 * 12
-    with pytest.raises(MemoryError, match="the characters of one text per component"):
-        expected_chance_pairs(
-            texts, "hamming", 2, ledger=budgeted(held + counting - 1), **search
+    refusals, expected = climb_refusals(
+        lambda budget: expected_chance_pairs(
+            texts, "hamming", 2, ledger=budgeted(budget), **search
         )
-    assert expected_chance_pairs(
-        texts, "hamming", 2, ledger=budgeted(held + counting), **search
-    ) == pytest.approx(expected_chance_pairs(texts, "hamming", 2, **search), rel=1e-12)
+    )
+    assert "the characters of one text per component" in _refused_steps(refusals)
+    assert expected == pytest.approx(
+        expected_chance_pairs(texts, "hamming", 2, **search), rel=1e-12
+    )
 
 
 def _error_families(rng, length: int, draws: int) -> tuple[list[str], dict[str, int]]:
@@ -2022,21 +2013,15 @@ def test_the_expectation_checks_its_arguments_and_needs_few_edits() -> None:
 def test_the_frequencies_of_edited_texts_count_against_the_budget() -> None:
     # Texts of lengths 7 and 8 in one block hold the count of each of 256
     # codes at each of their 15 positions, and the 64 chances of agreeing of
-    # two lengths, while their expectation is found; counting one position
-    # copies the codes of the larger length's texts, widened to 8 bytes, and
-    # counts them in 256 bins, and comparing the texts of one component in
-    # two lengths holds 3 bytes for each of them at each of 8 positions.
+    # two lengths, while their expectation is found.
     rng = np.random.default_rng(5)
     texts = _random_texts(rng, 200, [7, 8], (0.25, 0.25, 0.25, 0.25))
-    held = _encoding_bytes(texts) + _group_bytes(texts)
-    most = max(sum(len(text) == length for text in texts) for length in (7, 8))
-    frequencies = 8 * 256 * 15 + 8 * 8**2 + 9 * most + 8 * 256 + 3 * most * 8
-    with pytest.raises(MemoryError, match="frequencies of the texts' characters"):
-        expected_chance_pairs(
-            texts, "levenshtein", 1, ledger=budgeted(held + frequencies - 1)
+    refusals, expected = climb_refusals(
+        lambda budget: expected_chance_pairs(
+            texts, "levenshtein", 1, ledger=budgeted(budget)
         )
-    with pytest.raises(MemoryError) as refused:
-        expected_chance_pairs(
-            texts, "levenshtein", 1, ledger=budgeted(held + frequencies)
-        )
-    assert "frequencies" not in str(refused.value)
+    )
+    assert "frequencies of the texts' characters" in _refused_steps(refusals)
+    assert expected == pytest.approx(
+        expected_chance_pairs(texts, "levenshtein", 1), rel=1e-12
+    )

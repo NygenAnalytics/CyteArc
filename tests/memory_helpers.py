@@ -1,6 +1,7 @@
-"""Read the budget that a memory refusal names, and give a domain function a ledger of a budget."""
+"""Read the budget that a memory refusal names, follow refusals to a budget that runs, and give a domain function a ledger of a budget."""
 
 import re
+from collections.abc import Callable
 from typing import Any
 
 
@@ -25,6 +26,34 @@ def named_budget(refusal: BaseException) -> int:
         f"The refusal names a budget other than what it holds: {message}"
     )
     return int(named.group(1))
+
+
+def climb_refusals(
+    run: Callable[[int], Any], *, start: int = 1
+) -> tuple[list[Any], Any]:
+    """Run ``run`` at a budget of ``start`` bytes, then at each budget that its refusal names, until it runs.
+
+    Each refusal must name a budget above the one it refused, so each step
+    that refuses is passed at the next budget. The budgets come from the
+    refusals alone, so the climb holds whatever the steps charge.
+
+    Returns:
+        Each refusal, a ``MemoryBudgetError``, in order, and what the run at
+        the last budget returned.
+    """
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    refusals: list[MemoryBudgetError] = []
+    budget = start
+    for _ in range(1_000):
+        try:
+            return refusals, run(budget)
+        except MemoryBudgetError as error:
+            named = named_budget(error)
+            assert named > budget, f"A refusal at {budget} bytes names {named}: {error}"
+            refusals.append(error)
+            budget = named
+    raise AssertionError(f"1,000 refusals named no budget that runs: {refusals[-1]}")
 
 
 def budgeted(budget: int | None, doing: str = "Calling clones") -> Any:

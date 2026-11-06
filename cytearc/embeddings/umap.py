@@ -16,9 +16,6 @@ locale.setlocale(locale.LC_NUMERIC, "C")
 # are float32, with a relative resolution of about 1.2e-7, so such a spread
 # reflects rounding rather than density.
 _EQUAL_LOG_RADIUS_SPAN = 1e-6
-# Python objects a layout holds whatever the graph size, such as its settings
-# and the fitted curve parameters, measured below 64 KiB.
-_UMAP_OBJECT_BYTES = 256 * 1024
 
 
 def umap_peak_bytes(
@@ -34,8 +31,7 @@ def umap_peak_bytes(
     of its ``n_entries`` entries through CSR copies, sums, and products that
     SciPy sizes for the entries of both operands. It then lays out the
     union's ``union_entries`` edges with their COO arrays and four float64
-    sampling schedules per edge. The coefficients per entry and per cell
-    bound the traced peaks of directed and symmetrized kNN and random graphs.
+    sampling schedules per edge.
 
     densMAP, given the ``densmap_edges`` KNN pairs it reads, also holds their
     uint32 indices and float32 distances, the symmetric distance matrix of up
@@ -63,11 +59,11 @@ def umap_peak_bytes(
     pairs = integer_argument(densmap_edges, "densmap_edges", minimum=0)
     layout = 24 * entries + 40 * union + 72 * cells
     if not pairs:
-        return layout + _UMAP_OBJECT_BYTES
+        return layout
     distances = 8 * pairs + 16 * pairs + 4 * (cells + 1)
     building = 8 * pairs + 32 * pairs + 12 * (cells + 1)
     radii = 32 * union + 16 * cells
-    return max(building, layout + distances + radii) + _UMAP_OBJECT_BYTES
+    return max(building, layout + distances + radii)
 
 
 def densmap_distance_graph(

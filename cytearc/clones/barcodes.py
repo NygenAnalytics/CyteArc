@@ -91,8 +91,8 @@ _MERGE_TEXT_BYTES = 48
 # Merging begins once at least this many rows wait, so that small imports
 # merge once.
 _MIN_MERGE_ROWS = 250_000
-# Bytes that each held chunk takes whatever its rows: its eight arrays and its
-# record, about 1,100 to 1,250 traced for chunks of 0 to 5 rows.
+# Bytes that each held chunk takes beside its rows: its eight arrays and its
+# record.
 _PART_BYTES = 1_300
 # The waiting chunks merge once this many wait, so that the chunks of few rows
 # that a small budget reads hold little beside their rows.

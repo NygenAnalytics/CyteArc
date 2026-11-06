@@ -27,13 +27,6 @@ from .partition import SCAN_BAND_BYTES
 # Objects fetched at once: whole objects of up to SCAN_BAND_BYTES decoded,
 # and at most this many.
 _STAMP_BATCH_OBJECTS = 32
-# A stamp's Python and Zarr objects: the array's documents and the digest,
-# and for each stored object fetched at once its key, its task and its
-# buffer's object. Traced on local stores of 1 to 100 objects, a stamp held
-# 18 to 32 KB beside twice its stored bytes, and 5.5 KB more an object at 32
-# objects at once.
-_STAMP_FIXED_BYTES = 32 * 1024
-_STAMP_OBJECT_BYTES = 6 * 1024
 # Cached values; each is a short digest.
 _CACHE_ENTRIES = 1024
 
@@ -65,8 +58,7 @@ def stored_content_stamp_bytes(array: zarr.Array) -> int:
 
     A stamp fetches a batch of stored objects at once and copies each one as
     bytes before it hashes it, so it holds twice the stored bytes of its
-    largest batch, beside Python and Zarr objects of its own and of each
-    object fetched at once. Each object counts its stored size where
+    largest batch. Each object counts its stored size where
     the store reports sizes without reading the objects, as a local file
     system does, and otherwise its decoded size and a sixty-fourth more,
     which bounds an object whose compression could not shrink it.
@@ -98,11 +90,7 @@ def stored_content_stamp_bytes(array: zarr.Array) -> int:
             sum(sync(sizes(batch))) if sized else len(batch) * (decoded + decoded // 64)
         )
         largest = max(largest, stored)
-    return (
-        2 * largest
-        + _STAMP_FIXED_BYTES
-        + _STAMP_OBJECT_BYTES * min(batch_size, max(1, len(keys)))
-    )
+    return 2 * largest
 
 
 def stored_content_stamp(array: zarr.Array) -> bytes:

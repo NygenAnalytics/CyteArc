@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ...metadata.rows import rows_read_charge
+from ...metadata.rows import row_read_bytes
 from ...storage.async_execution import zarr_decoding_threads
 from ...storage.diagnostics import EXAMPLES, DiagnosticRule
 from ...storage.geometry import array_geometry
@@ -420,18 +420,17 @@ def _store_block_rows(store_ids: Any) -> int:
     return _HASHED_IDS if geometry is None else geometry.axisChunk(0)
 
 
-def _store_read_charge(
-    ledger: MemoryLedger, store_ids: Any, start: int, stop: int
-) -> tuple[int, int]:
-    """What reading the store's cell IDs from ``start`` to ``stop`` holds, and what the read leaves behind.
+def _store_read_bytes(store_ids: Any, n_rows: int) -> int:
+    """What reading ``n_rows`` of the store's cell IDs holds.
 
     A stored array is read as :func:`~cytearc.metadata.rows.read_rows` reads
     a band of chunks; an array without chunks, such as one given in memory,
     holds the rows alone.
     """
-    if array_geometry(store_ids) is None:
-        return (stop - start) * int(np.dtype(store_ids.dtype).itemsize), 0
-    return rows_read_charge(ledger, store_ids, stop - start, span=(start, stop - 1))
+    geometry = array_geometry(store_ids)
+    if geometry is None:
+        return n_rows * int(np.dtype(store_ids.dtype).itemsize)
+    return row_read_bytes(geometry, n_rows)
 
 
 def id_hashing_bytes(n_ids: int, characters: int, widest: int) -> int:
@@ -461,22 +460,19 @@ def id_hashing_bytes(n_ids: int, characters: int, widest: int) -> int:
     )
 
 
-def store_pass_bytes(store_ids: Any, n_selected: int, *, codec_threads: int = 1) -> int:
+def store_pass_bytes(store_ids: Any, n_selected: int) -> int:
     """Return the most bytes that the join's pass over the store's cell IDs holds.
 
     The join charges this when it starts, unless the selection holds every
     cell of the store, and runs the pass once a barcode needs it. It keeps the 64-bit hash of each of the store's cell IDs
     and reads them a band of chunks at a time, as
-    :func:`~cytearc.metadata.rows.read_rows` charges a read decoded on
-    ``codec_threads`` threads, then hashes 65,536 of them at a time beside the
-    band, each as a Python string of up to four bytes a character, with what
-    hashing it holds; what a band's read leaves behind stays beside the next
-    band's read.
+    :func:`~cytearc.metadata.rows.read_rows` charges a read, then hashes
+    65,536 of them at a time beside the band, each as a Python string of up
+    to four bytes a character, with what hashing it holds.
 
     Args:
         store_ids: The store's array of cell IDs, as fixed-width text.
         n_selected: The selected cells.
-        codec_threads: The threads that the import's reads decode on.
     """
     n_ids = int(store_ids.shape[0])
     if n_selected == n_ids:
@@ -484,18 +480,12 @@ def store_pass_bytes(store_ids: Any, n_selected: int, *, codec_threads: int = 1)
     rows = min(n_ids, _store_block_rows(store_ids))
     hashed = min(rows, _HASHED_IDS)
     itemsize = int(np.dtype(store_ids.dtype).itemsize)
-    reading, left = _store_read_charge(
-        MemoryLedger(None, "Reading the store's cell IDs", codec_threads=codec_threads),
-        store_ids,
-        0,
-        rows,
-    )
+    reading = _store_read_bytes(store_ids, rows)
     # A character takes up to four bytes in a Python string and four in UTF-8.
     hashing = hashed * (
         _HASHED_BYTES_PER_STORE_ID + _STRING_HEADER_BYTES + 2 * itemsize
     )
-    # What a band's read leaves behind stays beside the next band's read.
-    return 8 * n_ids + left + max(reading, rows * itemsize + hashing)
+    return 8 * n_ids + max(reading, rows * itemsize + hashing)
 
 
 def _hashes(values: np.ndarray) -> np.ndarray:
@@ -616,9 +606,7 @@ class CellBarcodeJoin:
         else:
             self._reserved = ledger.hold(
                 "the pass over the store's cell IDs",
-                store_pass_bytes(
-                    store_ids, n_cells, codec_threads=ledger.codec_threads
-                ),
+                store_pass_bytes(store_ids, n_cells),
                 remedy=_STORE_REMEDY,
             )
         self._named = np.zeros(n_cells, dtype=bool)
@@ -671,16 +659,14 @@ class CellBarcodeJoin:
         step = _store_block_rows(store_ids)
         for start in range(0, n_ids, step):
             stop = min(n_ids, start + step)
-            reading, left = _store_read_charge(self._ledger, store_ids, start, stop)
             self._ledger.peak(
-                "a block of the store's cell IDs", reading, remedy=_STORE_REMEDY
+                "a block of the store's cell IDs",
+                _store_read_bytes(store_ids, stop - start),
+                remedy=_STORE_REMEDY,
             )
-            # The read decodes on the ledger's codec threads, which may each
-            # still hold a chunk of it afterwards.
+            # The read decodes on the ledger's codec threads.
             with zarr_decoding_threads(self._ledger.codec_threads):
                 block = np.asarray(store_ids[start:stop])
-            if left:
-                self._ledger.leave(left)
             for first in range(0, len(block), _HASHED_IDS):
                 part = block[first : first + _HASHED_IDS]
                 # Each ID becomes a Python string, which hashing encodes as

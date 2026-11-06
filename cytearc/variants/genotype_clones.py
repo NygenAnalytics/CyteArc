@@ -44,7 +44,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..utils.arguments import quoted_value
-from ..utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
+from ..utils.memory_budget import MemoryLedger
 from ..utils.logging import logger
 from ..utils.numba import numba_threads
 from .genotype_mixture import (
@@ -105,9 +105,6 @@ MAX_PASSES = 3
 MAX_MERGE_ROUNDS = 20
 #: The most clones of a fit, beside the wild type.
 MAX_CLONES = 500
-#: What a step of the search holds whatever its size: the Python objects of
-#: its seeds, splits and keys beside NumPy's own.
-_SEARCH_FIXED_BYTES = 256 * 1024
 
 
 #: The rules that call genotype clones: ``"likelihood"`` fits SCClone's
@@ -301,12 +298,7 @@ def seed_bytes(n_cells: int, n_rows: int, n_sites: int) -> int:
     packed, a seed site's column as it is unpacked with the rows that read
     the other state there, and the sites' counts and statistics.
     """
-    return (
-        n_cells
-        + (8 * n_words(n_sites) + 33) * n_rows
-        + 160 * n_sites
-        + NUMPY_STEP_BYTES
-    )
+    return n_cells + (8 * n_words(n_sites) + 33) * n_rows + 160 * n_sites
 
 
 def kept_seed_bytes(n_rows: int, n_sites: int) -> int:
@@ -321,10 +313,7 @@ def pattern_bytes(n_rows: int, n_local: int) -> int:
     codes and the patterns. Above, NumPy's unique of the rows: its sorted
     copy, order, mask and inverse beside the keys and the patterns, of one
     word a row up to 32 sites, where a mutant and a wild-type word share
-    one key, and of both words otherwise. As traced on 100,000 rows of
-    nearly as many patterns: 16 and 30 bytes a row at 3 and 10 sites, 56 at
-    12, and 97, 161 and 289 at 40, 70 and 200 sites, below the 72, 136, 208
-    and 352 counted.
+    one key, and of both words otherwise.
     """
     if n_local <= DENSE_PATTERN_SITES:
         codes = int(3**n_local)
@@ -348,7 +337,6 @@ def split_fit_bytes(n_rows: int, n_local: int, n_sites: int) -> int:
         + 16 * N_CHUNKS * n_sites
         + 256 * n_sites
         + 160 * n_local
-        + NUMPY_STEP_BYTES
     )
 
 
@@ -365,7 +353,6 @@ def round_bytes(n_cells: int, n_sites: int, n_components: int) -> int:
         + 26 * n_components * n_sites
         + n_components * (n_sites // 8 + 128)
         + n_components * (3 * n_sites + 24 * MAX_SPLIT_SITES + 512)
-        + _SEARCH_FIXED_BYTES
     )
 
 
@@ -375,18 +362,12 @@ def joint_bytes(n_sites: int, n_components: int) -> int:
         192 * n_sites
         + 4 * n_components * n_sites
         + 32 * n_components * n_words(n_sites)
-        + NUMPY_STEP_BYTES
     )
 
 
 def prune_bytes(n_cells: int, n_sites: int, n_components: int) -> int:
     """What scoring the removal of each clone builds: each cell's most probable component, the chunks' sums of each removal and the genotypes without one clone."""
-    return (
-        8 * n_cells
-        + 24 * N_CHUNKS * n_components
-        + 3 * n_components * n_sites
-        + NUMPY_STEP_BYTES
-    )
+    return 8 * n_cells + 24 * N_CHUNKS * n_components + 3 * n_components * n_sites
 
 
 def merge_bytes(n_cells: int, n_sites: int, n_components: int) -> int:
@@ -402,18 +383,12 @@ def merge_bytes(n_cells: int, n_sites: int, n_components: int) -> int:
         + 16 * n_components * n_sites
         + 8 * n_components * n_components
         + 200 * n_components * n_sites
-        + NUMPY_STEP_BYTES
     )
 
 
 def assignment_bytes(n_cells: int, n_sites: int, n_components: int) -> int:
     """What assigning each cell its clone builds: its most probable component and posterior, its flags, code and probability, and the calls' totals over the components."""
-    return (
-        64 * n_cells
-        + 64 * n_components
-        + 48 * n_components * n_sites
-        + NUMPY_STEP_BYTES
-    )
+    return 64 * n_cells + 64 * n_components + 48 * n_components * n_sites
 
 
 def result_bytes(n_cells: int, n_sites: int, n_clones: int) -> int:
@@ -1331,7 +1306,7 @@ def _likelihood_clones(
     min_posterior: float,
     ledger: MemoryLedger,
 ) -> LikelihoodClones:
-    ledger.peak("each site's calls over the cells", 32 * n_sites + NUMPY_STEP_BYTES)
+    ledger.peak("each site's calls over the cells", 32 * n_sites)
     mixture = GenotypeMixture(
         mutant_bits,
         wild_bits,

@@ -212,9 +212,8 @@ def efficiency_memory_bytes(
     held = n_cells * (16 * n_features + 56)
     # One row's comparison holds, for each of its cells and each control
     # cell, the counts and scaled values of the gene, the values pooled for
-    # the test, and the ranks and sorted copies of SciPy's Mann-Whitney test,
-    # beside about 20 kB of Python objects however few the cells.
-    return held + 80 * (largest + n_control) + (1 << 16)
+    # the test, and the ranks and sorted copies of SciPy's Mann-Whitney test.
+    return held + 80 * (largest + n_control)
 
 
 def efficiency_arrays(

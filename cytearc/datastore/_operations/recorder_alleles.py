@@ -31,7 +31,11 @@ from ...clones.recorders import (
     records_in_line_order,
 )
 from ...metadata.arguments import AlleleCloneArguments, RecorderAlleleImportArguments
-from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
+from ...metadata.artifacts import (
+    cell_data_write_bytes,
+    plan_cell_data_artifact,
+    write_cell_data_artifact,
+)
 from ...metadata.records import RecordEncoder, RecordTable, pack_text, unpack_text
 from ...metadata.rows import (
     read_whole,
@@ -45,7 +49,6 @@ from ...metadata.selection import (
     plan_cell_selection_read,
     read_cell_selection,
 )
-from ...storage.arrays import zarr_write_buffer_bytes
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
@@ -66,7 +69,7 @@ from ...utils.arguments import bool_argument, quoted_value
 from ...utils.arrays import sorted_unique, unique_inverse
 from ...utils.digest import file_sha256, path_sha256
 from ...utils.logging import logger
-from ...utils.memory_budget import NUMPY_STEP_BYTES, MemoryLedger
+from ...utils.memory_budget import MemoryLedger
 from .cell_groups import group_columns, within_groups
 from .cell_barcodes import (
     BarcodeFile,
@@ -132,15 +135,8 @@ _MERGED_TEXT_BYTES = 1
 _MERGED_TEXT_COPIES = 3
 # Bytes that writing takes per record beside the table: the int32 copies of
 # its cells and files, the int8 copy of its states, and the keys that count
-# each cell's integrations, 43 as traced over 6 million records. The chunks
-# that the merge freed stay resident beside them, since the allocator keeps
-# them for reuse: at 30 million records the resident peak of writing was
-# twice the table's bytes and about as many bytes per record.
+# each cell's integrations.
 _WRITE_BYTES_PER_RECORD = 44
-# Bytes that an import, a load and an export hold whatever their size: a
-# block of a file as it is hashed, pandas' parser buffers, and a Zarr chunk of
-# 2 MiB as it is filled and encoded.
-_FIXED_BYTES = 8 * 2**20
 # Bytes that a loaded record takes at the peak of building the tables: its
 # stored arrays and its row of the table of records.
 _TABLE_BYTES_PER_RECORD = 120
@@ -175,16 +171,16 @@ _STORE_BYTES_PER_CELL = 24
 _STORE_BYTES_PER_ALLELE_BYTE = 2
 # Bytes of each row of a bank while it is checked: its allele as a Python
 # string with its references, sorted copies and packed bytes for the
-# fingerprint, and its frequency and samples with their copies, 73 as traced
-# on 300,000 rows; of each row once checked: its string, reference,
-# frequency and samples; and of each character of its text.
+# fingerprint, and its frequency and samples with their copies; of each row
+# once checked: its string, reference, frequency and samples; and of each
+# character of its text.
 _BANK_ROW_BYTES = 128
 _BANK_HELD_ROW_BYTES = 80
 _BANK_CHARACTER_BYTES = 4
 # Calling clones codes each edit's character from its integration and site,
 # as one int64 key, which it numbers by sorting: the keys' order and sorted
-# copy, the flags of runs and their numbering, about 41 bytes an edit as
-# traced on 3.5 million edits, beside the key and the character kept; and for
+# copy, the flags of runs and their numbering, beside the key and the
+# character kept; and for
 # each record of a block of _KEY_BLOCK, its key, its int64 copy of the
 # integration and its sorted copy. It then holds each edit's cell, character
 # and allele.
@@ -194,10 +190,9 @@ _HELD_EDIT_BYTES = 24
 # Bytes of each distinct allele, integration or site while its packed text is
 # read and decoded, beside the copies of its bytes that decoding holds: its
 # offset as read and in two lists of Python integers, its Python string and
-# two references to it, 145 as traced for ASCII text; and once decoded, its
-# string and its reference beside its characters, 49 as traced for ASCII
-# text. A string beyond ASCII holds 16 bytes more and a terminator as wide as
-# its characters, up to 4 bytes.
+# two references to it; and once decoded, its string and its reference
+# beside its characters. A string beyond ASCII holds 16 bytes more and a
+# terminator as wide as its characters, up to 4 bytes.
 _DECODE_TEXT_BYTES = 168
 _HELD_TEXT_BYTES = 68
 # The records whose characters are keyed at a time, while both full columns
@@ -419,15 +414,12 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         )
         # Writing holds a copy of the records and, for each, its cells' and
         # files' int32 copies and its states' int8 copy and the keys that
-        # count each cell's integrations, beside the file buffers of Zarr's
-        # writes.
-        ledger.peak(
-            f"writing the {table.n_records} records",
-            table.nbytes
-            + _WRITE_BYTES_PER_RECORD * table.n_records
-            + zarr_write_buffer_bytes(),
+        # count each cell's integrations.
+        writing = table.nbytes + _WRITE_BYTES_PER_RECORD * table.n_records
+        ledger.peak(f"writing the {table.n_records} records", writing)
+        self._write_alleles(
+            planned, table, n_cells, attributes, diagnostics, ledger, writing
         )
-        self._write_alleles(planned, table, n_cells, attributes, diagnostics)
         warn_diagnostics(
             arguments, inspect_artifact(self.zw, planned.ref).diagnostics, warnings
         )
@@ -528,10 +520,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
     ) -> tuple[RecordTable, MemoryLedger, dict[str, Any], dict[str, Any]]:
         """Read the alleles of the files' rows that name selected cells.
 
-        One ledger holds what the import keeps whatever its size, the
-        selected cells' arrays, positions and IDs, the join, a chunk of each
-        file and the records encoded, and is charged the merge of the records
-        before they merge.
+        One ledger holds the selected cells' arrays, positions and IDs, the
+        join, a chunk of each file and the records encoded, and is charged the
+        merge of the records before they merge.
 
         Returns:
             The records, the import's ledger, which holds them, the
@@ -544,11 +535,6 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             f"Importing alleles for {n_cells} selected cells",
             remedy="pass a smaller cell_selection",
             codec_threads=self.nthreads,
-        )
-        ledger.hold(
-            "a block of a file as it is hashed, the parser's buffers and a chunk "
-            "as it is written",
-            _FIXED_BYTES,
         )
         # The per-cell arrays and a mask of each file of one array's cells,
         # which find arrays that share no cell.
@@ -696,18 +682,35 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         n_cells: int,
         attributes: Mapping[str, Any],
         diagnostics: Mapping[str, Any],
+        ledger: MemoryLedger,
+        writing: int,
     ) -> None:
+        """Write the records and each cell's summaries, beside the ``writing`` bytes that building them holds.
+
+        The chunks that Zarr encodes from the arrays are charged to ``ledger``
+        once the arrays are built, before anything is written.
+        """
         summaries = cell_summaries(table, n_cells)
         arrays = record_arrays(table, _RECORDS)
         # A state fits a byte.
         arrays[f"{_RECORDS}_state"] = np.asarray(
             arrays[f"{_RECORDS}_state"], dtype=np.int8
         )
+        stored = {**summaries, **arrays}
+        chunk_lengths = record_chunk_lengths(arrays)
+        ledger.peak(
+            f"writing the {table.n_records} records",
+            writing
+            + cell_data_write_bytes(
+                {name: (values.shape, values.dtype) for name, values in stored.items()},
+                chunk_lengths=chunk_lengths,
+            ),
+        )
         write_cell_data_artifact(
             self.zw,
             planned,
-            {**summaries, **arrays},
-            chunk_lengths=record_chunk_lengths(arrays),
+            stored,
+            chunk_lengths=chunk_lengths,
             attributes={
                 "fields": list(FIELDS),
                 "states": list(STATES),
@@ -789,8 +792,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         # text and cell ID as a category, the texts as they are decoded, and
         # the cells' IDs as they are read.
         resident = (
-            _FIXED_BYTES
-            + _TABLE_BYTES_PER_RECORD * n_records
+            _TABLE_BYTES_PER_RECORD * n_records
             + _TABLE_BYTES_PER_TEXT * (n_text + n_cells)
             + counts["decoded_bytes"]
             + _CELL_BYTES * n_cells
@@ -915,11 +917,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         # allele as it is ranked, the texts as they are decoded, each
         # character as it is named and ordered (at most every integration at
         # every site), the exported cells' IDs, and a store's column and its
-        # alleles as they are written, beside the file buffers of Zarr's
-        # writes; the matrix's codes are counted once their size is known.
+        # alleles as they are written; the matrix's codes are counted once
+        # their size is known.
         resident = (
-            _FIXED_BYTES
-            + _EXPORT_BYTES_PER_RECORD * n_records
+            _EXPORT_BYTES_PER_RECORD * n_records
             + _EXPORT_BYTES_PER_ALLELE * counts["alleles"]
             + counts["decoded_bytes"]
             + _EXPORT_BYTES_PER_CHARACTER
@@ -928,7 +929,6 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             + _STORE_BYTES_PER_CELL * n_cells
             + (
                 _STORE_BYTES_PER_ALLELE_BYTE * counts["allele_bytes"]
-                + zarr_write_buffer_bytes()
                 if format == "treedata"
                 else 0
             )
@@ -1134,7 +1134,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         bank_bytes = 0
         if frequencies is not None:
             checking, bank_bytes = _bank_bytes(frequencies)
-            ledger.peak("the banks of frequencies", checking + NUMPY_STEP_BYTES)
+            ledger.peak("the banks of frequencies", checking)
             banks = allele_banks(frequencies)
             ledger.hold("the banks of frequencies", bank_bytes)
         settings = allele_call_settings(

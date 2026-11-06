@@ -140,32 +140,6 @@ _RELEASED_KNN_FEATURE_INDICES = (
 )
 
 
-def test_reduced_coordinate_write_counts_its_readers_held_chunk_once(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from cytearc.matrix import ChunkedArray
-
-    group = zarr.open_group(store=MemoryStore(), mode="w")
-    array = group.create_array(
-        "normalized", shape=(100, 20), chunks=(10, 20), dtype=np.float32
-    )
-    spec = graph_operations._coordinate_spec(group, 100, 2)
-    data = ChunkedArray(array, block_size=10)
-
-    def producer_bytes() -> int:
-        producer, _ = graph_operations._reduction_write_bytes(
-            spec, data, ResourceBudget(1 << 30, 1), dims=2, transform_bytes=0
-        )
-        return producer
-
-    counted = producer_bytes()
-    monkeypatch.setattr(ChunkedArray, "_held_read_bytes", lambda self: 0)
-    # The write holds three blocks that one reader reads one after another,
-    # so only the read before the last can still hold its 800-byte chunk, as
-    # stored and decoded, with Zarr's objects for both reads.
-    assert counted - producer_bytes() == 800 + (800 + 800 // 128 + 1024) + 64 * 1024
-
-
 def test_streaming_lsi_block_rows_respect_memory_budget() -> None:
     group = zarr.open_group(store=MemoryStore(), mode="w")
     array = group.create_array(
@@ -175,12 +149,11 @@ def test_streaming_lsi_block_rows_respect_memory_budget() -> None:
         dtype=np.float32,
     )
 
-    # Beside 5,000 bytes, the 800-byte chunk that the previous read can still
-    # hold, as stored and decoded, with Zarr's objects for both reads.
-    held = 800 + (800 + 800 // 128 + 1024) + 64 * 1024
+    # 8 kB holds the accumulators, the 800-byte chunk that a block's read
+    # decodes and a few rows of the 100, and a megabyte holds every row.
     constrained = graph_operations._streaming_lsi_block_rows(
         array,
-        ResourceBudget(memoryBytes=5_000 + held, workers=1),
+        ResourceBudget(memoryBytes=8_000, workers=1),
         n_components=3,
         n_oversamples=2,
     )

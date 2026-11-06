@@ -22,7 +22,6 @@ import pandas as pd
 from ..utils.arrays import sort_categories, sort_categories_bytes
 from ..utils.arguments import quoted_value
 from ..utils.memory_budget import (
-    NUMPY_STEP_BYTES,
     MemoryLedger,
     hash_table_bytes,
     object_array_bytes,
@@ -91,8 +90,7 @@ _PROBABILITY_BYTES = 8
 # arguments and the labels it keeps: the masks of the rows kept, their cells
 # and labels, the labels' positions and codes, the rows' order and their
 # sorted copies, and the first row, the length, the cell and the clone of
-# each cell's rows. Traced at 50 to 63 bytes a row beside pandas' hash table
-# of the labels, on 20,000 to 1,000,000 rows of one label or of 6,000.
+# each cell's rows, beside pandas' hash table of the labels.
 _ASSIGNMENT_BYTES_PER_ROW = 76
 #: The most bytes that CloneAssigner.add holds for each row, beside its
 #: arguments and the labels it keeps: what it works with, and pandas' hash
@@ -100,24 +98,19 @@ _ASSIGNMENT_BYTES_PER_ROW = 76
 CLONE_ASSIGNMENT_ROW_BYTES = _ASSIGNMENT_BYTES_PER_ROW + 42
 # Bytes of each distinct clone label beside its text: its entry in the table
 # that finds its code, its code and its slots in the lists of labels and of
-# their sources. Traced at 90 bytes, and 111 while the table grows, on up to
-# 400,000 labels.
+# their sources, while the table grows.
 _LABEL_ENTRY_BYTES = 120
 # Ranking the clones holds, while it orders their labels, each label's cells,
 # its place among the labels held and its slot in their list; then, for each
 # label, its rank by label and by size, the order of both and its slot in the
 # list and the array of the labels ranked, and for each cell its code by
-# rank, whether it has a clone and the codes gathered to rank them, beside
-# 32 KiB of NumPy's objects, which a few clones of many cells trace at up to
-# 19 KB. Traced within 23% above on 5,000 to 100,000 labels of one to 20
-# cells, and within 1% below on 10 and 100 labels of 200,000 to 1,000,000.
+# rank, whether it has a clone and the codes gathered to rank them.
 _ORDER_BYTES_PER_LABEL = 48
 _RANK_BYTES_PER_LABEL = 104
 _RANK_BYTES_PER_CELL = 25
-_RANK_FIXED_BYTES = 32 * 1024
 # Ordering labels of digits as integers holds each label's value, its order
 # and the values in order, and, when two labels are the same number, the
-# labels' order as text: traced at 32 bytes, and 56 with equal numbers.
+# labels' order as text.
 _INTEGER_ORDER_BYTES = 56
 
 
@@ -311,13 +304,11 @@ class CloneAssignment:
 def clone_assignment_bytes(n_rows: int) -> int:
     """The most bytes that :meth:`CloneAssigner.add` holds for ``n_rows`` rows, beside its arguments and the labels it keeps.
 
-    What it works with for each row, pandas' hash table of the rows' labels,
-    which pandas sizes for every row, and what a step of NumPy calls holds.
+    What it works with for each row, and pandas' hash table of the rows'
+    labels, which pandas sizes for every row.
     """
     n_rows = int(n_rows)
-    return (
-        _ASSIGNMENT_BYTES_PER_ROW * n_rows + hash_table_bytes(n_rows) + NUMPY_STEP_BYTES
-    )
+    return _ASSIGNMENT_BYTES_PER_ROW * n_rows + hash_table_bytes(n_rows)
 
 
 class CloneAssigner:
@@ -551,9 +542,7 @@ class CloneAssigner:
             max(
                 _label_order_bytes(self._label_list)
                 + _ORDER_BYTES_PER_LABEL * n_labels,
-                _RANK_BYTES_PER_LABEL * n_labels
-                + _RANK_BYTES_PER_CELL * n_cells
-                + _RANK_FIXED_BYTES,
+                _RANK_BYTES_PER_LABEL * n_labels + _RANK_BYTES_PER_CELL * n_cells,
             ),
         )
         ranked, clone_ids, clone_sizes = ranked_clones(self._codes, self._label_list)

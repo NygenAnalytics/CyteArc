@@ -48,6 +48,7 @@ from tests.barcode_join_helpers import (
     write_tree_file,
     write_variant_file,
 )
+from tests.memory_helpers import climb_refusals
 
 _REFERENCE = Path(__file__).parent / "guide_calls_import_reference.json"
 # Attributes that differ between two writes of one artifact.
@@ -938,30 +939,46 @@ def test_the_join_reads_the_stores_cell_ids_once_and_only_when_it_needs_them() -
     assert every.n_unmatched_barcodes == 1
 
 
-def test_the_pass_keeps_eight_bytes_for_each_of_the_stores_ids(tmp_path) -> None:
+def test_only_a_selection_of_some_cells_reserves_the_pass_over_the_stores_ids(
+    tmp_path,
+) -> None:
     import zarr
 
     from cytearc.datastore._operations.cell_barcodes import store_pass_bytes
 
     group = zarr.open_group(tmp_path / "ids.zarr", mode="w")
-    arrays = {}
-    for n_ids in (100_000, 100_010):
+    stores = {}
+    for n_ids in (100_000, 200_000):
         ids = np.asarray([f"s1__{index:09d}-1" for index in range(n_ids)])
-        arrays[n_ids] = group.create_array(
+        stores[n_ids] = group.create_array(
             f"ids{n_ids}", shape=ids.shape, dtype=ids.dtype, chunks=(50_000,)
         )
-        arrays[n_ids][:] = ids
-    # Ten more IDs in a band of the same rows add their ten hashes alone.
+        stores[n_ids][:] = ids
+    array = stores[100_000]
+    ids = np.asarray(array[:])
+
+    def join(selected: np.ndarray, budget: int) -> CellBarcodeJoin:
+        return CellBarcodeJoin(
+            selected.astype(object),
+            ledger=MemoryLedger(budget, "Joining"),
+            store_ids=array,
+        )
+
+    # A selection of every cell of the store leaves none outside it, so no
+    # pass over the store's IDs is reserved; a selection of all but one
+    # reserves it.
+    item = "the pass over the store's cell IDs"
+    every, _ = climb_refusals(lambda budget: join(ids, budget))
+    some, _ = climb_refusals(lambda budget: join(ids[:-1], budget))
+    assert item not in [error.item for error in every]
+    assert item in [error.item for error in some]
+    assert store_pass_bytes(array, len(ids)) == 0
+    # The pass reads a band of chunks at a time, the same for both stores,
+    # and keeps a 64-bit hash of each of the store's IDs.
     assert (
-        store_pass_bytes(arrays[100_010], 10) - store_pass_bytes(arrays[100_000], 10)
-        == 80
+        store_pass_bytes(stores[200_000], 10) - store_pass_bytes(stores[100_000], 10)
+        >= 8 * 100_000
     )
-    # A read on more threads can leave more chunks behind.
-    assert store_pass_bytes(arrays[100_000], 10, codec_threads=4) >= (
-        store_pass_bytes(arrays[100_000], 10)
-    )
-    # A selection of every cell of the store reads none of them.
-    assert store_pass_bytes(arrays[100_000], 100_000) == 0
 
 
 @pytest.mark.parametrize("order", ["named first", "unnamed first", "two chunks"])

@@ -62,7 +62,7 @@ _SAMPLE_ROWS = 100
 _CORRUPT = (EOFError, zlib.error, gzip.BadGzipFile)
 # The characters of text that the rows read from the file at a time, past
 # the line they end in, whatever pandas asks for: a batch of short lines holds
-# about 0.2 MB of Python objects, and larger batches read no faster.
+# a Python object for each field, and larger batches read no faster.
 _READ_CHARACTERS = 1 << 14
 # The fields of a space-separated row: pandas separates them by spaces and
 # tabs alone, as other whitespace, such as a no-break space, is text.

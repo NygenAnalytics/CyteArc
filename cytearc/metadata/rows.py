@@ -9,7 +9,6 @@ import zarr
 
 from ..storage.async_execution import zarr_decoding_threads, zarr_io_concurrency
 from ..storage.geometry import (
-    READ_OBJECT_BYTES,
     ROW_INDEX_BYTES,
     ROW_KEPT_INDEX_BYTES,
     ArrayGeometry,
@@ -74,18 +73,6 @@ def _read_array_rows(array: Any, rows: np.ndarray) -> np.ndarray:
     return np.asarray(array[indices])
 
 
-def previous_read_bytes(*stored: int) -> int:
-    """Return what the read before a read of stored arrays can still hold beside it.
-
-    ``stored`` holds the bytes of one stored chunk of each array that is read
-    one after another, as stored and decoded, as
-    :func:`array_row_selection_parts` counts them. A read can hold the largest
-    of those chunks beside its own, with the objects that Zarr makes for both
-    reads, as ``ArrayGeometry.heldReadBytes`` counts for one array.
-    """
-    return max(stored, default=0) + READ_OBJECT_BYTES
-
-
 def array_row_selection_parts(array: Any) -> tuple[int, int]:
     """Return fixed and per-row bytes for one chunk-serial selection."""
     row_values = int(np.prod(tuple(array.shape)[1:], dtype=np.int64))
@@ -146,6 +133,8 @@ def read_array_rows_chunkwise(array: Any, rows: np.ndarray) -> np.ndarray:
         if values.shape != (block.indices.size, *row_shape):
             raise ValueError("Metadata row selection returned an invalid shape")
         output[block.destinations] = values
+        # A band's rows go before the next band is read.
+        del values
     return output
 
 
@@ -164,11 +153,8 @@ def read_whole(
     decoded chunks fit the room, and at one chunk at a time when only that
     fits. A sharded array is read a band of inner chunks at a time, so that
     no fetch takes more than one band of a shard. The ledger counts what the
-    read holds while it runs, as ``ArrayGeometry.wholeReadBytes`` states, or
-    the result beside what the read leaves behind where that is more: a
-    chunk on each of the ledger's codec threads, which the read decodes on,
-    up to the chunks it decodes. It keeps the result charged and records
-    what the read leaves behind.
+    read holds while it runs, as ``ArrayGeometry.wholeReadBytes`` states, and
+    keeps the result charged.
 
     Raises:
         MemoryBudgetError: If even a read of one chunk at a time would pass
@@ -182,20 +168,8 @@ def read_whole(
         values = read_array(group, name) if array.ndim else np.asarray(array[()])
         ledger.hold(item, values.nbytes)
         return values
-    n_chunks = -(-geometry.shape[0] // geometry.axisChunk(0)) * geometry.bandChunks()
-    threads = ledger.holding_threads(n_chunks)
-    held = (
-        geometry.heldReadBytes(threads)
-        if geometry.shards is None
-        else geometry.bandHeldBytes(threads)
-    )
-    after = geometry.shape[0] * geometry.rowBytes() + held
-
-    def reading(concurrency: int) -> int:
-        return max(geometry.wholeReadBytes(concurrency), after)
-
-    concurrency = _fitting_concurrency(ledger, reading)
-    ledger.peak(item, reading(concurrency))
+    concurrency = _fitting_concurrency(ledger, geometry.wholeReadBytes)
+    ledger.peak(item, geometry.wholeReadBytes(concurrency))
     with (
         zarr_io_concurrency(concurrency),
         zarr_decoding_threads(ledger.codec_threads),
@@ -207,7 +181,6 @@ def read_whole(
             step = geometry.axisChunk(0)
             for start in range(0, geometry.shape[0], step):
                 values[start : start + step] = array[start : start + step]
-    ledger.leave(held)
     ledger.hold(item, values.nbytes)
     return values
 
@@ -224,65 +197,26 @@ def _fitting_concurrency(ledger: MemoryLedger, cost: Any) -> int:
     return 1
 
 
-def row_read_bytes(geometry: ArrayGeometry | None, rows: np.ndarray) -> int:
-    """What reading ``rows``, distinct rows of an array of ``geometry``, a band of chunks at a time holds, with the rows.
+def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
+    """What reading ``n_rows`` distinct rows of an array of ``geometry`` a band of chunks at a time holds, with the rows.
 
     Ordering the rows by band holds their indices as
     ``storage.geometry.ROW_INDEX_BYTES`` counts them. Reading the bands then
     holds each row in the result and the indices it keeps, one band's
-    selected rows as Zarr returns them and what reading the band holds; a
-    read of several bands holds the band before beside the next, as
+    selected rows as Zarr returns them and what reading the band holds, as
     ``ArrayGeometry.bandReadBytes`` counts. An array without chunks is
     counted by its rows' indices alone.
     """
-    indices = np.asarray(rows)
-    n_rows = int(indices.size)
-    if geometry is None:
-        return n_rows * ROW_INDEX_BYTES
-    step = geometry.axisChunk(0)
-    bands = int(indices.max()) // step - int(indices.min()) // step + 1 if n_rows else 1
-    return _band_rows_read_bytes(geometry, n_rows, bands)
-
-
-def _band_rows_read_bytes(geometry: ArrayGeometry, n_rows: int, bands: int) -> int:
-    """:func:`row_read_bytes` of ``n_rows`` rows that span ``bands`` bands of chunks."""
+    n_rows = int(n_rows)
     ordering = n_rows * ROW_INDEX_BYTES
+    if geometry is None:
+        return ordering
     reading = n_rows * (
         geometry.rowBytes() + ROW_KEPT_INDEX_BYTES
     ) + geometry.bandReadBytes(
-        min(n_rows, geometry.axisChunk(0)), operation_concurrency(), bands=bands
+        min(n_rows, geometry.axisChunk(0)), operation_concurrency()
     )
     return max(ordering, reading)
-
-
-def rows_read_charge(
-    ledger: MemoryLedger,
-    array: Any,
-    n_rows: int,
-    *,
-    span: tuple[int, int] | None = None,
-) -> tuple[int, int]:
-    """What :func:`read_rows` charges ``ledger`` to read ``n_rows`` distinct rows of ``array``, and what that read leaves behind.
-
-    ``span`` gives the first and last of the rows, which set the bands of
-    chunks the rows span. Without it, the rows span the fewest bands that
-    ``n_rows`` rows can, which no rows of that count are charged less than.
-    """
-    geometry = array_geometry(array)
-    n_rows = int(n_rows)
-    if geometry is None:
-        return n_rows * ROW_INDEX_BYTES, 0
-    step = geometry.axisChunk(0)
-    if span is None:
-        bands = max(1, -(-n_rows // step))
-    else:
-        bands = int(span[1]) // step - int(span[0]) // step + 1
-    reading = _band_rows_read_bytes(geometry, n_rows, bands)
-    if not n_rows:
-        return reading, 0
-    chunks = min(n_rows, bands) * geometry.bandChunks()
-    held = geometry.bandHeldBytes(ledger.holding_threads(chunks))
-    return max(reading, n_rows * geometry.rowBytes() + held), held
 
 
 def read_rows(
@@ -291,24 +225,16 @@ def read_rows(
     """Read distinct ``rows`` of a stored array a band of chunks at a time, keeping them charged as ``item``.
 
     The rows are read as :func:`read_array_rows_chunkwise` reads them, in the
-    order given. The ledger counts what the read holds, as
-    :func:`row_read_bytes` states, or the rows beside what the read leaves
-    behind where that is more: a chunk on each of the ledger's codec threads,
-    which the read decodes on, up to the chunks of the bands the rows span, as
-    :func:`rows_read_charge` states. It keeps the rows charged and records what
-    the read leaves behind.
+    order given, on the ledger's codec threads. The ledger counts what the
+    read holds, as :func:`row_read_bytes` states, and keeps the rows charged.
 
     Raises:
         MemoryBudgetError: If the read would pass the budget.
     """
     indices = np.asarray(rows)
-    span = (int(indices.min()), int(indices.max())) if indices.size else None
-    reading, held = rows_read_charge(ledger, array, int(indices.size), span=span)
-    ledger.peak(item, reading)
+    ledger.peak(item, row_read_bytes(array_geometry(array), int(indices.size)))
     with zarr_decoding_threads(ledger.codec_threads):
         values = read_array_rows_chunkwise(array, indices)
-    if held:
-        ledger.leave(held)
     ledger.hold(item, values.nbytes)
     return values
 

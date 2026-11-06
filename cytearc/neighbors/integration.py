@@ -16,9 +16,6 @@ _VALIDATION_ROWS = 100_000
 # Coordinate values whose squared row norms are summed at once; the sum
 # holds two float64 copies of them.
 _NORM_BAND_VALUES = 1 << 20
-# Python objects an integration holds whatever the data size, such as the
-# per-cell candidate arrays and the progress bar, measured below 64 KiB.
-_WNN_OBJECT_BYTES = 256 * 1024
 # Cells whose candidates, distances, and predictions are scored at once.
 _WNN_BLOCK_CELLS = 2048
 # Coordinate dtypes that the compiled kernels read.
@@ -107,7 +104,7 @@ def wnn_peak_bytes(
         # of its rows and columns.
         held + cells * 12 * edges,
     )
-    return inputs + max(phases) + _WNN_OBJECT_BYTES
+    return inputs + max(phases)
 
 
 def _validate_neighbor_indices(

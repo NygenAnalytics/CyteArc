@@ -1,7 +1,6 @@
 import hashlib
 import math
 import re
-import sys
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -267,16 +266,13 @@ def sort_categories(values: Iterable[Any]) -> list[Any]:
 # The tokens of a label's natural order: runs of digits and of other characters.
 _LABEL_TOKENS = re.compile(r"\d+|\D+")
 #: Sorting labels naturally holds, for each label, its sort key, a tuple of
-#: its kind, its tokens and its text, and the tuple of its tokens, beside 6
-#: bytes of the lists of labels, of their keys and of the result; and for
+#: its kind, its tokens and its text, and the tuple of its tokens, beside the
+#: lists of labels, of their keys and of the result: about 128 bytes; and for
 #: each token, a run of digits or of other characters, its tuple of its kind
-#: and its value, its slot in the tokens' tuple and 26 bytes of its number.
-#: The tuples take this Python's sizes: Python 3.14 caches a tuple's hash in
-#: 8 more bytes. Traced in all at 238, 311 and 824 bytes a label on Python
-#: 3.13, and 262, 341 and 902 on 3.14, for 20,000 ASCII labels of one, two
-#: and eight tokens.
-_SORT_BYTES_PER_LABEL = sys.getsizeof((0, (), "")) + sys.getsizeof(()) + 6
-_SORT_BYTES_PER_TOKEN = sys.getsizeof((0, 0)) + 8 + 26
+#: and its value, its slot in the tokens' tuple and its number: about 100
+#: bytes.
+_SORT_BYTES_PER_LABEL = 128
+_SORT_BYTES_PER_TOKEN = 100
 
 
 def sort_categories_bytes(texts: Sequence[str]) -> int:
