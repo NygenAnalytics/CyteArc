@@ -781,6 +781,33 @@ def test_the_diversity_plot_draws_each_groups_indices(truth_plot) -> None:
         gini.close()
 
 
+def test_the_diversity_plot_on_caller_axes_names_the_groups_where_a_row_starts(
+    truth_plot,
+) -> None:
+    store = truth_plot.store
+    diversity = store.clones.diversity(truth_plot.clones, group_by="sample")
+    indices = ["n_clones", "shannon", "inverse_simpson"]
+
+    def named(target) -> list[bool]:
+        result = clonal_diversity(
+            store, diversity, target=target, show_legend=False, show=False
+        )
+        try:
+            return [bool(result.axes[index].get_yticklabels()) for index in indices]
+        finally:
+            plt.close(result.figure)
+
+    # Panels side by side name the groups once, on the first; panels one
+    # above another each start a row; panels without a grid each name them.
+    _, row = plt.subplots(1, 3)
+    assert named(dict(zip(indices, row, strict=True))) == [True, False, False]
+    _, column = plt.subplots(3, 1)
+    assert named(dict(zip(indices, column, strict=True))) == [True, True, True]
+    loose = plt.figure()
+    panels = [loose.add_axes((0.1 + 0.3 * at, 0.1, 0.2, 0.8)) for at in range(3)]
+    assert named(dict(zip(indices, panels, strict=True))) == [True, True, True]
+
+
 def test_a_diversity_panel_of_no_defined_value_says_so(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
     diversity = store.clones.diversity(clones, group_by="sample")
