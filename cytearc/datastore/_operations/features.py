@@ -2674,6 +2674,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         This method has been designed for snATAC-Seq data and can be used to quantify accessibility of specific
         genomic loci such as gene bodies, promoters, enhancers, motifs, etc.
         Features from the BED file are retained even when they do not overlap any peak.
+        The new assay holds TF-IDF values, which already divide each cell's counts
+        by its total, so an assay of an RNA class, such as ``GeneScores``, passes
+        them through rather than normalizing them by library size.
 
         The new assay becomes visible only after its counts, and RNA ``countsT``,
         are complete. If the write fails or is interrupted, the partial assay is

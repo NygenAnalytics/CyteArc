@@ -46,6 +46,9 @@ PENDING_ASSAY_ATTR = "cytearc:pending_assay"
 # The assay group attribute of an assay that holds values normalized before
 # import. An assay without it holds counts.
 NORMALIZED_VALUES_ATTR = "normalizedValues"
+# The assay group attribute of an assay of TF-IDF values, such as melded gene
+# scores: what each term frequency divides a cell's counts by.
+TF_DENOMINATOR_ATTR = "tfDenominator"
 
 
 def normalized_values_record(values: MatrixValues) -> dict[str, Any] | None:

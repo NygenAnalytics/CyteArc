@@ -672,6 +672,77 @@ def test_add_melded_assay_rna_writes_complete_counts_t(tmp_path):
     )
 
 
+@pytest.mark.parametrize("renormalization", [False, True])
+@pytest.mark.parametrize("assay_type", ["RNA", "GeneScores"])
+def test_melded_gene_scores_of_an_rna_class_pass_through(
+    tmp_path, renormalization, assay_type
+):
+    from cytearc.assay import RNAassay
+    from cytearc.assay.normalization import norm_dummy
+
+    raw = np.array([[2, 0, 1], [0, 3, 0], [1, 0, 4], [5, 1, 0]], dtype=np.uint32)
+    peak_ids = ["chr1:100-200", "chr1:250-350", "chr2:100-200"]
+    store_path = tmp_path / "atac_scores.zarr"
+    SparseToZarr(
+        csr_matrix(raw),
+        zarr_loc=str(store_path),
+        cell_ids=[f"cell_{index}" for index in range(4)],
+        feature_ids=peak_ids,
+        assay_name="ATAC",
+        nthreads=1,
+    ).dump(batch_size=2)
+    store = DataStore(
+        str(store_path), default_assay="ATAC", min_features_per_cell=0, nthreads=1
+    )
+    feature_bed = _features_bed(
+        [
+            ("chr1", 120, 300, "gene_a", "GENE_A", "+"),
+            ("chr2", 120, 180, "gene_b", "GENE_B", "+"),
+        ]
+    )
+    bed_path = tmp_path / "genes.bed"
+    feature_bed.to_csv(bed_path, sep="\t", header=False, index=False)
+    store.add_melded_assay(
+        from_assay="ATAC",
+        external_bed_fn=str(bed_path),
+        assay_label="GeneScores",
+        assay_type=assay_type,
+        renormalization=renormalization,
+        scalar_coeff=50.0,
+    )
+    _, _, mapping = get_feature_mappings(
+        create_bed_from_coord_ids(peak_ids), feature_bed
+    )
+    scores = _reference_melded(
+        raw,
+        raw.sum(axis=1, dtype=np.float64),
+        np.count_nonzero(raw, axis=0),
+        mapping.toarray(),
+        scalar_coeff=50.0,
+        renorm=renormalization,
+    )
+    # The cells' totals differ without renormalization, which a library-size
+    # step would divide away.
+    assert renormalization or len(np.unique(scores.sum(axis=1).round(9))) > 1
+
+    for opened in (
+        store,
+        DataStore(str(store_path), default_assay="ATAC", min_features_per_cell=0),
+    ):
+        assay = opened.GeneScores
+        assert isinstance(assay, RNAassay)
+        assert assay.normMethod is norm_dummy
+        cells, genes = np.arange(4), np.arange(2)
+        np.testing.assert_allclose(
+            assay.normed(cell_idx=cells, feat_idx=genes).compute(), scores, rtol=1e-6
+        )
+        np.testing.assert_allclose(
+            assay.normed(cell_idx=cells, feat_idx=genes, log_transform=True).compute(),
+            np.log1p(scores),
+            rtol=1e-6,
+        )
+
+
 @pytest.mark.parametrize(
     ("idf_cell_idx", "error", "message"),
     [

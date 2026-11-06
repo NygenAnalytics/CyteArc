@@ -339,7 +339,7 @@ An assay group with the attribute `normalizedValues` holds values that were norm
 
 ## Library-size normalization
 
-An RNA class normalizes by library size to the size factor in the assay group's `size_factor` attribute, a finite positive number that it reads as stored, so that 2500.5 stays 2500.5; any other value raises `ValueError` when the assay opens. An assay without one takes 1000, which a writable store records. Mount, repack and `SubsetZarr` copy it, ambient correction keeps its source's, and `DataStoreMerge` and `create_composite` keep the one that their sources share and refuse sources of different size factors before anything is written.
+An RNA class normalizes by library size to the size factor in the assay group's `size_factor` attribute, a finite positive number that it reads as stored, so that 2500.5 stays 2500.5; any other value raises `ValueError` when the assay opens. An assay without one takes 1000, which a writable store records. Mount, repack and `SubsetZarr` copy it, ambient correction keeps its source's, and `DataStoreMerge` and `create_composite` keep the one that their sources share and refuse sources of different size factors before anything is written. A melded assay records `tfDenominator`, what the term frequencies of its TF-IDF values divide each cell's counts by, and an RNA class that opens such an assay passes its values through with `norm_dummy` instead of dividing them by their own totals again.
 
 ## Pending derived assays
 
