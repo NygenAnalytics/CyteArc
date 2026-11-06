@@ -710,6 +710,11 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 f"{name!r} is declared as {declared!r}" + remedy
             )
         assay = self._get_assay(name)
+        assay.require_counts(
+            "Guide calls",
+            "they model each guide's UMI counts",
+            "Import the guide counts",
+        )
         count_dtype = np.dtype(assay.rawData.dtype)
         if count_dtype.kind != "u":
             raise TypeError(

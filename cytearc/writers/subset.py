@@ -489,6 +489,7 @@ class SubsetZarr:
                 dtype=assay.rawData.dtype,
                 profile=self.profile,
                 policy=self._layouts[assay.name],
+                normalized_values=assay.normalizedValues,
             )
             path = (
                 assay.name

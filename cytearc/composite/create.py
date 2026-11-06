@@ -805,6 +805,7 @@ def create_composite(
             dtype,
             profile="fast_local",
             policy=pair.policy,
+            sources=assays,
         )
         matrix = as_zarr_group(root[assay], name=assay)
         counts = as_zarr_array(matrix["counts"], name="counts")

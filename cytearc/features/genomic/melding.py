@@ -18,7 +18,11 @@ from ...storage.count_matrix import (
     CountMatrixPolicy,
 )
 from ...storage.layout import array_shard_rows
-from ...storage.schema import DerivedAssayTransaction
+from ...storage.schema import (
+    NORMALIZED_VALUES_ATTR,
+    DerivedAssayTransaction,
+    derived_normalized_values,
+)
 from ...storage.sharding import write_dense_from_row_batches
 from ...utils.arrays import array_digest, sparse_matrix_bytes
 from ...utils.memory_budget import MemoryBudgetError
@@ -357,5 +361,7 @@ def write_melded_counts(
             "idfCellCount": int(len(selected_cells)),
             "sourceAssay": assay.name,
             "tfDenominator": "total_counts",
+            # Gene scores are TF-IDF values, which steps that need counts refuse.
+            NORMALIZED_VALUES_ATTR: derived_normalized_values(),
         }
     )

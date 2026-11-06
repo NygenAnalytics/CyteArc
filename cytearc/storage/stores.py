@@ -38,7 +38,13 @@ _MATRIX_SOURCE_ASSAY_KEYS = frozenset(
 # Object stores stop after 10 retries by default, which is about nine seconds
 # of backoff. Keep retrying transient errors for up to three minutes instead.
 _REMOTE_RETRY_CONFIG = {"max_retries": 100, "retry_timeout": timedelta(minutes=3)}
-_ASSAY_COPY_ATTRS = ("is_assay", "misc", "percentFeatures", "size_factor")
+_ASSAY_COPY_ATTRS = (
+    "is_assay",
+    "misc",
+    "normalizedValues",
+    "percentFeatures",
+    "size_factor",
+)
 _WORKSPACE_COPY_ATTRS = ("defaultAssay", "assayTypes")
 
 

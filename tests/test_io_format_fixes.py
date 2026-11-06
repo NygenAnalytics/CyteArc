@@ -123,6 +123,7 @@ def test_matrix_market_fractions_keep_the_text_pandas_wrote(tmp_path) -> None:
         cell_ids=["c0", "c1", "c2"],
         feature_ids=["g0", "g1", "g2"],
         nthreads=1,
+        values="counts",
     )
     store.dump()
     datastore = cytearc.DataStore(store.z.store, min_features_per_cell=0, nthreads=1)

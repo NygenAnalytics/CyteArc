@@ -9,7 +9,7 @@ read every value and reject NaN and infinity.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -38,16 +38,21 @@ class CountValueRange:
     Attributes:
         integral: Whether every value seen is a non-negative integer.
         maximum: The largest value seen while ``integral`` holds.
+        negative: Whether any value seen is negative.
+        largest: The largest value seen, which bounds the values that undoing
+            a log gives.
     """
 
     integral: bool = True
     maximum: int = 0
+    negative: bool = False
+    largest: float = field(default=0.0, compare=False)
 
     def update(self, values: Any) -> None:
         """Add a block of canonical values, in any shape.
 
-        A fractional or negative value settles the range; later blocks are
-        only checked for NaN and infinity.
+        A fractional or negative value settles ``integral``; later blocks are
+        checked only for NaN, infinity, and negative values.
 
         Raises:
             TypeError: If the values are not real numbers.
@@ -63,12 +68,16 @@ class CountValueRange:
             raise ValueError(
                 "Count matrices must hold finite values; found NaN or infinity"
             )
+        self.largest = max(self.largest, float(block.max()))
         if not self.integral:
-            return
-        if kind == "f" and not np.equal(block, np.trunc(block)).all():
-            self.integral = False
+            if kind in "if" and not self.negative and block.min() < 0:
+                self.negative = True
             return
         if kind in "if" and block.min() < 0:
+            self.integral = False
+            self.negative = True
+            return
+        if kind == "f" and not np.equal(block, np.trunc(block)).all():
             self.integral = False
             return
         self.maximum = max(self.maximum, int(block.max()))

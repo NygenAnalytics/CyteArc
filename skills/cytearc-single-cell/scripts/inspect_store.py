@@ -207,7 +207,13 @@ def check_matrix(ds, assay: str, n_rows: int, hints: list[str]) -> dict:
                 f"{store[kind]} {'matches' if same else 'differs from'} author {col} "
                 f"(Spearman {rho:.3f}, median ratio {ratio:.2f}): {verdict}"
             )
+    # The totals of normalized values are equal by design, not cut off.
+    normalized_totals = (
+        None if ds.get_assay(assay).holdsCounts else f"{assay}_nCounts"
+    )
     for col, info in [*out["store"].items(), *out["author"].items()]:
+        if col == normalized_totals:
+            continue
         if info["floor_share"] is not None and info["floor_share"] >= 0.005:
             hints.append(
                 f"{col}: {info['floor_share']:.1%} of active cells sit within 5% of the "
@@ -249,8 +255,12 @@ def main() -> None:
     )
     for assay in summary["assays"]:
         kinds = Counter(item["ref"]["kind"] for item in assay["artifacts"])
+        record = assay.get("normalized_values")
+        values = "counts" if record is None else "normalized values"
+        if record is not None and record["importedAs"] is not None:
+            values += f", imported as {record['importedAs']}"
         print(
-            f"Assay {assay['name']} ({assay['assay_type']}): "
+            f"Assay {assay['name']} ({assay['assay_type']}, {values}): "
             f"{assay['active_features']:,} of {assay['total_features']:,} features; "
             f"artifacts {dict(sorted(kinds.items()))}"
         )

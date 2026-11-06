@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, cast, overload
 
 import numpy as np
 import zarr
-from scipy.sparse import coo_matrix, issparse
+from scipy.sparse import coo_matrix, csr_matrix, issparse
 
 from ..metadata.membership import membership_attributes
 from ..readers import SeuratReader
@@ -45,6 +45,7 @@ from ..utils.arrays import canonicalize_sparse
 from ..utils.count_values import CountValueRange
 from ..utils.memory_budget import MemoryBudgetError, refusal_words
 from ._store import (
+    resolve_import_values,
     DEFAULT_IMPORT_BLOCK_ROWS,
     bounded_block_rows,
     decode_text,
@@ -54,8 +55,10 @@ from ._store import (
     resolve_import_cell_selection,
 )
 from ..utils.arguments import bool_argument
+from ..utils.matrix_values import ImportValues
 
 if TYPE_CHECKING:
+    from ..utils.matrix_values import MatrixValues
     from ..storage.identity import CountSummary
 
 # Cell columns are chunked by the rows of the store and their stored width,
@@ -192,6 +195,10 @@ class SeuratToZarr:
             assay is imported, with an ``sct_default_assay`` notice. An active
             assay that is not imported, such as the ``integrated`` assay of
             ``IntegrateData``, which holds no raw counts, requires it.
+        values: What the matrix holds, ``"counts"``, ``"normalized"``,
+            ``"log_normalized"`` or ``"log2_normalized"``, as the import
+            reference's normalized values section describes. None decides
+            from the values.
 
     The import writes the assays and reductions that the reader selected.
     With the reader's default selection (``assays`` or ``reductions`` None),
@@ -232,12 +239,17 @@ class SeuratToZarr:
         *,
         overwrite: bool = False,
         default_assay: str | None = None,
+        values: ImportValues = None,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
+        from ..utils.matrix_values import import_values_argument
+
+        import_values_argument(values)
         from ..storage.budget import resolve_budget
         from ..storage.schema import (
             create_empty_cell_data,
             create_empty_zarr_count_assay,
+            normalized_values_record,
             validate_assay_name,
         )
         from ..storage.destinations import check_destination, create_destination
@@ -378,8 +390,10 @@ class SeuratToZarr:
         )
         self._lastImportPlans: dict[str, Any] = {}
         self._lastDenseBatchRows: dict[str, int] = {}
-        # Every assay's dtype and layout are resolved, and a layout that does
-        # not fit fails, before the destination exists.
+        # Every assay's dtype, values and layout are resolved, and a layout
+        # that does not fit fails, before the destination exists.
+        self._valuesArgument = values
+        self.values: dict[str, "MatrixValues"] = {}
         count_dtypes = {assay.name: self._prepare_counts(assay) for assay in assays}
         self._residentSourceBytes = self._source_resident_bytes()
         layouts = {
@@ -429,6 +443,7 @@ class SeuratToZarr:
                 dtype=count_dtypes[assay.name],
                 profile=self.profile,
                 policy=layouts[assay.name],
+                normalized_values=normalized_values_record(self.values[assay.name]),
             )
             self.counts[assay.name] = counts
             self.featureData[assay.name] = feature_data
@@ -1000,7 +1015,21 @@ class SeuratToZarr:
                 value_range.update(
                     canonicalize_sparse(coo_matrix(raw)).data if issparse(raw) else raw
                 )
-        return count_storage_dtype(source.dtype, value_range)
+        from ..utils.matrix_values import DETECTION_CELLS
+
+        storage_dtype = count_storage_dtype(source.dtype, value_range)
+        self.values[assay.name] = resolve_import_values(
+            self._valuesArgument,
+            {assay.name: value_range},
+            lambda: {
+                assay.name: csr_matrix(
+                    source.read_cells(0, min(DETECTION_CELLS, n_cells))
+                )
+            },
+            {assay.name: None},
+            {assay.name: storage_dtype},
+        )[assay.name]
+        return storage_dtype
 
     def _fit_count_layout(
         self,
@@ -1112,13 +1141,18 @@ class SeuratToZarr:
         # A source returns one row per requested cell; the shard writer
         # rejects a batch of another width and a stream of another length.
         def batches() -> Iterator[coo_matrix]:
+            from ..utils.matrix_values import linear_coo
+
             for start in range(0, n_cells, plan.batchRows):
                 stop = min(start + plan.batchRows, n_cells)
                 raw = source.read_cells(start, stop)
-                yield (
+                yield linear_coo(
                     raw.tocoo(copy=False)
                     if issparse(raw)
-                    else coo_matrix(np.asarray(raw))
+                    else coo_matrix(np.asarray(raw)),
+                    self.values[assay_name].kind,
+                    destination.dtype,
+                    assay=assay_name,
                 )
 
         accumulate_sparse_to_shards(
@@ -1171,12 +1205,19 @@ class SeuratToZarr:
         self._lastDenseBatchRows[assay_name] = rows
 
         def batches() -> Iterator[np.ndarray]:
+            from ..utils.matrix_values import linear_values
+
             for start in range(0, n_cells, rows):
                 raw = source.read_cells(start, min(start + rows, n_cells))
                 # The writer casts to the stored dtype and rejects a count
                 # that dtype cannot hold, a batch of another width, and a
                 # stream of another length.
-                yield raw.toarray() if issparse(raw) else np.asarray(raw)
+                yield linear_values(
+                    raw.toarray() if issparse(raw) else np.asarray(raw),
+                    self.values[assay_name].kind,
+                    destination.dtype,
+                    assay=assay_name,
+                )
 
         write_dense_from_row_batches(
             destination,

@@ -1650,6 +1650,7 @@ Public imports, result records, facade behavior, and wheel contents have separat
   `RecipePlan` of `PlannedStage` values without writing anything, and one generic executor and
   ledger run every plan, with stages that several recipes share. The `rna`, `atac`, `adt`,
   `multimodal`, and `perturbation` recipes implement it.
+- D12: an assay group's `normalizedValues` attribute records values normalized before import. It describes the stored values rather than the assay's type, so it sits beside D8's labels. Imports undo logs, so the stored values are always linear and `normMethod` does not depend on the record; steps that need counts read it through `Assay.require_counts`.
 
 ### Deferred
 

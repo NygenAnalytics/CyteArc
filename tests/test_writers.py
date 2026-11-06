@@ -706,6 +706,94 @@ def test_h5ad_parallel_producer_count_is_memory_admitted(tmp_path):
     np.testing.assert_array_equal(root["RNA/counts"][:], values)
 
 
+def _log_normalized_band(
+    n_cells: int = 12, n_feats: int = 3
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return counts scaled to 10,000 per cell, and their natural logs."""
+    counts = np.random.default_rng(9).integers(1, 6, size=(n_cells, n_feats))
+    linear = counts / counts.sum(axis=1, keepdims=True) * 1e4
+    return linear, np.log1p(linear)
+
+
+@pytest.mark.parametrize("encoding", ["csr", "csc", "dense"])
+def test_h5ad_log_normalized_values_import_linear_from_every_encoding(
+    tmp_path, encoding
+):
+    from cytearc.readers import H5adReader
+    from cytearc.writers import H5adToZarr
+
+    linear, logged = _log_normalized_band()
+    path = _write_h5ad(tmp_path / "logged.h5ad", logged, encoding=encoding)
+    reader = H5adReader(str(path), feature_name_key="feature_name")
+    try:
+        H5adToZarr(reader, zarr_loc=str(tmp_path / "logged.zarr"), nthreads=1).dump()
+    finally:
+        reader.close()
+
+    root = zarr.open_group(str(tmp_path / "logged.zarr"), mode="r")
+    np.testing.assert_allclose(root["RNA/counts"][:], linear, rtol=1e-12)
+    np.testing.assert_allclose(root["RNA/countsT"][:], linear.T, rtol=1e-12)
+    assert root["RNA"].attrs["normalizedValues"]["importedAs"] == "log_normalized"
+
+
+def test_h5ad_writer_processes_undo_the_log_of_their_windows(tmp_path):
+    from cytearc.readers import H5adReader
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.storage.io_policy import StorageIoPolicy
+    from cytearc.writers import H5adToZarr
+
+    linear, logged = _log_normalized_band()
+    path = _write_h5ad(tmp_path / "logged.h5ad", logged, encoding="csr")
+    location = str(tmp_path / "written.zarr")
+    reader = H5adReader(str(path), feature_name_key="feature_name")
+    try:
+        writer = H5adToZarr(
+            reader,
+            zarr_loc=location,
+            io=StorageIoPolicy(readWorkers=2),
+            **_SHARD_BAND_BUDGET,
+        )
+        writer.resources = ResourceBudget(1_000_000, 4)
+        writer._write_counts(batch_size=2)
+    finally:
+        reader.close()
+
+    assert writer._lastImportProducerCount >= 2
+    root = zarr.open_group(store=location, mode="r")
+    np.testing.assert_allclose(root["RNA/counts"][:], linear, rtol=1e-12)
+
+
+def test_h5ad_reader_processes_undo_the_log_of_their_bands(tmp_path):
+    from zarr.storage import MemoryStore
+
+    from cytearc.readers import H5adReader
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.storage.io_policy import StorageIoPolicy
+    from cytearc.writers import H5adToZarr
+
+    linear, logged = _log_normalized_band()
+    path = _write_h5ad(tmp_path / "logged.h5ad", logged, encoding="csr")
+    # A store in memory cannot be opened by writer processes, so reader
+    # processes send their bands to the parent.
+    store = MemoryStore()
+    reader = H5adReader(str(path), feature_name_key="feature_name")
+    try:
+        writer = H5adToZarr(
+            reader,
+            zarr_loc=store,
+            io=StorageIoPolicy(readWorkers=2),
+            **_SHARD_BAND_BUDGET,
+        )
+        writer.resources = ResourceBudget(1_000_000, 4)
+        writer._write_counts(batch_size=2)
+    finally:
+        reader.close()
+
+    assert writer._lastImportProducerCount >= 2
+    root = zarr.open_group(store=store, mode="r")
+    np.testing.assert_allclose(root["RNA/counts"][:], linear, rtol=1e-12)
+
+
 def test_h5ad_direct_writers_fit_their_window_summaries(tmp_path, monkeypatch):
     import cytearc.storage.sharding as sharding
     from cytearc.readers import H5adReader
@@ -888,12 +976,14 @@ def test_h5adtozarr_uses_smallest_lossless_dtype_for_float_counts(
     reader = H5adReader(str(path), feature_name_key="feature_name")
     store = MemoryStore()
     try:
+        # Fractional values are counts here, so they are declared so.
         H5adToZarr(
             reader,
             zarr_loc=store,
             mem_budget=1024**2,
             nthreads=2,
             policy=CountMatrixPolicy(unitBytes=48, chunkBytes=48),
+            values="counts",
         ).dump(batch_size=4)
     finally:
         reader.h5.close()
@@ -940,12 +1030,14 @@ def test_h5adtozarr_imports_float16_counts_as_float32(
     store = MemoryStore()
     try:
         assert reader.sourceMatrixDtype == np.float32
+        # Fractional values are counts here, so they are declared so.
         H5adToZarr(
             reader,
             zarr_loc=store,
             mem_budget=1024**2,
             nthreads=2,
             policy=CountMatrixPolicy(unitBytes=48, chunkBytes=48),
+            values="counts",
         ).dump(batch_size=4)
     finally:
         reader.h5.close()
@@ -3025,6 +3117,7 @@ def test_count_matrix_bands_project_and_reject_uninitialized_split() -> None:
                 buffers,
                 ("RNA", "ADT"),
                 None,
+                {},
             )
         )
     # Source features 0 and 2 belong to RNA and 1 and 3 to ADT.
@@ -3036,6 +3129,7 @@ def test_count_matrix_bands_project_and_reject_uninitialized_split() -> None:
             buffers,
             ("RNA", "ADT"),
             (codes, columns),
+            {},
         )
     )
     # The four rows fill both two-row bands of each assay, so none is left.
@@ -3125,6 +3219,7 @@ def test_h5ad_process_windows_run_in_the_parent_process(tmp_path) -> None:
                 None,
                 connection,
                 stop,
+                {},
             )
             assert connection.closed
             return connection.messages
@@ -3148,6 +3243,7 @@ def test_h5ad_process_windows_run_in_the_parent_process(tmp_path) -> None:
                 None,
                 connection,
                 stop,
+                {},
             )
             assert connection.closed
             return connection.messages
@@ -3331,7 +3427,7 @@ def test_csv_import_keeps_later_fractional_counts_and_missing_text(tmp_path):
     path.write_text("cell,g1,g2,label\nc1,1,0,a\nc2,0,2,b\nc3,2.5,7,\n")
     reader = CSVReader(str(path), id_column=0, batch_size=2, cell_data_cols=["label"])
     store = MemoryStore()
-    CSVtoZarr(reader, store, assay_name="RNA", nthreads=1).dump()
+    CSVtoZarr(reader, store, assay_name="RNA", nthreads=1, values="counts").dump()
 
     root = zarr.open_group(store=store, mode="r")
     np.testing.assert_array_equal(root["RNA/counts"][:], [[1, 0], [0, 2], [2.5, 7]])

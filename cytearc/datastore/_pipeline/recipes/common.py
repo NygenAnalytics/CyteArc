@@ -424,6 +424,56 @@ def resolve_snapshot_columns(
     return snapshots
 
 
+def _listed(items: Sequence[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def count_stages(
+    assay: str, head: RNAHeadSettings, filtering: Mapping[str, Any]
+) -> list[tuple[str, str, bool]]:
+    """Return the shared RNA stages that need counts, for ``require_counts_for_stages``.
+
+    They are gene selection by a flavor that models counts and a filtering
+    bound on the assay's totals.
+    """
+    flavor = str(head.hvg.get("flavor", "cytearc"))
+    totals = f"{assay}_nCounts"
+    return [
+        (
+            f"{flavor} gene selection",
+            "hvg={'flavor': 'cytearc'}",
+            flavor != "cytearc",
+        ),
+        (
+            f"bound on {totals}",
+            f"filtering attrs without {totals}",
+            totals in filtering.get("attrs", ()),
+        ),
+    ]
+
+
+def require_counts_for_stages(
+    store: Any, assay: str, recipe: str, stages: Sequence[tuple[str, str, bool]]
+) -> None:
+    """Refuse, in one message, every stage of a run that needs counts.
+
+    ``stages`` holds each stage's name, the argument that turns it off, and
+    whether the run uses it.
+
+    Raises:
+        TypeError: If ``assay`` holds normalized values and the run uses one
+            of the stages.
+    """
+    used = [(stage, remedy) for stage, remedy, on in stages if on]
+    if used:
+        verb = "reads" if len(used) == 1 else "read"
+        store._get_assay(assay).require_counts(
+            f"The {recipe} recipe",
+            f"its {_listed([stage for stage, _ in used])} {verb} counts",
+            f"Pass {_listed([remedy for _, remedy in used])}",
+        )
+
+
 def resolve_run_filtering(
     store: Any,
     filtering: object,

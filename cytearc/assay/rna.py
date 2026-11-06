@@ -32,6 +32,7 @@ from .hvg_statistics import (
 from .normalization import (
     NORMALIZATION_PARAM_NAMES,
     PearsonResidualNormalizer,
+    require_counts_for,
     _feature_group_positions,
     _feature_subset_source,
     check_normalization_flags,
@@ -485,6 +486,7 @@ class RNAassay(Assay):
             renormalize_subset=renormalize_subset,
         )
         method = self.normMethod
+        require_counts_for(self, method)
         library_size = method is norm_lib_size or method is norm_lib_size_log
         if library_size and self.sf is None:
             raise ValueError(

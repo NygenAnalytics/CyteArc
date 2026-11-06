@@ -843,6 +843,10 @@ class _MtxEngine:
             separator=self.separator,
             index_offset=self.indexOffset,
             counts=True,
+            remedy=(
+                "To import normalized values, read the matrix with scipy.io.mmread "
+                "and write it with SparseToZarr(values=...)"
+            ),
         ):
             assert raw_values is not None
             values = raw_values.astype(np.uint64, copy=False)

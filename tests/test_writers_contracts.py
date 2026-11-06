@@ -59,12 +59,12 @@ _PUBLIC_CLASS_METHODS = {
 }
 # Every importer takes the keyword ``overwrite``.
 _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
-    CrToZarr: "52d442411d74637bc13ef200681f3a73ba5e32b085c1313332327eb9106823d9",
-    H5adToZarr: "af557d28c7a99d860acfeed7a95158a7c3ca07a24db85702acf087cbcbeaf8a3",
-    SparseToZarr: "93e2b19b931a3fb26315a5bcc32ed45da2633cfa38ae177c832e37236e09b1e2",
-    CSVtoZarr: "b005b7bd9fccc8d0c1ad987954f7f7d6de909987b42d577f4f416ccd9b5835de",
+    CrToZarr: "7204d387a6ac8a0ac3ae4cf1c519ef0994ce2679a96c287532eee4c80f35f1f6",
+    H5adToZarr: "b7303317618ecd8ac51935b9b53c65bc7ca6a8d1eb5baee9f4e23d25dd77b7f2",
+    SparseToZarr: "806a5dff67138f06652752060abf73017f3b73523ab7699885050d796ba695ee",
+    CSVtoZarr: "28a9845e7da065dd15d0781843d67c4d309e1b552889fdb7374b079783a696cd",
     SubsetZarr: "76fd6326d68a545065ce07fed9411ec7f02d3f080041db627c3623bda5fe4ed8",
-    SeuratToZarr: "41388ff31e4a94002511aee322870ab234b3fc74d184a48538dbb921ae2f28af",
+    SeuratToZarr: "97d18e34b684c4faea71e6cb1f2ba6aa8c0ef6e8a40b97b1638f07b9bf539e31",
     TapestriToZarr: "1ad6b6cb239bad23596e3a4a6b5696d554148cf5f763d4a00e67b5c502fe63df",
 }
 _MODULE_FUNCTIONS = (
@@ -80,7 +80,7 @@ _MODULE_FUNCTIONS = (
 # to_h5ad takes the keyword-only matrix="raw" or "normed" beside run, and the
 # keyword-only cell_selection, obsm, obs, graph, and dtype, each None by default.
 _MODULE_SIGNATURE_DIGEST = (
-    "4b6d6cdd593f4f8f6b363a1e447eae26724e0f25fb57453220956fa4ac4b10c8"
+    "912f2d15dd1103f65f951e473a18e782f9b60c5fb563dddec4a13e3825d3bf0f"
 )
 
 
@@ -129,7 +129,7 @@ def test_writer_class_and_method_signatures_are_stable():
 
 def test_seurat_writer_takes_a_keyword_default_assay():
     parameters = inspect.signature(SeuratToZarr.__init__).parameters
-    assert list(parameters)[-2:] == ["overwrite", "default_assay"]
+    assert list(parameters)[-3:] == ["overwrite", "default_assay", "values"]
     parameter = parameters["default_assay"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is None

@@ -23,9 +23,11 @@ from ..storage.profiles import (
 )
 from ..utils.digest import file_sha256
 from ..utils.logging import logger
+
 from ..utils.memory_budget import MemoryBudgetError
 from ..utils.progress import iter_progress
 from ..utils.arguments import bool_argument
+from ..utils.matrix_values import ImportValues, MatrixValuesKind
 
 
 # Categories longer than this list are not stored with their column: AnnData
@@ -135,8 +137,14 @@ def _count_matrix_bands(
     buffers: dict[str, Any],
     assay_names: tuple[str, ...],
     projection: tuple[np.ndarray, np.ndarray] | None,
+    linear: Mapping[str, MatrixValuesKind],
 ) -> Iterator[tuple[str, Any, int]]:
+    """Split a source batch into the bands of each assay.
+
+    ``linear`` maps an assay to the log kind whose log its values undo.
+    """
     from ..utils.arrays import sparse_matrix_bytes
+    from ..utils.matrix_values import linear_coo
 
     chunk = matrix.tocoo(copy=False)
     source_bytes = sparse_matrix_bytes(matrix, chunk)
@@ -145,6 +153,10 @@ def _count_matrix_bands(
             raise RuntimeError("Multi-assay projection was not initialized")
         assay_name = assay_names[0]
         buffer = buffers[assay_name]
+        if assay_name in linear:
+            chunk = linear_coo(
+                chunk, linear[assay_name], buffer.dtype, assay=assay_name
+            )
         for band in buffer.add(chunk):
             producer_bytes = source_bytes + sum(
                 item.residentBytes for item in buffers.values()
@@ -166,6 +178,10 @@ def _count_matrix_bands(
             ),
             shape=(chunk.shape[0], buffer.nColumns),
         )
+        if assay_name in linear:
+            projected = linear_coo(
+                projected, linear[assay_name], buffer.dtype, assay=assay_name
+            )
         for band in buffer.add(projected):
             producer_bytes = (
                 source_bytes
@@ -306,6 +322,7 @@ def _read_h5ad_process_window(
     projection: tuple[np.ndarray, np.ndarray] | None,
     connection: Any,
     stop: Any,
+    linear: Mapping[str, MatrixValuesKind],
 ) -> None:
     from ..storage.sharding import SparseShardBuffer
 
@@ -332,6 +349,7 @@ def _read_h5ad_process_window(
                 buffers,
                 assay_names,
                 projection,
+                linear,
             ):
                 if not send_band(item):
                     return
@@ -359,6 +377,7 @@ def _write_h5ad_process_window(
     io: StorageIoPolicy | None,
     connection: Any,
     stop: Any,
+    linear: Mapping[str, MatrixValuesKind],
 ) -> None:
     from ..storage.execution import execution_report_scope
     from ..storage.identity import CountSummary
@@ -402,6 +421,7 @@ def _write_h5ad_process_window(
                     buffers,
                     assay_names,
                     projection,
+                    linear,
                 ):
                     yield SparseWriteBand(
                         destinations[assay_name],
@@ -526,6 +546,10 @@ class H5adToZarr:
                     assay whose name is not a preset. When None, the assay
                     name decides the type. Not allowed with ``assay_split_key``.
         overwrite: If True, replace a CyteArc store that no ``DataStore`` has opened.
+        values: What the matrix holds, ``"counts"``, ``"normalized"``,
+            ``"log_normalized"`` or ``"log2_normalized"``, as the import
+            reference's normalized values section describes. None decides
+            from the values.
 
     Each assay stores its counts in the dtype that
     :func:`~cytearc.storage.count_dtype.count_storage_dtype` resolves from the
@@ -561,10 +585,15 @@ class H5adToZarr:
         assay_type: str | None = None,
         *,
         overwrite: bool = False,
+        values: ImportValues = None,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
+        from ..utils.matrix_values import import_values_argument
+
+        import_values_argument(values)
         from ..storage.budget import resolve_budget
-        from ..storage.schema import create_zarr_count_assay
+        from ..storage.schema import create_zarr_count_assay, normalized_values_record
+        from ._store import resolve_import_values
         from ..storage.destinations import check_destination, create_destination
         from ..assay.classification import validate_assay_type
 
@@ -644,9 +673,8 @@ class H5adToZarr:
             if self.assayFeatures is None
             else self._assay_feature_projection(self.assayFeatures)
         )
-        self.storageDtypes = {
-            name: count_storage_dtype(self.h5ad.sourceMatrixDtype, value_range)
-            for name, value_range in zip(
+        value_ranges = dict(
+            zip(
                 self.assayNames,
                 self.h5ad.count_value_ranges(
                     self.resources.memoryBytes,
@@ -654,9 +682,42 @@ class H5adToZarr:
                 ),
                 strict=True,
             )
+        )
+        self.storageDtypes = {
+            name: count_storage_dtype(self.h5ad.sourceMatrixDtype, value_range)
+            for name, value_range in value_ranges.items()
         }
         logger.debug(f"Resolved H5AD count storage dtypes={self.storageDtypes}")
         self.h5ad.materialize_csc(self.resources.memoryBytes)
+        try:
+            self.values = resolve_import_values(
+                values,
+                value_ranges,
+                self._first_cells,
+                {name: self.assayTypes.get(name) for name in self.assayNames},
+                self.storageDtypes,
+            )
+        except ValueError as error:
+            others = self._other_count_matrices()
+            if others:
+                raise ValueError(
+                    f"{error}. The file also holds counts in {others}; pass "
+                    "matrix_key to import them"
+                ) from error
+            raise
+        if any(decision.kind != "counts" for decision in self.values.values()):
+            others = self._other_count_matrices()
+            if others:
+                logger.warning(
+                    f"{self.h5ad.matrixKey} holds normalized values, and {others} "
+                    "hold counts; pass matrix_key to H5adReader to import the counts"
+                )
+        # The assays whose log the writer undoes, by log kind.
+        self._linear = {
+            name: decision.kind
+            for name, decision in self.values.items()
+            if decision.kind in ("log_normalized", "log2_normalized")
+        }
         # A layout that does not fit fails here, before the destination exists.
         self.policy = self._fit_count_layout(policy)
         # The destination must be empty, or with overwrite an unprepared store.
@@ -682,6 +743,9 @@ class H5adToZarr:
                 dtype=self.storageDtypes[resolved_assay_name],
                 profile=self.profile,
                 policy=self.policy,
+                normalized_values=normalized_values_record(
+                    self.values[resolved_assay_name]
+                ),
             )
         self._ini_feature_data()
         self.root = (
@@ -689,6 +753,33 @@ class H5adToZarr:
             if self.workspace is None
             else as_zarr_group(self.z[self.workspace], name=self.workspace)
         )
+
+    def _other_count_matrices(self) -> list[str]:
+        """Return the file's other matrices whose sampled values are counts."""
+        return [
+            key for key in self.h5ad._count_matrix_keys() if key != self.h5ad.matrixKey
+        ]
+
+    def _first_cells(self) -> dict[str, Any]:
+        """Return the values of each assay's first cells, which decide what they are."""
+        from scipy.sparse import csr_matrix, vstack
+
+        from ..utils.matrix_values import DETECTION_CELLS
+
+        rows = min(DETECTION_CELLS, self.h5ad.nCells)
+        blocks = list(self.h5ad.consume_row_range(max(1, rows), 0, rows))
+        cells = vstack(blocks).tocoo() if blocks else coo_matrix((0, 0))
+        if self._projection is None:
+            return {self.assayNames[0]: csr_matrix(cells)}
+        codes, columns = self._projection
+        first: dict[str, Any] = {}
+        for code, name in enumerate(self.assayNames):
+            inside = codes[cells.col] == code
+            first[name] = csr_matrix(
+                (cells.data[inside], (cells.row[inside], columns[cells.col[inside]])),
+                shape=(cells.shape[0], int(np.count_nonzero(codes == code))),
+            )
+        return first
 
     def _declared_membership(self) -> dict[str, np.ndarray]:
         """Read the membership of each imported assay that the file declares.
@@ -1513,6 +1604,7 @@ class H5adToZarr:
                         self.io,
                         child_connection,
                         stop,
+                        self._linear,
                     ),
                     name=f"h5ad-writer-{index}",
                     daemon=True,
@@ -1606,6 +1698,7 @@ class H5adToZarr:
                         projection,
                         child_connection,
                         stop,
+                        self._linear,
                     ),
                     name=f"h5ad-producer-{index}",
                     daemon=True,
@@ -1672,6 +1765,7 @@ class H5adToZarr:
             buffers,
             self.assayNames,
             projection,
+            self._linear,
         ):
             yield SparseWriteBand(
                 destinations[assay_name],

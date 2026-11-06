@@ -43,6 +43,8 @@ from .common import (
     resolve_graph,
     resolve_label,
     resolve_rna_head,
+    count_stages,
+    require_counts_for_stages,
     resolve_run_filtering,
     require_labeled_cells,
     resolve_snapshot_columns,
@@ -435,6 +437,16 @@ def resolve_rna(
         default_attrs=default_filter_columns(store, assay_name, FILTER_SUFFIXES),
         operation=OPERATION,
         qc_stages=calling_enabled or hashing_enabled,
+    )
+    require_counts_for_stages(
+        store,
+        assay_name,
+        RECIPE,
+        [
+            ("cell calling", "cell_calling=False", calling_enabled),
+            *count_stages(assay_name, head, filtering_config),
+            ("doublet scoring", "doublets=False", doublets_enabled),
+        ],
     )
     if calling_enabled and capture_column is not None:
         # The stage checks its frozen labels again, since the live column can

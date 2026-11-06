@@ -38,8 +38,7 @@ selections, audit removals without author labels, and score doublets. Docs:
 - `parameters["resolved_bounds"]` are reported back on the raw scale: `low` and `high` are counts,
   genes or percent; never apply `expm1`. Example (10x 5K PBMC docs dataset): `RNA_nCounts` low
   3377.1 and high 18389.9 mean 3,377 to 18,390 counts.
-- Every bound assumes raw UMI counts from unfiltered cell calls. Corrected (for example
-  SCTransform) or pre-filtered matrices change what each bound means: check the matrix first.
+- Every bound assumes raw UMI counts from unfiltered cell calls. Corrected (for example SCTransform) or pre-filtered matrices change what each bound means: check the matrix first. On an assay imported from normalized values, `RNA_nCounts` holds each cell's normalized total, so a bound on it refuses and default filtering leaves it out; bound genes and percentages instead. Cell calling, ambient RNA and doublet scoring refuse such an assay.
 - Pooled MAD erases real populations: platelets, erythrocytes and neutrophils fall under lower
   bounds (floors near 200 to 650 genes); plasma, cycling and progenitor cells cross upper bounds;
   myeloid cells carry more mito, so a pooled mito bound trims them first. Example (10x 5K PBMC

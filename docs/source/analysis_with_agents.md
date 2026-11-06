@@ -85,6 +85,7 @@ Use public methods instead of mutating `ds.z`, `ds.zw`, or stored run records.
 Inspect unfamiliar H5AD files with [`cytearc.inspect_h5ad`](/api/import_export.html#cytearc.inspect_h5ad) before creating a reader.
 This reports matrix candidates, encodings, dimensions, and suggested assays instead of relying on guessed keys.
 Use the format-specific import guides for other inputs.
+Prefer a deposit's raw counts. When it holds only normalized values, import them with `values=` as [normalized values](/api/import_export.html#normalized-values) describes, and expect steps that need counts, such as doublet scoring, to refuse them.
 
 ### Prospective execution record
 

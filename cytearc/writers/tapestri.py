@@ -97,6 +97,8 @@ class TapestriToZarr(CrToZarr):
             io=io,
             assay_types=assay_types,
             overwrite=overwrite,
+            # Read counts are counts, whole or not, as before values= existed.
+            values="counts",
         )
         root = (
             self.z

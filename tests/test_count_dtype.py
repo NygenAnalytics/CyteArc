@@ -118,12 +118,12 @@ def test_value_range_settles_at_the_first_fractional_or_negative_block():
     value_range = CountValueRange()
     value_range.update(np.array([3, 9], dtype=np.int32))
     value_range.update(np.array([-1], dtype=np.int32))
-    # Later blocks no longer change the range, but are still checked for NaN
-    # and infinity.
+    # Later blocks no longer change the maximum, but are still checked for
+    # NaN, infinity, and negative values.
     value_range.update(np.array([0.5, 1e9]))
-    assert value_range == CountValueRange(integral=False, maximum=9)
+    assert value_range == CountValueRange(integral=False, maximum=9, negative=True)
     value_range.update(np.array([], dtype=np.float32))
-    assert value_range == CountValueRange(integral=False, maximum=9)
+    assert value_range == CountValueRange(integral=False, maximum=9, negative=True)
     for value in (np.nan, np.inf):
         with pytest.raises(ValueError, match="finite values"):
             value_range.update(np.array([1.0, value]))
@@ -206,9 +206,11 @@ def test_compressed_range_reads_a_long_vector_whole_and_every_value(monkeypatch)
         value_range = compressed_count_range(
             settling.indptr, settling.indices, data, minorSize=8, maxBytes=1 << 20
         )
-        assert value_range == CountValueRange(integral=False, maximum=0)
+        assert value_range == CountValueRange(
+            integral=False, maximum=0, negative=first < 0
+        )
         # The scan reads past the value that settles the range, so a later
-        # NaN or infinity is still found.
+        # NaN, infinity, or negative value is still found.
         assert data.reads == 2
     late = matrix.copy()
     late.data[0] = 0.5
@@ -486,19 +488,23 @@ def test_h5ad_integral_counts_import_unsigned(tmp_path, dtype, maximum, expected
     np.testing.assert_array_equal(counts[:], values.astype(expected))
 
 
-@pytest.mark.parametrize(
-    ("dtype", "value"),
-    [(np.float32, 1.5), (np.float32, -3), (np.int32, -3), (np.float64, 0.25)],
-)
-def test_h5ad_counts_that_are_not_non_negative_integers_keep_their_dtype(
-    tmp_path, dtype, value
-):
+@pytest.mark.parametrize(("dtype", "value"), [(np.float32, 1.5), (np.float64, 0.25)])
+def test_h5ad_fractional_counts_keep_their_dtype(tmp_path, dtype, value):
     values = _VALUES.astype(np.float64)
     values[3, 4] = value
     path = _write_h5ad(tmp_path / "counts.h5ad", values, dtype=dtype)
-    counts = _import(path)
+    counts = _import(path, values="counts")
     assert counts.dtype == np.dtype(dtype)
     np.testing.assert_array_equal(counts[:], values.astype(dtype))
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.int32])
+def test_h5ad_negative_values_are_refused(tmp_path, dtype):
+    values = _VALUES.astype(np.float64)
+    values[3, 4] = -3
+    path = _write_h5ad(tmp_path / "counts.h5ad", values, dtype=dtype)
+    with pytest.raises(ValueError, match="negative values"):
+        _import(path, values="counts")
 
 
 @pytest.mark.parametrize("encoding", ["csr", "csc", "dense"])

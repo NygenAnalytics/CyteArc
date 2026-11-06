@@ -470,6 +470,11 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         rows = _label_rows(self, labels, by)
         status = rows.status
         expression = self._get_assay(from_assay)
+        expression.require_counts(
+            "Association tests",
+            "they fit a negative binomial model to each gene's counts",
+            "Run them on an assay of counts",
+        )
         cell_selection = status.input_ref("cell_selection")
         self._require_measured_cells(
             expression.name,

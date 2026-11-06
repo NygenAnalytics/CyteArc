@@ -1,5 +1,6 @@
-from collections.abc import Iterable, Iterator, Mapping
-from typing import Any
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from functools import cache, partial
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import zarr
@@ -22,8 +23,18 @@ from ..storage.metadata_keys import (
 )
 from ..storage.profiles import StorageProfile
 from ..storage.refs import ArtifactRef
+from ..utils.count_values import CountValueRange
 from ..utils.logging import logger
+from ..utils.matrix_values import (
+    MatrixValues,
+    decide_matrix_values,
+    import_values_argument,
+    linear_values,
+)
 from ..utils.arguments import bool_argument
+
+if TYPE_CHECKING:
+    from ..assay import Assay
 
 DEFAULT_IMPORT_BLOCK_ROWS = 65_536
 
@@ -363,6 +374,7 @@ def create_zarr_count_assay(
     *,
     profile: StorageProfile | None = None,
     policy: CountMatrixPolicy | None = None,
+    normalized_values: Mapping[str, Any] | None = None,
 ) -> zarr.Array:
     """Creates and returns a Zarr array with name 'counts'.
 
@@ -379,6 +391,11 @@ def create_zarr_count_assay(
         profile: Zarr encoding profile. When None, chosen from the store.
         policy: Count-matrix geometry policy. When None, the default plan
                 is used.
+        normalized_values: The ``normalizedValues`` record, such as
+            ``{"importedAs": "normalized", "cellTotal": None}``, of an assay
+            whose values were normalized before import, so that steps that
+            need counts refuse it. None declares counts. Log values must be
+            written linear, with the log undone.
 
     Returns:
         The created ``counts`` array.
@@ -393,4 +410,56 @@ def create_zarr_count_assay(
         dtype,
         profile=profile,
         policy=policy,
+        normalized_values=normalized_values,
     )
+
+
+def resolve_import_values(
+    values: object,
+    value_ranges: Mapping[str, CountValueRange],
+    sample: Callable[[], Mapping[str, Any]],
+    assay_types: Mapping[str, str | None],
+    dtypes: Mapping[str, Any],
+) -> dict[str, MatrixValues]:
+    """Return what each imported assay holds, before the destination exists.
+
+    ``sample`` returns the first cells of each assay, and is called at most
+    once. ``assay_types`` holds each assay's declared preset, or None, and
+    ``dtypes`` each assay's storage dtype.
+
+    Raises:
+        TypeError: If an assay whose class needs counts holds normalized values.
+        ValueError: As :func:`~cytearc.utils.matrix_values.decide_matrix_values`,
+            or if undoing a log would overflow the storage dtype.
+    """
+    from ..assay.classification import preset_assay_types, resolve_persisted_assay_type
+
+    declared = import_values_argument(values, list(value_ranges))
+    first_cells = cache(sample)
+
+    def assay_sample(name: str) -> Any:
+        return first_cells()[name]
+
+    decisions: dict[str, MatrixValues] = {}
+    for name, value_range in value_ranges.items():
+        decision = decide_matrix_values(
+            declared.get(name) if isinstance(declared, dict) else declared,
+            value_range,
+            partial(assay_sample, name),
+            assay=name,
+        )
+        assay_class = cast(
+            "type[Assay]",
+            preset_assay_types()[
+                resolve_persisted_assay_type(name, assay_types.get(name))
+            ],
+        )
+        if decision.kind != "counts" and assay_class.requiresCounts:
+            raise TypeError(assay_class.normalized_values_refusal(name))
+        # The largest value fails here, before the destination exists, if
+        # undoing its log overflows the storage dtype.
+        linear_values(
+            np.array([value_range.largest]), decision.kind, dtypes[name], assay=name
+        )
+        decisions[name] = decision
+    return decisions

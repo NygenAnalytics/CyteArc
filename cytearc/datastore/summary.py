@@ -19,7 +19,7 @@ from ..storage.budget import ResourceBudget, resolve_budget
 from ..storage.profiles import StorageProfile, resolve_storage_profile
 from ..storage.pipeline_runs import list_pipeline_run_records
 from ..storage.refs import ArtifactRef
-from ..storage.schema import validate_assay_name
+from ..storage.schema import read_normalized_values, validate_assay_name
 from ..storage.stores import load_zarr
 from ..storage.types import ZarrMode, as_zarr_group, read_fresh_group
 
@@ -56,6 +56,9 @@ class ArtifactSummary:
 class AssaySummary:
     name: str
     assay_type: str
+    # The ``normalizedValues`` record of an assay normalized before import,
+    # or None for counts.
+    normalized_values: dict[str, Any] | None
     total_features: int
     active_features: int
     feature_columns: tuple[str, ...]
@@ -66,6 +69,9 @@ class AssaySummary:
         return {
             "name": self.name,
             "assay_type": self.assay_type,
+            "normalized_values": (
+                None if self.normalized_values is None else dict(self.normalized_values)
+            ),
             "total_features": self.total_features,
             "active_features": self.active_features,
             "feature_columns": list(self.feature_columns),
@@ -282,6 +288,7 @@ def build_datastore_summary(
                 # The type that the open resolved, which a read-only open
                 # cannot record, so the attribute can lack it.
                 assay_type=declared_assay_type(assay),
+                normalized_values=read_normalized_values(assay.attrs, assay=assay_name),
                 total_features=int(assay.feats.N),
                 active_features=_count_active(assay.feats),
                 feature_columns=tuple(sorted(assay.feats.columns)),

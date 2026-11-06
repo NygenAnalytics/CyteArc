@@ -25,6 +25,7 @@ from ..utils.compute import controlled_compute
 from ..utils.logging import logger
 from .normalization import (
     PearsonResidualNormalizer,
+    require_counts_for,
     NormMethod,
     check_normalization_flags,
     iter_feature_group_means,
@@ -152,6 +153,14 @@ def _score_index_sets(
     ]
 
 
+# How a refusal names the values that an assay held before import.
+_IMPORTED_AS = {
+    "normalized": "normalized values",
+    "log_normalized": "log-normalized values",
+    "log2_normalized": "base-2 log-normalized values",
+}
+
+
 class Assay:
     """A generic Assay class that contains methods to calculate feature level
     statistics and stream normalized values for downstream computation.
@@ -241,6 +250,11 @@ class Assay:
             # Validated against counts, so reads may take rows from either.
             self.rawData = self.rawData.with_transposed(self.rawDataT)
         self.attrs = self.z.attrs
+        from ..storage.schema import read_normalized_values
+
+        self.normalizedValues = read_normalized_values(self.attrs, assay=name)
+        if self.requiresCounts and self.normalizedValues is not None:
+            raise TypeError(self.normalized_values_refusal(name))
         self.normMethod: NormMethod = norm_dummy
         self.sf: int | None = None
         self.scalar: np.ndarray | None = None
@@ -273,6 +287,45 @@ class Assay:
     def assayType(self) -> str | None:
         """Preset type declared for this assay, such as ``HTO``, or None."""
         return self._assayType
+
+    #: Whether the class needs counts, so that it refuses normalized values.
+    requiresCounts = False
+    #: Why the class needs counts, for its refusal.
+    countsReason = ""
+
+    @classmethod
+    def normalized_values_refusal(cls, name: str) -> str:
+        """Return the refusal of normalized values for an assay of this class."""
+        return (
+            f"Assay {name!r} holds normalized values, but {cls.countsReason}. "
+            "Import its counts, or declare it as a generic assay of type 'Assay'"
+        )
+
+    @property
+    def holdsCounts(self) -> bool:
+        """Whether the assay stores counts rather than values normalized before import."""
+        return self.normalizedValues is None
+
+    def require_counts(self, step: str, reason: str, remedy: str) -> None:
+        """Raise unless the assay stores counts.
+
+        Args:
+            step: The step that needs counts, such as ``Doublet scoring``.
+            reason: Why the step needs counts.
+            remedy: What to do instead.
+
+        Raises:
+            TypeError: If the assay holds values normalized before import.
+        """
+        record = self.normalizedValues
+        if record is None:
+            return
+        imported = record["importedAs"]
+        source = "" if imported is None else f", imported as {_IMPORTED_AS[imported]}"
+        raise TypeError(
+            f"{step} needs counts: {reason}. Assay {self.name!r} holds normalized "
+            f"values{source}. {remedy}"
+        )
 
     def _percent_features(self) -> PercentFeatures:
         raw = self.attrs.get("percentFeatures", {})
@@ -343,6 +396,7 @@ class Assay:
             cell_idx = self.cells.active_index("I")
         if feat_idx is None:
             feat_idx = np.arange(self.feats.N, dtype=np.int64)
+        require_counts_for(self, self.normMethod)
         counts = self.rawData[:, feat_idx][cell_idx, :]
         values = self.normMethod(self, counts)
         if log_transform:

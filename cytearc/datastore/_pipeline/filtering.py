@@ -71,11 +71,17 @@ def default_filter_columns(
     assay: str,
     suffixes: Sequence[str],
 ) -> tuple[str, ...]:
-    """Return the QC columns of ``assay`` that preparation wrote, in order."""
+    """Return the QC columns of ``assay`` that preparation wrote, in order.
+
+    The totals of an assay of normalized values are left out: they are not
+    sequencing depths.
+    """
+    holds_counts = store._get_assay(assay).holdsCounts
     return tuple(
         column
         for suffix in suffixes
         if (column := f"{assay}_{suffix}") in store.cells.columns
+        and (holds_counts or suffix != "nCounts")
     )
 
 

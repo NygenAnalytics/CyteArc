@@ -233,6 +233,16 @@ class H5adReader:
             "duplicate_cell_ids": self.duplicateCellIds,
         }
 
+    def _count_matrix_keys(self) -> list[str]:
+        """Return the keys of the file's matrices whose sampled values are counts."""
+        from ._h5ad_inspect import _matrix_candidates
+
+        return [
+            candidate.key
+            for candidate in _matrix_candidates(self.h5)
+            if candidate.integerLike
+        ]
+
     def close(self) -> None:
         self.h5.close()
         if self._convertedCsr is not None:

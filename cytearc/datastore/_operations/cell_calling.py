@@ -53,6 +53,11 @@ def _finite_or_none(value: float) -> float | None:
     return value if math.isfinite(value) else None
 
 
+# Why cell calling and barcode ranks need counts, and what to do instead.
+_DROPLET_REASON = "it ranks and models droplets by their UMI counts"
+_DROPLET_REMEDY = "Import the raw droplet counts"
+
+
 class _CellCallingOperationsMixin(_CellCallingOperationsBase):
     def _all_barcodes(self, assay_name: str) -> ArtifactRef:
         """Return the selection of every barcode that the assay measured.
@@ -238,6 +243,7 @@ class _CellCallingOperationsMixin(_CellCallingOperationsBase):
         if cell_selection is not None and not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
         assay = self._get_assay(from_assay)
+        assay.require_counts("Cell calling", _DROPLET_REASON, _DROPLET_REMEDY)
         count_dtype = np.dtype(assay.rawData.dtype)
         if count_dtype.kind != "u":
             raise TypeError(
@@ -464,6 +470,7 @@ class _CellCallingOperationsMixin(_CellCallingOperationsBase):
         if cell_selection is not None and not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
         assay = self._get_assay(from_assay)
+        assay.require_counts("Barcode ranks", _DROPLET_REASON, _DROPLET_REMEDY)
         if cell_selection is None:
             mask = np.ones(self.cells.N, dtype=bool)
             measured = measured_selection(self.cells, assay.name, mask)
