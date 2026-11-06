@@ -19,7 +19,11 @@ from scipy.sparse import csc_matrix, csr_matrix
 
 import cytearc
 from cytearc import DataStore, DataStoreMerge, SparseToZarr, SubsetZarr
-from cytearc.assay.normalization import PearsonResidualNormalizer, norm_clr
+from cytearc.assay.normalization import (
+    PearsonResidualNormalizer,
+    norm_clr,
+    norm_dummy,
+)
 from cytearc.composite import create_composite
 from cytearc.datastore._pipeline.filtering import default_filter_columns
 from cytearc.datastore._pipeline.recipes.rna import FILTER_SUFFIXES
@@ -578,6 +582,100 @@ def test_every_copy_and_combination_carries_the_record(
         TypeError, match="Doublet scoring needs counts|holds normalized"
     ):
         copied.RNA.require_counts("Doublet scoring", "a reason", "a remedy")
+
+
+def _melded_source(tmp_path: Path) -> DataStore:
+    """A store of peak counts whose melded gene scores, typed RNA, are named RNA.
+
+    The helpers of copies and combinations open a store's RNA assay, so they
+    open the gene scores.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    counts = np.random.default_rng(6).poisson(1.5, size=(30, 6)).astype(np.uint16)
+    counts[:, 0] = np.maximum(counts[:, 0], 1)
+    SparseToZarr(
+        csr_matrix(counts),
+        str(tmp_path / "melded.zarr"),
+        cell_ids=[f"m{i}" for i in range(30)],
+        feature_ids=[f"chr1:{100 * j}-{100 * j + 80}" for j in range(6)],
+        assay_name="ATAC",
+    ).dump()
+    peaks = DataStore(
+        str(tmp_path / "melded.zarr"),
+        default_assay="ATAC",
+        min_features_per_cell=0,
+        nthreads=1,
+    )
+    (genes := tmp_path / "genes.bed").write_text(
+        "chr1\t50\t250\tg0\tG0\t+\nchr1\t300\t520\tg1\tG1\t+\n"
+    )
+    peaks.add_melded_assay(
+        from_assay="ATAC",
+        external_bed_fn=str(genes),
+        assay_label="RNA",
+        assay_type="RNA",
+        renormalization=False,
+    )
+    return _open(tmp_path / "melded.zarr")
+
+
+def _passes_through(store: DataStore) -> None:
+    """Check that the store's RNA assay normalizes its values to themselves."""
+    assay = store.RNA
+    assert assay.normMethod is norm_dummy
+    assert assay.attrs["tfDenominator"] == "total_counts"
+    stored = np.vstack(list(assay.rawData.stream_blocks(nthreads=1)))
+    normed = assay.normed(
+        cell_idx=np.arange(stored.shape[0]), feat_idx=np.arange(stored.shape[1])
+    ).compute()
+    # Library-size values would sum to the size factor in every cell.
+    assert not np.allclose(stored.sum(axis=1), assay.sf)
+    np.testing.assert_allclose(normed, stored)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        _mount,
+        lambda source, tmp: _repack(source, tmp, data_only=False),
+        lambda source, tmp: _repack(source, tmp, data_only=True),
+        _subset,
+        _merge_with_itself,
+        _composite,
+    ],
+    ids=["mount", "repack", "data-only repack", "subset", "merge", "composite"],
+)
+def test_every_copy_and_combination_passes_melded_values_through(tmp_path, path):
+    source = _melded_source(tmp_path / "source")
+    _passes_through(source)
+
+    _passes_through(path(source, tmp_path))
+
+
+@pytest.mark.parametrize("combine", ["merge", "composite"])
+def test_melded_and_other_values_are_not_combined(tmp_path, combine):
+    melded = _melded_source(tmp_path / "m")
+    counts = _counts_source(tmp_path)
+    destination = tmp_path / "combined.zarr"
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Sources of assay 'RNA' hold different values: melded TF-IDF values "
+        r"in 'm' and other values in 'c'\. A combined assay normalizes all of its "
+        r"values one way, so combine assays that hold one kind of values\.$",
+    ):
+        if combine == "merge":
+            DataStoreMerge(
+                [melded, counts], str(destination), ["m", "c"], nthreads=1
+            ).dump()
+        else:
+            create_composite(
+                {"m": melded, "c": counts},
+                at=str(destination),
+                features="union",
+                nthreads=1,
+            )
+    assert not destination.exists()
 
 
 def _counts_with_size_factor(tmp_path: Path, size_factor: float) -> DataStore:

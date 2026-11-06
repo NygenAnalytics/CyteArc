@@ -70,7 +70,7 @@ from .writer import (
     create_assay_counts,
     fit_assay_counts_layout,
     matrix_group_complete,
-    shared_size_factor,
+    shared_normalization,
     validate_assay_counts,
     write_assay_counts,
     write_assay_counts_t,
@@ -250,9 +250,9 @@ class DataStoreMerge:
         self._assaySources: dict[str, list[Any | None]] = {}
         # The one type that every source holding an assay declares for it.
         self._assayTypes: dict[str, str] = {}
-        # The one size factor that every source holding an assay normalizes
-        # it with, or None for a class without one.
-        self._sizeFactors: dict[str, float | None] = {}
+        # The attributes that tell how each merged assay normalizes, which
+        # every source holding it shares, such as its size factor.
+        self._normalization: dict[str, dict[str, Any]] = {}
         # Each source's membership state of every merged assay.
         self._sourceMembership: dict[str, list[str]] = {}
         self._metadataPlan: CellMetadataPlan | None = None
@@ -325,7 +325,7 @@ class DataStoreMerge:
                 self._assayTypes[assay_name] = self._agreed_assay_type(
                     assay_name, sources
                 )
-                self._sizeFactors[assay_name] = shared_size_factor(
+                self._normalization[assay_name] = shared_normalization(
                     assay_name,
                     {
                         name: source
@@ -505,8 +505,8 @@ class DataStoreMerge:
             },
             "assays": list(self.uniqueAssays),
             "assayTypes": dict(self._assayTypes),
-            # The size factor that each merged assay keeps.
-            "sizeFactors": dict(self._sizeFactors),
+            # How each merged assay normalizes, such as its size factor.
+            "normalization": dict(self._normalization),
             # A resume must merge the same per-cell assay membership.
             "sourceMembership": {
                 assay_name: [
@@ -1302,7 +1302,7 @@ class DataStoreMerge:
                     profile=self.profile,
                     policy=self._countLayouts[assay_name],
                     sources=[source for source in sources if source is not None],
-                    size_factor=self._sizeFactors[assay_name],
+                    normalization=self._normalization[assay_name],
                 )
                 present_sources = [
                     (source, mapping)
@@ -1389,7 +1389,7 @@ class DataStoreMerge:
         self._alignments.clear()
         self._assaySources.clear()
         self._assayTypes.clear()
-        self._sizeFactors.clear()
+        self._normalization.clear()
         self._sourceMembership = {}
         self._metadataPlan = None
         self._countLayouts = {}

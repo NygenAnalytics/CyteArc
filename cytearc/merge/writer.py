@@ -13,6 +13,7 @@ from ..storage.io_policy import StorageIoPolicy
 from ..storage.profiles import StorageProfile
 from ..storage.layout import array_shard_rows
 from ..storage.schema import (
+    TF_DENOMINATOR_ATTR,
     _assay_paths,
     create_zarr_count_assay,
     load_count_array,
@@ -125,19 +126,21 @@ def scatter_block_dense(
     return dense
 
 
-def shared_size_factor(assay_name: str, sources: Mapping[str, Any]) -> float | None:
-    """Return the size factor that every source of a combined assay normalizes with.
+def shared_normalization(assay_name: str, sources: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the attributes that tell how a combined assay normalizes, as its sources do.
 
-    A combined assay keeps the size factor of its sources, so that it
-    normalizes their counts as they do. Sources whose class has no size
-    factor, such as ADT assays, give None.
+    A combined assay keeps the size factor that its sources normalize with,
+    and the ``tfDenominator`` of melded TF-IDF values, which an RNA class
+    passes through, so that it normalizes their values as they do. Sources
+    whose class has no size factor, such as ADT assays, give none.
 
     Args:
-        assay_name: The combined assay, which the error names.
+        assay_name: The combined assay, which the errors name.
         sources: Each source's assay, by the source's name.
 
     Raises:
-        ValueError: If two sources normalize with different size factors.
+        ValueError: If two sources normalize with different size factors, or
+            some hold melded TF-IDF values and others do not.
     """
     factors = {
         name: source.sf
@@ -152,9 +155,26 @@ def shared_size_factor(assay_name: str, sources: Mapping[str, Any]) -> float | N
             f"share; set it on each source's assay, such as ds.{assay_name}.sf = "
             "1000, then combine them again."
         )
-    shared = next(iter(factors.values()), None)
-    # Attributes are JSON, so a NumPy number is kept as the number it holds.
-    return None if shared is None else np.asarray(shared).item()
+    denominators = {
+        name: source.attrs.get(TF_DENOMINATOR_ATTR) for name, source in sources.items()
+    }
+    if len(set(denominators.values())) > 1:
+        melded = [name for name, value in denominators.items() if value is not None]
+        others = [name for name, value in denominators.items() if value is None]
+        raise ValueError(
+            f"Sources of assay {assay_name!r} hold different values: melded TF-IDF "
+            f"values in {', '.join(map(repr, melded))} and other values in "
+            f"{', '.join(map(repr, others))}. A combined assay normalizes all of "
+            "its values one way, so combine assays that hold one kind of values."
+        )
+    kept: dict[str, Any] = {}
+    if factors:
+        # Attributes are JSON, so a NumPy number is kept as the number it holds.
+        kept["size_factor"] = np.asarray(next(iter(factors.values()))).item()
+    denominator = next(iter(denominators.values()), None)
+    if denominator is not None:
+        kept[TF_DENOMINATOR_ATTR] = denominator
+    return kept
 
 
 def create_assay_counts(
@@ -168,12 +188,12 @@ def create_assay_counts(
     profile: StorageProfile,
     policy: CountMatrixPolicy,
     sources: Sequence[Any],
-    size_factor: float | None,
+    normalization: Mapping[str, Any],
 ) -> zarr.Array:
     """Create the counts of a combined assay, which holds normalized values when a source does.
 
-    ``size_factor`` is the one that its sources share, from
-    :func:`shared_size_factor`, which the assay keeps; None stores none.
+    ``normalization`` holds the attributes that its sources share, from
+    :func:`shared_normalization`, which the assay keeps.
     """
     counts = create_zarr_count_assay(
         z=root,
@@ -189,9 +209,9 @@ def create_assay_counts(
             source.normalizedValues for source in sources
         ),
     )
-    if size_factor is not None:
+    if normalization:
         path = _assay_metadata_path(assay_name, workspace)
-        as_zarr_group(root[path], name=path).attrs["size_factor"] = size_factor
+        as_zarr_group(root[path], name=path).attrs.update(dict(normalization))
     matrix_group = as_zarr_group(
         root[_matrix_group_path(assay_name, workspace)],
         name=_matrix_group_path(assay_name, workspace),

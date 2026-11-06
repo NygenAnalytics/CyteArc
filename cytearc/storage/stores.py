@@ -44,6 +44,7 @@ _ASSAY_COPY_ATTRS = (
     "normalizedValues",
     "percentFeatures",
     "size_factor",
+    "tfDenominator",
 )
 _WORKSPACE_COPY_ATTRS = ("defaultAssay", "assayTypes")
 

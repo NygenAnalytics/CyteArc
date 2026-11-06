@@ -245,6 +245,7 @@ def _copy_group(
                     "is_assay",
                     "normalizedValues",
                     "size_factor",
+                    "tfDenominator",
                     "defaultAssay",
                     "assayTypes",
                 }:
