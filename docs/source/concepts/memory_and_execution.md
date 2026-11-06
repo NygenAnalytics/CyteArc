@@ -43,6 +43,8 @@ measurements.
 
 ## Resource controls
 
+(memory-budget)=
+
 ### Memory budget
 
 `mem_budget` accepts bytes, a size such as `"8G"`, or a fraction of detected system memory such as `"0.6"`.
@@ -183,7 +185,7 @@ listeners, so a job can record progress without rendering bars.
 
 See [Utilities API reference](/api/utilities.html) for the exact output contract.
 
-(benchmarks)=
+(measuring-resource-use)=
 
 ## Measuring resource use
 

@@ -433,7 +433,7 @@ The clone sizes that `ds.clones.import_clones` saves were checked against counts
 
 ## Data that validated the immune repertoire methods
 
-The receptor import, the clonotypes, the gene usage and junction lengths, and the AIRR export in the [repertoire API page](https://docs.nygen.io/CyteArc/api/repertoire.html) were compared with scirpy, scRepertoire and Cell Ranger, and the export checked with the AIRR Community's airr library, on these datasets. The repository holds none of them, and neither the tests nor the documentation download them.
+The receptor import, the clonotypes, the gene usage and junction lengths, and the AIRR export in the [repertoire API page](https://docs.nygen.io/CyteArc/api/repertoire.html) were compared with scirpy, scRepertoire and Cell Ranger, and the export checked with the AIRR Community's airr library, on these datasets. The repository holds none of them, and the tests download neither; the immune repertoires tutorial downloads the first dataset's matrix and AIRR files, as listed above, rather than the contig annotations compared here.
 
 | Validation | Source | License or terms |
 | --- | --- | --- |

@@ -26,6 +26,8 @@ from cytearc.plotting import (
 from cytearc.plotting._groups import labels_by_group, plot_groups, table_groups
 from cytearc.plotting._style import MAX_FIGURE_WIDTH_INCHES
 from tests.clone_helpers import (
+    axis_names,
+    names_keep_apart,
     every_cell,
     import_truth_clones,
     import_truth_receptors,
@@ -657,7 +659,7 @@ def test_the_rarefaction_plot_draws_one_panel_per_order(truth_plot) -> None:
     assert sorted(curves["group"].unique()) == ["d2", "d4"]
     assert result.provenance.n_cells == 32
     assert result.provenance.extras["grouping"] == "sample"
-    assert result.axes["order_1"].get_title() == "Shannon diversity (order 1)"
+    assert result.axes["order_1"].get_title() == "Shannon diversity\n(order 1)"
     assert result.axes["coverage"].get_ylabel() == "Sample coverage"
     # One legend of the samples, beside the last panel of the first row.
     legend = result.axes["order_2"].get_legend()
@@ -737,8 +739,16 @@ def test_the_diversity_plot_draws_each_groups_indices(truth_plot) -> None:
             assert [bar.get_width() for bar in bars] == pytest.approx(
                 diversity.indices[index].tolist()
             )
-        ticks = result.axes["gini"].get_yticklabels()
-        assert [tick.get_text() for tick in ticks] == ["d2", "d4"]
+        # The first panel of each row names the samples, d2 on top, for the
+        # panels beside it.
+        for index, named in (
+            ("n_clones", ["d2", "d4"]),
+            ("gini", []),
+            ("chao1", []),
+            ("d50", ["d2", "d4"]),
+        ):
+            ticks = result.axes[index].get_yticklabels()
+            assert [tick.get_text() for tick in ticks] == named, index
         assert result.axes["n_clones"].get_title() == "Clones"
         assert result.axes["chao1"].get_title() == "Chao1"
         # One legend of the samples, beside the last panel of the first row,
@@ -771,6 +781,51 @@ def test_the_diversity_plot_draws_each_groups_indices(truth_plot) -> None:
         assert gini.provenance.extras["indices"] == ["gini"]
     finally:
         gini.close()
+
+
+def test_the_diversity_plot_on_caller_axes_names_the_groups_where_a_row_starts(
+    truth_plot,
+) -> None:
+    store = truth_plot.store
+    diversity = store.clones.diversity(truth_plot.clones, group_by="sample")
+    indices = ["n_clones", "shannon", "inverse_simpson"]
+
+    def named(target) -> list[bool]:
+        result = clonal_diversity(
+            store, diversity, target=target, show_legend=False, show=False
+        )
+        try:
+            return [bool(result.axes[index].get_yticklabels()) for index in indices]
+        finally:
+            plt.close(result.figure)
+
+    # Panels side by side name the groups once, on the first; panels one
+    # above another each start a row; panels without a grid each name them.
+    _, row = plt.subplots(1, 3)
+    assert named(dict(zip(indices, row, strict=True))) == [True, False, False]
+    _, column = plt.subplots(3, 1)
+    assert named(dict(zip(indices, column, strict=True))) == [True, True, True]
+    loose = plt.figure()
+    panels = [loose.add_axes((0.1 + 0.3 * at, 0.1, 0.2, 0.8)) for at in range(3)]
+    assert named(dict(zip(indices, panels, strict=True))) == [True, True, True]
+    # The caller's other panels name nothing for these: panels from the
+    # second column of a row, or a row's second panel alone, still start one.
+    _, wide = plt.subplots(1, 4)
+    assert named(dict(zip(indices, wide[1:], strict=True))) == [True, False, False]
+    _, grid = plt.subplots(2, 2)
+    result = clonal_diversity(
+        store,
+        diversity,
+        indices="shannon",
+        target={"shannon": grid[0, 1]},
+        show_legend=False,
+        show=False,
+    )
+    try:
+        ticks = result.axes["shannon"].get_yticklabels()
+        assert [tick.get_text() for tick in ticks] == ["d2", "d4"]
+    finally:
+        plt.close(result.figure)
 
 
 def test_a_diversity_panel_of_no_defined_value_says_so(truth_plot) -> None:
@@ -1279,18 +1334,25 @@ def test_the_overlap_plot_prints_values_of_at_most_12_groups(many_groups) -> Non
     plt.close(thirteen.figure)
 
 
-def test_the_overlap_plot_names_at_most_40_groups(many_groups) -> None:
-    forty = _overlap_of_first(many_groups, 40)
-    ax = forty.axes["matrix"]
-    names = [f"cell{i:03d}" for i in range(40)]
-    assert [tick.get_text() for tick in ax.get_xticklabels()] == names
-    assert [tick.get_text() for tick in ax.get_yticklabels()] == names
-    plt.close(forty.figure)
-    more = _overlap_of_first(many_groups, 41)
-    ax = more.axes["matrix"]
-    assert len(ax.get_xticks()) == 0 and len(ax.get_yticks()) == 0
-    assert more.tables["matrix"].index.tolist() == [f"cell{i:03d}" for i in range(41)]
-    plt.close(more.figure)
+@pytest.mark.parametrize("n_first", [12, 40, 41])
+def test_the_overlap_plot_names_every_nth_group_that_its_axes_hold(
+    many_groups, n_first
+) -> None:
+    result = _overlap_of_first(many_groups, n_first)
+    try:
+        result.figure.draw_without_rendering()
+        ax = result.axes["matrix"]
+        order = result.tables["matrix"].index.tolist()
+        assert sorted(order) == [f"cell{i:03d}" for i in range(n_first)]
+        for axis in (ax.xaxis, ax.yaxis):
+            # Every nth group in the order drawn, every one of 12, at most
+            # 40, and none running into the next.
+            step, names = axis_names(axis)
+            assert step is not None and names == order[::step]
+            assert step == 1 if n_first == 12 else len(names) <= 40
+            assert names_keep_apart(axis)
+    finally:
+        plt.close(result.figure)
 
 
 def test_the_overlap_plot_grows_to_the_width_of_a_page(many_groups) -> None:
@@ -1587,7 +1649,7 @@ def test_the_fates_plot_draws_the_top_clones_and_their_shares(fates_plot) -> Non
 
 def test_the_coupling_plot_names_at_most_40_groups(many_groups) -> None:
     store = many_groups.store
-    for n_first, named in ((40, True), (41, False)):
+    for n_first in (40, 41):
         coupling = store.clones.coupling(
             many_groups.clones,
             group_by="cell",
@@ -1601,7 +1663,11 @@ def test_the_coupling_plot_names_at_most_40_groups(many_groups) -> None:
         assert matrix.loc["cell000", "cell001"] == pytest.approx(1.0)
         assert matrix.loc["cell000", "cell002"] == 0.0
         ax = result.axes["matrix"]
-        assert len(ax.get_xticklabels()) == (n_first if named else 0)
+        # Every nth group in the order drawn, at most 40, apart once laid out.
+        result.figure.draw_without_rendering()
+        step, names = axis_names(ax.xaxis)
+        assert step is not None and names == matrix.index.tolist()[::step]
+        assert len(names) <= 40 and names_keep_apart(ax.xaxis)
         assert len(ax.texts) == 0
         plt.close(result.figure)
     # Shown by default: on Agg the owned figure is closed.

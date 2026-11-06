@@ -14,17 +14,95 @@ from tests.test_plotting_foundation import _ArrayStore
 from tests.test_plotting_raster import _GuardedMeta, _layout_store
 
 
-def _paired_profile_store():
+class _GeneScoreStore(_ArrayStore):
+    """The array store, its one assay of gene scores rather than RNA."""
+
+    _defaultAssay = "GeneScores"
+
+    def _get_assay(self, name):
+        if name != "GeneScores":
+            raise KeyError(name)
+        return self.RNA
+
+
+class _TwoAssayStore(_ArrayStore):
+    """The array store, its values read as RNA and as gene scores."""
+
+    def _get_assay(self, name):
+        if name not in ("RNA", "GeneScores"):
+            raise KeyError(name)
+        return self.RNA
+
+
+def _paired_profile_store(store_type=_ArrayStore):
     """Groups a and b share one expression profile, c and d another."""
     groups = np.repeat(np.asarray(["a", "b", "c", "d"], dtype=object), 3)
     profiles = {"a": [1.0, 0.0, 0.0], "b": [1.0, 0.0, 0.0], "c": [0.0, 5.0, 4.0]}
     profiles["d"] = profiles["c"]
     values = np.asarray([profiles[group] for group in groups])
-    return _ArrayStore(
+    return store_type(
         {"I": np.ones(len(groups), dtype=bool), "group": groups},
         values,
         names=("GeneA", "GeneB", "GeneC"),
     )
+
+
+@pytest.mark.parametrize("plot", [splt.dotplot, splt.matrixplot])
+@pytest.mark.parametrize(
+    ("assay", "standardize", "label"),
+    [
+        ("RNA", "none", "Mean expression"),
+        ("RNA", "feature", "Standardized mean expression"),
+        ("GeneScores", "none", "Mean of GeneScores"),
+        ("GeneScores", "feature", "Standardized mean of GeneScores"),
+    ],
+)
+def test_the_colour_bar_names_the_assay_whose_means_it_draws(
+    plot, assay, standardize, label
+):
+    store = _paired_profile_store(
+        _GeneScoreStore if assay == "GeneScores" else _ArrayStore
+    )
+    result = plot(
+        store,
+        features=["GeneA", "GeneB"],
+        group_by="group",
+        standardize=standardize,
+        show=False,
+    )
+    try:
+        (colorbar,) = [spec for spec in result.legends if spec.kind == "colorbar"]
+        assert colorbar.label == label
+        drawn = {
+            text.get_text()
+            for ax in result.figure.axes
+            for text in ax.findobj()
+            if hasattr(text, "get_text")
+        }
+        assert label in drawn
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize("plot", [splt.dotplot, splt.matrixplot])
+def test_the_colour_bar_names_every_assay_of_features_from_several(plot):
+    from cytearc.metadata.selection import FeatureRef
+
+    store = _paired_profile_store(_TwoAssayStore)
+    result = plot(
+        store,
+        features=[
+            FeatureRef("GeneA", assay="RNA"),
+            FeatureRef("GeneB", assay="GeneScores", label="GeneB score"),
+        ],
+        group_by="group",
+        show=False,
+    )
+    try:
+        (colorbar,) = [spec for spec in result.legends if spec.kind == "colorbar"]
+        assert colorbar.label == "Mean of GeneScores and RNA"
+    finally:
+        result.close()
 
 
 def test_dotplot_with_swapped_axes_reads_groups_from_the_top():

@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import replace
+from itertools import permutations
 from types import SimpleNamespace
 
 import matplotlib
@@ -29,6 +30,8 @@ from cytearc.plotting._style import (
     category_label,
 )
 from tests.clone_helpers import (
+    axis_names,
+    names_keep_apart,
     CLONE_FIGURES,
     REPERTOIRE_FIGURES,
     VARIANT_FIGURES,
@@ -323,6 +326,105 @@ def test_figures_of_many_groups_and_clones_stop_at_the_page_width(many) -> None:
     finally:
         for result in results:
             result.close()
+
+
+# Cell types named as a tutorial names them, beside their receptor type.
+LONG_NAMES = (
+    "CD4 memory T, TCR",
+    "CD4 naive T, TCR",
+    "CD8 effector memory T, TCR",
+    "CD8 naive T, TCR",
+    "MAIT and gamma delta T, TCR",
+)
+
+
+@pytest.fixture(scope="module")
+def long_names(tmp_path_factory) -> SimpleNamespace:
+    """300 cells of five cell types with long names, cell i in clone i // 3."""
+    folder = tmp_path_factory.mktemp("long_group_names")
+    ids = [f"cell{i:03d}" for i in range(300)]
+    store = write_cells_store(folder / "store.zarr", ids)
+    store.cells.insert(
+        "cell_type", np.asarray(LONG_NAMES, dtype=object)[np.arange(300) % 5]
+    )
+    clone_of = np.arange(300) // 3
+    store.cells.insert(
+        "clone", np.asarray([f"k{clone:03d}" for clone in clone_of], dtype=object)
+    )
+    cells = every_cell(store)
+    contigs = write_clone_contigs(folder, "contigs.csv", ids, clone_of)
+    return SimpleNamespace(
+        store=store,
+        clones=store.clones.from_column("clone", cell_selection=cells),
+        receptors=store.repertoire.import_receptors(contigs, cell_selection=cells),
+    )
+
+
+def _written(ax, renderer) -> list[tuple[str, object]]:
+    """The extents of what a panel writes: its title, axis labels and the tick labels within its limits."""
+    texts = [ax.title, ax.xaxis.label, ax.yaxis.label]
+    for axis, at, limits in (
+        (ax.xaxis, 0, ax.get_xlim()),
+        (ax.yaxis, 1, ax.get_ylim()),
+    ):
+        low, high = sorted(limits)
+        texts += [
+            label
+            for label in axis.get_ticklabels()
+            if label.get_visible() and low <= label.get_position()[at] <= high
+        ]
+    return [
+        (text.get_text(), text.get_window_extent(renderer))
+        for text in texts
+        if text.get_visible() and text.get_text()
+    ]
+
+
+@pytest.mark.parametrize(
+    "draw",
+    [
+        lambda data: data.store.plots.clonal_rarefaction(
+            data.store.clones.rarefaction(data.clones, group_by="cell_type"),
+            show=False,
+        ),
+        lambda data: data.store.plots.clonal_diversity(
+            data.store.clones.diversity(data.clones, group_by="cell_type"),
+            show=False,
+        ),
+        lambda data: data.store.plots.spectratype(
+            data.store.repertoire.spectratype(data.receptors, group_by="cell_type"),
+            show=False,
+        ),
+    ],
+    ids=["clonal_rarefaction", "clonal_diversity", "spectratype"],
+)
+def test_panels_beside_a_legend_of_long_names_keep_their_texts_apart(
+    long_names, draw
+) -> None:
+    # The page's width holds three panels beside the legend, so a panel's
+    # title, labels and tick labels must stay within its own room.
+    result = draw(long_names)
+    try:
+        figure = result.figure
+        assert figure.get_size_inches()[0] == MAX_FIGURE_WIDTH_INCHES
+        figure.draw_without_rendering()
+        renderer = figure.canvas.get_renderer()
+        frames = {
+            key: ax.get_window_extent(renderer) for key, ax in result.axes.items()
+        }
+        written = {key: _written(ax, renderer) for key, ax in result.axes.items()}
+        collisions = [
+            (key, text, other)
+            for key, other in permutations(result.axes, 2)
+            for text, extent in written[key]
+            if extent.overlaps(frames[other])
+            or any(extent.overlaps(seen) for _, seen in written[other])
+        ]
+        assert not collisions
+        # The legend names every group beside the first row.
+        assert set(LONG_NAMES) <= set(_texts(result))
+    finally:
+        result.close()
 
 
 def _empty_fate_bias(store):
@@ -977,10 +1079,17 @@ def test_repertoire_figures_of_many_groups_stop_at_the_page_width(
             width, height = result.figure.get_size_inches()
             assert width <= MAX_FIGURE_WIDTH_INCHES, result.provenance.notes
             assert height <= 22.0, result.provenance.notes
-        # A heatmap of 200 groups names none of them, as no axis names more
-        # than 40 items.
-        ax = results[1].axes["TRA"]
-        assert not ax.get_xticklabels()
+        # A heatmap of the 160 groups with an alpha chain names every nth, as
+        # many as its axis holds once laid out, and at most 40.
+        usage = results[1].tables["usage"]
+        alpha = sorted(usage.loc[usage["locus"] == "TRA", "group"].unique())
+        assert len(alpha) == 160
+        results[1].figure.draw_without_rendering()
+        for axis in (results[1].axes["TRA"].xaxis, results[1].axes["TRA"].yaxis):
+            assert names_keep_apart(axis)
+        step, names = axis_names(results[1].axes["TRA"].xaxis)
+        assert names == (alpha[:1] if step is None else alpha[::step])
+        assert len(names) <= 40
     finally:
         for result in results:
             result.close()
@@ -1433,6 +1542,129 @@ def test_locus_heatmaps_share_the_largest_fraction_of_any_locus(repertoire) -> N
             assert result.axes["TRA"].get_ylabel() == axis
         finally:
             result.close()
+
+
+def _usage_of_counts(source, counts: dict[str, dict[str, int]], group_by: tuple):
+    """A gene usage record of TRB V genes, ``counts[group][gene]`` cells each."""
+    from cytearc.repertoire import GeneUsage
+
+    rows = [
+        {
+            "group": group,
+            "locus": "TRB",
+            "v_call": gene,
+            "n_cells": n_cells,
+            "fraction": n_cells / sum(genes.values()),
+        }
+        for group, genes in counts.items()
+        for gene, n_cells in genes.items()
+    ]
+    names = pd.Index(list(counts), name="group")
+    return GeneUsage(
+        table=pd.DataFrame(rows),
+        group_keys=pd.DataFrame({"cell_type": list(counts)}, index=names),
+        source=source,
+        genes=("v_call",),
+        level="gene",
+        slots=("VDJ_1",),
+        count="cells",
+        group_by=group_by,
+        groups=None,
+        cell_selection=None,
+        n_cells=sum(sum(genes.values()) for genes in counts.values()),
+        diagnostics={},
+    )
+
+
+def test_gene_usage_draws_the_genes_that_each_group_uses_most(repertoire) -> None:
+    from cytearc import plotting
+
+    # The naive cells use TRBV1 to TRBV5 most, and the MAIT cells TRBV6-4,
+    # which ranks sixth over both groups.
+    common = {"TRBV1": 100, "TRBV2": 90, "TRBV3": 80, "TRBV4": 70, "TRBV5": 60}
+    counts = {
+        "naive": common,
+        "MAIT": {**dict.fromkeys(common, 1), "TRBV6-4": 20},
+    }
+    usage = _usage_of_counts(repertoire.receptors, counts, ("cell_type",))
+    result = plotting.gene_usage(object(), usage, max_genes=3, show=False)
+    try:
+        ax = result.axes["TRB"]
+        # Each group's first gene, then the next best, by their chains over
+        # both groups.
+        genes = [tick.get_text() for tick in ax.get_yticklabels()]
+        assert genes == ["TRBV1", "TRBV2", "TRBV6-4"]
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == ["MAIT", "naive"]
+        assert ax.get_ylabel() == "V gene (3 of 6)"
+        (image,) = ax.images
+        drawn = np.ma.filled(image.get_array(), np.nan)
+        np.testing.assert_allclose(drawn[2], [20 / 25, 0.0])
+        np.testing.assert_allclose(drawn[0], [1 / 25, 100 / 400])
+    finally:
+        result.close()
+    # Without groups, the genes with the most chains are drawn.
+    merged = {gene: common.get(gene, 0) + n for gene, n in counts["MAIT"].items()}
+    alone = _usage_of_counts(repertoire.receptors, {"all cells": merged}, ())
+    result = plotting.gene_usage(object(), alone, max_genes=3, show=False)
+    try:
+        ax = result.axes["TRB"]
+        assert [tick.get_text() for tick in ax.get_yticklabels()] == [
+            "TRBV1",
+            "TRBV2",
+            "TRBV3",
+        ]
+        assert ax.get_ylabel() == "V gene (3 of 6)"
+    finally:
+        result.close()
+
+
+def test_gene_usage_ranks_a_groups_tied_genes_by_their_chains_overall(
+    repertoire,
+) -> None:
+    from cytearc import plotting
+
+    # The MAIT cells' one cell of TRBV2 and of TRBV9 tie; TRBV9 has more chains
+    # over both groups, so it ranks second among the MAIT cells' genes, and
+    # TRBV2, third, does not displace the naive cells' third gene.
+    counts = {
+        "naive": {"TRBV9": 50, "TRBV3": 40, "TRBV4": 30, "TRBV2": 10},
+        "MAIT": {"TRBV6-4": 20, "TRBV2": 1, "TRBV9": 1},
+    }
+    usage = _usage_of_counts(repertoire.receptors, counts, ("cell_type",))
+    result = plotting.gene_usage(object(), usage, max_genes=4, show=False)
+    try:
+        ax = result.axes["TRB"]
+        assert [tick.get_text() for tick in ax.get_yticklabels()] == [
+            "TRBV9",
+            "TRBV3",
+            "TRBV4",
+            "TRBV6-4",
+        ]
+    finally:
+        result.close()
+
+
+def test_gene_usage_breaks_ties_of_first_genes_by_their_chains(repertoire) -> None:
+    from cytearc import plotting
+
+    # Three groups, each with a gene of its own first, and fewer genes drawn
+    # than groups: the first genes with the most chains over all groups.
+    counts = {
+        "a": {"TRBV1": 5, "TRBV9": 1},
+        "b": {"TRBV2": 30, "TRBV9": 1},
+        "c": {"TRBV3": 20, "TRBV9": 1},
+    }
+    usage = _usage_of_counts(repertoire.receptors, counts, ("cell_type",))
+    result = plotting.gene_usage(object(), usage, max_genes=2, show=False)
+    try:
+        ax = result.axes["TRB"]
+        assert [tick.get_text() for tick in ax.get_yticklabels()] == [
+            "TRBV2",
+            "TRBV3",
+        ]
+        assert ax.get_ylabel() == "V gene (2 of 4)"
+    finally:
+        result.close()
 
 
 # The figures of variant counts, informative variants and genotype calls keep

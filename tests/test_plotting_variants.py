@@ -12,7 +12,7 @@ from cytearc.plotting._style import (
     MUTED_COLOR,
     NO_VALUE_COLOR,
 )
-from tests.clone_helpers import write_embedding
+from tests.clone_helpers import axis_names, names_keep_apart, write_embedding
 from tests.storage_helpers import open_store, write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
@@ -1118,7 +1118,7 @@ def test_layout_points_take_the_size_of_their_panel_after_layout(tmp_path) -> No
         result.close()
 
 
-def test_allele_frequencies_of_many_variants_name_none(scored) -> None:
+def test_allele_frequencies_of_many_variants_name_every_nth(scored) -> None:
     from dataclasses import replace
     from types import SimpleNamespace
 
@@ -1144,8 +1144,15 @@ def test_allele_frequencies_of_many_variants_name_none(scored) -> None:
         assert n_variants > 40
         assert result.tables["frequencies"]["variant"].nunique() == n_variants
         assert result.provenance.extras["n_variants"] == n_variants
-        # An axis names at most 40 items, and cells never.
-        assert not ax.get_yticklabels() and not ax.get_xticklabels()
+        # The variants' axis names every nth of the 159, as many as it holds
+        # once laid out, at most 40, and cells are never named.
+        result.figure.draw_without_rendering()
+        step, named = axis_names(ax.yaxis)
+        assert step is not None and step >= 4
+        assert ax.get_yticks().tolist() == list(range(0, n_variants, step))
+        assert len(named) <= 40 and names_keep_apart(ax.yaxis)
+        assert set(named) <= set(result.tables["frequencies"]["variant"])
+        assert not ax.get_xticklabels()
     finally:
         result.close()
 

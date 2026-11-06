@@ -19,6 +19,7 @@ import pytest
 from cytearc.repertoire import ImmuneReceptors
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
+    AIRR_HEADER,
     CELLRANGER_HEADER,
     assert_joined,
     N_RECEPTOR_CELLS,
@@ -267,6 +268,38 @@ def test_full_ties_go_to_the_contig_id_in_any_row_order(tmp_path) -> None:
             "TRAV1",
             "TRAV2",
         ]
+
+
+def test_a_csv_and_an_airr_file_rank_a_cells_chains_on_their_umis(tmp_path) -> None:
+    # cell0's two beta chains: 3 UMIs in Cell Ranger's CSV, which names them
+    # umis, and 12 in its AIRR file, which names them duplicate_count. The
+    # AIRR chain has fewer reads and the earlier junction, so only its UMIs
+    # can rank it first.
+    store = receptor_store(tmp_path)
+    csv = tcr_file(
+        tmp_path,
+        rows=[
+            "cell0,true,cell0_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,"
+            "CASSF,TGTGCCAGCAGCTTT,900,3,ct1,ct1_1"
+        ],
+    )
+    airr = write_lines(
+        tmp_path,
+        "tcr.tsv",
+        AIRR_HEADER,
+        [
+            "cell0\tcell0_airr_1\tTRBV2*01\t\tTRBJ2*01\tTRBC1\t"
+            "TGTGCCAGCAGCGGT\tCASSG\tT\t12\t40\t\t\t"
+        ],
+    )
+    for paths in ([csv, airr], [airr, csv]):
+        receptors = store.repertoire.import_receptors(
+            paths, cell_selection=store.snapshot_cell_selection()
+        )
+        table = store.repertoire.load_receptors(receptors).cells
+        slots = table.loc["cell0", ["VDJ_1_junction_aa", "VDJ_2_junction_aa"]]
+        assert slots.tolist() == ["CASSG", "CASSF"]
+        assert table.loc["cell0", "n_vdj"] == 2
 
 
 def test_compressed_files_read_whatever_their_name(tmp_path) -> None:

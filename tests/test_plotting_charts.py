@@ -34,6 +34,7 @@ from cytearc.plotting._style import (
     item_inches,
 )
 from cytearc.repertoire.chains import RECEPTOR_TYPES
+from tests.clone_helpers import axis_names, names_keep_apart
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -665,14 +666,49 @@ def test_heatmaps_print_the_values_of_at_most_12_rows(ax, n_groups) -> None:
     assert len(ax.texts) == (n_groups * (n_groups - 1) if n_groups <= 12 else 0)
 
 
-@pytest.mark.parametrize("n_groups", [MAX_NAMED_ITEMS, MAX_NAMED_ITEMS + 1])
-def test_heatmaps_name_at_most_40_rows(ax, n_groups) -> None:
-    names = [f"g{at}" for at in range(n_groups)]
-    matrix = pd.DataFrame(np.ones((n_groups, n_groups)), index=names, columns=names)
-    draw_matrix(ax, matrix, color_scale=ColorScale(), value_label="", show_legend=False)
-    named = [tick.get_text() for tick in ax.get_yticklabels()]
-    assert named == (names if n_groups <= 40 else [])
-    assert [tick.get_text() for tick in ax.get_xticklabels()] == named
+@pytest.mark.parametrize(
+    ("n_rows", "n_columns"),
+    [(MAX_NAMED_ITEMS, MAX_NAMED_ITEMS), (MAX_NAMED_ITEMS + 1, 3), (5, 80), (81, 1000)],
+)
+@pytest.mark.parametrize("inches", [3.0, 12.0])
+def test_heatmaps_name_every_nth_item_that_their_axes_hold(
+    n_rows, n_columns, inches
+) -> None:
+    rows = [f"r{at}" for at in range(n_rows)]
+    columns = [f"c{at}" for at in range(n_columns)]
+    figure, ax = plt.subplots(figsize=(inches, inches), layout="constrained")
+    try:
+        draw_matrix(
+            ax,
+            pd.DataFrame(np.ones((n_rows, n_columns)), index=rows, columns=columns),
+            color_scale=ColorScale(),
+            value_label="",
+            show_legend=False,
+        )
+        figure.draw_without_rendering()
+        for axis, names in ((ax.yaxis, rows), (ax.xaxis, columns)):
+            step, labels = axis_names(axis)
+            # Every nth item from the first, at most 40, apart once laid out.
+            assert labels == (names[:1] if step is None else names[::step])
+            assert 1 <= len(labels) <= MAX_NAMED_ITEMS
+            assert names_keep_apart(axis)
+        # A square heatmap of 40 on a page of 12 inches names every item, and
+        # one of 3 inches only some; 1,000 columns take 40 names, every 25th.
+        if (n_rows, n_columns) == (MAX_NAMED_ITEMS, MAX_NAMED_ITEMS):
+            assert axis_names(ax.yaxis)[0] == (1 if inches == 12.0 else 4)
+        if n_columns == 1000 and inches == 12.0:
+            assert axis_names(ax.xaxis) == (25, columns[::25])
+    finally:
+        plt.close(figure)
+
+
+def test_heatmap_names_need_the_axis_of_a_panel() -> None:
+    from cytearc.plotting._charts import _item_names_type
+
+    locator = _item_names_type()(10, 14.0)
+    locator.create_dummy_axis()
+    with pytest.raises(TypeError, match="axis of a panel in a figure"):
+        locator()
 
 
 def test_a_trees_leaves_stand_over_the_matrixs_columns(ax) -> None:

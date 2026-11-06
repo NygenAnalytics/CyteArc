@@ -123,8 +123,9 @@ def test_chains_are_ranked_by_umis_then_reads_then_sequences() -> None:
     assert index.has_receptor.tolist() == [True]
 
 
-def test_missing_counts_rank_as_zero_and_duplicate_counts_follow_umis() -> None:
+def test_a_contig_without_umis_ranks_by_its_duplicate_count() -> None:
     rows = [
+        # Nine duplicates outrank one UMI, as nine UMIs would.
         _chain("TRB", "CASA", umi_count=None, duplicate_count=9, sequence_id="b1"),
         _chain("TRB", "CASB", umi_count=1, duplicate_count=0, sequence_id="b2"),
         _chain("TRA", "CAVA", umi_count=None, duplicate_count=2, sequence_id="a1"),
@@ -133,7 +134,33 @@ def test_missing_counts_rank_as_zero_and_duplicate_counts_follow_umis() -> None:
     table = _table(rows, [0, 0, 0, 0])
     index = index_chains(table, 1, locus=table.text["locus"])
     ids = table.column("sequence_id")
-    assert [ids[position] for position in index.slots[0]] == ["a2", "a1", "b2", "b1"]
+    assert [ids[position] for position in index.slots[0]] == ["a2", "a1", "b1", "b2"]
+
+
+def test_contigs_of_a_csv_and_an_airr_file_rank_on_their_umis() -> None:
+    # A Cell Ranger CSV gives UMIs as umi_count and its AIRR file as
+    # duplicate_count; each row lacks the other field, as an import of both
+    # files in one call holds them. Each pair's junctions sort against its
+    # expected order, so only the counts can put the expected contig first.
+    rows = [
+        _chain("TRB", "CASB", junction="TGTB", umi_count=3, consensus_count=900, sequence_id="b_csv"),
+        _chain("TRB", "CASA", junction="TGTA", duplicate_count=12, consensus_count=40, sequence_id="b_airr"),
+        _chain("TRA", "CAVA", junction="TGTA", umi_count=8, consensus_count=10, sequence_id="a_csv"),
+        _chain("TRA", "CAVB", junction="TGTB", duplicate_count=2, consensus_count=500, sequence_id="a_airr"),
+    ]  # fmt: skip
+    assert _slot_ids(rows) == ["a_csv", "a_airr", "b_airr", "b_csv"]
+
+
+def test_equal_umis_of_a_csv_and_an_airr_file_rank_by_reads() -> None:
+    # The AIRR contig's duplicate count is its UMI count, so it does not
+    # break the tie a second time; the reads do, whichever file has more.
+    rows = [
+        _chain("TRB", "CASA", junction="TGTA", umi_count=5, consensus_count=90, sequence_id="b_csv"),
+        _chain("TRB", "CASB", junction="TGTB", duplicate_count=5, consensus_count=10, sequence_id="b_airr"),
+        _chain("TRA", "CAVA", junction="TGTA", duplicate_count=5, consensus_count=90, sequence_id="a_airr"),
+        _chain("TRA", "CAVB", junction="TGTB", umi_count=5, consensus_count=10, sequence_id="a_csv"),
+    ]  # fmt: skip
+    assert _slot_ids(rows) == ["a_airr", "a_csv", "b_csv", "b_airr"]
 
 
 def _slot_ids(rows: list[dict]) -> list[str | None]:
@@ -144,18 +171,32 @@ def _slot_ids(rows: list[dict]) -> list[str | None]:
     return [None if position < 0 else ids[position] for position in index.slots[0]]
 
 
-def test_counts_rank_umis_then_duplicates_then_reads_missing_as_zero() -> None:
+def test_counts_rank_umis_then_reads_missing_as_zero() -> None:
     # Each pair's junctions sort against its expected order, so only the
     # counts can put the expected contig first.
     rows = [
-        # A missing UMI count ties a count of 0, so the duplicate count decides.
-        _chain("TRB", "CASB", junction="TGTB", umi_count=0, duplicate_count=1, sequence_id="b_zero"),
+        # A UMI count of 0 is a count, which the contig's own duplicates do
+        # not replace, so a contig without UMIs and five duplicates outranks it.
+        _chain("TRB", "CASB", junction="TGTB", umi_count=0, duplicate_count=9, sequence_id="b_zero"),
         _chain("TRB", "CASA", junction="TGTA", umi_count=None, duplicate_count=5, sequence_id="b_missing"),
-        # Equal UMIs: two duplicates outrank a hundred reads.
-        _chain("TRA", "CAVB", junction="TGTB", umi_count=1, duplicate_count=1, consensus_count=100, sequence_id="a_reads"),
-        _chain("TRA", "CAVA", junction="TGTA", umi_count=1, duplicate_count=2, consensus_count=1, sequence_id="a_duplicates"),
+        # Equal UMIs: a contig's duplicates do not count beside its UMIs, so
+        # a hundred reads outrank one.
+        _chain("TRA", "CAVA", junction="TGTA", umi_count=1, duplicate_count=1, consensus_count=100, sequence_id="a_reads"),
+        _chain("TRA", "CAVB", junction="TGTB", umi_count=1, duplicate_count=2, consensus_count=1, sequence_id="a_duplicates"),
     ]  # fmt: skip
-    assert _slot_ids(rows) == ["a_duplicates", "a_reads", "b_missing", "b_zero"]
+    assert _slot_ids(rows) == ["a_reads", "a_duplicates", "b_missing", "b_zero"]
+
+
+def test_contigs_of_files_without_umi_counts_rank_by_duplicates_then_reads() -> None:
+    # No row has a umi_count, as in an AIRR file of Cell Ranger alone.
+    rows = [
+        _chain("TRB", "CASA", junction="TGTA", duplicate_count=2, consensus_count=1, sequence_id="b_more"),
+        _chain("TRB", "CASB", junction="TGTB", duplicate_count=1, consensus_count=99, sequence_id="b_fewer"),
+        # Neither count: both count 0, so the reads decide.
+        _chain("TRA", "CAVB", junction="TGTB", consensus_count=2, sequence_id="a_fewer_reads"),
+        _chain("TRA", "CAVA", junction="TGTA", duplicate_count=None, consensus_count=3, sequence_id="a_more_reads"),
+    ]  # fmt: skip
+    assert _slot_ids(rows) == ["a_more_reads", "a_fewer_reads", "b_more", "b_fewer"]
 
 
 def test_equal_counts_rank_by_junction_then_its_amino_acids_last_first() -> None:

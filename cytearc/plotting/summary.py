@@ -68,6 +68,18 @@ def _wrap_tick_labels(values: Sequence[Any], width: int | None) -> list[str]:
     return [textwrap.fill(label, width=width) for label in labels]
 
 
+def _mean_label(features: Sequence[Any], standardize: str) -> str:
+    """Name what the colours of means draw: expression for the RNA assay, otherwise its assay.
+
+    A dot plot or matrix plot of an assay of gene scores, say, draws the mean
+    gene scores, so its colour bar names the assay, such as "Mean of
+    GeneScores".
+    """
+    assays = sorted({feature.assay for feature in features})
+    what = "expression" if assays == ["RNA"] else "of " + " and ".join(assays)
+    return f"{'Mean' if standardize == 'none' else 'Standardized mean'} {what}"
+
+
 # Bounds in points on the largest dot of a default size scale, which fills 72%
 # of a grid cell. No default dot is wider than 26 pt, however roomy the cell.
 _DEFAULT_DOT_DIAMETER_RANGE = (2.5, 26.0)
@@ -394,8 +406,10 @@ def dotplot(
 ) -> PlotResult:
     """Dotplot of expression by group.
 
-    Color is the mean value in the group. Dot size is the fraction of measured
-    cells above ``expression_cutoff``. Pass ``features`` as a list of genes, or
+    Color is the mean value in the group, and the colour bar names it: "Mean
+    expression" for the RNA assay and otherwise the assay, such as "Mean of
+    GeneScores". Dot size is the fraction of measured cells above
+    ``expression_cutoff``. Pass ``features`` as a list of genes, or
     as a mapping of group name to gene list when you want gene-set brackets.
     Different features of one assay that carry the same explicit
     ``FeatureRef.label`` are pooled into one row. Any other label shared by
@@ -591,11 +605,7 @@ def dotplot(
             [group for group, _ in feature_rows],
             swap_axes=swap_axes,
         )
-        colorbar_label = (
-            "Mean expression"
-            if standardize == "none"
-            else "Standardized mean expression"
-        )
+        colorbar_label = _mean_label(resolved_features, standardize)
         if show_legend:
             cb = fig.colorbar(
                 sc,
@@ -1049,9 +1059,7 @@ def matrixplot(
             else 0
         )
         colorbar_label = (
-            "Mean expression"
-            if value == "mean" and standardize == "none"
-            else "Standardized mean expression"
+            _mean_label(resolved_features, standardize)
             if value == "mean"
             else "Detected cells"
         )

@@ -211,6 +211,62 @@ def test_two_within_columns_keep_every_combination_apart(store) -> None:
     )
 
 
+def test_groups_smaller_than_a_neighbourhood_are_warned_of(store) -> None:
+    from cytearc.utils.logging import collect_warnings
+
+    _counts, selection = _inputs(store)
+    # The first four cells in a group of their own, and the others in one.
+    store.cells.insert(
+        "tiny", np.where(np.arange(TRUTH.n_cells) < 4, "few", "many").astype(object)
+    )
+    expected = (
+        "Of the 2 within groups, 1 holds fewer scored cells than n_neighbors=10, "
+        "so no neighbourhood there is full: each cell takes every cell of its "
+        "group that it resembles as a neighbour, and clones that share a "
+        "variant join. Pass a smaller n_neighbors."
+    )
+    with collect_warnings() as messages:
+        clones = store.variants.frequency_clones(selection, within="tiny")
+    assert messages == [expected]
+    # A reused call warns alike.
+    with collect_warnings() as messages:
+        assert store.variants.frequency_clones(selection, within="tiny") == clones
+    assert messages == [expected]
+    # Neighbourhoods of four fit every group, and the samples of over 100
+    # cells hold ten.
+    for options in ({"within": "tiny", "n_neighbors": 4}, {"within": "sample"}, {}):
+        with collect_warnings() as messages:
+            store.variants.frequency_clones(selection, **options)
+        assert messages == [], options
+    # Without within, all the scored cells are one group.
+    with collect_warnings() as messages:
+        store.variants.frequency_clones(selection, n_neighbors=TRUTH.n_cells + 1)
+    assert messages == [
+        f"The {TRUTH.n_cells} scored cells are fewer than "
+        f"n_neighbors={TRUTH.n_cells + 1}, so no neighbourhood there is full: "
+        "each cell takes every cell of its group that it resembles as a "
+        "neighbour, and clones that share a variant join. Pass a smaller "
+        "n_neighbors."
+    ]
+    # Statistics of 120 of the counts' cells score only those, which are
+    # fewer than 121, though the counts hold 230.
+    counts, _selection = _inputs(store)
+    store.cells.insert("first_120", np.arange(TRUTH.n_cells) < 120)
+    scored = store.variants.informative(
+        counts,
+        cell_selection=store.snapshot_cell_selection("first_120"),
+        preset="atac",
+    )
+    with collect_warnings() as messages:
+        store.variants.frequency_clones(scored, n_neighbors=121)
+    assert messages == [
+        "The 120 scored cells are fewer than n_neighbors=121, so no "
+        "neighbourhood there is full: each cell takes every cell of its group "
+        "that it resembles as a neighbour, and clones that share a variant "
+        "join. Pass a smaller n_neighbors."
+    ]
+
+
 def test_tied_clones_are_numbered_by_their_first_cell() -> None:
     from cytearc.datastore._operations.variants import _clone_assignment
     from cytearc.variants.frequencies import FrequencyClones

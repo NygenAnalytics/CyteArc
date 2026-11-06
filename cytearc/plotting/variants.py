@@ -37,7 +37,6 @@ from ._style import (
     LEGEND_SIDE_MAX_COLUMNS,
     LEGEND_SIDE_MAX_ENTRIES,
     MAX_FIGURE_WIDTH_INCHES,
-    MAX_NAMED_ITEMS,
     MUTED_COLOR,
     NO_VALUE_COLOR,
     category_label,
@@ -638,12 +637,6 @@ def allele_frequencies(
         # Many cells share the panel's width, and only the variants are named.
         ax.set_aspect("auto")
         ax.set_xticks([])
-        if len(chosen) <= MAX_NAMED_ITEMS:
-            ax.set_yticks(
-                np.arange(len(chosen)), [str(label) for label in chosen.index]
-            )
-        else:
-            ax.set_yticks([])
         ax.set_xlabel(
             "Cells"
             if len(cell_ids) == n_ordered

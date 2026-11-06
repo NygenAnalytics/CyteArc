@@ -34,16 +34,47 @@ __all__ = ["phylogeny"]
 
 # The wedges that a figure draws unless told otherwise.
 _MAX_LEAVES = 100
-# A clone takes a colour of a palette without greys by its rank among the
-# cut's clones, the largest first, so it keeps its colour whatever else is
-# drawn; a wedge whose cells are not all in one clone is grey, and a wedge of
-# cells in no clone takes the missing grey.
-_CLONE_COLORS = tuple(
-    color
-    for color in CUSTOM_PALETTES[20]
-    if len({color[1:3], color[3:5], color[5:7]}) > 1
-)
 _MIXED_COLOR = "#969696"
+# A clone takes a colour by its rank among the cut's clones, the largest
+# first, so it keeps its colour whatever else is drawn; a wedge whose cells
+# are not all in one clone is grey, and a wedge of cells in no clone takes
+# the missing grey. The clones' colours are those of the 20-colour palette
+# and then of the 102-colour one that stand at least _FROM_GREY from both
+# greys and _APART from every colour before them, by their distance in
+# CIELAB, so that no clone looks grey or like another: 56 colours, which
+# repeat from the 57th clone, past the 40 that a legend lists at most.
+_FROM_GREY = 25.0
+_APART = 20.0
+# sRGB's linear red, green and blue to CIE XYZ, and the D65 white point.
+_SRGB_TO_XYZ = np.asarray(
+    [[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722], [0.0193, 0.1192, 0.9505]]
+)
+_D65_WHITE = np.asarray([0.95047, 1.0, 1.08883])
+
+
+def _lab(color: str) -> np.ndarray:
+    """A colour's CIELAB lightness and its a and b coordinates."""
+    rgb = np.asarray([int(color[at : at + 2], 16) / 255 for at in (1, 3, 5)])
+    linear = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    xyz = _SRGB_TO_XYZ @ linear / _D65_WHITE
+    f = np.where(xyz > (6 / 29) ** 3, np.cbrt(xyz), xyz / (3 * (6 / 29) ** 2) + 4 / 29)
+    return np.asarray([116 * f[1] - 16, 500 * (f[0] - f[1]), 200 * (f[1] - f[2])])
+
+
+def _clone_colors() -> tuple[str, ...]:
+    """The clones' colours by rank: those far from the greys and from every one before."""
+    greys = [_lab(NO_VALUE_COLOR), _lab(_MIXED_COLOR)]
+    kept: dict[str, np.ndarray] = {}
+    for color in (*CUSTOM_PALETTES[20], *CUSTOM_PALETTES[102]):
+        point = _lab(color)
+        if all(np.linalg.norm(point - grey) >= _FROM_GREY for grey in greys) and all(
+            np.linalg.norm(point - other) >= _APART for other in kept.values()
+        ):
+            kept[color.lower()] = point
+    return tuple(kept)
+
+
+_CLONE_COLORS = _clone_colors()
 _MIXED = -2
 _NO_CLONE = -1
 _PANEL_INCHES = (MAX_FIGURE_WIDTH_INCHES, 5.0)
@@ -143,11 +174,12 @@ def phylogeny(
     The trees run from their roots at the left, each wedge as tall as its
     cells and stacked from the top, the most cells first. A wedge whose
     cells are all in one clone takes that clone's colour, by its rank among
-    the cut's clones; a wedge whose cells all end before the cut, in no
-    clone, takes the missing grey; and every other wedge, of several clones
-    or of a clone and cells before the cut, is grey, "Mixed" in the legend,
-    and says how many clones it holds where it is tall enough, at least a
-    fortieth of the height. The x axis is time for a cut at a time and
+    the cut's clones, from 56 colours far from grey and from each other,
+    which repeat from the 57th clone; a wedge whose cells all end before the
+    cut, in no clone, takes the missing grey; and every other wedge, of
+    several clones or of a clone and cells before the cut, is grey, "Mixed"
+    in the legend, and says how many clones it holds where it is tall
+    enough, at least a fortieth of the height. The x axis is time for a cut at a time and
     branchings below the root, single-child nodes merged, for a cut at a
     depth, with the cut as a dashed line. A forest of more trees than
     ``max_leaves`` draws its largest trees and the others as one grey wedge
