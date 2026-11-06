@@ -2621,7 +2621,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         a clone are shuffled ``n_permutations`` times, which keeps each clone's
         cells and each group's cells, and the coupling measured again. The
         z-score is the value's distance from the null mean in null standard
-        deviations, so groups of different sizes compare. Permutation ``k``
+        deviations, which says whether a pair couples more than chance; when
+        clones commit to few fates, most pairs fall below their null, so rank
+        pairs by the coupling itself. Permutation ``k``
         draws from a random stream keyed by ``random_seed`` and ``k``, so the result
         does not depend on ``nthreads``. The groups are ordered by average
         linkage on the coupling, the most coupled together.

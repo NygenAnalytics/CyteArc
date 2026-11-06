@@ -109,7 +109,7 @@ tracked = ds.clones.track(clones, group_by="time_point", top_n=5)
 ds.plots.clone_tracking(tracked, show=False).save("clone_tracking.png")
 late = ds.snapshot_cell_selection("is_day_6")
 coupling = ds.clones.coupling(clones, group_by="cell_type", cell_selection=late)
-print(coupling.pairs.sort_values("z_score", ascending=False).head())
+print(coupling.pairs.sort_values("coupling", ascending=False).head())
 ds.plots.clone_coupling(coupling, show=False).save("clone_coupling.png")
 bias = ds.clones.fate_bias(
     clones,
@@ -217,7 +217,7 @@ for time in (4.0, 5.5, 6.5):
 - Measure expansion and diversity `group_by` the sample: without it, a clone's cells in all samples add up. Frequency categories depend on sample size (one cell of 1,000 is already 0.001), so compare them only between samples of similar size; bounds in cells compare any samples.
 - Compare diversity by Hill numbers at a common coverage or size (`hill.at_coverage`, `hill.at_size`), not observed indices, which grow with the cells sampled. Check `plots.clonal_rarefaction`: steep curves at the observed point mean richness and Chao1 are poorly determined; order 2 is stable. Name the Chao1 form reported. Leave out tiny groups with `cell_selection`, or set `size`/`coverage`, since the smallest group sets the defaults.
 - Read overlap by the Morisita-Horn index and the shared fractions; presence indices (Jaccard, Sørensen, overlap, cosine) grow with both groups' cells, so compare them only between pairs of similar depth. A clone seen in one group only may be below detection in the others.
-- Measure coupling on the cells of one time point (`cell_selection`) and read `z_score` as a ranking: shuffled labels spread each clone over every group, so when clones commit to few fates most pairs fall below the null. Keep `share_cosine` unless a few large clones should dominate. Coupling treats cells as exchangeable: it is exploratory within one sample.
+- Measure coupling on the cells of one time point (`cell_selection`), rank pairs by `coupling` and use `z_score` to check that a pair beats chance: shuffled labels spread each clone over every group, so when clones commit to few fates most pairs fall below the null, strongly coupled pairs among them. Keep `share_cosine` unless a few large clones should dominate. Coupling treats cells as exchangeable: it is exploratory within one sample.
 - For fate bias, `early` and `late` must share no cell. Every early cell of a clone gets its clone's fractions, so summarise by clone; report how many early cells have late clone-mates. Small clones cannot reach small p-values. When barcode detection differs between cell types, pass only late cells with a clone as `late`.
 - Compare conditions with one value per sample (such as the fraction of cells in clones of more than two cells), never with cells as replicates; test such values with a method that treats samples as replicates, such as CytePool's (https://docs.nygen.io/CytePool/).
 - After importing a phylogeny, check its diagnostics' `unmatchedBarcodes` (leaves naming no cell of the store) and `cellsInNoTree`; cut at several times, not one, and check the phylogeny's `leafTimeSpread` and the cut's `cellsBeforeCut` for cuts near the leaves.
