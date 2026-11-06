@@ -714,6 +714,8 @@ def test_inspection_samples_values_across_the_whole_matrix(tmp_path) -> None:
         (np.asarray([1.0, 2.0, np.inf]), False, 0.0),
         (np.asarray([1.0, 2.0, -3.0]), False, 0.0),
         (np.asarray([1.0, 2.5]), False, 0.0),
+        # A value within 1e-8 of a whole number is not whole.
+        (np.asarray([1.0, 2.0 + 1e-10]), False, 0.0),
         (np.asarray([], dtype=np.float32), False, 0.0),
     ],
 )
@@ -727,6 +729,29 @@ def test_sampled_counts_must_be_finite_non_negative_and_whole(
         h5.create_dataset("data", data=values)
     with h5py.File(path, "r") as h5:
         assert _sparse_counts(h5["data"]) == (integer_like, total)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [0.0, 1.0, 7.0],
+        [1.0, 2.0 + 1e-10],
+        [3.0 - 1e-12, 1.0],
+        [1e-9],
+        [4.0, 0.5],
+    ],
+)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_inspection_tells_whole_numbers_as_the_import_stores_them(
+    values, dtype
+) -> None:
+    from cytearc.readers._h5ad_inspect import _sampled_counts
+    from cytearc.utils.count_values import CountValueRange
+
+    sample = np.asarray(values, dtype=dtype)
+    stored = CountValueRange()
+    stored.update(sample)
+    assert _sampled_counts(sample) is stored.integral
 
 
 def test_sample_windows_spread_over_the_values() -> None:
