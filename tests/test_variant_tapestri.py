@@ -636,6 +636,10 @@ def _texts(handle, name):
             "the genotype 4; genotypes are 0 to 3",
         ),
         (
+            lambda h: h[f"{_LAYERS}/NGT"].__setitem__((0, 9), -1),
+            "the genotype -1; genotypes are 0 to 3",
+        ),
+        (
             lambda h: h[f"{_LAYERS}/DP"].__setitem__(
                 (0, 1), int(h[f"{_LAYERS}/DP"][0, 0]) + 1
             ),
@@ -791,7 +795,11 @@ def test_tapestri_layers_and_cells_must_align(store, tmp_path) -> None:
         ),
         (
             lambda h: h["GT"].__setitem__((0, 0), 7),
-            "the genotype 7; genotypes are 0 to 3",
+            "the genotype 7; genotypes are -1 to 3",
+        ),
+        (
+            lambda h: h["GT"].__setitem__((0, 0), -2),
+            "the genotype -2; genotypes are -1 to 3",
         ),
         (
             lambda h: _replace(
@@ -1034,6 +1042,36 @@ def test_genotype_clones_of_tapestri_calls_are_the_truth_clones(
         for clone in TAPESTRI_CLONE_VARIANTS
     }
     assert loaded_partition(store, clones) == truth
+
+
+def test_a_dab_seq_gt_of_minus_one_is_kept_and_read_as_no_call(
+    dab_seq_store, tmp_path
+) -> None:
+    # DAb-seq writes GT as the sum of a diploid call's two allele indices as
+    # scikit-allel reads them, -1 for an allele not called (resources.py,
+    # vcf_to_tables), so -1 is one reference allele beside one not called:
+    # neither the wild type nor a heterozygous call.
+    path = write_dab_seq(TRUTH, tmp_path / "GSM0.hdf5")
+    with h5py.File(path, "r") as handle:
+        names = _texts(handle, "VARIANTS")
+        variant = names.index("NRAS:chr1:1000:G/A")
+        cell = int(np.flatnonzero(handle["DP"][:, variant] > 0)[0])
+        barcode = _texts(handle, "CELL_BARCODES")[cell]
+        before = int(handle["GT"][cell, variant])
+    assert before != -1
+    _edit(path, lambda h: h["GT"].__setitem__((cell, variant), -1))
+    counts, _ = _import(dab_seq_store, path)
+    calls = dab_seq_store.variants.load_counts(counts).calls
+    mine = calls[(calls["ids"].astype(str) == barcode) & (calls["site"] == "chr1:1000")]
+    assert mine.loc[mine["allele"] == "A", "call"].astype(str).tolist() == ["-1"]
+    genotypes = dab_seq_store.variants.load_genotypes(
+        dab_seq_store.variants.genotypes(counts, method="source")
+    ).calls
+    called = genotypes[
+        (genotypes["ids"].astype(str) == barcode)
+        & (genotypes["site"].astype(str) == "chr1:1000:G/A")
+    ]
+    assert called[["call", "label"]].astype(str).values.tolist() == [["filtered", "-1"]]
 
 
 def test_dab_seq_genotypes_adopt_gt_and_flt3_itd(dab_seq_store, tmp_path) -> None:
