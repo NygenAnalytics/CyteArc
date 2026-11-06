@@ -2356,12 +2356,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         the cells that the clones are called from.
 
         The similarity counts a frequency whatever the reads behind it, so
-        one stray read of a clone's variant can put a cell in that clone. A
-        clone of fewer cells than ``n_neighbors`` cannot stand alone: its
-        cells take neighbours from other clones and it joins the most similar
-        one, so a smaller ``n_neighbors`` finds smaller clones. The call warns
-        when a ``within`` group, or without ``within`` all the scored cells,
-        holds fewer cells than ``n_neighbors``.
+        one stray read of a clone's variant can put a cell in that clone. The
+        cells of a clone of fewer cells than ``n_neighbors`` take as
+        neighbours the cells of other clones that they resemble, so the clone
+        can join the most similar one, and a smaller ``n_neighbors`` separates
+        smaller clones; cells that resemble no other clone's stay apart. The
+        call warns when a ``within`` group, or without ``within`` all the
+        scored cells, holds fewer cells than ``n_neighbors``.
 
         Clones are numbered by size over every ``within`` group, so
         ``clone_1`` is the largest, and ties follow their first cell.

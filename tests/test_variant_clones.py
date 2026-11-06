@@ -248,6 +248,23 @@ def test_groups_smaller_than_a_neighbourhood_are_warned_of(store) -> None:
         "neighbour, and clones that share a variant join. Pass a smaller "
         "n_neighbors."
     ]
+    # Statistics of 120 of the counts' cells score only those, which are
+    # fewer than 121, though the counts hold 230.
+    counts, _selection = _inputs(store)
+    store.cells.insert("first_120", np.arange(TRUTH.n_cells) < 120)
+    scored = store.variants.informative(
+        counts,
+        cell_selection=store.snapshot_cell_selection("first_120"),
+        preset="atac",
+    )
+    with collect_warnings() as messages:
+        store.variants.frequency_clones(scored, n_neighbors=121)
+    assert messages == [
+        "The 120 scored cells are fewer than n_neighbors=121, so no "
+        "neighbourhood there is full: each cell takes every cell of its group "
+        "that it resembles as a neighbour, and clones that share a variant "
+        "join. Pass a smaller n_neighbors."
+    ]
 
 
 def test_tied_clones_are_numbered_by_their_first_cell() -> None:
