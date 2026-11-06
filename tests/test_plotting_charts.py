@@ -34,6 +34,7 @@ from cytearc.plotting._style import (
     item_inches,
 )
 from cytearc.repertoire.chains import RECEPTOR_TYPES
+from tests.clone_helpers import axis_names, names_keep_apart
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -666,30 +667,39 @@ def test_heatmaps_print_the_values_of_at_most_12_rows(ax, n_groups) -> None:
 
 
 @pytest.mark.parametrize(
-    ("n_rows", "n_columns", "row_step", "column_step"),
-    [
-        (MAX_NAMED_ITEMS, MAX_NAMED_ITEMS, 1, 1),
-        # A long axis names every nth, at most 40, and leaves the other whole.
-        (MAX_NAMED_ITEMS + 1, 3, 2, 1),
-        (5, 80, 1, 2),
-        (81, 1000, 3, 25),
-    ],
+    ("n_rows", "n_columns"),
+    [(MAX_NAMED_ITEMS, MAX_NAMED_ITEMS), (MAX_NAMED_ITEMS + 1, 3), (5, 80), (81, 1000)],
 )
-def test_heatmaps_name_every_nth_item_of_an_axis_of_more_than_40(
-    ax, n_rows, n_columns, row_step, column_step
+@pytest.mark.parametrize("inches", [3.0, 12.0])
+def test_heatmaps_name_every_nth_item_that_their_axes_hold(
+    n_rows, n_columns, inches
 ) -> None:
     rows = [f"r{at}" for at in range(n_rows)]
     columns = [f"c{at}" for at in range(n_columns)]
-    matrix = pd.DataFrame(np.ones((n_rows, n_columns)), index=rows, columns=columns)
-    draw_matrix(ax, matrix, color_scale=ColorScale(), value_label="", show_legend=False)
-    named_rows = [tick.get_text() for tick in ax.get_yticklabels()]
-    named_columns = [tick.get_text() for tick in ax.get_xticklabels()]
-    assert named_rows == rows[::row_step] and len(named_rows) <= MAX_NAMED_ITEMS
-    assert named_columns == columns[::column_step]
-    assert len(named_columns) <= MAX_NAMED_ITEMS
-    # Each name stands at its own row or column.
-    assert ax.get_yticks().tolist() == list(range(0, n_rows, row_step))
-    assert ax.get_xticks().tolist() == list(range(0, n_columns, column_step))
+    figure, ax = plt.subplots(figsize=(inches, inches), layout="constrained")
+    try:
+        draw_matrix(
+            ax,
+            pd.DataFrame(np.ones((n_rows, n_columns)), index=rows, columns=columns),
+            color_scale=ColorScale(),
+            value_label="",
+            show_legend=False,
+        )
+        figure.draw_without_rendering()
+        for axis, names in ((ax.yaxis, rows), (ax.xaxis, columns)):
+            step, labels = axis_names(axis)
+            # Every nth item from the first, at most 40, apart once laid out.
+            assert labels == (names[:1] if step is None else names[::step])
+            assert 1 <= len(labels) <= MAX_NAMED_ITEMS
+            assert names_keep_apart(axis)
+        # A square heatmap of 40 on a page of 12 inches names every item, and
+        # one of 3 inches only some; 1,000 columns take 40 names, every 25th.
+        if (n_rows, n_columns) == (MAX_NAMED_ITEMS, MAX_NAMED_ITEMS):
+            assert axis_names(ax.yaxis)[0] == (1 if inches == 12.0 else 4)
+        if n_columns == 1000 and inches == 12.0:
+            assert axis_names(ax.xaxis) == (25, columns[::25])
+    finally:
+        plt.close(figure)
 
 
 def test_a_trees_leaves_stand_over_the_matrixs_columns(ax) -> None:

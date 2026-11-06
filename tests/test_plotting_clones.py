@@ -26,6 +26,8 @@ from cytearc.plotting import (
 from cytearc.plotting._groups import labels_by_group, plot_groups, table_groups
 from cytearc.plotting._style import MAX_FIGURE_WIDTH_INCHES
 from tests.clone_helpers import (
+    axis_names,
+    names_keep_apart,
     every_cell,
     import_truth_clones,
     import_truth_receptors,
@@ -1332,21 +1334,25 @@ def test_the_overlap_plot_prints_values_of_at_most_12_groups(many_groups) -> Non
     plt.close(thirteen.figure)
 
 
-def test_the_overlap_plot_names_at_most_40_groups(many_groups) -> None:
-    forty = _overlap_of_first(many_groups, 40)
-    ax = forty.axes["matrix"]
-    names = [f"cell{i:03d}" for i in range(40)]
-    assert [tick.get_text() for tick in ax.get_xticklabels()] == names
-    assert [tick.get_text() for tick in ax.get_yticklabels()] == names
-    plt.close(forty.figure)
-    more = _overlap_of_first(many_groups, 41)
-    ax = more.axes["matrix"]
-    # Past 40, every second group is named, in the order drawn.
-    order = more.tables["matrix"].index.tolist()
-    assert sorted(order) == [f"cell{i:03d}" for i in range(41)]
-    assert [tick.get_text() for tick in ax.get_xticklabels()] == order[::2]
-    assert [tick.get_text() for tick in ax.get_yticklabels()] == order[::2]
-    plt.close(more.figure)
+@pytest.mark.parametrize("n_first", [12, 40, 41])
+def test_the_overlap_plot_names_every_nth_group_that_its_axes_hold(
+    many_groups, n_first
+) -> None:
+    result = _overlap_of_first(many_groups, n_first)
+    try:
+        result.figure.draw_without_rendering()
+        ax = result.axes["matrix"]
+        order = result.tables["matrix"].index.tolist()
+        assert sorted(order) == [f"cell{i:03d}" for i in range(n_first)]
+        for axis in (ax.xaxis, ax.yaxis):
+            # Every nth group in the order drawn, every one of 12, at most
+            # 40, and none running into the next.
+            step, names = axis_names(axis)
+            assert step is not None and names == order[::step]
+            assert step == 1 if n_first == 12 else len(names) <= 40
+            assert names_keep_apart(axis)
+    finally:
+        plt.close(result.figure)
 
 
 def test_the_overlap_plot_grows_to_the_width_of_a_page(many_groups) -> None:
@@ -1643,8 +1649,7 @@ def test_the_fates_plot_draws_the_top_clones_and_their_shares(fates_plot) -> Non
 
 def test_the_coupling_plot_names_at_most_40_groups(many_groups) -> None:
     store = many_groups.store
-    # Past 40 groups, every second is named.
-    for n_first, named in ((40, 40), (41, 21)):
+    for n_first in (40, 41):
         coupling = store.clones.coupling(
             many_groups.clones,
             group_by="cell",
@@ -1658,11 +1663,11 @@ def test_the_coupling_plot_names_at_most_40_groups(many_groups) -> None:
         assert matrix.loc["cell000", "cell001"] == pytest.approx(1.0)
         assert matrix.loc["cell000", "cell002"] == 0.0
         ax = result.axes["matrix"]
-        order = matrix.index.tolist()
-        assert [tick.get_text() for tick in ax.get_xticklabels()] == (
-            order[:: 1 if n_first <= 40 else 2]
-        )
-        assert len(ax.get_xticklabels()) == named
+        # Every nth group in the order drawn, at most 40, apart once laid out.
+        result.figure.draw_without_rendering()
+        step, names = axis_names(ax.xaxis)
+        assert step is not None and names == matrix.index.tolist()[::step]
+        assert len(names) <= 40 and names_keep_apart(ax.xaxis)
         assert len(ax.texts) == 0
         plt.close(result.figure)
     # Shown by default: on Agg the owned figure is closed.

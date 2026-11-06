@@ -1,11 +1,11 @@
 """Charts that the figures of clones, receptors, lineages and variants draw from tidy tables.
 
 Each chart draws one panel. It names at most ``MAX_NAMED_ITEMS`` items on an
-axis, a heatmap every nth of more, draws a titled legend beside the panel
-when given a legend title, and
-returns what that legend shows with the scale behind it, a :class:`Drawn`,
-which ``finish_plot`` reports so that ``compose_results`` can draw a legend
-that several figures share once.
+axis, a heatmap as many as its laid-out axis holds, draws a titled legend
+beside the panel when given a legend title, and returns what that legend
+shows with the scale behind it, a :class:`Drawn`, which ``finish_plot``
+reports so that ``compose_results`` can draw a legend that several figures
+share once.
 """
 
 import functools
@@ -50,6 +50,9 @@ _BAR_EXTENT = 0.8
 _LINE_WIDTH = 1.4
 _POINT_SIZE = 3.5
 _MARKED_POINT_SIZE = 4.0
+# The room that a heatmap's row or column name takes along its axis, in
+# multiples of the size of its text.
+_NAME_PITCH = 1.4
 # A tree's wedge fills this share of its slot, so that neighbours stay apart,
 # its lines are this wide, and a wedge that ends where it starts, such as one
 # leaf, is a point of this area.
@@ -253,6 +256,47 @@ def draw_bars(
             title=legend_title,
         )
     return legend_of(colors, entries, legend_title)
+
+
+@functools.cache
+def _item_names_type() -> type:
+    """A locator of every nth row or column of a heatmap, as many as its axis holds."""
+    from matplotlib.ticker import Locator
+
+    class ItemNames(Locator):
+        """Tick every nth of ``n_items``, as many as the axis holds ``pitch`` points apart.
+
+        The axis's length is read whenever the figure is drawn, after its
+        layout, so names keep apart however a page shares its width; an axis
+        names every one of its items where it can, and never more than
+        ``MAX_NAMED_ITEMS``.
+        """
+
+        def __init__(self, n_items: int, pitch: float) -> None:
+            self.n_items = n_items
+            self.pitch = pitch
+
+        def __call__(self) -> Any:
+            return self.tick_values(0.0, float(self.n_items - 1))
+
+        def tick_values(self, vmin: float, vmax: float) -> Any:
+            axes = self.axis.axes
+            pixels = axes.bbox.width if self.axis.axis_name == "x" else axes.bbox.height
+            room = int(pixels * 72.0 / axes.figure.dpi // self.pitch)
+            step = -(-self.n_items // max(1, min(MAX_NAMED_ITEMS, room)))
+            return np.arange(0, self.n_items, max(1, step), dtype=np.float64)
+
+    return ItemNames
+
+
+def _item_name(names: list[str]) -> Any:
+    """Name the item at a tick, or nothing past the items."""
+
+    def name(value: float, position: int | None = None) -> str:
+        at = int(round(value))
+        return names[at] if 0 <= at < len(names) else ""
+
+    return name
 
 
 @functools.cache
@@ -604,9 +648,9 @@ def draw_matrix(
     blank and out of the colour limits, so the colours span the other cells.
     A table of at most ``MAX_PRINTED_VALUES`` rows and columns prints each
     coloured value, dark on light colours and light on dark ones. Each axis
-    names its rows or columns, every one up to ``MAX_NAMED_ITEMS`` and
-    otherwise every second, third or nth, so that it names at most
-    ``MAX_NAMED_ITEMS``.
+    names as many of its rows or columns as its length holds once the
+    figure is laid out, at most ``MAX_NAMED_ITEMS``: every one, or else
+    every second, third or nth.
     ``colorbar_beside`` names the panels whose heatmaps share this one's
     scale and limits, beside all of which the colour bar stands; by
     default it stands beside this panel alone.
@@ -639,14 +683,17 @@ def draw_matrix(
         layer = np.zeros((n_rows, n_columns, 4), dtype=np.float64)
         layer[missing] = mpl.colors.to_rgba(color_scale.missing_color)
         ax.imshow(layer)
-    # An axis of more items than it can name names every second, third or
-    # nth, so that at most MAX_NAMED_ITEMS names stand at their usual size.
-    for set_ticks, names, rotation in (
-        (ax.set_xticks, matrix.columns, 90),
-        (ax.set_yticks, matrix.index, 0),
-    ):
-        named = np.arange(0, len(names), max(1, -(-len(names) // MAX_NAMED_ITEMS)))
-        set_ticks(named, [str(names[at]) for at in named], rotation=rotation)
+    # Each axis names as many of its items as its length holds once the
+    # figure is laid out, every one or else every second, third or nth.
+    for axis, names in ((ax.xaxis, matrix.columns), (ax.yaxis, matrix.index)):
+        size = mpl.font_manager.FontProperties(
+            size=mpl.rcParams[f"{axis.axis_name}tick.labelsize"]
+        ).get_size_in_points()
+        axis.set_major_locator(_item_names_type()(len(names), _NAME_PITCH * size))
+        axis.set_major_formatter(
+            mpl.ticker.FuncFormatter(_item_name([str(name) for name in names]))
+        )
+    ax.tick_params(axis="x", labelrotation=90)
     if n_rows <= MAX_PRINTED_VALUES and n_columns <= MAX_PRINTED_VALUES:
         for row, column in zip(*np.nonzero(colored), strict=True):
             value = values[row, column]

@@ -30,6 +30,8 @@ from cytearc.plotting._style import (
     category_label,
 )
 from tests.clone_helpers import (
+    axis_names,
+    names_keep_apart,
     CLONE_FIGURES,
     REPERTOIRE_FIGURES,
     VARIANT_FIGURES,
@@ -1077,13 +1079,17 @@ def test_repertoire_figures_of_many_groups_stop_at_the_page_width(
             width, height = result.figure.get_size_inches()
             assert width <= MAX_FIGURE_WIDTH_INCHES, result.provenance.notes
             assert height <= 22.0, result.provenance.notes
-        # A heatmap of the 160 groups with an alpha chain names every fourth,
-        # as no axis names more than 40 items.
+        # A heatmap of the 160 groups with an alpha chain names every nth, as
+        # many as its axis holds once laid out, and at most 40.
         usage = results[1].tables["usage"]
         alpha = sorted(usage.loc[usage["locus"] == "TRA", "group"].unique())
         assert len(alpha) == 160
-        ax = results[1].axes["TRA"]
-        assert [tick.get_text() for tick in ax.get_xticklabels()] == alpha[::4]
+        results[1].figure.draw_without_rendering()
+        for axis in (results[1].axes["TRA"].xaxis, results[1].axes["TRA"].yaxis):
+            assert names_keep_apart(axis)
+        step, names = axis_names(results[1].axes["TRA"].xaxis)
+        assert names == (alpha[:1] if step is None else alpha[::step])
+        assert len(names) <= 40
     finally:
         for result in results:
             result.close()

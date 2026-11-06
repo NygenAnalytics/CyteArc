@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from fractions import Fraction
 from math import sqrt
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -433,6 +433,19 @@ def variant_figure_calls(
             **options,
         ),
     }
+
+
+def axis_names(axis: Any) -> tuple[int | None, list[str]]:
+    """The step between the items that a heatmap's axis names, None for one, and their names."""
+    ticks = axis.get_majorticklocs().tolist()
+    labels = [label.get_text() for label in axis.get_ticklabels()]
+    return (int(ticks[1] - ticks[0]) if len(ticks) > 1 else None), labels
+
+
+def names_keep_apart(axis: Any) -> bool:
+    """Whether no two neighbouring names of a drawn axis overlap."""
+    extents = [label.get_window_extent() for label in axis.get_ticklabels()]
+    return not any(a.overlaps(b) for a, b in zip(extents, extents[1:], strict=False))
 
 
 def overlap_reference(x: Mapping[object, int], y: Mapping[object, int]) -> dict:
