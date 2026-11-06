@@ -84,6 +84,7 @@ memory on your workload.
   [](tutorials/tea_seq.ipynb).
 - **Analyze a CRISPR screen:** [](tutorials/crispr_screens.ipynb) calls guides, separates knocked-out cells from escapers, and tests what each perturbation changes.
 - **Analyze immune repertoires:** [](tutorials/immune_repertoires.ipynb) imports TCR and BCR chains, groups cells into clonotypes, and finds which T cells expanded.
+- **Trace cell lineages:** [](tutorials/lineage_tracing.ipynb) imports LARRY's clones, measures which fates share them, and scores a fate map against the fates that the clones took.
 
 Start with {ref}`Installation <installation>` to set up your environment, then follow the
 {ref}`Quick start <quickstart>`. For importing an existing analysis or translating individual

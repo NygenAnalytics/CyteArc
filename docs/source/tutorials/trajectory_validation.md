@@ -124,6 +124,8 @@ reflect graph geometry even when the underlying biological decision is abrupt. N
 convergence and a gradual change in probability do not establish that a biological fate
 decision is gradual or reversible.
 
+Lineage tracing gives independent endpoint evidence: [](lineage_tracing.ipynb) scores fate probabilities against the fates that the clones of hematopoietic progenitors took.
+
 ## Keep the inputs with the results
 
 Record which graph, cells, features, and endpoints produced the result. Saved references
