@@ -702,6 +702,15 @@ def test_heatmaps_name_every_nth_item_that_their_axes_hold(
         plt.close(figure)
 
 
+def test_heatmap_names_need_the_axis_of_a_panel() -> None:
+    from cytearc.plotting._charts import _item_names_type
+
+    locator = _item_names_type()(10, 14.0)
+    locator.create_dummy_axis()
+    with pytest.raises(TypeError, match="axis of a panel in a figure"):
+        locator()
+
+
 def test_a_trees_leaves_stand_over_the_matrixs_columns(ax) -> None:
     from scipy.cluster.hierarchy import leaves_list, linkage
 

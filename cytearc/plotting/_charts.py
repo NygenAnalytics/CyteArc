@@ -261,6 +261,7 @@ def draw_bars(
 @functools.cache
 def _item_names_type() -> type:
     """A locator of every nth row or column of a heatmap, as many as its axis holds."""
+    from matplotlib.axis import Axis, XAxis
     from matplotlib.ticker import Locator
 
     class ItemNames(Locator):
@@ -280,9 +281,13 @@ def _item_names_type() -> type:
             return self.tick_values(0.0, float(self.n_items - 1))
 
         def tick_values(self, vmin: float, vmax: float) -> Any:
-            axes = self.axis.axes
-            pixels = axes.bbox.width if self.axis.axis_name == "x" else axes.bbox.height
-            room = int(pixels * 72.0 / axes.figure.dpi // self.pitch)
+            axis = self.axis
+            figure = axis.axes.get_figure(root=True) if isinstance(axis, Axis) else None
+            if not isinstance(axis, Axis) or figure is None:
+                raise TypeError("A heatmap's names tick an axis of a panel in a figure")
+            box = axis.axes.bbox
+            pixels = box.width if isinstance(axis, XAxis) else box.height
+            room = int(pixels * 72.0 / figure.dpi // self.pitch)
             step = -(-self.n_items // max(1, min(MAX_NAMED_ITEMS, room)))
             return np.arange(0, self.n_items, max(1, step), dtype=np.float64)
 
