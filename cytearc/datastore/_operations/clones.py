@@ -2623,10 +2623,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         z-score is the value's distance from the null mean in null standard
         deviations, which says whether a pair couples more than chance; when
         clones commit to few fates, most pairs fall below their null, so rank
-        pairs by the coupling itself. Permutation ``k``
-        draws from a random stream keyed by ``random_seed`` and ``k``, so the result
-        does not depend on ``nthreads``. The groups are ordered by average
-        linkage on the coupling, the most coupled together.
+        pairs by the coupling itself. Permutation ``k`` draws from a random
+        stream keyed by ``random_seed`` and ``k``, so the result does not
+        depend on ``nthreads``. The groups are ordered by average linkage on
+        the coupling, the most coupled together.
 
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
