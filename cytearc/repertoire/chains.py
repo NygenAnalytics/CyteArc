@@ -11,7 +11,8 @@ up to two chains of each arm, so allelically included cells with two alpha or
 two light chains keep both. The chains that count are the contigs with a locus
 of one of the seven loci, a junction amino-acid sequence and, unless
 non-productive contigs are kept, a productive rearrangement. They are ranked
-within each arm by UMI count, then duplicate count, then read count (AIRR's
+within each arm by UMI count (``umi_count``, or AIRR's deprecated
+``duplicate_count`` for a contig without one), then read count (AIRR's
 ``consensus_count``), each most first, then by the junction nucleotide and
 amino-acid sequences, last in sort order first as scirpy ranks them, and last
 by contig ID, so the ranking does not depend on the order of the rows. The
@@ -233,6 +234,20 @@ def _count_key(table: RecordTable, name: str) -> np.ndarray:
     return np.maximum(np.asarray(values, dtype=np.int64), 0)
 
 
+def _umi_key(table: RecordTable) -> np.ndarray:
+    """Return each contig's UMIs for ranking: ``umi_count``, or ``duplicate_count`` where it has none.
+
+    A Cell Ranger CSV gives UMIs as ``umi_count`` and Cell Ranger's AIRR file
+    as the deprecated ``duplicate_count``, so contigs of both, imported in
+    one call, rank on one measure. A contig without either counts 0.
+    """
+    values = table.values.get("umi_count")
+    if values is None:
+        return _count_key(table, "duplicate_count")
+    umis = np.asarray(values, dtype=np.int64)
+    return np.where(umis >= 0, umis, _count_key(table, "duplicate_count"))
+
+
 def _break_ties_by_id(
     table: RecordTable,
     chosen: np.ndarray,
@@ -327,8 +342,7 @@ def index_chains(
         _descending(junction_aa[chosen]),
         _descending(_text_codes(table, "junction")[chosen]),
         -_count_key(table, "consensus_count")[chosen],
-        -_count_key(table, "duplicate_count")[chosen],
-        -_count_key(table, "umi_count")[chosen],
+        -_umi_key(table)[chosen],
         chosen_arms,
         cells,
     )
