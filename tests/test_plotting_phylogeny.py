@@ -46,12 +46,14 @@ TRUTH = clone_truth()
 # The truth's clones, largest first: their labels and cells.
 LABELS = [str(clone + 1) for clone in range(TRUTH.n_clones)]
 SIZES = [9, 6, 5, 4, 3, 2, 2, 1]
-# Clones take the colours of the 20-colour palette without its two greys,
-# by rank.
+# Clones take the colours of the 20-colour palette, by rank, without its two
+# greys and the lavender and greyish brown near them.
 CLONE_COLORS = [
-    color for color in CUSTOM_PALETTES[20] if color not in ("#7f7f7f", "#c7c7c7")
+    color
+    for color in CUSTOM_PALETTES[20]
+    if color not in ("#7f7f7f", "#c7c7c7", "#c5b0d5", "#c49c94")
 ]
-assert len(CLONE_COLORS) == 18
+assert len(CLONE_COLORS) == 16
 MIXED = "#969696"
 
 
@@ -550,6 +552,47 @@ def test_the_legend_lists_the_clones_tall_enough_to_see(random_tree) -> None:
         n_drawn = len(greys) + int((wedges["n_clones"] == 1).sum())
         assert legend.get_title().get_text() == f"Clone ({len(labels)} of {n_drawn})"
         assert result.legends[0].label == legend.get_title().get_text()
+    finally:
+        result.close()
+
+
+def test_the_legend_gives_each_clone_a_colour_of_its_own_away_from_grey(
+    random_tree, tmp_path
+) -> None:
+    # A root of 30 clades of three cells each, cut into 30 clones, each a
+    # thirtieth of the height and so listed.
+    store = random_tree.store
+    leaves = [f"cell{index:06d}-1" for index in range(90)]
+    clades = ",".join(
+        f"({leaves[3 * at]}:1,{leaves[3 * at + 1]}:1,{leaves[3 * at + 2]}:1):1"
+        for at in range(30)
+    )
+    path = tmp_path / "clades.nwk"
+    path.write_text(f"({clades});\n")
+    phylogeny = store.clones.import_phylogeny(
+        path, cell_selection=every_cell(store), time_unit="days"
+    )
+    clones = store.clones.phylogeny_clones(phylogeny, time=0.5)
+    result = store.plots.phylogeny(clones, show=False)
+    try:
+        scale = result.scales[0]
+        listed = [code for code in scale.order if code >= 0]
+        colors = [scale.palette[code].lower() for code in listed]
+        # More clones than the 18 colours that once repeated, each its own.
+        assert len(listed) == 30
+        assert len(set(colors)) == len(colors)
+        # The largest clones take the 20-colour palette's colours by rank.
+        ranked = {code: color for code, color in zip(listed, colors, strict=True)}
+        for code in range(len(CLONE_COLORS)):
+            if code in ranked:
+                assert ranked[code] == CLONE_COLORS[code]
+        # No clone's colour is a grey or near one: its red, green and blue
+        # differ by at least 50 of 255, where the missing grey's and the
+        # mixed grey's differ by none.
+        for color in colors:
+            channels = [int(color[at : at + 2], 16) for at in (1, 3, 5)]
+            assert max(channels) - min(channels) >= 50, color
+        assert NO_VALUE_COLOR not in colors and MIXED not in colors
     finally:
         result.close()
 

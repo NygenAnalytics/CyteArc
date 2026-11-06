@@ -34,14 +34,28 @@ __all__ = ["phylogeny"]
 
 # The wedges that a figure draws unless told otherwise.
 _MAX_LEAVES = 100
-# A clone takes a colour of a palette without greys by its rank among the
-# cut's clones, the largest first, so it keeps its colour whatever else is
-# drawn; a wedge whose cells are not all in one clone is grey, and a wedge of
-# cells in no clone takes the missing grey.
+# A clone takes a colour by its rank among the cut's clones, the largest
+# first, so it keeps its colour whatever else is drawn; a wedge whose cells
+# are not all in one clone is grey, and a wedge of cells in no clone takes
+# the missing grey. The clones' colours are those of the 20-colour palette
+# and then of the 102-colour one whose red, green and blue differ by at least
+# _MIN_CHROMA of 255, so that none is near either grey: 89 colours, which
+# repeat from the 90th clone, past the 40 that a legend lists at most.
+_MIN_CHROMA = 50
+
+
+def _chroma(color: str) -> int:
+    """The difference between a colour's largest and smallest channel, 0 for a grey."""
+    channels = [int(color[at : at + 2], 16) for at in (1, 3, 5)]
+    return max(channels) - min(channels)
+
+
 _CLONE_COLORS = tuple(
-    color
-    for color in CUSTOM_PALETTES[20]
-    if len({color[1:3], color[3:5], color[5:7]}) > 1
+    dict.fromkeys(
+        color.lower()
+        for color in (*CUSTOM_PALETTES[20], *CUSTOM_PALETTES[102])
+        if _chroma(color) >= _MIN_CHROMA
+    )
 )
 _MIXED_COLOR = "#969696"
 _MIXED = -2
@@ -143,7 +157,8 @@ def phylogeny(
     The trees run from their roots at the left, each wedge as tall as its
     cells and stacked from the top, the most cells first. A wedge whose
     cells are all in one clone takes that clone's colour, by its rank among
-    the cut's clones; a wedge whose cells all end before the cut, in no
+    the cut's clones, from a palette of colours far from grey that repeats
+    from its 90th clone; a wedge whose cells all end before the cut, in no
     clone, takes the missing grey; and every other wedge, of several clones
     or of a clone and cells before the cut, is grey, "Mixed" in the legend,
     and says how many clones it holds where it is tall enough, at least a
