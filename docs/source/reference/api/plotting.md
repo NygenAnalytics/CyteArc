@@ -74,7 +74,7 @@ Granular workflows pass exact refs to the same datastore-owned plotting surface:
 | diversity indices of each group, one panel of bars per index | `clonal_diversity(ds.clones.diversity(clones_ref, group_by="sample"))`, or `indices=["chao1", "gini"]` for other indices |
 | clones shared between samples or cell types | `clone_overlap(ds.clones.overlap(clones_ref, group_by="cell_type"))`, or `index="jaccard"` for another index |
 | chosen clones across time points or cell types | `clone_tracking(ds.clones.track(clones_ref, group_by="time_point"), order=[...])` |
-| fate coupling of every pair of groups with the tree of their order | `clone_coupling(ds.clones.coupling(clones_ref, group_by="cell_type"))`, or `value="coupling"` for the couplings |
+| fate coupling of every pair of groups with the tree of their order | `clone_coupling(ds.clones.coupling(clones_ref, group_by="cell_type"))`, or `value="z_score"` for the z-scores against shuffled labels |
 | each clone's late cells by fate, by dominant fate | `clone_fate_bias(bias_ref)`, or `normalize=True` for shares |
 | barcodes per cell, UMIs per barcode and reads per molecule of imported lineage barcodes | `barcode_calls(barcodes_ref)`, or `barcode_calls(barcodes_ref, max_barcodes_per_cell=5)` to gather cells of five barcodes or more in the last bar |
 | the fraction of cells that each site of a lineage recorder reads as marked, unknown, unedited or missing | `recorder_states(alleles_ref)`, or `recorder_states(alleles_ref, max_sites=20)` to draw the 20 sites read in the most cells |

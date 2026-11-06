@@ -1134,7 +1134,7 @@ def clone_coupling(
     store: Any,
     coupling: CloneCoupling,
     *,
-    value: str = "z_score",
+    value: str = "coupling",
     color_scale: ColorScale | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
@@ -1145,13 +1145,14 @@ def clone_coupling(
     """Plot the fate coupling of every pair of groups as a heatmap with its dendrogram.
 
     ``coupling`` is the result of ``ds.clones.coupling``. ``value`` is
-    ``"z_score"`` (the default), the coupling's distance from its null in
-    null standard deviations, or ``"coupling"``, the method's value. The
-    groups follow the result's average-linkage order, whose dendrogram is
-    drawn above the matrix. The diagonal is left blank, and pairs that were
-    not compared and z-scores that are not finite take the scale's missing
-    colour; a coupling measured without permutations has no z-scores and is
-    refused. By default z-scores, and couplings below 0, take a scale centred
+    ``"coupling"`` (the default), the method's value, which ranks the pairs,
+    or ``"z_score"``, the coupling's distance from its null in null standard
+    deviations, which checks whether a pair beats chance. The groups follow
+    the result's average-linkage order, whose dendrogram is drawn above the
+    matrix. The diagonal is left blank, and pairs that were not compared and
+    z-scores that are not finite take the scale's missing colour; z-scores
+    of a coupling measured without permutations are refused, since it has
+    none. By default z-scores, and couplings below 0, take a scale centred
     on 0, from minus to plus their largest size, and other couplings
     viridis; ``color_scale`` sets the map and limits instead, so two figures
     can share them.

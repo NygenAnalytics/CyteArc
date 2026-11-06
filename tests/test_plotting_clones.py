@@ -1415,10 +1415,38 @@ def test_the_tracking_plot_fits_many_clones_and_groups(many_groups) -> None:
     plt.close(eighths.figure)
 
 
-def test_the_coupling_plot_draws_z_scores_in_the_order_of_the_tree(truth_plot) -> None:
+def test_the_coupling_plot_draws_couplings_by_default(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
     coupling = store.clones.coupling(clones, group_by="cell_type", n_permutations=200)
     result = store.plots.clone_coupling(coupling, show=False)
+    matrix = result.tables["matrix"]
+    order = list(coupling.order)
+    assert matrix.index.tolist() == matrix.columns.tolist() == order
+    # Each pair's cosine of clone shares, not its z-score, on both sides.
+    assert not np.allclose(coupling.pairs["coupling"], coupling.pairs["z_score"])
+    for row in coupling.pairs.itertuples(index=False):
+        assert matrix.loc[row.group_1, row.group_2] == row.coupling
+        assert matrix.loc[row.group_2, row.group_1] == row.coupling
+    ax = result.axes["matrix"]
+    assert ax.get_title() == "Cosine of clone shares"
+    assert result.legends[0].label == "Cosine of clone shares"
+    assert result.provenance.extras["value"] == "coupling"
+    # Cosines are not negative, so a sequential scale from their least.
+    assert ax.images[0].cmap.name == "viridis"
+    plt.close(result.figure)
+    # A coupling measured without permutations has no z-scores, and its
+    # couplings draw by default.
+    unpermuted = store.plots.clone_coupling(
+        replace(coupling, n_permutations=0), show=False
+    )
+    assert unpermuted.tables["matrix"].equals(matrix)
+    plt.close(unpermuted.figure)
+
+
+def test_the_coupling_plot_draws_z_scores_in_the_order_of_the_tree(truth_plot) -> None:
+    store, clones = truth_plot.store, truth_plot.clones
+    coupling = store.clones.coupling(clones, group_by="cell_type", n_permutations=200)
+    result = store.plots.clone_coupling(coupling, value="z_score", show=False)
     matrix = result.tables["matrix"]
     order = list(coupling.order)
     assert matrix.index.tolist() == matrix.columns.tolist() == order
@@ -1439,7 +1467,7 @@ def test_the_coupling_plot_draws_z_scores_in_the_order_of_the_tree(truth_plot) -
         coupling,
         pairs=coupling.pairs.assign(z_score=np.abs(coupling.pairs["z_score"]) + 1),
     )
-    positive = clone_coupling(store, above, show=False)
+    positive = clone_coupling(store, above, value="z_score", show=False)
     low, high = positive.axes["matrix"].images[0].get_clim()
     assert low == -high == -above.pairs["z_score"].max()
     assert positive.axes["matrix"].images[0].cmap.name == "RdBu_r"
@@ -1473,13 +1501,15 @@ def test_the_coupling_plot_blanks_values_that_are_not_finite(truth_plot) -> None
     )
     # Without permutations there are no z-scores to draw.
     with pytest.raises(ValueError, match="without permutations, so it has no"):
-        clone_coupling(store, replace(coupling, n_permutations=0), show=False)
+        clone_coupling(
+            store, replace(coupling, n_permutations=0), value="z_score", show=False
+        )
     # A null without spread gives a z-score of NaN, or an infinite one, which
     # stay blank; the finite one is printed on both sides.
     blank = replace(
         coupling, pairs=coupling.pairs.assign(z_score=[np.nan, np.inf, 1.5])
     )
-    result = clone_coupling(store, blank, show=False)
+    result = clone_coupling(store, blank, value="z_score", show=False)
     assert [text.get_text() for text in result.axes["matrix"].texts] == ["1.5"] * 2
     assert np.isinf(result.tables["matrix"].to_numpy()).sum() == 2
     plt.close(result.figure)
