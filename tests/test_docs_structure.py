@@ -306,6 +306,52 @@ def test_the_notices_open_and_close_each_code_fence_on_a_line_of_its_own() -> No
     assert all(fence == "```" for fence in fences[1::2])
 
 
+def test_pages_hold_no_em_dashes_or_html_comments() -> None:
+    # The site publishes each page's source, so a comment becomes public.
+    found = [
+        (path.relative_to(_DOCS_SOURCE).as_posix(), mark)
+        for path in _pages()
+        for mark in ("\u2014", "<!--")
+        if mark in _source_text(path)
+    ]
+    assert not found
+
+
+def test_every_citation_names_an_entry_of_the_bibliography() -> None:
+    # A citation of a removed entry renders as its key, and MyST only warns.
+    bibliography = (_DOCS_SOURCE / "references.bib").read_text()
+    entries = set(re.findall(r"^@\w+\{([^,\s]+),", bibliography, re.MULTILINE))
+    cited = {
+        key: path.relative_to(_DOCS_SOURCE).as_posix()
+        for path in _pages()
+        for key in re.findall(r"(?<![\w@./])@([A-Za-z][\w:-]*\w)", _prose(path))
+    }
+    assert cited
+    assert {key: page for key, page in cited.items() if key not in entries} == {}
+
+
+def test_every_figure_of_a_built_notebook_has_a_description() -> None:
+    # The build gives each figure its description as alt text, and refuses a
+    # figure without one; the description lives in the cell's metadata.
+    excluded = _project()["exclude"]
+    undescribed = []
+    for path in _pages():
+        page = path.relative_to(_DOCS_SOURCE).as_posix()
+        if path.suffix != ".ipynb" or any(fnmatch(page, rule) for rule in excluded):
+            continue
+        for cell in json.loads(path.read_text())["cells"]:
+            outputs = cell.get("outputs", [])
+            figures = [
+                o
+                for o in outputs
+                if any(k.startswith("image/") for k in o.get("data", {}))
+            ]
+            texts = cell["metadata"].get("figure_descriptions", [])
+            if len(figures) != len(texts) or not all(str(t).strip() for t in texts):
+                undescribed.append((page, cell.get("id")))
+    assert not undescribed
+
+
 def test_api_pages_link_labels_through_the_ref_role() -> None:
     # Sphinx renders a Markdown link to a bare label, such as
     # [text](cell_aligned_kinds), as a link to a missing page.
