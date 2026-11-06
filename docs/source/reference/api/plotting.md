@@ -11,7 +11,7 @@ Import it as `splt` and call functions such as `splt.embedding(...)`, `splt.dotp
 For functions whose first argument is a datastore, `ds.plots.embedding(...)` and related accessor methods provide the same behavior with that argument already bound.
 Store-backed graph plotters mirror their `DataStore` counterparts and require an exact `graph=`
 reference.
-`dotplot` and `matrixplot` take `features=` as gene names or `FeatureRef` values, or as a mapping of group names to such lists.
+`dotplot` and `matrixplot` take `features=` as gene names or `FeatureRef` values, or as a mapping of group names to such lists. Their colour bar names the means it draws: "Mean expression" for the RNA assay and otherwise the assay, such as "Mean of GeneScores".
 Diagnostics remain standalone: `qc` takes a DataFrame, `elbow` and `highly_variable_features` take arrays, and `graph_qc` takes a sparse graph.
 
 A completed {py:class}`~cytearc.PipelineRun` can be passed to
