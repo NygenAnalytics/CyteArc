@@ -580,7 +580,12 @@ def _check_call_file(
     row_cells[~named] = -1
     if not np.any(row_cells >= 0):
         example = str(file_ids[np.argmax(named)])
-        if call_file.barcode_suffix is None and call_file.barcode_pattern is None:
+        if not named.any():
+            rule = (
+                f"barcode_pattern {call_file.barcode_pattern!r} matches none of its "
+                f"barcodes, such as {str(calls.barcodes[0])!r}; check barcode_pattern"
+            )
+        elif call_file.barcode_suffix is None and call_file.barcode_pattern is None:
             rule = (
                 "a cell matches a barcode when its ID is barcode_prefix followed by "
                 f"the barcode, which gives IDs such as {example!r}, but the run's "

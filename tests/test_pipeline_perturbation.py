@@ -1312,6 +1312,17 @@ def test_a_call_file_reaches_its_cells_through_a_suffix_and_a_pattern(
             f"barcode_suffix '-2', but {N_CELLS} of the run's cells, such as "
             f"'cell0-1', do not; restrict cells to the cells of that sample, {remedy}",
         ),
+        # A pattern that matches no barcode, whose whole text with the suffix
+        # would name the cells.
+        (
+            {"path": plain, "barcode_suffix": "-1", "barcode_pattern": untagged},
+            ValueError,
+            "No barcode of the call file names one of the run's cells, so the "
+            "import would label them all 'Negative': barcode_pattern "
+            f"{untagged!r} matches none of its barcodes, such as 'unknown-barcode'; "
+            "check barcode_pattern and that the file holds the calls of these "
+            "cells, " + remedy,
+        ),
         # A pattern that keeps a part of each barcode that names no cell.
         (
             {
