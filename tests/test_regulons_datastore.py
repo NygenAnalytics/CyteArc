@@ -10,7 +10,7 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.regulons.grn import GrnParameters, infer_grn
 from cytearc.regulons.results import GrnResult
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import record_normalized_values, write_count_store
 
 N_CELLS = 150
 FAST = {"max_stages": 150, "early_stop_window": 10}
@@ -86,6 +86,26 @@ def test_grn_artifact_matches_direct_inference(store_path):
     assert result.random_seed == 4
     assert result.cell_selection == cells
     pd.testing.assert_frame_equal(result.adjacencies, expected)
+
+
+def test_grn_records_the_values_that_it_reads(store_path, tmp_path):
+    store = _open(store_path)
+    counts = _grn(store)
+    assert store.artifacts.inspect(counts).parameters["values"] == "raw_counts"
+    # The same stored values, recorded as normalized before import.
+    path = _copy(store_path, tmp_path)
+    record_normalized_values(path, "RNA", "normalized")
+    normalized = _open(path)
+    assert not normalized.RNA.holdsCounts
+    ref = _grn(normalized)
+    assert ref != counts
+    status = normalized.artifacts.inspect(ref)
+    assert status.parameters["values"] == "normalized_values"
+    # Equal values give an equal network, whatever they hold.
+    pd.testing.assert_frame_equal(
+        normalized.regulons.load_grn(ref).adjacencies,
+        store.regulons.load_grn(counts).adjacencies,
+    )
 
 
 def test_grn_reuses_identical_requests_and_separates_seeds(store_path):

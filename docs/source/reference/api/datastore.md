@@ -215,8 +215,7 @@ ATAC assay; see {doc}`regulons` for building those networks.
 
 ### `ds.regulons`
 
-`grn` infers transcription-factor to target importances with GRNBoost2 on raw counts; the
-functions in {doc}`regulons` turn them into regulons.
+`grn` infers transcription-factor to target importances with GRNBoost2 on the assay's stored values, its raw counts or the values of an assay imported from normalized values; the functions in {doc}`regulons` turn them into regulons.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.RegulonsAccessor
