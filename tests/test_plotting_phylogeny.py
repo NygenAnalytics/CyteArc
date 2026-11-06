@@ -47,14 +47,29 @@ TRUTH = clone_truth()
 LABELS = [str(clone + 1) for clone in range(TRUTH.n_clones)]
 SIZES = [9, 6, 5, 4, 3, 2, 2, 1]
 # Clones take the colours of the 20-colour palette, by rank, without its two
-# greys and the lavender and greyish brown near them.
+# greys and the four pale colours near them: a blue, a cyan, a lavender and a
+# greyish brown.
+NEAR_GREY = ("#aec7e8", "#9edae5", "#c5b0d5", "#c49c94")
 CLONE_COLORS = [
     color
     for color in CUSTOM_PALETTES[20]
-    if color not in ("#7f7f7f", "#c7c7c7", "#c5b0d5", "#c49c94")
+    if color not in ("#7f7f7f", "#c7c7c7", *NEAR_GREY)
 ]
-assert len(CLONE_COLORS) == 16
+assert len(CLONE_COLORS) == 14
 MIXED = "#969696"
+
+
+def _lab(color: str) -> np.ndarray:
+    """A colour's CIELAB coordinates, from seaborn's CIE XYZ of it under D65."""
+    from seaborn.external import husl
+
+    rgb = [int(color[at : at + 2], 16) / 255 for at in (1, 3, 5)]
+    x, y, z = np.asarray(husl.rgb_to_xyz(rgb)) / (husl.refX, husl.refY, husl.refZ)
+    f = [
+        t ** (1 / 3) if t > (6 / 29) ** 3 else t / (3 * (6 / 29) ** 2) + 4 / 29
+        for t in (x, y, z)
+    ]
+    return np.asarray([116 * f[1] - 16, 500 * (f[0] - f[1]), 200 * (f[1] - f[2])])
 
 
 @pytest.fixture(scope="module")
@@ -586,13 +601,21 @@ def test_the_legend_gives_each_clone_a_colour_of_its_own_away_from_grey(
         for code in range(len(CLONE_COLORS)):
             if code in ranked:
                 assert ranked[code] == CLONE_COLORS[code]
-        # No clone's colour is a grey or near one: its red, green and blue
-        # differ by at least 50 of 255, where the missing grey's and the
-        # mixed grey's differ by none.
-        for color in colors:
-            channels = [int(color[at : at + 2], 16) for at in (1, 3, 5)]
-            assert max(channels) - min(channels) >= 50, color
-        assert NO_VALUE_COLOR not in colors and MIXED not in colors
+        # No clone's colour is near a grey or another clone's, by the CIE
+        # distance of seaborn's own conversion to CIELAB.
+        points = {color: _lab(color) for color in colors}
+        for grey in (NO_VALUE_COLOR, MIXED):
+            assert (
+                min(np.linalg.norm(point - _lab(grey)) for point in points.values())
+                >= 25
+            )
+        pairs = [
+            np.linalg.norm(points[first] - points[second])
+            for at, first in enumerate(colors)
+            for second in colors[at + 1 :]
+        ]
+        assert min(pairs) >= 20
+        assert not set(colors) & {*NEAR_GREY, "#006fa6"}
     finally:
         result.close()
 
