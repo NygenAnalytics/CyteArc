@@ -404,6 +404,7 @@ third-party observations and is licensed under BSD-3-Clause, as in `LICENSE`.
 | Pooled CRISPR screens | Papalexi et al. (2021), Nature Genetics 53:322-331, doi:10.1038/s41588-021-00778-2; GEO GSE153056 (GSM4633614, GSM4633615, GSM4633616, GSM4633618, and the series' ECCITE-seq metadata) | GEO; no license stated |
 | Cell calling | "1k PBMCs from a Healthy Donor (v2 chemistry)", raw feature-barcode matrix, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
 | Ambient RNA removal | "1k PBMCs from a Healthy Donor (v2 chemistry)", 10x Genomics, <https://www.10xgenomics.com/datasets>. Raw and filtered Cell Ranger matrices | CC BY 4.0 |
+| Immune repertoires | "Human PBMC from a Healthy Donor, 10k cells (v2)", 5' gene expression with antibody, TCR and BCR libraries, Cell Ranger 5.0.0, 10x Genomics, <https://www.10xgenomics.com/datasets>. Filtered feature-barcode matrix and the filtered contig annotations of the TCR and BCR libraries | CC BY 4.0 |
 | CyteBase datasets and CyteBase composite datasets | Datasets from CZ CELLxGENE Discover, each credited in its CyteBase catalog entry | The license of each dataset on CELLxGENE Discover, usually CC BY 4.0 |
 
 ## Data that validated the screen methods
