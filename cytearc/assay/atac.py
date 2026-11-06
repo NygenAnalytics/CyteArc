@@ -26,6 +26,12 @@ class ATACassay(Assay):
     """This subclass of Assay is designed for feature selection and
     normalization of scATAC-Seq data."""
 
+    requiresCounts = True
+    countsReason = (
+        "ATAC assays need counts: TF-IDF weights peaks across cells, and "
+        "chromVAR models fragment counts"
+    )
+
     _feature_summary_operation = "summarize_atac_features"
 
     def __init__(

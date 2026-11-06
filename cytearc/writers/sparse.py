@@ -20,6 +20,7 @@ from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError, refusal_words
 from ._store import decode_text
 from ..utils.arguments import bool_argument
+from ..utils.matrix_values import ImportValues
 
 
 def _identifiers(values: Any, label: str) -> np.ndarray:
@@ -77,6 +78,10 @@ class SparseToZarr:
         assay_type: Preset assay type, such as ``RNA``, for an assay whose name
                     is not a preset. When None, the assay name decides the type.
         overwrite: Replace an existing CyteArc store that no ``DataStore`` has opened.
+        values: What the matrix holds, ``"counts"``, ``"normalized"``,
+            ``"log_normalized"`` or ``"log2_normalized"``, as the import
+            reference's normalized values section describes. None decides
+            from the values.
 
     The counts are stored in the dtype that
     :func:`~cytearc.storage.count_dtype.count_storage_dtype` resolves from the
@@ -92,6 +97,7 @@ class SparseToZarr:
         mat: Input CSR matrix
         assayName: The name of the output assay.
         z: The Zarr hierarchy (array or group).
+        values: What the assay holds, decided before the store was created.
     """
 
     def __init__(
@@ -112,16 +118,23 @@ class SparseToZarr:
         assay_type: str | None = None,
         *,
         overwrite: bool = False,
+        values: ImportValues = None,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
+        from ..utils.matrix_values import import_values_argument
+
+        import_values_argument(values)
         from ..storage.budget import resolve_budget
         from ..storage.schema import (
             create_cell_data,
             create_zarr_count_assay,
+            normalized_values_record,
             validate_assay_name,
         )
         from ..storage.destinations import create_destination
         from ..assay.classification import validate_assay_type
+        from ..utils.matrix_values import DETECTION_CELLS
+        from ._store import resolve_import_values
 
         validate_assay_type(
             assay_type, assay="RNA" if assay_name is None else assay_name
@@ -184,6 +197,13 @@ class SparseToZarr:
                 item=error.item,
             ) from error
         storage_dtype = count_storage_dtype(self.mat.dtype, value_range)
+        self.values = resolve_import_values(
+            values,
+            {self.assayName: value_range},
+            lambda: {self.assayName: self.mat[:DETECTION_CELLS]},
+            {self.assayName: assay_type},
+            {self.assayName: storage_dtype},
+        )[self.assayName]
         # A layout that does not fit fails here, before the destination exists.
         layout = self._fit_count_layout(storage_dtype, policy)
         # The destination must be empty, or with overwrite an unprepared store.
@@ -209,6 +229,7 @@ class SparseToZarr:
             dtype=storage_dtype,
             profile=self.profile,
             policy=layout,
+            normalized_values=normalized_values_record(self.values),
         )
 
     def _count_import_requirements(self) -> tuple[int, Callable[[int], int]]:
@@ -261,6 +282,7 @@ class SparseToZarr:
         """
         from ..storage.schema import load_count_array
         from ..storage.sharding import resolve_sparse_import_batch
+        from ..utils.matrix_values import linear_coo
 
         if batch_size is not None and batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -285,7 +307,10 @@ class SparseToZarr:
 
         def row_batches() -> Iterator[coo_matrix]:
             for start in range(0, self.nCells, resolved_batch_rows):
-                yield self.mat[start : start + resolved_batch_rows].tocoo()
+                batch = self.mat[start : start + resolved_batch_rows]
+                yield linear_coo(
+                    batch, self.values.kind, store.dtype, assay=self.assayName
+                ).tocoo()
 
         accumulate_sparse_to_shards(
             store,

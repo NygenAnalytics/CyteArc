@@ -358,7 +358,8 @@ def test_h5ad_reader_batch_bounds(tmp_path) -> None:
     ("data_dtype", "values", "read_dtype", "stored_dtype"),
     [
         (">i4", [[1, 0, 300], [0, 3, 0], [4, 0, 5], [0, 6, 0]], np.int32, np.uint16),
-        (">i4", [[-1, 0, 2], [0, 3, 0], [4, 0, 5], [0, 6, 0]], np.int32, np.int32),
+        # Negative values are refused, whatever their byte order.
+        (">i4", [[-1, 0, 2], [0, 3, 0], [4, 0, 5], [0, 6, 0]], np.int32, None),
         (">f4", [[1.5, 0, 2], [0, 3, 0], [4, 0, 5], [0, 6, 0]], np.float32, np.float32),
         (">f8", [[1, 0, 2], [0, 3, 0], [4, 0, 5], [0, 6, 0]], np.float64, np.uint8),
     ],
@@ -370,7 +371,7 @@ def test_h5ad_import_reads_big_endian_counts_natively(
     data_dtype: str,
     values: list[list[float]],
     read_dtype: type,
-    stored_dtype: type,
+    stored_dtype: type | None,
 ) -> None:
     import zarr
 
@@ -383,7 +384,15 @@ def test_h5ad_import_reads_big_endian_counts_natively(
         # SciPy sparse matrices hold no other byte order, so these imports
         # used to fail while writing, after the destination was created.
         assert reader.sourceMatrixDtype == read_dtype
-        H5adToZarr(reader, str(tmp_path / "counts.zarr"), nthreads=1).dump()
+        # The fractional values are counts too, so they are declared so.
+        if stored_dtype is None:
+            with pytest.raises(ValueError, match="negative values"):
+                H5adToZarr(reader, str(tmp_path / "counts.zarr"), values="counts")
+            assert not (tmp_path / "counts.zarr").exists()
+            return
+        H5adToZarr(
+            reader, str(tmp_path / "counts.zarr"), nthreads=1, values="counts"
+        ).dump()
     finally:
         reader.close()
 

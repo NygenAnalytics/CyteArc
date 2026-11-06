@@ -178,6 +178,8 @@ UMAP/t-SNE-versus-coordinates role that the DimReduc key and name decide.
 `CSVReader`/`CSVtoZarr` (small dense CSV, ID column read as text) and `SparseToZarr` (any SciPy
 sparse or dense matrix plus unique cell and feature IDs) also exist.
 
+A deposit that holds only normalized values, such as LARRY's matrices on GEO or a CELLxGENE `X` without `raw/X`, imports with `values=` on `H5adToZarr`, `CrToZarr`, `CSVtoZarr`, `SparseToZarr` or `SeuratToZarr`: `"normalized"`, `"log_normalized"` (`log1p`, scanpy and Seurat) or `"log2_normalized"` (`log2(x + 1)`, scater). The default detects them from the first 100 cells, undoes a log, and records `ds.RNA.normalizedValues`; values it cannot place raise and name these options, with `values="counts"` for fractional counts such as alevin's. Negative (scaled) values are refused: import another matrix. CyteArc then normalizes them as counts, and steps that need counts refuse them; a Matrix Market file of normalized values goes through `scipy.io.mmread` and `SparseToZarr`.
+
 H5AD categoricals keep their category order, unused categories, `ordered`, and
 `uns["<col>_colors"]` (stored as `levels`, `ordered`, and `display` attributes, which plots use
 and exports restore). A var or obs index that is neither the ID nor the name column imports as
@@ -293,9 +295,7 @@ List the runs before opening one by label.
 - `print(ds)`: active versus total cells, expected assays, QC columns present.
 - `snap["default_assay"]` is the assay you intend; `snap["labeled_pipeline_runs"]` and
   `artifacts.list` show existing work to reuse (see `pipeline-runs-and-artifacts.md`).
-- Imports: `reader.assayFeats` lists the assays to be written; afterwards check
-  `ds.RNA.rawData.shape` and dtype. For H5AD, `insp.integerLike` should be `True` for raw counts,
-  but SCT-corrected counts are integers too: run "Check the matrix first" in `quality-control.md`.
+- Imports: `reader.assayFeats` lists the assays to be written; afterwards check `ds.RNA.rawData.shape` and dtype. For H5AD, `insp.integerLike` should be `True` for raw counts, but SCT-corrected counts are integers too: run "Check the matrix first" in `quality-control.md`. `ds.RNA.holdsCounts` is False for an assay imported from normalized values.
 - CyteBase: the URI names the release you intend; `ds.artifacts.find("embedding",
   imported="X_umap", from_assay="RNA")` succeeds before you plot an imported layout.
 - Mounts: `ds.RNA.rawData.shape` resolves.

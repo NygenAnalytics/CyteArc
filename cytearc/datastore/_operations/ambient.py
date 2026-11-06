@@ -72,6 +72,11 @@ def _counts_assay(store: Any, name: str | None, operation: str) -> RNAassay:
             f"{operation} needs an RNA assay; assay {assay.name!r} is a "
             f"{type(assay).__name__}"
         )
+    assay.require_counts(
+        operation,
+        "it models ambient RNA from the UMI counts of droplets",
+        "Import the raw droplet counts",
+    )
     dtype = np.dtype(assay.rawData.dtype)
     if dtype.kind != "u":
         raise TypeError(

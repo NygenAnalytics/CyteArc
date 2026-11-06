@@ -243,6 +243,7 @@ def _copy_group(
                     continue
                 if keepPaths is not None and attr_key not in {
                     "is_assay",
+                    "normalizedValues",
                     "size_factor",
                     "defaultAssay",
                     "assayTypes",

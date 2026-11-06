@@ -237,6 +237,13 @@ def _hvg_batch_argument(batch: object, columns: Sequence[str]) -> None:
     grouping_value_name(batch.kind)
 
 
+# Why each gene selection flavor that models counts needs them.
+_COUNT_MODEL_FLAVORS = {
+    "seurat_v3": "it models the variance of each gene's counts",
+    "pearson_residuals": "it compares each count with a negative binomial expectation",
+}
+
+
 class _FeatureOperationsMixin(_FeatureOperationsBase):
     @validation_scoped
     def _features_universe(
@@ -527,6 +534,13 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         **plot_kwargs: Any,
     ) -> ArtifactRef:
         """Create or reuse an HVG artifact without creating a mutable alias."""
+        if flavor in _COUNT_MODEL_FLAVORS:
+            assay.require_counts(
+                f"flavor={flavor!r}",
+                _COUNT_MODEL_FLAVORS[flavor],
+                "Use flavor='cytearc', which ranks genes by the variance of their "
+                "normalized values",
+            )
         min_cells, top_n, n_bins, lowess_frac, keep_bounds, bin_strategy = hvg_options(
             min_cells=min_cells,
             top_n=top_n,
@@ -2494,7 +2508,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         from ...metadata.membership import measured_rows, resolve_assay_membership
         from ...storage.identity import CountSummary, finalize_counts
         from ...storage.layout import array_shard_rows
-        from ...storage.schema import derived_assay_transaction
+        from ...storage.schema import (
+            NORMALIZED_VALUES_ATTR,
+            derived_assay_transaction,
+            derived_normalized_values,
+        )
         from ...storage.sharding import (
             dense_counts_admission,
             fit_count_layout,
@@ -2619,7 +2637,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             )
             finalize_counts(g, summary=summary)
             transaction.group.attrs.update(
-                {"grouped_from_assay": assay.name, **provenance}
+                {
+                    "grouped_from_assay": assay.name,
+                    **provenance,
+                    NORMALIZED_VALUES_ATTR: derived_normalized_values(),
+                }
             )
         self._register_derived_assay(assay_label, "Assay")
 
@@ -2681,7 +2703,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         """
         renormalization = bool_argument(renormalization, "renormalization")
 
-        from ...assay.classification import validate_assay_type
+        from ...assay.classification import preset_assay_types, validate_assay_type
         from ...features.genomic.melding import write_melded_counts
         from ...metadata.membership import resolve_assay_membership
         from ...storage.schema import derived_assay_transaction
@@ -2695,6 +2717,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 "It will be used to create a new assay"
             )
         validate_assay_type(assay_type, assay=assay_label)
+        if preset_assay_types()[assay_type].requiresCounts:
+            raise ValueError(
+                f"assay_type {assay_type!r} needs counts, and melded gene scores "
+                "are TF-IDF values. Pass a type such as 'GeneScores' or 'Assay'"
+            )
         if external_bed_fn is None:
             raise ValueError(
                 "ERROR: Please provide a value for `external_bed_fn`. "
@@ -2972,6 +2999,12 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         if from_assay is None and isinstance(groups, ArtifactRef):
             from_assay = groups.assay
         assay = self._get_assay(from_assay)
+        if aggr_type == "sum":
+            assay.require_counts(
+                "Pseudobulk sums",
+                "summed normalized values are not counts for count-model tests",
+                "Use aggr_type='mean'",
+            )
         column_rows = bulk_column_rows(
             group_values,
             groups_set,

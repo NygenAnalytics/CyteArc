@@ -220,7 +220,8 @@ def _write_mtx(
 
 
 def _write_csv(path: Path, values: np.ndarray, encoding: str) -> Path:
-    """Write counts as CSV text; ``encoding`` is ``integer`` or ``real``."""
+    """Write counts as CSV text; ``encoding`` is ``integer``, ``real`` (one
+    decimal) or ``exact`` (every digit of a float64)."""
     rows = (
         ",".join(f"{value:.1f}" if encoding == "real" else str(value) for value in row)
         for row in values.tolist()
@@ -247,19 +248,35 @@ def _sparse(values: np.ndarray, encoding: str) -> csr_matrix:
 
 
 def _write_seurat(path: Path, values: np.ndarray, encoding: str) -> Path:
-    """Write a Seurat object with dense counts; ``encoding`` is ``real`` (R
-    double) or ``integer`` (R integer)."""
+    """Write a Seurat object; ``encoding`` is ``real`` (dense R doubles),
+    ``integer`` (dense R integers) or ``sparse`` (a dgCMatrix)."""
     wire = _Wire()
     cells, features = _cells(values), _features(values)
-    # R matrices are column-major, so the features-by-cells counts are the
-    # row-major cells-by-features values.
-    counts = wire.matrix(
-        values.reshape(-1).tolist(),
-        (len(features), len(cells)),
-        rows=features,
-        columns=cells,
-        real=encoding == "real",
-    )
+    if encoding == "sparse":
+        # A dgCMatrix of features by cells holds the CSR arrays of the cells
+        # by features.
+        stored = csr_matrix(values)
+        counts = wire.s4(
+            [
+                ("i", wire.integer_vector(stored.indices.tolist())),
+                ("p", wire.integer_vector(stored.indptr.tolist())),
+                ("Dim", wire.integer_vector([len(features), len(cells)])),
+                ("Dimnames", wire.dimnames(features, cells)),
+                ("x", wire.real_vector(stored.data.tolist())),
+                ("factors", wire.vector([])),
+                ("class", wire.string_vector(["dgCMatrix"])),
+            ]
+        )
+    else:
+        # R matrices are column-major, so the features-by-cells counts are the
+        # row-major cells-by-features values.
+        counts = wire.matrix(
+            values.reshape(-1).tolist(),
+            (len(features), len(cells)),
+            rows=features,
+            columns=cells,
+            real=encoding == "real",
+        )
     assay = wire.s4(
         [
             ("counts", counts),
@@ -340,13 +357,13 @@ def _close(source: Any) -> None:
 
 
 def _construct(
-    writer: str, directory: Path, values: np.ndarray, encoding: str, **options: Any
+    writer: str, directory: Path, matrix: np.ndarray, encoding: str, **options: Any
 ) -> Any:
-    """Construct ``writer`` for ``values`` with a destination in ``directory``.
+    """Construct ``writer`` for ``matrix`` with a destination in ``directory``.
 
     Returns a callable that dumps the import and closes its reader.
     """
-    source = _source(writer, directory, values, encoding)
+    source = _source(writer, directory, matrix, encoding)
     try:
         instance = _writer(
             writer,
@@ -368,10 +385,10 @@ def _construct(
 
 
 def _import(
-    writer: str, directory: Path, values: np.ndarray, encoding: str, **options: Any
+    writer: str, directory: Path, matrix: np.ndarray, encoding: str, **options: Any
 ) -> zarr.Group:
     directory.mkdir(parents=True, exist_ok=True)
-    _construct(writer, directory, values, encoding, **options)()
+    _construct(writer, directory, matrix, encoding, **options)()
     return zarr.open_group(str(directory / "counts.zarr"), mode="r")
 
 
@@ -485,26 +502,167 @@ def test_cellranger_h5_counts_range_over_the_selected_barcodes(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize(
-    ("writer", "encoding", "value", "expected"),
+    ("writer", "encoding", "expected"),
     [
-        ("cellranger", "float32", 1.5, np.float32),
-        ("cellranger", "int32", -3, np.int32),
-        ("csv", "real", 1.5, np.float64),
-        ("sparse", "float32", 1.5, np.float32),
-        ("sparse", "float64", -0.5, np.float64),
-        ("sparse", "int32", -3, np.int32),
-        ("seurat", "real", 1.5, np.float64),
-        ("seurat", "integer", -3, np.int32),
+        ("cellranger", "float32", np.float32),
+        ("csv", "real", np.float64),
+        ("h5ad", "float32", np.float32),
+        ("sparse", "float32", np.float32),
+        ("seurat", "real", np.float64),
     ],
 )
-def test_counts_that_are_not_non_negative_integers_keep_their_dtype(
-    tmp_path, writer, encoding, value, expected
+def test_fractional_counts_keep_their_dtype_when_declared_counts(
+    tmp_path, writer, encoding, expected
+):
+    values = _VALUES.astype(np.float64)
+    values[3, 2] = 1.5
+    counts = _import(writer, tmp_path, values, encoding, values="counts")["RNA"]
+    assert counts["counts"].dtype == np.dtype(expected)
+    np.testing.assert_array_equal(counts["counts"][:], values.astype(expected))
+    assert "normalizedValues" not in counts.attrs
+
+
+@pytest.mark.parametrize(
+    ("writer", "encoding"),
+    [
+        ("cellranger", "float32"),
+        ("csv", "real"),
+        ("h5ad", "float32"),
+        ("sparse", "float32"),
+        ("seurat", "real"),
+    ],
+)
+def test_undeclared_fractional_values_are_refused_before_the_destination_exists(
+    tmp_path, writer, encoding
+):
+    values = _VALUES.astype(np.float64)
+    values[3, 2] = 1.5
+    with pytest.raises(ValueError, match="values='counts' for fractional counts"):
+        _construct(writer, tmp_path, values, encoding)
+    assert not (tmp_path / "counts.zarr").exists()
+
+
+@pytest.mark.parametrize(
+    ("writer", "encoding", "value"),
+    [
+        ("cellranger", "int32", -3),
+        ("h5ad", "float32", -3),
+        ("sparse", "float64", -0.5),
+        ("sparse", "int32", -3),
+        ("seurat", "integer", -3),
+    ],
+)
+@pytest.mark.parametrize("declared", [None, "counts", "normalized"])
+def test_negative_values_are_refused_before_the_destination_exists(
+    tmp_path, writer, encoding, value, declared
 ):
     values = _VALUES.astype(np.float64)
     values[3, 2] = value
-    counts = _import(writer, tmp_path, values, encoding)["RNA/counts"]
-    assert counts.dtype == np.dtype(expected)
-    np.testing.assert_array_equal(counts[:], values.astype(expected))
+    with pytest.raises(ValueError, match="negative values"):
+        _construct(writer, tmp_path, values, encoding, values=declared)
+    assert not (tmp_path / "counts.zarr").exists()
+
+
+def _poisson_counts(cells: int = 120, features: int = 30) -> np.ndarray:
+    """Seeded counts in which every cell holds a count of one."""
+    values = np.random.default_rng(8).poisson(0.8, size=(cells, features))
+    values[:, 0] = np.maximum(values[:, 0], 1)
+    return values.astype(np.float64)
+
+
+def _cp10k(values: np.ndarray) -> np.ndarray:
+    return values / values.sum(axis=1, keepdims=True) * 1e4
+
+
+@pytest.mark.parametrize(
+    ("writer", "encoding", "rtol"),
+    [
+        ("cellranger", "float32", 1e-5),
+        ("csv", "exact", 1e-12),
+        ("h5ad", "float32", 1e-5),
+        ("sparse", "float64", 1e-12),
+        ("seurat", "real", 1e-12),
+        ("seurat", "sparse", 1e-12),
+    ],
+)
+@pytest.mark.parametrize(
+    ("log", "declared", "imported_as"),
+    [
+        (np.log1p, None, "log_normalized"),
+        (lambda v: np.log2(v + 1), None, "log2_normalized"),
+        (lambda v: np.log2(v + 1), "log2_normalized", "log2_normalized"),
+        (None, None, "normalized"),
+    ],
+    ids=["log1p detected", "log2 detected", "log2 declared", "linear detected"],
+)
+def test_every_writer_stores_normalized_values_linear_and_records_them(
+    tmp_path, writer, encoding, rtol, log, declared, imported_as
+):
+    linear = _cp10k(_poisson_counts())
+    source = linear if log is None else log(linear)
+
+    assay = _import(writer, tmp_path, source, encoding, values=declared)["RNA"]
+
+    # Undoing the log gives back the scaled counts, as computed here.
+    np.testing.assert_allclose(assay["counts"][:], linear, rtol=rtol, atol=1e-9)
+    record = assay.attrs["normalizedValues"]
+    assert record["importedAs"] == imported_as
+    assert record["cellTotal"] == pytest.approx(1e4, rel=1e-4)
+
+
+def test_the_csv_sample_reads_chunks_until_it_holds_enough_cells(tmp_path):
+    linear = _cp10k(_poisson_counts())
+    path = _write_csv(tmp_path / "logged.csv", np.log1p(linear), "exact")
+    reader = CSVReader(str(path), batch_size=1)
+    writer = CSVtoZarr(reader, str(tmp_path / "logged.zarr"), assay_name="RNA")
+    writer.dump()
+
+    assert writer.values.kind == "log_normalized"
+    counts = zarr.open_group(str(tmp_path / "logged.zarr"), mode="r")["RNA/counts"]
+    np.testing.assert_allclose(counts[:], linear, rtol=1e-12)
+
+
+@pytest.mark.parametrize("writer", ["cellranger", "h5ad"])
+def test_split_imports_decide_each_assay_on_its_own(tmp_path, writer):
+    values = _CITE_VALUES.astype(np.float64)
+    values[:, :4] = np.log1p(_cp10k(_CITE_VALUES[:, :4].astype(np.float64) + 1))
+
+    (tmp_path / "rna").mkdir()
+    (tmp_path / "adt").mkdir()
+    root = _import_split(writer, tmp_path / "rna", values, "float64")
+
+    assert root["RNA"].attrs["normalizedValues"]["importedAs"] == "log_normalized"
+    np.testing.assert_allclose(
+        root["RNA/counts"][:], np.expm1(values[:, :4]), rtol=1e-12
+    )
+    assert "normalizedValues" not in root["ADT"].attrs
+    np.testing.assert_array_equal(root["ADT/counts"][:], _CITE_VALUES[:, 4:])
+
+    # Each assay of a split import takes its own declaration, or detection.
+    (tmp_path / "declared").mkdir()
+    root = _import_split(
+        writer,
+        tmp_path / "declared",
+        values,
+        "float64",
+        declared={"RNA": "log_normalized"},
+    )
+    assert root["RNA"].attrs["normalizedValues"]["importedAs"] == "log_normalized"
+    assert "normalizedValues" not in root["ADT"].attrs
+    (tmp_path / "unknown").mkdir()
+    with pytest.raises(ValueError, match="names assays that the import does not write"):
+        _import_split(
+            writer,
+            tmp_path / "unknown",
+            values,
+            "float64",
+            declared={"GEX": "normalized"},
+        )
+
+    values = _CITE_VALUES.astype(np.float64)
+    values[:, 4:] = _cp10k(_CITE_VALUES[:, 4:].astype(np.float64) + 1)
+    with pytest.raises(TypeError, match="ADT and HTO assays need counts"):
+        _import_split(writer, tmp_path / "adt", values, "float64")
 
 
 @pytest.mark.parametrize(
@@ -612,9 +770,18 @@ _CITE_VALUES = np.array(
 
 
 def _import_split(
-    writer: str, directory: Path, values: np.ndarray, encoding: str, **options: Any
+    writer: str,
+    directory: Path,
+    values: np.ndarray,
+    encoding: str,
+    *,
+    declared: str | None = None,
+    **options: Any,
 ) -> zarr.Group:
-    """Import RNA and ADT features of one source matrix as two assays."""
+    """Import RNA and ADT features of one source matrix as two assays.
+
+    ``declared`` is the writers' ``values`` argument.
+    """
     destination = str(directory / "counts.zarr")
     if writer == "h5ad":
         source: Any = H5adReader(
@@ -622,7 +789,11 @@ def _import_split(
             feature_name_key="feature_name",
         )
         create = lambda: H5adToZarr(  # noqa: E731
-            source, destination, assay_split_key="feature_types", nthreads=1
+            source,
+            destination,
+            assay_split_key="feature_types",
+            nthreads=1,
+            values=declared,
         )
     else:
         source = (
@@ -641,7 +812,9 @@ def _import_split(
                 **options,
             )
         )
-        create = lambda: CrToZarr(source, destination, nthreads=1)  # noqa: E731
+        create = lambda: CrToZarr(  # noqa: E731
+            source, destination, nthreads=1, values=declared
+        )
     try:
         create().dump()
     finally:
@@ -672,7 +845,8 @@ def test_a_fractional_assay_keeps_its_dtype_without_widening_the_others(
 ):
     values = _CITE_VALUES.astype(np.float64)
     values[1, 5] = 0.5
-    root = _import_split(writer, tmp_path, values, "float32")
+    # Fractional values are counts here, so they are declared so.
+    root = _import_split(writer, tmp_path, values, "float32", declared="counts")
     assert root["RNA/counts"].dtype == np.uint16
     assert root["RNA/countsT"].dtype == np.uint16
     assert root["ADT/counts"].dtype == np.float32
@@ -731,6 +905,7 @@ def test_float_duplicates_resolve_the_dtype_of_the_sums_the_import_stores(
             cell_ids=["c0", "c1"],
             feature_ids=_features(stored),
             nthreads=1,
+            values="counts",
         ).dump()
     else:
         path = (
@@ -746,10 +921,14 @@ def test_float_duplicates_resolve_the_dtype_of_the_sums_the_import_stores(
                 group.create_dataset(name, data=getattr(matrix, name))
         if writer == "h5ad":
             reader: Any = H5adReader(str(path), feature_name_key="feature_name")
-            create = lambda: H5adToZarr(reader, destination, nthreads=1)  # noqa: E731
+            create = lambda: H5adToZarr(  # noqa: E731
+                reader, destination, nthreads=1, values="counts"
+            )
         else:
             reader = CrH5Reader(str(path))
-            create = lambda: CrToZarr(reader, destination, nthreads=1)  # noqa: E731
+            create = lambda: CrToZarr(  # noqa: E731
+                reader, destination, nthreads=1, values="counts"
+            )
         try:
             create().dump()
         finally:

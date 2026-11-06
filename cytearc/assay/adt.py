@@ -21,6 +21,12 @@ class ADTassay(Assay):
         normMethod: Pointer to the function to be used for normalization of the raw data
     """
 
+    requiresCounts = True
+    countsReason = (
+        "ADT and HTO assays need counts: CLR normalization works across cells, "
+        "and hashtag demultiplexing models counts"
+    )
+
     def __init__(
         self,
         z: zarr.Group,

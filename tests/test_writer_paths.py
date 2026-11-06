@@ -203,6 +203,7 @@ def test_h5ad_producer_sends_no_band_after_the_parent_stops(
                 None,
                 connection,
                 stop,
+                {},
             )
 
         # A stop that arrives while a band is sent ends the window after it.

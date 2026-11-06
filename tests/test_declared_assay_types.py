@@ -299,6 +299,12 @@ def test_a_derived_assay_declares_the_type_it_was_registered_with(tmp_path) -> N
     )
     datastore.ATAC.feats.insert("module", np.array([1, 1, 2]), overwrite=True)
     datastore.add_grouped_assay("module", from_assay="ATAC", assay_label="MODULES")
+    # Gene scores and group means are not counts, so steps that need counts
+    # refuse them; the ATAC counts carry no record.
+    derived = {"importedAs": None, "cellTotal": None}
+    assert datastore.get_assay("GENES").normalizedValues == derived
+    assert datastore.get_assay("MODULES").normalizedValues == derived
+    assert datastore.ATAC.normalizedValues is None
 
     # Every assay of the session carries its type, including the ones that
     # were rebuilt when the derived assays were registered.

@@ -16,6 +16,7 @@ from ..utils.arrays import assay_feature_ranges
 from ..utils.logging import logger
 from ..utils.progress import iter_progress
 from ..utils.arguments import bool_argument
+from ..utils.matrix_values import ImportValues
 
 
 class CrToZarr:
@@ -46,6 +47,11 @@ class CrToZarr:
                       readers only). The layout fit and the write reserve
                       this parse buffer.
         overwrite: If True, replace a CyteArc store that no ``DataStore`` has opened.
+        values: What the matrix holds, ``"counts"``, ``"normalized"``,
+            ``"log_normalized"`` or ``"log2_normalized"``, as the import
+            reference's normalized values section describes. None decides
+            from the values. Matrix Market readers
+            read whole numbers only.
 
     Each assay stores its counts in the dtype that
     :func:`~cytearc.storage.count_dtype.count_storage_dtype` resolves from the
@@ -77,16 +83,22 @@ class CrToZarr:
         lines_in_mem: int = 100_000,
         *,
         overwrite: bool = False,
+        values: ImportValues = None,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
+        from ..utils.matrix_values import import_values_argument
+
+        import_values_argument(values)
         from ..storage.budget import resolve_budget
         from ..storage.schema import (
             create_cell_data,
             create_zarr_count_assay,
+            normalized_values_record,
             validate_assay_name,
         )
         from ..storage.destinations import check_destination, create_destination
         from ..assay.classification import validate_assay_type
+        from ._store import resolve_import_values
 
         self.resources = resolve_budget(mem_budget, nthreads)
         self.profile = resolve_storage_profile(zarr_loc, profile)
@@ -121,15 +133,25 @@ class CrToZarr:
         for code, spans in enumerate(ranges.values()):
             for start, end in spans:
                 groups[start:end] = code
-        storage_dtypes = {
-            name: count_storage_dtype(self.cr.matrix_dtype, value_range)
-            for name, value_range in zip(
+        value_ranges = dict(
+            zip(
                 ranges,
                 self.cr.count_value_ranges(self.resources.memoryBytes, groups),
                 strict=True,
             )
+        )
+        storage_dtypes = {
+            name: count_storage_dtype(self.cr.matrix_dtype, value_range)
+            for name, value_range in value_ranges.items()
         }
         logger.debug(f"Resolved Cell Ranger count storage dtypes={storage_dtypes}")
+        self.values = resolve_import_values(
+            values,
+            value_ranges,
+            lambda: self._first_cells(ranges),
+            {name: self.assayTypes.get(name) for name in value_ranges},
+            storage_dtypes,
+        )
         # A layout that does not fit fails here, before the destination exists.
         layout = self._fit_count_layout(storage_dtypes, policy)
         # The destination must be empty, or with overwrite an unprepared store.
@@ -154,8 +176,24 @@ class CrToZarr:
                 dtype=storage_dtypes[assay_name],
                 profile=self.profile,
                 policy=layout,
+                normalized_values=normalized_values_record(self.values[assay_name]),
             )
         self._write_reader_metadata(cell_group, assay_names)
+
+    def _first_cells(
+        self, ranges: dict[str, tuple[tuple[int, int], ...]]
+    ) -> dict[str, Any]:
+        """Return the values of each assay's first cells, which decide what they are."""
+        from scipy.sparse import csr_matrix
+
+        from ..utils.matrix_values import DETECTION_CELLS
+
+        batch = next(iter(self.cr.consume(DETECTION_CELLS, self.linesInMem)), None)
+        cells = csr_matrix((0, self.cr.nFeatures)) if batch is None else batch.tocsr()
+        return {
+            name: cells[:, np.concatenate([np.arange(a, b) for a, b in spans])]
+            for name, spans in ranges.items()
+        }
 
     def _assay_widths(self) -> dict[str, int]:
         """Return the feature count of each imported assay."""
@@ -365,6 +403,7 @@ class CrToZarr:
             write_sparse_bands,
         )
         from ..utils.arrays import sparse_matrix_bytes
+        from ..utils.matrix_values import linear_coo
 
         if batch_size is not None and batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -443,6 +482,12 @@ class CrToZarr:
                                 (chunk.row[selected], columns[selected]),
                             ),
                             shape=(chunk.shape[0], buffers[assay].nColumns),
+                        )
+                        projected = linear_coo(
+                            projected,
+                            self.values[assay].kind,
+                            stores[assay].dtype,
+                            assay=assay,
                         )
                         for band in buffers[assay].add(projected):
                             producer_bytes = (

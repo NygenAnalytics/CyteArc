@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -12,7 +12,12 @@ from ..storage.count_matrix import CountMatrixPolicy
 from ..storage.io_policy import StorageIoPolicy
 from ..storage.profiles import StorageProfile
 from ..storage.layout import array_shard_rows
-from ..storage.schema import _assay_paths, create_zarr_count_assay, load_count_array
+from ..storage.schema import (
+    _assay_paths,
+    create_zarr_count_assay,
+    load_count_array,
+    merged_normalized_values,
+)
 from ..storage.sharding import (
     accumulate_sparse_to_shards,
     fit_count_layout,
@@ -130,7 +135,9 @@ def create_assay_counts(
     *,
     profile: StorageProfile,
     policy: CountMatrixPolicy,
+    sources: Sequence[Any],
 ) -> zarr.Array:
+    """Create the counts of a combined assay, which holds normalized values when a source does."""
     counts = create_zarr_count_assay(
         z=root,
         assay_name=assay_name,
@@ -141,6 +148,9 @@ def create_assay_counts(
         dtype=dtype,
         profile=profile,
         policy=policy,
+        normalized_values=merged_normalized_values(
+            source.normalizedValues for source in sources
+        ),
     )
     matrix_group = as_zarr_group(
         root[_matrix_group_path(assay_name, workspace)],

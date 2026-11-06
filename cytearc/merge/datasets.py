@@ -1287,6 +1287,7 @@ class DataStoreMerge:
                     assay_plan.dtype,
                     profile=self.profile,
                     policy=self._countLayouts[assay_name],
+                    sources=[source for source in sources if source is not None],
                 )
                 present_sources = [
                     (source, mapping)

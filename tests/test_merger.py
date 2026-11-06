@@ -72,6 +72,8 @@ class _MergeAssay:
             I=np.ones(len(cell_ids), dtype=bool),
         )
         self.feats = _MergeMeta(ids=feature_ids, names=feature_names)
+        # An open source of counts carries no normalizedValues record.
+        self.normalizedValues = None
         self._matrixGroup = None
         self._matrixGroupCounts = None
 

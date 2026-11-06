@@ -4852,6 +4852,9 @@ def test_seurat_import_planning_does_not_read_every_cell_pointer(tmp_path, monke
     writer._lastImportPlans = {}
     writer.io = None
     from cytearc.storage.identity import CountSummary
+    from cytearc.utils.matrix_values import MatrixValues
+
+    writer.values = {"RNA": MatrixValues("counts")}
 
     writer._write_sparse_counts(
         "RNA", source, destination, None, CountSummary(destination)

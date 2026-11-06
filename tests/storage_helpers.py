@@ -184,3 +184,17 @@ def reset_zarr_runtime() -> None:
     zarr.config.set({"threading.max_workers": None, "async.concurrency": 10})
     async_execution._HOST_THREAD_CEILING = None
     clear_content_cache()
+
+
+def record_normalized_values(
+    zarr_loc: str | Path,
+    assay: str,
+    imported_as: str | None = "log_normalized",
+) -> None:
+    """Record an assay of a legacy-layout store as holding normalized values.
+
+    Steps that need counts read only this record, so a store of counts that
+    carries it tests their refusals on the same data that their own tests use.
+    """
+    group = zarr.open_group(str(zarr_loc), mode="r+")[assay]
+    group.attrs["normalizedValues"] = {"importedAs": imported_as, "cellTotal": None}

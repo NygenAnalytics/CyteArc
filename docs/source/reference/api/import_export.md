@@ -241,21 +241,7 @@ and write widths. Unset values stay under automatic planning from
 
 ### Count storage dtype
 
-Every import stores each assay's counts in a dtype resolved from the values of
-that assay, whatever the reader and source encoding, and no import takes a count
-dtype argument. When every canonical (duplicate-summed) value is a non-negative
-integer, the counts are stored in the narrowest of ``uint8``, ``uint16``,
-``uint32``, and ``uint64`` that holds them. Other counts keep their source
-dtype in native byte order, with ``float16`` read as ``float32``. Assays split from one source
-matrix (10x HDF5 and Matrix Market feature types, H5AD ``assay_split_key``)
-each resolve their own dtype. Each import reads every count once before it
-creates the destination: ``CrReader`` subclasses and ``H5adReader`` report the
-range of each group of features over the selected cells through
-``count_value_ranges``, ``CSVReader`` records it as ``countRange`` in its first
-pass, and ``SparseToZarr`` and ``SeuratToZarr`` scan their sources. Count
-matrices hold finite values, so imports reject NaN and infinity before they
-create the destination. Writers cast through a checked cast, so a count that
-the stored dtype cannot hold raises instead of wrapping.
+Every import stores each assay's counts in a dtype resolved from the values of that assay, whatever the reader and source encoding, and no import takes a count dtype argument. When every canonical (duplicate-summed) value is a non-negative integer, the counts are stored in the narrowest of ``uint8``, ``uint16``, ``uint32``, and ``uint64`` that holds them. Other counts keep their source dtype in native byte order, with ``float16`` read as ``float32``; values normalized before import are stored this way too, as [](#normalized_values) describes. Assays split from one source matrix (10x HDF5 and Matrix Market feature types, H5AD ``assay_split_key``) each resolve their own dtype. Each import reads every count once before it creates the destination: ``CrReader`` subclasses and ``H5adReader`` report the range of each group of features over the selected cells through ``count_value_ranges``, ``CSVReader`` records it as ``countRange`` in its first pass, and ``SparseToZarr`` and ``SeuratToZarr`` scan their sources. Count matrices hold finite, non-negative values, so imports reject NaN, infinity, and negative values before they create the destination. Writers cast through a checked cast, so a count that the stored dtype cannot hold raises instead of wrapping.
 
 Subset and repack keep the source dtype. Merge stores the common type of the
 source count dtypes, widened so that features summed by name cannot overflow
@@ -268,6 +254,24 @@ melded assays keep their ``float64`` values.
 .. autoclass:: cytearc.utils.count_values.CountValueRange
     :members:
 ```
+
+(normalized_values)=
+
+## Normalized values
+
+Some deposits hold only normalized values, such as LARRY's in vitro matrix on GEO or the `X` of a CELLxGENE file. `H5adToZarr`, `CrToZarr`, `CSVtoZarr`, `SparseToZarr`, and `SeuratToZarr` take `values=`: `"counts"`, `"normalized"` for counts scaled by one factor per cell, `"log_normalized"` for their natural log (`log1p`, as scanpy and Seurat write it), or `"log2_normalized"` for `log2(x + 1)`, as scater writes it. The default, `None`, decides each assay from its values before the destination is created:
+
+1. A negative value is refused: centred or scaled values, as prepared for PCA, have them.
+2. Whole numbers are counts.
+3. Otherwise the first 100 cells are read three ways: as they are, after undoing a natural log, and after undoing a base-2 log. A reading fits when every cell sums to one total within 1%, or when 99% of the values lie within 0.05 of a whole multiple of their cell's smallest value, as counts scaled per cell do. Exactly one fitting reading decides the values, and anything else refuses and asks for `values=`.
+
+A declaration is checked against the readings that fit. `"counts"` imports fractional counts, such as alevin's or RSEM's estimates, as counts, and is refused only for values that fit a log alone. `"normalized"` accepts normalized values rounded to whole numbers. A declared kind that is not among the readings that fit is refused, and so are a log declared for whole numbers and a log whose largest value would overflow when undone, before the destination is created. For a split import, `values` may map assay names to kinds, and an assay that the mapping leaves out is decided from its values. An H5AD import of normalized values names the file's other matrices that hold counts.
+
+Logs are undone once, at import, so every stored value is linear and scaled per cell. The assay group records the import in its `normalizedValues` attribute, such as `{"importedAs": "log_normalized", "cellTotal": 10000.0}`, where `cellTotal` is the total that every sampled cell shares, or null; `DataStore.summary()` reports it, and `Assay.holdsCounts` is False. Library-size normalization divides each cell by its own total, which cancels the factor that scaled the cell, so CyteArc normalizes these values as it normalizes counts and the RNA recipe gives the counts' highly variable genes, PCA, and clusters.
+
+Steps that need counts refuse a normalized assay with a `TypeError` that says why and what to do instead: cell calling, barcode ranks, ambient RNA, doublet scoring, `seurat_v3` and Pearson residual gene selection, bounds on `<assay>_nCounts`, pseudobulk sums, CLR and Pearson residual normalization, guide calls, and association tests. ADT, HTO, and ATAC assays need counts, so they refuse normalized values at import and when a store opens. The RNA and perturbation recipes check these stages before a run starts, and one refusal names the argument that turns off each stage the run would use: gene selection by a flavor other than `cytearc`, a filtering bound on `RNA_nCounts`, cell calling and doublet scoring in the RNA recipe, and association tests and guide calling from a guide assay of normalized values in the perturbation recipe. Doublet scoring is on by default, so an RNA run of a normalized assay passes `doublets=False`; its default filtering leaves out `RNA_nCounts`.
+
+Mount, repack, and subset stores carry the record. A merge or composite holds normalized values when any source does, keeps the import kind only when every source shares it, and keeps no cell total. Grouped and melded assays hold normalized values whatever their source. Matrix Market readers read whole numbers only: read a normalized Matrix Market file with `scipy.io.mmread` and write it with `SparseToZarr(values=...)`. Seurat imports read `counts` layers only. A store imported from normalized values by an earlier version of CyteArc holds no record and reads as counts; re-import it with `values=`.
 
 ## Writers
 

@@ -331,6 +331,12 @@ sources that declare different types. A mount opens each target assay as its `as
 or else as the source declares it, and requires the source's `countsT` for exactly the assays that
 open as RNA.
 
+(normalized_values_attribute)=
+
+## Normalized values
+
+An assay group with the attribute `normalizedValues` holds values that were normalized before import, and one without it holds counts. The record is `{"importedAs": ..., "cellTotal": ...}`: `importedAs` is `normalized`, `log_normalized`, or `log2_normalized` for an import, and null for an assay derived or combined from other values; `cellTotal` is the total that every sampled cell's values share, or null. The stored values are always linear, since imports undo a log before they write. Import writers pass the record to `create_zarr_count_assay`, which validates it, and `Assay.__init__` reads it; a record of another shape raises `ValueError`. Mount copies it with the assay attributes, a full repack copies every attribute and a data-only repack keeps it, `SubsetZarr` passes it on, `DataStoreMerge` and `create_composite` record the import kind that every source shares and no cell total, and grouped and melded assays record a null import. The dataset fingerprint does not cover it, since no operation changes it after import. ADT and ATAC classes refuse an assay that has it.
+
 ## Pending derived assays
 
 `add_grouped_assay` and `add_melded_assay` create the logical group `{assay}` or

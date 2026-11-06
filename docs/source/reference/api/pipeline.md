@@ -344,7 +344,8 @@ A recipe checks its call against the store before it creates a run record, and a
 - `PCA settings need dims above 0; dims=0 skips PCA`, for other `pca` settings beside `dims=0`;
 - `leiden selected must be one of the partitions`;
 - `snapshot_columns collide with reserved run fields: [...]`;
-- `TypeError("callback must be callable")` and a `cancel` that is not a `CancellationToken`.
+- `TypeError("callback must be callable")` and a `cancel` that is not a `CancellationToken`;
+- `The rna recipe needs counts: its doublet scoring reads counts. ...`, for an assay of normalized values, naming every stage of the run that needs counts and the argument that turns it off, as [normalized values](#normalized_values) describes.
 
 Before the run starts, the recipe also checks these settings, with the checks of the stage's
 method where it has them:

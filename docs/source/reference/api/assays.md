@@ -60,6 +60,8 @@ a flag it cannot apply defaults to False, and passing True raises `ValueError`:
 | ATAC `norm_tf_idf` (default) and custom normalizers | no, ATAC values are never logged | yes, as the term-frequency denominator |
 | `norm_clr` (the ADT default) on any assay, built-in normalizers of another assay class (`norm_tf_idf` outside ATAC, library-size and Pearson residual normalizers outside RNA), and `norm_dummy` of ATAC | no | no |
 
+An assay imported from normalized values keeps the normalizer of its class. Its stored values are linear and scaled per cell, since imports undo a log, and `norm_lib_size` divides each cell by its own total, so it turns them into the counts' normalized values; `normed` refuses CLR and Pearson residual normalizers for such an assay. `Assay.holdsCounts` says whether an assay holds counts, `Assay.normalizedValues` holds the record of [normalized values](#normalized_values), and `Assay.require_counts` raises the refusal that steps that need counts share.
+
 A custom RNA normalizer is a callable `(assay, counts)` that may read each cell's total from
 `assay.scalar` while it builds its result; `normed(log_transform=True)` returns the `log1p` of what
 it returns. Saved results need a module-level function or a callable with an `artifact_identity`

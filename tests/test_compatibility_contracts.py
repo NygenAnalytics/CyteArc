@@ -49,6 +49,7 @@ _EXPECTED_RESULT_FIELDS = {
     datastore_summary.AssaySummary: (
         "name",
         "assay_type",
+        "normalized_values",
         "total_features",
         "active_features",
         "feature_columns",

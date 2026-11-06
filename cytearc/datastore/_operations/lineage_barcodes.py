@@ -573,6 +573,11 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         if not isinstance(from_assay, str):
             raise TypeError("from_assay must be an assay name or None")
         assay = self._get_assay(from_assay)
+        assay.require_counts(
+            "Barcode import",
+            "it reads each barcode's UMI counts",
+            "Import the barcode counts",
+        )
         count_dtype = np.dtype(assay.rawData.dtype)
         if count_dtype.kind not in "iu":
             raise TypeError(

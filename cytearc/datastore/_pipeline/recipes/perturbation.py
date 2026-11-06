@@ -70,6 +70,8 @@ from .common import (
     modality_assay,
     resolve_label,
     resolve_rna_head,
+    count_stages,
+    require_counts_for_stages,
     resolve_run_filtering,
     resolve_snapshot_columns,
 )
@@ -699,6 +701,15 @@ def resolve_perturbation(
         assay=assay_name,
         default_attrs=default_filter_columns(store, assay_name, FILTER_SUFFIXES),
         operation=OPERATION,
+    )
+    require_counts_for_stages(
+        store,
+        assay_name,
+        RECIPE,
+        [
+            *count_stages(assay_name, head, filtering_config),
+            ("association testing", "associations=False", associations_enabled),
+        ],
     )
     # One call file reaches the cells of one sample, and the file is read
     # before the run, as the import reads it.

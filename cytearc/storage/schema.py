@@ -1,4 +1,5 @@
-from collections.abc import Iterator
+import math
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -28,6 +29,7 @@ from .metadata_keys import (
 )
 from .profiles import StorageProfile, resolve_storage_profile
 from ..utils.logging import logger
+from ..utils.matrix_values import MATRIX_VALUES, MatrixValues
 
 _ASSAY_NAME_OWNERS = {
     "artifacts": "datastore artifact storage",
@@ -41,6 +43,72 @@ RESERVED_ASSAY_NAMES = frozenset(_ASSAY_NAME_OWNERS)
 # Marks a derived assay whose counts are still being written. The group has no
 # ``is_assay`` marker until the write is complete, so assay scans skip it.
 PENDING_ASSAY_ATTR = "cytearc:pending_assay"
+# The assay group attribute of an assay that holds values normalized before
+# import. An assay without it holds counts.
+NORMALIZED_VALUES_ATTR = "normalizedValues"
+
+
+def normalized_values_record(values: MatrixValues) -> dict[str, Any] | None:
+    """Return the ``normalizedValues`` record of an import, or None for counts."""
+    if values.kind == "counts":
+        return None
+    return {"importedAs": values.kind, "cellTotal": values.cellTotal}
+
+
+def derived_normalized_values() -> dict[str, Any]:
+    """Return the record of an assay derived from normalized values, not imported."""
+    return {"importedAs": None, "cellTotal": None}
+
+
+def read_normalized_values(
+    attrs: Mapping[str, Any], *, assay: str
+) -> dict[str, Any] | None:
+    """Return an assay group's ``normalizedValues`` record, or None for counts.
+
+    Raises:
+        ValueError: If the record is not a mapping of ``importedAs``, None or a
+            normalized kind, and ``cellTotal``, None or a positive number.
+    """
+    record = attrs.get(NORMALIZED_VALUES_ATTR)
+    if record is None:
+        return None
+    total = record.get("cellTotal") if isinstance(record, Mapping) else None
+    if not (
+        isinstance(record, Mapping)
+        and set(record) == {"importedAs", "cellTotal"}
+        and record["importedAs"] in (None, *MATRIX_VALUES[1:])
+        and (
+            total is None
+            or (
+                isinstance(total, int | float)
+                and not isinstance(total, bool)
+                and math.isfinite(total)
+                and total > 0
+            )
+        )
+    ):
+        raise ValueError(
+            f"Assay {assay!r} has the {NORMALIZED_VALUES_ATTR} attribute {record!r}, "
+            "which is not {'importedAs': None or one of "
+            f"{list(MATRIX_VALUES[1:])}, 'cellTotal': None or a positive number}}"
+        )
+    return dict(record)
+
+
+def merged_normalized_values(
+    records: Iterable[Mapping[str, Any] | None],
+) -> dict[str, Any] | None:
+    """Return the record of an assay combined from sources with ``records``.
+
+    The result holds normalized values when any source does, and keeps the
+    import kind only when every source shares it, counts included. It keeps no
+    cell total, since a combined assay's features can differ from a source's.
+    """
+    sources = list(records)
+    if all(record is None for record in sources):
+        return None
+    kinds = {None if record is None else record["importedAs"] for record in sources}
+    return {"importedAs": kinds.pop() if len(kinds) == 1 else None, "cellTotal": None}
 
 
 def _assay_paths(assay_name: str, workspace: str | None) -> tuple[str, str | None]:
@@ -483,14 +551,19 @@ def _create_count_assay(
     *,
     profile: StorageProfile | None,
     policy: CountMatrixPolicy | None,
+    normalized_values: Mapping[str, Any] | None = None,
 ) -> tuple[zarr.Array, zarr.Group, StorageProfile]:
     """Create a complete-marked assay group with incomplete paired counts."""
     validate_new_assay(z, assay_name, workspace)
     _validate_dimensions(n_cells, n_features)
     logical, matrix = _assay_paths(assay_name, workspace)
-    group = z.create_group(
-        logical, attributes={"is_assay": True, "prepared": False, "misc": {}}
-    )
+    attributes: dict[str, Any] = {"is_assay": True, "prepared": False, "misc": {}}
+    if normalized_values is not None:
+        read_normalized_values(
+            {NORMALIZED_VALUES_ATTR: normalized_values}, assay=assay_name
+        )
+        attributes[NORMALIZED_VALUES_ATTR] = dict(normalized_values)
+    group = z.create_group(logical, attributes=attributes)
     return _create_assay_counts(
         group,
         group if matrix is None else z.create_group(matrix),
@@ -529,6 +602,7 @@ def create_zarr_count_assay(
     *,
     profile: StorageProfile | None = None,
     policy: CountMatrixPolicy | None = None,
+    normalized_values: Mapping[str, Any] | None = None,
 ) -> zarr.Array:
     """Create an assay group and its incomplete ``counts`` array in ``dtype``.
 
@@ -536,7 +610,8 @@ def create_zarr_count_assay(
     :func:`~cytearc.storage.count_dtype.count_storage_dtype` resolves. The
     counts carry ``complete=False`` until the writer calls
     ``finalize_counts``. Derived assays use :func:`derived_assay_transaction`
-    instead.
+    instead. ``normalized_values`` is the ``normalizedValues`` record of an
+    assay whose values were normalized before import; None writes counts.
     """
     counts, feature_group, resolved_profile = _create_count_assay(
         z,
@@ -547,6 +622,7 @@ def create_zarr_count_assay(
         dtype,
         profile=profile,
         policy=policy,
+        normalized_values=normalized_values,
     )
     _write_feature_columns(feature_group, feat_ids, feat_names, resolved_profile)
     return counts
@@ -564,6 +640,7 @@ def create_empty_zarr_count_assay(
     *,
     profile: StorageProfile | None = None,
     policy: CountMatrixPolicy | None = None,
+    normalized_values: Mapping[str, Any] | None = None,
 ) -> tuple[zarr.Array, zarr.Group]:
     """Create an assay with counts in ``dtype`` and blockwise feature metadata."""
     counts, feature_group, resolved_profile = _create_count_assay(
@@ -575,6 +652,7 @@ def create_empty_zarr_count_assay(
         dtype,
         profile=profile,
         policy=policy,
+        normalized_values=normalized_values,
     )
     _create_empty_columns(
         feature_group,

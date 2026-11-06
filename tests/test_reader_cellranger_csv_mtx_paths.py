@@ -343,7 +343,15 @@ def test_cellranger_h5_reads_float16_and_big_endian_counts_natively(
         # SciPy sparse matrices hold neither dtype, so these imports used to
         # fail while writing, after the destination was created.
         assert reader.matrix_dtype == read_dtype
-        CrToZarr(reader, store, mem_budget="64M", nthreads=1, policy=_POLICY).dump()
+        # The fractional values are counts too, so they are declared so.
+        CrToZarr(
+            reader,
+            store,
+            mem_budget="64M",
+            nthreads=1,
+            policy=_POLICY,
+            values="counts",
+        ).dump()
     finally:
         reader.close()
 
@@ -415,7 +423,10 @@ def test_csv_fraction_in_an_early_chunk_keeps_float_storage(tmp_path: Path) -> N
     assert reader.countRange.integral is False
     assert reader.countDtype == np.float64
     store = MemoryStore()
-    CSVtoZarr(reader, store, assay_name="RNA", nthreads=1, policy=_POLICY).dump()
+    # The fraction is a count here, so it is declared so.
+    CSVtoZarr(
+        reader, store, assay_name="RNA", nthreads=1, policy=_POLICY, values="counts"
+    ).dump()
 
     counts = zarr.open_group(store=store, mode="r")["RNA/counts"]
     assert counts.dtype == np.float64

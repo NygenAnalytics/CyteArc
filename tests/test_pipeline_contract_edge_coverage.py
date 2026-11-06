@@ -471,6 +471,8 @@ class _Cells:
 class _FakeRNA:
     # The recipe checks PCA dimensions against the assay's features too.
     feats = SimpleNamespace(N=100)
+    # Default filtering and the count stages read whether it holds counts.
+    holdsCounts = True
 
 
 class _RecipeStore:

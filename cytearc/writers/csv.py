@@ -17,6 +17,7 @@ from ..storage.profiles import (
 from ..storage.sharding import write_dense_from_row_batches
 from ..utils.logging import logger
 from ..utils.arguments import bool_argument
+from ..utils.matrix_values import ImportValues
 
 
 class CSVtoZarr:
@@ -43,6 +44,10 @@ class CSVtoZarr:
         assay_type: Preset assay type, such as ``RNA``, for an assay whose name
                     is not a preset. When None, the assay name decides the type.
         overwrite: If True, replace a CyteArc store that no ``DataStore`` has opened.
+        values: What the matrix holds, ``"counts"``, ``"normalized"``,
+            ``"log_normalized"`` or ``"log2_normalized"``, as the import
+            reference's normalized values section describes. None decides
+            from the values.
 
     The counts are stored in the dtype that
     :func:`~cytearc.storage.count_dtype.count_storage_dtype` resolves from the
@@ -72,16 +77,22 @@ class CSVtoZarr:
         assay_type: str | None = None,
         *,
         overwrite: bool = False,
+        values: ImportValues = None,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
+        from ..utils.matrix_values import import_values_argument
+
+        import_values_argument(values)
         from ..storage.budget import resolve_budget
         from ..storage.schema import (
             create_cell_data,
             create_zarr_count_assay,
+            normalized_values_record,
             validate_assay_name,
         )
         from ..storage.destinations import create_destination
         from ..assay.classification import validate_assay_type
+        from ._store import resolve_import_values
 
         self.csvr = cr
         self.assayName = assay_name
@@ -96,6 +107,13 @@ class CSVtoZarr:
         self.storage_options = storage_options
         cell_ids = self.csvr.cell_ids()
         storage_dtype = count_storage_dtype(self.csvr.countDtype, self.csvr.countRange)
+        self.values = resolve_import_values(
+            values,
+            {self.assayName: self.csvr.countRange},
+            self._first_cells,
+            {self.assayName: assay_type},
+            {self.assayName: storage_dtype},
+        )[self.assayName]
         # A layout that does not fit fails here, before the destination exists.
         layout = self._fit_count_layout(storage_dtype, policy)
         # The destination must be empty, or with overwrite an unprepared store.
@@ -119,7 +137,26 @@ class CSVtoZarr:
             dtype=storage_dtype,
             profile=self.profile,
             policy=layout,
+            normalized_values=normalized_values_record(self.values),
         )
+
+    def _first_cells(self) -> dict[str, Any]:
+        """Return the values of the first cells, which decide what they are."""
+        from scipy.sparse import csr_matrix
+
+        from ..utils.matrix_values import DETECTION_CELLS
+
+        blocks = []
+        batches = self.csvr.consume()
+        try:
+            for counts, _cell_values in batches:
+                blocks.append(counts)
+                if sum(len(block) for block in blocks) >= DETECTION_CELLS:
+                    break
+        finally:
+            batches.close()
+        cells = np.vstack(blocks) if blocks else np.zeros((0, self.csvr.nFeatures))
+        return {self.assayName: csr_matrix(cells[:DETECTION_CELLS])}
 
     def _count_import_requirements(self) -> tuple[int, int]:
         """Return the resident and source batch bytes of the counts write.
@@ -171,6 +208,7 @@ class CSVtoZarr:
         from ..storage.schema import load_count_array
         from ..storage.metadata_keys import metadata_column_keys
         from ..storage.layout import column_chunk_rows
+        from ..utils.matrix_values import linear_values
         from ._store import keyed_metadata_columns, write_metadata_column
 
         store = load_count_array(self.z, self.assayName, self.workspace)
@@ -211,7 +249,9 @@ class CSVtoZarr:
                         )
                 # The writer casts to the stored dtype and rejects a count
                 # that dtype cannot hold.
-                yield counts
+                yield linear_values(
+                    counts, self.values.kind, store.dtype, assay=self.assayName
+                )
 
         write_dense_from_row_batches(
             store,

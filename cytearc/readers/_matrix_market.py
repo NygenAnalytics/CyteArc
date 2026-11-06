@@ -215,6 +215,7 @@ def matrix_market_entries(
     separator: str = " ",
     index_offset: int = -1,
     counts: bool = False,
+    remedy: str | None = None,
 ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray | None]]:
     """Yield the entries of a Matrix Market coordinate matrix in chunks.
 
@@ -237,6 +238,7 @@ def matrix_market_entries(
             Market's coordinates, which count from 1, into positions from 0.
         counts: Whether every value must be a count: a finite whole number of
             at least 0.
+        remedy: Appended to the refusal of a value that is not a count.
 
     Yields:
         Each entry's row and column, ``index_offset`` added, as int64, and its
@@ -311,6 +313,7 @@ def matrix_market_entries(
                 raise ValueError(
                     "Matrix Market counts must be finite non-negative integers, but "
                     f"{path} holds {quoted_value(values[~whole][0].item())}"
+                    + ("" if remedy is None else f". {remedy}")
                 )
         yield rows, columns, values
     if seen != header.n_entries:

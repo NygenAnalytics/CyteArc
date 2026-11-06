@@ -179,6 +179,19 @@ def _doublet_sample_summary(
 
 
 class _QualityControlOperationsMixin(_QualityControlOperationsBase):
+    def _refuse_normalized_totals(self, attrs: Sequence[str]) -> None:
+        """Refuse a bound on the totals of an assay that holds normalized values."""
+        for name in self.assay_names:
+            column = f"{name}_nCounts"
+            if column in attrs:
+                self._get_assay(name).require_counts(
+                    f"A bound on {column}",
+                    f"it bounds sequencing depth, and {column} holds each cell's "
+                    "total of normalized values",
+                    f"Bound {name}_nFeatures, {name}_percentMito or "
+                    f"{name}_percentRibo instead",
+                )
+
     def _run_cell_cycle_scoring_artifact(
         self,
         *,
@@ -405,6 +418,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         if not (len(attrs) == len(lows) == len(highs)):
             raise ValueError("attrs, lows, and highs must have the same length")
         attrs, _, _ = validate_cell_filter_sources(attrs)
+        self._refuse_normalized_totals(attrs)
         validate_filter_bounds(lows, highs, keep_bounds=keep_bounds)
         available = set(self.cells.columns)
         missing = [attr for attr in attrs if attr not in available]
@@ -1020,8 +1034,12 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 raise ValueError("metric_policies apply only to method='mad'")
         available = set(self.cells.columns)
         if attrs is None:
+            # The totals of normalized values are not sequencing depths.
+            totals = self._get_assay(self._defaultAssay).holdsCounts
             attrs = []
             for i in ["nCounts", "nFeatures", "percentMito", "percentRibo"]:
+                if i == "nCounts" and not totals:
+                    continue
                 i = f"{self._defaultAssay}_{i}"
                 if i in available:
                     attrs.append(i)
@@ -1034,6 +1052,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 sample_artifact=sample_artifact,
             )
         )
+        self._refuse_normalized_totals(attrs_list)
         missing = [attr for attr in attrs_list if attr not in available]
         if missing:
             joined = ", ".join(repr(attr) for attr in missing)
@@ -1992,6 +2011,12 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             raise ValueError("from_assay is required for an integrated graph")
         resolve_graph_assay_inputs(self.zw, graph, assay_name)
         assay = self._get_assay(assay_name)
+        assay.require_counts(
+            "Doublet scoring",
+            "it simulates each doublet by adding two cells' counts",
+            "Score doublets on an assay of counts, or pass doublets=False to the "
+            "recipe",
+        )
         graph_selection = graph_cell_selection(self.zw, graph)
         validate_stored_selection_integrity(
             self.zw,

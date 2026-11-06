@@ -594,6 +594,31 @@ _LOG_TRANSFORM = "log_transform"
 _RENORMALIZE_SUBSET = "renormalize_subset"
 
 
+def require_counts_for(assay: "Assay", method: NormMethod) -> None:
+    """Refuse a normalizer that needs counts for an assay of normalized values.
+
+    Library-size, TF-IDF, and pass-through normalizers divide each cell by its
+    own total or pass the values through, so they give the counts' values for
+    values scaled per cell. CLR and Pearson residuals do not.
+
+    Raises:
+        TypeError: If ``method`` is CLR or Pearson residuals and ``assay``
+            holds values normalized before import.
+    """
+    if method is norm_clr:
+        assay.require_counts(
+            "CLR normalization",
+            "it divides each feature by its geometric mean across cells",
+            "Normalize with norm_lib_size",
+        )
+    elif isinstance(method, PearsonResidualNormalizer):
+        assay.require_counts(
+            "Pearson residuals",
+            "they compare each count with a negative binomial expectation",
+            "Normalize with norm_lib_size",
+        )
+
+
 def applicable_normalization_flags(assay: "Assay") -> frozenset[str]:
     """Return the normalization flags that ``assay.normed`` can apply.
 
