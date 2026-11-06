@@ -1405,10 +1405,12 @@ class NormalizationSpec:
     """How feature values are read for gene-colored plots.
 
     ``source="assay"`` uses the assay's current normalization settings.
-    ``source="raw"`` reads raw counts. ``transform="log1p"`` applies log1p
-    after that fetch, which is the usual choice for gene UMAPs and dotplots
-    when you want a compressed expression scale. With ``source="assay"`` it
-    needs a normalizer that supports ``log_transform``.
+    ``source="raw"`` reads the assay's stored values: its raw counts, or the
+    values of an assay imported from normalized values.
+    ``transform="log1p"`` applies log1p after that fetch, which is the usual
+    choice for gene UMAPs and dotplots when you want a compressed expression
+    scale. With ``source="assay"`` it needs a normalizer that supports
+    ``log_transform``.
     """
 
     source: NormSource = "assay"
