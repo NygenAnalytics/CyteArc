@@ -1,15 +1,15 @@
 """Charts that the figures of clones, receptors, lineages and variants draw from tidy tables.
 
 Each chart draws one panel. It names at most ``MAX_NAMED_ITEMS`` items on an
-axis, a heatmap as many as its laid-out axis holds, draws a titled legend
-beside the panel when given a legend title, and returns what that legend
-shows with the scale behind it, a :class:`Drawn`, which ``finish_plot``
-reports so that ``compose_results`` can draw a legend that several figures
-share once.
+axis, a heatmap and a bar chart as many as their laid-out axis holds, draws
+a titled legend beside the panel when given a legend title, and returns what
+that legend shows with the scale behind it, a :class:`Drawn`, which
+``finish_plot`` reports so that ``compose_results`` can draw a legend that
+several figures share once.
 """
 
 import functools
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -107,16 +107,10 @@ def legend_of(scale: CategoricalScale, entries: Sequence[Any], title: str) -> Dr
 def _name_items(
     ax: Any, positions: np.ndarray, names: list[str], *, horizontal: bool
 ) -> None:
-    """Name the items on their axis, or none of them past ``MAX_NAMED_ITEMS``."""
-    if horizontal:
-        if len(names) <= MAX_NAMED_ITEMS:
-            ax.set_yticks(positions, names)
-        else:
-            ax.set_yticks([])
-    elif len(names) <= MAX_NAMED_ITEMS:
-        ax.set_xticks(positions, names, rotation=90)
-    else:
-        ax.set_xticks([])
+    """Name the bars' items on their axis, as many as its length holds once laid out."""
+    _name_axis_items(ax.yaxis if horizontal else ax.xaxis, positions, names)
+    if not horizontal:
+        ax.tick_params(axis="x", labelrotation=90)
 
 
 def draw_bars(
@@ -151,7 +145,9 @@ def draw_bars(
     without one, and a value that is not a number draws no bar.
     ``numeric_items`` stands each bar at its item's value on a numeric axis,
     which keeps its own ticks, such as a junction length, rather than in a
-    named slot.
+    named slot. Named slots are named as a heatmap's rows are: once the
+    figure is laid out, every item, or else every second, third or nth from
+    the first, as many as the axis holds, at most ``MAX_NAMED_ITEMS``.
 
     Returns:
         The legend of the segments, or of the items' colours, drawn beside
@@ -260,47 +256,67 @@ def draw_bars(
 
 @functools.cache
 def _item_names_type() -> type:
-    """A locator of every nth row or column of a heatmap, as many as its axis holds."""
+    """A locator of every nth item of an axis, as many as the axis holds."""
     from matplotlib.axis import Axis, XAxis
     from matplotlib.ticker import Locator
 
     class ItemNames(Locator):
-        """Tick every nth of ``n_items``, as many as the axis holds ``pitch`` points apart.
+        """Tick every nth item at ``positions``, as many as the axis holds ``pitch`` points apart.
 
+        ``positions`` holds each item's position on the axis in the items'
+        order, so the ticks stand at the first item and every nth after it.
         The axis's length is read whenever the figure is drawn, after its
         layout, so names keep apart however a page shares its width; an axis
         names every one of its items where it can, and never more than
         ``MAX_NAMED_ITEMS``.
         """
 
-        def __init__(self, n_items: int, pitch: float) -> None:
-            self.n_items = n_items
+        def __init__(self, positions: np.ndarray, pitch: float) -> None:
+            self.positions = np.asarray(positions, dtype=np.float64)
             self.pitch = pitch
 
         def __call__(self) -> Any:
-            return self.tick_values(0.0, float(self.n_items - 1))
+            return self.tick_values(0.0, 0.0)
 
         def tick_values(self, vmin: float, vmax: float) -> Any:
             axis = self.axis
             if not isinstance(axis, Axis):
-                raise TypeError("A heatmap's names tick an axis of a panel in a figure")
+                raise TypeError("An axis's names tick an axis of a panel in a figure")
             box = axis.axes.bbox
             pixels = box.width if isinstance(axis, XAxis) else box.height
             room = int(pixels * 72.0 / axis.figure.dpi // self.pitch)
-            step = -(-self.n_items // max(1, min(MAX_NAMED_ITEMS, room)))
-            return np.arange(0, self.n_items, max(1, step), dtype=np.float64)
+            step = -(-len(self.positions) // max(1, min(MAX_NAMED_ITEMS, room)))
+            return self.positions[:: max(1, step)]
 
     return ItemNames
 
 
-def _item_name(names: list[str]) -> Any:
-    """Name the item at a tick, or nothing past the items."""
+def _item_name(names: Mapping[int, str]) -> Any:
+    """Name the item at a tick from each position's name, or nothing where no item stands."""
 
     def name(value: float, position: int | None = None) -> str:
-        at = int(round(value))
-        return names[at] if 0 <= at < len(names) else ""
+        return names.get(int(round(value)), "")
 
     return name
+
+
+def _name_axis_items(axis: Any, positions: np.ndarray, names: list[str]) -> None:
+    """Name the items at ``positions`` on ``axis``, as many as its length holds.
+
+    Once the figure is laid out, the axis names every one of its items, or
+    else every second, third or nth from the first, as many as stand 1.4
+    times the size of their text apart, at most ``MAX_NAMED_ITEMS``.
+    """
+    _, mpl = require_matplotlib()
+    size = mpl.font_manager.FontProperties(
+        size=mpl.rcParams[f"{axis.axis_name}tick.labelsize"]
+    ).get_size_in_points()
+    axis.set_major_locator(_item_names_type()(positions, _NAME_PITCH * size))
+    axis.set_major_formatter(
+        mpl.ticker.FuncFormatter(
+            _item_name(dict(zip(np.asarray(positions).tolist(), names, strict=True)))
+        )
+    )
 
 
 @functools.cache
@@ -690,13 +706,7 @@ def draw_matrix(
     # Each axis names as many of its items as its length holds once the
     # figure is laid out, every one or else every second, third or nth.
     for axis, names in ((ax.xaxis, matrix.columns), (ax.yaxis, matrix.index)):
-        size = mpl.font_manager.FontProperties(
-            size=mpl.rcParams[f"{axis.axis_name}tick.labelsize"]
-        ).get_size_in_points()
-        axis.set_major_locator(_item_names_type()(len(names), _NAME_PITCH * size))
-        axis.set_major_formatter(
-            mpl.ticker.FuncFormatter(_item_name([str(name) for name in names]))
-        )
+        _name_axis_items(axis, np.arange(len(names)), [str(name) for name in names])
     ax.tick_params(axis="x", labelrotation=90)
     if n_rows <= MAX_PRINTED_VALUES and n_columns <= MAX_PRINTED_VALUES:
         for row, column in zip(*np.nonzero(colored), strict=True):

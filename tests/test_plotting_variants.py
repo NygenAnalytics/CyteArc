@@ -12,7 +12,12 @@ from cytearc.plotting._style import (
     MUTED_COLOR,
     NO_VALUE_COLOR,
 )
-from tests.clone_helpers import axis_names, names_keep_apart, write_embedding
+from tests.clone_helpers import (
+    axis_names,
+    names_every_nth_item,
+    names_keep_apart,
+    write_embedding,
+)
 from tests.storage_helpers import open_store, write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
@@ -807,12 +812,20 @@ def test_genotypes_of_many_sites_and_groups_keep_a_drawable_height(tmp_path) -> 
     shares = result.tables["calls"].groupby(["site", "group"])["share"].sum()
     assert len(shares) == 960
     np.testing.assert_allclose(shares.to_numpy(), 1.0)
-    # Each bar is drawn; an axis names at most 40, and the panel stops
-    # growing where its names stop: 1.2 inches and 0.22 for each of 40.
+    # Each bar is drawn; an axis names every nth, at most 40, and the panel
+    # stops growing where its names stop: 1.2 inches and 0.22 for each of 40.
     ax = result.axes["calls"]
     assert len({round(patch.get_y(), 6) for patch in ax.patches}) == 960
-    assert not ax.get_yticks().size
     assert result.figure.get_size_inches() == pytest.approx((6.0, 1.2 + 0.22 * 40))
+    result.figure.draw_without_rendering()
+    bars = result.tables["calls"].drop_duplicates(["site", "group"])
+    assert (
+        names_every_nth_item(
+            ax.yaxis,
+            [f"{site}, {group}" for site, group in bars[["site", "group"]].to_numpy()],
+        )
+        == 24
+    )
     plt.close(result.figure)
 
 

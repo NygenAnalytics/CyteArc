@@ -27,6 +27,7 @@ from cytearc.plotting._groups import labels_by_group, plot_groups, table_groups
 from cytearc.plotting._style import MAX_FIGURE_WIDTH_INCHES
 from tests.clone_helpers import (
     axis_names,
+    names_every_nth_item,
     names_keep_apart,
     every_cell,
     import_truth_clones,
@@ -1718,11 +1719,15 @@ def test_the_fates_plot_names_at_most_40_clones(many_groups) -> None:
         early=store.snapshot_cell_selection("even_cell"),
         late=store.snapshot_cell_selection("odd_cell"),
     )
-    for max_clones, named in ((40, True), (41, False)):
+    # Every nth clone drawn, as many as the axis holds once laid out: of 41
+    # clones too, where none was named.
+    for max_clones in (40, 41):
         result = clone_fate_bias(store, bias, max_clones=max_clones, show=False)
         assert len(result.tables["clones"]) == max_clones
-        ticks = result.axes["fates"].get_xticklabels()
-        assert len(ticks) == (max_clones if named else 0)
+        result.figure.draw_without_rendering()
+        names_every_nth_item(
+            result.axes["fates"].xaxis, result.tables["clones"]["label"].tolist()
+        )
         plt.close(result.figure)
     shown = clone_fate_bias(store, bias, max_clones=100)
     assert shown.figure.number not in plt.get_fignums()
