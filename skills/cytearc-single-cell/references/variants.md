@@ -1,6 +1,6 @@
 # Mitochondrial and targeted variants
 
-Import each cell's counts of each allele at variant sites, from mitochondrial lineage tracing (mtscATAC-seq, MAESTER) or targeted genotyping (GoT, GIFT, Tapestri, DAb-seq), join them to the store's cells, check depth, read the counts as tables, select informative mitochondrial variants and call the clones they mark, and call genotypes at targeted sites and the clones their mutant calls define. Docs: <https://docs.nygen.io/CyteArc/api/variants.html>.
+Import each cell's counts of each allele at variant sites, from mitochondrial lineage tracing (mtscATAC-seq, MAESTER) or targeted genotyping (GoT, GIFT, Tapestri, DAb-seq), join them to the store's cells, check depth, read the counts as tables, select informative mitochondrial variants and call the clones they mark, and call genotypes at targeted sites and the clones their mutant calls define. Docs: <https://docs.nygen.io/CyteArc/api/variants.html>, <https://docs.nygen.io/CyteArc/tutorials/mitochondrial-lineage-tracing>.
 
 ## When to use
 

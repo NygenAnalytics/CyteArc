@@ -119,6 +119,7 @@ def test_navigation_prioritizes_remote_workflows_and_preserves_tutorials() -> No
     assert "AI-assisted analysis" not in sections
     assert {
         "tutorials/scatac_seq.ipynb",
+        "tutorials/mitochondrial_lineage_tracing.ipynb",
         "tutorials/cite_seq.ipynb",
         "tutorials/tea_seq.ipynb",
         "tutorials/multimodal_diagnostics.ipynb",

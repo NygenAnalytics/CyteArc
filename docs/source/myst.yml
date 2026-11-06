@@ -61,6 +61,8 @@ project:
     children:
     - file: tutorials/scatac_seq.ipynb
       title: scATAC-seq
+    - file: tutorials/mitochondrial_lineage_tracing.ipynb
+      title: Mitochondrial lineage tracing
     - file: tutorials/cite_seq.ipynb
       title: CITE-seq
     - file: tutorials/tea_seq.ipynb
