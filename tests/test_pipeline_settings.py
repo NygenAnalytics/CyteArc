@@ -174,7 +174,9 @@ _RECIPE_SETTINGS: dict[str, frozenset[str]] = {
     "hashing": frozenset({"assay"}),
     "cell_calling": frozenset({"sample_column"}),
     "panel": frozenset({"exclude"}),
-    "guide_calling": frozenset({"path", "barcode_prefix"}),
+    "guide_calling": frozenset(
+        {"path", "barcode_prefix", "barcode_suffix", "barcode_pattern"}
+    ),
     "profiles": frozenset({"cells"}),
 }
 # Method keywords without a default, which the settings must give: Harmony's

@@ -28,15 +28,14 @@ from ....storage.types import as_zarr_group
 from ....utils.memory_budget import (
     MemoryLedger,
     hash_table_bytes,
-    object_array_bytes,
-    python_text_bytes,
 )
+from ..._operations.cell_barcodes import BarcodeFile, barcode_files, derived_id_bytes
 from ..._operations.perturbation_guides import (
     _CELL_CHECK_BYTES_PER_CELL,
-    _barcode_ids,
     _guide_positions,
     _parse_call_file,
     _read_guide_ids,
+    _refuse_shared_cells,
     _require_call_file_cells,
     _strings_bytes,
 )
@@ -315,6 +314,8 @@ def _guide_calling_stage(guide_assay: str, settings: Mapping[str, Any]) -> Plann
                 cell_selection=cells,
                 from_assay=guide_assay,
                 barcode_prefix=settings.get("barcode_prefix"),
+                barcode_suffix=settings.get("barcode_suffix"),
+                barcode_pattern=settings.get("barcode_pattern"),
             )
             return (("guide_calls", calls),)
         calls = store._perturbation_call_guides(
@@ -477,14 +478,18 @@ def _unbudgeted(store: Any) -> MemoryLedger:
 
 
 def _check_call_file_cells(
-    store: Any, source: CellSource, barcode_prefix: str | None
+    store: Any,
+    source: CellSource,
+    barcode_prefix: str | None,
+    *,
+    barcode_suffix: str | None = None,
 ) -> tuple[np.ndarray, MemoryLedger]:
     """Refuse input cells that the barcodes of one call file cannot reach.
 
     Cell Ranger writes a call file for each sample, and the import matches
-    each of its barcodes to the cell whose ID is ``barcode_prefix`` followed
-    by the barcode. A cell that no barcode can reach would be labelled
-    ``"Negative"`` and left out of every later stage.
+    each of its barcodes to the cell whose ID is ``barcode_prefix``, the
+    barcode and ``barcode_suffix``. A cell that no barcode can reach would
+    be labelled ``"Negative"`` and left out of every later stage.
 
     Returns:
         The input cells' IDs, as fixed-width text, and the ledger of the
@@ -516,6 +521,7 @@ def _check_call_file_cells(
         cells="the run's cells",
         restrict="restrict cells to",
         remedy=CALL_FROM_COUNTS,
+        barcode_suffix=barcode_suffix,
     )
     return ids, ledger
 
@@ -524,26 +530,29 @@ def _check_call_file(
     ledger: MemoryLedger,
     store: Any,
     guide: Any,
-    path: str,
+    call_file: BarcodeFile,
     cell_ids: np.ndarray,
-    barcode_prefix: str | None,
 ) -> None:
     """Refuse a call file that the import would refuse, or that labels no input cell.
 
     The guide IDs and the file are read as the import reads them, and the
-    file's barcodes are found among the input cells' IDs, ``cell_ids``, as
-    fixed-width text, each step charged to the check's ``ledger``, from
+    cell that each of the file's barcodes names is found among the input
+    cells' IDs, ``cell_ids``, as fixed-width text, as the import joins them:
+    the prefix, the barcode or the part of it that the pattern keeps, and
+    the suffix. Each step is charged to the check's ``ledger``, from
     :func:`_check_call_file_cells`, before it allocates, so a malformed
-    file, a missing column, or a called guide that the guide assay lacks
-    fails before anything is written. A file none of whose barcodes names
-    one of the input cells would label every cell ``"Negative"``, and the
-    stages after the labels would find no control cell.
+    file, a missing column, a called guide that the guide assay lacks, or
+    two barcodes that name one cell fail before anything is written. A file
+    none of whose barcodes names one of the input cells would label every
+    cell ``"Negative"``, and the stages after the labels would find no
+    control cell.
 
     Raises:
         MemoryBudgetError: If a step does not fit the memory budget.
         ValueError: If the import would refuse the file, or it labels no
             input cell.
     """
+    path = call_file.path
     guide_ids = _read_guide_ids(ledger, guide.feats._get_array("ids"))
     ledger.peak("counting the call file's rows", PROTOSPACER_SCAN_BYTES)
     size = protospacer_calls_size(path)
@@ -556,31 +565,42 @@ def _check_call_file(
             + CALL_FROM_COUNTS
         )
     n_rows = len(calls.barcodes)
-    # The cells' IDs as Python strings in pandas' hash table of them, each
-    # barcode's ID with its prefix, and each barcode's cell.
-    prefixed = (
-        object_array_bytes(n_rows)
-        + python_text_bytes(n_rows, size.n_bytes + n_rows * len(barcode_prefix))
-        if barcode_prefix
-        else 0
-    )
+    # The cells' IDs as Python strings in pandas' hash table of them, the
+    # cell ID that each barcode names, and each barcode's cell.
     ledger.peak(
         "finding the call file's barcodes among the run's cells",
         _strings_bytes(cell_ids)
         + hash_table_bytes(len(cell_ids))
-        + prefixed
+        + derived_id_bytes(call_file, n_rows, size.n_bytes)
         + 8 * n_rows,
     )
-    file_ids = _barcode_ids(calls.barcodes, barcode_prefix)
-    if not np.any(pd.Index(cell_ids).get_indexer(file_ids) >= 0):
+    file_ids, named = call_file.cell_ids(calls.barcodes)
+    row_cells = pd.Index(cell_ids).get_indexer(file_ids)
+    # A barcode that the pattern does not match names no cell.
+    row_cells[~named] = -1
+    if not np.any(row_cells >= 0):
+        example = str(file_ids[np.argmax(named)])
+        if call_file.barcode_suffix is None and call_file.barcode_pattern is None:
+            rule = (
+                "a cell matches a barcode when its ID is barcode_prefix followed by "
+                f"the barcode, which gives IDs such as {example!r}, but the run's "
+                f"cells have IDs such as {str(cell_ids[0])!r}; check barcode_prefix"
+            )
+        else:
+            rule = (
+                "a cell matches a barcode when its ID is barcode_prefix, the "
+                "barcode or the part of it that barcode_pattern keeps, and "
+                f"barcode_suffix, which gives IDs such as {example!r}, but the "
+                f"run's cells have IDs such as {str(cell_ids[0])!r}; check these "
+                "options"
+            )
         raise ValueError(
             "No barcode of the call file names one of the run's cells, so the "
-            "import would label them all 'Negative': a cell matches a barcode "
-            "when its ID is barcode_prefix followed by the barcode, which gives "
-            f"IDs such as {str(file_ids[0])!r}, but the run's cells have IDs such "
-            f"as {str(cell_ids[0])!r}; check barcode_prefix and that the file "
+            f"import would label them all 'Negative': {rule} and that the file "
             "holds the calls of these cells, " + CALL_FROM_COUNTS
         )
+    ledger.peak("checking that no two barcodes name one cell", 32 * n_rows)
+    _refuse_shared_cells(row_cells, calls.barcodes, cell_ids)
 
 
 def resolve_perturbation(
@@ -714,11 +734,20 @@ def resolve_perturbation(
     # One call file reaches the cells of one sample, and the file is read
     # before the run, as the import reads it.
     if "path" in calling_settings:
-        prefix = calling_settings.get("barcode_prefix")
-        cell_ids, ledger = _check_call_file_cells(store, source, prefix)
-        _check_call_file(
-            ledger, store, guide, calling_settings["path"], cell_ids, prefix
+        (call_file,) = barcode_files(
+            calling_settings["path"],
+            barcode_prefix=calling_settings.get("barcode_prefix"),
+            barcode_suffix=calling_settings.get("barcode_suffix"),
+            barcode_pattern=calling_settings.get("barcode_pattern"),
+            what="call file",
         )
+        cell_ids, ledger = _check_call_file_cells(
+            store,
+            source,
+            call_file.barcode_prefix,
+            barcode_suffix=call_file.barcode_suffix,
+        )
+        _check_call_file(ledger, store, guide, call_file, cell_ids)
     # The stages that read these columns read some of the input cells, which
     # of them depends on the data, so every input cell needs a label and a
     # finite covariate value.

@@ -100,25 +100,32 @@ def validated_guide_ids(guide_ids: Any) -> np.ndarray:
     return text
 
 
-def import_settings(path: object, barcode_prefix: object) -> None:
+def import_settings(
+    path: object, barcode_prefix: object, barcode_suffix: object = None
+) -> None:
     """Check the settings of ``import_guide_calls``, which imports Cell Ranger's calls.
 
     The pipeline recipe checks the same settings before its run starts.
-    Whether ``path`` names a file is checked when the file is read.
+    Whether ``path`` names a file is checked when the file is read, and a
+    ``barcode_pattern`` where the import's barcode join is.
 
     Args:
         path: Cell Ranger's call file, as text or a path object.
         barcode_prefix: Text that precedes each barcode in the cell IDs, or
             None.
+        barcode_suffix: Text that follows each barcode in the cell IDs, or
+            None.
 
     Raises:
         TypeError: If ``path`` is empty or not a path, or ``barcode_prefix``
-            is neither text nor None.
+            or ``barcode_suffix`` is neither text nor None.
     """
     if not isinstance(path, str | os.PathLike) or path == "":
         raise TypeError("path must be a path to Cell Ranger's call file")
     if barcode_prefix is not None and not isinstance(barcode_prefix, str):
         raise TypeError("barcode_prefix must be text or None")
+    if barcode_suffix is not None and not isinstance(barcode_suffix, str):
+        raise TypeError("barcode_suffix must be text or None")
 
 
 @dataclass(frozen=True, slots=True)
