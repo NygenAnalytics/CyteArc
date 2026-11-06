@@ -64,6 +64,7 @@ from ._style import (
     LEGEND_SIDE_ENTRIES_PER_COLUMN,
     LEGEND_SIDE_MAX_COLUMNS,
     LEGEND_SIDE_MAX_ENTRIES,
+    RECEPTOR_TYPE_SCALE,
     FrameStyle,
     LegendLoc,
     _is_missing_category,
@@ -1434,7 +1435,9 @@ def embedding(
     Default category colors are assigned over every value of the colored
     column or label artifact, not only the drawn cells, so a category keeps
     its color in plots of different subsets or groups. A stored display or a
-    ``categorical_scale`` order or palette sets them instead. A log
+    ``categorical_scale`` order or palette sets them instead, and an
+    ``immune_receptors`` artifact draws its receptor types in the colors of
+    ``receptor_qc`` unless a ``categorical_scale`` is given. A log
     ``ColorScale`` draws values that are not positive in its missing color.
 
     Returns a :class:`PlotResult`. Access ``.figure`` in notebooks, or call
@@ -1633,6 +1636,14 @@ def embedding(
             )
         elif display["kind"] == "categorical" and not categorical_scale_was_explicit:
             stored_categorical_scales[index] = categorical_display_scale(display)
+    # Receptor types take the colors that every repertoire figure gives them.
+    for index, item in enumerate(color_items):
+        if (
+            isinstance(item, ArtifactRef)
+            and item.kind == "immune_receptors"
+            and not categorical_scale_was_explicit
+        ):
+            stored_categorical_scales[index] = RECEPTOR_TYPE_SCALE
     subset_vals = (
         _selected_metadata_column(
             store,

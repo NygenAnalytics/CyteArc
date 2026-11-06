@@ -143,16 +143,15 @@ def test_receptor_qc_groups_by_labels_of_fewer_cells(receptors) -> None:
         result.close()
 
 
-def test_embedding_draws_cells_without_a_clonotype_as_missing(receptors) -> None:
+def _layout(store: DataStore) -> object:
+    """A layout of every cell of the store, which the receptors share."""
     from cytearc.embeddings.imported import write_imported_embedding
     from cytearc.storage.artifacts import fingerprint_array
 
-    store, ref = receptors
-    cells = store.snapshot_cell_selection()
     coordinates = np.column_stack([np.arange(N_CELLS), np.zeros(N_CELLS)]).astype(
         np.float32
     )
-    layout = write_imported_embedding(
+    return write_imported_embedding(
         store.zw,
         assay="RNA",
         dimreduc_key="umap",
@@ -161,9 +160,67 @@ def test_embedding_draws_cells_without_a_clonotype_as_missing(receptors) -> None
         source_digest=hashlib.sha256(b"layout").digest(),
         payload_fingerprints={"values": fingerprint_array(coordinates)},
         source_cell_ids=np.asarray(store.cells.fetch_all("ids")).astype(str),
-        cell_selection=cells,
+        cell_selection=store.snapshot_cell_selection(),
         block_rows=4,
     )
+
+
+def _drawn_colors(result: plotting.PlotResult) -> list[str]:
+    """The color of each cell, in stored order when the plot drew them so."""
+    (points,) = result.axes[next(iter(result.axes))].collections
+    return [to_hex(color) for color in points.get_facecolors()]
+
+
+def test_embedding_draws_receptor_types_in_the_colors_of_receptor_qc(
+    receptors,
+) -> None:
+    store, ref = receptors
+    types = store.repertoire.load_receptors(ref).cells["receptor_type"].astype(str)
+    assert types.nunique() == 5
+    qc = store.plots.receptor_qc(ref, show=False)
+    try:
+        # Without a grouping, the bars of all cells stack one per category.
+        categories = qc.tables["receptor_type"]["receptor_type"].astype(str)
+        bars = [to_hex(bar.get_facecolor()) for bar in qc.axes["receptor_type"].patches]
+        assert len(bars) == len(categories)
+        qc_colors = dict(zip(categories, bars, strict=True))
+    finally:
+        qc.close()
+    result = store.plots.embedding(
+        layout=_layout(store), color_by=ref, seed=None, show=False
+    )
+    try:
+        assert _drawn_colors(result) == [qc_colors[name] for name in types]
+    finally:
+        result.close()
+
+
+def test_embedding_draws_receptor_types_in_a_given_scale(receptors) -> None:
+    store, ref = receptors
+    types = store.repertoire.load_receptors(ref).cells["receptor_type"].astype(str)
+    palette = {
+        "TCR": "#000000",
+        "BCR": "#111111",
+        "ambiguous": "#222222",
+        "multichain": "#333333",
+        "no IR": "#444444",
+    }
+    result = store.plots.embedding(
+        layout=_layout(store),
+        color_by=ref,
+        categorical_scale=plotting.CategoricalScale(palette=palette),
+        seed=None,
+        show=False,
+    )
+    try:
+        assert _drawn_colors(result) == [palette[name] for name in types]
+    finally:
+        result.close()
+
+
+def test_embedding_draws_cells_without_a_clonotype_as_missing(receptors) -> None:
+    store, ref = receptors
+    layout = _layout(store)
     clonotypes = store.repertoire.clonotypes(ref)
     labels = store.artifacts.load_values(clonotypes).to_pandas()
     without = int((labels.astype(str) == "").sum())
@@ -178,8 +235,7 @@ def test_embedding_draws_cells_without_a_clonotype_as_missing(receptors) -> None
         # Blank labels are missing: drawn in the missing colour, not as a category.
         assert "" not in scale.palette
         assert set(scale.palette) == set(labels[labels.astype(str) != ""])
-        (points,) = result.axes[next(iter(result.axes))].collections
-        drawn = [to_hex(color) for color in points.get_facecolors()]
+        drawn = _drawn_colors(result)
         assert drawn.count(to_hex(scale.missing_color)) == without
     finally:
         result.close()
