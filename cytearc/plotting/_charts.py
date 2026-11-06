@@ -282,12 +282,11 @@ def _item_names_type() -> type:
 
         def tick_values(self, vmin: float, vmax: float) -> Any:
             axis = self.axis
-            figure = axis.axes.get_figure(root=True) if isinstance(axis, Axis) else None
-            if not isinstance(axis, Axis) or figure is None:
+            if not isinstance(axis, Axis):
                 raise TypeError("A heatmap's names tick an axis of a panel in a figure")
             box = axis.axes.bbox
             pixels = box.width if isinstance(axis, XAxis) else box.height
-            room = int(pixels * 72.0 / figure.dpi // self.pitch)
+            room = int(pixels * 72.0 / axis.figure.dpi // self.pitch)
             step = -(-self.n_items // max(1, min(MAX_NAMED_ITEMS, room)))
             return np.arange(0, self.n_items, max(1, step), dtype=np.float64)
 
