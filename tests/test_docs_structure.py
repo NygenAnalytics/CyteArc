@@ -31,6 +31,38 @@ def _source_text(path: Path) -> str:
     )
 
 
+def _pages() -> list[Path]:
+    return sorted(
+        path for path in _DOCS_SOURCE.rglob("*") if path.suffix in {".md", ".ipynb"}
+    )
+
+
+def _prose(path: Path) -> str:
+    """A page's text outside code: Markdown, or a notebook's Markdown cells."""
+    if path.suffix != ".ipynb":
+        text = path.read_text()
+    else:
+        cells = json.loads(path.read_text())["cells"]
+        text = "\n".join(
+            "".join(cell["source"]) for cell in cells if cell["cell_type"] == "markdown"
+        )
+    return re.sub(r"```.*?```|`[^`\n]*`", "", text, flags=re.DOTALL)
+
+
+def _anchors(path: Path) -> set[str]:
+    """The anchors of a page: its labels, and the words of each heading without one."""
+    text = _prose(path)
+    labels = set(re.findall(r"^\(([^)\s]+)\)=\s*$", text, re.MULTILINE))
+    headings = re.findall(
+        r"^(\([^)\s]+\)=\s*\n(?:\s*\n)?)?#+ (.+)$", text, re.MULTILINE
+    )
+    return labels | {
+        re.sub(r"[^\w\s-]", "", heading).strip().lower().replace(" ", "-")
+        for labelled, heading in headings
+        if not labelled
+    }
+
+
 def _toc_files(entries: list[dict]) -> set[str]:
     files = {entry["file"] for entry in entries if "file" in entry}
     for entry in entries:
@@ -272,3 +304,44 @@ def test_the_notices_open_and_close_each_code_fence_on_a_line_of_its_own() -> No
     assert not inline, f"Fences that share a line with text, on lines {inline}"
     assert len(fences) % 2 == 0
     assert all(fence == "```" for fence in fences[1::2])
+
+
+def test_api_pages_link_labels_through_the_ref_role() -> None:
+    # Sphinx renders a Markdown link to a bare label, such as
+    # [text](cell_aligned_kinds), as a link to a missing page.
+    bare = re.compile(r"\[[^\]]+\]\(([^)\s/.#:]+)\)")
+    found = [
+        (path.name, target)
+        for path in sorted((_DOCS_SOURCE / "reference" / "api").glob("*.md"))
+        for target in bare.findall(_prose(path))
+    ]
+    assert not found
+
+
+def test_links_to_a_section_of_another_page_find_it() -> None:
+    # A label above a heading takes the place of the heading's words as its
+    # anchor, so a link to the words finds no target, as the build warns.
+    link = re.compile(r"\]\(([^)\s#:]+\.(?:md|ipynb))#([^)\s]+)\)")
+    missing = [
+        (path.relative_to(_DOCS_SOURCE).as_posix(), f"{file}#{anchor}")
+        for path in _pages()
+        for file, anchor in link.findall(_prose(path))
+        if anchor not in _anchors((path.parent / file).resolve())
+    ]
+    assert not missing
+
+
+def test_labels_of_built_pages_stay_apart_once_normalised() -> None:
+    # MyST writes a label's underscores as hyphens, so (a_b)= beside (a-b)= is
+    # one label twice, which the build warns of.
+    excluded = _project()["exclude"]
+    labels = [
+        label.lower().replace("_", "-")
+        for path in _pages()
+        if not any(
+            fnmatch(path.relative_to(_DOCS_SOURCE).as_posix(), rule)
+            for rule in excluded
+        )
+        for label in re.findall(r"^\(([^)\s]+)\)=\s*$", _prose(path), re.MULTILINE)
+    ]
+    assert len(labels) == len(set(labels))
