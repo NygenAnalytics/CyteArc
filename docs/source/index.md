@@ -82,6 +82,7 @@ memory on your workload.
   pipeline. Review [](tutorials/quality_control.ipynb) before interpreting the results.
 - **Use another assay:** follow [](tutorials/scatac_seq.ipynb), [](tutorials/cite_seq.ipynb), or
   [](tutorials/tea_seq.ipynb).
+- **Trace clones in human tissue:** [](tutorials/mitochondrial_lineage_tracing.ipynb) finds the mitochondrial DNA variants that mark clones in a colorectal tumor and compares the clones of its cell types.
 - **Analyze a CRISPR screen:** [](tutorials/crispr_screens.ipynb) calls guides, separates knocked-out cells from escapers, and tests what each perturbation changes.
 - **Analyze immune repertoires:** [](tutorials/immune_repertoires.ipynb) imports TCR and BCR chains, groups cells into clonotypes, and finds which T cells expanded.
 - **Trace cell lineages:** [](tutorials/lineage_tracing.ipynb) imports LARRY's clones, measures which fates share them, and scores a fate map against the fates that the clones took.

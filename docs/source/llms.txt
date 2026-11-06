@@ -32,6 +32,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 ## scATAC-seq and multimodal
 
 - [scATAC-seq](tutorials/scatac-seq/): peak filtering, LSI, graph construction, clustering, and gene scores
+- [Mitochondrial lineage tracing](tutorials/mitochondrial-lineage-tracing/): mgatk allele counts joined to a colorectal tumor's mtscATAC-seq cells, mitochondrial depth by cell type, informative variants and their confident carriers, clones called from the variants and shown on the ATAC embedding, and the coupling of cell types through shared clones
 - [CITE-seq](tutorials/cite-seq/): matched RNA and ADT analysis with WNN integration
 - [TEA-seq](tutorials/tea-seq/): prepared RNA, ATAC, and protein analysis with three-way WNN
 - [WNN and SNN integration](tutorials/multimodal-diagnostics/): compare SNN and WNN and inspect modality weights
