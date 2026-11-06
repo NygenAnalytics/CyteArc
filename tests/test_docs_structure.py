@@ -219,6 +219,7 @@ def test_trajectory_tutorials_use_source_sink_sign_convention() -> None:
         "fate_mapping.ipynb",
         "lineage_dynamics.ipynb",
         "lineage_curves.ipynb",
+        "lineage_tracing.ipynb",
     )
 
     for tutorial in tutorials:

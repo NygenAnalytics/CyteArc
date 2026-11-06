@@ -422,7 +422,7 @@ The comparisons of pooled CRISPR screen methods in [Methods and limitations](htt
 
 ## Data that validated the clone import
 
-The clone sizes that `ds.clones.import_clones` saves were checked against counts taken with SciPy and pandas from these files. The repository holds none of them, and neither the tests nor the documentation download them.
+The clone sizes that `ds.clones.import_clones` saves were checked against counts taken with SciPy and pandas from these files. The repository holds none of them, and the tests download neither; the lineage tracing tutorial downloads LARRY's, as listed above.
 
 | Validation | Source | License or terms |
 | --- | --- | --- |
