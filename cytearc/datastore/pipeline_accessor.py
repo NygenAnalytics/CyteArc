@@ -604,14 +604,16 @@ class PipelineAccessor:
                 :meth:`rna`.
             guide_calling: The keywords of ``perturbation.call_guides``
                 (``method``, ``min_umi``, ``fraction_threshold``, and
-                ``sample_column``), or ``path`` and ``barcode_prefix``, which
-                import Cell Ranger's ``protospacer_calls_per_cell.csv`` with
+                ``sample_column``), or ``path`` with ``barcode_prefix``,
+                ``barcode_suffix`` and ``barcode_pattern``, which import Cell
+                Ranger's ``protospacer_calls_per_cell.csv`` with
                 ``perturbation.import_guide_calls`` instead. The guides of the
                 run's analysis cells are called. A call file holds the
                 barcodes of one sample, so with ``barcode_prefix`` every cell
-                of ``cells`` must have an ID that starts with it, and without
-                one, ``cells`` must not come from several samples of a merged
-                store, whose cell IDs are ``<sample>__<barcode>``.
+                of ``cells`` must have an ID that starts with it, with
+                ``barcode_suffix`` one that ends with it, and without a
+                prefix, ``cells`` must not come from several samples of a
+                merged store, whose cell IDs are ``<sample>__<barcode>``.
             labels: The keywords of ``perturbation.labels``: ``controls``,
                 the targets of the control guides, which the recipe needs,
                 and ``target_column``, ``targets``, and ``policy``.

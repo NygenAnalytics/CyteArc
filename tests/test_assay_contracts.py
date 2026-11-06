@@ -174,6 +174,79 @@ def test_default_normalizer_identity_is_stable(monkeypatch):
     assert adt.normMethod is norm_clr
 
 
+def _rna_with_stored_size_factor(monkeypatch, stored, *, read_only=False):
+    """An RNA assay over a group whose attributes hold ``stored``, if not None."""
+
+    def initialize_base(self, *args, **kwargs):
+        group = zarr.open_group(store=MemoryStore(), mode="w")
+        if stored is not None:
+            group.attrs["size_factor"] = stored
+        self.z = zarr.open_group(store=group.store, mode="r") if read_only else group
+        self.attrs = self.z.attrs
+
+    monkeypatch.setattr(Assay, "__init__", initialize_base)
+    return RNAassay(None, "RNA", None)
+
+
+@pytest.mark.parametrize("stored", [2500.5, 0.5, 10_000, 1e6])
+def test_rna_keeps_a_stored_size_factor_as_stored(monkeypatch, stored):
+    rna = _rna_with_stored_size_factor(monkeypatch, stored)
+
+    # Not cut to an integer, and not replaced by the default.
+    assert rna.sf == stored and type(rna.sf) is type(stored)
+    assert rna.attrs["size_factor"] == stored
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_rna_without_a_size_factor_takes_1000(monkeypatch, read_only):
+    rna = _rna_with_stored_size_factor(monkeypatch, None, read_only=read_only)
+
+    assert rna.sf == 1000
+    # A writable store records the default; a read-only one is left as it is.
+    assert rna.attrs.get("size_factor") == (None if read_only else 1000)
+
+
+@pytest.mark.parametrize("stored", [0, -1.0, float("inf"), True, "1000", None, [1000]])
+def test_rna_refuses_a_stored_size_factor_that_is_no_positive_number(
+    monkeypatch, stored
+):
+    def initialize_base(self, *args, **kwargs):
+        self.z = zarr.open_group(store=MemoryStore(), mode="w")
+        self.z.attrs["size_factor"] = stored
+        self.attrs = self.z.attrs
+
+    monkeypatch.setattr(Assay, "__init__", initialize_base)
+    with pytest.raises(
+        ValueError,
+        match=r"^Assay 'RNA' has the size_factor attribute .*, which is not a "
+        "finite positive number$",
+    ):
+        RNAassay(None, "RNA", None)
+
+
+def test_a_store_opened_writable_normalizes_with_its_stored_size_factor(tmp_path):
+    raw = np.array([[3, 1, 0], [0, 2, 2]], dtype=np.uint32)
+    path = tmp_path / "rna.zarr"
+    SparseToZarr(
+        csr_matrix(raw),
+        zarr_loc=str(path),
+        cell_ids=["c0", "c1"],
+        feature_ids=["g0", "g1", "g2"],
+        assay_name="RNA",
+        nthreads=1,
+    ).dump(batch_size=2)
+    zarr.open_group(str(path / "RNA"), mode="r+").attrs["size_factor"] = 2500.5
+
+    store = DataStore(str(path), default_assay="RNA", min_features_per_cell=0)
+
+    assert store.RNA.sf == 2500.5
+    assert zarr.open_group(str(path / "RNA"), mode="r").attrs["size_factor"] == 2500.5
+    values = store.RNA.normed(cell_idx=np.arange(2), feat_idx=np.arange(3)).compute()
+    np.testing.assert_allclose(
+        values, [[1875.375, 625.125, 0.0], [0.0, 1250.25, 1250.25]]
+    )
+
+
 def test_normalization_numerical_contracts_are_stable():
     counts = np.array([[1.0, 3.0], [2.0, 4.0]])
 

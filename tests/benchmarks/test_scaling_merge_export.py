@@ -345,6 +345,7 @@ def test_merge_counts(bench, stores, tmp_path) -> None:
             profile="fast_local",
             policy=DEFAULT_COUNT_MATRIX_POLICY,
             sources=assays,
+            normalization={},
         )
         return assays, alignment, plan, root
 

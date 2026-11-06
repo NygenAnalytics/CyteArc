@@ -256,7 +256,7 @@ class Assay:
         if self.requiresCounts and self.normalizedValues is not None:
             raise TypeError(self.normalized_values_refusal(name))
         self.normMethod: NormMethod = norm_dummy
-        self.sf: int | None = None
+        self.sf: float | None = None
         self.scalar: np.ndarray | None = None
         self.n_term_per_doc: np.ndarray | None = None
         self.n_docs: int | None = None

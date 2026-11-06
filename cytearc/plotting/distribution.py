@@ -900,15 +900,24 @@ def _mean_colorbar_label(
     row_standardize: bool,
     *,
     all_features: bool,
+    assays: Collection[str],
 ) -> str:
-    """Label for the mean-expression colourbar, adapted to the value scale."""
+    """Label for the colour bar of group means, adapted to the value scale.
+
+    ``assays`` holds the assays of the features drawn. Means of the RNA assay
+    are "mean expression", and means of another assay name it, such as "mean
+    of GeneScores", as the colour bar of a dot plot does.
+    """
     if color_scale.scope == "panel":
         return (
             "Relative Expression Per Gene" if all_features else "Relative Value Per Key"
         )
     if row_standardize:
         return "mean standardized value"
-    return "mean expression" if all_features else "mean value"
+    if not all_features:
+        return "mean value"
+    names = sorted(assays)
+    return "mean expression" if names == ["RNA"] else "mean of " + " and ".join(names)
 
 
 def _mean_group_palette(
@@ -1053,7 +1062,9 @@ def distribution(
     with a warning. Statistical overlays cannot be combined with ``split_by``.
 
     For ``kind="stacked_violin"``, pass ``color_by="mean"`` to colour each
-    stacked violin by its group mean expression on a continuous scale. Pass a
+    stacked violin by its group mean on a continuous scale, whose colour bar
+    names the means: "mean expression" for the RNA assay and otherwise the
+    assay, such as "mean of GeneScores". Pass a
     ``ColorScale`` to control the mapping: ``cmap`` chooses the colormap,
     ``vmin``/``vmax`` fix explicit limits, ``quantiles`` clips extreme means,
     and ``vcenter`` enables diverging maps. The color scale follows
@@ -2068,6 +2079,7 @@ def distribution(
                     color_scale,
                     row_standardize,
                     all_features=all_features,
+                    assays=feature_assays,
                 )
             )
 
@@ -2108,6 +2120,7 @@ def distribution(
                     color_scale,
                     row_standardize,
                     all_features=all_features,
+                    assays=feature_assays,
                 ),
                 extras={"vmin": lo, "vmax": hi},
             ),

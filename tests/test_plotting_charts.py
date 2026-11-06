@@ -244,15 +244,55 @@ def test_plain_bars_take_one_colour_or_their_items_colours(ax) -> None:
     assert drawn.scale.order == ("x", "y")
 
 
-@pytest.mark.parametrize("n_items", [MAX_NAMED_ITEMS, MAX_NAMED_ITEMS + 1])
-def test_bars_name_at_most_40_items(ax, n_items) -> None:
-    table = pd.DataFrame(
-        {"item": [f"i{at}" for at in range(n_items)], "value": np.ones(n_items)}
-    )
-    draw_bars(ax, table, item="item", value="value", colors="#333333", value_label="")
-    names = [tick.get_text() for tick in ax.get_yticklabels()]
-    assert names == ([f"i{at}" for at in range(n_items)] if n_items <= 40 else [])
-    assert len(ax.patches) == n_items
+@pytest.mark.parametrize("horizontal", [True, False])
+@pytest.mark.parametrize("n_items", [5, MAX_NAMED_ITEMS, MAX_NAMED_ITEMS + 1, 1000])
+@pytest.mark.parametrize("inches", [3.0, 12.0])
+def test_bars_name_every_nth_item_that_their_axis_holds(
+    n_items, inches, horizontal
+) -> None:
+    names = [f"i{at}" for at in range(n_items)]
+    figure, ax = plt.subplots(figsize=(inches, inches), layout="constrained")
+    try:
+        draw_bars(
+            ax,
+            pd.DataFrame({"item": names, "value": np.arange(1.0, n_items + 1)}),
+            item="item",
+            value="value",
+            colors="#333333",
+            horizontal=horizontal,
+            value_label="",
+        )
+        assert len(ax.patches) == n_items
+        figure.draw_without_rendering()
+        axis = ax.yaxis if horizontal else ax.xaxis
+        labels = [label.get_text() for label in axis.get_ticklabels()]
+        # Every nth item from the first, at most 40, apart once laid out; the
+        # first item is the top bar of horizontal bars.
+        step = 1 if len(labels) < 2 else names.index(labels[1])
+        assert labels == names[::step]
+        assert 1 <= len(labels) <= MAX_NAMED_ITEMS
+        assert names_keep_apart(axis)
+        # Each name stands at its own bar, whose length is its item's value.
+        lengths = {
+            round(
+                bar.get_y() + bar.get_height() / 2
+                if horizontal
+                else bar.get_x() + bar.get_width() / 2
+            ): bar.get_width() if horizontal else bar.get_height()
+            for bar in ax.patches
+        }
+        for at, label in zip(axis.get_majorticklocs(), labels, strict=True):
+            assert lengths[round(at)] == names.index(label) + 1
+        if not horizontal:
+            assert {label.get_rotation() for label in axis.get_ticklabels()} == {90}
+        # Five bars name each item, and 40 on a page of 12 inches; 41 there
+        # take every second name and 1,000 every 25th, where none was named.
+        if n_items == 5 or (n_items == MAX_NAMED_ITEMS and inches == 12.0):
+            assert labels == names
+        if n_items > MAX_NAMED_ITEMS and inches == 12.0:
+            assert step == (2 if n_items == MAX_NAMED_ITEMS + 1 else 25)
+    finally:
+        plt.close(figure)
 
 
 @pytest.mark.parametrize(
@@ -705,7 +745,7 @@ def test_heatmaps_name_every_nth_item_that_their_axes_hold(
 def test_heatmap_names_need_the_axis_of_a_panel() -> None:
     from cytearc.plotting._charts import _item_names_type
 
-    locator = _item_names_type()(10, 14.0)
+    locator = _item_names_type()(np.arange(10), 14.0)
     locator.create_dummy_axis()
     with pytest.raises(TypeError, match="axis of a panel in a figure"):
         locator()

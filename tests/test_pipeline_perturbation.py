@@ -24,10 +24,12 @@ import zarr
 from cytearc import (
     CancellationToken,
     DataStore,
+    DiagnosticWarning,
     PipelineCancelled,
     PipelineExecutionError,
     PipelineRun,
 )
+from cytearc.datastore._operations.cell_barcodes import barcode_files
 from cytearc.datastore._pipeline import summaries
 from cytearc.datastore._pipeline.executor import RecipePlan
 from cytearc.datastore._pipeline.recipes.common import require_labeled_cells
@@ -1267,6 +1269,137 @@ def test_one_call_file_reaches_the_cells_of_one_sample(screen, tmp_path) -> None
     )
 
 
+def test_a_call_file_reaches_its_cells_through_a_suffix_and_a_pattern(
+    screen, tmp_path
+) -> None:
+    location = tmp_path / "suffixed.zarr"
+    shutil.copytree(screen, location)
+    # Cell IDs that end with the suffix that Cell Ranger's barcodes carry.
+    ids = np.asarray([f"cell{cell}-1" for cell in range(N_CELLS)])
+    zarr.open_group(str(location / "cellData"), mode="r+").create_array(
+        "ids", data=ids, overwrite=True
+    )
+    store = _open(location)
+    plain = _call_file(tmp_path / "plain.csv")
+    # Barcodes behind a tag that a pattern takes off, and the same with one
+    # more barcode under another tag, which names the cell of another.
+    tagged = _call_file(tmp_path / "tagged.csv", prefix="AAAC_")
+    frame = pd.read_csv(tagged, dtype=str)
+    frame.loc[len(frame)] = ["GGGT_cell0", "1", "CRISPR0", "50"]
+    frame.to_csv(twice := tmp_path / "twice.csv", index=False)
+    untagged = r"^[ACGT]{4}_(?P<barcode>.+)$"
+    remedy = (
+        "or call the guides from their counts with guide_calling settings without path"
+    )
+    before = written(store)
+
+    for guide_calling, error, message in (
+        # Without the suffix no barcode names one of the run's cells.
+        (
+            {"path": plain},
+            ValueError,
+            "No barcode of the call file names one of the run's cells, so the "
+            "import would label them all 'Negative': a cell matches a barcode when "
+            "its ID is barcode_prefix followed by the barcode, which gives IDs such "
+            "as 'unknown-barcode', but the run's cells have IDs such as 'cell0-1'; "
+            "check barcode_prefix and that the file holds the calls of these cells, "
+            + remedy,
+        ),
+        (
+            {"path": plain, "barcode_suffix": "-2"},
+            ValueError,
+            "The call file's barcodes reach only the cells whose IDs end with "
+            f"barcode_suffix '-2', but {N_CELLS} of the run's cells, such as "
+            f"'cell0-1', do not; restrict cells to the cells of that sample, {remedy}",
+        ),
+        # A pattern that matches no barcode, whose whole text with the suffix
+        # would name the cells.
+        (
+            {"path": plain, "barcode_suffix": "-1", "barcode_pattern": untagged},
+            ValueError,
+            "No barcode of the call file names one of the run's cells, so the "
+            "import would label them all 'Negative': barcode_pattern "
+            f"{untagged!r} matches none of its barcodes, such as 'unknown-barcode'; "
+            "check barcode_pattern and that the file holds the calls of these "
+            "cells, " + remedy,
+        ),
+        # A pattern that keeps a part of each barcode that names no cell.
+        (
+            {
+                "path": tagged,
+                "barcode_suffix": "-1",
+                "barcode_pattern": "^(?P<barcode>AAAC)",
+            },
+            ValueError,
+            "a cell matches a barcode when its ID is barcode_prefix, the barcode or "
+            "the part of it that barcode_pattern keeps, and barcode_suffix, which "
+            "gives IDs such as 'AAAC-1', but the run's cells have IDs such as "
+            "'cell0-1'; check these options and that the file holds the calls of "
+            "these cells, " + remedy,
+        ),
+        (
+            {"path": twice, "barcode_suffix": "-1", "barcode_pattern": untagged},
+            ValueError,
+            "Barcodes 'AAAC_cell0' and 'GGGT_cell0' of the call file name one cell, "
+            "'cell0-1'; check barcode_pattern",
+        ),
+        (
+            {"path": plain, "barcode_suffix": 1},
+            TypeError,
+            "barcode_suffix must be text or None",
+        ),
+        (
+            {"path": plain, "barcode_pattern": "cell"},
+            ValueError,
+            "has no named group 'barcode'",
+        ),
+        ({"barcode_pattern": untagged}, ValueError, "not both"),
+    ):
+        with pytest.raises(error, match=re.escape(message)):
+            store.pipeline.perturbation(
+                labels=LABELS, guide_calling=guide_calling, **HEAD
+            )
+    assert written(store) == before
+
+    # With the suffix, and with the pattern beside it, the run imports the
+    # calls that import_guide_calls gives with the same options: those of a
+    # floor of 11 UMIs.
+    called = (GUIDE_COUNTS > 10).any(axis=1)
+    unmatched = f"1 of {int(called.sum()) + 1} barcodes of the call file match no cell"
+    for guide_calling in (
+        {"path": plain, "barcode_suffix": "-1"},
+        {"path": tagged, "barcode_suffix": "-1", "barcode_pattern": untagged},
+    ):
+        with pytest.warns(DiagnosticWarning, match=unmatched):
+            run = store.pipeline.perturbation(
+                labels=LABELS,
+                guide_calling=guide_calling,
+                efficiency=False,
+                edistance=False,
+                **QUICK,
+            )
+        options = {key: value for key, value in guide_calling.items() if key != "path"}
+        with pytest.warns(DiagnosticWarning, match=unmatched):
+            reused = store.perturbation.import_guide_calls(
+                guide_calling["path"],
+                cell_selection=run["analysis_cell_selection"],
+                **options,
+            )
+        assert reused == run["guide_calls"]
+        summary = _stages(run)["guide_calling"]["summary"]
+        assert (summary["fileBarcodes"], summary["unmatchedBarcodes"]) == (
+            int(called.sum()) + 1,
+            1,
+        )
+        loaded = store.perturbation.load_guide_calls(run["guide_calls"])
+        fixed = store.perturbation.load_guide_calls(
+            store.perturbation.call_guides(
+                run["analysis_cell_selection"], method="fixed", min_umi=11
+            )
+        )
+        pd.testing.assert_series_equal(loaded.cells["call"], fixed.cells["call"])
+
+
 def test_the_call_file_check_reads_the_ids_of_the_runs_cells_only(
     screen, tmp_path, monkeypatch
 ) -> None:
@@ -1358,9 +1491,8 @@ def _check_every_cell(store: DataStore, path: Path) -> None:
     cell_ids, ledger = _check_call_file_cells(
         store, CellSource(column="I", selection=None), None
     )
-    _check_call_file(
-        ledger, store, store._get_assay("CRISPR"), str(path), cell_ids, None
-    )
+    (call_file,) = barcode_files(str(path), what="call file")
+    _check_call_file(ledger, store, store._get_assay("CRISPR"), call_file, cell_ids)
 
 
 def test_the_call_file_check_refuses_a_small_budget_before_the_run(

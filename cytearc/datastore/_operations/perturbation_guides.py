@@ -330,17 +330,6 @@ def _require_call_file_cells(
         )
 
 
-def _barcode_ids(barcodes: np.ndarray, barcode_prefix: str | None) -> np.ndarray:
-    """Return the ID of the cell that each barcode of a call file names.
-
-    A cell's ID is ``barcode_prefix`` followed by the barcode; None, or an
-    empty text, adds nothing.
-    """
-    if not barcode_prefix:
-        return barcodes
-    return np.asarray([barcode_prefix + barcode for barcode in barcodes], dtype=object)
-
-
 def _refuse_shared_cells(
     row_cells: np.ndarray, barcodes: np.ndarray, cell_ids: np.ndarray
 ) -> None:
@@ -1020,9 +1009,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         from ...readers.cellranger import PROTOSPACER_SCAN_BYTES, protospacer_calls_size
 
-        import_settings(path, barcode_prefix)
-        if barcode_suffix is not None and not isinstance(barcode_suffix, str):
-            raise TypeError("barcode_suffix must be text or None")
+        import_settings(path, barcode_prefix, barcode_suffix)
         barcode_pattern = checked_barcode_pattern(barcode_pattern)
         _require_ref(cell_selection, "cell_selection")
         assay, ledger, guide_ids, selection = self._guide_call_cells(

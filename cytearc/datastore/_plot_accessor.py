@@ -668,7 +668,7 @@ class DataStorePlotAccessor:
         self,
         coupling: CloneCoupling,
         *,
-        value: str = "z_score",
+        value: str = "coupling",
         color_scale: ColorScale | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,

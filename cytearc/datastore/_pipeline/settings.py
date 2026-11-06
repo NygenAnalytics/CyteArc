@@ -31,6 +31,7 @@ from ...quality_control.cell_calling import validated_fdr, validated_settings
 from ...quality_control.hto import _validated_positive_quantile
 from ...utils.arguments import bool_argument, integer_argument
 from ...utils.logging import logger
+from .._operations.cell_barcodes import barcode_pattern as checked_barcode_pattern
 from .._operations.cell_calling import _CellCallingOperationsMixin
 from .._operations.embeddings import _EmbeddingOperationsMixin
 from .._operations.features import _FeatureOperationsMixin
@@ -260,6 +261,8 @@ STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "sample_column",
                 "path",
                 "barcode_prefix",
+                "barcode_suffix",
+                "barcode_pattern",
             }
         ),
         "labels": frozenset({"controls", "target_column", "targets", "policy"}),
@@ -317,7 +320,9 @@ STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
 )
 # The settings with which guide calling imports Cell Ranger's calls, in place
 # of the settings with which it calls guides.
-GUIDE_IMPORT_SETTINGS = frozenset({"path", "barcode_prefix"})
+GUIDE_IMPORT_SETTINGS = frozenset(
+    {"path", "barcode_prefix", "barcode_suffix", "barcode_pattern"}
+)
 # Labels need controls, which CyteArc never guesses.
 LABELS_NEED_CONTROLS = (
     "labels needs controls, the targets of the control guides, such as "
@@ -325,9 +330,9 @@ LABELS_NEED_CONTROLS = (
 )
 # Guide calling either imports Cell Ranger's calls or calls guides.
 _GUIDE_CALLING_EITHER = (
-    "guide_calling imports Cell Ranger's calls with path and barcode_prefix, or "
-    "calls guides with method, min_umi, fraction_threshold and sample_column; "
-    "not both"
+    "guide_calling imports Cell Ranger's calls with path, barcode_prefix, "
+    "barcode_suffix and barcode_pattern, or calls guides with method, min_umi, "
+    "fraction_threshold and sample_column; not both"
 )
 
 
@@ -434,16 +439,20 @@ def method_setting(stage: str, settings: Mapping[str, Any], name: str) -> Any:
 def _check_perturbation_stage(stage: str, value: Mapping[str, Any]) -> None:
     """Run a perturbation stage method's own checks on the stage's settings.
 
-    Guide calling either imports Cell Ranger's calls, with ``path`` and
-    ``barcode_prefix``, or calls guides with the other settings. Labels need
-    ``controls``, which have no default.
+    Guide calling either imports Cell Ranger's calls, with ``path``,
+    ``barcode_prefix``, ``barcode_suffix`` and ``barcode_pattern``, or calls
+    guides with the other settings. Labels need ``controls``, which have no
+    default.
     """
     if stage == "guide_calling" and "path" in value:
         if set(value) - GUIDE_IMPORT_SETTINGS:
             raise ValueError(_GUIDE_CALLING_EITHER)
-        import_settings(value["path"], value.get("barcode_prefix"))
+        import_settings(
+            value["path"], value.get("barcode_prefix"), value.get("barcode_suffix")
+        )
+        checked_barcode_pattern(value.get("barcode_pattern"))
         return
-    if stage == "guide_calling" and "barcode_prefix" in value:
+    if stage == "guide_calling" and GUIDE_IMPORT_SETTINGS.intersection(value):
         raise ValueError(_GUIDE_CALLING_EITHER)
     if stage == "labels" and "controls" not in value:
         raise ValueError(LABELS_NEED_CONTROLS)

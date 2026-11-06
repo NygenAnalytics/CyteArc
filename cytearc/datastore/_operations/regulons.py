@@ -33,7 +33,10 @@ else:
     _RegulonOperationsBase = object
 
 _GRN_LAYOUT = "tf_target_edges"
-_GRN_VALUES = "raw_counts"
+# What GRN inference reads: an assay's stored values, which are its raw
+# counts, or the values of an assay imported from normalized values.
+_GRN_COUNTS = "raw_counts"
+_GRN_NORMALIZED_VALUES = "normalized_values"
 _GRN_EDGE_ARRAYS = ("tf_index", "target_index", "importance", "correlation")
 _GRN_ARRAYS = (*_GRN_EDGE_ARRAYS, "regulator_index")
 
@@ -108,14 +111,17 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
         """Infer transcription-factor to target importances with GRNBoost2.
 
         For each selected gene, a stochastic gradient boosting regressor
-        predicts its raw counts across the selected cells from the raw counts
-        of the selected transcription factors, as arboreto's GRNBoost2 does
-        for pySCENIC: the same regressor settings and early stopping, the same
+        predicts its stored values across the selected cells from those of
+        the selected transcription factors, as arboreto's GRNBoost2 does for
+        pySCENIC: the same regressor settings and early stopping, the same
         seed for every target, a factor never predicting itself, and
         importances scaled by the number of fitted stages. The Pearson
-        correlation of each linked factor and target is stored with it.
+        correlation of each linked factor and target is stored with it. The
+        stored values are raw counts, or the values of an assay imported from
+        normalized values, and the artifact's ``values`` parameter records
+        which: ``"raw_counts"`` or ``"normalized_values"``.
 
-        The counts of the selected cells and genes are held in memory as
+        The values of the selected cells and genes are held in memory as
         float32, so select a representative subset of cells for large data.
 
         Args:
@@ -227,7 +233,7 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             feature_selection=feature_selection,
             regulators_digest=_regulators_digest(tfs),
             method="grnboost2",
-            values=_GRN_VALUES,
+            values=_GRN_COUNTS if assay.holdsCounts else _GRN_NORMALIZED_VALUES,
             learning_rate=float(learning_rate),
             max_stages=int(max_stages),
             max_features=float(max_features),

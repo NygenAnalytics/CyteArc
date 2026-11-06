@@ -436,10 +436,30 @@ def variant_figure_calls(
 
 
 def axis_names(axis: Any) -> tuple[int | None, list[str]]:
-    """The step between the items that a heatmap's axis names, None for one, and their names."""
+    """The step between the items that an axis names, None for one, and their names.
+
+    The names run from the first item: down the axis for horizontal bars,
+    whose first item stands on top.
+    """
     ticks = axis.get_majorticklocs().tolist()
     labels = [label.get_text() for label in axis.get_ticklabels()]
-    return (int(ticks[1] - ticks[0]) if len(ticks) > 1 else None), labels
+    return (abs(int(ticks[1] - ticks[0])) if len(ticks) > 1 else None), labels
+
+
+def names_every_nth_item(axis: Any, items: Sequence[str]) -> int:
+    """Check that a drawn axis names every nth of ``items`` from the first, and return n.
+
+    At most ``MAX_NAMED_ITEMS`` names stand on the axis, each at its own
+    item's slot, and no two touch.
+    """
+    from cytearc.plotting._style import MAX_NAMED_ITEMS
+
+    step, names = axis_names(axis)
+    step = 1 if step is None else step
+    assert names == list(items)[::step]
+    assert 1 <= len(names) <= MAX_NAMED_ITEMS
+    assert names_keep_apart(axis)
+    return step
 
 
 def names_keep_apart(axis: Any) -> bool:

@@ -21,12 +21,7 @@ gene programs. Docs: <https://docs.nygen.io/CyteArc/tutorials/regulons>,
   chromVAR z-scores are NaN where a cell expects under one fragment.
 - Regions are always peak ids (`chrom:start-end`), the ATAC feature `ids`: `match_motifs`,
   `link_regions_to_genes`, `gc_content`, `binding_cistromes`, and chromVAR targets.
-- `ds.regulons.grn(cells, features=..., tfs=..., random_seed=...)` runs GRNBoost2 on **raw counts**
-  of the selected cells and genes (held in memory as float32; subsample cells for large data) and
-  returns `kind="grn_adjacencies"`; `ds.regulons.load_grn(ref).adjacencies` has `TF`, `target`,
-  `importance`, `correlation`, as does the in-memory `infer_grn`. The default
-  `early_stopping="stage"` matches the pySCENIC 0.12.1 container. Fits are deterministic for a
-  seed; different seeds give different networks.
+- `ds.regulons.grn(cells, features=..., tfs=..., random_seed=...)` runs GRNBoost2 on the **stored values** of the selected cells and genes, raw counts or the values of an assay imported from normalized values, which its `values` parameter records as `"raw_counts"` or `"normalized_values"` (held in memory as float32; subsample cells for large data) and returns `kind="grn_adjacencies"`; `ds.regulons.load_grn(ref).adjacencies` has `TF`, `target`, `importance`, `correlation`, as does the in-memory `infer_grn`. The default `early_stopping="stage"` matches the pySCENIC 0.12.1 container. Fits are deterministic for a seed; different seeds give different networks.
 - SCENIC steps are plain functions in `cytearc.regulons`: `modules_from_adjacencies` (pySCENIC
   rules), `prune_modules` (cisTarget with each motif's own recovery curve), `regulons_from_motifs`
   (`TF(+)`). pySCENIC 0.12.1 gives most motifs another motif's curve, so expect the same regulon

@@ -337,6 +337,10 @@ open as RNA.
 
 An assay group with the attribute `normalizedValues` holds values that were normalized before import, and one without it holds counts. The record is `{"importedAs": ..., "cellTotal": ...}`: `importedAs` is `normalized`, `log_normalized`, or `log2_normalized` for an import, and null for an assay derived or combined from other values; `cellTotal` is the total that every sampled cell's values share, or null. The stored values are always linear, since imports undo a log before they write. Import writers pass the record to `create_zarr_count_assay`, which validates it, and `Assay.__init__` reads it; a record of another shape raises `ValueError`. Mount copies it with the assay attributes, a full repack copies every attribute and a data-only repack keeps it, `SubsetZarr` passes it on, `DataStoreMerge` and `create_composite` record the import kind that every source shares and no cell total, and grouped and melded assays record a null import. The dataset fingerprint does not cover it, since no operation changes it after import. ADT and ATAC classes refuse an assay that has it.
 
+## Library-size normalization
+
+An RNA class normalizes by library size to the size factor in the assay group's `size_factor` attribute, a finite positive number that it reads as stored, so that 2500.5 stays 2500.5; any other value raises `ValueError` when the assay opens. An assay without one takes 1000, which a writable store records. A melded assay records `tfDenominator`, what the term frequencies of its TF-IDF values divide each cell's counts by, and an RNA class that opens such an assay passes its values through with `norm_dummy` instead of dividing them by their own totals again. Mount, both repacks and `SubsetZarr` copy both attributes, and ambient correction keeps its source's size factor. `DataStoreMerge` and `create_composite` keep both when their sources share them, and refuse sources of different size factors, or of melded and other values, before anything is written.
+
 ## Pending derived assays
 
 `add_grouped_assay` and `add_melded_assay` create the logical group `{assay}` or

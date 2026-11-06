@@ -503,8 +503,10 @@ class SubsetZarr:
                 exclude_members={"ids", "names", *GENERATED_FEATURE_COLUMNS},
                 profile=self.profile,
             )
-            if "size_factor" in assay.attrs:
-                destination.attrs["size_factor"] = assay.attrs["size_factor"]
+            # The subset normalizes as its source does.
+            for key in ("size_factor", "tfDenominator"):
+                if key in assay.attrs:
+                    destination.attrs[key] = assay.attrs[key]
 
     def dump(self) -> None:
         """Write subsetted cell metadata and count matrices, including RNA ``countsT``.

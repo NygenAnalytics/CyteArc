@@ -931,6 +931,25 @@ def test_corrected_counts_remove_the_estimated_soup(store):
         assert corrected[:N_CELLS][~others][:, markers].sum() > 0.9 * own
 
 
+def test_corrected_counts_keep_the_size_factor_of_their_source(path):
+    zarr.open_group(str(path / "RNA"), mode="r+").attrs["size_factor"] = 2500.5
+    store = _open(path)
+    cells, _clusters = _cells_and_clusters(store)
+    profile = store.qc.ambient_profile(total_counts=(2, 10))
+    estimate = store.qc.ambient_contamination(cells, profile, fraction=0.1)
+
+    store.qc.correct_ambient(estimate, assay_label="RNA_soup")
+
+    # The corrected counts normalize as their source's do, also once the
+    # store is opened again.
+    assert store.get_assay("RNA_soup").sf == 2500.5
+    assert _open(path).get_assay("RNA_soup").sf == 2500.5
+    # A size factor set as a NumPy number is stored as the number it holds.
+    store.RNA.sf = np.int64(2000)
+    store.qc.correct_ambient(estimate, assay_label="RNA_numpy")
+    assert _open(path).get_assay("RNA_numpy").sf == 2000
+
+
 def test_correction_is_deterministic_in_any_memory_budget(store, path, monkeypatch):
     cells, clusters = _cells_and_clusters(store)
     profile = store.qc.ambient_profile(total_counts=(2, 10))

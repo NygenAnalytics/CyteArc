@@ -20,6 +20,7 @@ from ...storage.count_matrix import (
 from ...storage.layout import array_shard_rows
 from ...storage.schema import (
     NORMALIZED_VALUES_ATTR,
+    TF_DENOMINATOR_ATTR,
     DerivedAssayTransaction,
     derived_normalized_values,
 )
@@ -360,7 +361,7 @@ def write_melded_counts(
             "idfCellIndexDigest": array_digest(selected_cells),
             "idfCellCount": int(len(selected_cells)),
             "sourceAssay": assay.name,
-            "tfDenominator": "total_counts",
+            TF_DENOMINATOR_ATTR: "total_counts",
             # Gene scores are TF-IDF values, which steps that need counts refuse.
             NORMALIZED_VALUES_ATTR: derived_normalized_values(),
         }

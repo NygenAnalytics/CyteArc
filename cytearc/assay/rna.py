@@ -1,3 +1,4 @@
+import math
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from typing import Any, Literal, cast
 
@@ -15,6 +16,7 @@ from ..storage.partition import (
     row_band,
     row_read_parts,
 )
+from ..storage.schema import TF_DENOMINATOR_ATTR
 from ..storage.types import as_zarr_group
 from ..utils.arguments import bool_argument, integer_argument
 from ..utils.compute import compute_with_progress
@@ -231,11 +233,28 @@ class RNAassay(Assay):
         )
         self.normMethod = norm_lib_size
         if "size_factor" in self.attrs:
-            self.sf = int(cast(int, self.attrs["size_factor"]))
+            # A stored size factor is kept as stored, such as 0.5 or 2500.5.
+            stored = self.attrs["size_factor"]
+            if (
+                isinstance(stored, bool)
+                or not isinstance(stored, int | float)
+                or not math.isfinite(stored)
+                or stored <= 0
+            ):
+                raise ValueError(
+                    f"Assay {name!r} has the size_factor attribute {stored!r}, "
+                    "which is not a finite positive number"
+                )
+            self.sf = stored
         else:
             self.sf = 1000
             if not self.z.read_only:
                 self.attrs["size_factor"] = self.sf
+        if TF_DENOMINATOR_ATTR in self.attrs:
+            # TF-IDF values, such as melded gene scores, already divide each
+            # cell's counts by its total, so they pass through rather than
+            # being divided by their own totals again.
+            self.normMethod = norm_dummy
         self.scalar: np.ndarray | None = None
 
     requiresCountsT = True

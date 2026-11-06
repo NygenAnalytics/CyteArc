@@ -31,6 +31,7 @@ from cytearc.plotting._style import (
 )
 from tests.clone_helpers import (
     axis_names,
+    names_every_nth_item,
     names_keep_apart,
     CLONE_FIGURES,
     REPERTOIRE_FIGURES,
@@ -1419,11 +1420,11 @@ def _recorder_store(sites: list[tuple[str, str, dict[str, int]]]) -> SimpleNames
     return SimpleNamespace(clones=SimpleNamespace(load_alleles=lambda ref: loaded))
 
 
-def test_recorder_states_name_every_site_drawn_and_rank_sites_by_reads(
+def test_recorder_states_name_the_sites_drawn_and_rank_sites_by_reads(
     repertoire,
 ) -> None:
     # 60 sites, site i read in 60 - i cells: the default draws the 40 read
-    # most, which its axis names.
+    # most, of which its axis names every nth, as many as its width holds.
     many = _recorder_store(
         [
             ("int1", f"s{i:02d}", {"mark": 60 - i, "missing": 3, "unedited": 0})
@@ -1433,9 +1434,8 @@ def test_recorder_states_name_every_site_drawn_and_rank_sites_by_reads(
     result = recorder_plots.recorder_states(many, repertoire.alleles, show=False)
     try:
         ax = result.axes["site_states"]
-        assert [tick.get_text() for tick in ax.get_xticklabels()] == [
-            f"int1-s{i:02d}" for i in range(40)
-        ]
+        result.figure.draw_without_rendering()
+        names_every_nth_item(ax.xaxis, [f"int1-s{i:02d}" for i in range(40)])
         assert ax.get_title() == "The 40 of 60 sites read in the most cells"
         assert result.provenance.extras["drawn_sites"] == 40
     finally:
@@ -1957,7 +1957,7 @@ def test_variant_figures_of_many_groups_stop_at_the_page_width(
             assert width <= MAX_FIGURE_WIDTH_INCHES, result.provenance.notes
             assert height <= 22.0, result.provenance.notes
         # 200 groups' histograms list 80 in their legend and say so, and
-        # 600 bars of three sites and 200 groups name none of them.
+        # 600 bars of three sites and 200 groups name every nth, at most 40.
         depth = results[0]
         assert depth.axes["cells"].get_legend().get_title().get_text() == (
             "own (80 of 200)"
@@ -1965,8 +1965,19 @@ def test_variant_figures_of_many_groups_stop_at_the_page_width(
         assert depth.legends[0].label == "own (80 of 200)"
         assert len(depth.axes["cells"].patches) == N_VARIANT_GROUPS
         calls = results[3].axes["calls"]
-        assert not calls.get_yticklabels()
         assert len({round(patch.get_y(), 6) for patch in calls.patches}) == 600
+        results[3].figure.draw_without_rendering()
+        bars = (
+            results[3]
+            .tables["calls"]
+            .drop_duplicates(["site", "group"])[["site", "group"]]
+        )
+        assert (
+            names_every_nth_item(
+                calls.yaxis, [f"{site}, {group}" for site, group in bars.to_numpy()]
+            )
+            == 15
+        )
     finally:
         for result in results:
             result.close()

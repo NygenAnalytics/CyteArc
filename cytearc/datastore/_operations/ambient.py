@@ -994,6 +994,10 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
                 assay_type="RNA",
                 resources=self.resources,
             )
+            if assay.sf is not None:
+                # The corrected counts normalize as their source's do; JSON
+                # keeps a NumPy number as the number it holds.
+                transaction.group.attrs["size_factor"] = np.asarray(assay.sf).item()
             transaction.group.attrs.update(
                 {
                     "ambient_source_assay": assay.name,

@@ -152,7 +152,12 @@ def _sample_windows(size: int, width: int) -> list[slice]:
 
 
 def _sampled_counts(sample: np.ndarray) -> bool:
-    """Return whether sampled values are finite, non-negative, and whole."""
+    """Return whether sampled values are finite, non-negative, and whole.
+
+    A value is whole only when it equals its integer part exactly, as the
+    count range of an import reads it, so a value a little off a whole
+    number is no count here either.
+    """
     if sample.size == 0 or not np.issubdtype(sample.dtype, np.number):
         return False
     if np.issubdtype(sample.dtype, np.integer):
@@ -160,7 +165,7 @@ def _sampled_counts(sample: np.ndarray) -> bool:
     return bool(
         np.all(np.isfinite(sample))
         and np.all(sample >= 0)
-        and np.allclose(sample, np.round(sample), rtol=0, atol=1e-8)
+        and np.equal(sample, np.trunc(sample)).all()
     )
 
 

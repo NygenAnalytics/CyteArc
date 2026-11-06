@@ -105,6 +105,44 @@ def test_the_colour_bar_names_every_assay_of_features_from_several(plot):
         result.close()
 
 
+@pytest.mark.parametrize(
+    ("store_type", "assays", "label"),
+    [
+        (_ArrayStore, ("RNA", "RNA"), "mean expression"),
+        (_GeneScoreStore, ("GeneScores", "GeneScores"), "mean of GeneScores"),
+        (_TwoAssayStore, ("RNA", "GeneScores"), "mean of GeneScores and RNA"),
+    ],
+)
+def test_the_stacked_violins_colour_bar_names_the_assay_whose_means_it_draws(
+    store_type, assays, label
+):
+    from cytearc.metadata.selection import FeatureRef
+
+    store = _paired_profile_store(store_type)
+    result = splt.distribution(
+        store,
+        [
+            FeatureRef(name, assay=assay, label=f"{name} of {assay}")
+            for name, assay in zip(("GeneA", "GeneB"), assays, strict=True)
+        ],
+        grouping=splt.CellField("group"),
+        kind="stacked_violin",
+        color_by="mean",
+        color_scale=splt.ColorScale(scope="shared"),
+        max_points=0,
+        show=False,
+    )
+    try:
+        (colorbar,) = [spec for spec in result.legends if spec.kind == "colorbar"]
+        assert colorbar.label == label
+        (drawn,) = [
+            ax for ax in result.figure.axes if ax.get_label().startswith("<colorbar")
+        ]
+        assert drawn.get_ylabel() == label
+    finally:
+        result.close()
+
+
 def test_dotplot_with_swapped_axes_reads_groups_from_the_top():
     store = _paired_profile_store()
     result = splt.dotplot(

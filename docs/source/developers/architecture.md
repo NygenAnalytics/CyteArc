@@ -1257,9 +1257,7 @@ CyteArc validates persisted data and public arguments against the following cont
 - `log_transform` means `log1p` of the configured normalizer's output, in float64, on every path. A
   normalizer applies only the flags that it supports (`applicable_normalization_flags`), and
   defaults turn flags on only for the RNA library-size normalizers (`default_normalization_flags`).
-- `log_transform=True` with CLR, `norm_lib_size_log`, or an ATAC normalizer, and
-  `renormalize_subset=True` with CLR, `norm_dummy`, or an ADT or generic assay, raise `ValueError`.
-  To plot logged counts of any assay, use `NormalizationSpec(source="raw", transform="log1p")`.
+- `log_transform=True` with CLR, `norm_lib_size_log`, or an ATAC normalizer, and `renormalize_subset=True` with CLR, `norm_dummy`, or an ADT or generic assay, raise `ValueError`. To plot the logged stored values of any assay, its counts or the values of an assay imported from normalized values, use `NormalizationSpec(source="raw", transform="log1p")`.
 - Every library-size path divides by one definition,
   `cytearc.assay.normalization.library_size_divisors`: a zero total becomes 1, and a negative or
   non-finite total raises `ValueError` naming its source before any result is saved. Results for
