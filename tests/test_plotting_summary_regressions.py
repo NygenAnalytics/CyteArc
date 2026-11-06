@@ -25,6 +25,15 @@ class _GeneScoreStore(_ArrayStore):
         return self.RNA
 
 
+class _TwoAssayStore(_ArrayStore):
+    """The array store, its values read as RNA and as gene scores."""
+
+    def _get_assay(self, name):
+        if name not in ("RNA", "GeneScores"):
+            raise KeyError(name)
+        return self.RNA
+
+
 def _paired_profile_store(store_type=_ArrayStore):
     """Groups a and b share one expression profile, c and d another."""
     groups = np.repeat(np.asarray(["a", "b", "c", "d"], dtype=object), 3)
@@ -71,6 +80,27 @@ def test_the_colour_bar_names_the_assay_whose_means_it_draws(
             if hasattr(text, "get_text")
         }
         assert label in drawn
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize("plot", [splt.dotplot, splt.matrixplot])
+def test_the_colour_bar_names_every_assay_of_features_from_several(plot):
+    from cytearc.metadata.selection import FeatureRef
+
+    store = _paired_profile_store(_TwoAssayStore)
+    result = plot(
+        store,
+        features=[
+            FeatureRef("GeneA", assay="RNA"),
+            FeatureRef("GeneB", assay="GeneScores", label="GeneB score"),
+        ],
+        group_by="group",
+        show=False,
+    )
+    try:
+        (colorbar,) = [spec for spec in result.legends if spec.kind == "colorbar"]
+        assert colorbar.label == "Mean of GeneScores and RNA"
     finally:
         result.close()
 

@@ -175,9 +175,9 @@ def test_counts_rank_umis_then_reads_missing_as_zero() -> None:
     # Each pair's junctions sort against its expected order, so only the
     # counts can put the expected contig first.
     rows = [
-        # A UMI count of 0 is a count, so the duplicate count of a contig
-        # without UMIs outranks it.
-        _chain("TRB", "CASB", junction="TGTB", umi_count=0, duplicate_count=1, sequence_id="b_zero"),
+        # A UMI count of 0 is a count, which the contig's own duplicates do
+        # not replace, so a contig without UMIs and five duplicates outranks it.
+        _chain("TRB", "CASB", junction="TGTB", umi_count=0, duplicate_count=9, sequence_id="b_zero"),
         _chain("TRB", "CASA", junction="TGTA", umi_count=None, duplicate_count=5, sequence_id="b_missing"),
         # Equal UMIs: a contig's duplicates do not count beside its UMIs, so
         # a hundred reads outrank one.

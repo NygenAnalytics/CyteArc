@@ -377,6 +377,25 @@ def test_links_to_a_section_of_another_page_find_it() -> None:
     assert not missing
 
 
+def test_links_within_a_built_page_name_a_label() -> None:
+    # MyST warns of a link to a heading's words on its own page, and a label
+    # names the heading whatever its words become.
+    excluded = _project()["exclude"]
+    unlabelled = []
+    for path in _pages():
+        page = path.relative_to(_DOCS_SOURCE).as_posix()
+        if any(fnmatch(page, rule) for rule in excluded):
+            continue
+        text = _prose(path)
+        labels = set(re.findall(r"^\(([^)\s]+)\)=\s*$", text, re.MULTILINE))
+        unlabelled += [
+            (page, anchor)
+            for anchor in re.findall(r"\]\(#([^)\s]+)\)", text)
+            if anchor not in labels
+        ]
+    assert not unlabelled
+
+
 def test_labels_of_built_pages_stay_apart_once_normalised() -> None:
     # MyST writes a label's underscores as hyphens, so (a_b)= beside (a-b)= is
     # one label twice, which the build warns of.

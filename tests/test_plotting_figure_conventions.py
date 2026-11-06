@@ -1618,6 +1618,32 @@ def test_gene_usage_draws_the_genes_that_each_group_uses_most(repertoire) -> Non
         result.close()
 
 
+def test_gene_usage_ranks_a_groups_tied_genes_by_their_chains_overall(
+    repertoire,
+) -> None:
+    from cytearc import plotting
+
+    # The MAIT cells' one cell of TRBV2 and of TRBV9 tie; TRBV9 has more chains
+    # over both groups, so it ranks second among the MAIT cells' genes, and
+    # TRBV2, third, does not displace the naive cells' third gene.
+    counts = {
+        "naive": {"TRBV9": 50, "TRBV3": 40, "TRBV4": 30, "TRBV2": 10},
+        "MAIT": {"TRBV6-4": 20, "TRBV2": 1, "TRBV9": 1},
+    }
+    usage = _usage_of_counts(repertoire.receptors, counts, ("cell_type",))
+    result = plotting.gene_usage(object(), usage, max_genes=4, show=False)
+    try:
+        ax = result.axes["TRB"]
+        assert [tick.get_text() for tick in ax.get_yticklabels()] == [
+            "TRBV9",
+            "TRBV3",
+            "TRBV4",
+            "TRBV6-4",
+        ]
+    finally:
+        result.close()
+
+
 def test_gene_usage_breaks_ties_of_first_genes_by_their_chains(repertoire) -> None:
     from cytearc import plotting
 
