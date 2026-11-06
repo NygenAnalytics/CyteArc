@@ -61,6 +61,7 @@ from ...utils.files import is_hdf5
 from ...utils.logging import logger
 from ...utils.memory_budget import MemoryLedger
 from ...utils.numba import numba_threads
+from ...utils.warnings import warn
 from ...variants.counts import (
     CALL_DTYPE,
     CALL_FIELDS,
@@ -198,6 +199,7 @@ _FREQUENCY_BYTES_PER_ENTRY = 8
 _BAND_FREQUENCY_BYTES = 32
 # The Leiden seed of variant clones, CyteArc's default.
 _CLONE_SEED = 4444
+
 # Bytes held for each cell while called clones are saved, beside what saving
 # them holds: its position, group, cluster and status of the call.
 _CLONE_CALL_BYTES_PER_CELL = 34
@@ -271,6 +273,30 @@ _GENOTYPE_RULES = (
         ),
     ),
 )
+
+
+def _warn_of_small_groups(groups: np.ndarray, n_groups: int, n_neighbors: int) -> None:
+    """Warn when groups of scored cells hold fewer cells than a full neighbourhood.
+
+    Each cell's neighbourhood then holds every cell of its group that it
+    resembles at all, so clones of the group that share a variant join.
+    """
+    sizes = np.bincount(groups, minlength=n_groups)
+    small = int(np.count_nonzero((sizes > 0) & (sizes < n_neighbors)))
+    if not small:
+        return
+    where = (
+        f"The {int(sizes.sum())} scored cells are fewer"
+        if n_groups == 1
+        else f"Of the {int(np.count_nonzero(sizes))} within groups, {small} "
+        f"hold{'s' if small == 1 else ''} fewer scored cells"
+    )
+    warn(
+        f"{where} than n_neighbors={n_neighbors}, so no neighbourhood there is "
+        "full: each cell takes every cell of its group that it resembles as a "
+        "neighbour, and clones that share a variant join. Pass a smaller "
+        "n_neighbors."
+    )
 
 
 def _skipped_variants(sources: Sequence["_Source"]) -> dict[str, Any]:
@@ -2329,6 +2355,14 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         of the counts that ``informative`` scored, and its statistics cover
         the cells that the clones are called from.
 
+        The similarity counts a frequency whatever the reads behind it, so
+        one stray read of a clone's variant can put a cell in that clone. A
+        clone of fewer cells than ``n_neighbors`` cannot stand alone: its
+        cells take neighbours from other clones and it joins the most similar
+        one, so a smaller ``n_neighbors`` finds smaller clones. The call warns
+        when a ``within`` group, or without ``within`` all the scored cells,
+        holds fewer cells than ``n_neighbors``.
+
         Clones are numbered by size over every ``within`` group, so
         ``clone_1`` is the largest, and ties follow their first cell.
 
@@ -2407,7 +2441,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         # each scored cell's group and the groups' labels.
         scored = np.zeros(n_cells, dtype=bool)
         scored[positions] = True
-        group_codes, _keys, fingerprint = within_groups(
+        group_codes, group_keys, fingerprint = within_groups(
             self.zw,
             self.cells,
             cell_selection,
@@ -2421,6 +2455,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             what="counts that the statistics scored",
         )
         del scored
+        _warn_of_small_groups(group_codes[positions], len(group_keys), int(n_neighbors))
         arguments = FrequencyCloneArguments(
             cell_selection=cell_selection,
             informative=informative,
