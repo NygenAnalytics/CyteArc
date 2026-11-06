@@ -489,7 +489,7 @@ def aggregate_bulk_profiles(
             codes[included],
             len(column_rows),
             scalars=scalars,
-            size_factor=cast(int, assay.sf),
+            size_factor=cast(float, assay.sf),
             return_fraction=return_fraction,
             resources=resources,
             io=assay.storageIo,

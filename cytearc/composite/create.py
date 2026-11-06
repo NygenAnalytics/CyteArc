@@ -30,7 +30,7 @@ from ..merge.row_plan import (
     iter_row_plan_segments,
     max_row_plan_block_rows,
 )
-from ..merge.writer import create_assay_counts
+from ..merge.writer import create_assay_counts, shared_size_factor
 from ..metadata.membership import resolve_assay_membership
 from ..metadata.rows import default_block_rows
 from ..storage.artifacts import fingerprint_stored_arrays
@@ -635,6 +635,7 @@ def create_composite(
     assay_types = {declared_assay_type(source) for source in assays}
     if len(assay_types) != 1:
         raise ValueError(f"Sources declare different types for assay {assay!r}")
+    size_factor = shared_size_factor(assay, dict(zip(names, assays, strict=True)))
     requires_transpose = assays[0].requiresCountsT
     for source, source_assay in zip(datasets, assays, strict=True):
         prefetch_metadata_listing(source.cells._group)
@@ -806,6 +807,7 @@ def create_composite(
             profile="fast_local",
             policy=pair.policy,
             sources=assays,
+            size_factor=size_factor,
         )
         matrix = as_zarr_group(root[assay], name=assay)
         counts = as_zarr_array(matrix["counts"], name="counts")

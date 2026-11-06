@@ -1,3 +1,4 @@
+import math
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from typing import Any, Literal, cast
 
@@ -231,7 +232,19 @@ class RNAassay(Assay):
         )
         self.normMethod = norm_lib_size
         if "size_factor" in self.attrs:
-            self.sf = int(cast(int, self.attrs["size_factor"]))
+            # A stored size factor is kept as stored, such as 0.5 or 2500.5.
+            stored = self.attrs["size_factor"]
+            if (
+                isinstance(stored, bool)
+                or not isinstance(stored, int | float)
+                or not math.isfinite(stored)
+                or stored <= 0
+            ):
+                raise ValueError(
+                    f"Assay {name!r} has the size_factor attribute {stored!r}, "
+                    "which is not a finite positive number"
+                )
+            self.sf = stored
         else:
             self.sf = 1000
             if not self.z.read_only:

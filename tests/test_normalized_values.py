@@ -2,8 +2,9 @@
 
 Steps that need counts read only an assay's ``normalizedValues`` record, so
 their refusals are tested on stores of counts that carry it, where every other
-input of the step is valid. Copies and combinations must carry the record, and
-the RNA recipe must give the counts' results on log-normalized values.
+input of the step is valid. Copies and combinations must carry the record and
+the size factor, and the RNA recipe must give the counts' results on
+log-normalized values.
 """
 
 import shutil
@@ -577,6 +578,73 @@ def test_every_copy_and_combination_carries_the_record(
         TypeError, match="Doublet scoring needs counts|holds normalized"
     ):
         copied.RNA.require_counts("Doublet scoring", "a reason", "a remedy")
+
+
+def _counts_with_size_factor(tmp_path: Path, size_factor: float) -> DataStore:
+    """A store of counts whose RNA assay stores ``size_factor``."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    _counts_source(tmp_path).RNA.attrs["size_factor"] = size_factor
+    return _open(tmp_path / "counts.zarr")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        _mount,
+        lambda source, tmp: _repack(source, tmp, data_only=False),
+        lambda source, tmp: _repack(source, tmp, data_only=True),
+        _subset,
+        _merge_with_itself,
+        _composite,
+    ],
+    ids=["mount", "repack", "data-only repack", "subset", "merge", "composite"],
+)
+def test_every_copy_and_combination_keeps_the_size_factor(tmp_path, path):
+    source = _counts_with_size_factor(tmp_path / "source", 2500.5)
+    assert source.RNA.sf == 2500.5
+
+    copied = path(source, tmp_path)
+
+    assert copied.RNA.sf == 2500.5
+    assert copied.RNA.attrs["size_factor"] == 2500.5
+
+
+@pytest.mark.parametrize("combine", ["merge", "composite"])
+def test_sources_of_different_size_factors_are_refused_before_a_write(
+    tmp_path, combine
+):
+    first = _counts_with_size_factor(tmp_path / "a", 1000)
+    second = _counts_with_size_factor(tmp_path / "b", 2500.5)
+    destination = tmp_path / "combined.zarr"
+
+    def combined() -> DataStore:
+        if combine == "merge":
+            DataStoreMerge(
+                [first, second], str(destination), ["a", "b"], nthreads=1
+            ).dump()
+            return _open(destination)
+        return create_composite(
+            {"a": first, "b": second},
+            at=str(destination),
+            features="intersection",
+            rows={"a": np.arange(20), "b": np.arange(20, 40)},
+            nthreads=1,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Sources normalize assay 'RNA' with different size factors: 'a' "
+        r"1000, 'b' 2500\.5\. A combined assay keeps the one size factor that its "
+        r"sources share; set it on each source's assay, such as ds\.RNA\.sf = "
+        r"1000, then combine them again\.$",
+    ):
+        combined()
+    assert not destination.exists()
+    # Set to one size factor, here as a NumPy number, the same sources combine
+    # with it, stored as the number it holds.
+    first.RNA.sf = np.float32(2500.5)
+    joint = combined()
+    assert joint.RNA.sf == 2500.5 and type(joint.RNA.sf) is float
 
 
 def test_a_merge_with_counts_holds_normalized_values_of_no_single_import(

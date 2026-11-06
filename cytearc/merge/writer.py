@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -125,6 +125,38 @@ def scatter_block_dense(
     return dense
 
 
+def shared_size_factor(assay_name: str, sources: Mapping[str, Any]) -> float | None:
+    """Return the size factor that every source of a combined assay normalizes with.
+
+    A combined assay keeps the size factor of its sources, so that it
+    normalizes their counts as they do. Sources whose class has no size
+    factor, such as ADT assays, give None.
+
+    Args:
+        assay_name: The combined assay, which the error names.
+        sources: Each source's assay, by the source's name.
+
+    Raises:
+        ValueError: If two sources normalize with different size factors.
+    """
+    factors = {
+        name: source.sf
+        for name, source in sources.items()
+        if getattr(source, "sf", None) is not None
+    }
+    if len(set(factors.values())) > 1:
+        listed = ", ".join(f"{name!r} {factor!r}" for name, factor in factors.items())
+        raise ValueError(
+            f"Sources normalize assay {assay_name!r} with different size factors: "
+            f"{listed}. A combined assay keeps the one size factor that its sources "
+            f"share; set it on each source's assay, such as ds.{assay_name}.sf = "
+            "1000, then combine them again."
+        )
+    shared = next(iter(factors.values()), None)
+    # Attributes are JSON, so a NumPy number is kept as the number it holds.
+    return None if shared is None else np.asarray(shared).item()
+
+
 def create_assay_counts(
     root: zarr.Group,
     assay_name: str,
@@ -136,8 +168,13 @@ def create_assay_counts(
     profile: StorageProfile,
     policy: CountMatrixPolicy,
     sources: Sequence[Any],
+    size_factor: float | None,
 ) -> zarr.Array:
-    """Create the counts of a combined assay, which holds normalized values when a source does."""
+    """Create the counts of a combined assay, which holds normalized values when a source does.
+
+    ``size_factor`` is the one that its sources share, from
+    :func:`shared_size_factor`, which the assay keeps; None stores none.
+    """
     counts = create_zarr_count_assay(
         z=root,
         assay_name=assay_name,
@@ -152,6 +189,9 @@ def create_assay_counts(
             source.normalizedValues for source in sources
         ),
     )
+    if size_factor is not None:
+        path = _assay_metadata_path(assay_name, workspace)
+        as_zarr_group(root[path], name=path).attrs["size_factor"] = size_factor
     matrix_group = as_zarr_group(
         root[_matrix_group_path(assay_name, workspace)],
         name=_matrix_group_path(assay_name, workspace),
