@@ -105,6 +105,8 @@ project:
       title: Lineage curves
     - file: tutorials/trajectory_validation.md
       title: Trajectory validation
+    - file: tutorials/lineage_tracing.ipynb
+      title: Lineage tracing
   - title: Data management
     children:
     - file: tutorials/import_and_export.ipynb

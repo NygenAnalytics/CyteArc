@@ -60,6 +60,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 - [Lineage dynamics](tutorials/lineage-dynamics/): fate-weighted genes, drivers, and modules per lineage
 - [Lineage curves](tutorials/lineage-curves/): curves per lineage, placing points, and candidate sinks from a cluster tree
 - [Trajectory validation](tutorials/trajectory-validation/): boundary, graph, statistical, and numerical checks
+- [Lineage tracing](tutorials/lineage-tracing/): LARRY's clones, clone sizes by day, fate coupling, the fate bias of day-2 progenitors, and fate probabilities scored against the fates their clones took
 
 ## Data management
 
