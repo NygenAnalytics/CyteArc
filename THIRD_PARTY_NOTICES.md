@@ -406,6 +406,7 @@ third-party observations and is licensed under BSD-3-Clause, as in `LICENSE`.
 | Cell calling | "1k PBMCs from a Healthy Donor (v2 chemistry)", raw feature-barcode matrix, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
 | Ambient RNA removal | "1k PBMCs from a Healthy Donor (v2 chemistry)", 10x Genomics, <https://www.10xgenomics.com/datasets>. Raw and filtered Cell Ranger matrices | CC BY 4.0 |
 | Immune repertoires | "Human PBMC from a Healthy Donor, 10k cells (v2)", 5' gene expression with antibody, TCR and BCR libraries, Cell Ranger 5.0.0, 10x Genomics, <https://www.10xgenomics.com/datasets>. Filtered feature-barcode matrix and the AIRR Rearrangement files of the TCR and BCR libraries | CC BY 4.0 |
+| Lineage recorders | Colgan et al. (2026), Cell 189:7154-7176.e20, doi:10.1016/j.cell.2026.09.050; GEO GSE342226 (GSM9925879: the expression matrix of embryo E7.5-R1; GSM9925880: its character matrix and its two clone trees). The same data are released as the Mouse Embryonic Lineage Atlas by William Colgan and Luke Koblan (Zenodo, doi:10.5281/zenodo.19892784), whose cell table `E7.5-E10_cells.csv` annotates each embryo's donor cells; the tutorial reads its first 185,933 bytes, the header and the rows of E7.5-R1 | MIT; the license text is at the end of this file |
 | CyteBase datasets and CyteBase composite datasets | Datasets from CZ CELLxGENE Discover, each credited in its CyteBase catalog entry | The license of each dataset on CELLxGENE Discover, usually CC BY 4.0 |
 
 ## Data that validated the screen methods

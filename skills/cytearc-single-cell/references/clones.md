@@ -1,6 +1,6 @@
 # Clones and lineage tracing
 
-Import the clones that a lineage tracing tool or a study assigned to cells, the lineage barcodes that clones are called from and call the clones, or the alleles of a lineage recorder that trees are built from and clones are called from, join them to the store's cells, check how many barcodes joined, see how large the clones are, measure clonal expansion and diversity within samples or other groups of cells, compare groups by the clones they share, measure which fates are coupled, and follow the clones of early cells to the fates they took. Docs: <https://docs.nygen.io/CyteArc/api/clones.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Import the clones that a lineage tracing tool or a study assigned to cells, the lineage barcodes that clones are called from and call the clones, or the alleles of a lineage recorder that trees are built from and clones are called from, join them to the store's cells, check how many barcodes joined, see how large the clones are, measure clonal expansion and diversity within samples or other groups of cells, compare groups by the clones they share, measure which fates are coupled, and follow the clones of early cells to the fates they took. Docs: <https://docs.nygen.io/CyteArc/api/clones.html>, <https://docs.nygen.io/CyteArc/tutorials/lineage-recorders>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 

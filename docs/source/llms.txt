@@ -61,6 +61,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 - [Lineage curves](tutorials/lineage-curves/): curves per lineage, placing points, and candidate sinks from a cluster tree
 - [Trajectory validation](tutorials/trajectory-validation/): boundary, graph, statistical, and numerical checks
 - [Lineage tracing](tutorials/lineage-tracing/): LARRY's clones, clone sizes by day, fate coupling, the fate bias of day-2 progenitors, and fate probabilities scored against the fates their clones took
+- [Lineage recorders](tutorials/lineage-recorders/): PEtracer marks of a mouse embryo at E7.5, its authors' clone trees, clones cut at five times from E5.0 to E7.0, and the coupling of cell types at each cut
 
 ## Data management
 

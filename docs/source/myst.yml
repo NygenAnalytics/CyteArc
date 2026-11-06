@@ -107,6 +107,8 @@ project:
       title: Trajectory validation
     - file: tutorials/lineage_tracing.ipynb
       title: Lineage tracing
+    - file: tutorials/lineage_recorders.ipynb
+      title: Lineage recorders
   - title: Data management
     children:
     - file: tutorials/import_and_export.ipynb
