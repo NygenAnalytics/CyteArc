@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import replace
+from itertools import permutations
 from types import SimpleNamespace
 
 import matplotlib
@@ -323,6 +324,105 @@ def test_figures_of_many_groups_and_clones_stop_at_the_page_width(many) -> None:
     finally:
         for result in results:
             result.close()
+
+
+# Cell types named as a tutorial names them, beside their receptor type.
+LONG_NAMES = (
+    "CD4 memory T, TCR",
+    "CD4 naive T, TCR",
+    "CD8 effector memory T, TCR",
+    "CD8 naive T, TCR",
+    "MAIT and gamma delta T, TCR",
+)
+
+
+@pytest.fixture(scope="module")
+def long_names(tmp_path_factory) -> SimpleNamespace:
+    """300 cells of five cell types with long names, cell i in clone i // 3."""
+    folder = tmp_path_factory.mktemp("long_group_names")
+    ids = [f"cell{i:03d}" for i in range(300)]
+    store = write_cells_store(folder / "store.zarr", ids)
+    store.cells.insert(
+        "cell_type", np.asarray(LONG_NAMES, dtype=object)[np.arange(300) % 5]
+    )
+    clone_of = np.arange(300) // 3
+    store.cells.insert(
+        "clone", np.asarray([f"k{clone:03d}" for clone in clone_of], dtype=object)
+    )
+    cells = every_cell(store)
+    contigs = write_clone_contigs(folder, "contigs.csv", ids, clone_of)
+    return SimpleNamespace(
+        store=store,
+        clones=store.clones.from_column("clone", cell_selection=cells),
+        receptors=store.repertoire.import_receptors(contigs, cell_selection=cells),
+    )
+
+
+def _written(ax, renderer) -> list[tuple[str, object]]:
+    """The extents of what a panel writes: its title, axis labels and the tick labels within its limits."""
+    texts = [ax.title, ax.xaxis.label, ax.yaxis.label]
+    for axis, at, limits in (
+        (ax.xaxis, 0, ax.get_xlim()),
+        (ax.yaxis, 1, ax.get_ylim()),
+    ):
+        low, high = sorted(limits)
+        texts += [
+            label
+            for label in axis.get_ticklabels()
+            if label.get_visible() and low <= label.get_position()[at] <= high
+        ]
+    return [
+        (text.get_text(), text.get_window_extent(renderer))
+        for text in texts
+        if text.get_visible() and text.get_text()
+    ]
+
+
+@pytest.mark.parametrize(
+    "draw",
+    [
+        lambda data: data.store.plots.clonal_rarefaction(
+            data.store.clones.rarefaction(data.clones, group_by="cell_type"),
+            show=False,
+        ),
+        lambda data: data.store.plots.clonal_diversity(
+            data.store.clones.diversity(data.clones, group_by="cell_type"),
+            show=False,
+        ),
+        lambda data: data.store.plots.spectratype(
+            data.store.repertoire.spectratype(data.receptors, group_by="cell_type"),
+            show=False,
+        ),
+    ],
+    ids=["clonal_rarefaction", "clonal_diversity", "spectratype"],
+)
+def test_panels_beside_a_legend_of_long_names_keep_their_texts_apart(
+    long_names, draw
+) -> None:
+    # The page's width holds three panels beside the legend, so a panel's
+    # title, labels and tick labels must stay within its own room.
+    result = draw(long_names)
+    try:
+        figure = result.figure
+        assert figure.get_size_inches()[0] == MAX_FIGURE_WIDTH_INCHES
+        figure.draw_without_rendering()
+        renderer = figure.canvas.get_renderer()
+        frames = {
+            key: ax.get_window_extent(renderer) for key, ax in result.axes.items()
+        }
+        written = {key: _written(ax, renderer) for key, ax in result.axes.items()}
+        collisions = [
+            (key, text, other)
+            for key, other in permutations(result.axes, 2)
+            for text, extent in written[key]
+            if extent.overlaps(frames[other])
+            or any(extent.overlaps(seen) for _, seen in written[other])
+        ]
+        assert not collisions
+        # The legend names every group beside the first row.
+        assert set(LONG_NAMES) <= set(_texts(result))
+    finally:
+        result.close()
 
 
 def _empty_fate_bias(store):

@@ -61,10 +61,12 @@ _COUPLING_VALUES = ("z_score", "coupling")
 
 
 def _order_title(order: int, names: CloneNames) -> str:
+    # The order takes a line of its own, so that three titles fit a row of
+    # panels beside a legend of long group names.
     return {
-        0: f"{names.plural.capitalize()} (order 0)",
-        1: "Shannon diversity (order 1)",
-        2: "Simpson diversity (order 2)",
+        0: f"{names.plural.capitalize()}\n(order 0)",
+        1: "Shannon diversity\n(order 1)",
+        2: "Simpson diversity\n(order 2)",
     }[order]
 
 
@@ -109,6 +111,20 @@ def _index_titles(names: CloneNames) -> dict[str, str]:
         "chao1_bias_corrected": "Bias-corrected Chao1",
         "ace": "ACE",
     }
+
+
+def _two_lines(title: str) -> str:
+    """Break a title of several words at the space nearest its middle.
+
+    Panels of a row stand beside a legend within the page, and a title is
+    centred over its panel whatever its width, so two lines keep the titles
+    of narrow panels apart.
+    """
+    spaces = [at for at, character in enumerate(title) if character == " "]
+    if not spaces:
+        return title
+    at = min(spaces, key=lambda space: abs(2 * space + 1 - len(title)))
+    return f"{title[:at]}\n{title[at + 1 :]}"
 
 
 def _color_scale(color_scale: Any) -> ColorScale | None:
@@ -733,7 +749,9 @@ def clonal_diversity(
     clones, Shannon entropy and the inverse Simpson index, which are the
     observed Hill numbers of orders 0, 1, as its logarithm, and 2. Each
     panel draws one bar per group, in the groups' colours, and the panels
-    fill rows of three, with one legend of the groups beside the first row.
+    fill rows of three, with one legend of the groups beside the first row;
+    the groups stand in one order in every panel, so the first panel of each
+    row names them.
     A group whose index is not defined, such as Pielou's evenness of a group
     of one clone, draws no bar, and a panel of none says so; a figure of
     none is refused. An observed
@@ -798,12 +816,17 @@ def clonal_diversity(
                 value=index,
                 colors=colors,
                 value_label="",
-                title=titles[index],
+                title=_two_lines(titles[index]),
                 legend_title=plotted.title if index == legend_panel else None,
                 show_legend=show_legend,
             )
             if index == legend_panel:
                 drawn = found
+            # Every panel lists the groups in one order, so the first panel of
+            # each row names them, and the later panels' bars keep the room.
+            spec = ax.get_subplotspec()
+            if spec is not None and not spec.is_first_col():
+                ax.tick_params(axis="y", labelleft=False)
             if not np.isfinite(table[index].to_numpy(dtype=np.float64)).any():
                 ax.text(
                     0.5,

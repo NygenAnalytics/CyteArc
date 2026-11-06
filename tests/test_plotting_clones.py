@@ -657,7 +657,7 @@ def test_the_rarefaction_plot_draws_one_panel_per_order(truth_plot) -> None:
     assert sorted(curves["group"].unique()) == ["d2", "d4"]
     assert result.provenance.n_cells == 32
     assert result.provenance.extras["grouping"] == "sample"
-    assert result.axes["order_1"].get_title() == "Shannon diversity (order 1)"
+    assert result.axes["order_1"].get_title() == "Shannon diversity\n(order 1)"
     assert result.axes["coverage"].get_ylabel() == "Sample coverage"
     # One legend of the samples, beside the last panel of the first row.
     legend = result.axes["order_2"].get_legend()
@@ -737,8 +737,16 @@ def test_the_diversity_plot_draws_each_groups_indices(truth_plot) -> None:
             assert [bar.get_width() for bar in bars] == pytest.approx(
                 diversity.indices[index].tolist()
             )
-        ticks = result.axes["gini"].get_yticklabels()
-        assert [tick.get_text() for tick in ticks] == ["d2", "d4"]
+        # The first panel of each row names the samples, d2 on top, for the
+        # panels beside it.
+        for index, named in (
+            ("n_clones", ["d2", "d4"]),
+            ("gini", []),
+            ("chao1", []),
+            ("d50", ["d2", "d4"]),
+        ):
+            ticks = result.axes[index].get_yticklabels()
+            assert [tick.get_text() for tick in ticks] == named, index
         assert result.axes["n_clones"].get_title() == "Clones"
         assert result.axes["chao1"].get_title() == "Chao1"
         # One legend of the samples, beside the last panel of the first row,

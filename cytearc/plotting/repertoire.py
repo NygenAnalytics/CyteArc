@@ -737,10 +737,12 @@ def spectratype(
             ),
             columns=_LOCUS_PANELS_PER_ROW,
         )
+    # The unit takes a line of its own, so that labels of panels side by side
+    # do not run into each other.
     x_label = (
-        "Junction length (residues)"
+        "Junction length\n(residues)"
         if sequence == "aa"
-        else "Junction length (nucleotides)"
+        else "Junction length\n(nucleotides)"
     )
     y_label = f"Fraction of {counted}"
     with theme_context(theme):

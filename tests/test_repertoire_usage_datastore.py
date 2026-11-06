@@ -432,7 +432,7 @@ def test_spectratype_plot_draws_lines_per_group(tmp_path) -> None:
         assert legend.get_title().get_text() == "sample"
         assert [text.get_text() for text in legend.get_texts()] == ["s1", "s2"]
         assert ax.get_legend() is None
-        assert ax.get_xlabel() == "Junction length (residues)"
+        assert ax.get_xlabel() == "Junction length\n(residues)"
     finally:
         result.close()
     single = plotting.spectratype(
@@ -440,7 +440,7 @@ def test_spectratype_plot_draws_lines_per_group(tmp_path) -> None:
     )
     try:
         assert len(single.axes["TRA"].patches) == 1
-        assert single.axes["TRA"].get_xlabel() == "Junction length (nucleotides)"
+        assert single.axes["TRA"].get_xlabel() == "Junction length\n(nucleotides)"
         assert single.axes["TRB"].get_legend() is None
     finally:
         single.close()
