@@ -806,6 +806,24 @@ def test_the_diversity_plot_on_caller_axes_names_the_groups_where_a_row_starts(
     loose = plt.figure()
     panels = [loose.add_axes((0.1 + 0.3 * at, 0.1, 0.2, 0.8)) for at in range(3)]
     assert named(dict(zip(indices, panels, strict=True))) == [True, True, True]
+    # The caller's other panels name nothing for these: panels from the
+    # second column of a row, or a row's second panel alone, still start one.
+    _, wide = plt.subplots(1, 4)
+    assert named(dict(zip(indices, wide[1:], strict=True))) == [True, False, False]
+    _, grid = plt.subplots(2, 2)
+    result = clonal_diversity(
+        store,
+        diversity,
+        indices="shannon",
+        target={"shannon": grid[0, 1]},
+        show_legend=False,
+        show=False,
+    )
+    try:
+        ticks = result.axes["shannon"].get_yticklabels()
+        assert [tick.get_text() for tick in ticks] == ["d2", "d4"]
+    finally:
+        plt.close(result.figure)
 
 
 def test_a_diversity_panel_of_no_defined_value_says_so(truth_plot) -> None:

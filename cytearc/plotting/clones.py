@@ -127,6 +127,23 @@ def _two_lines(title: str) -> str:
     return f"{title[:at]}\n{title[at + 1 :]}"
 
 
+def _follows_a_panel(ax: Any, panels: Sequence[Any]) -> bool:
+    """Whether one of ``panels`` stands directly left of ``ax`` in one row of one grid."""
+    spec = ax.get_subplotspec()
+    if spec is None:
+        return False
+    for panel in panels:
+        left = panel.get_subplotspec()
+        if (
+            left is not None
+            and left.get_gridspec() is spec.get_gridspec()
+            and left.rowspan == spec.rowspan
+            and left.colspan.stop == spec.colspan.start
+        ):
+            return True
+    return False
+
+
 def _color_scale(color_scale: Any) -> ColorScale | None:
     if color_scale is not None and not isinstance(color_scale, ColorScale):
         raise TypeError("color_scale must be a ColorScale or None")
@@ -750,8 +767,8 @@ def clonal_diversity(
     observed Hill numbers of orders 0, 1, as its logarithm, and 2. Each
     panel draws one bar per group, in the groups' colours, and the panels
     fill rows of three, with one legend of the groups beside the first row;
-    the groups stand in one order in every panel, so the first panel of each
-    row names them.
+    the groups stand in one order in every panel, so a panel directly right
+    of another leaves their names to it, also on caller axes.
     A group whose index is not defined, such as Pielou's evenness of a group
     of one clone, draws no bar, and a panel of none says so; a figure of
     none is refused. An observed
@@ -822,10 +839,9 @@ def clonal_diversity(
             )
             if index == legend_panel:
                 drawn = found
-            # Every panel lists the groups in one order, so the first panel of
-            # each row names them, and the later panels' bars keep the room.
-            spec = ax.get_subplotspec()
-            if spec is not None and not spec.is_first_col():
+            # Every panel lists the groups in one order, so a panel right of
+            # another of these panels leaves the names to it and keeps the room.
+            if _follows_a_panel(ax, [axes[other] for other in chosen]):
                 ax.tick_params(axis="y", labelleft=False)
             if not np.isfinite(table[index].to_numpy(dtype=np.float64)).any():
                 ax.text(
