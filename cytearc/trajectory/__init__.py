@@ -3,6 +3,10 @@ from typing import TYPE_CHECKING
 from .._facade import lazy_facade as _lazy_facade
 
 if TYPE_CHECKING:
+    from .errors import (
+        PseudotimeConvergenceError as PseudotimeConvergenceError,
+        SourceSinkLabelsError as SourceSinkLabelsError,
+    )
     from .feature_dynamics import (
         aggregate_feature_profiles as aggregate_feature_profiles,
         scatter_feature_clusters as scatter_feature_clusters,
@@ -38,8 +42,10 @@ __all__ = [
     "LineageMarkerResult",
     "LineageTreeResult",
     "PseudotimeAggregationResult",
+    "PseudotimeConvergenceError",
     "PseudotimeMarkerResult",
     "PseudotimeScoreResult",
+    "SourceSinkLabelsError",
     "aggregate_feature_profiles",
     "make_source_sink_vector",
     "random_walk_laplacian_transpose",
@@ -73,5 +79,7 @@ __getattr__, __dir__ = _lazy_facade(
         "PseudotimeAggregationResult": ".results",
         "PseudotimeMarkerResult": ".results",
         "PseudotimeScoreResult": ".results",
+        "PseudotimeConvergenceError": ".errors",
+        "SourceSinkLabelsError": ".errors",
     },
 )

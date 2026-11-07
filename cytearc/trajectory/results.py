@@ -55,19 +55,44 @@ class FateMappingResult:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class PseudotimeScoreResult:
-    """Pseudotime values loaded from an immutable artifact."""
+    """Pseudotime values loaded from an immutable artifact.
+
+    ``component`` gives each cell's connected component of the graph,
+    numbered by decreasing size, and ``component_sizes`` the components' cell
+    counts, largest first. The ``valid`` cells form the scored component.
+    """
 
     ref: ArtifactRef
     graph: ArtifactRef
     cell_selection: ArtifactRef
     values: np.ndarray = field(repr=False)
     valid: np.ndarray = field(repr=False)
+    component: np.ndarray = field(repr=False)
+    component_sizes: tuple[int, ...]
 
     def __post_init__(self) -> None:
         if self.values.ndim != 1 or self.valid.ndim != 1:
             raise ValueError("Pseudotime values and validity must be one-dimensional")
         if self.values.shape != self.valid.shape:
             raise ValueError("Pseudotime values and validity must have the same shape")
+        component = np.asarray(self.component)
+        if component.shape != self.values.shape:
+            raise ValueError("Pseudotime components must align with the values")
+        if component.dtype.kind not in "iu" or (
+            component.size and int(component.min()) < 0
+        ):
+            raise ValueError("Pseudotime components must be non-negative integers")
+        sizes = tuple(int(size) for size in self.component_sizes)
+        if list(sizes) != sorted(sizes, reverse=True):
+            raise ValueError("Pseudotime component sizes must be largest first")
+        if np.bincount(component, minlength=len(sizes)).tolist() != list(sizes):
+            raise ValueError("Pseudotime component sizes must count the components")
+        valid = np.asarray(self.valid, dtype=bool)
+        if valid.any() and not np.array_equal(
+            valid, component == component[np.argmax(valid)]
+        ):
+            raise ValueError("Valid pseudotime cells must form one whole component")
+        object.__setattr__(self, "component_sizes", sizes)
 
 
 @dataclass(frozen=True, slots=True, eq=False)

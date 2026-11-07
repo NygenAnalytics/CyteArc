@@ -39,6 +39,7 @@ from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.finite_values import NonFiniteArtifactError
 from cytearc.perturbation.histograms import HistogramMemoryError
 from cytearc.storage.sharding import CountLayoutMemoryError
+from cytearc.trajectory import PseudotimeConvergenceError, SourceSinkLabelsError
 from cytearc.utils.memory_budget import MemoryBudgetError, memory_refusal
 from cytearc.utils.shutdown import ShutdownRequest, ShutdownRequested
 from cytearc.utils.warnings import DiagnosticWarning
@@ -77,6 +78,17 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
         context={"kind": "cell_selection"},
     ),
     NonFiniteArtifactError: lambda: NonFiniteArtifactError("run_pca", "data", 7),
+    PseudotimeConvergenceError: lambda: PseudotimeConvergenceError(
+        595475, 30, 0, 50, 3224, 50, None
+    ),
+    SourceSinkLabelsError: lambda: SourceSinkLabelsError(
+        "Source/sink labels were not found in the retained connected component. "
+        "Missing sources: ['small_component']; missing sinks: []",
+        missing_sources=["small_component"],
+        missing_sinks=[],
+        missing_from="scored component",
+        component_sizes=[266, 8],
+    ),
     CountLayoutMemoryError: lambda: CountLayoutMemoryError(
         "countsT needs 8 GB",
         needed_bytes=8 * 10**9,

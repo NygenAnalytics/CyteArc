@@ -36,6 +36,9 @@ PSEUDOTIME_PARAMETERS = frozenset(
         "component_policy",
     }
 )
+# The solver bounds that a pseudotime records only when its call set them, so
+# a pseudotime solved with SciPy's defaults keeps its identity.
+PSEUDOTIME_SOLVER_PARAMETERS = frozenset({"solver_tol", "max_iterations"})
 FATE_INPUTS = frozenset(
     {"connectivity_map", "pseudotime", "sink_labels", "cell_selection"}
 )
@@ -216,17 +219,44 @@ def _size_factor(value: Any) -> float | None:
     return _real_parameter(value, "size_factor", minimum=0.0, minimum_open=True)
 
 
+def pseudotime_parameter_names(parameters: Mapping[str, Any]) -> frozenset[str]:
+    """Return the parameter names that a pseudotime with ``parameters`` records."""
+    return PSEUDOTIME_PARAMETERS | (PSEUDOTIME_SOLVER_PARAMETERS & parameters.keys())
+
+
 def validate_pseudotime_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a pseudotime's parameters, recorded or requested.
+
+    ``solver_tol`` and ``max_iterations`` are None when absent, as a record
+    leaves them out unless its call set them.
+    """
     require_exact_record_keys(
-        parameters, PSEUDOTIME_PARAMETERS, "Pseudotime parameters"
+        parameters, pseudotime_parameter_names(parameters), "Pseudotime parameters"
     )
     sources = _label_parameters(parameters["sources"], "sources", required=False)
     sinks = _label_parameters(parameters["sinks"], "sinks", required=False)
     if any(bool(source == sink) for source in sources for sink in sinks):
         raise ValueError("sources and sinks must be disjoint")
     component_policy = parameters["component_policy"]
-    if component_policy not in {"largest", "error"}:
-        raise ValueError("component_policy must be 'largest' or 'error'")
+    if component_policy not in {"largest", "sources", "error"}:
+        raise ValueError("component_policy must be 'largest', 'sources' or 'error'")
+    solver_tol = None
+    if "solver_tol" in parameters:
+        solver_tol = _real_parameter(
+            parameters["solver_tol"],
+            "solver_tol",
+            minimum=0.0,
+            maximum=1.0,
+            minimum_open=True,
+            maximum_open=True,
+        )
+    max_iterations = None
+    if "max_iterations" in parameters:
+        max_iterations = integer_argument(
+            parameters["max_iterations"],
+            "max_iterations",
+            minimum=1,
+        )
     return {
         "n_singular_vals": integer_argument(
             parameters["n_singular_vals"],
@@ -246,6 +276,8 @@ def validate_pseudotime_parameters(parameters: Mapping[str, Any]) -> dict[str, A
             maximum=2**32 - 1,
         ),
         "component_policy": component_policy,
+        "solver_tol": solver_tol,
+        "max_iterations": max_iterations,
     }
 
 

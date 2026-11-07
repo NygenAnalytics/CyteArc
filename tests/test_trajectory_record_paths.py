@@ -422,7 +422,17 @@ _PSEUDOTIME_ARGUMENT_ERRORS: dict[
     "unknown-component-policy": (
         lambda trajectory: {"ss_vec": _Y_SOURCE_SINK, "component_policy": "smallest"},
         ValueError,
-        "component_policy must be 'largest' or 'error'",
+        "component_policy must be 'largest', 'sources' or 'error'",
+    ),
+    "zero-max-iterations": (
+        lambda trajectory: {"ss_vec": _Y_SOURCE_SINK, "max_iterations": 0},
+        ValueError,
+        "max_iterations must be at least 1",
+    ),
+    "solver-tol-of-one": (
+        lambda trajectory: {"ss_vec": _Y_SOURCE_SINK, "solver_tol": 1.0},
+        ValueError,
+        "solver_tol must be less than 1.0",
     ),
 }
 
@@ -709,6 +719,27 @@ _PSEUDOTIME_RECORD_TAMPERS: dict[
             scored.store, scored.from_labels, n_singular_vals=1
         ),
         "Pseudotime parameters are malformed",
+    ),
+    "zero-max-iterations": (
+        "from_labels",
+        lambda scored: _rewrite_parameters(
+            scored.store, scored.from_labels, max_iterations=0
+        ),
+        "Pseudotime parameters are malformed",
+    ),
+    "unset-solver-tol": (
+        "from_labels",
+        lambda scored: _rewrite_parameters(
+            scored.store, scored.from_labels, solver_tol=None
+        ),
+        "Pseudotime parameters are malformed",
+    ),
+    "unknown-parameter": (
+        "from_labels",
+        lambda scored: _rewrite_parameters(
+            scored.store, scored.from_labels, solver="arpack"
+        ),
+        "Pseudotime parameters does not match its persisted contract",
     ),
     "other-cell-selection": (
         "from_labels",

@@ -37,6 +37,8 @@ def test_trajectory_results_describe_artifacts_not_metadata_columns() -> None:
         "cell_selection",
         "values",
         "valid",
+        "component",
+        "component_sizes",
     ]
     assert [field.name for field in fields(FateMappingResult)] == [
         "ref",

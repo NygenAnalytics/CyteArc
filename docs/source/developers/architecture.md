@@ -116,7 +116,7 @@ They must not import those packages at module load time.
   importing `cytearc.clustering.leiden` loads no Numba kernel. After a release, a change that
   alters the native labels for unchanged parameters needs an `OperationRevision` of
   `run_leiden_clustering` scoped to `backend == "cytearc"` (placement rule 10).
-- `trajectory/` owns pseudotime scoring, feature-profile aggregation, feature module clustering, and pseudotime result records.
+- `trajectory/` owns pseudotime scoring, feature-profile aggregation, feature module clustering, and pseudotime result records, and in `errors.py` the typed errors of pseudotime scoring and fate mapping.
   Lineage-resolved statistics weighted by fate probabilities (`lineages.py`), fate-weighted lineage
   curves (`curves.py`), cluster spanning trees (`lineage_tree.py`), and their result records also
   live there; their persisted contracts join the others in `artifacts.py`.
@@ -605,6 +605,7 @@ CyteArc validates persisted data and public arguments against the following cont
 - `trajectory.fate` treats `solver_tol` as an absolute bound on the largest Bellman residual of
   each solved sink column. Existing fate artifacts remain valid; this change alone does not stop
   their reuse.
+- `trajectory.pseudotime` takes `solver_tol` and `max_iterations`, the `tol` and `maxiter` of its `svds` solve, and records each only when set, so a default call keeps the identity of every pseudotime saved before; the loader accepts a record with or without them. A solve that reaches `max_iterations` raises `PseudotimeConvergenceError`, a `RuntimeError` with the cells, modes, converged modes, restarts, operator products and bounds, and the solve's products advance a progress bar and an INFO record every 30 seconds. `component_policy="sources"` scores the component that holds the most source cells, and a source or sink label without cells in the selected cells or in the scored component raises `SourceSinkLabelsError`, a `ValueError` with `missing_sources`, `missing_sinks`, `missing_from` and `component_sizes`, from `pseudotime`, its loader and `fate`. `PseudotimeScoreResult` gains `component`, each cell's connected component numbered by decreasing size, and `component_sizes`, which the loader computes from the stored graph, so no stored data changes. `cytearc.trajectory.select_pseudotime_component` lists the sizes largest first.
 - `cytearc.neighbors.diffusion_operator` is removed; it formed a powered operator with no memory
   bound. `bounded_diffusion_operator` is the only powered builder, and
   `neighbors.diffusion.transition_matrix` returns the graph-sized single step. The removal
