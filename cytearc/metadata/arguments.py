@@ -107,6 +107,14 @@ class LeidenArguments(OperationArguments):
 class DoubletScoreArguments(OperationArguments):
     operation: ClassVar[str] = "run_doublet_detection"
     artifact_kind: ClassVar[str] = "doublet_score"
+    # The samples whose cells share one cluster label while heterotypic_fraction
+    # asks for doublets of two clusters, so that they form none, and up to five
+    # of them.
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        "oneClusterSamples",
+        "oneClusterSampleExamples",
+    )
+    call: ClassVar[str | None] = "ds.qc.doublets"
 
     clusters: ArtifactRef = artifact_input()
     connectivity_map: ArtifactRef = artifact_input()
@@ -448,6 +456,13 @@ class GrnArguments(OperationArguments):
 class HtoIdentityArguments(OperationArguments):
     operation: ClassVar[str] = "run_hto_demultiplexing"
     artifact_kind: ClassVar[str] = "hto_identity"
+    # The HTOs whose positive calls overlap their background, each counted in
+    # every sample where it does, and up to five of them with their sample.
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        "overlappingHtos",
+        "overlappingHtoExamples",
+    )
+    call: ClassVar[str | None] = "ds.qc.hto_demultiplexing"
 
     cell_selection: ArtifactRef = artifact_input()
     feature_ids_fingerprint: str = artifact_input()
@@ -470,6 +485,9 @@ class HtoIdentityArguments(OperationArguments):
 class CellCallingArguments(OperationArguments):
     operation: ClassVar[str] = "run_cell_calling"
     artifact_kind: ClassVar[str] = "cell_calling"
+    # The slope of the Good-Turing frequency fit of the ambient pool.
+    diagnostics: ClassVar[tuple[str, ...]] = ("goodTuringSlope",)
+    call: ClassVar[str | None] = "ds.qc.call_cells"
 
     cell_selection: ArtifactRef = artifact_input()
     dataset_fingerprint: str = artifact_input()

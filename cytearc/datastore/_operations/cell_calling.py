@@ -17,11 +17,14 @@ from ...quality_control.cell_calling import (
     EmptyDropsResult,
     EmptyDropsSettings,
     barcode_ranks,
+    good_turing_slope_message,
     run_empty_drops,
+    unreliable_good_turing_slope,
     validated_fdr,
     validated_settings,
 )
 from ...storage.artifacts import artifact_group, inspect_artifact
+from ...storage.diagnostics import DiagnosticRule, warn_diagnostics
 from ...storage.refs import ArtifactRef
 from ...storage.selections import (
     resolve_generated_selection_artifact,
@@ -56,6 +59,17 @@ def _finite_or_none(value: float) -> float | None:
 # Why cell calling and barcode ranks need counts, and what to do instead.
 _DROPLET_REASON = "it ranks and models droplets by their UMI counts"
 _DROPLET_REMEDY = "Import the raw droplet counts"
+# The warning of a cell calling whose ambient profile's Good-Turing fit has a
+# slope of -1 or more, from its saved diagnostics.
+_GOOD_TURING_RULES = (
+    DiagnosticRule(
+        "goodTuringSlope",
+        applies=lambda numbers: unreliable_good_turing_slope(
+            numbers["goodTuringSlope"]
+        ),
+        message=lambda numbers: good_turing_slope_message(numbers["goodTuringSlope"]),
+    ),
+)
 
 
 class _CellCallingOperationsMixin(_CellCallingOperationsBase):
@@ -85,7 +99,7 @@ class _CellCallingOperationsMixin(_CellCallingOperationsBase):
         assay: "Assay",
         rows: np.ndarray,
         settings: EmptyDropsSettings,
-    ) -> EmptyDropsResult:
+    ) -> tuple[EmptyDropsResult, float]:
         """Run EmptyDrops over the barcodes at ``rows`` in bounded row blocks.
 
         Totals come from the prepared ``<assay>_nCounts`` column, so the
@@ -95,6 +109,10 @@ class _CellCallingOperationsMixin(_CellCallingOperationsBase):
         barcodes above ``lower`` are kept from that read in CSR form when,
         sized from the prepared ``<assay>_nFeatures`` column, they fit in half
         of the budget with the rest; otherwise they are read again.
+
+        Returns:
+            The statistics of every barcode and the slope of the Good-Turing
+            fit of the ambient pool.
 
         Raises:
             MemoryError: If what the computation holds exceeds the budget.
@@ -177,6 +195,13 @@ class _CellCallingOperationsMixin(_CellCallingOperationsBase):
         ``cell_calling``. Another ``fdr`` reuses the statistics. The counts
         are read in row blocks within the memory budget; totals come from the
         prepared ``<assay>_nCounts`` column.
+
+        The statistics save their diagnostics, which
+        ``ds.artifacts.inspect(statistics).diagnostics`` returns for the
+        ``cell_calling`` artifact: ``goodTuringSlope``, the slope of the
+        Good-Turing frequency fit that smooths the ambient profile. A slope of
+        -1 or more gives a ``DiagnosticWarning`` that the smoothed profile may
+        be unreliable, each time the statistics are computed or reused.
 
         Import every barcode of the droplet run, such as Cell Ranger's raw
         matrix with ``CrH5Reader(path, is_filtered=False, filtering_cutoff=0)``:
@@ -310,7 +335,7 @@ class _CellCallingOperationsMixin(_CellCallingOperationsBase):
             limited = np.asarray(as_zarr_array(group["limited"], name="limited")[:])
         else:
             self._require_writable(arguments.operation)
-            result = self._empty_drops(assay, rows, settings)
+            result, slope = self._empty_drops(assay, rows, settings)
             write_cell_data_artifact(
                 self.zw,
                 planned,
@@ -329,9 +354,16 @@ class _CellCallingOperationsMixin(_CellCallingOperationsBase):
                     "alpha": result.alpha,
                     "n_ambient": result.n_ambient,
                 },
+                diagnostics={"goodTuringSlope": slope},
             )
             fdr_values = result.fdr
             limited = result.limited
+        # Computed and reused statistics warn alike, from their diagnostics.
+        warn_diagnostics(
+            arguments,
+            inspect_artifact(self.zw, planned.ref).diagnostics,
+            _GOOD_TURING_RULES,
+        )
         called = fdr_values <= threshold
         undecided = int(np.count_nonzero(limited & ~called))
         if undecided:

@@ -17,6 +17,7 @@ from statsmodels.stats.multitest import multipletests
 
 from cytearc.quality_control import cell_calling
 from cytearc.quality_control.ambient import (
+    _contamination_fit,
     _round_up,
     _row_uniforms,
     estimate_contamination,
@@ -25,6 +26,7 @@ from cytearc.quality_control.ambient import (
     gene_set_evidence,
     remove_ambient_counts,
     soup_fractions,
+    zero_estimates_message,
 )
 from cytearc.utils.digest import mix64_array
 
@@ -401,6 +403,57 @@ def test_estimate_contamination_warns_about_each_estimate_of_zero():
     # Unnamed gene sets are named by their positions.
     with pytest.warns(UserWarning, match="from gene set '0' is 0: no count"):
         estimate_contamination(observed, expected, used)
+
+
+def test_the_contamination_fit_returns_each_estimate_of_zero_without_warning():
+    # The estimates of 0 of the test above, from the same counts.
+    observed = np.array([[0.0, 4.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])
+    expected = np.array([[10.0, 20.0], [12.0, 10.0], [8.0, 10.0], [4.0, 4.0]])
+    used = np.array([[True, True], [True, True], [True, True], [False, True]])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fit, zeros = _contamination_fit(
+            observed,
+            expected,
+            used,
+            clusters=np.array(["a", "b", "b", "c"]),
+            level="cluster",
+            set_names=["haemoglobin", "immunoglobulin"],
+        )
+
+    np.testing.assert_array_equal(fit.cluster_fractions, [4 / 30, 0.0, 0.0])
+    # The bounds are -log(0.05) / 30, / 40, and / 4.
+    examples = [zero.example() for zero in zeros]
+    assert examples == [
+        "gene set 'haemoglobin' (no count in 3 cells where pure soup would give "
+        "30, so below 0.0999)",
+        "cluster 'b' (no count in 2 cells where pure soup would give 40, so below "
+        "0.0749)",
+        "cluster 'c' (no count in 1 cell where pure soup would give 4, so below 0.749)",
+    ]
+    assert [zero.uncorrected for zero in zeros] == [4, 2, 1]
+    explanation = (
+        "A count of 0 puts a fraction below the one-sided 95% Poisson bound, 3 "
+        "divided by the pure-soup count, not at 0, so a correction with an estimate "
+        "of 0 would leave its cells uncorrected. Check that the gene sets and the "
+        "soup profile suit these cells."
+    )
+    assert zero_estimates_message(examples, 3) == (
+        f"3 contamination estimates are 0: {', '.join(examples)}. {explanation}"
+    )
+    # A diagnostic lists five examples; the others are counted.
+    assert zero_estimates_message(examples[:1], 7) == (
+        f"7 contamination estimates are 0: {examples[0]}, among others. {explanation}"
+    )
+    # The global estimate is named as such.
+    _, (global_zero,) = _contamination_fit(
+        [[0.0]], [[8.0]], [[True]], clusters=None, level="global", set_names=None
+    )
+    assert global_zero.example() == (
+        "global estimate (no count in 1 cell where pure soup would give 8, so "
+        "below 0.374)"
+    )
 
 
 def test_estimate_contamination_warns_once_for_a_global_estimate_of_zero():

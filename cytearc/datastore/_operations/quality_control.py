@@ -35,6 +35,7 @@ from ...quality_control.hto import (
     _validated_hto_counts,
     _validated_positive_quantile,
     checked_sample_hashtags,
+    unseparated_htos_message,
 )
 from ...metadata.artifacts import (
     artifact_values,
@@ -77,7 +78,9 @@ from ...storage.artifacts import (
     artifact_path,
     fingerprint_array,
     fingerprint_strings,
+    inspect_artifact,
 )
+from ...storage.diagnostics import EXAMPLES, DiagnosticRule, warn_diagnostics
 from ...storage.feature_selection import (
     _feature_selection_plan,
     _ordered_feature_ids_fingerprint,
@@ -188,6 +191,61 @@ def _sample_words(label: str | None, column: str | None, *, prefix: str) -> str:
     if column is None:
         return ""
     return f"{prefix}{label!r} of {column!r}"
+
+
+def _warn_hto_identity(
+    root: Any, arguments: HtoIdentityArguments, ref: ArtifactRef, quantile: float
+) -> None:
+    """Warn from saved hashtag identities' diagnostics, whether computed or reused."""
+    warn_diagnostics(
+        arguments,
+        inspect_artifact(root, ref).diagnostics,
+        (
+            DiagnosticRule(
+                "overlappingHtos",
+                applies=lambda numbers: bool(numbers["overlappingHtos"]),
+                message=lambda numbers: unseparated_htos_message(
+                    numbers["overlappingHtoExamples"],
+                    numbers["overlappingHtos"],
+                    quantile,
+                ),
+            ),
+        ),
+    )
+
+
+def _warn_doublet_scores(
+    root: Any, arguments: DoubletScoreArguments, ref: ArtifactRef
+) -> None:
+    """Warn from saved doublet scores' diagnostics, whether computed or reused."""
+
+    def one_cluster(numbers: Mapping[str, Any]) -> str:
+        count = numbers["oneClusterSamples"]
+        examples = list(numbers["oneClusterSampleExamples"])
+        others = "" if len(examples) == count else ", among others"
+        where, their = (
+            ("In 1 sample", "its")
+            if count == 1
+            else (f"In each of {count} samples", "their")
+        )
+        return (
+            f"{where} every cell has the same cluster label, so {their} doublets "
+            f"pair any two of {their} cells instead of forcing heterotypic_fraction="
+            f"{arguments.heterotypic_fraction:g} of them to pair two clusters: "
+            f"{', '.join(examples)}{others}"
+        )
+
+    warn_diagnostics(
+        arguments,
+        inspect_artifact(root, ref).diagnostics,
+        (
+            DiagnosticRule(
+                "oneClusterSamples",
+                applies=lambda numbers: bool(numbers["oneClusterSamples"]),
+                message=one_cluster,
+            ),
+        ),
+    )
 
 
 class _QualityControlOperationsMixin(_QualityControlOperationsBase):
@@ -1442,12 +1500,19 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         do. Otherwise the hashtag is unused in the cells of its background, as
         when pools of cells use different hashtags, and the call is refused,
         naming each such hashtag. Demultiplex each pool with its own
-        hashtags, through ``sample_column``. A warning also names each HTO whose
-        positive calls overlap its background: fewer than half of its positive
-        cells have counts that the background fit exceeds with probability
-        ``(1 - positive_quantile) ** 3``, one in a million for the default.
-        Such calls, for example of an unused tag or of pure background, may be
-        background.
+        hashtags, through ``sample_column``.
+
+        An HTO's positive calls overlap its background when fewer than half of
+        its positive cells have counts that the background fit exceeds with
+        probability ``(1 - positive_quantile) ** 3``, one in a million for the
+        default. Such calls, for example of an unused tag or of pure
+        background, may be background. The identities save their diagnostics,
+        which ``ds.artifacts.inspect(ref).diagnostics`` returns:
+        ``overlappingHtos``, the HTOs whose calls overlap, each counted in every
+        sample where it does, and ``overlappingHtoExamples``, up to five of them
+        with their sample, such as ``'HTO3' in sample 'a' of 'pool' (2 of 40
+        positive cells)``. Overlapping HTOs give a ``DiagnosticWarning`` that
+        names them each time the identities are computed or reused.
 
         Args:
             from_assay: HTO assay name (default: ``'HTO'``).
@@ -1623,6 +1688,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             ),
         )
         if planned.reused:
+            _warn_hto_identity(self.zw, arguments, planned.ref, positive_quantile)
             return planned.ref
         self._require_writable("run_hto_demultiplexing")
         matrix_bytes = n_cells * n_htos * np.dtype(np.float64).itemsize
@@ -1664,6 +1730,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         second_ids = np.empty(n_cells, dtype=object)
         margins = np.empty(n_cells, dtype=np.float64)
         entries = []
+        # Each HTO whose calls overlap its background, named with its sample.
+        unseparated: list[str] = []
         for code, (name, chosen) in enumerate(
             zip(sample_names, chosen_by_sample, strict=True)
         ):
@@ -1702,7 +1770,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 )
                 sample_counts = sample_counts.loc[:, has_counts]
             try:
-                identities, cutoffs = _hto_calls(
+                identities, cutoffs, sample_unseparated = _hto_calls(
                     _validated_hto_counts(sample_counts),
                     random_seed=random_seed,
                     positive_quantile=positive_quantile,
@@ -1713,11 +1781,15 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 raise ValueError(
                     _sample_words(name, sample_column, prefix="Sample ") + f": {exc}"
                 ) from exc
-            diagnostics = _hto_clr_diagnostics(sample_counts)
+            unseparated += [
+                hto.describe(_sample_words(name, sample_column, prefix=" in sample "))
+                for hto in sample_unseparated
+            ]
+            clr = _hto_clr_diagnostics(sample_counts)
             values[rows] = identities.to_numpy()
-            max_ids[rows] = diagnostics["max_id"].to_numpy()
-            second_ids[rows] = diagnostics["second_id"].to_numpy()
-            margins[rows] = diagnostics["margin"].to_numpy(dtype=np.float64)
+            max_ids[rows] = clr["max_id"].to_numpy()
+            second_ids[rows] = clr["second_id"].to_numpy()
+            margins[rows] = clr["margin"].to_numpy(dtype=np.float64)
             entries.append(
                 {
                     "label": name,
@@ -1739,7 +1811,12 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 "margin": margins,
             },
             attributes={"samples": entries},
+            diagnostics={
+                "overlappingHtos": len(unseparated),
+                "overlappingHtoExamples": unseparated[:EXAMPLES],
+            },
         )
+        _warn_hto_identity(self.zw, arguments, planned.ref, positive_quantile)
         return planned.ref
 
     def _run_doublet_detection_artifact(
@@ -1954,6 +2031,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             ),
         )
         if planned.reused:
+            _warn_doublet_scores(self.zw, arguments, planned.ref)
             return planned.ref
         self._require_writable("run_doublet_detection")
 
@@ -2016,14 +2094,13 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         del reference
         if result.scores.shape != (n_active,):
             raise RuntimeError("Doublet scores do not match the selected cells")
-        for sample, outcome in zip(samples, result.samples, strict=True):
-            if outcome.heterotypic_fraction < heterotypic:
-                logger.warning(
-                    f"Every parent cell of sample {_doublet_sample_text(sample)} "
-                    "has the same cluster label, so its doublets pair any two "
-                    f"of its cells instead of forcing heterotypic_fraction="
-                    f"{heterotypic:g} of them to pair two clusters"
-                )
+        # A sample whose parents share one cluster label pairs any two of its
+        # cells, so it forms none of the heterotypic doublets asked for.
+        one_cluster = [
+            _doublet_sample_text(sample)
+            for sample, outcome in zip(samples, result.samples, strict=True)
+            if outcome.heterotypic_fraction < heterotypic
+        ]
         values = result.scores
         if smoothing:
             graph_group = artifact_group(self.zw, connectivity)
@@ -2079,11 +2156,16 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                     for sample, outcome in zip(samples, result.samples, strict=True)
                 ]
             },
+            diagnostics={
+                "oneClusterSamples": len(one_cluster),
+                "oneClusterSampleExamples": one_cluster[:EXAMPLES],
+            },
         )
         logger.info(
             f"Stored doublet scores: {int(result.predicted.sum())} of {n_active} "
             f"cells called doublets in {len(samples)} sample(s)"
         )
+        _warn_doublet_scores(self.zw, arguments, planned.ref)
         return planned.ref
 
     @validation_scoped
@@ -2135,6 +2217,15 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         neighbors, threshold and its method, calls, the fraction of simulated
         doublets above the threshold, and Scrublet's estimate of the doublet
         rate.
+
+        A sample whose cells share one cluster label cannot pair two clusters,
+        so with ``heterotypic_fraction`` above 0 its doublets pair any two of
+        its cells. The scores save their diagnostics, which
+        ``ds.artifacts.inspect(ref).diagnostics`` returns:
+        ``oneClusterSamples``, the samples that formed none of the heterotypic
+        doublets asked for, and ``oneClusterSampleExamples``, up to five of
+        them, such as ``(sample='A')``. Such samples give a
+        ``DiagnosticWarning`` each time the scores are computed or reused.
 
         Args:
             clusters: Cluster labels over the graph's cell selection. They

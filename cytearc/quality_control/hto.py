@@ -1,5 +1,6 @@
 import warnings
 from collections.abc import Mapping, Sequence
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -382,13 +383,34 @@ def _strict_background_cutoff(mu: float, alpha: float, quantile: float) -> float
     return float(nbinom.isf(tail, n=1 / alpha, p=1 / (1 + alpha * mu)))
 
 
-def _warn_unseparated_htos(
+class UnseparatedHto(NamedTuple):
+    """An HTO whose positive calls overlap its background.
+
+    Attributes:
+        hto: The HTO's ID.
+        strong_cells: The cells called positive whose counts the background
+            fit exceeds with probability ``(1 - positive_quantile) ** 3``.
+        positive_cells: The cells called positive.
+    """
+
+    hto: str
+    strong_cells: int
+    positive_cells: int
+
+    def describe(self, where: str = "") -> str:
+        """Name the HTO, then ``where`` it was demultiplexed, then its cells."""
+        return (
+            f"{self.hto!r}{where} ({self.strong_cells} of {self.positive_cells} "
+            "positive cells)"
+        )
+
+
+def _unseparated_htos(
     hto_counts: pd.DataFrame,
     positive_calls: pd.DataFrame,
     strict_cutoffs: pd.Series,
-    positive_quantile: float,
-) -> None:
-    """Warn about HTOs whose positive calls overlap their background.
+) -> list[UnseparatedHto]:
+    """Return the HTOs whose positive calls overlap their background, in column order.
 
     An HTO with a stained population has most of its positive cells far above
     the background, beyond the strict cutoff. When fewer than half of them
@@ -398,22 +420,47 @@ def _warn_unseparated_htos(
     n_positive = positive_calls.sum(axis=0)
     # Each strict cutoff is at least its cutoff, so strong counts are positive.
     n_strong = (hto_counts > strict_cutoffs).sum(axis=0)
-    overlapping = [
-        f"{name!r} ({int(n_strong[name])} of {int(n_positive[name])} positive cells)"
+    return [
+        UnseparatedHto(str(name), int(n_strong[name]), int(n_positive[name]))
         for name in hto_counts.columns
         if n_positive[name] > 0
         and n_strong[name] < _SEPARATED_POSITIVE_FRACTION * n_positive[name]
     ]
-    if overlapping:
-        tail = (1.0 - positive_quantile) ** _STRICT_TAIL_POWER
+
+
+def unseparated_htos_message(
+    described: Sequence[str], count: int, positive_quantile: float
+) -> str:
+    """Return the warning that the positive and background counts of ``count`` HTOs overlap.
+
+    ``described`` names each of them, or some of them, as
+    :meth:`UnseparatedHto.describe` does.
+    """
+    tail = (1.0 - positive_quantile) ** _STRICT_TAIL_POWER
+    listed = ", ".join(described)
+    if len(described) < count:
+        listed = f"{count} HTOs, among them {listed}"
+    return (
+        f"Positive and background HTO counts overlap for {listed}: fewer than "
+        "half of the cells called positive have counts that the background fit "
+        f"exceeds with probability {tail:.3g}, so these calls may be background, "
+        "as in an unused tag or pure background. Check the HTO count "
+        "distributions; a tag without a separated positive population cannot be "
+        "demultiplexed."
+    )
+
+
+def _warn_unseparated_htos(
+    unseparated: Sequence[UnseparatedHto], positive_quantile: float
+) -> None:
+    """Warn that the positive and background counts of these HTOs overlap, naming each."""
+    if unseparated:
         warn(
-            "Positive and background HTO counts overlap for "
-            + ", ".join(overlapping)
-            + ": fewer than half of the cells called positive have counts that "
-            f"the background fit exceeds with probability {tail:.3g}, so these "
-            "calls may be background, as in an unused tag or pure background. "
-            "Check the HTO count distributions; a tag without a separated "
-            "positive population cannot be demultiplexed."
+            unseparated_htos_message(
+                [hto.describe() for hto in unseparated],
+                len(unseparated),
+                positive_quantile,
+            )
         )
 
 
@@ -532,11 +579,13 @@ def _positive_hto_calls(
 
     The cutoffs are those of :func:`_hto_cutoffs`. A warning names the HTOs
     whose positive calls overlap their background (see
-    ``_warn_unseparated_htos``).
+    ``_unseparated_htos``).
     """
-    return _calls_and_cutoffs(
+    positive_calls, _cutoffs, unseparated = _calls_and_cutoffs(
         hto_counts, cluster_labels, positive_quantile=positive_quantile
-    )[0]
+    )
+    _warn_unseparated_htos(unseparated, positive_quantile)
+    return positive_calls
 
 
 def _calls_and_cutoffs(
@@ -544,16 +593,20 @@ def _calls_and_cutoffs(
     cluster_labels: np.ndarray,
     *,
     positive_quantile: float,
-) -> tuple[pd.DataFrame, dict[str, int]]:
-    """Return the positive calls of :func:`_positive_hto_calls` and the cutoffs."""
+) -> tuple[pd.DataFrame, dict[str, int], list[UnseparatedHto]]:
+    """Return the positive calls of :func:`_positive_hto_calls` and the cutoffs.
+
+    The HTOs whose positive calls overlap their background are returned
+    third, without a warning.
+    """
     cutoffs, strict_cutoffs = _hto_cutoffs(
         hto_counts, cluster_labels, positive_quantile=positive_quantile
     )
     positive_calls = hto_counts > pd.Series(cutoffs)
-    _warn_unseparated_htos(
-        hto_counts, positive_calls, pd.Series(strict_cutoffs), positive_quantile
+    unseparated = _unseparated_htos(
+        hto_counts, positive_calls, pd.Series(strict_cutoffs)
     )
-    return positive_calls, cutoffs
+    return positive_calls, cutoffs, unseparated
 
 
 def _classify_hto_identities(positive_calls: pd.DataFrame) -> pd.Series:
@@ -658,11 +711,13 @@ def hto_demux(
     if isinstance(random_seed, bool) or not isinstance(random_seed, int):
         raise TypeError("random_seed must be an integer")
     quantile = _validated_positive_quantile(positive_quantile)
-    return _hto_calls(
+    identities, _cutoffs, unseparated = _hto_calls(
         _validated_hto_counts(hto_counts),
         random_seed=random_seed,
         positive_quantile=quantile,
-    )[0]
+    )
+    _warn_unseparated_htos(unseparated, quantile)
+    return identities
 
 
 def _hto_calls(
@@ -670,13 +725,16 @@ def _hto_calls(
     *,
     random_seed: int,
     positive_quantile: float,
-) -> tuple[pd.Series, dict[str, int]]:
+) -> tuple[pd.Series, dict[str, int], list[UnseparatedHto]]:
     """Return the identities that :func:`hto_demux` gives validated counts, and each HTO's cutoff.
 
-    ``counts`` are raw counts that ``_validated_hto_counts`` has checked.
+    ``counts`` are raw counts that ``_validated_hto_counts`` has checked. The
+    HTOs whose positive calls overlap their background are returned third,
+    without a warning: :func:`hto_demux` warns of them, and the operation that
+    saves the identities warns from its diagnostics.
     """
     cluster_labels = _cluster_labels(_clr_normalize(counts), random_seed)
-    positive_calls, cutoffs = _calls_and_cutoffs(
+    positive_calls, cutoffs, unseparated = _calls_and_cutoffs(
         counts, cluster_labels, positive_quantile=positive_quantile
     )
-    return _classify_hto_identities(positive_calls), cutoffs
+    return _classify_hto_identities(positive_calls), cutoffs, unseparated

@@ -335,7 +335,8 @@ def good_turing_proportions(counts: Any) -> np.ndarray:
     first count where it does not, or where ``N_{r+1}`` is 0. Observed species
     share ``1 - N_1 / N`` in proportion to ``r*``, and species with a count
     of 0 share ``N_1 / N`` equally. When every species was observed, the
-    proportions are scaled to sum to 1.
+    proportions are scaled to sum to 1. A fit whose slope ``b`` is not below
+    -1 logs a warning that its smoothed proportions may be unreliable.
 
     Args:
         counts: Non-negative integer count of each species.
@@ -348,6 +349,27 @@ def good_turing_proportions(counts: Any) -> np.ndarray:
         ValueError: If ``counts`` is not one-dimensional and non-negative, or
             holds fewer than two distinct positive counts.
     """
+    proportions, slope = _good_turing_fit(counts)
+    if unreliable_good_turing_slope(slope):
+        logger.warning(good_turing_slope_message(slope))
+    return proportions
+
+
+def unreliable_good_turing_slope(slope: float) -> bool:
+    """Whether a Good-Turing frequency fit of ``slope`` may give unreliable proportions: a slope of -1 or more."""
+    return slope >= -1.0
+
+
+def good_turing_slope_message(slope: float) -> str:
+    """Return the warning about a Good-Turing frequency fit of ``slope``."""
+    return (
+        f"The Good-Turing frequency fit has slope {slope:.3f}, which is not "
+        "below -1, so its smoothed proportions may be unreliable."
+    )
+
+
+def _good_turing_fit(counts: Any) -> tuple[np.ndarray, float]:
+    """Return the proportions of :func:`good_turing_proportions` and the slope of its fit, without its warning."""
     values = np.asarray(counts)
     if values.ndim != 1:
         raise ValueError("counts must be one-dimensional")
@@ -368,11 +390,6 @@ def good_turing_proportions(counts: Any) -> np.ndarray:
     following = np.concatenate((seen[1:], [2 * seen[-1] - previous[-1]]))
     averaged = frequency / (0.5 * (following - previous))
     slope = float(np.polyfit(np.log(seen), np.log(averaged), 1)[0])
-    if slope >= -1.0:
-        logger.warning(
-            f"The Good-Turing frequency fit has slope {slope:.3f}, which is not "
-            "below -1, so its smoothed proportions may be unreliable."
-        )
     frequency_of = dict(zip(seen.tolist(), frequency.tolist(), strict=True))
     adjusted = np.empty(len(seen))
     use_turing = True
@@ -399,7 +416,7 @@ def good_turing_proportions(counts: Any) -> np.ndarray:
         proportions[~observed] = unseen_share / n_unseen
     else:
         proportions /= proportions.sum()
-    return proportions
+    return proportions, slope
 
 
 # Ambient pool -------------------------------------------------------------
@@ -560,8 +577,12 @@ def _collect_ambient(
     return _AmbientPool(ambient, expressed, histogram, ambient_totals, tested)
 
 
-def _ambient_proportions(pool: _AmbientPool) -> np.ndarray:
-    """Return the Good-Turing ambient profile over the expressed features."""
+def _ambient_proportions(pool: _AmbientPool) -> tuple[np.ndarray, float]:
+    """Return the Good-Turing ambient profile over the expressed features and the slope of its fit.
+
+    Nothing warns of the slope: :func:`empty_drops` warns of it, and the
+    operation that saves a cell calling warns from its diagnostics.
+    """
     if not pool.counts.any():
         raise ValueError(
             "No barcode has a total from 1 to lower, so there is no ambient pool "
@@ -569,9 +590,10 @@ def _ambient_proportions(pool: _AmbientPool) -> np.ndarray:
             "with CrH5Reader(..., is_filtered=False, filtering_cutoff=0), or "
             "raise lower."
         )
+    smoothed, slope = _good_turing_fit(pool.counts[pool.expressed])
     proportions = np.zeros(len(pool.counts))
-    proportions[pool.expressed] = good_turing_proportions(pool.counts[pool.expressed])
-    return proportions
+    proportions[pool.expressed] = smoothed
+    return proportions, slope
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -1130,7 +1152,7 @@ def run_empty_drops(
     nthreads: int,
     barcodes: np.ndarray | None = None,
     keep_tested: bool = False,
-) -> EmptyDropsResult:
+) -> tuple[EmptyDropsResult, float]:
     """Run EmptyDrops over barcodes whose counts ``read_rows`` streams.
 
     ``read_rows(positions)`` yields the count rows of the barcodes at the
@@ -1139,6 +1161,10 @@ def run_empty_drops(
     collect the ambient pool, and then the barcodes above ``lower`` to
     compute their probabilities, unless ``keep_tested`` keeps their rows from
     the first read in CSR form.
+
+    Returns:
+        The statistics of every barcode, and the slope of the Good-Turing
+        frequency fit of the ambient pool, of which nothing warns here.
 
     Raises:
         ValueError: If no barcode exceeds ``lower``, the ambient pool cannot
@@ -1174,7 +1200,7 @@ def run_empty_drops(
         lower,
         keep_tested=keep_tested,
     )
-    proportions = _ambient_proportions(pool)
+    proportions, slope = _ambient_proportions(pool)
     alpha = (
         _estimate_alpha(_alpha_terms(pool, proportions))
         if settings.alpha is None
@@ -1209,7 +1235,7 @@ def run_empty_drops(
     full_p_value[tested] = p_values
     full_limited = np.zeros(n_barcodes, dtype=bool)
     full_limited[tested] = limited
-    return EmptyDropsResult(
+    result = EmptyDropsResult(
         barcodes=barcodes,
         total=totals,
         log_probability=full_log_probability,
@@ -1226,6 +1252,7 @@ def run_empty_drops(
         random_seed=settings.random_seed,
         n_ambient=pool.n_barcodes,
     )
+    return result, slope
 
 
 def _validated_matrix(counts: Any) -> np.ndarray | sparse.csr_matrix:
@@ -1289,7 +1316,9 @@ def empty_drops(
 
     Implements EmptyDrops (Lun et al. 2019) on an in-memory matrix: see the
     module documentation for the method. ``DataStore.qc.call_cells`` runs the
-    same computation over a stored matrix in bounded memory.
+    same computation over a stored matrix in bounded memory. A Good-Turing fit
+    of the ambient pool whose slope is not below -1 logs the warning of
+    :func:`good_turing_proportions`, once the barcodes are tested.
 
     Args:
         counts: Barcodes by features matrix of non-negative integer counts, a
@@ -1335,7 +1364,7 @@ def empty_drops(
     if identifiers is not None and identifiers.shape != (matrix.shape[0],):
         raise ValueError("barcodes must hold one identifier per row of counts")
     totals = np.asarray(matrix.sum(axis=1)).ravel().astype(np.int64)
-    return run_empty_drops(
+    result, slope = run_empty_drops(
         totals,
         lambda positions: _matrix_rows(matrix, positions),
         int(matrix.shape[1]),
@@ -1343,3 +1372,6 @@ def empty_drops(
         nthreads=threads,
         barcodes=identifiers,
     )
+    if unreliable_good_turing_slope(slope):
+        logger.warning(good_turing_slope_message(slope))
+    return result

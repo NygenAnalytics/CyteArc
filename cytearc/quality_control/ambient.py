@@ -143,6 +143,84 @@ class AmbientContamination:
     evidence: pd.DataFrame | None = field(repr=False)
 
 
+@dataclass(frozen=True, slots=True)
+class ZeroEstimate:
+    """A contamination estimate of 0 whose cells pure soup would give counts.
+
+    Attributes:
+        kind: ``"global"``, ``"gene set"`` for the estimate from one gene set,
+            or ``"cluster"`` for the estimate of one cluster.
+        label: The gene set's or cluster's name, None for the global estimate.
+        cells: The cells that measure the estimate.
+        expected: The counts of the gene sets that pure soup with those cells'
+            totals would give them.
+        uncorrected: The cells that a correction with the estimate would leave
+            uncorrected.
+    """
+
+    kind: Literal["global", "gene set", "cluster"]
+    label: str | None
+    cells: int
+    expected: float
+    uncorrected: int
+
+    @property
+    def bound(self) -> float:
+        """The one-sided 95% Poisson upper bound of the fraction, from a count of 0."""
+        return _ZERO_COUNT_BOUND / self.expected
+
+    def example(self) -> str:
+        """Describe the estimate as a diagnostic's example, such as ``"cluster 'b' (...)"``."""
+        name = (
+            "global estimate" if self.label is None else f"{self.kind} {self.label!r}"
+        )
+        return (
+            f"{name} (no count in {_cells(self.cells)} where pure soup would give "
+            f"{self.expected:.3g}, so below {self.bound:.3g})"
+        )
+
+    def warning(self) -> str:
+        """Return the warning that :func:`estimate_contamination` gives about the estimate."""
+        if self.kind == "global":
+            subject = "The global contamination estimate"
+            consequence = "a correction with this estimate would leave"
+        elif self.kind == "gene set":
+            subject = f"The contamination estimate from gene set {self.label!r}"
+            consequence = (
+                "a correction with an estimate from this gene set alone would leave"
+            )
+        else:
+            subject = f"The contamination estimate of cluster {self.label!r}"
+            consequence = "a correction at the cluster level would leave its"
+        genes = "the set" if self.kind == "gene set" else "the measured gene sets"
+        return (
+            f"{subject} is 0: no count of {genes} was observed in the "
+            f"{_cells(self.cells)} measuring it, where pure soup with their "
+            f"totals would give {self.expected:.3g}. A count of 0 puts the fraction "
+            f"below {self.bound:.3g} (the one-sided 95% Poisson bound, "
+            f"{_ZERO_COUNT_BOUND:.3g} / {self.expected:.3g}), not at 0, so "
+            f"{consequence} {_cells(self.uncorrected)} uncorrected. Check that the "
+            "gene sets and the soup profile suit these cells."
+        )
+
+
+def zero_estimates_message(examples: Sequence[str], count: int) -> str:
+    """Return the warning about ``count`` contamination estimates of 0.
+
+    ``examples`` describes each of them, or some of them, as
+    :meth:`ZeroEstimate.example` does.
+    """
+    others = "" if len(examples) == count else ", among others"
+    estimates = "estimate is" if count == 1 else "estimates are"
+    return (
+        f"{count} contamination {estimates} 0: {', '.join(examples)}{others}. A "
+        "count of 0 puts a fraction below the one-sided 95% Poisson bound, "
+        f"{_ZERO_COUNT_BOUND:.3g} divided by the pure-soup count, not at 0, so a "
+        "correction with an estimate of 0 would leave its cells uncorrected. "
+        "Check that the gene sets and the soup profile suit these cells."
+    )
+
+
 def soup_fractions(counts: Any) -> np.ndarray:
     """Return the soup profile ``b_g`` from the summed counts of empty droplets.
 
@@ -345,6 +423,24 @@ def estimate_contamination(
             the contamination, or with ``level="cluster"``, a cluster has no
             such cell.
     """
+    fit, zeros = _contamination_fit(
+        observed, expected, used, clusters=clusters, level=level, set_names=set_names
+    )
+    for zero in zeros:
+        warn(zero.warning())
+    return fit
+
+
+def _contamination_fit(
+    observed: Any,
+    expected: Any,
+    used: Any,
+    *,
+    clusters: Any | None,
+    level: ContaminationLevel,
+    set_names: Sequence[str] | None,
+) -> tuple[ContaminationFit, list[ZeroEstimate]]:
+    """Return the estimates of :func:`estimate_contamination` and its estimates of 0, without its warnings."""
     counts = np.asarray(observed, dtype=np.float64)
     soup = np.asarray(expected, dtype=np.float64)
     mask = np.asarray(used, dtype=bool)
@@ -374,18 +470,15 @@ def estimate_contamination(
         if value is not None:
             set_fractions[position] = value
     n_cells = counts.shape[0]
-    # Each estimate of 0: what it is, its measuring cells, the genes they
-    # measure it with, their pure-soup count, and what a correction with it does.
-    zeros: list[tuple[str, int, str, float, str]] = []
+    zeros: list[ZeroEstimate] = []
     if fraction == 0.0:
         zeros.append(
-            (
-                "The global contamination estimate",
-                int(mask.any(axis=1).sum()),
-                "the measured gene sets",
-                float(soup[mask].sum()),
-                f"a correction with this estimate would leave {_cells(n_cells)} "
-                "uncorrected",
+            ZeroEstimate(
+                "global",
+                None,
+                cells=int(mask.any(axis=1).sum()),
+                expected=float(soup[mask].sum()),
+                uncorrected=n_cells,
             )
         )
     if len(names) > 1:
@@ -393,24 +486,23 @@ def estimate_contamination(
             if set_fractions[position] == 0.0:
                 cells = mask[:, position]
                 zeros.append(
-                    (
-                        f"The contamination estimate from gene set {name!r}",
-                        int(cells.sum()),
-                        "the set",
-                        float(soup[cells, position].sum()),
-                        "a correction with an estimate from this gene set alone "
-                        f"would leave {_cells(n_cells)} uncorrected",
+                    ZeroEstimate(
+                        "gene set",
+                        name,
+                        cells=int(cells.sum()),
+                        expected=float(soup[cells, position].sum()),
+                        uncorrected=n_cells,
                     )
                 )
     if level == "global":
-        _warn_zero_estimates(zeros)
-        return ContaminationFit(
+        global_fit = ContaminationFit(
             fraction=fraction,
             set_fractions=set_fractions,
             cluster_labels=None,
             cluster_fractions=None,
             cell_fractions=np.full(n_cells, fraction, dtype=np.float64),
         )
+        return global_fit, zeros
     if clusters is None:
         raise ValueError("level='cluster' needs the cluster of each cell")
     labels = np.asarray(clusters)
@@ -433,13 +525,12 @@ def estimate_contamination(
         cell_fractions[members] = value
         if value == 0.0:
             zeros.append(
-                (
-                    f"The contamination estimate of cluster {str(label)!r}",
-                    int(pairs.any(axis=1).sum()),
-                    "the measured gene sets",
-                    float(soup[pairs].sum()),
-                    "a correction at the cluster level would leave its "
-                    f"{_cells(int(members.sum()))} uncorrected",
+                ZeroEstimate(
+                    "cluster",
+                    str(label),
+                    cells=int(pairs.any(axis=1).sum()),
+                    expected=float(soup[pairs].sum()),
+                    uncorrected=int(members.sum()),
                 )
             )
     if missing:
@@ -448,32 +539,18 @@ def estimate_contamination(
             f"because they express every gene set: {', '.join(missing)}. Add a "
             "gene set that they do not express, or use level='global'."
         )
-    _warn_zero_estimates(zeros)
-    return ContaminationFit(
+    cluster_fit = ContaminationFit(
         fraction=fraction,
         set_fractions=set_fractions,
         cluster_labels=distinct,
         cluster_fractions=cluster_fractions,
         cell_fractions=cell_fractions,
     )
+    return cluster_fit, zeros
 
 
 def _cells(count: int) -> str:
     return f"{count} cell" if count == 1 else f"{count} cells"
-
-
-def _warn_zero_estimates(zeros: list[tuple[str, int, str, float, str]]) -> None:
-    """Warn about each estimate of 0 that pure soup would have given counts."""
-    for subject, n_measuring, genes, expected, consequence in zeros:
-        warn(
-            f"{subject} is 0: no count of {genes} was observed in the "
-            f"{_cells(n_measuring)} measuring it, where pure soup with their "
-            f"totals would give {expected:.3g}. A count of 0 puts the fraction "
-            f"below {_ZERO_COUNT_BOUND / expected:.3g} (the one-sided 95% "
-            f"Poisson bound, {_ZERO_COUNT_BOUND:.3g} / {expected:.3g}), not at "
-            f"0, so {consequence}. Check that the gene sets and the soup profile "
-            "suit these cells."
-        )
 
 
 def remove_ambient_counts(

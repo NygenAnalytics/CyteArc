@@ -5,6 +5,7 @@ stream counts, plan and persist the artifacts, and write the corrected assay.
 """
 
 from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
@@ -19,13 +20,13 @@ from ...metadata.rows import iter_metadata_column_blocks
 from ...metadata.selection import resolve_cell_aligned_artifact, resolve_grouping
 from ...quality_control.ambient import (
     AmbientContamination,
-    ContaminationFit,
-    estimate_contamination,
+    _contamination_fit,
     estimation_cells,
     expressing_cells,
     gene_set_evidence,
     remove_ambient_counts,
     soup_fractions,
+    zero_estimates_message,
 )
 from ...storage.arrays import create_zarr_dataset
 from ...storage.artifact_writer import (
@@ -34,13 +35,22 @@ from ...storage.artifact_writer import (
     PlannedArtifact,
     artifact_transaction,
     plan_artifact,
+    planned_diagnostics,
 )
 from ...storage.artifacts import (
     ArtifactStatus,
     artifact_group,
     fingerprint_stored_arrays,
     fingerprint_stored_strings,
+    inspect_artifact,
     require_complete_artifact,
+)
+from ...storage.diagnostics import (
+    DIAGNOSTICS_ATTRIBUTE,
+    EXAMPLES,
+    DiagnosticRule,
+    declare_diagnostics,
+    warn_diagnostics,
 )
 from ...storage.identity import read_dataset_fingerprint
 from ...storage.refs import ArtifactRef
@@ -59,6 +69,21 @@ else:
 
 _PROFILE_ARRAYS = ("counts", "fraction")
 _EVIDENCE_ARRAYS = ("observed", "expected", "p_values", "expressing", "used")
+_CONTAMINATION_OPERATION = "estimate_ambient_contamination"
+#: The diagnostics that a contamination estimate saves: its largest estimate,
+#: global or of a cluster, and how many of its estimates are 0, with up to
+#: five examples; None for a supplied fraction, which estimates nothing. An
+#: estimate warns from them when it is computed and when it is reused.
+CONTAMINATION_DIAGNOSTICS = (
+    "largestEstimate",
+    "zeroEstimates",
+    "zeroEstimateExamples",
+)
+declare_diagnostics(
+    _CONTAMINATION_OPERATION,
+    CONTAMINATION_DIAGNOSTICS,
+    call="ds.qc.ambient_contamination",
+)
 # Bytes that ``remove_ambient_counts`` holds for each nonzero count it corrects,
 # its sorted copies and running sums included.
 _REMOVAL_ENTRY_BYTES = 256
@@ -169,8 +194,15 @@ def _write_artifact(
     planned: PlannedArtifact,
     arrays: Mapping[str, np.ndarray],
     attributes: Mapping[str, Any],
+    diagnostics: Mapping[str, Any] | None = None,
 ) -> None:
-    """Write the arrays and attributes of a planned artifact and publish it."""
+    """Write the arrays, attributes and diagnostics of a planned artifact and publish it.
+
+    Raises:
+        ValueError: If the diagnostics are not those that the operation
+            declares.
+    """
+    saved = planned_diagnostics(planned, diagnostics)
     with artifact_transaction(root, planned) as group:
         for name, values in arrays.items():
             chunks = (min(max(int(values.shape[0]), 1), 100_000), *values.shape[1:])
@@ -179,10 +211,54 @@ def _write_artifact(
             )
             output[...] = values
         group.attrs.update(dict(attributes))
+        if saved is not None:
+            group.attrs[DIAGNOSTICS_ATTRIBUTE] = saved
 
 
 def _estimate_record(value: float) -> float | None:
     return None if np.isnan(value) else float(value)
+
+
+@dataclass(frozen=True, slots=True)
+class _ContaminationEstimate:
+    """The operation that names a contamination estimate's warnings."""
+
+    operation: str = _CONTAMINATION_OPERATION
+
+
+def _warn_contamination(
+    root: zarr.Group, ref: ArtifactRef, max_contamination: float
+) -> None:
+    """Warn from a contamination estimate's saved diagnostics, whether computed or reused."""
+
+    def above_maximum(numbers: Mapping[str, Any]) -> str:
+        return (
+            f"An estimated contamination fraction, {numbers['largestEstimate']:.3g}, "
+            f"exceeds max_contamination={max_contamination:g}: some cells used to "
+            "estimate it may express a gene set. Check the gene sets and clusters."
+        )
+
+    warn_diagnostics(
+        _ContaminationEstimate(),
+        inspect_artifact(root, ref).diagnostics,
+        (
+            DiagnosticRule(
+                "largestEstimate",
+                applies=lambda numbers: (
+                    numbers["largestEstimate"] is not None
+                    and numbers["largestEstimate"] > max_contamination
+                ),
+                message=above_maximum,
+            ),
+            DiagnosticRule(
+                "zeroEstimates",
+                applies=lambda numbers: bool(numbers["zeroEstimates"]),
+                message=lambda numbers: zero_estimates_message(
+                    numbers["zeroEstimateExamples"], numbers["zeroEstimates"]
+                ),
+            ),
+        ),
+    )
 
 
 class _AmbientOperationsMixin(_AmbientOperationsBase):
@@ -476,10 +552,20 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
         An estimate is exactly 0 when its cells hold no count of the gene sets
         they measure although pure soup would give them some. A count of 0
         only bounds the fraction below about 3 divided by the pure-soup count,
-        with 95% confidence, so each such estimate, whether global, of a gene
-        set, or of a cluster, issues a ``UserWarning`` that names it, its
-        cells, the pure-soup count, and that bound: a correction with it would
-        leave those cells uncorrected. The estimate is saved as computed.
+        with 95% confidence, so a correction with it would leave those cells
+        uncorrected. The estimate is saved as computed.
+
+        The estimate saves its diagnostics, which
+        ``ds.artifacts.inspect(ref).diagnostics`` returns:
+        ``largestEstimate``, the largest of the global estimate and the
+        cluster estimates; ``zeroEstimates``, the estimates of 0, whether
+        global, of a gene set, or of a cluster; and ``zeroEstimateExamples``,
+        up to five of them with their cells, pure-soup count and bound, such
+        as ``gene set 'rare' (no count in 85 cells where pure soup would give
+        46.2, so below 0.0649)``. A supplied ``fraction`` saves None for both
+        numbers. An estimate above ``max_contamination`` gives a
+        ``DiagnosticWarning``, and so do estimates of 0, each time the
+        estimate is computed or reused.
 
         Args:
             cell_selection: Cells to estimate, such as called cells.
@@ -520,7 +606,7 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
                 read-only.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
-        operation = "estimate_ambient_contamination"
+        operation = _CONTAMINATION_OPERATION
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
         if level not in ("global", "cluster"):
@@ -638,9 +724,11 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
             ),
         )
         if planned.reused:
+            _warn_contamination(self.zw, planned.ref, rho_max)
             return planned.ref
         self._require_writable(operation)
         if not resolved_sets:
+            # A supplied fraction estimates nothing.
             _write_artifact(
                 self.zw,
                 planned,
@@ -650,6 +738,11 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
                     "estimate": parameters["fraction"],
                     "set_estimates": {},
                     "cluster_estimates": {},
+                },
+                {
+                    "largestEstimate": None,
+                    "zeroEstimates": None,
+                    "zeroEstimateExamples": [],
                 },
             )
             return planned.ref
@@ -663,7 +756,8 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
         )
         expressing = expressing_cells(p_values, rate)
         used = estimation_cells(expressing, labels)
-        fit: ContaminationFit = estimate_contamination(
+        # The estimate warns from its saved diagnostics below.
+        fit, zeros = _contamination_fit(
             observed,
             expected,
             used,
@@ -679,13 +773,6 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
                     fit.cluster_labels, fit.cluster_fractions, strict=True
                 )
             }
-        largest = max([fit.fraction, *cluster_estimates.values()])
-        if largest > rho_max:
-            logger.warning(
-                f"An estimated contamination fraction, {largest:.3g}, exceeds "
-                f"max_contamination={rho_max:g}: some cells used to estimate it "
-                "may express a gene set. Check the gene sets and clusters."
-            )
         _write_artifact(
             self.zw,
             planned,
@@ -708,11 +795,17 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
                 },
                 "cluster_estimates": cluster_estimates,
             },
+            {
+                "largestEstimate": max([fit.fraction, *cluster_estimates.values()]),
+                "zeroEstimates": len(zeros),
+                "zeroEstimateExamples": [zero.example() for zero in zeros[:EXAMPLES]],
+            },
         )
         logger.info(
             f"Estimated an ambient RNA contamination fraction of {fit.fraction:.4f} "
             f"for {n_cells} cells"
         )
+        _warn_contamination(self.zw, planned.ref, rho_max)
         return planned.ref
 
     @validation_scoped
@@ -731,7 +824,9 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
 
         Raises:
             TypeError: If ``contamination`` is not an ArtifactRef.
-            ValueError: If it is not an ``ambient_contamination`` artifact.
+            ValueError: If it is not an ``ambient_contamination`` artifact, or
+                an estimate saved without its diagnostics, as earlier releases
+                saved them; the error names the call that estimates it anew.
             MemoryError: If its values do not fit the datastore memory budget.
         """
         status = self._ambient_contamination_status(contamination)
@@ -834,7 +929,8 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``contamination`` is not an ``ambient_contamination``
-                artifact, ``assay_label`` is taken or invalid, or
+                artifact or was saved without its diagnostics, as earlier
+                releases saved them, ``assay_label`` is taken or invalid, or
                 ``random_seed`` is negative.
             PermissionError: If the store is not opened with ``zarr_mode='r+'``.
             MemoryError: If one row band of the new assay and its correction do
