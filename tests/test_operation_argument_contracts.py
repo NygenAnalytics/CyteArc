@@ -803,20 +803,18 @@ _CONTRACTS = (
     OperationContract(
         TrajectoryAccessor.lineage_tree,
         metadata_arguments.LineageTreeArguments,
+        # cells, or the graph's cells without it, is the tree's cell selection.
+        aliases={"cells": "cell_selection"},
         signature_only=_classified("transformed", "graph"),
-        model_only=_classified("resolved_input", "cell_selection"),
     ),
     OperationContract(
         TrajectoryAccessor.pseudotime,
         metadata_arguments.PseudotimeScoringArguments,
-        aliases={"graph": "connectivity_map"},
+        # cells, or the graph's cells without it, is the cell selection scored.
+        aliases={"graph": "connectivity_map", "cells": "cell_selection"},
         signature_only=_classified(
             "transformed",
             "ss_vec",
-        ),
-        model_only=_classified(
-            "resolved_input",
-            "cell_selection",
         ),
     ),
     OperationContract(

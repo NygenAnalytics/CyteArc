@@ -27,6 +27,7 @@ import numpy as np
 from numba import prange
 from scipy.interpolate import BSpline
 
+from ..utils.arrays import sorted_places
 from ..utils.numba import njit, numba_threads
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "LineageCurveFit",
     "curve_values_at",
     "fit_lineage_curves",
+    "layout_rows",
     "lineage_ranks",
     "project_onto_curve",
     "projection_scratch_bytes",
@@ -440,3 +442,25 @@ def smooth_against_progress(
         degrees_of_freedom,
     )
     return np.asarray(spline.design(np.linspace(0.0, 1.0, n_points)) @ coefficients)
+
+
+def layout_rows(layout_cells: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """Return the rows of a layout that hold a trajectory's cells, in their order.
+
+    Both arrays hold store positions in ascending order. A layout that
+    draws a trajectory, such as a UMAP, must hold every cell of the
+    trajectory and may hold more, such as every cell of the trajectory's
+    graph when the trajectory scores some of them.
+
+    Raises:
+        ValueError: If the layout lacks a cell of the trajectory.
+    """
+    rows = sorted_places(cells, layout_cells)
+    missing = int(np.count_nonzero(rows < 0))
+    if missing:
+        raise ValueError(
+            f"The layout lacks {missing} of the trajectory's {len(rows)} cells; "
+            "draw an embedding that holds them, such as a UMAP of the "
+            "trajectory's graph"
+        )
+    return rows

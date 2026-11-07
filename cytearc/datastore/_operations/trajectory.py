@@ -47,7 +47,11 @@ from ...metadata.artifacts import (
     plan_cell_data_artifact,
     write_cell_data_artifact,
 )
-from ...metadata.selection import FeatureRef, resolve_cell_aligned_artifact
+from ...metadata.selection import (
+    FeatureRef,
+    cell_selection_indices,
+    resolve_cell_aligned_artifact,
+)
 from ...storage.validation_scope import validation_scoped
 from ...storage.artifact_writer import (
     ArrayRequirement,
@@ -73,7 +77,6 @@ from ...storage.types import as_zarr_array, as_zarr_group
 from ...storage.selections import (
     read_stored_selection_indices,
     resolve_metadata_snapshot,
-    selections_hold_same_cells,
     validate_stored_selection_integrity,
 )
 from ...storage.arrays import create_zarr_dataset
@@ -137,6 +140,7 @@ from ...trajectory.curves import (
     CURVE_FIT_BINS,
     CURVE_SPLINE_BASIS,
     fit_lineage_curves as _fit_lineage_curves_impl,
+    layout_rows as _layout_rows_impl,
     lineage_ranks as _lineage_ranks_impl,
     project_onto_curve as _project_onto_curve_impl,
     projection_scratch_bytes,
@@ -192,7 +196,7 @@ from ...trajectory.results import (
     PseudotimeScoreResult,
 )
 from ...utils.arguments import bool_argument, float_argument, integer_argument
-from ...utils.arrays import array_digest
+from ...utils.arrays import array_digest, sorted_places
 from ...utils.logging import logger
 from ...utils.memory_budget import MemoryBudgetError
 from .enrichment_store import _RowBandWriter
@@ -444,12 +448,74 @@ class _FeatureRecordHead:
 
 
 @dataclass(frozen=True, slots=True)
+class _ScoredGraph:
+    """A loaded pseudotime with its graph over the cells it scores.
+
+    ``graph`` is the symmetric graph of the pseudotime's cells: its graph, or
+    the subgraph that some of the graph's cells induce. ``places`` gives
+    those cells' places among the graph's cells, and is None when the
+    pseudotime scores every cell of its graph.
+    """
+
+    pseudotime: PseudotimeScoreResult
+    graph: csr_matrix
+    graph_selection: ArtifactRef
+    places: np.ndarray | None
+
+
+@dataclass(frozen=True, slots=True)
 class _FateInputs:
     """A fate map with the pseudotime and sink labels that validated it."""
 
     fate: FateMappingResult
     pseudotime: PseudotimeScoreResult
     sink_values: np.ndarray
+
+
+def _rows_of_cells(
+    values: np.ndarray,
+    missing: np.ndarray | None,
+    places: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Take the rows of a trajectory's cells from values of its graph's cells.
+
+    ``places`` gives the trajectory's cells among the graph's, or is None
+    when the values already hold the trajectory's cells.
+    """
+    if places is None:
+        return values, missing
+    return values[places], None if missing is None else missing[places]
+
+
+def _cells_argument(cells: Any) -> ArtifactRef | None:
+    """Check the ``cells`` of a trajectory call: a cell selection or None."""
+    if cells is None:
+        return None
+    if not isinstance(cells, ArtifactRef):
+        raise TypeError("cells must be a cell-selection ArtifactRef or None")
+    if cells.kind != "cell_selection":
+        raise ValueError(f"cells must be a cell_selection artifact, not {cells.kind!r}")
+    return cells
+
+
+def _coordinates_align(n_rows: int, rows: np.ndarray | None, n_cells: int) -> bool:
+    """Whether ``n_rows`` rows of coordinates, read at ``rows``, give ``n_cells`` cells."""
+    if rows is None:
+        return n_rows == n_cells
+    return rows.shape == (n_rows,) and int(np.count_nonzero(rows)) == n_cells
+
+
+def _refuse_cells_outside_the_graph(places: np.ndarray | None) -> None:
+    """Refuse a ``cells`` selection that holds cells outside the graph's."""
+    if places is None:
+        return
+    outside = int(np.count_nonzero(places < 0))
+    if outside:
+        raise ValueError(
+            f"cells holds {outside} of its {len(places)} cells outside the "
+            "graph's cells; pass a selection of the graph's cells, such as one "
+            "that select_cells makes from labels of the graph's cells"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -851,11 +917,30 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 result[:, feature_slots[slot]] += imputed[:, column]
         return result[:, 0] if single_feature else result
 
+    def _cells_of_graph(
+        self,
+        selection: ArtifactRef,
+        graph_selection: ArtifactRef,
+        graph_indices: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        """Return a trajectory's cells and their places among its graph's cells.
+
+        A trajectory scores the cells of its graph's selection, or of a
+        selection of some of them. The first value gives the cells' store
+        positions. The places are None for the graph's own selection, and -1
+        for a cell outside the graph, which the caller refuses.
+        """
+        if selection == graph_selection:
+            return graph_indices, None
+        indices = cell_selection_indices(self.zw, selection)
+        return indices, sorted_places(indices, graph_indices)
+
     @validation_scoped
     def _trajectory_pseudotime(
         self,
         graph: ArtifactRef,
         *,
+        cells: ArtifactRef | None = None,
         method: Literal["untruncated", "truncated"] = "untruncated",
         n_singular_vals: int | None = None,
         source_sink: ArtifactRef | None = None,
@@ -874,9 +959,19 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         This is a reimplementation of the population balance analysis approach
         from Weinreb et al. 2018, whose potential applies the pseudoinverse of
         the graph's random-walk Laplacian to the source-sink vector. The
-        graph's stored cell selection defines the output axis. Disconnected
-        cells excluded by ``component_policy`` remain represented with NaN
-        values and a false ``valid`` entry.
+        graph's stored cell selection, or ``cells``, defines the output axis.
+        Disconnected cells excluded by ``component_policy`` remain represented
+        with NaN values and a false ``valid`` entry.
+
+        ``cells`` scores some of the graph's cells without building a graph
+        of their own: the pseudotime scores the subgraph that they induce,
+        the graph's edges among them, and finds that subgraph's connected
+        components, which can be more than the graph's, since cells at the
+        edge of the selection lose their edges to the cells left out. The
+        subgraph keeps the neighbors that the graph's cells chose, so it
+        orders the cells by the variation that the whole graph follows; a
+        graph built on the chosen cells' own reduction follows the variation
+        within them.
 
         The default ``method="untruncated"`` solves for that potential over all
         of the Laplacian's modes, with MINRES on the symmetric graph Laplacian
@@ -890,21 +985,28 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         Args:
             graph: Explicit connectivity-map or integrated-graph artifact.
+            cells: Cell-selection artifact of some of the graph's cells to
+                score, or None for every cell of the graph. It becomes the
+                pseudotime's cell selection, which ``fate``, ``curves`` and
+                the feature calls follow; the graph's own selection gives
+                the pseudotime that None gives.
             method: The potential, ``"untruncated"`` over all modes or
                 ``"truncated"`` over the smallest singular modes. It is
                 recorded.
             n_singular_vals: Number of smallest singular modes requested,
                 including the null mode, for ``method="truncated"`` only,
                 which takes 30 when it is None.
-            source_sink: Explicit axis-aligned label artifact. Required with
-                ``sources`` or ``sinks`` and omitted when ``ss_vec`` is supplied.
+            source_sink: Explicit label artifact of the graph's cells, or of
+                ``cells``. Required with ``sources`` or ``sinks`` and omitted
+                when ``ss_vec`` is supplied.
             sources: A list of group/cluster ids from ``source_sink`` to be treated as sources. Sources are
                      usually progenitor/precursor or other actively dividing cell states.
             sinks: A list of group/cluster ids from ``source_sink`` to be treated as sinks. Sinks are usually
                    more differentiated (or terminally differentiated) cell states.
-            ss_vec: Custom source-sink value for each selected cell. It must sum
-                to zero, with negative values for sources and positive values for
-                sinks. This is mutually exclusive with label-based arguments.
+            ss_vec: Custom source-sink value for each scored cell, of the
+                graph or of ``cells``. It must sum to zero, with negative
+                values for sources and positive values for sinks. This is
+                mutually exclusive with label-based arguments.
             min_max_norm_ptime: Whether to perform min-max normalization on the final pseudotime values so that values
                                 are in 0 to 1 range. (Default: True)
             random_seed: The seed of the start vector of ``svds``, for
@@ -942,8 +1044,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             SourceSinkLabelsError: If no selected cell, or no cell of the
                 scored component, holds a source or sink label.
             ValueError: If ``method`` is neither ``"untruncated"`` nor
-                ``"truncated"``, or ``n_singular_vals`` or ``random_seed`` is
-                set with ``method="untruncated"``.
+                ``"truncated"``, ``n_singular_vals`` or ``random_seed`` is
+                set with ``method="untruncated"``, or ``cells`` holds cells
+                outside the graph's.
         """
         min_max_norm_ptime = bool_argument(min_max_norm_ptime, "min_max_norm_ptime")
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
@@ -951,6 +1054,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         if not isinstance(graph, ArtifactRef):
             raise TypeError("graph must be an ArtifactRef")
         require_graph_kind(graph)
+        cells = _cells_argument(cells)
         if sources is not None and not isinstance(sources, list):
             raise TypeError("sources must be a list")
         if sinks is not None and not isinstance(sinks, list):
@@ -1007,7 +1111,20 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         solver_tol = validated_parameters["solver_tol"]
         max_iterations = validated_parameters["max_iterations"]
         graph_ref = graph
-        stored_selection = graph_cell_selection(self.zw, graph_ref)
+        graph_selection = graph_cell_selection(self.zw, graph_ref)
+        stored_selection = graph_selection if cells is None else cells
+        graph_indices = read_stored_selection_indices(
+            self.zw,
+            graph_selection,
+            kind="cell_selection",
+            scope="datastore",
+            assay=None,
+            table_path="cellData",
+        )
+        selected_cell_indices, places = self._cells_of_graph(
+            stored_selection, graph_selection, graph_indices
+        )
+        _refuse_cells_outside_the_graph(places)
 
         logger.info(f"Pseudotime scoring: loading graph {graph_ref.artifact_id}")
         graph_matrix = self._load_graph_artifact(
@@ -1019,18 +1136,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         if graph_matrix.shape[0] == 0:
             raise ValueError("No cells were selected for pseudotime scoring")
-        selected_cell_indices = read_stored_selection_indices(
-            self.zw,
-            stored_selection,
-            kind="cell_selection",
-            scope="datastore",
-            assay=None,
-            table_path="cellData",
-        )
-        if graph_matrix.shape[0] != len(selected_cell_indices):
+        if graph_matrix.shape[0] != len(graph_indices):
             raise ValueError(
                 "Graph cell count does not match its stored cell selection"
             )
+        if places is not None:
+            # The subgraph that the cells induce: the graph's edges among them.
+            graph_matrix = graph_matrix[places][:, places].tocsr()
 
         label_arguments_supplied = (
             source_sink is not None or sources is not None or sinks is not None
@@ -1069,10 +1181,22 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 self.zw,
                 source_sink,
             )
-            if label_selection != stored_selection:
-                raise ValueError("Source/sink labels do not match the graph selection")
-            if raw_labels.ndim != 1 or raw_labels.shape[0] != graph_matrix.shape[0]:
+            if label_selection not in (stored_selection, graph_selection):
+                raise ValueError(
+                    "Source/sink labels do not match the graph selection or cells"
+                )
+            label_rows = (
+                len(selected_cell_indices)
+                if label_selection == stored_selection
+                else len(graph_indices)
+            )
+            if raw_labels.ndim != 1 or raw_labels.shape[0] != label_rows:
                 raise ValueError("Source/sink labels do not align with graph rows")
+            if label_selection != stored_selection:
+                # Labels of the graph's cells, read at the cells scored.
+                raw_labels, label_missing = _rows_of_cells(
+                    raw_labels, label_missing, places
+                )
             selected_labels = pd.Series(
                 _labels_with_missing_mask(
                     raw_labels,
@@ -1277,19 +1401,21 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         The result also gives each cell's connected component of the graph,
         numbered by decreasing size, and the components' cell counts, which
-        the loader computes from the stored graph without storing them.
+        the loader computes from the stored graph without storing them. For
+        a pseudotime of some of the graph's cells, these are the components
+        of the subgraph that those cells induce.
         """
-        result, _graph_matrix = self._load_pseudotime_scoring_with_graph(ref)
-        return result
+        return self._load_pseudotime_scoring_with_graph(ref).pseudotime
 
     def _load_pseudotime_scoring_with_graph(
         self,
         ref: ArtifactRef,
-    ) -> tuple[PseudotimeScoreResult, csr_matrix]:
+    ) -> _ScoredGraph:
         """Load pseudotime values and the symmetric graph used to validate them.
 
-        Validation numbers the graph's connected components, which the result
-        returns with the values.
+        The graph is the subgraph of the pseudotime's cells when it scores
+        some of its graph's cells. Validation numbers the graph's connected
+        components, which the result returns with the values.
         """
         if not isinstance(ref, ArtifactRef):
             raise TypeError("ref must be an ArtifactRef")
@@ -1326,23 +1452,27 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             "Pseudotime source/sink input",
         )
         graph_selection = graph_cell_selection(self.zw, graph)
-        if graph_selection != selection:
-            raise ValueError("Pseudotime graph and cell selection do not match")
         if ref.scope != graph.scope or ref.assay != graph.assay:
             raise ValueError("Pseudotime artifact does not share its graph scope")
-        n_cells = _selection_size(self.zw, selection)
-        min_max_normalized = validated_parameters["min_max_norm_ptime"]
-        component_policy = cast(
-            Literal["largest", "sources", "error"],
-            validated_parameters["component_policy"],
-        )
-        selected_indices = read_stored_selection_indices(
+        graph_indices = read_stored_selection_indices(
             self.zw,
-            selection,
+            graph_selection,
             kind="cell_selection",
             scope="datastore",
             assay=None,
             table_path="cellData",
+        )
+        # A pseudotime scores its graph's cells, or some of them.
+        selected_indices, places = self._cells_of_graph(
+            selection, graph_selection, graph_indices
+        )
+        if places is not None and bool(np.any(places < 0)):
+            raise ValueError("Pseudotime graph and cell selection do not match")
+        n_cells = len(selected_indices)
+        min_max_normalized = validated_parameters["min_max_norm_ptime"]
+        component_policy = cast(
+            Literal["largest", "sources", "error"],
+            validated_parameters["component_policy"],
         )
         graph_matrix = self._load_graph_artifact(
             graph,
@@ -1350,14 +1480,20 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             upper_only=False,
             use_k=None,
         )
-        if graph_matrix.shape != (n_cells, n_cells):
+        if graph_matrix.shape != (len(graph_indices), len(graph_indices)):
             raise ValueError("Pseudotime graph does not match its stored selection")
+        if places is not None:
+            graph_matrix = graph_matrix[places][:, places].tocsr()
         source_values, source_selection, source_missing = _load_cell_artifact_values(
             self.zw,
             source_sink,
         )
-        if source_selection != selection:
+        if source_selection not in (selection, graph_selection):
             raise ValueError("Pseudotime source/sink input uses a different selection")
+        if source_selection != selection:
+            source_values, source_missing = _rows_of_cells(
+                source_values, source_missing, places
+            )
         raw_sources = list(validated_parameters["sources"])
         raw_sinks = list(validated_parameters["sinks"])
         source_labels: pd.Series | None = None
@@ -1467,7 +1603,12 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             component=component,
             component_sizes=component_sizes,
         )
-        return result, graph_matrix
+        return _ScoredGraph(
+            pseudotime=result,
+            graph=graph_matrix,
+            graph_selection=graph_selection,
+            places=places,
+        )
 
     @validation_scoped
     def _trajectory_fate(
@@ -1483,9 +1624,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
     ) -> ArtifactRef:
         """Compute fate probabilities from explicit pseudotime and labels.
 
+        The fate map scores the pseudotime's cells, on the graph that the
+        pseudotime scored: its graph, or the subgraph of the cells that it
+        was given as ``cells``.
+
         Args:
             pseudotime: Explicit pseudotime artifact. Its graph lineage is used.
-            sink_labels: Explicit axis-aligned cell-label artifact.
+            sink_labels: Explicit cell-label artifact of the pseudotime's
+                cells, or of its graph's cells.
             sinks: Ordered sink labels. Every matching selected cell becomes a
                    fate boundary.
             beta: Strength of the penalty applied to backward graph edges.
@@ -1531,22 +1677,30 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise TypeError("sink_labels must be an ArtifactRef")
         # Validating the pseudotime loads its symmetric graph, which is the
         # same graph the fate solve needs, so it is loaded only once.
-        pseudotime_result, graph_matrix = self._load_pseudotime_scoring_with_graph(
-            pseudotime
-        )
+        scored = self._load_pseudotime_scoring_with_graph(pseudotime)
+        pseudotime_result = scored.pseudotime
+        graph_matrix = scored.graph
         graph_ref = pseudotime_result.graph
         stored_selection = pseudotime_result.cell_selection
         raw_sink_values, sink_selection, sink_missing = _load_cell_artifact_values(
             self.zw,
             sink_labels,
         )
+        if sink_selection not in (stored_selection, scored.graph_selection):
+            raise ValueError(
+                "Sink labels do not match the pseudotime cell selection or its graph's"
+            )
+        if sink_selection != stored_selection:
+            # Labels of the graph's cells, read at the pseudotime's cells.
+            raw_sink_values, sink_missing = _rows_of_cells(
+                raw_sink_values, sink_missing, scored.places
+            )
         sink_values = _labels_with_missing_mask(
             raw_sink_values,
             sink_missing,
             "Sink labels",
         )
-        if sink_selection != stored_selection:
-            raise ValueError("Sink labels do not match the pseudotime cell selection")
+        del scored
         ptime = pseudotime_result.values
         ptime_valid = pseudotime_result.valid
         # The solve runs on the scored cells alone, so each sink needs some.
@@ -1736,7 +1890,19 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             sink_labels,
         )
         if sink_selection != selection:
-            raise ValueError("Fate-map sink labels use a different cell selection")
+            # Labels of the graph's cells, read at the fate map's cells, which
+            # the pseudotime's loader found among the graph's.
+            graph_selection = graph_cell_selection(self.zw, graph)
+            if sink_selection != graph_selection:
+                raise ValueError("Fate-map sink labels use a different cell selection")
+            _, places = self._cells_of_graph(
+                selection,
+                graph_selection,
+                cell_selection_indices(self.zw, graph_selection),
+            )
+            sink_values, sink_missing = _rows_of_cells(
+                sink_values, sink_missing, places
+            )
         masked_sink_values = _labels_with_missing_mask(
             sink_values,
             sink_missing,
@@ -1834,27 +2000,61 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         graph: ArtifactRef,
         coordinates: ArtifactRef | None,
         cell_selection: ArtifactRef,
-    ) -> ArtifactRef:
-        """Return the coordinates of a lineage analysis, by default the graph's."""
-        if coordinates is None:
-            if graph.kind == "integrated_graph":
-                raise ValueError(
-                    "An integrated graph has no coordinates of its own; pass "
-                    "coordinates of the same cells, such as one assay's reduction"
-                )
-            return resolve_native_graph_inputs(self.zw, graph).coordinates
-        if not isinstance(coordinates, ArtifactRef):
-            raise TypeError("coordinates must be an ArtifactRef or None")
-        if coordinates.kind not in NATIVE_COORDINATE_KINDS:
+    ) -> tuple[ArtifactRef, np.ndarray | None]:
+        """Return the coordinates of a lineage analysis and the rows of its cells.
+
+        The coordinates default to the graph's and hold the analysis's cells
+        or the graph's. The rows mark the analysis's cells among the graph's,
+        for an analysis of some of them, and are None when every row is one
+        of its cells.
+        """
+        if coordinates is None and graph.kind == "integrated_graph":
             raise ValueError(
-                "coordinates must be a reduction, batch_correction, "
-                "imported_coordinates, or normalized artifact"
+                "An integrated graph has no coordinates of its own; pass "
+                "coordinates of the same cells, such as one assay's reduction"
             )
-        if resolve_coordinate_inputs(self.zw, coordinates).cell_selection != (
-            cell_selection
-        ):
-            raise ValueError("coordinates must hold the cells of the trajectory")
-        return coordinates
+        graph_selection = graph_cell_selection(self.zw, graph)
+        if coordinates is None:
+            coordinates = resolve_native_graph_inputs(self.zw, graph).coordinates
+            coordinate_selection = graph_selection
+        else:
+            if not isinstance(coordinates, ArtifactRef):
+                raise TypeError("coordinates must be an ArtifactRef or None")
+            if coordinates.kind not in NATIVE_COORDINATE_KINDS:
+                raise ValueError(
+                    "coordinates must be a reduction, batch_correction, "
+                    "imported_coordinates, or normalized artifact"
+                )
+            coordinate_selection = resolve_coordinate_inputs(
+                self.zw, coordinates
+            ).cell_selection
+            if coordinate_selection not in (cell_selection, graph_selection):
+                raise ValueError(
+                    "coordinates must hold the cells of the trajectory or of its graph"
+                )
+        if coordinate_selection == cell_selection:
+            return coordinates, None
+        return coordinates, self._rows_of_selection(cell_selection, graph_selection)
+
+    def _rows_of_selection(
+        self, selection: ArtifactRef, within: ArtifactRef
+    ) -> np.ndarray:
+        """Mark the rows of ``within``'s cells that ``selection`` holds.
+
+        Every cell of ``selection`` must be a cell of ``within``.
+        """
+        places = sorted_places(
+            cell_selection_indices(self.zw, selection),
+            cell_selection_indices(self.zw, within),
+        )
+        if bool(np.any(places < 0)):
+            raise ValueError(
+                f"{int(np.count_nonzero(places < 0))} cells of the trajectory "
+                "lie outside the cells of its coordinates"
+            )
+        rows = np.zeros(_selection_size(self.zw, within), dtype=bool)
+        rows[places] = True
+        return rows
 
     def _lineage_coordinate_blocks(
         self,
@@ -1863,14 +2063,19 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         message: str,
         resident_bytes: int,
         scratch_bytes_per_row: int,
+        rows: np.ndarray | None = None,
     ) -> Iterator[tuple[int, np.ndarray]]:
-        """Yield ``(start, block)`` row blocks of coordinates under the budget."""
+        """Yield ``(start, block)`` row blocks of coordinates under the budget.
+
+        ``rows`` marks the rows to read, the trajectory's cells among the
+        coordinates of its graph's, and ``start`` counts only those rows.
+        """
         start = 0
         for block in data._stream_blocks(
             nthreads=self.nthreads,
             msg=message,
             prefetch=None,
-            row_mask=None,
+            row_mask=rows,
             resident_bytes=resident_bytes,
             memory_bytes=self.memoryBytes,
             scratch_bytes_per_row=scratch_bytes_per_row,
@@ -1918,9 +2123,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             fate: Explicit fate-map artifact. Its pseudotime orders the cells
                 and its probabilities weight them.
             lineages: Sink labels to fit, in order. ``None`` fits every sink.
-            coordinates: Coordinates of the fate map's cells to fit the curves
-                in. ``None`` uses the coordinates its graph was built on; an
-                integrated graph has none, so it needs this argument.
+            coordinates: Coordinates of the fate map's cells, or of its
+                graph's cells, to fit the curves in. ``None`` uses the
+                coordinates its graph was built on; an integrated graph has
+                none, so it needs this argument. Only the fate map's cells
+                are read.
             n_points: Points on each curve.
             df: Effective degrees of freedom of each coordinate's spline, from
                 just above 2, a straight line, to below 32. Larger values
@@ -1959,14 +2166,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         n_points = validated["n_points"]
         degrees_of_freedom = validated["df"]
         selection = fate_result.cell_selection
-        coordinates_ref = self._lineage_coordinates(
+        coordinates_ref, cell_rows = self._lineage_coordinates(
             fate_result.graph, coordinates, selection
         )
         valid = fate_result.valid
         n_cells = int(valid.shape[0])
         n_lineages = len(lineage_labels)
         data = self._coordinate_data(coordinates_ref, batch_size=batch_size)
-        if int(data.shape[0]) != n_cells:
+        if not _coordinates_align(int(data.shape[0]), cell_rows, n_cells):
             raise ValueError("Coordinates do not align with the fate map's cells")
         n_dims = int(data.shape[1])
         arguments = LineageCurveArguments(
@@ -2017,11 +2224,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             return planned.ref
         self._require_writable("fit_lineage_curves")
         # Weights, ranks, and positions per cell and lineage; the pseudotime;
-        # and the rank bins of every lineage.
+        # the rank bins of every lineage; and the rows of the cells among
+        # their graph's coordinates.
         resident_bytes = (
             4 * n_cells * n_lineages * 8
             + n_cells * 8
             + n_lineages * CURVE_FIT_BINS * (n_dims + 3) * 8
+            + (0 if cell_rows is None else cell_rows.nbytes)
         )
         chunk_rows = min(max(n_cells, 1), _PLACEMENT_CHUNK_ROWS)
         placement_bytes = _placement_write_bytes(n_cells, n_lineages, chunk_rows)
@@ -2051,6 +2260,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 message="Fitting lineage curves",
                 resident_bytes=resident_bytes,
                 scratch_bytes_per_row=n_dims * 8,
+                rows=cell_rows,
             ),
             ranks,
             weights,
@@ -2091,6 +2301,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 scratch_bytes_per_row=(
                     n_dims * 8 + 2 * n_lineages * 8 + projection_scratch_bytes(n_points)
                 ),
+                rows=cell_rows,
             ):
                 stop = start + block.shape[0]
                 scored = valid[start:stop]
@@ -2226,9 +2437,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         Args:
             curves: Explicit ``lineage_curves`` artifact.
-            layout: A two-dimensional embedding of the curves' cells, such as
-                a UMAP of their graph, whichever operation made its cell
-                selection.
+            layout: A two-dimensional embedding that holds every cell of the
+                curves, such as a UMAP of their graph, whichever operation
+                made its cell selection. It may hold more cells, such as
+                every cell of the graph when the curves follow some of them;
+                only the curves' cells are read.
             lineages: Sink labels of the lineages to draw, in order, or None
                 for every lineage of the curves.
             df: Effective degrees of freedom of the smoothing, greater than 2
@@ -2247,7 +2460,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 ``df`` is not a real number.
             ValueError: If ``curves`` is not a complete ``lineage_curves``
                 artifact, ``df`` is out of range, ``layout`` is not an
-                embedding of two finite columns or holds other cells than the
+                embedding of two finite columns or lacks a cell of the
                 curves, or ``lineages`` names a lineage that the curves do
                 not hold, repeats one or names none.
         """
@@ -2275,17 +2488,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         layout_status = inspect_artifact(self.zw, layout)
         if not layout_status.complete:
             raise ValueError("Embedding artifact is unavailable or incomplete")
-        if not selections_hold_same_cells(
-            self.zw, layout_status.input_ref("cell_selection"), loaded.cell_selection
-        ):
-            raise ValueError(
-                "The layout holds other cells than the trajectory; draw an "
-                "embedding of the trajectory's cells, such as a UMAP of its graph"
-            )
-        # The layout's own cells are the curves', in the same order.
-        coordinates = np.asarray(
-            resolve_cell_aligned_artifact(self.zw, layout, ndim=2).values
+        resolved_layout = resolve_cell_aligned_artifact(self.zw, layout, ndim=2)
+        # The layout's rows of the curves' cells, in the curves' order.
+        rows = _layout_rows_impl(
+            resolved_layout.cell_idx,
+            cell_selection_indices(self.zw, loaded.cell_selection),
         )
+        coordinates = np.asarray(resolved_layout.values)[rows]
         if coordinates.shape[1] != 2:
             raise ValueError(
                 "Embedding must have two columns and one row per selected cell"
@@ -2328,15 +2537,33 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         self,
         labels: ArtifactRef,
         selection: ArtifactRef,
+        graph_selection: ArtifactRef | None,
     ) -> tuple[list[Any], np.ndarray]:
-        """Return the sorted cluster labels of a label artifact and each cell's code."""
+        """Return the sorted cluster labels of a label artifact and each cell's code.
+
+        The labels hold the tree's cells, ``selection``, or its graph's,
+        ``graph_selection``, and are read at the tree's cells. A tree records
+        no graph, so its loader passes None and takes labels of any cells
+        that include the tree's.
+        """
         values, label_selection, missing = _load_cell_artifact_values(self.zw, labels)
         if label_selection != selection:
-            raise ValueError("labels must hold the cells of the graph")
+            if graph_selection is not None and label_selection != graph_selection:
+                raise ValueError(
+                    "labels must hold the cells of the graph, or the cells "
+                    "passed as cells"
+                )
+            rows = sorted_places(
+                cell_selection_indices(self.zw, selection),
+                cell_selection_indices(self.zw, label_selection),
+            )
+            if bool(np.any(rows < 0)):
+                raise ValueError("Lineage-tree labels do not hold its cells")
+            values, missing = _rows_of_cells(values, missing, rows)
         if missing is not None and np.any(missing):
             raise ValueError(
-                "Every cell needs a label; select the labelled cells before "
-                "building the graph"
+                "Every cell needs a label; pass as cells a selection of the "
+                "labelled cells, or select them before building the graph"
             )
         return _cluster_codes_impl(values)
 
@@ -2346,6 +2573,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         graph: ArtifactRef,
         labels: ArtifactRef,
         *,
+        cells: ArtifactRef | None = None,
         coordinates: ArtifactRef | None = None,
         root: Any = None,
         ends: list[Any] | None = None,
@@ -2369,12 +2597,19 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         before passing them to :meth:`fate`.
 
         Args:
-            graph: Explicit graph artifact; its cells are the tree's cells.
-            labels: Explicit cell-label artifact of the graph's cells, such
-                as ``cluster_labels``. Every cell needs a label.
-            coordinates: Coordinates of the graph's cells. ``None`` uses the
-                coordinates the graph was built on; an integrated graph has
-                none, so it needs this argument.
+            graph: Explicit graph artifact; its cells are the tree's cells,
+                unless ``cells`` names some of them.
+            labels: Explicit cell-label artifact of the graph's cells, or of
+                ``cells``, such as ``cluster_labels``. Every cell of the tree
+                needs a label.
+            cells: Cell-selection artifact of some of the graph's cells to
+                build the tree over, such as the cells of some clusters, or
+                None for every cell of the graph. It becomes the tree's cell
+                selection, and only these cells' labels and coordinates are
+                read.
+            coordinates: Coordinates of the graph's cells, or of ``cells``.
+                ``None`` uses the coordinates the graph was built on; an
+                integrated graph has none, so it needs this argument.
             root: Cluster label that starts the lineages, or ``None`` for an
                 unrooted tree without lineages.
             ends: Cluster labels to hold as leaves.
@@ -2384,6 +2619,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         Returns:
             Reference to a ``lineage_tree`` artifact.
+
+        Raises:
+            ValueError: If ``cells`` holds cells outside the graph's.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(graph, ArtifactRef):
@@ -2391,6 +2629,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         if not isinstance(labels, ArtifactRef):
             raise TypeError("labels must be an ArtifactRef")
         require_graph_kind(graph)
+        cells = _cells_argument(cells)
         batch_size = (
             None
             if batch_size is None
@@ -2401,9 +2640,21 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         validated = _validate_lineage_tree_parameters(
             {"root": root, "ends": [] if ends is None else ends}
         )
-        selection = graph_cell_selection(self.zw, graph)
-        coordinates_ref = self._lineage_coordinates(graph, coordinates, selection)
-        clusters, codes = self._lineage_tree_clusters(labels, selection)
+        graph_selection = graph_cell_selection(self.zw, graph)
+        selection = graph_selection if cells is None else cells
+        if cells is not None:
+            _, places = self._cells_of_graph(
+                selection,
+                graph_selection,
+                cell_selection_indices(self.zw, graph_selection),
+            )
+            _refuse_cells_outside_the_graph(places)
+        coordinates_ref, cell_rows = self._lineage_coordinates(
+            graph, coordinates, selection
+        )
+        clusters, codes = self._lineage_tree_clusters(
+            labels, selection, graph_selection
+        )
         if len(clusters) < 2:
             raise ValueError("A lineage tree needs at least two clusters")
         # The ends are recorded in cluster order, so any order reuses one tree.
@@ -2411,7 +2662,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             clusters, validated["root"], validated["ends"]
         )
         data = self._coordinate_data(coordinates_ref, batch_size=batch_size)
-        if int(data.shape[0]) != codes.shape[0]:
+        if not _coordinates_align(int(data.shape[0]), cell_rows, codes.shape[0]):
             raise ValueError("Coordinates do not align with the graph's cells")
         n_dims = int(data.shape[1])
         n_clusters = len(clusters)
@@ -2456,11 +2707,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 "without saving it"
             ),
         )
-        # The codes, each cluster's mean and covariance, and for one cluster
-        # pair the pooled covariance, the copy its eigenvalues are computed
-        # from, and its Cholesky factor.
+        # The codes, the rows of the cells among their graph's coordinates,
+        # each cluster's mean and covariance, and for one cluster pair the
+        # pooled covariance, the copy its eigenvalues are computed from, and
+        # its Cholesky factor.
         resident_bytes = (
             codes.nbytes
+            + (0 if cell_rows is None else cell_rows.nbytes)
             + n_clusters * (n_dims + n_dims * n_dims) * 8
             + (3 * n_dims * n_dims + n_dims) * 8
         )
@@ -2479,6 +2732,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 message="Summarizing clusters",
                 resident_bytes=resident_bytes,
                 scratch_bytes_per_row=2 * n_dims * 8,
+                rows=cell_rows,
             ),
             codes,
             n_clusters=n_clusters,
@@ -2542,11 +2796,22 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         selection = parse_artifact_ref(
             inputs.get("cell_selection"), "Lineage-tree cell selection input"
         )
-        if resolve_coordinate_inputs(self.zw, coordinates).cell_selection != (
-            selection
+        # A tree records no graph: its coordinates and labels hold its cells,
+        # or more cells, such as its graph's for a tree of some of them.
+        coordinate_selection = resolve_coordinate_inputs(
+            self.zw, coordinates
+        ).cell_selection
+        if coordinate_selection != selection and bool(
+            np.any(
+                sorted_places(
+                    cell_selection_indices(self.zw, selection),
+                    cell_selection_indices(self.zw, coordinate_selection),
+                )
+                < 0
+            )
         ):
             raise ValueError("Lineage-tree coordinates do not hold its cells")
-        clusters, _codes = self._lineage_tree_clusters(labels, selection)
+        clusters, _codes = self._lineage_tree_clusters(labels, selection, None)
         n_dims = int(
             as_zarr_array(
                 artifact_group(self.zw, coordinates)["data"], name="data"

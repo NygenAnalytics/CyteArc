@@ -467,11 +467,20 @@ def test_layout_for_returns_the_coordinates_of_the_trajectory_cells(
     )
     np.testing.assert_array_equal(again, layout.coordinates)
     np.testing.assert_array_equal(again_indices, layout.cell_indices)
+    # A trajectory of some of the layout's cells, every third, takes their rows.
+    flags = np.zeros(store.cells.N, dtype=bool)
+    flags[layout.cell_indices[::3]] = True
+    store.cells.insert("every_third_trajectory_cell", flags)
+    some = store.snapshot_cell_selection("every_third_trajectory_cell")
+    of_some, of_some_indices = lineage_plots._layout_for(store, layout.ref, some)
+    np.testing.assert_array_equal(of_some, layout.coordinates[::3])
+    np.testing.assert_array_equal(of_some_indices, layout.cell_indices[::3])
     with pytest.raises(ValueError) as raised:
         lineage_plots._layout_for(store, layout.ref, other_selections.swapped)
     assert raised.value.args == (
-        "The layout holds other cells than the trajectory; draw an embedding of "
-        "the trajectory's cells, such as a UMAP of its graph",
+        f"The layout lacks 1 of the trajectory's {len(layout.cell_indices)} "
+        "cells; draw an embedding that holds them, such as a UMAP of the "
+        "trajectory's graph",
     )
 
 
@@ -1688,8 +1697,9 @@ def test_curves_in_layout_take_any_selection_of_the_curves_cells(
             lineage_curves, other_selections.swapped_layout
         )
     assert raised.value.args == (
-        "The layout holds other cells than the trajectory; draw an embedding of "
-        "the trajectory's cells, such as a UMAP of its graph",
+        f"The layout lacks 1 of the trajectory's {len(layout.cell_indices)} "
+        "cells; draw an embedding that holds them, such as a UMAP of the "
+        "trajectory's graph",
     )
 
 
@@ -2117,9 +2127,9 @@ def test_layout_plots_draw_the_trajectory_cells_over_another_selection(
 
 @pytest.mark.parametrize("name", ["lineage_curves", "lineage_tree"])
 def test_layout_plots_require_the_trajectory_cells(
-    other_selections, plot_arguments, name
+    other_selections, plot_arguments, layout, name
 ):
-    """A layout of other cells is refused although its coordinates fit."""
+    """A layout that lacks a cell of the trajectory is refused although its coordinates fit."""
     with pytest.raises(ValueError) as raised:
         getattr(splt, name)(
             other_selections.store,
@@ -2128,6 +2138,7 @@ def test_layout_plots_require_the_trajectory_cells(
         ).close()
 
     assert raised.value.args == (
-        "The layout holds other cells than the trajectory; draw an embedding of "
-        "the trajectory's cells, such as a UMAP of its graph",
+        f"The layout lacks 1 of the trajectory's {len(layout.cell_indices)} "
+        "cells; draw an embedding that holds them, such as a UMAP of the "
+        "trajectory's graph",
     )

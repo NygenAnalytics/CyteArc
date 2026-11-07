@@ -141,9 +141,11 @@ _SIGNATURE_DIGESTS = {
     # float | None = None and max_iterations: int | None = None, then
     # method: Literal["untruncated", "truncated"] = "untruncated", with
     # n_singular_vals: int | None = None and random_seed: int | None = None,
-    # which only method="truncated" takes. get_imputed takes feature_name:
-    # str | FeatureRef | Sequence[str | FeatureRef] | np.ndarray | pd.Series.
-    GraphDataStore: "3b17227309ae6b6337f835d71f8231e773719dfdb4a0388f4590ac321be22a1d",
+    # which only method="truncated" takes, then the keyword-only cells:
+    # ArtifactRef | None = None, some of the graph's cells to score.
+    # get_imputed takes feature_name: str | FeatureRef | Sequence[str |
+    # FeatureRef] | np.ndarray | pd.Series.
+    GraphDataStore: "6a376e2ebeb65dbec864e2bbc589e4076967d5f2169212de8824e2d7f0196618",
     # run_mapping gained the keyword-only feature_key: Literal["ids",
     # "names"] = "ids" after missing_feature_policy.
     MappingDatastore: "12e809ed948d36552968c37dc3d2a9d3429ad06dcd5507673d95f839ef47171f",
