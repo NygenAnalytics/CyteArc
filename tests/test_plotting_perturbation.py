@@ -4976,6 +4976,90 @@ def test_composed_cluster_plots_share_their_cluster_legend(panel: str) -> None:
         plt.close(figure)
 
 
+def test_a_composed_cluster_heatmap_keeps_its_cluster_bar() -> None:
+    figure, ax = plt.subplots(figsize=(6.0, 5.0), layout="constrained")
+
+    try:
+        result = perturbation_clusters(
+            _record_store(_clusters_record()),
+            CLUSTERS,
+            panel="heatmap",
+            target=ax,
+            show=False,
+        )
+        composite = compose_results(figure, {"clusters": result}, panel_labels=False)
+        figure.canvas.draw()
+
+        # The cluster bar stays beside the heatmap, inside its axes, and the
+        # shared colorbar replaces the heatmap's own, which is not drawn.
+        assert set(composite.axes) == {
+            ("clusters", "heatmap"),
+            ("clusters", "cluster_bar"),
+        }
+        assert composite.axes[("clusters", "cluster_bar")] is result.axes["cluster_bar"]
+        assert result.axes["cluster_bar"] in ax.child_axes
+        assert result.axes["colorbar"] not in figure.axes
+    finally:
+        plt.close(figure)
+
+    figure, ax = plt.subplots(figsize=(6.0, 5.0), layout="constrained")
+    try:
+        result = perturbation_clusters(
+            _record_store(_clusters_record()),
+            CLUSTERS,
+            panel="heatmap",
+            target=ax,
+            show=False,
+        )
+        composite = compose_results(figure, [result], shared_legends=False)
+        # Without shared legends the heatmap keeps every axis it drew.
+        assert {key for _, key in composite.axes} == {
+            "heatmap",
+            "cluster_bar",
+            "colorbar",
+        }
+    finally:
+        plt.close(figure)
+
+
+@pytest.mark.parametrize("panel", ["heatmap", "embedding"])
+def test_cluster_legends_list_unassigned_perturbations_only_when_drawn(
+    panel: str,
+) -> None:
+    record = _clusters_record()
+    assigned = record.table.index[record.table["cluster"] >= 0].tolist()
+    assert len(assigned) < len(record.table)
+    for perturbations, drawn in ((None, True), (assigned, False)):
+        figure, ax = plt.subplots(figsize=(6.0, 5.0), layout="constrained")
+        try:
+            result = perturbation_clusters(
+                _record_store(record),
+                CLUSTERS,
+                panel=panel,
+                perturbations=perturbations,
+                target=ax,
+                show=False,
+            )
+            (cluster_legend,) = [
+                spec for spec in result.legends if spec.kind == "categorical"
+            ]
+            assert cluster_legend.extras["missing"] is drawn
+            compose_results(figure, [result], panel_labels=False)
+            ((title, entries),) = [
+                (
+                    legend.get_title().get_text(),
+                    [text.get_text() for text in legend.get_texts()],
+                )
+                for legend in figure.legends
+            ]
+            # The unassigned perturbations take the last entry when drawn.
+            assert title == "Cluster"
+            assert ("Unassigned" in entries) is drawn
+            assert (entries[-1] == "Unassigned") is drawn
+        finally:
+            plt.close(figure)
+
+
 @pytest.mark.parametrize("panel", ["heatmap", "embedding"])
 def test_composing_cluster_plots_without_legends_draws_none(panel: str) -> None:
     figure, ax = plt.subplots(figsize=(6.0, 5.0), layout="constrained")

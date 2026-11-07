@@ -181,9 +181,14 @@ def normalize_annotations(
 def annotation_colors(
     annotations: pd.DataFrame,
     scales: Mapping[str, CategoricalScale] | None,
-) -> tuple[pd.DataFrame, list[CategoricalScale]]:
+) -> tuple[pd.DataFrame, list[CategoricalScale], list[bool]]:
+    """Return each annotation's strip colors, its scale, and whether it has missing values.
+
+    A missing value takes the scale's missing color.
+    """
     colors = pd.DataFrame(index=annotations.index)
     resolved_scales: list[CategoricalScale] = []
+    missing: list[bool] = []
     for name in annotations:
         values = annotations[name].to_numpy(dtype=object)
         resolved = resolve_category_scale(
@@ -192,36 +197,48 @@ def annotation_colors(
             context=f"annotation_scales[{name!r}]",
         )
         palette = resolved.palette or {}
+        is_missing = pd.isna(values)
         colors[name] = [
-            resolved.missing_color if pd.isna(value) else palette[value]
-            for value in values
+            resolved.missing_color if absent else palette[value]
+            for value, absent in zip(values, is_missing, strict=True)
         ]
         resolved_scales.append(resolved)
-    return colors, resolved_scales
+        missing.append(bool(is_missing.any()))
+    return colors, resolved_scales, missing
 
 
 def annotation_legend_handles(
     mpl: Any,
     names: Sequence[str],
     scales: Sequence[CategoricalScale],
+    missing: Sequence[bool],
 ) -> list[Any]:
-    """Square legend handles naming each annotation value and its color."""
+    """Square legend handles naming each annotation value and its color.
+
+    An annotation with missing values lists its scale's missing label last.
+    """
     handles: list[Any] = []
-    for name, scale in zip(names, scales, strict=True):
+    for name, scale, absent in zip(names, scales, missing, strict=True):
         if scale.order is None or scale.palette is None:
             continue
+        entries = [
+            (scale.palette[value], category_label(scale, value))
+            for value in scale.order
+        ]
+        if absent:
+            entries.append((scale.missing_color, scale.missing_label))
         handles.extend(
             mpl.lines.Line2D(
                 [],
                 [],
                 marker="s",
                 linestyle="",
-                markerfacecolor=scale.palette[value],
+                markerfacecolor=color,
                 markeredgecolor="none",
                 markersize=5,
-                label=f"{name}: {category_label(scale, value)}",
+                label=f"{name}: {label}",
             )
-            for value in scale.order
+            for color, label in entries
         )
     return handles
 

@@ -33,6 +33,7 @@ from ._display import resolve_categorical_scale
 from ._figure import (
     LegendSpec,
     PlotResult,
+    categorical_legend,
     close_figures_on_error,
     normalize_axes_target,
 )
@@ -981,15 +982,18 @@ def matrixplot(
     column_annotation_values = column_annotation_values.reindex(
         resolved_group_order
     ).rename_axis("group")
-    row_colors, row_annotation_scales = annotation_colors(
+    row_colors, row_annotation_scales, row_annotation_missing = annotation_colors(
         row_annotation_values,
         annotation_scales,
     )
-    column_colors, column_annotation_scales = annotation_colors(
-        column_annotation_values,
-        annotation_scales,
+    column_colors, column_annotation_scales, column_annotation_missing = (
+        annotation_colors(
+            column_annotation_values,
+            annotation_scales,
+        )
     )
     resolved_annotation_scales = row_annotation_scales + column_annotation_scales
+    annotation_missing = row_annotation_missing + column_annotation_missing
 
     panel_key: Hashable = "matrixplot"
     resolved_figsize = figsize
@@ -1079,6 +1083,7 @@ def matrixplot(
                 list(row_annotation_values.columns)
                 + list(column_annotation_values.columns),
                 resolved_annotation_scales,
+                annotation_missing,
             )
             if annotation_handles:
                 legend_kwargs = {
@@ -1124,9 +1129,13 @@ def matrixplot(
                 extras={"vmin": vmin, "vmax": vmax},
             ),
             *(
-                LegendSpec(kind="categorical", label=name)
-                for name in list(row_annotation_values.columns)
-                + list(column_annotation_values.columns)
+                categorical_legend(name, missing=missing)
+                for name, missing in zip(
+                    list(row_annotation_values.columns)
+                    + list(column_annotation_values.columns),
+                    annotation_missing,
+                    strict=True,
+                )
             ),
         ),
         scales=(color_scale, *resolved_annotation_scales),

@@ -686,6 +686,11 @@ def test_each_figure_draws_in_a_composite_with_its_legends_once(truth, name) -> 
         colorbars = [ax for ax in figure.axes if is_colorbar_axes(ax)]
         assert len(colorbars) == kinds.count("colorbar")
         assert len(composite.legends) == len(result.legends)
+        # The composite names every axis that the figure still draws, a
+        # matrix's tree included, and none of the colour bars it replaced.
+        assert {key for _, key in composite.axes} == {
+            key for key, ax in result.axes.items() if not is_colorbar_axes(ax)
+        }
         if "dendrogram" in result.axes:
             # The tree stays above its matrix, which the colour bar spans.
             assert result.axes["dendrogram"] in result.axes["matrix"].child_axes
@@ -2091,6 +2096,12 @@ def test_each_variant_figure_draws_in_a_composite_with_its_legends_once(
         colorbars = [ax for ax in figure.axes if is_colorbar_axes(ax)]
         assert len(colorbars) == kinds.count("colorbar")
         assert len(composite.legends) == len(result.legends)
+        # The composite names every axis that the figure still draws, a
+        # strip of clone colours included, and none of the colour bars it
+        # replaced.
+        assert {key for _, key in composite.axes} == {
+            key for key, ax in result.axes.items() if not is_colorbar_axes(ax)
+        }
     finally:
         plt.close(figure)
 

@@ -22,6 +22,7 @@ from ._deps import require_matplotlib
 from ._figure import (
     LegendSpec,
     PlotResult,
+    categorical_legend,
     close_figures_on_error,
     normalize_axes_target,
 )
@@ -3212,11 +3213,7 @@ def perturbation_clusters(
     )
     named_axes = n_drawn <= _NAMED_PERTURBATIONS
     # The cluster legend lists the unassigned perturbations when it draws any.
-    cluster_legend = LegendSpec(
-        kind="categorical",
-        label="Cluster",
-        extras={"missing": True} if n_unassigned else {},
-    )
+    cluster_legend = categorical_legend("Cluster", missing=bool(n_unassigned))
     tables: dict[str, pd.DataFrame]
     legends: tuple[LegendSpec, ...]
     scales: tuple[Any, ...]

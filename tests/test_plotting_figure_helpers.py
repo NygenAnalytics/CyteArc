@@ -13,6 +13,7 @@ import pytest
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_hex
 from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
 
@@ -1242,6 +1243,157 @@ def test_composition_shares_the_legends_of_children_it_can_draw_again():
     assert [legend.get_title().get_text() for legend in figure.legends] == ["Group"]
     assert [text.get_text() for text in figure.legends[0].get_texts()] == ["a", "b"]
     plt.close(figure)
+
+
+def _inset_child(figure, axis) -> PlotResult:
+    """A child whose panel holds a tree, which holds a leaf, as a heatmap holds its dendrogram."""
+    axis.imshow([[0.0, 1.0]])
+    tree = axis.inset_axes([0.0, 1.02, 1.0, 0.2])
+    leaf = tree.inset_axes([0.0, 0.0, 0.5, 0.5])
+    return PlotResult(
+        figure=figure,
+        axes={"main": axis, "tree": tree, "leaf": leaf},
+        tables={},
+        legends=(splt.LegendSpec(kind="colorbar", label="Score"),),
+        scales=(splt.ColorScale(vmin=0.0, vmax=1.0),),
+        provenance=splt.PlotProvenance(cytearc_version="test"),
+        owns_figure=False,
+    )
+
+
+@pytest.mark.parametrize("shared_legends", [True, False])
+def test_composition_keeps_the_insets_that_its_children_draw(shared_legends):
+    figure, axes = plt.subplots(1, 2, figsize=(6, 3), layout="constrained")
+    first = _inset_child(figure, axes[0])
+    second = _inset_child(figure, axes[1])
+
+    composite = compose_results(
+        figure, {"first": first, "second": second}, shared_legends=shared_legends
+    )
+    figure.canvas.draw()
+
+    # Each inset keeps its key under its own child, at any depth, although
+    # the figure's own axes hold no inset.
+    assert composite.axes == {
+        (name, key): axis
+        for name, child in (("first", first), ("second", second))
+        for key, axis in child.axes.items()
+    }
+    assert first.axes["tree"] not in figure.axes
+    # Each child is one lettered panel, and its insets take no letter.
+    letters = {
+        key: [text.get_text() for text in axis.texts]
+        for key, axis in composite.axes.items()
+    }
+    assert letters == {
+        ("first", "main"): ["A"],
+        ("first", "tree"): [],
+        ("first", "leaf"): [],
+        ("second", "main"): ["B"],
+        ("second", "tree"): [],
+        ("second", "leaf"): [],
+    }
+    plt.close(figure)
+
+
+def test_composition_leaves_out_the_axes_that_a_caller_removed():
+    figure, axis = plt.subplots(figsize=(4, 3), layout="constrained")
+    child = _inset_child(figure, axis)
+    # A caller removes the tree, and with it the leaf that the tree holds.
+    child.axes["tree"].remove()
+
+    composite = compose_results(figure, [child], panel_labels=False)
+    figure.canvas.draw()
+
+    assert composite.axes == {(0, "main"): axis}
+    # The shared colorbar spans the panel alone, not the removed tree.
+    (colorbar,) = [ax for ax in figure.axes if is_colorbar_axes(ax)]
+    assert colorbar._colorbar_info["parents"] == [axis]
+    plt.close(figure)
+
+
+def test_composition_leaves_out_a_childs_colorbar_that_it_replaces():
+    figure, axis = plt.subplots(figsize=(4, 3), layout="constrained")
+    child = _inset_child(figure, axis)
+    own = figure.colorbar(axis.images[0], ax=axis)
+    child.axes["colorbar"] = own.ax
+
+    shared = compose_results(figure, [child], panel_labels=False)
+    assert own.ax not in figure.axes
+    assert {key for _, key in shared.axes} == {"main", "tree", "leaf"}
+    plt.close(figure)
+
+    figure, axis = plt.subplots(figsize=(4, 3), layout="constrained")
+    child = _inset_child(figure, axis)
+    own = figure.colorbar(axis.images[0], ax=axis)
+    child.axes["colorbar"] = own.ax
+
+    # Without shared legends the child keeps its colorbar, which the
+    # composite reports.
+    kept = compose_results(figure, [child], panel_labels=False, shared_legends=False)
+    assert kept.axes[(0, "colorbar")] is own.ax
+    assert {key for _, key in kept.axes} == {"main", "tree", "leaf", "colorbar"}
+    plt.close(figure)
+
+
+def _group_child(figure, axis, *, missing: bool) -> PlotResult:
+    """A child coloured by groups a and b, with or without cells without a group."""
+    scale = splt.CategoricalScale(
+        order=("a", "b"),
+        palette={"a": "#1f77b4", "b": "#ff7f0e"},
+        missing_color="#123456",
+        missing_label="no group",
+    )
+    return _child_result(
+        figure,
+        axis,
+        legends=(
+            splt.LegendSpec(
+                kind="categorical", label="Group", extras={"missing": missing}
+            ),
+        ),
+        scales=(scale,),
+    )
+
+
+@pytest.mark.parametrize(
+    "missing", [(True, False), (False, True), (True, True), (False, False)]
+)
+def test_a_shared_legend_lists_the_missing_entry_when_any_child_draws_it(missing):
+    figure, axes = plt.subplots(1, 2, figsize=(6, 3), layout="constrained")
+    children = [
+        _group_child(figure, axis, missing=flag)
+        for axis, flag in zip(axes, missing, strict=True)
+    ]
+
+    compose_results(figure, children, panel_labels=False)
+
+    # One legend for the shared colours, whichever child draws missing values.
+    (legend,) = figure.legends
+    texts = [text.get_text() for text in legend.get_texts()]
+    colors = [to_hex(handle.get_markerfacecolor()) for handle in legend.legend_handles]
+    if any(missing):
+        assert texts == ["a", "b", "no group"]
+        assert colors == ["#1f77b4", "#ff7f0e", "#123456"]
+    else:
+        assert texts == ["a", "b"]
+        assert colors == ["#1f77b4", "#ff7f0e"]
+    plt.close(figure)
+
+
+def test_categorical_legend_requires_the_missing_flag():
+    from cytearc.plotting._figure import categorical_legend
+
+    legend = categorical_legend("Group", missing=np.bool_(True), legend_loc="right")
+    assert legend == splt.LegendSpec(
+        kind="categorical",
+        label="Group",
+        extras={"legend_loc": "right", "missing": True},
+    )
+    # A plain bool, so provenance sidecars write it.
+    assert type(legend.extras["missing"]) is bool
+    with pytest.raises(TypeError, match="missing"):
+        categorical_legend("Group")  # type: ignore[call-arg]
 
 
 def test_panel_labels_follow_result_axes():

@@ -614,6 +614,73 @@ def test_clustermap_annotation_legend_without_dendrogram_is_owned_and_closed(
     assert not plt.fignum_exists(figure_number)
 
 
+def test_annotation_colors_report_which_annotations_have_missing_values():
+    annotations = normalize_annotations(
+        ["r1", "r2", "r3"],
+        {"set": ["x", None, "y"], "kind": {"r1": "u", "r2": "v", "r3": "u"}},
+        axis_name="row",
+    )
+
+    colors, scales, missing = annotation_colors(annotations, None)
+
+    assert missing == [True, False]
+    assert all(type(flag) is bool for flag in missing)
+    assert colors["set"].tolist()[1] == scales[0].missing_color
+    assert scales[0].order == ("x", "y")
+
+
+def test_marker_heatmap_annotation_legends_list_missing_annotations(marker_store):
+    import matplotlib.pyplot as plt
+
+    data = marker_store
+    column_annotations = {
+        "kind": {0: "x", 1: None, 2: "y"},
+        "parity": {0: "even", 1: "odd", 2: "even"},
+    }
+    result = splt.marker_heatmap(
+        data.store,
+        marker=data.markers,
+        topn=2,
+        column_annotations=column_annotations,
+        show=False,
+    )
+    try:
+        # The grey strip of group 1 has its entry, last among the kinds.
+        (legend,) = result.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "kind: x",
+            "kind: y",
+            "kind: NA",
+            "parity: even",
+            "parity: odd",
+        ]
+        assert [
+            (spec.label, spec.extras["missing"])
+            for spec in result.legends
+            if spec.kind == "categorical"
+        ] == [("kind", True), ("parity", False)]
+    finally:
+        result.close()
+
+    figure, ax = plt.subplots(figsize=(6, 6), layout="constrained")
+    try:
+        child = splt.marker_heatmap(
+            data.store,
+            marker=data.markers,
+            topn=2,
+            column_annotations=column_annotations,
+            target=ax,
+            show=False,
+        )
+        splt.compose_results(figure, [child], panel_labels=False)
+        assert [
+            (legend.get_title().get_text(), [t.get_text() for t in legend.get_texts()])
+            for legend in figure.legends
+        ] == [("kind", ["x", "y", "NA"]), ("parity", ["even", "odd"])]
+    finally:
+        plt.close(figure)
+
+
 def test_cluster_tree_prepares_cache_and_returns_tables(
     paris_clustering,
     connectivity_graph,
@@ -1806,17 +1873,18 @@ def test_annotation_legend_handles_name_values_and_skip_unresolved_scales():
 
     from cytearc.plotting._heatmap_utils import annotation_legend_handles
 
+    program = splt.CategoricalScale(
+        order=("late", "early"),
+        palette={"late": "#222222", "early": "#dddddd"},
+        labels={"late": "Late"},
+        missing_color="#123456",
+        missing_label="unknown",
+    )
     handles = annotation_legend_handles(
         mpl,
         ["unresolved", "program"],
-        [
-            splt.CategoricalScale(),
-            splt.CategoricalScale(
-                order=("late", "early"),
-                palette={"late": "#222222", "early": "#dddddd"},
-                labels={"late": "Late"},
-            ),
-        ],
+        [splt.CategoricalScale(), program],
+        [True, False],
     )
 
     assert [handle.get_label() for handle in handles] == [
@@ -1827,6 +1895,15 @@ def test_annotation_legend_handles_name_values_and_skip_unresolved_scales():
         "#222222",
         "#dddddd",
     ]
+
+    # An annotation with missing values lists the scale's missing entry last.
+    handles = annotation_legend_handles(mpl, ["program"], [program], [True])
+    assert [handle.get_label() for handle in handles] == [
+        "program: Late",
+        "program: early",
+        "program: unknown",
+    ]
+    assert handles[-1].get_markerfacecolor() == "#123456"
 
 
 def test_pseudotime_feature_order_refuses_to_drop_rows_with_repeated_names():

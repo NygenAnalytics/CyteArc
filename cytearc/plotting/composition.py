@@ -19,6 +19,7 @@ from ._figure import (
     LegendSpec,
     PlotResult,
     _place_legend_blocks,
+    categorical_legend,
     close_figures_on_error,
     normalize_axes_target,
 )
@@ -1026,7 +1027,11 @@ def composition(
     if pair_col is not None:
         notes.append(f"paired_by={pair_col}")
 
-    legends = [LegendSpec(kind="categorical", label=category_axis_label)]
+    # The NA category is the scale's missing entry, which a composed legend
+    # lists last.
+    legends = [
+        categorical_legend(category_axis_label, missing=bool(missing_mask.any()))
+    ]
     if condition_order is not None:
         legends.append(
             LegendSpec(

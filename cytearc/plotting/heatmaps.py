@@ -20,6 +20,7 @@ from ._deps import require_matplotlib, require_seaborn
 from ._figure import (
     LegendSpec,
     PlotResult,
+    categorical_legend,
     close_figures_on_error,
     normalize_axes_target,
 )
@@ -392,15 +393,18 @@ def marker_heatmap(
         method=cluster_method,
         metric=cluster_metric,
     )
-    row_colors, row_annotation_scales = annotation_colors(
+    row_colors, row_annotation_scales, row_annotation_missing = annotation_colors(
         row_annotation_values,
         annotation_scales,
     )
-    column_colors, column_annotation_scales = annotation_colors(
-        column_annotation_values,
-        annotation_scales,
+    column_colors, column_annotation_scales, column_annotation_missing = (
+        annotation_colors(
+            column_annotation_values,
+            annotation_scales,
+        )
     )
     resolved_annotation_scales = row_annotation_scales + column_annotation_scales
+    annotation_missing = row_annotation_missing + column_annotation_missing
     annotation_names = list(row_annotation_values.columns) + list(
         column_annotation_values.columns
     )
@@ -539,6 +543,7 @@ def marker_heatmap(
             mpl,
             annotation_names,
             resolved_annotation_scales,
+            annotation_missing,
         )
         if annotation_handles:
             if owns_figure:
@@ -593,7 +598,12 @@ def marker_heatmap(
                 label="standardized expression",
                 extras={"vmin": resolved_vmin, "vmax": resolved_vmax},
             ),
-            *(LegendSpec(kind="categorical", label=name) for name in annotation_names),
+            *(
+                categorical_legend(name, missing=missing)
+                for name, missing in zip(
+                    annotation_names, annotation_missing, strict=True
+                )
+            ),
         ),
         scales=(
             resolved_scale,
