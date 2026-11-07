@@ -11,6 +11,7 @@ import pytest
 from matplotlib.collections import PolyCollection
 from matplotlib.colors import to_rgba
 from matplotlib.markers import MarkerStyle
+from matplotlib.patches import Rectangle
 from matplotlib.text import Annotation, Text
 from scipy.stats import beta, false_discovery_control, norm
 
@@ -118,13 +119,33 @@ def _store(n_guides: int) -> SimpleNamespace:
     first cell carries guide 0 and also guide 1, so it is the one cell with two
     called guides.
     """
-    guide_ids = np.asarray([f"g{index}" for index in range(n_guides)], dtype=object)
     codes = np.repeat(np.arange(n_guides), np.arange(1, n_guides + 1))
+    return _calls_store(n_guides, codes, second_guide_of_first_cell=1)
+
+
+def _balanced_store(n_guides: int) -> SimpleNamespace:
+    """A store of calls whose cells each carry one guide, every guide in 30 cells.
+
+    Every guide's bar in the cells per guide panel is equally long.
+    """
+    codes = np.repeat(np.arange(n_guides), 30)
+    return _calls_store(n_guides, codes, second_guide_of_first_cell=None)
+
+
+def _calls_store(
+    n_guides: int, codes: np.ndarray, *, second_guide_of_first_cell: int | None
+) -> SimpleNamespace:
+    """A store whose loader returns calls of guide ``codes[i]`` in cell i.
+
+    The first cell also carries guide ``second_guide_of_first_cell``, if any.
+    """
+    guide_ids = np.asarray([f"g{index}" for index in range(n_guides)], dtype=object)
     cells = np.arange(len(codes))
+    second = [] if second_guide_of_first_cell is None else [second_guide_of_first_cell]
     arrays = guide_call_arrays(
-        np.concatenate([cells, [0]]),
-        np.concatenate([codes, [1]]),
-        np.full(len(codes) + 1, 20),
+        np.concatenate([cells, np.zeros(len(second), dtype=np.int64)]),
+        np.concatenate([codes, np.asarray(second, dtype=np.int64)]),
+        np.full(len(codes) + len(second), 20),
         n_cells=len(codes),
         guide_ids=guide_ids,
     )
@@ -236,6 +257,99 @@ def test_the_plot_refuses_settings_it_cannot_use() -> None:
         guide_calls(_store(5), CALLS, max_guides_per_cell=1, show=False)
     with pytest.raises(TypeError, match="^max_guides_per_cell must be an integer$"):
         guide_calls(_store(5), CALLS, max_guides_per_cell=True, show=False)
+
+
+def _legend_texts(figure: Any, axes: Sequence[Any]) -> list[list[str]]:
+    """The entries of each legend of ``figure`` and of each of ``axes``."""
+    legends = list(figure.legends) + [
+        ax.get_legend() for ax in axes if ax.get_legend() is not None
+    ]
+    return [[text.get_text() for text in legend.get_texts()] for legend in legends]
+
+
+@pytest.mark.parametrize("n_guides", [5, 50])
+def test_calls_without_a_cell_of_several_guides_name_none(n_guides: int) -> None:
+    result = guide_calls(_balanced_store(n_guides), CALLS, show=False)
+
+    try:
+        assert result.tables["cells_per_guide"]["several_guide_cells"].sum() == 0
+        texts = _legend_texts(result.figure, list(result.axes.values()))
+        expected = ["One guide called"]
+        if n_guides == 50:
+            expected.insert(0, "All cells with the guide")
+        assert texts == [expected]
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize(
+    ("n_guides", "expected"),
+    [
+        (5, ["One guide called", "Several guides called"]),
+        (
+            50,
+            ["All cells with the guide", "One guide called", "Several guides called"],
+        ),
+    ],
+)
+def test_one_legend_beside_the_panels_names_each_series_once(
+    n_guides: int, expected: list[str]
+) -> None:
+    result = guide_calls(_store(n_guides), CALLS, show=False)
+
+    try:
+        # The first cell carries two guides and the others one.
+        assert len(result.figure.legends) == 1
+        assert _legend_texts(result.figure, list(result.axes.values())) == [expected]
+        # The reported legend and the tables are unchanged.
+        assert result.legends == (LegendSpec(kind="categorical", label="Call"),)
+        assert set(result.tables) == {
+            "guides_per_cell",
+            "cells_per_guide",
+            "top_fraction",
+        }
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize("caller", [False, True])
+@pytest.mark.parametrize("n_guides", [5, 12])
+def test_the_legend_covers_no_bar(caller: bool, n_guides: int) -> None:
+    store = _balanced_store(n_guides)
+    if caller:
+        figure, row = plt.subplots(1, 3, figsize=(12.0, 4.0), layout="constrained")
+        result = guide_calls(store, CALLS, target=list(row), show=False)
+    else:
+        result = guide_calls(store, CALLS, show=False)
+        figure = result.figure
+
+    try:
+        figure.canvas.draw()
+        axes = list(result.axes.values())
+        legends = list(figure.legends) + [
+            ax.get_legend() for ax in axes if ax.get_legend() is not None
+        ]
+        boxes = [legend.get_window_extent() for legend in legends]
+        bars = [
+            patch.get_window_extent()
+            for ax in axes
+            for patch in ax.patches
+            if isinstance(patch, Rectangle) and patch.get_width() and patch.get_height()
+        ]
+        assert legends and bars
+        assert not any(bar.overlaps(box) for bar in bars for box in boxes)
+    finally:
+        plt.close(figure)
+
+
+def test_guide_calls_can_drop_the_legend() -> None:
+    result = guide_calls(_store(50), CALLS, show=False, show_legend=False)
+
+    try:
+        assert _legend_texts(result.figure, list(result.axes.values())) == []
+        assert result.legends == (LegendSpec(kind="categorical", label="Call"),)
+    finally:
+        result.close()
 
 
 def _threshold(method: str, parameters: dict[str, float], max_umi: int) -> int:
@@ -4831,10 +4945,7 @@ def test_screen_figures_take_numpy_numbers() -> None:
 # The legends that each screen figure draws into caller axes, by the position
 # of their axes, which a composed figure keeps.
 COMPOSED_LEGENDS: dict[str, dict[int, list[str]]] = {
-    "guide_calls": {
-        1: ["Only guide called", "One of several called"],
-        2: ["One guide called", "Several guides called"],
-    },
+    "guide_calls": {2: ["One guide called", "Several guides called"]},
     "guide_threshold_panels": {
         0: [
             "Cells called",
