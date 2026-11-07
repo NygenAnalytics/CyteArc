@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
+from ..metadata.records import MISSING_TEXT, parse_numbers
+from ..utils.delimited import require_columns, text_chunks, text_layout
+
 if TYPE_CHECKING:
     from ..features.genomic.motifs import Motif
 
@@ -21,14 +24,17 @@ __all__ = [
 #: Names that a cisTarget rankings database gives its column of motifs or tracks.
 INDEX_COLUMNS = ("motifs", "tracks")
 
-#: ``.tbl`` columns that annotation filtering and pruning read.
+#: ``.tbl`` columns that annotation filtering and pruning read. The header
+#: names the first ``#motif_id``; its ``#`` is not part of the name.
 ANNOTATION_COLUMNS = (
-    "#motif_id",
+    "motif_id",
     "gene_name",
     "motif_similarity_qvalue",
     "orthologous_identity",
     "description",
 )
+# Rows of an annotation table parsed at a time.
+_ANNOTATION_CHUNK_ROWS = 100_000
 
 
 def _polars() -> Any:
@@ -180,14 +186,13 @@ def read_motif_annotations(
     Returns:
         A DataFrame with ``motif``, ``TF``, ``motif_similarity_qvalue``,
         ``orthologous_identity``, ``description``, and ``category`` columns.
+
+    Raises:
+        ValueError: If a category is unknown, the table lacks an annotation
+            column, a row holds fewer or more fields than the header names,
+            or a q-value or identity is not a number; the message names the
+            file and the line.
     """
-    table = pd.read_csv(path, sep="\t", usecols=list(ANNOTATION_COLUMNS))
-    table = table.rename(columns={"#motif_id": "motif", "gene_name": "TF"})
-    table = table.loc[
-        (table["motif_similarity_qvalue"] <= motif_similarity_fdr)
-        & (table["orthologous_identity"] >= orthologous_identity_threshold)
-    ].copy()
-    table["category"] = _annotation_category(table["description"])
     if categories is not None:
         unknown = set(categories) - {
             "direct",
@@ -197,8 +202,51 @@ def read_motif_annotations(
         }
         if unknown:
             raise ValueError(f"Unknown annotation categories: {sorted(unknown)}")
+    table, lines = _annotation_rows(os.fspath(path))
+    for column in ("motif_similarity_qvalue", "orthologous_identity"):
+        table[column] = parse_numbers(table[column], name=column, lines=lines)
+    missing = table["description"].isin(MISSING_TEXT)
+    table["description"] = table["description"].where(~missing, np.nan)
+    table = table.rename(columns={"motif_id": "motif", "gene_name": "TF"})
+    table = table.loc[
+        (table["motif_similarity_qvalue"] <= motif_similarity_fdr)
+        & (table["orthologous_identity"] >= orthologous_identity_threshold)
+    ].copy()
+    table["category"] = _annotation_category(table["description"])
+    if categories is not None:
         table = table.loc[table["category"].isin(list(categories))]
     return table.reset_index(drop=True)
+
+
+def _annotation_rows(path: str) -> tuple[pd.DataFrame, np.ndarray]:
+    """Read the annotation columns of a ``.tbl`` as text, with each row's file line.
+
+    Every row must hold as many fields as the header names; the first row of
+    another width is refused, naming its line. cisTarget tables quote
+    nothing, so a quote in a description is text.
+    """
+    layout = text_layout(
+        path, what="a motif annotation table", quoted=False, allow_row_names=False
+    )
+    require_columns(layout, ANNOTATION_COLUMNS)
+    positions = [layout.names.index(name) for name in ANNOTATION_COLUMNS]
+    lines: list[np.ndarray] = []
+    parts: list[pd.DataFrame] = []
+    for chunk_lines, chunk in text_chunks(
+        layout, _ANNOTATION_CHUNK_ROWS, columns=positions
+    ):
+        lines.append(chunk_lines)
+        parts.append(chunk)
+    table = pd.DataFrame(
+        {
+            name: np.concatenate(
+                [part[position].to_numpy(dtype=object) for part in parts]
+                or [np.empty(0, dtype=object)]
+            )
+            for name, position in zip(ANNOTATION_COLUMNS, positions, strict=True)
+        }
+    )
+    return table, np.concatenate(lines or [np.empty(0, dtype=np.int64)])
 
 
 def motif_annotations(motifs: Sequence["Motif"]) -> pd.DataFrame:

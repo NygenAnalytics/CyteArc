@@ -18,7 +18,7 @@ import pytest
 import scipy.io
 import scipy.sparse as sp
 
-from cytearc.readers._delimited import first_lines
+from cytearc.utils.delimited import first_lines
 from cytearc.readers._matrix_market import (
     matrix_market_entries,
     matrix_market_header,

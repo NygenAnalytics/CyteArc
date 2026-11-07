@@ -155,3 +155,78 @@ def test_read_motif_annotations_filters_and_classifies(tmp_path):
     with pytest.raises(ValueError, match="Unknown annotation categories"):
         read_motif_annotations(path, categories=["bogus"])
     assert isinstance(table, pd.DataFrame)
+
+
+def _rows_of(table: str) -> list[str]:
+    return table.splitlines()
+
+
+@pytest.mark.parametrize(
+    ("row", "fields"),
+    [
+        # Missing its last three fields, which held the description.
+        ("m6\tn\td\ts\tv\tTF6\t0.0\tNone\tNone\t1.0", 10),
+        # One field beyond the description.
+        ("m6\tn\td\ts\tv\tTF6\t0.0\tNone\tNone\t1.0\tNone\tNone\tdirect\tEXTRA", 14),
+    ],
+    ids=["short", "long"],
+)
+def test_read_motif_annotations_refuses_a_row_of_another_width(
+    tmp_path, row: str, fields: int
+):
+    lines = _rows_of(_TBL)
+    lines.insert(2, row)
+    path = tmp_path / "motifs.tbl"
+    path.write_text("\n".join(lines) + "\n")
+
+    with pytest.raises(ValueError) as refused:
+        read_motif_annotations(path)
+    assert str(refused.value) == (
+        f"{path} is malformed: line 3 holds {fields} fields, but its header "
+        "names 13 columns"
+    )
+
+
+def test_read_motif_annotations_refuses_a_value_that_is_not_a_number(tmp_path):
+    path = tmp_path / "motifs.tbl"
+    path.write_text(_TBL.replace("\tSPI1\t0.0005\t", "\tSPI1\tlow\t"))
+
+    with pytest.raises(ValueError, match=r"motif_similarity_qvalue .*'low'.* line 3"):
+        read_motif_annotations(path)
+
+
+def test_read_motif_annotations_reads_variants_of_the_same_table_alike(tmp_path):
+    import gzip
+
+    plain = tmp_path / "motifs.tbl"
+    plain.write_text(_TBL)
+    expected = read_motif_annotations(plain)
+    assert expected["motif_similarity_qvalue"].tolist() == [0.0, 0.0005, 0.0, 0.0001]
+    assert expected["motif_similarity_qvalue"].dtype == np.float64
+
+    # Blank lines hold no rows, and a gzip copy reads by its first bytes.
+    blank = tmp_path / "blank.tbl"
+    blank.write_text(_TBL.replace("\nm3\t", "\n\n\nm3\t") + "\n")
+    packed = tmp_path / "motifs.tbl.gz"
+    packed.write_bytes(gzip.compress(_TBL.encode()))
+    for variant in (blank, packed):
+        pd.testing.assert_frame_equal(read_motif_annotations(variant), expected)
+
+    # cisTarget quotes nothing, so a quote in a description is text.
+    quoted = tmp_path / "quoted.tbl"
+    quoted.write_text(_TBL.replace("('x'; q-value", '("x"; q-value'))
+    descriptions = read_motif_annotations(quoted)["description"].tolist()
+    assert (
+        descriptions[1]
+        == 'gene is annotated for similar motif m9 ("x"; q-value = 0.0005)'
+    )
+
+
+def test_read_motif_annotations_keeps_a_missing_description_as_missing(tmp_path):
+    path = tmp_path / "motifs.tbl"
+    path.write_text(_TBL.replace("\tNone\tgene is directly annotated\n", "\tNone\t\n"))
+
+    table = read_motif_annotations(path)
+
+    assert pd.isna(table.loc[0, "description"])
+    assert table.loc[0, "category"] == "other"

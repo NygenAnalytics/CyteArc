@@ -45,7 +45,7 @@ delimiter after each row's last field also gives one field more than the
 header, an empty one, so when every row ends in its delimiter with nothing
 after it the table is refused, since the two layouts read alike there.
 Blank lines hold no rows, and a row of fewer or more fields than the header
-is refused (:mod:`cytearc.readers._delimited`). A clone label that is one of
+is refused (:mod:`cytearc.utils.delimited`). A clone label that is one of
 :data:`cytearc.metadata.records.MISSING_TEXT`, such as ``NA``, ``None`` or
 ``NULL``, means no clone, and a cell barcode joined from several columns
 must have every part.
@@ -65,7 +65,7 @@ import pandas as pd
 from ..clones.assignments import clone_label_texts
 from ..metadata.records import MISSING_TEXT, file_lines
 from ..utils.files import HDF5_SIGNATURE, file_signature
-from ._delimited import (
+from ..utils.delimited import (
     TextLayout,
     count_rows,
     first_lines,

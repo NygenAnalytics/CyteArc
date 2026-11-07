@@ -1,8 +1,9 @@
 """Read delimited text tables that single-cell tools write, in bounded chunks.
 
 The clone tables of lineage tracing tools, the barcode tables of their
-extractors, the allele tables of lineage recorders, receptor contigs and the
-tables of GoT and giftwrap share their quirks: plain or gzip-compressed text,
+extractors, the allele tables of lineage recorders, receptor contigs, the
+tables of GoT and giftwrap, and cisTarget's motif annotation tables share
+their quirks: plain or gzip-compressed text,
 whatever the file's name, separated by tabs, commas or spaces, quoted as R
 quotes, without a final newline, a header that starts with ``#`` as TREX
 writes it, and R's row-name layout, whose header holds one field fewer than
@@ -36,9 +37,9 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from ..utils.arguments import quoted_value
+from .arguments import quoted_value
 
-from ..utils.files import open_text
+from .files import open_text
 
 __all__ = [
     "TextLayout",

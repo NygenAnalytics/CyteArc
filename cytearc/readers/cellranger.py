@@ -13,7 +13,7 @@ from scipy.sparse import coo_matrix
 from ..utils.progress import iter_progress
 from ..utils.files import open_binary
 from ._contigs import contig_chunks, header_fields
-from ._delimited import stripped_text
+from ..utils.delimited import stripped_text
 from ._assay_names import (
     AUTO_ASSAY_NAMES,
     auto_name_feat_table,

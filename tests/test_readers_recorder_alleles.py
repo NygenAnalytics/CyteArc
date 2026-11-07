@@ -24,7 +24,7 @@ import pandas as pd
 import pytest
 
 from cytearc.clones.recorders import STATES
-from cytearc.readers._delimited import rows_end_in_delimiter, text_layout
+from cytearc.utils.delimited import rows_end_in_delimiter, text_layout
 from cytearc.readers.recorder_alleles import (
     ALLELE_FORMATS,
     allele_file,
@@ -1327,7 +1327,7 @@ def test_a_table_whose_rows_all_end_in_a_delimiter_takes_row_names_on_request(
     ):
         text_layout(str(path))
     # A reader that prefers the row names reads no further than the first rows.
-    import cytearc.readers._delimited as delimited
+    import cytearc.utils.delimited as delimited
 
     scan = delimited._rows_hold_values_after_their_names
     with monkeypatch.context() as patched:

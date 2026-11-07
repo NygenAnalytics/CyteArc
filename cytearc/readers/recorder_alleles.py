@@ -100,7 +100,7 @@ from ..clones.recorders import (
 )
 from ..metadata.records import MISSING_TEXT, file_lines, parse_integers
 from ..utils.files import HDF5_SIGNATURE, file_signature, open_text
-from ._delimited import (
+from ..utils.delimited import (
     TextLayout,
     delimiter,
     first_lines,

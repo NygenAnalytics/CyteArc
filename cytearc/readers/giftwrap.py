@@ -44,7 +44,7 @@ from ..metadata.records import MISSING_TEXT
 from ..utils.arrays import has_duplicates
 from ..utils.files import open_text
 from ..variants.counts import EntryBatch, SiteTable
-from ._delimited import require_columns, text_chunks, text_layout
+from ..utils.delimited import require_columns, text_chunks, text_layout
 from ._variant_files import find_file
 from ..utils.arguments import quoted_value
 
@@ -334,7 +334,7 @@ def _h5_source(path: str) -> GiftwrapSource:
 def _read_table(path: str, columns: Sequence[str] | None = None) -> pd.DataFrame:
     """Read a giftwrap table as text, by the names of its header.
 
-    The table is read as :mod:`~cytearc.readers._delimited` reads tables, so
+    The table is read as :mod:`~cytearc.utils.delimited` reads tables, so
     a row of fewer or more fields than the header is refused, and rows that
     each end in a tab after their last field are refused rather than read as
     R's row names.

@@ -1640,7 +1640,7 @@ def test_quicats_wide_table_is_parsed_once_per_chunk(tmp_path, monkeypatch) -> N
 
 
 def test_required_columns_are_found_in_time_linear_in_the_header(tmp_path) -> None:
-    from cytearc.readers._delimited import TextLayout, require_columns
+    from cytearc.utils.delimited import TextLayout, require_columns
 
     class Name(str):
         comparisons = 0

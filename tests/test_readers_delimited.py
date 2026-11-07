@@ -1,7 +1,7 @@
 """The one reader of delimited text: rows, their fields and their lines.
 
 Every table of clones, lineage barcodes, recorder alleles, contigs, GoT
-and giftwrap is read by ``readers/_delimited.py``, so these cases pin what
+and giftwrap is read by ``utils/delimited.py``, so these cases pin what
 each of those readers inherits: a row of another number of fields than its
 header is refused, naming its line, whatever size the chunks are, and every
 row comes with its line in the file.
@@ -18,8 +18,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import cytearc.readers._delimited as delimited
-from cytearc.readers._delimited import (
+import cytearc.utils.delimited as delimited
+from cytearc.utils.delimited import (
     TextLayout,
     count_rows,
     first_lines,
@@ -606,7 +606,7 @@ def test_stripping_text_leaves_no_reference_cycle() -> None:
     import gc
     import weakref
 
-    from cytearc.readers._delimited import joined_columns, stripped_text
+    from cytearc.utils.delimited import joined_columns, stripped_text
 
     # pandas 2 keeps the .str accessor on its Series, which the accessor
     # holds, so a chunk stripped through it would outlive its last reference
