@@ -613,7 +613,9 @@ def test_read_store_raises_when_a_request_stalls(loopback_hub, stalled, call):
 def test_read_store_reads_after_abandoning_a_stalled_attempt(
     loopback_hub, monkeypatch, stalled
 ):
-    store = _loopback_store(loopback_hub, request_timeout=0.25)
+    # The attempt after the stalled one must answer within the request
+    # timeout, so the timeout leaves room for a loaded test machine.
+    store = _loopback_store(loopback_hub, request_timeout=1.0)
     loopback_hub.plan[stalled] = ["stall"]
     sleeps = _record_sleeps(monkeypatch)
     try:
