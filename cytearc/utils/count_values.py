@@ -83,6 +83,19 @@ class CountValueRange:
         self.maximum = max(self.maximum, int(block.max()))
 
 
+@dataclass(slots=True)
+class IndexOrder:
+    """Running record of the index order of the compressed vectors scanned.
+
+    Attributes:
+        canonical: Whether every vector seen holds its indices sorted without
+            repeats, as SciPy's ``has_canonical_format`` reports. Row batches
+            of a CSR matrix whose rows all are need no sorting or summing.
+    """
+
+    canonical: bool = True
+
+
 def _summable(values: np.ndarray) -> np.ndarray:
     """Return values in the dtype in which their duplicates are summed.
 
@@ -132,6 +145,7 @@ def compressed_count_ranges(
     groups: np.ndarray | None = None,
     groupAxis: int = 1,
     valueRanges: list[CountValueRange] | None = None,
+    indexOrder: IndexOrder | None = None,
 ) -> list[CountValueRange]:
     """Return the ranges of the canonical values of a compressed sparse matrix.
 
@@ -156,6 +170,9 @@ def compressed_count_ranges(
         groupAxis: The axis that ``groups`` indexes.
         valueRanges: The range of each group that the scan extends, so that a
             matrix can be scanned in parts. None starts new ranges.
+        indexOrder: The record in which the scan clears ``canonical`` when a
+            vector it reads holds unsorted or repeated indices. None records
+            nothing.
 
     Returns:
         The range of each group.
@@ -209,6 +226,8 @@ def compressed_count_ranges(
                 shape=(end - position, int(minorSize)),
             )
             if not block.has_canonical_format:
+                if indexOrder is not None:
+                    indexOrder.canonical = False
                 block = _canonical(block)
             if groups is None:
                 value_ranges[0].update(block.data)

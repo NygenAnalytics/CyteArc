@@ -15,7 +15,12 @@ from ..storage.profiles import (
     resolve_storage_profile,
 )
 from ..storage.sharding import accumulate_sparse_to_shards
-from ..utils.arrays import has_duplicates, max_window_nnz, sparse_matrix_bytes
+from ..utils.arrays import (
+    csr_to_coo,
+    has_duplicates,
+    max_window_nnz,
+    sparse_matrix_bytes,
+)
 from ..utils.count_values import compressed_count_ranges
 from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError, refusal_words
@@ -377,17 +382,24 @@ class SparseToZarr:
 
     def _count_import_requirements(
         self, assay: _AssayMatrix
-    ) -> tuple[int, Callable[[int], int]]:
+    ) -> tuple[int, Callable[[int], int], bool]:
         """Return the resident bytes and the window entries of an assay's counts write.
 
-        Every matrix stays held while each assay is written. The layout fit
-        and the write plan the same import from these.
+        The third value says whether every row of the matrix holds its
+        indices sorted without repeats, so that the write marks its batches
+        canonical and sorts and sums none. Every matrix stays held while
+        each assay is written. The layout fit and the write plan the same
+        import from these.
         """
         indptr = np.asarray(assay.matrix.indptr)
         resident = self._heldMatrixBytes + CountSummary.nbytes_for(
             self.nCells, assay.matrix.shape[1]
         )
-        return resident, lambda rows: max_window_nnz(indptr, rows)
+        return (
+            resident,
+            lambda rows: max_window_nnz(indptr, rows),
+            bool(assay.matrix.has_canonical_format),
+        )
 
     def _fit_count_layout(
         self,
@@ -399,7 +411,7 @@ class SparseToZarr:
         from ..storage.sharding import fit_count_layout, sparse_counts_admission
         from .counts_t import counts_t_assays
 
-        resident, window_nnz = self._count_import_requirements(assay)
+        resident, window_nnz, canonical_batches = self._count_import_requirements(assay)
         assay_types = {} if assay.assay_type is None else {assay.name: assay.assay_type}
         return fit_count_layout(
             {assay.name: (assay.matrix.shape[1], storage_dtype)},
@@ -412,6 +424,7 @@ class SparseToZarr:
                 maxWindowNnz=window_nnz,
                 sourceDtype=assay.matrix.dtype,
                 residentBytes=resident,
+                canonicalBatches=canonical_batches,
             ),
             requested=DEFAULT_COUNT_MATRIX_POLICY if requested is None else requested,
         )
@@ -443,7 +456,9 @@ class SparseToZarr:
 
         store = load_count_array(self.z, assay.name, self.workspace)
         summary = CountSummary(store)
-        resident_bytes, window_nnz = self._count_import_requirements(assay)
+        resident_bytes, window_nnz, canonical_batches = self._count_import_requirements(
+            assay
+        )
         plan = resolve_sparse_import_batch(
             (store,),
             nRows=self.nCells,
@@ -452,6 +467,7 @@ class SparseToZarr:
             sourceDtype=assay.matrix.dtype,
             batchRows=batch_size,
             residentBytes=resident_bytes,
+            canonicalBatches=canonical_batches,
         )
         self._lastImportPlan = plan
         resolved_batch_rows = plan.batchRows
@@ -463,8 +479,8 @@ class SparseToZarr:
 
         def row_batches() -> Iterator[coo_matrix]:
             for start in range(0, self.nCells, resolved_batch_rows):
-                batch = assay.matrix[start : start + resolved_batch_rows]
-                yield linear_coo(batch, kind, store.dtype, assay=assay.name).tocoo()
+                batch = csr_to_coo(assay.matrix[start : start + resolved_batch_rows])
+                yield linear_coo(batch, kind, store.dtype, assay=assay.name)
 
         accumulate_sparse_to_shards(
             store,

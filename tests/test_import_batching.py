@@ -648,6 +648,7 @@ def test_h5ad_automatic_matches_explicit_for_split_assays(
             automatic_arrays,
             values.shape[0],
         )
+        # Every encoding yields canonical batches, which the split keeps.
         without_projection = resolve_sparse_import_batch(
             automatic_arrays,
             nRows=values.shape[0],
@@ -656,6 +657,7 @@ def test_h5ad_automatic_matches_explicit_for_split_assays(
             sourceDtype=readers[0].sourceMatrixDtype,
             batchRows=automatic._lastImportPlan.batchRows,
             producerStagingBytes=readers[0].producer_batch_staging_bytes,
+            canonicalBatches=True,
         )
         assert (
             automatic._lastImportPlan.producerReserveBytes
@@ -785,3 +787,336 @@ def test_sparse_automatic_matches_explicit() -> None:
     assert array_shard_rows(automatic_array) == array_shard_rows(explicit_array)
     np.testing.assert_array_equal(automatic_array[:], values.toarray())
     np.testing.assert_array_equal(explicit_array[:], values.toarray())
+
+
+def _record_sorts(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record the values of each batch that an import sorts and sums.
+
+    The shard buffer, and the undoing of a log, sort a batch and sum its
+    repeated coordinates through ``canonicalize_sparse`` unless the batch is
+    marked canonical.
+    """
+    from cytearc.storage import sharding
+    from cytearc.utils import arrays
+
+    canonicalize = arrays.canonicalize_sparse
+    sorted_values: list[int] = []
+
+    def recorded(coo, dtype=None):
+        if not coo.has_canonical_format:
+            sorted_values.append(int(coo.nnz))
+        return canonicalize(coo, dtype)
+
+    monkeypatch.setattr(sharding, "canonicalize_sparse", recorded)
+    monkeypatch.setattr(arrays, "canonicalize_sparse", recorded)
+    return sorted_values
+
+
+def _counts() -> np.ndarray:
+    """Eight cells of six features, each cell with four or five nonzero counts."""
+    return np.arange(48, dtype=np.float32).reshape(8, 6) % 5
+
+
+def _rows_out_of_order(values: np.ndarray) -> csr_matrix:
+    """CSR rows of ``values`` with row 1's indices reversed and row 4's first
+    value split into two entries at the same index."""
+    data: list[float] = []
+    indices: list[int] = []
+    pointers = [0]
+    for row, line in enumerate(values):
+        columns = np.flatnonzero(line).tolist()
+        stored = line[columns].tolist()
+        if row == 1:
+            columns.reverse()
+            stored.reverse()
+        if row == 4:
+            columns[0:1] = [columns[0], columns[0]]
+            stored[0:1] = [stored[0] - 1, 1.0]
+        data += stored
+        indices += columns
+        pointers.append(len(data))
+    matrix = csr_matrix(
+        (np.array(data, dtype=values.dtype), np.array(indices), np.array(pointers)),
+        shape=values.shape,
+    )
+    assert not matrix.has_canonical_format
+    return matrix
+
+
+def _row_is_canonical(matrix: csr_matrix, row: int) -> bool:
+    """Whether one CSR row holds its indices sorted without repeats, by NumPy."""
+    indices = matrix.indices[matrix.indptr[row] : matrix.indptr[row + 1]]
+    return bool(np.all(np.diff(indices) > 0))
+
+
+def _write_rows(path: Path, matrix: csr_matrix) -> None:
+    """Replace the CSR matrix of an h5ad file with ``matrix``'s rows as given."""
+    with h5py.File(path, mode="r+") as handle:
+        group = handle["X"]
+        for name in ("data", "indices", "indptr"):
+            del group[name]
+            group.create_dataset(name, data=getattr(matrix, name))
+
+
+def _log_normalized(counts: np.ndarray) -> np.ndarray:
+    """Counts scaled to 10,000 per cell and logged, as scanpy writes them."""
+    return np.log1p(counts / counts.sum(axis=1, keepdims=True) * 1e4).astype(np.float32)
+
+
+@pytest.mark.parametrize("encoding", ["csr", "csc", "dense"])
+def test_h5ad_reader_marks_the_batches_of_canonical_rows(
+    tmp_path: Path, encoding: str
+) -> None:
+    values = _counts()
+    path = tmp_path / f"{encoding}.h5ad"
+    _write_h5ad(path, values, encoding)
+    reader = H5adReader(str(path), feature_name_key="feature_name")
+    try:
+        # CSR rows count as not canonical until the value scan reads them.
+        assert reader._canonical_batches() is (encoding != "csr")
+        reader.count_value_ranges(1 << 20)
+        assert reader._canonical_batches() is True
+        for rows in (1, 3, 8):
+            batches = list(reader.consume(rows))
+            # SciPy 1.16 does not mark the COO that it converts from CSR.
+            assert all(batch.has_canonical_format is True for batch in batches)
+            np.testing.assert_array_equal(
+                np.vstack([batch.toarray() for batch in batches]), values
+            )
+    finally:
+        reader.close()
+
+
+def test_h5ad_reader_leaves_the_batches_of_rows_out_of_order_unmarked(
+    tmp_path: Path,
+) -> None:
+    values = _counts()
+    matrix = _rows_out_of_order(values)
+    path = tmp_path / "unsorted.h5ad"
+    _write_h5ad(path, values, "csr")
+    _write_rows(path, matrix)
+    reader = H5adReader(str(path), feature_name_key="feature_name")
+    try:
+        reader.count_value_ranges(1 << 20)
+        assert reader._canonical_batches() is False
+        for rows in (1, 3, 8):
+            marks = [batch.has_canonical_format for batch in reader.consume(rows)]
+            assert marks == [
+                all(
+                    _row_is_canonical(matrix, row)
+                    for row in range(start, min(start + rows, 8))
+                )
+                for start in range(0, 8, rows)
+            ]
+        # Only rows 1 and 4 are out of order.
+        assert [batch.has_canonical_format for batch in reader.consume(1)] == [
+            row not in (1, 4) for row in range(8)
+        ]
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize(
+    ("encoding", "split", "kind"),
+    [
+        ("csr", False, "counts"),
+        ("csr", True, "counts"),
+        ("csc", True, "counts"),
+        ("dense", True, "counts"),
+        ("csr", False, "log_normalized"),
+    ],
+    ids=["csr", "csr-split", "csc-split", "dense-split", "csr-log"],
+)
+def test_an_h5ad_import_sorts_no_batch_of_canonical_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+    split: bool,
+    kind: str,
+) -> None:
+    counts = _counts()
+    values = counts if kind == "counts" else _log_normalized(counts)
+    path = tmp_path / f"{encoding}.h5ad"
+    _write_h5ad(path, values, encoding)
+    sorts = _record_sorts(monkeypatch)
+    store = MemoryStore()
+    reader = H5adReader(str(path), feature_name_key="feature_name")
+    try:
+        H5adToZarr(
+            reader,
+            store,
+            assay_split_key="feature_types" if split else None,
+            mem_budget="64M",
+            nthreads=1,
+            policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
+            values=None if kind == "counts" else kind,
+        ).dump()
+    finally:
+        reader.close()
+    assert sorts == []
+    if split:
+        stored = _assay_counts(store)
+        np.testing.assert_array_equal(stored["RNA"], values[:, ::2])
+        np.testing.assert_array_equal(stored["ADT"], values[:, 1::2])
+    elif kind == "counts":
+        root = zarr.open_group(store=store, mode="r")
+        np.testing.assert_array_equal(root["RNA/counts"][:], values)
+    else:
+        # Undoing the log stores each cell's counts scaled to 10,000.
+        root = zarr.open_group(store=store, mode="r")
+        np.testing.assert_allclose(
+            root["RNA/counts"][:],
+            counts / counts.sum(axis=1, keepdims=True) * 1e4,
+            rtol=1e-5,
+        )
+
+
+def test_an_h5ad_import_sorts_and_sums_the_batches_of_rows_out_of_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _counts()
+    matrix = _rows_out_of_order(values)
+    paths = {"canonical": tmp_path / "canonical.h5ad", "out": tmp_path / "out.h5ad"}
+    for path in paths.values():
+        _write_h5ad(path, values, "csr")
+    _write_rows(paths["out"], matrix)
+    counts = {}
+    sorts: dict[str, list[int]] = {}
+    for name, path in paths.items():
+        with monkeypatch.context() as patch:
+            sorts[name] = _record_sorts(patch)
+            store = MemoryStore()
+            reader = H5adReader(str(path), feature_name_key="feature_name")
+            try:
+                H5adToZarr(
+                    reader,
+                    store,
+                    mem_budget="64M",
+                    nthreads=1,
+                    policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
+                ).dump()
+            finally:
+                reader.close()
+        counts[name] = zarr.open_group(store=store, mode="r")["RNA/counts"]
+    # Batches of four rows: row 1 is in the first and row 4 in the second, so
+    # both are sorted and summed, each with every value it holds.
+    assert sorts["out"] == [
+        int(matrix.indptr[4] - matrix.indptr[0]),
+        int(matrix.indptr[8] - matrix.indptr[4]),
+    ]
+    assert sorts["canonical"] == []
+    for array in counts.values():
+        np.testing.assert_array_equal(array[:], values)
+    assert (
+        counts["out"].attrs["content_fingerprint"]
+        == counts["canonical"].attrs["content_fingerprint"]
+    )
+
+
+@pytest.mark.parametrize("kind", ["counts", "log_normalized"])
+def test_sparse_to_zarr_sorts_no_batch_of_canonical_rows(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    counts = _counts()
+    values = counts if kind == "counts" else _log_normalized(counts)
+    sorts = _record_sorts(monkeypatch)
+    store = MemoryStore()
+    SparseToZarr(
+        csr_matrix(values),
+        store,
+        cell_ids=[f"cell-{index}" for index in range(values.shape[0])],
+        feature_ids=[f"feature-{index}" for index in range(values.shape[1])],
+        mem_budget="64M",
+        nthreads=1,
+        policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
+        values=None if kind == "counts" else kind,
+    ).dump()
+    assert sorts == []
+    stored = zarr.open_group(store=store, mode="r")["RNA/counts"][:]
+    if kind == "counts":
+        np.testing.assert_array_equal(stored, values)
+    else:
+        np.testing.assert_allclose(
+            stored, counts / counts.sum(axis=1, keepdims=True) * 1e4, rtol=1e-5
+        )
+
+
+def test_sparse_to_zarr_sorts_and_sums_the_batches_of_rows_out_of_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = _counts()
+    matrix = _rows_out_of_order(values)
+    sorts = _record_sorts(monkeypatch)
+    store = MemoryStore()
+    SparseToZarr(
+        matrix,
+        store,
+        cell_ids=[f"cell-{index}" for index in range(values.shape[0])],
+        feature_ids=[f"feature-{index}" for index in range(values.shape[1])],
+        mem_budget="64M",
+        nthreads=1,
+        policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
+    ).dump()
+    assert sorts == [
+        int(matrix.indptr[4] - matrix.indptr[0]),
+        int(matrix.indptr[8] - matrix.indptr[4]),
+    ]
+    stored = zarr.open_group(store=store, mode="r")["RNA/counts"][:]
+    np.testing.assert_array_equal(stored, values)
+
+
+def test_the_shard_buffer_sorts_and_sums_only_a_batch_not_marked_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cytearc.storage.sharding import SparseShardBuffer
+    from cytearc.utils.arrays import csr_to_coo
+
+    spec = ZarrArraySpec(
+        shape=(3, 4), chunks=(3, 4), shards=(3, 4), dtype=np.uint16, compressors=()
+    )
+    sorts = _record_sorts(monkeypatch)
+    # Coordinates out of order, with (0, 1) and (2, 3) each stored twice.
+    rows = np.array([2, 0, 1, 0, 2, 2])
+    columns = np.array([3, 1, 0, 1, 0, 3])
+    data = np.array([5, 100, 7, 100, 1, 60], dtype=np.uint16)
+    expected = np.zeros((3, 4), dtype=np.int64)
+    np.add.at(expected, (rows, columns), data.astype(np.int64))
+    buffer = SparseShardBuffer(spec)
+    (band,) = [
+        *buffer.add(coo_matrix((data, (rows, columns)), shape=(3, 4))),
+        *buffer.finish(),
+    ]
+    assert sorts == [6]
+    np.testing.assert_array_equal(band.dense(), expected)
+    # The band holds each coordinate once, in row-major order.
+    assert np.all(np.diff(band.row * 4 + band.column) > 0)
+
+    # A batch marked canonical is buffered as it is.
+    buffer = SparseShardBuffer(spec)
+    marked = csr_to_coo(csr_matrix(expected.astype(np.uint16)))
+    (band,) = [*buffer.add(marked), *buffer.finish()]
+    assert sorts == [6]
+    np.testing.assert_array_equal(band.dense(), expected)
+
+
+def test_canonical_batches_leave_out_a_charge_for_each_source_value_only() -> None:
+    from cytearc.storage.sharding import sparse_producer_peak_bytes
+
+    def saved(buffered: int, source: int, itemsize: int = 4) -> int:
+        return sparse_producer_peak_bytes(
+            buffered, source, itemsize
+        ) - sparse_producer_peak_bytes(
+            buffered, source, itemsize, canonicalBatches=True
+        )
+
+    # Without source values nothing is sorted, and the saving grows with the
+    # source values alone, whatever the producer buffers.
+    assert saved(1_000, 0) == 0
+    assert saved(0, 10) > 0
+    assert saved(1_000, 10) == saved(0, 10)
+    assert saved(0, 30) == 3 * saved(0, 10)
+    assert all(
+        sparse_producer_peak_bytes(5, 7, itemsize, canonicalBatches=True)
+        < sparse_producer_peak_bytes(5, 7, itemsize)
+        for itemsize in (1, 4, 8)
+    )

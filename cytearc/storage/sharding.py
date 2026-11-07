@@ -135,8 +135,16 @@ def sparse_producer_peak_bytes(
     bufferedValues: int,
     sourceValues: int,
     valueItemsize: int,
+    *,
+    canonicalBatches: bool = False,
 ) -> int:
-    """Bound one sparse pull through projection, buffering, and band splitting."""
+    """Bound one sparse pull through projection, buffering, and band splitting.
+
+    :class:`SparseShardBuffer` sorts a source batch and sums its repeated
+    coordinates unless the batch is marked canonical. With
+    ``canonicalBatches`` the producer marks every batch, so the bound leaves
+    out the bytes of that sort and sum.
+    """
     buffered_values = max(0, int(bufferedValues))
     source_values = max(0, int(sourceValues))
     value_bytes = max(1, int(valueItemsize))
@@ -148,6 +156,8 @@ def sparse_producer_peak_bytes(
     )
     source_bytes = 2 * source_values * triplet_bytes
     source_indexes = source_values * (2 * index_bytes + 2 * mask_bytes)
+    if canonicalBatches:
+        return buffered_bytes + source_bytes + source_indexes
     canonical_value_bytes = max(value_bytes, np.dtype(np.int64).itemsize)
     canonicalization_bytes = source_values * (
         4 * canonical_value_bytes + 6 * index_bytes + 4
@@ -177,6 +187,7 @@ def resolve_sparse_import_batch(
     residentBytes: int = 0,
     producerStagingBytes: Callable[[int], int] | None = None,
     extraProducerBytes: Callable[[int], int] | None = None,
+    canonicalBatches: bool = False,
 ) -> SparseImportPlan:
     """Resolve sparse source rows for physical destination arrays."""
     return _resolve_sparse_import_geometries(
@@ -189,6 +200,7 @@ def resolve_sparse_import_batch(
         residentBytes=residentBytes,
         producerStagingBytes=producerStagingBytes,
         extraProducerBytes=extraProducerBytes,
+        canonicalBatches=canonicalBatches,
     )
 
 
@@ -203,6 +215,7 @@ def resolve_sparse_import_spec(
     residentBytes: int = 0,
     producerStagingBytes: Callable[[int], int] | None = None,
     extraProducerBytes: Callable[[int], int] | None = None,
+    canonicalBatches: bool = False,
 ) -> SparseImportPlan:
     """Resolve sparse source rows before destination arrays are created."""
     return _resolve_sparse_import_geometries(
@@ -215,6 +228,7 @@ def resolve_sparse_import_spec(
         residentBytes=residentBytes,
         producerStagingBytes=producerStagingBytes,
         extraProducerBytes=extraProducerBytes,
+        canonicalBatches=canonicalBatches,
     )
 
 
@@ -229,8 +243,13 @@ def _resolve_sparse_import_geometries(
     residentBytes: int = 0,
     producerStagingBytes: Callable[[int], int] | None = None,
     extraProducerBytes: Callable[[int], int] | None = None,
+    canonicalBatches: bool = False,
 ) -> SparseImportPlan:
-    """Resolve source rows while admitting one complete destination write band."""
+    """Resolve source rows while admitting one complete destination write band.
+
+    ``canonicalBatches`` states that the producer marks every source batch
+    canonical, as :func:`sparse_producer_peak_bytes` describes.
+    """
     destination_list = tuple(destinations)
     if not destination_list:
         raise ValueError("At least one sparse import destination is required")
@@ -280,6 +299,7 @@ def _resolve_sparse_import_geometries(
                 buffered_values,
                 source_values,
                 value_itemsize,
+                canonicalBatches=canonicalBatches,
             )
             + max(0, int(staging_bytes(width)))
             + max(0, int(extra_bytes(width)))
@@ -1341,6 +1361,7 @@ def sparse_counts_admission(
     residentBytes: int = 0,
     producerStagingBytes: Callable[[int], int] | None = None,
     extraProducerBytes: Callable[[int], int] | None = None,
+    canonicalBatches: bool = False,
 ) -> Callable[[tuple[ZarrArraySpec, ...], ResourceBudget], object]:
     """Return the ``admitCounts`` of a sparse import for :func:`fit_count_layout`.
 
@@ -1362,6 +1383,7 @@ def sparse_counts_admission(
             residentBytes=residentBytes,
             producerStagingBytes=producerStagingBytes,
             extraProducerBytes=extraProducerBytes,
+            canonicalBatches=canonicalBatches,
         )
 
     return admit

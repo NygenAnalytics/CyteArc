@@ -333,6 +333,25 @@ def test_duplicate_coordinates_are_summed_before_the_log_is_undone():
     assert linear_coo(block, "counts", np.float64, assay="RNA") is block
 
 
+def test_an_undone_log_is_marked_canonical_so_it_is_not_sorted_again():
+    from cytearc.utils.arrays import canonicalize_sparse
+
+    # Out of order, with (0, 2) stored twice.
+    block = sp.coo_matrix(
+        ([1.0, 0.5, 0.25, 2.0], ([1, 0, 0, 0], [0, 2, 2, 1])), shape=(2, 3)
+    )
+    linear = linear_coo(block, "log_normalized", np.float64, assay="RNA")
+    assert linear.has_canonical_format is True
+    assert canonicalize_sparse(linear) is linear
+    # Each coordinate once, in row-major order.
+    assert list(zip(linear.row.tolist(), linear.col.tolist(), strict=True)) == [
+        (0, 1),
+        (0, 2),
+        (1, 0),
+    ]
+    np.testing.assert_allclose(linear.data, np.expm1([2.0, 0.75, 1.0]), rtol=1e-12)
+
+
 def test_value_range_keeps_recording_negative_values_after_a_fraction():
     value_range = CountValueRange()
     value_range.update(np.array([0.5, 2.0]))

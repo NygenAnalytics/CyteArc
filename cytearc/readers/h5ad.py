@@ -7,9 +7,15 @@ import h5py
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
 
-from ..utils.arrays import assay_feature_ranges, cumulative_nnz, max_window_nnz
+from ..utils.arrays import (
+    assay_feature_ranges,
+    csr_to_coo,
+    cumulative_nnz,
+    max_window_nnz,
+)
 from ..utils.count_values import (
     CountValueRange,
+    IndexOrder,
     compressed_count_ranges,
     dense_count_ranges,
     dense_row_nonzeros,
@@ -198,6 +204,9 @@ class H5adReader:
             # The cumulative nonzero values of a dense matrix's rows, which
             # plan its sparse batches as CSR row pointers do.
             self._cumulativeRowNnz: np.ndarray | None = None
+            # Whether every row of a CSR matrix holds its indices sorted
+            # without repeats, which the value scan finds; None before it.
+            self._canonicalRows: bool | None = None
             matrix_shape = self._matrix_shape()
             self.nCells, self.nFeatures = (
                 self._get_n(self.cellAttrsKey, matrix_shape[0]),
@@ -254,6 +263,7 @@ class H5adReader:
         self._convertedCsr = None
         self._indptrCache = None
         self._cumulativeRowNnz = None
+        self._canonicalRows = None
 
     @classmethod
     def from_inspect(
@@ -944,7 +954,9 @@ class H5adReader:
         :func:`~cytearc.storage.count_dtype.count_storage_dtype` to resolve the
         storage dtype of its group's counts. The scan of a dense matrix also
         counts the nonzero values of each row, which :meth:`max_batch_nnz`
-        plans from.
+        plans from, and the scan of a CSR matrix finds whether every row holds
+        its indices sorted without repeats, so that an import plans no sort
+        or sum of its batches.
 
         Args:
             maxBytes: Memory available to the scan.
@@ -971,7 +983,8 @@ class H5adReader:
             self._cumulativeRowNnz = cumulative_nnz(row_nonzeros)
             return value_ranges
         csr = self.matrixOrientation == "csr"
-        return compressed_count_ranges(
+        index_order = IndexOrder()
+        value_ranges = compressed_count_ranges(
             node["indptr"],
             node["indices"],
             node["data"],
@@ -980,7 +993,11 @@ class H5adReader:
             groups=featureGroups,
             # Features are the minor axis of CSR and the vectors of CSC.
             groupAxis=1 if csr else 0,
+            indexOrder=index_order,
         )
+        if csr:
+            self._canonicalRows = index_order.canonical
+        return value_ranges
 
     @property
     def consumeDtype(self) -> np.dtype[Any]:
@@ -1037,6 +1054,19 @@ class H5adReader:
             self._dense_cumulative_nnz()
         else:
             self._csr_indptr()
+
+    def _canonical_batches(self) -> bool:
+        """Return whether every batch that ``consume`` yields is marked canonical.
+
+        A canonical batch holds sorted coordinates without repeats, which an
+        import neither sorts nor sums. The rows of a dense matrix and the
+        converted rows of a CSC matrix always are; the rows of a CSR matrix
+        are when :meth:`count_value_ranges` found every row's indices sorted
+        without repeats, and before that scan they count as not canonical.
+        """
+        if self.matrixOrientation == "csr":
+            return bool(self._canonicalRows)
+        return True
 
     def _sparse_import_resident_bytes(self) -> int:
         """Return the bytes of the row counts that plan an import's batches.
@@ -1196,7 +1226,7 @@ class H5adReader:
                 ),
                 shape=(n_rows, self.nFeatures),
             )
-            yield batch.tocoo(copy=False)
+            yield csr_to_coo(batch)
 
     def _consume_converted_csr(
         self,
@@ -1210,7 +1240,7 @@ class H5adReader:
         assert self._convertedCsr is not None
         for offset in range(start, stop, batch_size):
             end = min(offset + batch_size, stop)
-            yield self._convertedCsr.read(offset, end).tocoo(copy=False)
+            yield csr_to_coo(self._convertedCsr.read(offset, end))
 
     def consume_row_range(
         self,
