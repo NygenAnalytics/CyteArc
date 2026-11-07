@@ -59,6 +59,21 @@ class LegendSpec:
     extras: dict[str, Any] = field(default_factory=dict)
 
 
+def categorical_legend(
+    label: str | None, *, missing: bool, **extras: Any
+) -> LegendSpec:
+    """Return the spec of a categorical legend.
+
+    ``missing`` says whether the plot draws values without a category in the
+    scale's missing colour. Every legend of such a plot, the shared legend of
+    :func:`compose_results` included, then lists the scale's missing label
+    last.
+    """
+    return LegendSpec(
+        kind="categorical", label=label, extras={**extras, "missing": bool(missing)}
+    )
+
+
 def close_figures_on_error[**P, R](function: Callable[P, R]) -> Callable[P, R]:
     """Close pyplot figures a plotting call created when that call raises."""
 
@@ -583,6 +598,8 @@ def _shared_legend_parts(result: PlotResult) -> list[_SharedLegendPart] | None:
     whose scale has no order or palette. Such a child keeps the legends that
     it drew. A categorical legend whose extras hold a true ``missing``, for
     values drawn without a category, lists its scale's missing entry last.
+    Its key leaves that flag out, so children that share a legend share one
+    key whether or not they draw missing values.
     """
     if not result.legends:
         return None
@@ -617,7 +634,6 @@ def _shared_legend_parts(result: PlotResult) -> list[_SharedLegendPart] | None:
                 tuple(
                     (str(value), categorical_scale.palette[value]) for value in order
                 ),
-                missing,
             )
             colors = [categorical_scale.palette[value] for value in order]
             labels = [
@@ -667,19 +683,16 @@ def _shared_legend_parts(result: PlotResult) -> list[_SharedLegendPart] | None:
                 vmax = legend.extras.get("vmax", color_scale.vmax)
                 if vmin is None or vmax is None:
                     return None
-                # The colorbar spans the child's panels, not the insets that
-                # a panel holds, such as a heatmap's dendrogram.
-                insets = {
-                    id(inset)
-                    for ax in result.axes.values()
-                    for inset in getattr(ax, "child_axes", ())
-                }
+                # The colorbar spans the child's panels, its axes that the
+                # figure holds. Insets that a panel holds, such as a heatmap's
+                # dendrogram, and axes that a caller removed are not panels.
+                figure_axes = set(result.figure.axes)
                 targets = [
                     (
                         tuple(
                             ax
                             for ax in dict.fromkeys(result.axes.values())
-                            if not is_colorbar_axes(ax) and id(ax) not in insets
+                            if ax in figure_axes and not is_colorbar_axes(ax)
                         ),
                         vmin,
                         vmax,
@@ -793,17 +806,28 @@ def _shared_legend_parts(result: PlotResult) -> list[_SharedLegendPart] | None:
 
 
 def _render_shared_legends(figure: Any, parts: Sequence[_SharedLegendPart]) -> None:
-    """Draw each shared legend element once, in order."""
+    """Draw each shared legend element once, in order.
+
+    Blocks of one key list the same entries, except that a categorical legend
+    adds the missing entry when its child draws missing values. A legend that
+    several children share keeps the longest list, so it lists the missing
+    entry when any of them draws missing values.
+    """
     plt, mpl = require_matplotlib()
     seen: set[tuple[Any, ...]] = set()
+    block_index: dict[tuple[Any, ...], int] = {}
     blocks: list[_BoxedLegendBlock] = []
     for key, part in parts:
+        if not isinstance(part, _SharedColorbar):
+            if key not in block_index:
+                block_index[key] = len(blocks)
+                blocks.append(part)
+            elif len(part[2]) > len(blocks[block_index[key]][2]):
+                blocks[block_index[key]] = part
+            continue
         if key in seen:
             continue
         seen.add(key)
-        if not isinstance(part, _SharedColorbar):
-            blocks.append(part)
-            continue
         mappable = plt.cm.ScalarMappable(
             cmap=part.scale.cmap or "viridis",
             norm=continuous_norm(
@@ -867,6 +891,18 @@ def _remove_child_legend_artists(figure: Any, children: Sequence[PlotResult]) ->
             figure.delaxes(ax)
 
 
+def _drawn_axes(figure: Any) -> set[Any]:
+    """Return the axes that ``figure`` draws: its own and the insets they hold, at any depth."""
+    drawn: set[Any] = set()
+    pending = list(figure.axes)
+    while pending:
+        ax = pending.pop()
+        if ax not in drawn:
+            drawn.add(ax)
+            pending.extend(ax.child_axes)
+    return drawn
+
+
 def compose_results(
     figure: Any,
     results: Mapping[Hashable, PlotResult] | Sequence[PlotResult],
@@ -880,10 +916,18 @@ def compose_results(
 
     With ``shared_legends=True``, the legends of the children are drawn again
     beside the figure and their colorbars below their axes, once for legends
-    that several children share. A child that reports no legend, or one that
-    cannot be drawn this way, such as a line legend or a categorical legend
-    whose scale has no order or palette, keeps the legends and colorbars it
-    drew.
+    that several children share. A categorical legend lists the scale's
+    missing label last when a child draws values without a category, and a
+    legend that several children share lists it when any of them does. A
+    child that reports no legend, or one that cannot be drawn this way, such
+    as a line legend or a categorical legend whose scale has no order or
+    palette, keeps the legends and colorbars it drew.
+
+    The result's ``axes`` holds every axis of the children that the figure
+    still draws, the insets that a panel holds included, such as a matrix
+    plot's dendrograms, keyed by the child's name or position and the axis's
+    key. A child's colorbar that a shared colorbar replaces is no longer drawn
+    and is left out.
     """
     shared_legends = bool_argument(shared_legends, "shared_legends")
     owns_figure = bool_argument(owns_figure, "owns_figure")
@@ -940,7 +984,7 @@ def compose_results(
             _render_shared_legends(figure, parts)
         refresh_layout_point_sizes(figure)
         place_layout_labels(figure)
-    remaining_axes = set(figure.axes)
+    remaining_axes = _drawn_axes(figure)
     axes: dict[Hashable, Any] = {
         (namespace, key): ax
         for namespace, result in named_results

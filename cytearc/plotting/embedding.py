@@ -48,6 +48,7 @@ from ._figure import (
     LegendSpec,
     PlotResult,
     _place_legend_blocks,
+    categorical_legend,
     close_figures_on_error,
     normalize_axes_target,
 )
@@ -1847,11 +1848,17 @@ def embedding(
         )
         for color_index, scale in categorical_maps.items()
     }
-    # Side legends list each drawn category and a missing entry when needed.
-    side_legend_missing = {
+    # Whether each categorical colour draws cells without a value, whatever
+    # its legend_loc: its side legend and a composite's shared legend list
+    # them last.
+    drawn_missing = {
         color_index: bool(
             pd.isna(np.asarray(color_cache[color_index][0])[selection_mask]).any()
         )
+        for color_index in legend_locs
+    }
+    side_legend_missing = {
+        color_index: drawn_missing[color_index]
         for color_index, loc in legend_locs.items()
         if loc == "right"
     }
@@ -1891,10 +1898,10 @@ def embedding(
     for color_index, scale in categorical_maps.items():
         categorical_scales.append(scale)
         legends.append(
-            LegendSpec(
-                kind="categorical",
-                label=labels[color_index],
-                extras={"legend_loc": legend_locs[color_index]},
+            categorical_legend(
+                labels[color_index],
+                missing=drawn_missing[color_index],
+                legend_loc=legend_locs[color_index],
             )
         )
     panel_limit_specs: dict[int, dict[str, list[float]]] = {}

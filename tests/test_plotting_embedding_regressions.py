@@ -679,6 +679,118 @@ def test_missing_color_replaces_the_active_scale_missing_color():
             result.close()
 
 
+# Groups b and a, and every third cell without a group.
+_GROUPS = np.asarray(["b", "a", None] * 8, dtype=object)
+
+
+def _group_store(groups=_GROUPS, **columns):
+    n = len(groups)
+    rng = np.random.default_rng(0)
+    return _store(
+        {"U1": rng.normal(size=n), "U2": rng.normal(size=n), "group": groups, **columns}
+    )
+
+
+def _composed_legends(figure) -> list[tuple[str, list[str]]]:
+    return [
+        (
+            legend.get_title().get_text(),
+            [text.get_text() for text in legend.get_texts()],
+        )
+        for legend in figure.legends
+    ]
+
+
+@pytest.mark.parametrize("legend_loc", ["right", "on_data", "none"])
+def test_a_composed_embedding_lists_its_cells_without_a_group(legend_loc):
+    figure, ax = plt.subplots(layout="constrained")
+    try:
+        child = splt.embedding(
+            _group_store(),
+            layout_key="U",
+            color_by="group",
+            legend_loc=legend_loc,
+            categorical_scale=splt.CategoricalScale(missing_color="#123456"),
+            target=ax,
+            show=False,
+        )
+        assert child.legends[0].extras["missing"] is True
+        splt.compose_results(figure, [child], panel_labels=False)
+        # The cells drawn in the missing colour keep their entry, last.
+        assert _composed_legends(figure) == [("group", ["a", "b", "NA"])]
+        handles = figure.legends[0].legend_handles
+        assert to_hex(handles[-1].get_markerfacecolor()) == "#123456"
+    finally:
+        plt.close(figure)
+
+
+def test_a_composed_embedding_lists_cells_that_a_missing_mask_flags():
+    # A nullable column stores a placeholder that its missing mask flags.
+    groups = np.asarray(["b", "a", "z"] * 8, dtype=object)
+    store = _group_store(groups)
+    store.cells._missing["group"] = groups == "z"
+    figure, ax = plt.subplots(layout="constrained")
+    try:
+        child = splt.embedding(
+            store, layout_key="U", color_by="group", target=ax, show=False
+        )
+        splt.compose_results(figure, [child], panel_labels=False)
+        assert _composed_legends(figure) == [("group", ["a", "b", "NA"])]
+    finally:
+        plt.close(figure)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"groups": ["a", "b"]}, {"cell_key": "grouped"}],
+    ids=["groups", "cell_key"],
+)
+def test_a_composed_embedding_without_missing_cells_lists_none(options):
+    store = _group_store(grouped=np.asarray([group is not None for group in _GROUPS]))
+    figure, ax = plt.subplots(layout="constrained")
+    try:
+        child = splt.embedding(
+            store, layout_key="U", color_by="group", target=ax, show=False, **options
+        )
+        assert child.legends[0].extras["missing"] is False
+        splt.compose_results(figure, [child], panel_labels=False)
+        assert _composed_legends(figure) == [("group", ["a", "b"])]
+    finally:
+        plt.close(figure)
+
+
+@pytest.mark.parametrize("missing_first", [True, False])
+def test_two_composed_embeddings_share_one_legend_with_the_missing_entry(
+    missing_first,
+):
+    grouped = np.asarray([group is not None for group in _GROUPS])
+    store = _group_store(grouped=grouped)
+    figure, axes = plt.subplots(1, 2, figsize=(8, 4), layout="constrained")
+    try:
+        # One embedding draws cells without a group, the other only cells
+        # with one.
+        keys = ["I", "grouped"] if missing_first else ["grouped", "I"]
+        children = [
+            splt.embedding(
+                store,
+                layout_key="U",
+                color_by="group",
+                cell_key=key,
+                target=ax,
+                show=False,
+            )
+            for key, ax in zip(keys, axes, strict=True)
+        ]
+        assert [child.legends[0].extras["missing"] for child in children] == [
+            key == "I" for key in keys
+        ]
+        splt.compose_results(figure, children, panel_labels=False)
+        # One legend for the colours they share, with the entry one needs.
+        assert _composed_legends(figure) == [("group", ["a", "b", "NA"])]
+    finally:
+        plt.close(figure)
+
+
 def test_log_scale_draws_values_that_are_not_positive_as_missing():
     values = np.array([0.0, 1.0, 10.0, -2.0, 100.0])
     store = _store(

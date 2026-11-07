@@ -245,6 +245,135 @@ def test_clustered_matrix_axes_draw_dendrograms_aligned_with_their_leaves():
         plain.close()
 
 
+def _clustered_matrixplot(ax):
+    return splt.matrixplot(
+        _paired_profile_store(),
+        features=["GeneA", "GeneB", "GeneC"],
+        group_by="group",
+        cluster_groups=True,
+        cluster_features=True,
+        target=ax,
+        show=False,
+    )
+
+
+@pytest.mark.parametrize("shared_legends", [True, False])
+def test_a_composite_keeps_the_dendrograms_of_a_clustered_matrixplot(shared_legends):
+    figure, ax = plt.subplots(layout="constrained")
+    try:
+        child = _clustered_matrixplot(ax)
+        composite = splt.compose_results(
+            figure, {"matrix": child}, shared_legends=shared_legends
+        )
+        figure.canvas.draw()
+        # The composite names the insets that the matrix still holds.
+        assert set(composite.axes) == {
+            ("matrix", "matrixplot"),
+            ("matrix", "column_dendrogram"),
+            ("matrix", "row_dendrogram"),
+        }
+        for key in ("column_dendrogram", "row_dendrogram"):
+            assert composite.axes[("matrix", key)] is child.axes[key]
+            assert child.axes[key] in ax.child_axes
+    finally:
+        plt.close(figure)
+
+
+def test_two_composed_matrixplots_keep_their_own_dendrograms():
+    figure, (left, right) = plt.subplots(1, 2, figsize=(10, 4), layout="constrained")
+    try:
+        first = _clustered_matrixplot(left)
+        second = _clustered_matrixplot(right)
+        composite = splt.compose_results(figure, {"first": first, "second": second})
+        for name, child, ax in (("first", first, left), ("second", second, right)):
+            for key in ("column_dendrogram", "row_dendrogram"):
+                assert composite.axes[(name, key)] is child.axes[key]
+                assert child.axes[key] in ax.child_axes
+        # Each matrix is one lettered panel, and its dendrograms take none.
+        letters = sorted(
+            text.get_text()
+            for axis in composite.axes.values()
+            for text in axis.texts
+            if text.get_text() in {"A", "B", "C", "D", "E", "F"}
+        )
+        assert letters == ["A", "B"]
+    finally:
+        plt.close(figure)
+
+
+def test_a_dendrogram_removed_before_composing_is_left_out():
+    figure, ax = plt.subplots(layout="constrained")
+    try:
+        child = _clustered_matrixplot(ax)
+        child.axes["row_dendrogram"].remove()
+        # The shared colour bar spans the matrix alone, so composing lays out.
+        composite = splt.compose_results(figure, {"matrix": child})
+        figure.canvas.draw()
+        assert set(composite.axes) == {
+            ("matrix", "matrixplot"),
+            ("matrix", "column_dendrogram"),
+        }
+    finally:
+        plt.close(figure)
+
+
+def _legend_texts(legend) -> list[str]:
+    return [text.get_text() for text in legend.get_texts()]
+
+
+def test_matrixplot_annotation_legends_list_missing_annotations():
+    store = _paired_profile_store()
+    annotations = {
+        "row_annotations": {"panel": {"GeneA": "x", "GeneB": None, "GeneC": "y"}},
+        "column_annotations": {"kind": {"a": "u", "b": "v", "c": "u", "d": "v"}},
+    }
+    result = splt.matrixplot(
+        store,
+        features=["GeneA", "GeneB", "GeneC"],
+        group_by="group",
+        annotation_scales={"panel": splt.CategoricalScale(missing_color="#123456")},
+        show=False,
+        **annotations,
+    )
+    try:
+        # The grey strip of GeneB has its entry, last among the panel's.
+        (legend,) = result.figure.legends
+        assert _legend_texts(legend) == [
+            "panel: x",
+            "panel: y",
+            "panel: NA",
+            "kind: u",
+            "kind: v",
+        ]
+        assert to_hex(legend.legend_handles[2].get_markerfacecolor()) == "#123456"
+        assert [
+            (spec.label, spec.extras.get("missing"))
+            for spec in result.legends
+            if spec.kind == "categorical"
+        ] == [("panel", True), ("kind", False)]
+    finally:
+        result.close()
+
+    figure, ax = plt.subplots(layout="constrained")
+    try:
+        child = splt.matrixplot(
+            store,
+            features=["GeneA", "GeneB", "GeneC"],
+            group_by="group",
+            target=ax,
+            show=False,
+            **annotations,
+        )
+        splt.compose_results(figure, [child], panel_labels=False)
+        # The composed legends list the missing panel too.
+        assert [
+            (legend.get_title().get_text(), _legend_texts(legend))
+            for legend in figure.legends
+        ] == [("panel", ["x", "y", "NA"]), ("kind", ["u", "v"])]
+    finally:
+        plt.close(figure)
+
+
 def test_grouped_matrix_features_keep_a_row_per_group_and_bracket_them():
     store = _paired_profile_store()
     features = {"first": ["GeneA", "GeneB"], "second": ["GeneB", "GeneC"]}
@@ -374,6 +503,62 @@ def test_stacked_composition_puts_the_first_category_on_top():
     finally:
         single.close()
         per_sample.close()
+
+
+@pytest.mark.parametrize(
+    ("kind", "sample_by"),
+    [("stacked", None), ("stacked", "sample"), ("per_sample", "sample")],
+)
+def test_a_composed_composition_lists_its_missing_category(kind, sample_by):
+    store = _ArrayStore(
+        {
+            "I": np.ones(12, dtype=bool),
+            "category": np.asarray(["a", "b", "c", None] * 3, dtype=object),
+            "sample": np.repeat(np.asarray(["s0", "s1", "s2"], dtype=object), 4),
+        },
+        np.zeros((12, 2)),
+    )
+    figure, ax = plt.subplots(layout="constrained")
+    try:
+        child = splt.composition(
+            store,
+            category_by="category",
+            sample_by=sample_by,
+            kind=kind,
+            target=ax,
+            show=False,
+        )
+        assert child.legends[0].extras["missing"] is True
+        splt.compose_results(figure, [child], panel_labels=False)
+        # The composed legend keeps the NA category, last and in the missing
+        # grey, as the composition draws it.
+        (legend,) = figure.legends
+        assert legend.get_title().get_text() == "category"
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "a",
+            "b",
+            "c",
+            "NA",
+        ]
+        assert to_hex(legend.legend_handles[-1].get_markerfacecolor()) == "#bdbdbd"
+    finally:
+        plt.close(figure)
+
+
+def test_a_composition_without_missing_categories_lists_no_na():
+    store = _ArrayStore(
+        {"I": np.ones(6, dtype=bool), "category": np.asarray(list("aabbcc"))},
+        np.zeros((6, 2)),
+    )
+    figure, ax = plt.subplots(layout="constrained")
+    try:
+        child = splt.composition(store, category_by="category", target=ax, show=False)
+        assert child.legends[0].extras["missing"] is False
+        splt.compose_results(figure, [child], panel_labels=False)
+        (legend,) = figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == ["a", "b", "c"]
+    finally:
+        plt.close(figure)
 
 
 def test_raster_paints_pixels_whose_cells_lack_a_value():

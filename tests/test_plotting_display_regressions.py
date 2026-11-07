@@ -16,6 +16,7 @@ import cytearc.plotting as splt
 from cytearc.plotting._style import default_point_size, panel_area_inches
 from tests.test_plotting_foundation import _ArrayAssay, _ArrayFeatures, _ArrayStore
 from tests.test_plotting_modernization import _synthetic_plot_store
+from tests.test_plotting_perturbation import CLUSTERS, _clusters_record, _record_store
 from tests.test_plotting_raster import _GuardedMeta
 
 embedding_module = import_module("cytearc.plotting.embedding")
@@ -879,6 +880,89 @@ def test_composed_colorbars_keep_panel_limits_scales_and_raster_limits():
     assert (norm.vmin, norm.vmax) == pytest.approx(expected)
     assert axis.get_images()[0].get_clim() == pytest.approx(expected)
     plt.close(figure)
+
+
+def _embedding_drawing_missing(drawn: bool) -> splt.PlotResult:
+    rng = np.random.default_rng(0)
+    absent = None if drawn else "a"
+    return splt.embedding(
+        _synthetic_plot_store(
+            I=np.ones(12, dtype=bool),
+            UMAP1=rng.normal(size=12),
+            UMAP2=rng.normal(size=12),
+            group=np.asarray(["b", "a", absent] * 4, dtype=object),
+            batch=np.asarray(["x", absent, "y"] * 4, dtype=object),
+        ),
+        layout_key="UMAP",
+        color_by=["group", "batch"],
+        show=False,
+    )
+
+
+def _composition_drawing_missing(drawn: bool) -> splt.PlotResult:
+    absent = None if drawn else "c"
+    categories = np.asarray(["a", "b", "c", absent] * 3, dtype=object)
+    return splt.composition(
+        _ArrayStore(
+            {"I": np.ones(12, dtype=bool), "category": categories},
+            np.zeros((12, 2)),
+        ),
+        category_by="category",
+        show=False,
+    )
+
+
+def _clusters_drawing_missing(drawn: bool) -> splt.PlotResult:
+    record = _clusters_record()
+    assigned = record.table.index[record.table["cluster"] >= 0].tolist()
+    return splt.perturbation_clusters(
+        _record_store(record),
+        CLUSTERS,
+        perturbations=None if drawn else assigned,
+        show=False,
+    )
+
+
+def _matrixplot_drawing_missing(drawn: bool) -> splt.PlotResult:
+    absent = None if drawn else "x"
+    return splt.matrixplot(
+        _summary_store(["a", "b"] * 6),
+        features=["GeneA", "GeneB"],
+        group_by="group",
+        row_annotations={"set": {"GeneA": "x", "GeneB": absent}},
+        column_annotations={"kind": {"a": absent, "b": "u"}},
+        show=False,
+    )
+
+
+# Every plot that draws values without a category in the scale's missing
+# colour, the annotation strips of marker_heatmap aside, which need a store of
+# markers (tests/test_plotting_heatmaps.py).
+_DRAWS_MISSING_VALUES = {
+    "embedding": _embedding_drawing_missing,
+    "composition": _composition_drawing_missing,
+    "perturbation_clusters": _clusters_drawing_missing,
+    "matrixplot": _matrixplot_drawing_missing,
+}
+
+
+@pytest.mark.parametrize("drawn", [True, False])
+@pytest.mark.parametrize("plot", list(_DRAWS_MISSING_VALUES))
+def test_categorical_legends_report_whether_their_plot_draws_missing_values(
+    plot, drawn
+):
+    result = _DRAWS_MISSING_VALUES[plot](drawn)
+    try:
+        categorical = [spec for spec in result.legends if spec.kind == "categorical"]
+        assert categorical
+        # A plain bool in every categorical legend, so that compose_results
+        # lists the missing entry exactly when the plot draws it.
+        assert [spec.extras["missing"] for spec in categorical] == [drawn] * len(
+            categorical
+        )
+        assert all(type(spec.extras["missing"]) is bool for spec in categorical)
+    finally:
+        result.close()
 
 
 def test_composition_refreshes_embedding_point_sizes():

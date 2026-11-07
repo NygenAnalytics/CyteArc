@@ -82,9 +82,10 @@ def test_tiff_export_exact_size_and_provenance_sidecar(embedding_store, tmp_path
         "filename": "figure.tiff",
         "format": "tiff",
     }
+    # The sidecar says whether the legend lists cells without a cluster.
     assert payload["legends"] == [
         {
-            "extras": {"legend_loc": "right"},
+            "extras": {"legend_loc": "right", "missing": False},
             "kind": "categorical",
             "label": "cluster",
         }

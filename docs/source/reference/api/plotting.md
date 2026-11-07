@@ -160,7 +160,7 @@ as missing, never as their stored placeholder. Dot plots and matrix plots leave 
 every group and report their number as `dropped_group_cells`. Composition plots count a missing
 category in the NA category and leave cells with a missing sample label out of every sample.
 Embeddings and cluster trees show missing colors or fill values as missing, and
-`cluster_connectivity` rejects missing group labels and coordinates. An embedding colored by a label artifact also draws a blank label, such as that of a cell without a clone or clonotype, in the missing color rather than as a category.
+`cluster_connectivity` rejects missing group labels and coordinates. An embedding colored by a label artifact also draws a blank label, such as that of a cell without a clone or clonotype, in the missing color rather than as a category. The legends of embeddings, compositions, `perturbation_clusters` and the annotation strips of `matrixplot` and `marker_heatmap` list the values drawn in the missing color last, under the scale's missing label, such as "NA". The legends that `compose_results` draws for them list that entry too, and a legend that several figures share lists it when any of them draws such values.
 
 A feature has no value in a cell that its assay did not measure, which the assay's membership
 column `<assay>_I` marks False ([Assay membership](../developers/zarr-internals#assay-membership)); such a cell holds zero counts, which are no
