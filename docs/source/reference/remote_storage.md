@@ -82,6 +82,41 @@ analysis = cytearc.DataStore(
 
 Without `source_storage_options`, the source opens with the target's options, which a store on another backend refuses. `python -m cytearc.tools.repack_zarr` takes the source's options as `--source-storage-options`.
 
+### Write a composite to your bucket
+
+A composite combines selected cells of several sources into one store and reads their counts from the sources, without copying them. `create_composite` writes it to a local path, a URL with the `storage_options` that open it, or a Zarr store, and writes its metadata with the storage profile of that destination. Each reopen needs the options of the composite's own store and of every source, by source name:
+
+```python
+# Create a composite of two public sources in your own bucket.
+from cytearc.composite import create_composite
+
+public = {"token": False}
+sources = {
+    "study_a": cytearc.DataStore(
+        "hf://buckets/org/name/a.zarr", zarr_mode="r", storage_options=public
+    ),
+    "study_b": cytearc.DataStore(
+        "hf://buckets/org/name/b.zarr", zarr_mode="r", storage_options=public
+    ),
+}
+joint = create_composite(
+    sources,
+    at="s3://my-bucket/project/joint.zarr",
+    storage_options=bucket_options,
+    features="intersection",
+    source_column="study",
+)
+
+# Reopen the composite with the options of its store and of each source.
+joint = cytearc.DataStore(
+    "s3://my-bucket/project/joint.zarr",
+    storage_options=bucket_options,
+    source_storage_options={name: public for name in sources},
+)
+```
+
+`source_column="study"` names the cell column that holds each cell's source name, `dataset` by default.
+
 ### Open a datastore directly
 
 Pass an object-store URI as `zarr_loc` and provider options as `storage_options`. This anonymous

@@ -25,7 +25,7 @@ from cytearc.storage.stores import (
     zarr_root_path,
 )
 from tests.fixtures_datastore import build_neighbourhood_graph
-from tests.storage_helpers import serve_uris
+from tests.storage_helpers import serve_uris, stored_bytes
 from cytearc.storage.schema import create_cell_data
 from cytearc.writers import create_zarr_count_assay
 
@@ -1194,21 +1194,6 @@ _SOURCE_OPTIONS = {"token": "source-token"}
 _TARGET_OPTIONS = {"access_key_id": "target-key", "secret_access_key": "target-secret"}
 
 
-def _object_store_keys(store: ObjectStore) -> dict[str, bytes]:
-    from zarr.core.buffer import default_buffer_prototype
-    from zarr.core.sync import sync
-
-    async def read() -> dict[str, bytes]:
-        values = {}
-        async for key in store.list():
-            value = await store.get(key, default_buffer_prototype())
-            assert value is not None
-            values[key] = value.to_bytes()
-        return values
-
-    return sync(read())
-
-
 def test_a_mount_opens_its_source_with_its_own_options(
     default_sources, monkeypatch, tmp_path
 ):
@@ -1240,7 +1225,7 @@ def test_a_mount_opens_its_source_with_its_own_options(
         **options,
     )
     np.testing.assert_array_equal(reopened.RNA.rawData.compute(), values)
-    stored = _object_store_keys(target)
+    stored = stored_bytes(target)
     record = json.loads(stored["zarr.json"])["attributes"][MATRIX_SOURCE_ATTR]
     assert record["location"] == _SOURCE_URI
     # Credentials are used to open the stores and never written into either.
@@ -1294,7 +1279,7 @@ def test_a_mount_needs_its_source_options_when_it_is_made(
             source_storage_options="source-token",
             nthreads=1,
         )
-    assert _object_store_keys(target) == {}
+    assert stored_bytes(target) == {}
 
 
 def test_a_mount_source_takes_the_target_options_when_it_has_none(
