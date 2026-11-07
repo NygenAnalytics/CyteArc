@@ -133,6 +133,8 @@ def test_fate_and_pseudotime_results_reject_each_invalid_dimension() -> None:
             refs["cells"],
             np.array([[0.0, 1.0]]),
             np.array([True, True]),
+            np.array([0, 0]),
+            (2,),
         )
 
 

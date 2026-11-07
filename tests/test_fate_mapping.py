@@ -833,6 +833,37 @@ def test_datastore_fate_mapping_returns_an_artifact_without_metadata_writes():
     _assert_cell_metadata_unchanged(store, metadata_before)
 
 
+def test_datastore_fate_names_sinks_outside_the_scored_cells():
+    from cytearc.trajectory import SourceSinkLabelsError
+
+    scored_store = _scored_y_store(include_disconnected_cells=True)
+    store = scored_store.store
+
+    # "other" labels only the two cells that the pseudotime left unscored.
+    with pytest.raises(SourceSinkLabelsError) as raised:
+        store.trajectory.fate(
+            scored_store.pseudotime, scored_store.labels, sinks=["A", "other"]
+        )
+    error = raised.value
+    assert (error.missing_sources, error.missing_sinks) == ((), ("other",))
+    assert (error.missing_from, error.component_sizes) == ("scored component", (5, 2))
+    assert str(error).startswith(
+        "Sink labels were not found in the cells that the pseudotime scored: ['other']"
+    )
+
+    with pytest.raises(ValueError, match="not found in the selected cells") as raised:
+        store.trajectory.fate(
+            scored_store.pseudotime, scored_store.labels, sinks=["A", "Z"]
+        )
+    assert isinstance(raised.value, SourceSinkLabelsError)
+    assert raised.value.missing_sinks == ("Z",)
+    assert (raised.value.missing_from, raised.value.component_sizes) == (
+        "labels",
+        None,
+    )
+    assert _fate_maps(store) == []
+
+
 def test_datastore_fate_mapping_leaves_no_component_without_a_sink_out():
     # The pseudotime scores one connected component of the graph, and the
     # fate map's sinks lie in it, so the solve leaves no component out and

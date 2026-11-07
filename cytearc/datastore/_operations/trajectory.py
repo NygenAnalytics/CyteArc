@@ -97,7 +97,6 @@ from ...trajectory.artifacts import (
     MARKER_INPUTS as _MARKER_INPUTS,
     MARKER_PAYLOAD as _MARKER_PAYLOAD,
     PSEUDOTIME_INPUTS as _PSEUDOTIME_INPUTS,
-    PSEUDOTIME_PARAMETERS as _PSEUDOTIME_PARAMETERS,
     aggregation_payload_is_valid as _aggregation_payload_is_valid,
     diffusion_load_bytes,
     diffusion_payload_is_valid as _diffusion_payload_is_valid,
@@ -112,6 +111,7 @@ from ...trajectory.artifacts import (
     lineage_tree_payload_is_valid as _lineage_tree_payload_is_valid,
     load_cell_artifact_values as _load_cell_artifact_values,
     marker_payload_is_valid as _marker_payload_is_valid,
+    pseudotime_parameter_names as _pseudotime_parameter_names,
     pseudotime_payload_is_valid as _pseudotime_payload_is_valid,
     require_exact_record_keys as _require_exact_record_keys,
     selection_size as _selection_size,
@@ -135,7 +135,9 @@ from ...trajectory.curves import (
     project_onto_curve as _project_onto_curve_impl,
     projection_scratch_bytes,
 )
+from ...trajectory.errors import SourceSinkLabelsError
 from ...trajectory.fate import (
+    _validate_sink_groups,
     compute_fate_probabilities as _compute_fate_probabilities_impl,
     fate_solver_bytes,
 )
@@ -162,8 +164,8 @@ from ...trajectory.lineages import (
 )
 from ...trajectory.pseudotime import (
     make_source_sink_vector as _make_source_sink_vector_impl,
+    pseudotime_components as _pseudotime_components_impl,
     random_walk_laplacian_transpose as _random_walk_laplacian_transpose_impl,
-    select_pseudotime_component as _select_pseudotime_component_impl,
     truncated_pba_potential as _truncated_pba_potential_impl,
     validate_source_sink_labels as _validate_source_sink_labels_impl,
     validate_source_sink_vector as _validate_source_sink_vector_impl,
@@ -833,7 +835,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         ss_vec: np.ndarray | None = None,
         min_max_norm_ptime: bool = True,
         random_seed: int = 4444,
-        component_policy: Literal["largest", "error"] = "largest",
+        component_policy: Literal["largest", "sources", "error"] = "largest",
+        solver_tol: float | None = None,
+        max_iterations: int | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Calculate pseudotime and return an immutable cell artifact.
@@ -842,6 +846,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         from Weinreb et al. 2018. The graph's stored cell selection defines the
         output axis. Disconnected cells excluded by ``component_policy`` remain
         represented with NaN values and a false ``valid`` entry.
+
+        The potential comes from the smallest singular values of the graph
+        Laplacian, which SciPy's ``svds`` finds with ARPACK's Lanczos solve.
+        The solve advances a progress bar with its products of the Laplacian
+        and logs their count at INFO level every 30 seconds.
 
         Args:
             graph: Explicit connectivity-map or integrated-graph artifact.
@@ -859,10 +868,30 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                                 are in 0 to 1 range. (Default: True)
             random_seed: A random seed for svds (Default: 4444)
             component_policy: How to handle a disconnected selected graph. ``'largest'`` scores the largest connected
-                              component and marks other selected cells as unscored. ``'error'`` raises instead.
+                              component and marks other selected cells as unscored. ``'sources'`` scores the
+                              component that holds the most source cells, the cells with a source label or a
+                              negative ``ss_vec`` value, so a smaller component can be scored. ``'error'`` raises
+                              instead. Every source and sink label must have cells in the scored component.
+            solver_tol: Relative tolerance of the singular values, passed to
+                ``svds`` as ``tol``. None, the default, means machine
+                precision. A looser tolerance can end the search before it
+                finds the smallest singular values, so the potential can lose
+                modes; a result without the null mode is refused. A set
+                tolerance is recorded.
+            max_iterations: Most implicit restarts of the solve, passed to
+                ``svds`` as ``maxiter``. None, the default, is SciPy's ten
+                restarts per cell, which can run for hours on graphs of
+                several hundred thousand cells. A set bound is recorded, so it
+                gives another artifact than the default.
 
         Returns:
             Reference to an artifact containing ``pseudotime`` and ``valid``.
+
+        Raises:
+            PseudotimeConvergenceError: If the solve reaches ``max_iterations``
+                before its singular modes converge.
+            SourceSinkLabelsError: If no selected cell, or no cell of the
+                scored component, holds a source or sink label.
         """
         min_max_norm_ptime = bool_argument(min_max_norm_ptime, "min_max_norm_ptime")
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
@@ -874,25 +903,31 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise TypeError("sources must be a list")
         if sinks is not None and not isinstance(sinks, list):
             raise TypeError("sinks must be a list")
-        validated_parameters = _validate_pseudotime_parameters(
-            {
-                "n_singular_vals": n_singular_vals,
-                "sources": [] if sources is None else sources,
-                "sinks": [] if sinks is None else sinks,
-                "min_max_norm_ptime": min_max_norm_ptime,
-                "random_seed": random_seed,
-                "component_policy": component_policy,
-            }
-        )
+        parameters: dict[str, Any] = {
+            "n_singular_vals": n_singular_vals,
+            "sources": [] if sources is None else sources,
+            "sinks": [] if sinks is None else sinks,
+            "min_max_norm_ptime": min_max_norm_ptime,
+            "random_seed": random_seed,
+            "component_policy": component_policy,
+        }
+        # A record holds the solver's bounds only when the call sets them.
+        if solver_tol is not None:
+            parameters["solver_tol"] = solver_tol
+        if max_iterations is not None:
+            parameters["max_iterations"] = max_iterations
+        validated_parameters = _validate_pseudotime_parameters(parameters)
         n_singular_vals = validated_parameters["n_singular_vals"]
         source_labels = list(validated_parameters["sources"])
         sink_labels = list(validated_parameters["sinks"])
         min_max_norm_ptime = validated_parameters["min_max_norm_ptime"]
         random_seed = validated_parameters["random_seed"]
         component_policy = cast(
-            Literal["largest", "error"],
+            Literal["largest", "sources", "error"],
             validated_parameters["component_policy"],
         )
+        solver_tol = validated_parameters["solver_tol"]
+        max_iterations = validated_parameters["max_iterations"]
         graph_ref = graph
         stored_selection = graph_cell_selection(self.zw, graph_ref)
 
@@ -918,33 +953,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise ValueError(
                 "Graph cell count does not match its stored cell selection"
             )
-        retained_mask, component_sizes = _select_pseudotime_component_impl(
-            graph_matrix,
-            selected_cell_indices,
-            component_policy,
-        )
-        retained_graph = (
-            graph_matrix
-            if retained_mask.all()
-            else graph_matrix[retained_mask][:, retained_mask]
-        ).tocsr()
-        if len(component_sizes) > 1:
-            logger.warning(
-                f"Selected graph components have sizes {component_sizes}. "
-                f"Scoring the largest component with {retained_graph.shape[0]} cells"
-            )
-
-        retained_n_cells = retained_graph.shape[0]
-        if retained_n_cells < 4:
-            raise ValueError(
-                "The retained graph must contain at least 4 cells for pseudotime scoring"
-            )
-        effective_k = min(n_singular_vals, retained_n_cells - 2)
-        if effective_k != n_singular_vals:
-            logger.warning(
-                f"Reducing n_singular_vals from {n_singular_vals} to {effective_k} "
-                "for the retained graph size"
-            )
 
         label_arguments_supplied = (
             source_sink is not None or sources is not None or sinks is not None
@@ -960,6 +968,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 )
             raise ValueError("Provide source/sink labels or a custom zero-sum ss_vec")
 
+        selected_labels: pd.Series | None = None
         if ss_vec is not None:
             owned_source_sink = np.array(ss_vec, copy=True)
             full_source_sink = np.array(
@@ -972,26 +981,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 copy=True,
             )
             full_source_sink.setflags(write=False)
-            selected_row_ids = read_metadata_rows_chunkwise(
-                self.cells,
-                "ids",
-                selected_cell_indices,
-            )
-            source_sink_input: ArtifactRef | np.ndarray = resolve_metadata_snapshot(
-                self.zw,
-                values=full_source_sink,
-                row_ids=selected_row_ids,
-                operation="snapshot_pseudotime_source_sink",
-                parameters={},
-                inputs={"cell_selection": stored_selection},
-                source_columns=["ss_vec"],
-                invalidate_cache=invalidate_cache,
-            )
-            retained_source_sink = _validate_source_sink_vector_impl(
-                full_source_sink[retained_mask],
-                retained_n_cells,
-                "ss_vec restricted to the retained component",
-            )
+            source_cells = full_source_sink < 0
         else:
             if not source_labels and not sink_labels:
                 raise ValueError("At least one source or sink label must be provided")
@@ -1018,6 +1008,66 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 sink_labels,
                 "the selected cells",
             )
+            source_cells = selected_labels.isin(source_labels).to_numpy(dtype=bool)
+
+        component, component_sizes, scored_component = _pseudotime_components_impl(
+            graph_matrix,
+            selected_cell_indices,
+            component_policy,
+            source_cells=source_cells if component_policy == "sources" else None,
+        )
+        retained_mask = component == scored_component
+        retained_graph = (
+            graph_matrix
+            if retained_mask.all()
+            else graph_matrix[retained_mask][:, retained_mask]
+        ).tocsr()
+        if len(component_sizes) > 1:
+            scored = (
+                "the component that holds the most source cells,"
+                if component_policy == "sources"
+                else "the largest component"
+            )
+            logger.warning(
+                f"Selected graph components have sizes {list(component_sizes)}. "
+                f"Scoring {scored} with {retained_graph.shape[0]} cells"
+            )
+
+        retained_n_cells = retained_graph.shape[0]
+        if retained_n_cells < 4:
+            raise ValueError(
+                "The retained graph must contain at least 4 cells for pseudotime scoring"
+            )
+        effective_k = min(n_singular_vals, retained_n_cells - 2)
+        if effective_k != n_singular_vals:
+            logger.warning(
+                f"Reducing n_singular_vals from {n_singular_vals} to {effective_k} "
+                "for the retained graph size"
+            )
+
+        if selected_labels is None:
+            selected_row_ids = read_metadata_rows_chunkwise(
+                self.cells,
+                "ids",
+                selected_cell_indices,
+            )
+            source_sink_input: ArtifactRef | np.ndarray = resolve_metadata_snapshot(
+                self.zw,
+                values=full_source_sink,
+                row_ids=selected_row_ids,
+                operation="snapshot_pseudotime_source_sink",
+                parameters={},
+                inputs={"cell_selection": stored_selection},
+                source_columns=["ss_vec"],
+                invalidate_cache=invalidate_cache,
+            )
+            retained_source_sink = _validate_source_sink_vector_impl(
+                full_source_sink[retained_mask],
+                retained_n_cells,
+                "ss_vec restricted to the retained component",
+            )
+        else:
+            assert source_sink is not None
             retained_labels = selected_labels.iloc[
                 np.flatnonzero(retained_mask)
             ].reset_index(drop=True)
@@ -1026,6 +1076,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 source_labels,
                 sink_labels,
                 "the retained connected component",
+                missing_from="scored component",
+                component_sizes=component_sizes,
             )
             retained_source_sink = _validate_source_sink_vector_impl(
                 _make_source_sink_vector_impl(
@@ -1049,6 +1101,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             random_seed=random_seed,
             component_policy=component_policy,
             invalidate_cache=invalidate_cache,
+            solver_tol=solver_tol,
+            max_iterations=max_iterations,
         )
         record = arguments.to_record()
         artifact_scope = graph_ref.scope
@@ -1091,6 +1145,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             effective_k,
             random_seed,
             retained_source_sink,
+            solver_tol=solver_tol,
+            max_iterations=max_iterations,
         )
         if not np.isfinite(retained_ptime).all():
             raise ValueError("Pseudotime calculation produced non-finite values")
@@ -1128,7 +1184,12 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         self,
         ref: ArtifactRef,
     ) -> PseudotimeScoreResult:
-        """Load pseudotime values from an explicit completed artifact."""
+        """Load pseudotime values from an explicit completed artifact.
+
+        The result also gives each cell's connected component of the graph,
+        numbered by decreasing size, and the components' cell counts, which
+        the loader computes from the stored graph without storing them.
+        """
         result, _graph_matrix = self._load_pseudotime_scoring_with_graph(ref)
         return result
 
@@ -1136,7 +1197,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         self,
         ref: ArtifactRef,
     ) -> tuple[PseudotimeScoreResult, csr_matrix]:
-        """Load pseudotime values and the symmetric graph used to validate them."""
+        """Load pseudotime values and the symmetric graph used to validate them.
+
+        Validation numbers the graph's connected components, which the result
+        returns with the values.
+        """
         if not isinstance(ref, ArtifactRef):
             raise TypeError("ref must be an ArtifactRef")
         if ref.kind != "pseudotime":
@@ -1153,7 +1218,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         _require_exact_record_keys(inputs, _PSEUDOTIME_INPUTS, "Pseudotime inputs")
         _require_exact_record_keys(
             parameters,
-            _PSEUDOTIME_PARAMETERS,
+            _pseudotime_parameter_names(parameters),
             "Pseudotime parameters",
         )
         try:
@@ -1178,7 +1243,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise ValueError("Pseudotime artifact does not share its graph scope")
         n_cells = _selection_size(self.zw, selection)
         min_max_normalized = validated_parameters["min_max_norm_ptime"]
-        component_policy = validated_parameters["component_policy"]
+        component_policy = cast(
+            Literal["largest", "sources", "error"],
+            validated_parameters["component_policy"],
+        )
         selected_indices = read_stored_selection_indices(
             self.zw,
             selection,
@@ -1195,30 +1263,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         )
         if graph_matrix.shape != (n_cells, n_cells):
             raise ValueError("Pseudotime graph does not match its stored selection")
-        expected_valid, _ = _select_pseudotime_component_impl(
-            graph_matrix,
-            selected_indices,
-            cast(Literal["largest", "error"], component_policy),
-        )
-        group = as_zarr_group(self.zw[status.path], name=status.path)
-        if not _pseudotime_payload_is_valid(
-            group,
-            n_cells=n_cells,
-            min_max_normalized=min_max_normalized,
-            expected_valid=expected_valid,
-        ):
-            raise ValueError("Pseudotime artifact payload is invalid")
-        # The validated payload has no missing masks and uses the recorded selection.
-        values, _, _ = _load_cell_artifact_values(
-            self.zw,
-            ref,
-            value_name="pseudotime",
-        )
-        valid, _, _ = _load_cell_artifact_values(
-            self.zw,
-            ref,
-            value_name="valid",
-        )
         source_values, source_selection, source_missing = _load_cell_artifact_values(
             self.zw,
             source_sink,
@@ -1227,6 +1271,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise ValueError("Pseudotime source/sink input uses a different selection")
         raw_sources = list(validated_parameters["sources"])
         raw_sinks = list(validated_parameters["sinks"])
+        source_labels: pd.Series | None = None
         if not raw_sources and not raw_sinks:
             source_status = inspect_artifact(self.zw, source_sink)
             source_inputs = source_status.inputs or {}
@@ -1265,11 +1310,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 != fingerprint_array(source_vector)
             ):
                 raise ValueError("Pseudotime source/sink snapshot is invalid")
-            _validate_source_sink_vector_impl(
-                source_vector[expected_valid],
-                int(expected_valid.sum()),
-                "stored source/sink vector restricted to the retained component",
-            )
+            source_cells = source_vector < 0
         else:
             source_labels = pd.Series(
                 _labels_with_missing_mask(
@@ -1284,6 +1325,40 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 raw_sinks,
                 "the stored pseudotime cells",
             )
+            source_cells = source_labels.isin(raw_sources).to_numpy(dtype=bool)
+        component, component_sizes, scored_component = _pseudotime_components_impl(
+            graph_matrix,
+            selected_indices,
+            component_policy,
+            source_cells=source_cells if component_policy == "sources" else None,
+        )
+        expected_valid = component == scored_component
+        group = as_zarr_group(self.zw[status.path], name=status.path)
+        if not _pseudotime_payload_is_valid(
+            group,
+            n_cells=n_cells,
+            min_max_normalized=min_max_normalized,
+            expected_valid=expected_valid,
+        ):
+            raise ValueError("Pseudotime artifact payload is invalid")
+        # The validated payload has no missing masks and uses the recorded selection.
+        values, _, _ = _load_cell_artifact_values(
+            self.zw,
+            ref,
+            value_name="pseudotime",
+        )
+        valid, _, _ = _load_cell_artifact_values(
+            self.zw,
+            ref,
+            value_name="valid",
+        )
+        if source_labels is None:
+            _validate_source_sink_vector_impl(
+                source_vector[expected_valid],
+                int(expected_valid.sum()),
+                "stored source/sink vector restricted to the retained component",
+            )
+        else:
             _validate_source_sink_labels_impl(
                 source_labels.iloc[np.flatnonzero(expected_valid)].reset_index(
                     drop=True
@@ -1291,6 +1366,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 raw_sources,
                 raw_sinks,
                 "the stored retained pseudotime component",
+                missing_from="scored component",
+                component_sizes=component_sizes,
             )
         result = PseudotimeScoreResult(
             ref=ref,
@@ -1298,6 +1375,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             cell_selection=selection,
             values=np.asarray(values, dtype=np.float64),
             valid=np.asarray(valid, dtype=bool),
+            component=component,
+            component_sizes=component_sizes,
         )
         return result, graph_matrix
 
@@ -1333,6 +1412,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         Returns:
             Reference to an artifact containing ``probabilities`` and ``valid``.
+
+        Raises:
+            SourceSinkLabelsError: If no selected cell, or no cell that the
+                pseudotime scored, holds a sink label.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if sinks is None:
@@ -1377,6 +1460,27 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise ValueError("Sink labels do not match the pseudotime cell selection")
         ptime = pseudotime_result.values
         ptime_valid = pseudotime_result.valid
+        # The solve runs on the scored cells alone, so each sink needs some.
+        ordered_sinks, sink_groups = _validate_sink_groups(
+            sink_values,
+            list(requested_sink_labels),
+        )
+        scored_groups = set(np.unique(sink_groups[ptime_valid]).tolist())
+        unscored_sinks = [
+            sink
+            for group, sink in enumerate(ordered_sinks)
+            if group not in scored_groups
+        ]
+        if unscored_sinks:
+            raise SourceSinkLabelsError(
+                "Sink labels were not found in the cells that the pseudotime "
+                f"scored: {unscored_sinks}. The graph's connected components "
+                f"hold {list(pseudotime_result.component_sizes)} cells",
+                missing_sources=(),
+                missing_sinks=unscored_sinks,
+                missing_from="scored component",
+                component_sizes=pseudotime_result.component_sizes,
+            )
 
         arguments = FateMappingArguments(
             connectivity_map=graph_ref,

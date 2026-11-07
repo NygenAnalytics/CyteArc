@@ -391,7 +391,7 @@ def test_source_sink_vector_must_be_numeric() -> None:
 
 
 def test_component_selection_rejects_unknown_policies() -> None:
-    with pytest.raises(ValueError, match="'largest' or 'error'"):
+    with pytest.raises(ValueError, match="'largest', 'sources' or 'error'"):
         select_pseudotime_component(_path_graph(3), np.arange(3), "smallest")  # type: ignore[arg-type]
 
 

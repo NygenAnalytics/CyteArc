@@ -9,6 +9,7 @@ from scipy.sparse.linalg import LinearOperator, gmres, splu
 from ..neighbors.graph import csr_symmetry_error
 from ..utils.logging import logger
 from ..utils.numba import njit
+from .errors import SourceSinkLabelsError
 
 _GMRES_RESTART = 20
 # Coarse aggregates above this count are merged into fewer pseudotime bins so
@@ -115,7 +116,12 @@ def _validate_sink_groups(
             raise ValueError("Sink groups must be disjoint")
         sink_groups[matches] = group
     if missing:
-        raise ValueError(f"Sink labels were not found in the selected cells: {missing}")
+        raise SourceSinkLabelsError(
+            f"Sink labels were not found in the selected cells: {missing}",
+            missing_sources=(),
+            missing_sinks=missing,
+            missing_from="labels",
+        )
     return sink_labels, sink_groups
 
 
