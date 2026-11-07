@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 from sklearn.ensemble import GradientBoostingRegressor
 
+from cytearc.regulons import grn
 from cytearc.regulons.grn import (
     GRNBOOST2_PARAMETERS,
     GrnParameters,
@@ -229,3 +230,163 @@ def test_stage_rule_measures_each_stage_on_its_own_out_of_bag_cells():
     np.testing.assert_allclose(recorder.improvements, expected, rtol=1e-9, atol=1e-12)
     # The rules differ: scikit-learn's improvements now compare different cells.
     assert not np.allclose(recorder.improvements, regressor.oob_improvement_)
+
+
+def _reference_links(
+    expression: np.ndarray,
+    names: list[str],
+    tf_names: list[str],
+    *,
+    seed: int,
+    parameters: GrnParameters,
+) -> list[tuple[str, str, float]]:
+    """Every target's links from a direct regressor fit, as arboreto fits them."""
+    links = []
+    factors = [names.index(name) for name in tf_names]
+    for column, target_name in enumerate(names):
+        target = expression[:, column].astype(np.float64)
+        others = [factor for factor in factors if factor != column]
+        if np.all(target == target[0]) or not others:
+            continue
+        regressor = GradientBoostingRegressor(
+            random_state=seed, **parameters.regressor_kwargs()
+        )
+        regressor.fit(
+            np.asfortranarray(expression[:, others], dtype=np.float32),
+            target,
+            monitor=_StageEarlyStopMonitor(parameters.earlyStopWindow),
+        )
+        importances = regressor.feature_importances_ * len(regressor.estimators_)
+        links += [
+            (names[factor], target_name, float(value))
+            for factor, value in zip(others, importances, strict=True)
+            if value > 0
+        ]
+    return links
+
+
+@pytest.mark.parametrize("processes", [2, 4])
+def test_grn_links_fitted_in_worker_processes_are_those_of_one_process(
+    monkeypatch, processes
+):
+    # Every factor is also a target, and Gconst is constant.
+    expression, names = _expression(3)
+    one = infer_grn(expression, names, names[:4], seed=5, parameters=_FAST)
+    pools: list[tuple[int, int]] = []
+    fit_in_processes = grn._fit_in_processes
+
+    def record_pool(*args, **kwargs):
+        pools.append((args[1], kwargs["processes"]))
+        return fit_in_processes(*args, **kwargs)
+
+    # Without a head start in this process, every target goes to the workers.
+    monkeypatch.setattr(grn, "_IN_PROCESS_SECONDS", 0.0)
+    monkeypatch.setattr(grn, "_fit_in_processes", record_pool)
+    many = infer_grn(
+        expression, names, names[:4], seed=5, parameters=_FAST, nthreads=processes
+    )
+
+    # The seven targets that are not constant were fitted on the workers.
+    assert pools == [(7, processes)]
+    pd.testing.assert_frame_equal(many, one)
+    reference = _reference_links(expression, names, names[:4], seed=5, parameters=_FAST)
+    assert sorted(zip(many["TF"], many["target"], many["importance"])) == sorted(
+        reference
+    )
+
+
+def test_grn_fits_short_calls_and_a_lone_target_in_the_calling_process(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("worker processes were started")
+
+    expression, names = _expression(3)
+    monkeypatch.setattr(grn, "_fit_in_processes", forbidden)
+    # Fits that end within the head start never start workers.
+    short = infer_grn(
+        expression, names, names[:4], seed=5, parameters=_FAST, nthreads=4
+    )
+    # Nor does one target, whatever the head start.
+    monkeypatch.setattr(grn, "_IN_PROCESS_SECONDS", 0.0)
+    lone = infer_grn(
+        expression,
+        names,
+        names[:4],
+        targets=["G1"],
+        seed=5,
+        parameters=_FAST,
+        nthreads=4,
+    )
+
+    pd.testing.assert_frame_equal(
+        short, infer_grn(expression, names, names[:4], seed=5, parameters=_FAST)
+    )
+    assert lone["target"].tolist() == ["G1"] * len(lone)
+    assert len(lone) > 0
+
+
+def test_a_worker_exception_reaches_the_caller_with_its_message():
+    import multiprocessing
+
+    expression, _ = _expression()
+    factors = np.asfortranarray(expression[:, :4], dtype=np.float32)
+    tasks = iter(
+        [
+            (position, None, expression[:, 4 + position].astype(np.float64))
+            for position in range(3)
+        ]
+    )
+
+    # A worker without settings fails in its first fit.
+    with pytest.raises(AttributeError, match="regressor_kwargs"):
+        grn._fit_in_processes(
+            tasks,
+            3,
+            factors,
+            np.arange(4),
+            parameters=None,
+            seed=0,
+            processes=2,
+            record=lambda *_args: None,
+        )
+    assert multiprocessing.active_children() == []
+
+
+def test_a_shutdown_request_stops_the_worker_processes(monkeypatch):
+    import multiprocessing
+
+    from cytearc.utils.shutdown import ShutdownRequested, ShutdownToken, shutdown_scope
+
+    rng = np.random.default_rng(11)
+    factors = rng.poisson(2.0, size=(100, 4)).astype(np.float32)
+    targets = factors[:, :1] + rng.poisson(1.0, size=(100, 20))
+    expression = np.hstack([factors, targets]).astype(np.float32)
+    names = [f"TF{index}" for index in range(4)] + [f"G{index}" for index in range(20)]
+    monkeypatch.setattr(grn, "_IN_PROCESS_SECONDS", 0.0)
+    done: list[int] = []
+
+    with shutdown_scope(ShutdownToken()) as token:
+
+        def stop(completed: int, _total: int) -> None:
+            done.append(completed)
+            token.request(reason="stop GRN inference")
+
+        with pytest.raises(ShutdownRequested, match="stop GRN inference"):
+            infer_grn(
+                expression,
+                names,
+                names[:4],
+                seed=0,
+                parameters=_FAST,
+                nthreads=2,
+                progress=stop,
+            )
+
+    # The targets that were being fitted finish, and no other starts.
+    assert 1 <= len(done) <= 4
+    assert multiprocessing.active_children() == []
+
+
+def test_a_worker_fits_a_target_only_once_it_started():
+    # The calling process never starts as a worker, so it holds no factors.
+    with pytest.raises(RuntimeError, match="fitted a target before it started"):
+        grn._fit_in_worker((0, None, np.zeros(3)))

@@ -1,8 +1,9 @@
 """Transcription-factor to target importance by stochastic gradient boosting."""
 
-import threading
-from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+import time
+from collections import deque
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -10,12 +11,23 @@ import numpy as np
 import pandas as pd
 
 from ..utils.arguments import integer_argument
+from ..utils.shutdown import shutdown_checkpoint
 
 __all__ = [
     "GRNBOOST2_PARAMETERS",
     "GrnParameters",
+    "grn_fit_bytes",
+    "grn_process_bytes",
     "infer_grn",
 ]
+
+# Targets are fitted in the calling process for at least this long before the
+# rest go to worker processes, about as long as starting the workers takes, so
+# a call whose fits end sooner starts none.
+_IN_PROCESS_SECONDS = 2.0
+# Each worker process holds at most this many targets' expression at once:
+# the one it fits and the next.
+_TARGETS_PER_PROCESS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,8 +212,13 @@ def infer_grn(
         targets: Target genes to model, by default every gene.
         seed: Random state given to every target's regressor.
         parameters: Regressor settings; GRNBoost2 defaults when omitted.
-        nthreads: Targets fitted concurrently. scikit-learn builds trees
-            without holding the GIL, so threads scale.
+        nthreads: The most targets fitted at once. Targets are fitted in the
+            calling process, and with ``nthreads`` above 1, those left after
+            about two seconds of fitting go to ``nthreads`` worker processes,
+            each with its own copy of the factors' expression. Worker processes
+            start as new interpreters that import the main module, so a script
+            that calls this keeps its own work under ``if __name__ ==
+            "__main__":``. The links do not depend on ``nthreads``.
         progress: Optional ``callback(done, total)`` after each target.
 
     Returns:
@@ -265,6 +282,137 @@ def infer_grn(
     ).astype({"TF": "str", "target": "str"})
 
 
+def grn_fit_bytes(n_cells: int, n_regulators: int, max_stages: int) -> int:
+    """Estimate the bytes that one target's fit holds beside its process's factors.
+
+    A factor that is also a target is fitted on a copy of the factors without
+    its own column. The fit holds a few float64 vectors of the cells, and each
+    of up to ``max_stages`` fitted stages keeps its tree, about 2 KiB and 15
+    bytes per factor with scikit-learn 1.9, which this rounds up.
+
+    Raises:
+        TypeError: If an argument is not an integer.
+        ValueError: If an argument is below its minimum.
+    """
+    cells = integer_argument(n_cells, "n_cells", minimum=1)
+    regulators = integer_argument(n_regulators, "n_regulators", minimum=1)
+    stages = integer_argument(max_stages, "max_stages", minimum=1)
+    return 4 * cells * regulators + 64 * cells + stages * (2048 + 16 * regulators)
+
+
+def grn_process_bytes(n_cells: int, n_regulators: int, max_stages: int) -> int:
+    """Estimate the bytes that one worker process of GRN inference holds.
+
+    A worker holds its own copy of the float32 factors, the expression of the
+    targets that it holds at once, and one fit (:func:`grn_fit_bytes`).
+
+    Raises:
+        TypeError: If an argument is not an integer.
+        ValueError: If an argument is below its minimum.
+    """
+    fit = grn_fit_bytes(n_cells, n_regulators, max_stages)
+    return 4 * n_cells * n_regulators + 8 * n_cells * _TARGETS_PER_PROCESS + fit
+
+
+def _fit_links(
+    tf_matrix: np.ndarray,
+    tf_columns: np.ndarray,
+    own: int | None,
+    target: np.ndarray,
+    parameters: GrnParameters,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the factor columns and importances of one target's links.
+
+    ``own`` is the target's position among the factors, or None when it is
+    not one, and the factor never predicts itself.
+    """
+    predictors, codes = tf_matrix, tf_columns
+    if own is not None:
+        predictors = np.asfortranarray(np.delete(tf_matrix, own, axis=1))
+        codes = np.delete(tf_columns, own)
+    importances = _fit_target(predictors, target, parameters=parameters, seed=seed)
+    keep = importances > 0
+    return codes[keep], importances[keep]
+
+
+# The factors, their columns, the settings and the seed of a worker process,
+# which _start_worker sets once.
+_worker_factors: tuple[np.ndarray, np.ndarray, GrnParameters, int] | None = None
+
+
+def _start_worker(
+    tf_matrix: np.ndarray,
+    tf_columns: np.ndarray,
+    parameters: GrnParameters,
+    seed: int,
+) -> None:
+    """Keep a worker process's factors and hold its BLAS and OpenMP to one thread."""
+    from ..utils.compute import enter_thread_limit
+
+    global _worker_factors
+    enter_thread_limit(1)
+    _worker_factors = (tf_matrix, tf_columns, parameters, seed)
+
+
+def _fit_in_worker(
+    task: tuple[int, int | None, np.ndarray],
+) -> tuple[int, tuple[np.ndarray, np.ndarray]]:
+    """Fit one target in a worker process and return its position and links."""
+    if _worker_factors is None:
+        raise RuntimeError("A GRN worker process fitted a target before it started")
+    position, own, target = task
+    tf_matrix, tf_columns, parameters, seed = _worker_factors
+    return position, _fit_links(tf_matrix, tf_columns, own, target, parameters, seed)
+
+
+def _fit_in_processes(
+    tasks: Iterator[tuple[int, int | None, np.ndarray]],
+    n_tasks: int,
+    tf_matrix: np.ndarray,
+    tf_columns: np.ndarray,
+    *,
+    parameters: GrnParameters,
+    seed: int,
+    processes: int,
+    record: Callable[[int, tuple[np.ndarray, np.ndarray]], None],
+) -> None:
+    """Fit targets on a pool of ``processes`` new worker processes.
+
+    Each worker receives the factors once and then the expression of each
+    target it fits, at most ``_TARGETS_PER_PROCESS`` targets per worker at a
+    time. ``record`` takes each target's position and links as they arrive.
+    A worker's exception reaches the caller, and so does a shutdown request,
+    after the targets being fitted finish and before any other starts.
+    """
+    from multiprocessing import get_context
+
+    # A forked child of a process that runs threads can deadlock, so workers
+    # start as new interpreters.
+    executor = ProcessPoolExecutor(
+        max_workers=min(processes, n_tasks),
+        mp_context=get_context("spawn"),
+        initializer=_start_worker,
+        initargs=(tf_matrix, tf_columns, parameters, seed),
+    )
+    outstanding: set[Future[tuple[int, tuple[np.ndarray, np.ndarray]]]] = set()
+    try:
+        for task in tasks:
+            if len(outstanding) >= processes * _TARGETS_PER_PROCESS:
+                finished, outstanding = wait(outstanding, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    record(*future.result())
+                shutdown_checkpoint()
+            outstanding.add(executor.submit(_fit_in_worker, task))
+        while outstanding:
+            finished, outstanding = wait(outstanding, return_when=FIRST_COMPLETED)
+            for future in finished:
+                record(*future.result())
+            shutdown_checkpoint()
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
 def _grn_links(
     matrix: np.ndarray,
     names: Sequence[str],
@@ -278,45 +426,70 @@ def _grn_links(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return the factor and target columns and importances of every link.
 
-    Links are sorted by decreasing importance, then by target and factor name.
+    Targets are fitted in the calling process, and with ``nthreads`` above 1,
+    those left once fitting has taken ``_IN_PROCESS_SECONDS`` are fitted on
+    up to ``nthreads`` worker processes (:func:`_fit_in_processes`). Every
+    target's regressor has the same seed and sees the same values in any
+    process, so the links do not depend on ``nthreads``. Links are sorted by
+    decreasing importance, then by target and factor name.
     """
     # scikit-learn gathers predictors by column, faster in Fortran order.
     tf_matrix = np.asfortranarray(matrix[:, tf_columns], dtype=np.float32)
     own_position = {column: index for index, column in enumerate(tf_columns.tolist())}
-
-    def fit(column: int) -> tuple[np.ndarray, np.ndarray] | None:
-        target = np.asarray(matrix[:, column], dtype=np.float64)
-        if np.all(target == target[0]):
-            return None
-        own = own_position.get(column)
-        predictors, codes = tf_matrix, tf_columns
-        if own is not None:
-            if len(tf_columns) == 1:
-                return None
-            predictors = np.asfortranarray(np.delete(tf_matrix, own, axis=1))
-            codes = np.delete(tf_columns, own)
-        importances = _fit_target(predictors, target, parameters=parameters, seed=seed)
-        keep = importances > 0
-        return codes[keep], importances[keep]
-
-    lock = threading.Lock()
+    columns = target_columns.tolist()
+    results: list[tuple[np.ndarray, np.ndarray] | None] = [None] * len(columns)
     done = 0
 
-    def run(column: int) -> tuple[np.ndarray, np.ndarray] | None:
+    def record(position: int, links: tuple[np.ndarray, np.ndarray] | None) -> None:
         nonlocal done
-        result = fit(column)
+        results[position] = links
+        done += 1
         if progress is not None:
-            with lock:
-                done += 1
-                progress(done, len(target_columns))
-        return result
+            progress(done, len(columns))
 
-    columns = target_columns.tolist()
-    if nthreads == 1 or len(columns) == 1:
-        results = [run(column) for column in columns]
-    else:
-        with ThreadPoolExecutor(max_workers=nthreads) as executor:
-            results = list(executor.map(run, columns))
+    def target_of(position: int) -> np.ndarray:
+        return np.asarray(matrix[:, columns[position]], dtype=np.float64)
+
+    pending: deque[int] = deque()
+    for position, column in enumerate(columns):
+        target = target_of(position)
+        # A constant target and a lone factor, which no other factor can
+        # predict, have no links.
+        if np.all(target == target[0]) or (
+            column in own_position and len(tf_columns) == 1
+        ):
+            record(position, None)
+        else:
+            pending.append(position)
+    started = time.monotonic()
+    while pending and (
+        nthreads == 1
+        or len(pending) == 1
+        or time.monotonic() - started < _IN_PROCESS_SECONDS
+    ):
+        shutdown_checkpoint()
+        position = pending.popleft()
+        own = own_position.get(columns[position])
+        record(
+            position,
+            _fit_links(
+                tf_matrix, tf_columns, own, target_of(position), parameters, seed
+            ),
+        )
+    if pending:
+        _fit_in_processes(
+            (
+                (position, own_position.get(columns[position]), target_of(position))
+                for position in pending
+            ),
+            len(pending),
+            tf_matrix,
+            tf_columns,
+            parameters=parameters,
+            seed=seed,
+            processes=nthreads,
+            record=record,
+        )
     fitted = [(column, result) for column, result in zip(columns, results) if result]
     if not fitted:
         return (np.empty(0, np.int64), np.empty(0, np.int64), np.empty(0, np.float64))
