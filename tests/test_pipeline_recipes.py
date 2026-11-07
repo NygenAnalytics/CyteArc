@@ -697,6 +697,89 @@ def test_adt_analyzes_the_store_only_adt_assay(cite) -> None:
     assert {adt[key].assay for key in ("panel", "normalized", "pca")} == {"assay2"}
 
 
+# Settings that leave every stage after Harmony out, so a run that passes the
+# label check stops early.
+_HARMONY_ONLY: dict[str, dict[str, Any]] = {
+    "adt": {"umap": False, "leiden": False, "markers": False},
+    "atac": {**ATAC_SETTINGS, "leiden": False},
+}
+
+
+def _harmony_store(recipe: str, tmp_path: Path) -> DataStore:
+    """A fresh store with one assay that ``recipe`` analyzes."""
+    if recipe == "adt":
+        write_count_store(
+            str(tmp_path / "adt.zarr"), {"ADT": _counts(300, 20, seed=5)}, np.uint16
+        )
+        return DataStore(str(tmp_path / "adt.zarr"), min_features_per_cell=0)
+    with tarfile.open(full_path("500_pbmc_atac.zarr.tar.gz"), "r:gz") as archive:
+        archive.extractall(tmp_path, filter="data")
+    return DataStore(str(tmp_path))
+
+
+def _written(datastore: DataStore) -> list[ArtifactRef]:
+    """Every artifact of the store, of the store's scope and of each assay."""
+    refs = list(datastore.artifacts.list(scope="datastore"))
+    for assay in datastore.assay_names:
+        refs += datastore.artifacts.list(from_assay=assay)
+    return refs
+
+
+@pytest.mark.parametrize("recipe", ["adt", "atac"])
+def test_adt_and_atac_refuse_a_harmony_column_without_every_label_before_the_run(
+    recipe: str, tmp_path: Path
+) -> None:
+    datastore = _harmony_store(recipe, tmp_path)
+    n_cells = datastore.cells.N
+    every_fifth = np.arange(n_cells) % 5 == 4
+    lane = np.where(every_fifth, None, _labels(n_cells, ("L1", "L2"))).astype(object)
+    datastore.cells.insert("lane", lane)
+    depth = np.where(every_fifth, np.nan, 1.0)
+    datastore.cells.insert("depth", depth)
+    unlabeled = int(np.count_nonzero(every_fifth & datastore.cells.fetch_all("I")))
+    before = _written(datastore)
+
+    for column in ("lane", "depth"):
+        with pytest.raises(
+            ValueError,
+            match=(
+                rf"^Harmony needs a '{column}' label for every cell, but "
+                rf"{unlabeled} of the run's cells have none$"
+            ),
+        ):
+            getattr(datastore.pipeline, recipe)(
+                harmony={"batch_columns": [column]}, **_HARMONY_ONLY[recipe]
+            )
+
+    # Nothing is written and no run is recorded, as for the RNA recipe.
+    assert _written(datastore) == before
+    assert not datastore.pipeline.list_runs()
+    if recipe == "adt":
+        assert unlabeled == 60
+
+
+@pytest.mark.parametrize("recipe", ["adt", "atac"])
+def test_adt_and_atac_check_the_harmony_labels_of_the_run_cells_only(
+    recipe: str, tmp_path: Path
+) -> None:
+    datastore = _harmony_store(recipe, tmp_path)
+    n_cells = datastore.cells.N
+    every_fifth = np.arange(n_cells) % 5 == 4
+    lane = np.where(every_fifth, None, _labels(n_cells, ("L1", "L2"))).astype(object)
+    datastore.cells.insert("lane", lane)
+    datastore.cells.insert("labelled", datastore.cells.fetch_all("I") & ~every_fifth)
+
+    # The cells without a lane lie outside the run, so the recipe resolves.
+    plan = _resolve(
+        recipe,
+        datastore,
+        cells=datastore.snapshot_cell_selection("labelled"),
+        harmony={"batch_columns": ["lane"]},
+        **_HARMONY_ONLY[recipe],
+    )
+    assert "harmony" in [stage.name for stage in plan.stages]
+
+
 @pytest.mark.parametrize(
     ("assay_type", "remedy"),
     [

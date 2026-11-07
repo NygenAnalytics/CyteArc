@@ -299,6 +299,19 @@ def resolve_harmony(
     return columns, settings
 
 
+def check_harmony_labels(
+    store: Any, source: CellSource, columns: Sequence[str]
+) -> None:
+    """Refuse a Harmony batch column that leaves one of the run's input cells unlabeled.
+
+    Every recipe with a Harmony stage calls this once its cells are resolved,
+    so a missing label is refused before anything is written, in the same
+    words whichever recipe runs.
+    """
+    for column in columns:
+        check_labeled_cells(store, source, column, purpose="Harmony")
+
+
 def harmony_config(
     columns: Sequence[str],
     settings: Mapping[str, Any],
@@ -348,8 +361,7 @@ class RNAHeadSettings:
                 purpose="Batch-aware HVG selection",
                 blank_is_label=False,
             )
-        for column in self.harmony_columns:
-            check_labeled_cells(store, source, column, purpose="Harmony")
+        check_harmony_labels(store, source, self.harmony_columns)
 
     def to_config(self) -> dict[str, Any]:
         return {
