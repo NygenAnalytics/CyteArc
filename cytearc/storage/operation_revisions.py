@@ -214,6 +214,16 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
             ),
             applies=None,
         ),
+        OperationRevision(
+            revision=3,
+            release="1.4.0",
+            change=(
+                "A hashtag whose background cluster gives a cutoff of 0 is refused "
+                "when the counts carry ambient tags, and hashtags without counts "
+                "in the selected cells are left out instead of refused."
+            ),
+            applies=None,
+        ),
     ),
     "run_pca": (
         OperationRevision(

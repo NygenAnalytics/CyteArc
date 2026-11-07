@@ -138,7 +138,8 @@ _SIGNATURE_DIGESTS = {
     GraphDataStore: "a848c56b3f6b98c9a5a90a26af7a86b46294cb313a14734a2eee403188b5ab33",
     MappingDatastore: "a4839ac0372df95f021fd8c383c1ac2aff6796c6b093e05510c71ad7e8449a72",
     # run_hto_demultiplexing gained the keyword-only positive_quantile: float
-    # with the default 0.99. auto_filter_cells gained the keyword-only
+    # with the default 0.99, then hashtags: Sequence[str] | None = None after
+    # it. auto_filter_cells gained the keyword-only
     # metric_policies: dict[str, dict[str, str]] | None with the default None.
     # to_anndata gained the keyword-only cell_selection, obsm, obs, graph, and
     # dtype, each None by default, reduction.import_coordinates is new, and
@@ -153,7 +154,7 @@ _SIGNATURE_DIGESTS = {
     # expected_doublet_rate, and threshold, with new defaults for the parent
     # pool, simulation_ratio, heterotypic_fraction, save_k, smoothing_t, and
     # normalize_scores; select_cells gained value.
-    DataStore: "10267b25dd0748137875d8d2df092819a063f57dc22abdc7222e3892df1b403e",
+    DataStore: "ec17000298647dfd6c2c126714758289aea8e666454af46eb9ccc57b411cd66f",
     # artifacts.prune_incomplete(*, dry_run: bool = True) -> list[str] was added.
     ArtifactAccessor: "6d4befabbbc91b00684038f44e0b3063905c84437587be0994c26370efa2570c",
 }

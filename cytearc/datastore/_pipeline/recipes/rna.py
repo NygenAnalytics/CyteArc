@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 
+from ....quality_control.hto import checked_hashtags
 from ....assay import ADTassay, RNAassay
 from ....metadata.rows import apply_missing_mask
 from ....storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
@@ -354,6 +355,12 @@ def resolve_rna(
         "hashing", hashing, optional=True
     )
     hto_assay = _resolve_hto_assay(store, hashing_settings) if hashing_enabled else None
+    if hto_assay is not None and hashing_settings.get("hashtags") is not None:
+        # Hashtags that the assay lacks are refused before the run starts.
+        hashing_settings["hashtags"] = checked_hashtags(
+            hashing_settings["hashtags"],
+            [str(name) for name in store._get_assay(hto_assay).feats.fetch_all("ids")],
+        )
     resolved_species = resolve_species(species)
     membership_strength = bool_argument(membership_strength, "membership_strength")
     markers = bool_argument(markers, "markers")

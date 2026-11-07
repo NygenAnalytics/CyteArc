@@ -540,14 +540,14 @@ def test_hto_identity_is_artifact_backed(
     columns_before = set(datastore.cells.columns)
     calls: list[tuple[pd.DataFrame, dict]] = []
 
-    def demultiplex(counts: pd.DataFrame, **kwargs) -> pd.Series:
+    def demultiplex(counts: pd.DataFrame, **kwargs) -> tuple[pd.Series, dict]:
         # The stand-in names each cell's largest HTO, so the stored values
         # reveal which rows it received and in which order.
         calls.append((counts.copy(), kwargs))
-        return counts.idxmax(axis=1)
+        return counts.idxmax(axis=1), dict.fromkeys(counts.columns, 0)
 
     monkeypatch.setattr(
-        "cytearc.datastore._operations.quality_control.hto_demux", demultiplex
+        "cytearc.datastore._operations.quality_control._hto_calls", demultiplex
     )
     datastore = _declare_hto(datastore)
 
@@ -600,6 +600,19 @@ def test_hto_demultiplexing_rejects_non_hto_assay(datastore_ephemeral) -> None:
     with pytest.raises(TypeError, match="'HTO' is declared as None"):
         datastore.qc.hto_demultiplexing(selection)
     assert datastore.artifacts.list(kind="hto_identity") == []
+
+
+def _panel_hashtags(datastore) -> list[str]:
+    """The fixture's antibody panel without its isotype control, as hashtags.
+
+    The IgG1 isotype control binds thinly to many cells, so it has no
+    positive population and HTO demultiplexing refuses it as a hashtag.
+    """
+    return [
+        str(name)
+        for name in datastore.assay2.feats.fetch_all("ids")
+        if str(name) != "IgG1"
+    ]
 
 
 def _hto_ids_budget(datastore, selection, **options) -> int:
@@ -661,12 +674,15 @@ def test_hto_demultiplexing_charges_its_hashtag_ids_before_writing(
     unbudgeted = datastore.memoryBytes
     assert datastore.zw["assay2/featureData/ids"].chunks == (100_000,)
     width = datastore.zw["assay2/featureData/ids"].dtype.itemsize
+    hashtags = _panel_hashtags(datastore)
     refusals: list[MemoryBudgetError] = []
     budget = 1
     while True:
         datastore.memoryBytes = budget
         try:
-            ref = datastore.qc.hto_demultiplexing(selection, from_assay="assay2")
+            ref = datastore.qc.hto_demultiplexing(
+                selection, from_assay="assay2", hashtags=hashtags
+            )
         except MemoryBudgetError as refusal:
             refusals.append(refusal)
             # Nothing is written before the last step passes.
@@ -681,7 +697,7 @@ def test_hto_demultiplexing_charges_its_hashtag_ids_before_writing(
     assert refusals[0].needed_bytes >= 100_000 * width
     datastore.memoryBytes = unbudgeted
     again = datastore.qc.hto_demultiplexing(
-        selection, from_assay="assay2", invalidate_cache=True
+        selection, from_assay="assay2", hashtags=hashtags, invalidate_cache=True
     )
     np.testing.assert_array_equal(
         artifact_values(artifact_group(datastore.zw, ref), "values"),
@@ -1034,10 +1050,14 @@ def test_hto_demultiplexing_names_the_budget_of_its_clustering(
     datastore = _declare_hto(datastore)
     item = "the whole-matrix clustering of HTO demultiplexing"
 
+    hashtags = _panel_hashtags(datastore)
+
     def demultiplex(budget: int) -> MemoryBudgetError | None:
         datastore.memoryBytes = budget
         try:
-            datastore.qc.hto_demultiplexing(selection, from_assay="assay2")
+            datastore.qc.hto_demultiplexing(
+                selection, from_assay="assay2", hashtags=hashtags
+            )
         except MemoryBudgetError as refusal:
             return refusal
         return None

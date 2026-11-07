@@ -45,7 +45,7 @@ from tests.storage_helpers import write_count_store
 from tests.test_cell_calling import _droplets
 from tests.test_cell_calling_datastore import _open as _open_droplets
 from tests.test_cell_calling_datastore import _write_store as _write_droplets
-from tests.test_hto import planted_hto_counts
+from tests.test_hto import planted_hto_counts, two_pool_hto_counts
 from tests.test_pipeline_run_foundation import _completed_run, _Owner, _root
 
 # Small settings keep each run to a few seconds: one Leiden partition, and no
@@ -1810,7 +1810,93 @@ def test_hashing_settings_are_checked_before_the_run(hashed) -> None:
                 hashing={"positive_quantile": quantile}, **SMALL_RNA_SETTINGS
             )
         assert str(caught.value) == message
+    # hashtags is checked against the HTO assay's hashtags.
+    for hashtags, error, message in (
+        (
+            ["HTO0", "HTO9"],
+            ValueError,
+            "hashtags names ['HTO9'], which the HTO assay does not hold; its "
+            "hashtags are ['HTO0', 'HTO1', 'HTO2']",
+        ),
+        (
+            "HTO0",
+            TypeError,
+            "hashtags must be a list of hashtag IDs, such as ['HTO1', 'HTO2'], not str",
+        ),
+    ):
+        with pytest.raises(error) as caught:
+            datastore.pipeline.rna(hashing={"hashtags": hashtags}, **SMALL_RNA_SETTINGS)
+        assert str(caught.value) == message
     assert _run_ids(datastore) == before
+
+
+def test_hashing_demultiplexes_the_hashtags_that_it_names(hashed) -> None:
+    datastore = hashed.datastore
+
+    run = datastore.pipeline.rna(
+        label="hashed-chosen",
+        hashing={"hashtags": ["HTO2", "HTO0", "HTO1"]},
+        **SMALL_RNA_SETTINGS,
+    )
+
+    # The stage records the hashtags in the assay's order and passes them on,
+    # so its artifact is the one that the call with those hashtags makes.
+    assert _config(run)["stages"]["hashing"] == {
+        "assay": "HTO",
+        "hashtags": ["HTO0", "HTO1", "HTO2"],
+    }
+    assert run["hashing"] == datastore.qc.hto_demultiplexing(
+        run["input_cell_selection"],
+        from_assay="HTO",
+        hashtags=["HTO0", "HTO1", "HTO2"],
+    )
+    assert run["hashing"] != hashed.run["hashing"]
+    # Every hashtag of the assay calls the same cells as the default.
+    np.testing.assert_array_equal(
+        _mask(datastore, run["hashed_cell_selection"]),
+        _mask(datastore, hashed.run["hashed_cell_selection"]),
+    )
+
+
+def test_pools_that_use_different_hashtags_run_apart(tmp_path) -> None:
+    hto, truth = two_pool_hto_counts()
+    location = tmp_path / "data.zarr"
+    write_count_store(
+        str(location),
+        {"RNA": _counts(len(hto), 200, seed=5), "HTO": hto.to_numpy()},
+        "uint16",
+    )
+    datastore = _open_hashed(location)
+    first = np.arange(len(hto)) < 60
+    datastore.cells.insert("pool_a", first, overwrite=True)
+    datastore.cells.insert("pool_b", ~first, overwrite=True)
+
+    # One run over both pools fails its hashing stage, which writes no calls.
+    with pytest.raises(PipelineExecutionError) as failed:
+        datastore.pipeline.rna(hashing=True, **SMALL_RNA_SETTINGS)
+    assert failed.value.stage == "hashing"
+    assert str(failed.value.__cause__).startswith(
+        "HTO demultiplexing cannot place a cutoff for 'HTO0', 'HTO1', 'HTO2', 'HTO3'"
+    )
+    assert datastore.artifacts.list(kind="hto_identity", from_assay="HTO") == []
+
+    for pool, cells, hashtags in (
+        ("pool_a", first, ["HTO0", "HTO1"]),
+        ("pool_b", ~first, ["HTO2", "HTO3"]),
+    ):
+        run = datastore.pipeline.rna(
+            label=pool, cells=pool, hashing={"hashtags": hashtags}, **SMALL_RNA_SETTINGS
+        )
+        singlets = cells & ~np.isin(truth, ["Doublet", "Negative"])
+        np.testing.assert_array_equal(
+            _mask(datastore, run["hashed_cell_selection"]), singlets
+        )
+        assert _stages(run)["hashing"]["summary"]["hashing"]["hashtags"] == {
+            hashtags[0]: 25,
+            hashtags[1]: 25,
+            "Doublet": 5,
+            "Negative": 5,
+        }
 
 
 def test_hashing_reads_the_hto_assay_that_it_names(hashed) -> None:

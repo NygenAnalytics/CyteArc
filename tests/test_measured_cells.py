@@ -648,8 +648,11 @@ def test_an_unmeasured_cell_is_refused_before_anything_is_written(
 def test_measured_cells_are_accepted(measured, entry, monkeypatch) -> None:
     # test_hto covers the demultiplexing; here only the check matters.
     monkeypatch.setattr(
-        "cytearc.datastore._operations.quality_control.hto_demux",
-        lambda frame, **_kwargs: frame.idxmax(axis=1),
+        "cytearc.datastore._operations.quality_control._hto_calls",
+        lambda frame, **_kwargs: (
+            frame.idxmax(axis=1),
+            dict.fromkeys(frame.columns, 0),
+        ),
     )
     store = measured.open()
 

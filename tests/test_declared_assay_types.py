@@ -140,8 +140,11 @@ def test_an_explicit_type_is_the_declared_type_of_the_whole_session(
 
     # Demultiplexing accepts the assay in the session that declared it.
     monkeypatch.setattr(
-        "cytearc.datastore._operations.quality_control.hto_demux",
-        lambda frame, **_kwargs: frame.idxmax(axis=1),
+        "cytearc.datastore._operations.quality_control._hto_calls",
+        lambda frame, **_kwargs: (
+            frame.idxmax(axis=1),
+            dict.fromkeys(frame.columns, 0),
+        ),
     )
     cells = first.snapshot_cell_selection("I")
     identity = first.qc.hto_demultiplexing(cells, from_assay="hashtags")

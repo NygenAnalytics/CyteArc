@@ -1465,16 +1465,9 @@ CyteArc validates persisted data and public arguments against the following cont
   `method.cutoff.quantile`, and the quantile is recorded there, so artifacts of the default keep
   their identities and are reused without a compatibility branch, while each other quantile has
   its own artifact. `qc.hto_demultiplexing` checks the quantile before it reads the selection.
-- HTO demultiplexing assigns a singlet the one tag that its negative-binomial cutoff calls
-  positive, not the tag with the highest CLR value, which in unbalanced pools could be a tag
-  called negative. `hto_identity` artifacts gain the diagnostic arrays `max_id`, `second_id`
-  (labels), and `margin` (float64), which `artifacts.load_values` reads with `value=`. This is
-  revision 2 of `run_hto_demultiplexing` for every artifact; the method record keeps its fields,
-  `singlet_assignment` included, so revision 1 artifacts are superseded matches that are logged
-  and recomputed. A background cluster of only zero counts no longer aborts demultiplexing: its
-  HTO gets a cutoff of 0, with a warning. A warning also names each HTO whose positive calls
-  overlap its background, where fewer than half of its positive cells exceed the count that the
-  background fit exceeds with probability `(1 - positive_quantile) ** 3`.
+- HTO demultiplexing assigns a singlet the one tag that its negative-binomial cutoff calls positive, not the tag with the highest CLR value, which in unbalanced pools could be a tag called negative. `hto_identity` artifacts gain the diagnostic arrays `max_id`, `second_id` (labels), and `margin` (float64), which `artifacts.load_values` reads with `value=`. This is revision 2 of `run_hto_demultiplexing` for every artifact; the method record keeps its fields, `singlet_assignment` included, so revision 1 artifacts are superseded matches that are logged and recomputed. A warning names each HTO whose positive calls overlap its background, where fewer than half of its positive cells exceed the count that the background fit exceeds with probability `(1 - positive_quantile) ** 3`.
+- A background cluster of only zero counts, or a fit whose cutoff is 0, calls every nonzero count of its HTO positive. That cutoff stands only for counts without ambient tags: no background cluster holds counts of its HTO in most of its cells, and at most half of the cells hold counts of more than one HTO, as doublets do. Otherwise every HTO with a cutoff of 0 is refused in one `ValueError` that names them, the evidence of ambient tags and the remedy, since such an HTO is unused in the cells of its background, as when pools of cells use different hashtags. This is revision 3 of `run_hto_demultiplexing`, for every artifact.
+- `qc.hto_demultiplexing` takes `hashtags`, the hashtag IDs to demultiplex, checked against the assay's IDs after the selection is read and before the counts are. The artifact records them in the assay's order, and only when given, so calls without them keep their identities. Hashtags without a count in the selected cells are left out, with an INFO log, instead of refused, and a selection in which no chosen hashtag has a count is refused. The `samples` attribute of an `hto_identity` artifact lists, for the selected cells, the hashtags demultiplexed, each one's integer cutoff, and those left out as `withoutCounts`; reuse requires the attribute and the write checks it. The `rna` recipe's `hashing` stage takes `hashtags` and checks it before the run.
 - `qc.auto_filter` takes `metric_policies`, the MAD policy of named metrics: `transform`
   (`log1p` or `identity`) and `bound_direction` (`two_sided`, `upper`, or the new `lower`).
   Default policies follow what CyteArc wrote: `<assay>_nCounts` and `<assay>_nFeatures` are
