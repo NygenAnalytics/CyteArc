@@ -53,6 +53,10 @@ artifacts. Its root `composite` attribute records `assay`, `sources`, `arrays`, 
 and `countsFingerprint`. Source credentials are supplied at reopen through
 `DataStore(source_storage_options={source_name: options})` and are never persisted.
 
+(source_locations)=
+
+A source's `location` is its absolute path or URL. A composite created with `relative_sources=True` records a source in the directory that holds the composite, or below it, by a path relative to that directory instead, with `/` separators, such as `a.zarr` or `sources/a.zarr`, when the source and the composite are both local or both at URLs of one scheme and host. Opening resolves a relative location against the directory of the path or URL that the composite is opened from, so a directory that holds a composite and its sources can be moved, copied, or served from a bucket, and the identity checks still refuse a source with other content at that place. A composite opened from a store object that has no path or URL, such as an object store, cannot resolve a relative location and raises `ValueError`. A mount's `location` follows the same rule, with `mount_datastore(relative_sources=True)`. Relative locations are opt-in because a release before them resolves a relative location against its working directory, so it finds the source only when run from the directory that holds the store; a store written without the option opens in every release as before.
+
 The `_composite` group stores `rowSources` and `sourceRows`, which map output cells to source
 names and row indices, and `featureColumns`, which maps output features to columns in each
 source. A feature column of `-1` contributes zeros. The manifest records mapping fingerprints;
@@ -257,12 +261,7 @@ workspace while preserving unrelated root siblings.
 
 ## Mounted targets
 
-`mount_datastore` creates a target whose root attribute `matrixSource` binds it to the source
-that owns the counts. The record holds exactly `location` (an absolute path or URI),
-`workspace`, and `assays`, and each assay entry holds exactly `datasetFingerprint`,
-`countsFingerprint`, and `requiresTranspose`. Every open checks the source against these
-identities. Any other shape, including a field that a later release adds, is rejected rather than
-ignored, and a source that is itself a mount is refused.
+`mount_datastore` creates a target whose root attribute `matrixSource` binds it to the source that owns the counts. The record holds exactly `location` (an absolute path or URI, or with `relative_sources=True` a path relative to the directory that holds the target for a source in it or below it, as for {ref}`composite sources <source_locations>`), `workspace`, and `assays`, and each assay entry holds exactly `datasetFingerprint`, `countsFingerprint`, and `requiresTranspose`. Every open checks the source against these identities. Any other shape, including a field that a later release adds, is rejected rather than ignored, and a source that is itself a mount is refused.
 
 The record holds no backend options. Each open passes the source's options, as `source_storage_options` of `mount_datastore`, `DataStore`, and `repack_store`, or opens the source with the target's `storage_options` when none are given.
 

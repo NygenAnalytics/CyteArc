@@ -38,9 +38,7 @@ CyteBase docs: <https://docs.nygen.io/CyteBase/>.
 - RNA assays hold cell-major `counts` plus gene-major `countsT`; other assays hold `counts` only.
   Stores from older releases (Zarr v2, no `countsT`, an `{assay}/state` group) fail to open:
   re-import the source.
-- A mount is a local writable target whose counts resolve from a separate source recorded in the
-  root `matrixSource` attribute (absolute path or URI). Metadata is copied once at mount time; new
-  artifacts are written only to the target.
+- A mount is a local writable target whose counts resolve from a separate source recorded in the root `matrixSource` attribute (an absolute path or URI, or with `relative_sources=True` a path relative to the target's directory for a source beside or below it). Metadata is copied once at mount time; new artifacts are written only to the target.
 - CyteBase datasets are published CyteArc stores in public Hugging Face buckets, one bucket per
   release (`Nygen/cytebase-YYMM`), at
   `hf://buckets/Nygen/cytebase-<release>/datasets/<cytebase_id>/data.zarr`. Open them by URI like

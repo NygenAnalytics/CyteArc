@@ -203,3 +203,53 @@ def record_normalized_values(
     """
     group = zarr.open_group(str(zarr_loc), mode="r+")[assay]
     group.attrs["normalizedValues"] = {"importedAs": imported_as, "cellTotal": None}
+
+
+def serve_uris(
+    monkeypatch: Any,
+    served: Mapping[str, tuple[Any, dict[str, Any] | None]],
+) -> None:
+    """Serve each URI from a store that opens only with the options it expects.
+
+    ``served`` maps a URI to its store, a local path or a Zarr store, and the
+    options that open it; a store opened with any other options raises
+    ``PermissionError`` that names the URI. Every other location opens as usual.
+    """
+    import cytearc.storage.stores as stores_module
+    from zarr.storage import LocalStore
+
+    make = stores_module.make_store
+
+    def serve(
+        location: Any,
+        *,
+        storage_options: dict[str, Any] | None = None,
+        read_only: bool = False,
+    ) -> Any:
+        if not isinstance(location, str) or location not in served:
+            return make(location, storage_options=storage_options, read_only=read_only)
+        store, expected = served[location]
+        if storage_options != expected:
+            raise PermissionError(
+                f"{location} refuses the options {sorted(storage_options or {})}"
+            )
+        if isinstance(store, Path):
+            return LocalStore(store, read_only=read_only)
+        return store.with_read_only(read_only)
+
+    monkeypatch.setattr(stores_module, "make_store", serve)
+
+
+def object_store_copy(directory: Path) -> Any:
+    """Return an in-memory object store that holds the files of a local store."""
+    import obstore
+    from obstore.store import MemoryStore as ObjectMemoryStore
+    from zarr.storage import ObjectStore
+
+    memory = ObjectMemoryStore()
+    for file in sorted(directory.rglob("*")):
+        if file.is_file():
+            obstore.put(
+                memory, file.relative_to(directory).as_posix(), file.read_bytes()
+            )
+    return ObjectStore(store=memory)

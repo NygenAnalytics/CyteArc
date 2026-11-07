@@ -25,6 +25,7 @@ from cytearc.storage.stores import (
     zarr_root_path,
 )
 from tests.fixtures_datastore import build_neighbourhood_graph
+from tests.storage_helpers import serve_uris
 from cytearc.storage.schema import create_cell_data
 from cytearc.writers import create_zarr_count_assay
 
@@ -1193,32 +1194,6 @@ _SOURCE_OPTIONS = {"token": "source-token"}
 _TARGET_OPTIONS = {"access_key_id": "target-key", "secret_access_key": "target-secret"}
 
 
-def _serve_with_own_options(monkeypatch, served: dict[str, tuple[object, dict]]):
-    """Serve each URI from a store that opens only with the options it expects.
-
-    ``served`` maps a URI to its store, a local path or a Zarr store, and the
-    options that open it; every other location opens as usual.
-    """
-    import cytearc.storage.stores as stores_module
-    from zarr.storage import LocalStore
-
-    make = stores_module.make_store
-
-    def serve(location, *, storage_options=None, read_only=False):
-        if not isinstance(location, str) or location not in served:
-            return make(location, storage_options=storage_options, read_only=read_only)
-        store, expected = served[location]
-        if storage_options != expected:
-            raise PermissionError(
-                f"{location} refuses the options {sorted(storage_options or {})}"
-            )
-        if isinstance(store, Path):
-            return LocalStore(store, read_only=read_only)
-        return store.with_read_only(read_only)
-
-    monkeypatch.setattr(stores_module, "make_store", serve)
-
-
 def _object_store_keys(store: ObjectStore) -> dict[str, bytes]:
     from zarr.core.buffer import default_buffer_prototype
     from zarr.core.sync import sync
@@ -1240,7 +1215,7 @@ def test_a_mount_opens_its_source_with_its_own_options(
     source = tmp_path / "source.zarr"
     values = _copy_source(default_sources, source)
     target = ObjectStore(store=ObjectMemoryStore())
-    _serve_with_own_options(
+    serve_uris(
         monkeypatch,
         {
             _SOURCE_URI: (source, _SOURCE_OPTIONS),
@@ -1290,7 +1265,7 @@ def test_a_mount_needs_its_source_options_when_it_is_made(
     source = tmp_path / "source.zarr"
     _copy_source(default_sources, source)
     target = ObjectStore(store=ObjectMemoryStore())
-    _serve_with_own_options(
+    serve_uris(
         monkeypatch,
         {
             _SOURCE_URI: (source, _SOURCE_OPTIONS),
@@ -1330,7 +1305,7 @@ def test_a_mount_source_takes_the_target_options_when_it_has_none(
     source = tmp_path / "source.zarr"
     values = _copy_source(default_sources, source)
     shared = {"token": "shared-token"}
-    _serve_with_own_options(
+    serve_uris(
         monkeypatch,
         {
             _SOURCE_URI: (source, shared),
@@ -1356,7 +1331,7 @@ def test_a_mount_repacks_with_its_source_options(
 
     source = tmp_path / "source.zarr"
     values = _copy_source(default_sources, source)
-    _serve_with_own_options(
+    serve_uris(
         monkeypatch,
         {
             _SOURCE_URI: (source, _SOURCE_OPTIONS),

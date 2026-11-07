@@ -248,6 +248,7 @@ class BaseDataStore:
         )
         resolved = resolve_matrix_source(
             self.z,
+            location=zarr_loc,
             storage_options=storage_options,
             source_storage_options=source_storage_options,
         )
