@@ -19,6 +19,7 @@ from cytearc.metadata.artifacts import (
     write_cell_data_artifact,
 )
 from cytearc.storage.arrays import create_metadata_column
+from cytearc.storage.layout import column_chunk_rows
 from cytearc.storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
 from cytearc.storage.refs import artifact_path
 from cytearc.storage.selections import resolve_generated_selection_artifact
@@ -99,7 +100,9 @@ def _whole_column(path: Path, values: np.ndarray, zarr_format: int) -> dict[str,
         "labels",
         data=values.astype(str),
         overwrite=True,
-        chunkSize=min(max(len(values), 1), _CHUNK_ROWS),
+        # Text takes the chunks of cell columns: at most 100,000 rows and
+        # 16 MiB of values at its stored width.
+        chunkSize=column_chunk_rows(len(values), values.astype(str).dtype.itemsize),
     )
     return _files(path / "labels")
 
@@ -245,3 +248,25 @@ def test_the_costliest_array_sets_the_cost_whatever_their_order() -> None:
 def test_the_cost_refuses_arrays_it_cannot_size(arrays, error, message) -> None:
     with pytest.raises(error, match=message):
         cell_data_write_bytes(arrays)
+
+
+def test_wide_text_is_chunked_by_its_bytes_and_charged_by_its_chunks(tmp_path) -> None:
+    rows = 50_000
+    # 200 characters, 800 bytes a value as stored: 16 MiB holds 20,971 rows.
+    values = np.asarray([f"{index:06d}" + "x" * 194 for index in range(rows)])
+    root, selection = _root(tmp_path / "store.zarr", n_cells=rows)
+    ref = _write(root, selection, rows, {"labels": values})
+
+    labels = artifact_group(root, ref)["labels"]
+    assert labels.chunks == (20_971,)
+    np.testing.assert_array_equal(labels[:], values)
+    # A chunk and its encoded copy, and the last, shorter chunk copied into a
+    # full one: 2 * 800 * 20,971 + 800 * 8,058 bytes, far below the 80 MB of
+    # two chunks of 50,000 rows.
+    assert cell_data_write_bytes({"labels": ((rows,), "U200")}) == (
+        2 * 800 * 20_971 + 800 * (rows % 20_971)
+    )
+    # Labels of up to 41 characters keep chunks of 100,000 rows.
+    assert cell_data_write_bytes({"labels": ((250_000,), "U41")}) == (
+        2 * 164 * 100_000 + 164 * 50_000
+    )
