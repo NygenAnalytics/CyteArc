@@ -442,6 +442,7 @@ class BaseDataStore:
         *,
         value: str | None = None,
         cell_selection: ArtifactRef | None = None,
+        cell_ids: bool = True,
     ) -> CellValues:
         """Read the per-cell values of a cell-aligned artifact or a cell column.
 
@@ -451,6 +452,12 @@ class BaseDataStore:
         column of ``kind="continuous"`` holds measurements, and any other
         kind holds labels.
 
+        A caller that needs only the values, such as one that draws an
+        embedding or colors cells by their labels, passes ``cell_ids=False``:
+        the cells' ids, text that often outweighs the values, are left out of
+        the read and of its memory budget, and ``cell_idx`` still names each
+        cell's row of the cell table.
+
         Args:
             ref: A cell-aligned artifact, such as a clustering or an
                 embedding, or a ``CellField`` that names a cell column.
@@ -459,9 +466,13 @@ class BaseDataStore:
             cell_selection: A subset of the artifact's cell selection, or
                 None for all of its cells. A ``CellField`` needs one: the
                 cells whose values are read.
+            cell_ids: Read the cells' ``ids`` with the values, the default.
+                False leaves them out of the read and of its memory budget,
+                and ``CellValues.cell_ids`` is None.
 
         Returns:
-            The values with their cell ids and missing mask, as ``CellValues``.
+            The values with their missing mask, and with their cell ids
+            unless ``cell_ids`` is False, as ``CellValues``.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -477,13 +488,14 @@ class BaseDataStore:
                 selection of this store.
             MemoryError: If the read does not fit the datastore memory budget.
         """
+        cell_ids = bool_argument(cell_ids, "cell_ids")
         if not isinstance(ref, ArtifactRef | CellField):
             raise TypeError("ref must be an ArtifactRef or a CellField")
         if cell_selection is not None and not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
         if isinstance(ref, CellField):
             return self._load_cell_column(
-                ref, value=value, cell_selection=cell_selection
+                ref, value=value, cell_selection=cell_selection, cell_ids=cell_ids
             )
         try:
             value_name, categorical = cell_value_array(ref.kind, value)
@@ -495,30 +507,23 @@ class BaseDataStore:
                 "lineage rather than a cell_selection input; open them with "
                 "artifacts.load"
             ) from None
+        ledger, id_reads = self._cell_values_ledger(
+            f"Loading the values of the {ref.kind} artifact", cell_ids=cell_ids
+        )
         resolved = resolve_cell_aligned_artifact(
             self.zw,
             ref,
             cell_selection=cell_selection,
             value_name=value_name,
             ndim=None,
-            ledger=MemoryLedger(
-                self.memoryBytes,
-                f"Loading the values of the {ref.kind} artifact",
-                remedy="read fewer cells with cell_selection",
-                codec_threads=self.nthreads,
-            ),
-            # The cell ids are read at the same rows, so the budget charges
-            # them with the values.
-            caller_reads=(self.cells._get_array("ids"),),
-        )
-        cell_ids = np.asarray(
-            read_metadata_rows_chunkwise(self.cells, "ids", resolved.cell_idx)
+            ledger=ledger,
+            caller_reads=id_reads,
         )
         return CellValues(
             source=ref,
             value=value_name,
             values=resolved.values,
-            cell_ids=cell_ids,
+            cell_ids=self._cell_ids_at(resolved.cell_idx) if cell_ids else None,
             cell_idx=resolved.cell_idx,
             cell_selection=resolved.cell_selection,
             missing=resolved.missing_mask,
@@ -531,6 +536,7 @@ class BaseDataStore:
         *,
         value: str | None,
         cell_selection: ArtifactRef | None,
+        cell_ids: bool,
     ) -> CellValues:
         """Read a cell column over a cell selection, for ``artifacts.load_values``."""
         if value is not None:
@@ -544,20 +550,16 @@ class BaseDataStore:
                 f"{field.key!r} to read, such as a selection that "
                 "snapshot_cell_selection makes"
             )
+        ledger, id_reads = self._cell_values_ledger(
+            f"Loading the values of the cell column {field.key!r}", cell_ids=cell_ids
+        )
         values, missing, cell_idx = resolve_cell_column(
             self.zw,
             self.cells,
             field.key,
             cell_selection=cell_selection,
-            ledger=MemoryLedger(
-                self.memoryBytes,
-                f"Loading the values of the cell column {field.key!r}",
-                remedy="read fewer cells with cell_selection",
-                codec_threads=self.nthreads,
-            ),
-            # The cell ids are read at the same rows, so the budget charges
-            # them with the values.
-            caller_reads=(self.cells._get_array("ids"),),
+            ledger=ledger,
+            caller_reads=id_reads,
         )
         if values.shape[:1] != (len(cell_idx),) or (
             missing is not None and missing.shape != (len(cell_idx),)
@@ -570,14 +572,35 @@ class BaseDataStore:
             source=field,
             value=field.key,
             values=values,
-            cell_ids=np.asarray(
-                read_metadata_rows_chunkwise(self.cells, "ids", cell_idx)
-            ),
+            cell_ids=self._cell_ids_at(cell_idx) if cell_ids else None,
             cell_idx=cell_idx,
             cell_selection=cell_selection,
             missing=missing,
             categorical=field.kind != "continuous",
         )
+
+    def _cell_values_ledger(
+        self, doing: str, *, cell_ids: bool
+    ) -> tuple[MemoryLedger, tuple[Any, ...]]:
+        """The ledger of a read of per-cell values, and the arrays it reads beside them.
+
+        With ``cell_ids``, the cells' ids are read at the same rows as the
+        values, so the budget charges them with the values, and a refusal
+        names leaving them out. Without, nothing else is read.
+        """
+        remedy = "read fewer cells with cell_selection"
+        id_reads: tuple[Any, ...] = ()
+        if cell_ids:
+            remedy += ", or leave out their ids with cell_ids=False"
+            id_reads = (self.cells._get_array("ids"),)
+        ledger = MemoryLedger(
+            self.memoryBytes, doing, remedy=remedy, codec_threads=self.nthreads
+        )
+        return ledger, id_reads
+
+    def _cell_ids_at(self, cell_idx: np.ndarray) -> np.ndarray:
+        """The ``ids`` of the cell table's rows ``cell_idx``, read one stored chunk at a time."""
+        return np.asarray(read_metadata_rows_chunkwise(self.cells, "ids", cell_idx))
 
     @validation_scoped
     def _artifacts_list(

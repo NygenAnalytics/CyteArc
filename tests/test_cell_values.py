@@ -2,6 +2,7 @@
 
 import hashlib
 import shutil
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from cytearc.storage.artifacts import ArtifactRef, fingerprint_array, new_artifa
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.selections import resolve_metadata_snapshot, snapshot_run_metadata
 from cytearc.trajectory.artifacts import load_cell_artifact_values
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.storage_helpers import insert_nullable_cell_column, write_count_store
 
 N_CELLS = 8
@@ -364,17 +366,26 @@ def test_values_beyond_the_memory_budget_are_refused_before_anything_is_read(
     ):
         monkeypatch.setattr(module, name, recorded(name, getattr(module, name)))
     # 48 bytes hold the six float64 values but not what reading them is
-    # charged, so no cell row, value or cell id is read.
+    # charged, so no cell row, value or cell id is read. A read of the ids
+    # names leaving them out, and a read without them names fewer cells.
     store.memoryBytes = 6 * 8
 
-    with pytest.raises(
-        MemoryError,
-        match=(
-            r"more than the memory budget of 48 bytes\. Raise mem_budget to at "
-            r"least \d+ bytes, or read fewer cells with cell_selection\.$"
+    for options, remedy in (
+        (
+            {},
+            "read fewer cells with cell_selection, or leave out their ids with "
+            "cell_ids=False",
         ),
+        ({"cell_ids": False}, "read fewer cells with cell_selection"),
     ):
-        store.artifacts.load_values(scores)
+        with pytest.raises(
+            MemoryError,
+            match=(
+                r"more than the memory budget of 48 bytes\. Raise mem_budget to "
+                rf"at least \d+ bytes, or {remedy}\.$"
+            ),
+        ):
+            store.artifacts.load_values(scores, **options)
     assert reads == []
 
 
@@ -414,6 +425,217 @@ def test_masked_values_of_many_cells_load_for_every_cell_or_a_selection(
         expected = n_cells if not options else n_cells // 2
         assert loaded.values.shape == (expected,)
         assert loaded.cell_ids.shape == (expected,)
+
+
+# A read with cell_ids=False leaves the cells' ids out of the result and out
+# of its memory budget; its values, missing mask and rows are those of a read
+# with ids.
+
+
+@pytest.mark.parametrize(
+    "case", ["embedding", "subset", "missing labels", "guide calls", "cell column"]
+)
+def test_a_read_without_cell_ids_holds_the_values_mask_and_rows_of_one_with_them(
+    store, case
+) -> None:
+    subset = store.snapshot_cell_selection("subset")
+    missing = np.array([False, True, False, True, False, False])
+    options: dict[str, object] = {}
+    if case == "embedding":
+        ref, arrays = _write_declared(store, "embedding")
+        expected = arrays["values"]
+    elif case == "subset":
+        ref, arrays = _write_declared(store, "doublet_score")
+        options["cell_selection"] = subset
+        expected = arrays["values"][SUBSET]
+    elif case == "missing labels":
+        expected = np.array([3, 0, 1, 0, 2, 1])
+        ref = _write_masked(
+            store, "cluster_labels", "values", expected, missing, case="labels"
+        )
+    elif case == "guide calls":
+        # A table of each cell's called guides, one row per cell.
+        ref, arrays = _write_declared(store, "guide_calls")
+        options["value"] = "guide_codes"
+        expected = arrays["guide_codes"]
+    else:
+        donors = np.array(["d1", "d2", "d1", "d3", "d2", "d1", "d3", "d2"])
+        insert_nullable_cell_column(
+            store, "donor", donors, np.isin(np.arange(N_CELLS), [2, 7])
+        )
+        ref = CellField("donor")
+        options["cell_selection"] = subset
+        expected = donors[SUBSET]
+
+    with_ids = store.artifacts.load_values(ref, **options)
+    without = store.artifacts.load_values(ref, cell_ids=False, **options)
+
+    assert without.cell_ids is None
+    np.testing.assert_array_equal(without.values, expected)
+    np.testing.assert_array_equal(without.values, with_ids.values)
+    assert without.values.dtype == with_ids.values.dtype
+    np.testing.assert_array_equal(without.cell_idx, with_ids.cell_idx)
+    if with_ids.missing is None:
+        assert without.missing is None
+    else:
+        np.testing.assert_array_equal(without.missing, with_ids.missing)
+    assert (without.source, without.value, without.categorical) == (
+        with_ids.source,
+        with_ids.value,
+        with_ids.categorical,
+    )
+    assert without.cell_selection == with_ids.cell_selection
+    if case == "missing labels":
+        np.testing.assert_array_equal(without.missing, missing)
+    # The read with ids holds the ids of the rows, as the store names them.
+    stored_ids = np.asarray(store.zw["cellData"]["ids"][:])
+    assert with_ids.cell_ids.tolist() == stored_ids[with_ids.cell_idx].tolist()
+    assert with_ids.cell_ids.tolist() == _cell_ids(with_ids.cell_idx)
+    # A table indexed by cell id needs the ids, so it names how to read them.
+    with pytest.raises(ValueError) as raised:
+        without.to_pandas()
+    assert str(raised.value) == (
+        "to_pandas indexes the values by cell id, and this read left the cell "
+        "ids out; read them with artifacts.load_values(..., cell_ids=True), or "
+        "use values and cell_idx, each cell's row of the cell table"
+    )
+    with pytest.raises(TypeError, match="cell_ids must be a boolean"):
+        store.artifacts.load_values(ref, cell_ids=1, **options)
+
+
+def _store_with_ids(path: Path, width: int, n_cells: int) -> DataStore:
+    """A store whose cell ids each hold ``width`` characters.
+
+    Its column ``half`` selects every second cell, and ``depth`` holds a
+    float64 measurement of each cell.
+    """
+    ids = [f"{index:0{width}d}" for index in range(n_cells)]
+    write_count_store(
+        str(path),
+        {"RNA": np.ones((n_cells, 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=ids,
+    )
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=-1, nthreads=1
+    )
+    store.cells.insert("half", np.arange(n_cells) % 2 == 0)
+    store.cells.insert("depth", np.arange(n_cells, dtype=np.float64))
+    return store
+
+
+def _named_budget(store: DataStore, read: Callable[[], object]) -> int:
+    """The budget that the refusal of ``read()`` names under a budget of one byte."""
+    budget = store.memoryBytes
+    store.memoryBytes = 1
+    try:
+        with pytest.raises(MemoryBudgetError) as raised:
+            read()
+    finally:
+        store.memoryBytes = budget
+    return raised.value.needed_bytes
+
+
+def test_a_read_without_cell_ids_is_charged_nothing_for_them(
+    tmp_path, monkeypatch
+) -> None:
+    n_cells = 4_000
+    coordinates = np.arange(2 * n_cells, dtype=np.float32).reshape(n_cells, 2)
+    budgets: dict[tuple[int, str, bool], int] = {}
+    for width in (18, 60):
+        store = _store_with_ids(tmp_path / f"ids{width}.zarr", width, n_cells)
+        stored_ids = np.asarray(store.zw["cellData"]["ids"][:])
+        # The ids are stored at 4 bytes a character.
+        assert stored_ids.dtype == np.dtype(f"<U{width}")
+        # Two float32 coordinates of every cell, 8 bytes a cell.
+        planned = plan_cell_data_artifact(
+            store.zw,
+            scope="assay",
+            assay="RNA",
+            kind="embedding",
+            operation="test_cell_values",
+            parameters={"case": "every cell"},
+            inputs={},
+            execution_options={},
+            cell_selection=store.snapshot_cell_selection("I"),
+            arrays={"values": (coordinates.shape, None)},
+        )
+        write_cell_data_artifact(store.zw, planned, {"values": coordinates})
+        layout = planned.ref
+        half = store.snapshot_cell_selection("half")
+        reads = {
+            "every cell": (
+                lambda cell_ids, store=store, layout=layout: (
+                    store.artifacts.load_values(layout, cell_ids=cell_ids)
+                ),
+                np.arange(n_cells),
+            ),
+            "half": (
+                lambda cell_ids, store=store, layout=layout, half=half: (
+                    store.artifacts.load_values(
+                        layout, cell_selection=half, cell_ids=cell_ids
+                    )
+                ),
+                np.arange(0, n_cells, 2),
+            ),
+            "cell column": (
+                lambda cell_ids, store=store, half=half: store.artifacts.load_values(
+                    CellField("depth", kind="continuous"),
+                    cell_selection=half,
+                    cell_ids=cell_ids,
+                ),
+                np.arange(0, n_cells, 2),
+            ),
+        }
+        for case, (read, rows) in reads.items():
+            for cell_ids in (True, False):
+                budgets[(width, case, cell_ids)] = _named_budget(
+                    store, lambda read=read, cell_ids=cell_ids: read(cell_ids)
+                )
+            without = budgets[(width, case, False)]
+            # The ids' rows alone, at 4 bytes a character, separate the two.
+            assert budgets[(width, case, True)] - without >= len(rows) * 4 * width
+            # At the budget that it names, the read without ids runs and
+            # reads no id.
+            id_reads: list[np.ndarray] = []
+            original = base_datastore_module.read_metadata_rows_chunkwise
+
+            def recording(metadata, column, cell_rows, *, original=original):
+                id_reads.append(np.asarray(cell_rows))
+                return original(metadata, column, cell_rows)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    base_datastore_module, "read_metadata_rows_chunkwise", recording
+                )
+                store.memoryBytes = without
+                loaded = read(False)
+                assert id_reads == []
+                np.testing.assert_array_equal(loaded.cell_idx, rows)
+                expected = (
+                    rows.astype(np.float64)
+                    if case == "cell column"
+                    else coordinates[rows]
+                )
+                np.testing.assert_array_equal(loaded.values, expected)
+                assert loaded.cell_ids is None
+                # A read of the ids does not fit that budget.
+                with pytest.raises(MemoryBudgetError):
+                    read(True)
+                # The read with ids runs at its own budget and holds them.
+                store.memoryBytes = budgets[(width, case, True)]
+                with_ids = read(True)
+                assert len(id_reads) == 1
+                np.testing.assert_array_equal(with_ids.values, loaded.values)
+                assert with_ids.cell_ids.tolist() == stored_ids[rows].tolist()
+    for case in ("every cell", "half", "cell column"):
+        n_rows = n_cells if case == "every cell" else n_cells // 2
+        # The ids' width does not move the budget of a read without them,
+        assert budgets[(18, case, False)] == budgets[(60, case, False)]
+        # and widens that of a read with them by at least the wider rows.
+        assert budgets[(60, case, True)] - budgets[(18, case, True)] >= n_rows * 4 * (
+            60 - 18
+        )
 
 
 # A cell column, named by a CellField, is read over a cell selection with its
@@ -523,17 +745,28 @@ def test_a_cell_column_beyond_the_memory_budget_is_refused_before_it_is_read(
     ):
         monkeypatch.setattr(module, name, recorded(name, getattr(module, name)))
     # 48 bytes hold the six float64 values but not what reading them is
-    # charged, so no cell row, value or cell id is read.
+    # charged, so no cell row, value or cell id is read. A read of the ids
+    # names leaving them out, and a read without them names fewer cells.
     store.memoryBytes = 6 * 8
 
-    with pytest.raises(
-        MemoryError,
-        match=(
-            r"more than the memory budget of 48 bytes\. Raise mem_budget to at "
-            r"least \d+ bytes, or read fewer cells with cell_selection\.$"
+    for options, remedy in (
+        (
+            {},
+            "read fewer cells with cell_selection, or leave out their ids with "
+            "cell_ids=False",
         ),
+        ({"cell_ids": False}, "read fewer cells with cell_selection"),
     ):
-        store.artifacts.load_values(CellField("depth"), cell_selection=selected)
+        with pytest.raises(
+            MemoryError,
+            match=(
+                r"more than the memory budget of 48 bytes\. Raise mem_budget to "
+                rf"at least \d+ bytes, or {remedy}\.$"
+            ),
+        ):
+            store.artifacts.load_values(
+                CellField("depth"), cell_selection=selected, **options
+            )
     assert reads == []
 
 

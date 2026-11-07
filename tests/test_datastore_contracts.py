@@ -129,8 +129,8 @@ _SIGNATURE_DIGESTS = {
     # Base and inherited graph constructors accept DataStore's optional setup values.
     # min_features_per_cell is int | None: None applies 10 on a store's first
     # writable open, and later opens never filter. load_cell_values takes
-    # ref: ArtifactRef | CellField.
-    BaseDataStore: "c6dde09e61384323518e7b4038f180af5338a3a7139759d0a00130db2d23525a",
+    # ref: ArtifactRef | CellField, and the keyword-only cell_ids: bool = True.
+    BaseDataStore: "bf5ff22b4f350a4727b43befa3e2f8a5ab4171266986fd7b62b8ba62759be92f",
     # run_leiden_clustering gained the native backend: backend is now
     # Literal["cytearc", "igraph", "leidenalg"] with the default "cytearc".
     # The inherited constructor takes min_features_per_cell: int | None.

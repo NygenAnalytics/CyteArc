@@ -473,11 +473,14 @@ datastore memory budget, and it raises `MemoryError` when it does not fit: the v
 missing mask, the cell ids, and the int64 cell rows and positions that it builds, each read chunk
 by chunk.
 
+The cell ids are text at 4 bytes a character, so they often take most of that budget: 18 characters take 72 bytes a cell, where two float32 coordinates take 8. A caller that needs only the values, such as one that draws an embedding or colors cells by their labels, passes `cell_ids=False`, which leaves the ids out of the read and of its budget. The result holds the values, `missing` and `cell_idx` (each cell's row of the cell table) of a read with ids, `cell_ids` is None, and `to_pandas()` raises `ValueError`, since it indexes the values by cell id. A refusal of a read with ids names `cell_ids=False` beside `cell_selection`.
+
 ```python
 phase = ds.artifacts.load_values(cell_cycle_ref)  # canonical "phase" labels
 s_score = ds.artifacts.load_values(cell_cycle_ref, value="s_score")
 phase.to_pandas()  # Series indexed by cell id
 coordinates = ds.artifacts.load_values(umap_ref).to_pandas()  # one column per dimension
+xy = ds.artifacts.load_values(umap_ref, cell_ids=False).values  # no cell ids read
 subset = ds.artifacts.load_values(clusters_ref, cell_selection=t_cells)
 donors = ds.artifacts.load_values(CellField("donor"), cell_selection=t_cells)
 ```
