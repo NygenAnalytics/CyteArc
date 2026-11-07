@@ -11,7 +11,12 @@ import zarr
 from zarr.storage import MemoryStore
 
 import cytearc.storage.operation_revisions as operation_revisions
-from cytearc.storage.artifact_writer import artifact_transaction, plan_artifact
+from cytearc.graph.arguments import PcaArguments
+from cytearc.storage.artifact_writer import (
+    PlannedArtifact,
+    artifact_transaction,
+    plan_artifact,
+)
 from cytearc.storage.artifacts import (
     ArtifactRef,
     artifact_path,
@@ -67,15 +72,21 @@ def _root() -> zarr.Group:
     return zarr.open_group(store=MemoryStore(), mode="w")
 
 
-def _write_data(group: zarr.Group) -> None:
-    """Write the reduction payload."""
+def _write_data(group: zarr.Group, planned: PlannedArtifact) -> None:
+    """Write the reduction payload and the diagnostics its operation declares.
+
+    The diagnostics are None, which PCA saves for an exact fit, so planning
+    reuses the artifact.
+    """
     group.create_array("data", data=np.arange(4, dtype=np.float32))
+    if planned.diagnostics:
+        group.attrs["diagnostics"] = dict.fromkeys(planned.diagnostics)
 
 
 def _write(
     root: zarr.Group,
     *,
-    operation: str = "run_pca",
+    operation: str = PcaArguments.operation,
     kind: str = "reduction",
     parameters: dict[str, Any] | None = None,
     inputs: dict[str, Any] | None = None,
@@ -93,7 +104,7 @@ def _write(
         invalidate_cache=True,
     )
     with artifact_transaction(root, planned) as group:
-        _write_data(group)
+        _write_data(group, planned)
     return planned.ref
 
 
@@ -102,7 +113,7 @@ def _plan(root: zarr.Group, **overrides: Any):
         "scope": "assay",
         "assay": "RNA",
         "kind": "reduction",
-        "operation": "run_pca",
+        "operation": PcaArguments.operation,
         "parameters": _PCA_PARAMETERS,
         "inputs": _PCA_INPUTS,
         "execution_options": {},
@@ -284,7 +295,7 @@ def test_superseded_artifact_is_recomputed_with_one_log_line(
     assert [message for message in messages if "Recomputing" in message] == [expected]
 
     with artifact_transaction(root, planned) as group:
-        _write_data(group)
+        _write_data(group, planned)
     with _messages("INFO") as messages:
         again = _plan(root)
     assert again.reused

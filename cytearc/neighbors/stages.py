@@ -8,7 +8,8 @@ from typing import Any, Protocol
 import numpy as np
 import pandas as pd
 
-from ..embeddings.harmony import HarmonyResult, fit_harmony
+from ..embeddings.harmony import HarmonyResult
+from ..embeddings.harmony.fit import _fitted_harmony
 from ..matrix import ChunkedArray
 from ..utils.compute import process_thread_limit, thread_pool_info
 from ..utils.logging import logger
@@ -127,11 +128,12 @@ class ReductionTransform:
         disable_scaling: bool,
         use_for_pca: np.ndarray,
     ) -> None:
-        from ..embeddings.reduction import fit_pca
+        # The reduction operation warns from the fit's saved diagnostics.
+        from ..embeddings.reduction import _fitted_pca
 
         assert self.dims is not None
         scale = self.transform_z if not disable_scaling else None
-        self.loadings, self.pca = fit_pca(
+        self.loadings, self.pca = _fitted_pca(
             self.data,
             dims=self.dims,
             use_for_pca=use_for_pca,
@@ -211,8 +213,9 @@ class BatchCorrectionStage:
                 f"Coordinate source contains {start} rows, expected {self.n_cells}"
             )
         shutdown_checkpoint()
+        # The correction operation warns from the fit's saved diagnostics.
         with process_thread_limit(self.nthreads):
-            self.result = fit_harmony(
+            self.result = _fitted_harmony(
                 uncorrected,
                 self.batches,
                 nthreads=self.nthreads,

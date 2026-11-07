@@ -1,7 +1,7 @@
 import math
 import os
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -11,9 +11,16 @@ import zarr
 from numpy.typing import NDArray
 from scipy.sparse import csr_matrix
 
+from ...embeddings.harmony.fit import (
+    convergence_diagnostics,
+    stopped_before_convergence,
+    unconverged_message,
+)
+from ...embeddings.harmony.parameters import HARMONY_DEFAULTS, check_harmony_options
 from ...embeddings.reduction import (
     _streaming_lsi_accumulator_bytes,
     pca_fit_resident_bytes,
+    pca_pass_limit_message,
     pca_solver,
     require_materialized_lsi_budget,
 )
@@ -84,6 +91,7 @@ from ...storage.artifact_writer import (
     PlannedArtifact,
     artifact_transaction,
     plan_artifact,
+    planned_diagnostics,
     reused_artifact_group,
 )
 from ...storage.artifacts import (
@@ -94,6 +102,11 @@ from ...storage.artifacts import (
     group_at,
     inspect_artifact,
     require_complete_artifact,
+)
+from ...storage.diagnostics import (
+    DIAGNOSTICS_ATTRIBUTE,
+    DiagnosticRule,
+    warn_diagnostics,
 )
 from ...storage.errors import ArtifactResolutionError
 from ...storage.finite_values import FiniteRowWriter, write_finite_array
@@ -131,7 +144,6 @@ from ...utils.memory_budget import MemoryBudgetError
 from ...utils.moments import ColumnMoments
 from ...utils.numba import numba_threads
 from ...utils.shutdown import shutdown_checkpoint
-from ...utils.warnings import warn
 
 if TYPE_CHECKING:
     from ..base_datastore import BaseDataStore as _GraphOperationsBase
@@ -142,6 +154,62 @@ else:
 # themselves among their nearest neighbors. An exact search finds every cell
 # whose coordinates no other cell shares.
 _MIN_SELF_HIT_RATE = 99.5
+
+
+def _pca_diagnostics(model: Any) -> dict[str, Any]:
+    """The diagnostics of a PCA fit: the randomized solver's passes and its components' last shift."""
+    return {
+        "solverPasses": model.n_passes_ if model.solver_ == "randomized" else None,
+        "componentShift": model.component_shift_,
+    }
+
+
+def _pca_rules(dims: int) -> tuple[DiagnosticRule, ...]:
+    """The warning of a PCA fit of ``dims`` components, from its diagnostics."""
+    return (
+        DiagnosticRule(
+            "componentShift",
+            applies=lambda numbers: numbers["componentShift"] is not None,
+            message=lambda numbers: pca_pass_limit_message(
+                numbers["solverPasses"], dims, numbers["componentShift"]
+            ),
+        ),
+    )
+
+
+def _harmony_rules(harmony_parameters: Mapping[str, Any]) -> tuple[DiagnosticRule, ...]:
+    """The warning of a Harmony fit with these options, from its diagnostics."""
+    epsilon = check_harmony_options(
+        epsilon_harmony=harmony_parameters.get(
+            "epsilon_harmony", HARMONY_DEFAULTS["epsilon_harmony"]
+        )
+    )["epsilon_harmony"]
+    return (
+        DiagnosticRule(
+            "objectiveChange",
+            applies=stopped_before_convergence,
+            message=lambda numbers: unconverged_message(numbers, epsilon),
+        ),
+    )
+
+
+def _self_hit_rules(k: int) -> tuple[DiagnosticRule, ...]:
+    """The warning of a query of ``k`` neighbors, from its diagnostics."""
+    return (
+        DiagnosticRule(
+            "selfHitRate",
+            applies=lambda numbers: numbers["selfHitRate"] < _MIN_SELF_HIT_RATE,
+            message=lambda numbers: (
+                f"Only {numbers['selfHitRate']:.2f}% of cells found themselves "
+                f"among their {k + 1} nearest neighbours in the ANN index (below "
+                f"{_MIN_SELF_HIT_RATE}%), so the search likely missed true "
+                "neighbours of other cells as well. Rebuild the index with "
+                "graph.ann_index and a larger ann_efc or ann_m, or query it with "
+                "a larger ann_ef. Cells with identical coordinates also lower "
+                "this rate."
+            ),
+        ),
+    )
 
 
 def _row_block(
@@ -1436,6 +1504,13 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 f"Reused {method.upper()} reduction for {n_cells} cells "
                 f"with {effective_dims} dimensions"
             )
+            if method == "pca":
+                # A reused fit warns from its saved diagnostics.
+                warn_diagnostics(
+                    arguments,
+                    inspect_artifact(self.zw, planned.ref).diagnostics,
+                    _pca_rules(effective_dims),
+                )
             return planned.ref
         self._require_writable(
             {"pca": "run_pca", "lsi": "run_lsi"}.get(method, "run_custom_reduction")
@@ -1546,6 +1621,11 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                     f"{None if loadings is None else loadings.shape}; expected "
                     f"{(n_features, effective_dims)}"
                 )
+            # Only PCA declares diagnostics, which it checks before it writes.
+            saved = planned_diagnostics(
+                planned,
+                None if transform.pca is None else _pca_diagnostics(transform.pca),
+            )
             with artifact_transaction(self.zw, planned) as reduction_group:
                 if method == "pca":
                     assert transform.center is not None
@@ -1622,6 +1702,8 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                     requireFinite=True,
                     operation=arguments.operation,
                 )
+                if saved is not None:
+                    reduction_group.attrs[DIAGNOSTICS_ATTRIBUTE] = saved
         if show_elbow_plot and method == "pca":
             # A reused fit returned above, so PCA was fitted here.
             assert transform.pca is not None
@@ -1631,6 +1713,13 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             f"{action} {method.upper()} reduction for {n_cells} cells "
             f"with {effective_dims} dimensions"
         )
+        if method == "pca":
+            # A computed fit warns from its saved diagnostics, as a reused one does.
+            warn_diagnostics(
+                arguments,
+                inspect_artifact(self.zw, planned.ref).diagnostics,
+                _pca_rules(effective_dims),
+            )
         return planned.ref
 
     @validation_scoped
@@ -1660,6 +1749,14 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         variance of the fitted values (``variance_ratio``) from release 1.3.0
         on.
 
+        The fit saves its diagnostics, which
+        ``ds.artifacts.inspect(ref).diagnostics`` returns: ``solverPasses``,
+        the passes of the randomized solver, None for the exact one, and
+        ``componentShift``, the degrees that its leading components moved in
+        the last pass when it stopped at 24 passes, None otherwise. A fit
+        that stopped there gives a ``DiagnosticWarning`` each time it is
+        computed or reused.
+
         Args:
             normalized: Normalized artifact to reduce.
             dims: Requested number of principal components. (Default: 21)
@@ -1675,8 +1772,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 the randomized solver read a local copy.
             show_elbow_plot: Whether to display the explained variance of the
                 ``dims`` components, read from the stored artifact when it is
-                reused. An artifact stored before release 1.3.0 holds none, so
-                its reuse logs a warning instead.
+                reused.
             invalidate_cache: Force a new reduction artifact.
 
         Returns:
@@ -1834,6 +1930,18 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         The correction is CyteArc's implementation of Harmony2. The stored
         ``batch_correction`` artifact holds the corrected coordinates and the
         fitted state that Symphony reference mapping needs.
+
+        The correction saves its diagnostics, which
+        ``ds.artifacts.inspect(ref).diagnostics`` returns: ``rounds``, the
+        rounds of clustering and correction run; ``convergedRound``, the
+        round at which the fit converged, None when it stopped before;
+        ``objectiveChange``, the objective's change in the last round as a
+        share of its value; ``previousObjectiveChange``, that change in the
+        round before; and ``averageObjectiveChange``, the change per round of
+        the average of two consecutive round objectives, as a share of that
+        average. A change is None until two, three and five rounds have run.
+        A fit that ran two or more rounds without converging gives a
+        ``DiagnosticWarning`` each time the correction is computed or reused.
 
         Args:
             reduction: The reduction whose coordinates are corrected, such as a
@@ -2057,6 +2165,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             result = correction.result
             # Without corrected data, ensure_corrected fits Harmony.
             assert result is not None
+            saved = planned_diagnostics(
+                planned, convergence_diagnostics(result.parameters)
+            )
             from ...mapping.symphony import weighted_centroids
 
             cluster_mass, raw_centroids = weighted_centroids(
@@ -2133,6 +2244,13 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 group.attrs["fit_parameters"] = cast(
                     dict[str, Any], dict(result.parameters)
                 )
+                group.attrs[DIAGNOSTICS_ATTRIBUTE] = saved
+        # A computed and a reused correction warn alike, from its diagnostics.
+        warn_diagnostics(
+            arguments,
+            inspect_artifact(self.zw, planned.ref).diagnostics,
+            _harmony_rules(resolved_harmony_params),
+        )
         action = "Reused" if planned.reused else "Stored"
         logger.info(
             f"{action} Harmony coordinates for {n_cells} cells with {dims} dimensions"
@@ -2507,10 +2625,13 @@ class _GraphOperationsMixin(_GraphOperationsBase):
 
         Every cell is queried against the index for itself and its ``k``
         nearest other cells, on the datastore's ``nthreads`` threads; the
-        neighbors do not depend on the thread count. The share of cells that
-        the search returns among their own neighbours is recorded as
-        ``self_hit_rate``, in percent, and a rate below 99.5% warns that the
-        index or the search depth is too small for these coordinates.
+        neighbors do not depend on the thread count. The percentage of cells
+        that the search returns among their own neighbours is saved as the
+        ``selfHitRate`` diagnostic, which
+        ``ds.artifacts.inspect(ref).diagnostics`` returns. A rate below 99.5%
+        gives a ``DiagnosticWarning``, each time the query is computed or
+        reused, that the index or the search depth is too small for these
+        coordinates.
 
         Args:
             ann_index: ANN index artifact to query.
@@ -2733,7 +2854,10 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 )
             # The index is released before the results are written.
             del query, ann_idx
-            self_hit_rate = 100.0 * (n_cells - missed_self_hits) / n_cells
+            saved = planned_diagnostics(
+                planned,
+                {"selfHitRate": 100.0 * (n_cells - missed_self_hits) / n_cells},
+            )
             with artifact_transaction(self.zw, planned) as group:
                 array_profile = resolve_storage_profile(group.store)
                 zarr_format = _group_zarr_format(group)
@@ -2768,17 +2892,13 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 )
                 group.attrs["n_cells"] = n_cells
                 group.attrs["n_neighbors"] = effective_k
-                group.attrs["self_hit_rate"] = self_hit_rate
-            if self_hit_rate < _MIN_SELF_HIT_RATE:
-                warn(
-                    f"Only {self_hit_rate:.2f}% of cells found themselves among "
-                    f"their {effective_k + 1} nearest neighbours in the ANN index "
-                    f"(below {_MIN_SELF_HIT_RATE}%), so the search likely missed "
-                    "true neighbours of other cells as well. Rebuild the index with "
-                    "graph.ann_index and a larger ann_efc or ann_m, or query it "
-                    "with a larger ann_ef. Cells with identical coordinates also "
-                    "lower this rate."
-                )
+                group.attrs[DIAGNOSTICS_ATTRIBUTE] = saved
+        # A computed and a reused query warn alike, from its diagnostics.
+        warn_diagnostics(
+            arguments,
+            inspect_artifact(self.zw, planned.ref).diagnostics,
+            _self_hit_rules(effective_k),
+        )
         action = "Reused" if planned.reused else "Stored"
         logger.info(f"{action} {effective_k} neighbors for each of {n_cells} cells")
         return planned.ref

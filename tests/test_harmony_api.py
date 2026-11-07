@@ -710,6 +710,98 @@ def test_a_fit_that_does_not_settle_warns_once() -> None:
     assert single.parameters["converged"] is False
 
 
+def test_the_correction_operations_fit_gives_the_same_result_without_a_warning() -> (
+    None
+):
+    from cytearc.embeddings.harmony.fit import _fitted_harmony
+
+    rng = np.random.default_rng(1)
+    values = rng.normal(size=(5, 300))
+    metadata = pd.DataFrame({"b": rng.integers(0, 3, size=300)})
+    options = {"n_clusters": 5, "max_iter_harmony": 2, "epsilon_harmony": 0.0}
+
+    # The operation warns from the fit's saved diagnostics instead.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        quiet = _fitted_harmony(values, metadata, **options)
+    with pytest.warns(UserWarning, match="stopped before convergence after 2 rounds"):
+        warned = fit_harmony(values, metadata, **options)
+
+    np.testing.assert_array_equal(quiet.corrected, warned.corrected)
+    assert quiet.parameters == warned.parameters
+
+
+def test_convergence_diagnostics_measure_the_last_rounds_of_a_fit() -> None:
+    from cytearc.embeddings.harmony.fit import (
+        convergence_diagnostics,
+        stopped_before_convergence,
+    )
+
+    numbers = convergence_diagnostics(
+        {"objective": [100.0, 90.0, 85.0, 84.0, 83.9], "converged": False}
+    )
+
+    assert numbers == {
+        "rounds": 5,
+        "convergedRound": None,
+        "objectiveChange": pytest.approx(0.1 / 84.0),
+        "previousObjectiveChange": pytest.approx(1.0 / 85.0),
+        # (-100 - 2 * 90 + 2 * 84 + 83.9) / 8 = -3.5125 per round, of the
+        # average 83.95 of the last two objectives.
+        "averageObjectiveChange": pytest.approx(3.5125 / 83.95),
+    }
+    assert stopped_before_convergence(numbers)
+    settled = convergence_diagnostics(
+        {"objective": [100.0, 100.005], "converged": True}
+    )
+    assert settled == {
+        "rounds": 2,
+        "convergedRound": 2,
+        "objectiveChange": pytest.approx(5e-5),
+        "previousObjectiveChange": None,
+        "averageObjectiveChange": None,
+    }
+    assert not stopped_before_convergence(settled)
+    # One round never assesses convergence.
+    single = convergence_diagnostics({"objective": [7.0], "converged": False})
+    assert single == {
+        "rounds": 1,
+        "convergedRound": None,
+        "objectiveChange": None,
+        "previousObjectiveChange": None,
+        "averageObjectiveChange": None,
+    }
+    assert not stopped_before_convergence(single)
+
+
+def test_a_change_from_an_objective_of_zero_has_no_finite_share() -> None:
+    from cytearc.embeddings.harmony.fit import (
+        convergence_diagnostics,
+        unconverged_message,
+    )
+    from cytearc.graph.arguments import HarmonyArguments
+    from cytearc.storage.diagnostics import checked_diagnostics
+
+    numbers = convergence_diagnostics(
+        {"objective": [0.0, 0.0, 5.0], "converged": False}
+    )
+
+    # No change is 0 whatever the value; a change from zero saves None, which
+    # the artifact accepts where an infinite share would be refused.
+    assert (numbers["previousObjectiveChange"], numbers["objectiveChange"]) == (
+        0.0,
+        None,
+    )
+    checked_diagnostics(
+        numbers, HarmonyArguments.diagnostics, operation=HarmonyArguments.operation
+    )
+    assert unconverged_message(numbers, 1e-4) == (
+        "Harmony stopped before convergence after 3 rounds: the objective changed "
+        "by 0 and inf of its value in the last two rounds, and convergence needs "
+        "both to be at most epsilon_harmony=0.0001"
+    )
+
+
 # Stopping rule of the rounds
 
 

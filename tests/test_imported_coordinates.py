@@ -1212,9 +1212,11 @@ def test_imported_embedding_validates_role_and_source_key(
     ("attribute", "path", "value", "message"),
     [
         (
+            # t-SNE saves no diagnostics, which the completeness check would
+            # read before the operation.
             "provenance",
             ("operation",),
-            "run_umap",
+            "run_tsne",
             "operation must be 'import_dimreduc'",
         ),
         (

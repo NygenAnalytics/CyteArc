@@ -93,27 +93,13 @@ result does not depend on the memory budget, and the block size changes it only 
   `dims` eigenvectors as the loadings. The covariance takes at most 128 MiB at this width, and the
   eigensolver's cost grows with the cube of the feature count: on two threads it took 0.35 s for
   2,000 features, 5.6 s for 4,096, and 38 s for 8,192.
-- **Above 4,096 features**, a randomized block Krylov solver fits the components. It applies
-  the covariance to a block of `dims + max(10, dims)` Gaussian vectors, seeded by a fixed seed,
-  and keeps every product in its basis, following the randomized range finder of
-  [Halko, Martinsson and Tropp](https://doi.org/10.1137/090771806) with the block Krylov space of
-  [Musco and Musco](https://doi.org/10.48550/arXiv.1504.05477), which converges in far fewer
-  passes than subspace iteration when the trailing variances are close. The Rayleigh-Ritz
-  projection of the covariance onto the basis gives the components and their variances. Each
-  pass reads the selected cells once; the solver stops when the leading `dims` components move
-  less than 0.1 degrees between two passes, and warns if they still move after 24 passes. The
-  artifact records `solver="randomized"`.
+- **Above 4,096 features**, a randomized block Krylov solver fits the components. It applies the covariance to a block of `dims + max(10, dims)` Gaussian vectors, seeded by a fixed seed, and keeps every product in its basis, following the randomized range finder of [Halko, Martinsson and Tropp](https://doi.org/10.1137/090771806) with the block Krylov space of [Musco and Musco](https://doi.org/10.48550/arXiv.1504.05477), which converges in far fewer passes than subspace iteration when the trailing variances are close. The Rayleigh-Ritz projection of the covariance onto the basis gives the components and their variances. Each pass reads the selected cells once; the solver stops when the leading `dims` components move less than 0.1 degrees between two passes, and warns if they still move after 24 passes, each time the fit is computed or reused. The artifact records `solver="randomized"`, and its diagnostics record the passes and how far the components moved in the last one.
 - **Data passes.** The Gram solver reads the normalized values once and the randomized solver
   once per pass. Writing the coordinates reads them once more. The scaling statistics come from
   the moments that `features.normalize` stores beside the values. On a remote store, the default
   `local_cache="auto"` stages the normalized values locally, so the passes read a local copy.
 
-A PCA artifact stores the variance of each of its `dims` components and that variance's share
-of the total variance of the fitted values, as `variance` and `variance_ratio`, and
-`show_elbow_plot=True` plots the shares for a new or a reused fit. Artifacts stored before
-release 1.3.0 have neither array; they are still reused, and their elbow plot is replaced by a
-warning. Signs follow scikit-learn's `svd_flip` convention: the largest loading of each component
-is positive.
+A PCA artifact stores the variance of each of its `dims` components and that variance's share of the total variance of the fitted values, as `variance` and `variance_ratio`, and `show_elbow_plot=True` plots the shares for a new or a reused fit. Artifacts stored before release 1.3.0 have neither array, nor the diagnostics that reuse requires, so their next call computes them anew. Signs follow scikit-learn's `svd_flip` convention: the largest loading of each component is positive.
 
 On the pancreas example (3,696 cells, standardized log-normalized values), the randomized solver
 took 11 to 14 passes for 5,000 or 17,750 features and 21 or 50 components. It stayed within 0.035

@@ -435,7 +435,7 @@ def test_harmony_reuses_a_matching_correction(graph_store, monkeypatch) -> None:
         harmony_params={"n_clusters": 3},
     )
     monkeypatch.setattr(
-        "cytearc.neighbors.stages.fit_harmony",
+        "cytearc.neighbors.stages._fitted_harmony",
         Mock(side_effect=AssertionError("a matching correction must be reused")),
     )
 

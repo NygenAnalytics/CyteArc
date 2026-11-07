@@ -15,6 +15,7 @@ from cytearc.graph.feature_projection import (
     resolve_native_graph_inputs,
 )
 from cytearc.embeddings.imported_storage import validate_imported_coordinates_artifact
+from cytearc.graph.arguments import NeighborQueryArguments
 from cytearc.storage.artifacts import (
     ArtifactRef,
     ArtifactStatus,
@@ -23,6 +24,7 @@ from cytearc.storage.artifacts import (
     fingerprint_strings,
     make_provenance,
     new_artifact_id,
+    require_complete_artifact,
 )
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.selections import validate_stored_selection_integrity
@@ -502,10 +504,14 @@ def _neighbors_payload(
     distances: np.ndarray | None = None,
     attrs: dict[str, object] | None = None,
 ) -> ArtifactRef:
-    """Store a neighbors artifact over four cells with two neighbors each."""
+    """Store a neighbors query over four cells with two neighbors each.
+
+    The query saves no diagnostics, as releases before queries saved them.
+    """
     ref = _complete_artifact(
         store,
         "neighbors",
+        operation=NeighborQueryArguments.operation,
         arrays={
             "indices": (
                 np.array([[1, 2], [0, 2], [0, 1], [0, 1]], dtype=np.uint32)
@@ -520,7 +526,7 @@ def _neighbors_payload(
         },
     )
     group = store.zw[artifact_path(ref)]
-    group.attrs.update({"n_cells": 4, "n_neighbors": 2, "self_hit_rate": 100.0})
+    group.attrs.update({"n_cells": 4, "n_neighbors": 2})
     group.attrs.update(attrs or {})
     for name, value in (attrs or {}).items():
         if value is None:
@@ -547,27 +553,25 @@ def test_neighbor_payload_validation_returns_the_validated_dimensions() -> None:
     from cytearc.graph.distances import validate_neighbors_payload
 
     store = _bare_store()
-    for rate in (0, 37.5, 100):
-        payload = validate_neighbors_payload(
-            store.zw, _neighbors_payload(store, attrs={"self_hit_rate": rate})
-        )
-        assert (payload.n_cells, payload.n_neighbors) == (4, 2)
-        np.testing.assert_array_equal(payload.indices[:, 0], [1, 0, 0, 0])
+    payload = validate_neighbors_payload(store.zw, _neighbors_payload(store))
+
+    assert (payload.n_cells, payload.n_neighbors) == (4, 2)
+    np.testing.assert_array_equal(payload.indices[:, 0], [1, 0, 0, 0])
 
 
-@pytest.mark.parametrize("rate", [None, True, "100", float("nan"), -1.0, 100.5])
-def test_neighbor_payload_validation_rejects_an_invalid_self_hit_rate(rate) -> None:
+def test_neighbor_payload_validation_reads_no_diagnostics() -> None:
     from cytearc.graph.distances import validate_neighbors_payload
 
     store = _bare_store()
-    neighbors = _neighbors_payload(store, attrs={"self_hit_rate": rate})
+    # Neighbors saved before queries saved their self-hit rate as a
+    # diagnostic still validate, so the mapping references built on them load.
+    earlier = _neighbors_payload(store, attrs={"self_hit_rate": 100.0})
 
-    with pytest.raises(
-        ArtifactResolutionError, match="invalid self_hit_rate"
-    ) as caught:
-        validate_neighbors_payload(store.zw, neighbors)
-    assert caught.value.code == "corrupt_payload"
-    assert caught.value.context["artifact_id"] == neighbors.artifact_id
+    assert validate_neighbors_payload(store.zw, earlier).n_cells == 4
+    # A call that reads the query's diagnostics names the call that computes
+    # it anew.
+    with pytest.raises(ValueError, match="call ds.graph.neighbors again"):
+        require_complete_artifact(store.zw, earlier)
 
 
 @pytest.mark.parametrize(

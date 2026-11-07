@@ -291,13 +291,13 @@ def _run_pca(store, refs, monkeypatch):
 def _run_pca_loadings(store, refs, monkeypatch):
     import cytearc.embeddings.reduction as reduction
 
-    fit = reduction.fit_pca
+    fit = reduction._fitted_pca
 
     def poisoned_fit(*args, **kwargs):
         loadings, model = fit(*args, **kwargs)
         return _poison(loadings, 2), model
 
-    monkeypatch.setattr(reduction, "fit_pca", poisoned_fit)
+    monkeypatch.setattr(reduction, "_fitted_pca", poisoned_fit)
     return store.reduction.pca(refs["normalized"], dims=3, invalidate_cache=True)
 
 
@@ -305,7 +305,7 @@ def _run_harmony(array: str):
     def run(store, refs, monkeypatch):
         import cytearc.neighbors.stages as stages
 
-        fit = stages.fit_harmony
+        fit = stages._fitted_harmony
 
         def poisoned_fit(*args, **kwargs):
             result = fit(*args, **kwargs)
@@ -315,7 +315,7 @@ def _run_harmony(array: str):
                 )
             return dataclasses.replace(result, sigma=_poison(result.sigma, 1))
 
-        monkeypatch.setattr(stages, "fit_harmony", poisoned_fit)
+        monkeypatch.setattr(stages, "_fitted_harmony", poisoned_fit)
         return store.reduction.harmony(
             refs["pca"],
             ["batch"],
@@ -368,13 +368,13 @@ def _build_connectivity_map(store, refs, monkeypatch):
 def _run_umap(store, refs, monkeypatch):
     import cytearc.embeddings.umap as umap
 
-    fit = umap.fit_transform
+    fit = umap._fit_layout
 
     def poisoned_fit(*args, **kwargs):
-        coordinates, a, b = fit(*args, **kwargs)
-        return _poison(coordinates, 6), a, b
+        coordinates, a, b, density_span = fit(*args, **kwargs)
+        return _poison(coordinates, 6), a, b, density_span
 
-    monkeypatch.setattr(umap, "fit_transform", poisoned_fit)
+    monkeypatch.setattr(umap, "_fit_layout", poisoned_fit)
     return store.embeddings.umap(
         refs["graph"], refs["initialization"], n_epochs=5, invalidate_cache=True
     )

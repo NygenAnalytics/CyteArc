@@ -18,13 +18,18 @@ import numpy as np
 import pytest
 from sklearn.neighbors import NearestNeighbors
 
-from cytearc import DataStore
+from cytearc import DataStore, DiagnosticWarning
 from cytearc.datastore.namespaces import EmbeddingsAccessor, GraphAccessor
 from cytearc.embeddings.imported import write_imported_coordinates
 from cytearc.neighbors.index import instantiate_knn_index, query_search_depth
 from cytearc.neighbors.stages import AnnIndexStage
 from cytearc.storage.artifact_writer import artifact_transaction, plan_artifact
-from cytearc.storage.artifacts import ArtifactRef, artifact_group, fingerprint_array
+from cytearc.storage.artifacts import (
+    ArtifactRef,
+    artifact_group,
+    artifact_path,
+    fingerprint_array,
+)
 from tests.storage_helpers import write_count_store
 from tests.test_imported_coordinates import (
     _SOURCE_DIGEST,
@@ -203,11 +208,12 @@ def test_neighbors_search_and_record_the_resolved_depth(store, monkeypatch) -> N
 def _previous_release_neighbors(
     datastore: DataStore, ann: ArtifactRef, k: int
 ) -> tuple[ArtifactRef, np.ndarray]:
-    """Save neighbors of ``ann`` as releases did before queries chose a depth.
+    """Save neighbors of ``ann`` with the identity of releases before queries chose a depth.
 
     Those releases searched the index's own ``ann_ef`` and recorded only ``k``
-    and the metric. The indices are ones that no search returns, so a call
-    that returns this artifact reused it.
+    and the metric. The query saves the diagnostics that queries save now,
+    which reuse requires. The indices are ones that no search returns, so a
+    call that returns this artifact reused it.
     """
     record = datastore.artifacts.inspect(ann)
     assert record.inputs is not None
@@ -235,7 +241,7 @@ def _previous_release_neighbors(
         group.create_array("distances", data=np.ones((N_CELLS, k), dtype=np.float32))
         group.attrs["n_cells"] = N_CELLS
         group.attrs["n_neighbors"] = k
-        group.attrs["self_hit_rate"] = 100.0
+        group.attrs["diagnostics"] = {"selfHitRate": 100.0}
     return planned.ref, indices
 
 
@@ -425,15 +431,15 @@ def test_ann_index_and_initialization_accept_seed_zero(store) -> None:
             call()
 
 
-def _self_hit_warnings(caught: list[warnings.WarningMessage]) -> list[str]:
+def _self_hit_warnings(caught: list[warnings.WarningMessage]) -> list[Warning]:
     return [
-        str(item.message)
+        item.message
         for item in caught
         if "found themselves among their" in str(item.message)
     ]
 
 
-def test_a_low_self_hit_rate_warns(store) -> None:
+def test_a_low_self_hit_rate_warns_when_computed_and_when_reused(store) -> None:
     datastore, _pca = store
     # The two genes with the most zeros leave most cells without counts, so
     # their normalized values coincide, and a cell among more than k + 1
@@ -449,36 +455,62 @@ def test_a_low_self_hit_rate_warns(store) -> None:
     assert duplicated > N_CELLS // 2
     ann = datastore.graph.ann_index(normalized)
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        neighbors = datastore.graph.neighbors(ann, k=3)
+    refs, recorded = [], []
+    for _ in range(2):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            refs.append(datastore.graph.neighbors(ann, k=3))
+        recorded.append(_self_hit_warnings(caught))
 
-    path = datastore.artifacts.inspect(neighbors).path
-    recorded = float(datastore.zw[path].attrs["self_hit_rate"])
-    assert recorded < 99.5
-    (message,) = _self_hit_warnings(caught)
-    assert message.startswith(
-        f"Only {recorded:.2f}% of cells found themselves among their 4 nearest "
-        "neighbours in the ANN index (below 99.5%)"
-    )
-    # A reused query does not warn again.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        assert datastore.graph.neighbors(ann, k=3) == neighbors
-    assert _self_hit_warnings(caught) == []
+    computed, reused = refs
+    assert reused == computed
+    rate = datastore.artifacts.inspect(computed).diagnostics["selfHitRate"]
+    assert rate < 99.5
+    # The second call reuses the query and warns again from its saved rate.
+    for messages in recorded:
+        (message,) = messages
+        assert isinstance(message, DiagnosticWarning)
+        assert (message.operation, message.diagnostic, message.value) == (
+            "query_neighbors",
+            "selfHitRate",
+            rate,
+        )
+        assert str(message).startswith(
+            f"Only {rate:.2f}% of cells found themselves among their 4 nearest "
+            "neighbours in the ANN index (below 99.5%)"
+        )
 
 
 def test_a_complete_self_hit_rate_does_not_warn(store) -> None:
     datastore, pca = store
     ann = datastore.graph.ann_index(pca)
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        neighbors = datastore.graph.neighbors(ann, k=5)
+    for _ in range(2):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            neighbors = datastore.graph.neighbors(ann, k=5)
+        assert _self_hit_warnings(caught) == []
 
-    path = datastore.artifacts.inspect(neighbors).path
-    assert datastore.zw[path].attrs["self_hit_rate"] == 100.0
-    assert _self_hit_warnings(caught) == []
+    assert datastore.artifacts.inspect(neighbors).diagnostics == {"selfHitRate": 100.0}
+    # The diagnostic replaces the attribute that held the rate.
+    assert "self_hit_rate" not in datastore.artifacts.load(neighbors).attrs
+
+
+def test_neighbors_saved_without_diagnostics_are_computed_anew(store) -> None:
+    datastore, pca = store
+    ann = datastore.graph.ann_index(pca)
+    saved = datastore.graph.neighbors(ann, k=5)
+    # As neighbors saved before queries saved their diagnostics.
+    del datastore.zw[artifact_path(saved)].attrs["diagnostics"]
+
+    recomputed = datastore.graph.neighbors(ann, k=5)
+
+    assert recomputed != saved
+    assert datastore.artifacts.inspect(recomputed).diagnostics == {"selfHitRate": 100.0}
+    np.testing.assert_array_equal(
+        artifact_group(datastore.zw, recomputed)["indices"][:],
+        artifact_group(datastore.zw, saved)["indices"][:],
+    )
 
 
 def _clustered(n_cells: int, dims: int, clusters: int, seed: int) -> np.ndarray:

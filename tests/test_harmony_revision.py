@@ -6,6 +6,7 @@ import zarr
 from zarr.storage import MemoryStore
 
 from cytearc.embeddings.harmony import validate_harmony_parameters
+from cytearc.graph.arguments import HarmonyArguments
 from cytearc.storage.artifact_writer import artifact_transaction, plan_artifact
 from cytearc.storage.artifacts import (
     ArtifactRef,
@@ -30,6 +31,17 @@ _INPUTS = {
 }
 
 
+# The diagnostics that a correction of this release saves, here of one round,
+# which never assesses convergence.
+_DIAGNOSTICS = {
+    "rounds": 1,
+    "convergedRound": None,
+    "objectiveChange": None,
+    "previousObjectiveChange": None,
+    "averageObjectiveChange": None,
+}
+
+
 def _parameters(options: dict) -> dict:
     return {"batch_columns": ["batch"], "harmony_parameters": options}
 
@@ -40,7 +52,7 @@ def _plan(root: zarr.Group, options: dict):
         scope="assay",
         assay="RNA",
         kind="batch_correction",
-        operation="run_harmony",
+        operation=HarmonyArguments.operation,
         parameters=_parameters(options),
         inputs=_INPUTS,
         execution_options={},
@@ -114,7 +126,7 @@ def test_a_correction_of_the_earlier_harmony_is_reported_stale():
     assert "Revision: `1, current 2: Harmony2 replaced the earlier Harmony" in markdown
 
 
-def test_corrections_recorded_by_harmony2_keep_their_identity_and_are_reused():
+def test_corrections_recorded_by_harmony2_keep_their_identity():
     root = zarr.open_group(store=MemoryStore(), mode="w")
     # A 1.2 correction with default options records no revision.
     released = _write_record(root, {}, "d")
@@ -122,12 +134,19 @@ def test_corrections_recorded_by_harmony2_keep_their_identity_and_are_reused():
 
     planned = _plan(root, {})
     assert "revision" not in planned.provenance
-    assert planned.reused and planned.ref == released
+    assert planned.provenance == inspect_artifact(root, released).provenance
+    # It saved no diagnostics, which corrections save now, so it is computed
+    # anew; with them, the same identity is reused.
+    assert not planned.reused
+    root[artifact_path(released)].attrs["diagnostics"] = _DIAGNOSTICS
+    reused = _plan(root, {})
+    assert reused.reused and reused.ref == released
 
     fresh = _plan(root, {"n_clusters": 4})
     assert "revision" not in fresh.provenance and not fresh.reused
     with artifact_transaction(root, fresh) as group:
         group.create_array("data", data=np.zeros((2, 2), dtype=np.float32))
+        group.attrs["diagnostics"] = _DIAGNOSTICS
     status = inspect_artifact(root, fresh.ref)
     assert status.revision == 1 and status.is_current
     assert _plan(root, {"n_clusters": 4}).ref == fresh.ref

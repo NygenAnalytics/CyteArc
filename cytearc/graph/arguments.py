@@ -208,6 +208,11 @@ class FeatureScalingArguments(OperationArguments):
 class PcaArguments(OperationArguments):
     operation: ClassVar[str] = "run_pca"
     artifact_kind: ClassVar[str] = "reduction"
+    # The passes of the randomized solver, None for the exact solver, and the
+    # degrees that its components moved in the last pass when it stopped at
+    # its pass limit, None otherwise.
+    diagnostics: ClassVar[tuple[str, ...]] = ("solverPasses", "componentShift")
+    call: ClassVar[str | None] = "ds.reduction.pca"
 
     normalized: ArtifactRef = artifact_input()
     feature_scaling: ArtifactRef = artifact_input()
@@ -256,6 +261,17 @@ class CustomReductionArguments(OperationArguments):
 class HarmonyArguments(OperationArguments):
     operation: ClassVar[str] = "run_harmony"
     artifact_kind: ClassVar[str] = "batch_correction"
+    # The rounds run, the round at which the fit converged, and the changes of
+    # the objective that its warning reports, as
+    # cytearc.embeddings.harmony.fit.convergence_diagnostics gives them.
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        "rounds",
+        "convergedRound",
+        "objectiveChange",
+        "previousObjectiveChange",
+        "averageObjectiveChange",
+    )
+    call: ClassVar[str | None] = "ds.reduction.harmony"
 
     reduction: ArtifactRef = artifact_input()
     batch_snapshot: ArtifactRef = artifact_input()
@@ -298,6 +314,10 @@ class AnnIndexArguments(OperationArguments):
 class NeighborQueryArguments(OperationArguments):
     operation: ClassVar[str] = "query_neighbors"
     artifact_kind: ClassVar[str] = "neighbors"
+    # The percentage of cells that the search returned among their own
+    # nearest neighbours.
+    diagnostics: ClassVar[tuple[str, ...]] = ("selfHitRate",)
+    call: ClassVar[str | None] = "ds.graph.neighbors"
 
     ann_index: ArtifactRef = artifact_input()
     coordinates: ArtifactRef = artifact_input()

@@ -39,6 +39,9 @@ GROUPING_DIAGNOSTICS: tuple[str, ...] = (
 class UmapArguments(OperationArguments):
     operation: ClassVar[str] = "run_umap"
     artifact_kind: ClassVar[str] = "embedding"
+    # The span of densMAP's log local radii, None without densMAP.
+    diagnostics: ClassVar[tuple[str, ...]] = ("densityRadiusSpan",)
+    call: ClassVar[str | None] = "ds.embeddings.umap"
 
     graph: ArtifactRef = artifact_input()
     initialization: Any = artifact_input()

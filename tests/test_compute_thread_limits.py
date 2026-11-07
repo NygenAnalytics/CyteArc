@@ -803,7 +803,7 @@ _FAMILIES = {
         _kmeans_stage_call, ("sklearn.cluster:MiniBatchKMeans", "fit"), 2
     ),
     "Harmony stage": _Family(
-        _harmony_stage_call, ("cytearc.neighbors.stages", "fit_harmony"), 2
+        _harmony_stage_call, ("cytearc.neighbors.stages", "_fitted_harmony"), 2
     ),
     "WNN integration": _Family(
         _integration_call, ("cytearc.neighbors.integration", "_integrate_blocks"), 2

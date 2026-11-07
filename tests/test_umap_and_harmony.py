@@ -90,6 +90,62 @@ def test_calc_dens_map_params_treats_float32_rounding_as_equal_radii():
     assert any("local radii are equal" in message for message in messages)
 
 
+def _densmap_layout(public: str) -> np.ndarray:
+    """Lay out eight equidistant cells with densMAP through a public function."""
+    indices, distances = _equidistant_knn(8)
+    densmap_kwds = {
+        "lambda": 2.0,
+        "frac": 0.3,
+        "var_shift": 0.1,
+        "n_neighbors": 7,
+        "knn_dists": densmap_distance_graph(indices, distances),
+    }
+    initial = np.random.default_rng(0).normal(size=(8, 2)).astype(np.float32)
+    options = {"parallel": False, "nthreads": 1, "verbose": False}
+    if public == "fit_transform":
+        return fit_transform(
+            _complete_graph(8),
+            initial,
+            spread=1.0,
+            min_dist=0.5,
+            n_epochs=5,
+            random_seed=42,
+            repulsion_strength=1.0,
+            initial_alpha=1.0,
+            negative_sample_rate=5,
+            densmap_kwds=densmap_kwds,
+            **options,
+        )[0]
+    return simplicial_set_embedding(
+        fuzzy_simplicial_set(_complete_graph(8), 1.0),
+        initial,
+        5,
+        1.0,
+        1.0,
+        42,
+        1.0,
+        1.0,
+        5,
+        densmap_kwds,
+        **options,
+    )
+
+
+@pytest.mark.parametrize("public", ["fit_transform", "simplicial_set_embedding"])
+def test_public_layouts_warn_once_of_equal_densmap_radii(public):
+    # The UMAP operation lays out without this warning and gives it from the
+    # saved span of the radii; direct callers keep it.
+    messages: list[str] = []
+    sink = logger.add(lambda message: messages.append(str(message)), level="WARNING")
+    try:
+        embedding = _densmap_layout(public)
+    finally:
+        logger.remove(sink)
+
+    assert np.all(np.isfinite(embedding))
+    assert sum("local radii are equal" in message for message in messages) == 1
+
+
 def test_calc_dens_map_params_rejects_undefined_radii():
     # Cell 3 has no graph edge, so its local radius is 0 / 0.
     graph = coo_matrix(

@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import warnings
 
 import numpy as np
 import pytest
@@ -460,12 +461,43 @@ def test_randomized_pca_warns_when_it_reaches_the_last_pass(
     with pytest.warns(
         UserWarning,
         match=r"stopped after 3 passes while its leading 10 components still moved",
-    ):
+    ) as caught:
         loadings, model = _fit(wide_values, block_size=64, dims=10)
 
     assert model.n_passes_ == 3
     assert loadings.shape == (_WIDE_FEATURES, 10)
     np.testing.assert_allclose(loadings.T @ loadings, np.eye(10), atol=1e-12)
+    # The warning reports the shift that the model records, above the 0.1
+    # degrees at which the solver stops.
+    assert model.component_shift_ is not None and model.component_shift_ > 0.1
+    (warning,) = caught
+    assert f"still moved {model.component_shift_:.2g} degrees" in str(warning.message)
+
+    # The reduction operation's fit warns from its saved diagnostics instead.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _quiet_loadings, quiet = reduction_module._fitted_pca(
+            ChunkedArray.from_numpy(wide_values, block_size=64),
+            dims=10,
+            use_for_pca=np.ones(len(wide_values), dtype=bool),
+            scale=None,
+            random_state=4466,
+            nthreads=1,
+        )
+    assert (quiet.n_passes_, quiet.component_shift_) == (3, model.component_shift_)
+
+
+def test_a_fit_that_settles_records_no_component_shift(monkeypatch) -> None:
+    monkeypatch.setattr(reduction_module, "_GRAM_PCA_MAX_FEATURES", 4)
+    values = _spectrum_values(60, 30, 5, n_signal=6)
+
+    exact = _fit(values[:, :4], block_size=16, dims=2)[1]
+    randomized = _fit(values, block_size=16, dims=8)[1]
+
+    assert (exact.solver_, exact.component_shift_) == ("gram", None)
+    # Two blocks of eighteen vectors span the thirty features, an exact fit.
+    assert (randomized.solver_, randomized.n_passes_) == ("randomized", 2)
+    assert randomized.component_shift_ is None
 
 
 @pytest.mark.slow
