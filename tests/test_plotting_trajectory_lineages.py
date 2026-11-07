@@ -1582,6 +1582,155 @@ def test_lineage_curves_validate_drawing_arguments(
         ).close()
 
 
+# Lineage curves in a layout, as a table without a figure.
+
+
+def test_curves_in_layout_are_the_curves_that_the_plot_draws(
+    closing, datastore, lineage_curves, loaded_curves, loaded_fate, layout
+):
+    before = plt.get_fignums()
+    table = datastore.trajectory.curves_in_layout(lineage_curves, layout.ref)
+    chosen = datastore.trajectory.curves_in_layout(
+        lineage_curves, layout.ref, lineages=[4, 3], df=4.0
+    )
+
+    # No figure is drawn.
+    assert plt.get_fignums() == before
+    assert list(table.columns) == ["lineage", "point", "x", "y"]
+    # The lineages keep their sink labels, as the curves store them.
+    assert table["lineage"].unique().tolist() == [int(name) for name in LINEAGES]
+    assert chosen["lineage"].unique().tolist() == [4, 3]
+    for points, df in ((table, 10.0), (chosen, 4.0)):
+        for lineage in points["lineage"].unique().tolist():
+            rows = points[points["lineage"] == lineage]
+            assert rows["point"].tolist() == list(range(N_POINTS))
+            np.testing.assert_allclose(
+                rows[["x", "y"]].to_numpy(),
+                _expected_curve(
+                    loaded_curves, loaded_fate, layout.coordinates, lineage, df
+                ),
+            )
+    # The plot draws these points and tabulates them under the text of the
+    # sink labels.
+    for points, arguments in (
+        (table, {}),
+        (chosen, {"lineages": [4, 3], "df": 4.0}),
+    ):
+        drawn = closing(
+            splt.lineage_curves(
+                datastore,
+                curves=lineage_curves,
+                layout=layout.ref,
+                show=False,
+                **arguments,
+            )
+        )
+        plotted = drawn.tables["curves"]
+        assert plotted["lineage"].tolist() == [
+            str(label) for label in points["lineage"]
+        ]
+        np.testing.assert_array_equal(
+            plotted[["point", "x", "y"]].to_numpy(),
+            points[["point", "x", "y"]].to_numpy(),
+        )
+        lines = drawn.axes["curves"].get_lines()[::2]
+        for line, lineage in zip(
+            lines, points["lineage"].unique().tolist(), strict=True
+        ):
+            np.testing.assert_array_equal(
+                line.get_xydata(),
+                points[points["lineage"] == lineage][["x", "y"]].to_numpy(),
+            )
+
+
+def test_curves_in_layout_follow_a_layout_that_is_a_straight_line_of_progress(
+    other_selections, lineage_curves, loaded_curves, layout
+):
+    """A layout that places each cell on a line by its progress draws that line.
+
+    The curves are smoothed with a spline penalized by second differences,
+    which leaves a straight line unpenalized, and the fate-weighted bin
+    means of points on a line lie on it, so the curve drawn is the line,
+    at any degrees of freedom.
+    """
+    store = other_selections.store
+    column = loaded_curves.lineages.index(3)
+    valid = np.asarray(loaded_curves.valid, dtype=bool)
+    progress = np.where(valid, np.asarray(loaded_curves.progress)[:, column], 0.0)
+    line = write_selection_embedding(
+        store,
+        layout.selection,
+        np.column_stack([3.0 + 2.0 * progress, -1.0 + 5.0 * progress]),
+    )
+    along = np.linspace(0.0, 1.0, N_POINTS)
+    expected = np.column_stack([3.0 + 2.0 * along, -1.0 + 5.0 * along])
+
+    for df in (None, 4.0, 20.0):
+        drawn = store.trajectory.curves_in_layout(
+            lineage_curves, line, lineages=[3], df=df
+        )
+        # The layout is stored as float32, a part in ten million.
+        np.testing.assert_allclose(drawn[["x", "y"]].to_numpy(), expected, atol=1e-5)
+
+
+def test_curves_in_layout_take_any_selection_of_the_curves_cells(
+    other_selections, lineage_curves, layout
+):
+    store = other_selections.store
+    own = store.trajectory.curves_in_layout(lineage_curves, layout.ref)
+
+    pd.testing.assert_frame_equal(
+        store.trajectory.curves_in_layout(lineage_curves, other_selections.same_layout),
+        own,
+    )
+    with pytest.raises(ValueError) as raised:
+        store.trajectory.curves_in_layout(
+            lineage_curves, other_selections.swapped_layout
+        )
+    assert raised.value.args == (
+        "The layout holds other cells than the trajectory; draw an embedding of "
+        "the trajectory's cells, such as a UMAP of its graph",
+    )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "error", "message"),
+    [
+        ({"curves": "latest"}, TypeError, "curves must be an ArtifactRef"),
+        ({"layout": "umap"}, TypeError, "layout must be an ArtifactRef"),
+        ({"df": "4"}, TypeError, "df must be a real number"),
+        ({"df": True}, TypeError, "df must be a real number"),
+        ({"df": 2.0}, ValueError, "df must be greater than 2 and less than 32"),
+        ({"df": 32}, ValueError, "df must be greater than 2 and less than 32"),
+        ({"df": np.nan}, ValueError, "df must be greater than 2 and less than 32"),
+        ({"lineages": [7]}, ValueError, "Lineage 7 is not in the result"),
+        ({"lineages": [3, 3]}, ValueError, "lineages must not repeat a lineage"),
+        ({"lineages": []}, ValueError, "lineages must name at least one lineage"),
+        ({"lineages": "2"}, TypeError, "lineages must be a list of lineage labels"),
+    ],
+)
+def test_curves_in_layout_check_their_arguments(
+    datastore, lineage_curves, umap, arguments, error, message
+):
+    call = {"curves": lineage_curves, "layout": umap, **arguments}
+    with pytest.raises(error, match=message):
+        datastore.trajectory.curves_in_layout(
+            call.pop("curves"), call.pop("layout"), **call
+        )
+
+
+def test_curves_in_layout_refuse_refs_of_other_kinds(
+    datastore, lineage_curves, lineage_tree, umap
+):
+    with pytest.raises(ValueError, match="ref must be a lineage_curves artifact"):
+        datastore.trajectory.curves_in_layout(lineage_tree, umap)
+    with pytest.raises(ValueError, match="layout must identify an embedding artifact"):
+        datastore.trajectory.curves_in_layout(lineage_curves, lineage_curves)
+    missing = _other_ref(umap)
+    with pytest.raises(ValueError, match="Embedding artifact is unavailable"):
+        datastore.trajectory.curves_in_layout(lineage_curves, missing)
+
+
 # Lineage tree.
 
 

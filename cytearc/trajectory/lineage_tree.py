@@ -14,19 +14,27 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import pandas as pd
+
+from ..utils.arrays import sort_categories
+from .results import ClusterTree
 
 __all__ = [
-    "ClusterTree",
+    "SpanningTree",
+    "build_cluster_tree",
+    "cluster_codes",
     "cluster_distances",
     "cluster_moments",
+    "labelled_tree",
     "spanning_tree",
+    "tree_ends",
     "tree_lineages",
 ]
 
 
 @dataclass(frozen=True, slots=True)
-class ClusterTree:
-    """A spanning tree over clusters and the lineages it proposes.
+class SpanningTree:
+    """A spanning tree over cluster indices and the lineages it proposes.
 
     Attributes:
         edges: Cluster index pairs, smaller index first, sorted.
@@ -181,7 +189,7 @@ def spanning_tree(
     root: int | None = None,
     ends: Sequence[int] = (),
     labels: Sequence[Any] | None = None,
-) -> ClusterTree:
+) -> SpanningTree:
     """Join clusters by a minimum spanning tree and trace lineages from a root.
 
     With ``ends``, the tree spans the other clusters first and each end
@@ -228,7 +236,7 @@ def spanning_tree(
             "clusters, into neighbouring clusters"
         )
     leaves, lineages = tree_lineages(n_clusters, edge_array, root)
-    return ClusterTree(
+    return SpanningTree(
         edges=edge_array,
         lengths=np.asarray(lengths, dtype=np.float64),
         leaves=leaves,
@@ -271,3 +279,183 @@ def tree_lineages(
             path.append(parent[path[-1]])
         paths.append(tuple(reversed(path)))
     return leaves, tuple(paths)
+
+
+def cluster_codes(labels: Any) -> tuple[list[Any], np.ndarray]:
+    """Return the clusters of the cells' labels in natural order, and each cell's cluster index.
+
+    The clusters follow the order in which CyteArc's plots and tables show
+    labels, so ``"c2"`` comes before ``"c10"``.
+
+    Raises:
+        ValueError: If ``labels`` does not hold one label per cell.
+    """
+    raw = np.asarray(labels)
+    if raw.ndim != 1:
+        raise ValueError("labels must hold one label per cell")
+    # Factorize the cells in compiled code; only the distinct labels are
+    # sorted and remapped in Python.
+    first_codes, uniques = pd.factorize(raw, use_na_sentinel=False)
+    native = [
+        value.item() if isinstance(value, np.generic) else value
+        for value in np.asarray(uniques, dtype=object)
+    ]
+    clusters = sort_categories(native)
+    index = {cluster: code for code, cluster in enumerate(clusters)}
+    remap = np.asarray([index[value] for value in native], dtype=np.int64)
+    return clusters, remap[np.asarray(first_codes, dtype=np.int64)]
+
+
+def tree_ends(
+    clusters: Sequence[Any], root: Any, ends: Sequence[Any]
+) -> tuple[int | None, list[int], tuple[Any, ...]]:
+    """Return the root's cluster index, and the ends' indices and labels in cluster order.
+
+    The tree does not depend on the order of the ends, so they are put in
+    cluster order and any order of them builds one tree.
+
+    Raises:
+        ValueError: If the root or an end is not a cluster label.
+    """
+
+    def position(label: Any, name: str) -> int:
+        for index, cluster in enumerate(clusters):
+            if bool(cluster == label):
+                return index
+        raise ValueError(f"{name} {label!r} is not a cluster label")
+
+    root_index = None if root is None else position(root, "root")
+    pairs = sorted(
+        ((position(end, "End"), end) for end in ends), key=lambda pair: pair[0]
+    )
+    return root_index, [index for index, _ in pairs], tuple(end for _, end in pairs)
+
+
+def labelled_tree(
+    clusters: Sequence[Any],
+    sizes: np.ndarray,
+    means: np.ndarray,
+    edges: np.ndarray,
+    lengths: np.ndarray,
+    *,
+    root: Any,
+    ends: Sequence[Any],
+) -> ClusterTree:
+    """Name a tree over cluster indices by the cluster labels.
+
+    ``edges`` holds cluster index pairs and ``lengths`` their distances; the
+    leaves and, with a root, the lineages are traced from them as
+    :func:`spanning_tree` traces them.
+    """
+    edge_array = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
+    root_index, _, _ = tree_ends(clusters, root, ())
+    leaves, paths = tree_lineages(len(clusters), edge_array, root_index)
+    return ClusterTree(
+        clusters=tuple(clusters),
+        sizes=np.asarray(sizes, dtype=np.int64),
+        means=np.asarray(means, dtype=np.float64),
+        edges=pd.DataFrame(
+            {
+                "source": [clusters[first] for first in edge_array[:, 0]],
+                "target": [clusters[second] for second in edge_array[:, 1]],
+                "length": np.asarray(lengths, dtype=np.float64),
+            }
+        ),
+        root=root,
+        ends=tuple(ends),
+        leaves=tuple(clusters[leaf] for leaf in leaves),
+        lineages=tuple(tuple(clusters[cluster] for cluster in path) for path in paths),
+    )
+
+
+def build_cluster_tree(
+    coordinates: Any,
+    labels: Any,
+    *,
+    root: Any = None,
+    ends: list[Any] | None = None,
+) -> ClusterTree:
+    """Build the cluster tree that ``ds.trajectory.lineage_tree`` saves, without a store.
+
+    Use it to see the tree before saving it, or on a store opened
+    read-only, where ``lineage_tree`` cannot save one. The clusters are the
+    distinct labels in their natural order, and the tree is built as
+    ``lineage_tree`` builds it: the distance between two clusters is
+    ``(m_i - m_j)^T (S_i + S_j)^{-1} (m_i - m_j)`` for their mean
+    coordinates ``m`` and covariances ``S``, using the diagonal where
+    ``S_i + S_j`` is singular, a minimum spanning tree joins the clusters,
+    and the paths from ``root`` to the other leaves propose lineages
+    (Street et al. 2018). ``ends`` makes clusters leaves: the tree first
+    spans the others, then each end joins its nearest cluster. Given the
+    coordinates and labels of a saved tree's cells, the tree equals the one
+    that ``load_lineage_tree`` returns.
+
+    Args:
+        coordinates: Coordinates of the cells, cells by dimensions, such as
+            the PCA that a graph was built on.
+        labels: One cluster label per cell, such as the values of a
+            clustering. Every cell needs a label.
+        root: Cluster label that starts the lineages, or None for an
+            unrooted tree without lineages.
+        ends: Cluster labels to hold as leaves.
+
+    Returns:
+        The tree, as a :class:`~cytearc.trajectory.ClusterTree`.
+
+    Raises:
+        TypeError: If ``coordinates`` are not numbers, ``ends`` is not a
+            list, or the root or an end is not a scalar label.
+        ValueError: If ``coordinates`` are not finite cells by dimensions,
+            ``labels`` does not hold one label for each of their rows, a
+            label is missing, fewer than two clusters remain, the root or an
+            end is not a cluster label or repeats, the root is also an end,
+            every cluster is an end, or the tree can join two clusters only
+            across an infinite distance.
+    """
+    from .artifacts import validate_lineage_tree_parameters
+
+    if ends is not None and not isinstance(ends, list):
+        raise TypeError("ends must be a list of cluster labels or None")
+    validated = validate_lineage_tree_parameters(
+        {"root": root, "ends": [] if ends is None else ends}
+    )
+    rows = np.asarray(coordinates)
+    if rows.dtype.kind not in "iuf":
+        raise TypeError("coordinates must hold numbers")
+    if rows.ndim != 2 or rows.shape[1] < 1:
+        raise ValueError("coordinates must be cells by dimensions")
+    rows = rows.astype(np.float64, copy=False)
+    if not np.isfinite(rows).all():
+        raise ValueError("Coordinates must be finite")
+    cell_labels = np.asarray(labels)
+    if cell_labels.ndim != 1 or cell_labels.shape[0] != rows.shape[0]:
+        raise ValueError("labels must hold one label for each row of coordinates")
+    if bool(np.any(pd.isna(cell_labels))):
+        raise ValueError(
+            "Every cell needs a label; leave out the cells without one, from "
+            "both coordinates and labels"
+        )
+    clusters, codes = cluster_codes(cell_labels)
+    if len(clusters) < 2:
+        raise ValueError("A lineage tree needs at least two clusters")
+    root_index, end_indices, ordered_ends = tree_ends(
+        clusters, validated["root"], validated["ends"]
+    )
+    counts, means, covariances = cluster_moments(
+        [(0, rows)], codes, n_clusters=len(clusters), n_dims=rows.shape[1]
+    )
+    tree = spanning_tree(
+        cluster_distances(means, covariances),
+        root=root_index,
+        ends=end_indices,
+        labels=clusters,
+    )
+    return labelled_tree(
+        clusters,
+        counts,
+        means,
+        tree.edges,
+        tree.lengths,
+        root=validated["root"],
+        ends=ordered_ends,
+    )

@@ -23,6 +23,7 @@ artifact refs. Docs: <https://docs.nygen.io/CyteArc/tutorials/plotting>,
   DataFrames with the plotted values), `legends`, `scales`, `provenance`, `owns_figure`, and
   `save()`, `save_provenance()`, `show()`, `close()`. Plots never add metadata columns; on a
   writable store `cluster_tree` caches `dendrogram` and `coalesced_tree` artifacts.
+- Some figures' data come from a store call that draws nothing: `ds.clusters.connectivity(graph, groups)` for `cluster_connectivity`, and `ds.trajectory.curves_in_layout(curves, layout)` for `lineage_curves`, a table of `lineage` (the sink label), `point`, `x` and `y`. `cytearc.trajectory.build_cluster_tree(coordinates, labels, root=...)` returns the tree that `ds.trajectory.lineage_tree` saves, without a store, so it also works on a store opened read-only.
 - `show=True` is the default. In a script it draws nothing on Agg and closes a CyteArc-owned figure.
   Pass `show=False`, save, then `close()`.
 - Run mode, embedding and embedding_raster only: `run=run`, `layout="umap"` (default). Cells are

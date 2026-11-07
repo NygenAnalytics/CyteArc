@@ -35,6 +35,7 @@ from cytearc.storage.selections import (
     resolve_metadata_snapshot,
 )
 from cytearc.trajectory import (
+    ClusterTree,
     LineageAggregationResult,
     LineageCurvesResult,
     LineageDriverResult,
@@ -53,6 +54,7 @@ from cytearc.trajectory.curves import (
     lineage_ranks,
     project_onto_curve,
 )
+from cytearc.trajectory import build_cluster_tree
 from cytearc.trajectory.lineage_tree import (
     cluster_distances,
     cluster_moments,
@@ -811,6 +813,173 @@ def test_lineage_tree_matches_the_domain_tree(
     assert result.candidate_sinks == tuple(
         clusters[leaf] for leaf in tree.leaves if leaf != 0
     )
+
+
+def _tree_inputs(store, tree) -> tuple[np.ndarray, np.ndarray]:
+    """The coordinates and labels of a saved tree's cells, read as a caller reads them."""
+    coordinates = np.asarray(store.artifacts.load(tree.coordinates)["data"][...])
+    labels = store.artifacts.load_values(
+        tree.labels, cell_selection=tree.cell_selection, cell_ids=False
+    ).values
+    return coordinates, np.asarray(labels)
+
+
+def _assert_same_tree(built: ClusterTree, saved: LineageTreeResult) -> None:
+    assert isinstance(built, ClusterTree)
+    assert built.clusters == saved.clusters
+    np.testing.assert_array_equal(built.sizes, saved.sizes)
+    np.testing.assert_allclose(built.means, saved.means, rtol=1e-12, atol=1e-12)
+    pd.testing.assert_frame_equal(
+        built.edges[["source", "target"]], saved.edges[["source", "target"]]
+    )
+    np.testing.assert_allclose(built.edges["length"], saved.edges["length"], rtol=1e-9)
+    assert built.root == saved.root
+    assert built.ends == saved.ends
+    assert built.leaves == saved.leaves
+    assert built.lineages == saved.lineages
+    assert built.candidate_sinks == saved.candidate_sinks
+
+
+def test_a_tree_built_without_a_store_equals_the_one_lineage_tree_saves(
+    datastore, connectivity_graph, leiden_clustering, lineage_tree
+):
+    from cytearc.datastore.datastore import DataStore
+
+    # The coordinates and labels are read from a store opened read-only,
+    # which cannot save a tree.
+    read_only = DataStore(datastore.zarr_loc, default_assay="RNA", zarr_mode="r")
+    saved = read_only.trajectory.load_lineage_tree(lineage_tree)
+    coordinates, labels = _tree_inputs(read_only, saved)
+    _assert_same_tree(build_cluster_tree(coordinates, labels, root=1), saved)
+    # A tree with ends, whose saved coordinates were summed in blocks of 101
+    # cells, and whose ends are recorded in cluster order.
+    with_ends = datastore.trajectory.load_lineage_tree(
+        datastore.trajectory.lineage_tree(
+            connectivity_graph, leiden_clustering, root=1, ends=[3, 2], batch_size=101
+        )
+    )
+    _assert_same_tree(
+        build_cluster_tree(coordinates, labels, root=1, ends=[3, 2]), with_ends
+    )
+    unrooted = build_cluster_tree(coordinates, labels)
+    assert (unrooted.root, unrooted.lineages) == (None, ())
+    assert unrooted.candidate_sinks == unrooted.leaves
+    # The read-only store refuses to save a tree that it does not hold, and
+    # names the call that builds it without saving.
+    clusters = saved.clusters
+    with pytest.raises(PermissionError) as refused:
+        read_only.trajectory.lineage_tree(
+            connectivity_graph, leiden_clustering, root=clusters[0], ends=[clusters[-1]]
+        )
+    assert str(refused.value) == (
+        "build_lineage_tree requires a DataStore opened with zarr_mode='r+', "
+        "because it saves the tree as an artifact; "
+        "cytearc.trajectory.build_cluster_tree builds the same tree without "
+        "saving it"
+    )
+    built = build_cluster_tree(
+        coordinates, labels, root=clusters[0], ends=[clusters[-1]]
+    )
+    assert built.root == clusters[0]
+    assert clusters[-1] in built.leaves
+    # A tree that the store holds is reused on a read-only store.
+    assert (
+        read_only.trajectory.lineage_tree(connectivity_graph, leiden_clustering, root=1)
+        == lineage_tree
+    )
+
+
+def test_a_tree_built_by_hand_over_three_clusters_on_a_line():
+    # Three cells about each centre, 0, 12 and 20, each cluster with a sample
+    # variance of 1, so Slingshot's distance between clusters is the squared
+    # gap of their means over 2: 72 from c1 to c2, 32 from c2 to c10 and 200
+    # from c1 to c10. The cells come in an order that mixes the clusters.
+    centres = {"c1": 0.0, "c2": 12.0, "c10": 20.0}
+    cells = [
+        (label, centre + offset)
+        for offset in (-1.0, 0.0, 1.0)
+        for label, centre in centres.items()
+    ]
+    labels = np.asarray([label for label, _ in cells], dtype=object)
+    coordinates = np.asarray([[value] for _, value in cells])
+
+    tree = build_cluster_tree(coordinates, labels, root="c1")
+
+    # The clusters follow their natural order, as the saved trees do.
+    assert tree.clusters == ("c1", "c2", "c10")
+    np.testing.assert_array_equal(tree.sizes, [3, 3, 3])
+    np.testing.assert_allclose(tree.means, [[0.0], [12.0], [20.0]])
+    assert tree.edges[["source", "target"]].values.tolist() == [
+        ["c1", "c2"],
+        ["c2", "c10"],
+    ]
+    np.testing.assert_allclose(tree.edges["length"], [72.0, 32.0])
+    assert tree.leaves == ("c1", "c10")
+    assert tree.lineages == (("c1", "c2", "c10"),)
+    assert tree.candidate_sinks == ("c10",)
+
+    # Held as a leaf, c2 joins its nearest cluster, c10, after c1 and c10
+    # are joined across their distance of 200.
+    held = build_cluster_tree(coordinates, labels, root="c1", ends=["c2"])
+    assert held.edges[["source", "target"]].values.tolist() == [
+        ["c1", "c10"],
+        ["c2", "c10"],
+    ]
+    np.testing.assert_allclose(held.edges["length"], [200.0, 32.0])
+    assert held.ends == ("c2",)
+    assert held.leaves == ("c1", "c2")
+    assert held.lineages == (("c1", "c10", "c2"),)
+    # Its arrays are read-only, as a saved tree's are.
+    with pytest.raises(ValueError, match="read-only"):
+        held.means[0, 0] = 1.0
+
+
+def test_build_cluster_tree_refuses_what_lineage_tree_refuses():
+    labels = np.asarray(["a", "a", "b", "b"], dtype=object)
+    coordinates = np.asarray([[0.0, 1.0], [1.0, 0.0], [5.0, 6.0], [6.0, 5.0]])
+
+    for arguments, error, message in (
+        ({"ends": ("b",)}, TypeError, "ends must be a list"),
+        ({"root": "a", "ends": ["a"]}, ValueError, "root cannot also be an end"),
+        ({"root": "z"}, ValueError, "root 'z' is not a cluster label"),
+        ({"ends": ["z"]}, ValueError, "End 'z' is not a cluster label"),
+        ({"ends": ["a", "a"]}, ValueError, "must not contain duplicate labels"),
+        ({"root": [1]}, TypeError, "root must contain scalar labels"),
+        ({"ends": ["a", "b"]}, ValueError, "At least one cluster must not be an end"),
+    ):
+        with pytest.raises(error, match=message):
+            build_cluster_tree(coordinates, labels, **arguments)
+    for cells, cell_labels, error, message in (
+        (coordinates, np.asarray(["a"] * 4), ValueError, "at least two clusters"),
+        (
+            coordinates,
+            np.asarray(["a", None, "b", "b"], dtype=object),
+            ValueError,
+            "Every cell needs a label",
+        ),
+        (
+            coordinates,
+            np.asarray([1.0, np.nan, 2.0, 2.0]),
+            ValueError,
+            "Every cell needs a label",
+        ),
+        (coordinates, labels[:3], ValueError, "one label for each row"),
+        (coordinates, labels.reshape(2, 2), ValueError, "one label for each row"),
+        (coordinates[:, 0], labels, ValueError, "cells by dimensions"),
+        (
+            np.where(coordinates > 5.5, np.inf, coordinates),
+            labels,
+            ValueError,
+            "Coordinates must be finite",
+        ),
+        (coordinates.astype(str), labels, TypeError, "coordinates must hold numbers"),
+    ):
+        with pytest.raises(error, match=message):
+            build_cluster_tree(cells, cell_labels)
+    # Two clusters of one cell each, at different positions, are infinitely
+    # far apart, so no tree joins them.
+    with pytest.raises(ValueError, match="only across an infinite distance"):
+        build_cluster_tree([[0.0], [1.0]], ["a", "b"])
 
 
 def test_lineage_tree_ends_become_leaves(
