@@ -1290,9 +1290,15 @@ def test_lineage_curves_refuse_a_budget_of_one_byte_before_placing_the_cells(
 
     store = copy_store(Path(datastore.zw.store.root), tmp_path)
     store.memoryBytes = 1
+    # Another test saves these curves in the session store, and a copy taken
+    # after it would reuse them without a check.
     refusal = refused(
         lambda: store.trajectory.curves(
-            lineage_fate, lineages=[2], n_points=24, batch_size=97
+            lineage_fate,
+            lineages=[2],
+            n_points=24,
+            batch_size=97,
+            invalidate_cache=True,
         )
     )
     # The first check counts the placement writes beside the weights and ranks.
