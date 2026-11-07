@@ -9,12 +9,16 @@ from scipy import sparse
 
 from ..graph.feature_projection import graph_cell_selection
 from ..storage.artifacts import ArtifactRef
-from ..storage.selections import validate_stored_selection_live_alias
+from ..storage.selections import (
+    selections_hold_same_cells,
+    validate_stored_selection_live_alias,
+)
 from ._contracts import CategoricalScale, PlotProvenance, SizeScale
 from ._deps import require_matplotlib
 from ._data import (
     _artifact_cell_selection,
     _fetch_cell_column,
+    _labels_for_cells,
     _resolve_grouping,
     _resolve_layout,
 )
@@ -321,6 +325,12 @@ def cluster_connectivity(
     is the sum of weighted cell degrees in each cluster, including internal
     cluster edges. Clusters with zero incident weight receive a normalized
     value of zero.
+
+    ``layout`` must hold the graph's cells, whichever operation made its cell
+    selection. ``groups`` are read for the graph's cells, which their own
+    cells must include, so labels of more cells serve. A layout of other
+    cells, or groups without a label for some of the graph's cells, raise
+    ``ValueError``.
     """
     show_cells = bool_argument(show_cells, "show_cells")
     labels = bool_argument(labels, "labels")
@@ -357,6 +367,7 @@ def cluster_connectivity(
     if not isinstance(graph, ArtifactRef):
         raise TypeError("graph must be an ArtifactRef")
     selection = graph_cell_selection(store.zw, graph)
+    group_universe: np.ndarray | None = None
     uses_artifacts = groups is not None or layout is not None
     uses_live_metadata = group_by is not None or layout_key is not None
     if uses_artifacts and uses_live_metadata:
@@ -375,24 +386,39 @@ def cluster_connectivity(
         if groups.assay is not None and groups.assay != graph.assay:
             raise ValueError("groups and graph must belong to the same assay")
         coordinates, cell_indices, layout_selection = _resolve_layout(store, layout)
-        _, group_indices, group_values, group_missing = _resolve_grouping(
+        # The layout's rows are the graph's: another selection of the same
+        # cells serves.
+        if not selections_hold_same_cells(store.zw, layout_selection, selection):
+            raise ValueError(
+                "The layout holds other cells than the graph; draw an embedding "
+                "of the graph's cells, such as a UMAP of the graph"
+            )
+        # The groups are read for the graph's cells, which their own cells
+        # must include.
+        _, group_indices, group_values, group_missing = _labels_for_cells(
             store,
-            group_by=None,
-            groups=groups,
-            cell_key="I",
+            groups,
+            cell_selection=selection,
+            refusal=(
+                f"The {groups.kind} artifact of groups holds no label for some "
+                "cells of the graph; compute it on cells that include the "
+                "graph's, such as the graph's cell selection"
+            ),
         )
         if group_missing is not None and group_missing.any():
             raise ValueError("groups contains missing labels")
-        group_selection = _artifact_cell_selection(store, groups)
-        if layout_selection != selection or group_selection != selection:
-            raise ValueError(
-                "graph, groups, and layout must share the same cell selection"
-            )
         if not np.array_equal(cell_indices, group_indices):
             raise ValueError("groups and layout select cells in a different order")
         x = coordinates[:, 0]
         y = coordinates[:, 1]
         group_values_array = np.asarray(group_values[0], dtype=object)
+        # Default colors range over every label of groups, also when they
+        # hold more cells than the graph.
+        if _artifact_cell_selection(store, groups) != selection:
+            _, _, all_labels, _ = _resolve_grouping(
+                store, group_by=None, groups=groups, cell_key="I"
+            )
+            group_universe = all_labels[0]
         group_label = "groups"
     else:
         if group_by is None or layout_key is None:
@@ -422,6 +448,7 @@ def cluster_connectivity(
         resolved_categorical_scale = resolve_category_scale(
             group_values_array,
             categorical_scale,
+            universe=group_universe,
         )
     except TypeError as exc:
         raise TypeError("group_by values must be hashable categories") from exc

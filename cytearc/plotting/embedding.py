@@ -31,6 +31,7 @@ from ._data import (
     _cell_column_values,
     _cell_metadata_columns,
     _fetch_cell_column,
+    _labels_for_cells,
     _resolve_grouping,
     _resolve_layout,
     fetch_normalized_feature_matrix,
@@ -516,22 +517,16 @@ def _prefetch_colors(
                 )
             # The artifact's values are read for the layout's cells, which
             # the artifact's own cell selection must contain.
-            try:
-                _, grouping_indices, grouping_values, _ = _resolve_grouping(
-                    store,
-                    group_by=None,
-                    groups=item,
-                    cell_key="I",
-                    cell_selection=cell_selection,
-                )
-            except ValueError as error:
-                if "must be a subset of the artifact cell selection" not in str(error):
-                    raise
-                raise ValueError(
+            _, grouping_indices, grouping_values, _ = _labels_for_cells(
+                store,
+                item,
+                cell_selection=cell_selection,
+                refusal=(
                     f"The {item.kind} artifact of color_by holds no value for "
                     "some cells of the layout; compute it on cells that include "
                     "the layout's, such as the run's analysis_cell_selection"
-                ) from error
+                ),
+            )
             if not np.array_equal(grouping_indices, cell_indices):
                 raise ValueError(
                     "color_by and layout artifacts select cells in a different order"

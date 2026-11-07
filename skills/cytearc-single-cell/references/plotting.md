@@ -224,6 +224,8 @@ r.tables["per_sample"].head()  # one stacked bar per sample
 r.close()
 ```
 
+`cluster_connectivity` reads `groups` for the graph's cells, and `composition` reads `grouping` for the cells of `categories`, so labels of more cells, such as labels of every cell, serve; labels that miss some of those cells are refused. A layout must hold the cells that the plot draws, the graph's in `cluster_connectivity` and `modality_weights`, the trajectory's in `lineage_curves` and `lineage_tree`, and the genotypes' in `genotypes`, from any cell selection of them.
+
 `kind="per_sample"` with a `StudyDesign` draws a strip of per-sample proportions per category
 instead; see integration-and-comparisons.md. For a WNN run,
 `ds.plots.modality_weights(graph=wnn["integrated_graph"], layout=wnn["umap"], show=False)` draws

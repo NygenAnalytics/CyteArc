@@ -90,6 +90,8 @@ Granular workflows pass exact refs to the same datastore-owned plotting surface:
 
 An embedding colored by an artifact, `embedding(layout=embedding_ref, color_by=labels_ref)`, reads the artifact's values for the layout's cells, so the artifact can hold more cells than the layout: labels computed on every cell color a run's layout of fewer cells, and keep the colors that a layout of all their cells gives them. An artifact that holds no value for some cells of the layout raises `ValueError`; compute it on cells that include the layout's, such as the run's `analysis_cell_selection`.
 
+Labels beside another artifact are read the same way: `composition(categories=cluster_ref, grouping=sample_labels_ref)` reads the grouping for the cells of `categories`, and `cluster_connectivity` reads `groups` for the graph's cells, so labels of more cells serve, and labels that miss some of those cells raise `ValueError` that names the cells to compute them on. A layout must hold the cells that it draws: those of the graph in `cluster_connectivity` and `modality_weights`, of the trajectory in `lineage_curves` and `lineage_tree`, and of the genotypes in `genotypes`. Any cell selection of those cells serves, whichever operation made it, such as one that `select_cells` makes of a run's cells; a layout of other cells raises `ValueError`.
+
 A figure of a clone or repertoire summary takes the record that the summary returns, such as the `CloneOverlap` of `ds.clones.overlap`, so the summary is computed once, can be read before it is drawn, and sets the figure's groups and cells; from the store it reads only what it calls the clones and the labels that its groups' colours range over. A figure of a saved result takes its artifact. Figures that split cells by group take `group_by`, one cell metadata column or several, and `groups`, a label artifact, alone or together, and group the cells as the clone summaries do: by the combinations of their labels, named by the labels joined by commas. A limit on what a figure draws is named for the items it limits, such as `max_clones`, `max_genes` and `max_barcodes_per_cell`.
 
 The figures of clones, `clone_abundance`, `clonal_expansion`, `clonal_rarefaction`, `clonal_diversity`, `clone_overlap`, `clone_tracking`, `clone_coupling` and `clone_fate_bias`, those of immune receptors and lineage records, `receptor_qc`, `gene_usage`, `gene_pairing`, `spectratype`, `barcode_calls`, `recorder_states` and `phylogeny`, and those of variants, `variant_depth`, `variant_statistics`, `allele_frequencies` and `genotypes`, keep one set of conventions:
@@ -181,11 +183,7 @@ group means of `marker_heatmap` leave out unmeasured cells. Dot plots, matrix pl
 `marker_heatmap` record `provenance.extras["unmeasured_cells"]`, a mapping from each feature assay
 to the number of plotted cells that it did not measure, when that number is not zero.
 
-WNN is the default for `DataStore.integration.modalities`. Its integrated graph stores one weight per
-input assay and cell. Use `ds.plots.modality_weights(graph=wnn_graph, layout=embedding)` or
-{py:func}`cytearc.plotting.modality_weights` to show those weights over an explicit embedding. The
-graph and layout must have the exact same cell-selection artifact. Explicit SNN graphs do not
-contain modality weights.
+WNN is the default for `DataStore.integration.modalities`. Its integrated graph stores one weight per input assay and cell. Use `ds.plots.modality_weights(graph=wnn_graph, layout=embedding)` or {py:func}`cytearc.plotting.modality_weights` to show those weights over an explicit embedding of the graph's cells. Explicit SNN graphs do not contain modality weights.
 
 Store-backed plotters and diagnostics generally return a `PlotResult` and render by default with `show=True`.
 Pass `show=False` before accessing, saving, or reusing an owned figure.

@@ -649,13 +649,16 @@ def test_cluster_connectivity_requires_artifact_graph_and_complete_live_inputs()
 def _artifact_plot(
     monkeypatch,
     *,
-    layout_selection=_SELECTION,
-    group_selection=_SELECTION,
     layout_indices=(10, 11, 12, 13),
     group_indices=(10, 11, 12, 13),
     group_missing=None,
     **kwargs,
 ):
+    """Draw groups and a layout of the graph's own cell selection.
+
+    tests/test_plotting_cell_selections.py draws inputs of other selections
+    on a store.
+    """
     module = import_module("cytearc.plotting.cluster_connectivity")
     coordinates = np.array([[0.0, 0.0], [1.0, 0.0], [5.0, 5.0], [6.0, 5.0]])
     labels = np.array(["x", "x", "y", "y"], dtype=object)
@@ -665,12 +668,12 @@ def _artifact_plot(
         lambda _store, layout: (
             coordinates,
             np.asarray(layout_indices),
-            layout_selection,
+            _SELECTION,
         ),
     )
     monkeypatch.setattr(
         module,
-        "_resolve_grouping",
+        "_labels_for_cells",
         lambda *_args, **_kwargs: (
             ("groups",),
             np.asarray(group_indices),
@@ -681,7 +684,7 @@ def _artifact_plot(
     monkeypatch.setattr(
         module,
         "_artifact_cell_selection",
-        lambda _store, _ref: group_selection,
+        lambda _store, _ref: _SELECTION,
     )
     store = _FakeStore({}, _symmetric_graph(4, [(0, 1, 1.0), (1, 2, 0.5), (2, 3, 1.0)]))
     arguments = {"groups": _GROUPS, "layout": _LAYOUT, "graph": _GRAPH}
@@ -707,13 +710,6 @@ def test_cluster_connectivity_reads_aligned_group_and_layout_artifacts(monkeypat
     assert result.provenance.extras["groups"] == _GROUPS.to_dict()
     assert result.provenance.extras["layout"] == _LAYOUT.to_dict()
     result.close()
-
-
-_OTHER_SELECTION = ArtifactRef(
-    scope="datastore",
-    kind="cell_selection",
-    artifact_id="9" * 64,
-)
 
 
 @pytest.mark.parametrize(
@@ -753,14 +749,6 @@ _OTHER_SELECTION = ArtifactRef(
         (
             {"group_missing": np.array([False, True, False, False])},
             "groups contains missing labels",
-        ),
-        (
-            {"layout_selection": _OTHER_SELECTION},
-            "graph, groups, and layout must share the same cell selection",
-        ),
-        (
-            {"group_selection": _OTHER_SELECTION},
-            "graph, groups, and layout must share the same cell selection",
         ),
         (
             {"group_indices": (10, 12, 11, 13)},

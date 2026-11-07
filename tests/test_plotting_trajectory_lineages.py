@@ -9,6 +9,7 @@ against the loaded result it draws.
 import dataclasses
 import inspect
 import re
+import shutil
 from types import SimpleNamespace
 from typing import Any
 
@@ -32,6 +33,7 @@ from cytearc.plotting._style import (
 )
 from cytearc.storage import ArtifactRef
 from cytearc.trajectory.curves import smooth_against_progress
+from tests.clone_helpers import write_selection_embedding
 
 # Lineages are drawn under the string form of their sink labels.
 LINEAGES = ("2", "3", "4")
@@ -115,6 +117,37 @@ def layout(datastore, umap, loaded_curves, loaded_tree):
         cell_indices=cell_indices,
         selection=selection,
         labels=np.asarray([by_cell[cell] for cell in cell_indices.tolist()]),
+    )
+
+
+@pytest.fixture(scope="module")
+def other_selections(datastore, layout, loaded_tree, tmp_path_factory):
+    """A copy of the session store with two more cell selections and their layouts.
+
+    ``same`` holds the trajectory's cells, as select_cells selects every
+    cluster of the tree's labels. ``swapped`` holds as many cells, one of
+    them outside the trajectory in place of its first cell. Both layouts
+    take the session UMAP's coordinates, so each fits the trajectory's rows.
+    """
+    path = tmp_path_factory.mktemp("lineage_layouts") / "store.zarr"
+    shutil.copytree(datastore.zarr_loc, path)
+    store = DataStore(str(path), default_assay="RNA")
+    same = store.select_cells(
+        loaded_tree.labels, include=sorted(set(layout.labels.tolist()))
+    )
+    assert same != layout.selection
+    outside = np.setdiff1d(np.arange(store.cells.N), layout.cell_indices)
+    flags = np.zeros(store.cells.N, dtype=bool)
+    flags[layout.cell_indices[1:]] = True
+    flags[outside[0]] = True
+    store.cells.insert("swapped_trajectory_cells", flags)
+    swapped = store.snapshot_cell_selection("swapped_trajectory_cells")
+    return SimpleNamespace(
+        store=store,
+        same=same,
+        same_layout=write_selection_embedding(store, same, layout.coordinates),
+        swapped=swapped,
+        swapped_layout=write_selection_embedding(store, swapped, layout.coordinates),
     )
 
 
@@ -385,7 +418,9 @@ def test_lineage_palette_spreads_a_colormap_over_the_lineages():
     assert palette["3"] == to_hex(plt.get_cmap("viridis")(1.0))
 
 
-def test_layout_for_returns_the_coordinates_of_the_trajectory_cells(datastore, layout):
+def test_layout_for_returns_the_coordinates_of_the_trajectory_cells(
+    datastore, layout, other_selections
+):
     coordinates, cell_indices = lineage_plots._layout_for(
         datastore, layout.ref, layout.selection
     )
@@ -393,8 +428,19 @@ def test_layout_for_returns_the_coordinates_of_the_trajectory_cells(datastore, l
     np.testing.assert_array_equal(coordinates, layout.coordinates)
     np.testing.assert_array_equal(cell_indices, layout.cell_indices)
     assert coordinates.shape == (len(cell_indices), 2)
-    with pytest.raises(ValueError, match="exact cell-selection artifact"):
-        lineage_plots._layout_for(datastore, layout.ref, _other_ref(layout.selection))
+    # A trajectory over another selection of the same cells takes the layout.
+    store = other_selections.store
+    again, again_indices = lineage_plots._layout_for(
+        store, layout.ref, other_selections.same
+    )
+    np.testing.assert_array_equal(again, layout.coordinates)
+    np.testing.assert_array_equal(again_indices, layout.cell_indices)
+    with pytest.raises(ValueError) as raised:
+        lineage_plots._layout_for(store, layout.ref, other_selections.swapped)
+    assert raised.value.args == (
+        "The layout holds other cells than the trajectory; draw an embedding of "
+        "the trajectory's cells, such as a UMAP of its graph",
+    )
 
 
 # Lineage heatmap.
@@ -1655,18 +1701,46 @@ def test_lineage_plots_validate_the_chosen_lineages(
 
 
 @pytest.mark.parametrize("name", ["lineage_curves", "lineage_tree"])
-def test_layout_plots_require_the_trajectory_cell_selection(
-    monkeypatch: pytest.MonkeyPatch, datastore, plot_arguments, layout, name
+def test_layout_plots_draw_the_trajectory_cells_over_another_selection(
+    closing, other_selections, plot_arguments, name
+):
+    """A layout over another selection of the trajectory's cells draws as the UMAP does."""
+    store = other_selections.store
+    arguments = plot_arguments[name]
+
+    own = closing(getattr(splt, name)(store, show=False, **arguments))
+    other = closing(
+        getattr(splt, name)(
+            store,
+            show=False,
+            **{**arguments, "layout": other_selections.same_layout},
+        )
+    )
+
+    assert own.tables.keys() == other.tables.keys()
+    for table in own.tables:
+        pd.testing.assert_frame_equal(other.tables[table], own.tables[table])
+    # The cells stand where the UMAP places them, in the trajectory's order.
+    (own_axis,), (other_axis,) = own.axes.values(), other.axes.values()
+    np.testing.assert_array_equal(
+        other_axis.collections[0].get_offsets(), own_axis.collections[0].get_offsets()
+    )
+    assert other.provenance.extras["layout"] == other_selections.same_layout.to_dict()
+
+
+@pytest.mark.parametrize("name", ["lineage_curves", "lineage_tree"])
+def test_layout_plots_require_the_trajectory_cells(
+    other_selections, plot_arguments, name
 ):
     """A layout of other cells is refused although its coordinates fit."""
-    requested: list[ArtifactRef] = []
+    with pytest.raises(ValueError) as raised:
+        getattr(splt, name)(
+            other_selections.store,
+            show=False,
+            **{**plot_arguments[name], "layout": other_selections.swapped_layout},
+        ).close()
 
-    def resolve(store: Any, ref: ArtifactRef) -> tuple[Any, Any, ArtifactRef]:
-        requested.append(ref)
-        return layout.coordinates, layout.cell_indices, _other_ref(layout.selection)
-
-    monkeypatch.setattr(lineage_plots, "_resolve_layout", resolve)
-
-    with pytest.raises(ValueError, match="exact cell-selection artifact"):
-        getattr(splt, name)(datastore, show=False, **plot_arguments[name]).close()
-    assert requested == [layout.ref]
+    assert raised.value.args == (
+        "The layout holds other cells than the trajectory; draw an embedding of "
+        "the trajectory's cells, such as a UMAP of its graph",
+    )
