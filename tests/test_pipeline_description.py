@@ -185,6 +185,12 @@ _OWN: dict[tuple[str, str, str], tuple[str | None, str | None, Any, str | None]]
         None,
     ),
     (_ALL, "leiden", "selected"): (None, "float | None", None, None),
+    ("multimodal", "leiden", "selected"): (
+        None,
+        "float | None",
+        None,
+        "the only partition; a call with several partitions must select one of them",
+    ),
     ("rna", "doublets", "sample_column"): (
         "qc.doublets",
         "str | None",
