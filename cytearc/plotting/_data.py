@@ -1,5 +1,6 @@
 """Feature resolution and bounded group reducers."""
 
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from ..utils.arrays import sort_categories
 from typing import Any
@@ -12,6 +13,7 @@ from ..features.values import (
     fetch_normalized_feature_matrix as fetch_normalized_feature_matrix,
     iter_normalized_feature_blocks,
     resolve_feature as resolve_feature,
+    resolve_feature_rows,
 )
 from ..metadata.rows import (
     apply_missing_mask,
@@ -323,6 +325,89 @@ def coerce_feature_list(
                 out.append((str(group), item))
         return out
     return [(None, item) for item in features]
+
+
+def feature_row_labels(
+    features: Sequence[str | FeatureRef],
+    rows: Sequence[int],
+    *,
+    names: np.ndarray,
+    ids: np.ndarray,
+) -> list[str]:
+    """Label each requested feature found at its row of a plot.
+
+    A name keeps the caller's spelling. A ``FeatureRef`` shows its ``label``,
+    or else its row's name, followed by the row's ID where another row has
+    that name, as ``marker_heatmap`` labels rows.
+    """
+    names = np.asarray(names).astype(str)
+    counts = Counter(names.tolist())
+    labels: list[str] = []
+    for feature, row in zip(features, rows, strict=True):
+        if isinstance(feature, str):
+            labels.append(feature)
+        elif feature.label is not None:
+            labels.append(feature.label)
+        elif counts[names[row]] > 1:
+            labels.append(f"{names[row]} ({ids[row]})")
+        else:
+            labels.append(str(names[row]))
+    return labels
+
+
+def shown_feature_rows(
+    show_features: Sequence[str | FeatureRef] | None,
+    *,
+    assay: str,
+    indices: np.ndarray,
+    ids: np.ndarray,
+    names: np.ndarray,
+) -> tuple[list[str | FeatureRef], list[int], list[str]]:
+    """Find the features a trajectory heatmap labels among its rows.
+
+    Rows are the retained features of an aggregation in the order drawn.
+    Lookups follow ``resolve_feature_rows``, and a feature that is not among
+    the rows is skipped.
+
+    Returns:
+        The requested features as a list, and the rows and labels of those
+        found, in request order.
+
+    Raises:
+        TypeError: If ``show_features`` is a single feature rather than a
+            sequence of them.
+    """
+    if show_features is None:
+        return [], [], []
+    if isinstance(show_features, str | FeatureRef) or not isinstance(
+        show_features, Sequence
+    ):
+        raise TypeError(
+            "show_features must be a list of feature names or FeatureRef values"
+        )
+    requested = list(show_features)
+    ids = np.asarray(ids).astype(str)
+    found = [
+        (feature, row)
+        for feature, row in zip(
+            requested,
+            resolve_feature_rows(
+                requested,
+                assay=assay,
+                indices=indices,
+                ids=ids,
+                names=names,
+                where="the retained features of the aggregation",
+            ),
+            strict=True,
+        )
+        if row is not None
+    ]
+    rows = [row for _, row in found]
+    labels = feature_row_labels(
+        [feature for feature, _ in found], rows, names=names, ids=ids
+    )
+    return requested, rows, labels
 
 
 def _cell_metadata_columns(store: Any, keys: Sequence[object]) -> frozenset[str]:

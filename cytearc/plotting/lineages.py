@@ -6,13 +6,14 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from ..features.values import feature_description, resolve_feature_rows
 from ..storage.artifacts import ArtifactRef, inspect_artifact
 from ..storage.selections import selections_hold_same_cells
 from ..trajectory.curves import smooth_against_progress
 from ..trajectory.lineages import select_lineages
 from ..utils.arguments import bool_argument, float_argument
-from ._contracts import CategoricalScale, ColorScale, PlotProvenance
-from ._data import _resolve_layout
+from ._contracts import CategoricalScale, ColorScale, FeatureRef, PlotProvenance
+from ._data import _resolve_layout, feature_row_labels, shown_feature_rows
 from ._deps import require_matplotlib
 from ._figure import (
     LegendSpec,
@@ -68,7 +69,7 @@ def lineage_heatmap(
     *,
     aggregation: ArtifactRef,
     lineages: Sequence[Any] | None = None,
-    show_features: list[str] | None = None,
+    show_features: list[str | FeatureRef] | None = None,
     figsize: tuple[float, float] | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
@@ -91,6 +92,14 @@ def lineage_heatmap(
     z-scaled profiles, and from the smallest mean to the 99th percentile for
     profiles stored without z-scaling, which the colorbar labels as mean
     expression.
+
+    ``show_features`` labels rows beside the last panel. A name matches the
+    retained features case-insensitively and keeps the caller's spelling,
+    and a ``FeatureRef`` finds a feature by name, ID, or index and shows its
+    ``label``, or its name, followed by its ID where another row has that
+    name. A name that several retained features share raises ``ValueError``
+    naming their IDs; pick one with ``FeatureRef(value=feature_id,
+    by="id")``. A feature that the aggregation did not retain is skipped.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -125,21 +134,27 @@ def lineage_heatmap(
     data = data[row_order]
     clusters = clusters[row_order]
     labels = labels[row_order]
+    show_features, label_rows, feature_labels = shown_feature_rows(
+        show_features,
+        assay=loaded.assay,
+        indices=np.asarray(loaded.feature_indices)[row_order],
+        ids=np.asarray(loaded.feature_ids)[row_order],
+        names=labels,
+    )
     cluster_order = sorted(set(clusters.tolist()))
     palette = colormap_palette(cluster_order, clusterbar_cmap)
     n_bins = data.shape[2]
     bin_pseudotime = np.asarray(loaded.bin_pseudotime)[columns]
-    show_features = [] if show_features is None else list(show_features)
     # Feature labels sit in their own column between the last panel and the
     # colorbar, as wide as the longest label at its font size, so they never
     # cover the colorbar. A panel is 2.4 inches wide at the default size.
     label_inches = (
         0.2
-        + max(len(str(feature)) for feature in show_features)
+        + max(len(label) for label in feature_labels)
         * feature_label_fontsize
         * 0.65
         / 72.0
-        if show_features
+        if feature_labels
         else 0.0
     )
     label_width = max(label_inches / 2.4 * 6.0, 0.05)
@@ -174,14 +189,12 @@ def lineage_heatmap(
             )
             heatmap_ax.set_xticks([])
             heatmap_ax.set_yticks([])
-            if position == len(names) - 1 and show_features:
-                index = {label.lower(): row for row, label in enumerate(labels)}
-                visible = [
-                    feature for feature in show_features if feature.lower() in index
-                ]
+            if position == len(names) - 1 and feature_labels:
                 heatmap_ax.yaxis.tick_right()
-                heatmap_ax.set_yticks([index[feature.lower()] for feature in visible])
-                heatmap_ax.set_yticklabels(visible, fontsize=feature_label_fontsize)
+                heatmap_ax.set_yticks(label_rows)
+                heatmap_ax.set_yticklabels(
+                    feature_labels, fontsize=feature_label_fontsize
+                )
             heatmap_ax.set_xlabel(
                 f"{bin_pseudotime[position, 0]:.2g} to "
                 f"{bin_pseudotime[position, -1]:.2g}",
@@ -293,7 +306,7 @@ def lineage_trends(
     store: Any,
     *,
     aggregation: ArtifactRef,
-    features: Sequence[str],
+    features: Sequence[str | FeatureRef],
     lineages: Sequence[Any] | None = None,
     axis: Literal["progress", "pseudotime"] = "progress",
     lineage_cmap: str = "tab10",
@@ -313,15 +326,28 @@ def lineage_trends(
     fate weight they have passed, so every bin is equally wide; with
     ``axis="pseudotime"`` they sit at their mean pseudotime, where bins
     inside an endpoint crowd together.
+
+    ``features`` names retained features of the aggregation. A name matches
+    case-insensitively and titles its panel in the caller's spelling. A
+    ``FeatureRef`` finds a feature by name, ID, or index, and its panel takes
+    its ``label``, or the feature's name, followed by its ID where another
+    retained feature has that name. A name that several retained features
+    share raises ``ValueError`` naming their IDs; draw one of them with
+    ``FeatureRef(value=feature_id, by="id")``.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
     if not isinstance(aggregation, ArtifactRef):
         raise TypeError("aggregation must be an ArtifactRef")
-    if isinstance(features, str) or not isinstance(features, Sequence) or not features:
-        raise TypeError("features must be a non-empty sequence of feature names")
-    if len({str(feature).lower() for feature in features}) != len(features):
-        raise ValueError("features must not repeat a feature")
+    if (
+        isinstance(features, str | FeatureRef)
+        or not isinstance(features, Sequence)
+        or not features
+    ):
+        raise TypeError(
+            "features must be a non-empty sequence of feature names or "
+            "FeatureRef values"
+        )
     if axis not in {"progress", "pseudotime"}:
         raise ValueError("axis must be 'progress' or 'pseudotime'")
     line_width = _positive(line_width, "line_width")
@@ -330,15 +356,31 @@ def lineage_trends(
     columns = _lineage_selection(loaded.lineages, lineages)
     names = [str(loaded.lineages[column]) for column in columns]
     labels = np.asarray(loaded.feature_names).astype(str)
+    feature_ids = np.asarray(loaded.feature_ids).astype(str)
+    found = resolve_feature_rows(
+        features,
+        assay=loaded.assay,
+        indices=np.asarray(loaded.feature_indices),
+        ids=feature_ids,
+        names=labels,
+        where="the retained features of the aggregation",
+    )
     rows: list[int] = []
-    for feature in features:
-        matches = np.flatnonzero(np.char.lower(labels) == str(feature).lower())
-        if not matches.size:
+    for feature, row in zip(features, found, strict=True):
+        if row is None:
             raise ValueError(
-                f"Feature {feature!r} is not a retained feature of the aggregation"
+                f"Feature {feature_description(feature)} is not a retained "
+                "feature of the aggregation"
             )
-        rows.append(int(matches[0]))
-    panel_keys = [str(feature) for feature in features]
+        rows.append(row)
+    if len(set(rows)) != len(rows):
+        raise ValueError("features must not repeat a feature")
+    panel_keys = feature_row_labels(features, rows, names=labels, ids=feature_ids)
+    if len(set(panel_keys)) != len(panel_keys):
+        raise ValueError(
+            "features must title each panel differently; give FeatureRef "
+            "values labels of their own"
+        )
     resolved_columns = min(len(panel_keys), 4) if n_columns is None else n_columns
     if (
         isinstance(resolved_columns, bool)

@@ -17,10 +17,12 @@ from ..metadata.table import CaseInsensitiveIndex
 
 __all__ = [
     "ResolvedFeature",
+    "feature_description",
     "fetch_normalized_feature_matrix",
     "measured_feature_means",
     "resolve_feature",
     "resolve_feature_batch",
+    "resolve_feature_rows",
 ]
 
 
@@ -109,16 +111,18 @@ def resolve_feature_batch(
             raise KeyError(
                 f"Feature {ref.value!r} not found in assay {assay_name!r} by {ref.by!r}"
             )
-        if len(indices) > 1 and ref.reduction is None:
-            raise ValueError(
-                f"Feature {ref.value!r} matches {len(indices)} entries in assay "
-                f"{assay_name!r} at indices {indices}. Pass reduction='mean' or "
-                f"reduction='sum', or look up by id/index."
-            )
-
         idx_arr = np.asarray(indices)
         names = tuple(str(x) for x in index.names[idx_arr])
         ids = tuple(str(x) for x in index.ids[idx_arr])
+        if len(indices) > 1 and ref.reduction is None:
+            raise ValueError(
+                f"Feature {ref.value!r} matches {len(indices)} entries in assay "
+                f"{assay_name!r} at indices {indices}, with IDs "
+                f"{', '.join(map(repr, ids))}. Pass FeatureRef(value=<ID>, "
+                "by='id') for one of them, or reduction='mean' or "
+                "reduction='sum'."
+            )
+
         label = ref.label or (
             names[0] if len(names) == 1 else f"{ref.value}:{ref.reduction}"
         )
@@ -145,6 +149,98 @@ def resolve_feature(
 ) -> ResolvedFeature:
     """Resolve exact feature IDs or case-insensitive names without implicit reduction."""
     return resolve_feature_batch(store, [feature], from_assay=from_assay)[0]
+
+
+def feature_description(feature: str | FeatureRef) -> str:
+    """Name a requested feature in a message: by its name, ID, or index."""
+    if not isinstance(feature, FeatureRef):
+        return repr(feature)
+    if feature.by == "id":
+        return f"ID {feature.value!r}"
+    if feature.by == "index":
+        return f"index {feature.value}"
+    return repr(feature.value)
+
+
+def resolve_feature_rows(
+    features: Sequence[str | FeatureRef],
+    *,
+    assay: str,
+    indices: np.ndarray,
+    ids: np.ndarray,
+    names: np.ndarray,
+    where: str,
+) -> list[int | None]:
+    """Find each feature among the rows of a saved result, in input order.
+
+    The rows are features that a result froze, such as the retained features
+    of a trajectory aggregation, given by their index in ``assay``, their ID,
+    and their name. Lookups follow :func:`resolve_feature_batch`: a string or a
+    ``FeatureRef`` by name matches names case-insensitively, and a
+    ``FeatureRef`` by ID or index matches exactly.
+
+    Args:
+        features: Feature names or ``FeatureRef`` values.
+        assay: The assay of the rows. A ``FeatureRef`` that names an assay
+            must name this one.
+        indices: The feature index of each row in ``assay``.
+        ids: The feature ID of each row.
+        names: The feature name of each row.
+        where: The rows as messages name them, such as ``"the retained
+            features of the aggregation"``.
+
+    Returns:
+        The row of each feature, or None for a feature that matches no row,
+        which the caller may skip or refuse.
+
+    Raises:
+        TypeError: If a feature is neither a string nor a ``FeatureRef``.
+        ValueError: If a feature matches several rows, naming their IDs in the
+            order of their indices, or a ``FeatureRef`` names another assay or
+            a reduction, which would combine rows rather than find one.
+    """
+    names = np.asarray(names).astype(str)
+    ids = np.asarray(ids).astype(str)
+    indices = np.asarray(indices)
+    by_name = CaseInsensitiveIndex(names)
+    rows: list[int | None] = []
+    for feature in features:
+        if isinstance(feature, str):
+            matches = by_name.positions(feature)
+        elif isinstance(feature, FeatureRef):
+            if feature.assay is not None and feature.assay != assay:
+                raise ValueError(
+                    f"Feature {feature_description(feature)} names assay "
+                    f"{feature.assay!r}, but {where} belong to assay {assay!r}"
+                )
+            if feature.reduction is not None:
+                raise ValueError(
+                    f"Feature {feature_description(feature)} sets "
+                    f"reduction={feature.reduction!r}, which combines features; "
+                    f"pass a FeatureRef without a reduction to find one of {where}"
+                )
+            if feature.by == "name":
+                matches = by_name.positions(feature.value)
+            elif feature.by == "id":
+                matches = np.flatnonzero(ids == feature.value).tolist()
+            else:
+                matches = np.flatnonzero(indices == feature.value).tolist()
+        else:
+            raise TypeError(
+                "Features must be feature names or FeatureRef values, not "
+                f"{type(feature).__name__}"
+            )
+        if len(matches) > 1:
+            # IDs follow the features' order in the assay, whatever the rows' order.
+            matched = np.asarray(matches)[np.argsort(indices[matches], kind="stable")]
+            shared = ", ".join(repr(str(identifier)) for identifier in ids[matched])
+            raise ValueError(
+                f"Feature {feature_description(feature)} matches {len(matches)} "
+                f"of {where}, with IDs {shared}. Pass "
+                "FeatureRef(value=<ID>, by='id') to choose one."
+            )
+        rows.append(int(matches[0]) if matches else None)
+    return rows
 
 
 def fetch_normalized_feature_matrix(

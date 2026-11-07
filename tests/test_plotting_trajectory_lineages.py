@@ -156,6 +156,37 @@ def feature_names(loaded_aggregation) -> list[str]:
     return np.asarray(loaded_aggregation.feature_names).astype(str).tolist()
 
 
+@pytest.fixture
+def shared_name(monkeypatch: pytest.MonkeyPatch, loaded_aggregation):
+    """The session aggregation with two retained features renamed to share MATR3.
+
+    ENSG00000280987 and ENSG00000015479 share that name in the 10x Genomics
+    human reference. The renamed features keep the rows, IDs, and indices that
+    the aggregation stored.
+    """
+    rows = (3, 11)
+    names = np.asarray(loaded_aggregation.feature_names).astype(str).copy()
+    names[list(rows)] = "MATR3"
+    assert np.count_nonzero(np.char.upper(names) == "MATR3") == 2
+    renamed = dataclasses.replace(loaded_aggregation, feature_names=names)
+    monkeypatch.setattr(
+        TrajectoryAccessor, "load_lineage_aggregation", lambda accessor, ref: renamed
+    )
+    ids = np.asarray(loaded_aggregation.feature_ids).astype(str)
+    indices = np.asarray(loaded_aggregation.feature_indices)
+    assert not np.array_equal(renamed.data[rows[0]], renamed.data[rows[1]])
+    return SimpleNamespace(
+        loaded=renamed,
+        rows=rows,
+        ids=tuple(str(ids[row]) for row in rows),
+        indices=tuple(int(indices[row]) for row in rows),
+        # Refusals name the IDs in the order of the features in the assay.
+        named_ids=", ".join(
+            repr(str(ids[row])) for row in sorted(rows, key=lambda row: indices[row])
+        ),
+    )
+
+
 def _module_peak_order(loaded: Any, columns: list[int]) -> list[int]:
     """Feature rows by module, then by the peak of the chosen lineages' profiles.
 
@@ -646,6 +677,69 @@ def test_lineage_heatmap_labels_requested_features_on_the_last_panel(
     assert result.provenance.extras["show_features"] == requested
 
 
+def test_lineage_heatmap_labels_one_feature_of_a_shared_name(
+    closing, datastore, lineage_aggregation, shared_name
+):
+    first, second = shared_name.rows
+    requested = [
+        splt.FeatureRef(shared_name.ids[1], by="id"),
+        splt.FeatureRef(shared_name.indices[0], by="index", label="other MATR3"),
+    ]
+
+    result = closing(
+        splt.lineage_heatmap(
+            datastore,
+            aggregation=lineage_aggregation,
+            show_features=requested,
+            show=False,
+        )
+    )
+
+    last = result.axes[("heatmap", LINEAGES[-1])]
+    assert [label.get_text() for label in last.get_yticklabels()] == [
+        f"MATR3 ({shared_name.ids[1]})",
+        "other MATR3",
+    ]
+    drawn = result.tables["features"]["feature_index"].tolist()
+    positions = [
+        drawn.index(shared_name.indices[1]),
+        drawn.index(shared_name.indices[0]),
+    ]
+    assert list(last.get_yticks()) == positions
+    # Each label marks the row that draws its feature's profiles.
+    profiles = result.tables["profiles"].to_numpy()
+    data = np.asarray(shared_name.loaded.data)
+    for position, row in zip(positions, (second, first), strict=True):
+        np.testing.assert_array_equal(profiles[position], data[row].reshape(-1))
+    assert result.provenance.extras["show_features"] == requested
+
+
+def test_lineage_heatmap_refuses_a_shared_name_and_names_its_ids(
+    datastore, lineage_aggregation, shared_name
+):
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Feature 'MATR3' matches 2 of the retained features of the "
+            f"aggregation, with IDs {shared_name.named_ids}. Pass "
+            "FeatureRef(value=<ID>, by='id') to choose one."
+        ),
+    ):
+        splt.lineage_heatmap(
+            datastore,
+            aggregation=lineage_aggregation,
+            show_features=["MATR3"],
+            show=False,
+        ).close()
+    with pytest.raises(TypeError, match="^show_features must be a list"):
+        splt.lineage_heatmap(
+            datastore,
+            aggregation=lineage_aggregation,
+            show_features="MATR3",
+            show=False,
+        ).close()
+
+
 def test_lineage_heatmap_feature_labels_clear_the_colorbar(
     closing, datastore, lineage_aggregation, feature_names
 ):
@@ -885,6 +979,116 @@ def test_lineage_trends_draw_each_lineage_against_bin_pseudotime(
     }
 
 
+def test_lineage_trends_draw_one_feature_of_a_shared_name(
+    closing, datastore, lineage_aggregation, shared_name, feature_names
+):
+    first, second = shared_name.rows
+    features = [
+        splt.FeatureRef(shared_name.ids[1], by="id"),
+        feature_names[0],
+        splt.FeatureRef(shared_name.indices[0], by="index"),
+    ]
+
+    result = closing(
+        splt.lineage_trends(
+            datastore, aggregation=lineage_aggregation, features=features, show=False
+        )
+    )
+
+    # A FeatureRef's panel adds the ID to a name that two retained features share.
+    keys = [
+        f"MATR3 ({shared_name.ids[1]})",
+        feature_names[0],
+        f"MATR3 ({shared_name.ids[0]})",
+    ]
+    assert list(result.axes) == keys
+    assert result.provenance.extras["features"] == keys
+    data = np.asarray(shared_name.loaded.data)
+    trends = result.tables["trends"]
+    for key, row in zip(keys, (second, 0, first), strict=True):
+        axis = result.axes[key]
+        assert axis.get_title() == key
+        for column, (name, line) in enumerate(
+            zip(LINEAGES, axis.get_lines(), strict=True)
+        ):
+            np.testing.assert_array_equal(line.get_ydata(), data[row, column])
+            part = trends[(trends["feature"] == key) & (trends["lineage"] == name)]
+            np.testing.assert_array_equal(part["value"], data[row, column])
+
+
+@pytest.mark.parametrize(
+    ("features", "message"),
+    [
+        (
+            lambda shared: ["matr3"],
+            lambda shared: (
+                "Feature 'matr3' matches 2 of the retained features of the "
+                f"aggregation, with IDs {shared.named_ids}. Pass "
+                "FeatureRef(value=<ID>, by='id') to choose one."
+            ),
+        ),
+        (
+            lambda shared: [splt.FeatureRef("MATR3", reduction="mean")],
+            lambda shared: (
+                "Feature 'MATR3' sets reduction='mean', which combines features; "
+                "pass a FeatureRef without a reduction to find one of the "
+                "retained features of the aggregation"
+            ),
+        ),
+        (
+            lambda shared: [splt.FeatureRef(shared.ids[0], by="id", assay="ADT")],
+            lambda shared: (
+                f"Feature ID '{shared.ids[0]}' names assay 'ADT', but the "
+                "retained features of the aggregation belong to assay 'RNA'"
+            ),
+        ),
+        (
+            lambda shared: [splt.FeatureRef("NOT_AN_ID", by="id")],
+            lambda shared: (
+                "Feature ID 'NOT_AN_ID' is not a retained feature of the aggregation"
+            ),
+        ),
+        (
+            lambda shared: [
+                splt.FeatureRef(shared.ids[0], by="id"),
+                splt.FeatureRef(shared.indices[0], by="index"),
+            ],
+            lambda shared: "features must not repeat a feature",
+        ),
+        (
+            lambda shared: [
+                splt.FeatureRef(shared.ids[0], by="id", label="MATR3"),
+                splt.FeatureRef(shared.ids[1], by="id", label="MATR3"),
+            ],
+            lambda shared: (
+                "features must title each panel differently; give FeatureRef "
+                "values labels of their own"
+            ),
+        ),
+    ],
+    ids=[
+        "shared name",
+        "reduction",
+        "another assay",
+        "not retained",
+        "repeated feature",
+        "repeated title",
+    ],
+)
+def test_lineage_trends_refuse_features_that_find_no_single_retained_feature(
+    datastore, lineage_aggregation, shared_name, features, message
+):
+    with pytest.raises(ValueError) as raised:
+        splt.lineage_trends(
+            datastore,
+            aggregation=lineage_aggregation,
+            features=features(shared_name),
+            show=False,
+        ).close()
+
+    assert raised.value.args == (message(shared_name),)
+
+
 def test_lineage_trends_space_bins_by_lineage_progress_by_default(
     closing, datastore, lineage_aggregation, loaded_aggregation, feature_names
 ):
@@ -1085,7 +1289,8 @@ def test_lineage_trends_require_an_aggregation_ref(
 
 
 @pytest.mark.parametrize(
-    "features", ["CD3E", [], (), {"CD3E"}, None, np.array(["CD3E"])]
+    "features",
+    ["CD3E", [], (), {"CD3E"}, None, np.array(["CD3E"]), splt.FeatureRef("CD3E")],
 )
 def test_lineage_trends_require_a_sequence_of_feature_names(
     datastore, lineage_aggregation, features

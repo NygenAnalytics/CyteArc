@@ -1507,6 +1507,7 @@ def test_pseudotime_heatmap_validates_orders_and_target_layout(
         "feature_indices": np.array([0, 1, 2]),
         "feature_clusters": np.array(["B", "A", "B"]),
         "feature_labels": np.array(["gene1", "gene2", "gene3"]),
+        "feature_ids": np.array(["id1", "id2", "id3"]),
         "pseudotime": np.array([0.0, 0.25, 0.5, 0.75]),
         "assay": "RNA",
         "cell_selection": _plot_ref("cell_selection", "3", assay=None),
@@ -1579,6 +1580,7 @@ def test_pseudotime_heatmap_applies_explicit_order_scales_and_target_ownership(
         "feature_indices": np.array([10, 11, 12]),
         "feature_clusters": np.array(["B", "A", "B"]),
         "feature_labels": np.array(["gene1", "gene2", "gene3"]),
+        "feature_ids": np.array(["id1", "id2", "id3"]),
         "pseudotime": np.array([0.0, 0.2, 0.4, 0.6, 0.8, 1.0]),
         "assay": "RNA",
         "cell_selection": _plot_ref("cell_selection", "3", assay=None),
@@ -1699,6 +1701,7 @@ def _pseudotime_store(*, scoring=None, **aggregation):
         "feature_indices": np.array([4, 5, 6]),
         "feature_clusters": np.array([1, 0, 1]),
         "feature_names": np.array(["g4", "g5", "g6"]),
+        "feature_ids": np.array(["id4", "id5", "id6"]),
         "assay": "RNA",
         "feature_selection": _plot_ref("feature_selection", "2"),
         **aggregation,
@@ -1925,6 +1928,78 @@ def test_pseudotime_feature_order_refuses_to_drop_rows_with_repeated_names():
             feature_order=["g6", "g4"],
             show=False,
         )
+
+
+def _shared_name_pseudotime_store():
+    """Features 4 and 6 of the saved aggregation share the name MATR3."""
+    return _pseudotime_store(
+        feature_names=np.array(["MATR3", "g5", "MATR3"]),
+        feature_ids=np.array(["ENSG04", "ENSG05", "ENSG06"]),
+    )
+
+
+def test_pseudotime_heatmap_labels_one_feature_of_a_shared_name():
+    result = splt.pseudotime_heatmap(
+        _shared_name_pseudotime_store(),
+        aggregation=_AGGREGATION,
+        show_features=[
+            splt.FeatureRef("ENSG06", by="id"),
+            "G5",
+            splt.FeatureRef(4, by="index", label="first MATR3"),
+            # Features that the aggregation did not retain are skipped.
+            splt.FeatureRef("ENSG07", by="id"),
+            "absent",
+        ],
+        show=False,
+    )
+
+    # Rows sort by feature cluster: feature 5 (cluster 0), then 4 and 6.
+    heatmap = result.axes["heatmap"]
+    assert [text.get_text() for text in heatmap.get_yticklabels()] == [
+        "MATR3 (ENSG06)",
+        "G5",
+        "first MATR3",
+    ]
+    np.testing.assert_array_equal(heatmap.get_yticks(), [2, 0, 1])
+    # Each label marks the row that draws its feature.
+    assert result.tables["features"]["feature_index"].tolist() == [5, 4, 6]
+    np.testing.assert_array_equal(result.tables["matrix"].to_numpy()[2], [4, 5])
+    assert result.provenance.extras["show_features"][0] == splt.FeatureRef(
+        "ENSG06", by="id"
+    )
+    result.close()
+
+
+def test_pseudotime_heatmap_refuses_a_shared_name_and_names_its_ids(figures_closed):
+    store = _shared_name_pseudotime_store()
+
+    with pytest.raises(ValueError) as raised:
+        splt.pseudotime_heatmap(
+            store, aggregation=_AGGREGATION, show_features=["matr3"], show=False
+        )
+    assert raised.value.args == (
+        "Feature 'matr3' matches 2 of the retained features of the aggregation, "
+        "with IDs 'ENSG04', 'ENSG06'. Pass FeatureRef(value=<ID>, by='id') to "
+        "choose one.",
+    )
+    for show_features in ("g5", splt.FeatureRef("ENSG05", by="id")):
+        with pytest.raises(TypeError, match="^show_features must be a list"):
+            splt.pseudotime_heatmap(
+                store,
+                aggregation=_AGGREGATION,
+                show_features=show_features,
+                show=False,
+            )
+
+
+def test_pseudotime_heatmap_requires_frozen_feature_ids_that_align():
+    store = _pseudotime_store(feature_ids=np.array(["ENSG04", "ENSG05"]))
+
+    with pytest.raises(ValueError) as raised:
+        splt.pseudotime_heatmap(store, aggregation=_AGGREGATION, show=False)
+    assert raised.value.args == (
+        "Frozen feature IDs do not align with aggregation rows",
+    )
 
 
 def test_marker_heatmap_clusters_markers_that_share_a_feature_name(tmp_path):

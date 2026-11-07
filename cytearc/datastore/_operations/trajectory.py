@@ -12,7 +12,11 @@ from ...assay.normalization import (
     reject_unknown_normalization_params,
     resolve_normalization_params,
 )
-from ...features.values import ResolvedFeature, iter_normalized_feature_blocks
+from ...features.values import (
+    ResolvedFeature,
+    iter_normalized_feature_blocks,
+    resolve_feature_batch,
+)
 from ...graph.feature_projection import (
     NATIVE_COORDINATE_KINDS,
     graph_cell_selection,
@@ -43,7 +47,7 @@ from ...metadata.artifacts import (
     plan_cell_data_artifact,
     write_cell_data_artifact,
 )
-from ...metadata.table import CaseInsensitiveIndex
+from ...metadata.selection import FeatureRef
 from ...storage.validation_scope import validation_scoped
 from ...storage.artifact_writer import (
     ArrayRequirement,
@@ -674,53 +678,75 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
     @validation_scoped
     def _imputation_compute_imputed(
         self,
-        feature_name: str | Sequence[str] | np.ndarray | pd.Series,
+        feature_name: str
+        | FeatureRef
+        | Sequence[str | FeatureRef]
+        | np.ndarray
+        | pd.Series,
         diffusion: ArtifactRef,
         *,
         from_assay: str | None = None,
     ) -> np.ndarray:
         """Impute feature values by diffusing along the KNN graph (MAGIC-style).
 
-        Each name is resolved in two steps. A name that exactly matches a live
-        cell metadata column (case-sensitive) diffuses that column's values.
-        Any other name matches assay feature names case-insensitively, and
-        the mean of all matching features is diffused when a name is not
-        unique. A metadata column whose linked missing mask flags a cell in
-        the operator's cell selection raises ``ValueError``, because diffusion
-        would spread its stored placeholder to neighbouring cells.
+        A string that exactly matches a live cell metadata column
+        (case-sensitive) diffuses that column's values. Any other string
+        names assay features case-insensitively, and a ``FeatureRef`` looks a
+        feature up by name, ID, or index, as plots and ``compare.test`` do. A
+        name that several features share raises ``ValueError`` naming their
+        IDs: impute one of them with ``FeatureRef(value=feature_id,
+        by="id")``, or their mean with ``FeatureRef(value=name,
+        reduction="mean")``. A metadata column whose linked missing mask flags
+        a cell in the operator's cell selection raises ``ValueError``, because
+        diffusion would spread its stored placeholder to neighbouring cells.
 
         Args:
-            feature_name: One name, or a sequence, one-dimensional string
-                array, or Series of names in the desired output order.
+            feature_name: One feature name, cell metadata column, or
+                ``FeatureRef``, or a sequence, one-dimensional array, or
+                Series of them in the desired output order.
             diffusion: Explicit diffusion-operator artifact returned by
                 ``imputation.diffusion``.
             from_assay: Assay whose features are imputed. A native graph's
                 operator uses the graph's own assay, which a given value must
                 match. An integrated graph's operator requires it unless every
-                name is a cell metadata column.
+                name is a cell metadata column. A ``FeatureRef`` that names an
+                assay must name this one.
 
         Returns:
-            A vector for one name, or a cells-by-features array for several
-            names.
+            A vector for one feature, or a cells-by-features array for several
+            features.
 
         Raises:
+            KeyError: If no feature of the assay has a requested name, ID, or
+                index.
+            ValueError: If a name or ID matches several features without the
+                ``reduction`` of a ``FeatureRef``, or a ``FeatureRef`` names
+                another assay.
             UnmeasuredCellsError: If the assay did not measure a cell of the operator.
         """
-        single_feature = isinstance(feature_name, str)
-        if isinstance(feature_name, str):
-            names = [feature_name]
+        single_feature = isinstance(feature_name, str | FeatureRef)
+        keys: list[Any]
+        if isinstance(feature_name, str | FeatureRef):
+            keys = [feature_name]
         elif isinstance(feature_name, np.ndarray | pd.Series):
             if feature_name.ndim != 1:
                 raise ValueError("feature_name arrays must be one-dimensional")
-            names = feature_name.tolist()
+            keys = feature_name.tolist()
         elif isinstance(feature_name, Sequence):
-            names = list(feature_name)
+            keys = list(feature_name)
         else:
-            raise TypeError("feature_name must be a string or a sequence of strings")
-        if not names or any(not isinstance(name, str) or not name for name in names):
-            raise ValueError("feature_name must contain non-empty strings")
+            raise TypeError(
+                "feature_name must be a string, a FeatureRef, or a sequence of them"
+            )
+        if not keys or any(
+            not isinstance(key, FeatureRef) and (not isinstance(key, str) or not key)
+            for key in keys
+        ):
+            raise ValueError(
+                "feature_name must contain non-empty strings or FeatureRef values"
+            )
         diff_op, graph, selection = self._load_diffusion_operator_with_lineage(
-            diffusion, imputed_features=len(names)
+            diffusion, imputed_features=len(keys)
         )
         cell_indices = read_stored_selection_indices(
             self.zw,
@@ -731,23 +757,26 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             table_path="cellData",
         )
         metadata_columns = set(self.cells.columns)
-        metadata_slots = [i for i, name in enumerate(names) if name in metadata_columns]
+        metadata_slots = [
+            i
+            for i, key in enumerate(keys)
+            if isinstance(key, str) and key in metadata_columns
+        ]
         for slot in metadata_slots:
             missing = read_metadata_missing_rows_chunkwise(
                 self.cells,
-                names[slot],
+                keys[slot],
                 cell_indices,
             )
             if missing is not None and missing.any():
                 raise ValueError(
-                    f"Cell metadata column {names[slot]!r} contains missing values "
+                    f"Cell metadata column {keys[slot]!r} contains missing values "
                     "in the diffusion operator's cell selection. Build the "
                     "diffusion operator over a selection without them, such as "
                     "one from qc.filter, which excludes missing values"
                 )
-        feature_slots = [
-            i for i, name in enumerate(names) if name not in metadata_columns
-        ]
+        metadata = set(metadata_slots)
+        feature_slots = [i for i in range(len(keys)) if i not in metadata]
         # Metadata columns need no assay; a given from_assay is still checked.
         assay_name = (
             resolve_graph_source_assay(
@@ -761,40 +790,29 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         )
         resolved: list[ResolvedFeature] = []
         if feature_slots and assay_name is not None:
-            # Feature names read the assay; metadata columns read no assay.
+            features = [keys[slot] for slot in feature_slots]
+            for feature in features:
+                if isinstance(feature, FeatureRef) and feature.assay not in (
+                    None,
+                    assay_name,
+                ):
+                    raise ValueError(
+                        f"FeatureRef {feature.value!r} names assay "
+                        f"{feature.assay!r}, but the features are imputed from "
+                        f"assay {assay_name!r}, the assay of the diffusion "
+                        "operator's graph or from_assay"
+                    )
+            # Plots and compare.test resolve features alike: a name or ID that
+            # several features share needs a reduction.
+            resolved = resolve_feature_batch(self, features, from_assay=assay_name)
+            # Features read the assay; metadata columns read no assay.
             self._require_measured_cells(
                 assay_name, cell_indices, operation="get_imputed", remedy="graph"
             )
-            assay = self._get_assay(assay_name)
-            feature_names = assay.feats.fetch_all("names")
-            feature_ids = assay.feats.fetch_all("ids")
-            name_index = CaseInsensitiveIndex(feature_names)
-            for slot in feature_slots:
-                name = names[slot]
-                indices = name_index.positions(name)
-                if not indices:
-                    raise ValueError(f"ERROR: {name} not found in {assay_name} assay.")
-                if len(indices) > 1:
-                    logger.warning(
-                        f"Imputing the mean of {len(indices)} features because "
-                        f"{name} is not unique."
-                    )
-                resolved.append(
-                    ResolvedFeature(
-                        assay=assay_name,
-                        by="name",
-                        indices=tuple(indices),
-                        ids=tuple(str(feature_ids[i]) for i in indices),
-                        names=tuple(str(feature_names[i]) for i in indices),
-                        label=name,
-                        reduction="mean" if len(indices) > 1 else None,
-                        raw=name,
-                    )
-                )
 
         sparse = diff_op.tocsc()
         del diff_op
-        output_bytes = len(cell_indices) * len(names) * np.dtype(np.float64).itemsize
+        output_bytes = len(cell_indices) * len(keys) * np.dtype(np.float64).itemsize
         # Reserve the sparse column slice and dense streaming temporaries.
         resident_bytes = 3 * output_bytes + 2 * sum(
             array.nbytes for array in (sparse.data, sparse.indices, sparse.indptr)
@@ -808,10 +826,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 budget_bytes=int(self.memoryBytes),
                 item="the imputed output and the diffusion operator",
             )
-        result = np.zeros((len(cell_indices), len(names)), dtype=np.float64)
+        result = np.zeros((len(cell_indices), len(keys)), dtype=np.float64)
         for slot in metadata_slots:
             values = np.asarray(
-                read_metadata_rows_chunkwise(self.cells, names[slot], cell_indices),
+                read_metadata_rows_chunkwise(self.cells, keys[slot], cell_indices),
                 dtype=np.float64,
             )
             result[:, slot] = sparse.dot(values)

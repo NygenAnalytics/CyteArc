@@ -548,7 +548,7 @@ def test_imputation_rejects_invalid_names_and_budget_after_sparse_conversion(
     )
     diffusion = store.imputation.diffusion(graph_ref, t=1)
 
-    with pytest.raises(TypeError, match="string or a sequence of strings"):
+    with pytest.raises(TypeError, match="a string, a FeatureRef, or a sequence"):
         store.imputation.compute_imputed(1, diffusion)
 
     # The loader preflight estimates index widths; this guard measures the

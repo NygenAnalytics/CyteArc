@@ -399,11 +399,13 @@ class RankMarkerResult:
     ) -> pd.DataFrame:
         """Return one tested group's ranked marker table.
 
-        The table equals the one read back from a marker artifact written from
-        this result, before ``markers.load`` filters it: ``group_id``,
+        The table equals the one that ``load_marker_table`` reads back from a
+        marker artifact written from this result: ``group_id``,
         ``feature_name``, and ``feature_index`` columns followed by
         ``MARKER_STAT_COLUMNS``, ordered by ``sort_by`` as
         :func:`~cytearc.features.markers.sort_marker_results` orders them.
+        ``markers.load`` adds each feature's ID in ``feature_id`` and filters
+        the rows.
 
         Args:
             group_id: One of ``tested_group_ids``; the table's ``group_id``
