@@ -286,7 +286,7 @@ List the runs before opening one by label.
 | `workspace` | `None` | store written into a named workspace |
 | `storage_options` | `None` | object-store credentials or endpoints (read from env vars) |
 | `zarrProfile` | from location (`fast_local`/`cloud`) | affects newly written arrays only |
-| `storage_options` for `hf://` URIs | `None` (Hugging Face login if present) | `{"token": False}` for anonymous reads of public CyteBase buckets |
+| `storage_options` for `hf://` URIs | `None` (Hugging Face login if present; each read or listing gets 60 s per attempt, `request_timeout`, and 180 s in all, `retry_timeout`) | `{"token": False}` for anonymous reads of public CyteBase buckets; larger `"request_timeout"` and `"retry_timeout"`, in seconds, on a slow connection |
 
 ## Check before moving on
 

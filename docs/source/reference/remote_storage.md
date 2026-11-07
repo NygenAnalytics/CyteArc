@@ -1,5 +1,5 @@
 ---
-description: Connect CyteArc to object storage, mount shared count matrices, and configure local scratch space for remote analysis.
+description: Connect CyteArc to object storage, set the time limits of Hugging Face stores, mount shared count matrices, and configure local scratch space for remote analysis.
 ---
 
 (remote_storage)=
@@ -7,7 +7,8 @@ description: Connect CyteArc to object storage, mount shared count matrices, and
 # Remote storage configuration
 
 For a working public example, start with [](../tutorials/remote_stores.ipynb). This reference covers
-your own object storage, what a mount preserves, and scratch space for repeated reads.
+your own object storage, the time limits of Hugging Face stores, what a mount preserves, and scratch
+space for repeated reads.
 The examples require CyteArc's `extra` dependencies.
 
 ## Connect your own bucket
@@ -92,6 +93,29 @@ Pass the provider options your environment already uses for obstore or fsspec, s
 application-default credentials on the VM or an explicit token in `storage_options`.
 
 After opening a writable store, use the same analysis calls as for local data.
+
+## Time limits of Hugging Face stores
+
+CyteArc reads an `hf://` URI, such as a [CyteBase dataset](../tutorials/cytebase_datasets.md), through Hugging Face's file system. `storage_options` takes that file system's options, such as `"token": False` for anonymous reads, and two time limits in seconds that bound each read or listing of the store:
+
+| Option | Default | Limit |
+|---|---|---|
+| `request_timeout` | `60` | Each attempt at a read or listing |
+| `retry_timeout` | `180` | The read or listing with all of its attempts |
+
+An attempt that runs out of time, loses its connection, or receives a 408 or 5xx response is retried after 2, 4, 8 and more seconds, or after the delay the server asks for if that is longer. When the next attempt could not start within `retry_timeout`, the read raises `TimeoutError`, which names the store, the key and the time limit. A 429 response, which asks the reader to slow down, is retried at most three times, after the delay it asks for or after 2, 4 and 8 seconds if that is longer, and only for a delay of up to 300 seconds; that wait does not count toward `retry_timeout`.
+
+On a slow connection, give the reads more time:
+
+```python
+# Open a CyteBase dataset with longer time limits.
+ds = cytearc.DataStore(
+    "hf://buckets/Nygen/cytebase-2610/datasets/"
+    "mcglade_2021_scrna_data_human_fallopian_tube_30f5e171/data.zarr",
+    zarr_mode="r",
+    storage_options={"token": False, "request_timeout": 120, "retry_timeout": 600},
+)
+```
 
 ## What a mount preserves
 

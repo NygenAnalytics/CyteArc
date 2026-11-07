@@ -64,6 +64,7 @@ ds.plots.embedding(layout=umap, color_by="cell_type")
 A read-only open writes nothing and never changes the published cell selection: an operation that
 would compute a new result raises `PermissionError`. `storage_options={"token": False}` reads
 anonymously; omit it to use your Hugging Face login.
+A read that the bucket leaves unanswered is retried and then raises `TimeoutError`; on a slow connection, raise the [time limits](../reference/remote_storage.md#time-limits-of-hugging-face-stores) in `storage_options`.
 Plotting needs CyteArc's plotting dependencies, `cytearc[extra]`.
 
 ## Analyze a dataset
