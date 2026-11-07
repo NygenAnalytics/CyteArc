@@ -596,7 +596,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             cell_selection=cell_selection,
             value_name=value_name,
             ledger=MemoryLedger(
-                self.memoryBytes, "Selecting cells", codec_threads=self.nthreads
+                self.memoryBytes,
+                "Selecting cells",
+                remedy="select from fewer cells with cell_selection",
+                codec_threads=self.nthreads,
             ),
         )
         source_selection = aligned.source_cell_selection

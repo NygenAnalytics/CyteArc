@@ -27,7 +27,6 @@ from ..storage.validation_scope import validation_scope
 from ..utils.arguments import integer_argument
 from ..utils.arrays import sort_categories, sort_categories_bytes
 from ..utils.memory_budget import (
-    MemoryBudgetError,
     MemoryLedger,
     fixed_text_bytes,
     hash_table_bytes,
@@ -970,17 +969,30 @@ def _selection_count(root: Any, selection: ArtifactRef) -> int:
 def _refuse_cell_read(
     ledger: MemoryLedger, required: int, *, item: str, n_cells: int
 ) -> None:
-    """Refuse a read of ``item`` for ``n_cells`` cells whose ``required`` bytes pass the ledger's budget."""
-    needed = ledger.held_bytes + required
-    if ledger.budget is not None and needed > ledger.budget:
-        raise MemoryBudgetError(
-            f"Reading {item} for {n_cells} cells needs about {needed} bytes, but "
-            f"the memory budget is {ledger.budget} bytes. Read fewer cells with "
-            "cell_selection, or raise mem_budget.",
-            needed_bytes=needed,
-            budget_bytes=ledger.budget,
-            item=item,
-        )
+    """Refuse a read of ``item`` for ``n_cells`` cells whose ``required`` bytes pass the ledger's budget.
+
+    The refusal takes the ledger's words and remedy, so each caller names
+    what it does and how its call can read less.
+    """
+    ledger.refuse_beyond(
+        f"reading {item} for {n_cells} cells", ledger.held_bytes + required
+    )
+
+
+def _reads_in_turn_bytes(arrays: Sequence[Any], n_rows: int) -> int:
+    """The most that reading ``n_rows`` rows of each array in turn holds.
+
+    Each read holds what :func:`~cytearc.metadata.rows.row_read_bytes`
+    states beside the rows of the arrays read before it, which
+    :func:`~cytearc.metadata.rows.read_rows` keeps charged.
+    """
+    kept = 0
+    most = 0
+    for array in arrays:
+        most = max(most, kept + row_read_bytes(array_geometry(array), n_rows))
+        row_values = int(np.prod(array.shape[1:], dtype=np.int64))
+        kept += n_rows * row_values * np.dtype(array.dtype).itemsize
+    return most
 
 
 def _unaligned_snapshot_error(
@@ -1080,10 +1092,13 @@ def resolve_cell_aligned_artifact(
     charges the flags and positions that the read holds, and each array read
     through :func:`~cytearc.metadata.rows.read_rows` at the selected rows,
     the values, their missing mask, and ``caller_reads``, arrays that the
-    caller reads at the same rows. The rows are charged before anything is
-    read, and again once the positions are read, before any array is. The
-    values, the mask and the positions of the cells stay charged when the
-    read returns. Without a ledger, the read checks no budget.
+    caller reads at the same rows. The arrays are read in turn, so each read
+    is charged beside the rows of the arrays read before it, not beside their
+    reads; the largest of these is checked before anything is read, and again
+    once the positions are read, before any array is. A refusal takes the
+    ledger's words and remedy. The values, the mask and the positions of the
+    cells stay charged when the read returns. Without a ledger, the read
+    checks no budget.
 
     Raises:
         MemoryBudgetError: If ``ledger`` cannot hold what the read holds.
@@ -1135,9 +1150,12 @@ def resolve_cell_aligned_artifact(
             values=values_array,
         )
         item = f"{value_name!r} of the {artifact.kind} artifact"
-        row_arrays = [values_array, *caller_reads]
+        # The order of the reads: the values, their mask, then the arrays
+        # that the caller reads at the same rows.
+        row_arrays = [values_array]
         if missing_array is not None:
             row_arrays.append(missing_array)
+        row_arrays.extend(caller_reads)
         budgeted = ledger is not None
         planned_source = planned_target = None
         if ledger is None:
@@ -1163,10 +1181,9 @@ def resolve_cell_aligned_artifact(
                     _INDEX_BYTES * n_source + _selection_read_bytes(planned_target),
                     _INDEX_BYTES * n_source + (3 * _INDEX_BYTES + 2) * n_target,
                 ]
-            row_reads = sum(
-                row_read_bytes(array_geometry(array), n_target) for array in row_arrays
+            steps.append(
+                2 * _INDEX_BYTES * n_target + _reads_in_turn_bytes(row_arrays, n_target)
             )
-            steps.append(2 * _INDEX_BYTES * n_target + row_reads)
             _refuse_cell_read(ledger, max(steps), item=item, n_cells=n_target)
 
         positions = f"the cell positions of {item}"
@@ -1214,11 +1231,8 @@ def resolve_cell_aligned_artifact(
             if budgeted:
                 ledger.release(source_bytes)
     if budgeted:
-        # Every array is read at the rows of the requested cells.
-        required = sum(
-            row_read_bytes(array_geometry(array), compact_idx.size)
-            for array in row_arrays
-        )
+        # Every array is read at the rows of the requested cells, in turn.
+        required = _reads_in_turn_bytes(row_arrays, compact_idx.size)
         _refuse_cell_read(ledger, required, item=item, n_cells=len(target_idx))
         ledger.peak(item, required)
     values = read_rows(ledger, values_array, compact_idx, item=item)

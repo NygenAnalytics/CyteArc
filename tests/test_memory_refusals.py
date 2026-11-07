@@ -1565,8 +1565,52 @@ def test_cells_over_more_bands_than_the_fewest_are_refused_before_any_value_is_r
             ledger=MemoryLedger(100_000, "Reading", codec_threads=4),
         )
     )
+    # The refusal takes the ledger's words, and a ledger without a remedy
+    # names none.
+    assert str(refusal).startswith("Reading holds about "), refusal
     assert str(refusal).endswith(
-        "Read fewer cells with cell_selection, or raise mem_budget."
+        f"Raise mem_budget to at least {refusal.needed_bytes} bytes."
     ), refusal
     # No value or mask was read for the refusal.
     assert reads == []
+
+
+def test_arrays_read_in_turn_are_charged_beside_the_rows_read_before_them(
+    tmp_path: Path,
+) -> None:
+    from cytearc.metadata.selection import resolve_cell_aligned_artifact
+    from cytearc.utils.memory_budget import MemoryLedger
+
+    n_cells = 8_000
+    _path, store, ref = _banded_values(tmp_path, "turns", n_cells, {})
+    extra = [
+        store.zw.create_array(
+            name,
+            data=np.arange(n_cells, dtype=np.float64),
+            chunks=(1_000,),
+        )
+        for name in ("first", "second")
+    ]
+
+    def named(caller_reads: list[Any]) -> int:
+        return refused(
+            lambda: resolve_cell_aligned_artifact(
+                store.zw,
+                ref,
+                ledger=MemoryLedger(1, "Reading", codec_threads=1),
+                caller_reads=caller_reads,
+            )
+        ).needed_bytes
+
+    alone = named([])
+    # Two more arrays of the values' shape, read after them, add at most
+    # their rows: each read lets its chunk go before the next one starts.
+    assert alone < named(extra) <= alone + 2 * n_cells * 8
+    # At the budget it names, the read runs and returns every value.
+    resolved = resolve_cell_aligned_artifact(
+        store.zw,
+        ref,
+        ledger=MemoryLedger(named(extra), "Reading", codec_threads=1),
+        caller_reads=extra,
+    )
+    np.testing.assert_array_equal(resolved.values, np.arange(n_cells, dtype=np.float64))
