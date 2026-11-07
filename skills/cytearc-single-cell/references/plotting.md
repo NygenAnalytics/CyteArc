@@ -216,6 +216,7 @@ r = ds.plots.cluster_connectivity(
 )
 r.tables["edges"]  # source, target, rawWeight, normalizedWeight
 r.close()
+ds.clusters.connectivity(graph, run["clusters"]).edges  # every pair, without a figure
 paris = ds.clusters.paris(graph)  # or run["paris"] of a paris=True run
 ds.plots.cluster_tree(graph=graph, clusters=paris, show=False).close()
 splt.graph_qc(ds.graph.load(graph=graph), show=False).close()

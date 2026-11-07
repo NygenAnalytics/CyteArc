@@ -167,9 +167,11 @@ backend is part of the artifact identity: a clustering saved with `"igraph"`, th
 earlier releases, is reused only by a call that passes `backend="igraph"`, and reusing it does not
 need the packages.
 
+`clusters.connectivity(graph, groups)` sums the graph's weight between each pair of clusters and returns the tables that `plots.cluster_connectivity` draws, without a layout or a figure, as a {py:class}`~cytearc.clustering.connectivity.ClusterConnectivity`: `nodes` holds each cluster's cells and incident weight, and `edges` each pair's `rawWeight` and `normalizedWeight`. It needs no plotting dependencies and saves nothing, so a diagnostic can call it once per clustering, such as each Leiden resolution. `groups` is a clustering or another categorical cell artifact, read for the graph's cells as the plot reads it, or a cell metadata column read over the graph's cells. Its filters keep every pair by default, while the plot's `minimum_edge_weight` defaults to 0.02; pass the plot's filters to get the edges it draws.
+
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.ClustersAccessor
-    :members: leiden, paris, load_paris, membership_strength, relabel_by_overlap
+    :members: leiden, paris, load_paris, membership_strength, relabel_by_overlap, connectivity
 ```
 
 ### `ds.markers`
@@ -751,6 +753,9 @@ The recommended workflow is in [Read RNA and protein together with CITE-seq](../
     :members:
 
 .. autoclass:: cytearc.clustering.ParisClusterDiagnostic
+    :members:
+
+.. autoclass:: cytearc.clustering.connectivity.ClusterConnectivity
     :members:
 
 .. autoclass:: cytearc.quality_control.cell_calling.EmptyDropsResult

@@ -1,4 +1,5 @@
-from collections.abc import Mapping, Sequence
+import inspect
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from ..storage.artifacts import ArtifactRef
@@ -12,7 +13,13 @@ from ._pipeline.events import (
     PipelineProgress as PipelineProgress,
     pipeline_listener as pipeline_listener,
 )
-from ._pipeline.executor import execute_recipe
+from ._pipeline.executor import RecipePlan, execute_recipe
+from ._pipeline.planning import (
+    PipelinePlan as PipelinePlan,
+    PipelineStageEstimate as PipelineStageEstimate,
+    PipelineStagePlan as PipelineStagePlan,
+    plan_recipe,
+)
 from ._pipeline.recipes.adt import DEFAULT_PANEL_EXCLUDE as DEFAULT_PANEL_EXCLUDE
 from ._pipeline.recipes.adt import resolve_adt
 from ._pipeline.recipes.atac import resolve_atac
@@ -26,11 +33,25 @@ from .pipeline_run import (
 )
 from ..utils.arguments import bool_argument
 
-# Keep the documented event types' import and pickle identity here, where
-# users import them, though they are implemented beside the ledger.
+# Keep the documented event and plan types' import and pickle identity here,
+# where users import them, though they are implemented beside the executor.
 PipelineEvent.__module__ = __name__
 PipelineProgress.__module__ = __name__
 pipeline_listener.__module__ = __name__
+PipelinePlan.__module__ = __name__
+PipelineStagePlan.__module__ = __name__
+PipelineStageEstimate.__module__ = __name__
+
+# Each recipe's resolver, which its method and a plan of it call alike.
+_RESOLVERS: dict[str, Callable[..., RecipePlan]] = {
+    "rna": resolve_rna,
+    "atac": resolve_atac,
+    "adt": resolve_adt,
+    "multimodal": resolve_multimodal,
+    "perturbation": resolve_perturbation,
+}
+# The keywords of a recipe that belong to its run, which a plan does not start.
+_RUN_KEYWORDS = ("callback", "cancel")
 
 type CellsArgument = str | ArtifactRef | PipelineRun
 """A boolean cell column, a cell-selection artifact, or a completed run."""
@@ -108,6 +129,72 @@ class PipelineAccessor:
             reason=reason,
         )
         return PipelineRun(self._store, record)
+
+    @validation_scoped
+    def plan(self, recipe: str, /, *args: object, **settings: object) -> PipelinePlan:
+        """Report what a recipe call would reuse and compute, without running it.
+
+        The plan resolves and checks the call as the recipe does before it
+        writes, the label included, and then goes through the stages in run
+        order. A stage whose artifacts all exist, complete and current, is
+        reused with the artifact refs that the run would record. A stage that
+        would compute an artifact reports why: no artifact of its operation,
+        a changed setting or input, a superseded revision, an interrupted or
+        invalid artifact, or one without the diagnostics that its operation
+        saves. A stage that reads what an earlier computed stage would
+        produce waits on that stage: its artifacts depend on ones that do
+        not exist yet, so it is reported computed with the stages it waits
+        on. Each computed stage carries what it took when the latest earlier
+        run of the same recipe and assay computed it, a past measurement.
+
+        The plan writes nothing and works on a read-only store. It reads run
+        records, cell and feature metadata, and the stored artifacts that
+        reuse checks read, never a count matrix. A stage's method checks some
+        settings only when the stage runs: when every stage before it would
+        be reused, the plan reaches that check and raises its error, as the
+        run would.
+
+        Args:
+            recipe: ``"rna"``, ``"atac"``, ``"adt"``, ``"multimodal"``, or
+                ``"perturbation"``.
+            *args: The positional arguments of the recipe's method: the
+                ``runs`` of ``"multimodal"``.
+            **settings: The keywords of the recipe's method, as a call would
+                pass them, without ``callback`` and ``cancel``.
+
+        Raises:
+            ValueError: If ``recipe`` names no recipe, or the call fails the
+                recipe's checks.
+            TypeError: If the call passes ``callback`` or ``cancel``, a
+                keyword that the recipe lacks, or fails the recipe's checks.
+            KeyError: If the call names a missing column.
+            UnmeasuredCellsError: If an assay did not measure one of the cells.
+
+        Example:
+            >>> plan = ds.pipeline.plan("rna", label="tuned", hvg={"top_n": 1000})
+            >>> [(stage.stage, stage.status, stage.reason) for stage in plan.stages]
+        """
+        resolver = _RESOLVERS.get(recipe) if isinstance(recipe, str) else None
+        if resolver is None:
+            raise ValueError(
+                f"recipe must be one of {sorted(_RESOLVERS)!r}, not {recipe!r}"
+            )
+        passed = [name for name in _RUN_KEYWORDS if name in settings]
+        if passed:
+            raise TypeError(
+                f"plan reports a call without running it, so it takes no "
+                f"{' or '.join(passed)}"
+            )
+        bound = inspect.signature(getattr(PipelineAccessor, recipe)).bind(
+            self, *args, **settings
+        )
+        bound.apply_defaults()
+        arguments = {
+            name: value
+            for name, value in bound.arguments.items()
+            if name != "self" and name not in _RUN_KEYWORDS
+        }
+        return plan_recipe(self._store, resolver(self._store, **arguments))
 
     def _require_runnable(self, callback: PipelineCallback | None) -> None:
         if callback is not None and not callable(callback):

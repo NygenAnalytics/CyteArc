@@ -54,6 +54,7 @@ refs, and record the analysis for handoff. Docs:
   (`ValueError` before any work). Failed and interrupted runs reserve nothing.
 - There is no resume. A new run reuses a complete artifact from an earlier attempt only when its
   operation, parameters, inputs and operation revision match.
+- `ds.pipeline.plan(recipe, ...)` takes a recipe call's arguments and reports, for each stage, whether the run would reuse its artifacts or compute them and why, writing nothing and reading no count matrix, on a read-only store too. A stage that reads what an earlier stage would compute is reported computed with `reason="upstream"`, since its artifacts depend on ones that do not exist yet.
 - `run.cells` and `run.features` are frozen views of captured fields only. Live columns such as
   author labels are absent unless listed in `snapshot_columns` on the run.
 
@@ -294,13 +295,29 @@ is migrated.
 | Paris on by default | `paris=True` |
 | recipe `"basic_rna_analysis"`, event `pipeline_interrupted` | recipe `"rna"`, events `stage_interrupted` and `run_interrupted` |
 
+### Plan a call before running it
+
+Plan a long run, or a rerun after a failure or a changed setting, to see which stages it recomputes. Pass the arguments of the recipe's method, positional `runs` included for `"multimodal"`; `callback` and `cancel` raise `TypeError`, and the plan raises what the call would raise before it writes, such as a `ValueError` for a completed label.
+
+```python
+plan = ds.pipeline.plan("rna", label="tuned", hvg={"top_n": 2000})
+plan.computed                      # stages that would compute, in run order
+for stage in plan.stages:          # status: "reused", "computed" or "skipped"
+    print(stage.stage, stage.status, stage.reason, stage.detail)
+plan["highly_variable_features"].changed_parameters  # ("top_n",) after that change
+plan["pca"].upstream               # ("normalization",): the stages it waits on
+plan["pca"].estimate               # wall time and RSS when an earlier rna run computed it
+```
+
+A reused stage's `outputs` are the `(key, ref)` pairs that the run would record. A computed stage's `reason` is `"absent"` (no artifact of the operation), `"changed"` (the closest one, `existing`, differs in `changed_parameters` or `changed_inputs`), `"superseded"` (an operation revision replaces `existing`), `"incomplete"`, `"missing_diagnostics"` (an artifact saved before its operation recorded diagnostics), `"invalid"`, or `"upstream"`. A stage that reads nothing that changed stays reused: after a `umap` change, Leiden, cluster selection, doublets and markers are reused. `estimate` is a past measurement from the latest run of the same recipe and assay that computed the stage, None without one; that run's cells, settings and machine can differ.
+
 ### Handle failures and interruptions
 
 A stage error raises `PipelineExecutionError` (`run_id`, `stage`, cause in `__cause__`). SIGTERM,
 SIGINT, SIGHUP or `KeyboardInterrupt` stop at the next safe checkpoint (in testing, the running
 stage finished and kept its artifact) and record `status="interrupted"`. Rerun with the same
 label; completed artifacts are reused (interrupted during UMAP: rerun 10 s, 16 reused; 10x 5K
-PBMC docs dataset). Run it as `timeout 1800 python job.py`; behind a wrapper such as `uv run`, put
+PBMC docs dataset), as `ds.pipeline.plan` with the same arguments shows beforehand. Run it as `timeout 1800 python job.py`; behind a wrapper such as `uv run`, put
 `timeout` inside it (`uv run timeout 1800 python job.py`), because `timeout 1800 uv run ...` killed the run without the handler (performance-and-export.md).
 
 ```python
