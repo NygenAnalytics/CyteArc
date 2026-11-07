@@ -146,7 +146,11 @@ _SIGNATURE_DIGESTS = {
     # which only method="truncated" takes. get_imputed takes feature_name:
     # str | FeatureRef | Sequence[str | FeatureRef] | np.ndarray | pd.Series.
     # The inherited constructor takes source_storage_options: dict[str, Any] | None.
-    GraphDataStore: "2502d823c04f900c3bf68fb7663f1e1edaa2f43841daf1a9ef97f54db00f5ead",
+    # run_fate_mapping takes pseudotime: ArtifactRef | None = None and
+    # sink_labels: ArtifactRef | None = None, and the keyword-only graph:
+    # ArtifactRef | None = None and direction: ArtifactRef | np.ndarray |
+    # None = None after sinks, so a per-cell score can direct the walk.
+    GraphDataStore: "10744343b2d9c455a53df2421e8940a9bc8b9266026dc192395aef6a12601efb",
     # run_mapping gained the keyword-only feature_key: Literal["ids",
     # "names"] = "ids" after missing_feature_policy.
     MappingDatastore: "12e809ed948d36552968c37dc3d2a9d3429ad06dcd5507673d95f839ef47171f",

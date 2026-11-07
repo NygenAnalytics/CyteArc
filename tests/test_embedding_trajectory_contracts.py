@@ -55,6 +55,7 @@ def test_trajectory_results_describe_artifacts_not_metadata_columns() -> None:
         "sink_labels",
         "values",
         "valid",
+        "direction",
     ]
     assert [field.name for field in fields(PseudotimeMarkerResult)] == [
         "ref",

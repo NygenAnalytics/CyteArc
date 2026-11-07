@@ -246,7 +246,7 @@ def test_fate_payload_rejects_invalid_rows_and_boundary_columns() -> None:
         group,
         n_cells=4,
         n_sinks=2,
-        pseudotime_valid=np.array([True, True, True, False]),
+        expected_valid=np.array([True, True, True, False]),
         sink_values=labels,
         sink_labels=["A", "B"],
     )
@@ -257,7 +257,7 @@ def test_fate_payload_rejects_invalid_rows_and_boundary_columns() -> None:
         group,
         n_cells=4,
         n_sinks=2,
-        pseudotime_valid=np.array([True, True, True, False]),
+        expected_valid=np.array([True, True, True, False]),
         sink_values=labels,
         sink_labels=["A", "B"],
     )

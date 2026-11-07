@@ -131,6 +131,7 @@
   "tests/test_exception_pickling.py": 1.5,
   "tests/test_execution.py": 0.4,
   "tests/test_failed_artifact_writes.py": 3.4,
+  "tests/test_fate_direction.py": 8.9,
   "tests/test_fate_helpers.py": 0.2,
   "tests/test_fate_mapping.py": 3.6,
   "tests/test_feat_utils.py": 18.9,

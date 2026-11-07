@@ -1514,7 +1514,7 @@ def _fate_is_valid(group: zarr.Group, sink_values: np.ndarray = _FATE_LABELS) ->
         group,
         n_cells=6,
         n_sinks=2,
-        pseudotime_valid=_FATE_VALID,
+        expected_valid=_FATE_VALID,
         sink_values=sink_values,
         sink_labels=["A", "B"],
     )

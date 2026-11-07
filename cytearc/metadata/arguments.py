@@ -205,7 +205,6 @@ class FateMappingArguments(OperationArguments):
     artifact_kind: ClassVar[str] = "fate_map"
 
     connectivity_map: ArtifactRef = artifact_input()
-    pseudotime: ArtifactRef = artifact_input()
     sink_labels: ArtifactRef = artifact_input()
     cell_selection: ArtifactRef = artifact_input()
     sinks: tuple[Any, ...] = parameter()
@@ -213,6 +212,11 @@ class FateMappingArguments(OperationArguments):
     solver_tol: float = parameter()
     max_iterations: int = parameter()
     invalidate_cache: bool = execution()
+    # What directs the walk: a pseudotime or a per-cell direction score. A map
+    # records only the one it took, so maps directed by a pseudotime keep
+    # their identities.
+    pseudotime: ArtifactRef | None = artifact_input(None, omit_if_none=True)
+    direction: ArtifactRef | None = artifact_input(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)
