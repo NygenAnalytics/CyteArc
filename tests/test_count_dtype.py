@@ -118,12 +118,13 @@ def test_value_range_settles_at_the_first_fractional_or_negative_block():
     value_range = CountValueRange()
     value_range.update(np.array([3, 9], dtype=np.int32))
     value_range.update(np.array([-1], dtype=np.int32))
-    # Later blocks no longer change the maximum, but are still checked for
+    # A settled range keeps no maximum. Later blocks are still checked for
     # NaN, infinity, and negative values.
     value_range.update(np.array([0.5, 1e9]))
-    assert value_range == CountValueRange(integral=False, maximum=9, negative=True)
+    assert value_range == CountValueRange(integral=False, maximum=0, negative=True)
+    assert value_range.largest == 1e9
     value_range.update(np.array([], dtype=np.float32))
-    assert value_range == CountValueRange(integral=False, maximum=9, negative=True)
+    assert value_range == CountValueRange(integral=False, maximum=0, negative=True)
     for value in (np.nan, np.inf):
         with pytest.raises(ValueError, match="finite values"):
             value_range.update(np.array([1.0, value]))
@@ -254,6 +255,142 @@ def test_compressed_range_does_not_depend_on_the_budget():
         for budget in (_PER_VALUE * 30, _PER_VALUE * 1_000, 1 << 30)
     }
     assert ranges == {True}
+
+
+@pytest.mark.parametrize("settling", [0.5, -1.0])
+def test_value_ranges_do_not_depend_on_where_blocks_end(settling):
+    # A large integer read in the block of a fractional or negative value, or
+    # in a block of its own before it.
+    values = np.array([500.0, settling, 3.0])
+    together = CountValueRange()
+    together.update(values)
+    apart = CountValueRange()
+    for value in values:
+        apart.update(np.array([value]))
+    assert (
+        together
+        == apart
+        == CountValueRange(integral=False, maximum=0, negative=settling < 0)
+    )
+    # A range scanned in parts of a CSR matrix equals the range of one scan.
+    matrix = csr_matrix(values.reshape(3, 1))
+    assert compressed_count_range(
+        *_compressed(matrix), minorSize=1, maxBytes=_PER_VALUE
+    ) == compressed_count_range(*_compressed(matrix), minorSize=1, maxBytes=1 << 20)
+
+
+def test_value_ranges_merge_into_the_range_of_all_their_values_in_any_order():
+    rng = np.random.default_rng(8)
+    blocks = [
+        rng.integers(0, 300, size=40).astype(np.float64),
+        rng.integers(0, 70_000, size=40).astype(np.float64),
+        np.array([2.5, 1.0]),
+        np.array([-4.0, 9.0]),
+        rng.integers(0, 10, size=40).astype(np.float64),
+    ]
+    for chosen in ([0, 1, 4], [0, 1, 2, 4], [0, 1, 3, 4], [2, 3], [1]):
+        serial = CountValueRange()
+        for index in chosen:
+            serial.update(blocks[index])
+        for order in (chosen, chosen[::-1], sorted(chosen, key=lambda i: -i % 3)):
+            merged = CountValueRange()
+            for index in order:
+                part = CountValueRange()
+                part.update(blocks[index])
+                merged.merge(part)
+            assert merged == serial, (chosen, order)
+            assert merged.largest == serial.largest
+    # Integral blocks keep the largest of their values, which a fractional
+    # block anywhere among them clears.
+    expected_maximum = int(max(blocks[0].max(), blocks[1].max(), blocks[4].max()))
+    for indices, expected in (
+        ((4, 0, 1), CountValueRange(integral=True, maximum=expected_maximum)),
+        ((4, 2, 0, 1), CountValueRange(integral=False, maximum=0)),
+    ):
+        merged = CountValueRange()
+        for index in indices:
+            part = CountValueRange()
+            part.update(blocks[index])
+            merged.merge(part)
+        assert merged == expected
+
+
+def test_count_scans_of_disjoint_windows_merge_into_the_scan_of_all():
+    from cytearc.utils.count_values import CountScan, merge_count_scans
+
+    def ranges(*blocks: list[float]) -> list[CountValueRange]:
+        result = []
+        for block in blocks:
+            value_range = CountValueRange()
+            value_range.update(np.array(block))
+            result.append(value_range)
+        return result
+
+    later = CountScan(4, 9, ranges([7], [0.5]), np.array([1, 0, 2, 2, 1]), True)
+    earlier = CountScan(0, 4, ranges([3], [2]), np.array([0, 3, 1, 1]), True)
+    merged = merge_count_scans([later, earlier])
+    assert (merged.start, merged.stop) == (0, 9)
+    assert merged.valueRanges == [
+        CountValueRange(integral=True, maximum=7),
+        CountValueRange(integral=False, maximum=0),
+    ]
+    np.testing.assert_array_equal(merged.rowNonzeros, [0, 3, 1, 1, 1, 0, 2, 2, 1])
+    assert merged.canonical is True
+    # One window out of canonical order clears the record of all; windows of
+    # a sparse matrix count no rows.
+    sparse = merge_count_scans(
+        [
+            CountScan(0, 2, ranges([1]), None, True),
+            CountScan(2, 3, ranges([1]), None, False),
+        ]
+    )
+    assert sparse.rowNonzeros is None and sparse.canonical is False
+    with pytest.raises(ValueError, match="0:4 is followed by 5:9"):
+        merge_count_scans([earlier, CountScan(5, 9, ranges([1], [1]))])
+    with pytest.raises(ValueError, match="ranges of different groups"):
+        merge_count_scans([earlier, CountScan(4, 9, ranges([1]))])
+
+
+def test_value_windows_split_vectors_into_windows_of_about_equal_values():
+    from cytearc.utils.count_values import value_windows
+
+    lengths = np.array([5, 0, 1, 9, 3, 3, 0, 2, 7, 1, 4, 5])
+    pointers = np.concatenate(([0], np.cumsum(lengths)))
+    for parts in range(1, 15):
+        windows = value_windows(pointers, parts)
+        # Whole vectors, one window after another, covering every vector.
+        assert windows[0][0] == 0 and windows[-1][1] == len(lengths)
+        assert all(a < b for a, b in windows)
+        assert all(a[1] == b[0] for a, b in zip(windows, windows[1:]))
+        assert len(windows) <= min(parts, len(lengths))
+    # Each window ends at the first vector boundary at or past its share of
+    # the 40 values, 10, 20 and 30: the windows hold 15, 6, 9 and 10 values.
+    assert value_windows(pointers, 4) == [(0, 4), (4, 6), (6, 9), (9, 12)]
+    # Pointers into a slice of the values split at its own half, value 114.
+    assert value_windows(pointers[3:9] + 100, 2) == [(0, 1), (1, 5)]
+    # One vector holding every value cannot be split.
+    assert value_windows(np.array([0, 0, 50, 50]), 3) == [(0, 2), (2, 3)]
+    assert value_windows(np.array([0, 4]), 3) == [(0, 1)]
+    assert value_windows(np.array([0]), 2) == []
+
+
+def test_scan_processes_follow_the_size_the_budget_and_the_longest_vector():
+    from cytearc.utils.count_values import scan_processes
+
+    threshold = count_values._SCAN_PROCESS_VALUES
+    window_bytes = _PER_VALUE * count_values._SCAN_WINDOW_VALUES
+    roomy = 64 * window_bytes
+    assert scan_processes(threshold - 1, 10, roomy, 8) == 1
+    assert scan_processes(threshold, 10, roomy, 1) == 1
+    assert scan_processes(threshold, 10, roomy, 8) == 8
+    # Each process needs room for a whole window, and for the longest vector
+    # when it holds more values than a window.
+    assert scan_processes(threshold, 10, 3 * window_bytes, 8) == 3
+    assert scan_processes(threshold, 10, 3 * window_bytes - 1, 8) == 2
+    longest = 4 * count_values._SCAN_WINDOW_VALUES
+    assert scan_processes(threshold, longest, roomy, 32) == 16
+    assert scan_processes(threshold, longest, 2 * window_bytes, 8) == 1
+    assert scan_processes(threshold, 10, 0, 8) == 1
 
 
 def test_dense_range_reads_row_blocks_within_the_budget():

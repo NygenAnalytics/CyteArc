@@ -920,6 +920,7 @@ class H5adToZarr:
                 self.h5ad.count_value_ranges(
                     self.resources.memoryBytes,
                     None if self._projection is None else self._projection[0],
+                    processes=self._value_scan_processes(),
                 ),
                 strict=True,
             )
@@ -1713,6 +1714,18 @@ class H5adToZarr:
         )
         for assay_name, summary in summaries.items():
             finalize_counts(destinations[assay_name], summary=summary)
+
+    def _value_scan_processes(self) -> int:
+        """Return how many processes may scan the values for their range at once.
+
+        Nothing is written while the values are scanned, so every worker may
+        read, at most ``io.readWorkers`` of them. The scan starts fewer when
+        the budget or the size of the matrix calls for fewer.
+        """
+        limit = max(1, int(self.resources.workers))
+        if self.io is not None and self.io.readWorkers is not None:
+            limit = min(limit, max(1, int(self.io.readWorkers)))
+        return limit
 
     def _producer_window_limit(self, shard_rows: int) -> int:
         """Return how many producers may read disjoint row windows.

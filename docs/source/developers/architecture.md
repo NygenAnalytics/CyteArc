@@ -772,6 +772,7 @@ CyteArc validates persisted data and public arguments against the following cont
   Market, CSV, sparse, and Seurat imports read every value and reject them before they create the
   destination. Stores whose counts contain NaN or infinity cannot be subset, merged, or repacked,
   even with `--data-only`; re-import their sources. Negative values stay storable.
+- `H5adToZarr` scans a matrix of about 67 million stored values or more for its value ranges in spawned processes, each over its own rows, or columns of a CSC matrix: as many as the import's workers, at most `io.readWorkers`, and as the budget holds a whole scan window of about 75 MB and the longest row or column in each. `H5adReader.count_value_ranges` takes `processes`, and each window runs `scan_file_window` of `readers/_h5ad_values.py`, which imports only the scan, so the processes start in about half a second. `CountValueRange.merge` combines ranges in any order, and a range keeps no `maximum` once a value is fractional or negative, where it kept the largest value of the blocks read before, so a range does not depend on where the scan's blocks end. The ranges, storage dtypes, the row counts of a dense matrix and the index order of CSR rows are the same for any number of processes.
 - Operations trust that prepared counts and artifacts do not change during a call. Writing to
   prepared data in place is outside the contract and is not detected.
 - Minimum versions rise to scipy 1.15, statsmodels 0.14.5 (earlier releases fail to import

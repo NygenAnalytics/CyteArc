@@ -94,8 +94,9 @@ _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
     CrH5Reader: "435e2965b15010e0d1a41a36dae1c492d24eac90386e3e1f58ea8b705570db7d",
     CrDirReader: "47ae6207108e6433f78e3214a0b38c11cadf5cf2d6a79eb218949d6137311bef",
     # H5adReader gained the keyword-only duplicate_cell_ids="error", and its
-    # embedding roles gained "coordinates".
-    H5adReader: "216ef56b5e006545a348a90b7fde68e51adb532cca98996f85a2fe578dac2a25",
+    # embedding roles gained "coordinates". count_value_ranges gained the
+    # keyword-only processes: int = 1.
+    H5adReader: "b5536d4b713e825c92aea4059bb7eec926798552cdc27634e9462b5b056a98ba",
     CSVReader: "8aa6c17c876afb62765584fc7ff64d2838c66ef53095da10d7198ca60ab83851",
     MtxReader: "b0ce7fc6984e0b49abd3e1e3d65ae97194af7b7de083b1d0ea0496735a8c5dd0",
     SeuratReader: "68678f67361080e8121eaae116ace832c1e0defc73ca36e3e3aa02d4d96718e6",
