@@ -11,7 +11,8 @@ import hashlib
 import http.client
 import urllib.error
 import urllib.request
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +93,33 @@ def download_or_skip(url: str, path: Path, *, git_blob: str | None = None) -> Pa
         partial.replace(path)
         return path
     pytest.skip(f"{NETWORK_SKIP} {url}: {failure}")
+
+
+@contextmanager
+def hub_or_skip(what: str) -> Iterator[None]:
+    """Skip a test marked integration when the Hugging Face host cannot serve ``what``.
+
+    A refused connection, a failed name lookup, a timeout, offline mode, a
+    Xet transfer that fails, and the statuses 403, 408, 429 and every 5xx
+    skip the test, with a reason that names ``what``. Any other error fails
+    it: a failed assertion, a 404 for a bucket or file that moved, and the
+    checks that ``cytearc.datasets`` makes of what it downloaded.
+    """
+    import httpx2
+    from huggingface_hub.errors import (
+        HfHubHTTPError,
+        OfflineModeIsEnabled,
+        XetDownloadError,
+    )
+
+    try:
+        yield
+    except HfHubHTTPError as error:
+        if not _transient(error.response.status_code):
+            raise
+        pytest.skip(f"{NETWORK_SKIP} {what}: {error}")
+    except (httpx2.TransportError, OfflineModeIsEnabled, XetDownloadError) as error:
+        pytest.skip(f"{NETWORK_SKIP} {what}: {error}")
 
 
 def network_skips(reports: Iterable[Any]) -> list[tuple[str, str]]:

@@ -4,6 +4,7 @@ import gzip
 import http.client
 import os
 import re
+import socket
 import subprocess
 import sys
 import textwrap
@@ -17,6 +18,7 @@ from tests.network_helpers import (
     NETWORK_SKIP,
     download_or_skip,
     git_blob_sha1,
+    hub_or_skip,
     network_skips,
     pytest_terminal_summary,
 )
@@ -269,3 +271,99 @@ def test_a_run_ends_naming_each_test_that_skipped_for_the_network(tmp_path) -> N
     summary = run.stdout[run.stdout.index("tests skipped for the network") :]
     assert "test_downloads.py::test_unreachable: " + NETWORK_SKIP in summary
     assert "test_skipped_otherwise" not in summary
+
+
+def _hub_status(status: int) -> Exception:
+    """The error that the Hugging Face client raises for an HTTP ``status``."""
+    import httpx2
+    from huggingface_hub.errors import HfHubHTTPError
+
+    request = httpx2.Request("GET", "https://huggingface.co/api/buckets/Nygen/cytebase")
+    return HfHubHTTPError(
+        f"{status} for the bucket", response=httpx2.Response(status, request=request)
+    )
+
+
+def _unserved() -> list[Exception]:
+    import httpx2
+    from huggingface_hub.errors import OfflineModeIsEnabled, XetDownloadError
+
+    return [
+        httpx2.ConnectError("[Errno 111] Connection refused"),
+        httpx2.ConnectError("[Errno -3] Temporary failure in name resolution"),
+        httpx2.ReadTimeout("The read operation timed out"),
+        OfflineModeIsEnabled("Cannot reach the bucket: offline mode is enabled"),
+        XetDownloadError("The transfer of data.zarr.tar.gz failed"),
+        _hub_status(429),
+        _hub_status(503),
+    ]
+
+
+@pytest.mark.parametrize("index", range(7))
+def test_the_hub_skips_a_test_when_it_cannot_serve_it(index: int) -> None:
+    error = _unserved()[index]
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        with hub_or_skip("the catalog of the bucket"):
+            raise error
+    assert str(skipped.value) == f"{NETWORK_SKIP} the catalog of the bucket: {error}"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        AssertionError("the catalog lacks tenx_5K_pbmc_rnaseq"),
+        OSError("Downloaded 3 bytes for 'a/data.h5', expected 4"),
+        ValueError("Unsafe tar archive member: ../a"),
+    ],
+    ids=["assertion", "short download", "unsafe archive"],
+)
+def test_the_hub_fails_a_test_for_what_it_served(error: Exception) -> None:
+    with pytest.raises(type(error), match=re.escape(str(error))):
+        with hub_or_skip("the catalog of the bucket"):
+            raise error
+
+
+def test_the_hub_fails_a_test_for_a_bucket_or_file_that_moved() -> None:
+    from huggingface_hub.errors import HfHubHTTPError
+
+    with pytest.raises(HfHubHTTPError, match="404"):
+        with hub_or_skip("the catalog of the bucket"):
+            raise _hub_status(404)
+
+
+def test_the_live_dataset_tests_skip_when_the_hub_is_unreachable() -> None:
+    # A port that nothing listens on refuses the connection at once, so the
+    # live tests meet an unreachable host without leaving the machine.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = {**os.environ, "HF_ENDPOINT": f"http://127.0.0.1:{port}"}
+    env.pop("HF_HUB_OFFLINE", None)
+    root = Path(__file__).resolve().parents[1]
+    run = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-n",
+            "0",
+            "-p",
+            "no:cacheprovider",
+            "-m",
+            "integration",
+            "tests/test_datasets.py",
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert re.search(r"\b2 skipped\b", run.stdout), run.stdout
+    summary = run.stdout[run.stdout.index("tests skipped for the network") :]
+    for name in (
+        "test_live_bucket_catalog_is_public",
+        "test_live_zarr_archive_download",
+    ):
+        assert f"tests/test_datasets.py::{name}: {NETWORK_SKIP}" in summary
