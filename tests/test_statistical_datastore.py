@@ -14,6 +14,7 @@ from cytearc.features.statistical import (
     WELCH_COLUMNS,
 )
 from cytearc.plotting import CellField, FeatureRef, NormalizationSpec, StudyDesign
+from cytearc.utils.logging import collect_warnings
 
 pytestmark = pytest.mark.filterwarnings("ignore:Cell-level statistical testing")
 
@@ -195,6 +196,30 @@ def test_run_statistical_testing_reuses_artifact(datastore_ephemeral):
     assert first.artifact is not None
     assert second.artifact == first.artifact
     assert ds.compare.load_tests(first.artifact).artifact == first.artifact
+
+
+def test_cell_level_tests_warn_when_computed_and_when_reused(datastore_ephemeral):
+    ds = datastore_ephemeral
+    _insert_group_columns(ds)
+    grouping = _active_metadata_grouping(ds, "stat_group2")
+    results = []
+    for _ in range(2):
+        with collect_warnings() as messages:
+            results.append(ds.compare.test(["MALAT1"], **grouping))
+        # One warning, on the call that computes the result and on the call
+        # that reuses it.
+        assert len(messages) == 1
+        assert messages[0].startswith(
+            "Cell-level statistical testing treats each cell as an independent "
+            "observation."
+        )
+    assert results[1].artifact == results[0].artifact
+    # Samples aggregate the cells, so neither call warns.
+    for _ in range(2):
+        with collect_warnings() as messages:
+            sampled = ds.compare.test(["MALAT1"], sample_by="stat_sample", **grouping)
+        assert messages == []
+    assert sampled.artifact != results[0].artifact
 
 
 def test_statistical_value_identity_changes_after_raw_mutation(datastore_ephemeral):

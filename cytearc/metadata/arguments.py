@@ -846,6 +846,11 @@ class GenotypeCloneArguments(OperationArguments):
         "cellsInSmallClones",
         "dropoutProbability",
         "errorProbability",
+        # The likelihood's searches, one per within group, that stopped
+        # splitting at the most clones a fit holds, and the cells they fitted;
+        # None for the exact rule.
+        "cappedSearches",
+        "cellsInCappedSearches",
     )
     call: ClassVar[str | None] = "ds.variants.genotype_clones"
 

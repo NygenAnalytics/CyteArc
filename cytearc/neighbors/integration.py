@@ -7,7 +7,6 @@ from scipy.sparse import coo_matrix
 
 from ..utils.arguments import bool_argument, integer_argument
 from ..utils.compute import process_thread_limit
-from ..utils.logging import logger
 from ..utils.numba import njit, numba_threads
 from ..utils.progress import iter_progress
 
@@ -908,18 +907,9 @@ def _wnn_integration_many(
         )
         validated_embeddings.append(_validate_embedding(name, embedding, n_cells))
 
-    neighbor_counts = [indices.shape[1] for indices in validated_indices]
-    nk = min(neighbor_counts)
-    if len(set(neighbor_counts)) != 1:
-        counts = ", ".join(
-            f"{name}: {count}"
-            for name, count in zip(names, neighbor_counts, strict=True)
-        )
-        logger.warning(
-            f"WNN graphs have different neighbor counts ({counts}). "
-            f"The integrated graph will retain {nk} "
-            "neighbors per cell."
-        )
+    # Sources of different neighbor counts give a graph of the smallest; the
+    # integration operation warns of them before it reuses or computes it.
+    nk = min(indices.shape[1] for indices in validated_indices)
 
     inverse_norms: list[np.ndarray | None] = (
         [_inverse_row_norms(embedding) for embedding in validated_embeddings]

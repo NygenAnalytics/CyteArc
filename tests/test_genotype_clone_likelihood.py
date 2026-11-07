@@ -8,13 +8,19 @@ first, which the code under test never computes.
 """
 
 import warnings
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 from scipy.sparse.csgraph import minimum_spanning_tree
 from sklearn.metrics import adjusted_rand_score
 
+from cytearc import DiagnosticWarning
+from cytearc.storage.artifacts import artifact_path
+from cytearc.utils.logging import collect_warnings
 from cytearc.utils.memory_budget import MemoryLedger
 from cytearc.variants import genotype_mixture as mixture_module
 from cytearc.variants.genotype_clones import (
@@ -617,6 +623,148 @@ def test_within_groups_are_fitted_apart_with_rates_of_their_own(tmp_path) -> Non
     )
 
 
+def _warned(call: Callable[[], Any]) -> tuple[Any, list[str], list[DiagnosticWarning]]:
+    """Call, and return its result, every warning that CyteArc logged or issued, and its DiagnosticWarnings."""
+    with (
+        collect_warnings() as messages,
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
+        result = call()
+    diagnostic = [
+        item.message for item in caught if isinstance(item.message, DiagnosticWarning)
+    ]
+    return result, messages, diagnostic
+
+
+def test_a_capped_search_warns_when_the_clones_are_called_and_when_reused(
+    tmp_path, monkeypatch
+) -> None:
+    from cytearc.variants import genotype_clones
+
+    # Six clones, of which a fit may hold three.
+    monkeypatch.setattr(genotype_clones, "MAX_CLONES", 3)
+    truth = dropout_truth(n_cells=400, n_sites=16, n_clones=6, dropout=0.1, seed=1)
+    store, _ids, genotypes = _store_of_truth(tmp_path, truth.calls)
+    call = partial(store.variants.genotype_clones, genotypes)
+
+    called, first, first_warned = _warned(call)
+    reused, second, second_warned = _warned(call)
+
+    assert reused == called
+    # Every cell with a call at a site takes part in the one search.
+    fitted = int((truth.calls >= 0).any(axis=1).sum())
+    expected = (
+        f"The search for the clones of {fitted} cells stopped splitting at 3 "
+        "clones, the most that a fit holds, so clones that its score would split "
+        "further may hold several of the cells' clones"
+    )
+    for messages, warned in ((first, first_warned), (second, second_warned)):
+        assert messages == [expected]
+        (warning,) = warned
+        assert str(warning) == expected
+        assert (warning.operation, warning.diagnostic, warning.value) == (
+            "call_genotype_clones",
+            "cappedSearches",
+            1,
+        )
+    diagnostics = store.artifacts.inspect(called).diagnostics
+    assert (diagnostics["cappedSearches"], diagnostics["cellsInCappedSearches"]) == (
+        1,
+        fitted,
+    )
+    assert len(store.clones.load_clones(called).clones) <= 3
+
+
+def test_capped_searches_are_counted_over_the_within_groups(
+    tmp_path, monkeypatch
+) -> None:
+    from cytearc.variants import genotype_clones
+
+    monkeypatch.setattr(genotype_clones, "MAX_CLONES", 3)
+    # Two donors of six clones, whose searches stop at three, and a donor of
+    # one clone, whose search never proposes a third; their cells interleave.
+    truths = [
+        dropout_truth(n_cells=300, n_sites=16, n_clones=6, dropout=0.1, seed=31),
+        dropout_truth(n_cells=300, n_sites=16, n_clones=6, dropout=0.1, seed=32),
+        dropout_truth(n_cells=200, n_sites=16, n_clones=1, dropout=0.1, seed=33),
+    ]
+    order = np.random.default_rng(30).permutation(800)
+    calls = np.vstack([truth.calls for truth in truths])[order]
+    donors = np.repeat(["d1", "d2", "d3"], [300, 300, 200])[order]
+    store, _ids, genotypes = _store_of_truth(tmp_path, calls, donors)
+    call = partial(store.variants.genotype_clones, genotypes, within="donor")
+    fitted = sum(int((truth.calls >= 0).any(axis=1).sum()) for truth in truths[:2])
+    expected = (
+        f"The searches for the clones of 2 within groups, {fitted} cells in all, "
+        "stopped splitting at 3 clones, the most that a fit holds, so clones that "
+        "their scores would split further may hold several of the cells' clones"
+    )
+
+    for _ in range(2):
+        clones, messages, warned = _warned(call)
+        assert messages == [expected]
+        (warning,) = warned
+        assert (warning.diagnostic, warning.value) == ("cappedSearches", 2)
+    diagnostics = store.artifacts.inspect(clones).diagnostics
+    assert (diagnostics["cappedSearches"], diagnostics["cellsInCappedSearches"]) == (
+        2,
+        fitted,
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "expected"), [("likelihood", (0, 0)), ("exact", (None, None))]
+)
+def test_clones_of_searches_below_the_cap_warn_in_neither_call(
+    tmp_path, method, expected
+) -> None:
+    truth = dropout_truth(n_cells=400, n_sites=16, n_clones=6, dropout=0.1, seed=1)
+    store, _ids, genotypes = _store_of_truth(tmp_path, truth.calls)
+    call = partial(store.variants.genotype_clones, genotypes, method=method)
+
+    for _ in range(2):
+        clones, messages, warned = _warned(call)
+        assert (messages, warned) == ([], [])
+    diagnostics = store.artifacts.inspect(clones).diagnostics
+    # The exact rule runs no search.
+    assert (
+        diagnostics["cappedSearches"],
+        diagnostics["cellsInCappedSearches"],
+    ) == expected
+
+
+def test_clones_saved_without_the_capped_search_diagnostics_are_called_anew(
+    tmp_path,
+) -> None:
+    truth = dropout_truth(n_cells=400, n_sites=16, n_clones=6, dropout=0.1, seed=1)
+    store, _ids, genotypes = _store_of_truth(tmp_path, truth.calls)
+    saved = store.variants.genotype_clones(genotypes)
+    group = store.zw[artifact_path(saved)]
+    # As clones saved before the operation counted the capped searches.
+    earlier = {
+        key: value
+        for key, value in group.attrs["diagnostics"].items()
+        if key not in ("cappedSearches", "cellsInCappedSearches")
+    }
+    group.attrs["diagnostics"] = earlier
+    with pytest.raises(ValueError, match="other diagnostics than call_genotype_clones"):
+        store.artifacts.inspect(saved).diagnostics
+
+    called = store.variants.genotype_clones(genotypes)
+
+    assert called != saved
+    assert store.artifacts.inspect(called).diagnostics == {
+        **earlier,
+        "cappedSearches": 0,
+        "cellsInCappedSearches": 0,
+    }
+    np.testing.assert_array_equal(
+        store.artifacts.load(called)["codes"][:],
+        store.artifacts.load(saved)["codes"][:],
+    )
+
+
 @pytest.mark.parametrize("method", ["likelihood", "exact"])
 def test_calls_read_in_bands_at_a_small_budget_give_the_clones_of_one_band(
     tmp_path, monkeypatch, method
@@ -680,8 +828,16 @@ def test_the_search_stops_at_the_most_clones_a_fit_may_hold(monkeypatch) -> None
 
     monkeypatch.setattr(genotype_clones, "MAX_CLONES", 3)
     truth = dropout_truth(n_cells=2_000, n_sites=40, n_clones=8, dropout=0.1, seed=1)
-    called = _call(truth.calls)
+    with collect_warnings() as messages:
+        called = _call(truth.calls)
     assert 1 <= len(called.sizes) <= 3
+    # A direct call records that its search stopped, and warns of it once.
+    assert called.capped
+    assert messages == [
+        "The search for the clones of 2000 cells stopped splitting at 3 clones, "
+        "the most that a fit holds, so clones that its score would split further "
+        "may hold several of the cells' clones"
+    ]
 
 
 def test_proposals_that_no_joint_bound_accepts_end_the_search(monkeypatch) -> None:

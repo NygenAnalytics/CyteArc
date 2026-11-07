@@ -18,6 +18,7 @@ from cytearc.trajectory.fate import (
     compute_fate_probabilities,
 )
 from cytearc.trajectory.results import FateMappingResult
+from cytearc.utils.logging import collect_warnings
 
 from .test_graph_coverage import _memory_graph_store
 from .test_graph_feature_projection import _native_chain
@@ -830,6 +831,29 @@ def test_datastore_fate_mapping_returns_an_artifact_without_metadata_writes():
     assert np.isnan(result.values[5:]).all()
     assert _fate_maps(store) == [ref]
     _assert_cell_metadata_unchanged(store, metadata_before)
+
+
+def test_datastore_fate_mapping_leaves_no_component_without_a_sink_out():
+    # The pseudotime scores one connected component of the graph, and the
+    # fate map's sinks lie in it, so the solve leaves no component out and
+    # gives no warning of one, whether it computes the map or reuses it.
+    scored_store = _scored_y_store(include_disconnected_cells=True)
+    store = scored_store.store
+    refs = []
+    for _ in range(2):
+        with collect_warnings() as messages:
+            refs.append(
+                store.trajectory.fate(
+                    scored_store.pseudotime, scored_store.labels, sinks=["A", "B"]
+                )
+            )
+        assert messages == []
+    assert refs[1] == refs[0]
+    # The other component's two cells were never scored.
+    np.testing.assert_array_equal(
+        store.trajectory.load_fate(refs[0]).valid,
+        store.trajectory.load_pseudotime(scored_store.pseudotime).valid,
+    )
 
 
 @pytest.mark.parametrize(

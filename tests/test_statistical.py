@@ -22,9 +22,11 @@ from cytearc.features.statistical import (
     adjust_pvalues,
     aggregate_samples,
     compare_group_distributions,
+    prepare_group_comparison,
     resolve_group_order,
 )
 from cytearc.metadata.selection import CellField
+from cytearc.utils.logging import collect_warnings
 
 pytestmark = pytest.mark.filterwarnings("ignore:Cell-level statistical testing")
 
@@ -73,6 +75,37 @@ def _dunn_reference(values, groups):
 
 def _seeded_groups(rng, n, n_groups):
     return np.array([f"g{i % n_groups}" for i in range(n)], dtype=object)
+
+
+def test_tests_of_cells_warn_once_for_direct_callers():
+    rng = np.random.default_rng(12)
+    values = rng.poisson(3, 40).astype(float)
+    groups = _seeded_groups(rng, 40, 2)
+    samples = np.array([f"s{i % 8}" for i in range(40)], dtype=object)
+    for call in (
+        lambda: compare_group_distributions(values, groups, test="mann_whitney"),
+        lambda: prepare_group_comparison(groups, test="mann_whitney"),
+    ):
+        with collect_warnings() as messages:
+            call()
+        assert len(messages) == 1
+        assert messages[0].startswith(
+            "Cell-level statistical testing treats each cell as an independent "
+            "observation."
+        )
+    # Samples aggregate the cells, and compare.test prepares its design
+    # without the warning, which it gives before it reuses or computes.
+    for call in (
+        lambda: compare_group_distributions(
+            values, groups, test="mann_whitney", samples=samples
+        ),
+        lambda: prepare_group_comparison(
+            groups, test="mann_whitney", _warn_cell_level=False
+        ),
+    ):
+        with collect_warnings() as messages:
+            call()
+        assert messages == []
 
 
 def test_mann_whitney_matches_scipy_and_marker_ranks():

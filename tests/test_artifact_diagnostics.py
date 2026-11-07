@@ -278,6 +278,8 @@ _OWN_KEYS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
             "cellsInSmallClones",
             "dropoutProbability",
             "errorProbability",
+            "cappedSearches",
+            "cellsInCappedSearches",
         ),
     ),
     "ClonalExpansionArguments": (GROUPING_DIAGNOSTICS, ()),

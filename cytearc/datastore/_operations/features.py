@@ -91,6 +91,7 @@ from ...features.markers.table import (
     rank_marker_tested_groups,
 )
 from ...features.statistical import (
+    CELL_LEVEL_WARNING,
     MANN_WHITNEY_P_VALUE_POLICY,
     GroupComparisonResult,
     StatisticalDesignColumns,
@@ -3403,6 +3404,10 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         raise an error. For nested subjects, pass the subject column as
         ``sample_by`` instead.
 
+        Without ``sample_by``, the tests treat each cell as an independent
+        observation, and a warning says so on every call, whether it computes
+        the result or reuses a saved one.
+
         Results are persisted as immutable artifacts unless ``skip_save`` is
         ``True``. Writing requires ``zarr_mode='r+'``; a matching saved
         result is still reused from a read-only store. Pass
@@ -3578,6 +3583,10 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 )
             return current_value_fingerprints
 
+        if selection.samples is None:
+            # The design alone calls for this warning, so a reused result
+            # gives it as a computed one does.
+            warn(CELL_LEVEL_WARNING)
         planned: Any = None
         if not skip_save:
             arguments = StatisticalTestingArguments(
@@ -3651,7 +3660,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             self._require_writable("run_statistical_testing")
 
         # The design is validated and encoded once, before any value is read,
-        # and then compares each key's values.
+        # and then compares each key's values; its warning was given above.
         design = prepare_group_comparison(
             selection.groups,
             test=effective_method,
@@ -3664,6 +3673,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             expression_cutoff=expression_cutoff,
             group_order=present,
             alternative=alternative,
+            _warn_cell_level=False,
         )
         outcomes: dict[str, GroupComparisonResult] = {}
         computed_value_fingerprints: list[str] = []
