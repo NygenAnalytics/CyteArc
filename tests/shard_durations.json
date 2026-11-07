@@ -273,6 +273,7 @@
   "tests/test_phylogeny_import.py": 20.8,
   "tests/test_pipeline.py": 50.4,
   "tests/test_pipeline_contract_edge_coverage.py": 0.1,
+  "tests/test_pipeline_description.py": 8.0,
   "tests/test_pipeline_ledger.py": 0.5,
   "tests/test_pipeline_observability.py": 94.1,
   "tests/test_pipeline_perturbation.py": 122.5,

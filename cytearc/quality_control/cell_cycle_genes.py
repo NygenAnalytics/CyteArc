@@ -7,6 +7,7 @@ from types import MappingProxyType
 import numpy as np
 
 __all__ = [
+    "GeneMatch",
     "cell_cycle_previous_symbols",
     "g2m_phase_genes",
     "g2m_phase_genes_mouse",
