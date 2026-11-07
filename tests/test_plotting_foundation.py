@@ -831,11 +831,20 @@ def test_resolve_feature_reports_missing_and_ambiguous_names(synthetic_plot_stor
     synthetic_plot_store.RNA = _ArrayAssay(
         synthetic_plot_store.RNA._values, ["GeneA", "GENEA"]
     )
-    # Names match case-insensitively, so both features answer "genea".
+    # Names match case-insensitively, so both features answer "genea", and the
+    # refusal names the IDs that tell them apart.
     with pytest.raises(
-        ValueError, match=r"matches 2 entries in assay 'RNA' at indices \[0, 1\]"
+        ValueError,
+        match=(
+            r"matches 2 entries in assay 'RNA' at indices \[0, 1\], with IDs "
+            r"'feature-0', 'feature-1'\. Pass FeatureRef\(value=<ID>, by='id'\) "
+            r"for one of them, or reduction='mean' or reduction='sum'\.$"
+        ),
     ):
         resolve_feature(synthetic_plot_store, "genea")
+    assert resolve_feature(
+        synthetic_plot_store, splt.FeatureRef("feature-1", by="id")
+    ).indices == (1,)
     pooled = resolve_feature(
         synthetic_plot_store, splt.FeatureRef("genea", reduction="mean")
     )

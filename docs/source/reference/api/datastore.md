@@ -391,19 +391,7 @@ membership = ds.clusters.membership_strength(cluster_ref, graph_ref)
 doublets = ds.qc.doublets(cluster_ref, graph_ref)
 ```
 
-`imputation.compute_imputed` starts with the feature name and aligns its returned array to the cell selection in
-the explicit diffusion-operator lineage. It accepts one name, a sequence of names, a
-one-dimensional string array, or a Series. A name that exactly matches a live cell metadata
-column, including case, diffuses that column; it takes precedence over an assay feature of the same
-name. Other names match assay feature names case-insensitively, and duplicates are averaged.
-Metadata columns need no assay, so `from_assay` is required only for feature names from an
-integrated graph's operator; a native graph's operator uses its own assay. A
-metadata column with a missing value in the operator's cell selection raises `ValueError`, because
-diffusion would spread its stored placeholder to neighbouring cells.
-`imputation.diffusion` raises `MemoryError` before persisting an operator that could not be
-formed or loaded again within the datastore memory budget. `imputation.load_diffusion(ref)` exposes
-the validated sparse operator for direct matrix work. Membership strength and doublet detection consume exact cluster
-and graph refs and return artifacts.
+`imputation.compute_imputed` starts with the features and aligns its returned array to the cell selection in the explicit diffusion-operator lineage. It accepts one name or `FeatureRef`, or a sequence, one-dimensional array, or Series of them. A string that exactly matches a live cell metadata column, including case, diffuses that column; it takes precedence over an assay feature of the same name. Other strings match assay feature names case-insensitively, and a `FeatureRef` finds a feature by name, ID, or index, as plots and `compare.test` find features. A name that several features share raises `ValueError` naming their IDs: `FeatureRef(value=feature_id, by="id")` imputes one of them, and `FeatureRef(value=name, reduction="mean")` their mean. A feature that the assay does not hold raises `KeyError`. Metadata columns need no assay, so `from_assay` is required only for features from an integrated graph's operator; a native graph's operator uses its own assay. A metadata column with a missing value in the operator's cell selection raises `ValueError`, because diffusion would spread its stored placeholder to neighbouring cells. `imputation.diffusion` raises `MemoryError` before persisting an operator that could not be formed or loaded again within the datastore memory budget. `imputation.load_diffusion(ref)` exposes the validated sparse operator for direct matrix work. Membership strength and doublet detection consume exact cluster and graph refs and return artifacts.
 
 `compare.compute_bulk(groups, ...)` accepts a categorical cell artifact or a user-owned metadata column name.
 Artifact inputs derive their cell selection from lineage; `cell_selection=` can restrict that
@@ -627,6 +615,8 @@ than two cells cannot be compared with the rest: `markers.search` skips it with 
 names it, records it in the table's `skipped_groups` metadata, keeps its cells in the rest of every
 other group, and `markers.load` gives it no rows. A clustering without any group of at least two
 cells and at least two other cells raises `ValueError` naming the groups.
+
+Each row of `markers.load` names its feature by `feature_name` and by `feature_id`, the ID that the marker table froze, and gives the feature's index in the assay as `feature_index`. The rows of two features that share a name, such as the two MATR3 genes of the 10x Genomics human reference, `ENSG00000280987` and `ENSG00000015479`, stay apart by their IDs. `markers.export_csv` writes names only.
 
 A marker table of operation revision 1, written before release 1.3.0, records neither
 `neg_log10_p_value` nor `p_value_policy`. `markers.load`, `markers.export_csv`, and

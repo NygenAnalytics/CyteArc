@@ -45,6 +45,7 @@ labels. Docs: <https://docs.nygen.io/CyteArc/tutorials/annotation>, <https://doc
   order (`"2"` before `"10"`). Default filters keep `frac_exp >= 0.2`, `auc >= 0.6` and
   `p_value_adjusted <= 0.05`; `min_score` is `None`. Pass `None` to a filter to drop it, and
   `min_frac_exp=None, min_auc=None, max_p_adj=None` for every gene of every group.
+- Each row holds `feature_name`, `feature_id` (the ID the table froze) and `feature_index`. Two genes can share a name, as `ENSG00000280987` and `ENSG00000015479` share MATR3 in the 10x Genomics human reference, so key rows by `feature_id` when one name may name several genes. `markers.export_csv` writes names only.
 - A label is a hypothesis. It needs named positive markers, low lineage-negative markers and a
   plausible QC and doublet profile. Keep an explicit `unresolved` label instead of forcing a name.
 - Doublet scores rise with RNA content, so plasma cells and other high-RNA types score high as

@@ -14,8 +14,8 @@ from ..metadata.selection import grouping_value_name
 from ..storage.artifacts import ArtifactRef, artifact_path
 from ..storage.selections import read_stored_selection_indices
 from ..storage.types import as_zarr_array, as_zarr_group
-from ._contracts import CategoricalScale, ColorScale, PlotProvenance
-from ._data import _artifact_input, unmeasured_extras
+from ._contracts import CategoricalScale, ColorScale, FeatureRef, PlotProvenance
+from ._data import _artifact_input, shown_feature_rows, unmeasured_extras
 from ._deps import require_matplotlib, require_seaborn
 from ._figure import (
     LegendSpec,
@@ -681,6 +681,9 @@ def _prepare_pseudotime_heatmap(
     feature_labels = np.asarray(loaded.feature_names).astype(str)
     if feature_labels.shape != feature_indices.shape:
         raise ValueError("Frozen feature labels do not align with aggregation rows")
+    feature_ids = np.asarray(loaded.feature_ids).astype(str)
+    if feature_ids.shape != feature_indices.shape:
+        raise ValueError("Frozen feature IDs do not align with aggregation rows")
     order = np.argsort(feature_clusters)
     pseudotime = np.asarray(
         pseudotime_result.values[pseudotime_result.valid],
@@ -693,6 +696,7 @@ def _prepare_pseudotime_heatmap(
         "feature_indices": feature_indices[order],
         "feature_clusters": feature_clusters[order],
         "feature_labels": feature_labels[order],
+        "feature_ids": feature_ids[order],
         "pseudotime": pseudotime,
         "assay": loaded.assay,
         "cell_selection": loaded.cell_selection,
@@ -707,7 +711,7 @@ def pseudotime_heatmap(
     store: Any,
     *,
     aggregation: ArtifactRef,
-    show_features: list[str] | None = None,
+    show_features: list[str | FeatureRef] | None = None,
     feature_order: Sequence[str] | None = None,
     feature_cluster_order: Sequence[Any] | None = None,
     figsize: tuple[float, float] = (5, 10),
@@ -727,7 +731,16 @@ def pseudotime_heatmap(
     show_legend: bool = True,
     show: bool = True,
 ) -> PlotResult:
-    """Plot binned feature dynamics ordered by pseudotime."""
+    """Plot binned feature dynamics ordered by pseudotime.
+
+    ``show_features`` labels rows of the heatmap. A name matches the retained
+    features case-insensitively and keeps the caller's spelling, and a
+    ``FeatureRef`` finds a feature by name, ID, or index and shows its
+    ``label``, or its name, followed by its ID where another row has that
+    name. A name that several retained features share raises ``ValueError``
+    naming their IDs; pick one with ``FeatureRef(value=feature_id,
+    by="id")``. A feature that the aggregation did not retain is skipped.
+    """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
     resolved_color_scale = color_scale or ColorScale(
@@ -757,7 +770,6 @@ def pseudotime_heatmap(
     feature_clusters = np.asarray(prepared["feature_clusters"])
     feature_labels = np.asarray(prepared["feature_labels"])
     pseudotime = np.asarray(prepared["pseudotime"], dtype=float)
-    show_features = [] if show_features is None else list(show_features)
     resolved_heatmap_cmap = resolved_color_scale.cmap or heatmap_cmap or "coolwarm"
     pseudotime_color_scale = pseudotime_scale or ColorScale(
         cmap=pseudotime_cmap or "viridis",
@@ -826,6 +838,14 @@ def pseudotime_heatmap(
     matrix = matrix[row_order]
     feature_clusters = feature_clusters[row_order]
     feature_labels = feature_labels[row_order]
+    feature_indices = np.asarray(prepared["feature_indices"])[row_order]
+    show_features, label_rows, shown_labels = shown_feature_rows(
+        show_features,
+        assay=cast(str, prepared["assay"]),
+        indices=feature_indices,
+        ids=np.asarray(prepared["feature_ids"])[row_order],
+        names=feature_labels,
+    )
     cluster_codes = {cluster: index for index, cluster in enumerate(cluster_order)}
     encoded_clusters = np.asarray(
         [cluster_codes[value] for value in feature_clusters],
@@ -903,18 +923,10 @@ def pseudotime_heatmap(
         )
         heatmap_ax.set_xticks([])
         heatmap_ax.set_yticks([])
-        if show_features:
-            row_index = {
-                str(label).lower(): index for index, label in enumerate(feature_labels)
-            }
-            visible_features = [
-                feature for feature in show_features if feature.lower() in row_index
-            ]
-            heatmap_ax.set_yticks(
-                [row_index[feature.lower()] for feature in visible_features]
-            )
+        if shown_labels:
+            heatmap_ax.set_yticks(label_rows)
             heatmap_ax.set_yticklabels(
-                visible_features,
+                shown_labels,
                 fontsize=feature_label_fontsize,
             )
         heatmap_ax.set_title(
@@ -980,7 +992,6 @@ def pseudotime_heatmap(
         )
         apply_figure_chrome(fig, theme)
 
-    feature_indices = np.asarray(prepared["feature_indices"])[row_order]
     feature_table = pd.DataFrame(
         {
             "feature_index": feature_indices,

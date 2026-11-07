@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -19,7 +20,7 @@ from cytearc.metadata.artifacts import (
     validate_display_metadata,
     write_cell_data_artifact,
 )
-from cytearc.metadata.selection import resolve_cell_aligned_artifact
+from cytearc.metadata.selection import FeatureRef, resolve_cell_aligned_artifact
 from cytearc.quality_control.cell_cycle_genes import g2m_phase_genes, s_phase_genes
 from cytearc.quality_control.hto import UnseparatedHto
 from cytearc.storage.artifacts import (
@@ -34,6 +35,7 @@ from cytearc.storage.selections import (
     resolve_generated_selection_artifact,
 )
 from tests.fixtures_datastore import build_neighbourhood_graph
+from tests.storage_helpers import write_count_store
 
 
 def _ensure_graph(datastore) -> ArtifactRef:
@@ -806,9 +808,13 @@ def test_imputation_batches_preserve_requested_columns_and_stream_rows(
     monkeypatch.setattr(store, "_load_diffusion_operator_with_lineage", load)
     monkeypatch.setattr(store.cells, "_column_names", columns)
     monkeypatch.setattr(store.RNA, "normed", normed)
-    actual = store.imputation.compute_imputed(
-        [metadata_name, "DUPLICATE", "duplicate"], diffusion
-    )
+    # A name that two features share imputes their mean only on request,
+    # matched case-insensitively.
+    mean = [
+        FeatureRef(value="DUPLICATE", reduction="mean"),
+        FeatureRef(value="duplicate", reduction="mean"),
+    ]
+    actual = store.imputation.compute_imputed([metadata_name, *mean], diffusion)
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
     assert calls == [diffusion]
     assert len(column_scans) <= 2
@@ -822,11 +828,16 @@ def test_imputation_batches_preserve_requested_columns_and_stream_rows(
     for invalid in ([], [""], [None]):
         with pytest.raises(ValueError, match="non-empty strings"):
             store.imputation.compute_imputed(invalid, diffusion)
-    with pytest.raises(ValueError, match="not found"):
+    with pytest.raises(KeyError, match="not found"):
         store.imputation.compute_imputed(["not_a_gene"], diffusion)
+    ids = store.RNA.feats.fetch_all("ids")[genes[:2]]
+    with pytest.raises(
+        ValueError, match=f"with IDs '{ids[0]}', '{ids[1]}'. Pass FeatureRef"
+    ):
+        store.imputation.compute_imputed([metadata_name, "duplicate"], diffusion)
     monkeypatch.setattr(store, "memoryBytes", 1)
     with pytest.raises(MemoryError, match="fewer features"):
-        store.imputation.compute_imputed([metadata_name, "duplicate"], diffusion)
+        store.imputation.compute_imputed([metadata_name, mean[1]], diffusion)
 
 
 def test_get_imputed_accepts_array_like_feature_names(graph_store) -> None:
@@ -857,6 +868,181 @@ def test_get_imputed_accepts_array_like_feature_names(graph_store) -> None:
         datastore.imputation.compute_imputed(np.asarray([], dtype=str), diffusion)
     with pytest.raises(ValueError, match="non-empty strings"):
         datastore.imputation.compute_imputed(pd.Series([names[0], 3]), diffusion)
+
+
+# Two features of the synthetic store share the name MATR3, as ENSG00000280987
+# and ENSG00000015479 do in the 10x Genomics human reference: the feature at
+# index 2 marks the first half of the cells, and the one at index 7 the second.
+_SHARED_NAME_INDICES = (2, 7)
+
+
+@pytest.fixture(scope="module")
+def shared_name_store(tmp_path_factory) -> SimpleNamespace:
+    """A store with two features named MATR3, its diffusion operator, and the
+    imputation of any per-cell values, derived from its counts."""
+    rng = np.random.default_rng(198)
+    n_cells, n_features = 60, 10
+    counts = rng.poisson(1.0, size=(n_cells, n_features))
+    first_half = np.arange(n_cells) < n_cells // 2
+    counts[first_half, :4] += rng.poisson(8.0, size=(n_cells // 2, 4))
+    counts[~first_half, 5:9] += rng.poisson(8.0, size=(n_cells // 2, 4))
+    ids = np.array([f"ENSG{index:011d}" for index in range(n_features)])
+    names = np.array([f"GENE{index}" for index in range(n_features)], dtype=object)
+    names[list(_SHARED_NAME_INDICES)] = "MATR3"
+    path = str(tmp_path_factory.mktemp("shared_names") / "store.zarr")
+    write_count_store(path, {"RNA": counts}, "uint32", feature_ids={"RNA": ids})
+    store = DataStore(path, default_assay="RNA", min_features_per_cell=0, nthreads=1)
+    store.RNA.feats.insert("names", names, overwrite=True)
+    depth = counts.sum(axis=1).astype(np.float64)
+    store.cells.insert("depth", depth)
+    cells = store.snapshot_cell_selection("I")
+    graph = build_neighbourhood_graph(
+        store,
+        from_assay="RNA",
+        cell_selection=cells,
+        features=store.features.universe(from_assay="RNA"),
+        dims=3,
+        k=5,
+        local_cache=False,
+    )
+    diffusion = store.imputation.diffusion(graph, t=2)
+    operator = store.imputation.load_diffusion(diffusion).tocsr()
+    # The graph holds every cell, in store order.
+    assert operator.shape == (n_cells, n_cells)
+    return SimpleNamespace(
+        store=store,
+        diffusion=diffusion,
+        ids=ids,
+        depth=depth,
+        # The library-size values that RNA imputation diffuses.
+        normalized=store.RNA.sf * counts / depth[:, None],
+        imputed=lambda values: operator @ values,
+    )
+
+
+def test_imputation_finds_one_feature_of_a_shared_name(shared_name_store) -> None:
+    data = shared_name_store
+    store, diffusion = data.store, data.diffusion
+    first, second = _SHARED_NAME_INDICES
+
+    by_first_id = store.imputation.compute_imputed(
+        FeatureRef(value=data.ids[first], by="id"), diffusion
+    )
+    by_second_id = store.imputation.compute_imputed(
+        FeatureRef(value=data.ids[second], by="id"), diffusion
+    )
+
+    np.testing.assert_allclose(
+        by_first_id, data.imputed(data.normalized[:, first]), rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        by_second_id, data.imputed(data.normalized[:, second]), rtol=1e-12
+    )
+    # Each feature marks its own half of the cells, and so does its imputation.
+    half = len(by_first_id) // 2
+    assert by_first_id[:half].mean() > 2 * by_first_id[half:].mean()
+    assert by_second_id[half:].mean() > 2 * by_second_id[:half].mean()
+    # An index finds the feature as its ID does.
+    np.testing.assert_array_equal(
+        store.imputation.compute_imputed(
+            FeatureRef(value=second, by="index"), diffusion
+        ),
+        by_second_id,
+    )
+    # Several requests keep their order, names and metadata columns included.
+    together = store.imputation.compute_imputed(
+        [
+            FeatureRef(value=data.ids[second], by="id"),
+            "gene0",
+            "depth",
+            FeatureRef(value=data.ids[first], by="id", assay="RNA"),
+        ],
+        diffusion,
+    )
+    np.testing.assert_allclose(
+        together,
+        np.column_stack(
+            [
+                by_second_id,
+                data.imputed(data.normalized[:, 0]),
+                data.imputed(data.depth),
+                by_first_id,
+            ]
+        ),
+        rtol=1e-12,
+    )
+
+
+def test_imputation_refuses_a_shared_name_without_a_reduction(
+    shared_name_store,
+) -> None:
+    data = shared_name_store
+    store, diffusion = data.store, data.diffusion
+    first, second = _SHARED_NAME_INDICES
+
+    for request in ("MATR3", ["GENE0", FeatureRef(value="matr3")]):
+        with pytest.raises(
+            ValueError,
+            match=(
+                rf"at indices \[2, 7\], with IDs '{data.ids[first]}', "
+                rf"'{data.ids[second]}'\. Pass FeatureRef\(value=<ID>, by='id'\)"
+            ),
+        ):
+            store.imputation.compute_imputed(request, diffusion)
+    # A reduction asks for the features' mean or sum.
+    pair = data.normalized[:, list(_SHARED_NAME_INDICES)]
+    np.testing.assert_allclose(
+        store.imputation.compute_imputed(
+            FeatureRef(value="matr3", reduction="mean"), diffusion
+        ),
+        data.imputed(pair.mean(axis=1)),
+        rtol=1e-12,
+    )
+    np.testing.assert_allclose(
+        store.imputation.compute_imputed(
+            FeatureRef(value="MATR3", reduction="sum"), diffusion
+        ),
+        data.imputed(pair.sum(axis=1)),
+        rtol=1e-12,
+    )
+
+
+def test_imputation_finds_ids_and_indices_only_through_feature_refs(
+    shared_name_store,
+) -> None:
+    data = shared_name_store
+    store, diffusion = data.store, data.diffusion
+    feature_id = str(data.ids[2])
+
+    # A string names a feature or a metadata column, never an ID.
+    with pytest.raises(
+        KeyError, match=f"Feature '{feature_id}' not found in assay 'RNA' by 'name'"
+    ):
+        store.imputation.compute_imputed(feature_id, diffusion)
+    with pytest.raises(
+        KeyError, match="Feature 'ENSG99999999999' not found in assay 'RNA' by 'id'"
+    ):
+        store.imputation.compute_imputed(
+            FeatureRef(value="ENSG99999999999", by="id"), diffusion
+        )
+    with pytest.raises(KeyError, match="Feature index 10 out of range"):
+        store.imputation.compute_imputed(FeatureRef(value=10, by="index"), diffusion)
+    with pytest.raises(
+        ValueError,
+        match=(
+            f"FeatureRef '{feature_id}' names assay 'ADT', but the features are "
+            "imputed from assay 'RNA'"
+        ),
+    ):
+        store.imputation.compute_imputed(
+            FeatureRef(value=feature_id, by="id", assay="ADT"), diffusion
+        )
+    with pytest.raises(TypeError, match="a string, a FeatureRef, or a sequence of"):
+        store.imputation.compute_imputed(2, diffusion)
+    with pytest.raises(ValueError, match="non-empty strings or FeatureRef values"):
+        store.imputation.compute_imputed(
+            [FeatureRef(value=2, by="index"), 2], diffusion
+        )
 
 
 def test_explicit_graph_consumers_ignore_later_live_selection_changes(

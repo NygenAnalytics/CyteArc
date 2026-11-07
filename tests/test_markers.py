@@ -3289,7 +3289,9 @@ def test_marker_tables_keep_infinite_and_undefined_fold_changes(
     # No cell expresses RNA0, and only group g0 expresses RNA1.
     assert np.isnan(fold_change.loc["RNA0"]).all()
     assert fold_change.loc["RNA1"].to_dict() == {"g0": np.inf, "g1": 0.0, "g2": 0.0}
-    statistics = markers.drop(columns=["group_id", "feature_name", "fold_change"])
+    statistics = markers.drop(
+        columns=["group_id", "feature_name", "feature_id", "fold_change"]
+    )
     assert np.isfinite(statistics.to_numpy(dtype=np.float64)).all()
     assert not (markers["fold_change"] < 0).any()
     # Only group g2 expresses RNA9 as well; every other ratio is defined.

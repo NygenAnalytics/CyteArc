@@ -2458,8 +2458,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 name and index.
 
         Returns:
-            Pandas dataframe with marker statistics and a string ``group_id``
-            column. ``fold_change`` may be +inf or NaN, and the
+            Pandas dataframe with a string ``group_id`` column, each row's
+            ``feature_name``, ``feature_id``, and ``feature_index``, and its
+            marker statistics. ``feature_id`` is the ID that the marker table
+            froze, which tells apart features that share a name.
+            ``fold_change`` may be +inf or NaN, and the
             ``neg_log10_p_value`` of a table of revision 1 may be +inf.
 
         Raises:
@@ -2494,13 +2497,22 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
     ) -> dict[str, pd.DataFrame]:
         """Load, sort, and filter each requested marker group in natural label order.
 
-        The slot's metadata and feature index are read once for every group.
+        The slot's metadata, feature index, and frozen feature identities are
+        read once for every group. Each table holds the ID of each row's
+        feature in ``feature_id``, after ``feature_name``.
         """
         marker_sort_key(sort_by)
         _assay, g = self._resolve_marker_group(marker)
         feature_names = np.asarray(
             as_zarr_array(g["feature_names"], name="feature_names")[:]
         ).astype(str)
+        feature_ids = np.asarray(
+            as_zarr_array(g["feature_ids"], name="feature_ids")[:]
+        ).astype(str)
+        if feature_ids.shape != feature_names.shape:
+            raise ValueError(
+                "Marker artifact feature IDs do not align with its feature names"
+            )
         # The canonical reader rejects statistics that break their contract,
         # tables without the fold-change policy, and layouts of no revision.
         slot = MarkerSlot.read(g, len(feature_names))
@@ -2534,6 +2546,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         tables: dict[str, pd.DataFrame] = {}
         for gid in gids:
             frame = slot.table(gid, feature_names, sort_by=sort_by)
+            frame.insert(
+                list(frame.columns).index("feature_name") + 1,
+                "feature_id",
+                feature_ids[frame["feature_index"].to_numpy()],
+            )
             tables[gid] = frame.loc[filters.keep(frame)].reset_index(drop=True)
         return tables
 
