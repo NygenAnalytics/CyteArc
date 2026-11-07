@@ -572,7 +572,9 @@ def test_hto_identity_is_artifact_backed(
         artifact_values(artifact_group(datastore.zw, ref), "values"),
         feature_ids[raw.argmax(axis=1)],
     )
-    datastore.memoryBytes = 1
+    # A reused call reads the hashtag IDs, which identify the artifact, but
+    # neither clusters nor saves, so a budget that holds the IDs returns it.
+    datastore.memoryBytes = _hto_ids_budget(datastore, selection, random_seed=5)
     assert (
         datastore.qc.hto_demultiplexing(
             selection,
@@ -600,16 +602,91 @@ def test_hto_demultiplexing_rejects_non_hto_assay(datastore_ephemeral) -> None:
     assert datastore.artifacts.list(kind="hto_identity") == []
 
 
+def _hto_ids_budget(datastore, selection, **options) -> int:
+    """The budget that HTO demultiplexing names for reading its hashtag IDs."""
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    budget = datastore.memoryBytes
+    datastore.memoryBytes = 1
+    try:
+        with pytest.raises(MemoryBudgetError) as refused:
+            datastore.qc.hto_demultiplexing(selection, from_assay="assay2", **options)
+    finally:
+        datastore.memoryBytes = budget
+    assert refused.value.item == "the hashtag IDs"
+    return refused.value.needed_bytes
+
+
 def test_hto_demultiplexing_respects_datastore_memory_budget(
     datastore_ephemeral,
 ) -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    from tests.storage_helpers import rechunk_feature_tables
+
     datastore = datastore_ephemeral
     selection = datastore.snapshot_cell_selection()
+    # In chunks of their rows, as a new store holds them, the hashtag IDs read
+    # little, and the clustering is the step that the budget binds.
+    rechunk_feature_tables(datastore.zarr_loc)
     datastore = _declare_hto(datastore)
     datastore.memoryBytes = 1
 
+    # The hashtag IDs are read first, in the one refusal form.
+    with pytest.raises(MemoryBudgetError, match="holds about .* for the hashtag IDs"):
+        datastore.qc.hto_demultiplexing(selection, from_assay="assay2")
+    # At the budget that reads them, the clustering refuses in its own words.
+    datastore.memoryBytes = _hto_ids_budget(datastore, selection)
     with pytest.raises(MemoryError, match="exceeds the datastore memory budget"):
         datastore.qc.hto_demultiplexing(selection, from_assay="assay2")
+    assert datastore.artifacts.list(kind="hto_identity") == []
+
+
+def test_hto_demultiplexing_charges_its_hashtag_ids_before_writing(
+    datastore_ephemeral,
+) -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    from tests.storage_helpers import rechunk_column
+
+    datastore = datastore_ephemeral
+    selection = datastore.snapshot_cell_selection()
+    # As in a store written before feature columns were chunked by their rows,
+    # the ten hashtag IDs sit in one chunk of 100,000 rows, which a read
+    # decodes whole.
+    rechunk_column(
+        zarr.open_group(datastore.zarr_loc, mode="r+")["assay2/featureData"], "ids"
+    )
+    datastore = _declare_hto(datastore)
+    unbudgeted = datastore.memoryBytes
+    assert datastore.zw["assay2/featureData/ids"].chunks == (100_000,)
+    width = datastore.zw["assay2/featureData/ids"].dtype.itemsize
+    refusals: list[MemoryBudgetError] = []
+    budget = 1
+    while True:
+        datastore.memoryBytes = budget
+        try:
+            ref = datastore.qc.hto_demultiplexing(selection, from_assay="assay2")
+        except MemoryBudgetError as refusal:
+            refusals.append(refusal)
+            # Nothing is written before the last step passes.
+            assert datastore.artifacts.list(kind="hto_identity") == []
+            assert refusal.needed_bytes > budget
+            budget = refusal.needed_bytes
+            continue
+        break
+    # The first refusal is the read of the IDs, charged at the whole chunk it
+    # decodes, which outweighs the clustering of these 10 hashtags.
+    assert refusals[0].item == "the hashtag IDs"
+    assert refusals[0].needed_bytes >= 100_000 * width
+    datastore.memoryBytes = unbudgeted
+    again = datastore.qc.hto_demultiplexing(
+        selection, from_assay="assay2", invalidate_cache=True
+    )
+    np.testing.assert_array_equal(
+        artifact_values(artifact_group(datastore.zw, ref), "values"),
+        artifact_values(artifact_group(datastore.zw, again), "values"),
+    )
 
 
 def test_cell_cycle_scoring_returns_one_artifact_without_writing_columns(
@@ -949,8 +1026,11 @@ def test_hto_demultiplexing_names_the_budget_of_its_clustering(
 ) -> None:
     from cytearc.utils.memory_budget import MemoryBudgetError
 
+    from tests.storage_helpers import rechunk_feature_tables
+
     datastore = datastore_ephemeral
     selection = datastore.snapshot_cell_selection()
+    rechunk_feature_tables(datastore.zarr_loc)
     datastore = _declare_hto(datastore)
     item = "the whole-matrix clustering of HTO demultiplexing"
 
@@ -962,9 +1042,15 @@ def test_hto_demultiplexing_names_the_budget_of_its_clustering(
             return refusal
         return None
 
-    refusal = demultiplex(1)
+    # Follow the refusals from 1 byte to the clustering's: the hashtag IDs
+    # are read and charged before it.
+    budget = 1
+    refusal = demultiplex(budget)
+    while refusal is not None and refusal.item != item:
+        budget = refusal.needed_bytes
+        refusal = demultiplex(budget)
     assert refusal is not None
-    assert (refusal.budget_bytes, refusal.item) == (1, item)
+    assert (refusal.budget_bytes, refusal.item) == (budget, item)
     assert str(refusal).endswith(f"It needs at least {refusal.needed_bytes} bytes.")
     below = demultiplex(refusal.needed_bytes - 1)
     assert below is not None

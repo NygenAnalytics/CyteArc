@@ -124,8 +124,8 @@ def _copy_metadata_array(
     that ``src`` carries, such as the role and assay of a membership column,
     are part of the copy's first metadata write. ``chunk_rows`` gives the
     copy's chunks from its rows and the bytes of each value as stored, such
-    as :func:`~cytearc.storage.layout.column_chunk_rows` for a cell column;
-    without it, chunks hold 100,000 rows.
+    as :func:`~cytearc.storage.layout.column_chunk_rows` for a column of a
+    cell or feature table; without it, chunks hold 100,000 rows.
     """
     if src.ndim != 1:
         raise ValueError(

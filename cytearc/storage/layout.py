@@ -12,10 +12,10 @@ from .profiles import StorageProfile
 from .types import array_metadata_shards
 
 PROFILE_METADATA_CHUNK = 100_000
-#: The most bytes of values that one stored chunk of a cell column holds, so
-#: that reading one row decodes at most this much: fixed-width text, which
-#: stores every value at four bytes a character of the widest, holds 100,000
-#: rows to a chunk only up to 41 characters.
+#: The most bytes of values that one stored chunk of a cell or feature column
+#: holds, so that reading one row decodes at most this much: fixed-width
+#: text, which stores every value at four bytes a character of the widest,
+#: holds 100,000 rows to a chunk only up to 41 characters.
 COLUMN_CHUNK_BYTES = 16 << 20
 _CODEC_MAX_BYTES = 2_147_483_647
 DEFAULT_TARGET_CHUNK_BYTES = 128 * 1024 * 1024
@@ -25,22 +25,21 @@ type ChunkRows = Callable[[int, int], int]
 
 A writer that encodes a column before it knows the column's stored width,
 such as text measured at its widest value, takes the rule its caller passes,
-which for a cell column is :func:`column_chunk_rows`.
+which for a column of a cell or feature table is :func:`column_chunk_rows`.
 """
 
 
 def column_chunk_rows(
     n_rows: int, itemsize: int, *, max_rows: int = PROFILE_METADATA_CHUNK
 ) -> int:
-    """Return the rows of each stored chunk of a cell column.
+    """Return the rows of each stored chunk of a column of a cell or feature table.
 
     A chunk holds at most ``max_rows`` rows, no more rows than the column's
     ``n_rows``, and no more than :data:`COLUMN_CHUNK_BYTES` of its values,
-    each ``itemsize`` bytes as stored, so a small store's column is one chunk
+    each ``itemsize`` bytes as stored, so a small table's column is one chunk
     of its rows and a wide text column takes fewer rows to a chunk. A chunk
     holds at least one row, so a value wider than the bound is a chunk of its
-    own. A saved phylogeny chunks its node names the same way; feature tables
-    keep the chunks that their writers give them.
+    own. A saved phylogeny chunks its node names the same way.
 
     Raises:
         ValueError: If ``n_rows`` is negative, or ``itemsize`` or

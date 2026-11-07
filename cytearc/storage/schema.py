@@ -16,12 +16,7 @@ from .arrays import (
     encode_metadata_values,
 )
 from .count_matrix import CountMatrixPolicy, create_product_counts_array
-from .layout import (
-    PROFILE_METADATA_CHUNK,
-    ChunkRows,
-    _group_zarr_format,
-    column_chunk_rows,
-)
+from .layout import _group_zarr_format, column_chunk_rows
 from .metadata_keys import (
     ASSAY_MEMBERSHIP_ROLE,
     assay_membership_attributes,
@@ -584,13 +579,26 @@ def _write_feature_columns(
     feat_names: np.ndarray | list[str],
     profile: StorageProfile,
 ) -> None:
+    """Write a feature table's ``ids``, ``names`` and an all-true ``I``.
+
+    Each column is chunked by :func:`~cytearc.storage.layout.column_chunk_rows`,
+    as a cell table's are.
+    """
     for name, values, column_dtype in (
         ("ids", feat_ids, None),
         ("names", feat_names, None),
         ("I", np.ones(len(feat_ids), dtype=bool), "bool"),
     ):
+        # Encoded once: the stored width of the text sets its chunk, and
+        # writing the encoded values copies them no further.
+        stored = encode_metadata_values(values, column_dtype, name=name)
         create_zarr_obj_array(
-            feature_group, name, values, column_dtype, profile=profile
+            feature_group,
+            name,
+            stored,
+            stored.dtype,
+            chunk_size=column_chunk_rows(len(stored), max(1, stored.dtype.itemsize)),
+            profile=profile,
         )
 
 
@@ -694,13 +702,11 @@ def _create_empty_columns(
     ids_dtype: Any,
     names_dtype: Any,
     profile: StorageProfile | None,
-    chunk_rows: ChunkRows | None = None,
 ) -> None:
     """Create blockwise-fillable ``ids`` and ``names`` and an all-true ``I``.
 
-    ``chunk_rows`` gives each column's chunk from its rows and the bytes of
-    its values, as a cell table's writer passes it; without it, chunks hold
-    100,000 rows.
+    Each column is chunked by :func:`~cytearc.storage.layout.column_chunk_rows`
+    from its rows and the bytes of its values, in a cell or a feature table.
     """
     for name, dtype in (("ids", ids_dtype), ("names", names_dtype), ("I", bool)):
         column = create_metadata_column(
@@ -708,11 +714,7 @@ def _create_empty_columns(
             name,
             dtype=dtype,
             shape=n_rows,
-            chunkSize=(
-                PROFILE_METADATA_CHUNK
-                if chunk_rows is None
-                else chunk_rows(n_rows, max(1, np.dtype(dtype).itemsize))
-            ),
+            chunkSize=column_chunk_rows(n_rows, max(1, np.dtype(dtype).itemsize)),
             profile=profile,
         )
         if name == "I":
@@ -762,6 +764,5 @@ def create_empty_cell_data(
         ids_dtype=id_dtype,
         names_dtype=name_dtype,
         profile=profile,
-        chunk_rows=column_chunk_rows,
     )
     return group

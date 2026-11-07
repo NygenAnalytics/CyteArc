@@ -502,6 +502,7 @@ class SubsetZarr:
                 as_zarr_group(destination["featureData"], name="featureData"),
                 exclude_members={"ids", "names", *GENERATED_FEATURE_COLUMNS},
                 profile=self.profile,
+                chunk_rows=column_chunk_rows,
             )
             # The subset normalizes as its source does.
             for key in ("size_factor", "tfDenominator"):

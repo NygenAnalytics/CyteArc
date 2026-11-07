@@ -775,15 +775,15 @@ def test_guide_calls_with_every_option_refuse_a_small_budget_before_writing(
         tmp_path / "calls.csv", [f"lane1:{barcode}:x" for barcode in named]
     )
 
-    # A budget of 1 MB cannot hold the guide IDs of 2,700 cells, and the
+    # A budget of 1 MB cannot hold the IDs of the 2,700 selected cells, and the
     # refusal names that step before anything is written.
     small = open_store(path, mem_budget=1_000_000)
     saved = written(small)
     with pytest.raises(
         MemoryBudgetError,
         match=r"^Importing the guide calls of 2700 cells holds about \d+ bytes for "
-        r"the guide IDs, more than the memory budget of 1000000 bytes\. Raise "
-        r"mem_budget",
+        r"the selected cells' IDs, more than the memory budget of 1000000 bytes\. "
+        r"Raise mem_budget",
     ):
         small.perturbation.import_guide_calls(
             calls,

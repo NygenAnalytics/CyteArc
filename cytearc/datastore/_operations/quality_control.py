@@ -36,6 +36,7 @@ from ...quality_control.hto import (
 )
 from ...metadata.artifacts import (
     artifact_values,
+    cell_data_write_bytes,
     plan_cell_data_artifact,
     write_cell_data_artifact,
 )
@@ -52,6 +53,7 @@ from ...metadata.rows import (
     read_metadata_missing_rows,
     read_metadata_missing_rows_chunkwise,
     read_metadata_rows_chunkwise,
+    read_whole_text,
 )
 from ...metadata.selection import (
     NamedCellArtifact,
@@ -1481,11 +1483,23 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         self._require_measured_cells(
             assay.name, cell_selection, operation="run_hto_demultiplexing"
         )
+        n_htos = int(assay.feats.N)
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Demultiplexing {n_cells} cells by {n_htos} hashtags",
+            codec_threads=self.nthreads,
+        )
+        # The hashtag IDs are read once, with the stored chunks that hold
+        # them: they identify the artifact and name the counts' columns.
+        hashtag_ids = read_whole_text(
+            ledger,
+            as_zarr_group(assay.z["featureData"], name="featureData"),
+            "ids",
+            item="the hashtag IDs",
+        )
         arguments = HtoIdentityArguments(
             cell_selection=cell_selection,
-            feature_ids_fingerprint=fingerprint_strings(
-                np.asarray(assay.feats.fetch_all("ids"))
-            ),
+            feature_ids_fingerprint=fingerprint_strings(hashtag_ids),
             method=_hto_demux_method(positive_quantile),
             random_seed=random_seed,
             invalidate_cache=invalidate_cache,
@@ -1512,9 +1526,23 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable("run_hto_demultiplexing")
-        matrix_bytes = n_cells * assay.feats.N * np.dtype(np.float64).itemsize
+        matrix_bytes = n_cells * n_htos * np.dtype(np.float64).itemsize
         # Per cell: the cluster label, the identity, and the three diagnostics.
-        estimated_peak_bytes = 6 * matrix_bytes + 40 * n_cells
+        clustering = 6 * matrix_bytes + 40 * n_cells
+        # The save writes the identities, each a hashtag ID, "Doublet" or
+        # "Negative", the two hashtags with the highest CLR values, and the
+        # margins between them.
+        id_width = max([1, *map(len, hashtag_ids)])
+        saving = cell_data_write_bytes(
+            {
+                "values": ((n_cells,), f"U{max(id_width, len('Negative'))}"),
+                "max_id": ((n_cells,), f"U{id_width}"),
+                "second_id": ((n_cells,), f"U{id_width}"),
+                "margin": ((n_cells,), np.float64),
+            }
+        )
+        # The clustering and the save, beside the hashtag IDs.
+        estimated_peak_bytes = ledger.held_bytes + clustering + saving
         if estimated_peak_bytes > self.memoryBytes:
             raise MemoryBudgetError(
                 "HTO demultiplexing needs an estimated "
@@ -1529,7 +1557,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             )
         counts = pd.DataFrame(
             controlled_compute(assay.rawData[cell_index, :], self.nthreads),
-            columns=assay.feats.fetch_all("ids"),
+            columns=hashtag_ids,
         )
         hto_idents = hto_demux(
             counts,
