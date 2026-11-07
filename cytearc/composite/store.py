@@ -4,7 +4,13 @@ import copy
 import itertools
 import json
 import math
-from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from pathlib import Path
 from typing import Any, Self
 
@@ -26,7 +32,8 @@ from zarr.storage import WrapperStore
 from ..storage.artifacts import fingerprint_stored_arrays
 from ..storage.geometry import ArrayGeometry
 from ..storage.identity import count_fingerprint, validate_preparation
-from ..storage.profiles import is_remote_zarr_location
+from ..storage.profiles import ZarrLocation, is_remote_zarr_location
+from ..storage.stores import resolve_source_location, store_location
 from ..storage.types import as_zarr_array, as_zarr_group, complete_chunks
 from ..storage.virtual_arrays import VirtualArrayReader, VirtualArrayStore
 from .reader import CompositeArrayReader
@@ -112,7 +119,9 @@ class CompositeStore(WrapperStore[Store], VirtualArrayStore):
     Zarr reads of the counts receive shards computed from the sources. CyteArc
     reads them through ``virtual_array_reader`` instead, which gathers only the
     selected values. Remote sources read through one ``SourceCache`` unless
-    ``CYTEARC_SOURCE_CACHE_BYTES`` turns it off.
+    ``CYTEARC_SOURCE_CACHE_BYTES`` turns it off. ``source_locations`` gives the
+    absolute path or URL of each source by name; when it is None, each
+    recorded location is resolved against the location of ``store``.
     """
 
     def __init__(
@@ -123,6 +132,7 @@ class CompositeStore(WrapperStore[Store], VirtualArrayStore):
         *,
         constructing: bool = False,
         owns_sources: bool = False,
+        source_locations: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(store)
         self.record = record
@@ -145,7 +155,16 @@ class CompositeStore(WrapperStore[Store], VirtualArrayStore):
             arrays = {"counts": as_zarr_array(matrix["counts"])}
             if "countsT" in matrix:
                 arrays["countsT"] = as_zarr_array(matrix["countsT"])
-            if is_remote_zarr_location(source["location"]):
+            location = (
+                resolve_source_location(
+                    source["location"],
+                    store_location(store),
+                    subject=f"Composite source {source['name']!r}",
+                )
+                if source_locations is None
+                else source_locations[source["name"]]
+            )
+            if is_remote_zarr_location(location):
                 if self._source_cache is None:
                     self._source_cache = new_source_cache()
                 if self._source_cache is not None:
@@ -625,12 +644,17 @@ class CompositeStore(WrapperStore[Store], VirtualArrayStore):
 
 
 def open_composite(
-    root: zarr.Group, *, source_storage_options: dict[str, Any] | None = None
+    root: zarr.Group,
+    *,
+    location: ZarrLocation | None = None,
+    source_storage_options: dict[str, Any] | None = None,
 ) -> zarr.Group:
     """Open a composite root over its sources, each opened with its own options.
 
-    ``source_storage_options`` maps each source's name to the backend options
-    that open it.
+    A source recorded by a relative path is found from ``location``, the path,
+    URL, or store that the composite was opened from, or from the store of
+    ``root`` when it is None. ``source_storage_options`` maps each source's
+    name to the backend options that open it.
     """
     if isinstance(root.store, CompositeStore):
         return root
@@ -692,7 +716,9 @@ def open_composite(
                 f"source_storage_options[{name!r}] must be a dict of backend "
                 f"options, got {type(options)!r}"
             )
+    derived = store_location(root.store if location is None else location)
     opened: dict[str, zarr.Group] = {}
+    resolved: dict[str, str] = {}
     try:
         for binding in sources:
             if not isinstance(binding, dict) or set(binding) != _SOURCE_KEYS:
@@ -700,11 +726,14 @@ def open_composite(
             name = binding["name"]
             if not isinstance(name, str) or not name or name in opened:
                 raise ValueError("Composite source names must be unique and nonempty")
-            location = binding["location"]
-            if not isinstance(location, str) or not location:
+            recorded = binding["location"]
+            if not isinstance(recorded, str) or not recorded:
                 raise ValueError("Composite sources need persistent locations")
+            resolved[name] = resolve_source_location(
+                recorded, derived, subject=f"Composite source {name!r}"
+            )
             store = make_store(
-                location,
+                resolved[name],
                 storage_options=source_options.get(name),
                 read_only=True,
             )
@@ -734,7 +763,9 @@ def open_composite(
                 != binding["countsFingerprint"]
             ):
                 raise ValueError(f"Composite source identity changed: {name}")
-        wrapped = CompositeStore(root.store, record, opened, owns_sources=True)
+        wrapped = CompositeStore(
+            root.store, record, opened, owns_sources=True, source_locations=resolved
+        )
         return zarr.open_group(
             store=wrapped, mode="r" if root.read_only else "r+", use_consolidated=False
         )

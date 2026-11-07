@@ -156,6 +156,8 @@ The mount records matrix shape, dtype, and source identity. Reopening fails if t
 longer matches that identity. Metadata is copied at mount time, so later source metadata changes
 are not synchronized into the target.
 
+A source in the directory that holds the target, or below it, is recorded by its path relative to that directory, so the target and its source can be moved, copied, or uploaded to a bucket together and still open. Any other source is recorded by its absolute path or URI, so the target alone can move.
+
 The target also resolves the source's artifacts read only, after its own. Results already saved in
 the source, including labels and embeddings imported with it, can be listed, loaded, traced, and
 used as inputs on the mount, and a step whose provenance matches a saved result reuses it instead

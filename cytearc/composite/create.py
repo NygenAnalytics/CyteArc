@@ -68,6 +68,7 @@ from ..storage.stores import (
     MATRIX_SOURCE_ATTR,
     locations_overlap,
     prefetch_metadata_listing,
+    record_source_location,
 )
 from ..storage.types import as_zarr_array, as_zarr_group
 from ..utils.memory_budget import MemoryBudgetError
@@ -562,7 +563,13 @@ def create_composite(
     mem_budget: int | str | None = None,
     nthreads: int | None = None,
 ) -> "DataStore":
-    """Create a writable datastore that reads its counts from frozen sources."""
+    """Create a writable datastore that reads its counts from frozen sources.
+
+    The composite records a source in the directory that holds it, or below it,
+    by its path relative to that directory, so a directory that holds the
+    composite and its sources can be moved, copied, or served from a bucket. It
+    records any other source by its absolute path or URL.
+    """
     from ..datastore.datastore import DataStore
     from .reader import copy_source_selection, source_index_bytes
     from .store import CompositeStore
@@ -600,6 +607,7 @@ def create_composite(
     )
     assays: list[Any] = []
     selected_rows = []
+    locations = []
     bindings = []
     source_roots = {}
     membership = []
@@ -629,10 +637,11 @@ def create_composite(
                 checked_indices(selection, limit=source.cells.N, name=f"rows[{name!r}]")
             )
         )
+        locations.append(location)
         bindings.append(
             {
                 "name": name,
-                "location": location,
+                "location": record_source_location(location, str(destination)),
                 "workspace": source.workspace,
                 "datasetFingerprint": fingerprint,
                 "countsFingerprint": count_fingerprint(
@@ -691,10 +700,10 @@ def create_composite(
     wrapper: CompositeStore | None = None
     try:
         schema_read_workers = resources.workers
-        for binding, table, source in zip(bindings, cell_tables, datasets, strict=True):
-            binding_location = binding["location"]
-            assert binding_location is not None
-            if is_remote_zarr_location(binding_location):
+        for source_location, table, source in zip(
+            locations, cell_tables, datasets, strict=True
+        ):
+            if is_remote_zarr_location(source_location):
                 if metadata_cache is None:
                     metadata_cache = new_source_cache()
                 if metadata_cache is not None:
@@ -790,7 +799,13 @@ def create_composite(
             name: fingerprint_stored_arrays(maps, [name])
             for name in ("rowSources", "sourceRows", "featureColumns")
         }
-        wrapper = CompositeStore(root.store, record, source_roots, constructing=True)
+        wrapper = CompositeStore(
+            root.store,
+            record,
+            source_roots,
+            constructing=True,
+            source_locations=dict(zip(names, locations, strict=True)),
+        )
         root = zarr.open_group(store=wrapper, mode="r+", use_consolidated=False)
         cells = write_cell_metadata(
             root,

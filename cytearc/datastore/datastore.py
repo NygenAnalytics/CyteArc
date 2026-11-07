@@ -82,7 +82,10 @@ def mount_datastore(
     that reuse source artifacts need the source, as counts do;
     ``cytearc.tools.repack_zarr.repack_store`` copies a mount into a
     self-contained store. The source must be prepared: open a fresh import once
-    with ``zarr_mode='r+'`` before mounting it.
+    with ``zarr_mode='r+'`` before mounting it. The target records a source in
+    the directory that holds it, or below it, by its path relative to that
+    directory, so a directory that holds both can be moved, copied, or served
+    from a bucket; it records any other source by its absolute path or URL.
 
     Args:
         source: Read-only store that owns the count matrices.

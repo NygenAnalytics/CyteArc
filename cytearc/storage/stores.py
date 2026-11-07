@@ -2,7 +2,7 @@ import asyncio
 import os
 import posixpath
 from datetime import timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlsplit, urlunsplit
 from collections.abc import (
     AsyncGenerator,
@@ -281,7 +281,9 @@ def open_store(
     if "composite" in root.attrs:
         from ..composite.store import open_composite
 
-        return open_composite(root, source_storage_options=source_storage_options)
+        return open_composite(
+            root, location=path, source_storage_options=source_storage_options
+        )
     return root
 
 
@@ -329,6 +331,124 @@ def _persistable_location(source: str) -> str:
         return source
     # As make_store opens it: "~" names the home directory.
     return os.path.abspath(os.path.expanduser(source))
+
+
+def store_location(location: ZarrLocation) -> str | None:
+    """Return the absolute path or URL of a store, or None when it has neither.
+
+    A local path or ``file://`` URI resolves as ``make_store`` opens it, and a
+    URL is returned as it is. A store object names its location when it is,
+    or wraps, a local store or an fsspec store.
+    """
+    if isinstance(location, str):
+        if is_remote_zarr_location(location):
+            return location
+        return os.path.abspath(os.path.expanduser(local_zarr_path(location)))
+    from zarr.storage import FsspecStore, LocalStore
+
+    store = location
+    while isinstance(store, WrapperStore):
+        store = store._store
+    if isinstance(store, LocalStore):
+        return os.path.abspath(store.root)
+    if isinstance(store, FsspecStore):
+        return store_location(str(store.fs.unstrip_protocol(store.path)))
+    return None
+
+
+def _local_directory(location: str) -> Path:
+    """Return the directory that holds a local store, with links resolved."""
+    path = os.path.abspath(os.path.expanduser(local_zarr_path(location)))
+    return Path(os.path.realpath(os.path.dirname(path)))
+
+
+def _url_directory(location: str) -> PurePosixPath:
+    """Return the path of the directory that holds the store at a URL."""
+    path = urlsplit(location).path.rstrip("/")
+    return PurePosixPath(posixpath.normpath(posixpath.dirname(path) or "/"))
+
+
+def record_source_location(source: str, derived: str | None) -> str:
+    """Return how a store at ``derived`` records its source at ``source``.
+
+    ``source`` is the source's absolute path or URL, and ``derived`` the
+    absolute path or URL of the store built on it, a mount or a composite.
+    When both are local paths, or both are URLs of one scheme and host, and the
+    source lies in the directory that holds the store or below it, the store
+    records the source's path relative to that directory, with ``/``
+    separators. It records any other source by ``source`` itself, so a source
+    kept elsewhere stays found when the store alone moves.
+    """
+    if derived is None:
+        return source
+    if not is_remote_zarr_location(source) and not is_remote_zarr_location(derived):
+        directory = _local_directory(derived)
+        path = Path(os.path.realpath(local_zarr_path(source)))
+        if path != directory and path.is_relative_to(directory):
+            return path.relative_to(directory).as_posix()
+        return source
+    if not is_remote_zarr_location(source) or not is_remote_zarr_location(derived):
+        return source
+    source_url, derived_url = urlsplit(source), urlsplit(derived)
+    if (
+        (source_url.scheme.lower(), source_url.netloc)
+        != (derived_url.scheme.lower(), derived_url.netloc)
+        or source_url.query
+        or source_url.fragment
+        or derived_url.query
+        or derived_url.fragment
+    ):
+        return source
+    url_directory = _url_directory(derived)
+    url_path = PurePosixPath(posixpath.normpath(source_url.path or "/"))
+    if url_path != url_directory and url_path.is_relative_to(url_directory):
+        return url_path.relative_to(url_directory).as_posix()
+    return source
+
+
+def _is_relative_location(location: str) -> bool:
+    return (
+        "://" not in location
+        and not PurePosixPath(location).is_absolute()
+        and not PureWindowsPath(location).is_absolute()
+    )
+
+
+def resolve_source_location(recorded: str, derived: str | None, *, subject: str) -> str:
+    """Return the absolute path or URL of a source recorded as ``recorded``.
+
+    An absolute path or URL names the source itself. A relative path names it
+    relative to the directory that holds ``derived``, the absolute path or URL
+    of the store that records it, whether that is local or a URL. ``subject``
+    names the source in errors.
+    """
+    if not _is_relative_location(recorded):
+        return recorded
+    if derived is None:
+        raise ValueError(
+            f"{subject} is recorded at {recorded!r}, a path relative to the store "
+            "that records it, but that store was opened from a store object whose "
+            "location is unknown. Open it by its path or URL."
+        )
+    if is_remote_zarr_location(derived):
+        base = urlsplit(derived)
+        anchor, parts = "/", list(_url_directory(derived).parts[1:])
+    else:
+        directory = _local_directory(derived)
+        anchor, parts = directory.anchor, list(directory.parts[1:])
+    for part in recorded.split("/"):
+        if part == "..":
+            if not parts:
+                raise ValueError(
+                    f"{subject} is recorded at {recorded!r}, which climbs above the "
+                    f"root of {derived}"
+                )
+            parts.pop()
+        elif part not in ("", "."):
+            parts.append(part)
+    if is_remote_zarr_location(derived):
+        return urlunsplit((base.scheme, base.netloc, "/" + "/".join(parts), "", ""))
+    return str(Path(anchor, *parts))
 
 
 def discard_mount_target(target: zarr.Group, at: ZarrLocation) -> None:
@@ -520,7 +640,7 @@ def create_matrix_source(
             )
 
         target.attrs[MATRIX_SOURCE_ATTR] = {
-            "location": source,
+            "location": record_source_location(source, store_location(at)),
             "workspace": workspace,
             "assays": assay_manifest,
         }
@@ -533,16 +653,20 @@ def create_matrix_source(
 def resolve_matrix_source(
     root: zarr.Group,
     *,
+    location: ZarrLocation | None = None,
     storage_options: dict[str, Any] | None = None,
     source_storage_options: dict[str, Any] | None = None,
 ) -> tuple[zarr.Group, str | None] | None:
     """Open and validate a mounted matrix source, if present.
 
-    The source is opened with ``source_storage_options``, or with the target's
-    ``storage_options`` when they are None. The manifest holds exactly
-    ``location``, ``workspace``, and ``assays``, and each assay entry exactly
-    its recorded identity. Any other shape, including a field added by a later
-    release, is rejected rather than ignored.
+    A source recorded by a relative path is found from ``location``, the path,
+    URL, or store that the target was opened from, or from the store of
+    ``root`` when it is None. The source is opened with
+    ``source_storage_options``, or with the target's ``storage_options`` when
+    they are None. The manifest holds exactly the keys ``location``,
+    ``workspace``, and ``assays``, and each assay entry exactly its recorded
+    identity. Any other shape, including a field added by a later release, is
+    rejected rather than ignored.
     """
     raw = root.attrs.get(MATRIX_SOURCE_ATTR)
     if raw is None:
@@ -555,8 +679,8 @@ def resolve_matrix_source(
             "Existing mount has an unsupported matrix source contract; create a "
             "fresh target with mount_datastore"
         )
-    location = raw.get("location")
-    if not isinstance(location, str) or not location:
+    recorded = raw.get("location")
+    if not isinstance(recorded, str) or not recorded:
         raise ValueError("matrixSource.location must be a non-empty string")
     workspace = raw.get("workspace")
     if workspace is not None and not isinstance(workspace, str):
@@ -583,7 +707,11 @@ def resolve_matrix_source(
     from .identity import count_fingerprint, validate_preparation
 
     source_root = load_zarr(
-        location,
+        resolve_source_location(
+            recorded,
+            store_location(root.store if location is None else location),
+            subject="The source of this mount",
+        ),
         mode="r",
         storage_options=source_options,
     )

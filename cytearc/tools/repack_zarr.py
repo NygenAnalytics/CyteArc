@@ -49,6 +49,8 @@ from cytearc.storage.stores import (
     mount_artifact_namespace,
     open_store,
     resolve_matrix_source,
+    resolve_source_location,
+    store_location,
     locations_overlap,
     MATRIX_SOURCE_ATTR,
 )
@@ -362,10 +364,16 @@ def repack_store(
             manifest.get("location"), str
         ):
             raise ValueError("Malformed matrix source location")
-        if locations_overlap(manifest["location"], output_path):
+        source_location = resolve_source_location(
+            manifest["location"],
+            store_location(input_path),
+            subject="The source of this mount",
+        )
+        if locations_overlap(source_location, output_path):
             raise ValueError("The destination overlaps the mounted count owner")
     resolved = resolve_matrix_source(
         src,
+        location=input_path,
         storage_options=storage_options,
         source_storage_options=source_storage_options,
     )

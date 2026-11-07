@@ -523,6 +523,16 @@ CyteArc validates persisted data and public arguments against the following cont
   did before. The `matrixSource` record holds no options and keeps its shape. A composite's
   `source_storage_options` map each source's name to its options, and a name that matches no
   source, as a mount's options would, is refused before any source opens.
+- A mount and a composite record a source in the directory that holds them, or below it, by its
+  path relative to that directory, when both are local or both are URLs of one scheme and host,
+  and any other source by its absolute path or URL, as before. `record_source_location` and
+  `resolve_source_location` in `storage/stores.py` hold the rule. Opening resolves a relative
+  location against the directory of the path or URL that the store is opened from, which
+  `resolve_matrix_source` and `open_composite` take as `location`, so a directory of stores can
+  be moved, copied, or served from a bucket. The records keep their shape, the identity checks
+  still refuse a source with other content, and records of earlier releases, which hold absolute
+  locations, open unchanged. An earlier release resolves a relative location against its working
+  directory, so it opens such a store only from the directory that holds it.
 - Public cell filters apply the pipeline filtering rules. `qc.filter` and `qc.auto_filter`
   exclude rows whose metric is missing and raise on missing sample labels among active cells,
   non-finite metrics used for automatic bounds, invalid bounds, duplicate attributes, and empty
