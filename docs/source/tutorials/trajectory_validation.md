@@ -47,6 +47,22 @@ The mask tells us which cells the result actually describes. A high fraction alo
 not sufficient: a small excluded component could contain an entire rare population.
 Including undefined values in custom summaries or exports can also distort the result.
 
+## Check a trajectory of some groups
+
+To follow a process through some groups of a large graph, score their cells on the graph you have instead of building a new one:
+
+```python
+# Select the cells of the groups the process runs through.
+groups_ref = ds.select_cells(clusters_ref, include=[2, 3, 5])
+
+# Score them on the subgraph that they induce in the existing graph.
+pseudotime_ref = ds.trajectory.pseudotime(
+    graph_ref, cells=groups_ref, source_sink=clusters_ref, sources=[2], sinks=[5]
+)
+```
+
+The subgraph keeps the edges that the whole graph chose among these cells, so the order follows the variation of the whole dataset within the groups. Cells at the edge of the groups lose their edges to cells outside them, and the subgraph can split where the whole graph does not; read `component_sizes` before reading the scores. A graph built on the groups' own variable genes and principal components follows the variation within the groups more closely, at the cost of normalizing, reducing and finding neighbours again. When both are feasible, compare their orderings: an order that only the rebuilt graph shows rests on variation that the whole-data reduction does not resolve.
+
 ## Inspect changing genes and modules
 
 ```python
@@ -98,6 +114,23 @@ recovers the markers that defined the endpoints.
 Candidate endpoints from a cluster tree, as in [](lineage_curves.ipynb), depend on the
 clustering and can chain similar populations. Check them with markers, and compare the fate
 maps of plausible endpoint sets, before treating a lineage as established.
+
+Fate probabilities sum to one over the endpoints, so a cell that lies on no trajectory still splits its probability among them. Call which lineages each cell follows from the lineage curves before reading a cell's lineage from its largest probability:
+
+```python
+# Call each cell's lineage, "shared" or "none", with the rule saved.
+membership_ref = ds.trajectory.lineage_membership(curves_ref)
+
+# Load the labels and where each pair of lineages parts.
+membership = ds.trajectory.load_lineage_membership(membership_ref)
+membership.branch_points
+
+# Test the genes that separate two endpoints where they part.
+branch_ref = ds.trajectory.branch_cells(membership_ref, [2, 3])
+drivers_ref = ds.trajectory.drivers(fate_ref, features=features_ref, cells=branch_ref)
+```
+
+Cells called `"none"` lie farther from every curve than its own cells do at the same progress; count them and look at where they lie before excluding them, since a population off the trajectory may be the biology. A pair whose branch point is NaN never shares a cell or never parts. The branch point is where the two lineages' fate probabilities leave the `band`, so it moves with `band`; compare a few values when the exact place matters.
 
 ## Separate probability checks from biological evidence
 

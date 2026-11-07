@@ -325,6 +325,7 @@ minimum seed ARI was 0.78. The parent had no FOXP3 group.
 - Subclustering on the parent graph, or carrying subcluster IDs across artifacts. Rebuild inside
   the subset, join on the cell axis, and keep the parent labels. `select_cells(include=[])`
   raises; integer cluster artifacts need integer `include` values.
+- Rebuilding a graph only to follow a trajectory through some groups. `trajectory.pseudotime(graph, cells=groups, ...)` and `trajectory.lineage_tree(graph, labels, cells=groups)` score those cells on the subgraph that they induce, with the labels and coordinates of the whole graph; `fate`, `curves` and the feature calls follow. Rebuild when the question concerns variation within the groups that the whole-data PCA may miss, and read `component_sizes`, since the subgraph can split.
 - `features.hvgs` is RNA only. ATAC uses `features.prevalent_peaks` then `reduction.lsi`, as
   `ds.pipeline.atac()` does; ADT uses an antibody panel, as `ds.pipeline.adt()` does.
 

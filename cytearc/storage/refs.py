@@ -52,6 +52,7 @@ ARTIFACT_KINDS = frozenset(
         "lineage_curves",
         "lineage_drivers",
         "lineage_markers",
+        "lineage_membership",
         "lineage_tree",
         "mapping_reference",
         "marker_table",

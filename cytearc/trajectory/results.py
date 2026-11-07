@@ -8,6 +8,7 @@ from ..matrix import ChunkedArray
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import read_only_copy
 from .curves import curve_values_at, project_onto_curve
+from .membership import BRANCH_POINT_COLUMNS
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,3 +556,52 @@ class LineageTreeResult:
     def candidate_sinks(self) -> tuple[Any, ...]:
         """Leaves other than the root, the clusters to check as sinks."""
         return tuple(leaf for leaf in self.leaves if not bool(leaf == self.root))
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class LineageMembershipResult:
+    """Which lineages each cell follows, and where each pair of lineages parts.
+
+    ``labels`` names, for each cell of ``cell_selection``, what it follows:
+    the text of one lineage's sink label, ``"shared"`` for several lineages,
+    or ``"none"``. ``members`` holds the lineages that each cell follows,
+    cells by lineages, and unscored cells follow none with a false
+    ``valid``. ``distance_limits`` holds, lineages by bins of progress, the
+    farthest distance from each curve that lies on it. ``branch_points``
+    holds one row per pair of lineages in their order: ``first`` and
+    ``second``, the ``pseudotime`` at which they part, the
+    ``first_progress`` and ``second_progress`` there on their curves, and
+    the ``shared_cells`` and ``parted_cells`` that place the split; a pair
+    that never parts, or never shares a cell, holds NaN.
+    """
+
+    ref: ArtifactRef
+    curves: ArtifactRef
+    cell_selection: ArtifactRef
+    lineages: tuple[Any, ...]
+    labels: np.ndarray = field(repr=False)
+    members: np.ndarray = field(repr=False)
+    valid: np.ndarray = field(repr=False)
+    distance_limits: np.ndarray = field(repr=False)
+    branch_points: pd.DataFrame = field(repr=False)
+
+    def __post_init__(self) -> None:
+        n_lineages = len(self.lineages)
+        if self.valid.ndim != 1:
+            raise ValueError("Membership validity must be one-dimensional")
+        n_cells = self.valid.shape[0]
+        if self.labels.shape != (n_cells,):
+            raise ValueError("Membership labels must hold one label per cell")
+        if self.members.shape != (n_cells, n_lineages):
+            raise ValueError("Membership must be cells by lineages")
+        if self.distance_limits.ndim != 2 or (
+            self.distance_limits.shape[0] != n_lineages
+        ):
+            raise ValueError("Distance limits must be lineages by bins")
+        _require_table_columns(
+            self.branch_points, frozenset(BRANCH_POINT_COLUMNS), "Branch-point"
+        )
+        if len(self.branch_points) != n_lineages * (n_lineages - 1) // 2:
+            raise ValueError("Branch points need one row per pair of lineages")
+        for name in ("labels", "members", "valid", "distance_limits"):
+            object.__setattr__(self, name, read_only_copy(getattr(self, name)))

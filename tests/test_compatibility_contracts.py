@@ -21,6 +21,7 @@ _EXPECTED_TRAJECTORY_EXPORTS = (
     "LineageCurvesResult",
     "LineageDriverResult",
     "LineageMarkerResult",
+    "LineageMembershipResult",
     "LineageTreeResult",
     "PseudotimeAggregationResult",
     "PseudotimeConvergenceError",
@@ -214,6 +215,17 @@ _EXPECTED_RESULT_FIELDS = {
         "ends",
         "leaves",
         "lineages",
+    ),
+    trajectory.LineageMembershipResult: (
+        "ref",
+        "curves",
+        "cell_selection",
+        "lineages",
+        "labels",
+        "members",
+        "valid",
+        "distance_limits",
+        "branch_points",
     ),
 }
 

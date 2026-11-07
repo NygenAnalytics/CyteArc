@@ -143,14 +143,16 @@ _SIGNATURE_DIGESTS = {
     # float | None = None and max_iterations: int | None = None, then
     # method: Literal["untruncated", "truncated"] = "untruncated", with
     # n_singular_vals: int | None = None and random_seed: int | None = None,
-    # which only method="truncated" takes. get_imputed takes feature_name:
-    # str | FeatureRef | Sequence[str | FeatureRef] | np.ndarray | pd.Series.
-    # The inherited constructor takes source_storage_options: dict[str, Any] | None.
-    # run_fate_mapping takes pseudotime: ArtifactRef | None = None and
-    # sink_labels: ArtifactRef | None = None, and the keyword-only graph:
-    # ArtifactRef | None = None and direction: ArtifactRef | np.ndarray |
-    # None = None after sinks, so a per-cell score can direct the walk.
-    GraphDataStore: "10744343b2d9c455a53df2421e8940a9bc8b9266026dc192395aef6a12601efb",
+    # which only method="truncated" takes, then the keyword-only cells:
+    # ArtifactRef | None = None, some of the graph's cells to score.
+    # get_imputed takes feature_name: str | FeatureRef | Sequence[str |
+    # FeatureRef] | np.ndarray | pd.Series. The inherited constructor takes
+    # source_storage_options: dict[str, Any] | None. run_fate_mapping takes
+    # pseudotime: ArtifactRef | None = None and sink_labels: ArtifactRef |
+    # None = None, and the keyword-only graph: ArtifactRef | None = None and
+    # direction: ArtifactRef | np.ndarray | None = None after sinks, so a
+    # per-cell score can direct the walk.
+    GraphDataStore: "195474045949f60de2656f4e5a2d0e95df0d7c2e5afc86bbdab0559ee5f2994e",
     # run_mapping gained the keyword-only feature_key: Literal["ids",
     # "names"] = "ids" after missing_feature_policy.
     MappingDatastore: "12e809ed948d36552968c37dc3d2a9d3429ad06dcd5507673d95f839ef47171f",
@@ -243,8 +245,10 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # clones.allele_clones, then clones.import_phylogeny,
     # clones.load_phylogeny and clones.phylogeny_clones, then
     # clusters.connectivity, then trajectory.curves_in_layout, then
-    # regulons.specificity and regulons.connection_specificity.
-    assert len(_NAMESPACE_METHODS) == 156
+    # regulons.specificity and regulons.connection_specificity, then
+    # trajectory.lineage_membership, trajectory.load_lineage_membership and
+    # trajectory.branch_cells.
+    assert len(_NAMESPACE_METHODS) == 159
     assert {
         "import_receptors",
         "load_receptors",
@@ -333,6 +337,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         "curves_in_layout",
         "lineage_tree",
         "load_lineage_tree",
+        "lineage_membership",
+        "load_lineage_membership",
+        "branch_cells",
     } <= {
         name
         for namespace, _, name, _ in _NAMESPACE_METHODS

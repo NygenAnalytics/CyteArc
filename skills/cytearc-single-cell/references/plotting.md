@@ -227,7 +227,7 @@ r.tables["per_sample"].head()  # one stacked bar per sample
 r.close()
 ```
 
-`cluster_connectivity` reads `groups` for the graph's cells, and `composition` reads `grouping` for the cells of `categories`, so labels of more cells, such as labels of every cell, serve; labels that miss some of those cells are refused. A layout must hold the cells that the plot draws, the graph's in `cluster_connectivity` and `modality_weights`, the trajectory's in `lineage_curves` and `lineage_tree`, and the genotypes' in `genotypes`, from any cell selection of them.
+`cluster_connectivity` reads `groups` for the graph's cells, and `composition` reads `grouping` for the cells of `categories`, so labels of more cells, such as labels of every cell, serve; labels that miss some of those cells are refused. A layout must hold the cells that the plot draws, the graph's in `cluster_connectivity` and `modality_weights`, the trajectory's in `lineage_curves` and `lineage_tree`, and the genotypes' in `genotypes`, from any cell selection of them. `lineage_curves` and `lineage_tree` also take a layout of more cells and draw the trajectory's, so the UMAP of a whole graph draws a trajectory of some of its cells.
 
 `kind="per_sample"` with a `StudyDesign` draws a strip of per-sample proportions per category
 instead; see integration-and-comparisons.md. For a WNN run,

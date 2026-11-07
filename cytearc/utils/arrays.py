@@ -125,6 +125,25 @@ def union_sorted(held: Any, values: Any) -> np.ndarray:
     return out
 
 
+def sorted_places(values: Any, among: Any) -> np.ndarray:
+    """Return where each value lies in another ascending array, or -1 where it lacks it.
+
+    Both arrays hold distinct integers in ascending order, such as the store
+    positions of two cell selections' cells, so ``among[places]`` gives
+    ``values`` back wherever no place is -1.
+
+    Raises:
+        TypeError: If either is not a one-dimensional array of integers.
+    """
+    found_values = _integer_vector(values, "sorted_places").astype(np.int64)
+    sorted_among = _integer_vector(among, "sorted_places").astype(np.int64)
+    places = np.searchsorted(sorted_among, found_values).astype(np.int64, copy=False)
+    found = places < sorted_among.size
+    found[found] = sorted_among[places[found]] == found_values[found]
+    places[~found] = -1
+    return places
+
+
 def unique_inverse(values: Any) -> tuple[np.ndarray, np.ndarray]:
     """Return the distinct values of an integer array and each value's position.
 

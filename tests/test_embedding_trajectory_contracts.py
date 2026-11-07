@@ -24,15 +24,21 @@ from tests.signature_contracts import signature_digest
 def test_embedding_and_trajectory_entry_point_signatures_are_stable() -> None:
     # build_cluster_tree(coordinates, labels, *, root=None, ends=None) and
     # trajectory.curves_in_layout(curves, layout, *, lineages=None, df=None)
-    # joined the entry points.
+    # joined the entry points, then trajectory.lineage_membership(curves, *,
+    # band=0.5, distance_score=5.0, n_bins=10, invalidate_cache=False), its
+    # loader, and trajectory.branch_cells(membership, lineages, *,
+    # window=0.2, invalidate_cache=False).
     methods = {
+        "branch_cells": TrajectoryAccessor.branch_cells,
         "build_cluster_tree": build_cluster_tree,
         "curves_in_layout": TrajectoryAccessor.curves_in_layout,
+        "lineage_membership": TrajectoryAccessor.lineage_membership,
+        "load_lineage_membership": TrajectoryAccessor.load_lineage_membership,
         "run_sgtsne": run_sgtsne,
         "validate_pseudotime_regressor": validate_pseudotime_regressor,
     }
     assert signature_digest(methods) == (
-        "ff084dd26939c82b025b07f6bf977a91c4e1276f9bcb1b01e47838ed36b3c951"
+        "f1efa103fdc64eaf6a00c023a0454238f69e4eef3a4f90bae1a79a81d3d1c0bd"
     )
 
 

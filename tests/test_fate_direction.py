@@ -8,6 +8,7 @@ and check that a score follows the validity rules of a pseudotime: it scores
 whole graph components, and sinks outside them are refused.
 """
 
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -16,6 +17,7 @@ import pytest
 
 from cytearc.graph.feature_projection import resolve_native_graph_inputs
 from cytearc.metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
+from cytearc.metadata.selection import cell_selection_indices
 from cytearc.storage.artifact_writer import artifact_transaction
 from cytearc.storage.artifacts import (
     ArtifactRef,
@@ -34,6 +36,7 @@ from cytearc.trajectory.fate import direction_scores, fate_map_cells
 from cytearc.utils.logging import collect_warnings
 
 from .test_fate_mapping import _direct_fate_reference, _ScoredStore, _scored_y_store
+from .test_trajectory_membership import _branching
 from .test_trajectory_record_paths import (
     _Y_LABELS,
     _empty_graph_payload,
@@ -724,6 +727,53 @@ def test_lineage_curves_order_the_cells_of_a_map_by_its_score() -> None:
         rtol=0.0,
         atol=1e-5,
     )
+
+
+def test_lineage_membership_of_a_map_directed_by_a_score_parts_lineages_on_it() -> None:
+    # The branching trajectory of the membership tests, its fate map directed
+    # by three times its pseudotime plus seven, which lies above 7 where a
+    # pseudotime lies in [0, 1].
+    branching = _branching()
+    store = branching.store
+    score = 3.0 * store.trajectory.load_pseudotime(branching.pseudotime).values + 7.0
+    fate = store.trajectory.fate(
+        sink_labels=branching.label_artifact(),
+        graph=branching.graph,
+        direction=score,
+        sinks=["a2", "b2"],
+    )
+    membership = store.trajectory.lineage_membership(
+        store.trajectory.curves(fate, n_points=40, df=6.0)
+    )
+    result = store.trajectory.load_lineage_membership(membership)
+
+    # By hand, on the score: the split with the fewest shared cells after it
+    # and parted cells before it, over every score between two of the pair's
+    # cells.
+    (row,) = result.branch_points.itertuples(index=False)
+    pair = result.members.any(axis=1)
+    shared = result.members.all(axis=1)
+    assert shared.any() and (pair & ~shared).any()
+    candidates = np.unique(score[pair])
+    best, best_errors = math.nan, math.inf
+    for before, after in zip(candidates[:-1], candidates[1:], strict=True):
+        split = 0.5 * (before + after)
+        errors = np.sum(shared & (score > split)) + np.sum(
+            pair & ~shared & (score < split)
+        )
+        if errors < best_errors:
+            best, best_errors = split, errors
+    assert row.pseudotime == pytest.approx(best)
+    assert row.pseudotime > 7.0
+
+    # The cells around the branch point are the nearest on the score.
+    selection = store.trajectory.branch_cells(membership, ["a2", "b2"], window=0.25)
+    rows = cell_selection_indices(store.zw, branching.selection)
+    selected = np.isin(rows, cell_selection_indices(store.zw, selection))
+    nearest = np.abs(score - row.pseudotime)
+    assert selected.sum() == math.ceil(0.25 * pair.sum())
+    assert not np.any(selected & ~pair)
+    assert nearest[selected].max() <= nearest[pair & ~selected].min()
 
 
 def test_direction_scores_keep_the_finite_values_of_whole_components() -> None:
