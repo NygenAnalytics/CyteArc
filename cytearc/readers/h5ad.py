@@ -26,12 +26,15 @@ from ..utils.progress import iter_progress
 from ._assay_names import auto_name_feat_table, make_feat_table_from_types
 from ._h5ad_columns import (
     SPARSE_KEYS,
+    CategoryCodes,
     H5adCategories,
+    TableColumn,
     category_colors,
     column_categories,
     column_encoding,
     column_length,
     column_order,
+    decoded_column,
     index_key,
     is_column,
     is_nullable,
@@ -39,6 +42,7 @@ from ._h5ad_columns import (
     read_table_column,
     sparse_encoding,
     sparse_shape,
+    table_column,
     table_column_dtype,
     table_column_names,
     table_members,
@@ -445,6 +449,10 @@ class H5adReader:
             stop,
         )
 
+    def _table_column(self, group: str, key: str) -> TableColumn:
+        """Return a whole column, a categorical as its codes and categories."""
+        return table_column(self.h5, self.h5[group], key, self._categoryGroups)
+
     def _validate_embedding_roles(
         self,
         roles: Mapping[str, H5adEmbeddingRole] | None,
@@ -687,12 +695,14 @@ class H5adReader:
 
     def _table_columns(
         self, group: str, ignore_keys: Sequence[str]
-    ) -> Iterator[tuple[str, np.ndarray, np.ndarray, H5adCategories | None]]:
-        """Yield each decodable column with its values, missing mask, and categories.
+    ) -> Iterator[tuple[str, TableColumn, H5adCategories | None]]:
+        """Yield each decodable column with its values and categories.
 
-        Columns come by the name they import under, which is their source
-        name except for an unnamed index. A dataframe group lists them in
-        ``column-order``, which resolves a name that old AnnData versions
+        A column comes as its values and missing mask, or a categorical as
+        its codes and categories, which :func:`decoded_column` decodes to
+        labels. Columns come by the name they import under, which is their
+        source name except for an unnamed index. A dataframe group lists them
+        in ``column-order``, which resolves a name that old AnnData versions
         nested into groups because it contains ``/``. An index that repeats
         the table's IDs or names is left out.
         """
@@ -724,24 +734,29 @@ class H5adReader:
                     )
                 continue
             try:
-                values, missing = self._read_column(group, name)
+                column = self._table_column(group, name)
             except ValueError as error:
                 logger.warning(f"Skipping {group} column {name!r}: {error}")
                 continue
-            if values.ndim != 1:
+            ndim = (
+                column.codes if isinstance(column, CategoryCodes) else column[0]
+            ).ndim
+            if ndim != 1:
                 logger.warning(
                     f"Skipping {group} column {name!r} because it holds "
-                    f"{values.ndim}-dimensional values"
+                    f"{ndim}-dimensional values"
                 )
                 continue
-            if name == index and self._repeats_identifiers(group, values, missing):
+            if name == index and self._repeats_identifiers(
+                group, *decoded_column(column)
+            ):
                 logger.info(
                     f"Leaving out the {group} index {name!r} because it holds the "
                     "IDs or the names that the import stores"
                 )
                 continue
             categories = column_categories(self.h5, table, name, self._categoryGroups)
-            yield self._import_name(group, name), values, missing, categories
+            yield self._import_name(group, name), column, categories
 
     def _source_column_names(self, group: str) -> list[str]:
         """Return the import names of the decodable columns of a table.
@@ -830,7 +845,7 @@ class H5adReader:
 
     def _cell_columns(
         self,
-    ) -> Iterator[tuple[str, np.ndarray, np.ndarray, H5adCategories | None]]:
+    ) -> Iterator[tuple[str, TableColumn, H5adCategories | None]]:
         return self._table_columns(
             self.cellAttrsKey,
             [self.cellIdsKey, self.catNamesKey, *self.clusterKeys],
@@ -838,7 +853,7 @@ class H5adReader:
 
     def _feature_columns(
         self,
-    ) -> Iterator[tuple[str, np.ndarray, np.ndarray, H5adCategories | None]]:
+    ) -> Iterator[tuple[str, TableColumn, H5adCategories | None]]:
         return self._table_columns(
             self.featureAttrsKey,
             [self.featIdsKey, self.featNamesKey, self.catNamesKey],
@@ -850,13 +865,13 @@ class H5adReader:
         Missing categorical and text values are ``None``; missing numeric
         values are NaN.
         """
-        for name, values, missing, _categories in self._cell_columns():
-            yield name, present_column(values, missing)
+        for name, column, _categories in self._cell_columns():
+            yield name, present_column(*decoded_column(column))
 
     def get_feat_columns(self) -> Generator[tuple[str, np.ndarray], None, None]:
         """Creates a Generator that yields the feature columns."""
-        for name, values, missing, _categories in self._feature_columns():
-            yield name, present_column(values, missing)
+        for name, column, _categories in self._feature_columns():
+            yield name, present_column(*decoded_column(column))
 
     def assay_membership(self) -> dict[str, str]:
         """Return the membership column of each assay that the file declares."""

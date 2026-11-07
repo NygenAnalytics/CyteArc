@@ -1,11 +1,11 @@
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
 from ..readers import CrReader
 from ..storage.count_dtype import count_storage_dtype
-from ..storage.count_matrix import DEFAULT_COUNT_MATRIX_POLICY, CountMatrixPolicy
+from ..storage.count_matrix import CountMatrixPolicy
 from ..storage.io_policy import StorageIoPolicy
 from ..storage.profiles import (
     StorageProfile,
@@ -34,10 +34,13 @@ class CrToZarr:
         nthreads: Worker count for write-time concurrency. When None, auto-detected.
         profile: Zarr encoding profile (``fast_local`` or ``cloud``). When
                  None, chosen from the destination location.
-        policy: Count-matrix geometry policy, used exactly. When None, the
-                default policy is used. An import that does not fit
-                ``mem_budget`` raises MemoryError before the destination is
-                created, naming the largest smaller policy that fits.
+        policy: Count-matrix layout: a ``CountMatrixPolicy``, used exactly;
+                None, the default layout; or ``"fit"``, the largest halving
+                of the default ``unitBytes`` and ``chunkBytes`` whose counts
+                write and ``countsT`` fit ``mem_budget``. A policy or the
+                default that does not fit raises ``CountLayoutMemoryError``,
+                a ``MemoryError``, before the destination is created, with
+                the largest halving that fits as its ``fittingPolicy``.
         io: Optional explicit read, compute, and write widths. Unset values
             stay under automatic planning.
         assay_types: Preset assay types, such as ``{"GEX": "RNA"}``, for
@@ -63,6 +66,8 @@ class CrToZarr:
     Attributes:
         cr: A CrReader object, containing the Cellranger data.
         z: The Zarr hierarchy (array or group).
+        policy: The count-matrix layout that every imported assay was written
+            with.
     """
 
     #: The tool whose files the writer reads, as its log names it.
@@ -77,7 +82,7 @@ class CrToZarr:
         mem_budget: int | str | None = None,
         nthreads: int | None = None,
         profile: StorageProfile | None = None,
-        policy: CountMatrixPolicy | None = None,
+        policy: CountMatrixPolicy | Literal["fit"] | None = None,
         io: StorageIoPolicy | None = None,
         assay_types: dict[str, str] | None = None,
         lines_in_mem: int = 100_000,
@@ -97,9 +102,11 @@ class CrToZarr:
             validate_assay_name,
         )
         from ..storage.destinations import check_destination, create_destination
+        from ..storage.sharding import count_layout_request
         from ..assay.classification import validate_assay_type
         from ._store import resolve_import_values
 
+        layout_request = count_layout_request(policy)
         self.resources = resolve_budget(mem_budget, nthreads)
         self.profile = resolve_storage_profile(zarr_loc, profile)
         self.io = io
@@ -153,7 +160,7 @@ class CrToZarr:
             storage_dtypes,
         )
         # A layout that does not fit fails here, before the destination exists.
-        layout = self._fit_count_layout(storage_dtypes, policy)
+        self.policy = self._fit_count_layout(storage_dtypes, layout_request)
         # The destination must be empty, or with overwrite an unprepared store.
         self.z = create_destination(
             zarr_loc, overwrite=overwrite, storage_options=storage_options
@@ -175,7 +182,7 @@ class CrToZarr:
                 feat_names=self.cr.feature_names(assay_name),
                 dtype=storage_dtypes[assay_name],
                 profile=self.profile,
-                policy=layout,
+                policy=self.policy,
                 normalized_values=normalized_values_record(self.values[assay_name]),
             )
         self._write_reader_metadata(cell_group, assay_names)
@@ -246,7 +253,10 @@ class CrToZarr:
         storage_dtypes: dict[str, Any],
         requested: CountMatrixPolicy | None,
     ) -> CountMatrixPolicy:
-        """Return the requested or default count layout if its writes fit the budget."""
+        """Return the ``requested`` count layout if its writes fit the budget.
+
+        None fits the default layout to the budget.
+        """
         from ..storage.sharding import fit_count_layout, sparse_counts_admission
         from .counts_t import counts_t_assays
 
@@ -268,7 +278,7 @@ class CrToZarr:
                 producerStagingBytes=staging_bytes,
                 extraProducerBytes=projection_bytes,
             ),
-            requested=DEFAULT_COUNT_MATRIX_POLICY if requested is None else requested,
+            requested=requested,
         )
 
     def _write_reader_metadata(

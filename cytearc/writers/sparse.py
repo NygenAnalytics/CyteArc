@@ -1,12 +1,12 @@
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix, issparse
 
 from ..storage.count_dtype import count_storage_dtype
-from ..storage.count_matrix import DEFAULT_COUNT_MATRIX_POLICY, CountMatrixPolicy
+from ..storage.count_matrix import CountMatrixPolicy
 from ..storage.identity import CountSummary, finalize_counts
 from ..storage.io_policy import StorageIoPolicy
 from ..storage.profiles import (
@@ -186,11 +186,14 @@ class SparseToZarr:
         nthreads: Worker count for write-time concurrency. When None, auto-detected.
         profile: Zarr encoding profile (``fast_local`` or ``cloud``). When
                  None, chosen from the destination location.
-        policy: Count-matrix geometry policy, used exactly for every assay.
-                When None, the default policy is used. An import that does
-                not fit ``mem_budget`` raises MemoryError before the
-                destination is created, naming the largest smaller policy
-                that fits.
+        policy: Count-matrix layout of every assay: a ``CountMatrixPolicy``,
+                used exactly; None, the default layout; or ``"fit"``, for
+                each assay the largest halving of the default ``unitBytes``
+                and ``chunkBytes`` whose counts write and ``countsT`` fit
+                ``mem_budget``. A policy or the default that does not fit
+                raises ``CountLayoutMemoryError``, a ``MemoryError``, before
+                the destination is created, with the largest halving that
+                fits as its ``fittingPolicy``.
         io: Optional explicit read, compute, and write widths. Unset values
             stay under automatic planning.
         assay_type: Preset assay type, such as ``RNA``, for an assay whose name
@@ -225,6 +228,8 @@ class SparseToZarr:
         z: The Zarr hierarchy (array or group).
         values: What the assay holds, or a mapping of assay names to it,
             decided before the store was created.
+        policy: The count-matrix layout that the assay was written with, or
+            a mapping of assay names to it.
     """
 
     def __init__(
@@ -240,7 +245,7 @@ class SparseToZarr:
         mem_budget: int | str | None = None,
         nthreads: int | None = None,
         profile: StorageProfile | None = None,
-        policy: CountMatrixPolicy | None = None,
+        policy: CountMatrixPolicy | Literal["fit"] | None = None,
         io: StorageIoPolicy | None = None,
         assay_type: str | Mapping[str, str] | None = None,
         *,
@@ -259,10 +264,12 @@ class SparseToZarr:
             validate_assay_name,
         )
         from ..storage.destinations import create_destination
+        from ..storage.sharding import count_layout_request
         from ..assay.classification import validate_assay_type
         from ..utils.matrix_values import DETECTION_CELLS
         from ._store import resolve_import_values
 
+        layout_request = count_layout_request(policy)
         single = not isinstance(csr_mat, Mapping)
         if single and assay_name is None:
             logger.debug("Using RNA as the default assay name")
@@ -352,9 +359,14 @@ class SparseToZarr:
         self.values: Any = decided[assays[0].name] if single else decided
         # A layout that does not fit fails here, before the destination exists.
         layouts = {
-            assay.name: self._fit_count_layout(assay, dtypes[assay.name], policy)
+            assay.name: self._fit_count_layout(
+                assay, dtypes[assay.name], layout_request
+            )
             for assay in assays
         }
+        self.policy: CountMatrixPolicy | dict[str, CountMatrixPolicy] = (
+            layouts[assays[0].name] if single else layouts
+        )
         # The destination must be empty, or with overwrite an unprepared store.
         self.z = create_destination(
             zarr_loc, overwrite=overwrite, storage_options=storage_options
@@ -407,7 +419,10 @@ class SparseToZarr:
         storage_dtype: Any,
         requested: CountMatrixPolicy | None,
     ) -> CountMatrixPolicy:
-        """Return the requested or default count layout if an assay's writes fit the budget."""
+        """Return the ``requested`` count layout if an assay's writes fit the budget.
+
+        None fits the default layout to the budget.
+        """
         from ..storage.sharding import fit_count_layout, sparse_counts_admission
         from .counts_t import counts_t_assays
 
@@ -426,7 +441,7 @@ class SparseToZarr:
                 residentBytes=resident,
                 canonicalBatches=canonical_batches,
             ),
-            requested=DEFAULT_COUNT_MATRIX_POLICY if requested is None else requested,
+            requested=requested,
         )
 
     def dump(self, batch_size: int | None = None) -> None:

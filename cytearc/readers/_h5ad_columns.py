@@ -216,6 +216,60 @@ def decode_categories(
     return values, ~valid
 
 
+@dataclass(frozen=True, slots=True)
+class CategoryCodes:
+    """The codes of a categorical column and the categories that they index.
+
+    A negative code, or one past the last category, marks a missing row.
+
+    Attributes:
+        codes: One integer code per row, as stored.
+        categories: The categories, as stored.
+    """
+
+    codes: np.ndarray
+    categories: np.ndarray
+
+    @property
+    def missing(self) -> np.ndarray:
+        """The rows whose code names no category."""
+        return (self.codes < 0) | (self.codes >= len(self.categories))
+
+
+type TableColumn = tuple[np.ndarray, np.ndarray] | CategoryCodes
+
+
+def decoded_column(column: TableColumn) -> tuple[np.ndarray, np.ndarray]:
+    """Return a column's values and missing rows, decoding a categorical's codes."""
+    if isinstance(column, CategoryCodes):
+        return decode_categories(column.codes, column.categories)
+    return column
+
+
+def _node_column(node: H5adNode, selection: slice) -> TableColumn:
+    """Return one dataframe column slice, a categorical as its codes."""
+    if isinstance(node, h5py.Dataset):
+        values = np.asarray(node[selection])
+        return values, np.zeros(values.shape, dtype=bool)
+    if is_categorical(node):
+        return CategoryCodes(
+            np.asarray(node["codes"][selection]), np.asarray(node["categories"][:])
+        )
+    if is_nullable(node):
+        values = np.asarray(node["values"][selection])
+        missing = np.asarray(node["mask"][selection], dtype=bool)
+        if missing.shape != values.shape:
+            raise ValueError(
+                f"Column {node.name!r} has a missing-value mask that does not "
+                "align with its values"
+            )
+        return values, missing
+    raise TypeError(
+        f"Column {node.name!r} uses the unsupported H5AD encoding "
+        f"{column_encoding(node)!r}"
+    )
+
+
 def read_column(
     node: H5adNode,
     start: int = 0,
@@ -231,25 +285,7 @@ def read_column(
         TypeError: If the node uses an encoding that cannot be decoded.
         ValueError: If a nullable column's mask does not align with its values.
     """
-    selection = slice(start, stop)
-    if isinstance(node, h5py.Dataset):
-        values = np.asarray(node[selection])
-        return values, np.zeros(values.shape, dtype=bool)
-    if is_categorical(node):
-        return decode_categories(node["codes"][selection], node["categories"][:])
-    if is_nullable(node):
-        values = np.asarray(node["values"][selection])
-        missing = np.asarray(node["mask"][selection], dtype=bool)
-        if missing.shape != values.shape:
-            raise ValueError(
-                f"Column {node.name!r} has a missing-value mask that does not "
-                "align with its values"
-            )
-        return values, missing
-    raise TypeError(
-        f"Column {node.name!r} uses the unsupported H5AD encoding "
-        f"{column_encoding(node)!r}"
-    )
+    return decoded_column(_node_column(node, slice(start, stop)))
 
 
 def legacy_categories(
@@ -274,15 +310,20 @@ def legacy_categories(
     return None
 
 
-def read_table_column(
+def table_column(
     h5: h5py.File,
     table: H5adNode,
     key: str,
     category_groups: tuple[str, ...],
     start: int = 0,
     stop: int | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Read one column of a dataframe group or of an old compound dataset."""
+) -> TableColumn:
+    """Read one column of a dataframe group or of an old compound dataset.
+
+    A categorical column comes back as its codes and categories, whether it
+    keeps its categories beside its codes or, as old AnnData versions wrote
+    it, apart from them; any other column as its values and missing rows.
+    """
     if isinstance(table, h5py.Dataset):
         fields = table.dtype.fields
         if fields is None or key not in fields:
@@ -291,13 +332,29 @@ def read_table_column(
         missing = np.zeros(values.shape, dtype=bool)
     else:
         node = table[key]
-        values, missing = read_column(node, start, stop)
-        if not isinstance(node, h5py.Dataset):
-            return values, missing
+        column = _node_column(node, slice(start, stop))
+        if isinstance(column, CategoryCodes) or not isinstance(node, h5py.Dataset):
+            return column
+        values, missing = column
     categories = legacy_categories(h5, table, key, category_groups)
     if categories is not None and values.dtype.kind in "iu":
-        return decode_categories(values, categories)
+        return CategoryCodes(values, categories)
     return values, missing
+
+
+def read_table_column(
+    h5: h5py.File,
+    table: H5adNode,
+    key: str,
+    category_groups: tuple[str, ...],
+    start: int = 0,
+    stop: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read one column of a dataframe group or of an old compound dataset.
+
+    Categorical labels are decoded as :func:`read_column` decodes them.
+    """
+    return decoded_column(table_column(h5, table, key, category_groups, start, stop))
 
 
 @dataclass(frozen=True, slots=True)
