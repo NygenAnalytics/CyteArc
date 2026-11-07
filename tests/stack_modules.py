@@ -27,7 +27,7 @@ STACK_MODULES = (
     "plotting/repertoire.py",
     "plotting/variants.py",
     "readers/_contigs.py",
-    "readers/_delimited.py",
+    "utils/delimited.py",
     "readers/_matrix_market.py",
     "readers/_treedata.py",
     "readers/_variant_files.py",

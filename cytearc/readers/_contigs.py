@@ -1,6 +1,6 @@
 """Parsing shared by the readers of immune receptor contig files.
 
-Contig files are delimited tables read by :mod:`cytearc.readers._delimited`,
+Contig files are delimited tables read by :mod:`cytearc.utils.delimited`,
 which refuses a row of fewer or more fields than the header names, so a row
 cut short is never read with empty fields.
 """
@@ -15,7 +15,7 @@ from ..metadata.records import file_lines, parse_columns, parse_text
 from ..repertoire.chains import infer_loci
 from ..repertoire.contigs import FIELDS
 from ..utils.arguments import quoted_value
-from ._delimited import first_lines, split_fields, text_chunks, text_layout
+from ..utils.delimited import first_lines, split_fields, text_chunks, text_layout
 
 __all__ = [
     "contig_chunks",

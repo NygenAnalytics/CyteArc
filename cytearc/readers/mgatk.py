@@ -41,7 +41,7 @@ import pandas as pd
 
 from ..variants.counts import BASES, MAX_COUNT, Contig, EntryBatch, SiteTable
 from ..utils.files import is_gzip
-from ._delimited import first_lines
+from ..utils.delimited import first_lines
 from ._variant_files import find_file
 from ..utils.arguments import quoted_value
 

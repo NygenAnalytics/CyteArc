@@ -1090,7 +1090,6 @@ def test_reader_implementations_are_runtime_isolated():
     required_files = {
         "__init__.py",
         "_contigs.py",
-        "_delimited.py",
         "_matrix_market.py",
         "_text.py",
         "_sparse.py",
@@ -1140,29 +1139,25 @@ def test_reader_implementations_are_runtime_isolated():
         "readers.seurat",
     }
     shared_reader_imports = {
-        "airr.py": {"readers._contigs", "readers._delimited"},
+        "airr.py": {"readers._contigs"},
         "cellranger.py": {
             "readers._assay_names",
             "readers._contigs",
-            "readers._delimited",
             "readers._sparse",
             "readers._text",
         },
         "cellsnp.py": {"readers._matrix_market", "readers._variant_files"},
         "clone_tables.py": {
-            "readers._delimited",
             "readers._h5ad_columns",
             "readers._matrix_market",
         },
         "csv.py": {"readers._text"},
-        "giftwrap.py": {"readers._delimited", "readers._variant_files"},
-        "got.py": {"readers._delimited"},
+        "giftwrap.py": {"readers._variant_files"},
         "lineage_barcodes.py": {
-            "readers._delimited",
             "readers._h5ad_columns",
             "readers._text",
         },
-        "mgatk.py": {"readers._delimited", "readers._variant_files"},
+        "mgatk.py": {"readers._variant_files"},
         "mito_afm.py": {"readers._h5ad_columns", "readers._text"},
         "vartrix.py": {"readers._matrix_market", "readers._variant_files"},
         "h5ad.py": {
@@ -1174,12 +1169,12 @@ def test_reader_implementations_are_runtime_isolated():
         },
         "mtx.py": {"readers._matrix_market", "readers._sparse", "readers._text"},
         "phylogeny.py": {"readers._treedata"},
-        "recorder_alleles.py": {"readers._delimited", "readers._treedata"},
+        "recorder_alleles.py": {"readers._treedata"},
         "tapestri.py": {"readers._assay_names", "readers._text"},
     }
-    # Contig files are delimited tables, so the contig parser reads them
-    # through the one reader of delimited text.
-    shared_module_imports = {"_contigs.py": {"readers._delimited"}}
+    # Contig files are delimited tables, which the contig parser reads through
+    # utils.delimited like every reader, so it imports no other reader module.
+    shared_module_imports: dict[str, set[str]] = {}
     reader_edges = {
         "readers.lineage_barcodes": {"readers.cellranger"},
         "readers.mtx": {"readers.cellranger"},

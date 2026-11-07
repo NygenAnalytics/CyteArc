@@ -47,7 +47,7 @@ import pandas as pd
 
 from ..metadata.records import MISSING_TEXT, file_lines
 from ..variants.counts import EntryBatch, SiteTable
-from ._delimited import first_lines, text_chunks, text_layout
+from ..utils.delimited import first_lines, text_chunks, text_layout
 from ..utils.arguments import quoted_value
 
 __all__ = ["GOT_FORMATS", "GotSource", "got_source", "got_table_format"]
@@ -83,7 +83,7 @@ def _delimiter(line: str) -> str:
 def _read_table(path: str) -> _Table:
     """Read a GoT table as text, with its cells from a column or R's row names.
 
-    The table is read as :mod:`~cytearc.readers._delimited` reads tables: a
+    The table is read as :mod:`~cytearc.utils.delimited` reads tables: a
     first row of one field more than the header holds R's row names, a table
     whose rows of one field more all end in a delimiter with nothing after it
     reads alike with a delimiter after each row's last field and is refused,

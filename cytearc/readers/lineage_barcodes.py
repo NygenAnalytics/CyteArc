@@ -63,7 +63,7 @@ import pandas as pd
 from ..metadata.records import MISSING_TEXT, file_lines, parse_text
 from ..utils.arrays import sorted_unique
 from ..utils.files import HDF5_SIGNATURE, file_signature
-from ._delimited import (
+from ..utils.delimited import (
     TextLayout,
     first_lines,
     joined_columns,

@@ -19,7 +19,7 @@ import pandas as pd
 
 from ..repertoire.contigs import FIELDS, REQUIRED_FIELDS
 from ._contigs import contig_chunks, header_fields
-from ._delimited import first_lines
+from ..utils.delimited import first_lines
 from ..utils.arguments import quoted_value
 
 __all__ = [
