@@ -225,9 +225,9 @@ def test_raw_source_sink_scoring_owns_the_vector_before_validation_and_snapshot(
             source_sink[:] *= -1.0
         return validated
 
-    def capture_source_sink(laplacian, n_values, seed, values):
+    def capture_source_sink(laplacian, n_values, seed, values, **bounds):
         received.append(np.array(values, copy=True))
-        return original_potential(laplacian, n_values, seed, values)
+        return original_potential(laplacian, n_values, seed, values, **bounds)
 
     monkeypatch.setattr(
         trajectory_operations,
@@ -295,7 +295,8 @@ def test_largest_component_selection_keeps_a_unique_largest_component():
         "largest",
     )
 
-    assert sizes == [2, 3, 1]
+    # Sizes are listed largest first.
+    assert sizes == [3, 2, 1]
     np.testing.assert_array_equal(retained, [False, False, True, True, True, False])
 
 
@@ -332,7 +333,7 @@ def test_largest_component_selection_matches_a_scan_of_every_component(seed):
         range(n_components),
         key=lambda label: (-counts[label], int(selected[labels == label].min())),
     )
-    assert component_sizes == counts
+    assert component_sizes == sorted(counts, reverse=True)
     if n_components > 1:
         np.testing.assert_array_equal(retained, labels == expected)
 
@@ -1502,3 +1503,677 @@ def test_aggregation_and_marker_search_complete_within_a_small_budget(tmp_path):
     ):
         ref = run()
         assert datastore.artifacts.inspect(ref).complete
+
+
+# Solver bounds, progress, and graph components of pseudotime scoring
+
+
+def _clusters_on_a_tree(n_cells: int, n_clusters: int, seed: int = 0) -> csr_matrix:
+    """Return a neighbour graph of Gaussian clusters, each one step from another.
+
+    Neighbouring clusters share few edges, so the smallest singular values of
+    the graph's Laplacian lie close together, as on a large atlas.
+    """
+    from scipy.spatial import cKDTree
+
+    rng = np.random.default_rng(seed)
+    centers = np.zeros((n_clusters, 10))
+    for index in range(1, n_clusters):
+        step = rng.normal(size=10)
+        centers[index] = centers[rng.integers(0, index)] + 5.0 * step / np.linalg.norm(
+            step
+        )
+    points = centers[rng.integers(0, n_clusters, n_cells)] + rng.normal(
+        size=(n_cells, 10)
+    )
+    distances, indices = cKDTree(points).query(points, k=11)
+    weights = np.exp(-((distances[:, 1:] / np.median(distances[:, -1])) ** 2))
+    rows = np.repeat(np.arange(n_cells), 10)
+    graph = csr_matrix(
+        (weights.ravel(), (rows, indices[:, 1:].ravel())), shape=(n_cells, n_cells)
+    )
+    return graph.maximum(graph.T).tocsr()
+
+
+def _first_to_last_source_sink(n_cells: int) -> np.ndarray:
+    source_sink = np.zeros(n_cells)
+    source_sink[[0, -1]] = [-1.0, 1.0]
+    return source_sink
+
+
+def _count_svds_products(monkeypatch) -> list[int]:
+    """Count the Laplacian products that svds takes, apart from the solve's count.
+
+    Each call appends one count to the returned list.
+    """
+    from scipy.sparse.linalg import LinearOperator, aslinearoperator
+
+    import cytearc.trajectory.pseudotime as pseudotime_module
+
+    original = pseudotime_module.svds
+    counts: list[int] = []
+
+    def counting_svds(operator, **arguments):
+        inner = aslinearoperator(operator)
+        counts.append(0)
+
+        def matvec(values):
+            counts[-1] += 1
+            return inner.matvec(values)
+
+        def rmatvec(values):
+            counts[-1] += 1
+            return inner.rmatvec(values)
+
+        counted = LinearOperator(
+            shape=inner.shape,
+            matvec=matvec,
+            rmatvec=rmatvec,
+            matmat=inner.matmat,
+            dtype=inner.dtype,
+        )
+        return original(counted, **arguments)
+
+    monkeypatch.setattr(pseudotime_module, "svds", counting_svds)
+    return counts
+
+
+def test_a_bounded_solve_stops_with_the_counts_of_the_solve(monkeypatch):
+    import re
+
+    from scipy.sparse.linalg import ArpackNoConvergence
+
+    from cytearc.trajectory import PseudotimeConvergenceError
+
+    laplacian_transpose = _random_walk_laplacian_transpose(_clusters_on_a_tree(600, 60))
+    counts = _count_svds_products(monkeypatch)
+
+    with pytest.raises(PseudotimeConvergenceError) as raised:
+        _truncated_pba_potential(
+            laplacian_transpose,
+            30,
+            4444,
+            _first_to_last_source_sink(600),
+            max_iterations=1,
+        )
+
+    error = raised.value
+    cause = error.__cause__
+    assert isinstance(error, RuntimeError)
+    assert isinstance(cause, ArpackNoConvergence)
+    # ARPACK counts its first basis as an iteration, so it reports one more
+    # iteration than the restarts it ran, and the modes that converged.
+    iterations, converged = map(
+        int, re.search(r"\((\d+) iterations, (\d+)/30 ", str(cause)).groups()
+    )
+    assert (error.n_cells, error.n_modes, error.max_iterations) == (600, 30, 1)
+    assert error.solver_tol is None
+    assert error.restarts == iterations - 1 == 1
+    assert error.converged_modes == converged == len(cause.eigenvalues)
+    assert error.operator_products == counts[0]
+    # A first basis of 2 * 30 + 1 vectors takes 62 products of L Lᵀ and the
+    # restart at most 31 more, each two products of the Laplacian.
+    assert 0 < error.operator_products <= 2 * (62 + 31)
+    assert "max_iterations=1" in str(error)
+    assert "fewer modes do not help" in str(error)
+
+
+def test_counting_the_products_leaves_the_potential_unchanged(monkeypatch):
+    import cytearc.trajectory.pseudotime as pseudotime_module
+
+    laplacian_transpose = _random_walk_laplacian_transpose(
+        _clusters_on_a_tree(300, 10, seed=1)
+    )
+    source_sink = _first_to_last_source_sink(300)
+    counted = _truncated_pba_potential(laplacian_transpose, 10, 7, source_sink)
+    # A bound that the solve meets changes nothing it computes.
+    bounded = _truncated_pba_potential(
+        laplacian_transpose, 10, 7, source_sink, max_iterations=10_000
+    )
+
+    # Without the counting operator, svds reads the matrix as it did before.
+    monkeypatch.setattr(
+        pseudotime_module, "_counted_operator", lambda matrix, _progress: matrix
+    )
+    plain = _truncated_pba_potential(laplacian_transpose, 10, 7, source_sink)
+
+    np.testing.assert_array_equal(counted, plain)
+    np.testing.assert_array_equal(bounded, plain)
+
+
+def test_the_solver_bounds_reach_svds(monkeypatch):
+    import cytearc.trajectory.pseudotime as pseudotime_module
+
+    received: list[dict] = []
+    original = pseudotime_module.svds
+
+    def recording_svds(operator, **arguments):
+        received.append({name: arguments[name] for name in ("tol", "maxiter")})
+        return original(operator, **arguments)
+
+    monkeypatch.setattr(pseudotime_module, "svds", recording_svds)
+    laplacian_transpose = _random_walk_laplacian_transpose(
+        _clusters_on_a_tree(300, 10, seed=1)
+    )
+    source_sink = _first_to_last_source_sink(300)
+    default = _truncated_pba_potential(laplacian_transpose, 10, 7, source_sink)
+    bounded = _truncated_pba_potential(
+        laplacian_transpose, 10, 7, source_sink, solver_tol=1e-8, max_iterations=500
+    )
+
+    # SciPy's own defaults: machine precision and ten restarts per cell.
+    assert received == [
+        {"tol": 0.0, "maxiter": None},
+        {"tol": 1e-8, "maxiter": 500},
+    ]
+    np.testing.assert_allclose(bounded, default, rtol=0.0, atol=1e-9)
+
+
+def test_a_result_without_the_null_mode_names_a_set_solver_tolerance(monkeypatch):
+    import cytearc.trajectory.pseudotime as pseudotime_module
+
+    laplacian_transpose = _random_walk_laplacian_transpose(_clusters_on_a_tree(40, 4))
+    original = pseudotime_module.svds
+
+    def search_that_missed_the_null_mode(operator, **arguments):
+        # Drop the smallest singular value, as a loose search can.
+        left, values, right = original(operator, **arguments)
+        order = np.argsort(values)[1:]
+        return left[:, order], values[order], right[order]
+
+    monkeypatch.setattr(pseudotime_module, "svds", search_that_missed_the_null_mode)
+    source_sink = _first_to_last_source_sink(40)
+
+    with pytest.raises(ValueError, match="null mode$"):
+        _truncated_pba_potential(laplacian_transpose, 5, 7, source_sink)
+    with pytest.raises(
+        ValueError, match="can miss at solver_tol=0.01; lower solver_tol or leave"
+    ):
+        _truncated_pba_potential(
+            laplacian_transpose, 5, 7, source_sink, solver_tol=0.01
+        )
+
+
+@pytest.mark.parametrize(
+    ("bounds", "error", "message"),
+    [
+        ({"solver_tol": 0.0}, ValueError, "greater than 0 and less than 1"),
+        ({"solver_tol": 1.0}, ValueError, "greater than 0 and less than 1"),
+        ({"solver_tol": float("nan")}, ValueError, "solver_tol must be finite"),
+        ({"solver_tol": "1e-4"}, TypeError, "solver_tol must be a real number"),
+        ({"solver_tol": True}, TypeError, "solver_tol must be a real number"),
+        ({"max_iterations": 0}, ValueError, "max_iterations must be at least 1"),
+        ({"max_iterations": 2.0}, TypeError, "max_iterations must be an integer"),
+        ({"max_iterations": True}, TypeError, "max_iterations must be an integer"),
+    ],
+)
+def test_solver_bounds_are_checked_before_the_solve(
+    bounds, error, message, monkeypatch
+):
+    import cytearc.trajectory.pseudotime as pseudotime_module
+
+    def unreachable(*_args, **_kwargs):
+        raise AssertionError("the bounds were not checked before the solve")
+
+    monkeypatch.setattr(pseudotime_module, "svds", unreachable)
+    laplacian_transpose = _random_walk_laplacian_transpose(_clusters_on_a_tree(40, 4))
+
+    with pytest.raises(error, match=message):
+        _truncated_pba_potential(
+            laplacian_transpose, 3, 7, _first_to_last_source_sink(40), **bounds
+        )
+
+
+@pytest.mark.parametrize("max_iterations", [200, None], ids=["bounded", "unbounded"])
+def test_the_solve_reports_progress_to_observers_and_the_log(
+    max_iterations, monkeypatch
+):
+    from loguru import logger
+
+    import cytearc.trajectory.pseudotime as pseudotime_module
+    from cytearc.utils.logging import configure_output, progress_enabled
+    from cytearc.utils.progress import observe_progress
+
+    # Report every product, so a quick solve reports as a long one does.
+    monkeypatch.setattr(pseudotime_module, "_PROGRESS_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(pseudotime_module, "_BAR_INTERVAL_SECONDS", 0.0)
+    counts = _count_svds_products(monkeypatch)
+    laplacian_transpose = _random_walk_laplacian_transpose(_clusters_on_a_tree(40, 4))
+    observed: list[tuple[str | None, int, int | None]] = []
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        level="INFO",
+        filter=lambda record: record["message"].startswith("Pseudotime scoring: "),
+    )
+    displayed = progress_enabled()
+    # Observers receive the bar whether or not it is displayed.
+    configure_output(progress=False)
+    try:
+        with observe_progress(
+            lambda _bar, description, completed, total: observed.append(
+                (description, completed, total)
+            )
+        ):
+            _truncated_pba_potential(
+                laplacian_transpose,
+                5,
+                7,
+                _first_to_last_source_sink(40),
+                max_iterations=max_iterations,
+            )
+    finally:
+        configure_output(progress=displayed)
+        logger.remove(sink)
+
+    products = counts[0]
+    assert products > 0
+    assert {description for description, _, _ in observed} == {"Pseudotime solve"}
+    completed = [done for _, done, _ in observed]
+    assert completed == sorted(completed)
+    record_counts = [int(message.split()[2]) for message in messages]
+    assert record_counts == list(range(1, products + 1))
+    if max_iterations is None:
+        assert {total for _, _, total in observed} == {None}
+        assert completed[-1] == products
+        assert messages[-1].endswith("; set max_iterations to bound the solve")
+    else:
+        # A basis of 20 vectors takes 21 products of L Lᵀ and each of 200
+        # restarts at most 15 more, each two products of the Laplacian.
+        bound = 2 * (21 + 200 * 15)
+        assert {total for _, _, total in observed} == {bound}
+        # The solve converged, so its bar completes.
+        assert completed[-2:] == [products, bound]
+        assert f"{products} of at most {bound} operator products" in messages[-1]
+        assert messages[-1].endswith("cells (max_iterations=200)")
+
+
+def test_graph_components_are_numbered_by_decreasing_size():
+    from cytearc.trajectory.pseudotime import pseudotime_components
+
+    # Paths of 3, 5, and 4 cells, laid out in a shuffled cell order.
+    order = np.random.default_rng(3).permutation(12)
+    paths = [order[:3], order[3:8], order[8:]]
+    adjacency = np.zeros((12, 12))
+    for members in paths:
+        for first, second in zip(members[:-1], members[1:], strict=True):
+            adjacency[first, second] = adjacency[second, first] = 1.0
+    graph = csr_matrix(adjacency)
+    expected = np.empty(12, dtype=np.int64)
+    for number, members in enumerate((paths[1], paths[2], paths[0])):
+        expected[members] = number
+
+    component, sizes, scored = pseudotime_components(graph, np.arange(12), "largest")
+
+    assert sizes == (5, 4, 3)
+    np.testing.assert_array_equal(component, expected)
+    assert scored == 0
+
+    # "sources" scores the component that holds the most source cells.
+    source_cells = np.isin(np.arange(12), paths[0][:2])
+    _, _, scored = pseudotime_components(
+        graph, np.arange(12), "sources", source_cells=source_cells
+    )
+    assert scored == 2
+    retained, listed = _select_pseudotime_component(
+        graph, np.arange(12), "sources", source_cells=source_cells
+    )
+    np.testing.assert_array_equal(retained, np.isin(np.arange(12), paths[0]))
+    assert listed == [5, 4, 3]
+    # A tie goes to the lower number, the larger component.
+    source_cells[paths[2][:2]] = True
+    _, _, scored = pseudotime_components(
+        graph, np.arange(12), "sources", source_cells=source_cells
+    )
+    assert scored == 1
+
+
+@pytest.mark.parametrize(
+    ("policy", "source_cells", "message"),
+    [
+        ("sources", None, "needs the source cells"),
+        ("sources", np.zeros(4, dtype=bool), "needs at least one source cell"),
+        ("sources", np.ones(3, dtype=bool), "one entry per graph row"),
+        ("sources", np.ones(4), "one entry per graph row"),
+        ("largest", np.ones(4, dtype=bool), "applies only to component_policy"),
+        ("smallest", None, "'largest', 'sources' or 'error'"),
+    ],
+)
+def test_component_selection_refuses_unusable_source_cells(
+    policy, source_cells, message
+):
+    from cytearc.trajectory.pseudotime import pseudotime_components
+
+    with pytest.raises(ValueError, match=message):
+        pseudotime_components(
+            csr_matrix(np.ones((4, 4))),
+            np.arange(4),
+            policy,
+            source_cells=source_cells,
+        )
+
+
+def test_missing_source_and_sink_labels_raise_a_typed_error():
+    from cytearc.trajectory import SourceSinkLabelsError
+
+    labels = pd.Series(["a", "b", "c"])
+
+    with pytest.raises(SourceSinkLabelsError) as raised:
+        _validate_source_sink_labels(labels, ["a", "x"], ["y", "c"], "test cells")
+    error = raised.value
+    assert (error.missing_sources, error.missing_sinks) == (("x",), ("y",))
+    assert (error.missing_from, error.component_sizes) == ("labels", None)
+    assert str(error) == (
+        "Source/sink labels were not found in test cells. "
+        "Missing sources: ['x']; missing sinks: ['y']"
+    )
+
+    # The error is a ValueError, so earlier handlers still catch it.
+    with pytest.raises(ValueError, match="missing sinks: \\['z'\\]") as raised:
+        _validate_source_sink_labels(
+            labels,
+            [],
+            ["z"],
+            "the retained connected component",
+            missing_from="scored component",
+            component_sizes=[3, 2],
+        )
+    assert isinstance(raised.value, SourceSinkLabelsError)
+    assert raised.value.missing_from == "scored component"
+    assert raised.value.component_sizes == (3, 2)
+    assert str(raised.value).endswith(
+        "The graph's connected components hold [3, 2] cells"
+    )
+
+    # The sizes go with the scored component and only with it.
+    for arguments in (
+        {"missing_from": "scored component"},
+        {"component_sizes": [3]},
+        {"missing_from": "graph", "component_sizes": [3]},
+    ):
+        with pytest.raises(ValueError, match="component_sizes|missing_from"):
+            _validate_source_sink_labels(labels, ["a"], [], "cells", **arguments)
+
+
+# Pseudotime scoring on stored graphs
+
+
+def _pseudotime_parameters(**changes):
+    return {
+        "n_singular_vals": 3,
+        "sources": ["root"],
+        "sinks": ["A", "B"],
+        "min_max_norm_ptime": True,
+        "random_seed": 4444,
+        "component_policy": "largest",
+        **changes,
+    }
+
+
+def test_a_default_pseudotime_records_what_it_recorded_before_the_bounds():
+    from .test_trajectory_record_paths import _Y_LABELS, _trajectory_store, _y_graph
+
+    trajectory = _trajectory_store(_y_graph())
+    labels = trajectory.labels(_Y_LABELS)
+    ref = trajectory.store.trajectory.pseudotime(
+        trajectory.graph,
+        source_sink=labels,
+        sources=["root"],
+        sinks=["A", "B"],
+        n_singular_vals=3,
+    )
+
+    # A store reuses an artifact of the same record, so an unchanged record
+    # keeps the identity of every pseudotime saved before.
+    status = trajectory.store.artifacts.inspect(ref)
+    assert status.parameters == _pseudotime_parameters()
+    assert set(status.inputs or {}) == {
+        "connectivity_map",
+        "source_sink",
+        "cell_selection",
+    }
+
+
+def test_a_set_solver_bound_enters_the_record_and_makes_another_artifact():
+    from .test_trajectory_record_paths import _Y_LABELS, _trajectory_store, _y_graph
+
+    trajectory = _trajectory_store(_y_graph())
+    store = trajectory.store
+    arguments = {
+        "source_sink": trajectory.labels(_Y_LABELS),
+        "sources": ["root"],
+        "sinks": ["A", "B"],
+        "n_singular_vals": 3,
+    }
+    default = store.trajectory.pseudotime(trajectory.graph, **arguments)
+    unset = store.trajectory.pseudotime(
+        trajectory.graph, solver_tol=None, max_iterations=None, **arguments
+    )
+    bounded = store.trajectory.pseudotime(
+        trajectory.graph, max_iterations=500, **arguments
+    )
+    tolerant = store.trajectory.pseudotime(
+        trajectory.graph, solver_tol=1e-6, **arguments
+    )
+
+    assert unset == default
+    assert len({default, bounded, tolerant}) == 3
+    assert store.artifacts.inspect(bounded).parameters == _pseudotime_parameters(
+        max_iterations=500
+    )
+    assert store.artifacts.inspect(tolerant).parameters == _pseudotime_parameters(
+        solver_tol=1e-6
+    )
+    # Each is reused by a call that sets its bound again.
+    assert (
+        store.trajectory.pseudotime(trajectory.graph, max_iterations=500, **arguments)
+        == bounded
+    )
+    expected = store.trajectory.load_pseudotime(default).values
+    np.testing.assert_array_equal(
+        store.trajectory.load_pseudotime(bounded).values, expected
+    )
+    np.testing.assert_allclose(
+        store.trajectory.load_pseudotime(tolerant).values,
+        expected,
+        rtol=0.0,
+        atol=1e-6,
+    )
+
+
+def test_a_solve_stopped_at_its_bound_saves_no_pseudotime():
+    from cytearc.trajectory import PseudotimeConvergenceError
+
+    from .test_trajectory_record_paths import _trajectory_store
+
+    trajectory = _trajectory_store(_clusters_on_a_tree(300, 30).toarray())
+    values = np.full(300, "middle", dtype=object)
+    values[:5] = "start"
+    values[-5:] = "end"
+
+    with pytest.raises(PseudotimeConvergenceError) as raised:
+        trajectory.store.trajectory.pseudotime(
+            trajectory.graph,
+            source_sink=trajectory.labels(values.astype(str)),
+            sources=["start"],
+            sinks=["end"],
+            max_iterations=1,
+        )
+
+    error = raised.value
+    assert (error.n_cells, error.n_modes, error.restarts) == (300, 30, 1)
+    assert trajectory.artifacts("pseudotime") == []
+
+
+def test_loaded_pseudotime_numbers_the_graph_components_by_size():
+    from scipy.sparse import block_diag
+    from scipy.sparse.csgraph import connected_components
+
+    from .test_trajectory_record_paths import (
+        _Y_LABELS,
+        _adjacency,
+        _path,
+        _trajectory_store,
+        _y_graph,
+    )
+
+    # A path of 4 cells, a pair, and a Y of 5 cells, in a shuffled cell order.
+    blocks = block_diag(
+        (
+            csr_matrix(_path(4)),
+            csr_matrix(_adjacency(2, [(0, 1)])),
+            csr_matrix(_y_graph()),
+        )
+    ).toarray()
+    order = np.random.default_rng(5).permutation(11)
+    trajectory = _trajectory_store(blocks[np.ix_(order, order)])
+    block_labels = np.array(["other"] * 6 + list(_Y_LABELS))
+    ref = trajectory.store.trajectory.pseudotime(
+        trajectory.graph,
+        source_sink=trajectory.labels(block_labels[order]),
+        sources=["root"],
+        sinks=["A", "B"],
+        n_singular_vals=3,
+    )
+
+    result = trajectory.store.trajectory.load_pseudotime(ref)
+
+    # Cells 0 to 3 of the blocks form the path, 4 and 5 the pair, the rest the Y.
+    block_component = np.array([1] * 4 + [2] * 2 + [0] * 5)
+    assert result.component_sizes == (5, 4, 2)
+    np.testing.assert_array_equal(result.component, block_component[order])
+    np.testing.assert_array_equal(result.valid, result.component == 0)
+    graph = trajectory.store.graph.load(trajectory.graph, symmetric=True)
+    _, scipy_labels = connected_components(graph, directed=False)
+    assert sorted(np.bincount(scipy_labels).tolist(), reverse=True) == [5, 4, 2]
+
+    connected = _trajectory_store(_y_graph())
+    whole = connected.store.trajectory.load_pseudotime(
+        connected.store.trajectory.pseudotime(
+            connected.graph,
+            source_sink=connected.labels(_Y_LABELS),
+            sources=["root"],
+            sinks=["A", "B"],
+            n_singular_vals=3,
+        )
+    )
+    assert whole.component_sizes == (5,)
+    np.testing.assert_array_equal(whole.component, np.zeros(5))
+
+
+def _path_and_y() -> tuple[np.ndarray, np.ndarray]:
+    """Return a path of 8 cells beside a Y of 5, and labels for the Y."""
+    from scipy.sparse import block_diag
+
+    from .test_trajectory_record_paths import _Y_LABELS, _path, _y_graph
+
+    adjacency = block_diag((csr_matrix(_path(8)), csr_matrix(_y_graph()))).toarray()
+    return adjacency, np.concatenate((np.full(8, "other"), _Y_LABELS))
+
+
+def test_the_sources_policy_scores_the_component_that_holds_the_sources():
+    from cytearc.trajectory import SourceSinkLabelsError
+
+    from .test_trajectory_record_paths import (
+        _Y_LABELS,
+        _Y_SOURCE_SINK,
+        _trajectory_store,
+        _y_graph,
+    )
+
+    adjacency, labels = _path_and_y()
+    trajectory = _trajectory_store(adjacency)
+    store = trajectory.store
+    arguments = {
+        "source_sink": trajectory.labels(labels),
+        "sources": ["root"],
+        "sinks": ["A", "B"],
+        "n_singular_vals": 3,
+    }
+
+    # The largest component, the path, holds none of the labels.
+    with pytest.raises(SourceSinkLabelsError) as raised:
+        store.trajectory.pseudotime(trajectory.graph, **arguments)
+    assert (raised.value.missing_sources, raised.value.missing_sinks) == (
+        ("root",),
+        ("A", "B"),
+    )
+    assert raised.value.missing_from == "scored component"
+    assert raised.value.component_sizes == (8, 5)
+
+    ref = store.trajectory.pseudotime(
+        trajectory.graph, component_policy="sources", **arguments
+    )
+    result = store.trajectory.load_pseudotime(ref)
+    np.testing.assert_array_equal(result.valid, np.arange(13) >= 8)
+    np.testing.assert_array_equal(result.component, np.repeat([0, 1], [8, 5]))
+    assert result.component_sizes == (8, 5)
+    assert np.isnan(result.values[:8]).all()
+    # The Y is scored as it is on a graph of the Y alone.
+    alone = _trajectory_store(_y_graph())
+    alone_ref = alone.store.trajectory.pseudotime(
+        alone.graph,
+        source_sink=alone.labels(_Y_LABELS),
+        sources=["root"],
+        sinks=["A", "B"],
+        n_singular_vals=3,
+    )
+    np.testing.assert_allclose(
+        result.values[8:],
+        alone.store.trajectory.load_pseudotime(alone_ref).values,
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+    # A custom vector's sources are its negative values.
+    from_vector = store.trajectory.pseudotime(
+        trajectory.graph,
+        ss_vec=np.concatenate((np.zeros(8), _Y_SOURCE_SINK)),
+        component_policy="sources",
+        n_singular_vals=3,
+    )
+    np.testing.assert_array_equal(
+        store.trajectory.load_pseudotime(from_vector).valid, np.arange(13) >= 8
+    )
+
+
+@pytest.mark.parametrize(
+    ("sources", "sinks", "expected"),
+    [
+        # The path holds two source cells and the Y one, so the path is scored.
+        (["early", "root"], ["late"], (("root",), (), "scored component", (8, 5))),
+        (["root"], ["late", "A"], ((), ("late",), "scored component", (8, 5))),
+        (["absent"], ["A"], (("absent",), (), "labels", None)),
+    ],
+    ids=["sources-in-two-components", "sink-outside", "label-absent"],
+)
+def test_the_sources_policy_names_labels_outside_the_scored_component(
+    sources, sinks, expected
+):
+    from cytearc.trajectory import SourceSinkLabelsError
+
+    from .test_trajectory_record_paths import _trajectory_store
+
+    adjacency, labels = _path_and_y()
+    labels[[0, 1]] = "early"
+    labels[7] = "late"
+    trajectory = _trajectory_store(adjacency)
+
+    with pytest.raises(SourceSinkLabelsError) as raised:
+        trajectory.store.trajectory.pseudotime(
+            trajectory.graph,
+            source_sink=trajectory.labels(labels),
+            sources=sources,
+            sinks=sinks,
+            component_policy="sources",
+            n_singular_vals=3,
+        )
+
+    error = raised.value
+    assert (
+        error.missing_sources,
+        error.missing_sinks,
+        error.missing_from,
+        error.component_sizes,
+    ) == expected
+    assert trajectory.artifacts("pseudotime") == []

@@ -33,6 +33,18 @@ def test_validate_sink_groups_accepts_and_rejects():
         _validate_sink_groups(labels, [["A"]])  # type: ignore[list-item]
 
 
+def test_missing_sinks_raise_a_typed_error_with_their_labels():
+    from cytearc.trajectory import SourceSinkLabelsError
+
+    with pytest.raises(SourceSinkLabelsError) as raised:
+        _validate_sink_groups(np.array(["A", "B", "A", "C"]), ["Z", "A", "Y"])
+
+    error = raised.value
+    assert str(error) == "Sink labels were not found in the selected cells: ['Z', 'Y']"
+    assert (error.missing_sources, error.missing_sinks) == ((), ("Z", "Y"))
+    assert (error.missing_from, error.component_sizes) == ("labels", None)
+
+
 def test_validate_sink_groups_rejects_unhashable_scalar_values():
     with pytest.raises(TypeError, match="hashable scalar"):
         _validate_sink_groups(

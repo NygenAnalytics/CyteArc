@@ -135,7 +135,10 @@ _SIGNATURE_DIGESTS = {
     # The inherited constructor takes min_features_per_cell: int | None.
     # build_ann_index defaults to ann_efc=200, ann_ef=200, and ann_m=24, and
     # query_neighbors gained the keyword ann_ef: int | None = None.
-    GraphDataStore: "a848c56b3f6b98c9a5a90a26af7a86b46294cb313a14734a2eee403188b5ab33",
+    # run_pseudotime_scoring's component_policy is Literal["largest",
+    # "sources", "error"], and it gained the keyword-only solver_tol:
+    # float | None = None and max_iterations: int | None = None.
+    GraphDataStore: "13888b7a00a2010689afc4d69a57bad3d2cf9532e06ed039300821bb5d3f7dae",
     MappingDatastore: "a4839ac0372df95f021fd8c383c1ac2aff6796c6b093e05510c71ad7e8449a72",
     # run_hto_demultiplexing gained the keyword-only positive_quantile: float
     # with the default 0.99, then hashtags: Sequence[str] | Mapping[str,

@@ -248,6 +248,16 @@ ATAC assay; see {doc}`regulons` for building those networks.
     :members: pseudotime, load_pseudotime, fate, load_fate, markers, load_markers, aggregation, load_aggregation, lineage_markers, load_lineage_markers, drivers, load_drivers, lineage_aggregation, load_lineage_aggregation, curves, load_curves, lineage_tree, load_lineage_tree
 ```
 
+`pseudotime` finds the smallest singular values of the graph Laplacian with SciPy's `svds`, whose default bound of ten restarts per cell lets a solve on a graph of several hundred thousand cells run for hours. `max_iterations` bounds the restarts and `solver_tol` sets the tolerance, and each enters the artifact's record only when set, so calls without them reuse the pseudotimes saved before. The solve advances a progress bar and logs its count of operator products at `INFO` level every 30 seconds, and a solve that reaches `max_iterations` raises {py:exc}`~cytearc.trajectory.PseudotimeConvergenceError` with its counts. A looser `solver_tol` can make the solve miss singular modes, so leave it unset unless a measurement shows the potential is unchanged.
+
+A pseudotime scores one connected component of its graph: the largest by default, or with `component_policy="sources"` the one that holds the most source cells, the cells with a source label or a negative `ss_vec` value. `load_pseudotime` returns each cell's `component`, numbered by decreasing size, and the `component_sizes`, computed from the stored graph. A source or sink label that no selected cell holds, or no cell of the scored component, raises {py:exc}`~cytearc.trajectory.SourceSinkLabelsError` from `pseudotime` and from `fate`, naming the labels in `missing_sources` and `missing_sinks`.
+
+```{eval-rst}
+.. autoexception:: cytearc.trajectory.PseudotimeConvergenceError
+
+.. autoexception:: cytearc.trajectory.SourceSinkLabelsError
+```
+
 The lineage methods resolve one fate map into its lineages: each scored cell
 weighs in each lineage by its fate probability. `lineage_markers` and
 `lineage_aggregation` follow features along each lineage, `drivers` correlates

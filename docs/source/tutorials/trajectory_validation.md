@@ -34,13 +34,12 @@ pseudotime = ds.trajectory.load_pseudotime(pseudotime_ref)
 
 # Report the fraction of cells with valid pseudotime scores.
 float(pseudotime.valid.mean())
+
+# List the cell counts of the graph's connected components, largest first.
+pseudotime.component_sizes
 ```
 
-By default, pseudotime uses the largest connected graph component. Other cells receive
-undefined values and `valid=False`. A separate component may reflect biology, filtering,
-or graph settings. Report how many cells were excluded and investigate where they lie.
-Use the validity mask for summaries you write yourself; CyteArc applies it internally
-when searching for pseudotime markers or aggregating expression.
+By default, pseudotime uses the largest connected graph component. Other cells receive undefined values and `valid=False`. `component` gives each cell's component, numbered as `component_sizes` lists them, so you can find the excluded cells without recomputing the graph's components. A separate component may reflect biology, filtering, or graph settings. Report how many cells were excluded and investigate where they lie. When the sources lie in a smaller component, `component_policy="sources"` scores the component that holds them instead. Use the validity mask for summaries you write yourself; CyteArc applies it internally when searching for pseudotime markers or aggregating expression.
 
 The mask tells us which cells the result actually describes. A high fraction alone is
 not sufficient: a small excluded component could contain an entire rare population.

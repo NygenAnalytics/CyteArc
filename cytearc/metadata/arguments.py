@@ -192,6 +192,10 @@ class PseudotimeScoringArguments(OperationArguments):
     random_seed: int = parameter()
     component_policy: str = parameter()
     invalidate_cache: bool = execution()
+    # The solver's bounds, recorded only when the call sets them, so a
+    # pseudotime solved with SciPy's defaults keeps its identity.
+    solver_tol: float | None = parameter(None, omit_if_none=True)
+    max_iterations: int | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)

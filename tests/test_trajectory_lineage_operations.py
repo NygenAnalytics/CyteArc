@@ -939,6 +939,85 @@ def test_lineage_tree_checks_alignment_and_memory(
         datastore.trajectory.lineage_tree(connectivity_graph, leiden_clustering, root=4)
 
 
+# Sink labels missing outside the sinks
+
+
+def test_sink_labels_missing_outside_the_sinks_give_the_same_lineages(
+    datastore,
+    pseudotime_scoring,
+    leiden_clustering,
+    lineage_fate,
+    lineage_drivers,
+    lineage_curves,
+    mark_hvgs,
+):
+    from cytearc.storage.artifact_writer import (
+        finish_artifact,
+        plan_artifact,
+        start_artifact,
+    )
+    from cytearc.trajectory.artifacts import load_cell_artifact_values
+
+    # Leiden labels kept on the cells of the sinks and missing elsewhere, the
+    # labels a search for terminal states gives. Every missing row holds the
+    # first sink underneath, so labels read without their mask would make each
+    # of those cells a sink.
+    labels, selection, missing = load_cell_artifact_values(
+        datastore.zw, leiden_clustering
+    )
+    assert missing is None
+    sink_cells = np.isin(labels, LINEAGE_SINKS)
+    planned = plan_artifact(
+        datastore.zw,
+        scope="assay",
+        assay="RNA",
+        kind="cluster_labels",
+        operation="import_cluster_labels",
+        parameters={"labels": "Leiden clusters of the sink cells"},
+        inputs={"cell_selection": selection},
+        execution_options={},
+    )
+    group = start_artifact(datastore.zw, planned)
+    values = group.create_array(
+        "values", data=np.where(sink_cells, labels, LINEAGE_SINKS[0])
+    )
+    group.create_array("__cytearc_missing__values", data=~sink_cells)
+    values.attrs["missing_mask"] = "__cytearc_missing__values"
+    finish_artifact(group, planned)
+
+    fate_ref = datastore.trajectory.fate(
+        pseudotime_scoring, planned.ref, sinks=LINEAGE_SINKS
+    )
+    assert (
+        datastore.trajectory.fate(pseudotime_scoring, planned.ref, sinks=LINEAGE_SINKS)
+        == fate_ref
+    )
+
+    fate = datastore.trajectory.load_fate(fate_ref)
+    expected = datastore.trajectory.load_fate(lineage_fate)
+    assert fate_ref != lineage_fate
+    np.testing.assert_array_equal(fate.valid, expected.valid)
+    np.testing.assert_array_equal(fate.values, expected.values)
+    # Only the cells labelled with the first sink are fixed at its probability one.
+    np.testing.assert_array_equal(
+        np.flatnonzero(fate.values[:, 0] == 1.0),
+        np.flatnonzero(fate.valid & (labels == LINEAGE_SINKS[0])),
+    )
+
+    drivers = datastore.trajectory.load_drivers(
+        datastore.trajectory.drivers(fate_ref, features=mark_hvgs)
+    )
+    expected_drivers = datastore.trajectory.load_drivers(lineage_drivers)
+    assert drivers.n_cells == expected_drivers.n_cells
+    pd.testing.assert_frame_equal(drivers.table, expected_drivers.table)
+    curves = datastore.trajectory.load_curves(
+        datastore.trajectory.curves(fate_ref, n_points=40)
+    )
+    expected_curves = datastore.trajectory.load_curves(lineage_curves)
+    np.testing.assert_array_equal(curves.points, expected_curves.points)
+    np.testing.assert_array_equal(curves.progress, expected_curves.progress)
+
+
 # Read-only stores
 
 

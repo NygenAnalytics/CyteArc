@@ -22,8 +22,10 @@ _EXPECTED_TRAJECTORY_EXPORTS = (
     "LineageMarkerResult",
     "LineageTreeResult",
     "PseudotimeAggregationResult",
+    "PseudotimeConvergenceError",
     "PseudotimeMarkerResult",
     "PseudotimeScoreResult",
+    "SourceSinkLabelsError",
     "aggregate_feature_profiles",
     "make_source_sink_vector",
     "random_walk_laplacian_transpose",
@@ -109,6 +111,8 @@ _EXPECTED_RESULT_FIELDS = {
         "cell_selection",
         "values",
         "valid",
+        "component",
+        "component_sizes",
     ),
     trajectory.PseudotimeMarkerResult: (
         "ref",
@@ -311,6 +315,8 @@ def test_result_records_accept_valid_inputs_and_attach_identity_once():
             cell_selection,
             np.array([0.0, 1.0]),
             np.array([True, True]),
+            np.array([0, 0]),
+            (2,),
         ),
         trajectory.PseudotimeMarkerResult(
             cytearc.ArtifactRef(
@@ -420,6 +426,8 @@ def test_pseudotime_result_shape_validation_is_stable():
             cell_selection,
             np.array([0.0, 1.0]),
             np.array([True]),
+            np.array([0, 0]),
+            (2,),
         )
 
     with pytest.raises(ValueError, match="missing columns"):
