@@ -10,7 +10,7 @@ read every value and reject NaN and infinity.
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import DTypeLike
@@ -24,6 +24,11 @@ from .memory_budget import MemoryBudgetError
 # pointer per window value adds 8 more.
 _SCAN_BYTES_PER_VALUE = 72
 _SCAN_WINDOW_VALUES = 1 << 20
+# A matrix with fewer stored values than this is scanned in one process.
+# Starting scan processes takes about half a second. One process scans this
+# many gzip-compressed values in 2 to 3 s, which four processes cut to about
+# 1 s, and uncompressed ones in about 0.4 s, which processes cannot improve.
+_SCAN_PROCESS_VALUES = 1 << 26
 
 
 def is_real_count_dtype(dtype: DTypeLike) -> bool:
@@ -35,9 +40,14 @@ def is_real_count_dtype(dtype: DTypeLike) -> bool:
 class CountValueRange:
     """Running summary of canonical count values.
 
+    A summary does not depend on how the values were split into blocks, nor
+    on their order, so the summaries of disjoint parts of a matrix merge into
+    the summary of the whole.
+
     Attributes:
         integral: Whether every value seen is a non-negative integer.
-        maximum: The largest value seen while ``integral`` holds.
+        maximum: The largest value seen while ``integral`` holds, and 0 once
+            it does not.
         negative: Whether any value seen is negative.
         largest: The largest value seen, which bounds the values that undoing
             a log gives.
@@ -76,11 +86,20 @@ class CountValueRange:
         if kind in "if" and block.min() < 0:
             self.integral = False
             self.negative = True
+            self.maximum = 0
             return
         if kind == "f" and not np.equal(block, np.trunc(block)).all():
             self.integral = False
+            self.maximum = 0
             return
         self.maximum = max(self.maximum, int(block.max()))
+
+    def merge(self, other: "CountValueRange") -> None:
+        """Add the values that ``other`` summarized, in any order."""
+        self.integral = self.integral and other.integral
+        self.maximum = max(self.maximum, other.maximum) if self.integral else 0
+        self.negative = self.negative or other.negative
+        self.largest = max(self.largest, other.largest)
 
 
 @dataclass(slots=True)
@@ -94,6 +113,115 @@ class IndexOrder:
     """
 
     canonical: bool = True
+
+
+@dataclass(slots=True)
+class CountScan:
+    """What a scan of the compressed vectors ``[start, stop)`` of a matrix found.
+
+    The vectors are the rows of a dense or CSR matrix and the columns of a
+    CSC matrix.
+
+    Attributes:
+        start: The first vector scanned.
+        stop: The vector after the last one scanned.
+        valueRanges: The range of each group of features.
+        rowNonzeros: The number of nonzero values of each row of a dense
+            matrix, or None for a sparse one.
+        canonical: Whether every vector holds its indices sorted without
+            repeats; True for a dense matrix.
+    """
+
+    start: int
+    stop: int
+    valueRanges: list[CountValueRange]
+    rowNonzeros: np.ndarray | None = None
+    canonical: bool = True
+
+
+def merge_count_scans(scans: list[CountScan]) -> CountScan:
+    """Return the scan of the vectors that the scans of disjoint windows cover.
+
+    Ranges merge exactly in any order, the index order of every vector
+    holds when it holds in each window, and the row counts of dense windows
+    take their positions, so the result equals one scan of all the vectors.
+
+    Raises:
+        ValueError: If the windows do not follow one another without gaps,
+            or record ranges of different groups.
+    """
+    ordered = sorted(scans, key=lambda scan: scan.start)
+    for before, after in zip(ordered, ordered[1:]):
+        if before.stop != after.start:
+            raise ValueError(
+                f"Scanned windows must follow one another; {before.start}:"
+                f"{before.stop} is followed by {after.start}:{after.stop}"
+            )
+    groups = {len(scan.valueRanges) for scan in ordered}
+    if len(groups) != 1:
+        raise ValueError("Scanned windows record ranges of different groups")
+    value_ranges = [CountValueRange() for _ in range(groups.pop())]
+    for scan in ordered:
+        for value_range, window_range in zip(
+            value_ranges, scan.valueRanges, strict=True
+        ):
+            value_range.merge(window_range)
+    counts = [scan.rowNonzeros for scan in ordered]
+    return CountScan(
+        start=ordered[0].start,
+        stop=ordered[-1].stop,
+        valueRanges=value_ranges,
+        rowNonzeros=(
+            None
+            if any(count is None for count in counts)
+            else np.concatenate(cast(list[np.ndarray], counts))
+        ),
+        canonical=all(scan.canonical for scan in ordered),
+    )
+
+
+def scan_processes(values: int, longest: int, maxBytes: int, processes: int) -> int:
+    """Return how many processes scan a matrix, each over its own vectors.
+
+    A matrix of fewer than about 67 million stored values
+    (``_SCAN_PROCESS_VALUES``) is scanned in one process, faster than
+    starting more would let it finish. Otherwise at most ``processes``
+    processes share ``maxBytes``, each with room for a whole scan window and
+    for the ``longest`` vector, so that each reads as one scan with all of
+    ``maxBytes`` would.
+
+    Args:
+        values: Stored values of the matrix.
+        longest: Values of its longest compressed vector.
+        maxBytes: Memory available to the scan.
+        processes: Most processes that may scan.
+    """
+    if int(processes) <= 1 or int(values) < _SCAN_PROCESS_VALUES:
+        return 1
+    process_bytes = _SCAN_BYTES_PER_VALUE * max(_SCAN_WINDOW_VALUES, int(longest))
+    return max(1, min(int(processes), max(0, int(maxBytes)) // process_bytes))
+
+
+def value_windows(pointers: np.ndarray, parts: int) -> list[tuple[int, int]]:
+    """Split compressed vectors into at most ``parts`` windows of about equal values.
+
+    Args:
+        pointers: Pointers of the vectors into their values, one more than
+            there are vectors.
+        parts: Most windows.
+
+    Returns:
+        Windows ``(start, stop)`` of whole vectors that follow one another
+        and cover every vector, each holding at least one.
+    """
+    n_vectors = len(pointers) - 1
+    if n_vectors < 1:
+        return []
+    first, last = int(pointers[0]), int(pointers[-1])
+    targets = [first + (last - first) * part // parts for part in range(1, parts)]
+    cuts = np.searchsorted(pointers, targets, side="left").clip(1, n_vectors - 1)
+    bounds = np.unique(np.concatenate(([0], cuts, [n_vectors]))).tolist()
+    return list(zip(bounds[:-1], bounds[1:], strict=True))
 
 
 def _summable(values: np.ndarray) -> np.ndarray:

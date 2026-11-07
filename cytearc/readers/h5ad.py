@@ -14,12 +14,14 @@ from ..utils.arrays import (
     max_window_nnz,
 )
 from ..utils.count_values import (
+    CountScan,
     CountValueRange,
-    IndexOrder,
-    compressed_count_ranges,
-    dense_count_ranges,
     dense_row_nonzeros,
+    merge_count_scans,
+    scan_processes,
+    value_windows,
 )
+from ..utils.arguments import integer_argument
 from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError, refusal_words
 from ..utils.progress import iter_progress
@@ -48,6 +50,7 @@ from ._h5ad_columns import (
     table_members,
 )
 from ._h5ad_inspect import H5adInspectResult, inspect_h5ad as inspect_h5ad
+from ._h5ad_values import matrix_values, scan_file_window, scan_window
 from ._sparse import SparseRowStore
 from ._text import (
     DuplicateCellIds,
@@ -369,9 +372,7 @@ class H5adReader:
 
     def _matrix_values(self, node: h5py.Dataset, selection: slice) -> np.ndarray:
         """Read matrix values in ``sourceMatrixDtype``."""
-        if node.dtype == self.sourceMatrixDtype:
-            return np.asarray(node[selection])
-        return np.asarray(node.astype(self.sourceMatrixDtype)[selection])
+        return matrix_values(node, selection, self.sourceMatrixDtype)
 
     def _matrix_shape(self) -> tuple[int, int]:
         """Return the stored matrix shape after checking that it is consistent.
@@ -982,7 +983,11 @@ class H5adReader:
             yield self._matrix_values(dset, slice(offset, end))
 
     def count_value_ranges(
-        self, maxBytes: int, featureGroups: np.ndarray | None = None
+        self,
+        maxBytes: int,
+        featureGroups: np.ndarray | None = None,
+        *,
+        processes: int = 1,
     ) -> list[CountValueRange]:
         """Return the range of the canonical values of each group of features.
 
@@ -996,46 +1001,129 @@ class H5adReader:
         its indices sorted without repeats, so that an import plans no sort
         or sum of its batches.
 
+        A matrix large enough that starting processes saves time is scanned
+        in up to ``processes`` new processes at once, each over its own rows,
+        or columns of a CSC matrix, with an equal share of ``maxBytes``: as
+        many as that share holds a whole scan window and the longest row or
+        column, which :func:`~cytearc.utils.count_values.scan_processes`
+        counts. The ranges and records are the same for any number of
+        processes.
+
         Args:
             maxBytes: Memory available to the scan.
             featureGroups: Group, numbered from zero, of each feature, such as
                 the assay that stores it. None puts every feature in one
                 group.
+            processes: Most processes that scan at once. 1 scans in this
+                process.
 
         Raises:
             MemoryError: If one compressed vector or dense row does not fit in
                 ``maxBytes``.
-            ValueError: If the matrix holds NaN or an infinite value.
+            ValueError: If the matrix holds NaN or an infinite value, or
+                ``processes`` is below 1.
+            TypeError: If ``processes`` is not an integer.
         """
+        processes = integer_argument(processes, "processes", minimum=1)
         node = self.h5[self.matrixKey]
-        if self.matrixOrientation == "dense":
-            row_nonzeros = np.empty(int(node.shape[0]), dtype=np.int64)
-            value_ranges = dense_count_ranges(
-                lambda start, stop: self._matrix_values(node, slice(start, stop)),
-                int(node.shape[0]),
-                int(node.shape[1]),
-                maxBytes=maxBytes,
-                groups=featureGroups,
-                rowNonzeros=row_nonzeros,
+        dense = self.matrixOrientation == "dense"
+        n_vectors = int(node.shape[0] if dense else int(node["indptr"].shape[0]) - 1)
+        count = 1
+        pointers: np.ndarray | None = None
+        if processes > 1:
+            if dense:
+                values, longest = self.nCells * self.nFeatures, self.nFeatures
+            else:
+                pointers = (
+                    self._csr_indptr()
+                    if self.matrixOrientation == "csr"
+                    else np.asarray(node["indptr"][:])
+                )
+                assert pointers is not None
+                values = int(pointers[-1] - pointers[0])
+                longest = int(np.diff(pointers).max(initial=0))
+            count = scan_processes(values, longest, maxBytes, processes)
+        windows = [(0, n_vectors)]
+        if count > 1:
+            from ..storage.sharding import aligned_row_windows
+
+            # Dense windows hold whole rows of HDF5 chunks, which no two
+            # processes then decompress.
+            windows = (
+                aligned_row_windows(n_vectors, self._dense_chunk_rows() or 1, count)
+                if pointers is None
+                else value_windows(pointers, count)
             )
-            self._cumulativeRowNnz = cumulative_nnz(row_nonzeros)
-            return value_ranges
-        csr = self.matrixOrientation == "csr"
-        index_order = IndexOrder()
-        value_ranges = compressed_count_ranges(
-            node["indptr"],
-            node["indices"],
-            node["data"],
-            minorSize=self.nFeatures if csr else self.nCells,
-            maxBytes=maxBytes,
-            groups=featureGroups,
-            # Features are the minor axis of CSR and the vectors of CSC.
-            groupAxis=1 if csr else 0,
-            indexOrder=index_order,
+        if len(windows) > 1:
+            logger.debug(f"Scanning H5AD values in {len(windows)} processes")
+            scan = merge_count_scans(
+                self._scan_in_processes(
+                    windows, int(maxBytes) // len(windows), featureGroups
+                )
+            )
+        else:
+            scan = self._scan_values(0, n_vectors, maxBytes, featureGroups)
+        if dense:
+            assert scan.rowNonzeros is not None
+            self._cumulativeRowNnz = cumulative_nnz(scan.rowNonzeros)
+        elif self.matrixOrientation == "csr":
+            self._canonicalRows = scan.canonical
+        return scan.valueRanges
+
+    def _scan_values(
+        self,
+        start: int,
+        stop: int,
+        maxBytes: int,
+        featureGroups: np.ndarray | None,
+    ) -> CountScan:
+        """Scan the values of compressed vectors ``[start, stop)`` in this process."""
+        return scan_window(
+            self.h5[self.matrixKey],
+            self.matrixOrientation,
+            self.sourceMatrixDtype,
+            self.nFeatures if self.matrixOrientation == "csr" else self.nCells,
+            start,
+            stop,
+            maxBytes,
+            featureGroups,
         )
-        if csr:
-            self._canonicalRows = index_order.canonical
-        return value_ranges
+
+    def _scan_in_processes(
+        self,
+        windows: list[tuple[int, int]],
+        maxBytes: int,
+        featureGroups: np.ndarray | None,
+    ) -> list[CountScan]:
+        """Scan each window in a new process of its own, with ``maxBytes`` each.
+
+        A window's error, such as a NaN or a vector that does not fit, is
+        raised here as the scan in this process raises it.
+        """
+        from concurrent.futures import ProcessPoolExecutor
+        from multiprocessing import get_context
+
+        # A forked child of a process that runs threads can deadlock, so scan
+        # processes start as new interpreters, which import only the scan.
+        with ProcessPoolExecutor(
+            max_workers=len(windows), mp_context=get_context("spawn")
+        ) as executor:
+            futures = [
+                executor.submit(
+                    scan_file_window,
+                    self.h5adFn,
+                    self.matrixKey,
+                    self.matrixOrientation,
+                    self.sourceMatrixDtype,
+                    self.nFeatures if self.matrixOrientation == "csr" else self.nCells,
+                    start,
+                    stop,
+                    maxBytes,
+                    featureGroups,
+                )
+                for start, stop in windows
+            ]
+            return [future.result() for future in futures]
 
     @property
     def consumeDtype(self) -> np.dtype[Any]:

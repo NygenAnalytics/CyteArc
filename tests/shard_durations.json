@@ -166,6 +166,7 @@
   "tests/test_h5ad_import_fidelity.py": 5.2,
   "tests/test_h5ad_inspect_columns.py": 0.0,
   "tests/test_h5ad_table_members.py": 0.1,
+  "tests/test_h5ad_value_scan_processes.py": 7.5,
   "tests/test_harmony_algorithm.py": 2.2,
   "tests/test_harmony_api.py": 0.6,
   "tests/test_harmony_revision.py": 0.4,
