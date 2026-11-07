@@ -24,11 +24,11 @@ from ...utils.compute import process_thread_limit
 from ...utils.logging import logger
 from ...utils.memory_budget import MemoryLedger
 from ...utils.numba import numba_threads
+from .cell_samples import read_cell_samples, require_cell_column
 from .perturbation_store import (
     _BAND_BYTES,
     _COORDINATE_KINDS,
     _band_bytes,
-    _cell_samples,
     _cell_values,
     _count_bands,
     _count_blocks,
@@ -37,7 +37,6 @@ from .perturbation_store import (
     _positions_in,
     _require_budget,
     _resident_ledger,
-    _require_cell_column,
     _require_ref,
     _status_labels,
     _stored_samples,
@@ -209,7 +208,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         resolved_dims, neighbors_k, factor = signature_settings(
             dims, n_neighbors, scale_factor, sample_column
         )
-        _require_cell_column(self, sample_column, "sample_column")
+        require_cell_column(self, sample_column, "sample_column")
         inputs = resolve_coordinate_inputs(self.zw, coordinates)
         if features is None:
             if inputs.feature_selection is None:
@@ -235,7 +234,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         cell_index = cell_selection_indices(self.zw, cell_selection)
         n_cells = len(cell_index)
         is_control, n_missing = self._signature_controls(labels, cell_index)
-        cell_samples = _cell_samples(
+        cell_samples = read_cell_samples(
             self,
             MemoryLedger(
                 None, "Numbering the cells' samples", codec_threads=self.nthreads
@@ -740,7 +739,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             perturbation_type,
             split_column,
         )
-        _require_cell_column(self, split_column, "split_column")
+        require_cell_column(self, split_column, "split_column")
         source = require_complete_artifact(self.zw, signature)
         stored = artifact_group(self.zw, signature)
         assay = self._get_assay(str(signature.assay))
@@ -751,7 +750,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             source.input_ref("labels"), cell_index
         )
         is_control = read_array(stored, "is_control").astype(bool)
-        cell_splits = _cell_samples(
+        cell_splits = read_cell_samples(
             self,
             MemoryLedger(
                 None, "Numbering the cells' samples", codec_threads=self.nthreads

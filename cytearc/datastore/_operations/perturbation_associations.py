@@ -41,10 +41,10 @@ from ...utils.logging import logger
 from ...utils.memory_budget import MemoryLedger
 from ...utils.numba import numba_threads
 from ...utils.warnings import warn
+from .cell_samples import read_cell_samples, require_cell_column
 from .perturbation_store import (
     _BAND_BYTES,
     _LabelRows,
-    _cell_samples,
     _count_bands,
     _count_blocks,
     _count_stream_bytes,
@@ -53,7 +53,6 @@ from .perturbation_store import (
     _pairs_fingerprint,
     _require_budget,
     _resident_ledger,
-    _require_cell_column,
     _require_ref,
     _row_features,
 )
@@ -462,10 +461,10 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             covariates,
         )
         high = moi == "high"
-        _require_cell_column(self, sample_column, "sample_column")
+        require_cell_column(self, sample_column, "sample_column")
         covariate_names = covariate_columns(covariates)
         for column in covariate_names:
-            _require_cell_column(self, column, "covariate")
+            require_cell_column(self, column, "covariate")
         by = "target" if integration == "union" else "guide"
         rows = _label_rows(self, labels, by)
         status = rows.status
@@ -562,7 +561,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             tested = np.concatenate([controls, targets_cells])
             needing = f"every control cell and every cell of a tested {by} needs one"
         tested_cells = cell_index[tested]
-        cell_samples = _cell_samples(
+        cell_samples = read_cell_samples(
             self,
             MemoryLedger(
                 None, "Numbering the cells' samples", codec_threads=self.nthreads

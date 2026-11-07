@@ -648,8 +648,15 @@ def test_hto_demultiplexing_respects_datastore_memory_budget(
     # The hashtag IDs are read first, in the one refusal form.
     with pytest.raises(MemoryBudgetError, match="holds about .* for the hashtag IDs"):
         datastore.qc.hto_demultiplexing(selection, from_assay="assay2")
-    # At the budget that reads them, the clustering refuses in its own words.
+    # At the budget that reads them, the cells' sample codes come next, and
+    # at the budget that holds those too, the clustering refuses in its own
+    # words.
     datastore.memoryBytes = _hto_ids_budget(datastore, selection)
+    with pytest.raises(
+        MemoryBudgetError, match="holds about .* for the cells' sample codes"
+    ) as refused:
+        datastore.qc.hto_demultiplexing(selection, from_assay="assay2")
+    datastore.memoryBytes = refused.value.needed_bytes
     with pytest.raises(MemoryError, match="exceeds the datastore memory budget"):
         datastore.qc.hto_demultiplexing(selection, from_assay="assay2")
     assert datastore.artifacts.list(kind="hto_identity") == []

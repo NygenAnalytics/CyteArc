@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from numbers import Real
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -34,7 +34,7 @@ from ...quality_control.hto import (
     _hto_demux_method,
     _validated_hto_counts,
     _validated_positive_quantile,
-    checked_hashtags,
+    checked_sample_hashtags,
 )
 from ...metadata.artifacts import (
     artifact_values,
@@ -99,6 +99,7 @@ from ...utils.arrays import within_bounds
 from ...utils.compute import controlled_compute
 from ...utils.memory_budget import MemoryBudgetError, MemoryLedger
 from ...utils.logging import logger
+from .cell_samples import read_cell_samples, require_cell_column
 
 if TYPE_CHECKING:
     from ...quality_control.doublets import DoubletSampleResult
@@ -180,6 +181,13 @@ def _doublet_sample_summary(
         "detectableDoubletFraction": outcome.detectable_fraction,
         "estimatedDoubletRate": outcome.estimated_doublet_rate,
     }
+
+
+def _sample_words(label: str | None, column: str | None, *, prefix: str) -> str:
+    """Name a sample of ``column`` by its label after ``prefix``; empty for none."""
+    if column is None:
+        return ""
+    return f"{prefix}{label!r} of {column!r}"
 
 
 class _QualityControlOperationsMixin(_QualityControlOperationsBase):
@@ -1395,7 +1403,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         from_assay: str | None = None,
         random_seed: int = 0,
         positive_quantile: float = 0.99,
-        hashtags: Sequence[str] | None = None,
+        hashtags: Sequence[str] | Mapping[str, Sequence[str]] | None = None,
+        sample_column: str | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Demultiplex HTO counts into an immutable identity artifact.
@@ -1414,12 +1423,16 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         ``secondID``) and the difference of those values (``margin``). With one
         HTO, ``second_id`` is empty and ``margin`` is NaN.
 
-        ``hashtags`` names the hashtags to demultiplex, such as those of one
-        pool of cells; by default every hashtag of the assay. A hashtag
-        without a count in the selected cells, such as one that another pool
-        used, is left out rather than refused, and the artifact's ``samples``
-        attribute records, for the selected cells, the hashtags demultiplexed,
-        each one's cutoff and those left out.
+        ``sample_column`` names the cell metadata column of each cell's
+        sample, such as the pool of a lane, and each sample is demultiplexed
+        on its own, as a separate call on its cells would. ``hashtags`` names
+        the hashtags to demultiplex, by default every hashtag of the assay:
+        one list for every sample, or a mapping from each sample's label to
+        its own hashtags. A hashtag without a count in a sample's cells, such
+        as one that another pool used, is left out rather than refused. The
+        artifact's ``samples`` attribute records, for each sample, its
+        ``label`` (None without ``sample_column``), its cells, the hashtags
+        demultiplexed, each one's cutoff and those left out.
 
         A background cluster that holds only zero counts, or whose fit gives a
         cutoff of 0, calls every nonzero count of its hashtag positive. That is
@@ -1428,8 +1441,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         half of the cells hold counts of more than one hashtag, as doublets
         do. Otherwise the hashtag is unused in the cells of its background, as
         when pools of cells use different hashtags, and the call is refused,
-        naming each such hashtag. Demultiplex each pool with a ``cell_selection`` of its
-        cells and its own ``hashtags``. A warning also names each HTO whose
+        naming each such hashtag. Demultiplex each pool with its own
+        hashtags, through ``sample_column``. A warning also names each HTO whose
         positive calls overlap its background: fewer than half of its positive
         cells have counts that the background fit exceeds with probability
         ``(1 - positive_quantile) ** 3``, one in a million for the default.
@@ -1448,8 +1461,14 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 can miss weakly stained tags. The artifact records the
                 quantile, so each quantile has its own artifact.
             hashtags: The hashtag IDs to demultiplex, or None for every
-                hashtag of the assay. The artifact records them, in the
-                assay's order.
+                hashtag of the assay. A mapping from each sample's label, as
+                text, to its hashtag IDs needs ``sample_column`` and an entry
+                for every sample of the selected cells. The artifact records
+                them, each list in the assay's order.
+            sample_column: Cell metadata column of each cell's sample, or None
+                to demultiplex every selected cell together. Every selected
+                cell needs a label. The artifact records the column and the
+                cells' samples, so other labels make another artifact.
             invalidate_cache: Recompute even when matching provenance exists.
 
         Returns:
@@ -1459,10 +1478,12 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             TypeError: If ``random_seed`` is not an integer or
                 ``positive_quantile`` is not a real number.
             ValueError: If ``positive_quantile`` is not finite or not between
-                0 and 1, ``hashtags`` names no hashtag of the assay, no chosen
-                hashtag has a count in the selected cells, or a hashtag's
-                background gives a cutoff of 0 in counts that carry ambient
-                tags.
+                0 and 1, ``sample_column`` is not a cell column or leaves a
+                selected cell without a label, ``hashtags`` names no hashtag of
+                the assay or maps samples without ``sample_column`` or other
+                than the selected cells', a sample has too few cells or no
+                chosen hashtag with a count, or a hashtag's background gives a
+                cutoff of 0 in counts that carry ambient tags.
             UnmeasuredCellsError: If the HTO assay did not measure a selected cell.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
@@ -1488,6 +1509,16 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         if isinstance(random_seed, bool) or not isinstance(random_seed, int):
             raise TypeError("random_seed must be an integer")
         positive_quantile = _validated_positive_quantile(positive_quantile)
+        if sample_column is not None and (
+            not isinstance(sample_column, str) or not sample_column.strip()
+        ):
+            raise TypeError("sample_column must be a cell metadata column name or None")
+        require_cell_column(self, sample_column, "sample_column")
+        if isinstance(hashtags, Mapping) and sample_column is None:
+            raise ValueError(
+                "hashtags maps samples to their hashtags, which needs "
+                "sample_column, the cell metadata column of each cell's sample"
+            )
         cell_index = read_stored_selection_indices(
             self.zw,
             cell_selection,
@@ -1515,23 +1546,39 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             "ids",
             item="the hashtag IDs",
         )
-        chosen = (
-            None
-            if hashtags is None
-            else checked_hashtags(hashtags, [str(name) for name in hashtag_ids])
+        samples = read_cell_samples(
+            self,
+            ledger,
+            sample_column,
+            cell_index,
+            reason="Hashtags are demultiplexed within each sample, so every "
+            "selected cell needs one",
         )
-        required_cells = (n_htos if chosen is None else len(chosen)) + 1
-        if n_cells < required_cells:
-            raise ValueError(
-                f"HTO demultiplexing requires at least {required_cells} selected cells"
-            )
+        chosen_by_sample, recorded_hashtags = checked_sample_hashtags(
+            hashtags,
+            [str(name) for name in hashtag_ids],
+            samples.names,
+            sample_column=sample_column,
+        )
+        sample_sizes = np.bincount(samples.codes, minlength=len(samples.names))
+        for name, size, chosen in zip(
+            samples.names, sample_sizes, chosen_by_sample, strict=True
+        ):
+            if size < len(chosen) + 1:
+                raise ValueError(
+                    f"HTO demultiplexing requires at least {len(chosen) + 1} "
+                    "selected cells"
+                    + _sample_words(name, sample_column, prefix=" in sample ")
+                )
         arguments = HtoIdentityArguments(
             cell_selection=cell_selection,
             feature_ids_fingerprint=fingerprint_strings(hashtag_ids),
             method=_hto_demux_method(positive_quantile),
             random_seed=random_seed,
             invalidate_cache=invalidate_cache,
-            hashtags=chosen,
+            hashtags=recorded_hashtags,
+            sample_column=sample_column,
+            sample_assignments_fingerprint=samples.assignments,
         )
         record = arguments.to_record()
         planned = plan_cell_data_artifact(
@@ -1552,15 +1599,23 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             },
             invalidate_cache=invalidate_cache,
             required_attributes=(
-                AttributeRequirement("samples", expected_types=(list,)),
+                AttributeRequirement(
+                    "samples",
+                    expected_types=(list,),
+                    predicate=lambda entries: all(
+                        isinstance(entry, dict) and "label" in entry
+                        for entry in entries
+                    ),
+                ),
             ),
         )
         if planned.reused:
             return planned.ref
         self._require_writable("run_hto_demultiplexing")
         matrix_bytes = n_cells * n_htos * np.dtype(np.float64).itemsize
-        # Per cell: the cluster label, the identity, and the three diagnostics.
-        clustering = 6 * matrix_bytes + 40 * n_cells
+        # Per cell: the cluster label, the identity, and the three diagnostics;
+        # several samples copy each one's counts beside the matrix.
+        clustering = (6 if len(samples.names) == 1 else 7) * matrix_bytes + 40 * n_cells
         # The save writes the identities, each a hashtag ID, "Doublet" or
         # "Negative", the two hashtags with the highest CLR values, and the
         # margins between them.
@@ -1591,55 +1646,80 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             controlled_compute(assay.rawData[cell_index, :], self.nthreads),
             columns=hashtag_ids,
         )
-        if chosen is not None:
-            counts = counts.loc[:, chosen]
-        # A hashtag without a count in the selected cells, such as one that
-        # another pool used, is left out rather than refused. Any other value,
-        # such as a negative count, stays for validation to refuse.
-        has_counts = (counts.to_numpy() != 0).any(axis=0)
-        without_counts = [
-            str(name) for name, kept in zip(counts.columns, has_counts) if not kept
-        ]
-        if not has_counts.any():
-            raise ValueError(
-                "No hashtag to demultiplex has a count in the selected cells: "
-                + ", ".join(repr(name) for name in without_counts)
+        values = np.empty(n_cells, dtype=object)
+        max_ids = np.empty(n_cells, dtype=object)
+        second_ids = np.empty(n_cells, dtype=object)
+        margins = np.empty(n_cells, dtype=np.float64)
+        entries = []
+        for code, (name, chosen) in enumerate(
+            zip(samples.names, chosen_by_sample, strict=True)
+        ):
+            rows = np.flatnonzero(samples.codes == code)
+            sample_counts = counts.iloc[rows].loc[:, chosen]
+            where = (
+                "the selected cells"
+                if sample_column is None
+                else _sample_words(name, sample_column, prefix="the cells of sample ")
             )
-        if without_counts:
-            logger.info(
-                f"Leaving out {len(without_counts)} hashtag(s) without counts in "
-                "the selected cells: " + ", ".join(without_counts)
+            # A hashtag without a count in the sample's cells, such as one
+            # that another pool used, is left out rather than refused. Any
+            # other value, such as a negative count, stays for validation to
+            # refuse.
+            has_counts = (sample_counts.to_numpy() != 0).any(axis=0)
+            without_counts = [
+                str(hashtag)
+                for hashtag, kept in zip(sample_counts.columns, has_counts)
+                if not kept
+            ]
+            if not has_counts.any():
+                raise ValueError(
+                    f"No hashtag to demultiplex has a count in {where}: "
+                    + ", ".join(repr(hashtag) for hashtag in without_counts)
+                )
+            if without_counts:
+                logger.info(
+                    f"Leaving out {len(without_counts)} hashtag(s) without counts "
+                    f"in {where}: " + ", ".join(without_counts)
+                )
+                sample_counts = sample_counts.loc[:, has_counts]
+            try:
+                identities, cutoffs = _hto_calls(
+                    _validated_hto_counts(sample_counts),
+                    random_seed=random_seed,
+                    positive_quantile=positive_quantile,
+                )
+            except ValueError as exc:
+                if sample_column is None:
+                    raise
+                raise ValueError(
+                    _sample_words(name, sample_column, prefix="Sample ") + f": {exc}"
+                ) from exc
+            diagnostics = _hto_clr_diagnostics(sample_counts)
+            values[rows] = identities.to_numpy()
+            max_ids[rows] = diagnostics["max_id"].to_numpy()
+            second_ids[rows] = diagnostics["second_id"].to_numpy()
+            margins[rows] = diagnostics["margin"].to_numpy(dtype=np.float64)
+            entries.append(
+                {
+                    "label": name,
+                    "cells": len(rows),
+                    "hashtags": [str(hashtag) for hashtag in sample_counts.columns],
+                    "cutoffs": {
+                        str(hashtag): int(cutoff) for hashtag, cutoff in cutoffs.items()
+                    },
+                    "withoutCounts": without_counts,
+                }
             )
-            counts = counts.loc[:, has_counts]
-        hto_idents, cutoffs = _hto_calls(
-            _validated_hto_counts(counts),
-            random_seed=random_seed,
-            positive_quantile=positive_quantile,
-        )
-        diagnostics = _hto_clr_diagnostics(counts)
         write_cell_data_artifact(
             self.zw,
             planned,
             {
-                "values": np.asarray(hto_idents.values),
-                "max_id": np.asarray(diagnostics["max_id"].to_numpy()),
-                "second_id": np.asarray(diagnostics["second_id"].to_numpy()),
-                "margin": np.asarray(
-                    diagnostics["margin"].to_numpy(), dtype=np.float64
-                ),
+                "values": values,
+                "max_id": max_ids,
+                "second_id": second_ids,
+                "margin": margins,
             },
-            attributes={
-                "samples": [
-                    {
-                        "cells": n_cells,
-                        "hashtags": [str(name) for name in counts.columns],
-                        "cutoffs": {
-                            str(name): int(cutoff) for name, cutoff in cutoffs.items()
-                        },
-                        "withoutCounts": without_counts,
-                    }
-                ]
-            },
+            attributes={"samples": entries},
         )
         return planned.ref
 

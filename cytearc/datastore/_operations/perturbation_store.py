@@ -7,13 +7,9 @@ import zarr
 
 from ...metadata.artifacts import plan_cell_data_artifact
 from ...metadata.rows import (
-    apply_missing_mask,
     array_row_selection_parts,
-    metadata_missing_mask,
-    read_rows,
-    read_text_rows,
 )
-from ...metadata.selection import resolve_cell_aligned_artifact, sample_codes
+from ...metadata.selection import resolve_cell_aligned_artifact
 from ...graph.arguments import OperationArguments
 from ...perturbation.efficiency import target_features
 from ...storage.artifact_writer import PlannedArtifact
@@ -34,16 +30,12 @@ from ...storage.types import as_zarr_array, read_array
 from ...utils.memory_budget import (
     MemoryBudgetError,
     MemoryLedger,
-    object_array_bytes,
 )
 
 # The most bytes of values that one band of features holds, in Mixscape and
 # the association tests, whatever the budget, so that a large budget does not
 # fill memory.
 _BAND_BYTES = 1 << 29
-# The bytes of a label that is not text as a Python object, such as a
-# number, beside its reference.
-_NUMBER_BYTES = 32
 # The coordinate artifacts that E-distances and signatures read, in the order
 # that their refusal names them: the kinds of NATIVE_COORDINATE_KINDS.
 _COORDINATE_KINDS = (
@@ -92,24 +84,6 @@ class _ComparedCells:
     cells: np.ndarray
     groups: np.ndarray
     control: np.ndarray
-
-
-@dataclass(frozen=True, slots=True)
-class _CellSamples:
-    """The samples of some cells, by their label in one cell metadata column.
-
-    Attributes:
-        columns: The column, or no column for one sample of every cell.
-        codes: Each cell's sample, numbered in the sorted order of the labels.
-        names: Each sample's label, None for the one sample without a column.
-        assignments: The fingerprint of the cells' samples, None without a
-            column.
-    """
-
-    columns: tuple[str, ...]
-    codes: np.ndarray
-    names: list[str | None]
-    assignments: str | None
 
 
 def _require_budget(
@@ -501,73 +475,6 @@ def _cell_values(
     )
     values: np.ndarray = np.asarray(resolved.values)
     return values
-
-
-def _require_cell_column(store: Any, column: str | None, argument: str) -> None:
-    """Refuse an ``argument`` that names a cell metadata column the store lacks.
-
-    Raises:
-        ValueError: If ``column`` is not None and not a cell column.
-    """
-    if column is not None and column not in store.cells.columns:
-        raise ValueError(f"{argument} '{column}' not found in cell metadata")
-
-
-def _cell_samples(
-    store: Any,
-    ledger: MemoryLedger,
-    column: str | None,
-    cell_index: np.ndarray,
-    *,
-    reason: str,
-) -> _CellSamples:
-    """Group cells into samples by their label in a cell metadata column.
-
-    Without a column every cell is in one sample. ``reason`` says why every
-    cell needs a label; it ends the error for a cell without one. The labels
-    and their missing mask are read through ``ledger``, and numbering them
-    charges it as :func:`~cytearc.metadata.selection.sample_codes` states;
-    the cells' sample codes stay charged and the labels are let go.
-    """
-    columns = () if column is None else (column,)
-    n_cells = len(cell_index)
-    labels = []
-    before = ledger.charged
-    for name in columns:
-        array = store.cells._get_array(name)
-        item = f"the cells' labels in {name!r}"
-        if np.dtype(array.dtype).kind == "U":
-            values = read_text_rows(ledger, array, cell_index, item=item)
-        else:
-            values = read_rows(ledger, array, cell_index, item=item)
-            # The labels as Python objects, as numbering them makes them.
-            ledger.hold(item, object_array_bytes(n_cells) + _NUMBER_BYTES * n_cells)
-            values = values.astype(object)
-        mask = metadata_missing_mask(store.cells, name)
-        missing = (
-            None
-            if mask is None
-            else read_rows(
-                ledger, mask, cell_index, item=f"the cells' missing labels in {name!r}"
-            ).astype(bool, copy=False)
-        )
-        if missing is not None and missing.any():
-            # The labels with the missing ones as None, an object copy.
-            ledger.hold(item, object_array_bytes(n_cells))
-        labels.append(apply_missing_mask(values, missing, labels=True))
-        del values, missing
-    held = ledger.charged - before
-    codes, sample_labels, assignments = sample_codes(
-        columns, labels, n_cells, reason=reason, ledger=ledger
-    )
-    del labels
-    ledger.release(held)
-    return _CellSamples(
-        columns=columns,
-        codes=codes,
-        names=[None if column is None else by[column] for by in sample_labels],
-        assignments=assignments,
-    )
 
 
 def _row_features(

@@ -123,7 +123,9 @@ STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "sample_column",
             }
         ),
-        "hashing": frozenset({"assay", "random_seed", "positive_quantile", "hashtags"}),
+        "hashing": frozenset(
+            {"assay", "random_seed", "positive_quantile", "hashtags", "sample_column"}
+        ),
         "cell_cycle": frozenset(
             {
                 "s_genes",

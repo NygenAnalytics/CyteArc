@@ -30,10 +30,10 @@ from ...utils.logging import logger
 from ...utils.memory_budget import MemoryLedger
 from ...utils.numba import numba_threads
 from ...utils.warnings import warn
+from .cell_samples import read_cell_samples, require_cell_column
 from .perturbation_store import (
     _LabelRows,
     _band_bytes,
-    _cell_samples,
     _cell_values,
     _count_bands,
     _count_blocks,
@@ -44,7 +44,6 @@ from .perturbation_store import (
     _positions_in,
     _require_budget,
     _resident_ledger,
-    _require_cell_column,
     _require_ref,
     _row_features,
     _stored_samples,
@@ -292,7 +291,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         )
         _require_ref(features, "features", "feature_selection")
         floor = profile_settings(by, min_cells, mask_targets, id_column, sample_column)
-        _require_cell_column(self, sample_column, "sample_column")
+        require_cell_column(self, sample_column, "sample_column")
         cells = self._profile_cells(labels, by)
         expression = self._get_assay(str(features.assay))
         self._require_measured_cells(
@@ -355,7 +354,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         used = np.flatnonzero(cells.control | (groups >= 0))
         used_cells = cells.cell_index[used]
         is_control = cells.control[used]
-        cell_samples = _cell_samples(
+        cell_samples = read_cell_samples(
             self,
             MemoryLedger(
                 None, "Numbering the cells' samples", codec_threads=self.nthreads

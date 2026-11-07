@@ -891,7 +891,7 @@ def test_the_other_screen_steps_refuse_their_budgets_with_memory_budget_error() 
 def test_samples_of_any_column_are_numbered_as_before_within_the_ledger(
     tmp_path,
 ) -> None:
-    from cytearc.datastore._operations.perturbation_store import _cell_samples
+    from cytearc.datastore._operations.cell_samples import read_cell_samples
     from cytearc.metadata.rows import (
         apply_missing_mask,
         read_metadata_missing_rows_chunkwise,
@@ -926,7 +926,7 @@ def test_samples_of_any_column_are_numbered_as_before_within_the_ledger(
 
         def number(column=column):
             ledger = MemoryLedger(10**9, "Numbering samples")
-            return ledger, _cell_samples(
+            return ledger, read_cell_samples(
                 store, ledger, column, cells, reason="every cell needs one"
             )
 

@@ -103,6 +103,82 @@ def checked_hashtags(hashtags: object, hashtag_ids: Sequence[str]) -> list[str]:
     return [name for name in hashtag_ids if name in chosen]
 
 
+def checked_hashtag_mapping(
+    hashtags: Mapping[object, object], hashtag_ids: Sequence[str]
+) -> dict[str, list[str]]:
+    """Return each sample's hashtags, by label, in the order of ``hashtag_ids``.
+
+    Raises:
+        TypeError: If a label is not text or a sample's hashtags are not a
+            sequence of texts.
+        ValueError: If a sample's hashtags are invalid as
+            :func:`checked_hashtags` states; the error names the sample.
+    """
+    if any(not isinstance(label, str) for label in hashtags):
+        raise TypeError(
+            "hashtags must map each sample's label, as text, to its hashtag IDs, "
+            "such as {'lane1': ['HTO1', 'HTO2']}"
+        )
+    checked = {}
+    for label, chosen in hashtags.items():
+        try:
+            checked[str(label)] = checked_hashtags(chosen, hashtag_ids)
+        except (TypeError, ValueError) as exc:
+            raise type(exc)(f"For sample {label!r}, {exc}") from exc
+    return checked
+
+
+def checked_sample_hashtags(
+    hashtags: object,
+    hashtag_ids: Sequence[str],
+    samples: Sequence[str | None],
+    *,
+    sample_column: str | None,
+) -> tuple[list[list[str]], list[str] | dict[str, list[str]] | None]:
+    """Return each sample's hashtags and the hashtags that a call records.
+
+    ``hashtags`` is None for every hashtag of the assay, a list of hashtag IDs
+    for every sample, or a mapping from each sample's label, as text, to its
+    hashtag IDs, which needs ``sample_column``. Each sample's hashtags follow
+    the order of ``hashtag_ids``; the record is None, the list, or the
+    mapping in the order of ``samples``.
+
+    Raises:
+        TypeError: If ``hashtags`` is not a sequence of texts or a mapping of
+            texts to them.
+        ValueError: If a mapping comes without ``sample_column``, names
+            samples that no selected cell has or leaves one out, or if a list
+            is invalid as :func:`checked_hashtags` states.
+    """
+    if hashtags is None:
+        return [list(hashtag_ids) for _ in samples], None
+    if not isinstance(hashtags, Mapping):
+        chosen = checked_hashtags(hashtags, hashtag_ids)
+        return [list(chosen) for _ in samples], chosen
+    if sample_column is None:
+        raise ValueError(
+            "hashtags maps samples to their hashtags, which needs sample_column, "
+            "the cell metadata column of each cell's sample"
+        )
+    checked = checked_hashtag_mapping(hashtags, hashtag_ids)
+    labels = [str(sample) for sample in samples]
+    extra = sorted(set(checked) - set(labels))
+    if extra:
+        raise ValueError(
+            f"hashtags names samples {extra} that no selected cell has in "
+            f"{sample_column!r}; the selected cells' samples are {labels}"
+        )
+    missing = [label for label in labels if label not in checked]
+    if missing:
+        raise ValueError(
+            f"hashtags gives no hashtags for samples {missing} of "
+            f"{sample_column!r}; give each sample of the selected cells its "
+            "hashtags"
+        )
+    chosen_by_sample = [checked[label] for label in labels]
+    return chosen_by_sample, dict(zip(labels, chosen_by_sample, strict=True))
+
+
 def _validated_hto_counts(hto_counts: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(hto_counts, pd.DataFrame):
         raise TypeError("hto_counts must be a pandas DataFrame")
