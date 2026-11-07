@@ -726,8 +726,9 @@ def test_a_composite_on_another_store_reads_as_a_local_one(
     reopened.z.store.close()
 
 
-def test_a_composite_in_the_bucket_of_its_sources_records_them_relative(
-    composite_sources, tmp_path, monkeypatch
+@pytest.mark.parametrize("relative_sources", [False, True])
+def test_a_composite_in_the_bucket_of_its_sources_records_them_relative_when_asked(
+    composite_sources, tmp_path, monkeypatch, relative_sources
 ):
     from obstore.store import MemoryStore as ObjectMemoryStore
     from zarr.storage import ObjectStore
@@ -760,15 +761,19 @@ def test_a_composite_in_the_bucket_of_its_sources_records_them_relative(
         sources,
         at=f"{bucket}/joint.zarr",
         storage_options=_BUCKET_OPTIONS,
+        relative_sources=relative_sources,
         **_SELECTED,
         **options,
     )
     expected = _expected_counts(joint, composite_sources)
     assert [
         binding["location"] for binding in joint.z.attrs["composite"]["sources"]
-    ] == ["a.zarr", "b.zarr"]
-    # Sources in a bucket read through the source cache, though recorded
-    # relative to the composite.
+    ] == [
+        f"{name}.zarr" if relative_sources else f"{bucket}/{name}.zarr"
+        for name in ("a", "b")
+    ]
+    # Sources in a bucket read through the source cache, however they are
+    # recorded.
     assert joint.z.store.source_cache is not None
     np.testing.assert_array_equal(joint.RNA.matrixGroup["counts"][:], expected)
     joint.z.store.close()
