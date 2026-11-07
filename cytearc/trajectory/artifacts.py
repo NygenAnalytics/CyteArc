@@ -1124,6 +1124,8 @@ LINEAGE_CURVE_PARAMETERS = frozenset(
 )
 LINEAGE_TREE_INPUTS = frozenset({"labels", "coordinates", "cell_selection"})
 LINEAGE_TREE_PARAMETERS = frozenset({"root", "ends"})
+LINEAGE_MEMBERSHIP_INPUTS = frozenset({"curves", "cell_selection"})
+LINEAGE_MEMBERSHIP_PARAMETERS = frozenset({"band", "distance_score", "n_bins"})
 LINEAGE_MARKER_PAYLOAD = (
     "r_value",
     "p_value",
@@ -1154,6 +1156,16 @@ LINEAGE_AGGREGATION_PAYLOAD = (
 )
 LINEAGE_CURVE_PAYLOAD = ("points", "curve_pseudotime", "progress", "distance", "valid")
 LINEAGE_TREE_PAYLOAD = ("sizes", "means", "edges", "lengths")
+LINEAGE_MEMBERSHIP_PAYLOAD = (
+    "values",
+    "members",
+    "valid",
+    "distance_limits",
+    "branch_pairs",
+    "branch_pseudotime",
+    "branch_progress",
+    "branch_cells",
+)
 LINEAGE_RESULT_ATTRIBUTES = _RESULT_ATTRIBUTES
 LINEAGE_DRIVER_ATTRIBUTES = _RESULT_ATTRIBUTES | {"n_cells"}
 LINEAGE_AGGREGATION_ATTRIBUTES = _RESULT_ATTRIBUTES | {"input_fingerprints"}
@@ -1292,6 +1304,31 @@ def validate_lineage_curve_parameters(
         ),
         "fit_bins": integer_argument(parameters["fit_bins"], "fit_bins", minimum=16),
         "spline_basis": spline_basis,
+    }
+
+
+def validate_lineage_membership_parameters(
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Check the rule of a lineage membership: its band, distance score and bins."""
+    require_exact_record_keys(
+        parameters,
+        LINEAGE_MEMBERSHIP_PARAMETERS,
+        "Lineage-membership parameters",
+    )
+    return {
+        "band": _real_parameter(
+            parameters["band"], "band", minimum=0.0, maximum=1.0, minimum_open=True
+        ),
+        "distance_score": _real_parameter(
+            parameters["distance_score"],
+            "distance_score",
+            minimum=0.0,
+            minimum_open=True,
+        ),
+        "n_bins": integer_argument(
+            parameters["n_bins"], "n_bins", minimum=1, maximum=1000
+        ),
     }
 
 
@@ -1753,3 +1790,79 @@ def lineage_tree_payload_is_valid(
     )
     n_components, _ = connected_components(adjacency, directed=False)
     return int(n_components) == 1
+
+
+def lineage_membership_payload_is_valid(
+    group: Any,
+    *,
+    n_cells: int,
+    lineage_names: Sequence[str],
+    n_bins: int,
+    expected_valid: np.ndarray,
+) -> bool:
+    """Check a stored lineage membership against its cells, lineages and rule.
+
+    Each label names what its row of ``members`` holds: the one lineage's
+    name, ``"shared"`` for several, or ``"none"``; unscored cells follow
+    none. Branch points cover every pair of lineages in order.
+    """
+    if set(group.attrs) != LINEAGE_RESULT_ATTRIBUTES:
+        return False
+    if not payload_fingerprint_matches(group, LINEAGE_MEMBERSHIP_PAYLOAD):
+        return False
+    n_lineages = len(lineage_names)
+    n_pairs = n_lineages * (n_lineages - 1) // 2
+    text = frozenset({"O", "S", "T", "U"})
+    contracts = {
+        name: _array_contract(group, name, shape=shape, dtype_kinds=kinds)
+        for name, shape, kinds in (
+            ("values", (n_cells,), text),
+            ("members", (n_cells, n_lineages), frozenset({"b"})),
+            ("valid", (n_cells,), frozenset({"b"})),
+            ("distance_limits", (n_lineages, n_bins), frozenset({"f"})),
+            ("branch_pairs", (n_pairs, 2), frozenset({"i"})),
+            ("branch_pseudotime", (n_pairs,), frozenset({"f"})),
+            ("branch_progress", (n_pairs, 2), frozenset({"f"})),
+            ("branch_cells", (n_pairs, 2), frozenset({"i"})),
+        )
+    }
+    arrays: dict[str, Any] = {
+        name: array for name, array in contracts.items() if array is not None
+    }
+    if len(arrays) != len(contracts):
+        return False
+    valid = np.asarray(arrays["valid"][:], dtype=np.bool_)
+    if not np.array_equal(valid, np.asarray(expected_valid, dtype=np.bool_)):
+        return False
+    members = np.asarray(arrays["members"][:], dtype=np.bool_)
+    labels = np.asarray(arrays["values"][:]).astype(str)
+    counts = members.sum(axis=1)
+    single = counts == 1
+    names = np.asarray(list(lineage_names), dtype=str)
+    if (
+        np.any(members[~valid])
+        or not np.all(labels[counts == 0] == "none")
+        or not np.all(labels[counts > 1] == "shared")
+        or not np.array_equal(labels[single], names[members[single].argmax(axis=1)])
+    ):
+        return False
+    expected_pairs = [
+        (first, second)
+        for first in range(n_lineages)
+        for second in range(first + 1, n_lineages)
+    ]
+    pairs = np.asarray(arrays["branch_pairs"][:], dtype=np.int64)
+    progress = np.asarray(arrays["branch_progress"][:], dtype=np.float64)
+    point = np.asarray(arrays["branch_pseudotime"][:], dtype=np.float64)
+    counted = np.asarray(arrays["branch_cells"][:], dtype=np.int64)
+    limits = np.asarray(arrays["distance_limits"][:], dtype=np.float64)
+    finite_progress = progress[np.isfinite(progress)]
+    return bool(
+        [tuple(pair) for pair in pairs.tolist()] == expected_pairs
+        and np.array_equal(np.isfinite(point), np.isfinite(progress).all(axis=1))
+        and not np.any(finite_progress < 0.0)
+        and not np.any(finite_progress > 1.0)
+        and not np.any(counted < 0)
+        and not np.any(limits[np.isfinite(limits)] < 0.0)
+        and not np.any(np.isinf(limits))
+    )

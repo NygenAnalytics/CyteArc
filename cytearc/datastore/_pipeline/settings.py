@@ -33,6 +33,7 @@ from ...utils.arguments import bool_argument, integer_argument
 from ...utils.logging import logger
 from .._operations.cell_barcodes import barcode_pattern as checked_barcode_pattern
 from .._operations.cell_calling import _CellCallingOperationsMixin
+from .._operations.clustering import _ClusteringOperationsMixin
 from .._operations.embeddings import _EmbeddingOperationsMixin
 from .._operations.features import _FeatureOperationsMixin
 from .._operations.graph import _GraphOperationsMixin
@@ -43,6 +44,7 @@ from .._operations.perturbation_effects import _PerturbationEffectOperationsMixi
 from .._operations.perturbation_guides import _PerturbationGuideOperationsMixin
 from .._operations.perturbation_mixscape import _PerturbationMixscapeOperationsMixin
 from .._operations.perturbation_profiles import _PerturbationProfileOperationsMixin
+from .._operations.presentation import _PresentationOperationsMixin
 from .._operations.quality_control import _QualityControlOperationsMixin
 
 
@@ -97,6 +99,9 @@ _TSNE_SETTING_DEFAULTS: Mapping[str, Any] = MappingProxyType(
 _GRAPH_FLAGS = ("symmetric_graph", "graph_upper_only")
 # The default Leiden candidates of a recipe that scores them by silhouette.
 DEFAULT_LEIDEN_PARTITIONS: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25)
+# The default Leiden candidate of a multimodal run, whose integrated graph has
+# no shared coordinates in which silhouettes could compare candidates.
+MULTIMODAL_LEIDEN_PARTITIONS: tuple[float, ...] = (1.0,)
 
 # The settings that each stage keyword accepts. The pipeline supplies the
 # artifacts a stage consumes, so only its settings appear here. A setting
@@ -107,9 +112,10 @@ DEFAULT_LEIDEN_PARTITIONS: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25)
 # cell calling, guide calling's ``path`` and ``barcode_prefix``, which import
 # Cell Ranger's calls in place of calling guides, and the ``cells`` of
 # profiles, which chooses between every cell of each label and Mixscape's
-# knocked-out cells. Harmony's
-# ``batch_columns`` and the ``controls`` of perturbation labels are required
-# keywords of their methods.
+# knocked-out cells. Harmony's ``batch_columns`` and the ``controls`` of
+# perturbation labels are required keywords of their methods.
+# ``_pipeline/description.py`` declares the recipe keys and the defaults that a
+# recipe fits to its data, for PipelineAccessor.describe.
 STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "cell_calling": frozenset(
@@ -318,6 +324,58 @@ STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "seed",
             }
         ),
+    }
+)
+_QC = _QualityControlOperationsMixin
+_GRAPH = _GraphOperationsMixin
+_PROFILE_STAGES = _PerturbationProfileOperationsMixin
+# The public methods whose keywords each stage keyword's settings are, the
+# method that the stage runs first: filtering filters with qc.auto_filter, or
+# with qc.filter when its method is "manual", and guide calling calls guides
+# with perturbation.call_guides, or imports Cell Ranger's calls with
+# perturbation.import_guide_calls when it names a path. The panel's only
+# setting configures the recipe.
+STAGE_METHODS: Mapping[str, tuple[Callable[..., Any], ...]] = MappingProxyType(
+    {
+        "cell_calling": (_CellCallingOperationsMixin._qc_call_cells,),
+        "hashing": (_QC._qc_hto_demultiplexing,),
+        "filtering": (_QC._qc_auto_filter, _QC._qc_filter),
+        "cell_cycle": (_QC._scores_cell_cycle,),
+        "hvg": (_FeatureOperationsMixin._features_hvgs,),
+        "prevalent_peaks": (_QC._features_prevalent_peaks,),
+        "panel": (),
+        "normalization": (_GRAPH._features_normalize,),
+        "pca": (_GRAPH._reduction_pca,),
+        "lsi": (_GRAPH._reduction_lsi,),
+        "harmony": (_GRAPH._reduction_harmony,),
+        "ann_index": (_GRAPH._graph_ann_index,),
+        "neighbors": (_GRAPH._graph_neighbors,),
+        "connectivity": (_GRAPH._graph_connectivity,),
+        "integration": (_GRAPH._integration_modalities,),
+        "embedding_initialization": (_GRAPH._embeddings_initialization,),
+        "umap": (_EmbeddingOperationsMixin._embeddings_umap,),
+        "tsne": (_EmbeddingOperationsMixin._embeddings_tsne,),
+        "leiden": (_ClusteringOperationsMixin._clusters_leiden,),
+        "membership_strength": (
+            _PresentationOperationsMixin._clusters_membership_strength,
+        ),
+        "paris": (_ClusteringOperationsMixin._clusters_paris,),
+        "doublets": (_QC._qc_doublets,),
+        "markers": (_FeatureOperationsMixin._markers_search,),
+        "guide_calling": (
+            _PerturbationGuideOperationsMixin._perturbation_call_guides,
+            _PerturbationGuideOperationsMixin._perturbation_import_guide_calls,
+        ),
+        "labels": (_PerturbationGuideOperationsMixin._perturbation_labels,),
+        "efficiency": (_PerturbationEffectOperationsMixin._perturbation_efficiency,),
+        "edistance": (_PerturbationEffectOperationsMixin._perturbation_edistance,),
+        "signature": (_PerturbationMixscapeOperationsMixin._perturbation_signature,),
+        "mixscape": (_PerturbationMixscapeOperationsMixin._perturbation_mixscape,),
+        "associations": (
+            _PerturbationAssociationOperationsMixin._perturbation_associations,
+        ),
+        "profiles": (_PROFILE_STAGES._perturbation_profiles,),
+        "clusters": (_PROFILE_STAGES._perturbation_cluster,),
     }
 )
 # The settings with which guide calling imports Cell Ranger's calls, in place

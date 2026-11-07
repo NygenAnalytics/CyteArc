@@ -47,7 +47,7 @@ from .common import (
 
 RECIPE = "atac"
 OPERATION = "pipeline.atac"
-_FILTER_SUFFIXES = ("nCounts", "nFeatures")
+FILTER_SUFFIXES = ("nCounts", "nFeatures")
 
 
 def _prevalent_peaks_stage(assay: str, settings: Mapping[str, Any]) -> PlannedStage:
@@ -164,7 +164,7 @@ def resolve_atac(
         filtering,
         cells=source,
         assay=assay_name,
-        default_attrs=default_filter_columns(store, assay_name, _FILTER_SUFFIXES),
+        default_attrs=default_filter_columns(store, assay_name, FILTER_SUFFIXES),
         operation=OPERATION,
     )
     check_tsne(embeddings)

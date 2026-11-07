@@ -191,13 +191,21 @@ ATAC assay; see {doc}`regulons` for building those networks.
     :members: aucell, chromvar, waggr, load, cell_cycle
 ```
 
+`scores.cell_cycle` scores the S-phase and G2M-phase genes of `cytearc.quality_control`, `s_phase_genes` and `g2m_phase_genes`, unless a call passes its own lists, such as `s_phase_genes_mouse` and `g2m_phase_genes_mouse`, and matches them to the assay's feature names with `match_gene_names`. The same call on a store's names, `match_gene_names(ds.RNA.feats.fetch_all("names"), s_phase_genes)`, shows which features a run will score, which genes match by a previous symbol, and which match none.
+
+```{eval-rst}
+.. autofunction:: cytearc.quality_control.match_gene_names
+
+.. autoclass:: cytearc.quality_control.cell_cycle_genes.GeneMatch
+```
+
 ### `ds.regulons`
 
-`grn` infers transcription-factor to target importances with GRNBoost2 on the assay's stored values, its raw counts or the values of an assay imported from normalized values; the functions in {doc}`regulons` turn them into regulons.
+`grn` infers transcription-factor to target importances with GRNBoost2 on the assay's stored values, its raw counts or the values of an assay imported from normalized values; the functions in {doc}`regulons` turn them into regulons. `specificity` and `connection_specificity` give the regulon specificity scores of each group of cells and the connection specificity index of each pair of regulons from a stored score artifact, such as AUCell's, reading its scores a block of cells at a time, so their memory follows a block of scores and the groups and regulons rather than every cell's scores. They save nothing.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.RegulonsAccessor
-    :members: grn, load_grn, profiles
+    :members: grn, load_grn, profiles, specificity, connection_specificity
 ```
 
 ### `ds.perturbation`
@@ -247,7 +255,7 @@ ATAC assay; see {doc}`regulons` for building those networks.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.TrajectoryAccessor
-    :members: pseudotime, load_pseudotime, fate, load_fate, markers, load_markers, aggregation, load_aggregation, lineage_markers, load_lineage_markers, drivers, load_drivers, lineage_aggregation, load_lineage_aggregation, curves, load_curves, curves_in_layout, lineage_tree, load_lineage_tree
+    :members: pseudotime, load_pseudotime, fate, load_fate, markers, load_markers, aggregation, load_aggregation, lineage_markers, load_lineage_markers, drivers, load_drivers, lineage_aggregation, load_lineage_aggregation, curves, load_curves, curves_in_layout, lineage_tree, load_lineage_tree, lineage_membership, load_lineage_membership, branch_cells
 ```
 
 `pseudotime` orders cells by the potential of population balance analysis, which [Weinreb et al. (2018)](https://doi.org/10.1073/pnas.1714723115) define as half the pseudoinverse of the graph's random-walk Laplacian applied to the source-sink vector. The default, `method="untruncated"`, solves for that potential over all of the Laplacian's modes by MINRES on the symmetric Laplacian, to machine precision: on synthetic graphs of one million cells it took 28 to 29 s and 724 to 777 iterations in containers of 4 CPUs, also when an eighth of the cells was joined to the rest by 64 edges. `method="truncated"` keeps the `n_singular_vals - 1` smallest nonzero singular modes, 29 by default, which SciPy's `svds` finds with ARPACK; it is the potential of releases before 1.4.0 and reproduces their pseudotimes. When the graph's slow modes outnumber the modes it keeps, as on graphs of many weakly joined clusters, the truncated potential departs from the full one, to a correlation of 0.971 on a synthetic graph of 20,000 cells in 150 clusters, and its solve can run for hours on graphs of several hundred thousand cells. Both potentials drop the component of the source-sink vector along the degree vector, as the pseudoinverse does, since the range of the Laplacian is orthogonal to that vector.
@@ -257,6 +265,8 @@ ATAC assay; see {doc}`regulons` for building those networks.
 The untruncated default is revision 2 of `run_pseudotime_scoring` ([Operation revisions](../developers/operation-revisions)). Pseudotimes saved by earlier releases record no method, so a default call computes them anew, the fate maps and lineage results built on them follow through their inputs, and `ds.artifacts.lineage` marks them stale. A pseudotime that records `method="truncated"` stays current and is reused.
 
 A pseudotime scores one connected component of its graph: the largest by default, or with `component_policy="sources"` the one that holds the most source cells, the cells with a source label or a negative `ss_vec` value. `load_pseudotime` returns each cell's `component`, numbered by decreasing size, and the `component_sizes`, computed from the stored graph. A source or sink label that no selected cell holds, or no cell of the scored component, raises {py:exc}`~cytearc.trajectory.SourceSinkLabelsError` from `pseudotime` and from `fate`, naming the labels in `missing_sources` and `missing_sinks`.
+
+`pseudotime` and `lineage_tree` take `cells`, a cell selection of some of the graph's cells, such as the cells of some clusters from `select_cells`, and score those cells without a graph of their own. The pseudotime scores the subgraph that the cells induce, the graph's edges among them with their weights, and numbers that subgraph's connected components, which can outnumber the graph's: cells at the edge of the selection lose their edges to the cells left out. `cells` becomes the result's cell selection, which `fate`, `curves`, `markers`, `aggregation` and the lineage calls follow. The graph's own selection gives the result that a call without `cells` gives, and a selection with cells outside the graph raises `ValueError`. Labels may hold the graph's cells or `cells`, and the coordinates of `curves` and `lineage_tree` the graph's cells or the result's; only the result's cells are read. The subgraph keeps the neighbours that the whole graph chose, so it orders the cells by the variation that the whole graph follows, while a graph built on the selected cells' own principal components follows the variation within them; the [trajectory validation checklist](../tutorials/trajectory-validation) compares the two.
 
 ```{eval-rst}
 .. autoexception:: cytearc.trajectory.PseudotimeConvergenceError
@@ -273,13 +283,15 @@ candidate sinks from a cluster tree; check them before passing them to `fate`.
 See [Resolve gene dynamics by lineage](../tutorials/lineage-dynamics) and
 [Draw lineage curves and check candidate sinks](../tutorials/lineage-curves).
 
-`curves_in_layout(curves, layout)` returns the curves drawn in a two-dimensional layout, such as a UMAP, as a table of each curve's points, `lineage`, `point`, `x` and `y`, which `plots.lineage_curves` draws. It averages the layout coordinates of the scored cells with each lineage's fate weights along the curve and smooths them with the curves' spline, needs no plotting dependencies and saves nothing, so a viewer of its own can draw the curves. The layout may come from any cell selection of the curves' cells.
+`curves_in_layout(curves, layout)` returns the curves drawn in a two-dimensional layout, such as a UMAP, as a table of each curve's points, `lineage`, `point`, `x` and `y`, which `plots.lineage_curves` draws. It averages the layout coordinates of the scored cells with each lineage's fate weights along the curve and smooths them with the curves' spline, needs no plotting dependencies and saves nothing, so a viewer of its own can draw the curves. The layout may come from any cell selection that holds the curves' cells, such as a UMAP of the whole graph for curves of some of its cells.
 
 `lineage_tree` saves its tree, so a store opened with `zarr_mode="r"` refuses to build a tree that it does not hold. {py:func}`cytearc.trajectory.build_cluster_tree` builds the same tree from the cells' coordinates and labels without a store, as a {py:class}`~cytearc.trajectory.ClusterTree`, with the clusters in the order that the saved tree gives them, so a caller can show a tree before saving it or from a read-only store.
 
 ```{eval-rst}
 .. autofunction:: cytearc.trajectory.build_cluster_tree
 ```
+
+Fate probabilities sum to one over the sinks, so a cell on no trajectory still splits its probability among them, and a cell that has not committed looks like a member of its most likely lineage. `lineage_membership(curves)` calls, for each cell of the curves, the lineage it follows, `"shared"` when it follows several or `"none"`, and saves the rule with its thresholds. A scored cell follows a lineage when its fate probability for that lineage is at least `band` times its largest, 0.5 by default, and when it lies on the trajectory: within some lineage's distance limit at its progress along that lineage's curve. In each of `n_bins` bins of progress, the lineage's cells weigh by their fate probability for it, and their spread is their weighted median distance plus `distance_score`, 5 by default, times their weighted median absolute deviation scaled by 1.4826. A bin's limit is the median spread of three neighbouring bins, so a state that projects onto one stretch of a curve, such as a dead end off it, cannot widen the limit there. `load_lineage_membership` returns a {py:class}`~cytearc.trajectory.LineageMembershipResult` with each cell's label and lineages, the limits, and for each pair of lineages its branch point: the pseudotime that best splits the cells the two share, before it, from the cells that follow one of them, after it, with the progress there on each curve. `select_cells` reads the labels, and `branch_cells(membership, lineages)` selects the cells that follow either of two lineages nearest their branch point, a `window` share of them, which `drivers(fate, cells=...)` correlates to find the genes that separate the two sinks where they part.
 
 ### `ds.mapping`
 
@@ -758,6 +770,9 @@ The recommended workflow is in [Read RNA and protein together with CITE-seq](../
     :members:
 
 .. autoclass:: cytearc.trajectory.ClusterTree
+    :members:
+
+.. autoclass:: cytearc.trajectory.LineageMembershipResult
     :members:
 
 .. autoclass:: cytearc.EnrichmentResult

@@ -7,8 +7,9 @@ import numpy as np
 import pandas as pd
 
 from ..features.values import feature_description, resolve_feature_rows
+from ..metadata.selection import cell_selection_indices
 from ..storage.artifacts import ArtifactRef, inspect_artifact
-from ..storage.selections import selections_hold_same_cells
+from ..trajectory.curves import layout_rows
 from ..trajectory.lineages import select_lineages
 from ..utils.arguments import bool_argument, float_argument
 from ._contracts import CategoricalScale, ColorScale, FeatureRef, PlotProvenance
@@ -461,18 +462,17 @@ def lineage_trends(
 def _layout_for(
     store: Any, layout: ArtifactRef, cell_selection: ArtifactRef
 ) -> tuple[np.ndarray, np.ndarray]:
-    """The coordinates and store positions of a layout of the trajectory's cells.
+    """The coordinates and store positions of the trajectory's cells in a layout.
 
-    The layout's rows are the trajectory's: another selection of the same
-    cells serves.
+    The layout holds every cell of the trajectory, from any cell selection,
+    and may hold more, such as every cell of the graph of a trajectory of
+    some of its cells; only the trajectory's rows are returned.
     """
     coordinates, cell_indices, layout_selection = _resolve_layout(store, layout)
-    if not selections_hold_same_cells(store.zw, layout_selection, cell_selection):
-        raise ValueError(
-            "The layout holds other cells than the trajectory; draw an embedding "
-            "of the trajectory's cells, such as a UMAP of its graph"
-        )
-    return coordinates, cell_indices
+    if layout_selection == cell_selection:
+        return coordinates, cell_indices
+    rows = layout_rows(cell_indices, cell_selection_indices(store.zw, cell_selection))
+    return coordinates[rows], cell_indices[rows]
 
 
 @close_figures_on_error
@@ -504,8 +504,10 @@ def lineage_curves(
     ``ds.trajectory.curves_in_layout`` returns the points drawn, without a
     figure. ``df`` overrides the curves' degrees of freedom for this
     smoothing; like theirs, it lies between 2 and the size of their spline
-    basis, 32 by default. ``layout`` must hold the curves' cells, whichever
-    operation made its cell selection; a layout of other cells raises
+    basis, 32 by default. ``layout`` must hold every cell of the curves,
+    whichever operation made its cell selection, and may hold more, such as
+    every cell of the graph when the curves follow some of its cells; the
+    plot draws the curves' cells. A layout that lacks one raises
     ``ValueError``.
     """
     show_legend = bool_argument(show_legend, "show_legend")
@@ -649,8 +651,10 @@ def lineage_tree(
     Each cluster sits at the median layout position of its cells. The root
     and the candidate sinks, the leaves other than the root, are coloured
     apart from the other clusters, and the legend names the colours.
-    ``layout`` must hold the tree's cells, whichever operation made its cell
-    selection; a layout of other cells raises ``ValueError``.
+    ``layout`` must hold every cell of the tree, whichever operation made its
+    cell selection, and may hold more, such as every cell of the graph when
+    the tree joins clusters of some of its cells; the plot draws the tree's
+    cells. A layout that lacks one raises ``ValueError``.
     """
     show_cells = bool_argument(show_cells, "show_cells")
     labels = bool_argument(labels, "labels")

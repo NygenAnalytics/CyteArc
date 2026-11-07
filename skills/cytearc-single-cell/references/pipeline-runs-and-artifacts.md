@@ -55,6 +55,7 @@ refs, and record the analysis for handoff. Docs:
 - There is no resume. A new run reuses a complete artifact from an earlier attempt only when its
   operation, parameters, inputs and operation revision match.
 - `ds.pipeline.plan(recipe, ...)` takes a recipe call's arguments and reports, for each stage, whether the run would reuse its artifacts or compute them and why, writing nothing and reading no count matrix, on a read-only store too. A stage that reads what an earlier stage would compute is reported computed with `reason="upstream"`, since its artifacts depend on ones that do not exist yet.
+- `ds.pipeline.describe(recipe)` (or `PipelineAccessor.describe(recipe)`, without a store) lists a recipe's stage keywords: whether each runs when omitted (`runs`, or a `rule`), the public methods it forwards to, and each setting's `annotation`, `default` and, for a default the recipe fits to its data or call, the `rule`, such as ATAC `prevalent_peaks` `top_n` and ADT `pca` `dims`. `to_dict()` gives JSON. A plan's `config` shows the fitted values for a store.
 - `run.cells` and `run.features` are frozen views of captured fields only. Live columns such as
   author labels are absent unless listed in `snapshot_columns` on the run.
 

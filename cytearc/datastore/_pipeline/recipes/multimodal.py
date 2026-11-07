@@ -15,7 +15,12 @@ from ....storage.selections import snapshot_run_metadata
 from ..cluster_selection import cluster_label_values
 from ..executor import PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
-from ..settings import leiden_config, resolve_leiden, stage_settings
+from ..settings import (
+    MULTIMODAL_LEIDEN_PARTITIONS,
+    leiden_config,
+    resolve_leiden,
+    stage_settings,
+)
 from ..stages import (
     Outputs,
     cluster_selection_stage,
@@ -293,7 +298,7 @@ def resolve_multimodal(
     # compare candidates, so one resolution is the default and several need a
     # selected one.
     partitions, selected, leiden_settings = resolve_leiden(
-        leiden, default_partitions=(1.0,)
+        leiden, default_partitions=MULTIMODAL_LEIDEN_PARTITIONS
     )
     if len(partitions) > 1 and selected is None:
         raise ValueError(
