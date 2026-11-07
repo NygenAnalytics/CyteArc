@@ -1164,6 +1164,7 @@ def test_reader_implementations_are_runtime_isolated():
             "readers._assay_names",
             "readers._h5ad_columns",
             "readers._h5ad_inspect",
+            "readers._h5ad_values",
             "readers._sparse",
             "readers._text",
         },

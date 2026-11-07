@@ -1044,16 +1044,19 @@ class H5adReader:
                 longest = int(np.diff(pointers).max(initial=0))
             count = scan_processes(values, longest, maxBytes, processes)
         windows = [(0, n_vectors)]
-        if count > 1:
-            from ..storage.sharding import aligned_row_windows
-
+        if count > 1 and pointers is not None:
+            windows = value_windows(pointers, count)
+        elif count > 1:
             # Dense windows hold whole rows of HDF5 chunks, which no two
-            # processes then decompress.
-            windows = (
-                aligned_row_windows(n_vectors, self._dense_chunk_rows() or 1, count)
-                if pointers is None
-                else value_windows(pointers, count)
+            # processes then decompress: the chunks' rows split as vectors
+            # whose values are their rows.
+            bounds = np.append(
+                np.arange(0, n_vectors, self._dense_chunk_rows() or 1), n_vectors
             )
+            windows = [
+                (int(bounds[first]), int(bounds[last]))
+                for first, last in value_windows(bounds, count)
+            ]
         if len(windows) > 1:
             logger.debug(f"Scanning H5AD values in {len(windows)} processes")
             scan = merge_count_scans(

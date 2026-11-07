@@ -115,12 +115,13 @@ def _assert_balanced_windows(
 ) -> None:
     """Check three windows that cover every vector, each with a third of the values.
 
-    A dense matrix, stored without HDF5 chunks, splits its 23 rows into 8, 8
-    and 7. A sparse window holds a third of the stored values to within its
-    longest vector.
+    A dense matrix, stored without HDF5 chunks, splits its 23 rows at rows 7
+    and 15, the first rows at or past a third and two thirds of them. A
+    sparse window holds a third of the stored values to within its longest
+    vector.
     """
     if encoding == "dense":
-        assert windows == [(0, 8), (8, 16), (16, 23)]
+        assert windows == [(0, 7), (7, 15), (15, 23)]
         return
     stored = np.count_nonzero(values, axis=0 if encoding == "csc" else 1)
     assert len(windows) == 3
