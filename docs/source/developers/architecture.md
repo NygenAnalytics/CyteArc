@@ -557,6 +557,7 @@ CyteArc validates persisted data and public arguments against the following cont
   is uninformative. The diagnostic `zeroNormCellCount` is renamed `uninformativeCellCount`, and
   `queryScaledDispersion` uses shared features only. Older projections fail to load with a
   request to rerun `mapping.run`.
+- `mapping.run(feature_key="names")` matches query features to the reference features by exact name, reading the reference features' names from the reference assay at the reference's feature selection. It refuses a reference whose features share a name, naming their IDs, and sums query features that share a name, as `DataStoreMerge(feature_key="names")` does. The projection and its `select_mapping_overlap` selection record `feature_key` only when it is `"names"`, so projections that match by ID keep their identities, and `featureCoverage` counts the reference features that some query feature matches.
 - Mann-Whitney uses the exact permutation null when the two groups can be formed in at most
   100,000 ways. Its statistical-test artifacts record `p_value_policy`, and results carry
   `p_value_method`; identities of other tests are unchanged. Saved Mann-Whitney results without

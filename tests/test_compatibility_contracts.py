@@ -485,6 +485,7 @@ def test_mapping_execution_contract_is_query_owned():
         "query_assay",
         "save_k",
         "missing_feature_policy",
+        "feature_key",
         "query_batches",
         "invalidate_cache",
     )
@@ -492,6 +493,8 @@ def test_mapping_execution_contract_is_query_owned():
     assert params["query_assay"].default is None
     assert params["save_k"].default == 3
     assert params["missing_feature_policy"].default == "reference_mean"
+    assert params["feature_key"].default == "ids"
+    assert params["feature_key"].kind is inspect.Parameter.KEYWORD_ONLY
     assert params["query_batches"].default is None
     assert params["invalidate_cache"].default is False
     # pandas 2 stringifies as pandas.core.frame.DataFrame; pandas 3 as pandas.DataFrame.

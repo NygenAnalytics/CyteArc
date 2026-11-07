@@ -656,7 +656,7 @@ def test_query_projection_reproduces_stored_reference_coordinates(
             assay=None,
             table_path="cellData",
         ),
-        reference_feature_ids=reference.feature_ids,
+        reference_feature_keys=reference.feature_ids,
         reference_normalized_means=reference.model.feature_means,
         reference_normalization_parameters=reference.normalization_parameters,
         missing_feature_policy="error",
@@ -749,7 +749,7 @@ def test_subset_fitted_pca_center_survives_mapping_reference_reload(
         stream = AlignedFeatureStream(
             query_assay=reference_store.RNA,
             query_cell_indices=np.arange(n_cells),
-            reference_feature_ids=reference.feature_ids,
+            reference_feature_keys=reference.feature_ids,
             reference_normalized_means=reference.model.feature_means,
             reference_normalization_parameters=reference.normalization_parameters,
             missing_feature_policy="error",

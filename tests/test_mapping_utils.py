@@ -12,7 +12,7 @@ from cytearc.mapping.confidence import (
     finish_mapping_scores,
     mapping_score_weights,
 )
-from cytearc.mapping.features import _feature_ids
+from cytearc.mapping.features import _feature_keys
 
 
 def test_mapping_score_kernel_skips_rows_and_scales_each_group():
@@ -235,7 +235,7 @@ def test_conformal_membership_includes_high_score_labels(alpha):
 
 
 def test_feature_identifier_order_is_preserved():
-    identifiers = _feature_ids(
+    identifiers = _feature_keys(
         np.array(["gene_b", "gene_a", "gene_c"]),
         name="Reference feature identifiers",
     )
@@ -246,7 +246,7 @@ def test_feature_identifier_order_is_preserved():
 
 def test_feature_alignment_rejects_duplicate_identifiers():
     with pytest.raises(ValueError, match="unique"):
-        _feature_ids(
+        _feature_keys(
             np.array(["gene_a", "gene_a"]),
             name="Reference feature identifiers",
         )

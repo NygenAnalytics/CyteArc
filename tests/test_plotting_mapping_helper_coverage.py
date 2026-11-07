@@ -735,7 +735,7 @@ def test_mapping_feature_helper_validation_and_lightweight_methods() -> None:
     )
     for values, error, message in invalid_ids:
         with pytest.raises(error, match=message):
-            mapping_features._feature_ids(values, name="feature IDs")
+            mapping_features._feature_keys(values, name="feature IDs")
 
     method = callable_identity(norm_lib_size)
     normalization = {

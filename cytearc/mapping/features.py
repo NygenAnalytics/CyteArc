@@ -55,7 +55,7 @@ class AlignedRowGeometry:
     boundaries: tuple[tuple[int, int], ...]
 
 
-def _feature_ids(values: Any, *, name: str) -> np.ndarray:
+def _feature_keys(values: Any, *, name: str, unique: bool = True) -> np.ndarray:
     raw = np.asarray(values)
     if raw.ndim != 1:
         raise ValueError(f"{name} must be one-dimensional")
@@ -68,10 +68,11 @@ def _feature_ids(values: Any, *, name: str) -> np.ndarray:
     ):
         raise TypeError(f"{name} must contain strings")
     identifiers = np.asarray(raw).astype(str)
-    unique, counts = np.unique(identifiers, return_counts=True)
-    if np.any(counts > 1):
-        duplicates = unique[counts > 1][:5].tolist()
-        raise ValueError(f"{name} must be unique: {duplicates}")
+    if unique:
+        distinct, counts = np.unique(identifiers, return_counts=True)
+        if np.any(counts > 1):
+            duplicates = distinct[counts > 1][:5].tolist()
+            raise ValueError(f"{name} must be unique: {duplicates}")
     return read_only_copy(identifiers)
 
 
@@ -175,18 +176,25 @@ def normalize_reference_counts(
 
 
 class AlignedFeatureStream:
-    """Replay normalized query rows in immutable reference feature order."""
+    """Replay normalized query rows in immutable reference feature order.
+
+    Query features match reference features by ID, or by name with
+    ``feature_key="names"``. Query features that share a reference feature's
+    name add their counts before normalization, so the query keeps every
+    count of the feature.
+    """
 
     def __init__(
         self,
         query_assay: "Assay",
         query_cell_indices: np.ndarray,
-        reference_feature_ids: np.ndarray,
+        reference_feature_keys: np.ndarray,
         reference_normalized_means: np.ndarray,
         reference_normalization_parameters: Mapping[str, Any],
         missing_feature_policy: str,
         resources: ResourceBudget,
         *,
+        feature_key: str = "ids",
         reserved_resident_bytes: int = 0,
         reserved_per_row_bytes: int = 0,
     ) -> None:
@@ -209,6 +217,8 @@ class AlignedFeatureStream:
                 "missing_feature_policy must be one of "
                 "'reference_mean', 'zero', or 'error'"
             )
+        if feature_key not in {"ids", "names"}:
+            raise ValueError("feature_key must be 'ids' or 'names'")
 
         raw_data = query_assay.rawData
         if len(raw_data.shape) != 2:
@@ -226,13 +236,14 @@ class AlignedFeatureStream:
             raise ValueError("query_cell_indices cannot be empty")
         self._query_cell_indices = read_only_copy(cell_indices, np.int64)
 
-        self._reference_feature_ids = _feature_ids(
-            reference_feature_ids,
-            name="Reference feature identifiers",
+        label = "identifiers" if feature_key == "ids" else "names"
+        self._reference_feature_keys = _feature_keys(
+            reference_feature_keys,
+            name=f"Reference feature {label}",
         )
         self._reference_normalized_means = _reference_means(
             reference_normalized_means,
-            n_features=len(self._reference_feature_ids),
+            n_features=len(self._reference_feature_keys),
         )
         self._normalization_parameters = _normalization_parameters(
             reference_normalization_parameters
@@ -243,40 +254,57 @@ class AlignedFeatureStream:
         self._raw_backing = raw_data._backing
         self._source_geometry = array_geometry(self._raw_backing)
 
-        # Preparation guarantees one identifier per count column.
-        query_feature_ids = _feature_ids(
-            query_assay.feats.fetch_all("ids"),
-            name="Query feature identifiers",
+        # Preparation guarantees one identifier per count column; several
+        # count columns may share a name.
+        query_feature_keys = _feature_keys(
+            query_assay.feats.fetch_all(feature_key),
+            name=f"Query feature {label}",
+            unique=feature_key == "ids",
         )
-        query_lookup = {
-            identifier: index for index, identifier in enumerate(query_feature_ids)
+        reference_lookup = {
+            key: index for index, key in enumerate(self._reference_feature_keys)
         }
-        reference_to_query = np.fromiter(
-            (
-                query_lookup.get(identifier, -1)
-                for identifier in self._reference_feature_ids
-            ),
+        column_reference = np.fromiter(
+            (reference_lookup.get(key, -1) for key in query_feature_keys),
             dtype=np.int64,
-            count=len(self._reference_feature_ids),
+            count=len(query_feature_keys),
         )
-        reference_indices = np.flatnonzero(reference_to_query >= 0).astype(
-            np.int64,
-            copy=False,
-        )
+        query_indices = np.flatnonzero(column_reference >= 0)
+        # Order the matched query columns by reference feature, then by query
+        # position, so each reference feature's columns are adjacent.
+        query_indices = query_indices[
+            np.argsort(column_reference[query_indices], kind="stable")
+        ]
+        column_reference = column_reference[query_indices]
+        column_starts = np.flatnonzero(np.diff(column_reference, prepend=-1))
+        reference_indices = column_reference[column_starts]
         if reference_indices.size == 0:
-            raise ValueError("No reference features overlap the query feature IDs")
+            if feature_key == "ids":
+                raise ValueError(
+                    "No reference features overlap the query feature IDs. If the "
+                    "query names the same genes with another ID scheme, such as "
+                    "gene symbols against Ensembl IDs, pass feature_key='names' "
+                    "to match features by name."
+                )
+            raise ValueError("No reference features overlap the query feature names")
         if missing_feature_policy == "error" and reference_indices.size != len(
-            self._reference_feature_ids
+            self._reference_feature_keys
         ):
-            missing = len(self._reference_feature_ids) - reference_indices.size
+            missing = len(self._reference_feature_keys) - reference_indices.size
             raise ValueError(
                 f"Query data is missing {missing} required reference features"
             )
-        query_indices = reference_to_query[reference_indices]
         self._reference_index_map = read_only_copy(reference_indices, np.int64)
         self._query_index_map = read_only_copy(query_indices, np.int64)
+        # The first of each reference feature's query columns, which
+        # np.add.reduceat sums, when a reference feature has several.
+        self._column_starts: np.ndarray | None = (
+            None
+            if column_starts.size == query_indices.size
+            else read_only_copy(column_starts, np.int64)
+        )
         self._feature_coverage = float(
-            reference_indices.size / len(self._reference_feature_ids)
+            reference_indices.size / len(self._reference_feature_keys)
         )
         if self.renormalize_subset and self._feature_coverage < 1:
             warn(
@@ -316,9 +344,15 @@ class AlignedFeatureStream:
             reserved_resident_bytes
         )
         normalized_bytes = np.dtype(np.float64).itemsize
+        summed_bytes = (
+            0
+            if self._column_starts is None
+            else len(self._reference_index_map) * normalized_bytes
+        )
         self._stream_row_bytes = (
             len(self._query_index_map) * (raw_dtype.itemsize + normalized_bytes)
-            + len(self._reference_feature_ids) * normalized_bytes
+            + summed_bytes
+            + len(self._reference_feature_keys) * normalized_bytes
             + (normalized_bytes if self.renormalize_subset else 0)
             + np.dtype(bool).itemsize
             + int(reserved_per_row_bytes)
@@ -361,17 +395,23 @@ class AlignedFeatureStream:
 
     @property
     def query_feature_indices(self) -> np.ndarray:
-        """Query feature positions aligned with ``reference_index_map``."""
+        """Query feature positions that match ``reference_index_map``, in its order.
+
+        Matched by name, several adjacent positions may match one reference
+        feature.
+        """
         return self._query_index_map.view()
 
     def _calculate_resident_bytes(self) -> int:
         arrays = [
             self._query_cell_indices,
-            self._reference_feature_ids,
+            self._reference_feature_keys,
             self._reference_normalized_means,
             self._reference_index_map,
             self._query_index_map,
         ]
+        if self._column_starts is not None:
+            arrays.append(self._column_starts)
         if self._cell_scalars is not None:
             arrays.append(self._cell_scalars)
         return sum(array.nbytes for array in arrays) + np.dtype(np.float64).itemsize
@@ -453,6 +493,12 @@ class AlignedFeatureStream:
             )
         ) as raw_blocks:
             for start, raw in raw_blocks:
+                if self._column_starts is not None:
+                    # Query features that share a reference feature's name add
+                    # their counts, in float64, which sums integer counts exactly.
+                    raw = np.add.reduceat(
+                        raw, self._column_starts, axis=1, dtype=np.float64
+                    )
                 observed = np.count_nonzero(raw, axis=1) > 0
                 normalized = normalize_reference_counts(
                     raw,
@@ -467,7 +513,7 @@ class AlignedFeatureStream:
                 )
 
                 values = np.empty(
-                    (len(raw), len(self._reference_feature_ids)),
+                    (len(raw), len(self._reference_feature_keys)),
                     dtype=np.float64,
                 )
                 if self._missing_feature_policy == "reference_mean":

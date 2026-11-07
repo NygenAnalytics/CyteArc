@@ -192,6 +192,7 @@
   "tests/test_loader_errors.py": 0.7,
   "tests/test_mapping_alignment.py": 0.2,
   "tests/test_mapping_artifact.py": 13.6,
+  "tests/test_mapping_feature_names.py": 14.7,
   "tests/test_mapping_label_transfer.py": 40.8,
   "tests/test_mapping_label_transfer_storage.py": 6.1,
   "tests/test_mapping_orchestration.py": 38.0,

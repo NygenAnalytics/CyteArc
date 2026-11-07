@@ -67,20 +67,22 @@ def iter_feature_selection_blocks(
     root: zarr.Group,
     assay: str,
     feature_selection: ArtifactRef,
+    *,
+    column: str = "ids",
 ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    """Yield an assay's feature IDs and selection flags in bounded row blocks."""
+    """Yield a feature column, IDs by default, and selection flags in row blocks."""
     values = validate_feature_selection(root, assay, feature_selection).values
-    ids = as_zarr_array(
-        root[f"{assay}/featureData/ids"],
-        name=f"{assay}/featureData/ids",
+    keys = as_zarr_array(
+        root[f"{assay}/featureData/{column}"],
+        name=f"{assay}/featureData/{column}",
     )
     block_rows = min(
-        row_band(array_geometry(ids), unit="chunk", fallback=1),
+        row_band(array_geometry(keys), unit="chunk", fallback=1),
         row_band(array_geometry(values), unit="chunk", fallback=1),
     )
     for start in range(0, int(values.shape[0]), block_rows):
         stop = min(start + block_rows, int(values.shape[0]))
-        yield np.asarray(ids[start:stop]), np.asarray(values[start:stop], dtype=bool)
+        yield np.asarray(keys[start:stop]), np.asarray(values[start:stop], dtype=bool)
 
 
 class _FrozenList(tuple):
@@ -371,3 +373,54 @@ class MappingReference:
         if not np.all(np.isfinite(coordinates) | np.isnan(coordinates)):
             raise ValueError("Reference layout contains infinite coordinates")
         return np.array(coordinates, copy=True)
+
+
+def reference_feature_keys(
+    reference: MappingReference,
+    feature_key: str,
+) -> np.ndarray:
+    """Return the keys that match the reference features to query features.
+
+    ``feature_key="ids"`` returns the reference feature IDs. ``"names"``
+    reads the names of the same features, in the same order, from the
+    reference assay's feature table.
+
+    Raises:
+        ValueError: If ``feature_key`` is ``"names"`` and reference features
+            share a name, which then identifies no single reference feature.
+    """
+    if feature_key == "ids":
+        return reference.feature_ids
+    if feature_key != "names":
+        raise ValueError("feature_key must be 'ids' or 'names'")
+    blocks = [
+        names[mask]
+        for names, mask in iter_feature_selection_blocks(
+            reference.datastore.zw,
+            reference.assay_name,
+            reference.feature_selection,
+            column="names",
+        )
+    ]
+    names = np.concatenate(blocks).astype(str)
+    if names.shape != reference.feature_ids.shape:
+        raise contract_error(
+            "Mapping reference feature IDs do not match the selected features"
+        )
+    unique, inverse, counts = np.unique(names, return_inverse=True, return_counts=True)
+    shared = np.flatnonzero(counts > 1)
+    if shared.size:
+        examples = "; ".join(
+            f"{str(unique[group])!r} names "
+            + ", ".join(reference.feature_ids[inverse == group].tolist())
+            for group in shared[:5]
+        )
+        if shared.size > 5:
+            examples += f"; and {shared.size - 5} more"
+        raise ValueError(
+            "Reference features share names, so mapping by name cannot tell "
+            f"them apart: {examples}. Map by feature ID with feature_key='ids', "
+            "or build the reference from a feature selection whose names are "
+            "unique"
+        )
+    return read_only_copy(names)

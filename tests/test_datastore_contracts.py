@@ -144,7 +144,9 @@ _SIGNATURE_DIGESTS = {
     # which only method="truncated" takes. get_imputed takes feature_name:
     # str | FeatureRef | Sequence[str | FeatureRef] | np.ndarray | pd.Series.
     GraphDataStore: "3b17227309ae6b6337f835d71f8231e773719dfdb4a0388f4590ac321be22a1d",
-    MappingDatastore: "a4839ac0372df95f021fd8c383c1ac2aff6796c6b093e05510c71ad7e8449a72",
+    # run_mapping gained the keyword-only feature_key: Literal["ids",
+    # "names"] = "ids" after missing_feature_policy.
+    MappingDatastore: "12e809ed948d36552968c37dc3d2a9d3429ad06dcd5507673d95f839ef47171f",
     # run_hto_demultiplexing gained the keyword-only positive_quantile: float
     # with the default 0.99, then hashtags: Sequence[str] | Mapping[str,
     # Sequence[str]] | None = None and sample_column: str | None = None after

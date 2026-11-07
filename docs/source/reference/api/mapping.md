@@ -48,6 +48,8 @@ adds no mapping score, and does not enter Symphony query-batch statistics or
 the measured reference features only, so it does not depend on `missing_feature_policy`.
 Projections written before this contract are rejected with an instruction to re-run `mapping.run`.
 
+`mapping.run` matches query features to the reference features by exact feature ID. A query that names the same genes with another ID scheme, such as gene symbols against a reference of Ensembl IDs, maps with `feature_key="names"`, which matches them by exact feature name. The reference features' names are read from the reference assay at the reference's feature selection, so every saved reference can map by name. A reference whose features share a name is refused with the names and their IDs, since one query feature would then match several reference features. Query features that share a name add their counts, as `DataStoreMerge(feature_key="names")` sums them. The projection and its overlap selection record `feature_key` only when it is `"names"`, so a match by name is a separate artifact and a match by ID keeps its identity. `featureCoverage` is the share of reference features that some query feature matches.
+
 ## Label transfer
 
 `mapping.transfer_labels` saves a label transfer as two query-owned artifacts. It first reads

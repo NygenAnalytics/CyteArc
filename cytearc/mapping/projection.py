@@ -43,6 +43,7 @@ from .reference import (
     contract_error,
     iter_feature_selection_blocks,
     payload_fingerprint,
+    reference_feature_keys,
 )
 
 PROJECTION_RERUN_MESSAGE = "Re-run mapping.run to create a new query projection."
@@ -302,9 +303,14 @@ def plan_projection(
     mapping_reference: ExternalArtifactRef,
     reference: MappingReference,
     reference_cell_count: int,
+    feature_key: str = "ids",
     invalidate_cache: bool = False,
 ) -> ProjectionPlan:
-    """Plan one immutable query-owned projection."""
+    """Plan one immutable query-owned projection.
+
+    The parameters record ``feature_key`` only when features match by name,
+    so projections that match by ID keep their identities.
+    """
     assay = _nonempty_string(query_assay, "query_assay")
     resolved_n_cells = integer_argument(n_cells, "n_cells", minimum=1)
     resolved_save_k = integer_argument(save_k, "save_k", minimum=1)
@@ -319,6 +325,8 @@ def plan_projection(
     correction = _nonempty_string(correction_method, "correction_method")
     if correction not in {"none", "symphony"}:
         raise ValueError("correction_method must be 'none' or 'symphony'")
+    if feature_key not in {"ids", "names"}:
+        raise ValueError("feature_key must be 'ids' or 'names'")
     dataset_fingerprint = _nonempty_string(
         query_dataset_fingerprint,
         "query_dataset_fingerprint",
@@ -351,7 +359,8 @@ def plan_projection(
         assay,
         feature_selection,
         mapping_reference=external,
-        reference_feature_ids=reference.feature_ids,
+        reference_feature_keys=reference_feature_keys(reference, feature_key),
+        feature_key=feature_key,
     )
     algorithm_variant = "symphony" if correction == "symphony" else "scaled_pca"
 
@@ -381,6 +390,7 @@ def plan_projection(
             "missing_feature_policy": policy,
             "correction_method": correction,
             **({"query_batch_model": "additive"} if correction == "symphony" else {}),
+            **({"feature_key": feature_key} if feature_key == "names" else {}),
         },
         inputs={
             "cell_selection": cell_selection,
@@ -473,6 +483,12 @@ def _load_projection(
                 "Remap the query with mapping.run using the prepared reference."
             )
         parameter_names = parameter_names | {"query_batch_model"}
+    # Only a projection that matches features by name records its key.
+    feature_key = parameters.get("feature_key", "ids")
+    if "feature_key" in parameters:
+        if feature_key != "names":
+            raise ValueError("Projection feature_key is unsupported")
+        parameter_names = parameter_names | {"feature_key"}
     if set(parameters) != parameter_names:
         raise ValueError("Projection parameters do not match the map_query contract")
     save_k = integer_argument(parameters["save_k"], "save_k", minimum=1)
@@ -547,7 +563,8 @@ def _load_projection(
         assay,
         feature_selection,
         mapping_reference=external,
-        reference_feature_ids=reference.feature_ids,
+        reference_feature_keys=reference_feature_keys(reference, feature_key),
+        feature_key=feature_key,
     )
     algorithm_variant = "symphony" if correction_method == "symphony" else "scaled_pca"
 
@@ -833,9 +850,15 @@ def _validate_mapping_overlap_selection(
     ref: ArtifactRef,
     *,
     mapping_reference: ExternalArtifactRef,
-    reference_feature_ids: np.ndarray,
+    reference_feature_keys: np.ndarray,
+    feature_key: str,
 ) -> float:
-    """Validate the mapping-specific feature-selection lineage and values."""
+    """Validate the mapping-specific feature-selection lineage and values.
+
+    ``reference_feature_keys`` are the reference features' IDs, or their
+    names with ``feature_key="names"``. Returns the share of reference
+    features that a query feature matches.
+    """
     resolve_feature_selection(root, assay, ref)
     status = inspect_artifact(root, ref)
     if status.operation != "select_mapping_overlap":
@@ -853,27 +876,37 @@ def _validate_mapping_overlap_selection(
         raise ValueError(
             "Projection feature selection belongs to a different mapping reference"
         )
-    raw_reference_ids = np.asarray(reference_feature_ids)
-    if raw_reference_ids.ndim != 1 or raw_reference_ids.size == 0:
-        raise ValueError("Mapping reference feature identifiers are malformed")
-    reference_ids = raw_reference_ids.astype(str)
-    reference_id_set = set(reference_ids.tolist())
-    overlap_count = 0
-    for ids, mask in iter_feature_selection_blocks(root, assay, ref):
-        query_ids = ids.astype(str)
-        expected = np.fromiter(
-            (identifier in reference_id_set for identifier in query_ids),
-            dtype=bool,
-            count=len(query_ids),
+    expected_parameters = {} if feature_key == "ids" else {"feature_key": feature_key}
+    if (status.parameters or {}) != expected_parameters:
+        raise ValueError(
+            "Projection feature selection matches features by another key than "
+            "the projection"
         )
-        overlap_count += int(np.count_nonzero(expected))
+    raw_reference_keys = np.asarray(reference_feature_keys)
+    if raw_reference_keys.ndim != 1 or raw_reference_keys.size == 0:
+        raise ValueError("Mapping reference feature identifiers are malformed")
+    reference_keys = raw_reference_keys.astype(str)
+    reference_key_set = set(reference_keys.tolist())
+    # Query features that share a name match one reference feature, so the
+    # coverage counts the reference keys matched, not the query features.
+    matched: set[str] = set()
+    for keys, mask in iter_feature_selection_blocks(
+        root, assay, ref, column=feature_key
+    ):
+        query_keys = keys.astype(str)
+        expected = np.fromiter(
+            (key in reference_key_set for key in query_keys),
+            dtype=bool,
+            count=len(query_keys),
+        )
+        matched.update(query_keys[expected].tolist())
         if not np.array_equal(mask, expected):
             raise ValueError(
                 "Projection feature selection does not match the reference overlap"
             )
-    if overlap_count == 0:
+    if not matched:
         raise ValueError("Projection feature selection has no reference overlap")
-    return float(overlap_count / len(reference_ids))
+    return float(len(matched) / len(reference_keys))
 
 
 def _local_ref_from_input(

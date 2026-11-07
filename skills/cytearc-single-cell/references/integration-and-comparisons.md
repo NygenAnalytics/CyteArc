@@ -272,6 +272,8 @@ print(calls["abstentionReason"].value_counts(dropna=False))  # None = labelled
 print(calls.loc[~calls["abstained"], "label"].value_counts())
 ```
 
+Features match by exact ID. A query whose IDs follow another scheme than the reference's (gene symbols against Ensembl IDs) maps with `query.mapping.run(..., feature_key="names")`, which matches exact names, sums query features that share a name, and refuses a reference whose features share a name; a match by name is its own projection. Check `featureCoverage` either way.
+
 `mapping.transfer_labels` freezes the reference labels into the query store and saves a
 `label_transfer` artifact; the same projection, labels and rule are reused. An abstained cell has
 a missing `label` and an `abstentionReason`; `candidateLabel` and `voteFraction` let you compare

@@ -1517,7 +1517,7 @@ def test_projection_rejects_a_feature_selection_without_reference_overlap(
     monkeypatch.setattr(
         projection_storage,
         "iter_feature_selection_blocks",
-        lambda *_args: iter(()),
+        lambda *_args, **_kwargs: iter(()),
     )
 
     with pytest.raises(ValueError, match="has no reference overlap"):
