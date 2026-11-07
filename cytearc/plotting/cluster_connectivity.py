@@ -7,6 +7,12 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 
+from ..clustering.connectivity import (
+    check_edge_filters,
+    cluster_connectivity_tables,
+    filter_cluster_edges,
+    label_codes,
+)
 from ..graph.feature_projection import graph_cell_selection
 from ..storage.artifacts import ArtifactRef
 from ..storage.selections import (
@@ -89,18 +95,6 @@ def _fetch_inputs(
     return x, y, groups
 
 
-def _category_codes(groups: np.ndarray, order: list[Any]) -> np.ndarray:
-    category_index = {category: index for index, category in enumerate(order)}
-    try:
-        return np.fromiter(
-            (category_index[value] for value in groups),
-            dtype=np.intp,
-            count=len(groups),
-        )
-    except (KeyError, TypeError) as exc:
-        raise ValueError("Could not map every group value to a category") from exc
-
-
 def _resolve_node_positions(
     x: np.ndarray,
     y: np.ndarray,
@@ -153,122 +147,15 @@ def _resolve_node_positions(
     return node_x, node_y
 
 
-def _load_graph(
-    store: Any,
-    *,
-    n_cells: int,
-    graph: ArtifactRef,
-) -> sparse.csr_matrix:
+def _load_graph(store: Any, graph: ArtifactRef) -> Any:
+    """Load the graph's symmetric weights through the store's ``graph.load``."""
     graph_matrix = store.graph.load(
         graph,
         symmetric=True,
     )
     if not sparse.issparse(graph_matrix):
         raise TypeError("graph.load must return a scipy sparse matrix")
-    if graph_matrix.shape != (n_cells, n_cells):
-        raise ValueError(
-            "Graph shape must match the selected cells; "
-            f"expected {(n_cells, n_cells)}, got {graph_matrix.shape}"
-        )
-
-    graph_matrix = graph_matrix.tocsr(copy=True).astype(np.float64, copy=False)
-    graph_matrix.sum_duplicates()
-    graph_matrix.eliminate_zeros()
-    if not np.isfinite(graph_matrix.data).all():
-        raise ValueError("Graph contains non-finite edge weights")
-    if (graph_matrix.data < 0).any():
-        raise ValueError("Graph edge weights must be non-negative")
-    graph_matrix.setdiag(0.0)
-    graph_matrix.eliminate_zeros()
     return graph_matrix
-
-
-def _aggregate_intercluster_edges(
-    graph: sparse.csr_matrix,
-    codes: np.ndarray,
-    n_categories: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Aggregate each undirected cell edge once and normalize symmetrically."""
-    incident_by_cell = np.asarray(graph.sum(axis=1), dtype=np.float64).ravel()
-    incident_by_category = np.bincount(
-        codes,
-        weights=incident_by_cell,
-        minlength=n_categories,
-    )
-
-    upper = sparse.triu(graph, k=1, format="coo")
-    source_codes = codes[upper.row]
-    target_codes = codes[upper.col]
-    intercluster = source_codes != target_codes
-    if not intercluster.any():
-        empty_int = np.empty(0, dtype=np.intp)
-        empty_float = np.empty(0, dtype=np.float64)
-        return empty_int, empty_int.copy(), empty_float, empty_float.copy()
-
-    first = np.minimum(source_codes[intercluster], target_codes[intercluster])
-    second = np.maximum(source_codes[intercluster], target_codes[intercluster])
-    pair_keys = first.astype(np.int64) * n_categories + second
-    unique_keys, inverse = np.unique(pair_keys, return_inverse=True)
-    raw_weights = np.bincount(
-        inverse,
-        weights=np.asarray(upper.data[intercluster], dtype=np.float64),
-    )
-    source = (unique_keys // n_categories).astype(np.intp, copy=False)
-    target = (unique_keys % n_categories).astype(np.intp, copy=False)
-
-    denominator = np.sqrt(incident_by_category[source] * incident_by_category[target])
-    normalized = np.divide(
-        raw_weights,
-        denominator,
-        out=np.zeros_like(raw_weights),
-        where=denominator > 0,
-    )
-    return source, target, raw_weights, normalized
-
-
-def _filter_edges(
-    source: np.ndarray,
-    target: np.ndarray,
-    raw_weights: np.ndarray,
-    normalized_weights: np.ndarray,
-    *,
-    minimum_edge_weight: float,
-    max_edges_per_node: int | None,
-    n_categories: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    retained = normalized_weights >= minimum_edge_weight
-    source = source[retained]
-    target = target[retained]
-    raw_weights = raw_weights[retained]
-    normalized_weights = normalized_weights[retained]
-
-    if max_edges_per_node is not None and len(source):
-        ranked = np.lexsort((target, source, -raw_weights, -normalized_weights))
-        degree = np.zeros(n_categories, dtype=np.intp)
-        keep = np.zeros(len(source), dtype=bool)
-        for edge_index in ranked:
-            left = source[edge_index]
-            right = target[edge_index]
-            if (
-                degree[left] >= max_edges_per_node
-                or degree[right] >= max_edges_per_node
-            ):
-                continue
-            keep[edge_index] = True
-            degree[left] += 1
-            degree[right] += 1
-        source = source[keep]
-        target = target[keep]
-        raw_weights = raw_weights[keep]
-        normalized_weights = normalized_weights[keep]
-
-    ordered = np.lexsort((target, source))
-    return (
-        source[ordered],
-        target[ordered],
-        raw_weights[ordered],
-        normalized_weights[ordered],
-    )
 
 
 def _edge_widths(
@@ -324,7 +211,8 @@ def cluster_connectivity(
     ``sqrt(incidentWeight[source] * incidentWeight[target])``. Incident weight
     is the sum of weighted cell degrees in each cluster, including internal
     cluster edges. Clusters with zero incident weight receive a normalized
-    value of zero.
+    value of zero. ``DataStore.clusters.connectivity`` returns these weights
+    as tables without drawing a figure.
 
     ``layout`` must hold the graph's cells, whichever operation made its cell
     selection. ``groups`` are read for the graph's cells, which their own
@@ -335,14 +223,7 @@ def cluster_connectivity(
     show_cells = bool_argument(show_cells, "show_cells")
     labels = bool_argument(labels, "labels")
     show = bool_argument(show, "show")
-    if not np.isfinite(minimum_edge_weight) or minimum_edge_weight < 0:
-        raise ValueError("minimum_edge_weight must be finite and non-negative")
-    if max_edges_per_node is not None and (
-        isinstance(max_edges_per_node, bool)
-        or not isinstance(max_edges_per_node, int)
-        or max_edges_per_node < 0
-    ):
-        raise ValueError("max_edges_per_node must be a non-negative integer or None")
+    check_edge_filters(minimum_edge_weight, max_edges_per_node)
     if cell_size is not None and (not np.isfinite(cell_size) or cell_size < 0):
         raise ValueError("cell_size must be finite and non-negative")
     if not np.isfinite(cell_alpha) or not 0 <= cell_alpha <= 1:
@@ -458,7 +339,7 @@ def cluster_connectivity(
         category: category_label(resolved_categorical_scale, category)
         for category in order
     }
-    codes = _category_codes(group_values_array, order)
+    codes = label_codes(group_values_array, order)
     node_x, node_y = _resolve_node_positions(
         x,
         y,
@@ -468,26 +349,21 @@ def cluster_connectivity(
         positions=positions,
     )
 
-    graph_matrix = _load_graph(
-        store,
-        n_cells=len(x),
-        graph=graph,
-    )
-    source_index, target_index, raw_weights, normalized_weights = (
-        _aggregate_intercluster_edges(graph_matrix, codes, len(order))
-    )
-    aggregated_edge_count = len(source_index)
-    source_index, target_index, raw_weights, normalized_weights = _filter_edges(
-        source_index,
-        target_index,
-        raw_weights,
-        normalized_weights,
+    # The tables of DataStore.clusters.connectivity, with the layout's
+    # positions, sizes, and labels beside them.
+    connectivity = cluster_connectivity_tables(_load_graph(store, graph), codes, order)
+    aggregated_edge_count = len(connectivity.edges)
+    connectivity = filter_cluster_edges(
+        connectivity,
         minimum_edge_weight=minimum_edge_weight,
         max_edges_per_node=max_edges_per_node,
-        n_categories=len(order),
     )
+    edges = connectivity.edges
+    source_index = label_codes(edges["source"], order)
+    target_index = label_codes(edges["target"], order)
+    normalized_weights = edges["normalizedWeight"].to_numpy(dtype=np.float64)
 
-    counts = np.bincount(codes, minlength=len(order))
+    counts = connectivity.nodes["nCells"].to_numpy()
     proportions = counts.astype(np.float64) / len(group_values_array)
     resolved_size_scale = size_scale or SizeScale(size_min=70.0, size_max=650.0)
     node_sizes = resolved_size_scale.areas(proportions)
@@ -505,14 +381,6 @@ def cluster_connectivity(
             "proportion": proportions,
             "size": node_sizes,
             "displayLabel": [display_labels[category] for category in order],
-        }
-    )
-    edges = pd.DataFrame(
-        {
-            "source": category_values[source_index],
-            "target": category_values[target_index],
-            "rawWeight": raw_weights,
-            "normalizedWeight": normalized_weights,
         }
     )
 
