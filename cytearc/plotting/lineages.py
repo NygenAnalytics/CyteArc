@@ -9,7 +9,6 @@ import pandas as pd
 from ..features.values import feature_description, resolve_feature_rows
 from ..storage.artifacts import ArtifactRef, inspect_artifact
 from ..storage.selections import selections_hold_same_cells
-from ..trajectory.curves import smooth_against_progress
 from ..trajectory.lineages import select_lineages
 from ..utils.arguments import bool_argument, float_argument
 from ._contracts import CategoricalScale, ColorScale, FeatureRef, PlotProvenance
@@ -502,10 +501,12 @@ def lineage_curves(
     coordinates of the cells are averaged with the lineage's fate weights
     along the cells' positions on the curve and smoothed with the spline
     the curves were fitted with, as Slingshot's ``embedCurves`` does.
-    ``df`` overrides the curves' degrees of freedom for this smoothing; like
-    theirs, it lies between 2 and the size of their spline basis, 32 by
-    default. ``layout`` must hold the curves' cells, whichever operation made
-    its cell selection; a layout of other cells raises ``ValueError``.
+    ``ds.trajectory.curves_in_layout`` returns the points drawn, without a
+    figure. ``df`` overrides the curves' degrees of freedom for this
+    smoothing; like theirs, it lies between 2 and the size of their spline
+    basis, 32 by default. ``layout`` must hold the curves' cells, whichever
+    operation made its cell selection; a layout of other cells raises
+    ``ValueError``.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -516,35 +517,23 @@ def lineage_curves(
         point_size = _positive(point_size, "point_size")
     if not np.isfinite(point_alpha) or not 0 <= point_alpha <= 1:
         raise ValueError("point_alpha must be between zero and one")
-    requested_df = np.nan
-    if df is not None:
-        try:
-            requested_df = float_argument(df, "df")
-        except ValueError:
-            requested_df = np.nan
-    loaded = store.trajectory.load_curves(curves)
-    _require_loaded(loaded.ref, curves, "lineage curves")
-    parameters = inspect_artifact(store.zw, curves).parameters or {}
-    spline_basis = int(parameters["spline_basis"])
-    if df is not None and not 2.0 < requested_df < spline_basis:
-        raise ValueError(f"df must be greater than 2 and less than {spline_basis}")
-    degrees_of_freedom = float(parameters["df"] if df is None else requested_df)
-    coordinates, cell_indices = _layout_for(store, layout, loaded.cell_selection)
-    columns = _lineage_selection(loaded.lineages, lineages)
-    names = [str(loaded.lineages[column]) for column in columns]
-    valid = np.asarray(loaded.valid, dtype=bool)
-    scored_coordinates = coordinates[valid]
-    drawn: dict[str, np.ndarray] = {}
-    for column, name in zip(columns, names, strict=True):
-        drawn[name] = smooth_against_progress(
-            scored_coordinates,
-            loaded.progress[valid, column],
-            loaded.weights[valid, column],
-            n_points=loaded.points.shape[1],
-            degrees_of_freedom=degrees_of_freedom,
-            n_bins=int(parameters["fit_bins"]),
-            n_basis=spline_basis,
-        )
+    # The store draws the curves in the layout, checking the curves, the
+    # layout, the lineages and df.
+    in_layout = store.trajectory.curves_in_layout(
+        curves, layout, lineages=lineages, df=df
+    )
+    status = inspect_artifact(store.zw, curves)
+    cell_selection = status.input_ref("cell_selection")
+    coordinates, cell_indices = _layout_for(store, layout, cell_selection)
+    # Lineages are drawn under the text of their sink labels.
+    drawn = {
+        str(label): in_layout.loc[in_layout["lineage"] == label, ["x", "y"]].to_numpy()
+        for label in pd.unique(in_layout["lineage"])
+    }
+    names = list(drawn)
+    degrees_of_freedom = float(
+        (status.parameters or {})["df"] if df is None else float_argument(df, "df")
+    )
     palette = _lineage_palette(names, lineage_cmap)
     xlim, ylim = padded_square_limits(coordinates[:, 0], coordinates[:, 1])
     if figsize is None and target is None:
@@ -619,8 +608,8 @@ def lineage_curves(
             extras={
                 "curves": curves.to_dict(),
                 "layout": layout.to_dict(),
-                "fate": loaded.fate.to_dict(),
-                "cell_selection": loaded.cell_selection.to_dict(),
+                "fate": status.input_ref("fate").to_dict(),
+                "cell_selection": cell_selection.to_dict(),
                 "lineages": names,
                 "df": degrees_of_freedom,
             },

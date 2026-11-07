@@ -10,6 +10,7 @@ from cytearc.datastore.namespaces import (
 )
 from cytearc.datastore.datastore import DataStore
 from cytearc.embeddings.sgtsne import run_sgtsne
+from cytearc.trajectory import build_cluster_tree
 from cytearc.trajectory.feature_dynamics import validate_pseudotime_regressor
 from cytearc.trajectory.results import (
     FateMappingResult,
@@ -21,12 +22,17 @@ from tests.signature_contracts import signature_digest
 
 
 def test_embedding_and_trajectory_entry_point_signatures_are_stable() -> None:
+    # build_cluster_tree(coordinates, labels, *, root=None, ends=None) and
+    # trajectory.curves_in_layout(curves, layout, *, lineages=None, df=None)
+    # joined the entry points.
     methods = {
+        "build_cluster_tree": build_cluster_tree,
+        "curves_in_layout": TrajectoryAccessor.curves_in_layout,
         "run_sgtsne": run_sgtsne,
         "validate_pseudotime_regressor": validate_pseudotime_regressor,
     }
     assert signature_digest(methods) == (
-        "d1af98d226150b81c1f5d8be645627caf270964b97646e735a0a668283fe6f9b"
+        "ff084dd26939c82b025b07f6bf977a91c4e1276f9bcb1b01e47838ed36b3c951"
     )
 
 

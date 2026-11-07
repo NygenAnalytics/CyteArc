@@ -1171,12 +1171,17 @@ class BaseDataStore:
         names = (name for name in assays if not name.startswith("_"))
         return sorted(set(super().__dir__()).union(names))
 
-    def _require_writable(self, operation: str) -> None:
-        """Refuse an operation that writes to a store opened read-only."""
+    def _require_writable(self, operation: str, *, reason: str | None = None) -> None:
+        """Refuse an operation that writes to a store opened read-only.
+
+        ``reason`` says why the operation writes, and what a read-only store
+        can do instead; the refusal gives it after "because".
+        """
         if self.zarr_mode != "r+":
-            raise PermissionError(
-                f"{operation} requires a DataStore opened with zarr_mode='r+'"
-            )
+            message = f"{operation} requires a DataStore opened with zarr_mode='r+'"
+            if reason:
+                message += f", because {reason}"
+            raise PermissionError(message)
 
     def _require_measured_cells(
         self,

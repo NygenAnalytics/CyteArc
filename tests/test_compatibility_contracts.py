@@ -14,6 +14,7 @@ import cytearc.trajectory as trajectory
 
 
 _EXPECTED_TRAJECTORY_EXPORTS = (
+    "ClusterTree",
     "CurveProjection",
     "FateMappingResult",
     "LineageAggregationResult",
@@ -27,6 +28,7 @@ _EXPECTED_TRAJECTORY_EXPORTS = (
     "PseudotimeScoreResult",
     "SourceSinkLabelsError",
     "aggregate_feature_profiles",
+    "build_cluster_tree",
     "make_source_sink_vector",
     "pba_potential",
     "random_walk_laplacian_transpose",
@@ -187,6 +189,16 @@ _EXPECTED_RESULT_FIELDS = {
         "distance",
         "weights",
         "valid",
+    ),
+    trajectory.ClusterTree: (
+        "clusters",
+        "sizes",
+        "means",
+        "edges",
+        "root",
+        "ends",
+        "leaves",
+        "lineages",
     ),
     trajectory.LineageTreeResult: (
         "ref",

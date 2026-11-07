@@ -12,6 +12,7 @@ if TYPE_CHECKING:
         scatter_feature_clusters as scatter_feature_clusters,
         validate_pseudotime_regressor as validate_pseudotime_regressor,
     )
+    from .lineage_tree import build_cluster_tree as build_cluster_tree
     from .pseudotime import (
         make_source_sink_vector as make_source_sink_vector,
         pba_potential as pba_potential,
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
         validate_source_sink_vector as validate_source_sink_vector,
     )
     from .results import (
+        ClusterTree as ClusterTree,
         CurveProjection as CurveProjection,
         FateMappingResult as FateMappingResult,
         LineageAggregationResult as LineageAggregationResult,
@@ -35,6 +37,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "ClusterTree",
     "CurveProjection",
     "FateMappingResult",
     "LineageAggregationResult",
@@ -48,6 +51,7 @@ __all__ = [
     "PseudotimeScoreResult",
     "SourceSinkLabelsError",
     "aggregate_feature_profiles",
+    "build_cluster_tree",
     "make_source_sink_vector",
     "pba_potential",
     "random_walk_laplacian_transpose",
@@ -63,6 +67,7 @@ __getattr__, __dir__ = _lazy_facade(
     __name__,
     {
         "aggregate_feature_profiles": ".feature_dynamics",
+        "build_cluster_tree": ".lineage_tree",
         "make_source_sink_vector": ".pseudotime",
         "pba_potential": ".pseudotime",
         "random_walk_laplacian_transpose": ".pseudotime",
@@ -72,6 +77,7 @@ __getattr__, __dir__ = _lazy_facade(
         "validate_source_sink_labels": ".pseudotime",
         "validate_source_sink_vector": ".pseudotime",
         "validate_pseudotime_regressor": ".feature_dynamics",
+        "ClusterTree": ".results",
         "CurveProjection": ".results",
         "FateMappingResult": ".results",
         "LineageAggregationResult": ".results",
