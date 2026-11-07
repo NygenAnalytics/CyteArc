@@ -491,9 +491,7 @@ Classify the problem before retrying:
 - **Numerical or graph:** check dimensions, graph components, neighbour count, convergence, validity masks, and method-specific diagnostics.
 - **Scientific ambiguity:** preserve branches, seek another independent form of evidence, narrow the claim, or report that the available design does not resolve the alternatives.
 
-In a granular workflow, retry the lowest failed stage. A failed, interrupted, or cancelled pipeline
-run is not resumable; start a new run, which can reuse matching complete artifacts from the earlier
-attempt.
+In a granular workflow, retry the lowest failed stage. A failed, interrupted, or cancelled pipeline run is not resumable; start a new run, which can reuse matching complete artifacts from the earlier attempt. Before a costly rerun, or a run with a changed setting, call `ds.pipeline.plan` with the recipe's name and the same arguments: without writing anything, it reports which stages the run would reuse and which it would compute, with the reason for each, such as a changed setting, a superseding operation revision, or an earlier stage that it waits on, and what each computed stage took when an earlier run computed it ([Plan a call](reference/api/pipeline.md#plan-a-call)).
 
 ## Progress, cancellation, and deterministic comparisons
 

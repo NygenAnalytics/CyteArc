@@ -8,7 +8,8 @@ myst:
 
 `DataStore.pipeline` runs CyteArc's modality recipes and records each run in the datastore. A call
 that fails its checks writes nothing
-([Validation before a run starts](#validation-before-a-run-starts)). `rna`, `atac`, and `adt` each
+([Validation before a run starts](#validation-before-a-run-starts)), and `plan` reports what a call
+would reuse and compute without running it ([Plan a call](#plan-a-call)). `rna`, `atac`, and `adt` each
 analyze one assay, `multimodal` integrates completed runs of the same cells, and `perturbation`
 analyzes a pooled CRISPR screen from its RNA and guide assays. Each recipe
 returns a durable, read-only {py:class}`~cytearc.PipelineRun` whose outputs are exact immutable
@@ -30,11 +31,15 @@ returns a durable, read-only {py:class}`~cytearc.PipelineRun` whose outputs are 
    cytearc.datastore.pipeline_accessor.PipelineAccessor.adt
    cytearc.datastore.pipeline_accessor.PipelineAccessor.multimodal
    cytearc.datastore.pipeline_accessor.PipelineAccessor.perturbation
+   cytearc.datastore.pipeline_accessor.PipelineAccessor.plan
    cytearc.datastore.pipeline_accessor.PipelineAccessor.open
    cytearc.datastore.pipeline_accessor.PipelineAccessor.list_runs
    cytearc.datastore.pipeline_accessor.PipelineAccessor.abandon_label_claim
    cytearc.datastore.pipeline_accessor.PipelineEvent
    cytearc.datastore.pipeline_accessor.PipelineProgress
+   cytearc.datastore.pipeline_accessor.PipelinePlan
+   cytearc.datastore.pipeline_accessor.PipelineStagePlan
+   cytearc.datastore.pipeline_accessor.PipelineStageEstimate
 ```
 
 ## Recipes
@@ -403,6 +408,42 @@ except PipelineExecutionError as error:
     failed_run = ds.pipeline.open(run_id=error.run_id)
     report = failed_run.report(format="dict")
 ```
+
+## Plan a call
+
+A run reuses every stage whose artifacts the store already holds, but which stages those are shows only as each stage starts. `ds.pipeline.plan` tells beforehand. It takes the recipe's name and the arguments of the recipe's method, checks the call as the recipe does, and reports for each stage whether the run would reuse its artifacts or compute them, and why. It writes nothing, reads no count matrix, and works on a read-only store, so it can precede a long run, show what a changed setting recomputes, or confirm that a new run after a failure reuses what the failed one finished.
+
+```python
+plan = ds.pipeline.plan("rna", label="tuned", hvg={"top_n": 2000}, pca={"dims": 30})
+for stage in plan.stages:
+    print(stage.stage, stage.status, stage.reason, stage.detail)
+plan.computed           # the stages that would compute, in run order
+plan["pca"].estimate    # what PCA took when an earlier rna run computed it
+```
+
+`plan("multimodal", [rna_run, adt_run], ...)` takes the runs as the method does. `plan.config` holds the settings that the run would record, `plan["pca"]` the plan of one stage, and `plan.to_dict()` the whole plan as JSON values. Each {py:class}`~cytearc.datastore.pipeline_accessor.PipelineStagePlan` has a `status`:
+
+| `status` | Meaning |
+| --- | --- |
+| `reused` | Every artifact that the stage plans exists, complete and current. `outputs` holds the `(key, ref)` pairs that the run would record for the stage. |
+| `computed` | The stage would compute an artifact, for the `reason` below. `operation` names the operation whose artifact it would compute first. |
+| `skipped` | The call turns the stage off. |
+
+| `reason` | Why the stage computes |
+| --- | --- |
+| `absent` | The store holds no artifact of the operation. |
+| `changed` | The store holds artifacts of the operation, and the closest, the one that differs in the fewest parameters and inputs, is `existing`. `changed_parameters` and `changed_inputs` name what differs, such as `("top_n",)` after a change to `hvg` `top_n`. |
+| `superseded` | An operation revision supersedes `existing`, the artifact of this identity ([Runs saved by other releases](#runs-saved-by-other-releases)); `detail` names the change. |
+| `incomplete` | `existing`, the artifact of this identity, was interrupted before it completed. |
+| `missing_diagnostics` | `existing`, the artifact of this identity, lacks the diagnostics that its operation saves, as artifacts saved before CyteArc recorded them do ([Diagnostics](#diagnostics)). |
+| `invalid` | `existing`, the artifact of this identity, fails its payload checks. |
+| `upstream` | The stage reads what the stages in `upstream` would compute. |
+
+An artifact's identity includes the identities of its inputs. A stage that reads what an earlier stage would compute therefore cannot know its own identity, since its inputs do not exist yet, and its artifact will be new whatever the store holds. The plan reports such a stage computed with the reason `upstream` and names, in `upstream`, the earlier stages whose outputs it reads; those may wait on others in turn. A stage that reads nothing that would change stays reused: after a change to the `umap` settings, the Leiden candidates, cluster selection, doublet scoring, and markers read the graph, not UMAP, so the plan, like the run, reuses them.
+
+A computed stage's `estimate`, a {py:class}`~cytearc.datastore.pipeline_accessor.PipelineStageEstimate`, holds the wall time and sampled RSS peaks of the stage in the latest earlier run of the same recipe and assay that computed it, with that run's ID; a run that reused every artifact of the stage does not count, and with no such run `estimate` is None. It is a past measurement, not a model: that run's cells, settings, and machine can differ.
+
+A plan raises the errors that the call raises before it writes, such as a `ValueError` for an already completed label, and a `TypeError` for `callback` or `cancel`, which belong to a run. A stage's method checks some values only when the stage runs ([Validation before a run starts](#validation-before-a-run-starts)): when every stage before it would be reused, the plan reaches that check and raises the stage's error, as the run would. The plan goes through each stage until the stage would compute an artifact, so a reused stage warns from its saved diagnostics as it does in a run.
 
 ## Migrate from `pipeline.run`
 
@@ -1145,7 +1186,7 @@ confirm that the process has stopped before treating such a run as abandoned.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.pipeline_accessor.PipelineAccessor
-    :members: rna, atac, adt, multimodal, perturbation, open, list_runs, abandon_label_claim
+    :members: rna, atac, adt, multimodal, perturbation, plan, open, list_runs, abandon_label_claim
 
 .. autoclass:: cytearc.PipelineRun
     :members:
@@ -1168,6 +1209,15 @@ confirm that the process has stopped before treating such a run as abandoned.
     :members:
 
 .. autoclass:: cytearc.datastore.pipeline_accessor.PipelineProgress
+    :members:
+
+.. autoclass:: cytearc.datastore.pipeline_accessor.PipelinePlan
+    :members:
+
+.. autoclass:: cytearc.datastore.pipeline_accessor.PipelineStagePlan
+    :members:
+
+.. autoclass:: cytearc.datastore.pipeline_accessor.PipelineStageEstimate
     :members:
 ```
 

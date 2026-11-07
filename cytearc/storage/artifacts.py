@@ -7,7 +7,7 @@ import secrets
 import struct
 import types
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -1128,13 +1128,16 @@ def reusable_artifact_groups(
     provenance: Mapping[str, Any],
     assay: str | None = None,
     invalidate_cache: bool = False,
+    log_recomputation: bool = True,
 ) -> list[tuple[ArtifactRef, zarr.Group]]:
     """Complete artifacts with exactly this provenance, newest first, with groups.
 
-    Without one, the newest artifact that differs only in its revision is logged.
-    An artifact that records a function defined outside CyteArc by name alone,
-    as releases before 1.3.0 did, differs from a request only in its revision
-    when the request's code digests are left out, and is logged the same way.
+    Without one, the newest artifact that differs only in its revision is
+    logged as recomputed, unless ``log_recomputation`` is False, as for a
+    forecast that computes nothing. An artifact that records a function
+    defined outside CyteArc by name alone, as releases before 1.3.0 did,
+    differs from a request only in its revision when the request's code
+    digests are left out, and is logged the same way.
     """
     if invalidate_cache:
         return []
@@ -1170,7 +1173,7 @@ def reusable_artifact_groups(
         key=lambda item: (item[0], item[1].artifact_id),
         reverse=True,
     )
-    if superseded and not reusable:
+    if superseded and not reusable and log_recomputation:
         _, ref, status = max(
             superseded, key=lambda item: (item[0], item[1].artifact_id)
         )
@@ -1181,3 +1184,107 @@ def reusable_artifact_groups(
             + (f": {changes}" if changes else "")
         )
     return [(ref, group) for _, ref, group in reusable]
+
+
+@dataclass(frozen=True, slots=True)
+class NearestArtifacts:
+    """The stored artifacts closest to a request that none of them can serve.
+
+    Attributes:
+        superseded: The newest complete artifact of the requested identity at
+            another revision, which planning never reuses.
+        incomplete: The newest incomplete artifact of the requested identity,
+            as an interrupted computation leaves it.
+        nearest: The complete artifact of the requested operation whose
+            provenance differs from the request in the fewest parameters and
+            inputs, the newest among equals.
+        changed_parameters: The parameters in which ``nearest`` differs.
+        changed_inputs: The inputs in which ``nearest`` differs.
+    """
+
+    superseded: ArtifactStatus | None = None
+    incomplete: ArtifactRef | None = None
+    nearest: ArtifactStatus | None = None
+    changed_parameters: tuple[str, ...] = ()
+    changed_inputs: tuple[str, ...] = ()
+
+
+def _differing_keys(
+    stored: Mapping[str, Any], requested: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """Return the keys whose canonical values differ, a key one side lacks included."""
+    return tuple(
+        key
+        for key in sorted(set(stored) | set(requested))
+        if key not in stored
+        or key not in requested
+        or canonical_bytes(stored[key]) != canonical_bytes(requested[key])
+    )
+
+
+def nearest_stored_artifacts(
+    root: zarr.Group,
+    *,
+    scope: ArtifactScope,
+    kind: str,
+    provenance: Mapping[str, Any],
+    assay: str | None = None,
+) -> NearestArtifacts:
+    """Find what the store holds near a request that no stored artifact serves.
+
+    The requested identity is compared as :func:`reusable_artifact_groups`
+    compares it, so an artifact counts as superseded exactly when that lookup
+    would skip it for its revision. Only artifact records are read.
+    """
+    requested = make_provenance(
+        operation=str(provenance["operation"]),
+        parameters=provenance["parameters"],
+        inputs=provenance["inputs"],
+        revision=provenance.get("revision", 1),
+    )
+    revision = requested.pop("revision", 1)
+    requested_bytes = canonical_bytes(requested)
+    legacy = _without_callable_code(requested)
+    legacy_bytes = None if legacy == requested else canonical_bytes(legacy)
+    found = NearestArtifacts()
+    statuses = []
+    for ref, group in _artifact_groups(root, scope=scope, assay=assay, kind=kind):
+        try:
+            statuses.append(_artifact_status(group, ref, artifact_path(ref)))
+        except (KeyError, TypeError, ValueError):
+            continue
+    # Newest first, so the first artifact of each sort found is the newest.
+    statuses.sort(
+        key=lambda status: (status.created_at_ns or 0, status.ref.artifact_id),
+        reverse=True,
+    )
+    fewest = None
+    for status in statuses:
+        if status.provenance is None:
+            continue
+        stored = canonical_bytes(_without_revision(status.provenance))
+        if stored == requested_bytes or (
+            stored == legacy_bytes and status.revision != revision
+        ):
+            if not status.complete and found.incomplete is None:
+                found = replace(found, incomplete=status.ref)
+            elif (
+                status.complete
+                and status.revision != revision
+                and found.superseded is None
+            ):
+                found = replace(found, superseded=status)
+            continue
+        if not status.complete or status.operation != requested["operation"]:
+            continue
+        parameters = _differing_keys(status.parameters or {}, requested["parameters"])
+        inputs = _differing_keys(status.inputs or {}, requested["inputs"])
+        if fewest is None or len(parameters) + len(inputs) < fewest:
+            fewest = len(parameters) + len(inputs)
+            found = replace(
+                found,
+                nearest=status,
+                changed_parameters=parameters,
+                changed_inputs=inputs,
+            )
+    return found

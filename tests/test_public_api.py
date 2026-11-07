@@ -857,11 +857,13 @@ def test_pipeline_accessor_has_a_public_import_path():
         for name, value in vars(PipelineAccessor).items()
         if not name.startswith("_") and callable(value)
     }
-    # One recipe per modality replaced the single run method, with no alias.
+    # One recipe per modality replaced the single run method, with no alias,
+    # and a plan reports what a recipe call would do without running it.
     assert public_methods == {
         "open",
         "list_runs",
         "abandon_label_claim",
+        "plan",
         "rna",
         "atac",
         "adt",
@@ -869,8 +871,16 @@ def test_pipeline_accessor_has_a_public_import_path():
         "perturbation",
     }
     assert not hasattr(PipelineAccessor, "run")
-    # The event types keep their documented import path, under which they pickle.
-    for name in ("PipelineEvent", "PipelineProgress", "pipeline_listener"):
+    # The event and plan types keep their documented import path, under which
+    # they pickle.
+    for name in (
+        "PipelineEvent",
+        "PipelineProgress",
+        "pipeline_listener",
+        "PipelinePlan",
+        "PipelineStagePlan",
+        "PipelineStageEstimate",
+    ):
         value = getattr(pipeline_accessor, name)
         assert value.__module__ == "cytearc.datastore.pipeline_accessor"
     for name in ("PipelineEventKind", "PipelineCallback", "DEFAULT_PANEL_EXCLUDE"):

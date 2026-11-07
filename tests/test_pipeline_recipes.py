@@ -47,6 +47,7 @@ from tests.test_cell_calling_datastore import _open as _open_droplets
 from tests.test_cell_calling_datastore import _write_store as _write_droplets
 from tests.test_hto import planted_hto_counts, two_pool_hto_counts
 from tests.test_pipeline_run_foundation import _completed_run, _Owner, _root
+from tests.test_pipeline_plan import assert_plan_reuses_run, read_only_plan
 
 # Small settings keep each run to a few seconds: one Leiden partition, and no
 # cell cycle, UMAP, doublet, or marker stage unless a test needs one.
@@ -356,7 +357,7 @@ def atac(tmp_path_factory) -> SimpleNamespace:
         archive.extractall(location, filter="data")
     datastore = DataStore(str(location))
     run = datastore.pipeline.atac(label="atac", **ATAC_SETTINGS)
-    return SimpleNamespace(datastore=datastore, run=run)
+    return SimpleNamespace(location=location, datastore=datastore, run=run)
 
 
 @pytest.fixture(scope="module")
@@ -2408,6 +2409,160 @@ def test_each_stage_summary_names_the_values_that_it_records(cite, full) -> None
 
 
 # Assays, reuse, and earlier records ------------------------------------------
+
+
+def test_the_plans_of_the_committed_cite_calls_reuse_their_runs(
+    cite, joint, full, adt_own, rna_unreduced, wnn_selected
+) -> None:
+    runs = [cite.rna, cite.adt]
+    calls = [
+        (("rna",), RNA_SETTINGS, cite.rna),
+        (("adt",), {"cells": cite.rna, **ADT_SETTINGS}, cite.adt),
+        (("rna",), FULL_RNA_SETTINGS, full),
+        (
+            ("adt",),
+            {
+                "cells": "I",
+                "panel": {"exclude": None},
+                "pca": {"dims": 4},
+                **ADT_SETTINGS,
+            },
+            adt_own,
+        ),
+        (
+            ("rna",),
+            {**RNA_SETTINGS, "pca": {"dims": 0}, "leiden": False},
+            rna_unreduced,
+        ),
+        (("multimodal", runs), {"umap": {"n_epochs": 30}}, joint.wnn),
+        (
+            ("multimodal",),
+            {
+                "runs": runs,
+                "method": "snn",
+                "umap": False,
+                "paris": True,
+                "membership_strength": True,
+                "markers": False,
+                "snapshot_columns": ["donor"],
+            },
+            joint.snn,
+        ),
+        (
+            ("multimodal", runs),
+            {
+                "integration": {"l2_normalize": True},
+                "leiden": {"partitions": [0.5, 1.0], "selected": 0.5},
+                "umap": False,
+                "markers": False,
+            },
+            wnn_selected,
+        ),
+    ]
+
+    for arguments, settings, run in calls:
+        plan = read_only_plan(
+            cite.location, *arguments, default_assay="RNA", **settings
+        )
+        assert_plan_reuses_run(plan, run)
+
+
+def test_a_multimodal_plan_waits_on_the_integration_that_it_would_compute(
+    cite, joint
+) -> None:
+    runs = [cite.rna, cite.adt]
+    pipeline = cite.datastore.pipeline
+
+    # The chunks of the integrated graph are an execution option, outside the
+    # integration's identity, so the run would reuse every stage.
+    chunked = pipeline.plan(
+        "multimodal", runs, integration={"chunk_size": 7}, umap={"n_epochs": 30}
+    )
+    assert chunked.computed == ()
+    assert chunked["integration"].outputs == (
+        ("integrated_graph", joint.wnn["integrated_graph"]),
+    )
+    plan = pipeline.plan(
+        "multimodal", runs, integration={"l2_normalize": False}, umap={"n_epochs": 30}
+    )
+
+    assert plan["input_snapshot"].status == "reused"
+    integration = plan["integration"]
+    assert (integration.reason, integration.changed_parameters) == (
+        "changed",
+        ("l2_normalize",),
+    )
+    assert {stage.stage: stage.upstream for stage in plan.stages if stage.upstream} == {
+        "umap": ("integration",),
+        "leiden_1.0": ("integration",),
+        "markers": ("leiden_1.0",),
+    }
+    # The joint embedding starts from the first run's coordinates, which exist.
+    assert plan["embedding_initialization"].outputs == (
+        ("embedding_initialization", joint.wnn["embedding_initialization"]),
+    )
+
+
+def test_the_plans_of_the_committed_atac_and_qc_calls_reuse_their_runs(
+    atac, droplets, hashed
+) -> None:
+    capture = {**CELL_CALLING, "sample_column": "capture"}
+    calls = [
+        (atac.location, "atac", ATAC_SETTINGS, atac.run),
+        (
+            droplets.location,
+            "rna",
+            {"cell_calling": CELL_CALLING, "filtering": False, **SMALL_RNA_SETTINGS},
+            droplets.single,
+        ),
+        (
+            droplets.location,
+            "rna",
+            {"cell_calling": capture, "filtering": False, **SMALL_RNA_SETTINGS},
+            droplets.per_capture,
+        ),
+        (
+            droplets.location,
+            "rna",
+            {
+                "cell_calling": capture,
+                "snapshot_columns": ["donor"],
+                **SMALL_RNA_SETTINGS,
+            },
+            droplets.filtered,
+        ),
+        (hashed.location, "rna", {"hashing": True, **SMALL_RNA_SETTINGS}, hashed.run),
+    ]
+
+    for location, recipe, settings, run in calls:
+        plan = read_only_plan(location, recipe, default_assay=run.assay, **settings)
+        assert_plan_reuses_run(plan, run)
+
+
+def test_a_qc_stage_that_would_compute_passes_its_cells_on_through_skipped_filtering(
+    droplets,
+) -> None:
+    plan = droplets.datastore.pipeline.plan(
+        "rna",
+        cell_calling={**CELL_CALLING, "random_seed": 4},
+        filtering=False,
+        **SMALL_RNA_SETTINGS,
+    )
+
+    calling = plan["cell_calling"]
+    assert (calling.status, calling.reason, calling.changed_parameters) == (
+        "computed",
+        "changed",
+        ("random_seed",),
+    )
+    # Filtering is off, so its stage aliases the called cells, and the stages
+    # that read the analysis cells wait on cell calling.
+    assert plan["filtering"].status == "skipped"
+    assert plan["highly_variable_features"].upstream == ("cell_calling",)
+    assert plan["normalization"].upstream == (
+        "cell_calling",
+        "highly_variable_features",
+    )
 
 
 def test_recipes_take_the_default_or_only_assay_of_their_modality(cite, atac) -> None:
