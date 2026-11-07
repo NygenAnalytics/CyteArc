@@ -32,6 +32,7 @@ returns a durable, read-only {py:class}`~cytearc.PipelineRun` whose outputs are 
    cytearc.datastore.pipeline_accessor.PipelineAccessor.multimodal
    cytearc.datastore.pipeline_accessor.PipelineAccessor.perturbation
    cytearc.datastore.pipeline_accessor.PipelineAccessor.plan
+   cytearc.datastore.pipeline_accessor.PipelineAccessor.describe
    cytearc.datastore.pipeline_accessor.PipelineAccessor.open
    cytearc.datastore.pipeline_accessor.PipelineAccessor.list_runs
    cytearc.datastore.pipeline_accessor.PipelineAccessor.abandon_label_claim
@@ -40,6 +41,9 @@ returns a durable, read-only {py:class}`~cytearc.PipelineRun` whose outputs are 
    cytearc.datastore.pipeline_accessor.PipelinePlan
    cytearc.datastore.pipeline_accessor.PipelineStagePlan
    cytearc.datastore.pipeline_accessor.PipelineStageEstimate
+   cytearc.datastore.pipeline_accessor.RecipeDescription
+   cytearc.datastore.pipeline_accessor.StageDescription
+   cytearc.datastore.pipeline_accessor.SettingDescription
 ```
 
 ## Recipes
@@ -259,7 +263,7 @@ Each stage keyword configures one stage:
 - `labels`, the settings of a `perturbation` run's labels, is a required mapping that names `controls`.
 - `signature` and `profiles` configure the stages that a `perturbation` run's `mixscape` and `clusters` run: None, the default, or a mapping of settings, which raises `ValueError` while its stage is off. A bool raises `TypeError`.
 
-A setting means exactly what the same keyword means on the stage's method, and an omitted setting takes that method's default, with three exceptions that fit the recipe to its data: an `adt` run's `pca` `dims` defaults to one fewer than the panel's antibodies, at most 21 ([ADT](#adt)); an `atac` run's `prevalent_peaks` `top_n` to 10,000 or one fewer than the assay's peaks ([ATAC](#atac)); and with Harmony, an `rna` run's `doublets` `sample_column` to the Harmony batch columns ([Doublets and Harmony](#doublets-and-harmony)). The pipeline supplies the artifacts that each stage consumes, so a mapping holds settings only. A few keys configure the recipe instead: Leiden `partitions` and `selected`, Harmony `batch_columns`, cell-calling `sample_column`, hashing `assay`, panel `exclude`, guide-calling `path`, `barcode_prefix`, `barcode_suffix` and `barcode_pattern`, which import Cell Ranger's calls in place of calling guides, and profiles `cells`, which chooses the cells that the profiles average ([Perturbation](#perturbation)). An unknown key raises `ValueError` that lists the allowed keys, such as `Unknown pca settings ['dim']; allowed: ['batch_size', 'dims', 'feat_scaling']`.
+A setting means exactly what the same keyword means on the stage's method, and an omitted setting takes that method's default, with three exceptions that fit the recipe to its data: an `adt` run's `pca` `dims` defaults to one fewer than the panel's antibodies, at most 21 ([ADT](#adt)); an `atac` run's `prevalent_peaks` `top_n` to 10,000 or one fewer than the assay's peaks ([ATAC](#atac)); and with Harmony, an `rna` run's `doublets` `sample_column` to the Harmony batch columns ([Doublets and Harmony](#doublets-and-harmony)). The pipeline supplies the artifacts that each stage consumes, so a mapping holds settings only. A few keys configure the recipe instead: Leiden `partitions` and `selected`, Harmony `batch_columns`, cell-calling `sample_column`, hashing `assay`, panel `exclude`, guide-calling `path`, `barcode_prefix`, `barcode_suffix` and `barcode_pattern`, which import Cell Ranger's calls in place of calling guides, and profiles `cells`, which chooses the cells that the profiles average ([Perturbation](#perturbation)). An unknown key raises `ValueError` that lists the allowed keys, such as `Unknown pca settings ['dim']; allowed: ['batch_size', 'dims', 'feat_scaling']`. `ds.pipeline.describe(recipe)` gives every stage's settings with these defaults and rules in code ([Describe a recipe](#describe-a-recipe)).
 
 ```python
 run = ds.pipeline.rna(
@@ -444,6 +448,29 @@ An artifact's identity includes the identities of its inputs. A stage that reads
 A computed stage's `estimate`, a {py:class}`~cytearc.datastore.pipeline_accessor.PipelineStageEstimate`, holds the wall time and sampled RSS peaks of the stage in the latest earlier run of the same recipe and assay that computed it, with that run's ID; a run that reused every artifact of the stage does not count, and with no such run `estimate` is None. It is a past measurement, not a model: that run's cells, settings, and machine can differ.
 
 A plan raises the errors that the call raises before it writes, such as a `ValueError` for an already completed label, and a `TypeError` for `callback` or `cancel`, which belong to a run. A stage's method checks some values only when the stage runs ([Validation before a run starts](#validation-before-a-run-starts)): when every stage before it would be reused, the plan reaches that check and raises the stage's error, as the run would. The plan goes through each stage until the stage would compute an artifact, so a reused stage warns from its saved diagnostics as it does in a run.
+
+## Describe a recipe
+
+An application that offers a recipe's settings, with the defaults of the installed release, reads them from `ds.pipeline.describe`. It takes a recipe's name and returns a {py:class}`~cytearc.datastore.pipeline_accessor.RecipeDescription` of the recipe's stage keywords, in the order of its signature. The description needs no store, so `PipelineAccessor.describe("rna")` gives the same one, and it is built from the code that resolves the recipe, so a setting added to a stage appears in it with its method's type and default.
+
+```python
+from cytearc.datastore.pipeline_accessor import PipelineAccessor
+
+rna = PipelineAccessor.describe("rna")
+rna["leiden"].methods                 # ("clusters.leiden",)
+rna["leiden"]["partitions"].default   # (0.5, 0.75, 1.0, 1.25)
+rna["filtering"].rule                 # when the stage runs if filtering is omitted
+rna["hvg"]["top_n"].annotation        # "int"
+PipelineAccessor.describe("atac")["prevalent_peaks"]["top_n"].rule
+# "the smaller of 10000 and one fewer than the assay's peaks"
+rna.to_dict()                         # the description as JSON values
+```
+
+A {py:class}`~cytearc.datastore.pipeline_accessor.StageDescription` gives in `runs` whether the stage runs when its keyword is omitted, or None with the `rule` that decides, such as `"when mixscape runs"` for the signature of a `perturbation` run. `methods` names the public methods that the stage passes its settings to: `filtering` filters with `qc.auto_filter`, or with `qc.filter` for `method="manual"`. `settings` describes each setting that the keyword's mapping takes, the keys that configure the recipe first and then each method's keywords in the order of its signature.
+
+A {py:class}`~cytearc.datastore.pipeline_accessor.SettingDescription` gives the setting's `annotation`, as the method's signature declares it or as the recipe takes it, such as a cell column for `hvg` `batch`, and the `method` whose keyword it is, or None for a key that configures the recipe, such as the Leiden `partitions`. Its `default` is what the recipe uses when a call omits the setting: the method's default, or the recipe's own, as for the Leiden `partitions` of each recipe. A default that the recipe fits to its data or to the rest of the call has no value: `default` is None, and `rule` states how the recipe sets it. `required` marks a setting that a mapping must give, such as Harmony's `batch_columns`. In `to_dict()`, a default that is not a finite number, such as `hvg` `min_var`, is the text `"-inf"` or `"inf"`.
+
+A plan ([Plan a call](#plan-a-call)) applies these rules to a store: its `config` holds the settings that the run would record, where a fitted default takes its value, such as `plan.config["stages"]["prevalent_peaks"]["top_n"]` of an `atac` call.
 
 ## Migrate from `pipeline.run`
 
@@ -1186,7 +1213,7 @@ confirm that the process has stopped before treating such a run as abandoned.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.pipeline_accessor.PipelineAccessor
-    :members: rna, atac, adt, multimodal, perturbation, plan, open, list_runs, abandon_label_claim
+    :members: rna, atac, adt, multimodal, perturbation, plan, describe, open, list_runs, abandon_label_claim
 
 .. autoclass:: cytearc.PipelineRun
     :members:
@@ -1218,6 +1245,15 @@ confirm that the process has stopped before treating such a run as abandoned.
     :members:
 
 .. autoclass:: cytearc.datastore.pipeline_accessor.PipelineStageEstimate
+    :members:
+
+.. autoclass:: cytearc.datastore.pipeline_accessor.RecipeDescription
+    :members:
+
+.. autoclass:: cytearc.datastore.pipeline_accessor.StageDescription
+    :members:
+
+.. autoclass:: cytearc.datastore.pipeline_accessor.SettingDescription
     :members:
 ```
 

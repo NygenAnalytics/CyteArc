@@ -51,7 +51,7 @@ RECIPE = "adt"
 OPERATION = "pipeline.adt"
 # Nearly every cell detects nearly every antibody of a small panel, so a
 # requested filter reads only each cell's total antibody counts by default.
-_FILTER_SUFFIXES = ("nCounts",)
+FILTER_SUFFIXES = ("nCounts",)
 DEFAULT_PANEL_EXCLUDE = r"(?i)isotype|control|ctrl"
 """Antibody names that the panel leaves out by default: isotype controls."""
 
@@ -190,7 +190,7 @@ def resolve_adt(
         filtering,
         cells=source,
         assay=assay_name,
-        default_attrs=default_filter_columns(store, assay_name, _FILTER_SUFFIXES),
+        default_attrs=default_filter_columns(store, assay_name, FILTER_SUFFIXES),
         operation=OPERATION,
         default_on=False,
     )

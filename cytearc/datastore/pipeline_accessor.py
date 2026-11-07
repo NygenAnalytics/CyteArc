@@ -6,6 +6,12 @@ from ..storage.artifacts import ArtifactRef
 from ..storage.pipeline_runs import abandon_pipeline_label_claim
 from ..storage.validation_scope import validation_scoped
 from ..utils.shutdown import CancellationToken
+from ._pipeline.description import (
+    RecipeDescription as RecipeDescription,
+    SettingDescription as SettingDescription,
+    StageDescription as StageDescription,
+    describe_recipe,
+)
 from ._pipeline.events import (
     PipelineCallback as PipelineCallback,
     PipelineEvent as PipelineEvent,
@@ -41,6 +47,9 @@ pipeline_listener.__module__ = __name__
 PipelinePlan.__module__ = __name__
 PipelineStagePlan.__module__ = __name__
 PipelineStageEstimate.__module__ = __name__
+RecipeDescription.__module__ = __name__
+StageDescription.__module__ = __name__
+SettingDescription.__module__ = __name__
 
 # Each recipe's resolver, which its method and a plan of it call alike.
 _RESOLVERS: dict[str, Callable[..., RecipePlan]] = {
@@ -195,6 +204,51 @@ class PipelineAccessor:
             if name != "self" and name not in _RUN_KEYWORDS
         }
         return plan_recipe(self._store, resolver(self._store, **arguments))
+
+    @staticmethod
+    def describe(recipe: str, /) -> RecipeDescription:
+        """Describe the stage keywords of a recipe, their settings, and the defaults it uses.
+
+        For each stage keyword, in the order of the recipe's signature, the
+        description says whether the stage runs when the keyword is omitted,
+        the public methods that it passes its settings to, and each setting
+        that its mapping takes: the setting's type, and the default that the
+        recipe uses when a call omits it. That default is the method's,
+        except where the recipe sets its own: a key that configures the
+        recipe, such as Leiden ``partitions``, has its own default, and a
+        default that the recipe fits to its data or to the rest of the call,
+        such as the ATAC recipe's ``prevalent_peaks`` ``top_n``, is given as
+        the rule by which it is set. The description is built from the code
+        that resolves the recipe, so it describes the installed release, and
+        it needs no store: ``PipelineAccessor.describe("rna")`` gives the
+        same as ``ds.pipeline.describe("rna")``.
+
+        :meth:`plan` reports what a call on a store would do; a plan's
+        ``config`` holds the settings that the run would record, where the
+        defaults that the recipe fits to the store take their values.
+
+        Args:
+            recipe: ``"rna"``, ``"atac"``, ``"adt"``, ``"multimodal"``, or
+                ``"perturbation"``.
+
+        Returns:
+            The recipe's stage keywords, whose ``to_dict()`` gives JSON values.
+
+        Raises:
+            ValueError: If ``recipe`` names no recipe.
+
+        Example:
+            >>> leiden = ds.pipeline.describe("rna")["leiden"]
+            >>> leiden["partitions"].default
+            (0.5, 0.75, 1.0, 1.25)
+        """
+        if not isinstance(recipe, str) or recipe not in _RESOLVERS:
+            raise ValueError(
+                f"recipe must be one of {sorted(_RESOLVERS)!r}, not {recipe!r}"
+            )
+        return describe_recipe(
+            recipe, inspect.signature(getattr(PipelineAccessor, recipe))
+        )
 
     def _require_runnable(self, callback: PipelineCallback | None) -> None:
         if callback is not None and not callable(callback):

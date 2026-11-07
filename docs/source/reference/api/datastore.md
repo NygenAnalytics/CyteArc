@@ -191,6 +191,14 @@ ATAC assay; see {doc}`regulons` for building those networks.
     :members: aucell, chromvar, waggr, load, cell_cycle
 ```
 
+`scores.cell_cycle` scores the S-phase and G2M-phase genes of `cytearc.quality_control`, `s_phase_genes` and `g2m_phase_genes`, unless a call passes its own lists, such as `s_phase_genes_mouse` and `g2m_phase_genes_mouse`, and matches them to the assay's feature names with `match_gene_names`. The same call on a store's names, `match_gene_names(ds.RNA.feats.fetch_all("names"), s_phase_genes)`, shows which features a run will score, which genes match by a previous symbol, and which match none.
+
+```{eval-rst}
+.. autofunction:: cytearc.quality_control.match_gene_names
+
+.. autoclass:: cytearc.quality_control.cell_cycle_genes.GeneMatch
+```
+
 ### `ds.regulons`
 
 `grn` infers transcription-factor to target importances with GRNBoost2 on the assay's stored values, its raw counts or the values of an assay imported from normalized values; the functions in {doc}`regulons` turn them into regulons.

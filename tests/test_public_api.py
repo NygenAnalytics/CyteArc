@@ -612,6 +612,14 @@ def test_domain_packages_export_canonical_objects():
             "cytearc.quality_control",
             "s_phase_genes",
         ): "cytearc.quality_control.cell_cycle_genes",
+        (
+            "cytearc.quality_control",
+            "match_gene_names",
+        ): "cytearc.quality_control.cell_cycle_genes",
+        (
+            "cytearc.quality_control",
+            "GeneMatch",
+        ): "cytearc.quality_control.cell_cycle_genes",
     }
 
     for (package_name, symbol), module_name in exports.items():
@@ -858,12 +866,14 @@ def test_pipeline_accessor_has_a_public_import_path():
         if not name.startswith("_") and callable(value)
     }
     # One recipe per modality replaced the single run method, with no alias,
-    # and a plan reports what a recipe call would do without running it.
+    # a plan reports what a recipe call would do without running it, and a
+    # description gives each recipe's stage settings and defaults.
     assert public_methods == {
         "open",
         "list_runs",
         "abandon_label_claim",
         "plan",
+        "describe",
         "rna",
         "atac",
         "adt",
@@ -880,8 +890,13 @@ def test_pipeline_accessor_has_a_public_import_path():
         "PipelinePlan",
         "PipelineStagePlan",
         "PipelineStageEstimate",
+        "RecipeDescription",
+        "StageDescription",
+        "SettingDescription",
     ):
         value = getattr(pipeline_accessor, name)
         assert value.__module__ == "cytearc.datastore.pipeline_accessor"
+    # A recipe's description needs no store.
+    assert isinstance(vars(PipelineAccessor)["describe"], staticmethod)
     for name in ("PipelineEventKind", "PipelineCallback", "DEFAULT_PANEL_EXCLUDE"):
         assert hasattr(pipeline_accessor, name)
