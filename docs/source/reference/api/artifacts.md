@@ -134,7 +134,7 @@ status.diagnostics
 `artifacts.list` uses the default assay unless another assay is supplied. Store-level outputs can
 be listed with `scope="datastore"`. `artifacts.load(ref)` opens the payload only after CyteArc confirms
 that the artifact exists and is complete, and `artifacts.load_values(ref)` reads the per-cell values of a
-cell-aligned artifact aligned to their cells ({ref}`cell_aligned_kinds`).
+cell-aligned artifact, or of a cell column over a cell selection, aligned to their cells ({ref}`cell_aligned_kinds`).
 
 A producer makes its artifact complete with one final write. A write that fails with an error
 before that write removes its incomplete artifact. An interruption, such as Ctrl-C, a cancelled
@@ -479,7 +479,10 @@ s_score = ds.artifacts.load_values(cell_cycle_ref, value="s_score")
 phase.to_pandas()  # Series indexed by cell id
 coordinates = ds.artifacts.load_values(umap_ref).to_pandas()  # one column per dimension
 subset = ds.artifacts.load_values(clusters_ref, cell_selection=t_cells)
+donors = ds.artifacts.load_values(CellField("donor"), cell_selection=t_cells)
 ```
+
+A {py:class}`~cytearc.plotting.CellField` names a cell metadata column instead of an artifact. `artifacts.load_values(CellField("donor"), cell_selection=t_cells)` reads the column at the cells of the selection, with the rows that its linked missing mask flags in `missing`, as `compare.compute_bulk` and the plots read a grouping column over cells, so a caller reads any grouping over any frozen selection through one call. A column has no cells of its own, so `cell_selection` is required and may be any cell selection of the store; `value` must stay None. `CellField(..., kind="continuous")` reads measurements, and the other kinds read labels, as `categorical` records. The read is charged against the datastore memory budget as an artifact's is, and the store's cell table must hold the column, or `KeyError` is raised.
 
 `select_cells`, artifact groupings and colors in plots, and pseudotime source and sink labels read
 the same canonical arrays, `select_cells` another one when `value=` names it, and every reader

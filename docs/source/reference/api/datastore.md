@@ -284,11 +284,7 @@ See [Resolve gene dynamics by lineage](../tutorials/lineage-dynamics) and
 
 ## Updating existing calls
 
-Replace the method name using this table. Arguments, defaults, return values, and saved
-artifacts stay the same, with one later change: the default Leiden backend of `clusters.leiden`
-is now `"cytearc"` instead of `"igraph"`, so pass `backend="igraph"` to keep reusing clusterings
-made with the earlier default (see `ds.clusters` above). The previous names are no longer methods
-on `DataStore`. Saved provenance retains its operation names, such as `run_umap`.
+Replace the method name using this table. Arguments, defaults, return values, and saved artifacts stay the same, with two later changes. The default Leiden backend of `clusters.leiden` is now `"cytearc"` instead of `"igraph"`, so pass `backend="igraph"` to keep reusing clusterings made with the earlier default (see `ds.clusters` above). `compare.compute_bulk` returns a `BulkProfiles` record instead of a frame or a tuple of frames, `count_detected=True` replaces `return_fraction=True`, and `return_n_cells` is removed because the record always holds each column's cells; the rows after `ds.make_bulk(...)` show how to read the record, which the selected analysis contracts below describe. The previous names are no longer methods on `DataStore`. Saved provenance retains its operation names, such as `run_umap`.
 
 | Previous call | Current call |
 |---|---|
@@ -304,6 +300,10 @@ on `DataStore`. Saved provenance retains its operation names, such as `run_umap`
 | `ds.run_paris_clustering(...)` | `ds.clusters.paris(...)` |
 | `ds.smart_label(...)` | `ds.clusters.relabel_by_overlap(...)` |
 | `ds.make_bulk(...)` | `ds.compare.compute_bulk(...)` |
+| `bulk = ds.compare.compute_bulk(...)` | `bulk = ds.compare.compute_bulk(...).profiles` |
+| `bulk, n_cells = ds.compare.compute_bulk(..., return_n_cells=True)` | `result = ds.compare.compute_bulk(...)`, then `result.profiles` and `result.columns["n_cells"]` |
+| `bulk, fraction = ds.compare.compute_bulk(..., return_fraction=True)` | `result = ds.compare.compute_bulk(..., count_detected=True)`, then `result.profiles`, `result.detected` (cells) and `result.detected_fraction` |
+| `bulk["a_d1"]`, a column named by joined labels | `result.profiles[("a", "d1")]`, a column labelled by its group and sub-group |
 | `ds.get_statistical_tests(...)` | `ds.compare.load_tests(...)` |
 | `ds.run_statistical_testing(...)` | `ds.compare.test(...)` |
 | `ds.build_embedding_initialization(...)` | `ds.embeddings.initialization(...)` |
@@ -416,14 +416,8 @@ group's size. A mean or floating-point sum that is not finite, such as one from 
 normalization that returns NaN, raises `ValueError` naming the group and the feature index. RNA
 means also raise `ValueError` when a selected cell's `<assay>_nCounts` total is negative or not
 finite. Cells whose group or sub-group label is recorded as missing join no group, as values in
-`null_vals` do. Group values that would produce the same column name raise an error.
-A bulk column without cells, such as a group and sub-group combination that no cell has or a
-pseudo-replicate of a group with fewer cells than `pseudo_reps`, is left out rather than returned
-as a profile of zeros; `remove_empty_columns=False` keeps such columns as NaN.
-`return_n_cells=True` appends an int64 Series named `n_cells` with the number of cells of each
-returned column, after the fractions when `return_fraction=True`, so a downstream count model can
-weight or drop small pseudobulk samples. `pseudo_reps` must be an integer of at least 1 and
-`feature_label` one of `"index"`, `"id"`, or `"name"`; other values raise before anything is read.
+`null_vals` do.
+The call returns a {py:class}`~cytearc.features.aggregation.BulkProfiles` record: `profiles`, the features-by-columns profiles; `columns`, one row per bulk column with its `n_cells` as int64, so a downstream count model can weight or drop small pseudobulk samples; and, with `count_detected=True`, `detected`, the int64 number of each column's cells whose raw count of each feature is above zero, which `detected_fraction` divides by `n_cells`. A bulk column is labelled by its group label, or by a pandas MultiIndex of the levels `group`, `subgroup` and `replicate` (numbered from 1) when the call passes `secondary_groups=` or `pseudo_reps` above 1, and `profiles`, `detected` and `columns` share these labels. Labels are never joined into text, so the groups `a_b` with sub-group `c` and `a` with sub-group `b_c` make two columns, and numeric labels stay numbers. A bulk column without cells, such as a group and sub-group combination that no cell has or a pseudo-replicate of a group with fewer cells than `pseudo_reps`, is left out rather than returned as a profile of zeros; `remove_empty_columns=False` keeps such columns, with NaN profiles, no detecting cells, and `n_cells` 0. `pseudo_reps` must be an integer of at least 1 and `feature_label` one of `"index"`, `"id"`, or `"name"`; other values raise before anything is read.
 `add_grouped_assay(groups, assay_label=...)` similarly accepts a
 pseudotime-aggregation ref or an explicit feature metadata column when constructing a new assay.
 An aggregation ref groups only the features it clustered, and missing metadata values never form a
@@ -750,6 +744,9 @@ The recommended workflow is in [Read RNA and protein together with CITE-seq](../
     :members:
 
 .. autoclass:: cytearc.features.statistical.StatisticalTestResult
+    :members:
+
+.. autoclass:: cytearc.features.aggregation.BulkProfiles
     :members:
 
 .. autoclass:: cytearc.clustering.ParisClusteringResult

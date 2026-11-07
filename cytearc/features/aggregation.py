@@ -1,12 +1,13 @@
 """Bulk aggregation of cell groups over stored or normalized matrices.
 
 It also builds the bulk profiles that ``ds.compare.compute_bulk`` returns: the
-cells of each bulk column, each column's mean or summed feature profile, and
-the frames labelled by feature.
+cells of each bulk column, labelled by its group, sub-group and
+pseudo-replicate, each column's mean or summed feature profile, and the
+number of its cells that detect each feature.
 """
 
-from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 import numpy as np
@@ -33,6 +34,52 @@ BULK_FEATURE_LABELS = ("index", "id", "name")
 _RAW_FEATURE_CHUNK = 256
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class BulkProfiles:
+    """The bulk profiles of groups of cells, as ``compare.compute_bulk`` returns them.
+
+    Each bulk column holds the cells of one group, of one group and
+    sub-group, or of one pseudo-replicate of either, and is labelled by them:
+    by its group label alone, or by a MultiIndex of the levels ``group``,
+    ``subgroup``, and ``replicate`` (numbered from 1) that the call uses. The
+    columns of ``profiles`` and ``detected`` and the rows of ``columns``
+    carry the same labels, in the same order. Rows of ``profiles`` and
+    ``detected`` are features, labelled as ``feature_label`` asks.
+
+    Attributes:
+        profiles: Each bulk column's mean or summed feature profile. A column
+            without cells, kept with ``remove_empty_columns=False``, holds
+            NaN.
+        columns: One row per bulk column, with ``n_cells``, its number of
+            cells, as int64.
+        detected: The number of each bulk column's cells whose count of each
+            feature is above zero, as int64, or None unless the call passed
+            ``count_detected=True``.
+    """
+
+    profiles: pd.DataFrame
+    columns: pd.DataFrame
+    detected: pd.DataFrame | None
+
+    @property
+    def detected_fraction(self) -> pd.DataFrame:
+        """The share of each column's cells that detect each feature.
+
+        It divides ``detected`` by ``n_cells``, so a column without cells
+        holds NaN.
+
+        Raises:
+            ValueError: If the cells that detect each feature were not
+                counted.
+        """
+        if self.detected is None:
+            raise ValueError(
+                "The bulk profiles hold no detected counts; pass "
+                "count_detected=True to compare.compute_bulk"
+            )
+        return self.detected.div(self.columns["n_cells"], axis=1)
+
+
 @njit(cache=True, nogil=True, parallel=True, error_model="numpy")
 def _accumulate_group_counts(
     raw: np.ndarray,
@@ -41,7 +88,7 @@ def _accumulate_group_counts(
     scalars: np.ndarray | None,
     size_factor: float,
     values: np.ndarray,
-    fractions: np.ndarray | None,
+    detected: np.ndarray | None,
 ) -> None:
     # Features own disjoint output entries; cell order stays fixed within each.
     for feature in prange(raw.shape[0]):  # type: ignore[no-untyped-call, attr-defined]
@@ -52,8 +99,8 @@ def _accumulate_group_counts(
                 values[feature, group] += count
             else:
                 values[feature, group] += np.float64(count) * size_factor / scalars[i]
-            if fractions is not None and count > 0:
-                fractions[feature, group] += 1
+            if detected is not None and count > 0:
+                detected[feature, group] += 1
 
 
 @njit(cache=True, nogil=True, parallel=True)
@@ -154,7 +201,7 @@ def aggregate_raw_groups(
 
 def _require_finite_groups(
     values: np.ndarray,
-    group_names: Sequence[str] | None,
+    group_names: Sequence[Any] | None,
     *,
     statistic: str,
 ) -> None:
@@ -179,12 +226,16 @@ def aggregate_rna_groups(
     *,
     scalars: np.ndarray | None,
     size_factor: float,
-    return_fraction: bool,
+    count_detected: bool,
     resources: ResourceBudget,
     io: StorageIoPolicy | None = None,
-    group_names: Sequence[str] | None = None,
+    group_names: Sequence[Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None]:
-    """Return features-by-groups count sums, or means normalized by ``scalars``."""
+    """Return features-by-groups count sums, or means normalized by ``scalars``.
+
+    With ``count_detected``, also the int64 number of each group's cells
+    whose count of each feature is above zero.
+    """
     if group_codes.shape != cell_indices.shape or np.any(
         (group_codes < 0) | (group_codes >= n_groups)
     ):
@@ -208,7 +259,7 @@ def aggregate_rna_groups(
     if scalars is not None or dtype.kind == "f":
         dtype = np.dtype(np.float64)
     band_cells = min(int(counts_t.shape[1]), geometry.axisChunk(1))
-    output_bytes = n_features * n_groups * (dtype.itemsize + 8 * return_fraction)
+    output_bytes = n_features * n_groups * (dtype.itemsize + 8 * count_detected)
     # Include DataFrame construction/filter copies and selected-cell bookkeeping.
     resident_bytes = 4 * output_bytes + 64 * len(cell_indices) + 16 * n_groups
     # Reserve band-local group codes and normalization scalars.
@@ -225,7 +276,7 @@ def aggregate_rna_groups(
             None if scalars is None else scalars[band.selectedDestinations],
             size_factor,
             values[:, columns].T,
-            None if fractions is None else fractions[:, columns].T,
+            None if detected is None else detected[:, columns].T,
         )
 
     # The stream plans when it is created, so a budget that cannot also hold
@@ -241,21 +292,18 @@ def aggregate_rna_groups(
         orderedCompute=True,
     )
     values = np.zeros((n_groups, n_features), dtype=dtype)
-    fractions = (
-        np.zeros((n_groups, n_features), dtype=np.float64) if return_fraction else None
+    detected = (
+        np.zeros((n_groups, n_features), dtype=np.int64) if count_detected else None
     )
     group_sizes = np.bincount(group_codes, minlength=n_groups)
     for _ in bands:
         pass
-    denominators = np.maximum(group_sizes, 1)[:, None]
     if scalars is not None:
-        values /= denominators
-    if fractions is not None:
-        fractions /= denominators
+        values /= np.maximum(group_sizes, 1)[:, None]
     _require_finite_groups(
         values, group_names, statistic="sum" if scalars is None else "mean"
     )
-    return values.T, None if fractions is None else fractions.T
+    return values.T, None if detected is None else detected.T
 
 
 def aggregate_normalized_groups(
@@ -264,7 +312,7 @@ def aggregate_normalized_groups(
     n_groups: int,
     *,
     nthreads: int,
-    group_names: Sequence[str] | None = None,
+    group_names: Sequence[Any] | None = None,
 ) -> np.ndarray:
     """Average normalized rows within each cell group in one streaming pass.
 
@@ -354,6 +402,11 @@ def _bulk_replicates(cells: NDArray[Any], n_reps: int, seed: int) -> list[NDArra
     return [np.array(sorted(x)) for x in rep_idx]
 
 
+def _index_label(value: Any) -> Any:
+    """Return a label as the Python value that a pandas index holds, such as an int for a NumPy int64."""
+    return value.item() if isinstance(value, np.generic) else value
+
+
 def bulk_column_rows(
     group_values: NDArray[Any],
     group_order: Sequence[Any],
@@ -365,63 +418,67 @@ def bulk_column_rows(
     secondary_null_vals: Sequence[Any] | None,
     pseudo_reps: int,
     random_seed: int,
-) -> dict[str, NDArray[Any]]:
-    """Return the global cell indices of each bulk column, keyed by column name.
+) -> tuple[pd.Index, list[NDArray[Any]]]:
+    """Return the labels of each bulk column and the global cell indices of its cells.
 
     Every combination of a group with a sub-group, and every pseudo-replicate,
     gets a column, so a column holds no cells when a group has no cells of a
-    sub-group or fewer cells than ``pseudo_reps``.
+    sub-group or fewer cells than ``pseudo_reps``. A column is labelled by
+    its group alone, or by a MultiIndex of the levels ``group``,
+    ``subgroup``, and ``replicate`` (numbered from 1) that the call uses, so
+    labels never join into a name that two columns could share.
     """
     if null_vals is None:
         null_vals = []
     if secondary_null_vals is None:
         secondary_null_vals = []
-    if secondary is None:
-        sec_group_values: NDArray[Any] = np.array([None], dtype=object)
-        sec_groups_set: Sequence[Any] = [None]
-    else:
-        sec_group_values, sec_groups_set = secondary
-    column_rows: dict[str, NDArray[Any]] = {}
+    level_names = ["group"]
+    if secondary is not None:
+        level_names.append("subgroup")
+    if pseudo_reps > 1:
+        level_names.append("replicate")
+    levels: dict[str, list[Any]] = {name: [] for name in level_names}
+    column_rows: list[NDArray[Any]] = []
+    subgroups: Sequence[Any] = [None] if secondary is None else secondary[1]
     for g in group_order:
         if g in null_vals:
             continue
-        for sg in sec_groups_set:
-            if sg in secondary_null_vals:
+        in_group = (group_values == g) & labelled
+        for sg in subgroups:
+            if secondary is None:
+                selected = in_group
+            elif sg in secondary_null_vals:
                 continue
-            if sg is None and len(sec_group_values) == 1:
-                selected_rows = np.flatnonzero((group_values == g) & labelled)
             else:
-                selected_rows = np.flatnonzero(
-                    (group_values == g) & (sec_group_values == sg) & labelled
-                )
-            g_idx = cell_idx[selected_rows]
-            rep_indices = _bulk_replicates(g_idx, pseudo_reps, random_seed)
-            for n, idx in enumerate(rep_indices):
-                if sg is None and len(sec_group_values) == 1:
-                    col_name = f"{g}"
-                else:
-                    col_name = f"{g}_{sg}"
+                selected = in_group & (secondary[0] == sg)
+            replicates = _bulk_replicates(
+                cell_idx[np.flatnonzero(selected)], pseudo_reps, random_seed
+            )
+            for number, rows in enumerate(replicates, start=1):
+                levels["group"].append(_index_label(g))
+                if secondary is not None:
+                    levels["subgroup"].append(_index_label(sg))
                 if pseudo_reps > 1:
-                    col_name += f"_Rep{n + 1}"
-                if col_name in column_rows:
-                    raise ValueError(
-                        f"Bulk column name {col_name!r} is produced by more "
-                        "than one group; rename the group values"
-                    )
-                column_rows[col_name] = idx
-    return column_rows
+                    levels["replicate"].append(number)
+                column_rows.append(rows)
+    if len(level_names) == 1:
+        return pd.Index(levels["group"], name="group"), column_rows
+    index = pd.MultiIndex.from_arrays(
+        [levels[name] for name in level_names], names=level_names
+    )
+    return index, column_rows
 
 
 def bulk_codes(
     cell_idx: NDArray[np.int64],
-    column_rows: Mapping[str, NDArray[Any]],
+    column_rows: Sequence[NDArray[Any]],
 ) -> NDArray[np.int64]:
     """Return the bulk column of each selected cell, or -1 for cells in none.
 
     Codes number the columns in the order of ``column_rows``.
     """
     codes = np.full(len(cell_idx), -1, dtype=np.int64)
-    for code, idx in enumerate(column_rows.values()):
+    for code, idx in enumerate(column_rows):
         codes[np.searchsorted(cell_idx, idx)] = code
     return codes
 
@@ -430,7 +487,7 @@ def bulk_read_cells(
     assay: Assay,
     aggr_type: str,
     cell_idx: NDArray[np.int64],
-    column_rows: Mapping[str, NDArray[Any]],
+    column_rows: Sequence[NDArray[Any]],
 ) -> NDArray[np.int64]:
     """Return the global indices of the cells that ``aggregate_bulk_profiles`` reads."""
     if not column_rows or len(cell_idx) == 0:
@@ -448,21 +505,27 @@ def bulk_read_cells(
 
 def aggregate_bulk_profiles(
     assay: Assay,
-    column_rows: Mapping[str, NDArray[Any]],
+    column_rows: Sequence[NDArray[Any]],
     cell_idx: NDArray[np.int64],
     *,
     aggr_type: str,
-    return_fraction: bool,
+    count_detected: bool,
     cells: MetaData,
     resources: ResourceBudget,
     nthreads: int,
-) -> tuple[dict[str, NDArray[Any]], dict[str, NDArray[Any]]]:
-    """Return each bulk column's feature profile and expressing fractions.
+    column_names: Sequence[Any] | None = None,
+) -> tuple[list[NDArray[Any]], list[NDArray[np.int64]] | None]:
+    """Return each bulk column's feature profile, and on request its detecting cells.
 
-    Every column of ``column_rows`` holds at least one cell.
+    Every column of ``column_rows`` holds at least one cell. With
+    ``count_detected``, the second list holds, for each column, the int64
+    number of its cells whose raw count of each feature is above zero;
+    without it, the second value is None. ``column_names`` name the columns
+    in errors.
     """
-    vals: dict[str, NDArray[Any]] = {}
-    fracs: dict[str, NDArray[Any]] = {}
+    n_columns = len(column_rows)
+    profiles: list[NDArray[Any]] = []
+    detected: list[NDArray[np.int64]] | None = [] if count_detected else None
     codes = bulk_codes(cell_idx, column_rows)
     stream_rna = isinstance(assay, RNAassay) and (
         aggr_type == "sum"
@@ -483,21 +546,21 @@ def aggregate_bulk_profiles(
             else None
         )
         # An RNA assay opens only with a complete countsT and a size factor.
-        values, fractions = aggregate_rna_groups(
+        values, counts = aggregate_rna_groups(
             cast(zarr.Array, assay.rawDataT),
             selected,
             codes[included],
-            len(column_rows),
+            n_columns,
             scalars=scalars,
             size_factor=cast(float, assay.sf),
-            return_fraction=return_fraction,
+            count_detected=count_detected,
             resources=resources,
             io=assay.storageIo,
-            group_names=list(column_rows),
+            group_names=column_names,
         )
-        vals = {name: values[:, i] for i, name in enumerate(column_rows)}
-        if fractions is not None:
-            fracs = {name: fractions[:, i] for i, name in enumerate(column_rows)}
+        profiles = [values[:, i] for i in range(n_columns)]
+        if counts is not None:
+            detected = [counts[:, i] for i in range(n_columns)]
     else:
         if aggr_type not in ("sum", "mean"):
             raise ValueError("ERROR: `aggr_type` can only be either 'sum' or 'mean'")
@@ -509,12 +572,12 @@ def aggregate_bulk_profiles(
                     feat_idx=np.arange(assay.feats.N, dtype=np.int64),
                 ),
                 codes,
-                len(column_rows),
+                n_columns,
                 nthreads=nthreads,
-                group_names=list(column_rows),
+                group_names=column_names,
             )
-            vals = {name: means[:, i] for i, name in enumerate(column_rows)}
-        if column_rows and (aggr_type == "sum" or return_fraction):
+            profiles = [means[:, i] for i in range(n_columns)]
+        if column_rows and (aggr_type == "sum" or count_detected):
             # One pass over the raw rows of the selected cells sums every
             # column and counts its positive values. Raw sums are exact:
             # integer counts keep NumPy's integer accumulator.
@@ -522,17 +585,16 @@ def aggregate_bulk_profiles(
             sums, positives = aggregate_raw_groups(
                 assay.rawData[cell_idx[included]],
                 codes[included],
-                len(column_rows),
+                n_columns,
                 sums=aggr_type == "sum",
-                positives=return_fraction,
+                positives=count_detected,
                 nthreads=nthreads,
             )
-            for i, (name, idx) in enumerate(column_rows.items()):
-                if sums is not None:
-                    vals[name] = sums[i]
-                if positives is not None:
-                    fracs[name] = positives[i] / len(idx)
-    return vals, fracs
+            if sums is not None:
+                profiles = [sums[i] for i in range(n_columns)]
+            if positives is not None:
+                detected = [positives[i] for i in range(n_columns)]
+    return profiles, detected
 
 
 def aligned_feature_labels(values: np.ndarray, index: pd.Index) -> np.ndarray:
@@ -541,74 +603,67 @@ def aligned_feature_labels(values: np.ndarray, index: pd.Index) -> np.ndarray:
     return labels[np.asarray(index, dtype=np.intp)]
 
 
-def bulk_frames(
-    vals: Mapping[str, NDArray[Any]],
-    fracs: Mapping[str, NDArray[Any]],
+def bulk_profiles(
+    profiles: Sequence[NDArray[Any]],
+    detected: Sequence[NDArray[np.int64]] | None,
     features: MetaData,
     *,
-    n_cells: Mapping[str, int],
+    columns: pd.Index,
+    n_cells: NDArray[np.int64],
     remove_empty_features: bool,
     remove_empty_columns: bool,
     feature_label: str,
-    return_fraction: bool,
-    return_n_cells: bool,
-) -> (
-    pd.DataFrame
-    | tuple[pd.DataFrame, pd.DataFrame]
-    | tuple[pd.DataFrame, pd.Series]
-    | tuple[pd.DataFrame, pd.DataFrame, pd.Series]
-):
-    """Return the bulk profiles, and fractions and cell counts on request, as frames.
+) -> BulkProfiles:
+    """Return the bulk profiles, labelled by feature and by bulk column, as a record.
 
-    ``n_cells`` lists every bulk column, in order, with its number of cells;
-    ``vals`` and ``fracs`` hold the profiles of the columns with cells.
-    Columns without cells are left out, or with ``remove_empty_columns=False``
-    kept as NaN, and cell counts form an int64 Series named ``n_cells`` over
-    the returned columns. The fractions and cell counts follow the profiles in
-    the returned tuple.
+    ``columns`` labels every bulk column and ``n_cells`` gives each one's
+    number of cells, in the same order; ``profiles`` and ``detected`` hold
+    the profiles and detected counts of the columns with cells, in that
+    order. Columns without cells are left out, or with
+    ``remove_empty_columns=False`` kept, with NaN profiles and no detecting
+    cells. ``remove_empty_features`` leaves out the features whose profile
+    sums to zero over the returned columns, in ``detected`` too.
     """
-    columns = [
-        name for name, count in n_cells.items() if count or not remove_empty_columns
-    ]
+    counts = np.asarray(n_cells, dtype=np.int64)
+    if counts.shape != (len(columns),):
+        raise ValueError("Bulk cell counts must align with the bulk columns")
+    filled = counts > 0
+    kept = np.flatnonzero(filled | (not remove_empty_columns))
+    # The position of each column with cells among the aggregated profiles.
+    aggregated = np.cumsum(filled) - 1
 
-    def frame(profiles: Mapping[str, NDArray[Any]]) -> pd.DataFrame:
-        return pd.DataFrame(
+    def frame(arrays: Sequence[NDArray[Any]], empty: NDArray[Any]) -> pd.DataFrame:
+        values = pd.DataFrame(
             {
-                name: profiles[name] if n_cells[name] else np.full(features.N, np.nan)
-                for name in columns
+                position: arrays[aggregated[position]] if filled[position] else empty
+                for position in kept
             }
         )
+        values.columns = columns[kept]
+        return values
 
-    vals_df = frame(vals)
-    counts = pd.Series(
-        [int(n_cells[name]) for name in columns],
-        index=columns,
-        dtype=np.int64,
-        name="n_cells",
+    profile_frame = frame(profiles, np.full(features.N, np.nan))
+    detected_frame = (
+        None
+        if detected is None
+        else frame(detected, np.zeros(features.N, dtype=np.int64))
     )
-
-    empty_idx = None
     if remove_empty_features:
-        empty_idx = vals_df.sum(axis=1) != 0
-        vals_df = vals_df.loc[empty_idx]
-
-    if feature_label == "id":
-        vals_df.set_index(
-            aligned_feature_labels(features.fetch_all("ids"), vals_df.index),
-            inplace=True,
-            drop=True,
+        expressed = profile_frame.sum(axis=1) != 0
+        profile_frame = profile_frame.loc[expressed]
+        if detected_frame is not None:
+            detected_frame = detected_frame.loc[expressed]
+    if feature_label in ("id", "name"):
+        profile_frame = profile_frame.set_index(
+            aligned_feature_labels(
+                features.fetch_all("ids" if feature_label == "id" else "names"),
+                profile_frame.index,
+            )
         )
-    elif feature_label == "name":
-        vals_df.set_index(
-            aligned_feature_labels(features.fetch_all("names"), vals_df.index),
-            inplace=True,
-            drop=True,
-        )
-
-    if not return_fraction:
-        return (vals_df, counts) if return_n_cells else vals_df
-    fracs_df = frame(fracs)
-    if empty_idx is not None:
-        fracs_df = fracs_df[empty_idx]
-    fracs_df.set_index(vals_df.index, inplace=True, drop=True)
-    return (vals_df, fracs_df, counts) if return_n_cells else (vals_df, fracs_df)
+    if detected_frame is not None:
+        detected_frame.index = profile_frame.index
+    return BulkProfiles(
+        profiles=profile_frame,
+        columns=pd.DataFrame({"n_cells": counts[kept]}, index=columns[kept]),
+        detected=detected_frame,
+    )

@@ -86,7 +86,7 @@ Facade aliases do not change implementation ownership.
   as `.DS_Store` is never a column; `head` and the membership columns reuse the arrays that one
   listing opened, and `to_pandas_dataframe` opens only the requested columns, each once.
   Shared value-selection contracts also live here so domain, orchestration, and presentation code can use one typed contract without reversing dependencies.
-  These include the nullable value contract of metadata columns (`metadata/encoding.py`), the assay-membership contract (`metadata/membership.py`), and `CELL_VALUE_NAMES`, the table of cell-aligned artifact kinds, with the reader that aligns their rows to cells (`metadata/selection.py`).
+  These include the nullable value contract of metadata columns (`metadata/encoding.py`), the assay-membership contract (`metadata/membership.py`), and `CELL_VALUE_NAMES`, the table of cell-aligned artifact kinds, with the reader that aligns their rows to cells and the reader of a cell column over a cell selection (`metadata/selection.py`).
   `metadata/records.py` encodes long tables of records that belong to cells, such as the contigs of a V(D)J library or the molecules of a lineage barcode library: it parses their text chunk by chunk, naming the file lines of values it refuses, stores a text field once per distinct value with a sorted code per record and a ragged field record by record as UTF-8 bytes with offsets, and merges the chunks with `RecordEncoder` into one `RecordTable` ordered by cell, source and file row. It never touches storage.
   `metadata/artifacts.py` plans and writes artifacts of one row per selected cell. `write_cell_data_artifact` stores text at the width of its widest value, converting and writing one stored chunk at a time, and `cell_data_write_bytes` states what a write holds, from the shapes and stored widths of its arrays, for the operations that check it against their memory budget.
 - `assay/` owns normalization, blockwise feature-summary computation, and the RNA, ATAC, and ADT assay types.
@@ -130,7 +130,7 @@ They must not import those packages at module load time.
   `features/enrichment/chromvar.py` owns chromVAR background peaks and deviation scoring beside
   AUCell and WAGGR.
   It also owns presentation-independent feature resolution and normalized value fetching used by datastore workflows and plots.
-  `features/statistical.py` owns the statistical design of `compare.test`, and `features/aggregation.py` the bulk profiles of `compare.compute_bulk`; the datastore methods keep grouping resolution, value reads, artifact planning, and persistence.
+  `features/statistical.py` owns the statistical design of `compare.test`, and `features/aggregation.py` the bulk profiles of `compare.compute_bulk` and the `BulkProfiles` record that holds them; the datastore methods keep grouping resolution, value reads, artifact planning, and persistence.
 - `quality_control/` owns filtering, HTO demultiplexing, doublet processing, cell-cycle assignment, and the default cell-cycle gene references.
   `cell_calling.py` owns EmptyDrops cell calling of unfiltered droplet matrices: the barcode-rank
   knee, Good-Turing ambient profiles, the Dirichlet-multinomial precision estimate, and seeded
@@ -630,8 +630,8 @@ CyteArc validates persisted data and public arguments against the following cont
   store before planning.
 - Public arguments are validated before any artifact is written: `graph.load(use_k=...)`,
   `reduction.lsi` `skip_first` and `rand_state`, `reduction.custom` loadings, `reduction.harmony`
-  parameters, `integration.modalities(chunk_size=...)`, `features.hvgs` keywords, `embeddings.umap` array
-  initializations, and `compare.compute_bulk` column names.
+  parameters, `integration.modalities(chunk_size=...)`, `features.hvgs` keywords, and `embeddings.umap` array
+  initializations.
 - Normalization arithmetic is independent of the count storage dtype. Library-size, CLR, and
   TF-IDF calculations use float64 for integer and floating-point counts. Persisted normalized
   values and the library-size values ranked by marker search are rounded once to float32;
@@ -1543,8 +1543,8 @@ CyteArc validates persisted data and public arguments against the following cont
   `"auc"`, `"fold_change"`, or `"p_value"` with deterministic ties, as
   `cytearc.features.sort_marker_results(table, sort_by)` does.
 - `compare.compute_bulk` leaves out bulk columns without cells, which it returned as zeros, keeps
-  them as NaN with `remove_empty_columns=False`, and with `return_n_cells=True` appends the cells
-  of each column. It raises for a `pseudo_reps` below 1, which it treated as 1, and for an unknown
+  them as NaN with `remove_empty_columns=False`, and reports the cells of each column in the
+  `columns` table of its record. It raises for a `pseudo_reps` below 1, which it treated as 1, and for an unknown
   `feature_label`, which fell back to positions.
 - `compare.test` validates and encodes its design once per call, through `prepare_group_comparison`, instead of once per key; `compare_group_distributions` gives each array the same result, bit for bit. A design without `sample_by` warns that it treats each cell as an independent observation: `compare.test` gives the warning before it reuses or computes its result, so a reused result warns as a computed one does, and prepares its design with `_warn_cell_level=False`, while both functions warn their direct callers.
 - `read_gmt` drops a UTF-8 byte order mark. `create_bed_from_coord_ids` parses ids with
@@ -1569,6 +1569,7 @@ CyteArc validates persisted data and public arguments against the following cont
   The warning of a writable open that keeps `I` because `min_features_per_cell` would remove at
   least half of the active cells now points to `qc.call_cells` for unfiltered droplet matrices.
 - Calls that take features tell apart features that share a name by their IDs. `imputation.compute_imputed` takes `FeatureRef` values beside names and resolves features through `resolve_feature_batch`, as plots and `compare.test` do: a name that several features share raises `ValueError` naming their IDs, where it imputed their mean, which `FeatureRef(value=name, reduction="mean")` now asks for, and a feature that the assay does not hold raises `KeyError` instead of `ValueError`. The refusal of `resolve_feature_batch` names the features' IDs. `markers.load` adds `feature_id`, the ID that the marker table froze, after `feature_name`. `plotting.lineage_trends` takes `FeatureRef` values in `features`, and `lineage_heatmap` and `pseudotime_heatmap` take them in `show_features`. These plots find features among the aggregation's retained features through `resolve_feature_rows` of `features/values.py`, and a name that several retained features share raises `ValueError` naming their IDs, where `lineage_trends` drew the first of them and the heatmaps labelled the last.
+- `compare.compute_bulk` returns a `BulkProfiles` record of `features/aggregation.py` instead of a frame or a tuple of frames, in one step and without an adapter: `profiles`, the frame it returned; `columns`, each bulk column's `n_cells` as int64; and, with `count_detected=True`, which replaces `return_fraction=True`, `detected`, the int64 number of each column's cells whose raw count of each feature is above zero, from which `detected_fraction` derives the share that it returned as floats. `return_n_cells` is removed. A bulk column is labelled by its group label, or by a MultiIndex of the levels `group`, `subgroup` and `replicate` that the call uses, where its name joined the labels with `_` and `_Rep1`, so labels that joined into one name, which it refused, give distinct columns, and numeric labels stay numbers where `1.0` became the text `"1.0"`. `regulons.profiles` indexes its rows by the same group labels. `artifacts.load_values` takes a `CellField` beside an artifact and reads the column over a `cell_selection`, which it then requires, with its linked missing mask, through `resolve_cell_column` of `metadata/selection.py`, the read of a metadata grouping in `resolve_grouping` too; the read is charged against the memory budget as an artifact's values are.
 
 Compatibility exists only where a current public facade or an explicit file-schema test says it
 does. There are no silent migrations, implicit compatibility branches, or forwarding shims for

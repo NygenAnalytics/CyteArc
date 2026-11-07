@@ -35,27 +35,27 @@ def _bulk_store(tmp_path, counts, *, workers=1):
 
 
 @pytest.mark.parametrize("normalize", [False, True])
-@pytest.mark.parametrize("return_fraction", [False, True])
-def test_bulk_kernel_matches_grouped_counts(normalize, return_fraction):
+@pytest.mark.parametrize("count_detected", [False, True])
+def test_bulk_kernel_matches_grouped_counts(normalize, count_detected):
     raw = np.array([[0, 90, 3, 7], [8, 80, 0, 2], [1, 70, 4, 0]], dtype=np.uint16)
     selected = np.array([0, 2, 3])
     codes = np.array([1, 0, 1])
     scalars = np.array([9.0, 7.0, 9.0]) if normalize else None
     expected = np.zeros((3, 3))
-    expected_fractions = np.zeros((3, 3))
+    expected_detected = np.zeros((3, 3), dtype=np.int64)
     for group in range(3):
         counts = raw[:, selected[codes == group]].astype(float)
-        expected_fractions[:, group] = (counts > 0).sum(axis=1)
+        expected_detected[:, group] = (counts > 0).sum(axis=1)
         if normalize:
             counts *= 100 / scalars[codes == group]
         expected[:, group] = counts.sum(axis=1)
     for kernel in (_accumulate_group_counts.py_func, _accumulate_group_counts):
         values = np.zeros((3, 3)).T
-        fractions = np.zeros((3, 3)).T if return_fraction else None
-        kernel(raw, selected, codes, scalars, 100.0, values, fractions)
+        detected = np.zeros((3, 3), dtype=np.int64).T if count_detected else None
+        kernel(raw, selected, codes, scalars, 100.0, values, detected)
         np.testing.assert_allclose(values, expected)
-        if return_fraction:
-            np.testing.assert_array_equal(fractions, expected_fractions)
+        if count_detected:
+            np.testing.assert_array_equal(detected, expected_detected)
 
 
 @pytest.mark.parametrize(
@@ -80,7 +80,7 @@ def test_bulk_rejects_misaligned_groups_and_scalars(codes, scalars, message):
             2,
             scalars=None if scalars is None else np.array(scalars),
             size_factor=100,
-            return_fraction=False,
+            count_detected=False,
             resources=ResourceBudget(1_000_000, 1),
         )
 
@@ -122,33 +122,38 @@ def test_bulk_counts_t_matches_selected_groups_and_empty_replicates(
     path, counts = grouped_counts_store
     store = _reopen(path, workers=workers)
     cells = store.snapshot_cell_selection("selected")
-    actual, fractions = store.compare.compute_bulk(
+    bulk = store.compare.compute_bulk(
         "group",
         cell_selection=cells,
         secondary_groups="secondary",
         null_vals=["skip"],
         aggr_type=aggregation,
         pseudo_reps=replicates,
-        return_fraction=True,
+        count_detected=True,
         feature_label="id",
         random_seed=61,
         remove_empty_columns=not keep_empty,
     )
+    actual, detected = bulk.profiles, bulk.detected
+    fractions = bulk.detected_fraction
     expected_columns = []
-    for name, rows in {"a_x": [0, 4], "a_y": [1], "b_x": [2], "b_y": [6]}.items():
+    pairs = {("a", "x"): [0, 4], ("a", "y"): [1], ("b", "x"): [2], ("b", "y"): [6]}
+    for pair, rows in pairs.items():
         shuffled = np.random.RandomState(61).choice(rows, len(rows), replace=False)
         for i, part in enumerate(np.array_split(shuffled, replicates)):
-            column = name if replicates == 1 else f"{name}_Rep{i + 1}"
+            column = pair if replicates == 1 else (*pair, i + 1)
             if len(part) == 0:
-                # A pseudo-replicate without cells is left out, or kept as NaN.
+                # A pseudo-replicate without cells is left out, or kept as NaN
+                # with no detecting cell.
                 if keep_empty:
                     expected_columns.append(column)
                     assert actual[column].isna().all()
+                    assert (detected[column] == 0).all()
                     assert fractions[column].isna().all()
+                    assert bulk.columns.loc[column, "n_cells"] == 0
                 continue
             expected_columns.append(column)
             raw = counts[sorted(part)]
-            expected_fraction = (raw > 0).mean(axis=0)
             expected = (
                 raw.sum(axis=0)
                 if aggregation == "sum"
@@ -157,9 +162,19 @@ def test_bulk_counts_t_matches_selected_groups_and_empty_replicates(
                 )
             )
             np.testing.assert_allclose(actual[column], expected[:-1])
-            np.testing.assert_array_equal(fractions[column], expected_fraction[:-1])
-    assert list(actual.columns) == list(fractions.columns) == expected_columns
-    assert list(actual.index) == [f"g{i}" for i in range(23)]
+            np.testing.assert_array_equal(detected[column], (raw > 0).sum(axis=0)[:-1])
+            np.testing.assert_array_equal(
+                fractions[column], (raw > 0).mean(axis=0)[:-1]
+            )
+            assert bulk.columns.loc[column, "n_cells"] == len(part)
+    assert list(actual.columns) == list(detected.columns) == expected_columns
+    assert list(bulk.columns.index) == expected_columns
+    assert actual.columns.names == (
+        ["group", "subgroup"] if replicates == 1 else ["group", "subgroup", "replicate"]
+    )
+    assert (detected.dtypes == np.int64).all()
+    assert bulk.columns["n_cells"].dtype == np.int64
+    assert list(actual.index) == list(detected.index) == [f"g{i}" for i in range(23)]
 
 
 @pytest.mark.parametrize("workers", [1, 4])
@@ -172,7 +187,9 @@ def test_bulk_sum_keeps_large_integers_and_ignores_custom_normalizer(tmp_path, w
         raise AssertionError("Raw bulk sums must not call the normalizer")
 
     store.RNA.normMethod = forbidden
-    actual = store.compare.compute_bulk("group", cell_selection=cells, aggr_type="sum")
+    actual = store.compare.compute_bulk(
+        "group", cell_selection=cells, aggr_type="sum"
+    ).profiles
     np.testing.assert_array_equal(actual["a"], counts.sum(axis=0))
     assert actual["a"].dtype == np.uint64
 
@@ -190,12 +207,13 @@ def test_bulk_mean_uses_stored_totals_and_averages_zero_total_cells_as_zero(
     normalized = store.RNA.normed(
         cell_idx=np.arange(3), feat_idx=np.arange(2)
     ).compute()
-    actual, fractions = store.compare.compute_bulk(
+    bulk = store.compare.compute_bulk(
         "group",
         cell_selection=cells,
-        return_fraction=True,
+        count_detected=True,
         remove_empty_features=False,
     )
+    actual = bulk.profiles
     np.testing.assert_allclose(
         actual["a"], counts[0].astype(float) * store.RNA.sf / 220
     )
@@ -205,7 +223,8 @@ def test_bulk_mean_uses_stored_totals_and_averages_zero_total_cells_as_zero(
     np.testing.assert_allclose(
         actual["b"], counts[1].astype(float) * store.RNA.sf / 220 / 2
     )
-    np.testing.assert_array_equal(fractions["b"], 0.5)
+    np.testing.assert_array_equal(bulk.detected["b"], 1)
+    np.testing.assert_array_equal(bulk.detected_fraction["b"], 0.5)
 
 
 @pytest.fixture(scope="module")
@@ -227,17 +246,18 @@ def test_bulk_mean_retains_other_normalizers(two_cell_store, normalizer, replica
     normalized = store.RNA.normed(
         cell_idx=np.arange(2), feat_idx=np.arange(2)
     ).compute()
-    actual, fractions = store.compare.compute_bulk(
+    bulk = store.compare.compute_bulk(
         "group",
         cell_selection=cells,
         pseudo_reps=replicates,
-        return_fraction=True,
+        count_detected=True,
         random_seed=61,
     )
+    actual, fractions = bulk.profiles, bulk.detected_fraction
     shuffled = np.random.RandomState(61).choice(2, 2, replace=False)
     columns = []
     for i, rows in enumerate(np.array_split(shuffled, replicates)):
-        column = "a" if replicates == 1 else f"a_Rep{i + 1}"
+        column = "a" if replicates == 1 else ("a", i + 1)
         if not len(rows):
             # Two cells fill two of three pseudo-replicates; the third is left out.
             continue
@@ -279,26 +299,28 @@ def test_bulk_excludes_masked_labels_like_null_values(tmp_path, aggregation):
 
     masked = store.compare.compute_bulk(
         "group", secondary_groups="secondary", **options
-    )
+    ).profiles
     nulled = store.compare.compute_bulk(
         "group_nulls",
         secondary_groups="secondary_nulls",
         null_vals=["-"],
         secondary_null_vals=["-"],
         **options,
-    )
+    ).profiles
 
     # Group 0 has no cell of sub-group y once masked labels are left out, so
-    # that combination has no column rather than a column of zeros.
-    assert list(masked.columns) == ["0_x", "1_x", "1_y"]
-    pd.testing.assert_frame_equal(masked, nulled)
+    # that combination has no column rather than a column of zeros. The
+    # integer labels of the masked column stay integers.
+    assert list(masked.columns) == [(0, "x"), (1, "x"), (1, "y")]
+    assert list(nulled.columns) == [("0", "x"), ("1", "x"), ("1", "y")]
+    pd.testing.assert_frame_equal(masked, nulled.set_axis(masked.columns, axis=1))
     if aggregation == "sum":
-        np.testing.assert_array_equal(masked["0_x"], counts[0])
+        np.testing.assert_array_equal(masked[(0, "x")], counts[0])
     kept = store.compare.compute_bulk(
         "group", secondary_groups="secondary", remove_empty_columns=False, **options
-    )
-    assert list(kept.columns) == ["0_x", "0_y", "1_x", "1_y"]
-    assert kept["0_y"].isna().all()
+    ).profiles
+    assert list(kept.columns) == [(0, "x"), (0, "y"), (1, "x"), (1, "y")]
+    assert kept[(0, "y")].isna().all()
     pd.testing.assert_frame_equal(kept[masked.columns], masked)
 
 
@@ -316,29 +338,83 @@ def test_bulk_leaves_nan_none_and_blank_labels_out_of_every_group(tmp_path):
         "remove_empty_features": False,
     }
 
-    by_float = store.compare.compute_bulk("float_group", **options)
-    by_text = store.compare.compute_bulk("text_group", **options)
+    by_float = store.compare.compute_bulk("float_group", **options).profiles
+    by_text = store.compare.compute_bulk("text_group", **options).profiles
 
-    assert list(by_float.columns) == ["1.0", "2.0"]
-    np.testing.assert_array_equal(by_float["1.0"], counts[[0, 1]].sum(axis=0))
-    np.testing.assert_array_equal(by_float["2.0"], counts[[3, 5]].sum(axis=0))
+    # Numeric labels stay numbers.
+    assert list(by_float.columns) == [1.0, 2.0]
+    assert by_float.columns.dtype == np.float64
+    np.testing.assert_array_equal(by_float[1.0], counts[[0, 1]].sum(axis=0))
+    np.testing.assert_array_equal(by_float[2.0], counts[[3, 5]].sum(axis=0))
     assert list(by_text.columns) == ["a", "b"]
     np.testing.assert_array_equal(by_text["a"], counts[[0, 2]].sum(axis=0))
     # Null values that name every label leave no group to read.
-    assert store.compare.compute_bulk(
-        "text_group", null_vals=["a", "b"], **options
-    ).empty
+    empty = store.compare.compute_bulk("text_group", null_vals=["a", "b"], **options)
+    assert empty.profiles.empty
+    assert empty.columns.empty
 
 
-def test_bulk_rejects_colliding_column_names(tmp_path):
-    store, cells = _bulk_store(tmp_path, np.ones((4, 3), dtype=np.uint16))
-    store.cells.insert("group", np.array(["a_b", "a_b", "a", "a"]))
-    store.cells.insert("secondary", np.array(["c", "c", "b_c", "b_c"]))
+@pytest.mark.parametrize("aggregation", ["sum", "mean"])
+def test_bulk_columns_keep_apart_labels_that_join_to_one_name(tmp_path, aggregation):
+    # The groups a_b with c and a with b_c both joined into "a_b_c", which
+    # was refused; a column is now labelled by its group and sub-group.
+    counts = np.arange(1, 25, dtype=np.uint16).reshape(6, 4)
+    store, cells = _bulk_store(tmp_path, counts)
+    store.cells.insert("group", np.array(["a_b", "a_b", "a", "a", "a", "a_b"]))
+    store.cells.insert("donor", np.array(["c", "c", "b_c", "b_c", "c", "d_1"]))
 
-    with pytest.raises(ValueError, match="'a_b_c' is produced by more than one"):
-        store.compare.compute_bulk(
-            "group", cell_selection=cells, secondary_groups="secondary"
+    bulk = store.compare.compute_bulk(
+        "group",
+        cell_selection=cells,
+        secondary_groups="donor",
+        aggr_type=aggregation,
+        count_detected=True,
+        remove_empty_features=False,
+    )
+
+    # By hand: a with b_c is cells 2 and 3, a with c cell 4, a_b with c cells
+    # 0 and 1, and a_b with d_1 cell 5.
+    members = {
+        ("a", "b_c"): [2, 3],
+        ("a", "c"): [4],
+        ("a_b", "c"): [0, 1],
+        ("a_b", "d_1"): [5],
+    }
+    assert list(bulk.profiles.columns) == list(members)
+    assert bulk.profiles.columns.names == ["group", "subgroup"]
+    table = bulk.columns.reset_index()
+    assert table.columns.tolist() == ["group", "subgroup", "n_cells"]
+    assert table[["group", "subgroup"]].values.tolist() == [
+        list(pair) for pair in members
+    ]
+    assert table["n_cells"].tolist() == [2, 1, 2, 1]
+    for pair, rows in members.items():
+        raw = counts[rows]
+        expected = (
+            raw.sum(axis=0)
+            if aggregation == "sum"
+            else (raw * store.RNA.sf / raw.sum(axis=1)[:, None]).mean(axis=0)
         )
+        np.testing.assert_allclose(bulk.profiles[pair], expected, rtol=1e-12)
+        np.testing.assert_array_equal(bulk.detected[pair], (raw > 0).sum(axis=0))
+
+
+def test_bulk_profiles_refuse_cell_counts_of_other_columns(tmp_path):
+    from cytearc.features.aggregation import bulk_profiles
+
+    store, _ = _bulk_store(tmp_path, np.ones((2, 3), dtype=np.uint16))
+    with pytest.raises(ValueError) as raised:
+        bulk_profiles(
+            [np.ones(3)],
+            None,
+            store.RNA.feats,
+            columns=pd.Index(["a"], name="group"),
+            n_cells=np.array([1, 1]),
+            remove_empty_features=False,
+            remove_empty_columns=True,
+            feature_label="index",
+        )
+    assert raised.value.args == ("Bulk cell counts must align with the bulk columns",)
 
 
 def test_bulk_by_a_column_reads_the_live_cells_without_a_snapshot(tmp_path):
@@ -366,12 +442,14 @@ def test_bulk_by_a_column_reads_the_live_cells_without_a_snapshot(tmp_path):
         }
 
     before = files()
-    bulk = store.compare.compute_bulk("group", secondary_groups=labels, **options)
+    bulk = store.compare.compute_bulk(
+        "group", secondary_groups=labels, **options
+    ).profiles
 
     assert files() == before
-    assert list(bulk.columns) == ["a_x", "a_y", "b_x", "b_y"]
-    np.testing.assert_array_equal(bulk["a_x"], counts[[0, 4]].sum(axis=0))
-    np.testing.assert_array_equal(bulk["b_y"], counts[3])
+    assert list(bulk.columns) == [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")]
+    np.testing.assert_array_equal(bulk[("a", "x")], counts[[0, 4]].sum(axis=0))
+    np.testing.assert_array_equal(bulk[("b", "y")], counts[3])
     # A sub-grouping artifact must hold every live cell, past its last cell
     # or between two of its cells.
     for partial in (part, gap):
@@ -397,8 +475,8 @@ def test_bulk_mean_fits_non_rna_normalization_once(tmp_path):
     store.cells.insert("group", np.repeat(["a", "b", "c"], 4))
     options = {"cell_selection": cells, "remove_empty_features": False}
 
-    every_group = store.compare.compute_bulk("group", **options)
-    without_b = store.compare.compute_bulk("group", null_vals=["b"], **options)
+    every_group = store.compare.compute_bulk("group", **options).profiles
+    without_b = store.compare.compute_bulk("group", null_vals=["b"], **options).profiles
 
     # CLR geometric means come from every selected cell, not from each group.
     normalized = np.log1p(counts / np.exp(np.log1p(counts).mean(axis=0)))
@@ -418,7 +496,7 @@ def test_bulk_rejects_unknown_aggregation(tmp_path):
 
     # The aggregation functions refuse it too, without reading a cell.
     cell_idx = np.arange(2, dtype=np.int64)
-    column_rows = {"a": cell_idx}
+    column_rows = [cell_idx]
     read = bulk_read_cells(store.RNA, "median", cell_idx, column_rows)
     assert read.dtype == np.int64
     np.testing.assert_array_equal(read, [])
@@ -430,7 +508,7 @@ def test_bulk_rejects_unknown_aggregation(tmp_path):
             column_rows,
             cell_idx,
             aggr_type="median",
-            return_fraction=True,
+            count_detected=True,
             cells=store.cells,
             resources=store.resources,
             nthreads=1,
@@ -482,22 +560,19 @@ def test_bulk_leaves_out_combinations_without_cells_and_counts_cells(
     }
 
     values = store.compare.compute_bulk("cluster", **options)
-    with_counts, n_cells = store.compare.compute_bulk(
-        "cluster", return_n_cells=True, **options
-    )
-    full, fractions, full_counts = store.compare.compute_bulk(
-        "cluster", return_fraction=True, return_n_cells=True, **options
-    )
-    kept, kept_fractions, kept_counts = store.compare.compute_bulk(
+    full = store.compare.compute_bulk("cluster", count_detected=True, **options)
+    kept = store.compare.compute_bulk(
         "cluster",
-        return_fraction=True,
-        return_n_cells=True,
+        count_detected=True,
         remove_empty_columns=False,
         **options,
     )
 
-    rows = {"A_d1": [0, 7], "A_d2": [1, 4, 6], "B_d1": [2, 3, 5]}
-    assert values.columns.tolist() == list(rows)
+    rows = {("A", "d1"): [0, 7], ("A", "d2"): [1, 4, 6], ("B", "d1"): [2, 3, 5]}
+    assert values.profiles.columns.tolist() == list(rows)
+    assert values.detected is None
+    with pytest.raises(ValueError, match="pass count_detected=True"):
+        values.detected_fraction
     for column, members in rows.items():
         raw = counts[members]
         expected = (
@@ -505,24 +580,28 @@ def test_bulk_leaves_out_combinations_without_cells_and_counts_cells(
             if aggregation == "sum"
             else (raw * store.RNA.sf / raw.sum(axis=1)[:, None]).mean(axis=0)
         )
-        np.testing.assert_allclose(values[column], expected, rtol=1e-12)
-        np.testing.assert_array_equal(fractions[column], (raw > 0).mean(axis=0))
-    for frame in (with_counts, full):
-        pd.testing.assert_frame_equal(frame, values)
-    expected_counts = pd.Series(
-        {column: len(members) for column, members in rows.items()},
-        dtype=np.int64,
-        name="n_cells",
+        np.testing.assert_allclose(values.profiles[column], expected, rtol=1e-12)
+        np.testing.assert_array_equal(full.detected[column], (raw > 0).sum(axis=0))
+        np.testing.assert_array_equal(
+            full.detected_fraction[column], (raw > 0).mean(axis=0)
+        )
+    pd.testing.assert_frame_equal(full.profiles, values.profiles)
+    expected_counts = pd.DataFrame(
+        {"n_cells": [len(members) for members in rows.values()]},
+        index=pd.MultiIndex.from_tuples(list(rows), names=["group", "subgroup"]),
     )
-    for counted in (n_cells, full_counts):
-        pd.testing.assert_series_equal(counted, expected_counts)
+    for counted in (values.columns, full.columns):
+        pd.testing.assert_frame_equal(counted, expected_counts)
 
-    # Kept, the combination holds NaN, never a profile of zeros.
-    assert kept.columns.tolist() == [*rows, "B_d2"]
-    assert kept["B_d2"].isna().all() and kept_fractions["B_d2"].isna().all()
-    pd.testing.assert_frame_equal(kept[list(rows)], values)
-    pd.testing.assert_frame_equal(kept_fractions[list(rows)], fractions)
-    assert kept_counts.to_dict() == {**expected_counts.to_dict(), "B_d2": 0}
+    # Kept, the combination holds NaN, never a profile of zeros, and no cell
+    # detects a feature in it.
+    assert kept.profiles.columns.tolist() == [*rows, ("B", "d2")]
+    assert kept.profiles[("B", "d2")].isna().all()
+    assert (kept.detected[("B", "d2")] == 0).all()
+    assert kept.detected_fraction[("B", "d2")].isna().all()
+    pd.testing.assert_frame_equal(kept.profiles[list(rows)], values.profiles)
+    pd.testing.assert_frame_equal(kept.detected[list(rows)], full.detected)
+    assert kept.columns["n_cells"].tolist() == [2, 3, 3, 0]
 
 
 def test_bulk_sum_preserves_non_rna_assays(datastore_ephemeral):
@@ -532,17 +611,20 @@ def test_bulk_sum_preserves_non_rna_assays(datastore_ephemeral):
     store.cells.insert("bulk_group", np.repeat("a", store.cells.N))
     cells = store.snapshot_cell_selection("bulk_cells")
     counts = store.assay2.rawData[np.flatnonzero(selected)].compute()
-    values, fractions = store.compare.compute_bulk(
+    bulk = store.compare.compute_bulk(
         "bulk_group",
         cell_selection=cells,
         from_assay="assay2",
         aggr_type="sum",
-        return_fraction=True,
+        count_detected=True,
         remove_empty_features=False,
         feature_label="id",
     )
-    np.testing.assert_array_equal(values["a"], counts.sum(axis=0))
-    np.testing.assert_array_equal(fractions["a"], (counts > 0).mean(axis=0))
+    np.testing.assert_array_equal(bulk.profiles["a"], counts.sum(axis=0))
+    np.testing.assert_array_equal(bulk.detected["a"], (counts > 0).sum(axis=0))
+    np.testing.assert_array_equal(
+        bulk.detected_fraction["a"], (counts > 0).mean(axis=0)
+    )
 
 
 def test_bulk_output_is_admitted_before_streaming(tmp_path):
@@ -556,7 +638,7 @@ def test_bulk_output_is_admitted_before_streaming(tmp_path):
             1_000_000,
             scalars=None,
             size_factor=1_000,
-            return_fraction=True,
+            count_detected=True,
             resources=ResourceBudget(1_000_000, 1),
         )
 
@@ -570,18 +652,19 @@ def test_bulk_aggregates_floating_point_counts_in_float64(aggregation):
     selected = np.array([0, 1, 3])
     codes = np.array([0, 0, 2])
     totals = counts[selected].sum(axis=1, dtype=np.float64)
-    actual, fractions = aggregate_rna_groups(
+    actual, detected = aggregate_rna_groups(
         _counts_t_with_plan(counts),
         selected,
         codes,
         4,
         scalars=totals if aggregation == "mean" else None,
         size_factor=1000,
-        return_fraction=True,
+        count_detected=True,
         resources=ResourceBudget(16 * 1024**2, 4),
     )
     assert actual.dtype == np.float64
-    assert fractions is not None
+    assert detected is not None
+    assert detected.dtype == np.int64
     for code in range(4):
         members = codes == code
         raw = counts[selected[members]]
@@ -591,9 +674,7 @@ def test_bulk_aggregates_floating_point_counts_in_float64(aggregation):
         else:
             expected = raw.sum(axis=0)
         np.testing.assert_allclose(actual[:, code], expected)
-        np.testing.assert_array_equal(
-            fractions[:, code], (raw > 0).sum(axis=0) / max(1, members.sum())
-        )
+        np.testing.assert_array_equal(detected[:, code], (raw > 0).sum(axis=0))
 
 
 @pytest.mark.parametrize("codes", [[0, 1], [0, 1, 2], [-2, 0, 1]])
@@ -657,7 +738,7 @@ def test_bulk_sums_of_float_counts_are_exact_above_float32_precision():
         1,
         scalars=None,
         size_factor=1000,
-        return_fraction=False,
+        count_detected=False,
         resources=ResourceBudget(16 * 1024**2, 1),
     )
 
@@ -678,7 +759,7 @@ def test_bulk_aggregation_rejects_results_that_are_not_finite(aggregation):
             2,
             scalars=np.ones(3) if aggregation == "mean" else None,
             size_factor=1000,
-            return_fraction=False,
+            count_detected=False,
             resources=ResourceBudget(16 * 1024**2, 1),
             group_names=["a", "b"],
         )
@@ -721,20 +802,20 @@ def _non_rna_store(tmp_path, counts, *, assay="ADT", workers=1):
     return store, store.snapshot_cell_selection("all_cells")
 
 
-def _column_profiles(raw, column_rows, *, aggr_type, return_fraction):
-    """Sum and count each column's raw rows one column at a time.
+def _column_profiles(raw, column_rows, *, aggr_type, count_detected):
+    """Sum each column's raw rows and count their positive values one column at a time.
 
     This is how compare.compute_bulk aggregated assays without countsT
     before one pass replaced it.
     """
-    vals, fracs = {}, {}
+    vals, detected = [], []
     sum_dtype = np.float64 if raw.dtype.kind == "f" else None
-    for name, idx in column_rows.items():
+    for idx in column_rows:
         if aggr_type == "sum":
-            vals[name] = np.asarray(raw[idx].sum(axis=0, dtype=sum_dtype).compute())
-        if return_fraction:
-            fracs[name] = (raw[idx] > 0).mean(axis=0).compute()
-    return vals, fracs
+            vals.append(np.asarray(raw[idx].sum(axis=0, dtype=sum_dtype).compute()))
+        if count_detected:
+            detected.append(np.asarray((raw[idx] > 0).sum(axis=0).compute()))
+    return vals, detected
 
 
 @pytest.fixture(scope="module")
@@ -758,7 +839,7 @@ def grouped_adt_stores(tmp_path_factory):
             donors = rng.choice(["x", "y"], size=60)
             store.cells.insert("group", groups)
             store.cells.insert("donor", donors)
-            column_rows = bulk_column_rows(
+            columns, column_rows = bulk_column_rows(
                 groups,
                 sorted(set(groups)),
                 np.ones(60, dtype=bool),
@@ -769,9 +850,16 @@ def grouped_adt_stores(tmp_path_factory):
                 pseudo_reps=2,
                 random_seed=4466,
             )
-            filled = {name: rows for name, rows in column_rows.items() if len(rows)}
+            filled = {
+                label: rows
+                for label, rows in zip(columns, column_rows, strict=True)
+                if len(rows)
+            }
             expected = _column_profiles(
-                store.ADT.rawData, filled, aggr_type="sum", return_fraction=True
+                store.ADT.rawData,
+                list(filled.values()),
+                aggr_type="sum",
+                count_detected=True,
             )
             stores[dtype] = (store, cells, filled, expected)
         return stores[dtype]
@@ -788,7 +876,7 @@ def test_non_rna_bulk_matches_the_per_column_aggregation(
 ):
     from cytearc.features.aggregation import aggregate_bulk_profiles
 
-    store, cells, filled, (expected_vals, expected_fracs) = grouped_adt_stores(dtype)
+    store, cells, filled, (expected_vals, expected_detected) = grouped_adt_stores(dtype)
     options = {
         "cell_selection": cells,
         "secondary_groups": "donor",
@@ -798,32 +886,33 @@ def test_non_rna_bulk_matches_the_per_column_aggregation(
         "remove_empty_columns": False,
     }
 
-    values, fractions = store.compare.compute_bulk(
-        "group", return_fraction=True, **options
-    )
+    bulk = store.compare.compute_bulk("group", count_detected=True, **options)
 
-    actual_vals, actual_fracs = aggregate_bulk_profiles(
+    actual_vals, actual_detected = aggregate_bulk_profiles(
         store.ADT,
-        filled,
+        list(filled.values()),
         np.arange(60, dtype=np.int64),
         aggr_type=aggregation,
-        return_fraction=True,
+        count_detected=True,
         cells=store.cells,
         resources=store.resources,
         nthreads=1,
     )
-    assert list(actual_fracs) == list(expected_fracs) == list(filled)
-    for name in filled:
-        assert actual_fracs[name].dtype == expected_fracs[name].dtype
-        assert actual_fracs[name].tobytes() == expected_fracs[name].tobytes()
+    assert actual_detected is not None
+    assert len(actual_detected) == len(expected_detected) == len(filled)
+    for position, label in enumerate(filled):
+        assert actual_detected[position].dtype == np.int64
+        np.testing.assert_array_equal(
+            actual_detected[position], expected_detected[position]
+        )
         if aggregation == "sum":
-            assert actual_vals[name].dtype == expected_vals[name].dtype
+            assert actual_vals[position].dtype == expected_vals[position].dtype
             # Integer-valued counts sum exactly in any order.
-            assert actual_vals[name].tobytes() == expected_vals[name].tobytes()
-            np.testing.assert_array_equal(values[name], expected_vals[name])
-        np.testing.assert_array_equal(fractions[name], expected_fracs[name])
+            assert actual_vals[position].tobytes() == expected_vals[position].tobytes()
+            np.testing.assert_array_equal(bulk.profiles[label], expected_vals[position])
+        np.testing.assert_array_equal(bulk.detected[label], expected_detected[position])
     if aggregation == "sum":
-        assert list(actual_vals) == list(filled)
+        assert len(actual_vals) == len(filled)
 
 
 def test_non_rna_bulk_reads_each_raw_row_once(tmp_path, monkeypatch):
@@ -842,11 +931,11 @@ def test_non_rna_bulk_reads_each_raw_row_once(tmp_path, monkeypatch):
 
     monkeypatch.setattr(chunked, "read_selection", counted)
 
-    values, fractions = store.compare.compute_bulk(
+    bulk = store.compare.compute_bulk(
         "group",
         cell_selection=cells,
         aggr_type="sum",
-        return_fraction=True,
+        count_detected=True,
         remove_empty_features=False,
     )
 
@@ -855,8 +944,8 @@ def test_non_rna_bulk_reads_each_raw_row_once(tmp_path, monkeypatch):
     assert sum(rows_read) == 40
     for index, name in enumerate("abcde"):
         rows = counts[8 * index : 8 * (index + 1)]
-        np.testing.assert_array_equal(values[name], rows.sum(axis=0))
-        np.testing.assert_array_equal(fractions[name], (rows > 0).mean(axis=0))
+        np.testing.assert_array_equal(bulk.profiles[name], rows.sum(axis=0))
+        np.testing.assert_array_equal(bulk.detected[name], (rows > 0).sum(axis=0))
 
 
 def test_raw_group_sums_add_floating_rows_in_order():

@@ -2026,7 +2026,7 @@ class TestDataStore:
 
         from cytearc.assay.base import raw_csr
 
-        df = datastore.compare.compute_bulk(leiden_clustering)
+        df = datastore.compare.compute_bulk(leiden_clustering).profiles
 
         # Expected: the mean library-size normalized profile of each cluster,
         # over the features that any clustered cell expresses.
@@ -2050,7 +2050,7 @@ class TestDataStore:
             ]
         )
         expressed = np.flatnonzero(np.asarray(counts.sum(axis=0)).ravel() > 0)
-        np.testing.assert_array_equal(df.columns.to_numpy(), groups.astype(str))
+        np.testing.assert_array_equal(df.columns.to_numpy(), groups)
         np.testing.assert_array_equal(df.index.to_numpy(), expressed)
         np.testing.assert_allclose(
             df.to_numpy(), expected[expressed], rtol=1e-5, atol=1e-9

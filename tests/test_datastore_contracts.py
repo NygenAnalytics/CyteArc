@@ -128,8 +128,9 @@ _METHODS = {
 _SIGNATURE_DIGESTS = {
     # Base and inherited graph constructors accept DataStore's optional setup values.
     # min_features_per_cell is int | None: None applies 10 on a store's first
-    # writable open, and later opens never filter.
-    BaseDataStore: "65b8c1277d428920d77b0766fe77bff11158da2c90ec36899b2c6257580da57c",
+    # writable open, and later opens never filter. load_cell_values takes
+    # ref: ArtifactRef | CellField.
+    BaseDataStore: "c6dde09e61384323518e7b4038f180af5338a3a7139759d0a00130db2d23525a",
     # run_leiden_clustering gained the native backend: backend is now
     # Literal["cytearc", "igraph", "leidenalg"] with the default "cytearc".
     # The inherited constructor takes min_features_per_cell: int | None.
@@ -155,12 +156,13 @@ _SIGNATURE_DIGESTS = {
     # min_score: float | None = None, min_frac_exp: float | None = 0.2,
     # min_auc: float | None = 0.6, max_p_adj: float | None = 0.05, and
     # sort_by: MarkerSortKey = "score"; make_bulk gained the keyword-only
-    # remove_empty_columns: bool = True and return_n_cells: bool = False, and
-    # returns their tuple shapes. run_doublet_detection gained sample_column,
+    # remove_empty_columns: bool = True, then returns a BulkProfiles record,
+    # with count_detected: bool = False in place of return_fraction and
+    # without return_n_cells. run_doublet_detection gained sample_column,
     # expected_doublet_rate, and threshold, with new defaults for the parent
     # pool, simulation_ratio, heterotypic_fraction, save_k, smoothing_t, and
     # normalize_scores; select_cells gained value.
-    DataStore: "ab900047d5616aa1e2bd1e86590a01f4163fb0d712717f637a725d6d0a8d8f1e",
+    DataStore: "12e9ccda832274acc155fde63c37fee1b60cf4f6d173ec76d58677b3e1c8a77d",
     # artifacts.prune_incomplete(*, dry_run: bool = True) -> list[str] was added.
     ArtifactAccessor: "6d4befabbbc91b00684038f44e0b3063905c84437587be0994c26370efa2570c",
 }

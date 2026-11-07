@@ -638,20 +638,18 @@ def test_make_bulk_excludes_missing_artifact_labels(nullable) -> None:
         "remove_empty_features": False,
     }
 
-    masked = store.compare.compute_bulk(clusters, **options)
+    masked = store.compare.compute_bulk(clusters, **options).profiles
     restricted = store.compare.compute_bulk(
         clusters, cell_selection=labelled, **options
-    )
+    ).profiles
 
-    assert list(masked.columns) == ["0", "1", "2"]
+    assert list(masked.columns) == [0, 1, 2]
     pd.testing.assert_frame_equal(masked, restricted)
     # Each bulk column sums the raw counts of its labelled cells only.
     raw = np.asarray(store.RNA.rawData[np.arange(store.cells.N)].compute())
     for code in range(3):
         rows = (nullable.codes == code) & ~nullable.missing
-        np.testing.assert_array_equal(
-            masked[str(code)].to_numpy(), raw[rows].sum(axis=0)
-        )
+        np.testing.assert_array_equal(masked[code].to_numpy(), raw[rows].sum(axis=0))
 
 
 def test_live_masked_columns_are_missing_values_or_rejected(nullable) -> None:

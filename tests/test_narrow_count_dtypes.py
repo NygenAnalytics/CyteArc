@@ -217,7 +217,7 @@ def _count_results(store: DataStore) -> dict[str, Any]:
     for aggr_type in ("sum", "mean"):
         results[f"bulk/{aggr_type}"] = store.compare.compute_bulk(
             "group", aggr_type=aggr_type, remove_empty_features=False
-        )
+        ).profiles
     return results
 
 
@@ -427,7 +427,7 @@ def test_totals_beyond_float32_precision_are_exact(tmp_path, dtype):
             cell_selection=cells,
             aggr_type="sum",
             remove_empty_features=False,
-        )
+        ).profiles
         assert sums["all"].dtype == _sum_dtype(dtype), assay
         np.testing.assert_array_equal(
             sums["all"].to_numpy(), WIDE_COUNTS.sum(axis=0), err_msg=assay

@@ -119,16 +119,17 @@ def test_make_bulk_respects_explicit_subset_selection(leiden_clustering, datasto
         aggr_type="sum",
         remove_empty_features=False,
         feature_label="index",
-    )
+    ).profiles
     sub = ds.compare.compute_bulk(
         leiden_clustering,
         cell_selection=subset_selection,
         aggr_type="sum",
         remove_empty_features=False,
         feature_label="index",
-    )
+    ).profiles
 
-    groups = [str(label) for label in np.unique(labels)]
+    # Columns are labelled by the clusters' integer labels.
+    groups = np.unique(labels).tolist()
     assert list(full.columns) == list(sub.columns) == groups
     # Group totals over every feature equal the per-cell totals recorded at
     # import, and a sample of features equals the raw counts of the members.
@@ -137,7 +138,7 @@ def test_make_bulk_respects_explicit_subset_selection(leiden_clustering, datasto
     features = np.sort(np.argsort(ds.RNA.feats.fetch_all("nCells"))[-25:])
     raw = np.asarray(ds.RNA.rawData[active_idx][:, features].compute())
     for group in groups:
-        members = labels.astype(str) == group
+        members = labels == group
         for frame, rows in ((full, members), (sub, members & in_subset)):
             assert frame[group].sum() == n_counts[active_idx[rows]].sum()
             np.testing.assert_array_equal(
@@ -165,7 +166,7 @@ def test_make_bulk_pseudo_reps_warns_without_changing_values(
         level="WARNING",
     )
     try:
-        default = ds.compare.compute_bulk(pseudo_reps=1, **kwargs)
+        default = ds.compare.compute_bulk(pseudo_reps=1, **kwargs).profiles
     finally:
         logger.remove(sink)
     assert not any(_PSEUDO_REP_WARNING in msg for msg in default_messages)
@@ -176,8 +177,8 @@ def test_make_bulk_pseudo_reps_warns_without_changing_values(
         level="WARNING",
     )
     try:
-        with_reps = ds.compare.compute_bulk(pseudo_reps=2, **kwargs)
-        again = ds.compare.compute_bulk(pseudo_reps=2, **kwargs)
+        with_reps = ds.compare.compute_bulk(pseudo_reps=2, **kwargs).profiles
+        again = ds.compare.compute_bulk(pseudo_reps=2, **kwargs).profiles
     finally:
         logger.remove(sink)
 
@@ -188,9 +189,10 @@ def test_make_bulk_pseudo_reps_warns_without_changing_values(
     assert with_reps.shape[1] == 2 * default.shape[1]
     # Each group's two pseudo-reps partition the cells; their sums recover the
     # unsplit group total (aggregation path unchanged by the warning).
+    assert with_reps.columns.names == ["group", "replicate"]
     for col in default.columns:
-        rep1 = f"{col}_Rep1"
-        rep2 = f"{col}_Rep2"
+        rep1 = (col, 1)
+        rep2 = (col, 2)
         assert rep1 in with_reps.columns and rep2 in with_reps.columns
         np.testing.assert_allclose(
             with_reps[rep1].to_numpy() + with_reps[rep2].to_numpy(),
@@ -214,13 +216,13 @@ def test_make_bulk_feature_name_index_is_hashable(leiden_clustering, datastore):
         feature_label="name",
         aggr_type="sum",
         remove_empty_features=True,
-    )
+    ).profiles
     indexed = datastore.compare.compute_bulk(
         leiden_clustering,
         feature_label="index",
         aggr_type="sum",
         remove_empty_features=True,
-    )
+    ).profiles
     names = np.asarray(datastore.RNA.feats.fetch_all("names"), dtype=object)
 
     # Names replace the positions of the expressed features, row for row.

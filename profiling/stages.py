@@ -1768,13 +1768,13 @@ def _run_analysis(
             clusters,
             from_assay=workflow.assayName,
             aggr_type=aggr_type,
-            return_fraction=False,
+            count_detected=False,
             feature_label="index",
             remove_empty_features=True,
             pseudo_reps=1,
         )
-        n_groups = int(bulk.shape[1])
-        n_features = int(bulk.shape[0])
+        n_groups = int(bulk.profiles.shape[1])
+        n_features = int(bulk.profiles.shape[0])
         del bulk
         return {
             "nGroups": n_groups,
