@@ -8,7 +8,7 @@ from scipy.sparse import csr_matrix, issparse
 from ..utils.arguments import integer_argument
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
-from ..utils.numba import enable_dispatcher_cache, import_umap, numba_threads
+from ..utils.numba import enable_dispatcher_cache, import_umap, njit, numba_threads
 from ..utils.progress import iter_progress
 
 locale.setlocale(locale.LC_NUMERIC, "C")
@@ -220,12 +220,10 @@ def _densmap_kernel(parallel: bool) -> Any:
     Numba's ``nogil`` option. This kernel compiles the same Python function
     with the same options and ``nogil``.
     """
-    import numba
-
     import_umap()
     from umap import layouts
 
-    return numba.njit(
+    return njit(
         layouts._optimize_layout_euclidean_densmap_epoch_init,
         fastmath=True,
         parallel=parallel,
