@@ -1005,7 +1005,7 @@ class H5adReader:
         in up to ``processes`` new processes at once, each over its own rows,
         or columns of a CSC matrix, with an equal share of ``maxBytes``: as
         many as that share holds a whole scan window and the longest row or
-        column, which :func:`~cytearc.utils.count_values.scan_processes`
+        column, which ``scan_processes`` of ``cytearc.utils.count_values``
         counts. The ranges and records are the same for any number of
         processes.
 
