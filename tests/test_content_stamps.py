@@ -341,3 +341,49 @@ def test_cleared_values_are_computed_again() -> None:
     assert cached_for_content("value", array, lambda: 2) == 1
     clear_content_cache()
     assert cached_for_content("value", array, lambda: 2) == 2
+
+
+def _ids_in_chunks(rows: int) -> zarr.Array:
+    """Fifty cell IDs stored in chunks of ``rows`` rows."""
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    ids = np.asarray([f"cell{index:05d}" for index in range(50)])
+    return root.create_array("ids", data=ids, chunks=(rows,))
+
+
+def test_a_first_identity_check_reads_one_stored_chunk_of_ids_at_a_time(
+    monkeypatch,
+) -> None:
+    import weakref
+
+    lengths: list[int] = []
+    held: list[int] = []
+    read: list[weakref.ref] = []
+    fingerprint_blocks = artifacts_module.fingerprint_text_blocks
+
+    def recording(n_values, source_dtype, blocks):
+        def recorded():
+            for block in blocks():
+                # How many blocks read before this one are still referenced.
+                held.append(sum(earlier() is not None for earlier in read))
+                read.append(weakref.ref(block))
+                lengths.append(len(block))
+                yield block
+                del block
+
+        return fingerprint_blocks(n_values, source_dtype, recorded)
+
+    monkeypatch.setattr(artifacts_module, "fingerprint_text_blocks", recording)
+    clear_content_cache()
+
+    fingerprint_stored_strings(_ids_in_chunks(8))
+
+    assert lengths == [8, 8, 8, 8, 8, 8, 2]
+    assert held == [0] * 7
+
+
+@pytest.mark.parametrize("rows", [1, 8, 50, 100_000])
+def test_the_fingerprint_of_stored_ids_does_not_depend_on_their_chunks(rows) -> None:
+    clear_content_cache()
+    ids = _ids_in_chunks(rows)
+
+    assert fingerprint_stored_strings(ids) == fingerprint_strings(ids[:])

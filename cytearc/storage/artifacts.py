@@ -26,7 +26,7 @@ from .operation_revisions import (
     applicable_revisions,
     effective_revision,
 )
-from .partition import scan_band
+from .partition import row_band, scan_band
 from .refs import (
     ARTIFACT_KINDS as ARTIFACT_KINDS,
     ArtifactRef as ArtifactRef,
@@ -413,21 +413,28 @@ def fingerprint_text_blocks(
         if values.size:
             builder.update_array_block("values", (offset,), values)
             offset += len(values)
+        # The values can be the block itself, so let them go before the next
+        # block is read.
+        del values
     builder.end_array("values")
     return builder.hexdigest()
 
 
 def fingerprint_stored_strings(array: Any) -> str:
-    """Fingerprint a stored or in-memory string column in bounded bands.
+    """Fingerprint a stored or in-memory string column one stored chunk at a time.
 
-    The fingerprint of a Zarr array is reused while its stored bytes are
-    unchanged (:func:`~cytearc.storage.content_stamps.cached_for_content`), so
-    checking ordered row IDs again reads their encoded bytes instead of decoding
-    and hashing every ID.
+    Each chunk is let go before the next is read, so the check holds one
+    chunk of IDs whatever the column's length. The fingerprint of a Zarr array
+    is reused while its stored bytes are unchanged
+    (:func:`~cytearc.storage.content_stamps.cached_for_content`), so checking
+    ordered row IDs again reads their encoded bytes instead of decoding and
+    hashing every ID.
     """
     if array.ndim != 1:
         raise ValueError("Stored string fingerprints require a one-dimensional array")
-    rows = _stored_array_chunk_rows(array)
+    rows = row_band(
+        array_geometry(array), unit="chunk", fallback=max(1, int(array.shape[0]))
+    )
     n_rows = int(array.shape[0])
 
     def compute() -> str:
