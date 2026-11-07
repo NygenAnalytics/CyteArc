@@ -26,18 +26,17 @@ from ..utils.arguments import bool_argument, integer_argument
 from ..utils.memory_budget import MemoryBudgetError
 
 PSEUDOTIME_INPUTS = frozenset({"connectivity_map", "source_sink", "cell_selection"})
+# The potentials that a pseudotime records as its method. A record without a
+# method comes from a release before 1.4.0, which computed the truncated one.
+PSEUDOTIME_METHODS = ("untruncated", "truncated")
+# The parameters that every pseudotime records.
 PSEUDOTIME_PARAMETERS = frozenset(
-    {
-        "n_singular_vals",
-        "sources",
-        "sinks",
-        "min_max_norm_ptime",
-        "random_seed",
-        "component_policy",
-    }
+    {"sources", "sinks", "min_max_norm_ptime", "component_policy"}
 )
-# The solver bounds that a pseudotime records only when its call set them, so
-# a pseudotime solved with SciPy's defaults keeps its identity.
+# The parameters of the truncated potential, which a record holds with the
+# method "truncated" or with no method.
+PSEUDOTIME_TRUNCATED_PARAMETERS = frozenset({"n_singular_vals", "random_seed"})
+# The solver bounds that a pseudotime records only when its call set them.
 PSEUDOTIME_SOLVER_PARAMETERS = frozenset({"solver_tol", "max_iterations"})
 FATE_INPUTS = frozenset(
     {"connectivity_map", "pseudotime", "sink_labels", "cell_selection"}
@@ -219,20 +218,41 @@ def _size_factor(value: Any) -> float | None:
     return _real_parameter(value, "size_factor", minimum=0.0, minimum_open=True)
 
 
+def pseudotime_method(value: Any) -> str:
+    """Return a pseudotime's method, ``"untruncated"`` or ``"truncated"``."""
+    if not isinstance(value, str) or value not in PSEUDOTIME_METHODS:
+        raise ValueError("method must be 'untruncated' or 'truncated'")
+    return value
+
+
 def pseudotime_parameter_names(parameters: Mapping[str, Any]) -> frozenset[str]:
-    """Return the parameter names that a pseudotime with ``parameters`` records."""
-    return PSEUDOTIME_PARAMETERS | (PSEUDOTIME_SOLVER_PARAMETERS & parameters.keys())
+    """Return the parameter names that a pseudotime with ``parameters`` records.
+
+    A record names its method, and holds the parameters of the truncated
+    potential with the method ``"truncated"`` or, from a release before
+    1.4.0, without a method.
+    """
+    names = PSEUDOTIME_PARAMETERS | (PSEUDOTIME_SOLVER_PARAMETERS & parameters.keys())
+    if "method" in parameters:
+        names |= {"method"}
+        if parameters["method"] != "truncated":
+            return names
+    return names | PSEUDOTIME_TRUNCATED_PARAMETERS
 
 
 def validate_pseudotime_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     """Validate a pseudotime's parameters, recorded or requested.
 
+    ``method`` is ``"truncated"`` for a record without one. ``n_singular_vals``
+    and ``random_seed`` are None for the untruncated potential, and
     ``solver_tol`` and ``max_iterations`` are None when absent, as a record
     leaves them out unless its call set them.
     """
     require_exact_record_keys(
         parameters, pseudotime_parameter_names(parameters), "Pseudotime parameters"
     )
+    method = pseudotime_method(parameters.get("method", "truncated"))
+    truncated = method == "truncated"
     sources = _label_parameters(parameters["sources"], "sources", required=False)
     sinks = _label_parameters(parameters["sinks"], "sinks", required=False)
     if any(bool(source == sink) for source in sources for sink in sinks):
@@ -258,11 +278,14 @@ def validate_pseudotime_parameters(parameters: Mapping[str, Any]) -> dict[str, A
             minimum=1,
         )
     return {
+        "method": method,
         "n_singular_vals": integer_argument(
             parameters["n_singular_vals"],
             "n_singular_vals",
             minimum=2,
-        ),
+        )
+        if truncated
+        else None,
         "sources": sources,
         "sinks": sinks,
         "min_max_norm_ptime": bool_argument(
@@ -274,7 +297,9 @@ def validate_pseudotime_parameters(parameters: Mapping[str, Any]) -> dict[str, A
             "random_seed",
             minimum=0,
             maximum=2**32 - 1,
-        ),
+        )
+        if truncated
+        else None,
         "component_policy": component_policy,
         "solver_tol": solver_tol,
         "max_iterations": max_iterations,

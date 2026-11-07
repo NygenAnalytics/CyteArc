@@ -446,14 +446,40 @@ def test_trajectory_parameter_contracts_reject_ambiguous_or_coerced_values() -> 
         "random_seed": np.int64(7),
         "component_policy": "largest",
     }
+    # A record without a method, as releases before 1.4.0 wrote, holds the
+    # truncated potential.
     validated = validate_pseudotime_parameters(pseudotime)
+    assert validated["method"] == "truncated"
     assert validated["n_singular_vals"] == 3
     assert type(validated["n_singular_vals"]) is int
     assert validated["min_max_norm_ptime"] is True
+    assert validate_pseudotime_parameters({**pseudotime, "method": "truncated"}) == (
+        validated
+    )
+    untruncated = {
+        key: value
+        for key, value in pseudotime.items()
+        if key not in {"n_singular_vals", "random_seed"}
+    } | {"method": "untruncated"}
+    assert validate_pseudotime_parameters(untruncated) | {
+        "n_singular_vals": 3,
+        "random_seed": 7,
+    } == validated | {"method": "untruncated"}
+    assert validate_pseudotime_parameters(untruncated)["n_singular_vals"] is None
     with pytest.raises(ValueError, match="disjoint"):
         validate_pseudotime_parameters({**pseudotime, "sources": [1], "sinks": [True]})
     with pytest.raises(TypeError, match="n_singular_vals"):
         validate_pseudotime_parameters({**pseudotime, "n_singular_vals": True})
+    with pytest.raises(ValueError, match="method must be 'untruncated' or 'truncated'"):
+        validate_pseudotime_parameters({**untruncated, "method": "exact"})
+    # Each method records the parameters of its own potential, and no others.
+    for parameters in (
+        {**untruncated, "n_singular_vals": 3},
+        {**pseudotime, "method": "untruncated"},
+        {key: value for key, value in pseudotime.items() if key != "random_seed"},
+    ):
+        with pytest.raises(ValueError, match="does not match its persisted contract"):
+            validate_pseudotime_parameters(parameters)
 
     fate = {
         "sinks": ["terminal"],

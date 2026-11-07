@@ -705,9 +705,7 @@ def _scored_y_store(*, include_disconnected_cells: bool = False) -> _ScoredStore
     graph_group.create_array("edges", data=edges)
     graph_group.create_array("weights", data=np.full(len(edges), 0.5))
     graph_group.attrs.update({"n_cells": len(cell_ids), "n_neighbors": 2})
-    pseudotime = store.trajectory.pseudotime(
-        graph_ref, ss_vec=source_sink, n_singular_vals=3
-    )
+    pseudotime = store.trajectory.pseudotime(graph_ref, ss_vec=source_sink)
     labels = resolve_metadata_snapshot(
         store.zw,
         values=label_values,

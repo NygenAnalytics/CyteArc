@@ -85,7 +85,12 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
     ),
     NonFiniteArtifactError: lambda: NonFiniteArtifactError("run_pca", "data", 7),
     PseudotimeConvergenceError: lambda: PseudotimeConvergenceError(
-        595475, 30, 0, 50, 3224, 50, None
+        method="untruncated",
+        n_cells=595475,
+        operator_products=502,
+        max_iterations=500,
+        solver_tol=None,
+        relative_residual=3.2e-7,
     ),
     SourceSinkLabelsError: lambda: SourceSinkLabelsError(
         "Source/sink labels were not found in the retained connected component. "

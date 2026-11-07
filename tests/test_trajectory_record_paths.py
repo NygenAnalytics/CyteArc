@@ -434,6 +434,44 @@ _PSEUDOTIME_ARGUMENT_ERRORS: dict[
         ValueError,
         "solver_tol must be less than 1.0",
     ),
+    "unknown-method": (
+        lambda trajectory: {"ss_vec": _Y_SOURCE_SINK, "method": "exact"},
+        ValueError,
+        "method must be 'untruncated' or 'truncated'",
+    ),
+    "modes-of-the-untruncated-potential": (
+        lambda trajectory: {"ss_vec": _Y_SOURCE_SINK, "n_singular_vals": 3},
+        ValueError,
+        "n_singular_vals applies only to method='truncated'; leave it unset",
+    ),
+    "seed-of-the-untruncated-potential": (
+        lambda trajectory: {
+            "ss_vec": _Y_SOURCE_SINK,
+            "method": "untruncated",
+            "random_seed": 4444,
+        },
+        ValueError,
+        "random_seed applies only to method='truncated'",
+    ),
+    "modes-and-seed-of-the-untruncated-potential": (
+        lambda trajectory: {
+            "ss_vec": _Y_SOURCE_SINK,
+            "n_singular_vals": 30,
+            "random_seed": 4444,
+        },
+        ValueError,
+        "n_singular_vals and random_seed apply only to method='truncated'; leave "
+        "them unset",
+    ),
+    "one-mode-of-the-truncated-potential": (
+        lambda trajectory: {
+            "ss_vec": _Y_SOURCE_SINK,
+            "method": "truncated",
+            "n_singular_vals": 1,
+        },
+        ValueError,
+        "n_singular_vals must be at least 2",
+    ),
 }
 
 
@@ -553,7 +591,10 @@ def test_pseudotime_scoring_refuses_a_graph_larger_than_its_selection() -> None:
     assert trajectory.artifacts("pseudotime") == []
 
 
-def test_pseudotime_scoring_keeps_requested_modes_and_raw_potential() -> None:
+@pytest.mark.parametrize("method", ["untruncated", "truncated"])
+def test_pseudotime_scoring_keeps_requested_modes_and_raw_potential(
+    method: str,
+) -> None:
     trajectory = _trajectory_store(_y_graph())
     store = trajectory.store
     messages: list[str] = []
@@ -565,21 +606,28 @@ def test_pseudotime_scoring_keeps_requested_modes_and_raw_potential() -> None:
         normalized = store.trajectory.pseudotime(
             trajectory.graph,
             ss_vec=_Y_SOURCE_SINK,
+            method=method,
         )
         raw = store.trajectory.pseudotime(
             trajectory.graph,
             ss_vec=_Y_SOURCE_SINK,
             min_max_norm_ptime=False,
+            method=method,
         )
     finally:
         logger.remove(sink)
 
-    # Five cells support three singular modes, so the default 30 is reduced.
-    assert "Reducing n_singular_vals from 30 to 3 for the retained graph size" in (
-        messages
-    )
     parameters = store.artifacts.inspect(raw).parameters or {}
-    assert parameters["n_singular_vals"] == 30
+    if method == "truncated":
+        # Five cells support three singular modes, so the default 30 is reduced.
+        assert "Reducing n_singular_vals from 30 to 3 for the retained graph size" in (
+            messages
+        )
+        assert parameters["n_singular_vals"] == 30
+    else:
+        # The untruncated potential has no modes to reduce, and records none.
+        assert not any("n_singular_vals" in message for message in messages)
+        assert "n_singular_vals" not in parameters
     assert parameters["min_max_norm_ptime"] is False
     assert raw != normalized
     raw_values = store.trajectory.load_pseudotime(raw).values
@@ -635,8 +683,49 @@ def test_pseudotime_scoring_refuses_degenerate_potentials(
         trajectory.store.trajectory.pseudotime(
             trajectory.graph,
             ss_vec=ss_vec,
+            method="truncated",
             n_singular_vals=2,
         )
+    assert trajectory.artifacts("pseudotime") == []
+
+
+@pytest.mark.parametrize(
+    ("adjacency", "ss_vec", "message"),
+    [
+        pytest.param(
+            _TWO_COMPONENTS,
+            np.array([0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 1.0]),
+            "Pseudotime calculation produced a constant potential",
+            id="source-sink-outside-retained-component",
+        ),
+        # The untruncated potential of the path from -1 to 1 is -1.5, -0.5,
+        # 0.5 and 1.5, so 1.5e308 overflows it, and 1e308 only its range.
+        pytest.param(
+            _path(4),
+            np.array([-1.5e308, 0.0, 0.0, 1.5e308]),
+            "Pseudotime calculation produced non-finite values",
+            id="overflowing-potential",
+        ),
+        pytest.param(
+            _path(4),
+            np.array([-1e308, 0.0, 0.0, 1e308]),
+            "Pseudotime normalization produced non-finite values",
+            id="overflowing-potential-range",
+        ),
+    ],
+)
+def test_the_untruncated_potential_refuses_degenerate_potentials(
+    adjacency: np.ndarray,
+    ss_vec: np.ndarray,
+    message: str,
+) -> None:
+    trajectory = _trajectory_store(adjacency)
+
+    with (
+        np.errstate(over="ignore", invalid="ignore"),
+        pytest.raises(ValueError, match=message),
+    ):
+        trajectory.store.trajectory.pseudotime(trajectory.graph, ss_vec=ss_vec)
     assert trajectory.artifacts("pseudotime") == []
 
 
@@ -649,6 +738,7 @@ class _ScoredTrajectory:
     labels: ArtifactRef
     from_labels: ArtifactRef
     from_vector: ArtifactRef
+    truncated: ArtifactRef
 
     @property
     def store(self) -> Any:
@@ -674,11 +764,17 @@ def _scored_template() -> _ScoredTrajectory:
             source_sink=labels,
             sources=["root"],
             sinks=["A", "B"],
-            n_singular_vals=3,
         ),
         from_vector=trajectory.store.trajectory.pseudotime(
             trajectory.graph,
             ss_vec=_Y_SOURCE_SINK,
+        ),
+        truncated=trajectory.store.trajectory.pseudotime(
+            trajectory.graph,
+            source_sink=labels,
+            sources=["root"],
+            sinks=["A", "B"],
+            method="truncated",
             n_singular_vals=3,
         ),
     )
@@ -714,11 +810,40 @@ _PSEUDOTIME_RECORD_TAMPERS: dict[
     tuple[str, Callable[[_ScoredTrajectory], None], str],
 ] = {
     "malformed-parameters": (
-        "from_labels",
+        "truncated",
         lambda scored: _rewrite_parameters(
-            scored.store, scored.from_labels, n_singular_vals=1
+            scored.store, scored.truncated, n_singular_vals=1
         ),
         "Pseudotime parameters are malformed",
+    ),
+    "unknown-method": (
+        "from_labels",
+        lambda scored: _rewrite_parameters(
+            scored.store, scored.from_labels, method="exact"
+        ),
+        "Pseudotime parameters are malformed",
+    ),
+    "modes-of-the-untruncated-potential": (
+        "from_labels",
+        lambda scored: _rewrite_parameters(
+            scored.store, scored.from_labels, n_singular_vals=3, random_seed=4444
+        ),
+        "Pseudotime parameters does not match its persisted contract",
+    ),
+    "truncated-potential-without-its-seed": (
+        "truncated",
+        lambda scored: _rewrite_record(
+            scored.store,
+            scored.truncated,
+            parameters={
+                key: value
+                for key, value in scored.store.artifacts.inspect(
+                    scored.truncated
+                ).parameters.items()
+                if key != "random_seed"
+            },
+        ),
+        "Pseudotime parameters does not match its persisted contract",
     ),
     "zero-max-iterations": (
         "from_labels",
@@ -879,7 +1004,6 @@ def _move_fate_to_another_assay(mapped: _MappedTrajectory) -> None:
     other_pseudotime = mapped.store.trajectory.pseudotime(
         other_graph,
         ss_vec=_Y_SOURCE_SINK,
-        n_singular_vals=3,
     )
     _rewrite_inputs(
         mapped.store,

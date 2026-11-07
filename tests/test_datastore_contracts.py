@@ -138,10 +138,12 @@ _SIGNATURE_DIGESTS = {
     # query_neighbors gained the keyword ann_ef: int | None = None.
     # run_pseudotime_scoring's component_policy is Literal["largest",
     # "sources", "error"], and it gained the keyword-only solver_tol:
-    # float | None = None and max_iterations: int | None = None. get_imputed
-    # takes feature_name: str | FeatureRef | Sequence[str | FeatureRef] |
-    # np.ndarray | pd.Series.
-    GraphDataStore: "28ecbff8c0892aafd3a0607359f9df284b413d8ad008b37b4e3211789a232d6d",
+    # float | None = None and max_iterations: int | None = None, then
+    # method: Literal["untruncated", "truncated"] = "untruncated", with
+    # n_singular_vals: int | None = None and random_seed: int | None = None,
+    # which only method="truncated" takes. get_imputed takes feature_name:
+    # str | FeatureRef | Sequence[str | FeatureRef] | np.ndarray | pd.Series.
+    GraphDataStore: "3b17227309ae6b6337f835d71f8231e773719dfdb4a0388f4590ac321be22a1d",
     MappingDatastore: "a4839ac0372df95f021fd8c383c1ac2aff6796c6b093e05510c71ad7e8449a72",
     # run_hto_demultiplexing gained the keyword-only positive_quantile: float
     # with the default 0.99, then hashtags: Sequence[str] | Mapping[str,

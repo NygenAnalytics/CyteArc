@@ -28,6 +28,7 @@ _EXPECTED_TRAJECTORY_EXPORTS = (
     "SourceSinkLabelsError",
     "aggregate_feature_profiles",
     "make_source_sink_vector",
+    "pba_potential",
     "random_walk_laplacian_transpose",
     "select_pseudotime_component",
     "scatter_feature_clusters",

@@ -185,15 +185,16 @@ class PseudotimeScoringArguments(OperationArguments):
     connectivity_map: ArtifactRef = artifact_input()
     source_sink: ArtifactRef | np.ndarray = artifact_input()
     cell_selection: ArtifactRef = artifact_input()
-    n_singular_vals: int = parameter()
+    method: str = parameter()
     sources: tuple[Any, ...] = parameter()
     sinks: tuple[Any, ...] = parameter()
     min_max_norm_ptime: bool = parameter()
-    random_seed: int = parameter()
     component_policy: str = parameter()
     invalidate_cache: bool = execution()
-    # The solver's bounds, recorded only when the call sets them, so a
-    # pseudotime solved with SciPy's defaults keeps its identity.
+    # The parameters of the truncated potential, None for the untruncated one.
+    n_singular_vals: int | None = parameter(None, omit_if_none=True)
+    random_seed: int | None = parameter(None, omit_if_none=True)
+    # The solver's bounds, recorded only when the call sets them.
     solver_tol: float | None = parameter(None, omit_if_none=True)
     max_iterations: int | None = parameter(None, omit_if_none=True)
 

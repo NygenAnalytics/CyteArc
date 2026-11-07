@@ -4,12 +4,13 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, issparse, sparray, spmatrix
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import (
     ArpackNoConvergence,
     LinearOperator,
     aslinearoperator,
+    minres,
     svds,
 )
 
@@ -29,6 +30,9 @@ _PROGRESS_INTERVAL_SECONDS = 30.0
 # The seconds between updates of the solve's progress bar. A progress
 # observer receives every update, so the bar is not updated per product.
 _BAR_INTERVAL_SECONDS = 0.5
+# The products of SciPy's check, before MINRES iterates, that its operator is
+# symmetric.
+_SYMMETRY_CHECK_PRODUCTS = 2
 
 
 def validate_source_sink_labels(
@@ -235,6 +239,20 @@ def random_walk_laplacian_transpose(graph: csr_matrix) -> csr_matrix:
     return identity - graph.dot(inverse_degree)
 
 
+def _solver_bounds(
+    solver_tol: float | None,
+    max_iterations: int | None,
+) -> tuple[float | None, int | None]:
+    """Check a potential solve's tolerance and iteration bound, either None."""
+    if solver_tol is not None:
+        solver_tol = float_argument(solver_tol, "solver_tol")
+        if not 0.0 < solver_tol < 1.0:
+            raise ValueError("solver_tol must be greater than 0 and less than 1")
+    if max_iterations is not None:
+        max_iterations = integer_argument(max_iterations, "max_iterations", minimum=1)
+    return solver_tol, max_iterations
+
+
 def _product_bound(n_cells: int, n_modes: int, max_iterations: int) -> int:
     """Return the most Laplacian products of a solve within ``max_iterations``.
 
@@ -251,21 +269,29 @@ def _product_bound(n_cells: int, n_modes: int, max_iterations: int) -> int:
 class _SolveProgress:
     """Count the Laplacian products of a pseudotime solve and report them.
 
-    A progress bar counts the products against the most that
-    ``max_iterations`` allows, or without a total when it is None, and an
-    INFO record reports them every ``_PROGRESS_INTERVAL_SECONDS``.
+    A progress bar counts the products against ``bound``, the most that
+    ``max_iterations`` allows, or without a total when ``max_iterations`` is
+    None, and an INFO record reports them every
+    ``_PROGRESS_INTERVAL_SECONDS``. ``solving`` names what the solve finds,
+    such as ``"for 30 singular modes"``.
     """
 
-    def __init__(self, n_cells: int, n_modes: int, max_iterations: int | None) -> None:
+    def __init__(
+        self,
+        n_cells: int,
+        solving: str,
+        max_iterations: int | None,
+        bound: int | None,
+    ) -> None:
+        if (max_iterations is None) != (bound is None):
+            raise ValueError(
+                "bound must be given with max_iterations, and only with it"
+            )
         self.products = 0
         self._n_cells = n_cells
-        self._n_modes = n_modes
+        self._solving = solving
         self._max_iterations = max_iterations
-        self._bound = (
-            None
-            if max_iterations is None
-            else _product_bound(n_cells, n_modes, max_iterations)
-        )
+        self._bound = bound
         if self._bound is None:
             # Without a total, the bar shows the count and its rate.
             self._bar = tqdmbar(
@@ -300,8 +326,7 @@ class _SolveProgress:
             bound = f" (max_iterations={self._max_iterations})"
         logger.info(
             f"Pseudotime scoring: {count} after {now - self._started:.0f} s, "
-            f"solving for {self._n_modes} singular modes of {self._n_cells} "
-            f"cells{bound}"
+            f"solving {self._solving} of {self._n_cells} cells{bound}"
         )
 
     def close(self, converged: bool) -> None:
@@ -355,9 +380,12 @@ def truncated_pba_potential(
 ) -> np.ndarray:
     """Return the population balance potential of the smallest singular modes.
 
-    SciPy's ``svds`` finds the ``n_singular_vals`` smallest singular values
-    of the transposed random-walk Laplacian, the null mode included, with
-    ARPACK's Lanczos solve. ``solver_tol`` is their relative tolerance,
+    The potential keeps the ``n_singular_vals - 1`` smallest nonzero singular
+    modes of the pseudoinverse that ``pba_potential`` applies in full; it
+    is the potential of ``method="truncated"``. SciPy's ``svds`` finds the
+    ``n_singular_vals`` smallest singular values of the transposed
+    random-walk Laplacian, the null mode included, with ARPACK's Lanczos
+    solve. ``solver_tol`` is their relative tolerance,
     machine precision when None, and ``max_iterations`` bounds the solve's
     implicit restarts, ten per cell when None; both defaults are SciPy's. A
     looser tolerance can end the search before it finds the smallest singular
@@ -370,12 +398,7 @@ def truncated_pba_potential(
         PseudotimeConvergenceError: If the solve reaches ``max_iterations``
             before every mode converges.
     """
-    if solver_tol is not None:
-        solver_tol = float_argument(solver_tol, "solver_tol")
-        if not 0.0 < solver_tol < 1.0:
-            raise ValueError("solver_tol must be greater than 0 and less than 1")
-    if max_iterations is not None:
-        max_iterations = integer_argument(max_iterations, "max_iterations", minimum=1)
+    solver_tol, max_iterations = _solver_bounds(solver_tol, max_iterations)
     random_state = np.random.RandomState(random_seed)
     initial_vector = random_state.rand(laplacian_transpose.shape[0])
     logger.debug(
@@ -384,7 +407,14 @@ def truncated_pba_potential(
         f"k={n_singular_vals})"
     )
     n_cells = int(laplacian_transpose.shape[0])
-    progress = _SolveProgress(n_cells, n_singular_vals, max_iterations)
+    progress = _SolveProgress(
+        n_cells,
+        f"for {n_singular_vals} singular modes",
+        max_iterations,
+        None
+        if max_iterations is None
+        else _product_bound(n_cells, n_singular_vals, max_iterations),
+    )
     converged = False
     try:
         left_vectors, singular_values, right_vectors_t = svds(
@@ -401,6 +431,7 @@ def truncated_pba_potential(
         # ARPACK stops only once its restarts reach the bound.
         bound = 10 * n_cells if max_iterations is None else max_iterations
         raise PseudotimeConvergenceError(
+            method="truncated",
             n_cells=n_cells,
             n_modes=n_singular_vals,
             converged_modes=len(exc.eigenvalues),
@@ -444,3 +475,139 @@ def truncated_pba_potential(
         left_vectors
         @ (inverse_singular_values * (right_vectors.T @ source_sink).ravel())
     )
+
+
+def pba_potential(
+    graph: spmatrix | sparray,
+    source_sink: np.ndarray,
+    *,
+    solver_tol: float | None = None,
+    max_iterations: int | None = None,
+) -> np.ndarray:
+    """Return the population balance potential of a graph over all of its modes.
+
+    The potential is ``pinv(L) R``, the minimum-norm least-squares solution
+    of ``L V = R`` for the random-walk Laplacian ``L = I - D^-1 W`` of the
+    symmetric graph ``W`` with degrees ``D``, and the source-sink vector
+    ``R``. Population balance analysis defines the potential as
+    ``1/2 pinv(L) R`` (Weinreb et al. 2018). The range of ``L`` is orthogonal
+    to the degree vector, so ``R`` first loses its component along it, as the
+    pseudoinverse drops it. ``L V = R`` is then ``L_sym (D^1/2 V) = D^1/2 R``
+    for the symmetric Laplacian ``L_sym = I - D^-1/2 W D^-1/2``, which SciPy's
+    ``minres`` solves after it checks that the operator is symmetric. The
+    potential is centred at zero, as the pseudoinverse centres it.
+
+    ``solver_tol`` is MINRES's ``rtol``: the solve stops once its residual
+    falls below ``solver_tol`` times the estimated norms of ``L_sym`` and of
+    its solution. None, the default, solves to machine precision.
+    ``max_iterations`` bounds the MINRES iterations, one product with
+    ``L_sym`` each, SciPy's five per cell when None. The solve advances a
+    progress bar with its products and logs their count at INFO level every
+    30 seconds.
+
+    Raises:
+        TypeError: If the graph is not a SciPy sparse matrix.
+        ValueError: If the graph is not square, symmetric or connected, or
+            holds isolated cells, or ``source_sink`` does not hold one finite
+            value per cell.
+        PseudotimeConvergenceError: If the solve reaches ``max_iterations``
+            before it meets ``solver_tol``.
+    """
+    solver_tol, max_iterations = _solver_bounds(solver_tol, max_iterations)
+    if not issparse(graph):
+        raise TypeError("graph must be a SciPy sparse matrix")
+    if graph.shape[0] != graph.shape[1]:
+        raise ValueError("graph must be square")
+    n_cells = int(graph.shape[0])
+    values = np.asarray(source_sink, dtype=np.float64)
+    if values.shape != (n_cells,) or not np.isfinite(values).all():
+        raise ValueError(
+            f"source_sink must hold one finite value for each of the {n_cells} "
+            "cells of the graph"
+        )
+    weights = graph.tocsr()
+    if weights.dtype != np.float64:
+        weights = weights.astype(np.float64)
+    degree = np.asarray(weights.sum(axis=1), dtype=np.float64).ravel()
+    if np.any(degree <= 0):
+        raise ValueError("The retained graph contains isolated cells")
+    n_components = connected_components(weights, directed=False, return_labels=False)
+    if n_components > 1:
+        # Each component adds a null mode to L, so the pseudoinverse would
+        # leave the potentials of the components unrelated.
+        raise ValueError(
+            f"graph must be connected, but it has {n_components} connected "
+            "components; score one component at a time"
+        )
+    magnitude = float(np.abs(values).max(initial=0.0))
+    if magnitude == 0.0:
+        return np.zeros(n_cells)
+    # The potential is linear in R, so the solve takes R scaled to a largest
+    # magnitude of 1, which none of its products can overflow.
+    unit = values / magnitude
+    projected = unit - degree * float(degree @ unit) / float(degree @ degree)
+    sqrt_degree = np.sqrt(degree)
+    inverse_sqrt_degree = 1.0 / sqrt_degree
+    right_hand_side = sqrt_degree * projected
+
+    def symmetric_laplacian(vector: np.ndarray) -> np.ndarray:
+        return np.asarray(
+            vector - inverse_sqrt_degree * weights.dot(inverse_sqrt_degree * vector)
+        )
+
+    progress = _SolveProgress(
+        n_cells,
+        "for the untruncated potential",
+        max_iterations,
+        None if max_iterations is None else max_iterations + _SYMMETRY_CHECK_PRODUCTS,
+    )
+
+    def counted(vector: np.ndarray) -> np.ndarray:
+        progress.add_product()
+        return symmetric_laplacian(np.asarray(vector, dtype=np.float64).ravel())
+
+    logger.debug(
+        f"Pseudotime scoring: solving for the untruncated potential "
+        f"(cells={n_cells}, nnz={weights.nnz})"
+    )
+    converged = False
+    try:
+        try:
+            solution, info = minres(
+                LinearOperator(
+                    shape=(n_cells, n_cells),
+                    matvec=counted,
+                    dtype=np.dtype(np.float64),
+                ),
+                right_hand_side,
+                # 0 solves to machine precision.
+                rtol=0.0 if solver_tol is None else solver_tol,
+                maxiter=max_iterations,
+                check=True,
+            )
+        except ValueError as exc:
+            if "non-symmetric" not in str(exc):
+                raise
+            raise ValueError(
+                "graph must be symmetric, with the same weight on each edge in "
+                "both directions"
+            ) from exc
+        converged = info == 0
+    finally:
+        progress.close(converged)
+    if not converged:
+        residual = np.linalg.norm(
+            symmetric_laplacian(solution) - right_hand_side
+        ) / np.linalg.norm(right_hand_side)
+        raise PseudotimeConvergenceError(
+            method="untruncated",
+            n_cells=n_cells,
+            operator_products=progress.products,
+            # SciPy's minres stops after five iterations per cell by default.
+            max_iterations=5 * n_cells if max_iterations is None else max_iterations,
+            solver_tol=solver_tol,
+            relative_residual=float(residual),
+        )
+    potential = solution * inverse_sqrt_degree
+    potential -= potential.mean()
+    return np.asarray(potential * magnitude)
