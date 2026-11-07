@@ -1,3 +1,4 @@
+import warnings
 from importlib import import_module
 from types import SimpleNamespace
 
@@ -498,35 +499,137 @@ def test_embedding_rejects_ambiguous_layouts_and_selections(kwargs, message):
     assert raised.value.args == (message,)
 
 
-def test_artifact_colors_must_share_the_layout_selection(monkeypatch):
-    from cytearc.storage import ArtifactRef
+SCREEN_CELLS = 120
+# The smaller layout leaves out every tenth cell of the screen.
+LEFT_OUT = np.arange(SCREEN_CELLS) % 10 == 0
+LAYOUT_CELLS = np.flatnonzero(~LEFT_OUT)
 
-    selection = ArtifactRef(
-        scope="datastore", kind="cell_selection", artifact_id="3" * 64
+
+@pytest.fixture(scope="module")
+def screen(tmp_path_factory):
+    """A screen of 120 cells that each carry one guide, and two layouts.
+
+    The layouts are imported embeddings: "every" of every cell, and "kept" of
+    all but every tenth cell. The cells left out carry the one guide of target
+    A1, and the others one guide of A, B or the NT controls. Each cell stands
+    at x equal to its store position, so a drawn point names its cell.
+    """
+    from cytearc.embeddings.imported import write_imported_embedding
+    from cytearc.storage.artifacts import fingerprint_array
+    from tests.perturbation_helpers import write_screen
+
+    rng = np.random.default_rng(0)
+    guides = np.zeros((SCREEN_CELLS, 7), dtype=np.int64)
+    guide = np.where(LEFT_OUT, 6, np.arange(SCREEN_CELLS) % 6)
+    guides[np.arange(SCREEN_CELLS), guide] = 30
+    store = write_screen(
+        tmp_path_factory.mktemp("screen") / "screen.zarr",
+        rng.poisson(2.0, size=(SCREEN_CELLS, 20)),
+        guides,
+        targets=["A", "A", "B", "B", "NT", "NT", "A1"],
+        cell_columns={"kept": ~LEFT_OUT, "half": np.arange(SCREEN_CELLS) < 60},
     )
-    foreign = ArtifactRef(
-        scope="datastore", kind="cell_selection", artifact_id="4" * 64
-    )
-    layout = ArtifactRef(
-        scope="assay", assay="RNA", kind="embedding", artifact_id="2" * 64
-    )
-    labels = ArtifactRef(
-        scope="assay", assay="RNA", kind="cluster_labels", artifact_id="1" * 64
-    )
-    monkeypatch.setattr(
-        embedding_module,
-        "_resolve_layout",
-        lambda _store, _layout: (np.zeros((3, 2)), np.arange(3), selection),
-    )
-    monkeypatch.setattr(
-        embedding_module, "_artifact_cell_selection", lambda _store, _ref: foreign
-    )
+    ids = np.asarray(store.cells.fetch_all("ids"))
+    layouts = {}
+    for name, cells in (("every", "I"), ("kept", "kept")):
+        positions = np.flatnonzero(np.asarray(store.cells.fetch_all(cells)))
+        coordinates = np.column_stack([positions, positions % 7]).astype(np.float32)
+        layouts[name] = write_imported_embedding(
+            store.zw,
+            assay="RNA",
+            dimreduc_key=f"X_umap_{name}",
+            role="umap",
+            coordinates=coordinates,
+            source_digest=bytes([len(layouts)]) * 32,
+            payload_fingerprints={"values": fingerprint_array(coordinates)},
+            source_cell_ids=ids[positions],
+            cell_selection=store.snapshot_cell_selection(cells),
+        )
+    return store, layouts
+
+
+def _screen_labels(store, selection):
+    """Label the cells of ``selection`` by the guide called in each."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        calls = store.perturbation.call_guides(selection, method="fixed", min_umi=10)
+        return store.perturbation.labels(calls, controls=["NT"])
+
+
+def _palette(store, layout, labels):
+    """The colour of each label drawn on ``layout``."""
+    result = splt_embedding(store, layout=layout, color_by=labels, show=False)
+    try:
+        (scale,) = [found for found in result.scales if hasattr(found, "palette")]
+        return dict(scale.palette)
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize(
+    "source", ["every cell", "the layout's cells, selected again", "the layout's"]
+)
+def test_labels_of_cells_that_hold_the_layouts_colour_each_cell(screen, source):
+    from matplotlib.colors import to_rgba
+
+    from cytearc.plotting._data import _artifact_cell_selection
+
+    store, layouts = screen
+    layout_selection = _artifact_cell_selection(store, layouts["kept"])
+    selection = {
+        "every cell": lambda: store.select_measured_cells("CRISPR"),
+        # Another selection artifact that holds exactly the layout's cells.
+        "the layout's cells, selected again": lambda: store.select_cells(
+            _screen_labels(store, store.select_measured_cells("CRISPR")),
+            include=["A", "B", "control"],
+        ),
+        "the layout's": lambda: layout_selection,
+    }[source]()
+    assert (selection == layout_selection) == (source == "the layout's")
+    labels = _screen_labels(store, selection)
+    result = splt_embedding(store, layout=layouts["kept"], color_by=labels, show=False)
+
+    try:
+        (scale,) = [found for found in result.scales if hasattr(found, "palette")]
+        label_of = store.perturbation.load_labels(labels).cells["label"]
+        ids = np.asarray(store.cells.fetch_all("ids"))
+        (points,) = next(iter(result.axes.values())).collections[:1]
+        offsets = np.asarray(points.get_offsets())
+        drawn = np.rint(offsets[:, 0]).astype(np.int64)
+        # Each cell of the layout is drawn once, at its own place, in the
+        # colour of its own label.
+        np.testing.assert_array_equal(np.sort(drawn), LAYOUT_CELLS)
+        np.testing.assert_array_equal(offsets[:, 1], drawn % 7)
+        colors = [to_rgba(scale.palette[label_of[ids[cell]]]) for cell in drawn]
+        np.testing.assert_allclose(points.get_facecolors(), colors)
+    finally:
+        result.close()
+
+
+def test_labels_of_more_cells_keep_their_colours_on_a_layout_of_fewer(screen):
+    store, layouts = screen
+    labels = _screen_labels(store, store.select_measured_cells("CRISPR"))
+
+    every = _palette(store, layouts["every"], labels)
+    kept = _palette(store, layouts["kept"], labels)
+
+    # A1, which only the cells left out of "kept" carry, sorts between A and
+    # B, and still takes its place among the default colours.
+    assert list(every) == ["A", "A1", "B", "control"]
+    assert kept == {label: every[label] for label in ("A", "B", "control")}
+
+
+def test_labels_of_cells_that_miss_some_of_the_layouts_are_refused(screen):
+    store, layouts = screen
+    labels = _screen_labels(store, store.snapshot_cell_selection("half"))
 
     with pytest.raises(ValueError) as raised:
-        splt_embedding(_plot_store(), layout=layout, color_by=labels, show=False)
+        splt_embedding(store, layout=layouts["kept"], color_by=labels, show=False)
 
     assert raised.value.args == (
-        "color_by and layout artifacts must share the same cell selection",
+        "The perturbation_labels artifact of color_by holds no value for some "
+        "cells of the layout; compute it on cells that include the layout's, "
+        "such as the run's analysis_cell_selection",
     )
 
 

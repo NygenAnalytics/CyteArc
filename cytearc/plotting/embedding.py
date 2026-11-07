@@ -467,6 +467,19 @@ def _selected_metadata_column(
     return apply_missing_mask(values, missing, labels=labels)
 
 
+def _blank_labels_missing(values: np.ndarray) -> np.ndarray:
+    """Mark blank labels, such as that of a cell without a clone, as missing.
+
+    Groupings treat a blank label as missing too.
+    """
+    valid = valid_category_mask(values)
+    if valid.all():
+        return values
+    labels = values.astype(object)
+    labels[~valid] = None
+    return labels
+
+
 def _prefetch_colors(
     store: Any,
     color_items: Sequence[str | ArtifactRef | FeatureRef | CellField | None],
@@ -477,6 +490,7 @@ def _prefetch_colors(
     n_cells: int,
     normalization: NormalizationSpec,
     cell_indices: np.ndarray | None = None,
+    cell_selection: ArtifactRef | None = None,
     unmeasured: dict[str, np.ndarray] | None = None,
     read_features: bool = True,
 ) -> list[tuple[np.ndarray, str, bool, bool]]:
@@ -484,6 +498,8 @@ def _prefetch_colors(
 
     ``metadata_columns`` lists the cell-metadata columns that a plain string
     item may name; any other string item is resolved as a feature.
+    ``cell_indices`` are the store positions of the layout's cells, those of
+    ``cell_selection``, for which an artifact item's values are read.
     ``unmeasured`` receives the cells that each feature assay did not
     measure, as the value layer records them.
     """
@@ -498,12 +514,24 @@ def _prefetch_colors(
                 raise ValueError(
                     "ArtifactRef color_by requires an explicit layout ArtifactRef"
                 )
-            _, grouping_indices, grouping_values, _ = _resolve_grouping(
-                store,
-                group_by=None,
-                groups=item,
-                cell_key="I",
-            )
+            # The artifact's values are read for the layout's cells, which
+            # the artifact's own cell selection must contain.
+            try:
+                _, grouping_indices, grouping_values, _ = _resolve_grouping(
+                    store,
+                    group_by=None,
+                    groups=item,
+                    cell_key="I",
+                    cell_selection=cell_selection,
+                )
+            except ValueError as error:
+                if "must be a subset of the artifact cell selection" not in str(error):
+                    raise
+                raise ValueError(
+                    f"The {item.kind} artifact of color_by holds no value for "
+                    "some cells of the layout; compute it on cells that include "
+                    "the layout's, such as the run's analysis_cell_selection"
+                ) from error
             if not np.array_equal(grouping_indices, cell_indices):
                 raise ValueError(
                     "color_by and layout artifacts select cells in a different order"
@@ -514,12 +542,7 @@ def _prefetch_colors(
                 pd.Series(values), "auto"
             )
             if categorical:
-                # A blank label, such as that of a cell without a clone, is
-                # missing, as groupings treat it.
-                valid = valid_category_mask(values)
-                if not valid.all():
-                    values = values.astype(object)
-                    values[~valid] = None
+                values = _blank_labels_missing(values)
             out.append((values, item.kind, categorical, False))
             continue
         if isinstance(item, CellField):
@@ -646,14 +669,23 @@ def _color_category_universe(
     store: Any,
     item: str | ArtifactRef | FeatureRef | CellField | None,
     values: np.ndarray,
+    *,
+    layout_selection: ArtifactRef | None,
 ) -> np.ndarray:
     """Every category of a categorical color, which default colors range over.
 
-    A label artifact's values already cover all of its cells; a metadata
-    column's categories come from all of its rows.
+    A label artifact's categories come from all of its cells: ``values``, the
+    labels drawn, when its cell selection is the layout's, and its labels read
+    again when it holds more cells. A metadata column's categories come from
+    all of its rows.
     """
     if isinstance(item, ArtifactRef):
-        return np.asarray(values)
+        if _artifact_cell_selection(store, item) == layout_selection:
+            return np.asarray(values)
+        _, _, labels, _ = _resolve_grouping(
+            store, group_by=None, groups=item, cell_key="I"
+        )
+        return _blank_labels_missing(np.asarray(labels[0]))
     assert isinstance(item, str | CellField)
     return _category_universe(store, item if isinstance(item, str) else item.key)
 
@@ -1433,6 +1465,13 @@ def embedding(
     - ``theme``: ``"notebook"`` or ``"paper"`` for white figures; ``"dark"``
       for dark notebook themes.
 
+    An artifact in ``color_by`` takes an embedding artifact as ``layout``, and
+    its cells must include the layout's: its values are read for the layout's
+    cells, so labels computed on every cell can color a run's layout of fewer
+    cells. An artifact that holds no value for some cells of the layout raises
+    ValueError; compute it on cells that include the layout's, such as the
+    run's ``analysis_cell_selection``.
+
     Default category colors are assigned over every value of the colored
     column or label artifact, not only the drawn cells, so a category keeps
     its color in plots of different subsets or groups. A stored display or a
@@ -1521,14 +1560,6 @@ def embedding(
         x = coordinates[:, 0]
         y = coordinates[:, 1]
         layout_name = "Embedding"
-        for item in _coerce_color_items(color_by):
-            if not isinstance(item, ArtifactRef):
-                continue
-            color_selection = _artifact_cell_selection(store, item)
-            if color_selection != layout_selection:
-                raise ValueError(
-                    "color_by and layout artifacts must share the same cell selection"
-                )
     resolved_from_assay = (
         from_assay
         if from_assay is not None
@@ -1606,6 +1637,7 @@ def embedding(
         n_cells=n,
         normalization=normalization,
         cell_indices=artifact_cell_indices,
+        cell_selection=layout_selection,
         unmeasured=unmeasured,
         read_features=False,
     )
@@ -1815,7 +1847,12 @@ def embedding(
                 np.asarray(vals)[selection_mask],
                 source,
                 universe=(
-                    _color_category_universe(store, color_items[color_index], vals)
+                    _color_category_universe(
+                        store,
+                        color_items[color_index],
+                        vals,
+                        layout_selection=layout_selection,
+                    )
                     if source.order is None and source.palette is None
                     else None
                 ),
