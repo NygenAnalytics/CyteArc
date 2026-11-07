@@ -61,9 +61,9 @@ if TYPE_CHECKING:
     from ..utils.matrix_values import MatrixValues
     from ..storage.identity import CountSummary
 
-# Cell columns are chunked by the rows of the store and their stored width,
-# in at most the import's blocks of rows.
-_CELL_CHUNK_ROWS = partial(column_chunk_rows, max_rows=DEFAULT_IMPORT_BLOCK_ROWS)
+# Cell and feature columns are chunked by the rows of their table and their
+# stored width, in at most the import's blocks of rows.
+_COLUMN_CHUNK_ROWS = partial(column_chunk_rows, max_rows=DEFAULT_IMPORT_BLOCK_ROWS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -676,7 +676,7 @@ class SeuratToZarr:
                 column,
                 block_rows,
                 name=key,
-                chunk_rows=_CELL_CHUNK_ROWS,
+                chunk_rows=_COLUMN_CHUNK_ROWS,
             )
         for assay in self._assays:
             if assay.cellMembership.allIncluded:
@@ -703,7 +703,9 @@ class SeuratToZarr:
             self._featureMetadataKeys[assay.name],
             f"{assay.name} feature",
         ):
-            self._write_metadata_column(group, column, block_rows, name=key)
+            self._write_metadata_column(
+                group, column, block_rows, name=key, chunk_rows=_COLUMN_CHUNK_ROWS
+            )
 
     @staticmethod
     def _write_string_axis(
@@ -792,8 +794,9 @@ class SeuratToZarr:
         """Write one metadata column of the source.
 
         ``chunk_rows`` gives its chunks from its rows and stored width, as the
-        cell table's writer passes it; without it, a chunk holds the rows of
-        one of the import's blocks.
+        writers of the cell and feature tables pass it; without it, as for
+        the active identity's artifact, a chunk holds the rows of one of the
+        import's blocks.
         """
         from ..storage.arrays import create_streamed_metadata_column
 
@@ -889,7 +892,7 @@ class SeuratToZarr:
                 for start in range(0, len(values), block_rows)
             ),
             overwrite=True,
-            chunkSize=_CELL_CHUNK_ROWS(len(values), np.dtype(bool).itemsize),
+            chunkSize=_COLUMN_CHUNK_ROWS(len(values), np.dtype(bool).itemsize),
             profile=self.profile,
             attributes=attributes,
         )

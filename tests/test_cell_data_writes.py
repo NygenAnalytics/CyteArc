@@ -270,3 +270,30 @@ def test_wide_text_is_chunked_by_its_bytes_and_charged_by_its_chunks(tmp_path) -
     assert cell_data_write_bytes({"labels": ((250_000,), "U41")}) == (
         2 * 164 * 100_000 + 164 * 50_000
     )
+
+
+def test_text_is_written_one_stored_chunk_at_a_time(tmp_path, monkeypatch) -> None:
+    import cytearc.metadata.artifacts as artifacts_module
+
+    rows = 250_000
+    # 40 characters, within the 41 that keep chunks of 100,000 rows.
+    values = np.asarray([f"{index:08d}" + "x" * 32 for index in range(rows)])
+    blocks: list[int] = []
+    streamed = artifacts_module.create_streamed_metadata_column
+
+    def recording(*args, blocks_of=blocks, **kwargs):
+        def counted(source):
+            for block in source:
+                blocks_of.append(len(block.values))
+                yield block
+
+        kwargs["blocks"] = counted(kwargs["blocks"])
+        return streamed(*args, **kwargs)
+
+    monkeypatch.setattr(artifacts_module, "create_streamed_metadata_column", recording)
+    root, selection = _root(tmp_path / "store.zarr", n_cells=rows)
+    ref = _write(root, selection, rows, {"labels": values})
+
+    # A whole-array conversion would hand over one block of every row.
+    assert blocks == [100_000, 100_000, 50_000]
+    np.testing.assert_array_equal(artifact_group(root, ref)["labels"][:], values)

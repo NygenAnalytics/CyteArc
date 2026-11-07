@@ -815,7 +815,6 @@ class H5adToZarr:
             assay_membership_column,
             metadata_column_keys,
         )
-        from ..storage.layout import column_chunk_rows
         from ..storage.schema import create_cell_data
         from ._store import (
             keyed_metadata_columns,
@@ -853,14 +852,7 @@ class H5adToZarr:
             "cell",
             membership=reserved,
         ):
-            write_metadata_column(
-                g,
-                key,
-                values,
-                missing,
-                profile=self.profile,
-                chunk_rows=column_chunk_rows,
-            )
+            write_metadata_column(g, key, values, missing, profile=self.profile)
             if categories is not None:
                 self._keep_categories(
                     as_zarr_array(g[key], name=key),

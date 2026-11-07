@@ -459,17 +459,19 @@ def create_matrix_source(
                 exclude_members={"I"},
                 profile=profile,
                 resources=resources,
+                chunk_rows=column_chunk_rows,
             )
             source_feature_ids = as_zarr_array(
                 source_feature_data["ids"],
                 name="ids",
             )
+            n_features = int(source_feature_ids.shape[0])
             create_metadata_column(
                 feature_data,
                 "I",
-                data=np.ones(int(source_feature_ids.shape[0]), dtype=bool),
+                data=np.ones(n_features, dtype=bool),
                 dtype=bool,
-                chunkSize=100_000,
+                chunkSize=column_chunk_rows(n_features, np.dtype(bool).itemsize),
                 profile=profile,
             )
 

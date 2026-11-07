@@ -51,6 +51,7 @@ from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.perturbation_helpers import record_cell_reads
 from tests.storage_helpers import (
     insert_nullable_cell_column,
+    rechunk_column,
     rechunk_feature_tables,
     write_count_store,
     written,
@@ -1524,9 +1525,10 @@ def test_the_call_file_check_refuses_the_read_of_the_guide_ids_before_it(
 ) -> None:
     from cytearc.metadata import rows as metadata_rows
 
-    # Forty cells and ten guides whose IDs have 60 characters: a feature
-    # column is stored in chunks of 100,000 rows, so reading the IDs decodes
-    # 24 MB at 240 bytes a row, far more than the cells' IDs and the file.
+    # Forty cells and ten guides whose IDs have 60 characters, in a store
+    # written before feature columns were chunked by their rows: its guide IDs
+    # sit in chunks of 100,000 rows, so reading them decodes 24 MB at 240 bytes
+    # a row, far more than the cells' IDs and the file.
     n_cells = 40
     guide_ids = [f"guide{index}-" + "x" * 53 for index in range(10)]
     counts = np.zeros((n_cells, 10), dtype=np.uint16)
@@ -1538,6 +1540,7 @@ def test_the_call_file_check_refuses_the_read_of_the_guide_ids_before_it(
         "uint16",
         feature_ids={"CRISPR": guide_ids},
     )
+    rechunk_column(zarr.open_group(str(location))["CRISPR/featureData"], "ids")
     path = tmp_path / "calls.csv"
     pd.DataFrame(
         {

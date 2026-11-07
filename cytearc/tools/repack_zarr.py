@@ -259,14 +259,13 @@ def _copy_group(
                     for member in node.keys()
                     if f"{child_path}/{member}" in skipPaths
                 }
-                # A cell table's columns take a new store's chunks; feature
-                # tables keep theirs.
+                # The table's columns take a new store's chunks.
                 copy_zarr_group_tree(
                     node,
                     new_group,
                     exclude_members=excluded,
                     profile=profile,
-                    chunk_rows=column_chunk_rows if key == "cellData" else None,
+                    chunk_rows=column_chunk_rows,
                 )
                 continue
             _copy_group(

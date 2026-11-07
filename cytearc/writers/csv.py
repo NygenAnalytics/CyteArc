@@ -207,7 +207,6 @@ class CSVtoZarr:
         from ..storage.identity import CountSummary, finalize_counts
         from ..storage.schema import load_count_array
         from ..storage.metadata_keys import metadata_column_keys
-        from ..storage.layout import column_chunk_rows
         from ..utils.matrix_values import linear_values
         from ._store import keyed_metadata_columns, write_metadata_column
 
@@ -267,12 +266,7 @@ class CSVtoZarr:
             values = np.concatenate([values for values, _missing in parts[position]])
             missing = np.concatenate([missing for _values, missing in parts[position]])
             write_metadata_column(
-                cell_data_grp,
-                name,
-                values,
-                missing,
-                profile=self.profile,
-                chunk_rows=column_chunk_rows,
+                cell_data_grp, name, values, missing, profile=self.profile
             )
         logger.info(
             f"Wrote {self.csvr.nCells} cells and {self.csvr.nFeatures} features "

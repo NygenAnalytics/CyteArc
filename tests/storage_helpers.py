@@ -145,10 +145,11 @@ def rechunk_column(group: zarr.Group, name: str, rows: int = 100_000) -> None:
 def rechunk_feature_tables(location: str | Path) -> None:
     """Store every column of each assay's feature table at ``location`` again in one chunk of its rows.
 
-    Feature tables keep the chunks of 100,000 rows that their writers give
-    them, so a read of a few guides' IDs decodes a chunk of 100,000 of them;
-    in chunks of their rows, the reads hold what the rows do, and a memory
-    test sees what each step of a screen operation holds besides.
+    Stores written before feature tables were chunked by their rows keep
+    chunks of 100,000 rows, so a read of a few guides' IDs decodes a chunk of
+    100,000 of them; in chunks of their rows, as a new store holds them, the
+    reads hold what the rows do, and a memory test sees what each step of an
+    operation holds besides.
     """
     root = zarr.open_group(str(location), mode="r+")
     for assay in root.group_keys():

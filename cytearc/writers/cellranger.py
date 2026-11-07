@@ -279,7 +279,6 @@ class CrToZarr:
         from ..metadata.membership import reserved_membership_columns
         from ..storage.metadata_keys import metadata_column_keys
         from ..storage.types import as_zarr_group
-        from ..storage.layout import column_chunk_rows
         from ._store import keyed_metadata_columns, write_metadata_column
 
         # These readers hold their metadata in memory, so listing the columns
@@ -305,13 +304,7 @@ class CrToZarr:
                         f"Cell metadata column {name!r} has shape {values.shape}; "
                         f"expected ({self.cr.nCells},)"
                     )
-                write_metadata_column(
-                    cell_group,
-                    key,
-                    values,
-                    profile=self.profile,
-                    chunk_rows=column_chunk_rows,
-                )
+                write_metadata_column(cell_group, key, values, profile=self.profile)
 
         feature_columns = getattr(self.cr, "get_feature_columns", None)
         if not callable(feature_columns):

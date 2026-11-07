@@ -15,7 +15,7 @@ from .arrays import (
 )
 from .artifacts import ValueFingerprintBuilder, canonical_bytes
 from .geometry import array_geometry
-from .layout import PROFILE_METADATA_CHUNK, column_chunk_rows
+from .layout import column_chunk_rows
 from .metadata_keys import (
     ASSAY_MEMBERSHIP_ROLE,
     assay_membership_column,
@@ -659,14 +659,9 @@ def replace_metadata_column(
         mask = linked_missing_mask(group, name, label=f"Column {name!r}", values=array)
         previous = (_held(array), None if mask is None else _held(mask))
     link = {} if flagged is None else {"missing_mask": f"{MISSING_MASK_PREFIX}{name}"}
-    # The column and its mask are chunked as a cell table's writers chunk a
-    # new column, and as before in other tables; the column it replaces is
-    # restored with its own chunks.
-    rows = (
-        column_chunk_rows(len(stored), max(1, stored.dtype.itemsize))
-        if _is_cell_table(group)
-        else PROFILE_METADATA_CHUNK
-    )
+    # The column and its mask are chunked as the table's writers chunk a new
+    # column; the column it replaces is restored with its own chunks.
+    rows = column_chunk_rows(len(stored), max(1, stored.dtype.itemsize))
     try:
         _write_column(
             group,

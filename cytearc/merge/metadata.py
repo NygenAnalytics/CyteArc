@@ -871,9 +871,12 @@ def _plan_feature_columns(
                 + _chunk_resident_bytes(dtype, rows)
             )
 
+        # The column is written a stored chunk at a time, of at most the rows
+        # that the rule gives a feature column of this width, and of fewer
+        # where the budget holds fewer.
         block_rows = affordable_width(
             lambda rows: cost(rows) <= available,
-            min(PROFILE_METADATA_CHUNK, max(1, n_features)),
+            column_chunk_rows(n_features, max(1, dtype.itemsize)),
         )
         if block_rows < 1:
             raise MemoryBudgetError(
