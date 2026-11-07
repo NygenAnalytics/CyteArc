@@ -14,6 +14,13 @@ from .arrays import (
     linked_missing_mask,
 )
 from .artifacts import ValueFingerprintBuilder, canonical_bytes
+from .categorical import (
+    CATEGORIES_LINK,
+    ORDERED_ATTRIBUTE,
+    categories_name,
+    category_codes_dtype,
+    linked_categories,
+)
 from .geometry import array_geometry
 from .layout import column_chunk_rows
 from .metadata_keys import (
@@ -577,18 +584,21 @@ def _protect_membership_column(
 
 
 def clear_column(group: zarr.Group, column: str) -> None:
-    """Delete a metadata column and its linked missing mask."""
+    """Delete a metadata column with its linked missing mask and categories."""
     # A missing column has nothing to protect or clear; one lookup answers both.
     try:
         array = as_zarr_array(group[column], name=column)
     except KeyError:
         return
     protect_metadata_column(group, column, removing=array)
-    # Resolve the mask before deleting anything, so a malformed link fails closed.
-    mask = linked_missing_mask(group, column, label=f"Column {column!r}", values=array)
+    # Resolve the links before deleting anything, so a malformed link fails closed.
+    label = f"Column {column!r}"
+    mask = linked_missing_mask(group, column, label=label, values=array)
+    categories = linked_categories(group, column, label=label, values=array)
     del group[column]
-    if mask is not None:
-        del group[mask.basename]
+    for linked in (mask, categories):
+        if linked is not None:
+            del group[linked.basename]
 
 
 type _HeldArray = tuple[np.ndarray, dict[str, Any], int]
@@ -605,15 +615,19 @@ def _write_column(
     name: str,
     column: _HeldArray | None,
     mask: _HeldArray | None,
+    categories: _HeldArray | None = None,
 ) -> None:
-    """Delete column ``name`` and its mask, then write ``mask`` and ``column``.
+    """Delete column ``name`` with its mask and categories, then write ``mask``, ``categories`` and ``column``.
 
-    The values are deleted first and written last, so they never link a missing mask.
+    The values are deleted first and written last, so they never link an
+    array that is not there.
     """
     mask_name = f"{MISSING_MASK_PREFIX}{name}"
+    linked_name = categories_name(name)
     del group[name]
     del group[mask_name]
-    for key, held in ((mask_name, mask), (name, column)):
+    del group[linked_name]
+    for key, held in ((mask_name, mask), (linked_name, categories), (name, column)):
         if held is not None:
             values, attributes, chunk = held
             create_metadata_column(
@@ -631,16 +645,39 @@ def replace_metadata_column(
     name: str,
     values: np.ndarray,
     missing: np.ndarray | None = None,
+    *,
+    categories: np.ndarray | None = None,
+    ordered: bool = False,
 ) -> None:
     """Replace or create column ``name``; the caller checks protection first.
 
-    A failed write puts the previous column back before the error propagates.
+    With ``categories``, ``values`` are each row's code, a position among the
+    categories or -1 for a missing row, and the column is stored as codes in
+    the smallest signed integer type that holds them beside its categories,
+    whose ``ordered`` attribute records ``ordered``; the rows of code -1 are
+    flagged in its missing mask, so ``missing`` must be None. A failed write
+    puts the previous column back, whatever its layout, before the error
+    propagates.
+
+    Raises:
+        TypeError: If codes are not integers.
+        ValueError: If the column cannot be stored as given, a code names no
+            category, or the store is read-only.
     """
     validate_metadata_column_name(name)
     raw = np.asarray(values)
+    linked: _HeldArray | None = None
     # A value that cannot be stored is refused before anything changes.
-    stored = encode_metadata_values(raw, raw.dtype, name=name)
-    flagged = None if missing is None else np.asarray(missing, dtype=bool)
+    if categories is None:
+        stored = encode_metadata_values(raw, raw.dtype, name=name)
+        flagged = None if missing is None else np.asarray(missing, dtype=bool)
+    else:
+        if missing is not None:
+            raise ValueError(
+                f"Categorical column {name!r} marks its missing rows with code -1, "
+                "not with a separate mask"
+            )
+        stored, flagged, linked = _categorical_column(name, raw, categories, ordered)
     if flagged is not None and flagged.shape != stored.shape:
         raise ValueError(f"Column {name!r} has a misaligned missing mask")
     if flagged is not None and not flagged.any():
@@ -649,16 +686,30 @@ def replace_metadata_column(
         raise ValueError(
             f"Cannot write metadata column {name!r}: the store is open read-only"
         )
-    previous: tuple[_HeldArray | None, _HeldArray | None] = (None, None)
+    previous: tuple[_HeldArray | None, _HeldArray | None, _HeldArray | None] = (
+        None,
+        None,
+        None,
+    )
     try:
         array = as_zarr_array(group[name], name=name)
     except KeyError:
         pass
     else:
-        # Resolve the mask before anything changes, so a malformed link fails closed.
-        mask = linked_missing_mask(group, name, label=f"Column {name!r}", values=array)
-        previous = (_held(array), None if mask is None else _held(mask))
-    link = {} if flagged is None else {"missing_mask": f"{MISSING_MASK_PREFIX}{name}"}
+        # Resolve the links before anything changes, so a malformed link fails closed.
+        label = f"Column {name!r}"
+        mask = linked_missing_mask(group, name, label=label, values=array)
+        held_categories = linked_categories(group, name, label=label, values=array)
+        previous = (
+            _held(array),
+            None if mask is None else _held(mask),
+            None if held_categories is None else _held(held_categories),
+        )
+    link: dict[str, Any] = {}
+    if linked is not None:
+        link[CATEGORIES_LINK] = categories_name(name)
+    if flagged is not None:
+        link["missing_mask"] = f"{MISSING_MASK_PREFIX}{name}"
     # The column and its mask are chunked as the table's writers chunk a new
     # column; the column it replaces is restored with its own chunks.
     rows = column_chunk_rows(len(stored), max(1, stored.dtype.itemsize))
@@ -668,6 +719,7 @@ def replace_metadata_column(
             name,
             (stored, link, rows),
             None if flagged is None else (flagged, {}, rows),
+            linked,
         )
     except BaseException as error:
         try:
@@ -678,3 +730,47 @@ def replace_metadata_column(
                 "it may be missing or hold partial values."
             )
         raise
+
+
+def _categorical_column(
+    name: str, codes: np.ndarray, categories: np.ndarray, ordered: bool
+) -> tuple[np.ndarray, np.ndarray, _HeldArray]:
+    """Return a categorical column's stored codes, missing rows, and held categories.
+
+    Raises:
+        TypeError: If the codes are not integers or ``ordered`` is not a bool.
+        ValueError: If the codes are not one per row, a code names no category,
+            or the categories are not one-dimensional.
+    """
+    if not isinstance(ordered, bool | np.bool_):
+        raise TypeError(f"ordered must be a bool, not {type(ordered).__name__}")
+    if codes.ndim != 1 or codes.dtype.kind not in "iu":
+        raise TypeError(
+            f"Categorical column {name!r} needs one integer code per row, not "
+            f"{codes.dtype} values of shape {codes.shape}"
+        )
+    labels = encode_metadata_values(categories, np.asarray(categories).dtype, name=name)
+    if labels.ndim != 1:
+        raise ValueError(
+            f"Categorical column {name!r} needs one-dimensional categories, not "
+            f"categories of shape {labels.shape}"
+        )
+    n_categories = len(labels)
+    if labels.dtype.kind in "fc" and bool(np.isnan(labels).any()):
+        raise ValueError(
+            f"Categorical column {name!r} has NaN among its categories; a missing "
+            "row takes code -1 instead"
+        )
+    if len(np.unique(labels)) != n_categories:
+        raise ValueError(
+            f"Categorical column {name!r} names a category twice among its "
+            f"{n_categories} categories as stored"
+        )
+    if codes.size and (int(codes.min()) < -1 or int(codes.max()) >= n_categories):
+        raise ValueError(
+            f"Categorical column {name!r} has codes outside -1 to "
+            f"{n_categories - 1}, the positions of its {n_categories} categories"
+        )
+    stored = codes.astype(category_codes_dtype(n_categories))
+    rows = column_chunk_rows(n_categories, max(1, labels.dtype.itemsize))
+    return stored, stored < 0, (labels, {ORDERED_ATTRIBUTE: bool(ordered)}, rows)

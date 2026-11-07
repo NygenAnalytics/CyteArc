@@ -22,10 +22,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..storage.arrays import encode_metadata_values, text_array
+from ..storage.arrays import encode_metadata_values, missing_placeholder, text_array
 
 __all__ = [
+    "categorical_codes",
     "checked_fill_value",
+    "is_categorical",
     "missing_placeholder",
     "missing_rows",
     "nullable_values",
@@ -43,24 +45,6 @@ def missing_rows(values: np.ndarray) -> np.ndarray:
     if array.dtype.kind != "O":
         return np.zeros(array.shape, dtype=bool)
     return np.asarray(pd.isna(array), dtype=bool)
-
-
-def missing_placeholder(dtype: np.dtype[Any]) -> Any:
-    """Return the value that a masked row holds in a column of ``dtype``."""
-    kind = dtype.kind
-    if kind == "b":
-        return False
-    if kind in "iu":
-        return 0
-    if kind in "fc":
-        return np.nan
-    if kind in "Mm":
-        return np.array("NaT", dtype=dtype)[()]
-    if kind == "U":
-        return ""
-    if kind == "S":
-        return b""
-    raise TypeError(f"A metadata column of dtype {dtype} cannot hold missing values")
 
 
 def _text(values: np.ndarray, missing: np.ndarray, *, name: str) -> np.ndarray:
@@ -231,6 +215,44 @@ def stored_categorical_values(
     stored = np.full(codes.shape, missing_placeholder(typed.dtype), dtype=typed.dtype)
     stored[present] = typed[rank[present_codes]]
     return stored, ~present
+
+
+def is_categorical(values: Any) -> bool:
+    """Return whether ``values`` are pandas categorical values, such as a ``pd.Categorical``."""
+    return isinstance(getattr(values, "dtype", None), pd.CategoricalDtype)
+
+
+def categorical_codes(values: Any, *, name: str) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Return the codes, categories and order of pandas categorical values.
+
+    A ``pd.Categorical``, a ``pd.CategoricalIndex`` and a Series of
+    categorical dtype are categorical. The codes are pandas' own, one per
+    value and -1 for a missing one. The categories are typed together, as
+    :func:`stored_values` types the values of a column, every category
+    included: text as fixed-width text, and numbers and booleans as int64,
+    float64, complex128 or bool.
+
+    Raises:
+        TypeError: If the values are not categorical.
+        ValueError: If two categories read alike once typed, such as ``1``
+            and ``"1"``, or :func:`stored_values` refuses a category.
+    """
+    if not is_categorical(values):
+        raise TypeError(
+            f"Column {name!r} needs pandas categorical values, not "
+            f"{type(values).__name__}"
+        )
+    categorical = pd.Categorical(values)
+    labels = np.empty(len(categorical.categories), dtype=object)
+    labels[:] = categorical.categories.tolist()
+    categories = stored_values(labels, np.zeros(len(labels), dtype=bool), name=name)
+    if len(np.unique(categories)) != len(categories):
+        raise ValueError(
+            f"Column {name!r} has categories that read alike once stored, as "
+            f"text or numbers: {categorical.categories.tolist()!r}; rename them "
+            "so that each stores apart"
+        )
+    return np.asarray(categorical.codes), categories, bool(categorical.ordered)
 
 
 def _is_pandas_values(values: Any) -> bool:

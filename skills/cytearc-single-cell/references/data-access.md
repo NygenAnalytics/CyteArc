@@ -24,6 +24,7 @@ CyteBase docs: <https://docs.nygen.io/CyteBase/>.
 - `I` is the live Boolean cell key (feature tables have one too). `fetch(col)` returns rows where
   `I` is true; `fetch_all(col)` returns every row. Analytical filtering returns a cell-selection
   artifact and never edits `I`.
+- A label column stores text values or, as a categorical column, integer codes beside its categories. `cells.insert(col, pd.Categorical(...))` writes a categorical column, other values write values, and every read returns the labels either way. `cells.fetch_categorical(col, key="I")` returns a pandas `Categorical` of any column (`key=None` for every row): a categorical column's stored codes and categories, unused ones included, or a text column's distinct values in natural order.
 - `zarr_mode="r+"` is the default. A writable open WRITES: first-open preparation of a freshly
   written store (QC columns, feature `nCells`/`dropOuts`), the `min_features_per_cell` filter
   applied to `I` by the first writable open only (recorded in `cellData`; reopening never filters

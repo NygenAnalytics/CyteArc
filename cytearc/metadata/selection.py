@@ -40,7 +40,7 @@ from .rows import (
     read_metadata_missing_rows,
     read_metadata_rows,
     read_rows,
-    row_read_bytes,
+    read_rows_bytes,
 )
 
 LookupBy = Literal["name", "id", "index"]
@@ -985,14 +985,15 @@ def _refuse_cell_read(
 def _reads_in_turn_bytes(arrays: Sequence[Any], n_rows: int) -> int:
     """The most that reading ``n_rows`` rows of each array in turn holds.
 
-    Each read holds what :func:`~cytearc.metadata.rows.row_read_bytes`
-    states beside the rows of the arrays read before it, which
+    Each read holds what :func:`~cytearc.metadata.rows.read_rows_bytes`
+    states, the codes and categories of a categorical column, beside the
+    rows of the arrays read before it, which
     :func:`~cytearc.metadata.rows.read_rows` keeps charged.
     """
     kept = 0
     most = 0
     for array in arrays:
-        most = max(most, kept + row_read_bytes(array_geometry(array), n_rows))
+        most = max(most, kept + read_rows_bytes(array, n_rows))
         row_values = int(np.prod(array.shape[1:], dtype=np.int64))
         kept += n_rows * row_values * np.dtype(array.dtype).itemsize
     return most
