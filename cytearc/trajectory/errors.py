@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from typing import Any, Literal
 
 _MISSING_FROM = ("labels", "scored component")
+_POTENTIAL_METHODS = ("untruncated", "truncated")
 
 
 def _check_missing_from(missing_from: object, component_sizes: object) -> None:
@@ -24,68 +25,129 @@ def _check_missing_from(missing_from: object, component_sizes: object) -> None:
 
 
 class PseudotimeConvergenceError(RuntimeError):
-    """The singular value solve of a pseudotime stopped at its bound.
+    """The solve of a pseudotime's potential stopped at its bound.
+
+    ``method`` names the solve: ``"untruncated"`` for MINRES on the symmetric
+    graph Laplacian, ``"truncated"`` for the Lanczos solve of the smallest
+    singular values. The fields of the other solve are None.
 
     Attributes:
+        method: The potential that the solve computed, ``"untruncated"`` or
+            ``"truncated"``.
         n_cells: The cells of the scored component, one row of the graph
             Laplacian each.
-        n_modes: The singular modes that the solve sought, the null mode
-            included.
-        converged_modes: The modes that had converged when the solve stopped.
-        restarts: The implicit restarts that the Lanczos solve ran, which
-            reached ``max_iterations``.
-        operator_products: The products of the Laplacian or its transpose
-            with a vector that the solve computed.
-        max_iterations: The bound on restarts that stopped the solve: the
-            caller's, or SciPy's default of ten per cell.
-        solver_tol: The relative tolerance of the singular values, or None
-            for machine precision.
+        operator_products: The products of the graph Laplacian, or of its
+            transpose, with a vector that the solve computed.
+        max_iterations: The bound that stopped the solve, on MINRES iterations
+            or on the implicit restarts of the singular value solve: the
+            caller's, or SciPy's default of five iterations or ten restarts
+            per cell.
+        solver_tol: The tolerance of the solve, or None for machine precision.
+        relative_residual: For ``"untruncated"``, the residual of the
+            symmetric system relative to its right-hand side when the solve
+            stopped.
+        n_modes: For ``"truncated"``, the singular modes that the solve
+            sought, the null mode included.
+        converged_modes: For ``"truncated"``, the modes that had converged
+            when the solve stopped.
+        restarts: For ``"truncated"``, the implicit restarts that the Lanczos
+            solve ran, which reached ``max_iterations``.
     """
 
     def __init__(
         self,
+        *,
+        method: Literal["untruncated", "truncated"],
         n_cells: int,
-        n_modes: int,
-        converged_modes: int,
-        restarts: int,
         operator_products: int,
         max_iterations: int,
         solver_tol: float | None,
+        relative_residual: float | None = None,
+        n_modes: int | None = None,
+        converged_modes: int | None = None,
+        restarts: int | None = None,
     ) -> None:
+        if method not in _POTENTIAL_METHODS:
+            raise ValueError(
+                f"method must be one of {_POTENTIAL_METHODS}, not {method!r}"
+            )
+        truncated = method == "truncated"
+        modes = (n_modes, converged_modes, restarts)
+        if any((value is None) == truncated for value in modes) or (
+            (relative_residual is None) != truncated
+        ):
+            raise ValueError(
+                "n_modes, converged_modes and restarts must be given with "
+                "method='truncated', and relative_residual with "
+                "method='untruncated', each only with it"
+            )
+        self.method: Literal["untruncated", "truncated"] = method
         self.n_cells = int(n_cells)
-        self.n_modes = int(n_modes)
-        self.converged_modes = int(converged_modes)
-        self.restarts = int(restarts)
         self.operator_products = int(operator_products)
         self.max_iterations = int(max_iterations)
         self.solver_tol = None if solver_tol is None else float(solver_tol)
+        self.relative_residual = (
+            None if relative_residual is None else float(relative_residual)
+        )
+        self.n_modes = None if n_modes is None else int(n_modes)
+        self.converged_modes = None if converged_modes is None else int(converged_modes)
+        self.restarts = None if restarts is None else int(restarts)
+        if truncated:
+            message = (
+                f"{self.converged_modes} of {self.n_modes} singular modes converged "
+                f"before the solve reached max_iterations={self.max_iterations} "
+                f"after {self.restarts} restarts and {self.operator_products} "
+                f"operator products (solver_tol={self.solver_tol}). The smallest "
+                "singular values lie too close together to separate, as on large "
+                "graphs and on graphs whose parts are joined by few edges, and "
+                "fewer modes do not help. Score fewer cells, or score each weakly "
+                "joined part on a graph of its own cells. A larger max_iterations "
+                "helps only when most modes converged."
+            )
+        else:
+            message = (
+                f"MINRES reached max_iterations={self.max_iterations} after "
+                f"{self.operator_products} operator products with a relative "
+                f"residual of {self.relative_residual:.1e} "
+                f"(solver_tol={self.solver_tol}). MINRES needs more iterations "
+                "the more weakly the graph's parts are joined. Raise "
+                "max_iterations, or score each weakly joined part on a graph of "
+                "its own cells."
+            )
         super().__init__(
             "Pseudotime scoring did not converge on the graph Laplacian of "
-            f"{self.n_cells} cells: {self.converged_modes} of {self.n_modes} "
-            "singular modes converged before the solve reached "
-            f"max_iterations={self.max_iterations} after {self.restarts} restarts "
-            f"and {self.operator_products} operator products "
-            f"(solver_tol={self.solver_tol}). The smallest singular values lie too "
-            "close together to separate, as on large graphs and on graphs whose "
-            "parts are joined by few edges, and fewer modes do not help. Score "
-            "fewer cells, or score each weakly joined part on a graph of its own "
-            "cells. A larger max_iterations helps only when most modes converged."
+            f"{self.n_cells} cells: {message}"
         )
 
     def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
         return (
-            type(self),
+            _restore_pseudotime_convergence_error,
             (
-                self.n_cells,
-                self.n_modes,
-                self.converged_modes,
-                self.restarts,
-                self.operator_products,
-                self.max_iterations,
-                self.solver_tol,
+                type(self),
+                {
+                    "method": self.method,
+                    "n_cells": self.n_cells,
+                    "operator_products": self.operator_products,
+                    "max_iterations": self.max_iterations,
+                    "solver_tol": self.solver_tol,
+                    "relative_residual": self.relative_residual,
+                    "n_modes": self.n_modes,
+                    "converged_modes": self.converged_modes,
+                    "restarts": self.restarts,
+                },
             ),
             self.__dict__,
         )
+
+
+def _restore_pseudotime_convergence_error(
+    error_type: type[PseudotimeConvergenceError],
+    fields: dict[str, Any],
+) -> PseudotimeConvergenceError:
+    """Rebuild a pickled PseudotimeConvergenceError, whose fields are keywords."""
+    error = PseudotimeConvergenceError.__new__(error_type)
+    PseudotimeConvergenceError.__init__(error, **fields)
+    return error
 
 
 class SourceSinkLabelsError(ValueError):

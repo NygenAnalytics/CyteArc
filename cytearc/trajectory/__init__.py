@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     )
     from .pseudotime import (
         make_source_sink_vector as make_source_sink_vector,
+        pba_potential as pba_potential,
         random_walk_laplacian_transpose as random_walk_laplacian_transpose,
         select_pseudotime_component as select_pseudotime_component,
         truncated_pba_potential as truncated_pba_potential,
@@ -48,6 +49,7 @@ __all__ = [
     "SourceSinkLabelsError",
     "aggregate_feature_profiles",
     "make_source_sink_vector",
+    "pba_potential",
     "random_walk_laplacian_transpose",
     "select_pseudotime_component",
     "scatter_feature_clusters",
@@ -62,6 +64,7 @@ __getattr__, __dir__ = _lazy_facade(
     {
         "aggregate_feature_profiles": ".feature_dynamics",
         "make_source_sink_vector": ".pseudotime",
+        "pba_potential": ".pseudotime",
         "random_walk_laplacian_transpose": ".pseudotime",
         "select_pseudotime_component": ".pseudotime",
         "scatter_feature_clusters": ".feature_dynamics",

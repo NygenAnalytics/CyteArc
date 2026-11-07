@@ -163,7 +163,6 @@ def test_raw_source_sink_scoring_round_trips_and_validates_snapshot(
     ref = datastore.trajectory.pseudotime(
         connectivity_graph,
         ss_vec=source_sink,
-        n_singular_vals=10,
     )
     result = datastore.trajectory.load_pseudotime(ref)
     assert result.graph == connectivity_graph
@@ -216,7 +215,7 @@ def test_raw_source_sink_scoring_owns_the_vector_before_validation_and_snapshot(
     source_sink[retained[-1]] = 1.0
     expected = source_sink.copy()
     original_validator = trajectory_operations._validate_source_sink_vector_impl
-    original_potential = trajectory_operations._truncated_pba_potential_impl
+    original_potential = trajectory_operations._pba_potential_impl
     received: list[np.ndarray] = []
 
     def mutate_caller_after_validation(values, n_cells, context):
@@ -225,9 +224,9 @@ def test_raw_source_sink_scoring_owns_the_vector_before_validation_and_snapshot(
             source_sink[:] *= -1.0
         return validated
 
-    def capture_source_sink(laplacian, n_values, seed, values, **bounds):
+    def capture_source_sink(graph, values, **bounds):
         received.append(np.array(values, copy=True))
-        return original_potential(laplacian, n_values, seed, values, **bounds)
+        return original_potential(graph, values, **bounds)
 
     monkeypatch.setattr(
         trajectory_operations,
@@ -236,13 +235,12 @@ def test_raw_source_sink_scoring_owns_the_vector_before_validation_and_snapshot(
     )
     monkeypatch.setattr(
         trajectory_operations,
-        "_truncated_pba_potential_impl",
+        "_pba_potential_impl",
         capture_source_sink,
     )
     ref = datastore.trajectory.pseudotime(
         connectivity_graph,
         ss_vec=source_sink,
-        n_singular_vals=10,
         invalidate_cache=True,
     )
     result = datastore.trajectory.load_pseudotime(ref)
@@ -907,7 +905,6 @@ def test_raw_source_sink_scoring_refuses_read_only_store_before_snapshot(
         read_only.trajectory.pseudotime(
             connectivity_graph,
             ss_vec=source_sink,
-            n_singular_vals=10,
         )
     assert (
         datastore.artifacts.list(kind="metadata_snapshot", scope="datastore")
@@ -1482,11 +1479,7 @@ def test_aggregation_and_marker_search_complete_within_a_small_budget(tmp_path):
     )
     source_sink = np.zeros(n_cells)
     source_sink[[0, -1]] = [-1.0, 1.0]
-    pseudotime = datastore.trajectory.pseudotime(
-        graph,
-        ss_vec=source_sink,
-        n_singular_vals=5,
-    )
+    pseudotime = datastore.trajectory.pseudotime(graph, ss_vec=source_sink)
     # Every cell is scored, so both analyses read the counts of all 4000 cells.
     assert datastore.trajectory.load_pseudotime(pseudotime).valid.all()
 
@@ -1898,43 +1891,59 @@ def test_missing_source_and_sink_labels_raise_a_typed_error():
 # Pseudotime scoring on stored graphs
 
 
-def _pseudotime_parameters(**changes):
-    return {
-        "n_singular_vals": 3,
+def _pseudotime_parameters(method: str = "untruncated", **changes):
+    """Return the parameters that a pseudotime of the Y graph records."""
+    parameters = {
+        "method": method,
         "sources": ["root"],
         "sinks": ["A", "B"],
         "min_max_norm_ptime": True,
-        "random_seed": 4444,
         "component_policy": "largest",
-        **changes,
     }
+    if method == "truncated":
+        parameters |= {"n_singular_vals": 3, "random_seed": 4444}
+    return parameters | changes
 
 
-def test_a_default_pseudotime_records_what_it_recorded_before_the_bounds():
+def _method_arguments(method: str) -> dict:
+    """Return the arguments that ask a pseudotime of the Y graph for ``method``."""
+    if method == "truncated":
+        return {"method": "truncated", "n_singular_vals": 3}
+    return {"method": method}
+
+
+@pytest.mark.parametrize("method", ["untruncated", "truncated"])
+def test_a_pseudotime_records_its_method_and_the_parameters_of_its_method(method):
     from .test_trajectory_record_paths import _Y_LABELS, _trajectory_store, _y_graph
 
     trajectory = _trajectory_store(_y_graph())
     labels = trajectory.labels(_Y_LABELS)
+    arguments = {"source_sink": labels, "sources": ["root"], "sinks": ["A", "B"]}
     ref = trajectory.store.trajectory.pseudotime(
-        trajectory.graph,
-        source_sink=labels,
-        sources=["root"],
-        sinks=["A", "B"],
-        n_singular_vals=3,
+        trajectory.graph, **arguments, **_method_arguments(method)
     )
 
-    # A store reuses an artifact of the same record, so an unchanged record
-    # keeps the identity of every pseudotime saved before.
     status = trajectory.store.artifacts.inspect(ref)
-    assert status.parameters == _pseudotime_parameters()
+    assert status.parameters == _pseudotime_parameters(method)
     assert set(status.inputs or {}) == {
         "connectivity_map",
         "source_sink",
         "cell_selection",
     }
+    # The untruncated potential is revision 2 of pseudotime scoring, and the
+    # truncated potential, which earlier releases computed, revision 1.
+    assert (status.revision, status.is_current) == (
+        (2, True) if method == "untruncated" else (1, True)
+    )
+    if method == "untruncated":
+        # A call that leaves the method unset asks for the same artifact.
+        assert trajectory.store.trajectory.pseudotime(
+            trajectory.graph, **arguments
+        ) == (ref)
 
 
-def test_a_set_solver_bound_enters_the_record_and_makes_another_artifact():
+@pytest.mark.parametrize("method", ["untruncated", "truncated"])
+def test_a_set_solver_bound_enters_the_record_and_makes_another_artifact(method):
     from .test_trajectory_record_paths import _Y_LABELS, _trajectory_store, _y_graph
 
     trajectory = _trajectory_store(_y_graph())
@@ -1943,7 +1952,7 @@ def test_a_set_solver_bound_enters_the_record_and_makes_another_artifact():
         "source_sink": trajectory.labels(_Y_LABELS),
         "sources": ["root"],
         "sinks": ["A", "B"],
-        "n_singular_vals": 3,
+        **_method_arguments(method),
     }
     default = store.trajectory.pseudotime(trajectory.graph, **arguments)
     unset = store.trajectory.pseudotime(
@@ -1959,10 +1968,10 @@ def test_a_set_solver_bound_enters_the_record_and_makes_another_artifact():
     assert unset == default
     assert len({default, bounded, tolerant}) == 3
     assert store.artifacts.inspect(bounded).parameters == _pseudotime_parameters(
-        max_iterations=500
+        method, max_iterations=500
     )
     assert store.artifacts.inspect(tolerant).parameters == _pseudotime_parameters(
-        solver_tol=1e-6
+        method, solver_tol=1e-6
     )
     # Each is reused by a call that sets its bound again.
     assert (
@@ -1981,7 +1990,8 @@ def test_a_set_solver_bound_enters_the_record_and_makes_another_artifact():
     )
 
 
-def test_a_solve_stopped_at_its_bound_saves_no_pseudotime():
+@pytest.mark.parametrize("method", ["untruncated", "truncated"])
+def test_a_solve_stopped_at_its_bound_saves_no_pseudotime(method):
     from cytearc.trajectory import PseudotimeConvergenceError
 
     from .test_trajectory_record_paths import _trajectory_store
@@ -1997,11 +2007,21 @@ def test_a_solve_stopped_at_its_bound_saves_no_pseudotime():
             source_sink=trajectory.labels(values.astype(str)),
             sources=["start"],
             sinks=["end"],
+            method=method,
             max_iterations=1,
         )
 
     error = raised.value
-    assert (error.n_cells, error.n_modes, error.restarts) == (300, 30, 1)
+    assert (error.method, error.n_cells, error.max_iterations) == (method, 300, 1)
+    if method == "truncated":
+        assert (error.n_modes, error.restarts) == (30, 1)
+    else:
+        # SciPy's symmetry check takes two products and the one iteration one.
+        assert (error.operator_products, error.n_modes, error.restarts) == (
+            3,
+            None,
+            None,
+        )
     assert trajectory.artifacts("pseudotime") == []
 
 
@@ -2033,7 +2053,6 @@ def test_loaded_pseudotime_numbers_the_graph_components_by_size():
         source_sink=trajectory.labels(block_labels[order]),
         sources=["root"],
         sinks=["A", "B"],
-        n_singular_vals=3,
     )
 
     result = trajectory.store.trajectory.load_pseudotime(ref)
@@ -2054,7 +2073,6 @@ def test_loaded_pseudotime_numbers_the_graph_components_by_size():
             source_sink=connected.labels(_Y_LABELS),
             sources=["root"],
             sinks=["A", "B"],
-            n_singular_vals=3,
         )
     )
     assert whole.component_sizes == (5,)
@@ -2088,7 +2106,6 @@ def test_the_sources_policy_scores_the_component_that_holds_the_sources():
         "source_sink": trajectory.labels(labels),
         "sources": ["root"],
         "sinks": ["A", "B"],
-        "n_singular_vals": 3,
     }
 
     # The largest component, the path, holds none of the labels.
@@ -2116,7 +2133,6 @@ def test_the_sources_policy_scores_the_component_that_holds_the_sources():
         source_sink=alone.labels(_Y_LABELS),
         sources=["root"],
         sinks=["A", "B"],
-        n_singular_vals=3,
     )
     np.testing.assert_allclose(
         result.values[8:],
@@ -2130,7 +2146,6 @@ def test_the_sources_policy_scores_the_component_that_holds_the_sources():
         trajectory.graph,
         ss_vec=np.concatenate((np.zeros(8), _Y_SOURCE_SINK)),
         component_policy="sources",
-        n_singular_vals=3,
     )
     np.testing.assert_array_equal(
         store.trajectory.load_pseudotime(from_vector).valid, np.arange(13) >= 8
@@ -2166,7 +2181,6 @@ def test_the_sources_policy_names_labels_outside_the_scored_component(
             sources=sources,
             sinks=sinks,
             component_policy="sources",
-            n_singular_vals=3,
         )
 
     error = raised.value
@@ -2177,3 +2191,613 @@ def test_the_sources_policy_names_labels_outside_the_scored_component(
         error.component_sizes,
     ) == expected
     assert trajectory.artifacts("pseudotime") == []
+
+
+# The untruncated potential
+
+
+def _random_walk_laplacian(adjacency: np.ndarray) -> np.ndarray:
+    """Return the dense random-walk Laplacian ``I - D^-1 W`` of a graph."""
+    degree = adjacency.sum(axis=1)
+    return np.eye(len(degree)) - adjacency / degree[:, np.newaxis]
+
+
+def _pseudoinverse_potential(adjacency: np.ndarray, source_sink: np.ndarray):
+    """Return NumPy's dense ``pinv(L) R'`` and ``R'``, the treated source-sink vector.
+
+    ``R'`` is ``R`` without its component along the degree vector, which
+    spans the left null space of the random-walk Laplacian ``L``.
+    """
+    degree = adjacency.sum(axis=1)
+    laplacian = _random_walk_laplacian(adjacency)
+    # A connected graph's Laplacian has one null mode, which a cutoff far
+    # above rounding and far below the other singular values drops.
+    assert np.linalg.matrix_rank(laplacian, rtol=1e-10) == len(degree) - 1
+    projected = source_sink - degree * (degree @ source_sink) / (degree @ degree)
+    return np.linalg.pinv(laplacian, rtol=1e-10) @ projected, projected
+
+
+def _weighted_path(weights: list[float]) -> np.ndarray:
+    adjacency = np.zeros((len(weights) + 1,) * 2)
+    for index, weight in enumerate(weights):
+        adjacency[index, index + 1] = adjacency[index + 1, index] = weight
+    return adjacency
+
+
+def _random_connected_graph(n_cells: int, seed: int) -> np.ndarray:
+    """Return a weighted graph of a random spanning tree and random extra edges."""
+    rng = np.random.default_rng(seed)
+    adjacency = np.zeros((n_cells, n_cells))
+    for cell in range(1, n_cells):
+        other = int(rng.integers(0, cell))
+        adjacency[cell, other] = adjacency[other, cell] = rng.uniform(0.1, 1.0)
+    for _ in range(2 * n_cells):
+        first, second = rng.integers(0, n_cells, size=2)
+        if first != second:
+            adjacency[first, second] = adjacency[second, first] = rng.uniform(0.1, 1.0)
+    return adjacency
+
+
+def _small_graphs() -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Graphs whose degrees differ, each with a source-sink vector that sums to zero."""
+    from .test_trajectory_record_paths import _Y_SOURCE_SINK, _y_graph
+
+    path = _weighted_path([1.0, 2.0, 1.5, 3.0, 0.75, 2.5, 1.25])
+    trees = _clusters_on_a_tree(300, 10, seed=1).toarray()
+    groups = pd.Series(np.arange(300) // 30)
+    random_graph = _random_connected_graph(60, seed=4)
+    return {
+        "weighted-path": (path, _first_to_last_source_sink(8)),
+        "y": (_y_graph(), _Y_SOURCE_SINK),
+        "clusters-on-a-tree": (trees, _make_source_sink_vector(groups, [0], [9])),
+        "random": (random_graph, np.random.default_rng(5).normal(size=60)),
+    }
+
+
+@pytest.mark.parametrize("name", ["weighted-path", "y", "clusters-on-a-tree", "random"])
+def test_the_untruncated_potential_equals_the_dense_pseudoinverse(name):
+    from cytearc.trajectory import pba_potential
+
+    adjacency, source_sink = _small_graphs()[name]
+    if name == "random":
+        source_sink = source_sink - source_sink.mean()
+    degree = adjacency.sum(axis=1)
+    # The degrees differ and R has a component along them, so the treatment
+    # of that component decides the potential.
+    assert np.ptp(degree) > 0.1
+    assert abs(degree @ source_sink) > 1e-3 * np.linalg.norm(degree)
+    expected, projected = _pseudoinverse_potential(adjacency, source_sink)
+
+    potential = pba_potential(csr_matrix(adjacency), source_sink)
+
+    np.testing.assert_allclose(
+        potential, expected, rtol=0.0, atol=1e-8 * np.abs(expected).max()
+    )
+    # Removing a constant instead, which also balances the degree-weighted
+    # sum, would give another potential.
+    balanced = source_sink - (degree @ source_sink) / degree.sum()
+    other = np.linalg.pinv(_random_walk_laplacian(adjacency), rtol=1e-10) @ balanced
+    assert np.abs(other - expected).max() > 1e-3 * np.abs(expected).max()
+    # The pseudoinverse drops the component itself.
+    np.testing.assert_allclose(
+        np.linalg.pinv(_random_walk_laplacian(adjacency), rtol=1e-10) @ source_sink,
+        expected,
+        rtol=0.0,
+        atol=1e-10 * np.abs(expected).max(),
+    )
+    assert abs(projected @ degree) < 1e-12 * np.linalg.norm(degree)
+
+
+def test_the_untruncated_potential_orders_a_path_from_source_to_sink():
+    from cytearc.trajectory import pba_potential
+
+    from .test_trajectory_record_paths import _trajectory_store
+
+    # Stored edge weights are united with the fuzzy union, so they stay in (0, 1].
+    adjacency = _weighted_path([0.9, 0.3, 0.6, 1.0, 0.45, 0.8, 0.2, 0.7])
+    source_sink = _first_to_last_source_sink(9)
+
+    potential = pba_potential(csr_matrix(adjacency), source_sink)
+
+    assert np.all(np.diff(potential) > 0)
+    trajectory = _trajectory_store(adjacency)
+    store = trajectory.store
+    values = store.trajectory.load_pseudotime(
+        store.trajectory.pseudotime(trajectory.graph, ss_vec=source_sink)
+    ).values
+    assert (values[0], values[-1]) == (0.0, 1.0)
+    assert np.all(np.diff(values) > 0)
+    scored = pba_potential(
+        store.graph.load(trajectory.graph, symmetric=True, upper_only=False),
+        source_sink,
+    )
+    np.testing.assert_allclose(
+        values, (scored - scored.min()) / np.ptp(scored), rtol=0.0, atol=1e-12
+    )
+
+
+def test_the_untruncated_potential_finishes_where_the_truncated_solve_cannot():
+    from scipy.sparse import diags, identity
+
+    from cytearc.trajectory import PseudotimeConvergenceError, pba_potential
+
+    # 400 clusters of about ten cells, each joined to another by few edges,
+    # pack the smallest singular values of the Laplacian closely.
+    graph = _clusters_on_a_tree(4000, 400)
+    source_sink = _first_to_last_source_sink(4000)
+
+    with pytest.raises(PseudotimeConvergenceError) as raised:
+        _truncated_pba_potential(
+            _random_walk_laplacian_transpose(graph),
+            30,
+            4444,
+            source_sink,
+            max_iterations=250,
+        )
+    # A restart takes up to 62 products, so the singular value solve stopped
+    # after more than 10,000.
+    assert raised.value.converged_modes < 30
+    assert raised.value.operator_products > 10_000
+
+    bounded = pba_potential(graph, source_sink, max_iterations=250)
+
+    # The bound changes nothing that the solve computes.
+    np.testing.assert_array_equal(bounded, pba_potential(graph, source_sink))
+    degree = np.asarray(graph.sum(axis=1)).ravel()
+    laplacian = identity(4000) - diags(1.0 / degree) @ graph
+    projected = source_sink - degree * (degree @ source_sink) / (degree @ degree)
+    residual = np.linalg.norm(laplacian @ bounded - projected)
+    assert residual < 1e-9 * np.linalg.norm(projected)
+    assert abs(bounded.mean()) < 1e-12 * np.abs(bounded).max()
+
+
+def _count_minres_products(monkeypatch) -> list[int]:
+    """Count the operator products that minres takes, apart from the solve's count.
+
+    Each call appends one count to the returned list.
+    """
+    from scipy.sparse.linalg import LinearOperator, aslinearoperator
+
+    import cytearc.trajectory.pseudotime as pseudotime_module
+
+    original = pseudotime_module.minres
+    counts: list[int] = []
+
+    def counting_minres(operator, right_hand_side, **arguments):
+        inner = aslinearoperator(operator)
+        counts.append(0)
+
+        def matvec(values):
+            counts[-1] += 1
+            return inner.matvec(values)
+
+        counted = LinearOperator(shape=inner.shape, matvec=matvec, dtype=inner.dtype)
+        return original(counted, right_hand_side, **arguments)
+
+    monkeypatch.setattr(pseudotime_module, "minres", counting_minres)
+    return counts
+
+
+def test_a_bounded_untruncated_solve_stops_with_the_counts_of_the_solve(monkeypatch):
+    from scipy.sparse.linalg import LinearOperator, minres
+
+    from cytearc.trajectory import PseudotimeConvergenceError, pba_potential
+
+    graph = _clusters_on_a_tree(600, 60)
+    source_sink = _first_to_last_source_sink(600)
+    counts = _count_minres_products(monkeypatch)
+
+    with pytest.raises(PseudotimeConvergenceError) as raised:
+        pba_potential(graph, source_sink, max_iterations=5)
+
+    error = raised.value
+    assert isinstance(error, RuntimeError)
+    assert (error.method, error.n_cells, error.max_iterations) == (
+        "untruncated",
+        600,
+        5,
+    )
+    assert (error.solver_tol, error.n_modes, error.converged_modes) == (
+        None,
+        None,
+        None,
+    )
+    assert error.restarts is None
+    # SciPy's symmetry check takes two products and each iteration one.
+    assert error.operator_products == counts[0] == 5 + 2
+    # The residual is that of SciPy's solve of the symmetric system after
+    # five iterations.
+    degree = np.asarray(graph.sum(axis=1)).ravel()
+    scale = 1.0 / np.sqrt(degree)
+    symmetric = LinearOperator(
+        shape=graph.shape,
+        matvec=lambda values: values - scale * (graph @ (scale * values)),
+        dtype=np.float64,
+    )
+    projected = source_sink - degree * (degree @ source_sink) / (degree @ degree)
+    right_hand_side = projected / scale
+    solution, info = minres(symmetric, right_hand_side, rtol=0.0, maxiter=5)
+    assert info == 5
+    expected = np.linalg.norm(symmetric @ solution - right_hand_side) / np.linalg.norm(
+        right_hand_side
+    )
+    assert error.relative_residual == pytest.approx(expected, rel=1e-8)
+    assert "MINRES reached max_iterations=5 after 7 operator products" in str(error)
+    assert "Raise max_iterations" in str(error)
+
+
+def test_the_untruncated_solver_bounds_reach_minres(monkeypatch):
+    import cytearc.trajectory.pseudotime as pseudotime_module
+    from cytearc.trajectory import pba_potential
+
+    received: list[dict] = []
+    original = pseudotime_module.minres
+
+    def recording_minres(operator, right_hand_side, **arguments):
+        received.append(
+            {name: arguments[name] for name in ("rtol", "maxiter", "check")}
+        )
+        return original(operator, right_hand_side, **arguments)
+
+    monkeypatch.setattr(pseudotime_module, "minres", recording_minres)
+    graph = _clusters_on_a_tree(300, 10, seed=1)
+    source_sink = _first_to_last_source_sink(300)
+    default = pba_potential(graph, source_sink)
+    bounded = pba_potential(graph, source_sink, solver_tol=1e-8, max_iterations=500)
+
+    # Machine precision by default, SciPy's bound of five iterations per cell,
+    # and SciPy's check that the operator is symmetric.
+    assert received == [
+        {"rtol": 0.0, "maxiter": None, "check": True},
+        {"rtol": 1e-8, "maxiter": 500, "check": True},
+    ]
+    # A looser tolerance moves the potential smoothly, far less than its range.
+    np.testing.assert_allclose(bounded, default, rtol=0.0, atol=1e-4 * np.ptp(default))
+
+
+@pytest.mark.parametrize(
+    ("bounds", "error", "message"),
+    [
+        ({"solver_tol": 0.0}, ValueError, "greater than 0 and less than 1"),
+        ({"solver_tol": 1.0}, ValueError, "greater than 0 and less than 1"),
+        ({"solver_tol": float("nan")}, ValueError, "solver_tol must be finite"),
+        ({"solver_tol": "1e-4"}, TypeError, "solver_tol must be a real number"),
+        ({"max_iterations": 0}, ValueError, "max_iterations must be at least 1"),
+        ({"max_iterations": 2.0}, TypeError, "max_iterations must be an integer"),
+        ({"max_iterations": True}, TypeError, "max_iterations must be an integer"),
+    ],
+)
+def test_untruncated_solver_bounds_are_checked_before_the_solve(
+    bounds, error, message, monkeypatch
+):
+    import cytearc.trajectory.pseudotime as pseudotime_module
+    from cytearc.trajectory import pba_potential
+
+    def unreachable(*_args, **_kwargs):
+        raise AssertionError("the bounds were not checked before the solve")
+
+    monkeypatch.setattr(pseudotime_module, "minres", unreachable)
+
+    with pytest.raises(error, match=message):
+        pba_potential(
+            _clusters_on_a_tree(40, 4), _first_to_last_source_sink(40), **bounds
+        )
+
+
+@pytest.mark.parametrize("max_iterations", [200, None], ids=["bounded", "unbounded"])
+def test_the_untruncated_solve_reports_progress_to_observers_and_the_log(
+    max_iterations, monkeypatch
+):
+    from loguru import logger
+
+    import cytearc.trajectory.pseudotime as pseudotime_module
+    from cytearc.trajectory import pba_potential
+    from cytearc.utils.logging import configure_output, progress_enabled
+    from cytearc.utils.progress import observe_progress
+
+    # Report every product, so a quick solve reports as a long one does.
+    monkeypatch.setattr(pseudotime_module, "_PROGRESS_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(pseudotime_module, "_BAR_INTERVAL_SECONDS", 0.0)
+    counts = _count_minres_products(monkeypatch)
+    observed: list[tuple[str | None, int, int | None]] = []
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        level="INFO",
+        filter=lambda record: record["message"].startswith("Pseudotime scoring: "),
+    )
+    displayed = progress_enabled()
+    # Observers receive the bar whether or not it is displayed.
+    configure_output(progress=False)
+    try:
+        with observe_progress(
+            lambda _bar, description, completed, total: observed.append(
+                (description, completed, total)
+            )
+        ):
+            pba_potential(
+                _clusters_on_a_tree(40, 4),
+                _first_to_last_source_sink(40),
+                max_iterations=max_iterations,
+            )
+    finally:
+        configure_output(progress=displayed)
+        logger.remove(sink)
+
+    products = counts[0]
+    assert products > 2
+    assert {description for description, _, _ in observed} == {"Pseudotime solve"}
+    completed = [done for _, done, _ in observed]
+    assert completed == sorted(completed)
+    record_counts = [int(message.split()[2]) for message in messages]
+    assert record_counts == list(range(1, products + 1))
+    assert "solving for the untruncated potential of 40 cells" in messages[-1]
+    if max_iterations is None:
+        assert {total for _, _, total in observed} == {None}
+        assert completed[-1] == products
+        assert messages[-1].endswith("; set max_iterations to bound the solve")
+    else:
+        # Two products of SciPy's symmetry check and one per iteration.
+        bound = 200 + 2
+        assert {total for _, _, total in observed} == {bound}
+        # The solve converged, so its bar completes.
+        assert completed[-2:] == [products, bound]
+        assert f"{products} of at most {bound} operator products" in messages[-1]
+        assert messages[-1].endswith("cells (max_iterations=200)")
+
+
+def _unusable_inputs():
+    path = csr_matrix(_weighted_path([0.5, 1.0, 0.25, 0.75, 1.0]))
+    directed = path.toarray()
+    directed[np.tril_indices(6, -1)] = 0.0
+    directed[5, 0] = 1.0
+    two_paths = csr_matrix(
+        np.block(
+            [[path.toarray(), np.zeros((6, 6))], [np.zeros((6, 6)), path.toarray()]]
+        )
+    )
+    isolated = path.toarray()
+    isolated[4, 5] = isolated[5, 4] = 0.0
+    source_sink = _first_to_last_source_sink(6)
+    return {
+        "dense-graph": (
+            path.toarray(),
+            source_sink,
+            TypeError,
+            "graph must be a SciPy sparse matrix",
+        ),
+        "rectangular-graph": (
+            csr_matrix(np.ones((6, 5))),
+            source_sink,
+            ValueError,
+            "graph must be square",
+        ),
+        "directed-graph": (
+            csr_matrix(directed),
+            source_sink,
+            ValueError,
+            "graph must be symmetric",
+        ),
+        "two-components": (
+            two_paths,
+            _first_to_last_source_sink(12),
+            ValueError,
+            "graph must be connected, but it has 2 connected components",
+        ),
+        "isolated-cell": (
+            csr_matrix(isolated),
+            source_sink,
+            ValueError,
+            "contains isolated cells",
+        ),
+        "short-vector": (path, source_sink[:5], ValueError, "one finite value"),
+        "missing-value": (
+            path,
+            np.r_[np.nan, source_sink[1:]],
+            ValueError,
+            "one finite value for each of the 6 cells",
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "dense-graph",
+        "rectangular-graph",
+        "directed-graph",
+        "two-components",
+        "isolated-cell",
+        "short-vector",
+        "missing-value",
+    ],
+)
+def test_the_untruncated_potential_refuses_unusable_graphs_and_vectors(case):
+    from cytearc.trajectory import pba_potential
+
+    graph, source_sink, error, message = _unusable_inputs()[case]
+
+    with pytest.raises(error, match=message):
+        pba_potential(graph, source_sink)
+
+
+def test_the_untruncated_potential_is_linear_up_to_the_float64_range():
+    from cytearc.trajectory import pba_potential
+
+    graph = _clusters_on_a_tree(300, 10, seed=1)
+    source_sink = _first_to_last_source_sink(300)
+    potential = pba_potential(graph, source_sink)
+
+    # A vector near the largest float64 values would overflow the norms of
+    # an unscaled solve, so the solve scales it to a largest magnitude of 1.
+    np.testing.assert_allclose(
+        pba_potential(graph, 1e300 * source_sink), 1e300 * potential, rtol=1e-12
+    )
+    np.testing.assert_array_equal(pba_potential(graph, np.zeros(300)), np.zeros(300))
+    # A vector along the degree vector has no component in the range of L.
+    degree = np.asarray(graph.sum(axis=1)).ravel()
+    np.testing.assert_allclose(pba_potential(graph, degree), 0.0, rtol=0.0, atol=1e-12)
+
+
+def test_the_convergence_error_carries_the_fields_of_its_solve():
+    import pickle
+
+    from cytearc.trajectory import PseudotimeConvergenceError
+
+    fields = {
+        "n_cells": 600,
+        "operator_products": 186,
+        "max_iterations": 1,
+        "solver_tol": None,
+    }
+    truncated = PseudotimeConvergenceError(
+        method="truncated", n_modes=30, converged_modes=0, restarts=1, **fields
+    )
+    untruncated = PseudotimeConvergenceError(
+        method="untruncated", relative_residual=2.5e-3, **fields
+    )
+
+    for error in (truncated, untruncated):
+        restored = pickle.loads(pickle.dumps(error))
+        assert type(restored) is PseudotimeConvergenceError
+        assert (restored.args, vars(restored)) == (error.args, vars(error))
+    assert "0 of 30 singular modes converged" in str(truncated)
+    assert "fewer modes do not help" in str(truncated)
+    assert "with a relative residual of 2.5e-03 (solver_tol=None)" in str(untruncated)
+    for arguments in (
+        {"method": "truncated", "n_modes": 30, "converged_modes": 0},
+        {
+            "method": "truncated",
+            "n_modes": 30,
+            "converged_modes": 0,
+            "restarts": 1,
+            "relative_residual": 1e-3,
+        },
+        {"method": "untruncated"},
+        {"method": "untruncated", "relative_residual": 1e-3, "restarts": 1},
+        {"method": "exact", "relative_residual": 1e-3},
+    ):
+        with pytest.raises(ValueError, match="must be|method must be one of"):
+            PseudotimeConvergenceError(**fields, **arguments)
+
+
+def test_the_truncated_method_reproduces_the_earlier_potential_bit_for_bit():
+    from .test_trajectory_record_paths import _trajectory_store
+
+    trajectory = _trajectory_store(_clusters_on_a_tree(120, 6, seed=2).toarray())
+    store = trajectory.store
+    source_sink = _first_to_last_source_sink(120)
+
+    ref = store.trajectory.pseudotime(
+        trajectory.graph, ss_vec=source_sink, method="truncated"
+    )
+
+    # Releases before 1.4.0 scored every pseudotime so: the 30 smallest
+    # singular modes from the seed 4444, scaled to [0, 1].
+    graph = store.graph.load(trajectory.graph, symmetric=True, upper_only=False)
+    earlier = _truncated_pba_potential(
+        _random_walk_laplacian_transpose(graph), 30, 4444, source_sink
+    )
+    earlier = np.clip((earlier - earlier.min()) / np.ptp(earlier), 0.0, 1.0)
+    np.testing.assert_array_equal(store.trajectory.load_pseudotime(ref).values, earlier)
+    # The record is the earlier one with the method.
+    assert store.artifacts.inspect(ref).parameters == {
+        "method": "truncated",
+        "n_singular_vals": 30,
+        "sources": [],
+        "sinks": [],
+        "min_max_norm_ptime": True,
+        "random_seed": 4444,
+        "component_policy": "largest",
+    }
+
+
+def test_saved_default_pseudotimes_are_computed_again_and_truncated_ones_reused():
+    from cytearc.storage.artifacts import artifact_group
+    from cytearc.storage.operation_revisions import OPERATION_REVISIONS
+
+    from .test_trajectory_record_paths import _trajectory_store
+
+    trajectory = _trajectory_store(_clusters_on_a_tree(120, 6, seed=2).toarray())
+    store = trajectory.store
+    source_sink = _first_to_last_source_sink(120)
+    # A release before 1.4.0 saved the truncated potential by default, with no
+    # method and no revision in its record.
+    earlier = store.trajectory.pseudotime(
+        trajectory.graph, ss_vec=source_sink, method="truncated"
+    )
+    group = artifact_group(store.zw, earlier)
+    provenance = dict(group.attrs["provenance"])
+    provenance["parameters"] = {
+        key: value for key, value in provenance["parameters"].items() if key != "method"
+    }
+    assert "revision" not in provenance
+    group.attrs["provenance"] = provenance
+
+    default = store.trajectory.pseudotime(trajectory.graph, ss_vec=source_sink)
+    truncated = store.trajectory.pseudotime(
+        trajectory.graph, ss_vec=source_sink, method="truncated"
+    )
+
+    (revision,) = OPERATION_REVISIONS["run_pseudotime_scoring"]
+    assert len({earlier, default, truncated}) == 3
+    old = store.artifacts.inspect(earlier)
+    assert (old.revision, old.current_revision, old.is_current) == (1, 2, False)
+    assert old.superseded_by == (revision,)
+    markdown = store.artifacts.lineage(earlier).to_markdown()
+    assert "- Status: `stale`" in markdown
+    assert f"- Revision: `1, current 2: {revision.change}`" in markdown
+    new = store.artifacts.inspect(default)
+    assert (new.revision, new.is_current) == (2, True)
+    assert new.parameters["method"] == "untruncated"
+    # The earlier pseudotime still loads, with the potential of the truncated
+    # method, which an explicit call reuses and keeps current.
+    np.testing.assert_array_equal(
+        store.trajectory.load_pseudotime(earlier).values,
+        store.trajectory.load_pseudotime(truncated).values,
+    )
+    again = store.trajectory.pseudotime(
+        trajectory.graph, ss_vec=source_sink, method="truncated"
+    )
+    assert again == truncated
+    kept = store.artifacts.inspect(truncated)
+    assert (kept.revision, kept.current_revision, kept.is_current) == (1, 1, True)
+    assert kept.superseded_by == ()
+    assert store.trajectory.pseudotime(trajectory.graph, ss_vec=source_sink) == default
+
+
+@pytest.mark.parametrize(
+    ("parameters", "expected"),
+    [
+        (_pseudotime_parameters("untruncated"), 2),
+        (_pseudotime_parameters("truncated"), 1),
+        # Records of releases before 1.4.0 hold no method.
+        (
+            {
+                key: value
+                for key, value in _pseudotime_parameters("truncated").items()
+                if key != "method"
+            },
+            2,
+        ),
+        # A record of another release may lack any parameter, or hold any value.
+        ({}, 2),
+        ({"method": ["truncated"]}, 2),
+    ],
+)
+def test_the_pseudotime_revision_applies_to_pseudotimes_without_the_truncated_method(
+    parameters, expected
+):
+    from cytearc.storage.operation_revisions import (
+        OPERATION_REVISIONS,
+        effective_revision,
+    )
+
+    inputs = {"connectivity_map": {"artifact_id": "a" * 64}}
+
+    assert (
+        effective_revision("run_pseudotime_scoring", "pseudotime", parameters, inputs)
+        == expected
+    )
+    (revision,) = OPERATION_REVISIONS["run_pseudotime_scoring"]
+    assert (revision.revision, revision.release) == (2, "1.4.0")

@@ -147,6 +147,19 @@ _NORMALIZER_CODE_AFTER_MARKER_TABLES = OperationRevision(
 )
 
 
+def _scores_the_default_potential(
+    kind: str, parameters: Mapping[str, Any], inputs: Mapping[str, Any]
+) -> bool:
+    """Select the pseudotimes that do not record the method ``"truncated"``.
+
+    Pseudotimes of releases before 1.4.0 record no method and hold the
+    truncated potential, which the untruncated potential replaced as the
+    default; a pseudotime that records ``"truncated"`` asked for that
+    potential, which is unchanged.
+    """
+    return parameters.get("method") != "truncated"
+
+
 def _finite_number(value: object) -> bool:
     """Return whether a recorded value is a finite number, not a special float."""
     return (
@@ -269,6 +282,20 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
     "run_normalization": (_NORMALIZER_CODE,),
     "run_pseudotime_aggregation": (_NORMALIZER_CODE,),
     "run_pseudotime_marker_search": (_NORMALIZER_CODE,),
+    "run_pseudotime_scoring": (
+        OperationRevision(
+            revision=2,
+            release="1.4.0",
+            change=(
+                "The default potential is the untruncated population balance "
+                "potential, solved by MINRES, instead of the potential of the "
+                "smallest singular modes, 30 with the null mode; affects "
+                "pseudotimes that do not record method='truncated', which "
+                "computes the earlier potential"
+            ),
+            applies=_scores_the_default_potential,
+        ),
+    ),
     "run_statistical_testing": (_NORMALIZER_CODE,),
     "summarize_atac_features": (_NORMALIZER_CODE,),
     "summarize_rna_features": (_NORMALIZER_CODE,),

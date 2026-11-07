@@ -82,6 +82,8 @@ Do not change recorded parameters or inputs to invalidate results. That changes 
 every artifact the operation writes without telling anyone why its stored results stopped
 matching. Use the operation revision registry for these changes.
 
+When a new default replaces a computation that callers may still ask for, keep the earlier computation reachable through an argument that the record names, and scope the revision to the records that do not name it. Records of earlier releases name nothing, so the revision supersedes them, while an artifact that asks for the earlier computation by name stays current and is reused. Revision 2 of `run_pseudotime_scoring` works this way: the untruncated potential became the default, and its predicate selects the pseudotimes that do not record `method="truncated"`.
+
 ## Rules for entries
 
 - The registry is append-only. A released entry is never edited, renumbered, or removed, and its

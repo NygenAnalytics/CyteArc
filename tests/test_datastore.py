@@ -1889,7 +1889,6 @@ class TestDataStore:
             "source_sink": leiden_clustering,
             "sources": [int(unique[0])],
             "sinks": [int(unique[-1])],
-            "n_singular_vals": 10,
         }
         ref = datastore.trajectory.pseudotime(
             connectivity_graph,
@@ -1912,7 +1911,7 @@ class TestDataStore:
 
         monkeypatch.setattr(
             trajectory_operations,
-            "_truncated_pba_potential_impl",
+            "_pba_potential_impl",
             fail_if_recomputed,
         )
         cached = datastore.trajectory.pseudotime(

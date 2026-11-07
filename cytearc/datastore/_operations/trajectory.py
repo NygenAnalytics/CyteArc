@@ -115,6 +115,7 @@ from ...trajectory.artifacts import (
     lineage_tree_payload_is_valid as _lineage_tree_payload_is_valid,
     load_cell_artifact_values as _load_cell_artifact_values,
     marker_payload_is_valid as _marker_payload_is_valid,
+    pseudotime_method as _pseudotime_method,
     pseudotime_parameter_names as _pseudotime_parameter_names,
     pseudotime_payload_is_valid as _pseudotime_payload_is_valid,
     require_exact_record_keys as _require_exact_record_keys,
@@ -168,6 +169,7 @@ from ...trajectory.lineages import (
 )
 from ...trajectory.pseudotime import (
     make_source_sink_vector as _make_source_sink_vector_impl,
+    pba_potential as _pba_potential_impl,
     pseudotime_components as _pseudotime_components_impl,
     random_walk_laplacian_transpose as _random_walk_laplacian_transpose_impl,
     truncated_pba_potential as _truncated_pba_potential_impl,
@@ -203,6 +205,10 @@ else:
 
 #: The rows of a chunk of the cells' positions and distances on lineage curves.
 _PLACEMENT_CHUNK_ROWS = 100_000
+#: The singular modes and start-vector seed of ``method="truncated"`` when a
+#: pseudotime call leaves them unset, the defaults of releases before 1.4.0.
+_TRUNCATED_MODES = 30
+_TRUNCATED_SEED = 4444
 
 
 def _placement_write_bytes(n_cells: int, n_lineages: int, chunk_rows: int) -> int:
@@ -846,13 +852,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         self,
         graph: ArtifactRef,
         *,
-        n_singular_vals: int = 30,
+        method: Literal["untruncated", "truncated"] = "untruncated",
+        n_singular_vals: int | None = None,
         source_sink: ArtifactRef | None = None,
         sources: list[Any] | None = None,
         sinks: list[Any] | None = None,
         ss_vec: np.ndarray | None = None,
         min_max_norm_ptime: bool = True,
-        random_seed: int = 4444,
+        random_seed: int | None = None,
         component_policy: Literal["largest", "sources", "error"] = "largest",
         solver_tol: float | None = None,
         max_iterations: int | None = None,
@@ -861,18 +868,30 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         """Calculate pseudotime and return an immutable cell artifact.
 
         This is a reimplementation of the population balance analysis approach
-        from Weinreb et al. 2018. The graph's stored cell selection defines the
-        output axis. Disconnected cells excluded by ``component_policy`` remain
-        represented with NaN values and a false ``valid`` entry.
+        from Weinreb et al. 2018, whose potential applies the pseudoinverse of
+        the graph's random-walk Laplacian to the source-sink vector. The
+        graph's stored cell selection defines the output axis. Disconnected
+        cells excluded by ``component_policy`` remain represented with NaN
+        values and a false ``valid`` entry.
 
-        The potential comes from the smallest singular values of the graph
-        Laplacian, which SciPy's ``svds`` finds with ARPACK's Lanczos solve.
-        The solve advances a progress bar with its products of the Laplacian
-        and logs their count at INFO level every 30 seconds.
+        The default ``method="untruncated"`` solves for that potential over all
+        of the Laplacian's modes, with MINRES on the symmetric graph Laplacian
+        (``cytearc.trajectory.pba_potential``). ``method="truncated"``
+        keeps the ``n_singular_vals - 1`` smallest nonzero singular modes,
+        which SciPy's ``svds`` finds with ARPACK's Lanczos solve
+        (``cytearc.trajectory.truncated_pba_potential``); releases before
+        1.4.0 computed only this potential, so it reproduces their
+        pseudotimes. Either solve advances a progress bar with its products of
+        the Laplacian and logs their count at INFO level every 30 seconds.
 
         Args:
             graph: Explicit connectivity-map or integrated-graph artifact.
-            n_singular_vals: Number of smallest singular modes requested, including the null mode.
+            method: The potential, ``"untruncated"`` over all modes or
+                ``"truncated"`` over the smallest singular modes. It is
+                recorded.
+            n_singular_vals: Number of smallest singular modes requested,
+                including the null mode, for ``method="truncated"`` only,
+                which takes 30 when it is None.
             source_sink: Explicit axis-aligned label artifact. Required with
                 ``sources`` or ``sinks`` and omitted when ``ss_vec`` is supplied.
             sources: A list of group/cluster ids from ``source_sink`` to be treated as sources. Sources are
@@ -884,32 +903,43 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 sinks. This is mutually exclusive with label-based arguments.
             min_max_norm_ptime: Whether to perform min-max normalization on the final pseudotime values so that values
                                 are in 0 to 1 range. (Default: True)
-            random_seed: A random seed for svds (Default: 4444)
+            random_seed: The seed of the start vector of ``svds``, for
+                ``method="truncated"`` only, which takes 4444 when it is None.
             component_policy: How to handle a disconnected selected graph. ``'largest'`` scores the largest connected
                               component and marks other selected cells as unscored. ``'sources'`` scores the
                               component that holds the most source cells, the cells with a source label or a
                               negative ``ss_vec`` value, so a smaller component can be scored. ``'error'`` raises
                               instead. Every source and sink label must have cells in the scored component.
-            solver_tol: Relative tolerance of the singular values, passed to
-                ``svds`` as ``tol``. None, the default, means machine
-                precision. A looser tolerance can end the search before it
-                finds the smallest singular values, so the potential can lose
-                modes; a result without the null mode is refused. A set
-                tolerance is recorded.
-            max_iterations: Most implicit restarts of the solve, passed to
-                ``svds`` as ``maxiter``. None, the default, is SciPy's ten
-                restarts per cell, which can run for hours on graphs of
-                several hundred thousand cells. A set bound is recorded, so it
-                gives another artifact than the default.
+            solver_tol: Tolerance of the solve. None, the default, solves to
+                machine precision. For ``method="untruncated"`` it is MINRES's
+                ``rtol``: the solve stops once its residual falls below
+                ``solver_tol`` times the estimated norms of the symmetric
+                Laplacian and of its solution, and the potential's error grows
+                smoothly with it. For ``method="truncated"`` it is the relative
+                tolerance of the singular values, passed to ``svds`` as
+                ``tol``; a looser tolerance can end the search before it finds
+                the smallest singular values, so the potential can lose modes,
+                and a result without the null mode is refused. A set tolerance
+                is recorded.
+            max_iterations: Bound of the solve: MINRES iterations, one product
+                with the Laplacian each, or for ``method="truncated"`` the
+                implicit restarts of ``svds``, passed as ``maxiter``. None, the
+                default, is SciPy's five iterations or ten restarts per cell;
+                the restarts can run for hours on graphs of several hundred
+                thousand cells. A set bound is recorded, so it gives another
+                artifact than the default.
 
         Returns:
             Reference to an artifact containing ``pseudotime`` and ``valid``.
 
         Raises:
             PseudotimeConvergenceError: If the solve reaches ``max_iterations``
-                before its singular modes converge.
+                before it converges.
             SourceSinkLabelsError: If no selected cell, or no cell of the
                 scored component, holds a source or sink label.
+            ValueError: If ``method`` is neither ``"untruncated"`` nor
+                ``"truncated"``, or ``n_singular_vals`` or ``random_seed`` is
+                set with ``method="untruncated"``.
         """
         min_max_norm_ptime = bool_argument(min_max_norm_ptime, "min_max_norm_ptime")
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
@@ -921,14 +951,40 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise TypeError("sources must be a list")
         if sinks is not None and not isinstance(sinks, list):
             raise TypeError("sinks must be a list")
+        method = cast(Literal["untruncated", "truncated"], _pseudotime_method(method))
         parameters: dict[str, Any] = {
-            "n_singular_vals": n_singular_vals,
+            "method": method,
             "sources": [] if sources is None else sources,
             "sinks": [] if sinks is None else sinks,
             "min_max_norm_ptime": min_max_norm_ptime,
-            "random_seed": random_seed,
             "component_policy": component_policy,
         }
+        if method == "truncated":
+            parameters["n_singular_vals"] = (
+                _TRUNCATED_MODES if n_singular_vals is None else n_singular_vals
+            )
+            parameters["random_seed"] = (
+                _TRUNCATED_SEED if random_seed is None else random_seed
+            )
+        else:
+            unused = [
+                name
+                for name, value in (
+                    ("n_singular_vals", n_singular_vals),
+                    ("random_seed", random_seed),
+                )
+                if value is not None
+            ]
+            if unused:
+                verb, pronoun = (
+                    ("apply", "them") if len(unused) > 1 else ("applies", "it")
+                )
+                raise ValueError(
+                    f"{' and '.join(unused)} {verb} only to method='truncated'; "
+                    f"leave {pronoun} unset for the untruncated potential, or pass "
+                    "method='truncated' for the potential of the smallest "
+                    "singular modes"
+                )
         # A record holds the solver's bounds only when the call sets them.
         if solver_tol is not None:
             parameters["solver_tol"] = solver_tol
@@ -1056,12 +1112,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise ValueError(
                 "The retained graph must contain at least 4 cells for pseudotime scoring"
             )
-        effective_k = min(n_singular_vals, retained_n_cells - 2)
-        if effective_k != n_singular_vals:
-            logger.warning(
-                f"Reducing n_singular_vals from {n_singular_vals} to {effective_k} "
-                "for the retained graph size"
-            )
+        effective_k = 0
+        if method == "truncated":
+            effective_k = min(n_singular_vals, retained_n_cells - 2)
+            if effective_k != n_singular_vals:
+                logger.warning(
+                    f"Reducing n_singular_vals from {n_singular_vals} to "
+                    f"{effective_k} for the retained graph size"
+                )
 
         if selected_labels is None:
             selected_row_ids = read_metadata_rows_chunkwise(
@@ -1112,13 +1170,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             connectivity_map=graph_ref,
             source_sink=source_sink_input,
             cell_selection=stored_selection,
-            n_singular_vals=n_singular_vals,
+            method=method,
             sources=tuple(source_labels),
             sinks=tuple(sink_labels),
             min_max_norm_ptime=min_max_norm_ptime,
-            random_seed=random_seed,
             component_policy=component_policy,
             invalidate_cache=invalidate_cache,
+            n_singular_vals=n_singular_vals,
+            random_seed=random_seed,
             solver_tol=solver_tol,
             max_iterations=max_iterations,
         )
@@ -1156,16 +1215,24 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             return planned.ref
         self._require_writable("run_pseudotime_scoring")
 
-        logger.debug("Pseudotime scoring: constructing Laplacian")
-        laplacian_transpose = _random_walk_laplacian_transpose_impl(retained_graph)
-        retained_ptime = _truncated_pba_potential_impl(
-            laplacian_transpose,
-            effective_k,
-            random_seed,
-            retained_source_sink,
-            solver_tol=solver_tol,
-            max_iterations=max_iterations,
-        )
+        if method == "untruncated":
+            retained_ptime = _pba_potential_impl(
+                retained_graph,
+                retained_source_sink,
+                solver_tol=solver_tol,
+                max_iterations=max_iterations,
+            )
+        else:
+            logger.debug("Pseudotime scoring: constructing Laplacian")
+            laplacian_transpose = _random_walk_laplacian_transpose_impl(retained_graph)
+            retained_ptime = _truncated_pba_potential_impl(
+                laplacian_transpose,
+                effective_k,
+                random_seed,
+                retained_source_sink,
+                solver_tol=solver_tol,
+                max_iterations=max_iterations,
+            )
         if not np.isfinite(retained_ptime).all():
             raise ValueError("Pseudotime calculation produced non-finite values")
         value_range = float(np.ptp(retained_ptime))
