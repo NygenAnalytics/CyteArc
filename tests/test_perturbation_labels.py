@@ -299,10 +299,17 @@ def test_no_refusal_of_loading_labels_names_a_cell_selection_it_cannot_take(
         break
     assert refusals
     assert not [message for message in refusals if "cell_selection" in message]
-    # load_values takes a cell_selection, so its refusal names one.
+    # load_values takes a cell_selection, so its refusal names one, and
+    # cell_ids beside it while the read holds the cells' ids.
     monkeypatch.setattr(store, "memoryBytes", 1)
     with pytest.raises(MemoryBudgetError) as values:
         store.artifacts.load_values(labels)
+    assert str(values.value).endswith(
+        ", or read fewer cells with cell_selection, or leave out their ids with "
+        "cell_ids=False."
+    )
+    with pytest.raises(MemoryBudgetError) as values:
+        store.artifacts.load_values(labels, cell_ids=False)
     assert str(values.value).endswith(", or read fewer cells with cell_selection.")
 
 
