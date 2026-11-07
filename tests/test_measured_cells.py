@@ -652,6 +652,7 @@ def test_measured_cells_are_accepted(measured, entry, monkeypatch) -> None:
         lambda frame, **_kwargs: (
             frame.idxmax(axis=1),
             dict.fromkeys(frame.columns, 0),
+            [],
         ),
     )
     store = measured.open()

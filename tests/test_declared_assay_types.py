@@ -144,6 +144,7 @@ def test_an_explicit_type_is_the_declared_type_of_the_whole_session(
         lambda frame, **_kwargs: (
             frame.idxmax(axis=1),
             dict.fromkeys(frame.columns, 0),
+            [],
         ),
     )
     cells = first.snapshot_cell_selection("I")

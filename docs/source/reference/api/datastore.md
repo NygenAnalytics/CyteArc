@@ -72,20 +72,9 @@ writable open with `min_features_per_cell=k` removes cells with at most `k` feat
 falls back to a column's name; pass `metric_policies` for imported columns such as scanpy's
 `total_counts` or `pct_counts_mt`.
 
-`qc.call_cells` calls cells in an unfiltered droplet matrix with EmptyDrops
-([Cell calling](../tutorials/cell-calling)). Import every barcode with counts, such as
-`CrH5Reader(path, is_filtered=False, filtering_cutoff=0)`: the barcodes with at most `lower`
-counts form the ambient pool that the other barcodes are tested against. It reads every barcode
-that the assay measured, never the live `I` column, so a writable open's `min_features_per_cell`
-floor cannot remove the ambient pool; open raw stores with `min_features_per_cell=-1` to keep `I`
-complete too. It saves the statistics of every barcode as an assay-scoped `cell_calling`
-artifact (operation `run_cell_calling`; arrays `total`, `log_probability`, `p_value`, `fdr`,
-`limited`, and the feature-length `ambient` profile; attributes `retain`, `knee`, `inflection`,
-`alpha`, and `n_ambient`) and returns a `cell_selection` (operation `call_cells`, parameter `fdr`)
-whose inputs are that artifact and the tested barcodes (a `select_all_cells` selection, narrowed by
-`select_measured_cells` when the assay did not measure every barcode). Another `fdr` reuses the
-statistics. `qc.load_cell_calls` reads them, and `qc.barcode_ranks` gives the barcode-rank curve
-from the prepared `<assay>_nCounts` totals without reading counts.
+`qc.hto_demultiplexing`, `qc.call_cells`, `qc.ambient_contamination` and `qc.doublets` save the numbers behind their warnings as {ref}`diagnostics <artifact_diagnostics>`, which their entries below list, and warn from them each time their artifact is computed or reused.
+
+`qc.call_cells` calls cells in an unfiltered droplet matrix with EmptyDrops ([Cell calling](../tutorials/cell-calling)). Import every barcode with counts, such as `CrH5Reader(path, is_filtered=False, filtering_cutoff=0)`: the barcodes with at most `lower` counts form the ambient pool that the other barcodes are tested against. It reads every barcode that the assay measured, never the live `I` column, so a writable open's `min_features_per_cell` floor cannot remove the ambient pool; open raw stores with `min_features_per_cell=-1` to keep `I` complete too. It saves the statistics of every barcode as an assay-scoped `cell_calling` artifact (operation `run_cell_calling`; arrays `total`, `log_probability`, `p_value`, `fdr`, `limited`, and the feature-length `ambient` profile; attributes `retain`, `knee`, `inflection`, `alpha`, and `n_ambient`; diagnostic `goodTuringSlope`) and returns a `cell_selection` (operation `call_cells`, parameter `fdr`) whose inputs are that artifact and the tested barcodes (a `select_all_cells` selection, narrowed by `select_measured_cells` when the assay did not measure every barcode). Another `fdr` reuses the statistics. `qc.load_cell_calls` reads them, and `qc.barcode_ranks` gives the barcode-rank curve from the prepared `<assay>_nCounts` totals without reading counts.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.QcAccessor
@@ -104,20 +93,7 @@ The same computation runs on an in-memory matrix:
 
 #### Ambient RNA
 
-These methods estimate and remove ambient RNA as SoupX describes it (Young and Behjati, 2020,
-GigaScience, [doi:10.1093/gigascience/giaa151](https://doi.org/10.1093/gigascience/giaa151)); see
-[Ambient RNA removal](../tutorials/ambient-rna). `qc.ambient_profile` saves an assay-scoped
-`ambient_profile` artifact: the summed `counts` of each feature over the chosen empty droplets and
-each feature's `fraction` of them. `qc.ambient_contamination` saves an assay-scoped,
-cell-aligned `ambient_contamination` artifact over its cell selection, whose `values` hold each
-cell's contamination fraction and, for an estimate from gene sets, whose `observed`, `expected`,
-`p_values`, `expressing`, and `used` arrays hold one column per gene set, in name order. It
-records the profile, the clustering, and the resolved feature indices of each gene set. An
-estimate of exactly 0, whose cells hold no counts of their gene sets although pure soup would
-give them some, is saved as computed with a `UserWarning` that names it, its cells, the pure-soup
-count, and the one-sided 95% Poisson upper bound of the fraction, about 3 divided by that count:
-a correction with it leaves those cells uncorrected. All three methods read RNA assays of raw UMI
-counts, which CyteArc stores as unsigned integers, and raise `TypeError` for other assays.
+These methods estimate and remove ambient RNA as SoupX describes it (Young and Behjati, 2020, GigaScience, [doi:10.1093/gigascience/giaa151](https://doi.org/10.1093/gigascience/giaa151)); see [Ambient RNA removal](../tutorials/ambient-rna). `qc.ambient_profile` saves an assay-scoped `ambient_profile` artifact: the summed `counts` of each feature over the chosen empty droplets and each feature's `fraction` of them. `qc.ambient_contamination` saves an assay-scoped, cell-aligned `ambient_contamination` artifact over its cell selection, whose `values` hold each cell's contamination fraction and, for an estimate from gene sets, whose `observed`, `expected`, `p_values`, `expressing`, and `used` arrays hold one column per gene set, in name order. It records the profile, the clustering, and the resolved feature indices of each gene set. An estimate of exactly 0, whose cells hold no counts of their gene sets although pure soup would give them some, is saved as computed: a correction with it leaves those cells uncorrected. Its diagnostics count such estimates as `zeroEstimates` and give up to five as `zeroEstimateExamples`, each with its cells, the pure-soup count and the one-sided 95% Poisson upper bound of the fraction, about 3 divided by that count, and `largestEstimate` holds the largest of the global and cluster estimates. A `DiagnosticWarning` names the estimates of 0, and another an estimate above `max_contamination`, each time the estimate is computed or reused. Loading or correcting an estimate saved without these diagnostics, as earlier releases saved them, raises `ValueError` naming the call that estimates it anew. All three methods read RNA assays of raw UMI counts, which CyteArc stores as unsigned integers, and raise `TypeError` for other assays.
 
 `qc.correct_ambient` writes a derived RNA assay, published atomically like the assays of
 `add_grouped_assay`. It keeps the source's features and count dtype, holds integer counts that

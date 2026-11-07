@@ -84,6 +84,22 @@ def _reference_good_turing(counts: list[int]) -> np.ndarray:
     return values if n_unseen else values / values.sum()
 
 
+def _ambient_good_turing_slope(counts: np.ndarray, lower: int = 100) -> float:
+    """The slope of the Good-Turing frequency fit of the ambient pool, as Gale and Sampson (1995) give it.
+
+    The pool sums each feature's counts over the barcodes with 1 to ``lower``
+    counts; the fit regresses ``log Z_r`` on ``log r`` over its positive sums.
+    """
+    totals = counts.sum(axis=1)
+    pooled = counts[(totals > 0) & (totals <= lower)].sum(axis=0)
+    seen, species = np.unique(pooled[pooled > 0], return_counts=True)
+    before = np.r_[0, seen[:-1]]
+    after = np.r_[seen[1:], 2 * seen[-1] - before[-1]]
+    x = np.log(seen)
+    y = np.log(species / (0.5 * (after - before)))
+    return float(np.sum((x - x.mean()) * (y - y.mean())) / np.sum((x - x.mean()) ** 2))
+
+
 def _dm_log_probability(counts: np.ndarray, proportions: np.ndarray, alpha: float):
     total = int(counts.sum())
     if math.isinf(alpha):
@@ -406,7 +422,7 @@ def _pool(counts: np.ndarray, lower: int) -> cc._AmbientPool:
 def test_alpha_matches_the_maximum_of_the_full_ambient_likelihood() -> None:
     counts, truth = _ambient_counts(4, precision=30.0)
     pool = _pool(counts, lower=100)
-    proportions = cc._ambient_proportions(pool)
+    proportions, _slope = cc._ambient_proportions(pool)
 
     estimate = cc._estimate_alpha(cc._alpha_terms(pool, proportions))
 
@@ -424,7 +440,7 @@ def test_alpha_takes_the_multinomial_without_overdispersion() -> None:
     for row in counts:
         row[rng.choice(60, int(rng.integers(2, 9)), replace=False)] = 1
     pool = _pool(counts, lower=100)
-    terms = cc._alpha_terms(pool, cc._ambient_proportions(pool))
+    terms = cc._alpha_terms(pool, cc._ambient_proportions(pool)[0])
 
     assert terms.weight.size == 0
     assert cc._estimate_alpha(terms) == math.inf
@@ -448,7 +464,7 @@ def test_alpha_of_single_feature_barcodes_is_the_smallest_precision() -> None:
     counts = np.zeros((60, 5), dtype=np.int64)
     counts[np.arange(60), np.arange(60) % 5] = np.arange(60) % 7 + 2
     pool = _pool(counts, lower=100)
-    terms = cc._alpha_terms(pool, cc._ambient_proportions(pool))
+    terms = cc._alpha_terms(pool, cc._ambient_proportions(pool)[0])
 
     assert terms.score(math.log(1e-3)) < 0
     assert cc._estimate_alpha(terms) == pytest.approx(1e-3)
@@ -686,6 +702,39 @@ def test_empty_drops_calls_simulated_cells_and_keeps_empty_droplets_out() -> Non
     assert result.n_ambient == int(
         ((counts.sum(axis=1) > 0) & (counts.sum(axis=1) <= 100)).sum()
     )
+
+
+def test_empty_drops_logs_a_rising_ambient_good_turing_fit_for_direct_callers() -> None:
+    # A hundred simulated features fit an ambient slope above -1.
+    counts, _, _ = _droplets(seed=7, n_features=100, n_empty=1000)
+    slope = _ambient_good_turing_slope(counts)
+    assert -1 < slope < 0
+    expected = (
+        f"The Good-Turing frequency fit has slope {slope:.3f}, which is not below "
+        "-1, so its smoothed proportions may be unreliable."
+    )
+    messages: list[str] = []
+    sink = logger.add(messages.append, level="WARNING", format="{message}")
+    try:
+        result = empty_drops(counts, n_iter=50, random_seed=1, nthreads=1)
+        # The run itself logs nothing and returns the slope.
+        totals = counts.sum(axis=1).astype(np.int64)
+        settings = cc.validated_settings(
+            lower=100, retain=None, n_iter=50, alpha=None, random_seed=1
+        )
+        run, run_slope = cc.run_empty_drops(
+            totals,
+            lambda positions: cc._matrix_rows(counts, positions),
+            counts.shape[1],
+            settings,
+            nthreads=1,
+        )
+    finally:
+        logger.remove(sink)
+
+    assert messages == [expected + "\n"]
+    assert run_slope == pytest.approx(slope, rel=1e-12)
+    np.testing.assert_array_equal(run.p_value, result.p_value)
 
 
 def test_empty_drops_reports_every_barcode(droplets) -> None:

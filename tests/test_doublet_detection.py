@@ -21,7 +21,7 @@ from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
 
 import cytearc.storage.operation_revisions as operation_revisions
-from cytearc import DataStore
+from cytearc import DataStore, DiagnosticWarning
 from cytearc.datastore._pipeline.recipes import rna as rna_recipe
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.quality_control import doublets
@@ -30,6 +30,7 @@ from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.selections import read_stored_selection_mask
 from cytearc.utils.logging import logger
 from tests.storage_helpers import insert_nullable_cell_column, write_count_store
+from tests.test_reduction_graph_diagnostics import _warned
 
 _INDEX = doublets.DoubletIndexSettings(
     metric="l2", m=16, ef_construction=100, ef=50, parallel=False
@@ -534,6 +535,21 @@ def two_captures(tmp_path_factory) -> _SyntheticDoublets:
     return _build_synthetic(path, _TWO_CAPTURES)
 
 
+# Two captures of a hundred cells each, for tests that need a graph and its
+# clusters rather than the recovery of doublets.
+_SMALL_CAPTURES = {
+    "A": {"types": (0, 1), "sizes": (60, 40), "het": 6, "hom": 2},
+    "B": {"types": (2, 3), "sizes": (60, 40), "het": 6, "hom": 2},
+}
+
+
+@pytest.fixture(scope="module")
+def small_captures(tmp_path_factory) -> _SyntheticDoublets:
+    """Two small captures, each of two cell types."""
+    path = tmp_path_factory.mktemp("small_captures") / "data.zarr"
+    return _build_synthetic(path, _SMALL_CAPTURES)
+
+
 def _open_synthetic(synthetic: _SyntheticDoublets, tmp_path: Path) -> SimpleNamespace:
     target = tmp_path / "data.zarr"
     shutil.copytree(synthetic.path, target)
@@ -954,20 +970,19 @@ def test_doublet_samples_need_labels_two_cells_and_pair_one_cluster_freely(
     clusters = store.snapshot_cluster_labels(
         "one_type_in_a", cell_selection=store.snapshot_cell_selection("I")
     )
-    messages: list[str] = []
-    sink = logger.add(
-        lambda message: messages.append(message.record["message"]), level="WARNING"
-    )
-    try:
+    with pytest.warns(DiagnosticWarning) as caught:
         ref = store.qc.doublets(
             clusters, opened.graph, sample_column="sample", heterotypic_fraction=0.8
         )
-    finally:
-        logger.remove(sink)
     summaries = _payload(store, ref).attrs["samples"]
     assert [summary["heterotypicFraction"] for summary in summaries] == [0.0, 0.8]
-    (warning,) = [message for message in messages if "same cluster label" in message]
-    assert warning.startswith("Every parent cell of sample (sample='A')")
+    (warning,) = [
+        str(warning.message)
+        for warning in caught
+        if "same cluster label" in str(warning.message)
+    ]
+    assert warning.startswith("In 1 sample every cell has the same cluster label")
+    assert warning.endswith(": (sample='A')")
     parents = _payload(store, ref)["simulated_parents"][:]
     in_b = samples[parents[:, 0]] == "B"
     labels = one_type[parents]
@@ -1138,3 +1153,155 @@ def test_pipeline_resolves_doublet_samples_from_settings_and_harmony(
         resolve(doublets={"sample_column": "missing"})
     with pytest.raises(ValueError, match="collide with reserved run fields"):
         resolve(snapshot_columns=("predicted_doublet",))
+
+
+# Samples whose cells share one cluster label
+
+_ONE_CLUSTER = "In 1 sample every cell has the same cluster label"
+
+
+def _one_cluster_in_a(opened: SimpleNamespace, synthetic: _SyntheticDoublets) -> Any:
+    """Return cluster labels that give every cell of sample A one label, and B its types."""
+    labels = np.where(synthetic.samples == "A", "a", synthetic.types.astype(str))
+    opened.store.cells.insert("one_type_in_a", labels)
+    return opened.store.snapshot_cluster_labels(
+        "one_type_in_a", cell_selection=opened.store.snapshot_cell_selection("I")
+    )
+
+
+def test_a_sample_of_one_cluster_warns_when_computed_and_when_reused(
+    small_captures, tmp_path
+):
+    opened = _open_synthetic(small_captures, tmp_path)
+    clusters = _one_cluster_in_a(opened, small_captures)
+
+    def score() -> ArtifactRef:
+        return opened.store.qc.doublets(
+            clusters, opened.graph, sample_column="sample", heterotypic_fraction=0.8
+        )
+
+    computed, first, first_texts = _warned(score, _ONE_CLUSTER)
+    reused, second, second_texts = _warned(score, _ONE_CLUSTER)
+
+    assert reused == computed
+    labels = opened.store.cells.fetch_all("one_type_in_a")
+    samples = small_captures.samples
+    assert [len(set(labels[samples == sample])) for sample in ("A", "B")] == [1, 2]
+    # Sample A forms none of the heterotypic doublets, and sample B its share.
+    summaries = _payload(opened.store, computed).attrs["samples"]
+    assert [summary["heterotypicFraction"] for summary in summaries] == [0.0, 0.8]
+    assert opened.store.artifacts.inspect(computed).diagnostics == {
+        "oneClusterSamples": 1,
+        "oneClusterSampleExamples": ["(sample='A')"],
+    }
+    expected = (
+        f"{_ONE_CLUSTER}, so its doublets pair any two of its cells instead of "
+        "forcing heterotypic_fraction=0.8 of them to pair two clusters: "
+        "(sample='A')"
+    )
+    for warned, texts in ((first, first_texts), (second, second_texts)):
+        assert texts == [expected]
+        (warning,) = warned
+        assert (warning.operation, warning.diagnostic, warning.value) == (
+            "run_doublet_detection",
+            "oneClusterSamples",
+            1,
+        )
+
+    # Each sample of one label of its own: two clusters in all, one in each.
+    opened.store.cells.insert(
+        "one_type_each", np.where(samples == "A", "a", "b"), overwrite=True
+    )
+    each = opened.store.snapshot_cluster_labels(
+        "one_type_each", cell_selection=opened.store.snapshot_cell_selection("I")
+    )
+    both, warned, texts = _warned(
+        lambda: opened.store.qc.doublets(
+            each, opened.graph, sample_column="sample", heterotypic_fraction=0.8
+        ),
+        "In each of 2 samples",
+    )
+    assert texts == [
+        "In each of 2 samples every cell has the same cluster label, so their "
+        "doublets pair any two of their cells instead of forcing "
+        "heterotypic_fraction=0.8 of them to pair two clusters: (sample='A'), "
+        "(sample='B')"
+    ]
+    assert [warning.value for warning in warned] == [2]
+    summaries = _payload(opened.store, both).attrs["samples"]
+    assert [summary["heterotypicFraction"] for summary in summaries] == [0.0, 0.0]
+
+
+def test_doublets_that_pair_as_asked_give_no_one_cluster_warning(
+    small_captures, tmp_path
+):
+    opened = _open_synthetic(small_captures, tmp_path)
+    one_cluster = _one_cluster_in_a(opened, small_captures)
+
+    # Each sample of the cell types holds two clusters, and without a
+    # heterotypic fraction no sample is asked for doublets of two clusters.
+    for clusters, fraction in ((opened.clusters, 0.8), (one_cluster, 0.0)):
+
+        def score(clusters: Any = clusters, fraction: float = fraction) -> Any:
+            return opened.store.qc.doublets(
+                clusters,
+                opened.graph,
+                sample_column="sample",
+                heterotypic_fraction=fraction,
+            )
+
+        for _ in range(2):
+            ref, warned, texts = _warned(score, "")
+            assert [w for w in warned if w.operation == "run_doublet_detection"] == []
+            assert not [text for text in texts if "cluster label" in text]
+        assert opened.store.artifacts.inspect(ref).diagnostics == {
+            "oneClusterSamples": 0,
+            "oneClusterSampleExamples": [],
+        }
+
+
+def test_doublet_scores_saved_without_diagnostics_are_computed_anew(
+    small_captures, tmp_path
+):
+    opened = _open_synthetic(small_captures, tmp_path)
+    store = opened.store
+
+    def score() -> ArtifactRef:
+        return store.qc.doublets(opened.clusters, opened.graph, sample_column="sample")
+
+    saved = score()
+    # As scores saved before doublet detection saved diagnostics.
+    del artifact_group(store.zw, saved).attrs["diagnostics"]
+    with pytest.raises(
+        ValueError,
+        match="holds no diagnostics, which run_doublet_detection saves with every "
+        "artifact; call ds.qc.doublets again",
+    ):
+        store.artifacts.inspect(saved).diagnostics
+
+    anew = score()
+
+    assert anew != saved
+    for name in (
+        "values",
+        "raw_scores",
+        "predicted_doublets",
+        "simulated_scores",
+        "simulated_parents",
+    ):
+        np.testing.assert_array_equal(
+            _payload(store, anew)[name][:], _payload(store, saved)[name][:]
+        )
+    # The earlier scores still select their singlets.
+    singlets = store.select_cells(saved, value="predicted_doublets", include=[False])
+    np.testing.assert_array_equal(
+        read_stored_selection_mask(
+            store.zw,
+            singlets,
+            kind="cell_selection",
+            scope="datastore",
+            assay=None,
+            table_path="cellData",
+        ),
+        ~_payload(store, anew)["predicted_doublets"][:],
+    )

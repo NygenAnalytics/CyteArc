@@ -21,6 +21,7 @@ from cytearc.metadata.artifacts import (
 )
 from cytearc.metadata.selection import resolve_cell_aligned_artifact
 from cytearc.quality_control.cell_cycle_genes import g2m_phase_genes, s_phase_genes
+from cytearc.quality_control.hto import UnseparatedHto
 from cytearc.storage.artifacts import (
     ArtifactRef,
     artifact_group,
@@ -542,11 +543,14 @@ def test_hto_identity_is_artifact_backed(
     columns_before = set(datastore.cells.columns)
     calls: list[tuple[pd.DataFrame, dict]] = []
 
-    def demultiplex(counts: pd.DataFrame, **kwargs) -> tuple[pd.Series, dict]:
+    def demultiplex(
+        counts: pd.DataFrame, **kwargs
+    ) -> tuple[pd.Series, dict, list[UnseparatedHto]]:
         # The stand-in names each cell's largest HTO, so the stored values
-        # reveal which rows it received and in which order.
+        # reveal which rows it received and in which order, and finds no HTO
+        # whose calls overlap its background.
         calls.append((counts.copy(), kwargs))
-        return counts.idxmax(axis=1), dict.fromkeys(counts.columns, 0)
+        return counts.idxmax(axis=1), dict.fromkeys(counts.columns, 0), []
 
     monkeypatch.setattr(
         "cytearc.datastore._operations.quality_control._hto_calls", demultiplex

@@ -33,11 +33,12 @@ from cytearc.quality_control.ambient import (
 )
 from cytearc.storage.arrays import MISSING_MASK_PREFIX
 from cytearc.storage.artifact_writer import artifact_transaction
-from cytearc.storage.artifacts import ArtifactRef, artifact_group
+from cytearc.storage.artifacts import ArtifactRef, artifact_group, artifact_path
 from cytearc.storage.identity import read_dataset_fingerprint
 from cytearc.storage.schema import create_cell_data, derived_assay_transaction
 from cytearc.utils.logging import logger
 from tests.storage_helpers import write_count_store
+from tests.test_reduction_graph_diagnostics import _warned
 
 N_GENES = 120
 CELLS_PER_CLUSTER = 120
@@ -704,7 +705,7 @@ def test_contamination_validates_its_arguments(store, case, error, message):
     )
 
 
-def test_contamination_logs_unmatched_genes_and_estimates_above_the_maximum(store):
+def test_contamination_logs_unmatched_genes(store):
     cells, _ = _cells_and_clusters(store)
     profile = store.qc.ambient_profile(total_counts=(2, 10))
     messages: list[str] = []
@@ -715,20 +716,104 @@ def test_contamination_logs_unmatched_genes_and_estimates_above_the_maximum(stor
         matched = store.qc.ambient_contamination(
             cells, profile, gene_sets={"haemoglobin": [*HAEMOGLOBIN, "hbm"]}
         )
-        # Below the true fraction, the test leaves only cells with few counts.
-        store.qc.ambient_contamination(
-            cells, profile, gene_sets=GENE_SETS, max_contamination=0.05
-        )
     finally:
         logger.remove(sink)
 
-    assert messages[0] == (
+    assert messages == [
         "1 of 5 genes of gene set 'haemoglobin' are not assay features: hbm"
-    )
-    assert messages[1].startswith("An estimated contamination fraction, ")
-    assert "exceeds max_contamination=0.05" in messages[1]
+    ]
     assert store.artifacts.inspect(matched).parameters["gene_sets"] == {
         "haemoglobin": [0, 1, 2, 3]
+    }
+
+
+_ESTIMATE = "estimate_ambient_contamination"
+_CONTAMINATION = "An estimated contamination fraction"
+_ZERO_ESTIMATES = "1 contamination estimate is 0"
+
+
+def test_an_estimate_above_the_maximum_warns_when_computed_and_when_reused(store):
+    cells, _ = _cells_and_clusters(store)
+    profile = store.qc.ambient_profile(total_counts=(2, 10))
+    soup = store.qc.load_ambient_profile(profile)["fraction"].to_numpy()
+
+    def estimate() -> ArtifactRef:
+        return store.qc.ambient_contamination(
+            cells, profile, gene_sets=GENE_SETS, max_contamination=0.05
+        )
+
+    computed, first, first_texts = _warned(estimate, _CONTAMINATION)
+    reused, second, second_texts = _warned(estimate, _CONTAMINATION)
+
+    assert reused == computed
+    # Below the true fraction, the test leaves only cells with few counts, so
+    # the global estimate, the only one without clusters, exceeds the maximum.
+    largest = _ratio(
+        _reference_evidence(soup, GENE_SETS, clusters=None, max_contamination=0.05)
+    )
+    assert largest > 0.05
+    assert store.artifacts.inspect(computed).diagnostics == {
+        "largestEstimate": pytest.approx(largest, rel=1e-12),
+        "zeroEstimates": 0,
+        "zeroEstimateExamples": [],
+    }
+    expected = (
+        f"An estimated contamination fraction, {largest:.3g}, exceeds "
+        "max_contamination=0.05: some cells used to estimate it may express a gene "
+        "set. Check the gene sets and clusters."
+    )
+    for warned, texts in ((first, first_texts), (second, second_texts)):
+        assert texts == [expected]
+        (warning,) = warned
+        assert (warning.operation, warning.diagnostic) == (
+            "estimate_ambient_contamination",
+            "largestEstimate",
+        )
+        assert warning.value == pytest.approx(largest, rel=1e-12)
+
+
+def test_estimates_within_the_maximum_give_no_warning(store):
+    droplets = simulate()
+    cells, clusters = _cells_and_clusters(store)
+    profile = store.qc.ambient_profile(total_counts=(2, 10))
+    soup = store.qc.load_ambient_profile(profile)["fraction"].to_numpy()
+    reference = _reference_evidence(
+        soup, GENE_SETS, clusters=CLUSTER_NAMES[droplets.labels]
+    )
+    # Each cluster's estimate and the global one, the largest of which the
+    # estimate saves.
+    largest = max(
+        _ratio(reference),
+        *(_ratio(reference, droplets.labels == label) for label in range(3)),
+    )
+
+    for level in ("global", "cluster"):
+        for _ in range(2):
+            ref, warned, texts = _warned(
+                lambda: store.qc.ambient_contamination(
+                    cells, profile, gene_sets=GENE_SETS, clusters=clusters, level=level
+                ),
+                "",
+            )
+            assert [w for w in warned if w.operation == _ESTIMATE] == []
+            assert not [text for text in texts if "contamination" in text]
+        assert store.artifacts.inspect(ref).diagnostics == {
+            "largestEstimate": pytest.approx(
+                largest if level == "cluster" else _ratio(reference), rel=1e-12
+            ),
+            "zeroEstimates": 0,
+            "zeroEstimateExamples": [],
+        }
+    # A supplied fraction estimates nothing.
+    for _ in range(2):
+        fixed, warned, _texts = _warned(
+            lambda: store.qc.ambient_contamination(cells, profile, fraction=0.2), ""
+        )
+        assert [w for w in warned if w.operation == _ESTIMATE] == []
+    assert store.artifacts.inspect(fixed).diagnostics == {
+        "largestEstimate": None,
+        "zeroEstimates": None,
+        "zeroEstimateExamples": [],
     }
 
 
@@ -745,47 +830,54 @@ def test_contamination_warns_about_an_estimate_of_zero_and_keeps_it(store):
     cells = store.snapshot_cell_selection("no_gene5")
     expected = float((droplets.cells[without].sum(axis=1) * soup[rare]).sum())
     assert expected > 40
+    measured = (
+        f"(no count in {int(without.sum())} cells where pure soup would give "
+        f"{expected:.3g}, so below {-math.log(0.05) / expected:.3g})"
+    )
 
-    def message(subject: str, genes: str, consequence: str) -> str:
-        return (
-            f"{subject} is 0: no count of {genes} was observed in the "
-            f"{int(without.sum())} cells measuring it, where pure soup with their "
-            f"totals would give {expected:.3g}. A count of 0 puts the fraction "
-            f"below {-math.log(0.05) / expected:.3g} (the one-sided 95% Poisson "
-            f"bound, 3 / {expected:.3g}), not at 0, so {consequence}. Check that "
-            "the gene sets and the soup profile suit these cells."
-        )
+    def warned_twice(gene_sets: dict[str, list[str]], example: str) -> ArtifactRef:
+        """Estimate twice, each time warning of one estimate of 0."""
+        refs = []
+        for _ in range(2):
+            ref, warned, texts = _warned(
+                lambda: store.qc.ambient_contamination(
+                    cells, profile, gene_sets=gene_sets
+                ),
+                _ZERO_ESTIMATES,
+            )
+            assert texts == [
+                f"1 contamination estimate is 0: {example}. A count of 0 puts a "
+                "fraction below the one-sided 95% Poisson bound, 3 divided by the "
+                "pure-soup count, not at 0, so a correction with an estimate of 0 "
+                "would leave its cells uncorrected. Check that the gene sets and the "
+                "soup profile suit these cells."
+            ]
+            (warning,) = warned
+            assert (warning.operation, warning.diagnostic, warning.value) == (
+                "estimate_ambient_contamination",
+                "zeroEstimates",
+                1,
+            )
+            refs.append(ref)
+        assert refs[1] == refs[0]
+        assert store.artifacts.inspect(ref).diagnostics["zeroEstimateExamples"] == [
+            example
+        ]
+        return ref
 
     # With a second gene set the global estimate is positive, and the warning
     # names the set of the estimate of 0.
-    with pytest.warns(UserWarning) as caught:
-        both = store.qc.ambient_contamination(
-            cells, profile, gene_sets={"rare": ["GENE5"], "haemoglobin": HAEMOGLOBIN}
-        )
-    assert [str(warning.message) for warning in caught] == [
-        message(
-            "The contamination estimate from gene set 'rare'",
-            "the set",
-            "a correction with an estimate from this gene set alone would "
-            f"leave {int(without.sum())} cells uncorrected",
-        )
-    ]
+    both = warned_twice(
+        {"rare": ["GENE5"], "haemoglobin": HAEMOGLOBIN}, f"gene set 'rare' {measured}"
+    )
     result = store.qc.load_ambient_contamination(both)
     assert result.set_estimates["rare"] == 0.0
     assert result.estimate > 0
+    assert store.artifacts.inspect(both).diagnostics["largestEstimate"] == (
+        result.estimate
+    )
 
-    with pytest.warns(UserWarning) as caught:
-        alone = store.qc.ambient_contamination(
-            cells, profile, gene_sets={"rare": ["GENE5"]}
-        )
-    assert [str(warning.message) for warning in caught] == [
-        message(
-            "The global contamination estimate",
-            "the measured gene sets",
-            f"a correction with this estimate would leave {int(without.sum())} "
-            "cells uncorrected",
-        )
-    ]
+    alone = warned_twice({"rare": ["GENE5"]}, f"global estimate {measured}")
     # The estimate of 0 is saved as computed, and a correction with it leaves
     # the cells' counts as they were.
     result = store.qc.load_ambient_contamination(alone)
@@ -797,6 +889,46 @@ def test_contamination_warns_about_an_estimate_of_zero_and_keeps_it(store):
         droplets.cells[without],
     )
     assert store.get_assay("unchanged").z.attrs["ambient_removed_counts"] == 0
+
+
+def test_an_estimate_saved_without_diagnostics_is_computed_anew(store):
+    cells, clusters = _cells_and_clusters(store)
+    profile = store.qc.ambient_profile(total_counts=(2, 10))
+
+    def estimate() -> ArtifactRef:
+        return store.qc.ambient_contamination(
+            cells, profile, gene_sets=GENE_SETS, clusters=clusters
+        )
+
+    saved = estimate()
+    # As an estimate saved before estimates saved diagnostics: loading or
+    # correcting it names the call that computes it anew.
+    del store.zw[artifact_path(saved)].attrs["diagnostics"]
+    message = (
+        "holds no diagnostics, which estimate_ambient_contamination saves with "
+        "every artifact; call ds.qc.ambient_contamination again"
+    )
+    for refused in (
+        lambda: store.artifacts.inspect(saved).diagnostics,
+        lambda: store.qc.load_ambient_contamination(saved),
+        lambda: store.qc.correct_ambient(saved, assay_label="corrected"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            refused()
+    assert "corrected" not in store.assay_names
+
+    anew = estimate()
+
+    assert anew != saved
+    assert list(store.artifacts.inspect(anew).diagnostics) == [
+        "largestEstimate",
+        "zeroEstimates",
+        "zeroEstimateExamples",
+    ]
+    np.testing.assert_array_equal(
+        store.artifacts.load(anew)["values"][:],
+        store.artifacts.load(saved)["values"][:],
+    )
 
 
 def test_contamination_is_reused_from_a_read_only_store(store, path):

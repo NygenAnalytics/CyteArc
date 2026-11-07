@@ -121,6 +121,7 @@ by_hand = ds.pipeline.rna(label="called_by_hand", cells=cells, filtering=True)  
 - Barcodes at or above `retain` (the knee total) are cells without a test. A warning names
   `limited` barcodes that were not called: rerun with a larger `n_iter`. In a run, such warnings
   are in the stage record and `run.report()["summary"]["warnings"]`.
+- The `cell_calling` statistics save `goodTuringSlope`, the slope of the Good-Turing fit that smooths the ambient profile: `ds.artifacts.inspect(ds.artifacts.inspect(cells).input_ref("cell_calling")).diagnostics`. A slope of -1 or more gives a `DiagnosticWarning` that the smoothed profile may be unreliable, each time the statistics are computed or reused, so a rerun's `cell_calling` stage records it again.
 - A merged store holds one ambient pool per capture: call each capture with
   `cell_selection=` and combine the selections, or run the recipe with
   `cell_calling={"sample_column": "capture"}`, which calls each capture apart and analyzes the
@@ -272,6 +273,8 @@ hashed = ds.pipeline.rna(
 
 Hashtags without a count in a pool's cells are left out, and the artifact's `samples` attribute records, for each pool, its `label`, its cells, the hashtags it demultiplexed, each one's cutoff and those it left out (`withoutCounts`). Called directly, `qc.hto_demultiplexing(selection, sample_column="pool", hashtags=...)` does the same.
 
+A hashtag whose positive calls overlap its background, such as an unused tag or a failed stain, gives a `DiagnosticWarning` that names it with its pool, such as `'HTO3' in sample 'a' of 'pool' (0 of 14 positive cells)`: 14 cells called positive, none of them beyond the background's tail. The warning repeats each time the identities are computed or reused, so a rerun's `hashing` stage records it again. `ds.artifacts.inspect(hashed["hashing"]).diagnostics` holds `overlappingHtos`, the overlapping hashtags counted in each pool, and `overlappingHtoExamples`, up to five of them.
+
 ### Pipeline filtering and feeding a custom selection
 
 With `cells` naming a column (the default `"I"`), and in a run with `cell_calling` or `hashing`
@@ -334,9 +337,7 @@ corrected = ds.pipeline.rna(label="soupx", assay="RNA_soupx", cells=first)  # th
   expressing cell is left out of that set; `level="cluster"` raises for a cluster that expresses
   every set. Without `clusters=`, weakly expressing cells inflate the estimate.
 - A known rate goes in `fraction=` instead of `gene_sets=`.
-- An estimate of exactly 0 (global, gene set, or cluster) warns: its cells hold no counts of their
-  gene sets although pure soup would give some, so the fraction is only bounded, below about
-  3 / expected. Correcting with it leaves those cells uncorrected; check the gene sets and profile.
+- An estimate of exactly 0 (global, gene set, or cluster) gives a `DiagnosticWarning`, each time the estimate is computed or reused: its cells hold no counts of their gene sets although pure soup would give some, so the fraction is only bounded, below about 3 / expected. Correcting with it leaves those cells uncorrected; check the gene sets and profile. `ds.artifacts.inspect(rho).diagnostics` counts such estimates (`zeroEstimates`, up to five in `zeroEstimateExamples`) and holds `largestEstimate`, which warns above `max_contamination`. An estimate saved by an earlier release without these diagnostics is refused by `load_ambient_contamination` and `correct_ambient`: call `qc.ambient_contamination` again.
 - Each gene's removal is rounded at random as in the paper (systematic sampling, one draw per
   cell from `random_seed`): every gene, even a rare soup gene, loses its share of the soup on
   average, and each cell loses its share rounded down or up. A seed reproduces the counts; the
@@ -404,7 +405,7 @@ clean = ds.pipeline.rna(label="baseline_singlets", cells=singlets)  # or the qc_
 | `qc.doublets(sample_column=)` | `None` (one sample) | Cells from several captures (10x channels or lanes): doublets are then simulated and scored within each. Never HTO identities. A Harmony pipeline run uses its batch columns. |
 | `qc.doublets(threshold=)` | `None` (per sample, automatic) | The `samples` attribute shows a `thresholdMethod` of `"otsu"` (no clear valley) or an estimated rate far from the loading's; then set one score, from 0 to 1, for every sample. |
 | `qc.doublets(expected_doublet_rate=)` | `0.05` | The loading predicts another multiplet rate (about 0.8% per 1,000 cells recovered on 10x). |
-| `qc.doublets(heterotypic_fraction=)` | `0.0` | Above 0 forces that share of simulated doublets to pair two clusters; it needs two clusters and biases the score. |
+| `qc.doublets(heterotypic_fraction=)` | `0.0` | Above 0 forces that share of simulated doublets to pair two clusters; it needs two clusters and biases the score. A sample whose cells share one cluster pairs any two of its cells instead, with a `DiagnosticWarning` on every call; the `oneClusterSamples` diagnostic counts such samples. |
 | `qc.ambient_contamination(max_contamination=, fdr=)` | `1.0`, `0.05` | Keep; they decide which cells express a gene set (Poisson test against pure soup). |
 | `qc.correct_ambient(random_seed=)` | `0` | Keep fixed; change only to check that a result does not depend on the rounding draws. |
 | `qc.hto_demultiplexing(sample_column=)` | `None` (one fit over every cell) | Pools of cells that used different hashtags, such as lanes that each pooled a few samples: each pool is demultiplexed on its own. Never the capture column of pools that share their hashtags. |

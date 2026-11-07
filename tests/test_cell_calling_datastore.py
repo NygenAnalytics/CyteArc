@@ -24,7 +24,8 @@ from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
 from cytearc.storage.stores import load_zarr
 from cytearc.writers.counts_t import finalize_writer_counts_t
 from tests.storage_helpers import finalize_test_counts
-from tests.test_cell_calling import _droplets
+from tests.test_cell_calling import _ambient_good_turing_slope, _droplets
+from tests.test_reduction_graph_diagnostics import _warned
 
 N_ITER = 2000
 
@@ -562,3 +563,93 @@ def test_call_cells_names_the_budget_that_passes_its_resident_arrays(
     except MemoryBudgetError as later:
         assert later.item != refusal.item
         assert later.needed_bytes > refusal.needed_bytes
+
+
+# The Good-Turing fit of the ambient profile
+
+_GOOD_TURING = "The Good-Turing frequency fit"
+
+
+def _statistics(store: DataStore, cells: ArtifactRef) -> ArtifactRef:
+    """The ``cell_calling`` statistics that a selection of called cells records."""
+    return inspect_artifact(store.zw, cells).input_ref("cell_calling")
+
+
+def test_a_good_turing_slope_above_minus_one_warns_when_computed_and_when_reused(
+    store_path, droplets
+) -> None:
+    counts, _ = droplets
+    store = _open(store_path)
+
+    def call() -> ArtifactRef:
+        return store.qc.call_cells(n_iter=N_ITER, random_seed=3)
+
+    computed, first, first_texts = _warned(call, _GOOD_TURING)
+    reused, second, second_texts = _warned(call, _GOOD_TURING)
+
+    assert reused == computed
+    # The 150 simulated features fit an ambient slope above -1.
+    slope = _ambient_good_turing_slope(counts)
+    assert -1 < slope < 0
+    assert store.artifacts.inspect(_statistics(store, computed)).diagnostics == {
+        "goodTuringSlope": pytest.approx(slope, rel=1e-12)
+    }
+    expected = (
+        f"The Good-Turing frequency fit has slope {slope:.3f}, which is not below "
+        "-1, so its smoothed proportions may be unreliable."
+    )
+    for warned, texts in ((first, first_texts), (second, second_texts)):
+        assert texts == [expected]
+        (warning,) = warned
+        assert (warning.operation, warning.diagnostic) == (
+            "run_cell_calling",
+            "goodTuringSlope",
+        )
+        assert warning.value == pytest.approx(slope, rel=1e-12)
+
+
+def test_a_good_turing_slope_below_minus_one_gives_no_warning(tmp_path) -> None:
+    # A thousand features, most of them rare in the ambient pool, fit a slope
+    # below -1.
+    counts, _, _ = _droplets(seed=7, n_features=1000, n_empty=1000)
+    _write_store(tmp_path / "steep.zarr", counts)
+    store = _open(tmp_path / "steep.zarr")
+
+    for _ in range(2):
+        cells, warned, texts = _warned(
+            lambda: store.qc.call_cells(n_iter=100, random_seed=3), _GOOD_TURING
+        )
+        assert (warned, texts) == ([], [])
+    slope = _ambient_good_turing_slope(counts)
+    assert slope < -1
+    assert store.artifacts.inspect(_statistics(store, cells)).diagnostics == {
+        "goodTuringSlope": pytest.approx(slope, rel=1e-12)
+    }
+
+
+def test_statistics_saved_without_diagnostics_are_computed_anew(store_path) -> None:
+    store = _open(store_path)
+    first = store.qc.call_cells(n_iter=N_ITER, random_seed=3)
+    statistics = _statistics(store, first)
+    # As statistics saved before cell calling saved diagnostics.
+    del artifact_group(store.zw, statistics).attrs["diagnostics"]
+    with pytest.raises(
+        ValueError,
+        match="holds no diagnostics, which run_cell_calling saves with every "
+        "artifact; call ds.qc.call_cells again",
+    ):
+        store.artifacts.inspect(statistics).diagnostics
+    # The earlier statistics still load.
+    earlier = store.qc.load_cell_calls(statistics)
+
+    again = store.qc.call_cells(n_iter=N_ITER, random_seed=3)
+
+    # The new statistics give the called cells a new identity too.
+    assert again != first
+    recomputed = _statistics(store, again)
+    assert recomputed != statistics
+    assert list(store.artifacts.inspect(recomputed).diagnostics) == ["goodTuringSlope"]
+    np.testing.assert_array_equal(
+        store.qc.load_cell_calls(recomputed).p_value, earlier.p_value
+    )
+    np.testing.assert_array_equal(_mask(store, again), _mask(store, first))

@@ -15,7 +15,7 @@ import pytest
 from threadpoolctl import threadpool_limits
 
 import cytearc.storage.operation_revisions as operation_revisions
-from cytearc import DataStore
+from cytearc import DataStore, DiagnosticWarning
 from cytearc.metadata.arguments import HtoIdentityArguments
 from cytearc.quality_control import hto
 from cytearc.quality_control.hto import (
@@ -30,17 +30,25 @@ from cytearc.quality_control.hto import (
     _negative_binomial_cutoff,
     _positive_hto_calls,
     _strict_background_cutoff,
+    _unseparated_htos,
     _validated_hto_counts,
     _warn_unseparated_htos,
+    UnseparatedHto,
     checked_hashtags,
     checked_sample_hashtags,
     hto_demux,
 )
-from cytearc.storage.artifacts import ArtifactRef, make_provenance, provenance_hash
+from cytearc.storage.artifacts import (
+    ArtifactRef,
+    artifact_path,
+    make_provenance,
+    provenance_hash,
+)
 from cytearc.storage.operation_revisions import effective_revision
 from cytearc.storage.selections import read_stored_selection_indices
 from cytearc.utils.logging import logger
 from tests.storage_helpers import write_count_store
+from tests.test_reduction_graph_diagnostics import _warned
 
 HTOS = ["HTO_A", "HTO_B", "HTO_C"]
 
@@ -442,9 +450,13 @@ def test_clean_counts_cut_at_0_with_doublets_outside_their_positive_cluster():
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        calls, cutoffs = hto._calls_and_cutoffs(frame, labels, positive_quantile=0.99)
+        calls, cutoffs, unseparated = hto._calls_and_cutoffs(
+            frame, labels, positive_quantile=0.99
+        )
 
     assert [str(warning.message) for warning in caught] == []
+    # Every positive count lies far above a background of zeros.
+    assert unseparated == []
     assert cutoffs == {"HTO_A": 0, "HTO_B": 0, "HTO_C": 0}
     pd.testing.assert_frame_equal(calls, frame > 0)
     assert _classify_hto_identities(calls).tolist() == [label for label, *_ in rows]
@@ -1499,8 +1511,10 @@ def test_unseparated_htos_are_named_in_one_warning():
     positive = counts > pd.Series({"HTO_A": 10, "HTO_B": 10, "HTO_C": 10})
     strict = pd.Series({"HTO_A": 30.0, "HTO_B": 30.0, "HTO_C": 30.0})
 
+    unseparated = _unseparated_htos(counts, positive, strict)
+    assert unseparated == [UnseparatedHto("HTO_B", 1, 3)]
     with pytest.warns(UserWarning) as caught:
-        _warn_unseparated_htos(counts, positive, strict, 0.99)
+        _warn_unseparated_htos(unseparated, 0.99)
 
     # HTO_A has 3 strong counts among 3 positive cells and HTO_C no positive
     # cell to judge; HTO_B has 1 strong count among 3 positive cells.
@@ -1514,9 +1528,10 @@ def test_unseparated_htos_are_named_in_one_warning():
     ]
     # Half of the positive cells above the strict cutoff counts as separated.
     halves = pd.DataFrame({"HTO_A": [11, 31]})
+    assert _unseparated_htos(halves, halves > 10, pd.Series({"HTO_A": 30.0})) == []
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        _warn_unseparated_htos(halves, halves > 10, pd.Series({"HTO_A": 30.0}), 0.99)
+        _warn_unseparated_htos([], 0.99)
 
 
 def test_pure_background_counts_warn_that_every_hto_overlaps_its_background():
@@ -1708,3 +1723,241 @@ def test_hto_identity_of_revision_1_is_recomputed_not_reused(
         "is revision 1, current 3: A singlet takes the one HTO"
     )
     assert store.qc.hto_demultiplexing(selection) == current
+
+
+# Hashtags whose positive and background counts overlap
+
+_OVERLAP = "Positive and background HTO counts overlap"
+
+
+def _unused_tag_counts(n_cells: int = 300, seed: int = 2) -> pd.DataFrame:
+    """Return counts of HTO0 to HTO3 over a negative-binomial background.
+
+    Every cell carries one of the first three tags, so the positive calls of
+    HTO3 follow its background tail.
+    """
+    rng = np.random.default_rng(seed)
+    counts = rng.negative_binomial(2, 2 / 12, size=(n_cells, 4))
+    tags = rng.integers(0, 3, n_cells)
+    counts[np.arange(n_cells), tags] += rng.negative_binomial(5, 5 / 305, n_cells)
+    return pd.DataFrame(counts, columns=[f"HTO{index}" for index in range(4)])
+
+
+def _background_counts(seed: int, n_cells: int = 300) -> pd.DataFrame:
+    """Return negative-binomial background counts of HTO0 to HTO3, without tags."""
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame(
+        rng.negative_binomial(2, 2 / 12, size=(n_cells, 4)),
+        columns=[f"HTO{index}" for index in range(4)],
+    )
+
+
+def _pooled_store(tmp_path: Path, pools: dict[str, pd.DataFrame]) -> DataStore:
+    """Write the counts of each pool in turn, with each cell's pool as the column "pool"."""
+    store = _hto_store(tmp_path, pd.concat(list(pools.values()), ignore_index=True))
+    sizes = [len(counts) for counts in pools.values()]
+    store.cells.insert("pool", np.repeat(list(pools), sizes), overwrite=True)
+    return store
+
+
+def _overlaps_alone(counts: pd.DataFrame) -> list[str]:
+    """Return the HTOs that a call on these counts alone warns overlap, as it names them."""
+    with threadpool_limits(limits=1), warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        hto_demux(counts.loc[:, (counts.to_numpy() > 0).any(axis=0)])
+    texts = [str(warning.message) for warning in caught]
+    assert all(text.startswith(_OVERLAP) for text in texts)
+    return [
+        named
+        for text in texts
+        for named in re.findall(r"'HTO\d' \(\d+ of \d+ positive cells\)", text)
+    ]
+
+
+def _in_pool(named: str, pool: str) -> str:
+    """Name a hashtag of ``_overlaps_alone`` as demultiplexed in its pool."""
+    return named.replace(" (", f" in sample {pool!r} of 'pool' (", 1)
+
+
+def _overlap_message(listed: str) -> str:
+    return (
+        f"{_OVERLAP} for {listed}: fewer than half of the cells called positive "
+        "have counts that the background fit exceeds with probability 1e-06, so "
+        "these calls may be background, as in an unused tag or pure background. "
+        "Check the HTO count distributions; a tag without a separated positive "
+        "population cannot be demultiplexed."
+    )
+
+
+def test_an_overlapping_hto_warns_when_computed_and_when_reused_naming_its_sample(
+    tmp_path: Path,
+):
+    unused = _unused_tag_counts()
+    separated = two_pool_hto_counts()[0].iloc[60:]
+    store = _pooled_store(tmp_path, {"a": unused, "b": separated})
+    cells = store.snapshot_cell_selection("I")
+
+    def demultiplex() -> ArtifactRef:
+        return store.qc.hto_demultiplexing(cells, sample_column="pool")
+
+    with threadpool_limits(limits=1):
+        computed, first, first_texts = _warned(demultiplex, _OVERLAP)
+        reused, second, second_texts = _warned(demultiplex, _OVERLAP)
+
+    assert reused == computed
+    # A call on each pool's cells alone finds the overlap of the unused tag
+    # only, and the demultiplexing names it with its pool.
+    (alone,) = _overlaps_alone(unused)
+    assert _overlaps_alone(separated) == []
+    example = _in_pool(alone, "a")
+    strong, positive = map(
+        int, re.fullmatch(r".* \((\d+) of (\d+) positive cells\)", example).groups()
+    )
+    # The positive cells exceed the saved cutoff, and fewer than half of them
+    # lie beyond the background's tail.
+    entry = store.artifacts.load(computed).attrs["samples"][0]
+    assert entry["label"] == "a"
+    assert positive == int((unused["HTO3"] > entry["cutoffs"]["HTO3"]).sum()) > 0
+    assert 2 * strong < positive
+    assert store.artifacts.inspect(computed).diagnostics == {
+        "overlappingHtos": 1,
+        "overlappingHtoExamples": [example],
+    }
+    assert example.startswith("'HTO3' in sample 'a' of 'pool' (")
+    for warned, texts in ((first, first_texts), (second, second_texts)):
+        assert texts == [_overlap_message(example)]
+        (warning,) = warned
+        assert (warning.operation, warning.diagnostic, warning.value) == (
+            "run_hto_demultiplexing",
+            "overlappingHtos",
+            1,
+        )
+
+
+def test_overlapping_htos_beyond_five_are_counted_and_five_are_named(tmp_path: Path):
+    # Pure background overlaps for every hashtag of both pools.
+    pools = {"a": _background_counts(seed=2), "b": _background_counts(seed=3)}
+    store = _pooled_store(tmp_path, pools)
+    cells = store.snapshot_cell_selection("I")
+
+    def demultiplex() -> ArtifactRef:
+        return store.qc.hto_demultiplexing(cells, sample_column="pool")
+
+    with threadpool_limits(limits=1):
+        computed, first, first_texts = _warned(demultiplex, _OVERLAP)
+        reused, second, second_texts = _warned(demultiplex, _OVERLAP)
+
+    assert reused == computed
+    named = [
+        _in_pool(entry, pool)
+        for pool, counts in pools.items()
+        for entry in _overlaps_alone(counts)
+    ]
+    assert len(named) == 8
+    assert store.artifacts.inspect(computed).diagnostics == {
+        "overlappingHtos": 8,
+        "overlappingHtoExamples": named[:5],
+    }
+    expected = _overlap_message(f"8 HTOs, among them {', '.join(named[:5])}")
+    for warned, texts in ((first, first_texts), (second, second_texts)):
+        assert texts == [expected]
+        (warning,) = warned
+        assert (warning.diagnostic, warning.value) == ("overlappingHtos", 8)
+
+
+def test_separated_hashtags_give_no_overlap_warning(tmp_path: Path):
+    counts, truth = two_pool_hto_counts()
+    store = _pool_store(tmp_path, counts)
+    cells = store.snapshot_cell_selection("I")
+
+    for _ in range(2):
+        with threadpool_limits(limits=1):
+            ref, warned, texts = _warned(
+                lambda: store.qc.hto_demultiplexing(cells, sample_column="pool"),
+                _OVERLAP,
+            )
+        assert (warned, texts) == ([], [])
+    np.testing.assert_array_equal(store.artifacts.load(ref)["values"][:], truth)
+    assert store.artifacts.inspect(ref).diagnostics == {
+        "overlappingHtos": 0,
+        "overlappingHtoExamples": [],
+    }
+
+
+def test_hto_identities_saved_without_diagnostics_are_demultiplexed_anew(
+    tmp_path: Path,
+):
+    counts, truth = planted_hto_counts()
+    store = _hto_store(tmp_path, counts)
+    selection = store.snapshot_cell_selection("I")
+    with threadpool_limits(limits=1):
+        saved = store.qc.hto_demultiplexing(selection)
+    # As identities saved before demultiplexing saved diagnostics.
+    del store.zw[artifact_path(saved)].attrs["diagnostics"]
+    with pytest.raises(
+        ValueError,
+        match="holds no diagnostics, which run_hto_demultiplexing saves with every "
+        "artifact; call ds.qc.hto_demultiplexing again",
+    ):
+        store.artifacts.inspect(saved).diagnostics
+
+    with threadpool_limits(limits=1):
+        anew = store.qc.hto_demultiplexing(selection)
+
+    assert anew != saved
+    assert store.artifacts.inspect(anew).diagnostics == {
+        "overlappingHtos": 0,
+        "overlappingHtoExamples": [],
+    }
+    renamed = {name: f"HTO{index}" for index, name in enumerate(HTOS)}
+    for ref in (saved, anew):
+        np.testing.assert_array_equal(
+            store.artifacts.load(ref)["values"][:],
+            [renamed.get(label, label) for label in truth],
+        )
+    # The earlier identities still load as values, which the recipes read.
+    np.testing.assert_array_equal(
+        store.artifacts.load_values(saved).values,
+        store.artifacts.load_values(anew).values,
+    )
+
+
+def test_a_rerun_pipeline_records_the_hto_warning_of_the_identities_it_reuses(
+    tmp_path: Path,
+):
+    hto = _unused_tag_counts()
+    rng = np.random.default_rng(5)
+    rna = rng.poisson(rng.gamma(0.6, 2.0, 200) * rng.uniform(0.5, 1.5, (len(hto), 1)))
+    path = tmp_path / "store.zarr"
+    write_count_store(str(path), {"RNA": rna, "HTO": hto.to_numpy()}, "uint16")
+    store = DataStore(str(path), default_assay="RNA", min_features_per_cell=0)
+    settings = {
+        "hashing": True,
+        "cell_cycle": False,
+        "hvg": {"top_n": 50},
+        "pca": {"dims": 4},
+        "neighbors": {"k": 5},
+        "leiden": False,
+        "umap": False,
+        "doublets": False,
+        "markers": False,
+    }
+
+    stages = []
+    for _ in range(2):
+        with (
+            threadpool_limits(limits=1),
+            pytest.warns(DiagnosticWarning, match=_OVERLAP),
+        ):
+            run = store.pipeline.rna(**settings)
+        stages.append({stage["stage"]: stage for stage in run.report()["stages"]})
+
+    first, second = (records["hashing"] for records in stages)
+    (warning,) = first["warnings"]
+    # The run demultiplexes every cell together, as a direct call does.
+    (alone,) = _overlaps_alone(hto)
+    assert warning == _overlap_message(alone)
+    # The second run reuses the identities and still records their warning.
+    assert [output["reused"] for output in first["outputs"]] == [False, False]
+    assert [output["reused"] for output in second["outputs"]] == [True, True]
+    assert second["warnings"] == [warning]
