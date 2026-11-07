@@ -248,6 +248,25 @@ def _resize_graph(trajectory: _Trajectory, n_cells: int) -> None:
     artifact_group(trajectory.store.zw, trajectory.graph).attrs["n_cells"] = n_cells
 
 
+def _selection_of(trajectory: _Trajectory, cells: list[int]) -> ArtifactRef:
+    """Select some of the trajectory's cells through a boolean cell column."""
+    flags = np.zeros(len(trajectory.cell_ids), dtype=bool)
+    flags[cells] = True
+    column = f"cells_{'_'.join(map(str, cells))}"
+    trajectory.store.z["cellData"].create_array(column, data=flags)
+    return resolve_stored_selection_artifact(
+        trajectory.store.zw,
+        table_path="cellData",
+        id_column="ids",
+        source_column=column,
+        scope="datastore",
+        kind="cell_selection",
+        operation="test_selection_of_cells",
+        parameters={},
+        inputs={},
+    )
+
+
 def _replace_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
     del group[name]
     group.create_array(name, data=values)
@@ -866,14 +885,16 @@ _PSEUDOTIME_RECORD_TAMPERS: dict[
         ),
         "Pseudotime parameters does not match its persisted contract",
     ),
-    "other-cell-selection": (
+    # A record of some of the graph's cells, here every cell but a-mid, whose
+    # payload holds every cell.
+    "selection-of-fewer-cells": (
         "from_labels",
         lambda scored: _rewrite_inputs(
             scored.store,
             scored.from_labels,
-            cell_selection=scored.trajectory.other_selection,
+            cell_selection=_selection_of(scored.trajectory, [0, 2, 3, 4]),
         ),
-        "Pseudotime graph and cell selection do not match",
+        "Pseudotime artifact payload is invalid",
     ),
     "graph-of-another-assay": (
         "from_labels",

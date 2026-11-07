@@ -45,6 +45,22 @@ The mask tells us which cells the result actually describes. A high fraction alo
 not sufficient: a small excluded component could contain an entire rare population.
 Including undefined values in custom summaries or exports can also distort the result.
 
+## Check a trajectory of some groups
+
+To follow a process through some groups of a large graph, score their cells on the graph you have instead of building a new one:
+
+```python
+# Select the cells of the groups the process runs through.
+groups_ref = ds.select_cells(clusters_ref, include=[2, 3, 5])
+
+# Score them on the subgraph that they induce in the existing graph.
+pseudotime_ref = ds.trajectory.pseudotime(
+    graph_ref, cells=groups_ref, source_sink=clusters_ref, sources=[2], sinks=[5]
+)
+```
+
+The subgraph keeps the edges that the whole graph chose among these cells, so the order follows the variation of the whole dataset within the groups. Cells at the edge of the groups lose their edges to cells outside them, and the subgraph can split where the whole graph does not; read `component_sizes` before reading the scores. A graph built on the groups' own variable genes and principal components follows the variation within the groups more closely, at the cost of normalizing, reducing and finding neighbours again. When both are feasible, compare their orderings: an order that only the rebuilt graph shows rests on variation that the whole-data reduction does not resolve.
+
 ## Inspect changing genes and modules
 
 ```python

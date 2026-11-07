@@ -143,10 +143,12 @@ _SIGNATURE_DIGESTS = {
     # float | None = None and max_iterations: int | None = None, then
     # method: Literal["untruncated", "truncated"] = "untruncated", with
     # n_singular_vals: int | None = None and random_seed: int | None = None,
-    # which only method="truncated" takes. get_imputed takes feature_name:
-    # str | FeatureRef | Sequence[str | FeatureRef] | np.ndarray | pd.Series.
-    # The inherited constructor takes source_storage_options: dict[str, Any] | None.
-    GraphDataStore: "2502d823c04f900c3bf68fb7663f1e1edaa2f43841daf1a9ef97f54db00f5ead",
+    # which only method="truncated" takes, then the keyword-only cells:
+    # ArtifactRef | None = None, some of the graph's cells to score.
+    # get_imputed takes feature_name: str | FeatureRef | Sequence[str |
+    # FeatureRef] | np.ndarray | pd.Series. The inherited constructor takes
+    # source_storage_options: dict[str, Any] | None.
+    GraphDataStore: "47b41fea7baa09e74faa7330429fe0b7f9a7bbf0877f8ba7b7a16178a73961b4",
     # run_mapping gained the keyword-only feature_key: Literal["ids",
     # "names"] = "ids" after missing_feature_policy.
     MappingDatastore: "12e809ed948d36552968c37dc3d2a9d3429ad06dcd5507673d95f839ef47171f",

@@ -411,6 +411,7 @@
   "tests/test_tapestri_store.py": 5.3,
   "tests/test_text_fingerprint_bulk.py": 0.3,
   "tests/test_trajectory_artifacts.py": 0.5,
+  "tests/test_trajectory_cells.py": 13.8,
   "tests/test_trajectory_lineage_artifacts.py": 8.0,
   "tests/test_trajectory_lineage_curves.py": 0.2,
   "tests/test_trajectory_lineage_operations.py": 116.7,

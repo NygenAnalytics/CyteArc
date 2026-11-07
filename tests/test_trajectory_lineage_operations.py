@@ -1354,15 +1354,17 @@ def test_tree_loader_refuses_changed_records(
 
 
 def test_tree_loader_checks_its_coordinates_cells(datastore, lineage_tree, monkeypatch):
-    other = datastore.snapshot_cell_selection("I")
     recorded = ArtifactRef.from_dict(
         _record(datastore, lineage_tree)["inputs"]["cell_selection"]
     )
-    if other == recorded:
-        pytest.skip("the session graph uses every cell")
+    # Coordinates of every cell of the tree but one. Coordinates of more
+    # cells, such as the graph's for a tree of some of them, serve.
+    keep = np.zeros(datastore.cells.N, dtype=bool)
+    keep[_selected_indices(datastore, recorded)[1:]] = True
+    fewer = _subset_selection(datastore, "tree_loader_test_cells", keep)
 
     class _Lineage:
-        cell_selection = other
+        cell_selection = fewer
 
     monkeypatch.setattr(
         f"{_OPERATIONS}.resolve_coordinate_inputs", lambda root, ref: _Lineage()
