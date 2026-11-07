@@ -294,7 +294,9 @@ def _resolve_sparse_import_geometries(
         admitted_worker_split(
             resources,
             nTasks=1,
-            residentBytes=max(0, int(residentBytes)) + producer_reserve,
+            residentBytes=max(0, int(residentBytes)),
+            reservedBytes=producer_reserve,
+            reservedFor="the producer that buffers a band of source rows",
             taskBytes=lambda _: 1,
             requested=1,
         )
@@ -316,9 +318,9 @@ def _resolve_sparse_import_geometries(
             admitted_worker_split(
                 resources,
                 nTasks=1,
-                residentBytes=(
-                    max(0, int(residentBytes)) + producer_held + band_sparse_bytes
-                ),
+                residentBytes=max(0, int(residentBytes)),
+                reservedBytes=producer_held + band_sparse_bytes,
+                reservedFor="the producer's source batch and the band's sparse values",
                 taskBytes=lambda inner: _row_band_task_peak(
                     sourceBytes=conversion_bytes,
                     denseBytes=dense_bytes,

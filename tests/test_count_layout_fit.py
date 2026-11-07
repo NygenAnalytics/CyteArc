@@ -234,6 +234,25 @@ def test_h5ad_import_names_the_count_layout_that_fits_its_budget(wide_counts, tm
     assert _named_policy(parallel.value) == named
 
 
+def test_a_count_layout_refusal_states_the_producer_apart_from_resident_data(
+    wide_counts, tmp_path
+):
+    path, _values = wide_counts
+    with pytest.raises(CountLayoutMemoryError) as refused:
+        _build(path, tmp_path / "default.zarr", mem_budget=12 * 1024**2, nthreads=1)
+    found = re.search(
+        r"Resident data needs about (\d+) bytes and the producer that buffers a "
+        r"band of source rows about (\d+) bytes, but the operation limit is",
+        str(refused.value),
+    )
+    assert found, str(refused.value)
+    resident, producer = (int(number) for number in found.groups())
+    # The matrix's resident data is a small part of what the plan refuses.
+    assert 0 < resident < producer
+    # The budget the refusal names is unchanged: both parts and one task.
+    assert refused.value.needed_bytes == resident + producer + 1
+
+
 def test_h5ad_import_below_one_row_shards_fails_before_the_destination_exists(
     wide_counts, tmp_path
 ):

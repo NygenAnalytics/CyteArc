@@ -10,6 +10,7 @@ from cytearc.storage.budget import (
     resolve_budget,
 )
 from cytearc.storage.execution import admitted_worker_split
+from cytearc.utils.memory_budget import MemoryBudgetError
 
 
 def _serve_files(monkeypatch: pytest.MonkeyPatch, files: dict[str, str]) -> None:
@@ -319,6 +320,60 @@ def test_admitted_worker_split_rejects_resident_data_at_limit():
             nTasks=1,
             taskBytes=lambda _: 1,
             residentBytes=500,
+        )
+
+
+def test_admitted_worker_split_states_reserved_bytes_apart_from_resident_data():
+    resources = ResourceBudget(memoryBytes=500, workers=8)
+    # Reserved bytes leave less room for tasks, as resident bytes do.
+    assert admitted_worker_split(
+        resources,
+        nTasks=20,
+        taskBytes=lambda concurrency: 100 + 10 * concurrency,
+        residentBytes=60,
+        reservedBytes=40,
+        reservedFor="the producer",
+    ) == (3, 2)
+
+    with pytest.raises(MemoryBudgetError) as nothing_left:
+        admitted_worker_split(
+            resources,
+            nTasks=1,
+            taskBytes=lambda _: 7,
+            residentBytes=100,
+            reservedBytes=400,
+            reservedFor="the producer that buffers a band of source rows",
+        )
+    assert str(nothing_left.value).startswith(
+        "Resident data needs about 100 bytes and the producer that buffers a band "
+        "of source rows about 400 bytes, but the operation limit is 500 bytes"
+    )
+    assert nothing_left.value.needed_bytes == 507
+
+    with pytest.raises(MemoryBudgetError) as no_task:
+        admitted_worker_split(
+            resources,
+            nTasks=1,
+            taskBytes=lambda _: 300,
+            residentBytes=100,
+            reservedBytes=150,
+            reservedFor="the producer's source batch",
+        )
+    assert str(no_task.value).startswith(
+        "One task needs about 300 bytes in addition to 100 resident bytes and "
+        "150 bytes of the producer's source batch, but the operation limit is "
+        "500 bytes"
+    )
+    assert no_task.value.needed_bytes == 550
+
+
+def test_admitted_worker_split_refuses_reserved_bytes_without_a_name():
+    with pytest.raises(ValueError, match="reservedFor must name"):
+        admitted_worker_split(
+            ResourceBudget(memoryBytes=500, workers=8),
+            nTasks=1,
+            taskBytes=lambda _: 1,
+            reservedBytes=10,
         )
 
 
