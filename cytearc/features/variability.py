@@ -1110,6 +1110,63 @@ def select_highly_variable_features(
     ``max_mean``, and the log2 bounds on the corrected variance ``min_var``
     and ``max_var`` (see :func:`hvg_candidates`). The ``top_n`` candidates
     with the highest corrected variance are selected, ties broken by lower
+    feature index, or every candidate when fewer pass, with a warning.
+
+    Raises:
+        ValueError: If the inputs are misaligned, ``top_n`` is below 1, or no
+            feature passes the filters.
+    """
+    selected = _highly_variable_selection(
+        corrected_variance,
+        normalized_cell_counts,
+        mean_nonzero,
+        active_features,
+        feature_names,
+        min_cells=min_cells,
+        max_cells=max_cells,
+        top_n=top_n,
+        min_var=min_var,
+        max_var=max_var,
+        min_mean=min_mean,
+        max_mean=max_mean,
+        blacklist=blacklist,
+        keep_bounds=keep_bounds,
+    )
+    n_selected = int(np.count_nonzero(selected))
+    # Every candidate is selected when fewer than top_n pass.
+    if n_selected < top_n:
+        _warn_few_candidates(n_selected, top_n)
+    return selected
+
+
+def _highly_variable_selection(
+    corrected_variance: np.ndarray,
+    normalized_cell_counts: np.ndarray,
+    mean_nonzero: np.ndarray,
+    active_features: np.ndarray,
+    feature_names: np.ndarray,
+    *,
+    min_cells: int,
+    max_cells: int | float,
+    top_n: int,
+    min_var: float,
+    max_var: float,
+    min_mean: float,
+    max_mean: float,
+    blacklist: str,
+    keep_bounds: bool,
+) -> np.ndarray:
+    """Select highly variable features from precomputed statistics, without warning.
+
+    :func:`select_highly_variable_features` describes the selection; an
+    operation that saves the selection warns from its saved count instead.
+
+    Every filter applies to the candidates before they are ranked: the
+    blacklist, the detection bounds ``min_cells`` and ``max_cells``, the
+    log2 bounds on the mean over detected cells ``min_mean`` and
+    ``max_mean``, and the log2 bounds on the corrected variance ``min_var``
+    and ``max_var`` (see :func:`hvg_candidates`). The ``top_n`` candidates
+    with the highest corrected variance are selected, ties broken by lower
     feature index, or every candidate when fewer pass.
 
     Raises:
@@ -1164,8 +1221,6 @@ def select_highly_variable_features(
                 max_mean=max_mean,
             )
         )
-    if top_n > n_candidates:
-        _warn_few_candidates(n_candidates, top_n)
     selected = np.zeros(size, dtype=bool)
     selected[_top_candidates(corrected_variance, candidates, top_n)] = True
     return selected
@@ -1181,11 +1236,14 @@ class BatchRanking(NamedTuple):
         median_rank: Each feature's median rank over those batches, counted
             from 0 for the most variable feature, and NaN for a feature that
             no batch ranks among its ``top_n``.
+        batch_candidates: The number of candidates of each batch; a batch
+            with fewer than ``top_n`` counts all of them as highly variable.
     """
 
     selected: np.ndarray
     batch_count: np.ndarray
     median_rank: np.ndarray
+    batch_candidates: np.ndarray
 
 
 def combine_batch_rankings(
@@ -1193,7 +1251,6 @@ def combine_batch_rankings(
     candidates: np.ndarray,
     *,
     top_n: int,
-    batch_names: list[str] | None = None,
 ) -> BatchRanking:
     """Select features that many batches rank as highly variable.
 
@@ -1207,16 +1264,16 @@ def combine_batch_rankings(
     ``seurat_v3_paper`` flavor by batch count first, as here. With one batch
     the selection is the ``top_n`` candidates by score.
 
-    A warning names each of several batches with fewer than ``top_n``
-    candidates, and another reports a selection of fewer than ``top_n``
-    features.
+    A batch with fewer than ``top_n`` candidates counts all of them as highly
+    variable, and a selection holds fewer than ``top_n`` features when fewer
+    are highly variable in some batch; the operation that saves the
+    selection warns of both from its diagnostics.
 
     Args:
         scores: Each batch's score of each feature, one row per batch.
         candidates: Whether each feature is a candidate in each batch.
         top_n: The number of features that each batch ranks as highly
             variable, and the number selected.
-        batch_names: The name of each batch for messages.
 
     Returns:
         The selection with each feature's batch count and median rank.
@@ -1227,15 +1284,8 @@ def combine_batch_rankings(
     scores = np.asarray(scores, dtype=np.float64)
     candidates = np.asarray(candidates, dtype=bool)
     n_batches, n_features = scores.shape
-    names = batch_names or [str(index) for index in range(n_batches)]
     ranks = np.full((n_batches, n_features), np.nan)
     for batch in range(n_batches):
-        n_candidates = int(candidates[batch].sum())
-        if n_batches > 1 and n_candidates < top_n:
-            logger.warning(
-                f"Batch {names[batch]!r} has {n_candidates} HVG candidates, fewer "
-                f"than top_n={top_n}; all of them count as highly variable in it"
-            )
         top = _top_candidates(scores[batch], candidates[batch], top_n)
         ranks[batch, top] = np.arange(len(top), dtype=np.float64)
     ranked = ~np.isnan(ranks)
@@ -1253,14 +1303,12 @@ def combine_batch_rankings(
     ]
     selected = np.zeros(n_features, dtype=bool)
     selected[order[:top_n]] = True
-    if len(order) < top_n and n_batches == 1:
-        _warn_few_candidates(len(order), top_n)
-    elif len(order) < top_n:
-        logger.warning(
-            f"Only {len(order)} features are highly variable in some batch, fewer "
-            f"than top_n={top_n}; all of them are selected"
-        )
-    return BatchRanking(selected, batch_count, median_rank)
+    return BatchRanking(
+        selected,
+        batch_count,
+        median_rank,
+        candidates.sum(axis=1).astype(np.int64),
+    )
 
 
 def select_batch_highly_variable_features(
@@ -1278,7 +1326,6 @@ def select_batch_highly_variable_features(
     max_mean: float,
     blacklist: str,
     keep_bounds: bool,
-    batch_names: list[str] | None = None,
 ) -> BatchRanking:
     """Select highly variable features from the scores of each batch.
 
@@ -1303,7 +1350,6 @@ def select_batch_highly_variable_features(
         max_mean: The log2 upper bound of the mean over detected cells.
         blacklist: A case-insensitive regular expression of excluded names.
         keep_bounds: Whether bounds keep equal values.
-        batch_names: The name of each batch for messages.
 
     Returns:
         The selection with each feature's batch count and median rank.
@@ -1346,6 +1392,4 @@ def select_batch_highly_variable_features(
                 where=" in any batch" if scores.shape[0] > 1 else "",
             )
         )
-    return combine_batch_rankings(
-        scores, candidates, top_n=top_n, batch_names=batch_names
-    )
+    return combine_batch_rankings(scores, candidates, top_n=top_n)

@@ -434,57 +434,26 @@ def test_one_batch_selects_the_top_scores() -> None:
     np.testing.assert_array_equal(ranking.median_rank, [np.nan, 0, 1, np.nan, np.nan])
 
 
-def test_batch_ranking_warns_and_fails_loudly() -> None:
+def test_batch_ranking_counts_each_batch_candidates_and_fails_loudly() -> None:
     scores = np.array([[3.0, 2.0, 1.0], [1.0, 2.0, 3.0]])
     candidates = np.array([[True, False, False], [True, True, True]])
-    messages = _warnings(
-        lambda: combine_batch_rankings(
-            scores, candidates, top_n=2, batch_names=["left", "right"]
-        )
-    )
-    assert messages == [
-        "Batch 'left' has 1 HVG candidates, fewer than top_n=2; all of them count "
-        "as highly variable in it"
-    ]
-
     rankings = []
+    # The ranking logs nothing: the operation that saves it warns from its
+    # diagnostics, so a reused selection warns as a computed one does.
     messages = _warnings(
-        lambda: rankings.append(
-            combine_batch_rankings(
-                scores, np.array([[True, False, False]] * 2), top_n=2
-            )
-        )
+        lambda: rankings.append(combine_batch_rankings(scores, candidates, top_n=2))
     )
-    # Unnamed batches are named by their position.
-    assert messages == [
-        *(
-            f"Batch '{batch}' has 1 HVG candidates, fewer than top_n=2; all of them "
-            "count as highly variable in it"
-            for batch in (0, 1)
-        ),
-        "Only 1 features are highly variable in some batch, fewer than top_n=2; "
-        "all of them are selected",
-    ]
-    np.testing.assert_array_equal(rankings[0].selected, [True, False, False])
+    assert messages == []
+    np.testing.assert_array_equal(rankings[0].batch_candidates, [1, 3])
+
+    short = combine_batch_rankings(
+        scores, np.array([[True, False, False]] * 2), top_n=2
+    )
+    np.testing.assert_array_equal(short.batch_candidates, [1, 1])
+    # Fewer features than top_n are highly variable in some batch.
+    np.testing.assert_array_equal(short.selected, [True, False, False])
     with pytest.raises(ValueError, match="in any batch"):
         combine_batch_rankings(scores, np.zeros(scores.shape, dtype=bool), top_n=2)
-
-
-def test_one_batch_ranking_warns_like_a_selection_without_batches() -> None:
-    # A flavor without batch ranks one batch, which a message never names.
-    messages = _warnings(
-        lambda: combine_batch_rankings(
-            np.array([[3.0, 2.0, 1.0]]),
-            np.array([[True, False, False]]),
-            top_n=2,
-            batch_names=["all"],
-        )
-    )
-
-    assert messages == [
-        "Only 1 features passed the HVG candidate filters, fewer than top_n=2; "
-        "all of them are selected"
-    ]
 
 
 @pytest.mark.parametrize(("n_batches", "where"), [(1, ""), (2, " in any batch")])
@@ -1675,3 +1644,159 @@ def test_batch_selection_filters_each_batch_before_ranking() -> None:
     np.testing.assert_array_equal(ranking.batch_count, [1, 0, 1, 0])
     np.testing.assert_array_equal(ranking.median_rank, [0, np.nan, 0, np.nan])
     np.testing.assert_array_equal(ranking.selected, [True, False, False, False])
+
+
+def _store_of_batches(path: Path) -> DataStore:
+    """120 cells in batches a and b, of which b expresses only 5 of 30 genes."""
+    from cytearc import SparseToZarr
+
+    rng = np.random.default_rng(0)
+    counts = np.zeros((120, 30), dtype=np.int64)
+    counts[:60] = rng.poisson(rng.gamma(2.0, 2.0, 30), size=(60, 30))
+    counts[60:, :5] = rng.poisson(rng.gamma(2.0, 2.0, 5), size=(60, 5))
+    SparseToZarr(
+        counts, str(path), [f"c{i}" for i in range(120)], [f"g{i}" for i in range(30)]
+    ).dump()
+    store = DataStore(str(path), min_features_per_cell=0)
+    store.cells.insert("batch", np.repeat(["a", "b"], 60).astype(object))
+    return store
+
+
+def _hvg_warnings(call: Any) -> tuple[Any, list[Any]]:
+    """The result of ``call`` and the DiagnosticWarnings it gave."""
+    import warnings
+
+    from cytearc import DiagnosticWarning
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = call()
+    return result, [
+        warning.message
+        for warning in caught
+        if issubclass(warning.category, DiagnosticWarning)
+    ]
+
+
+def test_a_selection_of_too_few_candidates_warns_when_computed_and_when_reused(
+    tmp_path,
+) -> None:
+    store = _store_of_batches(tmp_path / "hvg.zarr")
+    cells = store.snapshot_cell_selection()
+
+    computed, first = _hvg_warnings(
+        lambda: store.features.hvgs(cells, top_n=500, show_plot=False)
+    )
+    reused, second = _hvg_warnings(
+        lambda: store.features.hvgs(cells, top_n=500, show_plot=False)
+    )
+
+    assert reused == computed
+    selected = int(np.count_nonzero(store.artifacts.load(computed)["values"][:]))
+    assert 0 < selected < 500
+    expected = (
+        f"Only {selected} features passed the HVG candidate filters, fewer than "
+        "top_n=500; all of them are selected"
+    )
+    for warnings_of_call in (first, second):
+        assert [str(warning) for warning in warnings_of_call] == [expected]
+        (warning,) = warnings_of_call
+        assert (warning.operation, warning.diagnostic, warning.value) == (
+            "select_hvgs",
+            "selectedFeatures",
+            selected,
+        )
+    assert store.artifacts.inspect(computed).diagnostics == {
+        "selectedFeatures": selected,
+        "batches": None,
+        "batchesBelowTopN": None,
+        "batchBelowTopNExamples": [],
+    }
+
+
+def test_a_batch_of_too_few_candidates_warns_when_computed_and_when_reused(
+    tmp_path,
+) -> None:
+    store = _store_of_batches(tmp_path / "hvg.zarr")
+    cells = store.snapshot_cell_selection()
+
+    def select() -> Any:
+        return store.features.hvgs(
+            cells, batch="batch", top_n=10, min_mean=-1, show_plot=False
+        )
+
+    computed, first = _hvg_warnings(select)
+    reused, second = _hvg_warnings(select)
+
+    assert reused == computed
+    # Batch b's two candidates pass min_mean; batch a's thirty do.
+    expected = (
+        "1 of 2 batches have fewer HVG candidates than top_n=10, so all of their "
+        "candidates count as highly variable in them: b (2)"
+    )
+    assert [str(warning) for warning in first] == [expected]
+    assert [str(warning) for warning in second] == [expected]
+    assert store.artifacts.inspect(computed).diagnostics == {
+        "selectedFeatures": 10,
+        "batches": 2,
+        "batchesBelowTopN": 1,
+        "batchBelowTopNExamples": ["b (2)"],
+    }
+
+
+def test_a_selection_of_enough_candidates_gives_no_warning(tmp_path) -> None:
+    store = _store_of_batches(tmp_path / "hvg.zarr")
+    cells = store.snapshot_cell_selection()
+
+    for _ in range(2):
+        _ref, warnings_of_call = _hvg_warnings(
+            lambda: store.features.hvgs(cells, top_n=5, show_plot=False)
+        )
+        assert warnings_of_call == []
+
+
+def test_a_selection_saved_without_diagnostics_is_computed_anew(tmp_path) -> None:
+    store = _store_of_batches(tmp_path / "hvg.zarr")
+    cells = store.snapshot_cell_selection()
+    saved = store.features.hvgs(cells, top_n=5, show_plot=False)
+    # As a selection saved before HVG selections recorded their diagnostics.
+    del zarr.open_group(str(tmp_path / "hvg.zarr"))[artifact_path(saved)].attrs[
+        "diagnostics"
+    ]
+
+    recomputed = store.features.hvgs(cells, top_n=5, show_plot=False)
+
+    assert recomputed != saved
+    assert store.artifacts.inspect(recomputed).diagnostics["selectedFeatures"] == 5
+    np.testing.assert_array_equal(
+        store.artifacts.load(recomputed)["values"][:],
+        zarr.open_group(str(tmp_path / "hvg.zarr"))[artifact_path(saved)]["values"][:],
+    )
+
+
+def test_a_rerun_pipeline_records_the_hvg_warning_of_the_selection_it_reuses(
+    tmp_path,
+) -> None:
+    store = _store_of_batches(tmp_path / "hvg.zarr")
+    settings: dict[str, Any] = {
+        "hvg": {"top_n": 500},
+        "pca": {"dims": 5},
+        "filtering": False,
+        "cell_cycle": False,
+        "umap": False,
+        "leiden": False,
+        "doublets": False,
+        "markers": False,
+    }
+    recorded = []
+    for _ in range(2):
+        run = store.pipeline.rna(**settings)
+        stages = {stage["stage"]: stage for stage in run.report()["stages"]}
+        recorded.append(stages["highly_variable_features"]["warnings"])
+
+    first, second = recorded
+    assert len(first) == 1
+    assert first[0].startswith("Only ")
+    assert first[0].endswith("fewer than top_n=500; all of them are selected")
+    # The second run reuses the selection and still records its warning.
+    assert second == first

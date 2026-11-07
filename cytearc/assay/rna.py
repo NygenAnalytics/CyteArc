@@ -1040,10 +1040,11 @@ class RNAassay(Assay):
         """Return an HVG mask and corrected variance from sufficient stats.
 
         ``summary`` is a feature summary of this assay and ``feature_names``
-        holds one name per feature; ``select_highly_variable_features``
-        rejects inputs of any other length.
+        holds one name per feature; inputs of any other length are refused.
+        The selection gives no warning: the operation that saves it warns
+        from its diagnostics.
         """
-        from ..features.variability import select_highly_variable_features
+        from ..features.variability import _highly_variable_selection
 
         normed_tot = np.asarray(summary["normed_tot"], dtype=np.float64)
         normed_n = np.asarray(summary["normed_n"], dtype=np.float64)
@@ -1062,7 +1063,7 @@ class RNAassay(Assay):
             lowess_frac=lowess_frac,
             bin_strategy=bin_strategy,
         )
-        values = select_highly_variable_features(
+        values = _highly_variable_selection(
             corrected_variance=corrected_variance,
             normalized_cell_counts=normed_n,
             mean_nonzero=nz_mean,
