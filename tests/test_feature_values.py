@@ -19,10 +19,11 @@ from cytearc.features.values import (
     iter_normalized_feature_blocks,
     measured_feature_means,
     resolve_feature,
+    resolve_feature_rows,
     spread_measured_rows,
 )
 from cytearc.metadata.membership import membership_attributes
-from cytearc.metadata.selection import NormalizationSpec
+from cytearc.metadata.selection import FeatureRef, NormalizationSpec
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.execution import execution_report_scope
@@ -58,6 +59,118 @@ def test_spreading_measured_rows_ignores_empty_blocks_and_keeps_missing_rows(
         assert start == offset
         offset += len(block)
     assert offset == len(measured)
+
+
+# The rows of a saved result: features 5 and 25 share the name MATR3, as
+# ENSG00000280987 and ENSG00000015479 do in the 10x Genomics human reference.
+_ROWS = {
+    "assay": "RNA",
+    "indices": np.array([5, 10, 25, 30]),
+    "ids": np.array(["ENSG05", "ENSG10", "ENSG25", "ENSG30"]),
+    "names": np.array(["MATR3", "CD3E", "MATR3", "LYZ"]),
+    "where": "the rows",
+}
+
+
+def test_feature_rows_are_found_by_name_id_or_index_in_request_order() -> None:
+    found = resolve_feature_rows(
+        [
+            "lyz",
+            FeatureRef("ENSG25", by="id"),
+            FeatureRef(5, by="index"),
+            FeatureRef("Cd3e"),
+            FeatureRef("ENSG10", by="id", assay="RNA"),
+        ],
+        **_ROWS,
+    )
+
+    assert found == [3, 2, 0, 1, 1]
+
+
+def test_feature_rows_give_none_for_features_that_match_no_row() -> None:
+    found = resolve_feature_rows(
+        [
+            "ABSENT",
+            FeatureRef("ENSG99", by="id"),
+            # An index is the feature's index in the assay, not a row position.
+            FeatureRef(1, by="index"),
+            # IDs match exactly, without folding case.
+            FeatureRef("ensg10", by="id"),
+            "LYZ",
+        ],
+        **_ROWS,
+    )
+
+    assert found == [None, None, None, None, 3]
+
+
+@pytest.mark.parametrize(
+    ("feature", "message"),
+    [
+        (
+            "matr3",
+            "Feature 'matr3' matches 2 of the rows, with IDs 'ENSG05', 'ENSG25'. "
+            "Pass FeatureRef(value=<ID>, by='id') to choose one.",
+        ),
+        (
+            FeatureRef("MATR3"),
+            "Feature 'MATR3' matches 2 of the rows, with IDs 'ENSG05', 'ENSG25'. "
+            "Pass FeatureRef(value=<ID>, by='id') to choose one.",
+        ),
+        (
+            FeatureRef("ENSG05", by="id", assay="ADT"),
+            "Feature ID 'ENSG05' names assay 'ADT', but the rows belong to assay 'RNA'",
+        ),
+        (
+            FeatureRef("MATR3", reduction="mean"),
+            "Feature 'MATR3' sets reduction='mean', which combines features; pass "
+            "a FeatureRef without a reduction to find one of the rows",
+        ),
+        (
+            FeatureRef(25, by="index", reduction="sum"),
+            "Feature index 25 sets reduction='sum', which combines features; pass "
+            "a FeatureRef without a reduction to find one of the rows",
+        ),
+    ],
+)
+def test_feature_rows_refuse_a_shared_name_another_assay_or_a_reduction(
+    feature, message
+) -> None:
+    with pytest.raises(ValueError) as raised:
+        resolve_feature_rows(["CD3E", feature], **_ROWS)
+
+    assert raised.value.args == (message,)
+
+
+@pytest.mark.parametrize(
+    ("feature", "kind"), [(5, "int"), (None, "NoneType"), (b"LYZ", "bytes")]
+)
+def test_feature_rows_refuse_values_that_are_not_features(feature, kind) -> None:
+    with pytest.raises(
+        TypeError,
+        match=f"^Features must be feature names or FeatureRef values, not {kind}$",
+    ):
+        resolve_feature_rows([feature], **_ROWS)
+
+
+def test_feature_rows_name_shared_ids_in_the_order_of_their_indices() -> None:
+    # Rows in drawing order, which need not follow the assay.
+    rows = {
+        **_ROWS,
+        "indices": np.array([25, 10, 5, 30]),
+        "ids": np.array(["ENSG25", "ENSG10", "ENSG05", "ENSG30"]),
+    }
+
+    with pytest.raises(ValueError, match="with IDs 'ENSG05', 'ENSG25'. Pass"):
+        resolve_feature_rows(["MATR3"], **rows)
+
+
+def test_feature_rows_of_a_result_whose_ids_repeat_name_them_all() -> None:
+    # IDs of one assay are unique, but a result's rows are taken as given.
+    rows = {**_ROWS, "ids": np.array(["ENSG05", "ENSG10", "ENSG05", "ENSG30"])}
+
+    with pytest.raises(ValueError, match="^Feature ID 'ENSG05' matches 2 of the rows"):
+        resolve_feature_rows([FeatureRef("ENSG05", by="id")], **rows)
 
 
 def _count_store(

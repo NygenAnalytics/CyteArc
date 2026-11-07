@@ -43,6 +43,7 @@ artifact refs. Docs: <https://docs.nygen.io/CyteArc/tutorials/plotting>,
   `CategoricalScale(order, palette, labels, missing_color, missing_label, palette_name)`,
   `Highlight(by, groups, indices, color, dim_alpha, ...)`, `DensityOverlay`, `SizeScale`,
   `StudyDesign`.
+- A gene name that several features share, such as MATR3 in the 10x Genomics human reference, raises `ValueError` naming their IDs wherever a `FeatureRef` is accepted, `imputation.compute_imputed` included. Pass `FeatureRef(feature_id, by="id")` for one feature, or `reduction="mean"` for their mean. `lineage_trends(features=...)` and the `show_features` of `pseudotime_heatmap` and `lineage_heatmap` take `FeatureRef` values without a reduction, and label a feature whose name another retained feature shares as `name (ID)`.
 - Plots are display. `max_points` thins only the overlaid points in `distribution`, and
   `provenance.notes` gains `"subsampled_display"`; a violin estimates its density from at most
   `max_density_points` (20000) values, adding `"subsampled_density"`. Take numbers from
