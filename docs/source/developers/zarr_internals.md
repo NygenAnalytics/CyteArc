@@ -261,14 +261,7 @@ workspace while preserving unrelated root siblings.
 
 ## Mounted targets
 
-`mount_datastore` creates a target whose root attribute `matrixSource` binds it to the source
-that owns the counts. The record holds exactly `location` (a path relative to the directory
-that holds the target for a source in it or below it, as for {ref}`composite sources
-<source_locations>`, and otherwise an absolute path or URI),
-`workspace`, and `assays`, and each assay entry holds exactly `datasetFingerprint`,
-`countsFingerprint`, and `requiresTranspose`. Every open checks the source against these
-identities. Any other shape, including a field that a later release adds, is rejected rather than
-ignored, and a source that is itself a mount is refused.
+`mount_datastore` creates a target whose root attribute `matrixSource` binds it to the source that owns the counts. The record holds exactly `location` (a path relative to the directory that holds the target for a source in it or below it, as for {ref}`composite sources <source_locations>`, and otherwise an absolute path or URI), `workspace`, and `assays`, and each assay entry holds exactly `datasetFingerprint`, `countsFingerprint`, and `requiresTranspose`. Every open checks the source against these identities. Any other shape, including a field that a later release adds, is rejected rather than ignored, and a source that is itself a mount is refused.
 
 The record holds no backend options. Each open passes the source's options, as `source_storage_options` of `mount_datastore`, `DataStore`, and `repack_store`, or opens the source with the target's `storage_options` when none are given.
 
