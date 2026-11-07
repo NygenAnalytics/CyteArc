@@ -838,6 +838,8 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
         set_estimates = cast(dict[str, float | None], attributes["set_estimates"])
         cluster_estimates = cast(dict[str, float], attributes["cluster_estimates"])
         loaded = self._artifacts_load_values(contamination)
+        # A read with the default cell_ids=True holds the cells' ids.
+        assert loaded.cell_ids is not None
         fractions = pd.Series(
             np.asarray(loaded.values, dtype=np.float64),
             index=pd.Index(loaded.cell_ids, name="ids"),

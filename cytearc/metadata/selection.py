@@ -771,7 +771,8 @@ class CellValues:
             holds the values.
         value: The name of the array or column that was read.
         values: One value, or one row of values, per cell.
-        cell_ids: The ``ids`` of the cells, aligned to ``values``.
+        cell_ids: The ``ids`` of the cells, aligned to ``values``, or None
+            when the read left them out with ``cell_ids=False``.
         cell_idx: The row of each cell in the cell table, in ascending order.
         cell_selection: The cell selection that the rows follow.
         missing: True for each cell whose value is missing, or None.
@@ -781,14 +782,26 @@ class CellValues:
     source: ArtifactRef | CellField
     value: str
     values: np.ndarray
-    cell_ids: np.ndarray
+    cell_ids: np.ndarray | None
     cell_idx: np.ndarray
     cell_selection: ArtifactRef
     missing: np.ndarray | None
     categorical: bool
 
     def to_pandas(self) -> pd.Series | pd.DataFrame:
-        """Return the values indexed by cell id, showing missing rows as missing."""
+        """Return the values indexed by cell id, showing missing rows as missing.
+
+        Raises:
+            ValueError: If the read left out the cell ids, or the values have
+                more than two dimensions.
+        """
+        if self.cell_ids is None:
+            raise ValueError(
+                "to_pandas indexes the values by cell id, and this read left "
+                "the cell ids out; read them with artifacts.load_values(..., "
+                "cell_ids=True), or use values and cell_idx, each cell's row "
+                "of the cell table"
+            )
         index = pd.Index(self.cell_ids, name="ids")
         values = np.asarray(self.values)
         if values.ndim == 1:

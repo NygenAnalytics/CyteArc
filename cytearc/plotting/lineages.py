@@ -677,8 +677,10 @@ def lineage_tree(
     loaded = store.trajectory.load_lineage_tree(tree)
     _require_loaded(loaded.ref, tree, "lineage tree")
     coordinates, cell_indices = _layout_for(store, layout, loaded.cell_selection)
+    # The clusters are placed by their labels alone, so the read leaves out
+    # the cells' ids and their share of the memory budget.
     labels_values = store.artifacts.load_values(
-        loaded.labels, cell_selection=loaded.cell_selection
+        loaded.labels, cell_selection=loaded.cell_selection, cell_ids=False
     )
     # One pass factorizes the labels and takes every cluster's median,
     # instead of comparing every cell's label once per cluster.

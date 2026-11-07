@@ -1083,6 +1083,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         # arrays are aligned to the same cells.
         loaded = self._artifacts_load_values(receptors)
         cell_ids = loaded.cell_ids
+        assert cell_ids is not None
         arrays = {name: read_array(group, name) for name in _CELL_ARRAYS[1:]}
         slots = read_array(group, "chain_slots")
         columns = {

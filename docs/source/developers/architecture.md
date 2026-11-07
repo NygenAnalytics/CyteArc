@@ -1222,9 +1222,7 @@ CyteArc validates persisted data and public arguments against the following cont
 - `cytearc.metadata.selection.CELL_VALUE_NAMES` names the canonical per-cell array of every
   cell-aligned artifact kind and replaces `GROUPING_VALUE_NAMES`. Readers no longer fall back to a
   `values` array, and other kinds raise `ValueError`. `select_cells` accepts `pseudotime` artifacts.
-- `DataStore.artifacts.load_values(ref, *, value=None, cell_selection=None)` returns a
-  `cytearc.metadata.CellValues` (values, cell ids, and missing mask) for any cell-aligned artifact.
-  The read is checked against the memory budget before anything is read.
+- `DataStore.artifacts.load_values(ref, *, value=None, cell_selection=None, cell_ids=True)` returns a `cytearc.metadata.CellValues` (values, cell ids, and missing mask) for any cell-aligned artifact. The read is checked against the memory budget before anything is read. `cell_ids=False` leaves the cell ids out of the read and of that check, so `CellValues.cell_ids` is None and `to_pandas` raises `ValueError`; the lineage tree plot reads its labels this way.
 - `select_cells` reads its values through the reader of `artifacts.load_values`, so its refusals take
   that reader's messages, and the read is checked against the memory budget.
 - `FeatureRef` checks `value` against `by`: an index must be an integer and a name or id must be

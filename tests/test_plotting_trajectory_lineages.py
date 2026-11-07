@@ -33,6 +33,7 @@ from cytearc.plotting._style import (
 )
 from cytearc.storage import ArtifactRef
 from cytearc.trajectory.curves import smooth_against_progress
+from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import write_selection_embedding
 
 # Lineages are drawn under the string form of their sink labels.
@@ -1816,6 +1817,38 @@ def test_lineage_tree_without_a_root_marks_every_leaf(
     assert result.provenance.extras["root"] is None
     assert result.provenance.extras["candidate_sinks"] == list(loaded_tree.leaves)
     assert set(loaded_tree.leaves) == leaves
+
+
+def test_lineage_tree_draws_within_the_budget_of_its_labels_without_cell_ids(
+    closing, datastore, lineage_tree, loaded_tree, umap
+):
+    """The tree places its clusters by their labels alone, so it reads no cell id."""
+
+    def labels(**options: Any) -> Any:
+        return datastore.artifacts.load_values(
+            loaded_tree.labels, cell_selection=loaded_tree.cell_selection, **options
+        )
+
+    sizes = pd.Series(np.asarray(labels().values)).value_counts()
+    budget = datastore.memoryBytes
+    try:
+        datastore.memoryBytes = 1
+        with pytest.raises(MemoryBudgetError) as raised:
+            labels(cell_ids=False)
+        datastore.memoryBytes = raised.value.needed_bytes
+        # The labels with their cells' ids do not fit that budget,
+        with pytest.raises(MemoryBudgetError):
+            labels()
+        # and the tree draws within it.
+        result = closing(
+            splt.lineage_tree(datastore, tree=lineage_tree, layout=umap, show=False)
+        )
+    finally:
+        datastore.memoryBytes = budget
+
+    nodes = result.tables["nodes"]
+    assert nodes["cluster"].tolist() == list(loaded_tree.clusters)
+    assert nodes["size"].tolist() == [int(sizes[c]) for c in loaded_tree.clusters]
 
 
 @pytest.mark.parametrize("tree", ["latest", None])
