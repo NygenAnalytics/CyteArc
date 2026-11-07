@@ -270,9 +270,13 @@ def open_store(
     mode: ZarrMode = "r",
     storage_options: dict[str, Any] | None = None,
     *,
-    source_storage_options: dict[str, dict[str, Any]] | None = None,
+    source_storage_options: dict[str, Any] | None = None,
 ) -> zarr.Group:
-    """Open a Zarr group from a path, URI, or store object."""
+    """Open a Zarr group from a path, URI, or store object.
+
+    A composite opens each source with ``source_storage_options[name]``; other
+    stores ignore ``source_storage_options``.
+    """
     root = _open_store_root(path, mode=mode, storage_options=storage_options)
     if "composite" in root.attrs:
         from ..composite.store import open_composite
@@ -286,7 +290,7 @@ def load_zarr(
     mode: ZarrMode,
     storage_options: dict[str, Any] | None = None,
     *,
-    source_storage_options: dict[str, dict[str, Any]] | None = None,
+    source_storage_options: dict[str, Any] | None = None,
 ) -> zarr.Group:
     """Open a Zarr group through the compatibility entry point."""
     return open_store(
@@ -358,6 +362,26 @@ def _list_assay_names(root: zarr.Group, workspace: str | None) -> list[str]:
     return assays
 
 
+def mount_source_options(
+    storage_options: dict[str, Any] | None,
+    source_storage_options: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return the backend options that open a mount's source.
+
+    A mount's source takes ``source_storage_options``, and the target's
+    ``storage_options`` when it is None, as it took them before mounts had
+    options of their own.
+    """
+    if source_storage_options is None:
+        return storage_options
+    if not isinstance(source_storage_options, dict):
+        raise TypeError(
+            "source_storage_options of a mount must be a dict of the backend "
+            f"options that open its source, got {type(source_storage_options)!r}"
+        )
+    return source_storage_options
+
+
 def create_matrix_source(
     source: str,
     at: ZarrLocation,
@@ -365,11 +389,17 @@ def create_matrix_source(
     workspace: str | None = None,
     required_transposes: frozenset[str],
     storage_options: dict[str, Any] | None = None,
+    source_storage_options: dict[str, Any] | None = None,
     profile: StorageProfile | None = None,
     source_root: zarr.Group | None = None,
     resources: ResourceBudget | None = None,
 ) -> zarr.Group:
-    """Create a writable store that mounts count matrices from ``source``."""
+    """Create a writable store that mounts count matrices from ``source``.
+
+    ``storage_options`` open the target ``at``, and ``source_storage_options``
+    open ``source`` when ``source_root`` is None; the source takes
+    ``storage_options`` when they are None.
+    """
     from .arrays import create_metadata_column
     from .copy import copy_zarr_group_tree
     from .layout import column_chunk_rows
@@ -380,11 +410,12 @@ def create_matrix_source(
     source = _persistable_location(source)
     if isinstance(at, str) and locations_overlap(source, at):
         raise ValueError("Source and destination must not overlap")
+    source_options = mount_source_options(storage_options, source_storage_options)
     if source_root is None:
         source_root = _open_store_root(
             source,
             mode="r",
-            storage_options=storage_options,
+            storage_options=source_options,
             operation="mounted",
         )
     if MATRIX_SOURCE_ATTR in source_root.attrs:
@@ -503,16 +534,20 @@ def resolve_matrix_source(
     root: zarr.Group,
     *,
     storage_options: dict[str, Any] | None = None,
+    source_storage_options: dict[str, Any] | None = None,
 ) -> tuple[zarr.Group, str | None] | None:
     """Open and validate a mounted matrix source, if present.
 
-    The manifest holds exactly ``location``, ``workspace``, and ``assays``, and
-    each assay entry exactly its recorded identity. Any other shape, including
-    a field added by a later release, is rejected rather than ignored.
+    The source is opened with ``source_storage_options``, or with the target's
+    ``storage_options`` when they are None. The manifest holds exactly
+    ``location``, ``workspace``, and ``assays``, and each assay entry exactly
+    its recorded identity. Any other shape, including a field added by a later
+    release, is rejected rather than ignored.
     """
     raw = root.attrs.get(MATRIX_SOURCE_ATTR)
     if raw is None:
         return None
+    source_options = mount_source_options(storage_options, source_storage_options)
     if not isinstance(raw, dict):
         raise ValueError("matrixSource attribute must be a mapping")
     if set(raw) != _MATRIX_SOURCE_KEYS:
@@ -550,7 +585,7 @@ def resolve_matrix_source(
     source_root = load_zarr(
         location,
         mode="r",
-        storage_options=storage_options,
+        storage_options=source_options,
     )
     source_zw = _workspace_group(source_root, workspace)
     source_cells = as_zarr_group(source_zw["cellData"], name="cellData")

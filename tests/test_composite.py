@@ -609,6 +609,18 @@ def test_remote_source_credentials_are_runtime_only(
             source_storage_options={"a": credentials, "unknown": {}},
             nthreads=1,
         )
+    # Options shaped for a mount's one source name no composite source, and are
+    # refused before source "a" fails to open without its credentials.
+    with pytest.raises(
+        ValueError, match=re.escape("Unknown composite source options: ['token']")
+    ):
+        DataStore(str(path), source_storage_options=credentials, nthreads=1)
+    with pytest.raises(TypeError, match=re.escape("source_storage_options['a']")):
+        DataStore(
+            str(path),
+            source_storage_options={"a": credentials["token"]},
+            nthreads=1,
+        )
 
 
 @pytest.mark.parametrize("writer", ["subset", "merge"])
