@@ -246,6 +246,9 @@ class LikelihoodClones:
             held fewer than ``min_size`` cells.
         bound_checks: For each round of splits, the rise in log-likelihood
             that EM's first E-step found and the joint bound on it.
+        capped: Whether the search stopped splitting at ``MAX_CLONES``
+            clones, the most that a fit holds, so that clones its score would
+            split further may hold several of the cells' clones.
         held_bytes: The bytes that the call left charged to its ledger for
             these clones, which the caller releases once it lets them go.
     """
@@ -265,7 +268,24 @@ class LikelihoodClones:
     score: float
     cells_in_small_clones: int
     bound_checks: tuple[tuple[float, float], ...]
+    capped: bool
     held_bytes: int
+
+
+def capped_search_message(searches: int, cells: int) -> str:
+    """The warning of ``searches`` searches, over ``cells`` cells in all, that stopped splitting at ``MAX_CLONES`` clones."""
+    if searches == 1:
+        return (
+            f"The search for the clones of {cells} cells stopped splitting at "
+            f"{MAX_CLONES} clones, the most that a fit holds, so clones that its "
+            "score would split further may hold several of the cells' clones"
+        )
+    return (
+        f"The searches for the clones of {searches} within groups, {cells} cells "
+        f"in all, stopped splitting at {MAX_CLONES} clones, the most that a fit "
+        "holds, so clones that their scores would split further may hold several "
+        "of the cells' clones"
+    )
 
 
 def tree_length(genotypes: np.ndarray) -> int:
@@ -1261,6 +1281,9 @@ def likelihood_clones(
 ) -> LikelihoodClones:
     """Call the clones of one group of cells by the likelihood rule; see the module docstring.
 
+    A search that stops splitting at ``MAX_CLONES`` clones logs a warning, and
+    the result's ``capped`` records it.
+
     Args:
         mutant_bits: Each cell's mutant calls, packed as
             :func:`~cytearc.variants.genotype_mixture.pack_mask` packs them,
@@ -1283,7 +1306,7 @@ def likelihood_clones(
         MemoryBudgetError: If a step does not fit the ledger's budget.
     """
     with numba_threads(nthreads):
-        return _likelihood_clones(
+        clones = _likelihood_clones(
             mutant_bits,
             wild_bits,
             int(n_sites),
@@ -1293,6 +1316,9 @@ def likelihood_clones(
             min_posterior=float(min_posterior),
             ledger=ledger,
         )
+    if clones.capped:
+        logger.warning(capped_search_message(1, len(clones.codes)))
+    return clones
 
 
 def _likelihood_clones(
@@ -1306,6 +1332,12 @@ def _likelihood_clones(
     min_posterior: float,
     ledger: MemoryLedger,
 ) -> LikelihoodClones:
+    """Call the clones as :func:`likelihood_clones` does, on the caller's threads, without its warning.
+
+    The genotype clone operation saves how many searches were capped and
+    warns from its saved diagnostics, whether it computes or reuses its
+    clones.
+    """
     ledger.peak("each site's calls over the cells", 32 * n_sites)
     mixture = GenotypeMixture(
         mutant_bits,
@@ -1370,12 +1402,6 @@ def _search(
     flags = ledger.hold("whether each cell has a mutant call", n_cells)
     has_mutant = np.empty(n_cells, dtype=bool)
     any_bits(mixture.mbits, has_mutant)
-    if search.capped:
-        logger.warning(
-            f"The search for the clones of {n_cells} cells stopped splitting at "
-            f"{MAX_CLONES} clones, the most that a fit holds, so clones that its "
-            "score would split further may hold several of the cells' clones"
-        )
     fit = _pruned(mixture, fit, min_size)
     if not (
         np.isfinite(fit.loglik)
@@ -1440,6 +1466,7 @@ def _search(
         score=schwarz_score(fit.loglik, fit.genotypes, n_cells),
         cells_in_small_clones=cells_in_small_clones,
         bound_checks=tuple(checks),
+        capped=search.capped,
         held_bytes=held,
     )
     del probability, clone

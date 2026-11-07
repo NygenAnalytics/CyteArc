@@ -429,6 +429,8 @@ def test_every_source_records_the_clone_writers_diagnostics(source) -> None:
             "cellsInSmallClones",
             "dropoutProbability",
             "errorProbability",
+            "cappedSearches",
+            "cellsInCappedSearches",
         ],
         "cut_phylogeny_clones": ["cellsBeforeCut"],
     }.get(str(status.operation), [])

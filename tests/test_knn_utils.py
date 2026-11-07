@@ -1330,7 +1330,9 @@ def test_wnn_integration_uses_minimum_neighbor_count_for_mismatched_graphs():
     finally:
         logger.remove(sink)
 
-    assert any("different neighbor counts" in message for message in messages)
+    # The integration operation warns of the counts before it reuses or
+    # computes its graph, so the kernel gives no warning of its own.
+    assert not any("different neighbor counts" in message for message in messages)
     assert merged.nnz == len(indices1) * 2
     expected_indices, expected_affinities, expected_weights = _reference_wnn(
         indices1, ld1, indices2, ld2, l2_normalize=True

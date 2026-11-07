@@ -106,7 +106,9 @@ _PARAMETRIC_TESTS = frozenset(
         "f_test",
     }
 )
-_CELL_LEVEL_WARNING = (
+#: The warning of a test without samples, which treats each cell as an
+#: independent observation.
+CELL_LEVEL_WARNING = (
     "Cell-level statistical testing treats each cell as an independent "
     "observation. Results are descriptive distribution testing, not "
     "population-level condition or disease inference; this applies equally "
@@ -1209,12 +1211,17 @@ def prepare_group_comparison(
     expression_cutoff: float = 0.0,
     group_order: Sequence[Any] | None = None,
     alternative: Alternative = "two-sided",
+    _warn_cell_level: bool = True,
 ) -> GroupComparisonDesign:
     """Validate and encode a group comparison once for many value arrays.
 
     The options mean what they mean for :func:`compare_group_distributions`,
     and every check of that function that does not read the values runs
-    here. ``samples`` and ``pairs`` align with ``groups``.
+    here. ``samples`` and ``pairs`` align with ``groups``. A design without
+    ``samples`` tests cells, and a warning says that it treats each cell as
+    an independent observation; ``ds.compare.test`` gives that warning before
+    it reuses or computes its result instead, so a reused result warns as a
+    computed one does.
 
     Returns:
         The design, whose :meth:`GroupComparisonDesign.compare` tests one
@@ -1293,8 +1300,8 @@ def prepare_group_comparison(
                 )
             seen_pairs.add(pair)
 
-    if samples is None:
-        warn(_CELL_LEVEL_WARNING)
+    if samples is None and _warn_cell_level:
+        warn(CELL_LEVEL_WARNING)
 
     rows = np.flatnonzero(_valid_group_mask(groups))
     if len(rows) == 0:

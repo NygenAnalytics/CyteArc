@@ -144,6 +144,7 @@ from ...utils.memory_budget import MemoryBudgetError
 from ...utils.moments import ColumnMoments
 from ...utils.numba import numba_threads
 from ...utils.shutdown import shutdown_checkpoint
+from ...utils.warnings import warn
 
 if TYPE_CHECKING:
     from ..base_datastore import BaseDataStore as _GraphOperationsBase
@@ -3113,7 +3114,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         CyteArc WNN scores only the union of the existing self-free KNN rows and
         uses the distance span from the nearest to the k-th neighbour as its
         bandwidth, so it is not bit-identical to Seurat's default wider search
-        and SNN-far bandwidth.
+        and SNN-far bandwidth. WNN neighbors of different counts give a graph
+        of the smallest count, and a warning says so each time the graph is
+        computed or reused.
 
         Args:
             sources: Connectivity-map refs for SNN or neighbor refs for WNN.
@@ -3313,6 +3316,27 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                     dtype=np.float32,
                 )
             )
+            # The sources alone call for this warning, so a reused graph gives
+            # it as a new one does. Its counts are the widths of the stored
+            # neighbor indices, which the integration reads.
+            wnn_counts = [
+                int(
+                    as_zarr_array(
+                        artifact_group(self.zw, source)["indices"], name="indices"
+                    ).shape[1]
+                )
+                for source in captured_sources
+            ]
+            if len(set(wnn_counts)) > 1:
+                counts = ", ".join(
+                    f"{assay_name}: {count}"
+                    for assay_name, count in zip(assays, wnn_counts, strict=True)
+                )
+                warn(
+                    f"WNN graphs have different neighbor counts ({counts}). "
+                    f"The integrated graph will retain {min(wnn_counts)} "
+                    "neighbors per cell."
+                )
         integrated_plan = plan_artifact(
             self.zw,
             scope="datastore",

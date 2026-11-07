@@ -1,6 +1,7 @@
 """Argument, reuse, staging, and integrity paths of the explicit graph operations."""
 
 import shutil
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -20,7 +21,7 @@ from cytearc.storage.artifacts import (
     new_artifact_id,
 )
 from cytearc.storage.errors import ArtifactResolutionError
-from cytearc.utils.logging import logger
+from cytearc.utils.logging import collect_warnings, logger
 from tests.storage_helpers import write_count_store
 from tests.storage_helpers import insert_nullable_cell_column
 
@@ -627,6 +628,51 @@ def test_integration_rejects_a_source_payload_over_other_cells(graph_store) -> N
         store.integration.modalities([refs["rna_neighbors"], adt])
     assert caught.value.code == "corrupt_payload"
     assert caught.value.context["artifact_id"] == adt.artifact_id
+
+
+def test_wnn_sources_of_different_neighbor_counts_warn_when_computed_and_reused(
+    graph_store,
+) -> None:
+    store, refs = graph_store
+    ann_index = store.artifacts.inspect(refs["adt_neighbors"]).input_ref("ann_index")
+    adt_neighbors = store.graph.neighbors(ann_index, k=3)
+    expected = (
+        "WNN graphs have different neighbor counts (RNA: 5, ADT: 3). The "
+        "integrated graph will retain 3 neighbors per cell."
+    )
+    graphs = []
+    for _ in range(2):
+        with (
+            collect_warnings() as messages,
+            warnings.catch_warnings(record=True) as caught,
+        ):
+            warnings.simplefilter("always")
+            graphs.append(
+                store.integration.modalities([refs["rna_neighbors"], adt_neighbors])
+            )
+        # One warning, among everything CyteArc warns or logs, when the graph
+        # is computed and when it is reused.
+        assert messages == [expected]
+        assert [
+            type(item.message) for item in caught if str(item.message) == expected
+        ] == [UserWarning]
+    assert graphs[1] == graphs[0]
+    integrated = artifact_group(store.zw, graphs[0])
+    assert integrated.attrs["n_neighbors"] == 3
+    assert integrated["weights"].shape == (3 * N_CELLS,)
+
+
+def test_wnn_sources_of_one_neighbor_count_warn_in_neither_call(graph_store) -> None:
+    store, refs = graph_store
+    sources = [refs["rna_neighbors"], refs["adt_neighbors"]]
+    for invalidate_cache in (False, True):
+        with collect_warnings() as messages:
+            integrated = store.integration.modalities(
+                sources, invalidate_cache=invalidate_cache
+            )
+        assert messages == []
+        # The template's graph is reused, then computed anew.
+        assert (integrated == refs["wnn"]) is not invalidate_cache
 
 
 def test_wnn_integration_assembles_coordinates_streamed_in_several_blocks(

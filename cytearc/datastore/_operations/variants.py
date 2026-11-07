@@ -299,6 +299,21 @@ def _warn_of_small_groups(groups: np.ndarray, n_groups: int, n_neighbors: int) -
     )
 
 
+def _capped_search_rules() -> tuple[DiagnosticRule, ...]:
+    """The warning of genotype clones whose likelihood searches stopped splitting at the most clones a fit holds."""
+    from ...variants.genotype_clones import capped_search_message
+
+    return (
+        DiagnosticRule(
+            "cappedSearches",
+            lambda saved: bool(saved["cappedSearches"]),
+            lambda saved: capped_search_message(
+                saved["cappedSearches"], saved["cellsInCappedSearches"]
+            ),
+        ),
+    )
+
+
 def _skipped_variants(sources: Sequence["_Source"]) -> dict[str, Any]:
     """The diagnostics of the chosen variants that Tapestri and DAb-seq sources skip.
 
@@ -3429,13 +3444,18 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         rates. The artifact's diagnostics, which
         ``ds.artifacts.inspect(clones).diagnostics`` returns, count the
         ``sites`` compared, the ``mutantCells``, the ``ambiguousCells`` and,
-        for the likelihood, the ``cellsInSmallClones``, and record the pooled
+        for the likelihood, the ``cellsInSmallClones``; record the pooled
         ``dropoutProbability`` and ``errorProbability`` that the fit used,
-        weighed over the groups by the calls that estimate them, beside
-        every source's ``cellsWithClone`` and
-        ``largestCloneShare``; the rule that does not run records None. The
-        likelihood also saves each site's label and each group's dropout and
-        error probability at each site.
+        weighed over the groups by the calls that estimate them; and count
+        the ``cappedSearches``, the groups whose search stopped splitting at
+        500 clones, the most that a fit holds, and the
+        ``cellsInCappedSearches`` that those searches fitted, beside every
+        source's ``cellsWithClone`` and ``largestCloneShare``; the rule that
+        does not run records None. Clones that a capped search's score would
+        split further may hold several of the cells' clones, so a
+        ``DiagnosticWarning`` says so each time the clones are computed or
+        reused. The likelihood also saves each site's label and each group's
+        dropout and error probability at each site.
 
         Args:
             genotypes: A ``variant_genotypes`` artifact from
@@ -3575,6 +3595,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             site_arrays=SITE_ARRAYS if likelihood else (),
         )
         if planned.reused:
+            # Saved clones warn as they did when they were called.
+            warn_diagnostics(
+                arguments,
+                inspect_artifact(self.zw, planned.ref).diagnostics,
+                _capped_search_rules(),
+            )
             return planned.ref
         self._require_writable(arguments.operation)
         n_mutant_cells = int(np.count_nonzero(has_mutant))
@@ -3597,6 +3623,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "cellsInSmallClones": called.cells_in_small_clones,
                 "dropoutProbability": called.dropout_probability,
                 "errorProbability": called.error_probability,
+                "cappedSearches": called.capped_searches,
+                "cellsInCappedSearches": called.cells_in_capped_searches,
             }
         else:
             assignment, ambiguous, attributes = self._exact_genotype_clones(
@@ -3606,6 +3634,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "cellsInSmallClones": None,
                 "dropoutProbability": None,
                 "errorProbability": None,
+                "cappedSearches": None,
+                "cellsInCappedSearches": None,
             }
         del members, group_codes
         ledger.hold(
@@ -3629,6 +3659,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             },
         )
         ledger.release(flags_held)
+        # Called clones warn from their saved diagnostics, as reused ones do.
+        warn_diagnostics(
+            arguments,
+            inspect_artifact(self.zw, planned.ref).diagnostics,
+            _capped_search_rules(),
+        )
         log_clones(assignment, n_cells)
         return planned.ref
 
@@ -3717,7 +3753,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         groups, unless every cell is fitted in one group, and the packed
         calls are let go once every group is fitted.
         """
-        from ...variants.genotype_clones import likelihood_clones
+        from ...variants.genotype_clones import _likelihood_clones
 
         n_cells = len(members)
         words = calls.mutant.shape[1]
@@ -3748,23 +3784,30 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         # Each group's pooled rates, weighed by the calls that estimate them.
         weighed = np.zeros(4)
         cells_in_small_clones = 0
+        # The searches that stopped splitting at the most clones a fit holds,
+        # and their cells, which the clones warn of from their diagnostics.
+        capped_searches = 0
+        cells_in_capped_searches = 0
         offset = 0
         for index in range(n_groups):
             first, stop = int(bounds[index]), int(bounds[index + 1])
             if first == stop:
                 continue
             group_cells = fitted[first:stop]
-            result = likelihood_clones(
-                calls.mutant[first:stop],
-                calls.wild[first:stop],
-                n_sites,
-                dropout_probability=rules.dropout_probability,
-                error_probability=rules.error_probability,
-                min_size=rules.min_size,
-                min_posterior=rules.min_posterior,
-                ledger=ledger,
-                nthreads=self.nthreads,
-            )
+            with numba_threads(self.nthreads):
+                result = _likelihood_clones(
+                    calls.mutant[first:stop],
+                    calls.wild[first:stop],
+                    n_sites,
+                    dropout_probability=rules.dropout_probability,
+                    error_probability=rules.error_probability,
+                    min_size=rules.min_size,
+                    min_posterior=rules.min_posterior,
+                    ledger=ledger,
+                )
+            if result.capped:
+                capped_searches += 1
+                cells_in_capped_searches += stop - first
             ledger.peak(
                 f"placing the clones of {stop - first} cells", 41 * (stop - first)
             )
@@ -3819,6 +3862,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             dropout=dropout,
             error=error,
             cells_in_small_clones=cells_in_small_clones,
+            capped_searches=capped_searches,
+            cells_in_capped_searches=cells_in_capped_searches,
             dropout_probability=(
                 rules.dropout_probability
                 if rules.dropout_probability is not None
@@ -3945,6 +3990,8 @@ class _LikelihoodCall:
     dropout: np.ndarray
     error: np.ndarray
     cells_in_small_clones: int
+    capped_searches: int
+    cells_in_capped_searches: int
     dropout_probability: float | None
     error_probability: float | None
 
