@@ -175,8 +175,7 @@ reductions whose `assayUsed` you import. An active SCT assay holds corrected cou
 the default (`sct_default_assay` notice). `reduction_roles={"phate": "umap"}` overrides the
 UMAP/t-SNE-versus-coordinates role that the DimReduc key and name decide.
 
-`CSVReader`/`CSVtoZarr` (small dense CSV, ID column read as text) and `SparseToZarr` (any SciPy
-sparse or dense matrix plus unique cell and feature IDs) also exist.
+`CSVReader`/`CSVtoZarr` (small dense CSV, ID column read as text) and `SparseToZarr` (any SciPy sparse or dense matrix plus unique cell and feature IDs) also exist. `SparseToZarr` also takes a mapping of assay names to matrices of the same cells, with `feature_ids` (and optionally `feature_names`, `assay_type`, `values`) mapped by assay, to build one multi-assay store from tables held in memory; feature IDs need be unique only within their assay.
 
 A deposit that holds only normalized values, such as LARRY's matrices on GEO or a CELLxGENE `X` without `raw/X`, imports with `values=` on `H5adToZarr`, `CrToZarr`, `CSVtoZarr`, `SparseToZarr` or `SeuratToZarr`: `"normalized"`, `"log_normalized"` (`log1p`, scanpy and Seurat) or `"log2_normalized"` (`log2(x + 1)`, scater). The default detects them from the first 100 cells, undoes a log, and records `ds.RNA.normalizedValues`; values it cannot place raise and name these options, with `values="counts"` for fractional counts such as alevin's. Negative (scaled) values are refused: import another matrix. CyteArc then normalizes them as counts, and steps that need counts refuse them; a Matrix Market file of normalized values goes through `scipy.io.mmread` and `SparseToZarr`.
 

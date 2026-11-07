@@ -307,7 +307,10 @@ class H5adReader:
             ret_val = 0
         if ret_val == 2:
             if len(self.h5[group].keys()) == 0:
-                logger.warning(f"`{group}` slot in H5ad file is empty.")
+                # AnnData writes an empty obsm whenever a file holds no
+                # embeddings, so an empty group is ordinary; a requested
+                # embedding that it lacks raises where it is read.
+                logger.debug(f"`{group}` slot in H5ad file is empty.")
                 ret_val = 0
             elif (
                 len(
