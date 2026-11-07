@@ -1,7 +1,7 @@
 from collections.abc import Generator
 from contextlib import closing
 from tempfile import TemporaryFile
-from typing import TYPE_CHECKING, Any, BinaryIO, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -43,7 +43,7 @@ from ...mapping.projection import (
     load_projection,
     plan_projection,
 )
-from ...mapping.reference import MappingReference
+from ...mapping.reference import MappingReference, reference_feature_keys
 from ...mapping.symphony import (
     SYMPHONY_ALGORITHM,
     accumulate_sufficient_statistics,
@@ -259,10 +259,19 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         query_assay: str | None = None,
         save_k: int = 3,
         missing_feature_policy: str = "reference_mean",
+        feature_key: Literal["ids", "names"] = "ids",
         query_batches: pd.DataFrame | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Map selected query cells into an immutable prepared reference.
+
+        Query features match the reference features by exact feature ID.
+        ``feature_key="names"`` matches them by exact feature name instead,
+        for a query that names the same genes with another ID scheme, such as
+        gene symbols against Ensembl IDs. Query features that share a name
+        then add their counts, as ``DataStoreMerge`` sums them. The projection
+        and its overlap selection record ``feature_key`` only when it is
+        ``"names"``, so a match by name is a separate artifact.
 
         A query cell whose raw counts are zero in every reference feature that
         the query measured is recorded as uninformative. It keeps a projection
@@ -272,6 +281,8 @@ class _MappingOperationsMixin(_MappingOperationsBase):
 
         Raises:
             UnmeasuredCellsError: If the query assay did not measure a selected cell.
+            ValueError: If ``feature_key`` is ``"names"`` and reference
+                features share a name, before anything is written.
             PermissionError: If the projection or its overlap selection must be
                 written and the query store is not opened with
                 ``zarr_mode='r+'``, before any query cell is projected.
@@ -297,6 +308,10 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             raise ValueError(
                 "missing_feature_policy must be 'reference_mean', 'zero', or 'error'"
             )
+        if not isinstance(feature_key, str):
+            raise TypeError("feature_key must be a string")
+        if feature_key not in {"ids", "names"}:
+            raise ValueError("feature_key must be 'ids' or 'names'")
         if query_batches is not None and not isinstance(query_batches, pd.DataFrame):
             raise TypeError("query_batches must be a pandas DataFrame or None")
         if _same_physical_store(self, reference):
@@ -385,11 +400,12 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         stream = AlignedFeatureStream(
             query_assay=assay,
             query_cell_indices=query_cell_indices,
-            reference_feature_ids=reference.feature_ids,
+            reference_feature_keys=reference_feature_keys(reference, feature_key),
             reference_normalized_means=reference.model.feature_means,
             reference_normalization_parameters=reference.normalization_parameters,
             missing_feature_policy=missing_feature_policy,
             resources=self.resources,
+            feature_key=feature_key,
             reserved_resident_bytes=reserved_resident,
             reserved_per_row_bytes=reserved_per_row,
         )
@@ -407,7 +423,9 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             n_features=assay.feats.N,
             ordered_feature_ids_fingerprint=feature_ids_fingerprint,
             operation="select_mapping_overlap",
-            parameters={},
+            # Recorded only for a match by name, so overlaps of features
+            # matched by ID keep their identities.
+            parameters={} if feature_key == "ids" else {"feature_key": feature_key},
             inputs={
                 "mapping_reference": reference.external_ref,
                 "all_features": all_features,
@@ -439,6 +457,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             mapping_reference=reference.external_ref,
             reference=reference,
             reference_cell_count=reference.selected_cell_count,
+            feature_key=feature_key,
             invalidate_cache=invalidate_cache,
         )
         if projection_plan.reused:

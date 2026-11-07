@@ -253,6 +253,7 @@ _FEATURE_SELECTION_CONTRACTS = {
         frozenset({"top_n"}),
         ("values",),
     ),
+    # An overlap of features matched by name also records feature_key.
     "select_mapping_overlap": (
         frozenset({"mapping_reference", "all_features"}),
         frozenset(),
@@ -607,6 +608,12 @@ def _validate_feature_selection_provenance(
         input_names, parameter_names, payload_names = _hvg_contract(
             parameters, inputs, context
         )
+    # A mapping overlap records its feature key only when it matched by name.
+    if (
+        status.operation == "select_mapping_overlap"
+        and parameters.get("feature_key") == "names"
+    ):
+        parameter_names = frozenset({"feature_key"})
     received_inputs = set(inputs)
     if received_inputs != input_names or set(parameters) != parameter_names:
         raise ArtifactResolutionError(

@@ -79,13 +79,19 @@ def mapping_counts(seed: int = 17) -> np.ndarray:
 
 
 def build_mapping_store(
-    path: Path, *, with_references: bool, with_symphony: bool = True
+    path: Path,
+    *,
+    with_references: bool,
+    with_symphony: bool = True,
+    feature_ids: list[str] | None = None,
+    feature_names: list[str] | None = None,
 ) -> MappingStoreSource:
     """Write and analyze the small reference store described above.
 
     Without ``with_symphony`` the store has no Harmony correction, Symphony
     neighbors or Symphony reference, for modules that use the plain
-    reference only.
+    reference only. ``feature_ids`` and ``feature_names`` set the RNA
+    features' IDs and names.
     """
     rng = np.random.default_rng(23)
     write_count_store(
@@ -95,6 +101,8 @@ def build_mapping_store(
             "ADT": rng.integers(1, 20, size=(MAPPING_N_CELLS, 3)),
         },
         "uint32",
+        feature_ids=None if feature_ids is None else {"RNA": feature_ids},
+        feature_names=None if feature_names is None else {"RNA": feature_names},
     )
     store = DataStore(str(path), default_assay="RNA", min_features_per_cell=0)
     keep = np.ones(MAPPING_N_CELLS, dtype=bool)

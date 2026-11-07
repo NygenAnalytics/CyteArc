@@ -69,6 +69,7 @@ def write_count_store(
     *,
     feature_ids: Mapping[str, Sequence[str]] | None = None,
     cell_ids: Sequence[str] | None = None,
+    feature_names: Mapping[str, Sequence[str]] | None = None,
 ) -> None:
     """Write a store whose count matrices have the storage dtype ``dtype``.
 
@@ -76,8 +77,10 @@ def write_count_store(
     cells. Each assay takes the preset type of its name, such as RNA, ADT,
     or ATAC, and RNA assays also get ``countsT``. Features are named
     ``f"{assay}{index}"``, or by ``feature_ids`` for the assays it names, and
-    cells ``f"cell{index}"`` unless ``cell_ids`` names them. The values must
-    be exactly representable in ``dtype``, so the stored counts equal them.
+    cells ``f"cell{index}"`` unless ``cell_ids`` names them. A feature's name
+    is its ID unless ``feature_names`` names the features of its assay. The
+    values must be exactly representable in ``dtype``, so the stored counts
+    equal them.
     """
     from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
     from cytearc.storage.stores import load_zarr
@@ -106,13 +109,14 @@ def write_count_store(
             if named is None
             else list(named)
         )
+        names = (feature_names or {}).get(assay)
         array = create_zarr_count_assay(
             root,
             assay,
             None,
             len(cells),
             feat_ids=ids,
-            feat_names=ids,
+            feat_names=ids if names is None else np.array(list(names)),
             dtype=storage_dtype.name,
         )
         array[:] = stored

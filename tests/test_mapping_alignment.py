@@ -96,6 +96,7 @@ def _query_assay(
     chunks: tuple[int, int] = (3, 2),
     size_factor: int = 997,
     read_only: bool = False,
+    feature_names: list[str] | None = None,
 ) -> tuple[RNAassay, RecordingStore, zarr.Array]:
     store = RecordingStore()
     writable_root = zarr.open_group(store=store, mode="w")
@@ -121,7 +122,14 @@ def _query_assay(
         nthreads=1,
         resources=ResourceBudget(1_000_000, 1),
     )
-    assay.feats = _MemoryMetadata({"ids": np.asarray(feature_ids)})
+    assay.feats = _MemoryMetadata(
+        {
+            "ids": np.asarray(feature_ids),
+            "names": np.asarray(
+                feature_ids if feature_names is None else feature_names
+            ),
+        }
+    )
     assay.cells = _MemoryMetadata({"RNA_nCounts": values.sum(axis=1, dtype=np.float64)})
     assay.sf = size_factor
     assay.scalar = np.array([123.0])
@@ -140,6 +148,7 @@ def _stream(
     resources: ResourceBudget | None = None,
     reserved_resident_bytes: int = 0,
     reserved_per_row_bytes: int = 0,
+    feature_key: str = "ids",
 ) -> AlignedFeatureStream:
     if cells is None:
         cells = np.arange(assay.rawData.shape[0], dtype=np.int64)
@@ -150,11 +159,12 @@ def _stream(
     return AlignedFeatureStream(
         query_assay=assay,
         query_cell_indices=cells,
-        reference_feature_ids=reference_ids,
+        reference_feature_keys=reference_ids,
         reference_normalized_means=means,
         reference_normalization_parameters=normalization or _normalization(),
         missing_feature_policy=policy,
         resources=resources or ResourceBudget(1_000_000, 2),
+        feature_key=feature_key,
         reserved_resident_bytes=reserved_resident_bytes,
         reserved_per_row_bytes=reserved_per_row_bytes,
     )
@@ -482,6 +492,123 @@ def test_aligned_feature_stream_rejects_duplicate_and_disjoint_ids() -> None:
             reference_ids=np.array(["x", "y"]),
             means=np.zeros(2),
         )
+
+
+@pytest.mark.parametrize("renormalize_subset", [False, True])
+def test_aligned_feature_stream_adds_the_counts_of_query_features_sharing_a_name(
+    renormalize_subset: bool,
+) -> None:
+    counts = np.array(
+        [
+            [9, 2, 4, 1],
+            [3, 0, 7, 0],
+            [8, 0, 0, 5],
+            [6, 0, 0, 0],
+        ],
+        dtype=np.uint16,
+    )
+    # Two query features carry the name A, and their IDs follow a scheme of
+    # their own.
+    assay, _, _ = _query_assay(
+        counts,
+        ["q0", "q1", "q2", "q3"],
+        feature_names=["extra", "A", "B", "A"],
+    )
+    normalization = _normalization(
+        size_factor=10, renormalize_subset=renormalize_subset
+    )
+    with warnings.catch_warnings():
+        # A partial reference coverage warns with renormalize_subset.
+        warnings.simplefilter("ignore", UserWarning)
+        stream = _stream(
+            assay,
+            reference_ids=np.array(["B", "missing", "A"]),
+            normalization=normalization,
+            feature_key="names",
+        )
+    blocks = list(stream.iter_blocks())
+
+    a_counts = counts[:, 1].astype(np.float64) + counts[:, 3]
+    b_counts = counts[:, 2].astype(np.float64)
+    totals = (
+        a_counts + b_counts
+        if renormalize_subset
+        else counts.sum(axis=1, dtype=np.float64)
+    )
+    totals[totals == 0] = 1
+    expected = np.column_stack(
+        (10 * b_counts / totals, np.full(4, 7.5), 10 * a_counts / totals)
+    )
+    np.testing.assert_allclose(
+        np.concatenate([block.values for block in blocks]), expected
+    )
+    np.testing.assert_array_equal(
+        np.concatenate([block.observed for block in blocks]),
+        [True, True, True, False],
+    )
+    np.testing.assert_array_equal(stream.reference_index_map, [0, 2])
+    # B's query feature, then both of A's, in query order.
+    np.testing.assert_array_equal(stream.query_feature_indices, [2, 1, 3])
+    assert stream.feature_coverage == pytest.approx(2 / 3)
+
+    # A query that holds A's counts summed beforehand aligns to the same values.
+    summed, _, _ = _query_assay(
+        np.column_stack((counts[:, 0], a_counts, b_counts)).astype(np.uint16),
+        ["q0", "q1", "q2"],
+        feature_names=["extra", "A", "B"],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        summed_stream = _stream(
+            summed,
+            reference_ids=np.array(["B", "missing", "A"]),
+            normalization=normalization,
+            feature_key="names",
+        )
+    assert summed_stream._column_starts is None
+    np.testing.assert_array_equal(_collect(summed_stream), _collect(stream))
+
+
+def test_aligned_feature_stream_matches_names_when_ids_differ() -> None:
+    counts = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.uint32)
+    assay, _, _ = _query_assay(
+        counts,
+        ["ENSG1", "ENSG2", "ENSG3"],
+        feature_names=["C", "A", "B"],
+    )
+
+    with pytest.raises(ValueError, match="pass feature_key='names'"):
+        _stream(assay, reference_ids=np.array(["A", "B"]), means=np.zeros(2))
+    by_name = _stream(
+        assay,
+        reference_ids=np.array(["A", "B"]),
+        means=np.zeros(2),
+        feature_key="names",
+    )
+    by_id = _stream(
+        assay,
+        reference_ids=np.array(["ENSG2", "ENSG3"]),
+        means=np.zeros(2),
+    )
+
+    np.testing.assert_array_equal(_collect(by_name), _collect(by_id))
+    np.testing.assert_array_equal(by_name.query_feature_indices, [1, 2])
+    with pytest.raises(ValueError, match="overlap the query feature names$"):
+        _stream(
+            assay,
+            reference_ids=np.array(["X", "Y"]),
+            means=np.zeros(2),
+            feature_key="names",
+        )
+    with pytest.raises(ValueError, match="Reference feature names must be unique"):
+        _stream(
+            assay,
+            reference_ids=np.array(["A", "A"]),
+            means=np.zeros(2),
+            feature_key="names",
+        )
+    with pytest.raises(ValueError, match="feature_key must be 'ids' or 'names'"):
+        _stream(assay, feature_key="symbols")
 
 
 @pytest.mark.parametrize(
