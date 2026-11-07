@@ -380,3 +380,74 @@ def test_a_batch_of_reads_gives_a_row_for_each_cell(tmp_path, read_dtype) -> Non
             assert matrix.shape == (rows, reader.nFeatures)
     finally:
         reader.close()
+
+
+def _zero_reads(path: Path, share: float) -> np.ndarray:
+    """Set a share of each assay's reads to zero; return all reads, cells by
+    amplicons then antibodies."""
+    rng = np.random.default_rng(5)
+    reads = []
+
+    def edit(handle) -> None:
+        for name in ("dna_read_counts", "protein_read_counts"):
+            layers = handle[f"assays/{name}/layers"]
+            values = layers["read_counts"][:]
+            values[rng.random(values.shape) < share] = 0
+            _replace(layers, "read_counts", values)
+            reads.append(values)
+
+    _edit(path, edit)
+    return np.concatenate(reads, axis=1)
+
+
+@pytest.mark.parametrize("scanned", [True, False], ids=["scanned", "unscanned"])
+def test_a_window_of_cells_plans_its_nonzero_reads(tmp_path, scanned) -> None:
+    from cytearc.readers import TapestriReader
+
+    file = write_large_tapestri(
+        tmp_path / "zeros.h5", n_cells=300, n_variants=2, n_amplicons=40
+    )
+    reads = _zero_reads(file, 0.6)
+    reader = TapestriReader(str(file))
+    try:
+        if scanned:
+            reader.count_value_ranges(1 << 20)
+        # Before the scan the reader counts the cells itself.
+        for rows in (1, 7, 300, 3_000):
+            width = min(rows, 300)
+            expected = max(
+                int(np.count_nonzero(reads[start : start + width]))
+                for start in range(300 - width + 1)
+            )
+            assert reader.max_window_nnz(rows) == expected
+            assert expected < width * reader.nFeatures
+        with pytest.raises(ValueError, match="window_rows must be positive"):
+            reader.max_window_nnz(0)
+    finally:
+        reader.close()
+
+
+def test_reads_that_are_mostly_zero_write_the_default_layout_in_less_memory(
+    tmp_path,
+) -> None:
+    from cytearc.storage.count_matrix import (
+        DEFAULT_COUNT_MATRIX_POLICY,
+        load_count_matrix_plan,
+        policy_from_payload,
+    )
+
+    file = write_large_tapestri(
+        tmp_path / "zeros.h5", n_cells=2_000, n_variants=2, n_amplicons=300
+    )
+    reads = _zero_reads(file, 0.6)
+    # Planned as if every read were nonzero, the default layout needed about
+    # 168 MiB; these reads need about 80.
+    _write_store(file, tmp_path / "store.zarr", mem_budget=120 * 1024**2)
+    root = zarr.open_group(str(tmp_path / "store.zarr"), mode="r")
+    for name, columns in (("CNV", slice(0, 300)), ("ADT", slice(300, None))):
+        counts = root[f"{name}/counts"]
+        assert (
+            policy_from_payload(load_count_matrix_plan(counts))
+            == DEFAULT_COUNT_MATRIX_POLICY
+        )
+        np.testing.assert_array_equal(counts[:], reads[:, columns])

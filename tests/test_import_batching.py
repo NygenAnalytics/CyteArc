@@ -478,14 +478,17 @@ def _write_cr_h5(path: Path, values: np.ndarray) -> None:
 
 
 def _write_h5ad(path: Path, values: np.ndarray, encoding: str) -> None:
-    matrix = csr_matrix(values) if encoding == "csr" else csc_matrix(values)
     with h5py.File(path, mode="w") as handle:
-        group = handle.create_group("X")
-        group.attrs["encoding-type"] = f"{encoding}_matrix"
-        group.attrs["shape"] = values.shape
-        group.create_dataset("data", data=matrix.data)
-        group.create_dataset("indices", data=matrix.indices)
-        group.create_dataset("indptr", data=matrix.indptr)
+        if encoding == "dense":
+            handle.create_dataset("X", data=values)
+        else:
+            matrix = csr_matrix(values) if encoding == "csr" else csc_matrix(values)
+            group = handle.create_group("X")
+            group.attrs["encoding-type"] = f"{encoding}_matrix"
+            group.attrs["shape"] = values.shape
+            group.create_dataset("data", data=matrix.data)
+            group.create_dataset("indices", data=matrix.indices)
+            group.create_dataset("indptr", data=matrix.indptr)
         obs = handle.create_group("obs")
         obs.create_dataset(
             "_index",
@@ -604,7 +607,7 @@ def test_cellranger_h5_automatic_matches_explicit_and_caches_planning(
         np.testing.assert_array_equal(counts["ADT"], values[:, 1::2])
 
 
-@pytest.mark.parametrize("encoding", ["csr", "csc"])
+@pytest.mark.parametrize("encoding", ["csr", "csc", "dense"])
 def test_h5ad_automatic_matches_explicit_for_split_assays(
     tmp_path: Path,
     encoding: str,
@@ -677,6 +680,79 @@ def test_h5ad_automatic_matches_explicit_for_split_assays(
         counts = _assay_counts(store)
         np.testing.assert_array_equal(counts["RNA"], values[:, ::2])
         np.testing.assert_array_equal(counts["ADT"], values[:, 1::2])
+
+
+def _largest_window_nonzeros(values: np.ndarray, rows: int) -> int:
+    """The most nonzero values of any ``rows`` consecutive rows, by NumPy."""
+    rows = min(rows, values.shape[0])
+    return max(
+        int(np.count_nonzero(values[start : start + rows]))
+        for start in range(values.shape[0] - rows + 1)
+    )
+
+
+def _tenth_nonzero(n_cells: int = 40, n_features: int = 12) -> np.ndarray:
+    rng = np.random.default_rng(3)
+    values = np.where(
+        rng.random((n_cells, n_features)) < 0.1,
+        rng.integers(1, 9, (n_cells, n_features)),
+        0,
+    ).astype(np.float32)
+    # Signed zeros are zero, as the sparse batches drop them.
+    values[values == 0] = np.where(
+        rng.random(int((values == 0).sum())) < 0.5, -0.0, 0.0
+    )
+    return values
+
+
+@pytest.mark.parametrize("scanned", [True, False], ids=["scanned", "unscanned"])
+def test_dense_h5ad_plans_each_window_from_its_nonzero_values(
+    tmp_path: Path, scanned: bool
+) -> None:
+    values = _tenth_nonzero()
+    path = tmp_path / "dense.h5ad"
+    _write_h5ad(path, values, "dense")
+    reader = H5adReader(str(path), feature_name_key="feature_name")
+    try:
+        if scanned:
+            reader.count_value_ranges(1 << 20)
+        # Before the scan the reader counts the rows itself.
+        for rows in (1, 7, values.shape[0], 10 * values.shape[0]):
+            expected = _largest_window_nonzeros(values, rows)
+            assert reader.max_batch_nnz(rows) == expected
+            assert expected < min(rows, values.shape[0]) * values.shape[1]
+            # No batch that the import reads holds more than its plan.
+            assert max(batch.nnz for batch in reader.consume(rows)) <= expected
+        # The import holds the cumulative counts, one 64-bit integer per row
+        # and one more.
+        reader._prepare_sparse_import()
+        assert reader._sparse_import_resident_bytes() == 8 * (values.shape[0] + 1)
+        with pytest.raises(ValueError, match="batch_size must be positive"):
+            reader.max_batch_nnz(0)
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize(
+    ("values", "per_row"),
+    [
+        (np.arange(1, 61, dtype=np.uint16).reshape(10, 6), 6),
+        (np.zeros((10, 6), dtype=np.float32), 0),
+    ],
+    ids=["no-zeros", "empty-rows"],
+)
+def test_dense_h5ad_plans_every_value_only_when_none_is_zero(
+    tmp_path: Path, values: np.ndarray, per_row: int
+) -> None:
+    path = tmp_path / "dense.h5ad"
+    _write_h5ad(path, values, "dense")
+    reader = H5adReader(str(path), feature_name_key="feature_name")
+    try:
+        reader.count_value_ranges(1 << 20)
+        for rows in (1, 7, 10, 11):
+            assert reader.max_batch_nnz(rows) == min(rows, 10) * per_row
+    finally:
+        reader.close()
 
 
 def test_sparse_automatic_matches_explicit() -> None:
