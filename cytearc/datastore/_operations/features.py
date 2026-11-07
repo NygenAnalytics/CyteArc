@@ -164,6 +164,7 @@ from .statistical_store import (
 )
 
 if TYPE_CHECKING:
+    from ...features.aggregation import BulkProfiles
     from ..mapping_datastore import MappingDatastore as _FeatureOperationsBase
 else:
     _FeatureOperationsBase = object
@@ -2965,21 +2966,15 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         cell_selection: ArtifactRef | None = None,
         secondary_groups: ArtifactRef | str | None = None,
         aggr_type: Literal["mean", "sum"] = "mean",
-        return_fraction: bool = False,
+        count_detected: bool = False,
         feature_label: Literal["index", "id", "name"] = "index",
         remove_empty_features: bool = True,
         remove_empty_columns: bool = True,
-        return_n_cells: bool = False,
         pseudo_reps: int = 1,
         null_vals: list[Any] | None = None,
         secondary_null_vals: list[Any] | None = None,
         random_seed: int = 4466,
-    ) -> (
-        pd.DataFrame
-        | tuple[pd.DataFrame, pd.DataFrame]
-        | tuple[pd.DataFrame, pd.Series]
-        | tuple[pd.DataFrame, pd.DataFrame, pd.Series]
-    ):
+    ) -> "BulkProfiles":
         """Merge data from cells to create a bulk profile.
 
         With ``aggr_type='mean'``, cells are normalized with the assay's
@@ -2992,12 +2987,14 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         cells whose value is in ``null_vals``. Missing labels are ``NaN``,
         ``None``, blank text, and values flagged by a linked missing mask.
 
-        Each bulk column is one group, one group and sub-group combination
-        (``f"{group}_{subgroup}"``), or one pseudo-replicate of either
-        (``"_Rep1"``, ``"_Rep2"``, ...). A column without cells, such as a
-        combination that no cell has or a pseudo-replicate of a group with
-        fewer cells than ``pseudo_reps``, is left out, so that no empty
-        column passes for a measured profile of zeros. With
+        Each bulk column is one group, one group and sub-group combination,
+        or one pseudo-replicate of either, and is labelled by them: by its
+        group label alone, or by a MultiIndex of the levels ``group``,
+        ``subgroup``, and ``replicate`` (numbered from 1) that the call uses,
+        so labels that hold ``_`` keep their columns apart. A column without
+        cells, such as a combination that no cell has or a pseudo-replicate
+        of a group with fewer cells than ``pseudo_reps``, is left out, so
+        that no empty column passes for a measured profile of zeros. With
         ``remove_empty_columns=False`` such columns are kept and hold NaN.
 
         Args:
@@ -3013,7 +3010,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             secondary_groups: Optional clustering artifact or user-owned
                 metadata column used to sub-group cells.
             aggr_type: Type of aggregation to be used. Can be either 'mean' or 'sum'. (Default value: 'mean')
-            return_fraction: Return the fraction of cells expressing a gene in each group. (Default value: False)
+            count_detected: Also count, for each feature, the cells of each
+                bulk column whose raw count is above zero. (Default value:
+                False)
             feature_label: The feature metadata that labels the rows: the
                 feature's position (``'index'``, the default), its ``'id'``,
                 or its ``'name'``.
@@ -3024,38 +3023,33 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             remove_empty_features: Remove features that are not expressed in any cell. (Default value: True)
             remove_empty_columns: Leave out bulk columns without cells
                 (default). With False they are kept and hold NaN.
-            return_n_cells: Also return the number of cells of each bulk
-                column. (Default value: False)
             null_vals: Primary group values to skip.
             secondary_null_vals: Secondary group values to skip.
                                  These values will be skipped.
             random_seed: Seed used when assigning cells to pseudo-replicates.
 
         Returns:
-            A features-by-columns dataframe of the bulk profiles. With
-            ``return_fraction`` or ``return_n_cells``, a tuple that starts
-            with it and follows with, in this order, a dataframe of the
-            fraction of each column's cells that express each feature, and
-            an int64 Series named ``n_cells`` of each column's number of
-            cells, indexed by the column names.
+            The bulk profiles as
+            :class:`~cytearc.features.aggregation.BulkProfiles`: the
+            features-by-columns ``profiles``, the ``columns`` table of each
+            bulk column's ``n_cells``, and, with ``count_detected``, the int64
+            ``detected`` counts, from which ``detected_fraction`` derives the
+            share of each column's cells.
 
         Raises:
             TypeError: If ``pseudo_reps`` is not an integer.
             ValueError: If ``aggr_type``, ``feature_label``, or
                 ``pseudo_reps`` is not one of the values above, which is
-                checked before anything is read, or two groups produce the
-                same column name, for example groups ``'a_b'`` with
-                sub-group ``'c'`` and ``'a'`` with sub-group ``'b_c'``.
+                checked before anything is read.
             UnmeasuredCellsError: If the assay did not measure a cell that is read.
         """
-        return_fraction = bool_argument(return_fraction, "return_fraction")
+        count_detected = bool_argument(count_detected, "count_detected")
         remove_empty_features = bool_argument(
             remove_empty_features, "remove_empty_features"
         )
         remove_empty_columns = bool_argument(
             remove_empty_columns, "remove_empty_columns"
         )
-        return_n_cells = bool_argument(return_n_cells, "return_n_cells")
 
         def resolve_groups(
             source: ArtifactRef | str,
@@ -3105,7 +3099,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         from ...features.aggregation import (
             aggregate_bulk_profiles,
             bulk_column_rows,
-            bulk_frames,
+            bulk_profiles,
             bulk_read_cells,
             validate_bulk_options,
         )
@@ -3152,7 +3146,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 "summed normalized values are not counts for count-model tests",
                 "Use aggr_type='mean'",
             )
-        column_rows = bulk_column_rows(
+        columns, column_rows = bulk_column_rows(
             group_values,
             groups_set,
             labelled,
@@ -3163,8 +3157,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             pseudo_reps=pseudo_reps,
             random_seed=random_seed,
         )
-        n_cells = {name: len(rows) for name, rows in column_rows.items()}
-        filled = {name: rows for name, rows in column_rows.items() if len(rows)}
+        n_cells = np.array([len(rows) for rows in column_rows], dtype=np.int64)
+        filled = [rows for rows in column_rows if len(rows)]
         # The cells whose counts aggregation reads.
         self._require_measured_cells(
             assay.name,
@@ -3172,26 +3166,26 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             operation="make_bulk",
             remedy="cell_selection",
         )
-        values, fractions = aggregate_bulk_profiles(
+        profiles, detected = aggregate_bulk_profiles(
             assay,
             filled,
             active_idx,
             aggr_type=aggr_type,
-            return_fraction=return_fraction,
+            count_detected=count_detected,
             cells=self.cells,
             resources=self.resources,
             nthreads=self.nthreads,
+            column_names=columns[n_cells > 0].tolist(),
         )
-        return bulk_frames(
-            values,
-            fractions,
+        return bulk_profiles(
+            profiles,
+            detected,
             assay.feats,
+            columns=columns,
             n_cells=n_cells,
             remove_empty_features=remove_empty_features,
             remove_empty_columns=remove_empty_columns,
             feature_label=feature_label,
-            return_fraction=return_fraction,
-            return_n_cells=return_n_cells,
         )
 
     def _statistical_design_columns(

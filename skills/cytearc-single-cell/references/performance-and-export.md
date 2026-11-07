@@ -251,27 +251,27 @@ ds.cells.to_pandas_dataframe(["ids", "cell_type"], key="I").to_csv("cells.csv", 
 Raw counts per population x sample plus a design table, for DESeq2, edgeR or another count model.
 
 ```python
-bulk, n_cells = ds.compare.compute_bulk(
+bulk = ds.compare.compute_bulk(
     "cell_type", secondary_groups="sample_id",        # one column per population x sample
     cell_selection=run["analysis_cell_selection"],
     aggr_type="sum", feature_label="id",              # raw counts; Ensembl ids are unique
-    return_n_cells=True,                              # cells per column; pairs without cells drop
-)
-cells = ds.cells.to_pandas_dataframe(["cell_type", "sample_id", "donor_id", "condition"])
+)                                                     # pairs without cells drop
+cells = ds.cells.to_pandas_dataframe(["sample_id", "donor_id", "condition"])
 cells = cells[np.asarray(run.cells.fetch_all("I"), dtype=bool)]
-assert cells.groupby("sample_id")[["donor_id", "condition"]].nunique().eq(1).all().all()
-cells["column"] = cells["cell_type"].astype(str) + "_" + cells["sample_id"].astype(str)
-design = cells.groupby("column").first().reindex(bulk.columns).assign(n_cells=n_cells)
-keep = design["n_cells"] >= 10                        # choose a floor and report what you drop
-assert np.allclose(bulk.to_numpy(), np.round(bulk.to_numpy()))
-bulk.loc[:, keep].round().astype("int64").to_csv("pseudobulk_counts.csv")
-design.loc[keep].to_csv("pseudobulk_design.csv")
-print(design[keep].groupby(["cell_type", "condition"])["donor_id"].nunique().unstack(fill_value=0))
+samples = cells.groupby("sample_id")[["donor_id", "condition"]]
+assert samples.nunique().eq(1).all().all()            # one donor and condition per sample
+design = bulk.columns.join(samples.first(), on="subgroup")  # n_cells, donor_id, condition
+keep = (design["n_cells"] >= 10).to_numpy()           # choose a floor and report what you drop
+counts = bulk.profiles.loc[:, keep]
+assert np.allclose(counts.to_numpy(), np.round(counts.to_numpy()))
+design = design.loc[keep].reset_index()               # group, subgroup, n_cells, donor_id, condition
+design.index = [f"pseudobulk{i}" for i in range(len(design))]  # one text name per count column
+counts.set_axis(design.index, axis=1).round().astype("int64").to_csv("pseudobulk_counts.csv")
+design.to_csv("pseudobulk_design.csv")
+print(design.groupby(["group", "condition"])["donor_id"].nunique().unstack(fill_value=0))
 ```
 
-`compare.compute_bulk` emits one column per group x subgroup pair with cells, named
-`f"{group}_{subgroup}"`; `remove_empty_columns=False` keeps pairs without cells as NaN, never zeros,
-and `return_n_cells=True` appends the cells per column. A name collision raises. Sums are exact: integral counts sum in an integer dtype (uint64 for unsigned
+`compare.compute_bulk` returns a `BulkProfiles` record. `bulk.profiles` holds one column per group x subgroup pair with cells, labelled by a MultiIndex of `group` and `subgroup`, and `bulk.columns` holds each column's `n_cells` under the same labels, so a design joins on the labels themselves and never parses a joined name. `remove_empty_columns=False` keeps pairs without cells as NaN, never zeros, with `n_cells` 0, and `count_detected=True` adds `bulk.detected`, the cells of each column whose count of each feature is above zero, and `bulk.detected_fraction`. Sums are exact: integral counts sum in an integer dtype (uint64 for unsigned
 counts, int64 for signed and bool counts) and floating-point counts in float64. Means average each
 group's rows of `normed`, so a cell without counts adds zeros and still counts toward its group.
 Model one population at a time with donor-level terms; with repeated samples per donor, include the
@@ -319,7 +319,7 @@ contains no artifacts or pipeline runs. Use it to hand off, or before `to_mtx` o
 | `to_mtx(compress=)` | `False` | `True` for Cell Ranger 3 file names |
 | `markers.load` / `markers.export_csv` `min_frac_exp`, `min_auc`, `max_p_adj`, `min_score`, `sort_by` | `0.2`, `0.6`, `0.05`, `None`, `"score"` | widen (`None`) or narrow the exported marker list; `sort_by="auc"` for small groups |
 | `compare.compute_bulk(aggr_type=, feature_label=, pseudo_reps=)` | `"mean"`, `"index"`, `1` | `"sum"` and `"id"` for count models; never `pseudo_reps` above 1 for inference |
-| `compare.compute_bulk(remove_empty_columns=, return_n_cells=)` | `True`, `False` | `return_n_cells=True` to drop or weight small pseudobulk samples |
+| `compare.compute_bulk(remove_empty_columns=, count_detected=)` | `True`, `False` | `count_detected=True` for each column's detecting cells; `bulk.columns["n_cells"]` always holds the cells to drop or weight small pseudobulk samples by |
 | `SubsetZarr(reset_cell_filter=)` | `True` (new `I` all true) | `False` to carry `I` over |
 | `SubsetZarr(overwrite_existing_file=)`, importers' `overwrite=` | `False` (destination must be empty) | `True` to replace an earlier output that no `DataStore` has opened |
 

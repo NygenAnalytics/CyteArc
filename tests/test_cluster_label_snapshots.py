@@ -540,7 +540,7 @@ def test_label_consumers_accept_a_snapshot(store_path, leiden):
 
     bulk = ds.compare.compute_bulk(
         disease, aggr_type="sum", feature_label="id", remove_empty_features=False
-    )
+    ).profiles
     counts = np.asarray(ds.RNA.rawData.compute())
     for group in ("covid", "normal"):
         cells = (CELL_TYPES == "T") & (DISEASE == group)
@@ -608,7 +608,7 @@ def test_snapshot_keeps_labels_that_cannot_name_a_marker_group(store_path):
     labels = ds.snapshot_cluster_labels("subtype", cell_selection=all_cells)
 
     np.testing.assert_array_equal(_labels(ds, labels), subtype)
-    assert set(ds.compare.compute_bulk(labels).columns) == {"B", "NK/T"}
+    assert set(ds.compare.compute_bulk(labels).profiles.columns) == {"B", "NK/T"}
     with pytest.raises(
         ValueError,
         match=r"'NK/T' cannot name a stored marker group.*snapshot_cluster_labels",

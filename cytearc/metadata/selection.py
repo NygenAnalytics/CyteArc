@@ -35,6 +35,7 @@ from ..utils.memory_budget import (
 )
 from .rows import (
     apply_missing_mask,
+    metadata_missing_mask,
     operation_concurrency,
     read_metadata_missing_rows,
     read_metadata_rows,
@@ -76,6 +77,7 @@ __all__ = [
     "plan_cell_selection_read",
     "read_cell_selection",
     "resolve_cell_aligned_artifact",
+    "resolve_cell_column",
     "resolve_grouping",
     "sample_codes",
     "valid_category_mask",
@@ -762,11 +764,12 @@ class ResolvedGrouping:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class CellValues:
-    """The per-cell values of one cell-aligned artifact, aligned to cells.
+    """The per-cell values of one cell-aligned artifact or cell column, aligned to cells.
 
     Attributes:
-        source: The artifact that holds the values.
-        value: The name of the array that was read.
+        source: The artifact, or the ``CellField`` of the cell column, that
+            holds the values.
+        value: The name of the array or column that was read.
         values: One value, or one row of values, per cell.
         cell_ids: The ``ids`` of the cells, aligned to ``values``.
         cell_idx: The row of each cell in the cell table, in ascending order.
@@ -775,7 +778,7 @@ class CellValues:
         categorical: Whether the values are labels that group cells.
     """
 
-    source: ArtifactRef
+    source: ArtifactRef | CellField
     value: str
     values: np.ndarray
     cell_ids: np.ndarray
@@ -1283,6 +1286,84 @@ def _read_positions(
     return read_cell_selection(ledger, root, planned, item=item)
 
 
+def resolve_cell_column(
+    root: Any,
+    cells: Any,
+    column: str,
+    *,
+    cell_selection: ArtifactRef | None,
+    ledger: MemoryLedger | None = None,
+    caller_reads: Sequence[Any] = (),
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+    """Read one cell metadata column and its linked missing mask at the cells of a selection.
+
+    Without ``cell_selection``, every row of the cell table is read. With
+    ``ledger``, the read is charged as :func:`resolve_cell_aligned_artifact`
+    charges an artifact's: the selection's flags and positions, read through
+    :func:`read_cell_selection`, then the column's rows, its mask's, and
+    ``caller_reads``, arrays that the caller reads at the same rows, each
+    beside the rows read before it; the largest step is checked before
+    anything is read, and the values, the mask and the positions stay
+    charged. Without a ledger, the read checks no budget.
+
+    Returns:
+        The values, the missing mask or None, and the rows of the cells in
+        the cell table, ascending, as int64. The caller checks that the
+        values and the mask hold one row per cell.
+
+    Raises:
+        MemoryBudgetError: If ``ledger`` cannot hold what the read holds.
+    """
+    if ledger is None:
+        cell_idx = (
+            np.arange(cells.N, dtype=np.int64)
+            if cell_selection is None
+            else cell_selection_indices(root, cell_selection)
+        )
+        values = np.asarray(read_metadata_rows(cells, column, cell_idx))
+        missing = read_metadata_missing_rows(cells, column, cell_idx)
+    else:
+        values_array = cells._get_array(column)
+        mask_array = metadata_missing_mask(cells, column)
+        row_arrays = [values_array]
+        if mask_array is not None:
+            row_arrays.append(mask_array)
+        row_arrays.extend(caller_reads)
+        item = f"the cell column {column!r}"
+        positions = f"the cell positions of {item}"
+        # The selection is validated once: counting its cells here and
+        # reading their rows below share one validation.
+        with validation_scope():
+            if cell_selection is None:
+                n_cells = int(cells.N)
+                selection_read = _INDEX_BYTES * n_cells
+            else:
+                planned = plan_cell_selection_read(root, cell_selection)
+                n_cells = planned.cells
+                selection_read = _selection_read_bytes(planned)
+            rows_read = 2 * _INDEX_BYTES * n_cells + _reads_in_turn_bytes(
+                row_arrays, n_cells
+            )
+            _refuse_cell_read(
+                ledger, max(selection_read, rows_read), item=item, n_cells=n_cells
+            )
+            if cell_selection is None:
+                cell_idx = np.arange(n_cells, dtype=np.int64)
+                ledger.hold(positions, cell_idx.nbytes)
+            else:
+                cell_idx = read_cell_selection(ledger, root, planned, item=positions)
+        values = read_rows(ledger, values_array, cell_idx, item=item)
+        missing = (
+            None
+            if mask_array is None
+            else read_rows(
+                ledger, mask_array, cell_idx, item=f"the missing mask of {item}"
+            )
+        )
+    missing_mask = None if missing is None else np.asarray(missing, dtype=bool)
+    return values, missing_mask, cell_idx
+
+
 def resolve_grouping(
     root: Any,
     cells: Any,
@@ -1293,21 +1374,16 @@ def resolve_grouping(
 ) -> ResolvedGrouping:
     """Resolve categorical labels from an artifact or an explicit metadata field.
 
-    With ``ledger``, an artifact's labels are read within it, as
-    :func:`resolve_cell_aligned_artifact` charges them; a metadata field is
-    read without one.
+    With ``ledger``, the labels are read within it, an artifact's as
+    :func:`resolve_cell_aligned_artifact` charges them and a metadata
+    field's as :func:`resolve_cell_column` charges them.
     """
     if isinstance(grouping, CellField):
         if grouping.kind == "continuous":
             raise ValueError("Grouping CellField must be categorical")
-        cell_idx = (
-            np.arange(cells.N, dtype=np.int64)
-            if cell_selection is None
-            else cell_selection_indices(root, cell_selection)
+        labels, missing_mask, cell_idx = resolve_cell_column(
+            root, cells, grouping.key, cell_selection=cell_selection, ledger=ledger
         )
-        labels = np.asarray(read_metadata_rows(cells, grouping.key, cell_idx))
-        missing = read_metadata_missing_rows(cells, grouping.key, cell_idx)
-        missing_mask = None if missing is None else np.asarray(missing, dtype=bool)
         if labels.shape != (len(cell_idx),):
             raise ValueError("Grouping metadata does not align with selected cells")
         if missing_mask is not None and missing_mask.shape != labels.shape:

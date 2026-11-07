@@ -461,10 +461,11 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             cell_selection: Cells to read, as for ``compare.compute_bulk``.
 
         Returns:
-            A groups-by-features DataFrame of ``log1p`` counts per million.
-            Columns are peak ids (``chrom:start-end``) for an ATAC assay and
-            feature names otherwise; names that several features share are
-            left out.
+            A groups-by-features DataFrame of ``log1p`` counts per million,
+            indexed by the group labels, as the columns of
+            ``compare.compute_bulk`` are. Columns are peak ids
+            (``chrom:start-end``) for an ATAC assay and feature names
+            otherwise; names that several features share are left out.
 
         Raises:
             UnmeasuredCellsError: If the assay did not measure a cell that is read.
@@ -472,7 +473,7 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
         from ...assay import ATACassay
 
         assay = self._get_assay(from_assay)
-        sums = cast(Any, self)._compare_compute_bulk(
+        bulk = cast(Any, self)._compare_compute_bulk(
             groups,
             from_assay=assay.name,
             cell_selection=cell_selection,
@@ -480,6 +481,7 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             feature_label="id" if isinstance(assay, ATACassay) else "name",
             remove_empty_features=False,
         )
+        sums = bulk.profiles
         sums = sums.loc[~sums.index.duplicated(keep=False)].T.astype(np.float64)
         profiles: pd.DataFrame = np.log1p(sums.div(sums.sum(axis=1), axis=0) * 1e6)
         return profiles

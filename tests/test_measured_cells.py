@@ -1541,13 +1541,14 @@ def test_make_bulk_checks_only_the_cells_that_it_reads(partial_rna, measured) ->
         bulk = store.compare.compute_bulk(
             "source", from_assay="RNA", null_vals=["adt"], aggr_type=aggr_type
         )
-        assert list(bulk.columns) == ["full"]
+        assert list(bulk.profiles.columns) == ["full"]
 
     multiome = measured.open()
     sums = multiome.compare.compute_bulk(
         "adt_cells", from_assay="ATAC", null_vals=[True], aggr_type="sum"
     )
-    assert list(sums.columns) == ["False"]
+    # A boolean column labels its bulk column by the boolean itself.
+    assert list(sums.profiles.columns) == [False]
     with pytest.raises(UnmeasuredCellsError) as raised:
         multiome.compare.compute_bulk("adt_cells", from_assay="ATAC", null_vals=[True])
     assert (raised.value.assay, raised.value.unmeasured) == ("ATAC", _N_ADT)

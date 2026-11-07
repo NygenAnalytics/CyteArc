@@ -483,21 +483,25 @@ def test_make_bulk_leaves_out_empty_pseudo_replicates(
         "remove_empty_features": False,
     }
 
-    bulk, n_cells = store.compare.compute_bulk(
-        "solo_group", return_n_cells=True, **options
-    )
+    bulk = store.compare.compute_bulk("solo_group", **options)
     kept = store.compare.compute_bulk(
         "solo_group", remove_empty_columns=False, **options
     )
 
     # One cell fills one of its two pseudo-replicates; the other has no cells
     # and is left out instead of being returned as zeros.
-    assert bulk.columns.tolist() == ["rest_Rep1", "rest_Rep2", "solo_Rep1"]
-    assert n_cells.to_dict() == {"rest_Rep1": 12, "rest_Rep2": 11, "solo_Rep1": 1}
-    assert not bulk["solo_Rep1"].eq(0).all()
-    assert kept.columns.tolist() == [*bulk.columns, "solo_Rep2"]
-    assert kept["solo_Rep2"].isna().all()
-    pd.testing.assert_frame_equal(kept[bulk.columns], bulk)
+    columns = [("rest", 1), ("rest", 2), ("solo", 1)]
+    assert bulk.profiles.columns.tolist() == columns
+    assert bulk.columns["n_cells"].to_dict() == {
+        ("rest", 1): 12,
+        ("rest", 2): 11,
+        ("solo", 1): 1,
+    }
+    assert not bulk.profiles[("solo", 1)].eq(0).all()
+    assert kept.profiles.columns.tolist() == [*columns, ("solo", 2)]
+    assert kept.profiles[("solo", 2)].isna().all()
+    assert kept.columns.loc[("solo", 2), "n_cells"] == 0
+    pd.testing.assert_frame_equal(kept.profiles[columns], bulk.profiles)
 
 
 def _statistical_tests(

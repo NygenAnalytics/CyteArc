@@ -267,6 +267,10 @@ def test_profiles_are_log_cpm_of_each_groups_summed_counts(store_path):
     sums = np.vstack([counts[groups == group].sum(axis=0) for group in range(3)])
     expected = np.log1p(sums / sums.sum(axis=1, keepdims=True) * 1e6)
     assert profiles.columns.tolist() == [f"RNA{index}" for index in range(8)]
+    # Rows are labelled by the groups' integer labels, as compute_bulk labels
+    # its columns.
+    assert profiles.index.tolist() == [0, 1, 2]
+    assert profiles.index.name == "group"
     np.testing.assert_allclose(profiles.to_numpy(), expected)
 
 

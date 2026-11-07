@@ -29,9 +29,11 @@ from ..metadata.rows import (
     read_metadata_rows_chunkwise,
 )
 from ..metadata.selection import (
+    CellField,
     CellValues,
     cell_value_array,
     resolve_cell_aligned_artifact,
+    resolve_cell_column,
 )
 from ..storage.preparation import preparation_claim
 from ..storage.schema import validate_assay_name
@@ -436,34 +438,53 @@ class BaseDataStore:
     @validation_scoped
     def _artifacts_load_values(
         self,
-        ref: ArtifactRef,
+        ref: ArtifactRef | CellField,
         *,
         value: str | None = None,
         cell_selection: ArtifactRef | None = None,
     ) -> CellValues:
-        """Read the per-cell values of a cell-aligned artifact.
+        """Read the per-cell values of a cell-aligned artifact or a cell column.
+
+        A ``CellField`` names a cell metadata column, which is read over the
+        cells of ``cell_selection`` with its linked missing mask, as
+        ``compare.compute_bulk`` and the plots read a grouping column. A
+        column of ``kind="continuous"`` holds measurements, and any other
+        kind holds labels.
 
         Args:
-            ref: A cell-aligned artifact, such as a clustering or an embedding.
-            value: Name of the per-cell array to read, or None for the canonical one.
-            cell_selection: A subset of the artifact's cell selection, or None for all.
+            ref: A cell-aligned artifact, such as a clustering or an
+                embedding, or a ``CellField`` that names a cell column.
+            value: Name of the per-cell array of an artifact to read, or None
+                for the canonical one. A ``CellField`` takes None.
+            cell_selection: A subset of the artifact's cell selection, or
+                None for all of its cells. A ``CellField`` needs one: the
+                cells whose values are read.
 
         Returns:
             The values with their cell ids and missing mask, as ``CellValues``.
 
         Raises:
             TypeError: If an argument has the wrong type.
+            KeyError: If the store holds no cell column that a ``CellField``
+                names.
             ValueError: If ``ref`` is not of a cell-aligned kind, ``value``
                 names no per-cell array of its kind, the store holds no such
                 artifact or it is incomplete, as a call that stopped before it
                 finished leaves it, or ``cell_selection`` is not within its
-                cells.
+                cells; or if ``ref`` is a ``CellField`` and ``value`` is given
+                or ``cell_selection`` is not.
+            ArtifactResolutionError: If ``cell_selection`` is not a cell
+                selection of this store.
             MemoryError: If the read does not fit the datastore memory budget.
         """
-        if not isinstance(ref, ArtifactRef):
-            raise TypeError("ref must be an ArtifactRef")
+        if not isinstance(ref, ArtifactRef | CellField):
+            raise TypeError("ref must be an ArtifactRef or a CellField")
         if cell_selection is not None and not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
+        if isinstance(ref, CellField):
+            return self._load_cell_column(
+                ref, value=value, cell_selection=cell_selection
+            )
         try:
             value_name, categorical = cell_value_array(ref.kind, value)
         except ValueError as error:
@@ -502,6 +523,60 @@ class BaseDataStore:
             cell_selection=resolved.cell_selection,
             missing=resolved.missing_mask,
             categorical=categorical,
+        )
+
+    def _load_cell_column(
+        self,
+        field: CellField,
+        *,
+        value: str | None,
+        cell_selection: ArtifactRef | None,
+    ) -> CellValues:
+        """Read a cell column over a cell selection, for ``artifacts.load_values``."""
+        if value is not None:
+            raise ValueError(
+                "value names a per-cell array of an artifact; a CellField reads "
+                "its own column, so pass value=None"
+            )
+        if cell_selection is None:
+            raise ValueError(
+                f"A CellField needs cell_selection, the cells whose values of "
+                f"{field.key!r} to read, such as a selection that "
+                "snapshot_cell_selection makes"
+            )
+        values, missing, cell_idx = resolve_cell_column(
+            self.zw,
+            self.cells,
+            field.key,
+            cell_selection=cell_selection,
+            ledger=MemoryLedger(
+                self.memoryBytes,
+                f"Loading the values of the cell column {field.key!r}",
+                remedy="read fewer cells with cell_selection",
+                codec_threads=self.nthreads,
+            ),
+            # The cell ids are read at the same rows, so the budget charges
+            # them with the values.
+            caller_reads=(self.cells._get_array("ids"),),
+        )
+        if values.shape[:1] != (len(cell_idx),) or (
+            missing is not None and missing.shape != (len(cell_idx),)
+        ):
+            raise ValueError(
+                f"Cell column {field.key!r} does not hold one value for each "
+                "selected cell"
+            )
+        return CellValues(
+            source=field,
+            value=field.key,
+            values=values,
+            cell_ids=np.asarray(
+                read_metadata_rows_chunkwise(self.cells, "ids", cell_idx)
+            ),
+            cell_idx=cell_idx,
+            cell_selection=cell_selection,
+            missing=missing,
+            categorical=field.kind != "continuous",
         )
 
     @validation_scoped

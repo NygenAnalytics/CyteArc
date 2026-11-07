@@ -18,9 +18,11 @@ from cytearc.metadata import CellValues
 from cytearc.metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from cytearc.metadata.selection import (
     CELL_VALUE_NAMES,
+    CellField,
     CellValueSpec,
     cell_value_spec,
     resolve_cell_aligned_artifact,
+    resolve_grouping,
 )
 from cytearc.storage.arrays import MISSING_MASK_PREFIX
 from cytearc.storage.artifact_writer import artifact_transaction
@@ -28,7 +30,7 @@ from cytearc.storage.artifacts import ArtifactRef, fingerprint_array, new_artifa
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.selections import resolve_metadata_snapshot, snapshot_run_metadata
 from cytearc.trajectory.artifacts import load_cell_artifact_values
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import insert_nullable_cell_column, write_count_store
 
 N_CELLS = 8
 # The cells of the artifacts' own selection, and a subset of them.
@@ -412,6 +414,167 @@ def test_masked_values_of_many_cells_load_for_every_cell_or_a_selection(
         expected = n_cells if not options else n_cells // 2
         assert loaded.values.shape == (expected,)
         assert loaded.cell_ids.shape == (expected,)
+
+
+# A cell column, named by a CellField, is read over a cell selection with its
+# linked missing mask, as compare.compute_bulk and the plots read a grouping.
+
+
+def _stored_mask(store: DataStore, column: str) -> np.ndarray:
+    """The linked missing mask of a cell column, read from the cell table apart."""
+    cell_data = store.zw["cellData"]
+    return np.asarray(cell_data[cell_data[column].attrs["missing_mask"]][:])
+
+
+def test_a_cell_column_reads_over_a_selection_with_its_missing_mask(store) -> None:
+    # Cells 2 and 7 have no donor; their stored placeholders are "d1" and "d2".
+    donors = np.array(["d1", "d2", "d1", "d3", "d2", "d1", "d3", "d2"])
+    insert_nullable_cell_column(
+        store, "donor", donors, np.isin(np.arange(N_CELLS), [2, 7])
+    )
+    subset = store.snapshot_cell_selection("subset")
+
+    loaded = store.artifacts.load_values(CellField("donor"), cell_selection=subset)
+
+    assert isinstance(loaded, CellValues)
+    assert loaded.source == CellField("donor")
+    assert loaded.value == "donor"
+    np.testing.assert_array_equal(
+        loaded.values, np.asarray(store.cells.fetch_all("donor"))[SUBSET]
+    )
+    np.testing.assert_array_equal(loaded.missing, _stored_mask(store, "donor")[SUBSET])
+    np.testing.assert_array_equal(loaded.missing, [False, True, False])
+    np.testing.assert_array_equal(loaded.cell_idx, SUBSET)
+    assert loaded.cell_ids.tolist() == _cell_ids(SUBSET)
+    assert loaded.cell_selection == subset
+    assert loaded.categorical
+    series = loaded.to_pandas()
+    assert series.name == "donor"
+    assert series.isna().tolist() == [False, True, False]
+    assert series.dropna().tolist() == ["d1", "d2"]
+    # A grouping column reads the same labels and mask.
+    grouping = resolve_grouping(
+        store.zw, store.cells, CellField("donor"), cell_selection=subset
+    )
+    np.testing.assert_array_equal(grouping.labels, loaded.values)
+    np.testing.assert_array_equal(grouping.missing_mask, loaded.missing)
+    np.testing.assert_array_equal(grouping.cell_idx, loaded.cell_idx)
+
+
+def test_a_continuous_cell_column_reads_measurements(store) -> None:
+    depth = np.arange(N_CELLS, dtype=np.float64) * 1.5
+    insert_nullable_cell_column(store, "depth", depth, np.arange(N_CELLS) == 4)
+    selected = store.snapshot_cell_selection("selected")
+    field = CellField("depth", kind="continuous")
+
+    loaded = store.artifacts.load_values(field, cell_selection=selected)
+    plain = store.artifacts.load_values(CellField("cluster"), cell_selection=selected)
+
+    assert not loaded.categorical
+    np.testing.assert_array_equal(loaded.values, depth[SELECTED])
+    series = loaded.to_pandas()
+    assert series.dtype == np.float64
+    np.testing.assert_array_equal(series.isna(), (np.arange(N_CELLS) == 4)[SELECTED])
+    # A column without a mask has no missing value.
+    assert plain.missing is None
+    np.testing.assert_array_equal(plain.values, np.array(list("aabbccdd"))[SELECTED])
+    # A grouping refuses the continuous column that load_values reads.
+    with pytest.raises(ValueError, match="Grouping CellField must be categorical"):
+        resolve_grouping(store.zw, store.cells, field, cell_selection=selected)
+
+
+def test_a_cell_column_needs_a_cell_selection_of_this_store(store) -> None:
+    field = CellField("cluster")
+    subset = store.snapshot_cell_selection("subset")
+    unsaved = ArtifactRef(
+        scope="datastore", kind="cell_selection", artifact_id=new_artifact_id()
+    )
+
+    with pytest.raises(ValueError, match="^A CellField needs cell_selection"):
+        store.artifacts.load_values(field)
+    with pytest.raises(ValueError, match="a CellField reads its own column"):
+        store.artifacts.load_values(field, value="values", cell_selection=subset)
+    with pytest.raises(KeyError, match="absent"):
+        store.artifacts.load_values(CellField("absent"), cell_selection=subset)
+    with pytest.raises(ArtifactResolutionError):
+        store.artifacts.load_values(field, cell_selection=unsaved)
+    with pytest.raises(TypeError, match="ref must be an ArtifactRef or a CellField"):
+        store.artifacts.load_values("cluster", cell_selection=subset)
+
+
+def test_a_cell_column_beyond_the_memory_budget_is_refused_before_it_is_read(
+    store, monkeypatch
+) -> None:
+    store.cells.insert("depth", np.arange(N_CELLS, dtype=np.float64))
+    selected = store.snapshot_cell_selection("selected")
+    reads: list[str] = []
+
+    def recorded(name, function):
+        def record(*args, **kwargs):
+            reads.append(name)
+            return function(*args, **kwargs)
+
+        return record
+
+    for module, name in (
+        (selection_module, "cell_selection_indices"),
+        (selection_module, "read_rows"),
+        (base_datastore_module, "read_metadata_rows_chunkwise"),
+    ):
+        monkeypatch.setattr(module, name, recorded(name, getattr(module, name)))
+    # 48 bytes hold the six float64 values but not what reading them is
+    # charged, so no cell row, value or cell id is read.
+    store.memoryBytes = 6 * 8
+
+    with pytest.raises(
+        MemoryError,
+        match=(
+            r"more than the memory budget of 48 bytes\. Raise mem_budget to at "
+            r"least \d+ bytes, or read fewer cells with cell_selection\.$"
+        ),
+    ):
+        store.artifacts.load_values(CellField("depth"), cell_selection=selected)
+    assert reads == []
+
+
+def test_a_grouping_column_is_read_within_a_ledger(store) -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
+
+    clusters = np.array(list("aabbccdd"))
+    ledger = MemoryLedger(None, "Grouping cells")
+
+    every = resolve_grouping(store.zw, store.cells, CellField("cluster"), ledger=ledger)
+
+    # Without a selection, every row of the cell table is read.
+    np.testing.assert_array_equal(every.labels, clusters)
+    np.testing.assert_array_equal(every.cell_idx, np.arange(N_CELLS))
+    assert every.missing_mask is None
+    # The labels and the rows stay charged: 8 one-character labels and 8 rows.
+    assert ledger.held_bytes == clusters.nbytes + 8 * N_CELLS
+    with pytest.raises(MemoryBudgetError, match="the cell column 'cluster'"):
+        resolve_grouping(
+            store.zw,
+            store.cells,
+            CellField("cluster"),
+            ledger=MemoryLedger(16, "Grouping cells"),
+        )
+
+
+def test_a_cell_column_that_does_not_align_with_its_cells_is_refused(
+    store, monkeypatch
+) -> None:
+    def misaligned(*args, **kwargs):
+        return np.array(["a"]), None, np.arange(3, dtype=np.int64)
+
+    monkeypatch.setattr(base_datastore_module, "resolve_cell_column", misaligned)
+
+    with pytest.raises(ValueError) as raised:
+        store.artifacts.load_values(
+            CellField("cluster"), cell_selection=store.snapshot_cell_selection("subset")
+        )
+    assert raised.value.args == (
+        "Cell column 'cluster' does not hold one value for each selected cell",
+    )
 
 
 def test_a_snapshot_without_a_cell_selection_is_refused_as_not_cell_aligned(
