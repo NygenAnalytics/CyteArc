@@ -51,6 +51,7 @@ from ...metadata.artifacts import (
 from ...metadata.selection import (
     FeatureRef,
     cell_selection_indices,
+    cell_value_spec,
     resolve_cell_aligned_artifact,
 )
 from ...storage.validation_scope import validation_scoped
@@ -89,6 +90,7 @@ from ...trajectory.parameters import resolve_aggregation_ann_params
 from ...trajectory.artifacts import (
     AGGREGATION_INPUTS as _AGGREGATION_INPUTS,
     AGGREGATION_PAYLOAD as _AGGREGATION_PAYLOAD,
+    FATE_DIRECTION_INPUTS as _FATE_DIRECTION_INPUTS,
     FATE_INPUTS as _FATE_INPUTS,
     FATE_PARAMETERS as _FATE_PARAMETERS,
     LINEAGE_AGGREGATION_INPUTS as _LINEAGE_AGGREGATION_INPUTS,
@@ -155,6 +157,8 @@ from ...trajectory.errors import SourceSinkLabelsError
 from ...trajectory.fate import (
     _validate_sink_groups,
     compute_fate_probabilities as _compute_fate_probabilities_impl,
+    direction_scores as _direction_scores_impl,
+    fate_map_cells as _fate_map_cells_impl,
     fate_solver_bytes,
 )
 from ...trajectory.lineage_tree import (
@@ -478,11 +482,44 @@ class _ScoredGraph:
 
 
 @dataclass(frozen=True, slots=True)
+class _FateDirection:
+    """What directs a fate map's walk: a pseudotime or a per-cell score.
+
+    ``scores`` holds the pseudotime or direction score of each cell of
+    ``cell_selection``, NaN where it has none, so the scored cells make up
+    whole connected components of the graph that the walk takes: the
+    graph's, or the subgraph of a pseudotime's cells. ``component`` numbers
+    each cell's component of that graph and ``component_sizes`` lists their
+    cell counts, largest first. ``scored_cells`` names the scored cells in
+    refusals.
+    """
+
+    graph: ArtifactRef
+    cell_selection: ArtifactRef
+    scores: np.ndarray
+    component: np.ndarray
+    component_sizes: tuple[int, ...]
+    scored_cells: str
+
+    @classmethod
+    def of_pseudotime(cls, pseudotime: PseudotimeScoreResult) -> Self:
+        """Return the direction of a validated pseudotime, NaN where unscored."""
+        return cls(
+            graph=pseudotime.graph,
+            cell_selection=pseudotime.cell_selection,
+            scores=np.where(pseudotime.valid, pseudotime.values, np.nan),
+            component=pseudotime.component,
+            component_sizes=pseudotime.component_sizes,
+            scored_cells="the cells that the pseudotime scored",
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class _FateInputs:
-    """A fate map with the pseudotime and sink labels that validated it."""
+    """A fate map with the direction and sink labels that validated it."""
 
     fate: FateMappingResult
-    pseudotime: PseudotimeScoreResult
+    direction: _FateDirection
     sink_values: np.ndarray
 
 
@@ -1624,30 +1661,127 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             places=places,
         )
 
+    def _load_fate_direction(
+        self,
+        graph: ArtifactRef,
+        direction: ArtifactRef | np.ndarray,
+    ) -> tuple[_FateDirection, csr_matrix]:
+        """Read a direction score of a graph's cells, with the symmetric graph.
+
+        Numbering the graph's components checks that the score covers whole
+        components; the fate solve needs the same graph, so it is loaded once.
+        """
+        require_graph_kind(graph)
+        selection = graph_cell_selection(self.zw, graph)
+        if isinstance(direction, ArtifactRef):
+            if direction.kind == "pseudotime":
+                raise ValueError(
+                    "A pseudotime directs a fate map as pseudotime, which records "
+                    "the graph that it scored; direction takes other per-cell scores"
+                )
+            if cell_value_spec(direction.kind).categorical:
+                raise ValueError(
+                    f"direction must hold real values, and {direction.kind} "
+                    "artifacts hold labels"
+                )
+            values, direction_selection, missing = _load_cell_artifact_values(
+                self.zw,
+                direction,
+            )
+            if direction_selection != selection:
+                raise ValueError(
+                    "Direction scores do not match the graph's cell selection"
+                )
+        else:
+            values, missing = direction, None
+        selected_cell_indices = read_stored_selection_indices(
+            self.zw,
+            selection,
+            kind="cell_selection",
+            scope="datastore",
+            assay=None,
+            table_path="cellData",
+        )
+        graph_matrix = self._load_graph_artifact(
+            graph,
+            symmetric=True,
+            upper_only=False,
+            use_k=None,
+        )
+        if graph_matrix.shape[0] == 0:
+            raise ValueError("No cells were selected for fate mapping")
+        if graph_matrix.shape[0] != len(selected_cell_indices):
+            raise ValueError(
+                "Graph cell count does not match its stored cell selection"
+            )
+        component, component_sizes, _ = _pseudotime_components_impl(
+            graph_matrix,
+            selected_cell_indices,
+            "largest",
+        )
+        directed = _FateDirection(
+            graph=graph,
+            cell_selection=selection,
+            scores=_direction_scores_impl(values, missing, component),
+            component=component,
+            component_sizes=component_sizes,
+            scored_cells="the cells with a direction score",
+        )
+        return directed, graph_matrix
+
     @validation_scoped
     def _trajectory_fate(
         self,
-        pseudotime: ArtifactRef,
-        sink_labels: ArtifactRef,
+        pseudotime: ArtifactRef | None = None,
+        sink_labels: ArtifactRef | None = None,
         *,
         sinks: list[Any] | None = None,
+        graph: ArtifactRef | None = None,
+        direction: ArtifactRef | np.ndarray | None = None,
         beta: float = 10.0,
         solver_tol: float = 1e-6,
         max_iterations: int = 1000,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
-        """Compute fate probabilities from explicit pseudotime and labels.
+        """Compute fate probabilities of a walk that a pseudotime or a score directs.
 
-        The fate map scores the pseudotime's cells, on the graph that the
-        pseudotime scored: its graph, or the subgraph of the cells that it
-        was given as ``cells``.
+        Each cell's probability of each fate is the probability that a random
+        walk on the graph from the cell is absorbed first by that fate's sink
+        cells. The walk is directed: an edge to a cell of lower pseudotime
+        keeps ``2 / (1 + exp(beta * d))`` of its weight, where ``d`` is the
+        drop in pseudotime rescaled to [0, 1].
+
+        A pseudotime directs the walk on the graph that it scored, its graph or
+        the subgraph of the cells that it was given as ``cells``, and the map
+        covers the cells that it scored. ``direction`` takes any per-cell score
+        in its place, higher meaning later, such as a pseudotime that another
+        tool computed, with the ``graph`` to walk on; the walk is biased by the
+        score exactly as by a pseudotime. A direction score scores the cells
+        where it holds a finite value. Those cells must make up whole connected
+        components of the graph, as a pseudotime's do, and the map covers those
+        of them in components that hold a sink. Other components stay out of
+        the map, with a warning when the score covers them. A score given as
+        an array is saved as a snapshot of the graph's cells, which the fate
+        map records as its direction. The lineage analyses of a map that a
+        score directs, such as :meth:`curves` and :meth:`lineage_markers`,
+        order its cells by the score in place of a pseudotime.
 
         Args:
-            pseudotime: Explicit pseudotime artifact. Its graph lineage is used.
+            pseudotime: Explicit pseudotime artifact, which directs the walk on
+                the graph that it scored. Leave it out with ``direction``.
             sink_labels: Explicit cell-label artifact of the pseudotime's
-                cells, or of its graph's cells.
+                cells or of its graph's cells, or with ``direction`` of the
+                cells of ``graph``.
             sinks: Ordered sink labels. Every matching selected cell becomes a
                    fate boundary.
+            graph: Explicit connectivity-map or integrated-graph artifact to
+                walk on, required with ``direction`` and only with it.
+            direction: Per-cell score that directs the walk in place of a
+                pseudotime, higher meaning later: a cell-aligned artifact of
+                real values over the graph's cells, other than a pseudotime,
+                or an array with one value per cell of the graph's cell
+                selection, in its order. A missing or non-finite value leaves
+                a cell unscored.
             beta: Strength of the penalty applied to backward graph edges.
             solver_tol: Absolute tolerance on the Bellman residual of each
                 solved sink column. A solve stops once its largest residual
@@ -1664,7 +1798,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         Raises:
             SourceSinkLabelsError: If no selected cell, or no cell that the
-                pseudotime scored, holds a sink label.
+                pseudotime or the direction scores, holds a sink label.
+            ValueError: If neither or both of ``pseudotime`` and
+                ``direction`` are given, ``graph`` comes without
+                ``direction``, or the direction scores some cells of a graph
+                component and leaves others unscored.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if sinks is None:
@@ -1685,44 +1823,79 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         beta = validated_parameters["beta"]
         solver_tol = validated_parameters["solver_tol"]
         max_iterations = validated_parameters["max_iterations"]
-        if not isinstance(pseudotime, ArtifactRef):
-            raise TypeError("pseudotime must be an ArtifactRef")
+        if direction is None:
+            if graph is not None:
+                raise ValueError(
+                    "graph applies only with direction; a pseudotime directs the "
+                    "walk on the graph that it scored"
+                )
+            if pseudotime is None:
+                raise ValueError(
+                    "Provide a pseudotime, or a direction score with its graph"
+                )
+            if not isinstance(pseudotime, ArtifactRef):
+                raise TypeError("pseudotime must be an ArtifactRef")
+        else:
+            if pseudotime is not None:
+                raise ValueError(
+                    "Provide either a pseudotime or a direction score, not both"
+                )
+            if graph is None:
+                raise ValueError("graph is required with direction")
+            if not isinstance(graph, ArtifactRef):
+                raise TypeError("graph must be an ArtifactRef")
+            if not isinstance(direction, ArtifactRef | np.ndarray):
+                raise TypeError("direction must be an ArtifactRef or a NumPy array")
+        if sink_labels is None:
+            raise ValueError("sink_labels must be provided")
         if not isinstance(sink_labels, ArtifactRef):
             raise TypeError("sink_labels must be an ArtifactRef")
-        # Validating the pseudotime loads its symmetric graph, which is the
-        # same graph the fate solve needs, so it is loaded only once.
-        scored = self._load_pseudotime_scoring_with_graph(pseudotime)
-        pseudotime_result = scored.pseudotime
-        graph_matrix = scored.graph
-        graph_ref = pseudotime_result.graph
-        stored_selection = pseudotime_result.cell_selection
+        # Validating what directs the walk loads its symmetric graph, which is
+        # the same graph the fate solve needs, so it is loaded only once. Sink
+        # labels may hold the cells that the map covers or the graph's cells,
+        # which are the same cells for a direction score.
+        if direction is None:
+            assert pseudotime is not None
+            scored = self._load_pseudotime_scoring_with_graph(pseudotime)
+            directed = _FateDirection.of_pseudotime(scored.pseudotime)
+            graph_matrix = scored.graph
+            graph_selection = scored.graph_selection
+            places = scored.places
+            del scored
+            selection_refusal = (
+                "Sink labels do not match the pseudotime cell selection or its graph's"
+            )
+        else:
+            assert graph is not None
+            directed, graph_matrix = self._load_fate_direction(graph, direction)
+            graph_selection = directed.cell_selection
+            places = None
+            selection_refusal = "Sink labels do not match the graph's cell selection"
+        graph_ref = directed.graph
+        stored_selection = directed.cell_selection
+        scores = directed.scores
         raw_sink_values, sink_selection, sink_missing = _load_cell_artifact_values(
             self.zw,
             sink_labels,
         )
-        if sink_selection not in (stored_selection, scored.graph_selection):
-            raise ValueError(
-                "Sink labels do not match the pseudotime cell selection or its graph's"
-            )
+        if sink_selection not in (stored_selection, graph_selection):
+            raise ValueError(selection_refusal)
         if sink_selection != stored_selection:
             # Labels of the graph's cells, read at the pseudotime's cells.
             raw_sink_values, sink_missing = _rows_of_cells(
-                raw_sink_values, sink_missing, scored.places
+                raw_sink_values, sink_missing, places
             )
         sink_values = _labels_with_missing_mask(
             raw_sink_values,
             sink_missing,
             "Sink labels",
         )
-        del scored
-        ptime = pseudotime_result.values
-        ptime_valid = pseudotime_result.valid
         # The solve runs on the scored cells alone, so each sink needs some.
         ordered_sinks, sink_groups = _validate_sink_groups(
             sink_values,
             list(requested_sink_labels),
         )
-        scored_groups = set(np.unique(sink_groups[ptime_valid]).tolist())
+        scored_groups = set(np.unique(sink_groups[~np.isnan(scores)]).tolist())
         unscored_sinks = [
             sink
             for group, sink in enumerate(ordered_sinks)
@@ -1730,18 +1903,54 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         ]
         if unscored_sinks:
             raise SourceSinkLabelsError(
-                "Sink labels were not found in the cells that the pseudotime "
-                f"scored: {unscored_sinks}. The graph's connected components "
-                f"hold {list(pseudotime_result.component_sizes)} cells",
+                f"Sink labels were not found in {directed.scored_cells}: "
+                f"{unscored_sinks}. The graph's connected components hold "
+                f"{list(directed.component_sizes)} cells",
                 missing_sources=(),
                 missing_sinks=unscored_sinks,
                 missing_from="scored component",
-                component_sizes=pseudotime_result.component_sizes,
+                component_sizes=directed.component_sizes,
+            )
+        mapped = _fate_map_cells_impl(scores, directed.component, sink_groups >= 0)
+        sinkless = ~np.isnan(scores) & ~mapped
+        if sinkless.any():
+            # Only a direction score can cover a component without a sink: a
+            # pseudotime scores one component, which holds every sink.
+            sizes = np.bincount(directed.component[sinkless])
+            logger.warning(
+                f"Fate mapping: the direction scores {int(sinkless.sum())} cells in "
+                f"graph components without a sink, of sizes "
+                f"{sorted(sizes[sizes > 0].tolist(), reverse=True)}, which stay out "
+                "of the fate map"
+            )
+        if direction is not None and not isinstance(direction, ArtifactRef):
+            selected_row_ids = read_metadata_rows_chunkwise(
+                self.cells,
+                "ids",
+                read_stored_selection_indices(
+                    self.zw,
+                    stored_selection,
+                    kind="cell_selection",
+                    scope="datastore",
+                    assay=None,
+                    table_path="cellData",
+                ),
+            )
+            direction = resolve_metadata_snapshot(
+                self.zw,
+                values=scores,
+                row_ids=selected_row_ids,
+                operation="snapshot_fate_direction",
+                parameters={},
+                inputs={"cell_selection": stored_selection},
+                source_columns=["direction"],
+                invalidate_cache=invalidate_cache,
             )
 
         arguments = FateMappingArguments(
             connectivity_map=graph_ref,
             pseudotime=pseudotime,
+            direction=direction,
             sink_labels=sink_labels,
             cell_selection=stored_selection,
             sinks=requested_sink_labels,
@@ -1751,6 +1960,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             invalidate_cache=invalidate_cache,
         )
         record = arguments.to_record()
+        n_cells = len(scores)
         planned = plan_cell_data_artifact(
             self.zw,
             scope=graph_ref.scope,
@@ -1763,10 +1973,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             cell_selection=stored_selection,
             arrays={
                 "probabilities": (
-                    (len(ptime), len(requested_sink_labels)),
+                    (n_cells, len(requested_sink_labels)),
                     "f",
                 ),
-                "valid": ((len(ptime),), "b"),
+                "valid": ((n_cells,), "b"),
             },
             invalidate_cache=invalidate_cache,
             required_attributes=(
@@ -1777,9 +1987,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             ),
             reuse_validator=lambda _ref, group: _fate_payload_is_valid(
                 group,
-                n_cells=len(ptime),
+                n_cells=n_cells,
                 n_sinks=len(requested_sink_labels),
-                pseudotime_valid=ptime_valid,
+                expected_valid=mapped,
                 sink_values=sink_values,
                 sink_labels=requested_sink_labels,
             ),
@@ -1789,9 +1999,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         self._require_writable("run_fate_mapping")
         logger.info(f"Fate mapping: solving on graph {graph_ref.artifact_id}")
         retained_graph = (
-            graph_matrix
-            if ptime_valid.all()
-            else graph_matrix[ptime_valid][:, ptime_valid]
+            graph_matrix if mapped.all() else graph_matrix[mapped][:, mapped]
         ).tocsr()
         del graph_matrix
         solver_bytes = fate_solver_bytes(
@@ -1801,16 +2009,17 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise MemoryBudgetError(
                 f"Fate mapping needs about {solver_bytes} bytes of working memory, "
                 f"which exceeds the memory budget of {self.memoryBytes} bytes. "
-                "Increase the memory budget or compute the pseudotime on fewer cells.",
+                "Increase the memory budget, or compute the pseudotime or the "
+                "direction score on fewer cells.",
                 needed_bytes=solver_bytes + 1,
                 budget_bytes=int(self.memoryBytes),
                 item="the fate solver",
             )
-        retained_ptime = ptime[ptime_valid]
-        retained_sink_values = sink_values[ptime_valid]
+        retained_scores = scores[mapped]
+        retained_sink_values = sink_values[mapped]
         retained_probabilities, retained_valid, _ = _compute_fate_probabilities_impl(
             retained_graph,
-            retained_ptime,
+            retained_scores,
             retained_sink_values,
             list(requested_sink_labels),
             beta=beta,
@@ -1820,13 +2029,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             _copy_graph=False,
         )
         probabilities = np.full(
-            (len(ptime), len(requested_sink_labels)),
+            (n_cells, len(requested_sink_labels)),
             np.nan,
             dtype=retained_probabilities.dtype,
         )
-        valid = np.zeros(len(ptime), dtype=bool)
-        probabilities[ptime_valid] = retained_probabilities
-        valid[ptime_valid] = retained_valid
+        valid = np.zeros(n_cells, dtype=bool)
+        probabilities[mapped] = retained_probabilities
+        valid[mapped] = retained_valid
         write_cell_data_artifact(
             self.zw,
             planned,
@@ -1852,8 +2061,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
     @validation_scoped
     def _load_fate_inputs(self, ref: ArtifactRef) -> _FateInputs:
-        """Load a fate map with the pseudotime and sink labels that validate it.
+        """Load a fate map with the direction and sink labels that validate it.
 
+        The direction is the fate map's pseudotime or direction score.
         Lineage operations need both again, so they keep what validation read.
         """
         if not isinstance(ref, ArtifactRef):
@@ -1869,7 +2079,12 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise ValueError("Fate-map artifact is unavailable or invalid")
         inputs = status.inputs or {}
         parameters = status.parameters or {}
-        _require_exact_record_keys(inputs, _FATE_INPUTS, "Fate-map inputs")
+        directed_by_score = set(inputs) == _FATE_DIRECTION_INPUTS
+        _require_exact_record_keys(
+            inputs,
+            _FATE_DIRECTION_INPUTS if directed_by_score else _FATE_INPUTS,
+            "Fate-map inputs",
+        )
         _require_exact_record_keys(parameters, _FATE_PARAMETERS, "Fate-map parameters")
         try:
             validated_parameters = _validate_fate_parameters(parameters)
@@ -1877,10 +2092,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise ValueError("Fate-map parameters are malformed") from exc
         graph = parse_artifact_ref(
             inputs.get("connectivity_map"), "Fate-map graph input"
-        )
-        pseudotime = parse_artifact_ref(
-            inputs.get("pseudotime"),
-            "Fate-map pseudotime input",
         )
         sink_labels = parse_artifact_ref(
             inputs.get("sink_labels"),
@@ -1891,12 +2102,28 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             "Fate-map cell selection input",
         )
         raw_sinks = list(validated_parameters["sinks"])
-        pseudotime_result = self._trajectory_load_pseudotime(pseudotime)
-        if (
-            pseudotime_result.graph != graph
-            or pseudotime_result.cell_selection != selection
-        ):
-            raise ValueError("Fate-map lineage does not match its pseudotime")
+        pseudotime: ArtifactRef | None = None
+        direction: ArtifactRef | None = None
+        if directed_by_score:
+            direction = parse_artifact_ref(
+                inputs.get("direction"),
+                "Fate-map direction input",
+            )
+            directed, _ = self._load_fate_direction(graph, direction)
+            if directed.cell_selection != selection:
+                raise ValueError("Fate-map graph and cell selection do not match")
+        else:
+            pseudotime = parse_artifact_ref(
+                inputs.get("pseudotime"),
+                "Fate-map pseudotime input",
+            )
+            pseudotime_result = self._trajectory_load_pseudotime(pseudotime)
+            if (
+                pseudotime_result.graph != graph
+                or pseudotime_result.cell_selection != selection
+            ):
+                raise ValueError("Fate-map lineage does not match its pseudotime")
+            directed = _FateDirection.of_pseudotime(pseudotime_result)
         if ref.scope != graph.scope or ref.assay != graph.assay:
             raise ValueError("Fate-map artifact does not share its graph scope")
         sink_values, sink_selection, sink_missing = _load_cell_artifact_values(
@@ -1905,7 +2132,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         )
         if sink_selection != selection:
             # Labels of the graph's cells, read at the fate map's cells, which
-            # the pseudotime's loader found among the graph's.
+            # the pseudotime's loader found among the graph's. A map directed
+            # by a score covers the graph's cells, so its labels hold them.
             graph_selection = graph_cell_selection(self.zw, graph)
             if sink_selection != graph_selection:
                 raise ValueError("Fate-map sink labels use a different cell selection")
@@ -1922,18 +2150,26 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             sink_missing,
             "Fate-map sink labels",
         )
-        retained_labels = masked_sink_values[pseudotime_result.valid]
+        scored = ~np.isnan(directed.scores)
+        sink_cells = np.zeros(scored.shape, dtype=bool)
         for sink in raw_sinks:
-            matches = np.asarray(retained_labels == sink)
-            if matches.ndim != 1 or matches.dtype.kind != "b" or not matches.any():
+            matches = np.asarray(masked_sink_values == sink)
+            if (
+                matches.ndim != 1
+                or matches.dtype.kind != "b"
+                or not matches[scored].any()
+            ):
                 raise ValueError("Fate-map sink labels are malformed")
+            sink_cells |= matches
         n_cells = _selection_size(self.zw, selection)
         group = as_zarr_group(self.zw[status.path], name=status.path)
         if not _fate_payload_is_valid(
             group,
             n_cells=n_cells,
             n_sinks=len(raw_sinks),
-            pseudotime_valid=pseudotime_result.valid,
+            expected_valid=_fate_map_cells_impl(
+                directed.scores, directed.component, sink_cells
+            ),
             sink_values=masked_sink_values,
             sink_labels=raw_sinks,
         ):
@@ -1959,8 +2195,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 sink_labels=tuple(raw_sinks),
                 values=np.asarray(probabilities),
                 valid=np.asarray(valid, dtype=bool),
+                direction=direction,
             ),
-            pseudotime=pseudotime_result,
+            direction=directed,
             sink_values=masked_sink_values,
         )
 
@@ -1971,7 +2208,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
     ) -> _LineageCells:
         """Return the scored cells, ordering, weights, and sinks of a fate map.
 
-        The pseudotime and sink labels are those that validated the fate map,
+        The cells are ordered by the fate map's pseudotime or direction score.
+        The direction and sink labels are those that validated the fate map,
         so nothing is read twice.
         """
         fate_result = inputs.fate
@@ -1989,7 +2227,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         valid = fate_result.valid
         cell_indices = np.asarray(selected_cell_indices[valid], dtype=np.int64)
         ordering = validate_pseudotime_regressor(
-            inputs.pseudotime.values[valid],
+            inputs.direction.scores[valid],
             len(cell_indices),
             "pseudotime artifact",
             "pseudotime validity mask",
@@ -2134,8 +2372,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         :meth:`~cytearc.trajectory.LineageCurvesResult.project`.
 
         Args:
-            fate: Explicit fate-map artifact. Its pseudotime orders the cells
-                and its probabilities weight them.
+            fate: Explicit fate-map artifact. Its pseudotime, or the score
+                that directs it, orders the cells and its probabilities weight
+                them.
             lineages: Sink labels to fit, in order. ``None`` fits every sink.
             coordinates: Coordinates of the fate map's cells, or of its
                 graph's cells, to fit the curves in. ``None`` uses the
@@ -2872,9 +3111,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
     def _membership_inputs(
         self, curves: ArtifactRef
     ) -> tuple[LineageCurvesResult, np.ndarray]:
-        """Load lineage curves with the pseudotime of their cells."""
+        """Load lineage curves with the pseudotime of their cells.
+
+        For curves of a fate map that a score directs, the score takes the
+        pseudotime's place.
+        """
         loaded = self._trajectory_load_curves(curves)
-        pseudotime = self._load_fate_inputs(loaded.fate).pseudotime.values
+        pseudotime = self._load_fate_inputs(loaded.fate).direction.scores
         return loaded, np.asarray(pseudotime, dtype=np.float64)
 
     @validation_scoped
@@ -4171,8 +4414,9 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         inference across biological replicates.
 
         Args:
-            fate: Explicit fate-map artifact. Its pseudotime and probabilities
-                define the cells, their order, and their weights.
+            fate: Explicit fate-map artifact. Its pseudotime, or the score
+                that directs it, and its probabilities define the cells, their
+                order, and their weights.
             features: Explicit assay-scoped feature-selection artifact.
             lineages: Sink labels to analyse, in order. ``None`` analyses
                 every sink.
@@ -4708,16 +4952,16 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
     ) -> ArtifactRef:
         """Store fate-weighted feature profiles along each lineage, with modules.
 
-        Along pseudotime, each lineage's fate weight is cut into ``n_bins``
-        bins of equal weight, a cell whose weight straddles a cut being
-        shared in proportion. A feature's profile is its weighted mean in
-        every bin, smoothed across neighbouring bins by a Gaussian of
-        ``smoothing`` bins, so every lineage runs from the shared start to its
-        sink. With ``z_scale``, each feature is scaled by one mean and
-        standard deviation over all lineages, which keeps its lineages
-        comparable. Features with similar profiles across all lineages are
-        grouped into ``n_clusters`` modules, as :meth:`aggregation` groups
-        them along one pseudotime.
+        Along the fate map's pseudotime, or the score that directs it, each
+        lineage's fate weight is cut into ``n_bins`` bins of equal weight, a
+        cell whose weight straddles a cut being shared in proportion. A
+        feature's profile is its weighted mean in every bin, smoothed across
+        neighbouring bins by a Gaussian of ``smoothing`` bins, so every
+        lineage runs from the shared start to its sink. With ``z_scale``, each
+        feature is scaled by one mean and standard deviation over all
+        lineages, which keeps its lineages comparable. Features with similar
+        profiles across all lineages are grouped into ``n_clusters`` modules,
+        as :meth:`aggregation` groups them along one pseudotime.
 
         Args:
             fate: Explicit fate-map artifact.

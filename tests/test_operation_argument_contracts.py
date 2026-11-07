@@ -262,11 +262,10 @@ _CONTRACTS = (
     OperationContract(
         TrajectoryAccessor.fate,
         metadata_arguments.FateMappingArguments,
-        model_only=_classified(
-            "resolved_input",
-            "cell_selection",
-            "connectivity_map",
-        ),
+        # A pseudotime records its graph, which the map records too; a
+        # direction score comes with the graph it directs.
+        aliases={"graph": "connectivity_map"},
+        model_only=_classified("resolved_input", "cell_selection"),
     ),
     OperationContract(
         ClonesAccessor.import_clones,

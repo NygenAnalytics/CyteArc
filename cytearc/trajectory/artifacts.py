@@ -41,6 +41,11 @@ PSEUDOTIME_SOLVER_PARAMETERS = frozenset({"solver_tol", "max_iterations"})
 FATE_INPUTS = frozenset(
     {"connectivity_map", "pseudotime", "sink_labels", "cell_selection"}
 )
+# A fate map directed by a per-cell score records the score in place of a
+# pseudotime, beside the graph that its walk takes.
+FATE_DIRECTION_INPUTS = frozenset(
+    {"connectivity_map", "direction", "sink_labels", "cell_selection"}
+)
 FATE_PARAMETERS = frozenset({"sinks", "beta", "solver_tol", "max_iterations"})
 MARKER_INPUTS = frozenset(
     {
@@ -721,10 +726,15 @@ def fate_payload_is_valid(
     *,
     n_cells: int,
     n_sinks: int,
-    pseudotime_valid: np.ndarray,
+    expected_valid: np.ndarray,
     sink_values: np.ndarray,
     sink_labels: Sequence[Any],
 ) -> bool:
+    """Check a stored fate map against the cells it must cover and its sinks.
+
+    ``expected_valid`` marks the cells that the map covers: the scored cells
+    of the graph components that hold a sink.
+    """
     if set(group.attrs) != _RESULT_ATTRIBUTES:
         return False
     if not payload_fingerprint_matches(group, FATE_PAYLOAD):
@@ -744,7 +754,7 @@ def fate_payload_is_valid(
     if probabilities_array is None or valid_array is None:
         return False
     valid = np.asarray(valid_array[:], dtype=bool)
-    expected_valid = np.asarray(pseudotime_valid, dtype=bool)
+    expected_valid = np.asarray(expected_valid, dtype=bool)
     if expected_valid.shape != (n_cells,) or not np.array_equal(valid, expected_valid):
         return False
     tolerance = 1e-3

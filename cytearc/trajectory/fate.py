@@ -125,6 +125,19 @@ def _validate_sink_groups(
     return sink_labels, sink_groups
 
 
+def _scaled_range(values: np.ndarray) -> tuple[float, float, float]:
+    """Return the scale of finite values, their scaled minimum and scaled range.
+
+    Values above one in magnitude are divided by the largest magnitude, so the
+    range of large values is compared with machine precision as a fraction.
+    """
+    minimum = float(values.min())
+    maximum = float(values.max())
+    scale = max(1.0, abs(minimum), abs(maximum))
+    scaled_minimum = minimum / scale
+    return scale, scaled_minimum, (maximum / scale) - scaled_minimum
+
+
 def _normalize_pseudotime(values: np.ndarray) -> np.ndarray:
     try:
         pseudotime = np.asarray(values, dtype=np.float64)
@@ -134,11 +147,7 @@ def _normalize_pseudotime(values: np.ndarray) -> np.ndarray:
         raise ValueError("Pseudotime values must be one-dimensional")
     if not np.isfinite(pseudotime).all():
         raise ValueError("Pseudotime values must be finite")
-    minimum = float(pseudotime.min())
-    maximum = float(pseudotime.max())
-    scale = max(1.0, abs(minimum), abs(maximum))
-    scaled_minimum = minimum / scale
-    value_range = (maximum / scale) - scaled_minimum
+    scale, scaled_minimum, value_range = _scaled_range(pseudotime)
     if value_range <= np.finfo(np.float64).eps:
         raise ValueError("Pseudotime values must contain at least two distinct values")
     normalized = pseudotime / scale
@@ -146,6 +155,101 @@ def _normalize_pseudotime(values: np.ndarray) -> np.ndarray:
     normalized /= value_range
     np.clip(normalized, 0.0, 1.0, out=normalized)
     return normalized
+
+
+def direction_scores(
+    values: Any,
+    missing: np.ndarray | None,
+    component: np.ndarray,
+) -> np.ndarray:
+    """Return a direction score of a graph's cells as float64, NaN where it scores none.
+
+    A direction score orders the cells of a fate map's walk in place of a
+    pseudotime, higher meaning later. It scores the cells whose value is
+    present and finite. Those cells must make up whole connected components
+    of the graph, as a pseudotime's scored cells do: each component's cells
+    all hold a score, or none of them does.
+
+    Args:
+        values: One real value per cell of the graph.
+        missing: True for each cell whose value is missing, or None.
+        component: Each cell's connected component of the graph, a
+            non-negative integer.
+
+    Raises:
+        TypeError: If the values are not real numbers.
+        ValueError: If there is not one value per cell, no cell holds a
+            finite value, or a component holds cells with a score and cells
+            without one.
+    """
+    array = np.asarray(values)
+    if array.dtype.kind not in "iuf":
+        raise TypeError(
+            f"Direction scores must be real numbers, not values of dtype {array.dtype}"
+        )
+    n_cells = component.shape[0]
+    if array.shape != (n_cells,):
+        raise ValueError(
+            f"Direction scores must hold one value per cell of the graph, {n_cells} "
+            f"values, not an array of shape {array.shape}"
+        )
+    scores = np.array(array, dtype=np.float64)
+    unscored = ~np.isfinite(scores)
+    if missing is not None:
+        unscored |= np.asarray(missing, dtype=bool)
+    if unscored.all():
+        raise ValueError("Direction scores hold no finite value")
+    scores[unscored] = np.nan
+    n_components = int(component.max()) + 1
+    unscored_cells = np.bincount(component[unscored], minlength=n_components)
+    sizes = np.bincount(component, minlength=n_components)
+    split = (unscored_cells > 0) & (unscored_cells < sizes)
+    if split.any():
+        raise ValueError(
+            "Direction scores are missing or not finite for "
+            f"{int(unscored_cells[split].sum())} cells of graph components whose "
+            "other cells they score. A direction scores whole connected components "
+            "of the graph, as a pseudotime does: give every cell of a component a "
+            "finite score, or none of them"
+        )
+    return scores
+
+
+def fate_map_cells(
+    scores: np.ndarray,
+    component: np.ndarray,
+    sink_cells: np.ndarray,
+) -> np.ndarray:
+    """Return the cells that a fate map covers: the scored cells of components with a sink.
+
+    ``scores`` holds each cell's pseudotime or direction score, NaN where it
+    scores none, so that the scored cells make up whole connected components
+    of the graph. A walk in a component without a sink cell is never
+    absorbed, so its cells stay out of the map. The bias of the walk rescales
+    the scores of the covered cells to [0, 1], so they need two distinct
+    values.
+
+    Args:
+        scores: Each cell's score, NaN where it has none.
+        component: Each cell's connected component of the graph.
+        sink_cells: True for each cell that holds a sink label.
+
+    Raises:
+        ValueError: If no scored cell holds a sink label, or the scores of the
+            covered cells are all equal.
+    """
+    scored = ~np.isnan(scores)
+    holds_sink = np.zeros(int(component.max()) + 1, dtype=bool)
+    holds_sink[component[scored & sink_cells]] = True
+    covered = np.asarray(scored & holds_sink[component], dtype=bool)
+    if not covered.any():
+        raise ValueError("No scored cell holds a sink label")
+    if _scaled_range(scores[covered])[2] <= np.finfo(np.float64).eps:
+        raise ValueError(
+            "The scores that direct a fate map must hold at least two distinct "
+            "values in the graph components that hold a sink"
+        )
+    return covered
 
 
 def _validate_graph(
@@ -567,6 +671,12 @@ def compute_fate_probabilities(
     _copy_graph: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, tuple[Any, ...]]:
     """Compute grouped absorption probabilities on a pseudotime-biased graph.
+
+    ``pseudotime`` may be any per-cell score that orders the cells, higher
+    meaning later, such as a direction score: an edge to a cell of lower score
+    keeps ``2 / (1 + exp(beta * d))`` of its weight, where ``d`` is the drop in
+    the score rescaled to [0, 1] over the cells of the components that hold a
+    sink.
 
     Each sink column except the last solves a Dirichlet system with
     preconditioned, restarted GMRES. ``solver_tol`` bounds the largest

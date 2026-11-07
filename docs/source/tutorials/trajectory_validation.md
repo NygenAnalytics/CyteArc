@@ -26,6 +26,8 @@ assumptions; changing it can change the scores.
 Compare these alternatives visually as well as numerically. A smooth-looking ordering
 cannot by itself distinguish biological progression from a technical gradient.
 
+A direction score that orients `fate` in place of a pseudotime needs the same checks. Its higher values must mark later cells, so reverse a score that is highest at the start, such as a potency score. The map leaves out the graph components that the score does not cover and those without a sink, so compare the `valid` mask that `load_fate` returns with the cells you meant to map.
+
 ## Count the cells that were scored
 
 ```python
