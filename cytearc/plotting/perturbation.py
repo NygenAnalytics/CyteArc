@@ -297,20 +297,20 @@ def guide_calls(
         ax.set_title("Guides per cell")
 
         ax = axes["cells_per_guide"]
+        one_guide = cells_per_guide["one_guide_cells"].to_numpy()
+        several_guides = cells_per_guide["several_guide_cells"].to_numpy()
+        # A series is named in the legend only when its counts hold a cell.
+        one_label = _CALL_GROUPS[1][0] if one_guide.any() else None
+        several_label = _CALL_GROUPS[2][0] if several_guides.any() else None
         if labelled:
             positions = np.arange(len(cells_per_guide))[::-1]
+            ax.barh(positions, one_guide, color=_HIGHLIGHT_COLOR, label=one_label)
             ax.barh(
                 positions,
-                cells_per_guide["one_guide_cells"],
-                color=_HIGHLIGHT_COLOR,
-                label="Only guide called",
-            )
-            ax.barh(
-                positions,
-                cells_per_guide["several_guide_cells"],
-                left=cells_per_guide["one_guide_cells"],
+                several_guides,
+                left=one_guide,
                 color=_SEVERAL_GUIDES_COLOR,
-                label="One of several called",
+                label=several_label,
             )
             ax.set_yticks(positions, cells_per_guide["guide"].tolist())
             ax.set_xlabel("Cells")
@@ -322,17 +322,10 @@ def guide_calls(
                 color=foreground_color(theme),
                 label="All cells with the guide",
             )
-            ax.plot(
-                ranks,
-                cells_per_guide["one_guide_cells"],
-                color=_HIGHLIGHT_COLOR,
-                label="Only guide called",
-            )
+            ax.plot(ranks, one_guide, color=_HIGHLIGHT_COLOR, label=one_label)
             ax.set_xlabel("Guides, ranked by cells")
             ax.set_ylabel("Cells")
         ax.set_title("Cells per guide")
-        if show_legend:
-            ax.legend(frameon=False)
 
         ax = axes["top_fraction"]
         for group, color in _CALL_GROUPS:
@@ -349,8 +342,22 @@ def guide_calls(
         ax.set_xlabel("Top guide's share of guide UMIs")
         ax.set_ylabel("Cells")
         ax.set_title("Top guide share")
-        if show_legend:
-            ax.legend(frameon=False)
+        # One legend names the calls of both panels, beside the last panel and
+        # clear of the bars.
+        handles, labels = _legend_entries(
+            [axes["cells_per_guide"], ax],
+            ("All cells with the guide", *(group for group, _ in _CALL_GROUPS)),
+        )
+        _place_legend(
+            figure,
+            ax,
+            handles,
+            labels,
+            owns=owns,
+            show_legend=show_legend,
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+        )
         apply_figure_chrome(figure, theme)
     plot_result = PlotResult(
         figure=figure,
