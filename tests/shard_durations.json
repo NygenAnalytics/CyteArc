@@ -170,7 +170,7 @@
   "tests/test_harmony_revision.py": 0.4,
   "tests/test_hto.py": 12.8,
   "tests/test_hto_seurat_golden.py": 0.2,
-  "tests/test_huggingface_store.py": 0.2,
+  "tests/test_huggingface_store.py": 8.4,
   "tests/test_hvg_flavors.py": 25.4,
   "tests/test_hvg_kernel_parity.py": 1.6,
   "tests/test_hvg_plot_dependency.py": 1.1,

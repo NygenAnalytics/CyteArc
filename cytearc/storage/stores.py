@@ -36,8 +36,11 @@ _MATRIX_SOURCE_ASSAY_KEYS = frozenset(
     {"datasetFingerprint", "countsFingerprint", "requiresTranspose"}
 )
 # Object stores stop after 10 retries by default, which is about nine seconds
-# of backoff. Keep retrying transient errors for up to three minutes instead.
-_REMOTE_RETRY_CONFIG = {"max_retries": 100, "retry_timeout": timedelta(minutes=3)}
+# of backoff. Remote stores keep retrying transient errors for up to three
+# minutes instead: object stores through obstore, Hugging Face stores through
+# HfReadStore.
+REMOTE_RETRY_TIMEOUT = timedelta(minutes=3)
+_REMOTE_RETRY_CONFIG = {"max_retries": 100, "retry_timeout": REMOTE_RETRY_TIMEOUT}
 _ASSAY_COPY_ATTRS = (
     "is_assay",
     "misc",

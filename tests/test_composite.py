@@ -570,7 +570,9 @@ def test_remote_source_credentials_are_runtime_only(
     credentials = {"token": "composite-test-token"}
     from_url = FsspecStore.from_url
 
-    def local_source(cls, url, *, storage_options=None, read_only=False):
+    def local_source(
+        cls, url, *, storage_options=None, read_only=False, allowed_exceptions=()
+    ):
         assert url == uri
         if storage_options != credentials:
             raise PermissionError("source credentials required")
