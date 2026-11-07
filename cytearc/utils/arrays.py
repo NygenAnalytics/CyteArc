@@ -397,6 +397,23 @@ def canonicalize_sparse(coo: Any, dtype: Any | None = None) -> Any:
     return canonical
 
 
+def csr_to_coo(matrix: Any) -> Any:
+    """Return CSR rows as COO, marked canonical when every row is.
+
+    Rows whose indices are sorted without repeats convert to a COO in
+    canonical order, which SciPy marks canonical only from 1.17. A marked COO
+    is not sorted or summed again by :func:`canonicalize_sparse`.
+
+    Raises:
+        TypeError: If ``matrix`` is not a CSR matrix or array.
+    """
+    if getattr(matrix, "format", None) != "csr":
+        raise TypeError(f"csr_to_coo takes a CSR matrix, not {type(matrix).__name__}")
+    coo = matrix.tocoo(copy=False)
+    coo.has_canonical_format = bool(matrix.has_canonical_format)
+    return coo
+
+
 def sparse_matrix_bytes(*matrices: Any) -> int:
     """Return the bytes of the arrays held by SciPy sparse matrices.
 

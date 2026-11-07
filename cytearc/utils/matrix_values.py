@@ -257,7 +257,8 @@ def linear_coo(
     """Return a sparse block as COO with the log of a log kind undone.
 
     Duplicate coordinates are summed before the log is undone, since the
-    summed value is the stored one. Other kinds return ``matrix`` unchanged.
+    summed value is the stored one, so the COO is marked canonical. Other
+    kinds return ``matrix`` unchanged.
     """
     from scipy.sparse import coo_matrix
 
@@ -266,10 +267,12 @@ def linear_coo(
     if kind not in _LOG_SCALES:
         return matrix
     canonical = canonicalize_sparse(coo_matrix(matrix, copy=True))
-    return coo_matrix(
+    linear = coo_matrix(
         (
             linear_values(canonical.data, kind, dtype, assay=assay),
             (canonical.row, canonical.col),
         ),
         shape=canonical.shape,
     )
+    linear.has_canonical_format = True
+    return linear

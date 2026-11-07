@@ -418,6 +418,55 @@ def test_scans_resolve_one_range_for_each_group_of_features():
     assert new_count_ranges(None) == [CountValueRange()]
 
 
+def test_compressed_scan_records_whether_every_vector_is_canonical():
+    from cytearc.utils.count_values import IndexOrder
+
+    # Four rows of up to three values. Each variant puts one row out of
+    # canonical order: its indices reversed, or one index stored twice.
+    pointers = np.array([0, 3, 4, 7, 9])
+    canonical = np.array([0, 2, 5, 1, 0, 3, 4, 2, 5])
+    variants = {
+        "canonical": (canonical, True),
+        "reversed in the last row": (np.r_[canonical[:7], 5, 2], False),
+        "repeated in the first row": (np.r_[0, 2, 2, canonical[3:]], False),
+    }
+    data = np.arange(1, 10, dtype=np.float32)
+    for name, (indices, expected) in variants.items():
+        unrecorded = compressed_count_ranges(
+            pointers, indices, data, minorSize=6, maxBytes=1 << 20
+        )
+        # Windows of one row and of every row record the same order.
+        for max_bytes in (_PER_VALUE * 3, 1 << 20):
+            index_order = IndexOrder()
+            ranges = compressed_count_ranges(
+                pointers,
+                indices,
+                data,
+                minorSize=6,
+                maxBytes=max_bytes,
+                indexOrder=index_order,
+            )
+            assert index_order.canonical is expected, name
+            assert ranges == unrecorded
+
+    # A scan in parts keeps a vector out of order that an earlier part found.
+    index_order = IndexOrder()
+    ranges = new_count_ranges(None)
+    reversed_last = variants["reversed in the last row"][0]
+    for start, stop in ((2, 4), (0, 2)):
+        compressed_count_ranges(
+            pointers[start : stop + 1],
+            reversed_last,
+            data,
+            minorSize=6,
+            maxBytes=1 << 20,
+            valueRanges=ranges,
+            indexOrder=index_order,
+        )
+    assert index_order.canonical is False
+    assert IndexOrder().canonical is True
+
+
 @pytest.mark.parametrize(
     ("duplicates", "integral"),
     [([0.1, 0.2, 0.7], False), ([0.7, 0.2, 0.1], True)],

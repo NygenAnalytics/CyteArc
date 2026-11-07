@@ -422,6 +422,51 @@ def test_canonicalize_sparse_handles_empty_and_already_canonical_inputs():
     np.testing.assert_array_equal(returned.data, [1, 2])
 
 
+def test_csr_to_coo_marks_only_rows_sorted_without_repeats():
+    from scipy.sparse import csc_matrix, csr_matrix
+
+    from cytearc.utils.arrays import csr_to_coo
+
+    pointers = np.array([0, 2, 3])
+    # Row 0 holds (0, 1) = 4 and (0, 3) = 5, and row 1 holds (1, 0) = 6.
+    stored = {
+        "sorted": (np.array([1, 3, 0]), np.array([4.0, 5.0, 6.0]), True),
+        "unsorted": (np.array([3, 1, 0]), np.array([5.0, 4.0, 6.0]), False),
+        "repeated": (np.array([1, 1, 0]), np.array([4.0, 5.0, 6.0]), False),
+    }
+    for name, (indices, data, canonical) in stored.items():
+        matrix = csr_matrix((data, indices, pointers), shape=(2, 4))
+        coo = csr_to_coo(matrix)
+        assert coo.has_canonical_format is canonical, name
+        np.testing.assert_array_equal(coo.row, [0, 0, 1])
+        np.testing.assert_array_equal(coo.col, indices)
+        np.testing.assert_array_equal(coo.data, data)
+        summed = canonicalize_sparse(coo)
+        if canonical:
+            # A marked COO is neither sorted nor summed again.
+            assert summed is coo
+        expected = {(0, 1): 4.0, (0, 3): 5.0, (1, 0): 6.0}
+        if name == "repeated":
+            expected = {(0, 1): 9.0, (1, 0): 6.0}
+        assert (
+            dict(
+                zip(
+                    zip(summed.row.tolist(), summed.col.tolist(), strict=True),
+                    summed.data.tolist(),
+                    strict=True,
+                )
+            )
+            == expected
+        )
+        assert list(zip(summed.row.tolist(), summed.col.tolist(), strict=True)) == (
+            sorted(expected)
+        )
+
+    for other in (csc_matrix(np.eye(2)), coo_matrix(np.eye(2)), np.eye(2)):
+        with pytest.raises(TypeError, match="takes a CSR matrix"):
+            csr_to_coo(other)
+
+
 def test_canonicalize_sparse_detects_int64_duplicate_overflow():
     maximum = np.iinfo(np.int64).max
     duplicated = coo_matrix(

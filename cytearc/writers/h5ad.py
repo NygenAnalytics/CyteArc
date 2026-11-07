@@ -178,6 +178,9 @@ def _count_matrix_bands(
             ),
             shape=(chunk.shape[0], buffer.nColumns),
         )
+        # An assay's columns follow the order of its source features, so the
+        # projection of a canonical batch is canonical.
+        projected.has_canonical_format = bool(chunk.has_canonical_format)
         if assay_name in linear:
             projected = linear_coo(
                 projected, linear[assay_name], buffer.dtype, assay=assay_name
@@ -1271,10 +1274,15 @@ class H5adToZarr:
             for name in self.assayNames
         }
 
-    def _count_import_requirements(self) -> tuple[int, Callable[[int], int]]:
+    def _count_import_requirements(
+        self,
+    ) -> tuple[int, Callable[[int], int], bool]:
         """Return the resident and extra producer bytes of the counts write.
 
-        The layout fit and the write plan the same import from these.
+        The third value says whether every source batch arrives marked
+        canonical, which a split into assays and an undone log keep, so the
+        write sorts and sums none. The layout fit and the write plan the
+        same import from these.
         """
         from ..storage.identity import CountSummary
 
@@ -1317,7 +1325,7 @@ class H5adToZarr:
                 )
             return extra
 
-        return resident, extra_producer_bytes
+        return resident, extra_producer_bytes, self.h5ad._canonical_batches()
 
     def _fit_count_layout(
         self, requested: CountMatrixPolicy | None
@@ -1326,7 +1334,9 @@ class H5adToZarr:
         from ..storage.sharding import fit_count_layout, sparse_counts_admission
         from .counts_t import counts_t_assays
 
-        resident, extra_producer_bytes = self._count_import_requirements()
+        resident, extra_producer_bytes, canonical_batches = (
+            self._count_import_requirements()
+        )
         widths = self._assay_widths()
         return fit_count_layout(
             {
@@ -1344,6 +1354,7 @@ class H5adToZarr:
                 residentBytes=resident,
                 producerStagingBytes=self.h5ad.producer_batch_staging_bytes,
                 extraProducerBytes=extra_producer_bytes,
+                canonicalBatches=canonical_batches,
             ),
             requested=DEFAULT_COUNT_MATRIX_POLICY if requested is None else requested,
         )
@@ -1380,7 +1391,9 @@ class H5adToZarr:
         )
         started = time.perf_counter()
         projection = self._projection
-        resident_source_bytes, extra_producer_bytes = self._count_import_requirements()
+        resident_source_bytes, extra_producer_bytes, canonical_batches = (
+            self._count_import_requirements()
+        )
 
         plan = resolve_sparse_import_batch(
             tuple(destinations.values()),
@@ -1392,6 +1405,7 @@ class H5adToZarr:
             residentBytes=resident_source_bytes,
             producerStagingBytes=self.h5ad.producer_batch_staging_bytes,
             extraProducerBytes=extra_producer_bytes,
+            canonicalBatches=canonical_batches,
         )
         self._lastImportPlan = plan
         resolved_batch_rows = plan.batchRows
@@ -1455,6 +1469,7 @@ class H5adToZarr:
                     residentBytes=candidate_resident,
                     producerStagingBytes=self.h5ad.producer_batch_staging_bytes,
                     extraProducerBytes=extra_producer_bytes,
+                    canonicalBatches=canonical_batches,
                 )
                 if (
                     direct_candidate
@@ -1471,6 +1486,7 @@ class H5adToZarr:
                         residentBytes=candidate_resident,
                         producerStagingBytes=self.h5ad.producer_batch_staging_bytes,
                         extraProducerBytes=extra_producer_bytes,
+                        canonicalBatches=canonical_batches,
                     )
             except MemoryBudgetError:
                 continue

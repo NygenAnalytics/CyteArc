@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import zarr
 from scipy.sparse import csr_matrix
+from zarr.storage import MemoryStore
 
 from cytearc.readers import H5adReader
 from cytearc.storage.budget import ResourceBudget
@@ -19,7 +20,7 @@ from cytearc.storage.count_matrix import (
 )
 from cytearc.storage.sharding import CountLayoutMemoryError, fit_count_layout
 from cytearc.utils.memory_budget import MemoryBudgetError
-from cytearc.writers import H5adToZarr
+from cytearc.writers import H5adToZarr, SparseToZarr
 
 
 def _refusal(message: str, resources: ResourceBudget) -> MemoryBudgetError:
@@ -275,7 +276,7 @@ def test_a_dense_h5ad_plans_the_memory_of_its_nonzero_values(tenth_nonzero, tmp_
     dense, csr, values = tenth_nonzero
     # Planned as if every value were nonzero, the dense file's default layout
     # needed about 224 MiB. Its nonzero values need what the CSR file's do,
-    # about 24 MiB, beside its dense rows.
+    # about 14 MiB, beside its dense rows.
     budget = 64 * 1024**2
     stores = {
         name: _build(path, tmp_path / f"{name}.zarr", mem_budget=budget, nthreads=1)
@@ -292,14 +293,108 @@ def test_a_dense_h5ad_plans_the_memory_of_its_nonzero_values(tenth_nonzero, tmp_
 
 def test_a_dense_h5ad_still_plans_its_dense_rows(tenth_nonzero, tmp_path):
     dense, csr, _values = tenth_nonzero
-    # The CSR file fits 26 MiB. A batch of the dense file also holds its
+    # The CSR file fits 17 MiB. A batch of the dense file also holds its
     # rows' 2,000 by 600 float32 values, 4.6 MiB, so the same nonzero values
     # do not.
-    budget = 26 * 1024**2
+    budget = 17 * 1024**2
     root = _build(csr, tmp_path / "csr.zarr", mem_budget=budget, nthreads=1)
     assert _policy(root) == DEFAULT_COUNT_MATRIX_POLICY
     with pytest.raises(CountLayoutMemoryError, match="default count-matrix policy"):
         _build(dense, tmp_path / "dense.zarr", mem_budget=budget, nthreads=1)
+
+
+def _reversed_rows(matrix: csr_matrix) -> csr_matrix:
+    """The same values with each row's indices in descending order."""
+    order = np.concatenate(
+        [
+            np.arange(stop - 1, start - 1, -1)
+            for start, stop in zip(matrix.indptr[:-1], matrix.indptr[1:], strict=True)
+        ]
+    )
+    return csr_matrix(
+        (matrix.data[order], matrix.indices[order], matrix.indptr),
+        shape=matrix.shape,
+    )
+
+
+@pytest.fixture(scope="module")
+def reversed_rows(tenth_nonzero, tmp_path_factory) -> Path:
+    """The tenth-nonzero matrix as a CSR h5ad whose rows hold descending indices."""
+    _dense, _csr, values = tenth_nonzero
+    path = _write_h5ad(tmp_path_factory.mktemp("reversed") / "reversed.h5ad", values)
+    with h5py.File(path, "r+") as h5:
+        group = h5["X"]
+        matrix = _reversed_rows(
+            csr_matrix(
+                (group["data"][:], group["indices"][:], group["indptr"][:]),
+                shape=values.shape,
+            )
+        )
+        assert not matrix.has_canonical_format
+        group["data"][...] = matrix.data
+        group["indices"][...] = matrix.indices
+    return path
+
+
+def test_an_h5ad_import_charges_sorting_only_for_rows_out_of_order(
+    tenth_nonzero, reversed_rows, tmp_path
+):
+    dense, csr, values = tenth_nonzero
+    # Sorting each batch and summing its repeated coordinates was charged for
+    # every source, so the default layout needed about 24 MiB for the CSR
+    # file and 29 MiB for the dense one. Their batches arrive canonical, so
+    # they need about 14 and 19 MiB. The same rows with their indices
+    # reversed are sorted, and still need about 24 MiB.
+    budget = 22 * 1024**2
+    roots = {
+        name: _build(path, tmp_path / f"{name}.zarr", mem_budget=budget, nthreads=1)
+        for name, path in (("dense", dense), ("csr", csr))
+    }
+    with pytest.raises(CountLayoutMemoryError, match="default count-matrix policy"):
+        _build(reversed_rows, tmp_path / "reversed.zarr", mem_budget=budget, nthreads=1)
+    roots["reversed"] = _build(
+        reversed_rows, tmp_path / "reversed.zarr", mem_budget=26 * 1024**2, nthreads=1
+    )
+    for root in roots.values():
+        assert _policy(root) == DEFAULT_COUNT_MATRIX_POLICY
+        np.testing.assert_array_equal(root["RNA/counts"][:], values)
+    fingerprints = {
+        root["RNA/counts"].attrs["content_fingerprint"] for root in roots.values()
+    }
+    assert len(fingerprints) == 1
+
+
+def _sparse_import(matrix: csr_matrix, budget: int) -> zarr.Group:
+    store = MemoryStore()
+    SparseToZarr(
+        matrix,
+        store,
+        cell_ids=[f"c{i}" for i in range(matrix.shape[0])],
+        feature_ids=[f"g{j}" for j in range(matrix.shape[1])],
+        mem_budget=budget,
+        nthreads=1,
+    ).dump()
+    return zarr.open_group(store=store, mode="r")
+
+
+def test_sparse_to_zarr_charges_sorting_only_for_rows_out_of_order(tenth_nonzero):
+    _dense, _csr, values = tenth_nonzero
+    canonical = csr_matrix(values)
+    reversed_matrix = _reversed_rows(canonical)
+    # As from an h5ad file, the canonical rows need about 15 MiB instead of
+    # 25 MiB, and the same rows with their indices reversed still need 25 MiB.
+    budget = 20 * 1024**2
+    roots = {"canonical": _sparse_import(canonical, budget)}
+    with pytest.raises(CountLayoutMemoryError, match="default count-matrix policy"):
+        _sparse_import(reversed_matrix, budget)
+    roots["reversed"] = _sparse_import(reversed_matrix, 28 * 1024**2)
+    for root in roots.values():
+        assert _policy(root) == DEFAULT_COUNT_MATRIX_POLICY
+        np.testing.assert_array_equal(root["RNA/counts"][:], values)
+    assert (
+        roots["canonical"]["RNA/counts"].attrs["content_fingerprint"]
+        == roots["reversed"]["RNA/counts"].attrs["content_fingerprint"]
+    )
 
 
 def test_h5ad_import_below_one_row_shards_fails_before_the_destination_exists(
