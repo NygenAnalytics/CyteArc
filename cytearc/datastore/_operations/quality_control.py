@@ -29,10 +29,12 @@ from ...quality_control.filtering import (
     validate_metric_policies,
 )
 from ...quality_control.hto import (
+    _hto_calls,
     _hto_clr_diagnostics,
     _hto_demux_method,
+    _validated_hto_counts,
     _validated_positive_quantile,
-    hto_demux,
+    checked_hashtags,
 )
 from ...metadata.artifacts import (
     artifact_values,
@@ -1393,6 +1395,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         from_assay: str | None = None,
         random_seed: int = 0,
         positive_quantile: float = 0.99,
+        hashtags: Sequence[str] | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Demultiplex HTO counts into an immutable identity artifact.
@@ -1411,13 +1414,27 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         ``secondID``) and the difference of those values (``margin``). With one
         HTO, ``second_id`` is empty and ``margin`` is NaN.
 
-        A background cluster that holds only zero counts gets a cutoff of 0, so
-        every nonzero count of that HTO is positive, with a warning. A warning
-        also names each HTO whose positive calls overlap its background: fewer
-        than half of its positive cells have counts that the background fit
-        exceeds with probability ``(1 - positive_quantile) ** 3``, one in a
-        million for the default. Such calls, for example of an unused tag or
-        of pure background, may be background.
+        ``hashtags`` names the hashtags to demultiplex, such as those of one
+        pool of cells; by default every hashtag of the assay. A hashtag
+        without a count in the selected cells, such as one that another pool
+        used, is left out rather than refused, and the artifact's ``samples``
+        attribute records, for the selected cells, the hashtags demultiplexed,
+        each one's cutoff and those left out.
+
+        A background cluster that holds only zero counts, or whose fit gives a
+        cutoff of 0, calls every nonzero count of its hashtag positive. That is
+        accepted only for counts without ambient tags, in which no background
+        cluster holds counts of its hashtag in most of its cells and at most
+        half of the cells hold counts of more than one hashtag, as doublets
+        do. Otherwise the hashtag is unused in the cells of its background, as
+        when pools of cells use different hashtags, and the call is refused,
+        naming each such hashtag. Demultiplex each pool with a ``cell_selection`` of its
+        cells and its own ``hashtags``. A warning also names each HTO whose
+        positive calls overlap its background: fewer than half of its positive
+        cells have counts that the background fit exceeds with probability
+        ``(1 - positive_quantile) ** 3``, one in a million for the default.
+        Such calls, for example of an unused tag or of pure background, may be
+        background.
 
         Args:
             from_assay: HTO assay name (default: ``'HTO'``).
@@ -1430,6 +1447,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 background counts positive, and so fewer false doublets, but
                 can miss weakly stained tags. The artifact records the
                 quantile, so each quantile has its own artifact.
+            hashtags: The hashtag IDs to demultiplex, or None for every
+                hashtag of the assay. The artifact records them, in the
+                assay's order.
             invalidate_cache: Recompute even when matching provenance exists.
 
         Returns:
@@ -1439,7 +1459,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             TypeError: If ``random_seed`` is not an integer or
                 ``positive_quantile`` is not a real number.
             ValueError: If ``positive_quantile`` is not finite or not between
-                0 and 1.
+                0 and 1, ``hashtags`` names no hashtag of the assay, no chosen
+                hashtag has a count in the selected cells, or a hashtag's
+                background gives a cutoff of 0 in counts that carry ambient
+                tags.
             UnmeasuredCellsError: If the HTO assay did not measure a selected cell.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
@@ -1474,11 +1497,6 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             table_path="cellData",
         ).astype(np.int64, copy=False)
         n_cells = len(cell_index)
-        required_cells = assay.feats.N + 1
-        if n_cells < required_cells:
-            raise ValueError(
-                f"HTO demultiplexing requires at least {required_cells} selected cells"
-            )
         # The stored mask of the selection is read in bounded blocks.
         self._require_measured_cells(
             assay.name, cell_selection, operation="run_hto_demultiplexing"
@@ -1497,12 +1515,23 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             "ids",
             item="the hashtag IDs",
         )
+        chosen = (
+            None
+            if hashtags is None
+            else checked_hashtags(hashtags, [str(name) for name in hashtag_ids])
+        )
+        required_cells = (n_htos if chosen is None else len(chosen)) + 1
+        if n_cells < required_cells:
+            raise ValueError(
+                f"HTO demultiplexing requires at least {required_cells} selected cells"
+            )
         arguments = HtoIdentityArguments(
             cell_selection=cell_selection,
             feature_ids_fingerprint=fingerprint_strings(hashtag_ids),
             method=_hto_demux_method(positive_quantile),
             random_seed=random_seed,
             invalidate_cache=invalidate_cache,
+            hashtags=chosen,
         )
         record = arguments.to_record()
         planned = plan_cell_data_artifact(
@@ -1522,6 +1551,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 "margin": ((n_cells,), "f"),
             },
             invalidate_cache=invalidate_cache,
+            required_attributes=(
+                AttributeRequirement("samples", expected_types=(list,)),
+            ),
         )
         if planned.reused:
             return planned.ref
@@ -1559,8 +1591,28 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             controlled_compute(assay.rawData[cell_index, :], self.nthreads),
             columns=hashtag_ids,
         )
-        hto_idents = hto_demux(
-            counts,
+        if chosen is not None:
+            counts = counts.loc[:, chosen]
+        # A hashtag without a count in the selected cells, such as one that
+        # another pool used, is left out rather than refused. Any other value,
+        # such as a negative count, stays for validation to refuse.
+        has_counts = (counts.to_numpy() != 0).any(axis=0)
+        without_counts = [
+            str(name) for name, kept in zip(counts.columns, has_counts) if not kept
+        ]
+        if not has_counts.any():
+            raise ValueError(
+                "No hashtag to demultiplex has a count in the selected cells: "
+                + ", ".join(repr(name) for name in without_counts)
+            )
+        if without_counts:
+            logger.info(
+                f"Leaving out {len(without_counts)} hashtag(s) without counts in "
+                "the selected cells: " + ", ".join(without_counts)
+            )
+            counts = counts.loc[:, has_counts]
+        hto_idents, cutoffs = _hto_calls(
+            _validated_hto_counts(counts),
             random_seed=random_seed,
             positive_quantile=positive_quantile,
         )
@@ -1575,6 +1627,18 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 "margin": np.asarray(
                     diagnostics["margin"].to_numpy(), dtype=np.float64
                 ),
+            },
+            attributes={
+                "samples": [
+                    {
+                        "cells": n_cells,
+                        "hashtags": [str(name) for name in counts.columns],
+                        "cutoffs": {
+                            str(name): int(cutoff) for name, cutoff in cutoffs.items()
+                        },
+                        "withoutCounts": without_counts,
+                    }
+                ]
             },
         )
         return planned.ref

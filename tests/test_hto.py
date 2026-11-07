@@ -32,6 +32,7 @@ from cytearc.quality_control.hto import (
     _strict_background_cutoff,
     _validated_hto_counts,
     _warn_unseparated_htos,
+    checked_hashtags,
     hto_demux,
 )
 from cytearc.storage.artifacts import ArtifactRef, make_provenance, provenance_hash
@@ -355,35 +356,128 @@ def test_positive_calls_reject_invalid_backgrounds(counts, labels, message):
         _positive_hto_calls(counts, labels)
 
 
-def test_an_all_zero_background_calls_every_nonzero_count_positive(monkeypatch):
-    # The all-zero background used to abort demultiplexing. Its cutoff is now
-    # 0, with a warning, and the other HTO keeps its negative-binomial fit.
+ZERO_CUTOFF_REMEDY = (
+    "That is right only for counts without ambient tags, while here {evidence}. "
+    "Such a hashtag is unused, or nearly so, in the cells of its background, as "
+    "in a pool of cells that did not use it. Leave these hashtags out, or "
+    "demultiplex each pool of cells with its own hashtags."
+)
+
+
+def test_a_zero_background_beside_an_ambient_one_is_refused(monkeypatch):
+    # HTO_B's background cluster holds counts in most of its cells, so the
+    # counts carry ambient tags, and HTO_A's background of zeros means HTO_A
+    # is unused in those cells; its cutoff of 0 would call cell2 a doublet.
     counts = pd.DataFrame(
         {"HTO_A": [0, 0, 1, 10, 20], "HTO_B": [40, 60, 2, 1, 0]},
         index=[f"cell{index}" for index in range(5)],
     )
     labels = np.asarray([0, 0, 1, 1, 1])
-    fitted: list[tuple[list[int], str]] = []
+    monkeypatch.setattr(
+        hto, "_fit_negative_binomial_parameters", lambda values, name: (1.0, 1.0)
+    )
 
-    def fit(values, name):
-        fitted.append((np.asarray(values).tolist(), name))
-        return 1.0, 1.0
+    with pytest.raises(ValueError) as refused:
+        _positive_hto_calls(counts, labels)
 
-    monkeypatch.setattr(hto, "_fit_negative_binomial_parameters", fit)
+    assert str(refused.value) == (
+        "HTO demultiplexing cannot place a cutoff for 'HTO_A': its background "
+        "cluster gives a cutoff of 0, which calls every cell with one count of it "
+        "positive. "
+        + ZERO_CUTOFF_REMEDY.format(
+            evidence="most cells of the background cluster of 'HTO_B' hold counts of it"
+        )
+    )
 
-    with pytest.warns(UserWarning) as caught:
-        positive = _positive_hto_calls(counts, labels)
 
-    assert fitted == [([2, 1, 0], "HTO_B")]
-    assert [str(warning.message) for warning in caught] == [
-        "Background cluster for HTO 'HTO_A' contains only zero counts, so its "
-        "cutoff is 0 and every nonzero count of this HTO is called positive, "
-        "including a few background counts in cells outside that cluster."
-    ]
-    assert positive["HTO_A"].tolist() == [False, False, True, True, True]
-    cutoff = nb2_quantile(1.0, 1.0)
-    assert positive["HTO_B"].tolist() == (counts["HTO_B"] > cutoff).tolist()
-    assert positive.index.equals(counts.index)
+def test_pools_that_use_different_hashtags_are_refused_together():
+    # Two pools, each with its own two hashtags: every cell holds its tag and
+    # ambient counts of its pool's other tag, while each hashtag's background
+    # cluster lies in the other pool and holds only zeros.
+    tagged = [130, 150, 170, 120, 140, 160, 110, 180, 125, 135, 145, 155]
+    ambient = [1, 2, 3, 2, 1, 3, 3, 1, 2, 1, 2, 3]
+    counts = np.zeros((12, 4), dtype=np.int64)
+    for row in range(12):
+        tag = row // 3
+        counts[row, tag] = tagged[row]
+        counts[row, tag ^ 1] = ambient[row]
+    frame = pd.DataFrame(
+        counts,
+        columns=["HTO_A", "HTO_B", "HTO_C", "HTO_D"],
+        index=[f"cell{index}" for index in range(12)],
+    )
+    labels = np.repeat([0, 1, 2, 3], 3)
+
+    with pytest.raises(ValueError) as refused:
+        _positive_hto_calls(frame, labels)
+
+    assert str(refused.value) == (
+        "HTO demultiplexing cannot place a cutoff for 'HTO_A', 'HTO_B', 'HTO_C', "
+        "'HTO_D': the background cluster of each gives a cutoff of 0, which calls "
+        "every cell with one count of it positive. "
+        + ZERO_CUTOFF_REMEDY.format(
+            evidence="12 of the 12 cells hold counts of more than one hashtag"
+        )
+    )
+
+
+def test_clean_counts_cut_at_0_with_doublets_outside_their_positive_cluster():
+    # Without ambient tags a cell holds counts of its own tags only. The
+    # doublets of HTO_A and HTO_B sit in HTO_B's cluster, outside HTO_A's
+    # positive cluster, and their HTO_A counts are still positive.
+    rows = (
+        [("HTO_A", 120 + 10 * index, 0, 0) for index in range(4)]
+        + [("HTO_B", 0, 130 + 10 * index, 0) for index in range(4)]
+        + [("Doublet", 90 + index, 140 + index, 0) for index in range(2)]
+        + [("HTO_C", 0, 0, 110 + 10 * index) for index in range(4)]
+        + [("Negative", 0, 0, 0) for _ in range(3)]
+    )
+    frame = pd.DataFrame(
+        [values for _, *values in rows],
+        columns=["HTO_A", "HTO_B", "HTO_C"],
+        index=[f"cell{index}" for index in range(len(rows))],
+    )
+    labels = np.asarray([0] * 4 + [1] * 6 + [2] * 4 + [3] * 3)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        calls, cutoffs = hto._calls_and_cutoffs(frame, labels, positive_quantile=0.99)
+
+    assert [str(warning.message) for warning in caught] == []
+    assert cutoffs == {"HTO_A": 0, "HTO_B": 0, "HTO_C": 0}
+    pd.testing.assert_frame_equal(calls, frame > 0)
+    assert _classify_hto_identities(calls).tolist() == [label for label, *_ in rows]
+
+
+def test_a_background_fit_that_cuts_at_0_is_refused_in_ambient_counts(
+    monkeypatch,
+):
+    # HTO_A's background holds one stray count, and a fit of tiny mean puts
+    # its cutoff at 0, which would call that background cell positive.
+    counts = pd.DataFrame(
+        {"HTO_A": [0, 1, 0, 10, 20, 15], "HTO_B": [40, 60, 50, 1, 3, 2]},
+        index=[f"cell{index}" for index in range(6)],
+    )
+    labels = np.asarray([0, 0, 0, 1, 1, 1])
+    fits = {"HTO_A": (0.001, 1.0), "HTO_B": (2.0, 0.5)}
+    monkeypatch.setattr(
+        hto, "_fit_negative_binomial_parameters", lambda values, name: fits[name]
+    )
+    assert nb2_quantile(0.001, 1.0) == 0
+    assert nb2_quantile(2.0, 0.5) > 0
+
+    with pytest.raises(ValueError) as refused:
+        _positive_hto_calls(counts, labels)
+
+    assert str(refused.value) == (
+        "HTO demultiplexing cannot place a cutoff for 'HTO_A': its background "
+        "cluster gives a cutoff of 0, which calls every cell with one count of it "
+        "positive. "
+        + ZERO_CUTOFF_REMEDY.format(
+            evidence="most cells of the background cluster of 'HTO_B' hold counts "
+            "of it and 4 of the 6 cells hold counts of more than one hashtag"
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -779,12 +873,14 @@ def test_default_hto_identity_is_the_one_cytearc_1_2_recorded():
 
     # CyteArc 1.2.0 recorded its fixed quantile, 0.99, as the cutoff quantile
     # of the method record, so stored artifacts of the default keep their
-    # parameters and inputs: revision 2 supersedes them as matches that differ
-    # only in their revision.
+    # parameters and inputs: the current revision supersedes them as matches
+    # that differ only in their revision. Leaving the hashtags unchosen records
+    # nothing, so it keeps that identity too.
     assert identity(arguments) == (
         "eade487927ab18af43de927d0ff3d067ae58d3de6fde4f5d6b144cf4f0c6c80c"
     )
     record = arguments.to_record()
+    assert "hashtags" not in record.parameters
     assert (
         effective_revision(
             arguments.operation,
@@ -792,11 +888,14 @@ def test_default_hto_identity_is_the_one_cytearc_1_2_recorded():
             record.parameters,
             record.inputs,
         )
-        == 2
+        == 3
     )
     stricter = dataclasses.replace(arguments, method=_hto_demux_method(0.999))
     assert stricter.to_record().parameters["method"]["cutoff"]["quantile"] == 0.999
     assert identity(stricter) != identity(arguments)
+    chosen = dataclasses.replace(arguments, hashtags=["HTO_B", "HTO_A"])
+    assert chosen.to_record().parameters["hashtags"] == ["HTO_B", "HTO_A"]
+    assert identity(chosen) != identity(arguments)
 
 
 @pytest.mark.parametrize(("positive_quantile", "error", "message"), INVALID_QUANTILES)
@@ -816,6 +915,180 @@ def test_hto_demultiplexing_rejects_an_invalid_quantile_before_reading_counts(
     )
     with pytest.raises(error, match=f"^{re.escape(message)}$"):
         store.qc.hto_demultiplexing(selection, positive_quantile=positive_quantile)
+    assert store.artifacts.list(kind="hto_identity", from_assay="HTO") == []
+
+
+def two_pool_hto_counts(seed: int = 0) -> tuple[pd.DataFrame, np.ndarray]:
+    """Return counts of two pools of 60 cells and the identity planted in each.
+
+    The first pool uses HTO0 and HTO1, the second HTO2 and HTO3. Each cell
+    holds ambient counts of 0 to 6 of its pool's two hashtags and none of the
+    other pool's; 25 cells of each hashtag gain 100 to 199 counts of it, 5
+    doublets of each pool gain both, and 5 negatives gain none.
+    """
+    rng = np.random.default_rng(seed)
+    names = ["HTO0", "HTO1", "HTO2", "HTO3"]
+    counts = np.zeros((120, 4), dtype=np.int64)
+    truth: list[str] = []
+    for pool, used in enumerate(([0, 1], [2, 3])):
+        rows = np.arange(60 * pool, 60 * (pool + 1))
+        counts[np.ix_(rows, used)] = rng.integers(0, 7, size=(60, 2))
+        labels = [names[used[0]]] * 25 + [names[used[1]]] * 25
+        labels += ["Doublet"] * 5 + ["Negative"] * 5
+        for row, label in zip(rows, labels):
+            tagged = {
+                names[used[0]]: used[:1],
+                names[used[1]]: used[1:],
+                "Doublet": used,
+            }.get(label, [])
+            for column in tagged:
+                counts[row, column] += 100 + rng.integers(0, 100)
+        truth += labels
+    return pd.DataFrame(counts, columns=names), np.asarray(truth)
+
+
+def _identities_from_cutoffs(counts: pd.DataFrame, cutoffs: dict) -> list[str]:
+    """Name each cell by the hashtags whose counts exceed their cutoffs."""
+    identities = []
+    for _, row in counts[list(cutoffs)].iterrows():
+        positive = [name for name, cutoff in cutoffs.items() if row[name] > cutoff]
+        identities.append(
+            positive[0]
+            if len(positive) == 1
+            else ("Doublet" if positive else "Negative")
+        )
+    return identities
+
+
+def test_pools_that_use_different_hashtags_are_demultiplexed_one_at_a_time(
+    tmp_path: Path,
+):
+    counts, truth = two_pool_hto_counts()
+    store = _hto_store(tmp_path, counts)
+    first = np.arange(len(counts)) < 60
+    store.cells.insert("pool1", first, overwrite=True)
+    store.cells.insert("pool2", ~first, overwrite=True)
+    several = int(((counts > 0).sum(axis=1) > 1).sum())
+    assert several > 60
+
+    # One call over both pools finds each hashtag's background in the other
+    # pool, a cluster of zeros, while ambient tags reach most cells.
+    with threadpool_limits(limits=1), pytest.raises(ValueError) as refused:
+        store.qc.hto_demultiplexing(store.snapshot_cell_selection("I"))
+    message = str(refused.value)
+    assert message.startswith(
+        "HTO demultiplexing cannot place a cutoff for 'HTO0', 'HTO1', 'HTO2', "
+        "'HTO3': the background cluster of each gives a cutoff of 0"
+    )
+    assert (
+        f"here {several} of the 120 cells hold counts of more than one hashtag. "
+        in message
+    )
+    assert store.artifacts.list(kind="hto_identity", from_assay="HTO") == []
+
+    pool1 = store.snapshot_cell_selection("pool1")
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="INFO"
+    )
+    try:
+        with threadpool_limits(limits=1):
+            chosen = store.qc.hto_demultiplexing(pool1, hashtags=["HTO1", "HTO0"])
+            unchosen = store.qc.hto_demultiplexing(pool1)
+    finally:
+        logger.remove(sink)
+
+    # Chosen in any order, the hashtags are recorded in the assay's order.
+    assert store.artifacts.inspect(chosen).parameters["hashtags"] == ["HTO0", "HTO1"]
+    assert store.qc.hto_demultiplexing(pool1, hashtags=["HTO0", "HTO1"]) == chosen
+    # Unchosen, the other pool's hashtags have no count in these cells and
+    # are left out, which gives the same calls under another identity.
+    assert unchosen != chosen
+    assert "hashtags" not in store.artifacts.inspect(unchosen).parameters
+    assert (
+        "Leaving out 2 hashtag(s) without counts in the selected cells: HTO2, HTO3"
+        in messages
+    )
+    for ref, without_counts in ((chosen, []), (unchosen, ["HTO2", "HTO3"])):
+        payload = store.artifacts.load(ref)
+        np.testing.assert_array_equal(payload["values"][:], truth[first])
+        (sample,) = payload.attrs["samples"]
+        assert (sample["cells"], sample["hashtags"]) == (60, ["HTO0", "HTO1"])
+        assert sample["withoutCounts"] == without_counts
+        # The recorded cutoffs give the stored calls.
+        assert (
+            _identities_from_cutoffs(counts[first], sample["cutoffs"])
+            == payload["values"][:].tolist()
+        )
+        assert all(cutoff > 0 for cutoff in sample["cutoffs"].values())
+
+    pool2 = store.snapshot_cell_selection("pool2")
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "No hashtag to demultiplex has a count in the selected cells: "
+            "'HTO0', 'HTO1'"
+        ),
+    ):
+        store.qc.hto_demultiplexing(pool2, hashtags=["HTO0", "HTO1"])
+    with threadpool_limits(limits=1):
+        second = store.qc.hto_demultiplexing(pool2)
+    np.testing.assert_array_equal(
+        store.artifacts.load(second)["values"][:], truth[~first]
+    )
+
+
+def test_chosen_hashtags_are_returned_in_the_assays_order():
+    assert checked_hashtags(("HTO_C", "HTO_A"), ["HTO_A", "HTO_B", "HTO_C"]) == [
+        "HTO_A",
+        "HTO_C",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("hashtags", "error", "message"),
+    [
+        (
+            "HTO0",
+            TypeError,
+            "hashtags must be a list of hashtag IDs, such as ['HTO1', 'HTO2'], not str",
+        ),
+        (
+            {"HTO0"},
+            TypeError,
+            "hashtags must be a list of hashtag IDs, such as ['HTO1', 'HTO2'], not set",
+        ),
+        ([], ValueError, "hashtags must name at least one hashtag"),
+        (["HTO0", " "], ValueError, "hashtags must name hashtags by non-empty IDs"),
+        (["HTO0", 1], ValueError, "hashtags must name hashtags by non-empty IDs"),
+        (
+            ["HTO1", "HTO0", "HTO1"],
+            ValueError,
+            "hashtags names ['HTO1'] more than once",
+        ),
+        (
+            ["HTO0", "HTO9"],
+            ValueError,
+            "hashtags names ['HTO9'], which the HTO assay does not hold; its "
+            "hashtags are ['HTO0', 'HTO1', 'HTO2']",
+        ),
+    ],
+)
+def test_hto_demultiplexing_checks_its_hashtags_before_reading_counts(
+    tmp_path: Path, monkeypatch, hashtags, error, message
+):
+    counts, _ = planted_hto_counts()
+    store = _hto_store(tmp_path, counts)
+    selection = store.snapshot_cell_selection("I")
+
+    def unread(*args, **kwargs):
+        raise AssertionError("the counts were read")
+
+    monkeypatch.setattr(
+        "cytearc.datastore._operations.quality_control.controlled_compute", unread
+    )
+    with pytest.raises(error, match=f"^{re.escape(message)}$"):
+        store.qc.hto_demultiplexing(selection, hashtags=hashtags)
     assert store.artifacts.list(kind="hto_identity", from_assay="HTO") == []
 
 
@@ -1094,19 +1367,48 @@ def test_clean_hashing_with_zero_background_counts_is_demultiplexed():
     frame = pd.DataFrame(counts, columns=["HTO_A", "HTO_B", "HTO_C"])
     truth = np.where(negative, "Negative", np.asarray(frame.columns)[tags])
 
-    with threadpool_limits(limits=1), pytest.warns(UserWarning) as caught:
+    with threadpool_limits(limits=1), warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         identities = hto_demux(frame)
 
     np.testing.assert_array_equal(identities.to_numpy(), truth)
-    assert sorted(str(warning.message) for warning in caught) == [
-        f"Background cluster for HTO {name!r} contains only zero counts, so its "
-        "cutoff is 0 and every nonzero count of this HTO is called positive, "
-        "including a few background counts in cells outside that cluster."
-        for name in ("HTO_A", "HTO_B", "HTO_C")
-    ]
+    # Every count lies in its hashtag's positive cluster, so the cutoffs of 0
+    # are right and nothing warns.
+    assert [str(warning.message) for warning in caught] == []
 
 
-def test_hto_identity_artifact_stores_clr_diagnostics_as_revision_2(
+@pytest.mark.parametrize(("n_tags", "doublet_rate"), [(2, 0.3), (3, 0.15), (12, 0.15)])
+def test_clean_hashing_with_doublets_is_demultiplexed(n_tags, doublet_rate):
+    # Without ambient tags, a doublet holds counts of its two tags and every
+    # other cell of at most one. k-means places doublets, and with many tags
+    # whole populations, outside a tag's positive cluster, and the cutoffs of
+    # 0 still call every cell exactly. Doublets in a background cluster can
+    # still raise the overlap warning, which this test leaves aside.
+    rng = np.random.default_rng(7)
+    counts = np.zeros((600, n_tags), dtype=np.int64)
+    truth = []
+    for row in range(600):
+        draw = rng.random()
+        if draw < 0.05:
+            truth.append("Negative")
+            continue
+        if draw < 0.05 + doublet_rate:
+            tags = rng.choice(n_tags, 2, replace=False)
+            truth.append("Doublet")
+        else:
+            tags = [rng.integers(n_tags)]
+            truth.append(f"HTO_{tags[0]}")
+        counts[row, tags] = rng.integers(50, 400, len(tags))
+    frame = pd.DataFrame(counts, columns=[f"HTO_{tag}" for tag in range(n_tags)])
+
+    with threadpool_limits(limits=1), warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        identities = hto_demux(frame)
+
+    np.testing.assert_array_equal(identities.to_numpy(), truth)
+
+
+def test_hto_identity_artifact_stores_clr_diagnostics_as_revision_3(
     tmp_path: Path,
 ):
     counts, truth = planted_hto_counts()
@@ -1120,7 +1422,7 @@ def test_hto_identity_artifact_stores_clr_diagnostics_as_revision_2(
     expected = _hto_clr_diagnostics(renamed)
 
     status = store.artifacts.inspect(ref)
-    assert status.revision == 2
+    assert status.revision == 3
     assert status.is_current
     payload = store.artifacts.load(ref)
     renaming = {name: f"HTO{index}" for index, name in enumerate(HTOS)}
@@ -1176,13 +1478,13 @@ def test_hto_identity_of_revision_1_is_recomputed_not_reused(
         logger.remove(sink)
 
     assert current != legacy
-    assert store.artifacts.inspect(current).revision == 2
+    assert store.artifacts.inspect(current).revision == 3
     legacy_status = store.artifacts.inspect(legacy)
     assert not legacy_status.is_current
-    assert [entry.revision for entry in legacy_status.superseded_by] == [2]
+    assert [entry.revision for entry in legacy_status.superseded_by] == [2, 3]
     (line,) = [message for message in messages if "Recomputing" in message]
     assert line.startswith(
         f"Recomputing run_hto_demultiplexing: artifact {legacy.artifact_id[:12]} "
-        "is revision 1, current 2: A singlet takes the one HTO"
+        "is revision 1, current 3: A singlet takes the one HTO"
     )
     assert store.qc.hto_demultiplexing(selection) == current

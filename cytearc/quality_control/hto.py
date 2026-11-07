@@ -1,5 +1,5 @@
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -69,6 +69,38 @@ def _hto_demux_method(positive_quantile: float) -> dict[str, object]:
         },
         "singlet_assignment": _SINGLET_ASSIGNMENT,
     }
+
+
+def checked_hashtags(hashtags: object, hashtag_ids: Sequence[str]) -> list[str]:
+    """Return the hashtags that ``hashtags`` names, in the order of ``hashtag_ids``.
+
+    Raises:
+        TypeError: If ``hashtags`` is not a sequence of texts.
+        ValueError: If it names no hashtag, an empty or repeated one, or one
+            that ``hashtag_ids`` lacks.
+    """
+    if isinstance(hashtags, str | bytes) or not isinstance(hashtags, Sequence):
+        raise TypeError(
+            "hashtags must be a list of hashtag IDs, such as ['HTO1', 'HTO2'], "
+            f"not {type(hashtags).__name__}"
+        )
+    names = list(hashtags)
+    if not names:
+        raise ValueError("hashtags must name at least one hashtag")
+    if any(not isinstance(name, str) or not name.strip() for name in names):
+        raise ValueError("hashtags must name hashtags by non-empty IDs")
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(f"hashtags names {repeated} more than once")
+    known = set(hashtag_ids)
+    unknown = [name for name in names if name not in known]
+    if unknown:
+        raise ValueError(
+            f"hashtags names {unknown}, which the HTO assay does not hold; its "
+            f"hashtags are {list(hashtag_ids)}"
+        )
+    chosen = set(names)
+    return [name for name in hashtag_ids if name in chosen]
 
 
 def _validated_hto_counts(hto_counts: pd.DataFrame) -> pd.DataFrame:
@@ -309,22 +341,34 @@ def _warn_unseparated_htos(
         )
 
 
-def _positive_hto_calls(
+def _hto_cutoffs(
     hto_counts: pd.DataFrame,
     cluster_labels: np.ndarray,
     *,
     positive_quantile: float = _DEFAULT_POSITIVE_QUANTILE,
-) -> pd.DataFrame:
-    """Call each count positive when it exceeds its HTO's background cutoff.
+) -> tuple[dict[str, int], dict[str, float]]:
+    """Return each HTO's cutoff and the strict cutoff of its background fit.
 
-    A background cluster that holds only zero counts has no negative-binomial
-    fit; its cutoff is 0, so every nonzero count of that HTO is positive, and
-    a warning says so. A warning also names the HTOs whose positive calls
-    overlap their background (see ``_warn_unseparated_htos``).
+    A background cluster that holds only zero counts has no
+    negative-binomial fit, and one whose fit has a tiny mean gives a cutoff
+    of 0 too; a cutoff of 0 calls every cell with one count positive. That is
+    right only for counts without ambient tags. Ambient tags reach most
+    cells: most cells of a background cluster hold counts of its HTO, or most
+    cells hold counts of more than one HTO, where without them only doublets
+    do. When the counts carry ambient tags, an HTO with a cutoff of 0 is
+    unused in the cells of its background, such as the cells of a pool that
+    did not use it, and every such HTO is refused in one error.
+
+    Raises:
+        ValueError: If a background cluster holds fewer than two cells, a fit
+            is invalid, or an HTO has a cutoff of 0 in counts that carry
+            ambient tags.
     """
     background_clusters = _background_clusters(hto_counts, cluster_labels)
     cutoffs: dict[str, int] = {}
     strict_cutoffs: dict[str, float] = {}
+    # The HTOs whose background cluster holds counts of them in most cells.
+    ambient_backgrounds: list[str] = []
     for hto_name in hto_counts.columns:
         background = hto_counts.loc[
             cluster_labels == background_clusters[hto_name],
@@ -335,31 +379,105 @@ def _positive_hto_calls(
                 f"Background cluster for HTO {hto_name!r} must contain "
                 "at least two cells"
             )
-        if not np.any(background > 0):
-            warn(
-                f"Background cluster for HTO {hto_name!r} contains only zero "
-                "counts, so its cutoff is 0 and every nonzero count of this HTO "
-                "is called positive, including a few background counts in cells "
-                "outside that cluster."
-            )
-            cutoffs[hto_name] = 0
-            strict_cutoffs[hto_name] = 0.0
-            continue
-        mu, alpha = _fit_negative_binomial_parameters(background, hto_name)
-        try:
-            cutoffs[hto_name] = _negative_binomial_cutoff(mu, alpha, positive_quantile)
-        except ValueError as exc:
-            raise ValueError(
-                f"Negative-binomial cutoff is invalid for HTO {hto_name!r}"
-            ) from exc
-        strict_cutoffs[hto_name] = _strict_background_cutoff(
-            mu, alpha, positive_quantile
+        if 2 * np.count_nonzero(background) > len(background):
+            ambient_backgrounds.append(str(hto_name))
+        if np.any(background > 0):
+            mu, alpha = _fit_negative_binomial_parameters(background, hto_name)
+            try:
+                cutoff = _negative_binomial_cutoff(mu, alpha, positive_quantile)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Negative-binomial cutoff is invalid for HTO {hto_name!r}"
+                ) from exc
+            strict_cutoff = _strict_background_cutoff(mu, alpha, positive_quantile)
+        else:
+            cutoff, strict_cutoff = 0, 0.0
+        cutoffs[hto_name] = cutoff
+        strict_cutoffs[hto_name] = strict_cutoff
+    unfit = [str(name) for name, cutoff in cutoffs.items() if cutoff == 0]
+    if unfit:
+        _refuse_zero_cutoffs_in_ambient_counts(hto_counts, unfit, ambient_backgrounds)
+    return cutoffs, strict_cutoffs
+
+
+def _refuse_zero_cutoffs_in_ambient_counts(
+    hto_counts: pd.DataFrame, unfit: list[str], ambient_backgrounds: list[str]
+) -> None:
+    """Refuse the HTOs with a cutoff of 0 when the counts carry ambient tags.
+
+    Ambient tags show as ``ambient_backgrounds``, the HTOs whose background
+    cluster holds counts of them in most cells, or as most cells holding
+    counts of more than one HTO. Without them, a cell holds counts of its own
+    tags only, and doublets, the cells with two, are a minority.
+    """
+    counts = hto_counts.to_numpy()
+    n_cells = counts.shape[0]
+    several = int(np.count_nonzero(np.count_nonzero(counts > 0, axis=1) > 1))
+    if not ambient_backgrounds and 2 * several <= n_cells:
+        return
+    evidence = []
+    if ambient_backgrounds:
+        names = ", ".join(repr(name) for name in ambient_backgrounds)
+        evidence.append(
+            f"most cells of the background cluster of {names} hold counts of it"
+            if len(ambient_backgrounds) == 1
+            else f"most cells of the background clusters of {names} hold counts "
+            "of their hashtags"
         )
+    if 2 * several > n_cells:
+        evidence.append(
+            f"{several} of the {n_cells} cells hold counts of more than one hashtag"
+        )
+    raise ValueError(
+        "HTO demultiplexing cannot place a cutoff for "
+        + ", ".join(repr(name) for name in unfit)
+        + ": "
+        + (
+            "its background cluster gives"
+            if len(unfit) == 1
+            else "the background cluster of each gives"
+        )
+        + " a cutoff of 0, which calls every cell with one count of it positive. "
+        "That is right only for counts without ambient tags, while here "
+        + " and ".join(evidence)
+        + ". Such a hashtag is unused, or nearly so, in the cells of its "
+        "background, as in a pool of cells that did not use it. Leave these "
+        "hashtags out, or demultiplex each pool of cells with its own hashtags."
+    )
+
+
+def _positive_hto_calls(
+    hto_counts: pd.DataFrame,
+    cluster_labels: np.ndarray,
+    *,
+    positive_quantile: float = _DEFAULT_POSITIVE_QUANTILE,
+) -> pd.DataFrame:
+    """Call each count positive when it exceeds its HTO's background cutoff.
+
+    The cutoffs are those of :func:`_hto_cutoffs`. A warning names the HTOs
+    whose positive calls overlap their background (see
+    ``_warn_unseparated_htos``).
+    """
+    return _calls_and_cutoffs(
+        hto_counts, cluster_labels, positive_quantile=positive_quantile
+    )[0]
+
+
+def _calls_and_cutoffs(
+    hto_counts: pd.DataFrame,
+    cluster_labels: np.ndarray,
+    *,
+    positive_quantile: float,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Return the positive calls of :func:`_positive_hto_calls` and the cutoffs."""
+    cutoffs, strict_cutoffs = _hto_cutoffs(
+        hto_counts, cluster_labels, positive_quantile=positive_quantile
+    )
     positive_calls = hto_counts > pd.Series(cutoffs)
     _warn_unseparated_htos(
         hto_counts, positive_calls, pd.Series(strict_cutoffs), positive_quantile
     )
-    return positive_calls
+    return positive_calls, cutoffs
 
 
 def _classify_hto_identities(positive_calls: pd.DataFrame) -> pd.Series:
@@ -431,12 +549,17 @@ def hto_demux(
     value, which in unbalanced pools can be an HTO that the cutoff called
     negative.
 
-    A background cluster that holds only zero counts gets a cutoff of 0, so
-    every nonzero count of that HTO is positive, with a warning. A warning
-    also names each HTO whose positive calls overlap its background: fewer
-    than half of its positive cells have counts that the background fit
-    exceeds with probability ``(1 - positive_quantile) ** 3``. Such calls,
-    for example of an unused tag or of pure background, may be background.
+    A background cluster that holds only zero counts, or whose fit gives a
+    cutoff of 0, calls every nonzero count of that HTO positive. That is
+    accepted only for counts without ambient tags, in which no background
+    cluster holds counts of its HTO in most of its cells and at most half of
+    the cells hold counts of more than one HTO, as doublets do. Otherwise the
+    HTO is unused in the cells of its background, as in a pool that did not
+    use it, and the call is refused, naming each such HTO. A warning also
+    names each HTO whose positive calls overlap its background: fewer than
+    half of its positive cells have counts that the background fit exceeds
+    with probability ``(1 - positive_quantile) ** 3``. Such calls, for
+    example of an unused tag or of pure background, may be background.
 
     Args:
         hto_counts: A dataframe containing the raw HTO counts for each cell.
@@ -459,10 +582,25 @@ def hto_demux(
     if isinstance(random_seed, bool) or not isinstance(random_seed, int):
         raise TypeError("random_seed must be an integer")
     quantile = _validated_positive_quantile(positive_quantile)
-    counts = _validated_hto_counts(hto_counts)
-    normalized = _clr_normalize(counts)
-    cluster_labels = _cluster_labels(normalized, random_seed)
-    positive_calls = _positive_hto_calls(
-        counts, cluster_labels, positive_quantile=quantile
+    return _hto_calls(
+        _validated_hto_counts(hto_counts),
+        random_seed=random_seed,
+        positive_quantile=quantile,
+    )[0]
+
+
+def _hto_calls(
+    counts: pd.DataFrame,
+    *,
+    random_seed: int,
+    positive_quantile: float,
+) -> tuple[pd.Series, dict[str, int]]:
+    """Return the identities that :func:`hto_demux` gives validated counts, and each HTO's cutoff.
+
+    ``counts`` are raw counts that ``_validated_hto_counts`` has checked.
+    """
+    cluster_labels = _cluster_labels(_clr_normalize(counts), random_seed)
+    positive_calls, cutoffs = _calls_and_cutoffs(
+        counts, cluster_labels, positive_quantile=positive_quantile
     )
-    return _classify_hto_identities(positive_calls)
+    return _classify_hto_identities(positive_calls), cutoffs

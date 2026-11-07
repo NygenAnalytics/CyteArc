@@ -451,6 +451,8 @@ class HtoIdentityArguments(OperationArguments):
     method: dict[str, object] = parameter()
     random_seed: int = parameter()
     invalidate_cache: bool = execution()
+    # The hashtags demultiplexed, in the assay's order; None for all of them.
+    hashtags: list[str] | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)

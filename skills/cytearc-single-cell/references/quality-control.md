@@ -257,13 +257,16 @@ print(summary["hashing"])  # {"hashing": {"hashtags", "negative", "multiplets"},
 margin = ds.artifacts.load_values(hashed["hashing"], value="margin")  # CLR diagnostics per cell
 ```
 
-Settings are those of `qc.hto_demultiplexing` plus `assay`, needed when the store has several HTO
-assays; `positive_quantile` is checked before the run starts. The run filters the singlets by
-default, also when `cells` is a selection or a run. Hashed samples share a capture, so doublets
-stay scored together unless `doublets` names a capture column. Known limitation: one
-demultiplexing fit covers every capture, even with per-capture cell calling, although each
-capture's HTO background differs, and each hashtag's MAD bounds pool its captures; on several
-captures, check the calls and `margin` per capture.
+Settings are those of `qc.hto_demultiplexing` plus `assay`, needed when the store has several HTO assays; `positive_quantile` and `hashtags` are checked before the run starts. The run filters the singlets by default, also when `cells` is a selection or a run. Hashed samples share a capture, so doublets stay scored together unless `doublets` names a capture column. Known limitation: one demultiplexing fit covers every capture, even with per-capture cell calling, although each capture's HTO background differs, and each hashtag's MAD bounds pool its captures; on several captures, check the calls and `margin` per capture.
+
+When pools of cells used different hashtags, run each pool apart; one fit over every pool is refused, naming the hashtags whose background clusters lie in a pool that did not use them:
+
+```python
+for pool, hashtags in {"pool_a": ["HTO1", "HTO2"], "pool_b": ["HTO3", "HTO4"]}.items():
+    ds.pipeline.rna(label=pool, cells=pool, hashing={"hashtags": hashtags})
+```
+
+`cells` names a boolean cell column of the pool. Called directly, `qc.hto_demultiplexing(selection, hashtags=[...])` does the same for one selection; hashtags without a count in the selection are left out, and the artifact's `samples` attribute records the hashtags it demultiplexed, each one's cutoff and those it left out (`withoutCounts`).
 
 ### Pipeline filtering and feeding a custom selection
 
@@ -400,6 +403,7 @@ clean = ds.pipeline.rna(label="baseline_singlets", cells=singlets)  # or the qc_
 | `qc.doublets(heterotypic_fraction=)` | `0.0` | Above 0 forces that share of simulated doublets to pair two clusters; it needs two clusters and biases the score. |
 | `qc.ambient_contamination(max_contamination=, fdr=)` | `1.0`, `0.05` | Keep; they decide which cells express a gene set (Poisson test against pure soup). |
 | `qc.correct_ambient(random_seed=)` | `0` | Keep fixed; change only to check that a result does not depend on the rounding draws. |
+| `qc.hto_demultiplexing(hashtags=)` | `None` (every hashtag) | Name a pool's hashtags, with that pool's cells as the selection, when pools used different hashtags; leave out a hashtag that the experiment did not use. Hashtags without counts in the selection are left out, logged and recorded as `withoutCounts`. |
 | `qc.hto_demultiplexing(positive_quantile=)` | `0.99` (Seurat's `positive.quantile`) | Raise (for example `0.999`) when doublet calls exceed the multiplet rate the loading predicts and their second tag sits near background; each quantile is its own `hto_identity` artifact. A singlet takes its one positive tag; `max_id`, `second_id` and `margin` hold the CLR diagnostics (`ds.artifacts.load_values(ref, value="margin")`). |
 
 ## Check before moving on
@@ -424,6 +428,7 @@ clean = ds.pipeline.rna(label="baseline_singlets", cells=singlets)  # or the qc_
   by the wrong population. On a raw droplet matrix, call cells or import the filtered matrix.
 - Keeping HTO calls of a tag that a warning says overlaps its background (an unused tag or a
   failed stain): its positive calls follow the background tail.
+- Demultiplexing pools that used different hashtags in one call, or keeping a hashtag that the experiment did not use: the refusal names the hashtags whose background clusters hold only zeros while ambient tags reach the other cells. Pass each pool's cells and hashtags, and leave unused hashtags out, rather than raising `positive_quantile`, which cannot move a cutoff of 0.
 - Applying `expm1` to `resolved_bounds` (already raw scale), or taking integer values as raw UMIs
   (SCT-corrected counts are integers too). On corrected or pre-filtered counts, filter gently.
 - Pooling samples with different depths under one bound; use `sample_column`.
