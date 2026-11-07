@@ -272,6 +272,7 @@
   "tests/test_pipeline_ledger.py": 0.5,
   "tests/test_pipeline_observability.py": 94.1,
   "tests/test_pipeline_perturbation.py": 122.5,
+  "tests/test_pipeline_plan.py": 107.5,
   "tests/test_pipeline_recipes.py": 150.1,
   "tests/test_pipeline_run_foundation.py": 6.8,
   "tests/test_pipeline_run_record_paths.py": 61.0,

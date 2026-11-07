@@ -49,6 +49,7 @@ from cytearc.perturbation.labels import guide_targets
 from cytearc.storage.artifacts import artifact_group
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.perturbation_helpers import record_cell_reads
+from tests.test_pipeline_plan import assert_plan_reuses_run, read_only_plan
 from tests.storage_helpers import (
     insert_nullable_cell_column,
     rechunk_column,
@@ -882,6 +883,37 @@ def test_the_effect_tables_take_their_rows_from_the_recorded_by(runs, tmp_path) 
 
 
 # Reuse -----------------------------------------------------------------------
+
+
+def test_the_plans_of_the_committed_screen_calls_reuse_their_runs(runs) -> None:
+    for settings, run in ((HEAD, runs.default), (FULL, runs.full)):
+        plan = read_only_plan(
+            runs.location,
+            "perturbation",
+            default_assay="RNA",
+            labels=LABELS,
+            **settings,
+        )
+        assert_plan_reuses_run(plan, run)
+
+
+def test_a_mixscape_change_computes_only_the_stages_that_read_its_classes(runs) -> None:
+    plan = runs.store.pipeline.plan(
+        "perturbation", labels=LABELS, **{**FULL, "mixscape": {"min_cells": 6}}
+    )
+
+    assert plan.computed == ("mixscape", "profiles", "perturbation_clusters")
+    mixscape = plan["mixscape"]
+    assert (mixscape.reason, mixscape.changed_parameters) == (
+        "changed",
+        ("min_cells",),
+    )
+    # The profiles average the cells that Mixscape calls knocked out.
+    assert plan["profiles"].upstream == ("mixscape",)
+    assert plan["perturbation_clusters"].upstream == ("profiles",)
+    assert plan["associations"].outputs == (
+        ("associations", runs.full["associations"]),
+    )
 
 
 def test_the_stage_methods_return_the_runs_artifacts(runs) -> None:

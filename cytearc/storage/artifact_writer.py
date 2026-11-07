@@ -17,6 +17,7 @@ from .artifacts import (
     artifact_path,
     canonical_bytes,
     make_provenance,
+    nearest_stored_artifacts,
     new_artifact_id,
     reusable_artifact_groups,
     serialize_artifact_value,
@@ -55,6 +56,153 @@ def artifact_plan_scope() -> Any:
         yield receipts
     finally:
         _PLAN_COLLECTORS.reset(token)
+
+
+type ComputationReason = Literal[
+    "absent",
+    "changed",
+    "superseded",
+    "incomplete",
+    "missing_diagnostics",
+    "invalid",
+    "invalidate_cache",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactComputation:
+    """An artifact that planning would compute rather than reuse, and why.
+
+    Attributes:
+        operation: The operation that would compute it.
+        kind: Its artifact kind.
+        reason: Why no stored artifact serves it: ``"absent"``, the store holds
+            no artifact of the operation; ``"changed"``, the closest one of the
+            operation was computed with other parameters or inputs;
+            ``"superseded"``, one of this identity is at an earlier revision;
+            ``"incomplete"``, one of this identity was interrupted;
+            ``"missing_diagnostics"``, one of this identity lacks the
+            diagnostics that its operation saves; ``"invalid"``, one of this
+            identity fails its payload checks; ``"invalidate_cache"``, the
+            call asked to compute it again.
+        existing: The stored artifact that the reason concerns, or None.
+        revision_changes: For ``"superseded"``, what each newer revision changed.
+        changed_parameters: For ``"changed"``, the parameters that differ.
+        changed_inputs: For ``"changed"``, the inputs that differ.
+    """
+
+    operation: str
+    kind: str
+    reason: ComputationReason
+    existing: ArtifactRef | None = None
+    revision_changes: tuple[str, ...] = ()
+    changed_parameters: tuple[str, ...] = ()
+    changed_inputs: tuple[str, ...] = ()
+
+    def describe(self) -> str:
+        """Say in one sentence why the artifact would be computed."""
+        operation = self.operation
+        if self.reason == "absent":
+            return f"The store holds no {operation} artifact"
+        if self.reason == "changed":
+            differences = []
+            if self.changed_parameters:
+                differences.append("parameters " + ", ".join(self.changed_parameters))
+            if self.changed_inputs:
+                differences.append("inputs " + ", ".join(self.changed_inputs))
+            return f"The closest {operation} artifact differs in " + " and ".join(
+                differences
+            )
+        if self.reason == "superseded":
+            changes = "; ".join(self.revision_changes)
+            return f"A revision supersedes the stored {operation} artifact" + (
+                f": {changes}" if changes else ""
+            )
+        if self.reason == "incomplete":
+            return f"The stored {operation} artifact is incomplete"
+        if self.reason == "missing_diagnostics":
+            return (
+                f"The stored {operation} artifact lacks the diagnostics that "
+                f"{operation} saves"
+            )
+        if self.reason == "invalid":
+            return f"The stored {operation} artifact fails its payload checks"
+        return f"The call asks to compute the {operation} artifact again"
+
+
+class ArtifactComputationRequired(BaseException):
+    """Raised by :func:`plan_artifact` in a forecast instead of planning a new artifact.
+
+    It derives from ``BaseException``, as a shutdown request does, so that an
+    operation's handlers of ``Exception`` let it pass.
+    """
+
+    def __init__(self, computation: ArtifactComputation) -> None:
+        super().__init__(computation.describe())
+        self.computation = computation
+
+
+_FORECAST: ContextVar[bool] = ContextVar("cytearc_artifact_forecast", default=False)
+
+
+@contextmanager
+def artifact_forecast_scope() -> Iterator[None]:
+    """Make planning raise ``ArtifactComputationRequired`` rather than plan a new artifact.
+
+    Inside the scope, :func:`plan_artifact` reuses as it always does and
+    raises before it plans an artifact to compute, so an operation stops
+    before it computes or writes anything and its caller learns why.
+    """
+    token = _FORECAST.set(True)
+    try:
+        yield
+    finally:
+        _FORECAST.reset(token)
+
+
+def _computation(
+    root: zarr.Group,
+    *,
+    scope: ArtifactScope,
+    assay: str | None,
+    kind: str,
+    provenance: dict[str, Any],
+    rejected: list[tuple[ArtifactRef, ComputationReason]],
+    invalidate_cache: bool,
+) -> ArtifactComputation:
+    """Explain why planning found no stored artifact to reuse."""
+    operation = str(provenance["operation"])
+    if invalidate_cache:
+        return ArtifactComputation(operation, kind, "invalidate_cache")
+    if rejected:
+        # The candidates are newest first.
+        existing, reason = rejected[0]
+        return ArtifactComputation(operation, kind, reason, existing)
+    found = nearest_stored_artifacts(
+        root, scope=scope, assay=assay, kind=kind, provenance=provenance
+    )
+    if found.superseded is not None:
+        return ArtifactComputation(
+            operation,
+            kind,
+            "superseded",
+            found.superseded.ref,
+            revision_changes=tuple(
+                entry.change for entry in found.superseded.superseded_by
+            ),
+        )
+    if found.incomplete is not None:
+        return ArtifactComputation(operation, kind, "incomplete", found.incomplete)
+    if found.nearest is not None:
+        return ArtifactComputation(
+            operation,
+            kind,
+            "changed",
+            found.nearest.ref,
+            changed_parameters=found.changed_parameters,
+            changed_inputs=found.changed_inputs,
+        )
+    return ArtifactComputation(operation, kind, "absent")
 
 
 def _record_plan(planned: "PlannedArtifact") -> "PlannedArtifact":
@@ -221,7 +369,9 @@ def plan_artifact(
     """Reuse a complete artifact with this exact provenance or plan a new one.
 
     An artifact is reused only with the diagnostics that its operation
-    declares, so an artifact saved without them is computed anew.
+    declares, so an artifact saved without them is computed anew. Inside
+    :func:`artifact_forecast_scope`, a new artifact is never planned: the call
+    raises ``ArtifactComputationRequired`` with the reason instead.
     """
     diagnostics = declared_diagnostics(operation)
     provenance = make_provenance(
@@ -243,6 +393,7 @@ def plan_artifact(
     if not isinstance(stored_execution_options, dict):
         raise TypeError("execution_options must serialize to a mapping")
     canonical_bytes(stored_execution_options)
+    forecast = _FORECAST.get()
     candidates = reusable_artifact_groups(
         root,
         scope=scope,
@@ -250,26 +401,45 @@ def plan_artifact(
         kind=kind,
         provenance=provenance,
         invalidate_cache=invalidate_cache,
+        log_recomputation=not forecast,
     )
     requirements = _array_requirements(required_arrays)
     attribute_requirements = _attribute_requirements(required_attributes)
     reused = None
+    # Why each candidate was passed over, which a forecast reports.
+    rejected: list[tuple[ArtifactRef, ComputationReason]] = []
     for candidate, group in candidates:
         if not all(_requirements_met(group, requirements)):
+            rejected.append((candidate, "invalid"))
             continue
         if any(
             not requirement.matches(group) for requirement in attribute_requirements
         ):
+            rejected.append((candidate, "invalid"))
             continue
         if diagnostics and not _holds_diagnostics(group, operation):
+            rejected.append((candidate, "missing_diagnostics"))
             continue
         if reuse_validator is not None and not reuse_validator(
             candidate,
             group,
         ):
+            rejected.append((candidate, "invalid"))
             continue
         reused = candidate
         break
+    if reused is None and forecast:
+        raise ArtifactComputationRequired(
+            _computation(
+                root,
+                scope=scope,
+                assay=assay,
+                kind=kind,
+                provenance=provenance,
+                rejected=rejected,
+                invalidate_cache=invalidate_cache,
+            )
+        )
     if reused is not None:
         return _record_plan(
             PlannedArtifact(

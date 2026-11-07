@@ -42,6 +42,8 @@ RECIPE = "multimodal"
 _GRAPH = "integrated_graph"
 # WNN weighs each modality's neighbors, and SNN shares each one's graph edges.
 _SOURCE_OUTPUT = {"wnn": "neighbors", "snn": "connectivity_map"}
+# The key of the run state's extras that holds each modality's frozen features.
+_MODALITIES = "modalities"
 
 
 def _coordinates(store: Any, neighbors: ArtifactRef) -> ArtifactRef:
@@ -185,10 +187,27 @@ def _input_stage(
         first = runs[0].assay
         state.artifacts["feature_snapshot"] = modalities[first]["feature_snapshot"]
         state.artifacts["feature_universe"] = modalities[first]["feature_universe"]
-        state.extras["modalities"] = modalities
+        state.extras[_MODALITIES] = modalities
         return tuple(outputs)
 
-    return PlannedStage("input_snapshot", action)
+    return PlannedStage(
+        "input_snapshot",
+        action,
+        outputs=(
+            "input_cell_selection",
+            "analysis_cell_selection",
+            "cell_snapshot",
+            *(("column_snapshot",) if snapshot_columns else ()),
+            *(
+                f"{key}_{run.assay}"
+                for run in runs
+                for key in ("feature_snapshot", "feature_universe")
+            ),
+            "feature_snapshot",
+            "feature_universe",
+            _MODALITIES,
+        ),
+    )
 
 
 def _integration_stage(
@@ -202,7 +221,8 @@ def _integration_stage(
         ref = state.store._integration_modalities(sources, method=method, **settings)
         return ((_GRAPH, ref),)
 
-    return PlannedStage("integration", action)
+    # The sources are outputs of the completed runs, not of this run's stages.
+    return PlannedStage("integration", action, outputs=(_GRAPH,))
 
 
 def _markers_stage(enabled: bool, assays: Sequence[str]) -> PlannedStage:
@@ -216,7 +236,7 @@ def _markers_stage(enabled: bool, assays: Sequence[str]) -> PlannedStage:
         values = cluster_label_values(store.zw, clusters)
         outputs = []
         for assay in assays:
-            modality = state.extras["modalities"][assay]
+            modality = state.extras[_MODALITIES][assay]
             ref = store._run_marker_search_artifact(
                 assay=store._get_assay(assay),
                 cell_selection=state.artifacts["analysis_cell_selection"],
@@ -229,7 +249,12 @@ def _markers_stage(enabled: bool, assays: Sequence[str]) -> PlannedStage:
             outputs.append((f"markers_{assay}", ref))
         return tuple(outputs)
 
-    return PlannedStage("markers", action)
+    return PlannedStage(
+        "markers",
+        action,
+        inputs=("clusters", "analysis_cell_selection", _MODALITIES),
+        outputs=tuple(f"markers_{assay}" for assay in assays),
+    )
 
 
 def resolve_multimodal(

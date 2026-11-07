@@ -19,7 +19,7 @@ from ...storage.types import as_zarr_array
 from ...utils.logging import logger
 from ..pipeline_run import PipelineRun
 from .cluster_selection import cluster_label_values, run_cluster_selection
-from .executor import PlannedStage, RunState
+from .executor import COORDINATES, FEATURE_NAMES, PlannedStage, RunState
 from .filtering import filter_pipeline_selection
 
 type Outputs = tuple[tuple[str, ArtifactRef], ...]
@@ -225,7 +225,18 @@ def input_snapshot_stage(
             )
         return tuple(outputs)
 
-    return PlannedStage("input_snapshot", action)
+    return PlannedStage(
+        "input_snapshot",
+        action,
+        outputs=(
+            "input_cell_selection",
+            "cell_snapshot",
+            "feature_snapshot",
+            "feature_universe",
+            *extras,
+            FEATURE_NAMES,
+        ),
+    )
 
 
 def filtering_stage(
@@ -245,8 +256,11 @@ def filtering_stage(
     def skip(state: RunState) -> None:
         state.artifacts["analysis_cell_selection"] = state.artifacts[input_key]
 
+    outputs = ("analysis_cell_selection",)
     if not config["enabled"]:
-        return PlannedStage("filtering", None, on_skip=skip)
+        return PlannedStage(
+            "filtering", None, on_skip=skip, inputs=(input_key,), outputs=outputs
+        )
 
     def action(state: RunState) -> Outputs:
         source = state.artifacts[input_key]
@@ -264,7 +278,12 @@ def filtering_stage(
             return ()
         return (("analysis_cell_selection", ref),)
 
-    return PlannedStage("filtering", action)
+    return PlannedStage(
+        "filtering",
+        action,
+        inputs=(input_key, "cell_snapshot", *(("hashing",) if hashtags else ())),
+        outputs=outputs,
+    )
 
 
 def hvg_stage(settings: Mapping[str, Any]) -> PlannedStage:
@@ -281,7 +300,12 @@ def hvg_stage(settings: Mapping[str, Any]) -> PlannedStage:
         )
         return (("highly_variable_features", ref),)
 
-    return PlannedStage("highly_variable_features", action)
+    return PlannedStage(
+        "highly_variable_features",
+        action,
+        inputs=("analysis_cell_selection", "feature_snapshot", FEATURE_NAMES),
+        outputs=("highly_variable_features",),
+    )
 
 
 def normalization_stage(features_key: str, settings: Mapping[str, Any]) -> PlannedStage:
@@ -294,7 +318,12 @@ def normalization_stage(features_key: str, settings: Mapping[str, Any]) -> Plann
         state.coordinates = ref
         return (("normalized", ref),)
 
-    return PlannedStage("normalization", action)
+    return PlannedStage(
+        "normalization",
+        action,
+        inputs=("analysis_cell_selection", features_key),
+        outputs=("normalized", COORDINATES),
+    )
 
 
 def pca_stage(dims: int, settings: Mapping[str, Any]) -> PlannedStage:
@@ -311,7 +340,9 @@ def pca_stage(dims: int, settings: Mapping[str, Any]) -> PlannedStage:
         state.coordinates = ref
         return (("pca", ref),)
 
-    return PlannedStage("pca", action)
+    return PlannedStage(
+        "pca", action, inputs=("normalized",), outputs=("pca", COORDINATES)
+    )
 
 
 def harmony_stage(
@@ -332,7 +363,12 @@ def harmony_stage(
         state.coordinates = ref
         return (("harmony", ref),)
 
-    return PlannedStage("harmony", action)
+    return PlannedStage(
+        "harmony",
+        action,
+        inputs=(COORDINATES, "harmony_snapshot"),
+        outputs=("harmony", COORDINATES),
+    )
 
 
 def graph_stages(
@@ -361,9 +397,21 @@ def graph_stages(
         return (("connectivity_map", ref),)
 
     return (
-        PlannedStage("ann_index", ann_action),
-        PlannedStage("neighbors", neighbors_action),
-        PlannedStage("connectivity", connectivity_action),
+        PlannedStage(
+            "ann_index", ann_action, inputs=(COORDINATES,), outputs=("ann_index",)
+        ),
+        PlannedStage(
+            "neighbors",
+            neighbors_action,
+            inputs=("ann_index", COORDINATES),
+            outputs=("neighbors",),
+        ),
+        PlannedStage(
+            "connectivity",
+            connectivity_action,
+            inputs=("neighbors",),
+            outputs=("connectivity_map",),
+        ),
     )
 
 
@@ -379,7 +427,12 @@ def initialization_stage(
         ref = state.store._embeddings_initialization(state.coordinates, **settings)
         return (("embedding_initialization", ref),)
 
-    return PlannedStage("embedding_initialization", action)
+    return PlannedStage(
+        "embedding_initialization",
+        action,
+        inputs=(COORDINATES,),
+        outputs=("embedding_initialization",),
+    )
 
 
 def umap_stage(
@@ -399,7 +452,12 @@ def umap_stage(
         )
         return (("umap", ref),)
 
-    return PlannedStage("umap", action)
+    return PlannedStage(
+        "umap",
+        action,
+        inputs=(graph_key, "embedding_initialization"),
+        outputs=("umap",),
+    )
 
 
 def leiden_stages(
@@ -424,7 +482,9 @@ def leiden_stages(
             )
             return ((output_key, ref),)
 
-        stages.append(PlannedStage(output_key, action))
+        stages.append(
+            PlannedStage(output_key, action, inputs=(graph_key,), outputs=(output_key,))
+        )
     return tuple(stages)
 
 
@@ -441,7 +501,7 @@ def paris_stage(
         ref = state.store._run_paris_artifact(state.artifacts[graph_key], **settings)
         return (("paris", ref),)
 
-    return PlannedStage("paris", action)
+    return PlannedStage("paris", action, inputs=(graph_key,), outputs=("paris",))
 
 
 def cluster_selection_stage(
@@ -459,7 +519,13 @@ def cluster_selection_stage(
         def alias(state: RunState) -> None:
             state.artifacts["clusters"] = state.artifacts[f"leiden_{selected}"]
 
-        return PlannedStage("cluster_selection", None, on_skip=alias)
+        return PlannedStage(
+            "cluster_selection",
+            None,
+            on_skip=alias,
+            inputs=(f"leiden_{selected}",),
+            outputs=("clusters",),
+        )
     if not partitions:
         return PlannedStage("cluster_selection", None)
 
@@ -480,7 +546,17 @@ def cluster_selection_stage(
         logger.info(f"Selected clustering candidate: {selected_key}")
         return (("cluster_selection", decision),)
 
-    return PlannedStage("cluster_selection", action)
+    return PlannedStage(
+        "cluster_selection",
+        action,
+        inputs=(
+            COORDINATES,
+            "connectivity_map",
+            "analysis_cell_selection",
+            *(f"leiden_{key}" for key, _resolution in partitions),
+        ),
+        outputs=("cluster_selection", "clusters"),
+    )
 
 
 def membership_strength_stage(
@@ -497,7 +573,12 @@ def membership_strength_stage(
         )
         return (("membership_strength", ref),)
 
-    return PlannedStage("membership_strength", action)
+    return PlannedStage(
+        "membership_strength",
+        action,
+        inputs=("clusters", graph_key),
+        outputs=("membership_strength",),
+    )
 
 
 def tsne_stage(
@@ -518,7 +599,12 @@ def tsne_stage(
         )
         return (("tsne", ref),)
 
-    return PlannedStage("tsne", action)
+    return PlannedStage(
+        "tsne",
+        action,
+        inputs=(graph_key, "embedding_initialization"),
+        outputs=("tsne",),
+    )
 
 
 def markers_stage(enabled: bool) -> PlannedStage:
@@ -540,7 +626,18 @@ def markers_stage(enabled: bool) -> PlannedStage:
         )
         return (("markers", ref),)
 
-    return PlannedStage("markers", action)
+    return PlannedStage(
+        "markers",
+        action,
+        inputs=(
+            "clusters",
+            "analysis_cell_selection",
+            "feature_universe",
+            "feature_snapshot",
+            FEATURE_NAMES,
+        ),
+        outputs=("markers",),
+    )
 
 
 def clustering_tail(

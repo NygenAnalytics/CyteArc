@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ....assay import ATACassay
-from ..executor import PlannedStage, RecipePlan, RunState
+from ..executor import COORDINATES, PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
 from ..filtering import default_filter_columns
 from ..settings import (
@@ -59,7 +59,12 @@ def _prevalent_peaks_stage(assay: str, settings: Mapping[str, Any]) -> PlannedSt
         )
         return (("prevalent_peaks", ref),)
 
-    return PlannedStage("prevalent_peaks", action)
+    return PlannedStage(
+        "prevalent_peaks",
+        action,
+        inputs=("analysis_cell_selection",),
+        outputs=("prevalent_peaks",),
+    )
 
 
 def _lsi_stage(settings: Mapping[str, Any]) -> PlannedStage:
@@ -68,7 +73,9 @@ def _lsi_stage(settings: Mapping[str, Any]) -> PlannedStage:
         state.coordinates = ref
         return (("lsi", ref),)
 
-    return PlannedStage("lsi", action)
+    return PlannedStage(
+        "lsi", action, inputs=("normalized",), outputs=("lsi", COORDINATES)
+    )
 
 
 def resolve_atac(

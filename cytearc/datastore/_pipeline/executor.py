@@ -35,6 +35,11 @@ from .ledger import RunLedger, StageSummarizer, end_pipeline_run, interruption_r
 
 type StageAction = Callable[["RunState"], Sequence[tuple[str, ArtifactRef]]]
 
+# The names under which a stage declares the run state's coordinates and
+# frozen feature names among its inputs and outputs, beside artifact keys.
+COORDINATES = "coordinates"
+FEATURE_NAMES = "feature_names"
+
 
 @dataclass(slots=True)
 class RunState:
@@ -60,11 +65,20 @@ class PlannedStage:
 
     A stage without an action is recorded as skipped; its ``on_skip`` hook
     lets later stages see the inputs they would have read from it.
+
+    ``inputs`` names what the action, or the hook of a skipped stage, reads
+    from the run state, and ``outputs`` what it adds there: artifact keys,
+    :data:`COORDINATES` and :data:`FEATURE_NAMES` for those values of the
+    state, and the keys of its extras. A plan follows them to find the stages
+    that wait on a stage that would be computed, and refuses a stage that
+    reads or adds an artifact key it does not declare.
     """
 
     name: str
     action: StageAction | None
     on_skip: Callable[[RunState], None] | None = None
+    inputs: tuple[str, ...] = ()
+    outputs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

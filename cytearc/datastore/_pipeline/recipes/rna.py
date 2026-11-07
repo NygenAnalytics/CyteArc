@@ -15,7 +15,7 @@ from ....storage.selections import (
 )
 from ..._operations.cell_samples import require_cell_column
 from ..cluster_selection import cluster_label_values
-from ..executor import PlannedStage, RecipePlan, RunState
+from ..executor import FEATURE_NAMES, PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
 from ..filtering import default_filter_columns, hashtag_labels, snapshot_column_values
 from ..settings import (
@@ -159,7 +159,19 @@ def _cell_calling_stage(
         )
         return (("called_cell_selection", merged),)
 
-    return PlannedStage("cell_calling", action)
+    if capture_column is None:
+        return PlannedStage(
+            "cell_calling",
+            action,
+            inputs=("input_cell_selection",),
+            outputs=("cell_calling", "called_cell_selection"),
+        )
+    return PlannedStage(
+        "cell_calling",
+        action,
+        inputs=("input_cell_selection", "capture_snapshot"),
+        outputs=("called_cell_selection",),
+    )
 
 
 def _hashing_stage(
@@ -191,7 +203,12 @@ def _hashing_stage(
         )
         return (("hashing", hashing), ("hashed_cell_selection", kept))
 
-    return PlannedStage("hashing", action)
+    return PlannedStage(
+        "hashing",
+        action,
+        inputs=(input_key,),
+        outputs=("hashing", "hashed_cell_selection"),
+    )
 
 
 def _resolve_hto_assay(store: Any, settings: dict[str, Any]) -> str:
@@ -292,7 +309,12 @@ def _cell_cycle_stage(enabled: bool, settings: Mapping[str, Any]) -> PlannedStag
         )
         return (("cell_cycle", ref),)
 
-    return PlannedStage("cell_cycle", action)
+    return PlannedStage(
+        "cell_cycle",
+        action,
+        inputs=("analysis_cell_selection", "feature_snapshot", FEATURE_NAMES),
+        outputs=("cell_cycle",),
+    )
 
 
 def _doublet_stage(
@@ -349,7 +371,18 @@ def _doublet_stage(
         )
         return (("doublets", ref),)
 
-    return PlannedStage("doublets", action)
+    return PlannedStage(
+        "doublets",
+        action,
+        inputs=(
+            "analysis_cell_selection",
+            "clusters",
+            "connectivity_map",
+            "feature_snapshot",
+            *(("doublet_sample_snapshot",) if sample_columns else ()),
+        ),
+        outputs=("doublets",),
+    )
 
 
 def resolve_rna(
