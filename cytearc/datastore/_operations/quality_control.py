@@ -1546,23 +1546,34 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             "ids",
             item="the hashtag IDs",
         )
-        samples = read_cell_samples(
-            self,
-            ledger,
-            sample_column,
-            cell_index,
-            reason="Hashtags are demultiplexed within each sample, so every "
-            "selected cell needs one",
+        # The samples' labels identify the artifact, so they are read before
+        # the reuse check; without a column every selected cell is one sample.
+        samples = (
+            None
+            if sample_column is None
+            else read_cell_samples(
+                self,
+                ledger,
+                sample_column,
+                cell_index,
+                reason="Hashtags are demultiplexed within each sample, so every "
+                "selected cell needs one",
+            )
         )
+        sample_names: list[str | None] = [None] if samples is None else samples.names
         chosen_by_sample, recorded_hashtags = checked_sample_hashtags(
             hashtags,
             [str(name) for name in hashtag_ids],
-            samples.names,
+            sample_names,
             sample_column=sample_column,
         )
-        sample_sizes = np.bincount(samples.codes, minlength=len(samples.names))
+        sample_sizes = (
+            np.asarray([n_cells])
+            if samples is None
+            else np.bincount(samples.codes, minlength=len(sample_names))
+        )
         for name, size, chosen in zip(
-            samples.names, sample_sizes, chosen_by_sample, strict=True
+            sample_names, sample_sizes, chosen_by_sample, strict=True
         ):
             if size < len(chosen) + 1:
                 raise ValueError(
@@ -1578,7 +1589,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             invalidate_cache=invalidate_cache,
             hashtags=recorded_hashtags,
             sample_column=sample_column,
-            sample_assignments_fingerprint=samples.assignments,
+            sample_assignments_fingerprint=(
+                None if samples is None else samples.assignments
+            ),
         )
         record = arguments.to_record()
         planned = plan_cell_data_artifact(
@@ -1615,7 +1628,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         matrix_bytes = n_cells * n_htos * np.dtype(np.float64).itemsize
         # Per cell: the cluster label, the identity, and the three diagnostics;
         # several samples copy each one's counts beside the matrix.
-        clustering = (6 if len(samples.names) == 1 else 7) * matrix_bytes + 40 * n_cells
+        clustering = (6 if samples is None else 7) * matrix_bytes + 40 * n_cells
         # The save writes the identities, each a hashtag ID, "Doublet" or
         # "Negative", the two hashtags with the highest CLR values, and the
         # margins between them.
@@ -1652,10 +1665,16 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         margins = np.empty(n_cells, dtype=np.float64)
         entries = []
         for code, (name, chosen) in enumerate(
-            zip(samples.names, chosen_by_sample, strict=True)
+            zip(sample_names, chosen_by_sample, strict=True)
         ):
-            rows = np.flatnonzero(samples.codes == code)
-            sample_counts = counts.iloc[rows].loc[:, chosen]
+            rows = (
+                np.arange(n_cells)
+                if samples is None
+                else np.flatnonzero(samples.codes == code)
+            )
+            sample_counts = counts if samples is None else counts.iloc[rows]
+            if chosen != list(sample_counts.columns):
+                sample_counts = sample_counts.loc[:, chosen]
             where = (
                 "the selected cells"
                 if sample_column is None
