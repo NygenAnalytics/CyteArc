@@ -84,6 +84,7 @@
   "tests/test_clones_phylogeny.py": 0.0,
   "tests/test_clones_recorders.py": 0.1,
   "tests/test_clones_sequences.py": 44.7,
+  "tests/test_cluster_connectivity.py": 4.7,
   "tests/test_cluster_import.py": 0.0,
   "tests/test_cluster_label_snapshots.py": 10.1,
   "tests/test_cluster_selection.py": 0.1,

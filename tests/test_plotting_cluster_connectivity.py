@@ -559,17 +559,6 @@ def test_cluster_connectivity_rejects_unhashable_group_values():
     assert isinstance(raised.value.__cause__, TypeError)
 
 
-def test_category_codes_rejects_values_outside_the_resolved_order():
-    from cytearc.plotting.cluster_connectivity import _category_codes
-
-    groups = np.array(["B", "A", "B"], dtype=object)
-    np.testing.assert_array_equal(_category_codes(groups, ["A", "B"]), [1, 0, 1])
-    with pytest.raises(ValueError) as raised:
-        _category_codes(groups, ["A"])
-    assert raised.value.args == ("Could not map every group value to a category",)
-    assert isinstance(raised.value.__cause__, KeyError)
-
-
 @pytest.mark.parametrize(
     ("position", "error", "message"),
     [

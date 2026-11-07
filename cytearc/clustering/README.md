@@ -19,6 +19,7 @@ that implementation. The Paris hierarchy is described in the methods documentati
 | `_leiden_aggregate.py` | Aggregation by the refined partition, the connected-component fallback and the final label numbering |
 | `_paris_core.py`, `_paris_modularity.py`, `paris.py`, `paris_multiscale.py` | The Paris hierarchy, its fixed and adaptive cuts, and their diagnostics |
 | `cluster_tree.py` | The cluster tree drawn by the plotting functions |
+| `connectivity.py` | The graph weight between each pair of clusters, which `DataStore.clusters.connectivity` returns and `plots.cluster_connectivity` draws |
 
 ## Method
 

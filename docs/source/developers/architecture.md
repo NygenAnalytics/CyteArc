@@ -108,7 +108,8 @@ They must not import those packages at module load time.
   It does not own stored KNN graph arrays; persistence lives in `datastore` and `storage`.
 - `embeddings/` owns PCA, LSI, Harmony2 batch correction, UMAP, SG-tSNE, embedding initialization,
   and the narrow storage adapter for imported coordinate artifacts.
-- `clustering/` owns Leiden clustering and PARIS hierarchy operations.
+- `clustering/` owns Leiden clustering, PARIS hierarchy operations, and the graph weight between clusters.
+  `connectivity.py` sums a cell graph's weight between each pair of clusters from each cell's cluster code, for `DataStore.clusters.connectivity`, which returns the tables, and `plots.cluster_connectivity`, which draws them on a layout.
   `leiden.py` holds the public `leiden_membership` and dispatches between the native `"cytearc"`
   backend and the `"igraph"` and `"leidenalg"` backends, whose GPL packages it imports only when
   one of them is requested (CyteArc does not install them). The native backend lives in the private
