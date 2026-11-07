@@ -193,11 +193,15 @@ def _resolve_grouping(
     group_by: str | tuple[str, ...] | None,
     groups: ArtifactRef | None,
     cell_key: str,
+    cell_selection: ArtifactRef | None = None,
 ) -> tuple[tuple[str, ...], np.ndarray, list[np.ndarray], np.ndarray | None]:
     """Resolve either explicit live metadata or one immutable label artifact.
 
     Labels that a linked missing mask flags are None. The last element marks
-    those rows, or is None when no grouping source has a mask.
+    those rows, or is None when no grouping source has a mask. An artifact's
+    labels are read for the cells of ``cell_selection``, which the artifact's
+    own cell selection must contain, or for the artifact's own cells without
+    one.
     """
     if (group_by is None) == (groups is None):
         raise ValueError("Provide exactly one of group_by or groups")
@@ -234,6 +238,7 @@ def _resolve_grouping(
     resolved = resolve_cell_aligned_artifact(
         store.zw,
         groups,
+        cell_selection=cell_selection,
         value_name=cell_value_spec(groups.kind).name,
         expected_kind=groups.kind,
     )

@@ -252,8 +252,13 @@ def test_plot_data_grouping_and_layout_validation(monkeypatch) -> None:
         groups=groups,
         cell_key="I",
     )
+    # Without a cell selection, the artifact's own cells are read.
     assert resolver_calls == [
-        {"value_name": "values", "expected_kind": "cluster_labels"}
+        {
+            "cell_selection": None,
+            "value_name": "values",
+            "expected_kind": "cluster_labels",
+        }
     ]
     assert keys == ("groups",)
     np.testing.assert_array_equal(cell_idx, [0, 2, 5])
