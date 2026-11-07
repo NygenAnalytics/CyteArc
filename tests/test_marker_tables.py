@@ -51,7 +51,13 @@ from cytearc.storage.artifacts import artifact_path
 from tests.storage_helpers import write_count_store
 
 EVERY_ROW = {"min_frac_exp": None, "min_auc": None, "max_p_adj": None}
-TABLE_COLUMNS = ["group_id", "feature_name", "feature_index", *MARKER_STAT_COLUMNS]
+TABLE_COLUMNS = [
+    "group_id",
+    "feature_name",
+    "feature_id",
+    "feature_index",
+    *MARKER_STAT_COLUMNS,
+]
 
 
 def _store(directory, counts: np.ndarray, labels: np.ndarray, *, assays=("RNA",)):
@@ -535,6 +541,61 @@ def test_skipped_groups_have_no_rows_and_an_empty_export_column(
     assert exported["b"].notna().all()
 
 
+def _shared_name_markers(directory):
+    """Two groups of ten cells, each marked by its own feature named MATR3.
+
+    Features 1 and 3 share the name, as ENSG00000280987 and ENSG00000015479
+    do in the 10x Genomics human reference; feature 1 marks group a and
+    feature 3 group b.
+    """
+    rng = np.random.default_rng(198)
+    labels = np.repeat(np.array(["a", "b"], dtype=object), 10)
+    counts = rng.integers(1, 6, size=(len(labels), 5)).astype(np.float64)
+    counts[labels == "a", 1] += rng.choice(np.arange(30, 60), 10, replace=False)
+    counts[labels == "b", 3] += rng.choice(np.arange(30, 60), 10, replace=False)
+    store, clusters = _store(directory, _float32_counts(counts), labels)
+    names = np.array(["CD3E", "MATR3", "LYZ", "MATR3", "NKG7"], dtype=object)
+    store.RNA.feats.insert("names", names, overwrite=True)
+    marker = store.markers.search(clusters, features=store.features.universe())
+    return store, marker, names
+
+
+def test_marker_tables_give_each_row_the_id_of_its_feature(tmp_path) -> None:
+    store, marker, names = _shared_name_markers(tmp_path)
+    ids = np.asarray(store.RNA.feats.fetch_all("ids")).astype(str)
+
+    table = store.markers.load(marker, **EVERY_ROW)
+
+    assert table.columns.tolist() == TABLE_COLUMNS
+    assert table["feature_id"].tolist() == ids[table["feature_index"]].tolist()
+    assert table["feature_name"].tolist() == names[table["feature_index"]].tolist()
+    # Each group leads with its own MATR3, which only the ID tells apart.
+    leaders = table.groupby("group_id", sort=False).head(1)
+    assert leaders["feature_name"].tolist() == ["MATR3", "MATR3"]
+    assert leaders["feature_id"].tolist() == [ids[1], ids[3]]
+    for group in ("a", "b"):
+        rows = table[(table["group_id"] == group) & (table["feature_name"] == "MATR3")]
+        assert sorted(rows["feature_id"]) == [ids[1], ids[3]]
+    # A filtered table of one group keeps each row's ID.
+    group_b = store.markers.load(marker, group_id="b")
+    assert group_b["feature_id"].tolist() == ids[group_b["feature_index"]].tolist()
+    assert group_b["feature_id"].iloc[0] == ids[3]
+
+
+def test_marker_tables_refuse_feature_ids_that_do_not_align(tmp_path) -> None:
+    store, marker, _ = _shared_name_markers(tmp_path)
+    slot = store.zw[artifact_path(marker)]
+    ids = np.asarray(slot["feature_ids"][:])
+    del slot["feature_ids"]
+    slot.create_array("feature_ids", data=ids[:-1])
+
+    with pytest.raises(
+        ValueError,
+        match="^Marker artifact feature IDs do not align with its feature names$",
+    ):
+        store.markers.load(marker, **EVERY_ROW)
+
+
 def test_marker_search_names_the_groups_when_none_can_be_tested(tmp_path) -> None:
     labels = np.array(["solo", "pair", "pair"], dtype=object)
     store, clusters = _store(tmp_path, _float32_counts(np.ones((3, 2))), labels)
@@ -951,9 +1012,12 @@ def test_revision_1_marker_tables_load_under_their_policy(
     stored = {name: np.asarray(slot[name]["stats"][:]) for name in "abc"}
 
     read_only = DataStore(store.zarr_loc, zarr_mode="r", nthreads=1)
+    ids = np.asarray(store.RNA.feats.fetch_all("ids")).astype(str)
     for reopened, name in ((store, "writable"), (read_only, "read_only")):
         full = reopened.markers.load(marker, **EVERY_ROW)
         assert full.columns.tolist() == TABLE_COLUMNS
+        # The table froze each feature's ID, which revision 1 stored too.
+        assert full["feature_id"].tolist() == ids[full["feature_index"]].tolist()
         assert list(dict.fromkeys(full["group_id"])) == ["a", "b", "c"]
         for group, rows in full.groupby("group_id", sort=False):
             # The statistics come back as revision 1 stored them.
