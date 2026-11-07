@@ -52,7 +52,12 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import coo_matrix
 
-from ..utils.count_values import CountValueRange, dense_count_ranges
+from ..utils.arrays import cumulative_nnz, max_window_nnz
+from ..utils.count_values import (
+    CountValueRange,
+    dense_count_ranges,
+    dense_row_nonzeros,
+)
 from ..utils.warnings import warn
 from ..variants.counts import ALLELE_ROLES, Contig, EntryBatch, SiteTable
 from ._assay_names import auto_name_feat_table
@@ -281,6 +286,9 @@ class TapestriReader(CrReader):
 
     def __init__(self, h5_fn: str) -> None:
         self.path = os.fspath(h5_fn)
+        # The cumulative nonzero reads of the cells, which plan an import's
+        # batches.
+        self._cumulativeRowNnz: np.ndarray | None = None
         self.h5obj: h5py.File = h5py.File(self.path, mode="r")
         try:
             self._load_layout()
@@ -421,17 +429,38 @@ class TapestriReader(CrReader):
     ) -> list[CountValueRange]:
         """Return the range of the reads of each group of features.
 
+        The scan also counts each cell's nonzero reads, which
+        :meth:`max_window_nnz` plans from.
+
         Raises:
             MemoryError: If one cell's reads do not fit in ``maxBytes``.
             ValueError: If a value is NaN or infinite.
         """
-        return dense_count_ranges(
+        row_nonzeros = np.empty(self.nCells, dtype=np.int64)
+        value_ranges = dense_count_ranges(
             self._block,
             self.nCells,
             self.nFeatures,
             maxBytes=maxBytes,
             groups=featureGroups,
+            rowNonzeros=row_nonzeros,
         )
+        self._cumulativeRowNnz = cumulative_nnz(row_nonzeros)
+        return value_ranges
+
+    def max_window_nnz(self, window_rows: int) -> int:
+        """Return the most nonzero reads of any ``window_rows`` consecutive cells.
+
+        :meth:`count_value_ranges` counts each cell's nonzero reads as it
+        scans them; before it runs, the cells are read here to count them.
+        """
+        if window_rows <= 0:
+            raise ValueError("window_rows must be positive")
+        if self._cumulativeRowNnz is None:
+            self._cumulativeRowNnz = cumulative_nnz(
+                dense_row_nonzeros(self._block, self.nCells, self.nFeatures)
+            )
+        return max_window_nnz(self._cumulativeRowNnz, window_rows)
 
     def consume(
         self, batch_size: int, lines_in_mem: int | None = None
@@ -469,7 +498,8 @@ class TapestriReader(CrReader):
 
     def _sparse_import_resident_bytes(self) -> int:
         """The cells' samples, barcodes and IDs, which the reader holds while
-        it is open."""
+        it is open, and their cumulative nonzero reads, counted before they
+        are read so that an import can plan before it scans."""
         return int(
             sum(
                 sum(map(sys.getsizeof, values.tolist())) + 8 * len(values)
@@ -479,6 +509,7 @@ class TapestriReader(CrReader):
                     self._cells.ids,
                 )
             )
+            + (self.nCells + 1) * np.dtype(np.int64).itemsize
         )
 
     def get_cell_columns(self) -> Iterator[tuple[str, np.ndarray]]:

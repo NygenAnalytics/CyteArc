@@ -7,11 +7,12 @@ import h5py
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
 
-from ..utils.arrays import assay_feature_ranges, max_window_nnz
+from ..utils.arrays import assay_feature_ranges, cumulative_nnz, max_window_nnz
 from ..utils.count_values import (
     CountValueRange,
     compressed_count_ranges,
     dense_count_ranges,
+    dense_row_nonzeros,
 )
 from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError, refusal_words
@@ -194,6 +195,9 @@ class H5adReader:
             self.sourceMatrixDtype: Any = self._get_matrix_dtype()
             self._convertedCsr: SparseRowStore | None = None
             self._indptrCache: np.ndarray | None = None
+            # The cumulative nonzero values of a dense matrix's rows, which
+            # plan its sparse batches as CSR row pointers do.
+            self._cumulativeRowNnz: np.ndarray | None = None
             matrix_shape = self._matrix_shape()
             self.nCells, self.nFeatures = (
                 self._get_n(self.cellAttrsKey, matrix_shape[0]),
@@ -249,6 +253,7 @@ class H5adReader:
             self._convertedCsr.close()
         self._convertedCsr = None
         self._indptrCache = None
+        self._cumulativeRowNnz = None
 
     @classmethod
     def from_inspect(
@@ -937,7 +942,9 @@ class H5adReader:
         stores them, so the ranges depend neither on the order of distinct
         coordinates, nor on orientation or encoding. Pass a range to
         :func:`~cytearc.storage.count_dtype.count_storage_dtype` to resolve the
-        storage dtype of its group's counts.
+        storage dtype of its group's counts. The scan of a dense matrix also
+        counts the nonzero values of each row, which :meth:`max_batch_nnz`
+        plans from.
 
         Args:
             maxBytes: Memory available to the scan.
@@ -952,13 +959,17 @@ class H5adReader:
         """
         node = self.h5[self.matrixKey]
         if self.matrixOrientation == "dense":
-            return dense_count_ranges(
+            row_nonzeros = np.empty(int(node.shape[0]), dtype=np.int64)
+            value_ranges = dense_count_ranges(
                 lambda start, stop: self._matrix_values(node, slice(start, stop)),
                 int(node.shape[0]),
                 int(node.shape[1]),
                 maxBytes=maxBytes,
                 groups=featureGroups,
+                rowNonzeros=row_nonzeros,
             )
+            self._cumulativeRowNnz = cumulative_nnz(row_nonzeros)
+            return value_ranges
         csr = self.matrixOrientation == "csr"
         return compressed_count_ranges(
             node["indptr"],
@@ -1004,22 +1015,55 @@ class H5adReader:
             self._indptrCache = np.asarray(self.h5[self.matrixKey]["indptr"][:])
         return self._indptrCache
 
+    def _dense_cumulative_nnz(self) -> np.ndarray:
+        """Return the cumulative nonzero values of the dense matrix's rows.
+
+        :meth:`count_value_ranges` records them as it scans the values;
+        before it runs, the rows are read here to count them.
+        """
+        if self._cumulativeRowNnz is None:
+            node = self.h5[self.matrixKey]
+            self._cumulativeRowNnz = cumulative_nnz(
+                dense_row_nonzeros(
+                    lambda start, stop: self._matrix_values(node, slice(start, stop)),
+                    self.nCells,
+                    self.nFeatures,
+                )
+            )
+        return self._cumulativeRowNnz
+
     def _prepare_sparse_import(self) -> None:
-        self._csr_indptr()
+        if self.matrixOrientation == "dense":
+            self._dense_cumulative_nnz()
+        else:
+            self._csr_indptr()
 
     def _sparse_import_resident_bytes(self) -> int:
-        """Return the bytes of cached CSR row pointers.
+        """Return the bytes of the row counts that plan an import's batches.
 
-        Converted CSC rows count under :meth:`materialized_csr_bytes`.
+        They are the cached CSR row pointers, or the cumulative nonzero values
+        of a dense matrix's rows. Converted CSC rows count under
+        :meth:`materialized_csr_bytes`.
         """
+        if self._cumulativeRowNnz is not None:
+            return int(self._cumulativeRowNnz.nbytes)
         if self._convertedCsr is None and self._indptrCache is not None:
             return int(self._indptrCache.nbytes)
         return 0
 
     def max_batch_nnz(self, batch_size: int) -> int:
-        """Return the largest contiguous row-window nnz without loading values."""
+        """Return the most nonzero values of any ``batch_size`` consecutive rows.
+
+        CSR row pointers and converted CSC rows give the count without
+        reading values. A dense matrix plans from the nonzero values of each
+        row, which its value scan counts, or which are counted here before
+        the scan. CSC columns not yet converted bound a window by its rows
+        times the features.
+        """
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.matrixOrientation == "dense":
+            return max_window_nnz(self._dense_cumulative_nnz(), batch_size)
         batch_rows = min(batch_size, self.nCells)
         indptr = self._csr_indptr()
         if indptr is None:

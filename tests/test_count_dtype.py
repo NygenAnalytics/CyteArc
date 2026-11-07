@@ -284,6 +284,89 @@ def test_dense_range_reads_row_blocks_within_the_budget():
     assert dense_count_range(read, 0, 3, maxBytes=0) == CountValueRange()
 
 
+@pytest.mark.parametrize("rows_per_block", [1, 2, 5])
+def test_dense_scan_records_the_nonzero_values_of_each_row(rows_per_block):
+    # Signed zeros are zero and negative values are not, as a sparse batch
+    # built from the rows keeps them.
+    values = np.array(
+        [
+            [0.0, -0.0, 0.0, 0.0],
+            [1.0, 0.0, -2.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [3.0, 4.0, 5.0, 6.0],
+            [-0.0, 7.0, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    expected = [0, 2, 0, 4, 1]
+    assert [coo_matrix(row).nnz for row in values] == expected
+    counts = np.full(5, -1, dtype=np.int64)
+    ranges = dense_count_ranges(
+        lambda start, stop: values[start:stop],
+        5,
+        4,
+        maxBytes=rows_per_block * 4 * _PER_VALUE,
+        groups=np.array([0, 0, 1, 1]),
+        rowNonzeros=counts,
+    )
+    assert counts.tolist() == expected
+    # Recording the counts leaves the ranges as they were.
+    assert ranges == dense_count_ranges(
+        lambda start, stop: values[start:stop],
+        5,
+        4,
+        maxBytes=rows_per_block * 4 * _PER_VALUE,
+        groups=np.array([0, 0, 1, 1]),
+    )
+    assert (
+        count_values.dense_row_nonzeros(
+            lambda start, stop: values[start:stop], 5, 4
+        ).tolist()
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [np.zeros(4, dtype=np.int64), np.zeros(5, dtype=np.float64), np.zeros((5, 1))],
+)
+def test_dense_scan_refuses_row_counts_of_another_shape_or_kind(counts):
+    values = np.ones((5, 2), dtype=np.uint16)
+    with pytest.raises(ValueError, match="one integer for each of the 5 rows"):
+        dense_count_ranges(
+            lambda start, stop: values[start:stop],
+            5,
+            2,
+            maxBytes=1 << 20,
+            rowNonzeros=counts,
+        )
+
+
+def test_dense_row_count_reads_rows_wider_than_its_window_one_at_a_time():
+    width = count_values._SCAN_WINDOW_VALUES + 3
+    rng = np.random.default_rng(0)
+    values = (rng.random((3, width)) < 0.25).astype(np.uint8)
+    blocks: list[tuple[int, int]] = []
+
+    def read(start: int, stop: int) -> np.ndarray:
+        blocks.append((start, stop))
+        return values[start:stop]
+
+    counts = count_values.dense_row_nonzeros(read, 3, width)
+    assert counts.dtype == np.int64
+    np.testing.assert_array_equal(counts, np.count_nonzero(values, axis=1))
+    assert blocks == [(0, 1), (1, 2), (2, 3)]
+    # Narrow rows are read many to a block.
+    blocks.clear()
+    narrow = values[:, :4]
+    counts = count_values.dense_row_nonzeros(
+        lambda start, stop: read(start, stop)[:, :4], 3, 4
+    )
+    np.testing.assert_array_equal(counts, np.count_nonzero(narrow, axis=1))
+    assert blocks == [(0, 3)]
+    assert count_values.dense_row_nonzeros(read, 0, 4).shape == (0,)
+
+
 def test_scans_resolve_one_range_for_each_group_of_features():
     values = np.array(
         [[300, 0, 2, 0], [0, 5, 0, 1], [7, 0, 0.5, 0]],

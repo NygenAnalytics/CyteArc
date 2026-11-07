@@ -135,15 +135,18 @@ def test_fit_stops_at_count_shards_of_one_row():
     assert seen.count(1) == 1
 
 
-def _write_h5ad(path: Path, values: np.ndarray) -> Path:
-    matrix = csr_matrix(values)
+def _write_h5ad(path: Path, values: np.ndarray, *, dense: bool = False) -> Path:
     with h5py.File(path, "w") as h5:
-        group = h5.create_group("X")
-        group.attrs["encoding-type"] = "csr_matrix"
-        group.attrs["shape"] = values.shape
-        group.create_dataset("data", data=matrix.data)
-        group.create_dataset("indices", data=matrix.indices)
-        group.create_dataset("indptr", data=matrix.indptr)
+        if dense:
+            h5.create_dataset("X", data=values)
+        else:
+            matrix = csr_matrix(values)
+            group = h5.create_group("X")
+            group.attrs["encoding-type"] = "csr_matrix"
+            group.attrs["shape"] = values.shape
+            group.create_dataset("data", data=matrix.data)
+            group.create_dataset("indices", data=matrix.indices)
+            group.create_dataset("indptr", data=matrix.indptr)
         h5.create_group("obs").create_dataset(
             "_index", data=np.array([f"c{i}".encode() for i in range(values.shape[0])])
         )
@@ -251,6 +254,52 @@ def test_a_count_layout_refusal_states_the_producer_apart_from_resident_data(
     assert 0 < resident < producer
     # The budget the refusal names is unchanged: both parts and one task.
     assert refused.value.needed_bytes == resident + producer + 1
+
+
+@pytest.fixture(scope="module")
+def tenth_nonzero(tmp_path_factory) -> tuple[Path, Path, np.ndarray]:
+    """One matrix with a tenth of its values nonzero, as dense and CSR h5ad."""
+    rng = np.random.default_rng(1)
+    values = np.where(
+        rng.random((2_000, 600)) < 0.1, rng.integers(1, 30, (2_000, 600)), 0
+    ).astype(np.float32)
+    directory = tmp_path_factory.mktemp("tenth")
+    return (
+        _write_h5ad(directory / "dense.h5ad", values, dense=True),
+        _write_h5ad(directory / "csr.h5ad", values),
+        values,
+    )
+
+
+def test_a_dense_h5ad_plans_the_memory_of_its_nonzero_values(tenth_nonzero, tmp_path):
+    dense, csr, values = tenth_nonzero
+    # Planned as if every value were nonzero, the dense file's default layout
+    # needed about 224 MiB. Its nonzero values need what the CSR file's do,
+    # about 24 MiB, beside its dense rows.
+    budget = 64 * 1024**2
+    stores = {
+        name: _build(path, tmp_path / f"{name}.zarr", mem_budget=budget, nthreads=1)
+        for name, path in (("dense", dense), ("csr", csr))
+    }
+    for root in stores.values():
+        assert _policy(root) == DEFAULT_COUNT_MATRIX_POLICY
+        np.testing.assert_array_equal(root["RNA/counts"][:], values)
+    assert (
+        stores["dense"]["RNA/counts"].attrs["content_fingerprint"]
+        == stores["csr"]["RNA/counts"].attrs["content_fingerprint"]
+    )
+
+
+def test_a_dense_h5ad_still_plans_its_dense_rows(tenth_nonzero, tmp_path):
+    dense, csr, _values = tenth_nonzero
+    # The CSR file fits 26 MiB. A batch of the dense file also holds its
+    # rows' 2,000 by 600 float32 values, 4.6 MiB, so the same nonzero values
+    # do not.
+    budget = 26 * 1024**2
+    root = _build(csr, tmp_path / "csr.zarr", mem_budget=budget, nthreads=1)
+    assert _policy(root) == DEFAULT_COUNT_MATRIX_POLICY
+    with pytest.raises(CountLayoutMemoryError, match="default count-matrix policy"):
+        _build(dense, tmp_path / "dense.zarr", mem_budget=budget, nthreads=1)
 
 
 def test_h5ad_import_below_one_row_shards_fails_before_the_destination_exists(

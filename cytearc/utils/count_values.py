@@ -234,6 +234,7 @@ def dense_count_ranges(
     *,
     maxBytes: int,
     groups: np.ndarray | None = None,
+    rowNonzeros: np.ndarray | None = None,
 ) -> list[CountValueRange]:
     """Return the ranges of the values of a dense matrix read in row blocks.
 
@@ -246,14 +247,25 @@ def dense_count_ranges(
         maxBytes: Memory available to the scan.
         groups: Group, numbered from zero, of each column. None puts every
             value in one group.
+        rowNonzeros: An array of ``nRows`` integers in which the scan records
+            the number of nonzero values of each row, from which an import
+            plans its sparse batches. None records nothing.
 
     Returns:
         The range of each group.
 
     Raises:
         MemoryError: If one row does not fit in ``maxBytes``.
-        ValueError: If a value is NaN or infinite.
+        ValueError: If a value is NaN or infinite, or ``rowNonzeros`` does
+            not hold one integer for each row.
     """
+    if rowNonzeros is not None and (
+        rowNonzeros.shape != (int(nRows),) or rowNonzeros.dtype.kind not in "iu"
+    ):
+        raise ValueError(
+            f"rowNonzeros must hold one integer for each of the {int(nRows)} "
+            f"rows; got shape {rowNonzeros.shape} and dtype {rowNonzeros.dtype}"
+        )
     row_values = max(1, int(nColumns))
     rows = min(
         max(1, _SCAN_WINDOW_VALUES // row_values),
@@ -275,10 +287,38 @@ def dense_count_ranges(
         else [np.flatnonzero(groups == code) for code in range(len(value_ranges))]
     )
     for start in range(0, int(nRows), max(1, rows)):
-        block = read(start, min(int(nRows), start + rows))
+        stop = min(int(nRows), start + rows)
+        block = read(start, stop)
+        if rowNonzeros is not None:
+            rowNonzeros[start:stop] = np.count_nonzero(block, axis=1)
         if columns is None:
             value_ranges[0].update(block)
         else:
             for value_range, selected in zip(value_ranges, columns, strict=True):
                 value_range.update(block[:, selected])
     return value_ranges
+
+
+def dense_row_nonzeros(
+    read: Callable[[int, int], np.ndarray], nRows: int, nColumns: int
+) -> np.ndarray:
+    """Return the number of nonzero values of each row of a dense matrix.
+
+    The count reads every row, in blocks of about a million values, or one
+    row at a time when a row holds more. :func:`dense_count_ranges` records
+    the same counts in its scan; this reads them for a matrix not scanned.
+
+    Args:
+        read: Returns rows ``[start, stop)`` as a NumPy array.
+        nRows: Number of rows.
+        nColumns: Number of columns.
+
+    Returns:
+        The count of each row, as int64.
+    """
+    rows = max(1, _SCAN_WINDOW_VALUES // max(1, int(nColumns)))
+    counts = np.empty(int(nRows), dtype=np.int64)
+    for start in range(0, int(nRows), rows):
+        stop = min(int(nRows), start + rows)
+        counts[start:stop] = np.count_nonzero(read(start, stop), axis=1)
+    return counts
