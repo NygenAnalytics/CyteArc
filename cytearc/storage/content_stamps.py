@@ -11,6 +11,7 @@ other contents.
 """
 
 import asyncio
+from typing import Any
 import hashlib
 import math
 import threading
@@ -56,8 +57,8 @@ def _batch_size(array: zarr.Array) -> int:
 def stored_content_stamp_bytes(array: zarr.Array) -> int:
     """The most bytes that :func:`stored_content_stamp` holds while it reads ``array``.
 
-    A stamp fetches a batch of stored objects at once and copies each one as
-    bytes before it hashes it, so it holds twice the stored bytes of its
+    A stamp fetches a batch of stored objects at once and hashes each one as
+    fetched, letting it go once hashed, so it holds the stored bytes of its
     largest batch. Each object counts its stored size where
     the store reports sizes without reading the objects, as a local file
     system does, and otherwise its decoded size and a sixty-fourth more,
@@ -90,7 +91,7 @@ def stored_content_stamp_bytes(array: zarr.Array) -> int:
             sum(sync(sizes(batch))) if sized else len(batch) * (decoded + decoded // 64)
         )
         largest = max(largest, stored)
-    return 2 * largest
+    return largest
 
 
 def stored_content_stamp(array: zarr.Array) -> bytes:
@@ -116,22 +117,28 @@ def stored_content_stamp(array: zarr.Array) -> bytes:
     add(repr(array.config).encode("utf-8"))
     batch_size = _batch_size(array)
 
-    async def fetch(batch: list[str]) -> list[bytes | None]:
-        buffers = await asyncio.gather(
-            *((array.store_path / key).get(prototype=prototype) for key in batch)
+    async def fetch(batch: list[str]) -> list[Any]:
+        return list(
+            await asyncio.gather(
+                *((array.store_path / key).get(prototype=prototype) for key in batch)
+            )
         )
-        return [None if buffer is None else buffer.to_bytes() for buffer in buffers]
 
     keys = _object_keys(array)
     for start in range(0, len(keys), batch_size):
         batch = keys[start : start + batch_size]
-        for key, payload in zip(batch, sync(fetch(batch)), strict=True):
+        buffers = sync(fetch(batch))
+        for index, key in enumerate(batch):
             add(key.encode("utf-8"))
-            if payload is None:
+            buffer = buffers[index]
+            if buffer is None:
                 digest.update(b"\x00")
             else:
                 digest.update(b"\x01")
-                add(payload)
+                # Hashed as fetched, without a copy, and let go once hashed.
+                add(buffer.as_numpy_array())
+            buffers[index] = None
+            del buffer
     return digest.digest()
 
 

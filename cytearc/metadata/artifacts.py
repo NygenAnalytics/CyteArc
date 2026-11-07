@@ -31,6 +31,7 @@ from ..storage.artifacts import (
 )
 from ..storage.diagnostics import DIAGNOSTICS_ATTRIBUTE
 from ..storage.finite_values import requires_finite_values, write_finite_array
+from ..storage.layout import column_chunk_rows
 from ..storage.selections import validate_cell_selection
 from ..storage.types import as_zarr_array, as_zarr_group
 from .selection import CellField, resolve_grouping, valid_category_mask
@@ -53,8 +54,8 @@ _LABEL_KINDS = _TEXT_LABEL_KINDS | {"b", "i", "u"}
 # int64 holds the whole numbers in [-_INT64_BOUND, _INT64_BOUND). A float64
 # bound, unlike a Python float, compares with float16 labels without overflow.
 _INT64_BOUND = np.float64(2.0**63)
-# The rows of each stored chunk of an artifact's arrays, unless chunk_lengths
-# names others.
+# The rows of each stored chunk of an artifact's numeric arrays, unless
+# chunk_lengths names others; text follows column_chunk_rows.
 _CHUNK_ROWS = 100_000
 # The pass that finds the widest value of a text array converts this many
 # values to text at a time.
@@ -223,11 +224,14 @@ def write_cell_data_artifact(
     ``attributes`` are JSON values stored on the artifact group before it is
     published. ``diagnostics`` are those that the operation declares, checked
     before anything is written and saved in the artifact's ``diagnostics``
-    attribute; an operation that declares none passes None. Arrays are chunked in 100,000 rows; ``chunk_lengths`` sets the
-    rows of each chunk of named numeric arrays instead, such as packed bytes,
-    which read and write faster in chunks of megabytes. Text is stored as
-    ``values.astype(str)`` holds it, at the width of the widest value, and is
-    written a chunk at a time, so a write holds what
+    attribute; an operation that declares none passes None. Numeric arrays
+    are chunked in 100,000 rows; ``chunk_lengths`` sets the rows of each chunk
+    of named numeric arrays instead, such as packed bytes, which read and
+    write faster in chunks of megabytes. Text is stored as
+    ``values.astype(str)`` holds it, at the width of the widest value, in
+    chunks of at most 100,000 rows and 16 MiB of values, as
+    :func:`~cytearc.storage.layout.column_chunk_rows` chunks cell columns,
+    and is written a chunk at a time, so a write holds what
     :func:`cell_data_write_bytes` states rather than copies of whole arrays.
     """
     if planned.reused:
@@ -295,7 +299,8 @@ def cell_data_write_bytes(
     one after another, in the order given, so the write holds what its
     costliest array holds:
 
-    - text, a stored chunk at a time: the chunk's values at the stored width,
+    - text, a stored chunk of at most 16 MiB of values at a time: the chunk's
+      values at the stored width,
       four bytes a character, and the chunk that Zarr encodes from them, a
       last chunk of fewer rows also copied into a full chunk first;
     - numbers, written whole: each chunk that Zarr encodes at once, up to its
@@ -370,7 +375,7 @@ def _array_write_bytes(
     """What writing one array holds beside it, as :func:`cell_data_write_bytes` counts."""
     n_rows = shape[0]
     if dtype.kind == "U":
-        rows = _chunk_rows(n_rows, _CHUNK_ROWS)
+        rows = column_chunk_rows(n_rows, dtype.itemsize)
         # A chunk and its encoded copy. Measuring the widest value converts
         # 4,096 values at a time beside their lengths, which holds less.
         partial = n_rows % rows if n_rows > rows else 0
@@ -386,8 +391,8 @@ def _array_write_bytes(
 def _write_text_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
     """Write text values a stored chunk at a time, after one pass that finds the widest."""
     n_rows = len(values)
-    rows = _chunk_rows(n_rows, _CHUNK_ROWS)
     dtype = _stored_text_dtype(values)
+    rows = column_chunk_rows(n_rows, dtype.itemsize)
     create_streamed_metadata_column(
         group,
         name,

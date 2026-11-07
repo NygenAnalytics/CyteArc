@@ -387,3 +387,23 @@ def test_the_fingerprint_of_stored_ids_does_not_depend_on_their_chunks(rows) -> 
     ids = _ids_in_chunks(rows)
 
     assert fingerprint_stored_strings(ids) == fingerprint_strings(ids[:])
+
+
+def test_a_stamp_holds_each_batch_of_stored_objects_once(tmp_path) -> None:
+    path = tmp_path / "ids.zarr"
+    root = zarr.open_group(LocalStore(str(path)), mode="w")
+    ids = np.asarray([f"cell{index:06d}" for index in range(50_000)])
+    array = root.create_array("ids", data=ids, chunks=(5_000,))
+    keys = stamps_module._object_keys(array)
+    batch = stamps_module._batch_size(array)
+    # The bytes of each batch of chunk files as stored on disk.
+    largest = max(
+        sum((path / "ids" / key).stat().st_size for key in keys[start : start + batch])
+        for start in range(0, len(keys), batch)
+    )
+
+    # Each fetched object is hashed as fetched, not copied first.
+    assert stamps_module.stored_content_stamp_bytes(array) == largest
+    assert stored_content_stamp(array) == stored_content_stamp(
+        zarr.open_group(LocalStore(str(path)), mode="r")["ids"]
+    )
