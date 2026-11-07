@@ -1072,6 +1072,13 @@ class H5adReader:
             )
         return self._cumulativeRowNnz
 
+    def _dense_chunk_rows(self) -> int | None:
+        """Return the rows of a dense matrix's HDF5 chunks, or None if unchunked."""
+        if self.matrixOrientation != "dense":
+            return None
+        chunks = self.h5[self.matrixKey].chunks
+        return None if chunks is None else int(chunks[0])
+
     def _prepare_sparse_import(self) -> None:
         if self.matrixOrientation == "dense":
             self._dense_cumulative_nnz()

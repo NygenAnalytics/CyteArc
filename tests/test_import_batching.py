@@ -744,6 +744,57 @@ def test_dense_h5ad_split_writes_dense_bands_of_each_assay(
             assert array_metadata_shards(array) == (40, 3)
 
 
+def test_dense_h5ad_batches_hold_whole_rows_of_hdf5_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = np.arange(360, dtype=np.uint16).reshape(60, 6) % 7
+    paths = {
+        "contiguous": tmp_path / "contiguous.h5ad",
+        "chunked": tmp_path / "chunked.h5ad",
+    }
+    for path in paths.values():
+        _write_h5ad(path, values, "dense")
+    with h5py.File(paths["chunked"], mode="r+") as handle:
+        del handle["X"]
+        handle.create_dataset("X", data=values, chunks=(7, 3))
+    batches: list[int] = []
+    consume = H5adReader.consume_dense_rows
+
+    def recorded(self, batch_size, row_start=0, row_end=None):
+        for batch in consume(self, batch_size, row_start, row_end):
+            batches.append(batch.shape[0])
+            yield batch
+
+    monkeypatch.setattr(H5adReader, "consume_dense_rows", recorded)
+    read = {}
+    for name, path in paths.items():
+        store = MemoryStore()
+        reader = H5adReader(str(path), feature_name_key="feature_name")
+        try:
+            # Counts up to 6 store as uint8, so 360 bytes make one band of
+            # every cell.
+            writer = H5adToZarr(
+                reader,
+                store,
+                mem_budget="64M",
+                nthreads=1,
+                policy=CountMatrixPolicy(unitBytes=360, chunkBytes=180),
+            )
+            batches.clear()
+            writer.dump()
+        finally:
+            reader.close()
+        read[name] = list(batches)
+        np.testing.assert_array_equal(
+            zarr.open_group(store=store, mode="r")["RNA/counts"][:], values
+        )
+    # A row of six uint16 values takes 12 bytes and their checked cast to
+    # uint8 18 more, so the band's 360 bytes hold 12 rows. A chunked matrix
+    # reads whole rows of its 7-row chunks within them.
+    assert read["contiguous"] == [12] * 5
+    assert read["chunked"] == [7] * 8 + [4]
+
+
 def test_dense_rows_come_in_the_source_dtype_and_window(tmp_path: Path) -> None:
     values = _tenth_nonzero()
     dense = tmp_path / "dense.h5ad"

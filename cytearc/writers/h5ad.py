@@ -35,8 +35,8 @@ from ..utils.matrix_values import ImportValues, MatrixValuesKind
 # unique text can hold about one category per row.
 _MAX_STORED_CATEGORIES = 10_000
 # A dense matrix is read about this many values at a time, as its value scan
-# reads it. Each batch is copied into a band of every assay, so a batch need
-# not hold a destination row band.
+# reads it, or in whole rows of its HDF5 chunks. Each batch is copied into a
+# band of every assay, so a batch need not hold a destination row band.
 _DENSE_BATCH_VALUES = 1 << 20
 _MISSING_DISPLAY = {"missing_label": "NA", "missing_color": "#bdbdbd"}
 
@@ -1146,7 +1146,8 @@ class H5adToZarr:
                         destination row band, which is the default for a
                         sparse matrix. A dense matrix is copied into dense
                         row bands, so its batches hold about a million values
-                        by default, and this caps them.
+                        or whole rows of its HDF5 chunks by default, and this
+                        caps them.
 
         Raises:
             ValueError: If ``batch_size`` is not positive.
@@ -1534,22 +1535,31 @@ class H5adToZarr:
         """Return the rows of each batch that a dense counts write reads.
 
         A batch holds about a million values, as the value scan reads them,
-        and no more rows than ``requested``, nor than leave its producer
-        holding more bytes than ``bandRows`` rows of every assay hold in
-        storage, so a batch never outweighs the bands that it fills.
+        or one row of the matrix's HDF5 chunks when that holds more. It holds
+        no more rows than ``requested``, nor than leave its producer holding
+        more bytes than ``bandRows`` rows of every assay hold in storage, so a
+        batch never outweighs the bands that it fills. Within these limits a
+        batch of a chunked matrix holds whole rows of chunks, which HDF5 then
+        decompresses once each.
         """
         band_bytes = int(bandRows) * sum(
             width * np.dtype(self.storageDtypes[assay_name]).itemsize
             for assay_name, width in self._assay_widths().items()
         )
+        value_rows = _DENSE_BATCH_VALUES // max(1, int(self.h5ad.nFeatures))
+        chunk_rows = self.h5ad._dense_chunk_rows()
+        if chunk_rows is not None:
+            value_rows = max(value_rows, chunk_rows)
         rows = max(
             1,
             min(
                 int(bandRows),
-                _DENSE_BATCH_VALUES // max(1, int(self.h5ad.nFeatures)),
+                value_rows,
                 band_bytes // max(1, self._dense_producer_bytes(1)),
             ),
         )
+        if chunk_rows is not None and rows >= chunk_rows:
+            rows -= rows % chunk_rows
         return rows if requested is None else max(1, min(rows, int(requested)))
 
     def _dense_producer_bytes(self, rows: int) -> int:
