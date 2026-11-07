@@ -19,6 +19,7 @@ gene programs. Docs: <https://docs.nygen.io/CyteArc/tutorials/regulons>,
   `ds.scores.chromvar` peak sets on ATAC; both return `kind="enrichment_scores"`.
   `ds.scores.load(ref).to_pandas()` gives cells x sources; chromVAR also has `.deviations`.
   chromVAR z-scores are NaN where a cell expects under one fragment.
+- `ds.regulons.specificity(auc, groups, cell_selection=None)` gives the regulon specificity scores (RSS), groups x regulons with groups in natural order, and `ds.regulons.connection_specificity(auc, margin=0.05)` the connection specificity index (CSI), regulons x regulons, from the stored scores a block of cells at a time: memory follows a block, the groups and the regulons, not the cells. `groups` is a clustering artifact or a cell column, read for the scored cells as `compare.compute_bulk` reads it; a missing label is refused. Scores must be finite and non-negative for RSS, so chromVAR z-scores are refused. `rg.regulon_specificity(table, labels)` and `rg.connection_specificity(table)` give the same scores, up to rounding, from a table in memory.
 - Regions are always peak ids (`chrom:start-end`), the ATAC feature `ids`: `match_motifs`,
   `link_regions_to_genes`, `gc_content`, `binding_cistromes`, and chromVAR targets.
 - `ds.regulons.grn(cells, features=..., tfs=..., random_seed=...)` runs GRNBoost2 on the **stored values** of the selected cells and genes, raw counts or the values of an assay imported from normalized values, which its `values` parameter records as `"raw_counts"` or `"normalized_values"` (held in memory as float32; subsample cells for large data) and returns `kind="grn_adjacencies"`; `ds.regulons.load_grn(ref).adjacencies` has `TF`, `target`, `importance`, `correlation`, as does the in-memory `infer_grn`. The default `early_stopping="stage"` matches the pySCENIC 0.12.1 container. Fits are deterministic for a seed; different seeds give different networks.
@@ -71,8 +72,9 @@ database = rg.RankingDatabase("hg38_10kbp_up_10kbp_down_full_tx_v10_clust.genes_
 annotations = rg.read_motif_annotations("motifs-v10nr_clust-nr.hgnc-m0.001-o0.0.tbl")
 regulons = rg.regulons_from_motifs(rg.prune_modules(modules, [database], annotations, nthreads=8))
 auc = ds.scores.aucell(regulons, cells, features=run["feature_universe"], tmin=5)
-activity = ds.scores.load(auc).to_pandas()
-rss = rg.regulon_specificity(activity, run.cells.fetch("clusters"))
+rss = ds.regulons.specificity(auc, run["clusters"])  # groups x regulons
+csi = ds.regulons.connection_specificity(auc)
+regulon_groups = rg.regulon_modules(csi, n_modules=5)
 ```
 
 ### Motif and binding activity in ATAC cells (chromVAR)

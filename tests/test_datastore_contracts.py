@@ -234,8 +234,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # clones.load_alleles and clones.export_characters, then
     # clones.allele_clones, then clones.import_phylogeny,
     # clones.load_phylogeny and clones.phylogeny_clones, then
-    # clusters.connectivity, then trajectory.curves_in_layout.
-    assert len(_NAMESPACE_METHODS) == 154
+    # clusters.connectivity, then trajectory.curves_in_layout, then
+    # regulons.specificity and regulons.connection_specificity.
+    assert len(_NAMESPACE_METHODS) == 156
     assert {
         "import_receptors",
         "load_receptors",

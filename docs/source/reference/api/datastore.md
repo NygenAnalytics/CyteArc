@@ -201,11 +201,11 @@ ATAC assay; see {doc}`regulons` for building those networks.
 
 ### `ds.regulons`
 
-`grn` infers transcription-factor to target importances with GRNBoost2 on the assay's stored values, its raw counts or the values of an assay imported from normalized values; the functions in {doc}`regulons` turn them into regulons.
+`grn` infers transcription-factor to target importances with GRNBoost2 on the assay's stored values, its raw counts or the values of an assay imported from normalized values; the functions in {doc}`regulons` turn them into regulons. `specificity` and `connection_specificity` give the regulon specificity scores of each group of cells and the connection specificity index of each pair of regulons from a stored score artifact, such as AUCell's, reading its scores a block of cells at a time, so their memory follows a block of scores and the groups and regulons rather than every cell's scores. They save nothing.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.RegulonsAccessor
-    :members: grn, load_grn, profiles
+    :members: grn, load_grn, profiles, specificity, connection_specificity
 ```
 
 ### `ds.perturbation`
