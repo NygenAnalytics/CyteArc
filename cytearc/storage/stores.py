@@ -20,6 +20,7 @@ from zarr.core.buffer import Buffer, BufferPrototype
 from zarr.core.common import ZARR_JSON
 from zarr.storage import WrapperStore
 
+from ..utils.arguments import bool_argument
 from .types import ZarrMode, as_zarr_array, as_zarr_group
 from .budget import ResourceBudget
 from .profiles import (
@@ -513,12 +514,15 @@ def create_matrix_source(
     profile: StorageProfile | None = None,
     source_root: zarr.Group | None = None,
     resources: ResourceBudget | None = None,
+    relative_sources: bool = False,
 ) -> zarr.Group:
     """Create a writable store that mounts count matrices from ``source``.
 
     ``storage_options`` open the target ``at``, and ``source_storage_options``
     open ``source`` when ``source_root`` is None; the source takes
-    ``storage_options`` when they are None.
+    ``storage_options`` when they are None. The target records the source by
+    its absolute path or URL, or, with ``relative_sources``, as
+    :func:`record_source_location` records it.
     """
     from .arrays import create_metadata_column
     from .copy import copy_zarr_group_tree
@@ -527,6 +531,7 @@ def create_matrix_source(
 
     if not isinstance(source, str) or not source:
         raise TypeError("Matrix source location must be a non-empty string")
+    relative_sources = bool_argument(relative_sources, "relative_sources")
     source = _persistable_location(source)
     if isinstance(at, str) and locations_overlap(source, at):
         raise ValueError("Source and destination must not overlap")
@@ -640,7 +645,9 @@ def create_matrix_source(
             )
 
         target.attrs[MATRIX_SOURCE_ATTR] = {
-            "location": record_source_location(source, store_location(at)),
+            "location": record_source_location(source, store_location(at))
+            if relative_sources
+            else source,
             "workspace": workspace,
             "assays": assay_manifest,
         }

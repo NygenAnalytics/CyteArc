@@ -156,7 +156,7 @@ The mount records matrix shape, dtype, and source identity. Reopening fails if t
 longer matches that identity. Metadata is copied at mount time, so later source metadata changes
 are not synchronized into the target.
 
-A source in the directory that holds the target, or below it, is recorded by its path relative to that directory, so the target and its source can be moved, copied, or uploaded to a bucket together and still open. Any other source is recorded by its absolute path or URI, so the target alone can move.
+The mount records its source's absolute path or URI, so the target alone can move. With `relative_sources=True`, a source in the directory that holds the target, or below it, is recorded by its path relative to that directory instead, so the target and its source can be moved, copied, or uploaded to a bucket together and still open. Releases before this option cannot open a target that records a relative path, except from the directory that holds it.
 
 The target also resolves the source's artifacts read only, after its own. Results already saved in
 the source, including labels and embeddings imported with it, can be listed, loaded, traced, and

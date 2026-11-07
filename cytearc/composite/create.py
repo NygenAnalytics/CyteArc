@@ -71,6 +71,7 @@ from ..storage.stores import (
     record_source_location,
 )
 from ..storage.types import as_zarr_array, as_zarr_group
+from ..utils.arguments import bool_argument
 from ..utils.memory_budget import MemoryBudgetError
 from .source_cache import CachedSourceStore, SourceCache, new_source_cache
 
@@ -562,13 +563,15 @@ def create_composite(
     rows: Mapping[str, Sequence[int] | np.ndarray] | None = None,
     mem_budget: int | str | None = None,
     nthreads: int | None = None,
+    relative_sources: bool = False,
 ) -> "DataStore":
     """Create a writable datastore that reads its counts from frozen sources.
 
-    The composite records a source in the directory that holds it, or below it,
-    by its path relative to that directory, so a directory that holds the
-    composite and its sources can be moved, copied, or served from a bucket. It
-    records any other source by its absolute path or URL.
+    The composite records each source by its absolute path or URL. With
+    ``relative_sources=True`` it records a source in the directory that holds
+    it, or below it, by its path relative to that directory, so the directory
+    can be moved, copied, or served from a bucket with its sources in it.
+    Releases before this option cannot find a source recorded that way.
     """
     from ..datastore.datastore import DataStore
     from .reader import copy_source_selection, source_index_bytes
@@ -592,6 +595,7 @@ def create_composite(
     selections = dict(rows or {})
     if set(selections) - set(names):
         raise ValueError("Selections must name an existing source")
+    relative_sources = bool_argument(relative_sources, "relative_sources")
     target = str(at)
     if is_remote_zarr_location(target):
         raise ValueError("The composite destination must be a local path")
@@ -641,7 +645,9 @@ def create_composite(
         bindings.append(
             {
                 "name": name,
-                "location": record_source_location(location, str(destination)),
+                "location": record_source_location(location, str(destination))
+                if relative_sources
+                else location,
                 "workspace": source.workspace,
                 "datasetFingerprint": fingerprint,
                 "countsFingerprint": count_fingerprint(

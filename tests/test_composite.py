@@ -1722,10 +1722,8 @@ def test_composite_shard_padding_and_missing_array_metadata(composite_adapter, s
 def _copy_bound_composite(template, destination):
     """Copy a composite and its sources, binding the copy to the copied sources.
 
-    The copy records each source by its absolute path, as releases before
-    relative locations did, so tests of a saved composite also open a record
-    of absolute locations. Creation is otherwise deterministic, so the copy
-    holds what a composite created at ``destination`` holds.
+    Creation is deterministic and records sources only by their locations, so
+    the copy equals a composite created at ``destination``.
     """
     for entry in ("a.zarr", "b.zarr", "joint.zarr"):
         shutil.copytree(template / entry, destination / entry)

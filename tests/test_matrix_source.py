@@ -391,9 +391,7 @@ def test_mounted_store_reopens_from_another_directory(
     )
     target = str(tmp_path / "target.zarr")
     location = zarr.open_group(target, mode="r").attrs[MATRIX_SOURCE_ATTR]["location"]
-    # A source beside the target is recorded relative to it, not to the
-    # working directory.
-    assert location == "source.zarr"
+    assert Path(location).resolve() == (tmp_path / "source.zarr").resolve()
 
     monkeypatch.chdir(tmp_path.parent)
     reopened = DataStore(
