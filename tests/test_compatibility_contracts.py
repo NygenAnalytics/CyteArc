@@ -108,6 +108,7 @@ _EXPECTED_RESULT_FIELDS = {
         "sink_labels",
         "values",
         "valid",
+        "direction",
     ),
     trajectory.PseudotimeScoreResult: (
         "ref",

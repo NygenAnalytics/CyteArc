@@ -159,8 +159,9 @@ class SourceSinkLabelsError(ValueError):
         missing_sinks: The sink labels that no checked cell holds, in the
             order given.
         missing_from: ``"labels"`` when no selected cell holds them, or
-            ``"scored component"`` when no cell of the graph component that
-            the pseudotime scores holds them.
+            ``"scored component"`` when no scored cell holds them: no cell of
+            the graph component that the pseudotime scores, or of the
+            components that the direction score of a fate map scores.
         component_sizes: The cell counts of the graph's connected components,
             largest first, when ``missing_from`` is ``"scored component"``,
             and None otherwise.

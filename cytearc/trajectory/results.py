@@ -31,18 +31,28 @@ class _PseudotimeAggregationIdentityCarrier:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class FateMappingResult:
-    """Fate probabilities loaded from an immutable artifact."""
+    """Fate probabilities loaded from an immutable artifact.
+
+    The walk of a fate map is directed by a pseudotime, which ``pseudotime``
+    names, or by a per-cell score, which ``direction`` names; the other is
+    None.
+    """
 
     ref: ArtifactRef
     graph: ArtifactRef
-    pseudotime: ArtifactRef
+    pseudotime: ArtifactRef | None
     sink_labels_artifact: ArtifactRef
     cell_selection: ArtifactRef
     sink_labels: tuple[Any, ...]
     values: np.ndarray = field(repr=False)
     valid: np.ndarray = field(repr=False)
+    direction: ArtifactRef | None = None
 
     def __post_init__(self) -> None:
+        if (self.pseudotime is None) == (self.direction is None):
+            raise ValueError(
+                "A fate map is directed by either a pseudotime or a direction score"
+            )
         if self.values.ndim != 2:
             raise ValueError("Fate probabilities must be two-dimensional")
         if self.valid.ndim != 1:

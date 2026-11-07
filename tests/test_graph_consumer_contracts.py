@@ -237,10 +237,14 @@ def test_graph_and_neighbor_consumers_have_no_path_selectors() -> None:
         assert "integrated_graph" not in names
         assert "graph_loc" not in names
 
-    fate_names = _parameter_names(TrajectoryAccessor.fate)
-    assert "pseudotime" in fate_names
-    assert "sink_labels" in fate_names
-    assert "graph" not in fate_names
+    # A pseudotime records the graph that it scored, so fate takes a graph
+    # only beside a direction score, as an explicit artifact.
+    fate_parameters = inspect.signature(TrajectoryAccessor.fate).parameters
+    assert list(fate_parameters)[:3] == ["self", "pseudotime", "sink_labels"]
+    for name in ("graph", "direction"):
+        assert fate_parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert fate_parameters[name].default is None
+    assert {"feat_key", "integrated_graph", "graph_loc"}.isdisjoint(fate_parameters)
 
     neighbor_methods = (
         IntegrationAccessor.compute_ilisi,
