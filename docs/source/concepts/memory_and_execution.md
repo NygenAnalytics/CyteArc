@@ -125,6 +125,7 @@ Opt-in parallel UMAP layouts and ANN index builds are faster but not reproducibl
 Their artifact identities therefore record only the `parallel` or `ann_parallel` flag, and the thread counts are execution options, so the same request reuses its result on any machine.
 Leiden clustering with the default `"cytearc"` backend runs on the worker budget and returns identical labels for any thread count, so its artifacts record no worker count either; the optional `"igraph"` and `"leidenalg"` backends run on one thread.
 t-SNE always runs on one thread through the optional `sgtsnepi` package, so its artifacts record no worker count.
+GRN inference with `nthreads` above 1 fits the targets left after about two seconds of fitting in worker processes, as many as `nthreads` allows; `regulons.grn` runs fewer when the memory budget holds fewer of them, each charged its own copy of the regulators and one fit. Every target's regressor has the same seed, so the links are the same for any thread count. The workers start as new interpreters that import the main module, so a script keeps its own work under `if __name__ == "__main__":`.
 
 ## Why RNA stores have two count orientations
 

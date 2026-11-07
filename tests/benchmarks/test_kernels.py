@@ -501,3 +501,60 @@ def test_harmony_fit(bench) -> None:
         np.testing.assert_allclose(result.assignments.sum(axis=0), 1.0, atol=1e-12)
 
     bench("harmony.fit", make, CELLS, check=check)
+
+
+def test_grn_targets_on_four_processes(bench) -> None:
+    from unittest import mock
+
+    from cytearc.regulons import grn
+
+    # 500 cells and 300 factors, as the GRN inference of a cell subset holds.
+    n_cells, n_factors = 500, 300
+    rng = np.random.default_rng(218)
+    factors = rng.poisson(1.0, size=(n_cells, n_factors)).astype(np.float32)
+
+    def make(n_targets: int):
+        # Each target follows two factors with Poisson noise.
+        drivers = rng.integers(0, n_factors, size=(n_targets, 2))
+        targets = factors[:, drivers].sum(axis=2) + rng.poisson(
+            1.0, (n_cells, n_targets)
+        )
+        matrix = np.hstack([factors, targets.astype(np.float32)])
+        names = [f"F{index}" for index in range(n_factors)]
+        names += [f"T{index}" for index in range(n_targets)]
+
+        def fit():
+            # Without a head start in the calling process, every target is
+            # fitted on the four worker processes.
+            with mock.patch.object(grn, "_IN_PROCESS_SECONDS", 0.0):
+                return grn._grn_links(
+                    matrix,
+                    names,
+                    np.arange(n_factors),
+                    np.arange(n_factors, n_factors + n_targets),
+                    seed=0,
+                    parameters=grn.GRNBOOST2_PARAMETERS,
+                    nthreads=4,
+                    progress=None,
+                )
+
+        return fit
+
+    def check(n_targets: int, links) -> None:
+        tf_codes, target_codes, importance = links
+        assert np.all(tf_codes < n_factors) and np.all(importance > 0)
+        assert np.all(target_codes >= n_factors)
+        # A target's importances, normalized and scaled by its fitted stages,
+        # sum to the stages: a whole number up to the 5,000 allowed.
+        stages = np.bincount(
+            target_codes - n_factors, weights=importance, minlength=n_targets
+        )
+        np.testing.assert_allclose(stages, np.round(stages), rtol=0, atol=1e-6)
+        assert np.all((stages >= 1) & (stages <= 5_000))
+
+    bench(
+        "regulons.grn_targets_on_four_processes",
+        make,
+        Ladder(sizes=(32,), smoke=2, unit="call", targets=(1,), model="fixed"),
+        check=check,
+    )

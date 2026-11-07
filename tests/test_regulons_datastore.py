@@ -302,3 +302,109 @@ def test_grn_names_the_budget_of_its_matrix_and_links(store_path):
     assert below is not None and below.needed_bytes == refusal.needed_bytes
     later = infer(refusal.needed_bytes)
     assert later is None or later.item != refusal.item
+
+
+def test_grn_runs_as_many_worker_processes_as_the_budget_holds(
+    store_path, tmp_path, monkeypatch
+):
+    from cytearc.regulons import grn
+    from cytearc.utils.logging import logger
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    path = _copy(store_path, tmp_path)
+    workers: list[int] = []
+    grn_links = grn._grn_links
+
+    def record_workers(*args, **kwargs):
+        workers.append(kwargs["nthreads"])
+        return grn_links(*args, **kwargs)
+
+    monkeypatch.setattr(grn, "_grn_links", record_workers)
+
+    def infer(budget: int, seed: int) -> None:
+        store = DataStore(
+            path,
+            default_assay="RNA",
+            min_features_per_cell=-1,
+            nthreads=4,
+            mem_budget=budget,
+        )
+        store.regulons.grn(
+            store.snapshot_cell_selection("everyone"),
+            features=store.features.universe(),
+            tfs=TFS,
+            random_seed=seed,
+            **FAST,
+        )
+
+    with pytest.raises(MemoryBudgetError) as refused:
+        infer(1024, 80)
+    # The refusal names the expression, the links and one fit in this
+    # process; each worker process holds its own copy of the four
+    # regulators and its own fit instead.
+    fit = grn.grn_fit_bytes(N_CELLS, len(TFS), FAST["max_stages"])
+    worker = grn.grn_process_bytes(N_CELLS, len(TFS), FAST["max_stages"])
+    held = refused.value.needed_bytes - fit
+    assert worker > fit
+    messages: list[str] = []
+    sink = logger.add(lambda message: messages.append(str(message)), level="INFO")
+    try:
+        infer(held + 3 * worker, 81)
+        infer(held + 3 * worker - 1, 82)
+        infer(held + 2 * worker - 1, 83)
+    finally:
+        logger.remove(sink)
+
+    assert workers == [3, 2, 1]
+    reductions = [message for message in messages if "fits targets on" in message]
+    assert len(reductions) == 3
+    assert (
+        f"on 3 of 4 workers: each worker process holds about {worker} bytes"
+        in (reductions[0])
+    )
+
+
+def test_grn_identity_and_links_do_not_depend_on_the_worker_processes(
+    store_path, tmp_path, monkeypatch
+):
+    from cytearc.regulons import grn
+
+    pools: list[int] = []
+    fit_in_processes = grn._fit_in_processes
+
+    def record_pool(*args, **kwargs):
+        pools.append(kwargs["processes"])
+        return fit_in_processes(*args, **kwargs)
+
+    monkeypatch.setattr(grn, "_IN_PROCESS_SECONDS", 0.0)
+    monkeypatch.setattr(grn, "_fit_in_processes", record_pool)
+    # A seed of its own, which no other test's network shares.
+    request = {"features": None, "tfs": TFS, "random_seed": 37, **FAST}
+
+    def infer(path: str, nthreads: int) -> tuple[DataStore, ArtifactRef]:
+        store = DataStore(
+            path, default_assay="RNA", min_features_per_cell=-1, nthreads=nthreads
+        )
+        ref = store.regulons.grn(
+            store.snapshot_cell_selection("everyone"),
+            **(request | {"features": store.features.universe()}),
+        )
+        return store, ref
+
+    on_workers, computed = infer(_copy(store_path, tmp_path / "workers"), 3)
+    assert pools == [3]
+    # The thread count is an execution setting, so one thread reuses the
+    # network that three worker processes inferred.
+    assert infer(str(on_workers.zarr_loc), 1)[1] == computed
+    # A copy of the store infers the same network in this process alone,
+    # recorded with the same parameters.
+    alone, recomputed = infer(_copy(store_path, tmp_path / "alone"), 1)
+    assert pools == [3]
+    assert (
+        alone.artifacts.inspect(recomputed).parameters
+        == on_workers.artifacts.inspect(computed).parameters
+    )
+    pd.testing.assert_frame_equal(
+        alone.regulons.load_grn(recomputed).adjacencies,
+        on_workers.regulons.load_grn(computed).adjacencies,
+    )

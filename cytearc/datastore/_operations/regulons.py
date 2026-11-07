@@ -144,8 +144,15 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
                 its own out-of-bag cells, as GRNBoost2 does in the pySCENIC
                 0.12.1 container; ``"consecutive"`` compares consecutive
                 stages, as arboreto does with scikit-learn 1.3 and later.
-            nthreads: Targets fitted concurrently. The store's thread count
-                when omitted. It does not change the result.
+            nthreads: The most targets fitted at once. The store's thread
+                count when omitted. Targets are fitted in this process, and
+                with ``nthreads`` above 1, those left after about two seconds
+                of fitting go to that many worker processes, fewer when the
+                memory budget holds fewer of their copies of the regulators
+                and their fits. Worker processes start as new interpreters
+                that import the main module, so a script keeps its own work
+                under ``if __name__ == "__main__":``. It does not change the
+                result.
             invalidate_cache: Recompute even when a matching result exists.
 
         Returns:
@@ -157,7 +164,13 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             UnmeasuredCellsError: If the assay did not measure a selected cell.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
-        from ...regulons.grn import GrnParameters, _grn_links, _pair_correlations
+        from ...regulons.grn import (
+            GrnParameters,
+            _grn_links,
+            _pair_correlations,
+            grn_fit_bytes,
+            grn_process_bytes,
+        )
 
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
@@ -272,12 +285,17 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
         )
         if planned.reused:
             return planned.ref
-        # The matrix, the regulator copy, one leave-one-out copy per thread,
-        # the correlation blocks, and about 64 bytes per possible link while
-        # the links are sorted, correlated, and written.
-        needed = 4 * n_cells * (n_genes + n_regulators * (1 + threads))
-        needed += 8 * n_cells * 2 * max(n_regulators, 256)
-        needed += 64 * n_genes * n_regulators
+        # The matrix, the regulators' copy, the correlation blocks, and about
+        # 64 bytes per possible link while the links are sorted, correlated,
+        # and written.
+        held = 4 * n_cells * (n_genes + n_regulators)
+        held += 8 * n_cells * 2 * max(n_regulators, 256)
+        held += 64 * n_genes * n_regulators
+        # One target's fit in this process, or each worker process's copy of
+        # the regulators and its fit; the workers start once this process has
+        # stopped fitting.
+        needed = held + grn_fit_bytes(n_cells, n_regulators, max_stages)
+        worker_bytes = grn_process_bytes(n_cells, n_regulators, max_stages)
         if needed > self.resources.memoryBytes:
             raise MemoryBudgetError(
                 f"GRN inference over {n_cells} cells and {n_genes} genes needs "
@@ -286,6 +304,19 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
                 needed_bytes=needed,
                 budget_bytes=int(self.resources.memoryBytes),
                 item="the expression matrix and the links of GRN inference",
+            )
+        workers = threads
+        while (
+            workers > 1 and held + workers * worker_bytes > self.resources.memoryBytes
+        ):
+            workers -= 1
+        if workers < threads:
+            logger.info(
+                f"GRN inference fits targets on {workers} of {threads} workers: "
+                f"each worker process holds about {worker_bytes} bytes for its "
+                "copy of the regulators and its fit, and the memory budget of "
+                f"{self.resources.memoryBytes} bytes holds {workers} beside "
+                f"{held} bytes of expression and links"
             )
 
         from ...assay.normalization import feature_value_blocks
@@ -325,7 +356,7 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             np.arange(n_genes),
             seed=random_seed,
             parameters=parameters,
-            nthreads=threads,
+            nthreads=workers,
             progress=progress,
         )
         correlation = _pair_correlations(expression, tf_codes, target_codes)
