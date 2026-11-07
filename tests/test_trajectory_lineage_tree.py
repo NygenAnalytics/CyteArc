@@ -1,8 +1,9 @@
 import numpy as np
 import pytest
 
+from cytearc.trajectory import build_cluster_tree
 from cytearc.trajectory.lineage_tree import (
-    ClusterTree,
+    SpanningTree,
     cluster_distances,
     cluster_moments,
     spanning_tree,
@@ -323,7 +324,7 @@ def test_spanning_tree_joins_a_y_of_clusters_and_traces_its_branches():
     tree = spanning_tree(distances, root=0)
     unrooted = spanning_tree(distances)
 
-    assert isinstance(tree, ClusterTree)
+    assert isinstance(tree, SpanningTree)
     assert tree.edges.tolist() == _Y_EDGES
     assert tree.edges.dtype == np.int64
     np.testing.assert_array_equal(
@@ -466,3 +467,99 @@ def test_tree_lineages_of_a_single_cluster_have_no_leaves():
 
     assert leaves.size == 0
     assert lineages == ()
+
+
+# A tree built without a store, as ds.trajectory.lineage_tree builds it.
+
+
+def test_a_tree_built_by_hand_over_three_clusters_on_a_line():
+    # Three cells about each centre, 0, 12 and 20, each cluster with a sample
+    # variance of 1, so Slingshot's distance between clusters is the squared
+    # gap of their means over 2: 72 from c1 to c2, 32 from c2 to c10 and 200
+    # from c1 to c10. The cells come in an order that mixes the clusters.
+    centres = {"c1": 0.0, "c2": 12.0, "c10": 20.0}
+    cells = [
+        (label, centre + offset)
+        for offset in (-1.0, 0.0, 1.0)
+        for label, centre in centres.items()
+    ]
+    labels = np.asarray([label for label, _ in cells], dtype=object)
+    coordinates = np.asarray([[value] for _, value in cells])
+
+    tree = build_cluster_tree(coordinates, labels, root="c1")
+
+    # The clusters follow their natural order, as the saved trees do.
+    assert tree.clusters == ("c1", "c2", "c10")
+    np.testing.assert_array_equal(tree.sizes, [3, 3, 3])
+    np.testing.assert_allclose(tree.means, [[0.0], [12.0], [20.0]])
+    assert tree.edges[["source", "target"]].values.tolist() == [
+        ["c1", "c2"],
+        ["c2", "c10"],
+    ]
+    np.testing.assert_allclose(tree.edges["length"], [72.0, 32.0])
+    assert tree.leaves == ("c1", "c10")
+    assert tree.lineages == (("c1", "c2", "c10"),)
+    assert tree.candidate_sinks == ("c10",)
+
+    # Held as a leaf, c2 joins its nearest cluster, c10, after c1 and c10
+    # are joined across their distance of 200.
+    held = build_cluster_tree(coordinates, labels, root="c1", ends=["c2"])
+    assert held.edges[["source", "target"]].values.tolist() == [
+        ["c1", "c10"],
+        ["c2", "c10"],
+    ]
+    np.testing.assert_allclose(held.edges["length"], [200.0, 32.0])
+    assert held.ends == ("c2",)
+    assert held.leaves == ("c1", "c2")
+    assert held.lineages == (("c1", "c10", "c2"),)
+    # Its arrays are read-only, as a saved tree's are.
+    with pytest.raises(ValueError, match="read-only"):
+        held.means[0, 0] = 1.0
+
+
+def test_build_cluster_tree_refuses_what_lineage_tree_refuses():
+    labels = np.asarray(["a", "a", "b", "b"], dtype=object)
+    coordinates = np.asarray([[0.0, 1.0], [1.0, 0.0], [5.0, 6.0], [6.0, 5.0]])
+
+    for arguments, error, message in (
+        ({"ends": ("b",)}, TypeError, "ends must be a list"),
+        ({"root": "a", "ends": ["a"]}, ValueError, "root cannot also be an end"),
+        ({"root": "z"}, ValueError, "root 'z' is not a cluster label"),
+        ({"ends": ["z"]}, ValueError, "End 'z' is not a cluster label"),
+        ({"ends": ["a", "a"]}, ValueError, "must not contain duplicate labels"),
+        ({"root": [1]}, TypeError, "root must contain scalar labels"),
+        ({"ends": ["a", "b"]}, ValueError, "At least one cluster must not be an end"),
+    ):
+        with pytest.raises(error, match=message):
+            build_cluster_tree(coordinates, labels, **arguments)
+    for cells, cell_labels, error, message in (
+        (coordinates, np.asarray(["a"] * 4), ValueError, "at least two clusters"),
+        (
+            coordinates,
+            np.asarray(["a", None, "b", "b"], dtype=object),
+            ValueError,
+            "Every cell needs a label",
+        ),
+        (
+            coordinates,
+            np.asarray([1.0, np.nan, 2.0, 2.0]),
+            ValueError,
+            "Every cell needs a label",
+        ),
+        (coordinates, labels[:3], ValueError, "one label for each row"),
+        (coordinates, labels.reshape(2, 2), ValueError, "one label for each row"),
+        (coordinates[:, 0], labels, ValueError, "cells by dimensions"),
+        (
+            np.where(coordinates > 5.5, np.inf, coordinates),
+            labels,
+            ValueError,
+            "Coordinates must be finite",
+        ),
+        (coordinates.astype(str), labels, TypeError, "coordinates must hold numbers"),
+    ):
+        with pytest.raises(error, match=message):
+            build_cluster_tree(cells, cell_labels)
+    # Two clusters of one cell each, at different positions, are infinitely
+    # far apart, so no tree joins them.
+    with pytest.raises(ValueError, match="only across an infinite distance"):
+        build_cluster_tree([[0.0], [1.0]], ["a", "b"])
