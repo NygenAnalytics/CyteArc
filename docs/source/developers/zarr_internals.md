@@ -264,9 +264,7 @@ that owns the counts. The record holds exactly `location` (an absolute path or U
 identities. Any other shape, including a field that a later release adds, is rejected rather than
 ignored, and a source that is itself a mount is refused.
 
-The record holds no backend options. Each open passes the source's options, as
-`source_storage_options` of `mount_datastore`, `DataStore`, and `repack_store`, or opens the
-source with the target's `storage_options` when none are given.
+The record holds no backend options. Each open passes the source's options, as `source_storage_options` of `mount_datastore`, `DataStore`, and `repack_store`, or opens the source with the target's `storage_options` when none are given.
 
 The target holds copied cell and feature tables, its own artifacts, and its own pipeline runs.
 Opening it reopens the target root through a namespace that resolves keys in this order:
