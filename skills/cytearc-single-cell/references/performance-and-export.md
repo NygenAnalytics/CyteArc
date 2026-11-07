@@ -38,7 +38,7 @@ markers, and pipeline-run results. Docs: <https://docs.nygen.io/CyteArc/concepts
   slice materializes it. `ds.to_anndata(...)` always builds `X` in memory; `cytearc.to_h5ad`, with
   or without `run=`, and `cytearc.to_mtx` stream. `to_h5ad` writes a temporary file beside the
   target and renames it once complete, so a failed export leaves no partial file and keeps an
-  existing one.
+  existing one. It compresses on `nthreads` threads (the datastore's with `run=`) and stores column indices as int32 when the features fit.
 - On a mount, every pass over counts is a network read; artifacts (normalized, PCA, graph) live
   in the local target. `local_cache` (PCA) stages normalized data only when the datastore
   location itself is remote, so it is skipped for a local mount target.
