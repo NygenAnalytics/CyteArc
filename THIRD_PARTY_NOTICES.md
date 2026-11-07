@@ -38,8 +38,9 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - Source: <https://github.com/lmcinnes/umap>
 - Copyright (c) 2017, Leland McInnes
 - License: BSD-3-Clause
-- Used in: `cytearc/embeddings/umap.py` (the densMAP density terms and the fuzzy set union)
-  and the UMAP parameter descriptions in `cytearc/datastore/_operations/embeddings.py`.
+- Used in: `cytearc/embeddings/umap.py` (the densMAP density terms, the fuzzy set union, and the
+  epoch loop of `_optimize_layout`, adapted from `optimize_layout_euclidean` in `umap/layouts.py`
+  at 0.5.12) and the UMAP parameter descriptions in `cytearc/datastore/_operations/embeddings.py`.
 
 ### Seurat
 
