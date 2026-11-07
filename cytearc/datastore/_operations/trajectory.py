@@ -37,6 +37,7 @@ from ...metadata.arguments import (
     LineageCurveArguments,
     LineageDriverArguments,
     LineageMarkerArguments,
+    LineageMembershipArguments,
     LineageTreeArguments,
     PseudotimeAggregationArguments,
     PseudotimeMarkerArguments,
@@ -100,6 +101,8 @@ from ...trajectory.artifacts import (
     LINEAGE_MARKER_INPUTS as _LINEAGE_MARKER_INPUTS,
     LINEAGE_MARKER_METHODS as _LINEAGE_MARKER_METHODS,
     LINEAGE_MARKER_PAYLOAD as _LINEAGE_MARKER_PAYLOAD,
+    LINEAGE_MEMBERSHIP_INPUTS as _LINEAGE_MEMBERSHIP_INPUTS,
+    LINEAGE_MEMBERSHIP_PAYLOAD as _LINEAGE_MEMBERSHIP_PAYLOAD,
     LINEAGE_TREE_INPUTS as _LINEAGE_TREE_INPUTS,
     LINEAGE_TREE_PAYLOAD as _LINEAGE_TREE_PAYLOAD,
     MARKER_INPUTS as _MARKER_INPUTS,
@@ -116,6 +119,7 @@ from ...trajectory.artifacts import (
     lineage_curve_payload_is_valid as _lineage_curve_payload_is_valid,
     lineage_driver_payload_is_valid as _lineage_driver_payload_is_valid,
     lineage_marker_payload_is_valid as _lineage_marker_payload_is_valid,
+    lineage_membership_payload_is_valid as _lineage_membership_payload_is_valid,
     lineage_tree_payload_is_valid as _lineage_tree_payload_is_valid,
     load_cell_artifact_values as _load_cell_artifact_values,
     marker_payload_is_valid as _marker_payload_is_valid,
@@ -131,6 +135,7 @@ from ...trajectory.artifacts import (
     validate_lineage_curve_parameters as _validate_lineage_curve_parameters,
     validate_lineage_driver_parameters as _validate_lineage_driver_parameters,
     validate_lineage_marker_parameters as _validate_lineage_marker_parameters,
+    validate_lineage_membership_parameters as _validate_lineage_membership_parameters,
     validate_lineage_tree_parameters as _validate_lineage_tree_parameters,
     validate_marker_parameters as _validate_marker_parameters,
     validate_pseudotime_parameters as _validate_pseudotime_parameters,
@@ -175,6 +180,14 @@ from ...trajectory.lineages import (
     stream_lineage_profiles as _stream_lineage_profiles_impl,
     stream_weighted_correlations as _stream_weighted_correlations_impl,
 )
+from ...storage.selections import resolve_generated_selection_artifact
+from ...trajectory.membership import (
+    branch_points as _branch_points_impl,
+    branch_window as _branch_window_impl,
+    distance_limits as _distance_limits_impl,
+    lineage_members as _lineage_members_impl,
+    membership_labels as _membership_labels_impl,
+)
 from ...trajectory.pseudotime import (
     make_source_sink_vector as _make_source_sink_vector_impl,
     pba_potential as _pba_potential_impl,
@@ -190,6 +203,7 @@ from ...trajectory.results import (
     LineageCurvesResult,
     LineageDriverResult,
     LineageMarkerResult,
+    LineageMembershipResult,
     LineageTreeResult,
     PseudotimeAggregationResult,
     PseudotimeMarkerResult,
@@ -2854,6 +2868,404 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             leaves=tree.leaves,
             lineages=tree.lineages,
         )
+
+    def _membership_inputs(
+        self, curves: ArtifactRef
+    ) -> tuple[LineageCurvesResult, np.ndarray]:
+        """Load lineage curves with the pseudotime of their cells."""
+        loaded = self._trajectory_load_curves(curves)
+        pseudotime = self._load_fate_inputs(loaded.fate).pseudotime.values
+        return loaded, np.asarray(pseudotime, dtype=np.float64)
+
+    @validation_scoped
+    def _trajectory_lineage_membership(
+        self,
+        curves: ArtifactRef,
+        *,
+        band: float = 0.5,
+        distance_score: float = 5.0,
+        n_bins: int = 10,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Call which lineages each cell follows, and find where each pair of lineages parts.
+
+        Fate probabilities sum to one over the sinks, so a cell on no
+        trajectory still splits its probability among them, and a cell that
+        has not committed looks like a member of its most likely lineage. A
+        scored cell follows a lineage when its fate probability for that
+        lineage is positive and at least ``band`` times its largest
+        probability over the curves' lineages, and when it lies on the
+        trajectory: within some lineage's distance limit at the cell's
+        progress on that lineage's curve. In each of ``n_bins`` equal bins
+        of progress, the lineage's cells weigh by their fate probability for
+        it, and their spread is their weighted median distance plus
+        ``distance_score`` times their weighted median absolute deviation
+        scaled by 1.4826, which estimates the standard deviation of a normal
+        spread. A bin's limit is the median spread of three neighbouring
+        bins, so a state off the trajectory that projects onto one stretch
+        of a curve, such as a dead end off it, cannot widen the limit there.
+        A cell that follows several lineages is shared by them, and a cell
+        that lies on no curve follows none, whatever its probabilities.
+
+        Two lineages part where their shared cells give way to cells that
+        follow only one of them. Their branch point is the pseudotime that
+        splits the pair's shared cells, before it, from its parted cells,
+        after it, with the fewest cells on the wrong side.
+        :meth:`branch_cells` selects the cells around it, which
+        :meth:`drivers` takes as ``cells`` to test the genes that separate
+        the two sinks where they part.
+
+        Args:
+            curves: Explicit ``lineage_curves`` artifact.
+            band: Share of a cell's largest fate probability, above 0 and at
+                most 1, that its probability for another lineage must reach
+                for the cell to follow both. Larger values call fewer cells
+                shared.
+            distance_score: Robust standard deviations beyond the median
+                distance of a lineage's cells at which a cell lies off that
+                lineage's curve. Smaller values call more cells none; cells
+                where a curve cuts the corner of a sharp bend lie farther
+                from it than its other cells, so values below 4 can call
+                some of them none.
+            n_bins: Equal bins of progress along each curve, each with its
+                own distance limit.
+            invalidate_cache: Compute a new membership even when one matches.
+
+        Returns:
+            Reference to a ``lineage_membership`` artifact, whose labels
+            ``select_cells`` reads.
+
+        Raises:
+            ValueError: If a lineage's sink label reads ``"shared"`` or
+                ``"none"``, or ``band``, ``distance_score`` or ``n_bins`` is
+                out of range.
+        """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
+        if not isinstance(curves, ArtifactRef):
+            raise TypeError("curves must be an ArtifactRef")
+        validated = _validate_lineage_membership_parameters(
+            {"band": band, "distance_score": distance_score, "n_bins": n_bins}
+        )
+        loaded, pseudotime = self._membership_inputs(curves)
+        lineages = loaded.lineages
+        # A lineage cannot share its name with the labels of shared cells and
+        # of cells that follow none.
+        _membership_labels_impl(np.zeros((0, len(lineages)), dtype=bool), lineages)
+        names = [str(lineage) for lineage in lineages]
+        n_cells = int(loaded.valid.shape[0])
+        n_lineages = len(lineages)
+        n_pairs = n_lineages * (n_lineages - 1) // 2
+        arguments = LineageMembershipArguments(
+            curves=curves,
+            cell_selection=loaded.cell_selection,
+            band=validated["band"],
+            distance_score=validated["distance_score"],
+            n_bins=validated["n_bins"],
+            invalidate_cache=invalidate_cache,
+        )
+        planned = arguments.plan(
+            self.zw,
+            scope=curves.scope,
+            assay=curves.assay,
+            invalidate_cache=invalidate_cache,
+            required_arrays=(
+                ArrayRequirement("values", shape=(n_cells,)),
+                ArrayRequirement(
+                    "members", shape=(n_cells, n_lineages), dtype_kind="b"
+                ),
+                ArrayRequirement("valid", shape=(n_cells,), dtype_kind="b"),
+                ArrayRequirement(
+                    "distance_limits",
+                    shape=(n_lineages, validated["n_bins"]),
+                    dtype_kind="f",
+                ),
+                ArrayRequirement("branch_pairs", shape=(n_pairs, 2), dtype_kind="i"),
+                ArrayRequirement("branch_pseudotime", shape=(n_pairs,), dtype_kind="f"),
+                ArrayRequirement("branch_progress", shape=(n_pairs, 2), dtype_kind="f"),
+                ArrayRequirement("branch_cells", shape=(n_pairs, 2), dtype_kind="i"),
+            ),
+            required_attributes=(
+                AttributeRequirement("payload_fingerprint", expected_types=(str,)),
+            ),
+            reuse_validator=lambda _ref, group: _lineage_membership_payload_is_valid(
+                group,
+                n_cells=n_cells,
+                lineage_names=names,
+                n_bins=validated["n_bins"],
+                expected_valid=loaded.valid,
+            ),
+        )
+        if planned.reused:
+            return planned.ref
+        self._require_writable("call_lineage_membership")
+        # The curves' positions, distances and weights, and the pseudotime,
+        # beside each cell's bins, limits, probabilities and members for
+        # every lineage, its label, and the sorted cells of a pair.
+        label_width = max(len(name) for name in (*names, "shared", "none"))
+        needed = (
+            3 * n_cells * n_lineages * 8
+            + n_cells * 8
+            + n_cells * (34 * n_lineages + 4 * label_width + 120)
+        )
+        if needed >= self.memoryBytes:
+            raise MemoryBudgetError(
+                f"Lineage membership needs about {needed} bytes of working "
+                f"memory, which exceeds the memory budget of {self.memoryBytes} "
+                "bytes. Increase the memory budget or fit curves of fewer "
+                "lineages or cells.",
+                needed_bytes=needed + 1,
+                budget_bytes=int(self.memoryBytes),
+                item="the lineage membership of every cell",
+            )
+        limits = _distance_limits_impl(
+            loaded.distance,
+            loaded.progress,
+            loaded.weights,
+            loaded.valid,
+            n_bins=validated["n_bins"],
+            score=validated["distance_score"],
+        )
+        members = _lineage_members_impl(
+            loaded.weights,
+            loaded.distance,
+            loaded.progress,
+            loaded.valid,
+            limits,
+            band=validated["band"],
+        )
+        table = _branch_points_impl(
+            members, pseudotime, loaded.curve_pseudotime, lineages
+        )
+        pairs = np.asarray(
+            [
+                (first, second)
+                for first in range(n_lineages)
+                for second in range(first + 1, n_lineages)
+            ],
+            dtype=np.int64,
+        ).reshape(n_pairs, 2)
+        payload = {
+            "values": _membership_labels_impl(members, lineages),
+            "members": members,
+            "valid": np.asarray(loaded.valid, dtype=bool),
+            "distance_limits": limits,
+            "branch_pairs": pairs,
+            "branch_pseudotime": table["pseudotime"].to_numpy(dtype=np.float64),
+            "branch_progress": table[["first_progress", "second_progress"]].to_numpy(
+                dtype=np.float64
+            ),
+            "branch_cells": table[["shared_cells", "parted_cells"]].to_numpy(
+                dtype=np.int64
+            ),
+        }
+        write_cell_data_artifact(
+            self.zw,
+            planned,
+            {name: payload[name] for name in _LINEAGE_MEMBERSHIP_PAYLOAD},
+            fingerprint_payload=True,
+        )
+        counts = members.sum(axis=1)
+        logger.info(
+            f"Stored lineage membership of {int(loaded.valid.sum())} cells: "
+            f"{int((counts == 1).sum())} follow one lineage, "
+            f"{int((counts > 1).sum())} are shared, and "
+            f"{int((loaded.valid & (counts == 0)).sum())} follow none"
+        )
+        return planned.ref
+
+    @validation_scoped
+    def _trajectory_load_lineage_membership(
+        self,
+        ref: ArtifactRef,
+    ) -> LineageMembershipResult:
+        """Load which lineages each cell follows, and the branch points, from an explicit artifact."""
+        return self._load_lineage_membership_with_pseudotime(ref)[0]
+
+    def _load_lineage_membership_with_pseudotime(
+        self, ref: ArtifactRef
+    ) -> tuple[LineageMembershipResult, np.ndarray]:
+        """Load a lineage membership with the pseudotime of its cells."""
+        if not isinstance(ref, ArtifactRef):
+            raise TypeError("ref must be an ArtifactRef")
+        if ref.kind != "lineage_membership":
+            raise ValueError("ref must be a lineage_membership artifact")
+        status = inspect_artifact(self.zw, ref)
+        if (
+            not status.exists
+            or not status.complete
+            or status.operation != "call_lineage_membership"
+        ):
+            raise ValueError("Lineage-membership artifact is unavailable or invalid")
+        inputs = status.inputs or {}
+        _require_exact_record_keys(
+            inputs, _LINEAGE_MEMBERSHIP_INPUTS, "Lineage-membership inputs"
+        )
+        try:
+            parameters = _validate_lineage_membership_parameters(
+                status.parameters or {}
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Lineage-membership parameters are malformed") from exc
+        curves = parse_artifact_ref(
+            inputs.get("curves"), "Lineage-membership curves input"
+        )
+        selection = parse_artifact_ref(
+            inputs.get("cell_selection"), "Lineage-membership cell selection input"
+        )
+        loaded, pseudotime = self._membership_inputs(curves)
+        if loaded.cell_selection != selection:
+            raise ValueError("Lineage membership does not use its curves' cells")
+        if ref.scope != curves.scope or ref.assay != curves.assay:
+            raise ValueError(
+                "Lineage-membership artifact does not share its curves' scope"
+            )
+        lineages = loaded.lineages
+        group = as_zarr_group(self.zw[status.path], name=status.path)
+        if not _lineage_membership_payload_is_valid(
+            group,
+            n_cells=int(loaded.valid.shape[0]),
+            lineage_names=[str(lineage) for lineage in lineages],
+            n_bins=parameters["n_bins"],
+            expected_valid=loaded.valid,
+        ):
+            raise ValueError("Lineage-membership artifact payload is invalid")
+        pairs = np.asarray(_stored_values(group, "branch_pairs"), dtype=np.int64)
+        progress = np.asarray(
+            _stored_values(group, "branch_progress"), dtype=np.float64
+        )
+        counted = np.asarray(_stored_values(group, "branch_cells"), dtype=np.int64)
+        table = pd.DataFrame(
+            {
+                "first": [lineages[first] for first in pairs[:, 0]],
+                "second": [lineages[second] for second in pairs[:, 1]],
+                "pseudotime": np.asarray(
+                    _stored_values(group, "branch_pseudotime"), dtype=np.float64
+                ),
+                "first_progress": progress[:, 0],
+                "second_progress": progress[:, 1],
+                "shared_cells": counted[:, 0],
+                "parted_cells": counted[:, 1],
+            }
+        )
+        result = LineageMembershipResult(
+            ref=ref,
+            curves=curves,
+            cell_selection=selection,
+            lineages=lineages,
+            labels=np.asarray(_stored_values(group, "values")).astype(str),
+            members=np.asarray(_stored_values(group, "members"), dtype=bool),
+            valid=np.asarray(_stored_values(group, "valid"), dtype=bool),
+            distance_limits=np.asarray(
+                _stored_values(group, "distance_limits"), dtype=np.float64
+            ),
+            branch_points=table,
+        )
+        return result, pseudotime
+
+    @validation_scoped
+    def _trajectory_branch_cells(
+        self,
+        membership: ArtifactRef,
+        lineages: list[Any],
+        *,
+        window: float = 0.2,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Select the cells around the point where two lineages part.
+
+        The selection holds the ``window`` share of the cells that follow
+        either lineage, rounded up, whose pseudotime lies closest to the two
+        lineages' branch point. Pass it as ``cells`` to :meth:`drivers` to
+        test the genes that separate the two sinks where they part.
+
+        Args:
+            membership: Explicit ``lineage_membership`` artifact.
+            lineages: The sink labels of the two lineages, in either order.
+            window: Share of the cells that follow either lineage to select,
+                above 0 and at most 1.
+            invalidate_cache: Create a fresh selection instead of reusing a
+                match.
+
+        Returns:
+            A complete datastore-scoped ``cell_selection`` artifact of some
+            of the membership's cells.
+
+        Raises:
+            ValueError: If ``lineages`` does not name two lineages of the
+                membership, or the two never share a cell or never part, so
+                that they have no branch point.
+        """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
+        if not isinstance(membership, ArtifactRef):
+            raise TypeError("membership must be an ArtifactRef")
+        if not isinstance(lineages, list | tuple):
+            raise TypeError("lineages must be a list of two sink labels")
+        share = float_argument(window, "window")
+        if not 0.0 < share <= 1.0:
+            raise ValueError("window must be above 0 and at most 1")
+        result, pseudotime = self._load_lineage_membership_with_pseudotime(membership)
+        _, columns = _select_lineages_impl(
+            result.lineages, list(lineages), where="a lineage of the membership"
+        )
+        if len(columns) != 2:
+            raise ValueError("lineages must name two lineages of the membership")
+        first, second = sorted(int(column) for column in columns)
+        table = result.branch_points
+        row = int(
+            np.flatnonzero(
+                (table["first"] == result.lineages[first]).to_numpy()
+                & (table["second"] == result.lineages[second]).to_numpy()
+            )[0]
+        )
+        point = float(table["pseudotime"].iloc[row])
+        if not np.isfinite(point):
+            raise ValueError(
+                f"Lineages {result.lineages[first]!r} and "
+                f"{result.lineages[second]!r} never share a cell or never part, "
+                "so they have no branch point"
+            )
+        window_cells = _branch_window_impl(
+            pseudotime,
+            result.members[:, first] | result.members[:, second],
+            point,
+            share,
+        )
+        selected = np.zeros(self.cells.N, dtype=bool)
+        selected[
+            cell_selection_indices(self.zw, result.cell_selection)[window_cells]
+        ] = True
+        prior = validate_stored_selection_integrity(
+            self.zw,
+            result.cell_selection,
+            kind="cell_selection",
+            scope="datastore",
+            assay=None,
+            table_path="cellData",
+        )
+        ref, stored = resolve_generated_selection_artifact(
+            self.zw,
+            scope="datastore",
+            kind="cell_selection",
+            values=selected,
+            row_ids=prior.row_ids,
+            row_ids_fingerprint=prior.row_ids_fingerprint,
+            operation="select_branch_cells",
+            parameters={
+                "lineages": [result.lineages[first], result.lineages[second]],
+                "window": share,
+            },
+            inputs={
+                "lineage_membership": membership,
+                "cell_selection": result.cell_selection,
+            },
+            source_column="artifact",
+            invalidate_cache=invalidate_cache,
+        )
+        logger.info(
+            f"Selected {int(stored.sum())} cells around the branch point of "
+            f"lineages {result.lineages[first]!r} and {result.lineages[second]!r}"
+        )
+        return ref
 
 
 class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
