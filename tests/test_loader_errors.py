@@ -136,7 +136,7 @@ def test_load_values_raises_value_errors_for_missing_and_incomplete_artifacts(
         method(incomplete)
     with pytest.raises(ValueError, match="'cell_selection' is not a cell-aligned"):
         method(selection)
-    with pytest.raises(TypeError, match="^ref must be an ArtifactRef$"):
+    with pytest.raises(TypeError, match="^ref must be an ArtifactRef or a CellField$"):
         method("cluster_labels")
     with pytest.raises(TypeError, match="^cell_selection must be an ArtifactRef$"):
         method(missing, cell_selection="every")
