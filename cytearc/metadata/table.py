@@ -12,6 +12,12 @@ from ..storage.arrays import (
     MISSING_MASK_PREFIX,
     linked_missing_mask,
 )
+from ..storage.categorical import (
+    CATEGORIES_LINK,
+    CATEGORIES_PREFIX,
+    CategoricalColumn,
+    category_codes_dtype,
+)
 from ..storage.metadata_keys import (
     is_metadata_column_key,
     metadata_column_key,
@@ -19,7 +25,13 @@ from ..storage.metadata_keys import (
     validate_metadata_column_name,
 )
 from ..utils.logging import logger
-from .encoding import checked_fill_value, missing_placeholder, nullable_values
+from .encoding import (
+    categorical_codes,
+    checked_fill_value,
+    is_categorical,
+    missing_placeholder,
+    nullable_values,
+)
 from .queries import (
     grep as _grep,
     head as _head,
@@ -33,6 +45,7 @@ from .rows import (
     iter_row_blocks as _iter_row_blocks,
 )
 from ..utils.arguments import bool_argument
+from ..utils.arrays import sort_categories
 
 _RESERVED_COLUMNS = ("I", "ids", "names")
 _RESERVED_COLUMN_SET = frozenset(_RESERVED_COLUMNS)
@@ -77,12 +90,21 @@ class MetaData:
     @staticmethod
     def _get_size(zgrp: zarr.Group) -> int:
         # members() reads child metadata concurrently; opening each key in turn
-        # costs one sequential round trip per column on object stores.
-        sizes = {
-            child.shape[0]
-            for _key, child in zgrp.members()
-            if isinstance(child, zarr.Array)
+        # costs one sequential round trip per column on object stores. The
+        # categories of a categorical column hold one value per category.
+        arrays = {
+            key: child
+            for key, child in zgrp.members()
+            if isinstance(child, zarr.Array) and not key.startswith(CATEGORIES_PREFIX)
         }
+        for key in _RESERVED_COLUMNS:
+            if key in arrays and CATEGORIES_LINK in arrays[key].attrs:
+                raise ValueError(
+                    f"Column {key!r} is stored as a categorical column, but "
+                    "CyteArc stores the I, ids and names columns as their values; "
+                    "write the column again from its labels"
+                )
+        sizes = {child.shape[0] for child in arrays.values()}
         if not sizes:
             raise ValueError("Attempted to get size of empty zarr group")
         if len(sizes) != 1:
@@ -94,7 +116,7 @@ class MetaData:
     @staticmethod
     def _is_public(column: str) -> bool:
         return is_metadata_column_key(column) and not column.startswith(
-            MISSING_MASK_PREFIX
+            (MISSING_MASK_PREFIX, CATEGORIES_PREFIX)
         )
 
     @staticmethod
@@ -142,30 +164,40 @@ class MetaData:
         self,
         column: str,
         opened: Mapping[str, zarr.Array | zarr.Group],
-    ) -> zarr.Array:
+    ) -> zarr.Array | CategoricalColumn:
         """Return a public column's array, reusing ``opened``.
 
         ``opened`` maps member names to nodes that were already opened, such
         as those of :meth:`_members`; a column missing from it is opened here.
-        Raises as :meth:`_get_array` does for a column that the table does not
-        hold or that is a nested group.
+        A categorical column is returned as its labels, as :meth:`_get_array`
+        returns it. Raises as :meth:`_get_array` does for a column that the
+        table does not hold or that is a nested group.
         """
         node = opened.get(column) if self._is_public(column) else None
         if node is None:
             return self._get_array(column)
         if isinstance(node, zarr.Group):
             raise nested_group_error(column)
-        return as_zarr_array(node, name=column)
+        array = as_zarr_array(node, name=column)
+        categorical = CategoricalColumn.open(
+            self._group, column, values=array, opened=opened
+        )
+        return array if categorical is None else categorical
 
     def _opened_column(
         self,
         column: str,
         opened: Mapping[str, zarr.Array | zarr.Group],
-    ) -> tuple[zarr.Array, zarr.Array | None]:
+    ) -> tuple[zarr.Array | CategoricalColumn, zarr.Array | None]:
         """Return a column's array and linked missing mask, reusing ``opened``."""
         array = self._opened_array(column, opened)
+        stored = array.codes if isinstance(array, CategoricalColumn) else array
         mask = linked_missing_mask(
-            self._group, column, label=f"Column {column!r}", values=array, opened=opened
+            self._group,
+            column,
+            label=f"Column {column!r}",
+            values=stored,
+            opened=opened,
         )
         return array, mask
 
@@ -188,8 +220,13 @@ class MetaData:
                 return reserved
         return True
 
-    def _get_array(self, column: str) -> zarr.Array:
+    def _get_array(self, column: str) -> zarr.Array | CategoricalColumn:
         """Return the array of a public column.
+
+        A categorical column is returned as a
+        :class:`~cytearc.storage.categorical.CategoricalColumn`, which reads
+        as the column's labels, so every read sees the values that a column
+        storing the labels holds.
 
         Raises:
             KeyError: If the table has no public column of that name.
@@ -197,6 +234,8 @@ class MetaData:
                 renamed imported columns nested a source column whose name
                 contains ``/`` or ``\\`` into groups; such a store must be
                 imported again.
+            ValueError: If a categorical column links its categories in a
+                malformed way.
         """
         # One metadata read per column: a membership test before indexing
         # doubles the round trips on object stores.
@@ -208,7 +247,9 @@ class MetaData:
             else:
                 if isinstance(node, zarr.Group):
                     raise nested_group_error(column)
-                return as_zarr_array(node, name=column)
+                array = as_zarr_array(node, name=column)
+                categorical = CategoricalColumn.open(self._group, column, values=array)
+                return array if categorical is None else categorical
         raise self._missing_column(column)
 
     def _get_missing_mask_array(self, column: str) -> zarr.Array | None:
@@ -220,7 +261,7 @@ class MetaData:
         """Return the dtype of a metadata column."""
         return self._get_array(column).dtype
 
-    def _bool_array(self, key: str) -> zarr.Array:
+    def _bool_array(self, key: str) -> zarr.Array | CategoricalColumn:
         array = self._get_array(key)
         if array.dtype != bool:  # noqa: E721
             raise TypeError(
@@ -259,6 +300,66 @@ class MetaData:
         placeholders; ``to_pandas_dataframe`` shows them as missing.
         """
         return np.asarray(self.fetch_all(column)[self.active_index(key)])
+
+    def fetch_categorical(self, column: str, key: str | None = "I") -> pd.Categorical:
+        """Return a column's labels for the rows that ``key`` selects as a pandas Categorical.
+
+        A categorical column returns its stored codes and categories, every
+        category in its stored order, unused ones included, and whether they
+        are ordered. Any other column returns its distinct values as
+        unordered categories, numbers and times ascending and text in the
+        natural order of plots and marker tables, so ``"2"`` precedes
+        ``"10"``. Rows that the column's missing mask flags, and NaN and NaT
+        values, are missing: their code is -1. ``key=None`` reads every row.
+
+        Raises:
+            KeyError: If the table has no column of that name.
+            TypeError: If ``key`` does not name a boolean column.
+            ValueError: If a categorical column's missing mask disagrees
+                with its codes.
+        """
+        array = self._get_array(column)
+        rows = None if key is None else self.active_index(key)
+        mask = self._get_missing_mask_array(column)
+        missing = None if mask is None else np.asarray(mask[:], dtype=bool)
+        if isinstance(array, CategoricalColumn):
+            codes = array.check_codes(np.asarray(array.codes[:]))
+            flagged = codes < 0
+            if (missing is None and flagged.any()) or (
+                missing is not None and not np.array_equal(missing, flagged)
+            ):
+                raise ValueError(
+                    f"Categorical column {column!r} has a missing mask that "
+                    "disagrees with its codes of -1; write the column again"
+                )
+            if rows is not None:
+                codes = codes[rows]
+            return pd.Categorical.from_codes(
+                codes, categories=pd.Index(array.categories), ordered=array.ordered
+            )
+        values = self.fetch_all(column)
+        if rows is not None:
+            values = values[rows]
+            missing = None if missing is None else missing[rows]
+        present = np.ones(len(values), dtype=bool) if missing is None else ~missing
+        if values.dtype.kind in "fc":
+            present &= ~np.isnan(values)
+        elif values.dtype.kind in "Mm":
+            present &= ~np.isnat(values)
+        # The distinct values, ascending, and each present row's position among them.
+        distinct, inverse = np.unique(values[present], return_inverse=True)
+        position = np.arange(len(distinct))
+        categories = pd.Index(distinct)
+        if distinct.dtype.kind == "U":
+            natural = sort_categories(distinct.tolist())
+            rank = {text: index for index, text in enumerate(natural)}
+            position = np.asarray(
+                [rank[text] for text in distinct.tolist()], dtype=np.intp
+            )
+            categories = pd.Index(natural)
+        codes = np.full(len(values), -1, dtype=category_codes_dtype(len(distinct)))
+        codes[present] = position[inverse.reshape(-1)]
+        return pd.Categorical.from_codes(codes, categories=categories)
 
     def default_block_rows(self, column: str = "I") -> int:
         """Prefer the Zarr chunk length of ``column`` for row iteration."""
@@ -326,6 +427,72 @@ class MetaData:
         from ..storage.identity import replace_metadata_column
 
         replace_metadata_column(self._group, column_name, values, missing)
+
+    def _save_categorical(
+        self,
+        column_name: str,
+        codes: np.ndarray,
+        categories: np.ndarray,
+        ordered: bool,
+    ) -> None:
+        """Write a categorical column: each row's code, -1 for missing, beside its categories.
+
+        The column is replaced through
+        :func:`~cytearc.storage.identity.replace_metadata_column` as
+        :meth:`_save` replaces one.
+        """
+        validate_metadata_column_name(column_name)
+        if isinstance(self._group.get(column_name), zarr.Group):
+            raise nested_group_error(column_name)
+        from ..storage.identity import replace_metadata_column
+
+        replace_metadata_column(
+            self._group, column_name, codes, categories=categories, ordered=ordered
+        )
+
+    def _codes_for_rows(
+        self,
+        codes: np.ndarray,
+        categories: np.ndarray,
+        key: str,
+        fill_value: Any,
+        *,
+        name: str,
+    ) -> np.ndarray:
+        """Return one code per row from the codes of every row or of the rows that ``key`` selects.
+
+        Each row that ``key`` does not select takes the code of
+        ``fill_value``, which must be one of the categories, or -1 for a
+        missing row when it is None.
+
+        Raises:
+            ValueError: If the codes cover neither every row nor the rows that
+                ``key`` selects, or ``fill_value`` is not a category.
+        """
+        n_values = codes.shape[0]
+        if n_values == self.N:
+            return codes
+        selected = np.asarray(self._bool_array(key)[:], dtype=bool)
+        selected_count = int(np.count_nonzero(selected))
+        if n_values != selected_count:
+            raise ValueError(
+                f"ERROR: `values`  are of incorrect length ({n_values}). "
+                f" Chosen key ({key}) has {selected_count} active rows"
+            )
+        fill = -1
+        if fill_value is not None:
+            fitted, _dtype = checked_fill_value(fill_value, categories.dtype)
+            matches = np.flatnonzero(categories == fitted)
+            if not len(matches):
+                raise ValueError(
+                    f"fill_value {fill_value!r} is not a category of column {name!r}: "
+                    "pass one of its categories, add it to the values' categories "
+                    "first, or pass None to flag the rows as missing"
+                )
+            fill = int(matches[0])
+        expanded = np.full(self.N, fill, dtype=category_codes_dtype(len(categories)))
+        expanded[selected] = codes
+        return expanded
 
     def _expand_to_rows(
         self,
@@ -496,11 +663,23 @@ class MetaData:
         label: its labels must be exactly the ``ids`` of those rows, in any
         order, and each value goes to the row with its label.
 
+        Pandas categorical values, a ``pd.Categorical`` or a Series of
+        categorical dtype, are stored as a categorical column: each row's
+        code beside the categories, every category kept in its order, with
+        whether they are ordered. The categories are typed together, as
+        other values are: text, int64, float64, complex128 or bool. An
+        explicit ``fill_value`` must then be one of the categories. ``I``,
+        ``ids`` and ``names`` store the labels of categorical values. Every
+        read returns a categorical column's labels, and
+        :meth:`fetch_categorical` returns its codes and categories.
+
         Raises:
             ValueError: If ``column_name`` is protected, already exists
                 without ``overwrite``, or contains ``/`` or ``\\``, which
-                Zarr reads as path separators, or if a Series is labelled by
-                anything other than those ids.
+                Zarr reads as path separators, if a Series is labelled by
+                anything other than those ids, or if two categories of
+                categorical values read alike once stored or the
+                ``fill_value`` of categorical values is not a category.
         """
         overwrite = bool_argument(overwrite, "overwrite")
         force = bool_argument(force, "force")
@@ -520,6 +699,21 @@ class MetaData:
                 "'values' parameter is of `list` type and not `np.ndarray` as "
                 "expected. The correct dtype may not be assigned to the column"
             )
+        # Categorical values keep their layout, except in the reserved
+        # columns, which store their labels.
+        if column_name not in _RESERVED_COLUMN_SET and is_categorical(values):
+            codes, categories, ordered = categorical_codes(
+                self._label_aligned(values, key, name=column_name), name=column_name
+            )
+            self._save_categorical(
+                column_name,
+                self._codes_for_rows(
+                    codes, categories, key, fill_value, name=column_name
+                ),
+                categories,
+                ordered,
+            )
+            return
         expanded, missing = self._expand_to_rows(
             values, key, fill_value, name=column_name
         )

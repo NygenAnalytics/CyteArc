@@ -8,6 +8,7 @@ import numpy as np
 import zarr
 
 from ..storage.async_execution import zarr_decoding_threads, zarr_io_concurrency
+from ..storage.categorical import CategoricalColumn
 from ..storage.geometry import (
     ROW_INDEX_BYTES,
     ROW_KEPT_INDEX_BYTES,
@@ -21,6 +22,7 @@ from ..storage.partition import (
     row_band,
 )
 from ..storage.content_stamps import stored_content_stamp, stored_content_stamp_bytes
+from ..storage.layout import column_chunk_rows
 from ..storage.types import as_zarr_array, read_array
 from ..utils.memory_budget import (
     MemoryLedger,
@@ -144,7 +146,12 @@ def operation_concurrency() -> int:
 
 
 def read_whole(
-    ledger: MemoryLedger, group: zarr.Group, name: str, *, item: str
+    ledger: MemoryLedger,
+    group: zarr.Group,
+    name: str,
+    *,
+    item: str,
+    codes: bool = False,
 ) -> np.ndarray:
     """Read the whole array ``name`` of ``group`` within the ledger's room, and keep it charged as ``item``.
 
@@ -154,7 +161,9 @@ def read_whole(
     fits. A sharded array is read a band of inner chunks at a time, so that
     no fetch takes more than one band of a shard. The ledger counts what the
     read holds while it runs, as ``ArrayGeometry.wholeReadBytes`` states, and
-    keeps the result charged.
+    keeps the result charged. A categorical column of a metadata table is
+    read as its labels, as :func:`read_rows` decodes them, unless ``codes``
+    asks for its stored codes.
 
     Raises:
         MemoryBudgetError: If even a read of one chunk at a time would pass
@@ -162,6 +171,11 @@ def read_whole(
         TypeError: If ``name`` is a group, not an array.
     """
     array = as_zarr_array(group[name], name=name)
+    categorical = None if codes else CategoricalColumn.open(group, name, values=array)
+    if categorical is not None:
+        # A categorical column reads its codes whole and decodes them.
+        stored = read_whole(ledger, group, name, item=item, codes=True)
+        return _decoded(ledger, categorical, stored, item)
     geometry = array_geometry(array)
     if geometry is None:
         # An array without chunks, such as a scalar, is read as it is.
@@ -219,6 +233,25 @@ def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
     return max(ordering, reading)
 
 
+def read_rows_bytes(array: Any, n_rows: int) -> int:
+    """What :func:`read_rows` holds to read ``n_rows`` distinct rows of ``array``, with the rows.
+
+    A stored array holds what :func:`row_read_bytes` states. A categorical
+    column holds the read of its codes, then its codes beside the categories,
+    the lookup that decoding builds and the labels returned.
+    """
+    if not isinstance(array, CategoricalColumn):
+        return row_read_bytes(array_geometry(array), n_rows)
+    n_rows = int(n_rows)
+    codes = row_read_bytes(array_geometry(array.codes), n_rows)
+    decoding = (
+        n_rows * int(np.dtype(array.codes.dtype).itemsize)
+        + _categories_bytes(array)
+        + n_rows * int(array.dtype.itemsize)
+    )
+    return max(codes, decoding)
+
+
 def read_rows(
     ledger: MemoryLedger, array: Any, rows: np.ndarray, *, item: str
 ) -> np.ndarray:
@@ -227,10 +260,16 @@ def read_rows(
     The rows are read as :func:`read_array_rows_chunkwise` reads them, in the
     order given, on the ledger's codec threads. The ledger counts what the
     read holds, as :func:`row_read_bytes` states, and keeps the rows charged.
+    A categorical column reads the codes of the rows that way, then decodes
+    them into its categories' dtype beside the categories, so the read holds
+    codes and the labels returned rather than a stored label per row.
 
     Raises:
         MemoryBudgetError: If the read would pass the budget.
     """
+    if isinstance(array, CategoricalColumn):
+        codes = read_rows(ledger, array.codes, rows, item=item)
+        return _decoded(ledger, array, codes, item)
     indices = np.asarray(rows)
     ledger.peak(item, row_read_bytes(array_geometry(array), int(indices.size)))
     with zarr_decoding_threads(ledger.codec_threads):
@@ -250,6 +289,12 @@ def read_text_rows(
     counts, which is charged before they are made. The stored rows are then
     let go, and the strings stay charged.
 
+    A categorical column of text categories reads the codes of the rows
+    through :func:`read_rows` and returns its categories at them as one
+    Python string per category, which the rows share: the read holds the
+    codes, the categories' strings and a reference per row, not a string per
+    row.
+
     Returns:
         An object array of one string for each row.
 
@@ -259,6 +304,9 @@ def read_text_rows(
     """
     if np.dtype(array.dtype).kind != "U":
         raise TypeError(f"{item} must be stored as text, not as {array.dtype}")
+    if isinstance(array, CategoricalColumn):
+        codes = read_rows(ledger, array.codes, rows, item=item)
+        return _decoded_strings(ledger, array, codes, item)
     stored = read_rows(ledger, array, rows, item=item)
     values = _strings_of(ledger, stored, item)
     stored_bytes = stored.nbytes
@@ -284,8 +332,13 @@ def read_whole_text(
         TypeError: If the array does not store fixed-width text.
     """
     array = as_zarr_array(group[name], name=name)
-    if np.dtype(array.dtype).kind != "U":
-        raise TypeError(f"{item} must be stored as text, not as {array.dtype}")
+    categorical = CategoricalColumn.open(group, name, values=array)
+    labels = array if categorical is None else categorical
+    if np.dtype(labels.dtype).kind != "U":
+        raise TypeError(f"{item} must be stored as text, not as {labels.dtype}")
+    if categorical is not None:
+        codes = read_whole(ledger, group, name, item=item, codes=True)
+        return _decoded_strings(ledger, categorical, codes, item)
     stored = read_whole(ledger, group, name, item=item)
     values = _strings_of(ledger, stored, item)
     stored_bytes = stored.nbytes
@@ -310,6 +363,53 @@ def _strings_of(ledger: MemoryLedger, stored: np.ndarray, item: str) -> np.ndarr
         + python_text_bytes(len(stored), characters, widest=widest),
     )
     return stored.astype(object)
+
+
+def _categories_bytes(column: CategoricalColumn) -> int:
+    """The bytes of a categorical column's categories as read, beside the lookup that decoding builds from them."""
+    return 2 * (column.n_categories + 1) * int(column.dtype.itemsize)
+
+
+def _decoded(
+    ledger: MemoryLedger, column: CategoricalColumn, codes: np.ndarray, item: str
+) -> np.ndarray:
+    """The labels of ``codes``, which the ledger holds, charged in their place.
+
+    The categories and the lookup are held while the labels are made; the
+    codes are let go once they are.
+    """
+    ledger.peak(item, _categories_bytes(column) + len(codes) * column.dtype.itemsize)
+    values = column.decode(codes)
+    ledger.hold(item, values.nbytes)
+    codes_bytes = codes.nbytes
+    del codes
+    ledger.release(codes_bytes)
+    return values
+
+
+def _decoded_strings(
+    ledger: MemoryLedger, column: CategoricalColumn, codes: np.ndarray, item: str
+) -> np.ndarray:
+    """The labels of ``codes``, which the ledger holds, as references to one string per category, charged in their place.
+
+    Each category becomes one Python string, measured by its characters and
+    its widest character, which the rows share; the codes are let go once
+    the references are made.
+    """
+    categories = column.categories
+    characters = int(np.char.str_len(categories).sum()) if categories.size else 0
+    widest = int(categories.view(np.uint32).max()) if categories.size else 0
+    ledger.peak(item, _categories_bytes(column))
+    ledger.hold(
+        item,
+        object_array_bytes(len(codes) + column.n_categories + 1)
+        + python_text_bytes(column.n_categories + 1, characters, widest=widest),
+    )
+    values = column.decode_objects(codes)
+    codes_bytes = codes.nbytes
+    del codes
+    ledger.release(codes_bytes)
+    return values
 
 
 def read_metadata_rows(
@@ -369,10 +469,14 @@ def metadata_column_fingerprint(metadata: _RowReadableMetaData, column: str) -> 
 
     The digest covers the stored dtype, the type and representation of each
     object value, and the linked missing mask, so an edit to any of them
-    changes it.
+    changes it. A categorical column is hashed as its labels would be stored
+    in a column of their own: at the dtype of
+    :meth:`~cytearc.storage.categorical.CategoricalColumn.stored_labels_dtype`,
+    in blocks of the chunk rows that a cell or feature table gives such a
+    column, so the same labels give the same digest in either layout.
     """
     digest = hashlib.sha256()
-    for block in iter_metadata_column_blocks(metadata, column):
+    for block in _fingerprint_blocks(metadata, column):
         digest.update(str(block.dtype).encode())
         digest.update(str(block.shape).encode())
         digest.update(
@@ -393,6 +497,20 @@ def metadata_column_fingerprint(metadata: _RowReadableMetaData, column: str) -> 
     return digest.hexdigest()
 
 
+def _fingerprint_blocks(
+    metadata: _RowReadableMetaData, column: str
+) -> Iterator[np.ndarray]:
+    """Yield a column's values in the blocks that :func:`metadata_column_fingerprint` hashes."""
+    array = metadata._get_array(column)
+    if not isinstance(array, CategoricalColumn):
+        yield from iter_metadata_column_blocks(metadata, column)
+        return
+    dtype = array.stored_labels_dtype()
+    rows = column_chunk_rows(metadata.N, max(1, dtype.itemsize))
+    for start in range(0, metadata.N, rows):
+        yield array[start : start + rows].astype(dtype)
+
+
 def metadata_column_stamp(metadata: _RowReadableMetaData, column: str) -> str:
     """Stamp one metadata column by its stored chunks and those of its missing mask.
 
@@ -400,10 +518,17 @@ def metadata_column_stamp(metadata: _RowReadableMetaData, column: str) -> str:
     :func:`~cytearc.storage.content_stamps.stored_content_stamp` reads them
     without decoding them, and whether it has a missing mask and that mask's
     objects, so an edit to the values, their dtype or which are missing
-    changes it. Values written again with other chunks or codecs change it
-    too.
+    changes it. A categorical column is stamped by its codes and its
+    categories. Values written again with other chunks, codecs or layout
+    change it too.
     """
-    digest = hashlib.sha256(stored_content_stamp(metadata._get_array(column)))
+    array = metadata._get_array(column)
+    if isinstance(array, CategoricalColumn):
+        digest = hashlib.sha256(stored_content_stamp(array.codes))
+        digest.update(b"categories:")
+        digest.update(stored_content_stamp(array.categories_array))
+    else:
+        digest = hashlib.sha256(stored_content_stamp(array))
     missing = metadata_missing_mask(metadata, column)
     digest.update(b"missing:none" if missing is None else b"missing:present")
     if missing is not None:
@@ -412,10 +537,16 @@ def metadata_column_stamp(metadata: _RowReadableMetaData, column: str) -> str:
 
 
 def metadata_column_stamp_bytes(metadata: _RowReadableMetaData, column: str) -> int:
-    """The most bytes that :func:`metadata_column_stamp` holds: the larger of its two stamps, made in turn."""
+    """The most bytes that :func:`metadata_column_stamp` holds: the largest of its stamps, made in turn."""
     missing = metadata_missing_mask(metadata, column)
+    array = metadata._get_array(column)
+    stamped = (
+        [array.codes, array.categories_array]
+        if isinstance(array, CategoricalColumn)
+        else [array]
+    )
     return max(
-        stored_content_stamp_bytes(metadata._get_array(column)),
+        *(stored_content_stamp_bytes(each) for each in stamped),
         0 if missing is None else stored_content_stamp_bytes(missing),
     )
 

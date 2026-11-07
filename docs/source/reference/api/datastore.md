@@ -555,6 +555,14 @@ filters over it record its mask. Replacing a column reads the previous column, i
 its mask first; if writing the new column fails or is interrupted, the previous one is written back
 before the error propagates. When that also fails, a note on the error names the column.
 
+Pandas categorical values, a `pd.Categorical` or a Series of categorical dtype, are stored as a categorical column: each row's code, -1 for a missing row, in the smallest signed integer type that holds it, beside the categories, every category in its order with whether they are ordered ([Categorical columns](../developers/zarr-internals#categorical-columns)). The categories are typed together, as other values are, so categories that read alike once stored, such as `1` and `"1"`, raise `ValueError`, and an explicit `fill_value` must be one of them. `I`, `ids` and `names` store the labels of categorical values. Every read returns the labels of either layout: `fetch`, `fetch_all`, `to_pandas_dataframe`, `artifacts.load_values` of a `CellField`, groupings, plots and exports read a categorical column as they read a text column of the same labels, and the fingerprints that results record of those labels are the same, apart from the stamp of stored chunks that `clones.from_column` records. {py:meth}`cytearc.metadata.MetaData.fetch_categorical` returns a column's labels for the rows that `key` selects, or for every row with `key=None`, as a pandas `Categorical`: the codes and categories of a categorical column as stored, unused categories included, and for another column its distinct values as unordered categories, numbers ascending and text in the natural order of plots.
+
+```python
+ds.cells.insert("cell_type", pd.Categorical(labels, categories=["T cell", "B cell", "NK cell"]))
+cell_type = ds.cells.fetch_categorical("cell_type", key=None)
+cell_type.codes, cell_type.categories
+```
+
 The cell table reserves the membership column `<assay>_I` of every assay of the store, which only
 imports, merges, and derived assays write ([Assay membership](../developers/zarr-internals#assay-membership)). `insert`, with or without
 `overwrite`, `update_key`, and `reset_key` raise `ValueError` for that name whether or not the

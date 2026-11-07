@@ -27,6 +27,24 @@ class MetadataBlock:
     missing: np.ndarray | None = None
 
 
+def missing_placeholder(dtype: np.dtype[Any]) -> Any:
+    """Return the value that a masked row holds in a column of ``dtype``."""
+    kind = dtype.kind
+    if kind == "b":
+        return False
+    if kind in "iu":
+        return 0
+    if kind in "fc":
+        return np.nan
+    if kind in "Mm":
+        return np.array("NaT", dtype=dtype)[()]
+    if kind == "U":
+        return ""
+    if kind == "S":
+        return b""
+    raise TypeError(f"A metadata column of dtype {dtype} cannot hold missing values")
+
+
 def linked_missing_mask(
     group: zarr.Group,
     name: str,
