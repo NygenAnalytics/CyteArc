@@ -123,6 +123,7 @@ class ClustersAccessor(_Accessor):
     compute_concordance = _bind(
         _IntegrationMetricsOperationsMixin._clusters_compute_concordance
     )
+    connectivity = _bind(_ClusteringOperationsMixin._clusters_connectivity)
 
 
 class CompareAccessor(_Accessor):

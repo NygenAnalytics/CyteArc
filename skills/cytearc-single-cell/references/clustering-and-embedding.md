@@ -292,5 +292,6 @@ The same helper works for membership strength, doublet scores, cell cycle and en
 - `quality-control.md`: doublet scores and QC covariates behind technical clusters.
 - `plotting.md`: `ds.plots.embedding(layout=umap_ref, color_by=cluster_ref)`,
   `cluster_connectivity(graph=, groups=, layout=)` and `cluster_tree(graph=, clusters=paris_ref)`.
+  `ds.clusters.connectivity(graph, cluster_ref)` returns the connectivity figure's `nodes` and `edges` tables without drawing it, one call per candidate partition.
 - `pipeline-runs-and-artifacts.md`: run keys, `leiden=` and `paris=` recipe settings, lineage.
 - `integration-and-comparisons.md`: clustering on integrated graphs and batch metrics.

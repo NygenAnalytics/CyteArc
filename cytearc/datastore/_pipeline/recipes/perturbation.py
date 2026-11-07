@@ -40,7 +40,7 @@ from ..._operations.perturbation_guides import (
     _strings_bytes,
 )
 from ..._operations.cell_samples import require_cell_column
-from ..executor import PlannedStage, RecipePlan, RunState
+from ..executor import COORDINATES, PlannedStage, RecipePlan, RunState
 from ..fields import (
     PERTURBATION_CELL_FIELDS,
     cell_fields,
@@ -330,19 +330,34 @@ def _guide_calling_stage(guide_assay: str, settings: Mapping[str, Any]) -> Plann
             ("guide_calls", calls),
         )
 
-    return PlannedStage("guide_calling", action)
+    return PlannedStage(
+        "guide_calling",
+        action,
+        inputs=("analysis_cell_selection",),
+        outputs=("guide_thresholds", "guide_calls"),
+    )
 
 
 def _stage(
-    name: str, enabled: bool, compute: Callable[[RunState], ArtifactRef]
+    name: str,
+    enabled: bool,
+    compute: Callable[[RunState], ArtifactRef],
+    *,
+    inputs: tuple[str, ...],
 ) -> PlannedStage:
     """Return the stage ``name``, which saves what ``compute`` returns under its name.
 
-    A stage that is not enabled is recorded as skipped.
+    ``compute`` reads ``inputs`` from the run state. A stage that is not
+    enabled is recorded as skipped.
     """
     if not enabled:
         return PlannedStage(name, None)
-    return PlannedStage(name, lambda state: ((name, compute(state)),))
+    return PlannedStage(
+        name,
+        lambda state: ((name, compute(state)),),
+        inputs=inputs,
+        outputs=(name,),
+    )
 
 
 def _check_labeled_inputs(
@@ -808,6 +823,7 @@ def resolve_perturbation(
             lambda state: state.store._perturbation_labels(
                 state.artifacts["guide_calls"], **label_settings_
             ),
+            inputs=("guide_calls",),
         ),
         _stage(
             "efficiency",
@@ -817,6 +833,7 @@ def resolve_perturbation(
                 from_assay=state.assay.name,
                 **efficiency_settings,
             ),
+            inputs=("perturbation_labels",),
         ),
         *head.stages(),
         # The E-distances and the signature's nearest controls are found in
@@ -830,6 +847,7 @@ def resolve_perturbation(
                 state.coordinates,
                 **edistance_settings,
             ),
+            inputs=("perturbation_labels", COORDINATES),
         ),
         _stage(
             "signature",
@@ -840,6 +858,7 @@ def resolve_perturbation(
                 features=state.artifacts["highly_variable_features"],
                 **signature_settings,
             ),
+            inputs=("perturbation_labels", COORDINATES, "highly_variable_features"),
         ),
         _stage(
             "mixscape",
@@ -847,6 +866,7 @@ def resolve_perturbation(
             lambda state: state.store._perturbation_mixscape(
                 state.artifacts["signature"], **mixscape_settings
             ),
+            inputs=("signature",),
         ),
         # Every target against every highly variable gene.
         _stage(
@@ -859,6 +879,7 @@ def resolve_perturbation(
                 features=state.artifacts["highly_variable_features"],
                 **association_settings,
             ),
+            inputs=("perturbation_labels", "highly_variable_features"),
         ),
         # The profiles of the highly variable genes average each label's
         # cells, or a target's knocked-out cells from Mixscape's classes.
@@ -870,6 +891,7 @@ def resolve_perturbation(
                 state.artifacts["highly_variable_features"],
                 **profile_method_settings,
             ),
+            inputs=(profile_labels, "highly_variable_features"),
         ),
         _stage(
             "perturbation_clusters",
@@ -877,6 +899,7 @@ def resolve_perturbation(
             lambda state: state.store._perturbation_cluster(
                 state.artifacts["profiles"], **cluster_settings
             ),
+            inputs=("profiles",),
         ),
     )
     config = {

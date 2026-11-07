@@ -2,6 +2,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
+import pandas as pd
 
 from ...graph.arguments import graph_load_flags
 from ...graph.feature_projection import graph_cell_selection
@@ -32,6 +33,7 @@ from ...utils.logging import logger
 from ...utils.shutdown import shutdown_checkpoint
 
 if TYPE_CHECKING:
+    from ...clustering.connectivity import ClusterConnectivity
     from ...clustering.paris_multiscale import ParisClusteringResult
     from .graph import _GraphOperationsMixin as _ClusteringOperationsBase
 else:
@@ -671,4 +673,107 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
             n_clusters=n_clusters,
             min_cluster_size=min_cluster_size,
             invalidate_cache=invalidate_cache,
+        )
+
+    @validation_scoped
+    def _clusters_connectivity(
+        self,
+        graph: ArtifactRef,
+        groups: ArtifactRef | str,
+        *,
+        minimum_edge_weight: float = 0.0,
+        max_edges_per_node: int | None = None,
+    ) -> "ClusterConnectivity":
+        """Sum a cell graph's weight between each pair of clusters, as tables.
+
+        Compare cluster structure across resolutions, or report which
+        clusters the graph joins, without drawing a figure. ``nodes`` holds
+        each cluster's cells and incident weight, the summed weighted degree
+        of its cells, and ``edges`` each pair of clusters that the graph
+        joins: ``rawWeight`` sums the weights of the edges between their
+        cells, each undirected edge once, and ``normalizedWeight`` divides it
+        by ``sqrt(incidentWeight[source] * incidentWeight[target])``. The
+        graph is read as ``graph.load(symmetric=True)`` returns it, and
+        ``plots.cluster_connectivity`` draws the same weights on a layout.
+        Nothing is saved.
+
+        Args:
+            graph: Connectivity-map or integrated-graph artifact.
+            groups: The clusters: a categorical cell artifact, such as a
+                clustering, or a user-owned cell metadata column. Labels are
+                read for the graph's cells, which an artifact's own cells
+                must include, so labels of more cells serve.
+            minimum_edge_weight: Keep the pairs whose ``normalizedWeight``
+                is at least this. The default, 0, keeps every pair.
+            max_edges_per_node: Keep at most this many pairs for each
+                cluster, the largest ``normalizedWeight`` first, or every
+                pair with None, the default.
+
+        Returns:
+            The ``nodes`` and ``edges`` tables, as
+            :class:`~cytearc.clustering.connectivity.ClusterConnectivity`,
+            with the clusters in the natural order of their labels.
+
+        Raises:
+            TypeError: If ``graph`` is not an ArtifactRef, or ``groups`` is
+                neither an ArtifactRef nor a column name.
+            ValueError: If a filter is invalid, which is checked before
+                anything is read, ``groups`` belongs to another assay than
+                ``graph`` or holds no label for some of the graph's cells, or
+                a label is missing: NaN, None, blank, or flagged by a linked
+                missing mask.
+        """
+        from ...clustering.connectivity import (
+            check_edge_filters,
+            cluster_connectivity_tables,
+            filter_cluster_edges,
+            label_codes,
+        )
+        from ...metadata.selection import (
+            CellField,
+            resolve_grouping,
+            valid_category_mask,
+        )
+        from ...utils.arrays import sort_categories
+
+        check_edge_filters(minimum_edge_weight, max_edges_per_node)
+        if not isinstance(graph, ArtifactRef):
+            raise TypeError("graph must be an ArtifactRef")
+        grouping: ArtifactRef | CellField
+        if isinstance(groups, ArtifactRef):
+            if groups.assay is not None and groups.assay != graph.assay:
+                raise ValueError("groups and graph must belong to the same assay")
+            grouping = groups
+        elif isinstance(groups, str):
+            grouping = CellField(groups)
+        else:
+            raise TypeError("groups must be an ArtifactRef or a cell column name")
+        selection = graph_cell_selection(self.zw, graph)
+        try:
+            resolved = resolve_grouping(
+                self.zw, self.cells, grouping, cell_selection=selection
+            )
+        except ValueError as error:
+            if not isinstance(groups, ArtifactRef) or (
+                "must be a subset of the artifact cell selection" not in str(error)
+            ):
+                raise
+            raise ValueError(
+                f"The {groups.kind} artifact of groups holds no label for some "
+                "cells of the graph; compute it on cells that include the "
+                "graph's, such as the graph's cell selection"
+            ) from error
+        labels = np.asarray(resolved.labels)
+        if not valid_category_mask(labels, missing_mask=resolved.missing_mask).all():
+            raise ValueError("groups contains missing labels")
+        categories = sort_categories(pd.unique(labels).tolist())
+        connectivity = cluster_connectivity_tables(
+            self._graph_load(graph, symmetric=True),
+            label_codes(labels, categories),
+            categories,
+        )
+        return filter_cluster_edges(
+            connectivity,
+            minimum_edge_weight=minimum_edge_weight,
+            max_edges_per_node=max_edges_per_node,
         )

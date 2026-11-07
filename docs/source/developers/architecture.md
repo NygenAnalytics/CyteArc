@@ -108,7 +108,8 @@ They must not import those packages at module load time.
   It does not own stored KNN graph arrays; persistence lives in `datastore` and `storage`.
 - `embeddings/` owns PCA, LSI, Harmony2 batch correction, UMAP, SG-tSNE, embedding initialization,
   and the narrow storage adapter for imported coordinate artifacts.
-- `clustering/` owns Leiden clustering and PARIS hierarchy operations.
+- `clustering/` owns Leiden clustering, PARIS hierarchy operations, and the graph weight between clusters.
+  `connectivity.py` sums a cell graph's weight between each pair of clusters from each cell's cluster code, for `DataStore.clusters.connectivity`, which returns the tables, and `plots.cluster_connectivity`, which draws them on a layout.
   `leiden.py` holds the public `leiden_membership` and dispatches between the native `"cytearc"`
   backend and the `"igraph"` and `"leidenalg"` backends, whose GPL packages it imports only when
   one of them is requested (CyteArc does not install them). The native backend lives in the private
@@ -254,6 +255,8 @@ of the public `cytearc.metrics` facade. `datastore.pipeline_run` exposes the nar
 artifacts and a strict run/stage ledger under `pipeline/runs`; it does not write live metadata.
 DataStore-owned plotting, marker loading, and export consume narrow frozen-run views. Completed
 runs can be reopened by their immutable label or exact run ID.
+
+`_pipeline/planning.py` answers `DataStore.pipeline.plan`, which reports what a resolved recipe would reuse and compute without executing it. It runs each stage's action inside `artifact_forecast_scope` of `storage/artifact_writer.py`, where `plan_artifact` reuses as it always does but, instead of planning an artifact to compute, raises `ArtifactComputationRequired` with the reason: no artifact of the operation, the closest one and the parameters and inputs in which it differs, which `nearest_stored_artifacts` of `storage/artifacts.py` finds, a superseding revision, an interrupted artifact, missing diagnostics, or a failed payload check. An operation therefore stops before it computes or writes anything, and the plan learns each reused stage's refs from the operation's own planning, with the identities and reuse checks that a run uses. A `PlannedStage` declares the run-state keys that its action or skip hook reads, `inputs`, and adds, `outputs`: artifact keys, `COORDINATES` and `FEATURE_NAMES` for those values of the `RunState`, and keys of its extras. The plan follows them to report a stage that reads what a computed stage would produce as waiting on that stage, without running it, and refuses an action that reads or adds an artifact key that it does not declare, so a new stage declares both. Each computed stage's estimate comes from the stage records of the latest earlier run of the same recipe and assay that computed the stage.
 
 A cell field may read an artifact of any assay, since every assay shares `cellData`; the cell view checks the artifact's recorded `cell_selection` against the run's. A feature field must belong to the run's assay, whose `featureData` the feature view covers. The executor opens both views on the record that it is about to complete, so a field that a view refuses fails the run at `finalize`, before `complete_pipeline_run_record` claims the label.
 

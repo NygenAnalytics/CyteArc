@@ -191,7 +191,7 @@ def _cluster_graph(n_cells: int) -> tuple[sparse.csr_matrix, np.ndarray]:
     """Return a symmetric kNN-like graph and the cluster code of each cell.
 
     Each cell links to ``N_NEIGHBORS`` cells, 85% of them in its own cluster,
-    and the graph is prepared exactly as cluster_connectivity loads it.
+    and the graph is loaded as cluster_connectivity loads it.
     """
     from cytearc.plotting.cluster_connectivity import _load_graph
     from cytearc.storage import ArtifactRef
@@ -216,8 +216,7 @@ def _cluster_graph(n_cells: int) -> tuple[sparse.csr_matrix, np.ndarray]:
     )
     graph = _load_graph(
         store,
-        n_cells=n_cells,
-        graph=ArtifactRef(
+        ArtifactRef(
             scope="assay", assay="RNA", kind="connectivity_map", artifact_id="1" * 64
         ),
     )
@@ -225,14 +224,19 @@ def _cluster_graph(n_cells: int) -> tuple[sparse.csr_matrix, np.ndarray]:
 
 
 def test_cluster_connectivity_edges(bench) -> None:
-    from cytearc.plotting.cluster_connectivity import _aggregate_intercluster_edges
+    from cytearc.clustering.connectivity import cluster_connectivity_tables
 
     def make(n_cells: int):
         graph, codes = _cluster_graph(n_cells)
-        return lambda: _aggregate_intercluster_edges(graph, codes, N_CLUSTERS)
+        return lambda: cluster_connectivity_tables(
+            graph, codes, list(range(N_CLUSTERS))
+        )
 
     def check(n_cells: int, value) -> None:
-        source, target, raw, normalized = value
+        source = value.edges["source"].to_numpy(dtype=np.intp)
+        target = value.edges["target"].to_numpy(dtype=np.intp)
+        raw = value.edges["rawWeight"].to_numpy()
+        normalized = value.edges["normalizedWeight"].to_numpy()
         graph, codes = _cluster_graph(n_cells)
         membership = sparse.csr_matrix(
             (np.ones(n_cells), (np.arange(n_cells), codes)),

@@ -1,11 +1,18 @@
+from types import MappingProxyType
+from typing import Any
+
 import numpy as np
 import pytest
 import zarr
 from zarr.storage import MemoryStore
 
+from cytearc.storage import operation_revisions
 from cytearc.storage.artifact_writer import (
     ArrayRequirement,
+    ArtifactComputation,
+    ArtifactComputationRequired,
     AttributeRequirement,
+    artifact_forecast_scope,
     artifact_plan_scope,
     artifact_transaction,
     finish_artifact,
@@ -13,7 +20,15 @@ from cytearc.storage.artifact_writer import (
     reused_artifact_group,
     start_artifact,
 )
-from cytearc.storage.artifacts import artifact_path, inspect_artifact
+from cytearc.storage.artifacts import ArtifactRef, artifact_path, inspect_artifact
+from cytearc.storage.diagnostics import DIAGNOSTICS_ATTRIBUTE, declare_diagnostics
+from cytearc.utils.logging import logger
+
+# An operation that only the forecast tests plan; it saves one diagnostic.
+_FORECAST_OPERATION = "forecast_test_counts"
+declare_diagnostics(
+    _FORECAST_OPERATION, ("forecastCount",), call="ds.tests.forecast_counts"
+)
 
 
 def test_artifact_writer_streams_to_random_path_then_reuses_provenance(
@@ -365,4 +380,234 @@ def test_artifact_transaction_never_deletes_once_publication_is_issued(
     assert inspect_artifact(root, planned.ref).complete
     np.testing.assert_array_equal(
         artifact_group(root, planned.ref)["data"][:], np.arange(3.0)
+    )
+
+
+def _forecast_arguments(**changes: Any) -> dict[str, Any]:
+    """The planning arguments of the forecast tests' artifact, with ``changes``."""
+    return {
+        "scope": "assay",
+        "assay": "RNA",
+        "kind": "normalized",
+        "operation": _FORECAST_OPERATION,
+        "parameters": {"log_transform": True, "scale": 2},
+        "inputs": {"cells": {"artifact_id": "a" * 64}},
+        "execution_options": {},
+        "required_arrays": (ArrayRequirement("data", shape=(3,)),),
+        **changes,
+    }
+
+
+def _stored(
+    root: zarr.Group,
+    *,
+    diagnostics: dict[str, Any] | None = None,
+    complete: bool = True,
+    **changes: Any,
+) -> ArtifactRef:
+    """Store the forecast tests' artifact as a run would, and return its ref."""
+    planned = plan_artifact(root, **_forecast_arguments(**changes))
+    group = start_artifact(root, planned)
+    group.create_array("data", data=np.arange(3.0))
+    if diagnostics is not None:
+        group.attrs[DIAGNOSTICS_ATTRIBUTE] = diagnostics
+    if complete:
+        finish_artifact(group, planned)
+    return planned.ref
+
+
+def _forecast(root: zarr.Group, **changes: Any) -> ArtifactComputation:
+    """Plan the artifact in a forecast and return why it would be computed."""
+    with (
+        artifact_forecast_scope(),
+        pytest.raises(ArtifactComputationRequired) as raised,
+    ):
+        plan_artifact(root, **_forecast_arguments(**changes))
+    return raised.value.computation
+
+
+def _keys(store: MemoryStore) -> dict[str, bytes]:
+    return {key: bytes(value.to_bytes()) for key, value in store._store_dict.items()}
+
+
+def test_a_forecast_reuses_as_planning_does_and_writes_nothing() -> None:
+    store = MemoryStore()
+    root = zarr.open_group(store=store, mode="w")
+    ref = _stored(root, diagnostics={"forecastCount": 3})
+    before = _keys(store)
+
+    with artifact_plan_scope() as receipts, artifact_forecast_scope():
+        reused = plan_artifact(root, **_forecast_arguments())
+
+    assert reused.reused and reused.ref == ref
+    assert [(item.ref, item.disposition) for item in receipts] == [(ref, "reused")]
+    # A request that would compute raises before it plans a new artifact.
+    assert _forecast(root, parameters={"log_transform": False, "scale": 2}).reason == (
+        "changed"
+    )
+    assert _keys(store) == before
+    # Outside the scope, planning plans a new artifact as before.
+    planned = plan_artifact(
+        root, **_forecast_arguments(parameters={"log_transform": False, "scale": 2})
+    )
+    assert not planned.reused and planned.ref != ref
+
+
+def test_a_forecast_of_an_empty_store_finds_no_artifact_of_the_operation() -> None:
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+
+    computation = _forecast(root)
+
+    assert computation == ArtifactComputation(
+        operation=_FORECAST_OPERATION, kind="normalized", reason="absent"
+    )
+    assert computation.describe() == (
+        "The store holds no forecast_test_counts artifact"
+    )
+
+
+def test_a_forecast_names_the_parameters_and_inputs_that_differ() -> None:
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    far = _stored(
+        root,
+        diagnostics={"forecastCount": 1},
+        parameters={"log_transform": False, "scale": 5},
+        inputs={"cells": {"artifact_id": "b" * 64}},
+    )
+    near = _stored(
+        root,
+        diagnostics={"forecastCount": 1},
+        parameters={"log_transform": True, "scale": 3},
+    )
+
+    computation = _forecast(root)
+
+    # The artifact of the same inputs differs in one parameter, the other in
+    # two parameters and an input.
+    assert computation.reason == "changed"
+    assert computation.existing == near
+    assert computation.changed_parameters == ("scale",)
+    assert computation.changed_inputs == ()
+    assert computation.describe() == (
+        "The closest forecast_test_counts artifact differs in parameters scale"
+    )
+    moved = _forecast(root, parameters={"log_transform": False, "scale": 5})
+    assert (moved.existing, moved.changed_parameters, moved.changed_inputs) == (
+        far,
+        (),
+        ("cells",),
+    )
+    assert moved.describe().endswith("differs in inputs cells")
+    # A parameter that one side lacks differs too.
+    added = _forecast(root, parameters={"log_transform": True, "scale": 3, "new": 1})
+    assert (added.existing, added.changed_parameters) == (near, ("new",))
+    # Among artifacts that differ as little, the newest is the closest.
+    newest = _stored(
+        root,
+        diagnostics={"forecastCount": 1},
+        parameters={"log_transform": True, "scale": 4},
+    )
+    assert _forecast(root).existing == newest
+    both = _forecast(
+        root,
+        parameters={"log_transform": True, "scale": 9},
+        inputs={"cells": {"artifact_id": "c" * 64}},
+    )
+    assert (both.existing, both.changed_parameters, both.changed_inputs) == (
+        newest,
+        ("scale",),
+        ("cells",),
+    )
+    assert both.describe().endswith("differs in parameters scale and inputs cells")
+
+
+def test_a_forecast_names_the_revision_that_supersedes_the_stored_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    stored = _stored(root, diagnostics={"forecastCount": 1})
+    revision = operation_revisions.OperationRevision(
+        revision=2,
+        release="9.9.9",
+        change="Forecast counts are scaled twice",
+        applies=None,
+    )
+    monkeypatch.setattr(
+        operation_revisions,
+        "OPERATION_REVISIONS",
+        MappingProxyType({_FORECAST_OPERATION: (revision,)}),
+    )
+
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="INFO"
+    )
+    try:
+        computation = _forecast(root)
+        # The forecast recomputes nothing, so only planning logs a recomputation.
+        assert not [message for message in messages if "Recomputing" in message]
+        plan_artifact(root, **_forecast_arguments())
+    finally:
+        logger.remove(sink)
+
+    (line,) = [message for message in messages if "Recomputing" in message]
+    assert line.startswith(
+        f"Recomputing forecast_test_counts: artifact {stored.artifact_id[:12]}"
+    )
+    assert computation.reason == "superseded"
+    assert computation.existing == stored
+    assert computation.revision_changes == ("Forecast counts are scaled twice",)
+    assert computation.describe() == (
+        "A revision supersedes the stored forecast_test_counts artifact: "
+        "Forecast counts are scaled twice"
+    )
+
+
+def test_a_forecast_tells_an_interrupted_artifact_apart() -> None:
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    interrupted = _stored(root, diagnostics={"forecastCount": 1}, complete=False)
+
+    computation = _forecast(root)
+
+    assert (computation.reason, computation.existing) == ("incomplete", interrupted)
+    assert computation.describe() == (
+        "The stored forecast_test_counts artifact is incomplete"
+    )
+
+
+def test_a_forecast_names_an_artifact_without_the_diagnostics_of_its_operation() -> (
+    None
+):
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    stored = _stored(root)
+
+    computation = _forecast(root)
+
+    assert (computation.reason, computation.existing) == (
+        "missing_diagnostics",
+        stored,
+    )
+    assert computation.describe() == (
+        "The stored forecast_test_counts artifact lacks the diagnostics that "
+        "forecast_test_counts saves"
+    )
+
+
+def test_a_forecast_names_an_artifact_that_fails_its_payload_checks() -> None:
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    stored = _stored(root, diagnostics={"forecastCount": 1})
+
+    shape = _forecast(root, required_arrays=(ArrayRequirement("data", shape=(4,)),))
+    rejected = _forecast(root, reuse_validator=lambda _ref, _group: False)
+    attribute = _forecast(root, required_attributes=("missing",))
+
+    for computation in (shape, rejected, attribute):
+        assert (computation.reason, computation.existing) == ("invalid", stored)
+    assert shape.describe() == (
+        "The stored forecast_test_counts artifact fails its payload checks"
+    )
+    recompute = _forecast(root, invalidate_cache=True)
+    assert (recompute.reason, recompute.existing) == ("invalidate_cache", None)
+    assert recompute.describe() == (
+        "The call asks to compute the forecast_test_counts artifact again"
     )

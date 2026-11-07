@@ -7,7 +7,7 @@ import numpy as np
 
 from ....assay import ADTassay
 from ....utils.arguments import integer_argument
-from ..executor import PlannedStage, RecipePlan, RunState
+from ..executor import FEATURE_NAMES, PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
 from ..filtering import default_filter_columns
 from ..settings import (
@@ -75,7 +75,7 @@ def _panel_stage(assay: str, pattern: re.Pattern[str] | None) -> PlannedStage:
         )
         return (("panel", ref),)
 
-    return PlannedStage("panel", action)
+    return PlannedStage("panel", action, inputs=(FEATURE_NAMES,), outputs=("panel",))
 
 
 def _resolve_panel(

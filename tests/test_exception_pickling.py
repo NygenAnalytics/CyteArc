@@ -35,6 +35,11 @@ from cytearc.readers._seurat.errors import (
     UnsupportedMatrixOperation,
 )
 from cytearc.readers.seurat import SeuratImportError
+from cytearc.storage.artifact_writer import (
+    ArtifactComputation,
+    ArtifactComputationRequired,
+)
+from cytearc.storage.artifacts import ArtifactRef
 from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.finite_values import NonFiniteArtifactError
@@ -127,6 +132,17 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
         "import_clones",
         "unmatchedBarcodes",
         3,
+    ),
+    ArtifactComputationRequired: lambda: ArtifactComputationRequired(
+        ArtifactComputation(
+            operation="select_hvgs",
+            kind="feature_selection",
+            reason="changed",
+            existing=ArtifactRef(
+                scope="assay", assay="RNA", kind="feature_selection", artifact_id=RUN_ID
+            ),
+            changed_parameters=("top_n",),
+        )
     ),
     ShutdownRequested: lambda: ShutdownRequested(
         ShutdownRequest(
