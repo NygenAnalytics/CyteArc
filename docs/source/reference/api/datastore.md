@@ -247,7 +247,7 @@ ATAC assay; see {doc}`regulons` for building those networks.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.TrajectoryAccessor
-    :members: pseudotime, load_pseudotime, fate, load_fate, markers, load_markers, aggregation, load_aggregation, lineage_markers, load_lineage_markers, drivers, load_drivers, lineage_aggregation, load_lineage_aggregation, curves, load_curves, lineage_tree, load_lineage_tree
+    :members: pseudotime, load_pseudotime, fate, load_fate, markers, load_markers, aggregation, load_aggregation, lineage_markers, load_lineage_markers, drivers, load_drivers, lineage_aggregation, load_lineage_aggregation, curves, load_curves, curves_in_layout, lineage_tree, load_lineage_tree
 ```
 
 `pseudotime` orders cells by the potential of population balance analysis, which [Weinreb et al. (2018)](https://doi.org/10.1073/pnas.1714723115) define as half the pseudoinverse of the graph's random-walk Laplacian applied to the source-sink vector. The default, `method="untruncated"`, solves for that potential over all of the Laplacian's modes by MINRES on the symmetric Laplacian, to machine precision: on synthetic graphs of one million cells it took 28 to 29 s and 724 to 777 iterations in containers of 4 CPUs, also when an eighth of the cells was joined to the rest by 64 edges. `method="truncated"` keeps the `n_singular_vals - 1` smallest nonzero singular modes, 29 by default, which SciPy's `svds` finds with ARPACK; it is the potential of releases before 1.4.0 and reproduces their pseudotimes. When the graph's slow modes outnumber the modes it keeps, as on graphs of many weakly joined clusters, the truncated potential departs from the full one, to a correlation of 0.971 on a synthetic graph of 20,000 cells in 150 clusters, and its solve can run for hours on graphs of several hundred thousand cells. Both potentials drop the component of the source-sink vector along the degree vector, as the pseudoinverse does, since the range of the Laplacian is orthogonal to that vector.
@@ -272,6 +272,14 @@ through the graph's coordinates. `lineage_tree` is a diagnostic that proposes
 candidate sinks from a cluster tree; check them before passing them to `fate`.
 See [Resolve gene dynamics by lineage](../tutorials/lineage-dynamics) and
 [Draw lineage curves and check candidate sinks](../tutorials/lineage-curves).
+
+`curves_in_layout(curves, layout)` returns the curves drawn in a two-dimensional layout, such as a UMAP, as a table of each curve's points, `lineage`, `point`, `x` and `y`, which `plots.lineage_curves` draws. It averages the layout coordinates of the scored cells with each lineage's fate weights along the curve and smooths them with the curves' spline, needs no plotting dependencies and saves nothing, so a viewer of its own can draw the curves. The layout may come from any cell selection of the curves' cells.
+
+`lineage_tree` saves its tree, so a store opened with `zarr_mode="r"` refuses to build a tree that it does not hold. {py:func}`cytearc.trajectory.build_cluster_tree` builds the same tree from the cells' coordinates and labels without a store, as a {py:class}`~cytearc.trajectory.ClusterTree`, with the clusters in the order that the saved tree gives them, so a caller can show a tree before saving it or from a read-only store.
+
+```{eval-rst}
+.. autofunction:: cytearc.trajectory.build_cluster_tree
+```
 
 ### `ds.mapping`
 
@@ -747,6 +755,9 @@ The recommended workflow is in [Read RNA and protein together with CITE-seq](../
     :members:
 
 .. autoclass:: cytearc.trajectory.LineageTreeResult
+    :members:
+
+.. autoclass:: cytearc.trajectory.ClusterTree
     :members:
 
 .. autoclass:: cytearc.EnrichmentResult

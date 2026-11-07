@@ -353,6 +353,7 @@ class TrajectoryAccessor(_Accessor):
     )
     curves = _bind(_TrajectoryOperationsMixin._trajectory_curves)
     load_curves = _bind(_TrajectoryOperationsMixin._trajectory_load_curves)
+    curves_in_layout = _bind(_TrajectoryOperationsMixin._trajectory_curves_in_layout)
     lineage_tree = _bind(_TrajectoryOperationsMixin._trajectory_lineage_tree)
     load_lineage_tree = _bind(_TrajectoryOperationsMixin._trajectory_load_lineage_tree)
 

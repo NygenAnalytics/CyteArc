@@ -47,7 +47,7 @@ from ...metadata.artifacts import (
     plan_cell_data_artifact,
     write_cell_data_artifact,
 )
-from ...metadata.selection import FeatureRef
+from ...metadata.selection import FeatureRef, resolve_cell_aligned_artifact
 from ...storage.validation_scope import validation_scoped
 from ...storage.artifact_writer import (
     ArrayRequirement,
@@ -73,6 +73,7 @@ from ...storage.types import as_zarr_array, as_zarr_group
 from ...storage.selections import (
     read_stored_selection_indices,
     resolve_metadata_snapshot,
+    selections_hold_same_cells,
     validate_stored_selection_integrity,
 )
 from ...storage.arrays import create_zarr_dataset
@@ -139,6 +140,7 @@ from ...trajectory.curves import (
     lineage_ranks as _lineage_ranks_impl,
     project_onto_curve as _project_onto_curve_impl,
     projection_scratch_bytes,
+    smooth_against_progress as _smooth_against_progress_impl,
 )
 from ...trajectory.errors import SourceSinkLabelsError
 from ...trajectory.fate import (
@@ -147,10 +149,12 @@ from ...trajectory.fate import (
     fate_solver_bytes,
 )
 from ...trajectory.lineage_tree import (
+    cluster_codes as _cluster_codes_impl,
     cluster_distances as _cluster_distances_impl,
     cluster_moments as _cluster_moments_impl,
+    labelled_tree as _labelled_tree_impl,
     spanning_tree as _spanning_tree_impl,
-    tree_lineages as _tree_lineages_impl,
+    tree_ends as _tree_ends_impl,
 )
 from ...trajectory.lineages import (
     LINEAGE_OK,
@@ -187,8 +191,8 @@ from ...trajectory.results import (
     PseudotimeMarkerResult,
     PseudotimeScoreResult,
 )
-from ...utils.arguments import bool_argument, integer_argument
-from ...utils.arrays import array_digest, sort_categories
+from ...utils.arguments import bool_argument, float_argument, integer_argument
+from ...utils.arrays import array_digest
 from ...utils.logging import logger
 from ...utils.memory_budget import MemoryBudgetError
 from .enrichment_store import _RowBandWriter
@@ -2200,6 +2204,126 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             valid=np.asarray(_stored_values(group, "valid"), dtype=bool),
         )
 
+    @validation_scoped
+    def _trajectory_curves_in_layout(
+        self,
+        curves: ArtifactRef,
+        layout: ArtifactRef,
+        *,
+        lineages: Sequence[Any] | None = None,
+        df: float | None = None,
+    ) -> pd.DataFrame:
+        """Draw lineage curves in a two-dimensional layout, such as a UMAP, as a table.
+
+        The curves were fitted in their own coordinates, often many reduced
+        dimensions. To draw one in a layout, the layout coordinates of the
+        scored cells are averaged with the lineage's fate weights in fine
+        bins of the cells' progress along the curve and smoothed with the
+        spline that the curves were fitted with, as Slingshot's
+        ``embedCurves`` does. ``plots.lineage_curves`` draws these points
+        over the layout. The call needs no plotting dependencies and saves
+        nothing, so a viewer of its own can draw the curves.
+
+        Args:
+            curves: Explicit ``lineage_curves`` artifact.
+            layout: A two-dimensional embedding of the curves' cells, such as
+                a UMAP of their graph, whichever operation made its cell
+                selection.
+            lineages: Sink labels of the lineages to draw, in order, or None
+                for every lineage of the curves.
+            df: Effective degrees of freedom of the smoothing, greater than 2
+                and less than the size of the curves' spline basis, 32 by
+                default, or None for the curves' own.
+
+        Returns:
+            One row per point of each curve, lineage by lineage: ``lineage``,
+            the lineage's sink label; ``point``, the point's number along the
+            curve, from 0 at its start; and ``x`` and ``y``, its layout
+            coordinates. Each curve has as many points as the fitted curves,
+            evenly spaced in progress from the start to the sink.
+
+        Raises:
+            TypeError: If ``curves`` or ``layout`` is not an ArtifactRef, or
+                ``df`` is not a real number.
+            ValueError: If ``curves`` is not a complete ``lineage_curves``
+                artifact, ``df`` is out of range, ``layout`` is not an
+                embedding of two finite columns or holds other cells than the
+                curves, or ``lineages`` names a lineage that the curves do
+                not hold, repeats one or names none.
+        """
+        if not isinstance(curves, ArtifactRef):
+            raise TypeError("curves must be an ArtifactRef")
+        if not isinstance(layout, ArtifactRef):
+            raise TypeError("layout must be an ArtifactRef")
+        requested_df = np.nan
+        if df is not None:
+            try:
+                requested_df = float_argument(df, "df")
+            except ValueError:
+                # A value that is not finite lies outside the range below.
+                requested_df = np.nan
+        loaded = self._trajectory_load_curves(curves)
+        parameters = _validate_lineage_curve_parameters(
+            inspect_artifact(self.zw, curves).parameters or {}
+        )
+        spline_basis = parameters["spline_basis"]
+        if df is not None and not 2.0 < requested_df < spline_basis:
+            raise ValueError(f"df must be greater than 2 and less than {spline_basis}")
+        degrees_of_freedom = parameters["df"] if df is None else requested_df
+        if layout.kind != "embedding":
+            raise ValueError("layout must identify an embedding artifact")
+        layout_status = inspect_artifact(self.zw, layout)
+        if not layout_status.complete:
+            raise ValueError("Embedding artifact is unavailable or incomplete")
+        if not selections_hold_same_cells(
+            self.zw, layout_status.input_ref("cell_selection"), loaded.cell_selection
+        ):
+            raise ValueError(
+                "The layout holds other cells than the trajectory; draw an "
+                "embedding of the trajectory's cells, such as a UMAP of its graph"
+            )
+        # The layout's own cells are the curves', in the same order.
+        coordinates = np.asarray(
+            resolve_cell_aligned_artifact(self.zw, layout, ndim=2).values
+        )
+        if coordinates.shape[1] != 2:
+            raise ValueError(
+                "Embedding must have two columns and one row per selected cell"
+            )
+        if coordinates.dtype.kind not in "iuf":
+            raise TypeError("Embedding coordinates must be numeric")
+        coordinates = coordinates.astype(np.float64, copy=False)
+        if not np.isfinite(coordinates).all():
+            raise ValueError("Embedding coordinates must be finite")
+        chosen, columns = _select_lineages_impl(
+            loaded.lineages, lineages, where="in the result"
+        )
+        valid = np.asarray(loaded.valid, dtype=bool)
+        scored = coordinates[valid]
+        n_points = int(loaded.points.shape[1])
+        frames = []
+        for label, column in zip(chosen, columns.tolist(), strict=True):
+            points = _smooth_against_progress_impl(
+                scored,
+                loaded.progress[valid, column],
+                loaded.weights[valid, column],
+                n_points=n_points,
+                degrees_of_freedom=degrees_of_freedom,
+                n_bins=parameters["fit_bins"],
+                n_basis=spline_basis,
+            )
+            frames.append(
+                pd.DataFrame(
+                    {
+                        "lineage": label,
+                        "point": np.arange(n_points),
+                        "x": points[:, 0],
+                        "y": points[:, 1],
+                    }
+                )
+            )
+        return pd.concat(frames, ignore_index=True)
+
     def _lineage_tree_clusters(
         self,
         labels: ArtifactRef,
@@ -2214,20 +2338,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 "Every cell needs a label; select the labelled cells before "
                 "building the graph"
             )
-        raw = np.asarray(values)
-        if raw.ndim != 1:
-            raise ValueError("labels must hold one label per cell")
-        # Factorize the cells in compiled code; only the distinct labels are
-        # sorted and remapped in Python.
-        first_codes, uniques = pd.factorize(raw, use_na_sentinel=False)
-        native = [
-            value.item() if isinstance(value, np.generic) else value
-            for value in np.asarray(uniques, dtype=object)
-        ]
-        clusters = sort_categories(native)
-        index = {cluster: code for code, cluster in enumerate(clusters)}
-        remap = np.asarray([index[value] for value in native], dtype=np.int64)
-        return clusters, remap[np.asarray(first_codes, dtype=np.int64)]
+        return _cluster_codes_impl(values)
 
     @validation_scoped
     def _trajectory_lineage_tree(
@@ -2295,29 +2406,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         clusters, codes = self._lineage_tree_clusters(labels, selection)
         if len(clusters) < 2:
             raise ValueError("A lineage tree needs at least two clusters")
-        positions = {cluster: index for index, cluster in enumerate(clusters)}
-
-        def cluster_index(label: Any, name: str) -> int:
-            matches = [
-                index for cluster, index in positions.items() if bool(cluster == label)
-            ]
-            if not matches:
-                raise ValueError(f"{name} {label!r} is not a cluster label")
-            return matches[0]
-
-        root_index = (
-            None
-            if validated["root"] is None
-            else cluster_index(validated["root"], "root")
+        # The ends are recorded in cluster order, so any order reuses one tree.
+        root_index, end_indices, ordered_ends = _tree_ends_impl(
+            clusters, validated["root"], validated["ends"]
         )
-        # The tree does not depend on the order of the ends, so they are
-        # recorded in cluster order and any order reuses one tree.
-        end_pairs = sorted(
-            ((cluster_index(end, "End"), end) for end in validated["ends"]),
-            key=lambda pair: pair[0],
-        )
-        end_indices = [index for index, _ in end_pairs]
-        ordered_ends = tuple(end for _, end in end_pairs)
         data = self._coordinate_data(coordinates_ref, batch_size=batch_size)
         if int(data.shape[0]) != codes.shape[0]:
             raise ValueError("Coordinates do not align with the graph's cells")
@@ -2356,7 +2448,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         )
         if planned.reused:
             return planned.ref
-        self._require_writable("build_lineage_tree")
+        self._require_writable(
+            "build_lineage_tree",
+            reason=(
+                "it saves the tree as an artifact; "
+                "cytearc.trajectory.build_cluster_tree builds the same tree "
+                "without saving it"
+            ),
+        )
         # The codes, each cluster's mean and covariance, and for one cluster
         # pair the pooled covariance, the copy its eigenvalues are computed
         # from, and its Cholesky factor.
@@ -2462,36 +2561,33 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise ValueError("Lineage-tree artifact payload is invalid")
         root = parameters["root"]
         ends = tuple(parameters["ends"])
-        index = {cluster: position for position, cluster in enumerate(clusters)}
         for label in (*([] if root is None else [root]), *ends):
             if not any(bool(cluster == label) for cluster in clusters):
                 raise ValueError("Lineage-tree root or ends are not cluster labels")
-        edges = np.asarray(_stored_values(group, "edges"), dtype=np.int64)
-        root_index = None if root is None else index[root]
-        leaves, paths = _tree_lineages_impl(len(clusters), edges, root_index)
+        # The saved tree is named by its labels as a tree built without a
+        # store is, so the two are the same.
+        tree = _labelled_tree_impl(
+            clusters,
+            np.asarray(_stored_values(group, "sizes"), dtype=np.int64),
+            np.asarray(_stored_values(group, "means"), dtype=np.float64),
+            np.asarray(_stored_values(group, "edges"), dtype=np.int64),
+            np.asarray(_stored_values(group, "lengths"), dtype=np.float64),
+            root=root,
+            ends=ends,
+        )
         return LineageTreeResult(
             ref=ref,
             labels=labels,
             coordinates=coordinates,
             cell_selection=selection,
-            clusters=tuple(clusters),
-            sizes=np.asarray(_stored_values(group, "sizes"), dtype=np.int64),
-            means=np.asarray(_stored_values(group, "means"), dtype=np.float64),
-            edges=pd.DataFrame(
-                {
-                    "source": [clusters[first] for first in edges[:, 0]],
-                    "target": [clusters[second] for second in edges[:, 1]],
-                    "length": np.asarray(
-                        _stored_values(group, "lengths"), dtype=np.float64
-                    ),
-                }
-            ),
-            root=root,
-            ends=ends,
-            leaves=tuple(clusters[leaf] for leaf in leaves),
-            lineages=tuple(
-                tuple(clusters[cluster] for cluster in path) for path in paths
-            ),
+            clusters=tree.clusters,
+            sizes=tree.sizes,
+            means=tree.means,
+            edges=tree.edges,
+            root=tree.root,
+            ends=tree.ends,
+            leaves=tree.leaves,
+            lineages=tree.lineages,
         )
 
 

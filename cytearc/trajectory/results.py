@@ -466,6 +466,54 @@ class LineageCurvesResult:
         )
 
 
+def _check_cluster_tree(tree: "ClusterTree | LineageTreeResult", label: str) -> None:
+    """Check that a tree's sizes, means and edges fit its clusters, and freeze its arrays."""
+    n_clusters = len(tree.clusters)
+    if tree.sizes.shape != (n_clusters,):
+        raise ValueError("Cluster sizes must align with the clusters")
+    if tree.means.ndim != 2 or tree.means.shape[0] != n_clusters:
+        raise ValueError("Cluster means must be clusters by dimensions")
+    _require_table_columns(tree.edges, frozenset({"source", "target", "length"}), label)
+    if len(tree.edges) != n_clusters - 1:
+        raise ValueError("A tree over n clusters has n - 1 edges")
+    for name in ("sizes", "means"):
+        object.__setattr__(tree, name, read_only_copy(getattr(tree, name)))
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ClusterTree:
+    """A minimum spanning tree over clusters and the lineages it proposes, built without a store.
+
+    :func:`~cytearc.trajectory.build_cluster_tree` returns it, with the
+    fields of the :class:`~cytearc.trajectory.LineageTreeResult` that
+    ``ds.trajectory.lineage_tree`` saves, less the artifacts that a saved
+    tree records. ``clusters`` holds the cluster labels in their natural
+    order, ``sizes`` the cells of each cluster and ``means`` its mean
+    coordinates. ``edges`` lists the tree's edges by cluster label with
+    their Slingshot distance. ``leaves`` are clusters joined to one other
+    cluster; with a root, ``lineages`` are the paths from it to the other
+    leaves. Leaves are candidates for sinks, not discovered fates: a tree
+    must join every cluster, so similar terminal clusters can be chained.
+    """
+
+    clusters: tuple[Any, ...]
+    sizes: np.ndarray = field(repr=False)
+    means: np.ndarray = field(repr=False)
+    edges: pd.DataFrame = field(repr=False)
+    root: Any
+    ends: tuple[Any, ...]
+    leaves: tuple[Any, ...]
+    lineages: tuple[tuple[Any, ...], ...]
+
+    def __post_init__(self) -> None:
+        _check_cluster_tree(self, "Cluster-tree")
+
+    @property
+    def candidate_sinks(self) -> tuple[Any, ...]:
+        """Leaves other than the root, the clusters to check as sinks."""
+        return tuple(leaf for leaf in self.leaves if not bool(leaf == self.root))
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class LineageTreeResult:
     """A minimum spanning tree over clusters and the lineages it proposes.
@@ -491,18 +539,7 @@ class LineageTreeResult:
     lineages: tuple[tuple[Any, ...], ...]
 
     def __post_init__(self) -> None:
-        n_clusters = len(self.clusters)
-        if self.sizes.shape != (n_clusters,):
-            raise ValueError("Cluster sizes must align with the clusters")
-        if self.means.ndim != 2 or self.means.shape[0] != n_clusters:
-            raise ValueError("Cluster means must be clusters by dimensions")
-        _require_table_columns(
-            self.edges, frozenset({"source", "target", "length"}), "Lineage-tree"
-        )
-        if len(self.edges) != n_clusters - 1:
-            raise ValueError("A tree over n clusters has n - 1 edges")
-        for name in ("sizes", "means"):
-            object.__setattr__(self, name, read_only_copy(getattr(self, name)))
+        _check_cluster_tree(self, "Lineage-tree")
 
     @property
     def candidate_sinks(self) -> tuple[Any, ...]:

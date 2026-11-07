@@ -35,6 +35,7 @@ from cytearc.storage.selections import (
     resolve_metadata_snapshot,
 )
 from cytearc.trajectory import (
+    ClusterTree,
     LineageAggregationResult,
     LineageCurvesResult,
     LineageDriverResult,
@@ -53,6 +54,7 @@ from cytearc.trajectory.curves import (
     lineage_ranks,
     project_onto_curve,
 )
+from cytearc.trajectory import build_cluster_tree
 from cytearc.trajectory.lineage_tree import (
     cluster_distances,
     cluster_moments,
@@ -810,6 +812,80 @@ def test_lineage_tree_matches_the_domain_tree(
     )
     assert result.candidate_sinks == tuple(
         clusters[leaf] for leaf in tree.leaves if leaf != 0
+    )
+
+
+def _tree_inputs(store, tree) -> tuple[np.ndarray, np.ndarray]:
+    """The coordinates and labels of a saved tree's cells, read as a caller reads them."""
+    coordinates = np.asarray(store.artifacts.load(tree.coordinates)["data"][...])
+    labels = store.artifacts.load_values(
+        tree.labels, cell_selection=tree.cell_selection, cell_ids=False
+    ).values
+    return coordinates, np.asarray(labels)
+
+
+def _assert_same_tree(built: ClusterTree, saved: LineageTreeResult) -> None:
+    assert isinstance(built, ClusterTree)
+    assert built.clusters == saved.clusters
+    np.testing.assert_array_equal(built.sizes, saved.sizes)
+    np.testing.assert_allclose(built.means, saved.means, rtol=1e-12, atol=1e-12)
+    pd.testing.assert_frame_equal(
+        built.edges[["source", "target"]], saved.edges[["source", "target"]]
+    )
+    np.testing.assert_allclose(built.edges["length"], saved.edges["length"], rtol=1e-9)
+    assert built.root == saved.root
+    assert built.ends == saved.ends
+    assert built.leaves == saved.leaves
+    assert built.lineages == saved.lineages
+    assert built.candidate_sinks == saved.candidate_sinks
+
+
+def test_a_tree_built_without_a_store_equals_the_one_lineage_tree_saves(
+    datastore, connectivity_graph, leiden_clustering, lineage_tree
+):
+    from cytearc.datastore.datastore import DataStore
+
+    # The coordinates and labels are read from a store opened read-only,
+    # which cannot save a tree.
+    read_only = DataStore(datastore.zarr_loc, default_assay="RNA", zarr_mode="r")
+    saved = read_only.trajectory.load_lineage_tree(lineage_tree)
+    coordinates, labels = _tree_inputs(read_only, saved)
+    _assert_same_tree(build_cluster_tree(coordinates, labels, root=1), saved)
+    # A tree with ends, whose saved coordinates were summed in blocks of 101
+    # cells, and whose ends are recorded in cluster order.
+    with_ends = datastore.trajectory.load_lineage_tree(
+        datastore.trajectory.lineage_tree(
+            connectivity_graph, leiden_clustering, root=1, ends=[3, 2], batch_size=101
+        )
+    )
+    _assert_same_tree(
+        build_cluster_tree(coordinates, labels, root=1, ends=[3, 2]), with_ends
+    )
+    unrooted = build_cluster_tree(coordinates, labels)
+    assert (unrooted.root, unrooted.lineages) == (None, ())
+    assert unrooted.candidate_sinks == unrooted.leaves
+    # The read-only store refuses to save a tree that it does not hold, and
+    # names the call that builds it without saving.
+    clusters = saved.clusters
+    with pytest.raises(PermissionError) as refused:
+        read_only.trajectory.lineage_tree(
+            connectivity_graph, leiden_clustering, root=clusters[0], ends=[clusters[-1]]
+        )
+    assert str(refused.value) == (
+        "build_lineage_tree requires a DataStore opened with zarr_mode='r+', "
+        "because it saves the tree as an artifact; "
+        "cytearc.trajectory.build_cluster_tree builds the same tree without "
+        "saving it"
+    )
+    built = build_cluster_tree(
+        coordinates, labels, root=clusters[0], ends=[clusters[-1]]
+    )
+    assert built.root == clusters[0]
+    assert clusters[-1] in built.leaves
+    # A tree that the store holds is reused on a read-only store.
+    assert (
+        read_only.trajectory.lineage_tree(connectivity_graph, leiden_clustering, root=1)
+        == lineage_tree
     )
 
 
