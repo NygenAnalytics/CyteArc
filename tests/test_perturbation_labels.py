@@ -278,6 +278,34 @@ def test_loading_labels_checks_the_budget_of_every_array_at_once(
         store.perturbation.load_labels(labels)
 
 
+def test_no_refusal_of_loading_labels_names_a_cell_selection_it_cannot_take(
+    store, template, monkeypatch
+) -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    labels = store.perturbation.labels(template.calls, controls=CONTROLS)
+    # Follow each refusal to the budget it names until the labels load.
+    refusals: list[str] = []
+    budget = 1
+    while True:
+        monkeypatch.setattr(store, "memoryBytes", budget)
+        try:
+            store.perturbation.load_labels(labels)
+        except MemoryBudgetError as error:
+            refusals.append(str(error))
+            assert error.needed_bytes > budget
+            budget = error.needed_bytes
+            continue
+        break
+    assert refusals
+    assert not [message for message in refusals if "cell_selection" in message]
+    # load_values takes a cell_selection, so its refusal names one.
+    monkeypatch.setattr(store, "memoryBytes", 1)
+    with pytest.raises(MemoryBudgetError) as values:
+        store.artifacts.load_values(labels)
+    assert str(values.value).endswith(", or read fewer cells with cell_selection.")
+
+
 @pytest.mark.parametrize(
     ("arguments", "error", "message"),
     [

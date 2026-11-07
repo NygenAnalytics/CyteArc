@@ -483,6 +483,7 @@ class BaseDataStore:
             ledger=MemoryLedger(
                 self.memoryBytes,
                 f"Loading the values of the {ref.kind} artifact",
+                remedy="read fewer cells with cell_selection",
                 codec_threads=self.nthreads,
             ),
             # The cell ids are read at the same rows, so the budget charges

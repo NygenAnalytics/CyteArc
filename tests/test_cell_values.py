@@ -365,7 +365,13 @@ def test_values_beyond_the_memory_budget_are_refused_before_anything_is_read(
     # charged, so no cell row, value or cell id is read.
     store.memoryBytes = 6 * 8
 
-    with pytest.raises(MemoryError, match="but the memory budget is 48 bytes"):
+    with pytest.raises(
+        MemoryError,
+        match=(
+            r"more than the memory budget of 48 bytes\. Raise mem_budget to at "
+            r"least \d+ bytes, or read fewer cells with cell_selection\.$"
+        ),
+    ):
         store.artifacts.load_values(scores)
     assert reads == []
 
@@ -472,7 +478,13 @@ def test_select_cells_admits_its_read_against_the_memory_budget(
     budget = store.memoryBytes
     store.memoryBytes = 64
 
-    with pytest.raises(MemoryError, match="but the memory budget is 64 bytes"):
+    with pytest.raises(
+        MemoryError,
+        match=(
+            r"more than the memory budget of 64 bytes\. Raise mem_budget to at "
+            r"least \d+ bytes, or select from fewer cells with cell_selection\.$"
+        ),
+    ):
         store.select_cells(scores, low=0.0)
     assert reads == []
 
