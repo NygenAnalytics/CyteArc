@@ -491,24 +491,43 @@ def admitted_worker_split(
     nTasks: int,
     taskBytes: Callable[[int], int],
     residentBytes: int = 0,
+    reservedBytes: int = 0,
+    reservedFor: str = "",
     requested: int | None = None,
 ) -> tuple[int, int]:
-    """Split worker slots between outer tasks and each task's inner work."""
+    """Split worker slots between outer tasks and each task's inner work.
+
+    ``residentBytes`` is the data that the operation holds throughout.
+    ``reservedBytes`` is memory that it holds beside that data for something
+    other than its tasks, such as the producer of an import, which
+    ``reservedFor`` names, so a refusal states the two apart.
+
+    Raises:
+        ValueError: If ``reservedBytes`` is positive and ``reservedFor`` is
+            empty.
+        MemoryBudgetError: If one task of one inner worker does not fit
+            beside the resident and reserved bytes.
+    """
     cpu = min(
         resources.workers,
         resources.workers if requested is None else max(1, int(requested)),
     )
     tasks = max(1, int(nTasks))
     resident = max(0, int(residentBytes))
-    available = resources.memoryBytes - resident
+    reserved = max(0, int(reservedBytes))
+    if reserved and not reservedFor:
+        raise ValueError("reservedFor must name what reservedBytes holds")
+    available = resources.memoryBytes - resident - reserved
     # The smallest budget that admits the work holds one task of one inner
-    # worker beside the resident data.
+    # worker beside the resident and reserved bytes.
     one_task = max(1, int(taskBytes(1)))
     if available <= 0:
+        held = f"Resident data needs about {resident} bytes"
+        if reserved:
+            held += f" and {reservedFor} about {reserved} bytes"
         raise MemoryBudgetError(
-            f"Resident data needs about {resident} bytes, but the operation "
-            f"limit is {resources.memoryBytes} bytes",
-            needed_bytes=resident + one_task,
+            f"{held}, but the operation limit is {resources.memoryBytes} bytes",
+            needed_bytes=resident + reserved + one_task,
             budget_bytes=int(resources.memoryBytes),
             item="one task beside the resident data",
         )
@@ -519,10 +538,13 @@ def admitted_worker_split(
             if outer * per_task <= available:
                 return outer, inner
 
+    beside = f"{resident} resident bytes"
+    if reserved:
+        beside += f" and {reserved} bytes of {reservedFor}"
     raise MemoryBudgetError(
-        f"One task needs about {one_task} bytes in addition to {resident} "
-        f"resident bytes, but the operation limit is {resources.memoryBytes} bytes",
-        needed_bytes=resident + one_task,
+        f"One task needs about {one_task} bytes in addition to {beside}, but the "
+        f"operation limit is {resources.memoryBytes} bytes",
+        needed_bytes=resident + reserved + one_task,
         budget_bytes=int(resources.memoryBytes),
         item="one task beside the resident data",
     )
