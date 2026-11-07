@@ -384,3 +384,9 @@ def test_a_shutdown_request_stops_the_worker_processes(monkeypatch):
     # The targets that were being fitted finish, and no other starts.
     assert 1 <= len(done) <= 4
     assert multiprocessing.active_children() == []
+
+
+def test_a_worker_fits_a_target_only_once_it_started():
+    # The calling process never starts as a worker, so it holds no factors.
+    with pytest.raises(RuntimeError, match="fitted a target before it started"):
+        grn._fit_in_worker((0, None, np.zeros(3)))
