@@ -551,9 +551,10 @@ def _fingerprint_selected_stored_strings(
     if np.dtype(ids.dtype).kind not in {"O", "S", "T", "U"}:
         raise TypeError("Stored row IDs must contain strings")
 
+    # One stored chunk at a time, so the check holds one chunk of IDs.
     block_rows = min(
-        scan_band(array_geometry(ids), fallback=1),
-        scan_band(array_geometry(selection), fallback=1),
+        row_band(array_geometry(ids), unit="chunk", fallback=1),
+        row_band(array_geometry(selection), unit="chunk", fallback=1),
     )
     n_rows = int(ids.shape[0])
     starts = range(0, n_rows, block_rows)
