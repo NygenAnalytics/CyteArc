@@ -932,6 +932,29 @@ class H5adReader:
         row_end: int | None = None,
     ) -> Generator[coo_matrix, None, None]:
         """Returns a generator that yield chunks of data."""
+        for values in self.consume_dense_rows(batch_size, row_start, row_end):
+            yield coo_matrix(values)
+
+    def consume_dense_rows(
+        self,
+        batch_size: int,
+        row_start: int = 0,
+        row_end: int | None = None,
+    ) -> Generator[np.ndarray, None, None]:
+        """Yield rows ``[row_start, row_end)`` of a dense matrix, ``batch_size`` at a time.
+
+        Each batch is a NumPy array of the values in ``sourceMatrixDtype``.
+
+        Raises:
+            TypeError: If the matrix is sparse, whose rows ``consume`` yields.
+            ValueError: If ``batch_size`` is not positive or the rows lie
+                outside the matrix.
+        """
+        if self.matrixOrientation != "dense":
+            raise TypeError(
+                f"{self.matrixKey} holds a {self.matrixOrientation} matrix; "
+                "consume yields its rows"
+            )
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         dset = self.h5[self.matrixKey]
@@ -941,7 +964,7 @@ class H5adReader:
             raise ValueError("consume row range is outside the matrix")
         for offset in range(start, stop, batch_size):
             end = min(offset + batch_size, stop)
-            yield coo_matrix(self._matrix_values(dset, slice(offset, end)))
+            yield self._matrix_values(dset, slice(offset, end))
 
     def count_value_ranges(
         self, maxBytes: int, featureGroups: np.ndarray | None = None

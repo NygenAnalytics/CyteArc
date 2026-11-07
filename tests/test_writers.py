@@ -736,14 +736,15 @@ def test_h5ad_log_normalized_values_import_linear_from_every_encoding(
     assert root["RNA"].attrs["normalizedValues"]["importedAs"] == "log_normalized"
 
 
-def test_h5ad_writer_processes_undo_the_log_of_their_windows(tmp_path):
+@pytest.mark.parametrize("encoding", ["csr", "dense"])
+def test_h5ad_writer_processes_undo_the_log_of_their_windows(tmp_path, encoding):
     from cytearc.readers import H5adReader
     from cytearc.storage.budget import ResourceBudget
     from cytearc.storage.io_policy import StorageIoPolicy
     from cytearc.writers import H5adToZarr
 
     linear, logged = _log_normalized_band()
-    path = _write_h5ad(tmp_path / "logged.h5ad", logged, encoding="csr")
+    path = _write_h5ad(tmp_path / "logged.h5ad", logged, encoding=encoding)
     location = str(tmp_path / "written.zarr")
     reader = H5adReader(str(path), feature_name_key="feature_name")
     try:
@@ -763,7 +764,8 @@ def test_h5ad_writer_processes_undo_the_log_of_their_windows(tmp_path):
     np.testing.assert_allclose(root["RNA/counts"][:], linear, rtol=1e-12)
 
 
-def test_h5ad_reader_processes_undo_the_log_of_their_bands(tmp_path):
+@pytest.mark.parametrize("encoding", ["csr", "dense"])
+def test_h5ad_reader_processes_undo_the_log_of_their_bands(tmp_path, encoding):
     from zarr.storage import MemoryStore
 
     from cytearc.readers import H5adReader
@@ -772,7 +774,7 @@ def test_h5ad_reader_processes_undo_the_log_of_their_bands(tmp_path):
     from cytearc.writers import H5adToZarr
 
     linear, logged = _log_normalized_band()
-    path = _write_h5ad(tmp_path / "logged.h5ad", logged, encoding="csr")
+    path = _write_h5ad(tmp_path / "logged.h5ad", logged, encoding=encoding)
     # A store in memory cannot be opened by writer processes, so reader
     # processes send their bands to the parent.
     store = MemoryStore()
@@ -794,8 +796,12 @@ def test_h5ad_reader_processes_undo_the_log_of_their_bands(tmp_path):
     np.testing.assert_allclose(root["RNA/counts"][:], linear, rtol=1e-12)
 
 
-def test_h5ad_direct_writers_fit_their_window_summaries(tmp_path, monkeypatch):
+@pytest.mark.parametrize("encoding", ["csr", "dense"])
+def test_h5ad_direct_writers_fit_their_window_summaries(
+    tmp_path, monkeypatch, encoding
+):
     import cytearc.storage.sharding as sharding
+    import cytearc.writers.h5ad as h5ad_writer
     from cytearc.readers import H5adReader
     from cytearc.storage.budget import ResourceBudget
     from cytearc.storage.identity import CountSummary
@@ -803,7 +809,19 @@ def test_h5ad_direct_writers_fit_their_window_summaries(tmp_path, monkeypatch):
     from cytearc.writers import H5adToZarr
 
     values = _band_counts(12, 3)
-    path = _write_h5ad(tmp_path / "window_summaries.h5ad", values, encoding="csr")
+    path = _write_h5ad(tmp_path / "window_summaries.h5ad", values, encoding=encoding)
+    # Where each matrix starts its writer processes, and where it writes in
+    # this process instead.
+    process_start, own_write = {
+        "csr": (
+            (H5adToZarr, "_write_parallel_count_windows"),
+            (sharding, "write_sparse_bands"),
+        ),
+        "dense": (
+            (h5ad_writer, "_producer_messages"),
+            (sharding, "write_dense_bands"),
+        ),
+    }[encoding]
 
     class Planned(Exception):
         pass
@@ -840,8 +858,8 @@ def test_h5ad_direct_writers_fit_their_window_summaries(tmp_path, monkeypatch):
                 **_SHARD_BAND_BUDGET,
             )
             with monkeypatch.context() as patch:
-                patch.setattr(H5adToZarr, "_write_parallel_count_windows", stop(True))
-                patch.setattr(sharding, "write_sparse_bands", stop(False))
+                patch.setattr(*process_start, stop(True))
+                patch.setattr(*own_write, stop(False))
                 low, high = 1_000, 1_000_000
                 assert not uses_processes(low)
                 assert uses_processes(high)
@@ -893,13 +911,103 @@ def test_h5ad_direct_writers_fit_their_window_summaries(tmp_path, monkeypatch):
     np.testing.assert_array_equal(root["RNA/counts"][:], values)
 
 
-def test_h5ad_read_width_caps_parallel_producers(tmp_path):
+def test_dense_h5ad_reader_processes_hold_their_batches_beside_the_writes(
+    tmp_path, monkeypatch
+):
+    import cytearc.storage.sharding as sharding
+    from cytearc.readers import H5adReader
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.storage.io_policy import StorageIoPolicy
+    from cytearc.writers import H5adToZarr
+
+    values = _band_counts(12, 3)
+    path = _write_h5ad(tmp_path / "dense.h5ad", values, encoding="dense")
+
+    class Planned(Exception):
+        pass
+
+    def planned(*_args, **_kwargs):
+        raise Planned
+
+    def smallest_reader_budget() -> int:
+        """Return the smallest budget at which reader processes send the bands."""
+        reader = H5adReader(str(path), feature_name_key="feature_name")
+        try:
+            # A store in memory cannot be opened by writer processes.
+            writer = H5adToZarr(
+                reader,
+                zarr_loc=MemoryStore(),
+                io=StorageIoPolicy(readWorkers=2),
+                **_SHARD_BAND_BUDGET,
+            )
+
+            def producers(budget: int) -> int:
+                writer._lastImportProducerCount = 0
+                writer.resources = ResourceBudget(budget, 4)
+                try:
+                    writer._write_counts(batch_size=2)
+                except (Planned, MemoryError):
+                    pass
+                return writer._lastImportProducerCount
+
+            with monkeypatch.context() as patch:
+                # Each probe stops once the producers are chosen.
+                patch.setattr(sharding, "write_dense_bands", planned)
+                low, high = 1_000, 1_000_000
+                assert producers(low) < 2
+                assert producers(high) == 2
+                while high - low > 1:
+                    middle = (low + high) // 2
+                    if producers(middle) == 2:
+                        high = middle
+                    else:
+                        low = middle
+        finally:
+            reader.close()
+        return high
+
+    budget = smallest_reader_budget()
+    # Each reader process holds its batch beside the bands it fills and sends,
+    # so a batch that holds 1,000 more bytes raises the budget that two of
+    # them need beside the writes by 2,000 bytes.
+    original = H5adToZarr._dense_producer_bytes
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            H5adToZarr,
+            "_dense_producer_bytes",
+            lambda self, rows: original(self, rows) + 1_000,
+        )
+        assert smallest_reader_budget() == budget + 2_000
+
+    # At that budget two reader processes send every band to this process.
+    store = MemoryStore()
+    reader = H5adReader(str(path), feature_name_key="feature_name")
+    try:
+        writer = H5adToZarr(
+            reader,
+            zarr_loc=store,
+            io=StorageIoPolicy(readWorkers=2),
+            **_SHARD_BAND_BUDGET,
+        )
+        writer.resources = ResourceBudget(budget, 4)
+        writer._write_counts(batch_size=2)
+    finally:
+        reader.close()
+    assert writer._lastImportProducerCount == 2
+    assert writer._lastImportWorkersPerProcess is None
+    np.testing.assert_array_equal(
+        zarr.open_group(store=store, mode="r")["RNA/counts"][:], values
+    )
+
+
+@pytest.mark.parametrize("encoding", ["csr", "dense"])
+def test_h5ad_read_width_caps_parallel_producers(tmp_path, encoding):
     from cytearc.readers import H5adReader
     from cytearc.storage.io_policy import StorageIoPolicy
     from cytearc.writers import H5adToZarr
 
     values = _band_counts(12, 3)
-    path = _write_h5ad(tmp_path / "read_width.h5ad", values, encoding="csr")
+    path = _write_h5ad(tmp_path / "read_width.h5ad", values, encoding=encoding)
     reader = H5adReader(str(path), feature_name_key="feature_name")
     try:
         writer = H5adToZarr(

@@ -603,6 +603,7 @@ def test_h5ad_counts_import_identically_from_every_encoding(tmp_path):
     assert next(iter(imported))[0] == np.dtype(np.uint16)
 
 
+@pytest.mark.parametrize("encoding", ["csr", "dense"])
 @pytest.mark.parametrize(
     ("dtype", "maximum", "expected"),
     [
@@ -611,23 +612,53 @@ def test_h5ad_counts_import_identically_from_every_encoding(tmp_path):
         (np.int32, 300, np.uint16),
     ],
 )
-def test_h5ad_integral_counts_import_unsigned(tmp_path, dtype, maximum, expected):
+def test_h5ad_integral_counts_import_unsigned(
+    tmp_path, dtype, maximum, expected, encoding
+):
     values = _VALUES.astype(np.float64)
     values[1, 0] = maximum
-    path = _write_h5ad(tmp_path / "counts.h5ad", values, dtype=dtype)
+    path = _write_h5ad(tmp_path / "counts.h5ad", values, encoding=encoding, dtype=dtype)
     counts = _import(path)
     assert counts.dtype == np.dtype(expected)
     np.testing.assert_array_equal(counts[:], values.astype(expected))
 
 
+@pytest.mark.parametrize("encoding", ["csr", "dense"])
 @pytest.mark.parametrize(("dtype", "value"), [(np.float32, 1.5), (np.float64, 0.25)])
-def test_h5ad_fractional_counts_keep_their_dtype(tmp_path, dtype, value):
+def test_h5ad_fractional_counts_keep_their_dtype(tmp_path, dtype, value, encoding):
     values = _VALUES.astype(np.float64)
     values[3, 4] = value
-    path = _write_h5ad(tmp_path / "counts.h5ad", values, dtype=dtype)
+    path = _write_h5ad(tmp_path / "counts.h5ad", values, encoding=encoding, dtype=dtype)
     counts = _import(path, values="counts")
     assert counts.dtype == np.dtype(dtype)
     np.testing.assert_array_equal(counts[:], values.astype(dtype))
+
+
+@pytest.mark.parametrize("kind", ["counts", "log_normalized"])
+def test_dense_h5ad_negative_zeros_store_as_the_csr_file_stores_them(tmp_path, kind):
+    counts = np.random.default_rng(4).integers(0, 6, (12, 5)).astype(np.float64)
+    counts[:, 0] += 1
+    values = (
+        counts / 2
+        if kind == "counts"
+        else np.log1p(counts / counts.sum(axis=1, keepdims=True) * 1e4)
+    ).astype(np.float32)
+    values[values == 0] = -0.0
+    assert np.signbit(values).any()
+    stored = {
+        encoding: _import(
+            _write_h5ad(tmp_path / f"{encoding}.h5ad", values, encoding=encoding),
+            values=kind,
+        )[:]
+        for encoding in ("csr", "dense")
+    }
+    # A sparse matrix holds no negative zeros, so the dense file stores the
+    # positive zeros, and the same bytes, that the CSR file does.
+    assert stored["dense"].dtype == np.float32
+    assert not np.signbit(stored["dense"]).any()
+    np.testing.assert_array_equal(
+        stored["dense"].view(np.uint32), stored["csr"].view(np.uint32)
+    )
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.int32])

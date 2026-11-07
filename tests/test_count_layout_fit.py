@@ -136,7 +136,13 @@ def test_fit_stops_at_count_shards_of_one_row():
     assert seen.count(1) == 1
 
 
-def _write_h5ad(path: Path, values: np.ndarray, *, dense: bool = False) -> Path:
+def _write_h5ad(
+    path: Path,
+    values: np.ndarray,
+    *,
+    dense: bool = False,
+    feature_types: list[bytes] | None = None,
+) -> Path:
     with h5py.File(path, "w") as h5:
         if dense:
             h5.create_dataset("X", data=values)
@@ -155,6 +161,8 @@ def _write_h5ad(path: Path, values: np.ndarray, *, dense: bool = False) -> Path:
         names = np.array([f"g{i}".encode() for i in range(values.shape[1])])
         var.create_dataset("_index", data=names)
         var.create_dataset("feature_name", data=names)
+        if feature_types is not None:
+            var.create_dataset("feature_types", data=np.array(feature_types))
         h5.create_group("obsm")
     return path
 
@@ -177,8 +185,8 @@ def _build(path: Path, destination: Path, **options) -> zarr.Group:
     return zarr.open_group(str(destination), mode="r")
 
 
-def _policy(root: zarr.Group) -> CountMatrixPolicy:
-    return policy_from_payload(load_count_matrix_plan(root["RNA/counts"]))
+def _policy(root: zarr.Group, assay: str = "RNA") -> CountMatrixPolicy:
+    return policy_from_payload(load_count_matrix_plan(root[f"{assay}/counts"]))
 
 
 def test_h5ad_import_names_the_count_layout_that_fits_its_budget(wide_counts, tmp_path):
@@ -272,35 +280,51 @@ def tenth_nonzero(tmp_path_factory) -> tuple[Path, Path, np.ndarray]:
     )
 
 
-def test_a_dense_h5ad_plans_the_memory_of_its_nonzero_values(tenth_nonzero, tmp_path):
-    dense, csr, values = tenth_nonzero
-    # Planned as if every value were nonzero, the dense file's default layout
-    # needed about 224 MiB. Its nonzero values need what the CSR file's do,
-    # about 14 MiB, beside its dense rows.
-    budget = 64 * 1024**2
-    stores = {
-        name: _build(path, tmp_path / f"{name}.zarr", mem_budget=budget, nthreads=1)
-        for name, path in (("dense", dense), ("csr", csr))
-    }
-    for root in stores.values():
-        assert _policy(root) == DEFAULT_COUNT_MATRIX_POLICY
-        np.testing.assert_array_equal(root["RNA/counts"][:], values)
-    assert (
-        stores["dense"]["RNA/counts"].attrs["content_fingerprint"]
-        == stores["csr"]["RNA/counts"].attrs["content_fingerprint"]
+def _nonzero_share(share: float) -> np.ndarray:
+    """2,000 cells by 600 features, with ``share`` of the values nonzero."""
+    rng = np.random.default_rng(1)
+    return np.where(
+        rng.random((2_000, 600)) < share, rng.integers(1, 30, (2_000, 600)), 0
+    ).astype(np.float32)
+
+
+@pytest.mark.parametrize("split", [False, True], ids=["one-assay", "split"])
+@pytest.mark.parametrize("share", [0.1, 0.42], ids=["tenth", "screen"])
+def test_a_dense_h5ad_writes_the_default_layout_below_the_sparse_plan(
+    share, split, tmp_path
+):
+    values = _nonzero_share(share)
+    # The last 40 features are antibodies, which a split stores apart.
+    types = [b"Gene Expression"] * 560 + [b"Antibody Capture"] * 40 if split else None
+    dense = _write_h5ad(
+        tmp_path / "dense.h5ad", values, dense=True, feature_types=types
     )
-
-
-def test_a_dense_h5ad_still_plans_its_dense_rows(tenth_nonzero, tmp_path):
-    dense, csr, _values = tenth_nonzero
-    # The CSR file fits 17 MiB. A batch of the dense file also holds its
-    # rows' 2,000 by 600 float32 values, 4.6 MiB, so the same nonzero values
-    # do not.
-    budget = 17 * 1024**2
-    root = _build(csr, tmp_path / "csr.zarr", mem_budget=budget, nthreads=1)
-    assert _policy(root) == DEFAULT_COUNT_MATRIX_POLICY
+    csr = _write_h5ad(tmp_path / "csr.h5ad", values, feature_types=types)
+    options = {"nthreads": 1, "assay_split_key": "feature_types" if split else None}
+    # Through the sparse writer, the default layout needs 14 to 18 MiB at a
+    # tenth nonzero and 52 to 70 MiB at 42%, as the screen holds, for the CSR
+    # file and before for the dense one. Through dense row bands, the dense
+    # file needs about 8 MiB whatever its share of zeros.
+    budget = 11 * 1024**2
+    roots = {
+        "dense": _build(dense, tmp_path / "dense.zarr", mem_budget=budget, **options)
+    }
     with pytest.raises(CountLayoutMemoryError, match="default count-matrix policy"):
-        _build(dense, tmp_path / "dense.zarr", mem_budget=budget, nthreads=1)
+        _build(csr, tmp_path / "csr.zarr", mem_budget=budget, **options)
+    roots["csr"] = _build(
+        csr, tmp_path / "csr.zarr", mem_budget=96 * 1024**2, **options
+    )
+    expected = (
+        {"RNA": values[:, :560], "ADT": values[:, 560:]} if split else {"RNA": values}
+    )
+    for assay, counts in expected.items():
+        for root in roots.values():
+            assert _policy(root, assay) == DEFAULT_COUNT_MATRIX_POLICY
+            np.testing.assert_array_equal(root[f"{assay}/counts"][:], counts)
+        stored = [root[f"{assay}/counts"] for root in roots.values()]
+        assert len({array.attrs["content_fingerprint"] for array in stored}) == 1
+        assert len({(array.dtype, array.chunks, array.shards) for array in stored}) == 1
+        assert load_count_matrix_plan(stored[0]) == load_count_matrix_plan(stored[1])
 
 
 def _reversed_rows(matrix: csr_matrix) -> csr_matrix:
@@ -342,9 +366,9 @@ def test_an_h5ad_import_charges_sorting_only_for_rows_out_of_order(
     dense, csr, values = tenth_nonzero
     # Sorting each batch and summing its repeated coordinates was charged for
     # every source, so the default layout needed about 24 MiB for the CSR
-    # file and 29 MiB for the dense one. Their batches arrive canonical, so
-    # they need about 14 and 19 MiB. The same rows with their indices
-    # reversed are sorted, and still need about 24 MiB.
+    # file. Its batches arrive canonical, so it needs about 14 MiB, and the
+    # dense file, written through dense row bands, about 8 MiB. The same rows
+    # with their indices reversed are sorted, and still need about 24 MiB.
     budget = 22 * 1024**2
     roots = {
         name: _build(path, tmp_path / f"{name}.zarr", mem_budget=budget, nthreads=1)
