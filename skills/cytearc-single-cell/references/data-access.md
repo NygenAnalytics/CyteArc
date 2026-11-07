@@ -108,7 +108,7 @@ print(reader.assayFeats)                  # assays and feature ranges that will 
 cytearc.CrToZarr(reader, zarr_loc="pbmc.zarr", mem_budget="4G").dump()
 # A default count layout that does not fit mem_budget raises CountLayoutMemoryError before
 # writing and names a smaller policy=CountMatrixPolicy(...) (cytearc.storage.count_matrix);
-# raise mem_budget to its needed_bytes or pass that policy.
+# raise mem_budget to its needed_bytes, or pass policy="fit" to write that layout.
 ds = cytearc.DataStore("pbmc.zarr", default_assay="RNA")   # required when there are 2+ assays
 
 # 10x directory (matrix.mtx, genes/features.tsv, barcodes.tsv; .gz accepted)
@@ -199,13 +199,12 @@ a repeated header: pandas renames it `ID.1`, `ID.2`, ... without a warning.
 reader = cytearc.CrDirReader("filtered_gene_bc_matrices/hg19", duplicate_feature_ids="make_unique")
 ```
 
-Every converter raises `CountLayoutMemoryError`, a `MemoryBudgetError`, when the count layout does not fit the budget; its `needed_bytes` is the budget that writes the layout. Catch `MemoryError`. Prefer a larger `mem_budget` when the host has the memory. Otherwise copy the policy numbers from the message exactly and record that choice: smaller layouts make every later gene-major read slower.
+Every converter raises `CountLayoutMemoryError`, a `MemoryBudgetError`, when the count layout does not fit the budget; its `needed_bytes` is the budget that writes the layout, and its `fittingPolicy` the largest smaller layout that fits, which its message names. Catch `MemoryError`. Prefer a larger `mem_budget` when the host has the memory. Otherwise pass `policy="fit"`, which writes that smaller layout, and record the layout the writer reports as `writer.policy`: smaller layouts make every later gene-major read slower.
 
 ```python
-from cytearc.storage.count_matrix import CountMatrixPolicy
-
-policy = CountMatrixPolicy(unitBytes=3906250, chunkBytes=390625)   # copied from the message
-cytearc.CrToZarr(reader, zarr_loc="pbmc.zarr", mem_budget="128M", policy=policy).dump()
+writer = cytearc.CrToZarr(reader, zarr_loc="pbmc.zarr", mem_budget="128M", policy="fit")
+print(writer.policy)   # CountMatrixPolicy(unitBytes=3906250, chunkBytes=390625), for example
+writer.dump()
 ```
 
 The need follows genes per cell relative to the gene count, not the number of cells. The 1K PBMC

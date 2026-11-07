@@ -59,13 +59,13 @@ _PUBLIC_CLASS_METHODS = {
 }
 # Every importer takes the keyword ``overwrite``.
 _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
-    CrToZarr: "7204d387a6ac8a0ac3ae4cf1c519ef0994ce2679a96c287532eee4c80f35f1f6",
-    H5adToZarr: "b7303317618ecd8ac51935b9b53c65bc7ca6a8d1eb5baee9f4e23d25dd77b7f2",
-    SparseToZarr: "0ee2022e494f10b5c7239799d7c197dec80aed24daafaeaa109dfeb8f0c61e7b",
-    CSVtoZarr: "28a9845e7da065dd15d0781843d67c4d309e1b552889fdb7374b079783a696cd",
+    CrToZarr: "0bad82837ebacaac338db06c264da8ded4ca3846fb909c8d4f9fc5cbe4c53c05",
+    H5adToZarr: "73600608e432fc45187acb12b569036d664246b54bacdda6d6956347f558bc08",
+    SparseToZarr: "4414be8892bf0a7f7baa9aacd4ff2f2a1648cb722d62f07878dda83fba22a3ef",
+    CSVtoZarr: "3044903008c618715e44e0127ca983d174eb27813e76144d4c48145be9996b7f",
     SubsetZarr: "76fd6326d68a545065ce07fed9411ec7f02d3f080041db627c3623bda5fe4ed8",
-    SeuratToZarr: "97d18e34b684c4faea71e6cb1f2ba6aa8c0ef6e8a40b97b1638f07b9bf539e31",
-    TapestriToZarr: "1ad6b6cb239bad23596e3a4a6b5696d554148cf5f763d4a00e67b5c502fe63df",
+    SeuratToZarr: "8d42546ee3b47fc4d819745ecfeec48c53e11c4c802b3ca50b50dfc5bc61c901",
+    TapestriToZarr: "51b512936408314a83b9c3ce39de6ad97943eef360e1c36fb0ec1395aee37dcb",
 }
 _MODULE_FUNCTIONS = (
     "create_zarr_count_assay",

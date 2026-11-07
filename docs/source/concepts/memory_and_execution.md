@@ -55,7 +55,7 @@ Explicit budgets, including fractions of detected memory, are not reduced.
 Each operation reserves within it the blocks it reads and what Zarr holds while it reads them: for a sharded array, such as the counts, a shard-level copy of the selection and the compressed chunks the read touches in a shard, and for every array the chunks it decodes.
 For a block transformed by a chain of element-wise steps, such as library-size scaling followed by a logarithm, it reserves the step of the chain that holds the most, one step's input beside its output.
 It also reserves its kernel scratch and results, and limits its concurrent reads and writes and the width of automatically sized feature batches to fit.
-Imports write the default count layout unless they are given a `policy`, and an import whose default count shards do not fit stops before it writes, naming the smaller `policy` that fits; subset, repack, merge, and grouped assays instead fit the count layout to the budget, writing smaller count shards. The layout changes how the counts are stored, never the store's identity.
+Imports write the default count layout unless they are given a `policy`, and an import whose default count shards do not fit stops before it writes, naming the smaller `policy` that fits; given `policy="fit"`, it writes that policy instead. Subset, repack, merge, and grouped assays fit the count layout to the budget by default, writing smaller count shards. The layout changes how the counts are stored, never the store's identity.
 
 Some steps hold whole structures in memory beside their streamed blocks, and compare an estimate of them with the budget before they read a coordinate or graph:
 

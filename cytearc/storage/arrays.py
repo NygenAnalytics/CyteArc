@@ -126,6 +126,69 @@ def text_value(value: Any) -> str:
     return str(value)
 
 
+def _is_ascii(values: np.ndarray) -> bool:
+    """Return whether an array of byte strings holds only ASCII bytes."""
+    return int(np.ascontiguousarray(values).view(np.uint8).max(initial=0)) < 0x80
+
+
+def _ascii_text(values: np.ndarray, width: int) -> np.ndarray:
+    """Return ASCII byte strings as text of ``width`` characters, in their shape.
+
+    UTF-8 decodes an ASCII byte to the character of the same code, so the
+    first ``width`` bytes of each value, NUL padding included, widen to the
+    code points of its text. ``width`` is at most the byte width.
+    """
+    rows = np.ascontiguousarray(values).view(np.uint8)
+    points = rows.reshape(-1, values.dtype.itemsize)[:, :width].astype(np.uint32)
+    return points.view(np.dtype((np.str_, width))).reshape(values.shape)
+
+
+def _decoded_text(values: Iterable[Any], shape: tuple[int, ...]) -> np.ndarray:
+    """Return byte strings decoded as UTF-8, as text in an array of ``shape``."""
+    return np.asarray(list(map(bytes.decode, values)), dtype=str).reshape(shape)
+
+
+def text_array(values: np.ndarray) -> np.ndarray:
+    """Return values as fixed-width text, each as :func:`text_value` gives it.
+
+    The array keeps the shape of ``values`` and is as wide as its longest
+    text, one character at least. Fixed-width text and byte strings, and
+    arrays that hold only Python ``str`` or only byte strings, convert in
+    whole-array NumPy operations; other values convert one at a time.
+
+    Raises:
+        UnicodeDecodeError: If a byte string is not valid UTF-8.
+    """
+    kind = values.dtype.kind
+    if kind == "U":
+        width = int(np.strings.str_len(values).max(initial=0))
+        return values.astype(np.dtype((np.str_, max(1, width))))
+    if kind == "S":
+        if _is_ascii(values):
+            width = int(np.strings.str_len(values).max(initial=0))
+            return _ascii_text(values, max(1, width))
+        return _decoded_text(values.flat, values.shape)
+    if kind == "O":
+        # Each distinct type is checked once rather than each value. Only the
+        # exact types qualify: str() of a subclass, such as np.str_, can drop
+        # characters that NumPy's conversion keeps. astype sizes the result
+        # by the longest value, one character at least, where np.asarray
+        # widens values that are all empty.
+        kinds = set(map(type, values.flat))
+        if kinds <= {str}:
+            return values.astype(str)
+        if kinds <= {bytes, np.bytes_}:
+            # Trailing NULs count toward the width, as they count toward the
+            # length of the ASCII text.
+            raw = values.astype(np.bytes_)
+            if _is_ascii(raw):
+                return _ascii_text(raw, raw.dtype.itemsize)
+            return _decoded_text(values.flat, values.shape)
+    return np.asarray([text_value(value) for value in values.flat], dtype=str).reshape(
+        values.shape
+    )
+
+
 def _holds_bytes_or_none(values: np.ndarray) -> bool:
     """Return whether an array of Python objects holds None or a byte string."""
     # Each distinct type is checked once rather than each value.
@@ -141,9 +204,7 @@ def _decode_metadata_values(data: Any) -> np.ndarray:
     if values.dtype.kind == "S" or (
         values.dtype.hasobject and _holds_bytes_or_none(values)
     ):
-        return np.asarray(
-            [text_value(value) for value in values.flat], dtype=str
-        ).reshape(values.shape)
+        return text_array(values)
     return values
 
 

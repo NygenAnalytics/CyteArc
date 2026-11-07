@@ -1,6 +1,6 @@
 """Write a store from a Tapestri file of single-cell DNA and protein."""
 
-from typing import Any
+from typing import Any, Literal
 
 from ..readers.tapestri import TapestriReader
 from ..storage.count_matrix import CountMatrixPolicy
@@ -42,8 +42,10 @@ class TapestriToZarr(CrToZarr):
             auto-detected.
         profile: Zarr encoding profile (``fast_local`` or ``cloud``). When
             None, chosen from the destination location.
-        policy: Count-matrix geometry policy, used exactly. When None, the
-            default policy is used.
+        policy: Count-matrix layout: a ``CountMatrixPolicy``, used exactly;
+            None, the default layout; or ``"fit"``, the largest halving of
+            the default ``unitBytes`` and ``chunkBytes`` whose counts write
+            and ``countsT`` fit ``mem_budget``.
         io: Optional explicit read, compute, and write widths.
         assay_types: Preset assay types, such as ``{"CNV": "CUSTOM"}``, that
             replace the defaults: ``"Assay"`` for the amplicons' assay, and
@@ -58,7 +60,13 @@ class TapestriToZarr(CrToZarr):
         FileExistsError: If ``zarr_loc`` is not empty, unless ``overwrite``
             replaces it.
         MemoryError: If the import does not fit ``mem_budget``, before the
-            destination is created.
+            destination is created: a ``CountLayoutMemoryError``, whose
+            ``fittingPolicy`` is the largest halving of the layout that fits,
+            when a policy or the default layout does not fit.
+
+    Attributes:
+        policy: The count-matrix layout that every imported assay was written
+            with.
     """
 
     source_name = "Tapestri"
@@ -72,7 +80,7 @@ class TapestriToZarr(CrToZarr):
         mem_budget: int | str | None = None,
         nthreads: int | None = None,
         profile: StorageProfile | None = None,
-        policy: CountMatrixPolicy | None = None,
+        policy: CountMatrixPolicy | Literal["fit"] | None = None,
         io: StorageIoPolicy | None = None,
         assay_types: dict[str, str] | None = None,
         *,
