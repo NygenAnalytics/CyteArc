@@ -15,14 +15,7 @@ modules and regulons to programs and cistromes, is a table with
 `set_overlaps` compares. Regions are named by their `chrom:start-end` ids, as ATAC peaks are.
 Reading cisTarget ranking databases needs the `regulons` extra: `pip install "cytearc[regulons]"`.
 
-The cell-level steps run on a `DataStore`: {meth}`ds.regulons.grn
-<cytearc.datastore.namespaces.RegulonsAccessor.grn>` infers the co-expression network,
-{meth}`ds.regulons.profiles <cytearc.datastore.namespaces.RegulonsAccessor.profiles>` sums
-groups of cells such as metacells into profiles, and the scoring methods above write
-`enrichment_scores` artifacts, which {meth}`EnrichmentResult.to_pandas
-<cytearc.EnrichmentResult.to_pandas>` reads as a table. The functions on this page work on
-those results and on reference files, such as cisTarget databases, JASPAR motifs, a genome
-FASTA, a gene annotation, and peak files.
+The cell-level steps run on a `DataStore`: {meth}`ds.regulons.grn <cytearc.datastore.namespaces.RegulonsAccessor.grn>` infers the co-expression network, {meth}`ds.regulons.profiles <cytearc.datastore.namespaces.RegulonsAccessor.profiles>` sums groups of cells such as metacells into profiles, the scoring methods above write `enrichment_scores` artifacts, which {meth}`EnrichmentResult.to_pandas <cytearc.EnrichmentResult.to_pandas>` reads as a table, and {meth}`ds.regulons.specificity <cytearc.datastore.namespaces.RegulonsAccessor.specificity>` and {meth}`ds.regulons.connection_specificity <cytearc.datastore.namespaces.RegulonsAccessor.connection_specificity>` score those artifacts a block of cells at a time. The functions on this page work on those results and on reference files, such as cisTarget databases, JASPAR motifs, a genome FASTA, a gene annotation, and peak files.
 
 ## RNA regulons (SCENIC)
 
@@ -91,6 +84,8 @@ metacells.
 ```
 
 ## Gene programs and specificity
+
+`regulon_specificity` and `connection_specificity` take a table of activity in memory. For the scores of many cells, the `ds.regulons` methods above give the same scores from the stored artifact without reading it whole.
 
 ```{eval-rst}
 .. autofunction:: cytearc.regulons.gene_programs

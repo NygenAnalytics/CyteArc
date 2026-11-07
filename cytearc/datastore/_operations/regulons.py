@@ -1,5 +1,5 @@
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
@@ -22,12 +22,14 @@ from ...storage.selections import (
 )
 from ...storage.types import as_zarr_array, as_zarr_group
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import bool_argument, integer_argument
+from ...utils.arguments import bool_argument, float_argument, integer_argument
 from ...utils.arrays import array_digest
 from ...utils.logging import logger
-from ...utils.memory_budget import MemoryBudgetError
+from ...utils.memory_budget import MemoryBudgetError, MemoryLedger, hash_table_bytes
 
 if TYPE_CHECKING:
+    from ...features.enrichment.results import EnrichmentResult
+    from ...matrix import ChunkedArray
     from ..mapping_datastore import MappingDatastore as _RegulonOperationsBase
 else:
     _RegulonOperationsBase = object
@@ -87,6 +89,84 @@ def _grn_slot_matches(group: zarr.Group, attrs: dict[str, Any]) -> bool:
         and regulators.ndim == 1
         and regulators.shape[0] > 0
     )
+
+
+# Bytes of one int64 row or position.
+_INDEX_BYTES = np.dtype(np.int64).itemsize
+
+
+def _scored_rows(
+    ledger: MemoryLedger, scored: np.ndarray, cells: np.ndarray
+) -> np.ndarray:
+    """Return the rows of a score matrix that hold ``cells``, positions in the store.
+
+    ``scored`` holds the position of each row's cell. Both are ascending.
+    The rows stay charged to ``ledger``.
+
+    Raises:
+        ValueError: If the scores hold no row for one of ``cells``.
+    """
+    item = f"the rows of the scores of {len(cells)} cells"
+    # The rows found, whether each lies among the scored cells, and the cells
+    # found there.
+    ledger.peak(item, (2 * _INDEX_BYTES + 1) * len(cells))
+    rows = np.searchsorted(scored, cells)
+    if not bool((rows < len(scored)).all()) or not np.array_equal(scored[rows], cells):
+        raise ValueError(
+            "cell_selection holds cells that scores did not score; pass a "
+            "selection of the scored cells"
+        )
+    ledger.hold(item, rows.nbytes)
+    return rows
+
+
+def _score_blocks(
+    ledger: MemoryLedger,
+    result: "EnrichmentResult",
+    rows: np.ndarray | None,
+    *,
+    nthreads: int,
+    msg: str,
+    scratch_bytes_per_row: int = 0,
+) -> Iterator[np.ndarray]:
+    """Stream the scores of ``result`` at ``rows``, every row for None, one block at a time, with the block charged to ``ledger``.
+
+    A block holds the rows of one stored chunk, which a smaller block would
+    decode again for each block, or as many rows as the ledger's room holds
+    beside the chunk's decode and the index of ``rows``, at least one: each
+    row's scores, what Zarr's read holds for them, and the
+    ``scratch_bytes_per_row`` that the caller makes of each row. No block is
+    read ahead. The block's bytes are held while the stream runs, which
+    refuses a budget without room for one row before anything is read, and
+    released when it ends.
+    """
+    data: ChunkedArray = result.data
+    if rows is not None:
+        # Selecting rows indexes every stored row, then keeps the selected.
+        data_index = _INDEX_BYTES * (len(result.cell_index) + len(rows))
+        ledger.peak(f"the index of the scores of {len(rows)} cells", data_index)
+        data = data[rows]
+    chunk_rows = min(data._block_size, max(1, data.shape[0]))
+    per_row = -(-data._block_owned_bytes() // chunk_rows) + scratch_bytes_per_row
+    fixed = data._resident_bytes() + data._max_decode_bytes()
+    block_rows = chunk_rows
+    if ledger.room is not None:
+        block_rows = max(1, min(chunk_rows, (ledger.room - fixed) // max(1, per_row)))
+    charged = ledger.hold(
+        "the scores read one block of cells at a time", fixed + block_rows * per_row
+    )
+    try:
+        yield from data._with_block_size(block_rows)._stream_blocks(
+            nthreads=nthreads,
+            msg=msg,
+            prefetch=1,
+            row_mask=None,
+            resident_bytes=ledger.held_bytes - charged,
+            memory_bytes=ledger.budget,
+            scratch_bytes_per_row=scratch_bytes_per_row,
+        )
+    finally:
+        ledger.release(charged)
 
 
 class _RegulonOperationsMixin(_RegulonOperationsBase):
@@ -516,3 +596,261 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
         sums = sums.loc[~sums.index.duplicated(keep=False)].T.astype(np.float64)
         profiles: pd.DataFrame = np.log1p(sums.div(sums.sum(axis=1), axis=0) * 1e6)
         return profiles
+
+    def _regulon_scores(
+        self, scores: ArtifactRef, cell_selection: ArtifactRef | None
+    ) -> tuple["EnrichmentResult", MemoryLedger]:
+        """Load a score artifact for a specificity call, with a ledger that holds its cells and regulons."""
+        if not isinstance(scores, ArtifactRef):
+            raise TypeError("scores must be an ArtifactRef")
+        if scores.kind != "enrichment_scores":
+            raise ValueError(
+                "scores must identify an enrichment_scores artifact, such as "
+                f"scores.aucell returns, not a {scores.kind} artifact"
+            )
+        if cell_selection is not None and not isinstance(cell_selection, ArtifactRef):
+            raise TypeError("cell_selection must be an ArtifactRef or None")
+        result: EnrichmentResult = cast(Any, self)._scores_load(scores)
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Scoring the specificity of {len(result.source_names)} regulons",
+            codec_threads=self.nthreads,
+        )
+        ledger.hold(
+            "the scored cells' positions and the regulons' names",
+            result.cell_index.nbytes
+            + result.source_names.nbytes
+            + result.source_sizes.nbytes,
+        )
+        return result, ledger
+
+    @validation_scoped
+    def _regulons_specificity(
+        self,
+        scores: ArtifactRef,
+        groups: ArtifactRef | str,
+        *,
+        cell_selection: ArtifactRef | None = None,
+    ) -> pd.DataFrame:
+        """Score how specific each regulon's activity is to each group of cells.
+
+        Gives the regulon specificity scores (RSS) of
+        ``regulons.regulon_specificity`` from a stored score artifact, such as
+        ``scores.aucell`` writes, without reading its scores whole: one pass
+        over the scores in blocks of cells sums each regulon's activity, and a
+        second sums, for each group, the regulon's share of activity in the
+        group's cells and their terms of the Jensen-Shannon divergence. The
+        call holds one block of scores and three numbers for each group and
+        regulon, beside a position, a label, and a code for each cell. A block
+        holds the cells of one stored chunk of scores, or fewer when the
+        memory budget leaves less room. Nothing is saved.
+
+        Args:
+            scores: An ``enrichment_scores`` artifact of finite, non-negative
+                scores, such as AUCell's. chromVAR's z-scores, which can be
+                negative, are refused.
+            groups: Clustering artifact or user-owned cell metadata column
+                that groups the cells, read for the scored cells as
+                ``compare.compute_bulk`` reads it. An artifact's own cells must
+                include them.
+            cell_selection: The cells to score, which ``scores`` must hold.
+                Every scored cell when omitted.
+
+        Returns:
+            A groups-by-regulons DataFrame of the scores, indexed by the group
+            labels in their natural order, named ``group``, with a column for
+            each regulon of ``scores``. A regulon without activity in the cells
+            scores NaN. Up to rounding, these are the scores that
+            ``regulon_specificity`` gives for the same cells' scores and labels.
+
+        Raises:
+            TypeError: If ``scores`` or ``cell_selection`` is not an
+                ArtifactRef, or ``groups`` is neither an ArtifactRef nor a
+                column name.
+            ValueError: If ``scores`` is not an ``enrichment_scores``
+                artifact, ``cell_selection`` holds a cell that ``scores`` did
+                not score, ``groups`` holds no label, or a missing label, for a
+                cell to score, or a score is negative or not finite.
+            MemoryBudgetError: If the memory budget cannot hold the cells'
+                positions, labels, and codes, the sums, and a block of one
+                cell's scores beside one stored chunk's decode.
+        """
+        from ...clustering.connectivity import label_codes
+        from ...metadata.selection import (
+            CellField,
+            resolve_grouping,
+            valid_category_mask,
+        )
+        from ...regulons.specificity import specificity_bytes, specificity_scores
+        from ...utils.arrays import sort_categories
+
+        if not isinstance(groups, ArtifactRef | str):
+            raise TypeError("groups must be an ArtifactRef or a cell column name")
+        result, ledger = self._regulon_scores(scores, cell_selection)
+        selection = result.cell_selection if cell_selection is None else cell_selection
+        grouping = CellField(groups) if isinstance(groups, str) else groups
+        try:
+            resolved = resolve_grouping(
+                self.zw, self.cells, grouping, cell_selection=selection, ledger=ledger
+            )
+        except ValueError as error:
+            if not isinstance(groups, ArtifactRef) or (
+                "must be a subset of the artifact cell selection" not in str(error)
+            ):
+                raise
+            raise ValueError(
+                f"The {groups.kind} artifact of groups holds no label for some "
+                "cells to score; compute it on cells that include them, or pass "
+                "a cell_selection of the cells that it labels"
+            ) from error
+        labels = np.asarray(resolved.labels)
+        n_cells = len(labels)
+        # Whether each label is missing, pandas' hash table of the labels,
+        # and each label's code.
+        ledger.peak(
+            f"coding the labels of {n_cells} cells",
+            n_cells + hash_table_bytes(n_cells) + _INDEX_BYTES * n_cells,
+        )
+        missing = ~valid_category_mask(labels, missing_mask=resolved.missing_mask)
+        if missing.any():
+            raise ValueError(
+                f"groups holds no label for {int(missing.sum())} of the "
+                f"{n_cells} cells to score; pass a cell_selection of the "
+                "labelled cells"
+            )
+        categories = sort_categories(pd.unique(labels).tolist())
+        codes = label_codes(labels, categories)
+        ledger.hold(f"the groups of {n_cells} cells", codes.nbytes)
+        rows = (
+            None
+            if cell_selection is None
+            else _scored_rows(ledger, result.cell_index, resolved.cell_idx)
+        )
+        n_regulons = len(result.source_names)
+        ledger.hold(
+            f"the specificity sums of {n_regulons} regulons in "
+            f"{len(categories)} groups",
+            specificity_bytes(len(categories), n_regulons),
+        )
+        specificity = specificity_scores(
+            lambda: _score_blocks(
+                ledger,
+                result,
+                rows,
+                nthreads=self.nthreads,
+                msg=f"({result.assay}) Scoring regulon specificity",
+            ),
+            codes,
+            len(categories),
+            n_regulons,
+            name=f"The scores of the {result.method} artifact",
+        )
+        return pd.DataFrame(
+            specificity,
+            index=pd.Index(categories, name="group"),
+            columns=result.source_names.tolist(),
+            copy=False,
+        )
+
+    @validation_scoped
+    def _regulons_connection_specificity(
+        self,
+        scores: ArtifactRef,
+        *,
+        margin: float = 0.05,
+        cell_selection: ArtifactRef | None = None,
+    ) -> pd.DataFrame:
+        """Score how specifically each pair of regulons is active in the same cells.
+
+        Gives the connection specificity index (CSI) of
+        ``regulons.connection_specificity`` from a stored score artifact, such
+        as ``scores.aucell`` writes, without reading its scores whole: one pass
+        over the scores in blocks of cells merges each block's sums of
+        products of deviations into the regulons' correlation matrix. The call
+        holds one block of scores, as float64 too, and the correlations, then
+        the index, two numbers for each pair of regulons, beside a position for
+        each cell. A block holds the cells of one stored chunk of scores, or
+        fewer when the memory budget leaves less room. Nothing is saved.
+
+        Args:
+            scores: An ``enrichment_scores`` artifact, such as AUCell's.
+            margin: Correlation margin: a regulon counts for a pair whose
+                correlation is ``r`` when it correlates below ``r - margin``
+                with both.
+            cell_selection: The cells to read, which ``scores`` must hold.
+                Every scored cell when omitted.
+
+        Returns:
+            A symmetric regulons-by-regulons DataFrame, indexed and labelled by
+            the regulons of ``scores``. A regulon of constant scores correlates
+            0 with every regulon. The indices equal those of
+            ``connection_specificity`` for the same cells' scores, except where
+            rounding moves a correlation across ``r - margin``.
+
+        Raises:
+            TypeError: If ``scores`` or ``cell_selection`` is not an
+                ArtifactRef, or ``margin`` is not a real number.
+            ValueError: If ``margin`` is not finite, ``scores`` is not an
+                ``enrichment_scores`` artifact, or ``cell_selection`` holds a
+                cell that ``scores`` did not score.
+            MemoryBudgetError: If the memory budget cannot hold the cells'
+                positions, the correlations of every pair of regulons twice
+                over, and a block of one cell's scores beside one stored
+                chunk's decode.
+        """
+        from ...metadata.selection import (
+            plan_cell_selection_read,
+            read_cell_selection,
+        )
+        from ...regulons.specificity import (
+            activity_correlation,
+            connection_specificity_from_correlation,
+            correlation_bytes,
+            correlation_bytes_per_row,
+        )
+
+        margin = float_argument(margin, "margin")
+        result, ledger = self._regulon_scores(scores, cell_selection)
+        rows = None
+        if cell_selection is not None:
+            cells = read_cell_selection(
+                ledger,
+                self.zw,
+                plan_cell_selection_read(self.zw, cell_selection),
+                item="the cell positions of cell_selection",
+            )
+            rows = _scored_rows(ledger, result.cell_index, cells)
+            ledger.release(cells.nbytes)
+            del cells
+        n_regulons = len(result.source_names)
+        remedy = "score fewer regulons"
+        summing = ledger.hold(
+            f"the correlations of {n_regulons} regulons",
+            correlation_bytes(n_regulons),
+            remedy=remedy,
+        )
+        correlation = activity_correlation(
+            _score_blocks(
+                ledger,
+                result,
+                rows,
+                nthreads=self.nthreads,
+                msg=f"({result.assay}) Correlating regulon activity",
+                scratch_bytes_per_row=correlation_bytes_per_row(n_regulons),
+            ),
+            n_regulons,
+        )
+        ledger.release(summing)
+        ledger.hold(f"the correlations of {n_regulons} regulons", correlation.nbytes)
+        ledger.hold(
+            f"the connection specificity index of {n_regulons} regulons",
+            correlation.nbytes,
+            remedy=remedy,
+        )
+        names = result.source_names.tolist()
+        return pd.DataFrame(
+            connection_specificity_from_correlation(correlation, margin),
+            index=names,
+            columns=names,
+            copy=False,
+        )
