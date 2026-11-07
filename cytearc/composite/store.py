@@ -625,8 +625,13 @@ class CompositeStore(WrapperStore[Store], VirtualArrayStore):
 
 
 def open_composite(
-    root: zarr.Group, *, source_storage_options: dict[str, dict[str, Any]] | None = None
+    root: zarr.Group, *, source_storage_options: dict[str, Any] | None = None
 ) -> zarr.Group:
+    """Open a composite root over its sources, each opened with its own options.
+
+    ``source_storage_options`` maps each source's name to the backend options
+    that open it.
+    """
     if isinstance(root.store, CompositeStore):
         return root
     record = root.attrs[COMPOSITE_ATTR]
@@ -667,6 +672,26 @@ def open_composite(
             raise ValueError(f"Invalid composite mapping: {name}")
         if fingerprint_stored_arrays(maps, [name]) != record["maps"][name]:
             raise ValueError(f"Composite mapping was modified: {name}")
+    # Options are checked before any source opens, so options meant for one
+    # source, such as a mount's, are refused before a source needs them.
+    source_options = dict(source_storage_options or {})
+    unknown = set(source_options) - {
+        binding["name"]
+        for binding in sources
+        if isinstance(binding, dict) and isinstance(binding.get("name"), str)
+    }
+    if unknown:
+        raise ValueError(
+            f"Unknown composite source options: {sorted(unknown)}. "
+            "source_storage_options of a composite maps each source's name to its "
+            "backend options."
+        )
+    for name, options in source_options.items():
+        if not isinstance(options, dict):
+            raise TypeError(
+                f"source_storage_options[{name!r}] must be a dict of backend "
+                f"options, got {type(options)!r}"
+            )
     opened: dict[str, zarr.Group] = {}
     try:
         for binding in sources:
@@ -680,7 +705,7 @@ def open_composite(
                 raise ValueError("Composite sources need persistent locations")
             store = make_store(
                 location,
-                storage_options=(source_storage_options or {}).get(name),
+                storage_options=source_options.get(name),
                 read_only=True,
             )
             source = (
@@ -709,9 +734,6 @@ def open_composite(
                 != binding["countsFingerprint"]
             ):
                 raise ValueError(f"Composite source identity changed: {name}")
-        unknown = set(source_storage_options or {}) - set(opened)
-        if unknown:
-            raise ValueError(f"Unknown composite source options: {sorted(unknown)}")
         wrapped = CompositeStore(root.store, record, opened, owns_sources=True)
         return zarr.open_group(
             store=wrapped, mode="r" if root.read_only else "r+", use_consolidated=False

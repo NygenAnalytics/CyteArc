@@ -1026,17 +1026,41 @@ def test_repack_module_repacks_a_store_from_the_command_line(
     np.testing.assert_array_equal(_merged_counts(output), _COUNTS)
 
 
+@pytest.mark.parametrize("flag", ["--storage-options", "--source-storage-options"])
 @pytest.mark.parametrize(
     ("options", "message"),
     [("{not json", "must be valid JSON"), ("[1]", "must be a JSON object")],
 )
 def test_repack_command_line_rejects_invalid_storage_options(
-    monkeypatch, options, message
+    monkeypatch, flag, options, message
 ):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["repack_zarr", "in.zarr", "out.zarr", "--storage-options", options],
+        ["repack_zarr", "in.zarr", "out.zarr", flag, options],
     )
-    with pytest.raises(SystemExit, match=message):
+    with pytest.raises(SystemExit, match=f"^{flag} {message}"):
         repack_zarr.main()
+
+
+def test_repack_command_line_passes_source_storage_options(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        repack_zarr, "repack_store", lambda *args, **kwargs: calls.append(kwargs)
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "repack_zarr",
+            "s3://bucket/mount.zarr",
+            "out.zarr",
+            "--storage-options",
+            '{"region": "eu-west-1"}',
+            "--source-storage-options",
+            '{"token": false}',
+        ],
+    )
+    repack_zarr.main()
+    assert calls[0]["storage_options"] == {"region": "eu-west-1"}
+    assert calls[0]["source_storage_options"] == {"token": False}

@@ -130,7 +130,9 @@ _SIGNATURE_DIGESTS = {
     # min_features_per_cell is int | None: None applies 10 on a store's first
     # writable open, and later opens never filter. load_cell_values takes
     # ref: ArtifactRef | CellField, and the keyword-only cell_ids: bool = True.
-    BaseDataStore: "bf5ff22b4f350a4727b43befa3e2f8a5ab4171266986fd7b62b8ba62759be92f",
+    # source_storage_options is dict[str, Any] | None, since a mount takes the
+    # options of its one source and a composite a dict of them by source name.
+    BaseDataStore: "d0385b7054c1074430a13f45bf6934097e70fca0986fbfb20b7ca85e61075bcb",
     # run_leiden_clustering gained the native backend: backend is now
     # Literal["cytearc", "igraph", "leidenalg"] with the default "cytearc".
     # The inherited constructor takes min_features_per_cell: int | None.
@@ -143,7 +145,8 @@ _SIGNATURE_DIGESTS = {
     # n_singular_vals: int | None = None and random_seed: int | None = None,
     # which only method="truncated" takes. get_imputed takes feature_name:
     # str | FeatureRef | Sequence[str | FeatureRef] | np.ndarray | pd.Series.
-    GraphDataStore: "3b17227309ae6b6337f835d71f8231e773719dfdb4a0388f4590ac321be22a1d",
+    # The inherited constructor takes source_storage_options: dict[str, Any] | None.
+    GraphDataStore: "2502d823c04f900c3bf68fb7663f1e1edaa2f43841daf1a9ef97f54db00f5ead",
     # run_mapping gained the keyword-only feature_key: Literal["ids",
     # "names"] = "ids" after missing_feature_policy.
     MappingDatastore: "12e809ed948d36552968c37dc3d2a9d3429ad06dcd5507673d95f839ef47171f",
@@ -165,8 +168,9 @@ _SIGNATURE_DIGESTS = {
     # without return_n_cells. run_doublet_detection gained sample_column,
     # expected_doublet_rate, and threshold, with new defaults for the parent
     # pool, simulation_ratio, heterotypic_fraction, save_k, smoothing_t, and
-    # normalize_scores; select_cells gained value.
-    DataStore: "12e9ccda832274acc155fde63c37fee1b60cf4f6d173ec76d58677b3e1c8a77d",
+    # normalize_scores; select_cells gained value. source_storage_options is
+    # dict[str, Any] | None: a mount's source options, or a composite's by name.
+    DataStore: "340e9f5ec90337969d0417d35bc5e905fbc509fd1164d6c89b3e5c80340c7768",
     # artifacts.prune_incomplete(*, dry_run: bool = True) -> list[str] was added.
     ArtifactAccessor: "6d4befabbbc91b00684038f44e0b3063905c84437587be0994c26370efa2570c",
 }

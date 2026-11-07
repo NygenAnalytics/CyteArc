@@ -1,3 +1,5 @@
+import json
+import re
 import shutil
 from pathlib import Path
 
@@ -1183,3 +1185,207 @@ def test_mounted_store_build_mapping_reference(tmp_path):
     assert (Path(target) / artifact_path(reference_ref)).is_dir()
     assert "counts" not in zarr.open_group(target, mode="r")["RNA"]
     assert _snapshot_store_files(source) == source_before
+
+
+_SOURCE_URI = "hf://buckets/tests/atlas/data.zarr"
+_TARGET_URI = "s3://analysis-bucket/mount.zarr"
+_SOURCE_OPTIONS = {"token": "source-token"}
+_TARGET_OPTIONS = {"access_key_id": "target-key", "secret_access_key": "target-secret"}
+
+
+def _serve_with_own_options(monkeypatch, served: dict[str, tuple[object, dict]]):
+    """Serve each URI from a store that opens only with the options it expects.
+
+    ``served`` maps a URI to its store, a local path or a Zarr store, and the
+    options that open it; every other location opens as usual.
+    """
+    import cytearc.storage.stores as stores_module
+    from zarr.storage import LocalStore
+
+    make = stores_module.make_store
+
+    def serve(location, *, storage_options=None, read_only=False):
+        if not isinstance(location, str) or location not in served:
+            return make(location, storage_options=storage_options, read_only=read_only)
+        store, expected = served[location]
+        if storage_options != expected:
+            raise PermissionError(
+                f"{location} refuses the options {sorted(storage_options or {})}"
+            )
+        if isinstance(store, Path):
+            return LocalStore(store, read_only=read_only)
+        return store.with_read_only(read_only)
+
+    monkeypatch.setattr(stores_module, "make_store", serve)
+
+
+def _object_store_keys(store: ObjectStore) -> dict[str, bytes]:
+    from zarr.core.buffer import default_buffer_prototype
+    from zarr.core.sync import sync
+
+    async def read() -> dict[str, bytes]:
+        values = {}
+        async for key in store.list():
+            value = await store.get(key, default_buffer_prototype())
+            assert value is not None
+            values[key] = value.to_bytes()
+        return values
+
+    return sync(read())
+
+
+def test_a_mount_opens_its_source_with_its_own_options(
+    default_sources, monkeypatch, tmp_path
+):
+    source = tmp_path / "source.zarr"
+    values = _copy_source(default_sources, source)
+    target = ObjectStore(store=ObjectMemoryStore())
+    _serve_with_own_options(
+        monkeypatch,
+        {
+            _SOURCE_URI: (source, _SOURCE_OPTIONS),
+            _TARGET_URI: (target, _TARGET_OPTIONS),
+        },
+    )
+    options = {"default_assay": "RNA", "min_features_per_cell": 1, "nthreads": 1}
+
+    mounted = mount_datastore(
+        _SOURCE_URI,
+        at=_TARGET_URI,
+        storage_options=_TARGET_OPTIONS,
+        source_storage_options=_SOURCE_OPTIONS,
+        **options,
+    )
+    np.testing.assert_array_equal(mounted.RNA.rawData.compute(), values)
+    np.testing.assert_array_equal(mounted.RNA.rawDataT[:], values.T)
+    reopened = DataStore(
+        _TARGET_URI,
+        storage_options=_TARGET_OPTIONS,
+        source_storage_options=_SOURCE_OPTIONS,
+        **options,
+    )
+    np.testing.assert_array_equal(reopened.RNA.rawData.compute(), values)
+    stored = _object_store_keys(target)
+    record = json.loads(stored["zarr.json"])["attributes"][MATRIX_SOURCE_ATTR]
+    assert record["location"] == _SOURCE_URI
+    # Credentials are used to open the stores and never written into either.
+    for secret in (*_SOURCE_OPTIONS.values(), *_TARGET_OPTIONS.values()):
+        assert not any(secret.encode() in value for value in stored.values())
+
+    # Without options of its own the source gets the target's, which it refuses.
+    with pytest.raises(PermissionError, match=re.escape(_SOURCE_URI)):
+        DataStore(_TARGET_URI, storage_options=_TARGET_OPTIONS, **options)
+    with pytest.raises(PermissionError, match=re.escape(_SOURCE_URI)):
+        DataStore(
+            _TARGET_URI,
+            storage_options=_TARGET_OPTIONS,
+            source_storage_options=_TARGET_OPTIONS,
+            **options,
+        )
+
+
+def test_a_mount_needs_its_source_options_when_it_is_made(
+    default_sources, monkeypatch, tmp_path
+):
+    source = tmp_path / "source.zarr"
+    _copy_source(default_sources, source)
+    target = ObjectStore(store=ObjectMemoryStore())
+    _serve_with_own_options(
+        monkeypatch,
+        {
+            _SOURCE_URI: (source, _SOURCE_OPTIONS),
+            _TARGET_URI: (target, _TARGET_OPTIONS),
+        },
+    )
+
+    with pytest.raises(PermissionError, match=re.escape(_SOURCE_URI)):
+        mount_datastore(
+            _SOURCE_URI, at=_TARGET_URI, storage_options=_TARGET_OPTIONS, nthreads=1
+        )
+    # The target refuses the source's options, so a mount checks it with its own.
+    with pytest.raises(PermissionError, match=re.escape(_TARGET_URI)):
+        mount_datastore(
+            _SOURCE_URI,
+            at=_TARGET_URI,
+            storage_options=_SOURCE_OPTIONS,
+            source_storage_options=_SOURCE_OPTIONS,
+            nthreads=1,
+        )
+    with pytest.raises(TypeError, match="must be a dict of the backend options"):
+        mount_datastore(
+            _SOURCE_URI,
+            at=_TARGET_URI,
+            storage_options=_TARGET_OPTIONS,
+            source_storage_options="source-token",
+            nthreads=1,
+        )
+    assert _object_store_keys(target) == {}
+
+
+def test_a_mount_source_takes_the_target_options_when_it_has_none(
+    default_sources, monkeypatch, tmp_path
+):
+    # Before mounts took source options, both stores opened with the same
+    # options, and calls written for that keep working.
+    source = tmp_path / "source.zarr"
+    values = _copy_source(default_sources, source)
+    shared = {"token": "shared-token"}
+    _serve_with_own_options(
+        monkeypatch,
+        {
+            _SOURCE_URI: (source, shared),
+            _TARGET_URI: (ObjectStore(store=ObjectMemoryStore()), shared),
+        },
+    )
+
+    mount_datastore(
+        _SOURCE_URI, at=_TARGET_URI, storage_options=shared, min_features_per_cell=1
+    )
+    reopened = DataStore(_TARGET_URI, storage_options=shared, nthreads=1)
+    np.testing.assert_array_equal(reopened.RNA.rawData.compute(), values)
+    with pytest.raises(TypeError, match="must be a dict of the backend options"):
+        DataStore(
+            _TARGET_URI, storage_options=shared, source_storage_options=[], nthreads=1
+        )
+
+
+def test_a_mount_repacks_with_its_source_options(
+    default_sources, monkeypatch, tmp_path
+):
+    from cytearc.tools.repack_zarr import repack_store
+
+    source = tmp_path / "source.zarr"
+    values = _copy_source(default_sources, source)
+    _serve_with_own_options(
+        monkeypatch,
+        {
+            _SOURCE_URI: (source, _SOURCE_OPTIONS),
+            _TARGET_URI: (ObjectStore(store=ObjectMemoryStore()), _TARGET_OPTIONS),
+        },
+    )
+    mount_datastore(
+        _SOURCE_URI,
+        at=_TARGET_URI,
+        storage_options=_TARGET_OPTIONS,
+        source_storage_options=_SOURCE_OPTIONS,
+        default_assay="RNA",
+        min_features_per_cell=1,
+        nthreads=1,
+    )
+
+    with pytest.raises(PermissionError, match=re.escape(_SOURCE_URI)):
+        repack_store(
+            _TARGET_URI, str(tmp_path / "refused.zarr"), storage_options=_TARGET_OPTIONS
+        )
+    output = tmp_path / "repacked.zarr"
+    repack_store(
+        _TARGET_URI,
+        str(output),
+        storage_options=_TARGET_OPTIONS,
+        source_storage_options=_SOURCE_OPTIONS,
+        nthreads=1,
+    )
+    shutil.rmtree(source)
+    repacked = DataStore(str(output), nthreads=1)
+    assert MATRIX_SOURCE_ATTR not in repacked.z.attrs
+    np.testing.assert_array_equal(repacked.RNA.rawData.compute(), values)

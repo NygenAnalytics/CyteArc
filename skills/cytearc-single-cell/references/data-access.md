@@ -250,7 +250,8 @@ run = analysis.pipeline.rna(label="baseline")  # results are written to work/ana
 ```python
 # Open it like any store: counts resolve from matrixSource
 analysis = cytearc.DataStore("work/analysis.zarr")  # reopening never filters I
-# Generic mount; for s3:// or gs:// sources also pass storage_options (not executed here)
+# Generic mount; for s3:// or gs:// sources also pass storage_options, and
+# source_storage_options when the source needs other options than the target (not executed here)
 mounted = cytearc.mount_datastore("shared/data.zarr", at="my_analysis.zarr", default_assay="RNA")
 ```
 

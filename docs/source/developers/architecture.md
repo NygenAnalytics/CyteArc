@@ -518,6 +518,11 @@ CyteArc validates persisted data and public arguments against the following cont
   the store that holds the normalized artifact rather than the datastore location, so a local mount
   stages a normalized artifact that it reuses from a remote source and never one that the target
   holds; staging on stores that are not mounts is unchanged.
+- A mount opens its source with `source_storage_options`, which `mount_datastore`, `DataStore`, and
+  `repack_store` take, and with the target's `storage_options` when they are None, as every mount
+  did before. The `matrixSource` record holds no options and keeps its shape. A composite's
+  `source_storage_options` map each source's name to its options, and a name that matches no
+  source, as a mount's options would, is refused before any source opens.
 - Public cell filters apply the pipeline filtering rules. `qc.filter` and `qc.auto_filter`
   exclude rows whose metric is missing and raise on missing sample labels among active cells,
   non-finite metrics used for automatic bounds, invalid bounds, duplicate attributes, and empty

@@ -67,6 +67,7 @@ def mount_datastore(
     *,
     workspace: str | None = None,
     storage_options: dict[str, Any] | None = None,
+    source_storage_options: dict[str, Any] | None = None,
     **datastore_options: Any,
 ) -> "DataStore":
     """Create a writable DataStore whose count matrices come from ``source``.
@@ -87,7 +88,14 @@ def mount_datastore(
         source: Read-only store that owns the count matrices.
         at: Writable destination for metadata and analysis artifacts.
         workspace: Workspace name to mount. None uses the source workspace.
-        storage_options: Backend options passed when opening both locations.
+        storage_options: Backend options passed when opening ``at``, and when
+                         opening ``source`` if ``source_storage_options`` is
+                         None.
+        source_storage_options: Backend options passed when opening
+                                ``source``, for a source on another backend
+                                than the target. Pass them again to
+                                ``DataStore`` when reopening the target; they
+                                are never saved in it.
         datastore_options: Keyword arguments forwarded to ``DataStore``.
                            ``zarr_loc`` is rejected; ``zarr_mode`` must be
                            ``r+`` when set.
@@ -101,7 +109,11 @@ def mount_datastore(
         validate_assay_types,
     )
     from ..storage.budget import ResourceBudget
-    from ..storage.stores import _open_store_root, discard_mount_target
+    from ..storage.stores import (
+        _open_store_root,
+        discard_mount_target,
+        mount_source_options,
+    )
 
     if "zarr_loc" in datastore_options:
         raise TypeError("mount_datastore takes the target location through 'at'")
@@ -111,6 +123,7 @@ def mount_datastore(
             f"A mounted datastore is writable and needs zarr_mode 'r+', got "
             f"{zarr_mode!r}. Reopen the target with DataStore to read it."
         )
+    source_options = mount_source_options(storage_options, source_storage_options)
     resources = _check_forwarded_options(
         at, workspace=workspace, storage_options=storage_options, **datastore_options
     )
@@ -128,13 +141,13 @@ def mount_datastore(
         )
 
     source_root = _open_store_root(
-        source, storage_options=storage_options, operation="mounted"
+        source, storage_options=source_options, operation="mounted"
     )
     source_store = DataStore(
         source_root.store,
         workspace=workspace,
         zarr_mode="r",
-        storage_options=storage_options,
+        storage_options=source_options,
         default_assay=datastore_options.get("default_assay"),
     )
     # The target opens each assay as the type that its assay_types declares,
@@ -157,6 +170,7 @@ def mount_datastore(
         required_transposes=required_transposes,
         workspace=workspace,
         storage_options=storage_options,
+        source_storage_options=source_storage_options,
         profile=datastore_options.get("zarrProfile"),
         source_root=source_root,
         resources=resources,
@@ -167,6 +181,7 @@ def mount_datastore(
             zarr_mode=zarr_mode,
             workspace=workspace,
             storage_options=storage_options,
+            source_storage_options=source_storage_options,
             **datastore_options,
         )
     except BaseException:
@@ -268,9 +283,12 @@ class DataStore(
                      None, chosen from the store location. Changing it on open
                      does not rewrite existing arrays.
         storage_options: Backend options passed when opening the Zarr store.
-        source_storage_options: Backend options keyed by source name when reopening
-                                a composite. Credentials are used at runtime and
-                                are never saved in the composite.
+        source_storage_options: Backend options of the stores that a composite
+                                or a mount reads its counts from. For a composite,
+                                a dict from each source's name to its options. For a
+                                mount, the options of its one source; when None, the
+                                source is opened with ``storage_options``. Credentials
+                                are used at runtime and are never saved in the store.
         mem_budget: Memory budget bounding streaming and concurrency. Accepts bytes, a suffixed size
                     (e.g. '8G'), or a fraction of total system memory (e.g. '0.6'). When None, it is
                     auto-detected (CYTEARC_MEM_BUDGET env var, else 75% of effective system/container memory). Override it to
@@ -294,7 +312,7 @@ class DataStore(
         storage_options: dict[str, Any] | None = None,
         mem_budget: int | str | None = None,
         storageIo: StorageIoPolicy | None = None,
-        source_storage_options: dict[str, dict[str, Any]] | None = None,
+        source_storage_options: dict[str, Any] | None = None,
     ) -> None:
         from ..storage.budget import resolve_budget
         from ..storage.profiles import resolve_storage_profile
