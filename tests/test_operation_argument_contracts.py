@@ -795,6 +795,11 @@ _CONTRACTS = (
         | _classified("execution", "nthreads"),
     ),
     OperationContract(
+        TrajectoryAccessor.lineage_membership,
+        metadata_arguments.LineageMembershipArguments,
+        model_only=_classified("resolved_input", "cell_selection"),
+    ),
+    OperationContract(
         TrajectoryAccessor.curves,
         metadata_arguments.LineageCurveArguments,
         model_only=_classified("resolved_input", "cell_selection")

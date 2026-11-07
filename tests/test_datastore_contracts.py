@@ -235,8 +235,10 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # clones.allele_clones, then clones.import_phylogeny,
     # clones.load_phylogeny and clones.phylogeny_clones, then
     # clusters.connectivity, then trajectory.curves_in_layout, then
-    # regulons.specificity and regulons.connection_specificity.
-    assert len(_NAMESPACE_METHODS) == 156
+    # regulons.specificity and regulons.connection_specificity, then
+    # trajectory.lineage_membership, trajectory.load_lineage_membership and
+    # trajectory.branch_cells.
+    assert len(_NAMESPACE_METHODS) == 159
     assert {
         "import_receptors",
         "load_receptors",
@@ -325,6 +327,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         "curves_in_layout",
         "lineage_tree",
         "load_lineage_tree",
+        "lineage_membership",
+        "load_lineage_membership",
+        "branch_cells",
     } <= {
         name
         for namespace, _, name, _ in _NAMESPACE_METHODS

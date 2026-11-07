@@ -386,6 +386,7 @@ their rows follow the cell selection of their lineage rather than a recorded inp
 | `lineage_alleles` | `n_edits` | measurements | | `n_integrations`, `n_records` |
 | `lineage_barcodes` | `n_barcodes` | measurements | | `n_umis`, `n_reads`, `n_records` |
 | `lineage_curves` | `progress` | measurements | `valid` | `distance` |
+| `lineage_membership` | `values` | labels | `members`, `valid` | |
 | `membership_strength` | `values` | measurements | | |
 | `metadata_snapshot` | `values` | measurements | | |
 | `mixscape_classes` | `values` | labels | `global_class` | `posterior`, `score` |

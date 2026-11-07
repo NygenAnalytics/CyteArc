@@ -46,6 +46,7 @@ The aim is one coherent execution path, not reimplementation for its own sake.
 - **Trajectory analysis:** memory-aware [Population Balance Analysis](https://doi.org/10.1073/pnas.1714723115), supervised terminal-state fate probabilities, pseudotime aggregation and modules, and [MAGIC-style graph diffusion](https://doi.org/10.1016/j.cell.2018.05.061) for imputation.
   Fate probabilities also weigh each cell in each lineage, as in [CellRank](https://doi.org/10.1038/s41592-021-01346-6), for lineage-resolved markers, profiles, and modules, and for lineage drivers: correlations with fate probability tested by Fisher's z-transform.
   Lineage curves are fate-weighted [principal curves](https://doi.org/10.1080/01621459.1989.10478797) with the pseudotime rank as their projection index, smoothed by [penalized B-splines](https://doi.org/10.1214/ss/1038425655), and a [Slingshot](https://doi.org/10.1186/s12864-018-4772-0) cluster tree proposes candidate sinks ({ref}`lineage_curves`).
+  Lineage membership calls each cell a lineage, shared or none: a band of fate probabilities decides between one lineage and several, and a robust limit on the distance from the curves, the weighted median plus a multiple of the weighted median absolute deviation of each lineage's cells at the same progress, decides none. Two lineages part at the pseudotime that best splits their shared cells from those that follow one of them.
 - **Statistical comparisons:** [Mann-Whitney U](https://doi.org/10.1214/aoms/1177730491),
   Kruskal-Wallis with optional Dunn pairwise tests, and paired Wilcoxon signed-rank tests on
   sample summaries. Cell-level Welch t-tests and one-way ANOVA are also available.
@@ -264,7 +265,7 @@ same AUROC. This evaluates a biological prediction separately from agreement bet
 - **Fate and lineage analysis:** sparse fate solutions are checked against dense Dirichlet
   solutions. Lineage markers, drivers, and profiles are checked against dense recomputations
   from expression and fate probabilities. Lineage curves recover a known noisy curve, and
-  cluster trees recover a branched cluster layout.
+  cluster trees recover a branched cluster layout. Lineage membership recovers the known lineages of a branching trajectory and calls a dead end off its trunk none, and branch points sit where the fate probabilities of two lineages leave their band.
 - **Cell calling and doublets:** tests check EmptyDrops likelihoods and simulations against
   direct calculations, and reproduce calls across thread counts. Doublet tests check that
   simulated parents come from the same capture and compare neighbour counts with exact searches.
