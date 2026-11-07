@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from tests.fixtures_hub import bucket_file, bucket_folder
+from tests.network_helpers import hub_or_skip
 
 
 @pytest.fixture(autouse=True)
@@ -872,9 +873,17 @@ def test_remove_path_unlinks_symlinks_without_following_them(tmp_path):
 def test_live_bucket_catalog_is_public():
     from cytearc import datasets
 
-    assert "cytearc_docs" in datasets.list_repositories()
-    repository = datasets.connect("cytearc_docs")
-    names = set(repository.list_datasets())
+    with hub_or_skip("the cytearc_docs catalog of the Hugging Face bucket"):
+        repositories = datasets.list_repositories()
+        repository = datasets.connect("cytearc_docs")
+        names = set(repository.list_datasets())
+        files = [
+            datasets._relative_file_path("cytearc_docs", file).as_posix()
+            for file in datasets._bucket_files(
+                "cytearc_docs", "tenx_5K_pbmc_rnaseq", recursive=True
+            )
+        ]
+    assert "cytearc_docs" in repositories
     assert {
         "annotations",
         "bastidas-ponce_4K_pancreas-d15_rnaseq",
@@ -886,12 +895,6 @@ def test_live_bucket_catalog_is_public():
         "tenx_5K_pbmc_rnaseq",
         "tenx_8K_pbmc_citeseq",
     } <= names
-    files = [
-        datasets._relative_file_path("cytearc_docs", file).as_posix()
-        for file in datasets._bucket_files(
-            "cytearc_docs", "tenx_5K_pbmc_rnaseq", recursive=True
-        )
-    ]
     assert {
         "tenx_5K_pbmc_rnaseq/data.h5",
         "tenx_5K_pbmc_rnaseq/data.zarr.tar.gz",
@@ -914,11 +917,12 @@ def test_live_zarr_archive_download(tmp_path, monkeypatch):
         return files
 
     monkeypatch.setattr(datasets, "_bucket_files", recorded)
-    dataset_path = datasets.connect("cytearc_docs").download_dataset(
-        "tenx_5K_pbmc_rnaseq",
-        tmp_path,
-        zarr=True,
-    )
+    with hub_or_skip("tenx_5K_pbmc_rnaseq of the Hugging Face bucket"):
+        dataset_path = datasets.connect("cytearc_docs").download_dataset(
+            "tenx_5K_pbmc_rnaseq",
+            tmp_path,
+            zarr=True,
+        )
 
     # Only the archive is downloaded, and no staging directory is left.
     assert dataset_path == tmp_path / "tenx_5K_pbmc_rnaseq"
