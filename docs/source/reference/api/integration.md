@@ -134,19 +134,7 @@ A fit repeats rounds of two steps:
   correction from that cluster. A level whose assignment mass in a cluster is below
   `prune_threshold` of its cells is left out of that cluster's regression.
 
-Each round runs clustering passes until the objective changes by at most `epsilon_cluster` of its
-value or `max_iter_cluster` passes have run, then corrects the coordinates. The fit has converged
-when the objective changes between rounds by at most `epsilon_harmony` of its value twice in a
-row, or, from the fifth round on, when it drifts by at most `epsilon_harmony` of its value per
-round once its alternation from round to round is averaged out. The second test ends fits whose
-clustering and correction settle into two states that take turns, so that the objective
-alternates between two close values instead of repeating one; asking for two small changes in a
-row keeps such an alternation from stopping a fit by chance. A fit stops as soon as it
-converges, so `max_iter_harmony` only bounds fits that settle slowly; its default of 40 rounds,
-where the 2019 paper used 10, leaves room for large, heterogeneous datasets. A fit that reaches
-`max_iter_harmony` rounds, two or more, while its objective is still drifting stops there and
-warns; raising `max_iter_harmony` gives it more rounds. With several batch columns, their
-penalties add and each regression has one term per level of every column.
+Each round runs clustering passes until the objective changes by at most `epsilon_cluster` of its value or `max_iter_cluster` passes have run, then corrects the coordinates. The fit has converged when the objective changes between rounds by at most `epsilon_harmony` of its value twice in a row, or, from the fifth round on, when it drifts by at most `epsilon_harmony` of its value per round once its alternation from round to round is averaged out. The second test ends fits whose clustering and correction settle into two states that take turns, so that the objective alternates between two close values instead of repeating one; asking for two small changes in a row keeps such an alternation from stopping a fit by chance. A fit stops as soon as it converges, so `max_iter_harmony` only bounds fits that settle slowly; its default of 40 rounds, where the 2019 paper used 10, leaves room for large, heterogeneous datasets. A fit that reaches `max_iter_harmony` rounds, two or more, while its objective is still drifting stops there and warns, each time the correction is computed or reused; raising `max_iter_harmony` gives it more rounds. With several batch columns, their penalties add and each regression has one term per level of every column.
 
 `harmony_params` takes the keyword options of {py:func}`~cytearc.embeddings.fit_harmony`, all but
 `nthreads`, which the datastore sets:
@@ -204,6 +192,7 @@ Symphony-style mapping references copy. The soft assignments are not stored.
 | `active_levels` | clusters by batch levels, bool | levels that entered each cluster's last regression |
 | attribute `batch_levels` | one list of strings per batch column | batch levels in design order |
 | attribute `fit_parameters` | mapping | `HarmonyResult.parameters` |
+| attribute `diagnostics` | mapping | the {ref}`diagnostics <artifact_diagnostics>` behind the warning of a fit that stops before converging: `rounds`; `convergedRound`, the round at which the fit converged, None when it stopped before; `objectiveChange`, the objective's change in the last round as a share of its value; `previousObjectiveChange`, that change in the round before; and `averageObjectiveChange`, the change per round of the average of two consecutive round objectives, as a share of that average. A change is None until two, three and five rounds have run |
 
 `HarmonyResult.parameters` records the settings the fit used, with camelCase keys: `algorithm`
 (`"harmony2"`), `nClusters`, `theta` per batch level after `tau`, `tau`, `sigma` per cluster,
@@ -213,11 +202,7 @@ Symphony-style mapping references copy. The soft assignments are not stored.
 `rounds`, `converged`, `objective`, the objective at the end of each round's clustering, and
 `clusterPasses`, the clustering passes of each round.
 
-Reuse requires every array in this table. A correction saved by the earlier implementation stored a
-`ridge` array instead of `ridge_penalty` and `active_levels`, so it stays listable, loadable, and
-traceable, but no request reuses it: the next request computes a new correction, and the ANN index,
-neighbours, graphs, embeddings, clusters, and mapping references built on it are computed again.
-Mapping references built from an earlier correction still load and map.
+Reuse requires every array and the diagnostics in this table. A correction saved by the earlier implementation stored a `ridge` array instead of `ridge_penalty` and `active_levels`, so it stays listable, loadable, and traceable, but no request reuses it: the next request computes a new correction, and the ANN index, neighbours, graphs, embeddings, clusters, and mapping references built on it are computed again. Mapping references built from an earlier correction still load and map.
 
 ```{eval-rst}
 .. autofunction:: cytearc.embeddings.fit_harmony

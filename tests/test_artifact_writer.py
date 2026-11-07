@@ -245,11 +245,12 @@ def test_finish_rejects_payload_that_violates_declared_shape() -> None:
 
 def test_exact_dtype_requirement_prevents_reuse() -> None:
     root = zarr.open_group(store=MemoryStore(), mode="w")
+    # An operation that saves no diagnostics, so reuse turns on the array alone.
     arguments = {
         "scope": "assay",
         "assay": "RNA",
         "kind": "reduction",
-        "operation": "run_pca",
+        "operation": "test_reduction",
         "parameters": {},
         "inputs": {},
         "execution_options": {},

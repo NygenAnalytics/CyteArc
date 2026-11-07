@@ -1,6 +1,5 @@
 """Read-side contracts for persisted neighbor and connectivity-map payloads."""
 
-import math
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -123,19 +122,18 @@ def validate_neighbors_payload(
     root: zarr.Group,
     ref: ArtifactRef,
 ) -> ValidatedNeighborsPayload:
-    """Validate a persisted neighbor matrix in bounded row blocks."""
+    """Validate a persisted neighbor matrix in bounded row blocks.
+
+    The check reads the matrices and the counts that the artifact records.
+    The query's ``selfHitRate`` is a diagnostic, which
+    ``ArtifactStatus.diagnostics`` checks, so neighbors saved before queries
+    saved diagnostics still validate, as the mapping references built on them
+    need.
+    """
     if ref.kind != "neighbors":
         raise ValueError("Neighbor payload validation requires a neighbors artifact")
     group, indices, distances = _payload_arrays(root, ref, ("indices", "distances"))
     n_cells, n_neighbors = _payload_dimensions(group, ref)
-    raw_self_hit_rate = group.attrs.get("self_hit_rate")
-    if (
-        isinstance(raw_self_hit_rate, bool)
-        or not isinstance(raw_self_hit_rate, int | float | np.integer | np.floating)
-        or not math.isfinite(float(raw_self_hit_rate))
-        or not 0 <= float(raw_self_hit_rate) <= 100
-    ):
-        raise payload_error(ref, "neighbors artifact has an invalid self_hit_rate")
     expected_shape = (n_cells, n_neighbors)
     if (
         indices.ndim != 2

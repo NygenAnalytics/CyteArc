@@ -38,7 +38,9 @@ class _PcaModel:
 
     ``components_`` holds one principal axis per row, in decreasing order of
     explained variance. ``n_passes_`` counts the passes the fit read over its
-    input rows.
+    input rows. ``component_shift_`` holds the degrees that the leading
+    components of the randomized solver moved in its last pass when it
+    stopped at its pass limit, and None otherwise.
     """
 
     components_: np.ndarray
@@ -51,11 +53,21 @@ class _PcaModel:
     n_samples_seen_: int
     solver_: PcaSolver
     n_passes_: int
+    component_shift_: float | None
 
 
 def pca_solver(n_features: int) -> PcaSolver:
     """Return the solver that PCA uses for ``n_features`` features."""
     return "gram" if int(n_features) <= _GRAM_PCA_MAX_FEATURES else "randomized"
+
+
+def pca_pass_limit_message(passes: int, dims: int, shift: float) -> str:
+    """The warning that the randomized solver stopped at its pass limit after ``shift`` degrees in its last pass."""
+    return (
+        f"PCA's randomized solver stopped after {passes} passes while its leading "
+        f"{dims} components still moved {shift:.2g} degrees in the last pass. Fit "
+        "fewer dims or select fewer features."
+    )
 
 
 def _randomized_pca_width(n_features: int, dims: int) -> int:
@@ -183,6 +195,7 @@ def _pca_model(
     eigenvalues: np.ndarray,
     total_variance: float,
     solver: PcaSolver,
+    component_shift: float | None = None,
 ) -> _PcaModel:
     """Return the model of eigenpairs in decreasing order of eigenvalue."""
     from sklearn.utils.extmath import svd_flip
@@ -203,6 +216,7 @@ def _pca_model(
         n_samples_seen_=rows.n_rows,
         solver_=solver,
         n_passes_=rows.passes,
+        component_shift_=component_shift,
     )
 
 
@@ -275,7 +289,8 @@ def _fit_randomized_pca(
     stops once the leading ``dims``-dimensional subspace moves less than
     ``_RANDOMIZED_PCA_TOLERANCE_DEGREES`` between two passes, or once the
     basis spans every feature or a subspace that ``C`` maps into itself, where
-    the projection is exact, and warns when the last pass comes first.
+    the projection is exact. When the last pass comes first, the model records
+    how far the components moved in it as ``component_shift_``.
     """
     from scipy.linalg import eigh, qr, subspace_angles
 
@@ -294,6 +309,7 @@ def _fit_randomized_pca(
     total_variance = 0.0
     previous: np.ndarray | None = None
     change = np.inf
+    component_shift: float | None = None
     pass_number = 0
     # Every pass ends the loop or adds a block to the basis.
     while True:
@@ -333,12 +349,10 @@ def _fit_randomized_pca(
         if change <= tolerance or stop == n_features:
             break
         if pass_number == _RANDOMIZED_PCA_MAX_PASSES:
-            warn(
-                f"PCA's randomized solver stopped after {pass_number} passes "
-                f"while its leading {dims} components still moved "
-                f"{np.degrees(change):.2g} degrees in the last pass. Fit fewer "
-                "dims or select fewer features."
-            )
+            # The components still move. A first pass has no earlier subspace
+            # to measure their movement against.
+            if previous is not None:
+                component_shift = float(np.degrees(change))
             break
         previous = leading
         # The next block is the product's part outside the basis,
@@ -375,6 +389,7 @@ def _fit_randomized_pca(
         eigenvalues=ritz_values[::-1],
         total_variance=total_variance,
         solver="randomized",
+        component_shift=component_shift,
     )
 
 
@@ -397,9 +412,37 @@ def fit_pca(
     covariance of the selected rows, whose leading eigenvectors are the
     loadings. Wider inputs use the randomized block Krylov solver, which
     reads the selected rows once per pass, for up to 24 passes, from vectors
-    seeded by ``random_state``. Neither result depends on the block size
-    beyond rounding. Constant values give components of zero variance, and
-    values that are not finite raise ValueError.
+    seeded by ``random_state``, and warns when it stops at that limit before
+    its components settle. Neither result depends on the block size beyond
+    rounding. Constant values give components of zero variance, and values
+    that are not finite raise ValueError.
+    """
+    loadings, model = _fitted_pca(
+        data,
+        dims=dims,
+        use_for_pca=use_for_pca,
+        scale=scale,
+        random_state=random_state,
+        nthreads=nthreads,
+    )
+    if model.component_shift_ is not None:
+        warn(pca_pass_limit_message(model.n_passes_, dims, model.component_shift_))
+    return loadings, model
+
+
+def _fitted_pca(
+    data: ChunkedArray,
+    *,
+    dims: int,
+    use_for_pca: np.ndarray,
+    scale: Callable[[np.ndarray], np.ndarray] | None,
+    random_state: int,
+    nthreads: int,
+) -> tuple[np.ndarray, _PcaModel]:
+    """Fit PCA as :func:`fit_pca` does, without its warning at the pass limit.
+
+    The reduction operation saves the model's passes and component shift and
+    warns from them, so a reused reduction warns as a computed one does.
     """
     selected_samples = int(np.count_nonzero(use_for_pca))
     row_mask = use_for_pca if selected_samples != data.shape[0] else None

@@ -21,6 +21,7 @@ from ...storage.artifacts import (
     fingerprint_array,
     inspect_artifact,
 )
+from ...storage.diagnostics import DiagnosticRule, warn_diagnostics
 from ...storage.types import as_zarr_array, as_zarr_group
 from ...utils.arguments import bool_argument, float_argument, integer_argument
 from ...utils.logging import logger, progress_enabled
@@ -52,6 +53,26 @@ def _check_initial_shape(ini_embed: np.ndarray, n_cells: int, n_comps: int) -> N
         raise ValueError(
             f"Initial embedding has an invalid shape; expected {(n_cells, n_comps)}"
         )
+
+
+def _warn_umap(root: Any, arguments: UmapArguments, ref: ArtifactRef) -> None:
+    """Warn from a UMAP embedding's saved diagnostics, whether computed or reused."""
+    from ...embeddings.umap import EQUAL_DENSITY_RADII_WARNING, equal_density_radii
+
+    warn_diagnostics(
+        arguments,
+        inspect_artifact(root, ref).diagnostics,
+        (
+            DiagnosticRule(
+                "densityRadiusSpan",
+                applies=lambda numbers: (
+                    numbers["densityRadiusSpan"] is not None
+                    and equal_density_radii(numbers["densityRadiusSpan"])
+                ),
+                message=lambda _numbers: EQUAL_DENSITY_RADII_WARNING,
+            ),
+        ),
+    )
 
 
 def _require_initialization_ref(initialization: ArtifactRef) -> None:
@@ -357,8 +378,8 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
         The arguments are those of :meth:`~cytearc.datastore.namespaces.EmbeddingsAccessor.umap`.
         """
         from ...embeddings.umap import (
+            _fit_layout,
             densmap_distance_graph,
-            fit_transform,
             layout_threads,
             umap_peak_bytes,
         )
@@ -436,6 +457,7 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             logger.info(
                 f"Reused {umap_dims}-dimensional UMAP embedding for {n_cells} cells"
             )
+            _warn_umap(self.zw, arguments, planned.ref)
             return planned.ref
         self._require_writable(arguments.operation)
         lineage = None
@@ -487,7 +509,8 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             }
             logger.trace("Created symmetric sparse KNN distances")
         shutdown_checkpoint()
-        t, _a, _b = fit_transform(
+        # The embedding warns from its saved diagnostics below.
+        t, _a, _b, density_span = _fit_layout(
             graph=graph_matrix.tocoo(),
             ini_embed=ini_embed,
             spread=spread,
@@ -503,10 +526,16 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             verbose=progress_enabled(),
         )
         shutdown_checkpoint()
-        write_cell_data_artifact(self.zw, planned, {"values": t})
+        write_cell_data_artifact(
+            self.zw,
+            planned,
+            {"values": t},
+            diagnostics={"densityRadiusSpan": density_span},
+        )
         logger.info(
             f"Stored {umap_dims}-dimensional UMAP embedding for {n_cells} cells"
         )
+        _warn_umap(self.zw, arguments, planned.ref)
         return planned.ref
 
     @validation_scoped
@@ -534,6 +563,14 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Build and return an immutable UMAP embedding artifact.
+
+        The embedding saves its diagnostics, which
+        ``ds.artifacts.inspect(ref).diagnostics`` returns:
+        ``densityRadiusSpan``, the span of densMAP's log local radii, their
+        largest minus their smallest, None without densMAP. Radii whose
+        logarithms span at most 1e-6 are equal to float32 resolution, so
+        densMAP adds no density term, and a ``DiagnosticWarning`` says so each
+        time the embedding is computed or reused.
 
         Args:
             graph: Explicit connectivity map or integrated graph to embed.

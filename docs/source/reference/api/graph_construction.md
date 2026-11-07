@@ -84,9 +84,8 @@ the depth that the query used as its `ann_ef` unless it is `max(ann_ef, k + 1)`,
 depth as hnswlib applies it; an artifact without `ann_ef` searched that depth. A query of the
 index's depth therefore keeps the identity of earlier ones, and a changed depth computes new
 neighbors from the same index.
-Queries run on the datastore's `nthreads` threads, which never change the neighbors. Each query
-records the percentage of cells that it returned among their own nearest neighbours as
-`self_hit_rate` and warns below 99.5%; cells with identical coordinates also lower it.
+
+Queries run on the datastore's `nthreads` threads, which never change the neighbors. Each query saves the percentage of cells that it returned among their own nearest neighbours as its `selfHitRate` {ref}`diagnostic <artifact_diagnostics>`, and a rate below 99.5% warns each time the query is computed or reused; cells with identical coordinates also lower it. `reduction.pca` and `reduction.harmony` also save the numbers behind their warnings as diagnostics, which their entries below list.
 
 ## External coordinates
 

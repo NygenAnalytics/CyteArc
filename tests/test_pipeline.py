@@ -273,6 +273,12 @@ def _array_artifact(
     group = start_artifact(root, planned)
     for name, data in values.items():
         group.create_array(name, data=data)
+    # Readers refuse an artifact without the diagnostics that its operation
+    # declares, such as PCA's, so the artifact saves them unmeasured.
+    if planned.diagnostics:
+        group.attrs["diagnostics"] = {
+            key: [] if key.endswith("Examples") else None for key in planned.diagnostics
+        }
     finish_artifact(group, planned)
     return planned.ref
 

@@ -190,13 +190,19 @@ def _harmony(group: Any) -> dict[str, Any]:
     }
 
 
-def _neighbors(group: Any) -> dict[str, Any]:
+def _graph_size(group: Any) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     for key, name in (("cells", "n_cells"), ("k", "n_neighbors")):
         if name in group.attrs:
             summary[key] = int(group.attrs[name])
-    if "self_hit_rate" in group.attrs:
-        summary["selfHitRate"] = _float(group.attrs["self_hit_rate"])
+    return summary
+
+
+def _neighbors(group: Any, diagnostics: Mapping[str, Any]) -> dict[str, Any]:
+    """Count the cells and neighbors of a query, with its saved self-hit rate."""
+    summary = _graph_size(group)
+    if "selfHitRate" in diagnostics:
+        summary["selfHitRate"] = _float(diagnostics["selfHitRate"])
     return summary
 
 
@@ -596,8 +602,7 @@ _BY_KIND: Mapping[str, Callable[[Any], dict[str, Any]]] = {
     "normalized": lambda group: _shape(group, "data", ("cells", "features")),
     "reduction": _reduction,
     "batch_correction": _harmony,
-    "neighbors": _neighbors,
-    "connectivity_map": _neighbors,
+    "connectivity_map": _graph_size,
     "embedding": lambda group: _shape(group, "values", ("cells", "dims")),
     "embedding_initialization": lambda group: _shape(
         group, "cluster_centers", ("centroids", "dims")
@@ -623,6 +628,7 @@ _BY_KIND_WITH_DIAGNOSTICS: Mapping[
     str, Callable[[Any, Mapping[str, Any]], dict[str, Any]]
 ] = {
     "guide_calls": _guide_calls,
+    "neighbors": _neighbors,
 }
 # The summaries that also read the artifact's recorded parameters.
 _BY_KIND_WITH_PARAMETERS: Mapping[

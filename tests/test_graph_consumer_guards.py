@@ -115,7 +115,7 @@ def _forbid(monkeypatch, store: DataStore, *targets: str) -> None:
 
 _KERNELS = (
     "cytearc.clustering.leiden.leiden_membership",
-    "cytearc.embeddings.umap.fit_transform",
+    "cytearc.embeddings.umap._fit_layout",
     "cytearc.embeddings.sgtsne.run_sgtsne",
     "cytearc.clustering.paris.fit_paris_hierarchy",
 )

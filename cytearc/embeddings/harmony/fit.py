@@ -5,8 +5,8 @@ References:
     Patikas N, Yao H, et al. Integration of large, complex single-cell datasets with Harmony2. bioRxiv (2026). doi:10.64898/2026.03.16.711825
 """
 
-import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -152,6 +152,45 @@ def fit_harmony(
         Patikas N, Yao H, et al. Integration of large, complex single-cell
         datasets with Harmony2. bioRxiv (2026). doi:10.64898/2026.03.16.711825
     """
+    result = _fitted_harmony(
+        values,
+        metadata,
+        n_clusters=n_clusters,
+        theta=theta,
+        sigma=sigma,
+        tau=tau,
+        ridge_penalty=ridge_penalty,
+        ridge_alpha=ridge_alpha,
+        prune_threshold=prune_threshold,
+        block_size=block_size,
+        max_iter_cluster=max_iter_cluster,
+        max_iter_harmony=max_iter_harmony,
+        epsilon_cluster=epsilon_cluster,
+        epsilon_harmony=epsilon_harmony,
+        random_state=random_state,
+        nthreads=nthreads,
+    )
+    record: Mapping[str, Any] = result.parameters
+    diagnostics = convergence_diagnostics(record)
+    if stopped_before_convergence(diagnostics):
+        warn(unconverged_message(diagnostics, record["epsilonHarmony"]))
+    return result
+
+
+def _fitted_harmony(
+    values: np.ndarray,
+    metadata: pd.DataFrame,
+    *,
+    nthreads: int = 1,
+    **options: Any,
+) -> HarmonyResult:
+    """Fit Harmony as :func:`fit_harmony` does, without its warning when the rounds stop before converging.
+
+    ``options`` are the options of :func:`fit_harmony`; one that is left out
+    takes its default. The reduction operation saves the fit's
+    :func:`convergence_diagnostics` and warns from them, so a reused
+    correction warns as a computed one does.
+    """
     values = np.asarray(values)
     if values.ndim != 2:
         raise ValueError(
@@ -168,27 +207,15 @@ def fit_harmony(
     check_batch_metadata(metadata, n_cells)
     threads = integer_argument(nthreads, "nthreads", minimum=1)
     # The cluster count is checked against the cell count once the design is known.
+    n_clusters = options.pop("n_clusters", None)
     if n_clusters is not None:
         integer_argument(n_clusters, "n_clusters")
-    options = check_harmony_options(
-        theta=theta,
-        sigma=sigma,
-        tau=tau,
-        ridge_penalty=ridge_penalty,
-        ridge_alpha=ridge_alpha,
-        prune_threshold=prune_threshold,
-        block_size=block_size,
-        max_iter_cluster=max_iter_cluster,
-        max_iter_harmony=max_iter_harmony,
-        epsilon_cluster=epsilon_cluster,
-        epsilon_harmony=epsilon_harmony,
-        random_state=random_state,
-    )
+    checked = check_harmony_options(**options)
     design = encode_batch_design(metadata)
     parameters = resolve_harmony_parameters(
-        {**options, "n_clusters": n_clusters}, design
+        {**checked, "n_clusters": n_clusters}, design
     )
-    del options
+    del checked
     with numba_threads(threads), process_thread_limit(threads):
         return _fit(values, design, parameters)
 
@@ -306,8 +333,6 @@ def _fit(
             f"Harmony left {empty} of {n_clusters} clusters without assigned cells; "
             "use a larger sigma or fewer clusters"
         )
-    if not converged and rounds >= 2:
-        warn(_unconverged_message(objectives, epsilon))
     logger.info(
         f"Harmony {'converged' if converged else 'stopped'} after {rounds} "
         f"round{'s' if rounds != 1 else ''}"
@@ -399,31 +424,98 @@ def rounds_converged(objectives: Sequence[float], epsilon: float) -> bool:
     return False
 
 
-def _relative(change: float, value: float) -> float:
-    return abs(change) / abs(value) if value != 0 else math.inf
+def _relative_change(change: float, value: float) -> float | None:
+    """Return ``change`` as a share of the size of ``value``.
+
+    No change is 0 whatever the value, and a change from zero has no finite
+    share, which is None.
+    """
+    if change == 0:
+        return 0.0
+    if value == 0:
+        return None
+    return abs(change) / abs(value)
 
 
-def _unconverged_message(objectives: Sequence[float], epsilon: float) -> str:
-    """Describe why the rounds did not converge, for the warning."""
+def convergence_diagnostics(record: Mapping[str, Any]) -> dict[str, int | float | None]:
+    """Return the numbers that describe how a fit's rounds converged, from its parameter record.
+
+    ``rounds`` counts the rounds run and ``convergedRound`` is the round at
+    which the fit converged, None when it stopped before. ``objectiveChange``
+    is the objective's change in the last round as a share of its value
+    before, ``previousObjectiveChange`` its change in the round before that,
+    and ``averageObjectiveChange`` the change per round of the average of two
+    consecutive round objectives, as a share of that average
+    (:func:`objective_cycle_slope`). Each change is None until enough rounds
+    have run, two, three and five, and for a change from an objective of
+    zero.
+
+    Args:
+        record: ``HarmonyResult.parameters``, which records each round's
+            ``objective`` and whether the fit ``converged``.
+    """
+    objectives = [float(value) for value in record["objective"]]
     rounds = len(objectives)
-    last = _relative(objectives[-1] - objectives[-2], objectives[-2])
+    return {
+        "rounds": rounds,
+        "convergedRound": rounds if record["converged"] else None,
+        "objectiveChange": (
+            _relative_change(objectives[-1] - objectives[-2], objectives[-2])
+            if rounds >= 2
+            else None
+        ),
+        "previousObjectiveChange": (
+            _relative_change(objectives[-2] - objectives[-3], objectives[-3])
+            if rounds >= 3
+            else None
+        ),
+        "averageObjectiveChange": (
+            _relative_change(
+                objective_cycle_slope(objectives),
+                (objectives[-1] + objectives[-2]) / 2.0,
+            )
+            if rounds >= len(CYCLE_SLOPE_WEIGHTS)
+            else None
+        ),
+    }
+
+
+def stopped_before_convergence(diagnostics: Mapping[str, Any]) -> bool:
+    """Whether a fit's :func:`convergence_diagnostics` show rounds that stopped before converging.
+
+    One round never assesses convergence, so it never counts.
+    """
+    return diagnostics["convergedRound"] is None and diagnostics["rounds"] >= 2
+
+
+def _share_text(share: float | None) -> str:
+    # A change from an objective of zero has no finite share.
+    return "inf" if share is None else f"{share:.3g}"
+
+
+def unconverged_message(diagnostics: Mapping[str, Any], epsilon: float) -> str:
+    """Describe why the rounds did not converge, from a fit's :func:`convergence_diagnostics`.
+
+    Args:
+        diagnostics: The convergence diagnostics of a fit that stopped before
+            converging after two or more rounds.
+        epsilon: The fit's ``epsilon_harmony``.
+    """
+    rounds = diagnostics["rounds"]
+    last = _share_text(diagnostics["objectiveChange"])
     message = f"Harmony stopped before convergence after {rounds} rounds: the objective"
     if rounds == 2:
         return (
-            f"{message} changed by {last:.3g} of its value in the last round, above "
+            f"{message} changed by {last} of its value in the last round, above "
             f"epsilon_harmony={epsilon}"
         )
-    before = _relative(objectives[-2] - objectives[-3], objectives[-3])
-    message += (
-        f" changed by {before:.3g} and {last:.3g} of its value in the last two rounds"
-    )
+    before = _share_text(diagnostics["previousObjectiveChange"])
+    message += f" changed by {before} and {last} of its value in the last two rounds"
     if rounds < len(CYCLE_SLOPE_WEIGHTS):
         return f"{message}, and convergence needs both to be at most epsilon_harmony={epsilon}"
-    slope = _relative(
-        objective_cycle_slope(objectives), (objectives[-1] + objectives[-2]) / 2.0
-    )
+    slope = _share_text(diagnostics["averageObjectiveChange"])
     return (
-        f"{message}, and its two-round average by {slope:.3g} per round; convergence "
+        f"{message}, and its two-round average by {slope} per round; convergence "
         f"needs both changes, or that average's change, to be at most "
         f"epsilon_harmony={epsilon}"
     )

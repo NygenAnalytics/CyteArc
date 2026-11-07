@@ -16,6 +16,22 @@ locale.setlocale(locale.LC_NUMERIC, "C")
 # are float32, with a relative resolution of about 1.2e-7, so such a spread
 # reflects rounding rather than density.
 _EQUAL_LOG_RADIUS_SPAN = 1e-6
+#: The warning that densMAP gives over local radii that are equal for every cell.
+EQUAL_DENSITY_RADII_WARNING = (
+    "densMAP local radii are equal for every cell to float32 resolution, so "
+    "densMAP adds no density term and lays the cells out as UMAP does"
+)
+
+
+def equal_density_radii(span: float) -> bool:
+    """Whether local radii whose logarithms span ``span`` are equal, so densMAP adds no density term."""
+    return span <= _EQUAL_LOG_RADIUS_SPAN
+
+
+def _warn_equal_radii(span: float | None) -> None:
+    """Warn when densMAP's local radii are equal; ``span`` is None without densMAP."""
+    if span is not None and equal_density_radii(span):
+        logger.warning(EQUAL_DENSITY_RADII_WARNING)
 
 
 def umap_peak_bytes(
@@ -105,10 +121,24 @@ def calc_dens_map_params(
             reads the distance stored at its own row and column.
 
     Returns:
-        Per-cell membership sums and standardized log local radii.
+        Per-cell membership sums and standardized log local radii. Radii
+        that are equal for every cell to float32 resolution standardize to
+        zero, and a warning says that densMAP adds no density term.
 
     Raises:
         ValueError: If a local radius is not finite.
+    """
+    mu_sum, standardized_ro, span = _density_terms(graph, dists)
+    _warn_equal_radii(span)
+    return mu_sum, standardized_ro
+
+
+def _density_terms(graph: Any, dists: Any) -> tuple[np.ndarray, np.ndarray, float]:
+    """Compute densMAP's terms as :func:`calc_dens_map_params` does, without its warning.
+
+    Returns:
+        Per-cell membership sums, standardized log local radii, and the span
+        of the log local radii, their largest minus their smallest.
     """
     n_vertices = graph.shape[0]
     head = np.asarray(graph.row)
@@ -133,11 +163,8 @@ def calc_dens_map_params(
     # A cell without graph edges has radius 0 / 0, which the check below rejects.
     with np.errstate(divide="ignore", invalid="ignore"):
         log_ro = np.log(epsilon + (ro / mu_sum))
-    if log_ro.size and np.ptp(log_ro) <= _EQUAL_LOG_RADIUS_SPAN:
-        logger.warning(
-            "densMAP local radii are equal for every cell to float32 resolution, "
-            "so densMAP adds no density term and lays the cells out as UMAP does"
-        )
+    span = float(np.ptp(log_ro)) if log_ro.size else 0.0
+    if equal_density_radii(span):
         standardized_ro = np.zeros_like(log_ro)
     else:
         standardized_ro = (log_ro - np.mean(log_ro)) / np.std(log_ro)
@@ -146,7 +173,7 @@ def calc_dens_map_params(
             "densMAP local radii are not finite. Every cell needs a graph edge "
             "with a positive weight and a finite distance."
         )
-    return mu_sum.astype(np.float32), standardized_ro.astype(np.float32)
+    return mu_sum.astype(np.float32), standardized_ro.astype(np.float32), span
 
 
 def layout_threads(parallel: bool, nthreads: int) -> int:
@@ -173,7 +200,51 @@ def simplicial_set_embedding(
     nthreads: int,
     verbose: bool,
 ) -> np.ndarray:
-    """Run UMAP simplicial-set embedding with optional densMAP."""
+    """Run UMAP simplicial-set embedding with optional densMAP.
+
+    densMAP over local radii that are equal for every cell warns that it adds
+    no density term.
+    """
+    layout, span = _embed_simplicial_set(
+        g,
+        embedding,
+        n_epochs,
+        a,
+        b,
+        random_seed,
+        gamma,
+        initial_alpha,
+        negative_sample_rate,
+        densmap_kwds,
+        parallel,
+        nthreads,
+        verbose,
+    )
+    _warn_equal_radii(span)
+    return layout
+
+
+def _embed_simplicial_set(
+    g: Any,
+    embedding: np.ndarray,
+    n_epochs: int,
+    a: float,
+    b: float,
+    random_seed: int,
+    gamma: float,
+    initial_alpha: float,
+    negative_sample_rate: float,
+    densmap_kwds: dict[str, Any],
+    parallel: bool,
+    nthreads: int,
+    verbose: bool,
+) -> tuple[np.ndarray, float | None]:
+    """Run :func:`simplicial_set_embedding` without its densMAP warning.
+
+    Returns:
+        The embedding, and the span of densMAP's log local radii, their
+        largest minus their smallest, or None without densMAP.
+    """
     from sklearn.utils import check_random_state
 
     import_umap()
@@ -197,11 +268,12 @@ def simplicial_set_embedding(
         .randint(np.iinfo(np.int32).min + 1, np.iinfo(np.int32).max - 1, 3)
         .astype(np.int64)
     )
+    span: float | None = None
     # The calling thread's count may be below the request, so always set it.
     with numba_threads(layout_threads(parallel, nthreads)):
         if densmap_kwds != {}:
             with process_thread_limit(nthreads):
-                mu_sum, standardized_ro = calc_dens_map_params(
+                mu_sum, standardized_ro, span = _density_terms(
                     g,
                     densmap_kwds["knn_dists"],
                 )
@@ -240,7 +312,7 @@ def simplicial_set_embedding(
             tqdm_kwds=tqdm_params,
             move_other=True,
         )
-    return np.asarray(embedding)
+    return np.asarray(embedding), span
 
 
 def fuzzy_simplicial_set(g: Any, set_op_mix_ratio: float) -> Any:
@@ -275,7 +347,51 @@ def fit_transform(
     ``graph`` holds the directed edge weights, such as a connectivity map.
     This function forms their fuzzy union ``w_ij + w_ji - w_ij * w_ji``
     itself, so a graph that was already united this way would be united
-    twice, each weight ``w`` becoming ``2w - w**2``.
+    twice, each weight ``w`` becoming ``2w - w**2``. densMAP over local radii
+    that are equal for every cell warns that it adds no density term.
+    """
+    embedding, a, b, span = _fit_layout(
+        graph,
+        ini_embed,
+        spread,
+        min_dist,
+        n_epochs,
+        random_seed,
+        repulsion_strength,
+        initial_alpha,
+        negative_sample_rate,
+        densmap_kwds,
+        parallel,
+        nthreads,
+        verbose,
+    )
+    _warn_equal_radii(span)
+    return embedding, a, b
+
+
+def _fit_layout(
+    graph: Any,
+    ini_embed: np.ndarray,
+    spread: float,
+    min_dist: float,
+    n_epochs: int,
+    random_seed: int,
+    repulsion_strength: float,
+    initial_alpha: float,
+    negative_sample_rate: float,
+    densmap_kwds: dict[str, Any],
+    parallel: bool,
+    nthreads: int,
+    verbose: bool,
+) -> tuple[np.ndarray, float, float, float | None]:
+    """Lay out a graph as :func:`fit_transform` does, without its densMAP warning.
+
+    The UMAP operation saves the span of densMAP's log local radii and warns
+    from it, so a reused embedding warns as a computed one does.
+
+    Returns:
+        The embedding, the curve parameters ``a`` and ``b``, and the span of
+        densMAP's log local radii, or None without densMAP.
     """
     import warnings
 
@@ -287,7 +403,7 @@ def fit_transform(
         a, b = find_ab_params(spread=spread, min_dist=min_dist)
     logger.trace("Found ab params")
 
-    embedding = simplicial_set_embedding(
+    embedding, span = _embed_simplicial_set(
         fuzzy_simplicial_set(graph, 1.0),
         ini_embed,
         n_epochs,
@@ -302,4 +418,4 @@ def fit_transform(
         nthreads,
         verbose,
     )
-    return embedding, a, b
+    return embedding, a, b, span

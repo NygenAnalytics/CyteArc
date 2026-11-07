@@ -568,7 +568,7 @@ def test_harmony_stage_materializes_uncorrected_coordinates_once(
             parameters={},
         )
 
-    monkeypatch.setattr("cytearc.neighbors.stages.fit_harmony", fake_harmony)
+    monkeypatch.setattr("cytearc.neighbors.stages._fitted_harmony", fake_harmony)
     stage = BatchCorrectionStage(
         stream=stream,
         n_cells=values.shape[0],
@@ -970,7 +970,7 @@ def test_harmony_stage_holds_no_block_while_its_stream_reads_the_next(
             parameters={},
         )
 
-    monkeypatch.setattr("cytearc.neighbors.stages.fit_harmony", fit)
+    monkeypatch.setattr("cytearc.neighbors.stages._fitted_harmony", fit)
     stage = BatchCorrectionStage(
         stream=stream,
         n_cells=90,
