@@ -68,6 +68,7 @@ def mount_datastore(
     workspace: str | None = None,
     storage_options: dict[str, Any] | None = None,
     source_storage_options: dict[str, Any] | None = None,
+    relative_sources: bool = False,
     **datastore_options: Any,
 ) -> "DataStore":
     """Create a writable DataStore whose count matrices come from ``source``.
@@ -82,10 +83,7 @@ def mount_datastore(
     that reuse source artifacts need the source, as counts do;
     ``cytearc.tools.repack_zarr.repack_store`` copies a mount into a
     self-contained store. The source must be prepared: open a fresh import once
-    with ``zarr_mode='r+'`` before mounting it. The target records a source in
-    the directory that holds it, or below it, by its path relative to that
-    directory, so a directory that holds both can be moved, copied, or served
-    from a bucket; it records any other source by its absolute path or URL.
+    with ``zarr_mode='r+'`` before mounting it.
 
     Args:
         source: Read-only store that owns the count matrices.
@@ -99,6 +97,14 @@ def mount_datastore(
                                 than the target. Pass them again to
                                 ``DataStore`` when reopening the target; they
                                 are never saved in it.
+        relative_sources: Record a source in the directory that holds ``at``,
+                          or below it, by its path relative to that
+                          directory, so the directory can be moved, copied,
+                          or served from a bucket with the source in it. By
+                          default, and for a source elsewhere, the target
+                          records the source's absolute path or URL.
+                          Releases before this option cannot find a source
+                          recorded by a relative path.
         datastore_options: Keyword arguments forwarded to ``DataStore``.
                            ``zarr_loc`` is rejected; ``zarr_mode`` must be
                            ``r+`` when set.
@@ -112,6 +118,7 @@ def mount_datastore(
         validate_assay_types,
     )
     from ..storage.budget import ResourceBudget
+    from ..utils.arguments import bool_argument
     from ..storage.stores import (
         _open_store_root,
         discard_mount_target,
@@ -127,6 +134,7 @@ def mount_datastore(
             f"{zarr_mode!r}. Reopen the target with DataStore to read it."
         )
     source_options = mount_source_options(storage_options, source_storage_options)
+    relative_sources = bool_argument(relative_sources, "relative_sources")
     resources = _check_forwarded_options(
         at, workspace=workspace, storage_options=storage_options, **datastore_options
     )
@@ -177,6 +185,7 @@ def mount_datastore(
         profile=datastore_options.get("zarrProfile"),
         source_root=source_root,
         resources=resources,
+        relative_sources=relative_sources,
     )
     try:
         return DataStore(

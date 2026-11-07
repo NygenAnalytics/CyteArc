@@ -81,6 +81,7 @@ from ..storage.stores import (
     zarr_location_has_content,
 )
 from ..storage.types import as_zarr_array, as_zarr_group
+from ..utils.arguments import bool_argument
 from ..utils.memory_budget import MemoryBudgetError
 from .source_cache import CachedSourceStore, SourceCache, new_source_cache
 
@@ -574,15 +575,14 @@ def create_composite(
     nthreads: int | None = None,
     storage_options: dict[str, Any] | None = None,
     source_column: str = "dataset",
+    relative_sources: bool = False,
 ) -> "DataStore":
     """Create a writable datastore that reads its counts from frozen sources.
 
     The composite copies cell and feature metadata and leaves the counts in the
-    sources, which must stay available and unchanged. It records a source in
-    the directory that holds it, or below it, by its path relative to that
-    directory, so a directory that holds the composite and its sources can be
-    moved, copied, or served from a bucket. It records any other source by its
-    absolute path or URL. New arrays use the storage profile of ``at``.
+    sources, which must stay available and unchanged. It records each source
+    by its absolute path or URL, unless ``relative_sources`` asks for relative
+    paths. New arrays use the storage profile of ``at``.
 
     Args:
         sources: Open source DataStores by name. A cell's ID in the composite
@@ -605,6 +605,15 @@ def create_composite(
                          with ``source_storage_options`` for its sources.
         source_column: Cell metadata column that holds each cell's source
                        name.
+        relative_sources: Record a source in the directory that holds ``at``,
+                          or below it, by its path relative to that
+                          directory, when both are local or both are URLs of
+                          one scheme and host, so the directory can be moved,
+                          copied, or served from a bucket with its sources in
+                          it. By default, and for any other source, the
+                          composite records the source's absolute path or
+                          URL. Releases before this option cannot find a
+                          source recorded by a relative path.
 
     Returns:
         The composite, open for writing.
@@ -631,6 +640,7 @@ def create_composite(
     selections = dict(rows or {})
     if set(selections) - set(names):
         raise ValueError("Selections must name an existing source")
+    relative_sources = bool_argument(relative_sources, "relative_sources")
     # Merge checks its source column the same way, and planning the metadata
     # refuses the reserved names and a name that a source column takes.
     validate_metadata_column_name(source_column)
@@ -686,7 +696,9 @@ def create_composite(
         bindings.append(
             {
                 "name": name,
-                "location": record_source_location(location, destination),
+                "location": record_source_location(location, destination)
+                if relative_sources
+                else location,
                 "workspace": source.workspace,
                 "datasetFingerprint": fingerprint,
                 "countsFingerprint": count_fingerprint(

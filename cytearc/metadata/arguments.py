@@ -366,6 +366,19 @@ class LineageCurveArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class LineageMembershipArguments(OperationArguments):
+    operation: ClassVar[str] = "call_lineage_membership"
+    artifact_kind: ClassVar[str] = "lineage_membership"
+
+    curves: ArtifactRef = artifact_input()
+    cell_selection: ArtifactRef = artifact_input()
+    band: float = parameter()
+    distance_score: float = parameter()
+    n_bins: int = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class LineageTreeArguments(OperationArguments):
     operation: ClassVar[str] = "build_lineage_tree"
     artifact_kind: ClassVar[str] = "lineage_tree"

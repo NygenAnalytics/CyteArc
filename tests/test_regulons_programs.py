@@ -17,6 +17,7 @@ from cytearc.regulons.specificity import (
     regulon_modules,
     regulon_specificity,
 )
+from tests.regulon_helpers import csi_by_definition, rss_by_definition
 
 
 def _planted(seed=0, n_samples=200, per_program=25):
@@ -262,3 +263,222 @@ def test_connection_specificity_and_modules():
     # Ward linkage needs two regulons; a lone regulon forms module 1.
     lone = regulon_modules(csi.iloc[:1, :1], 2)
     assert lone.tolist() == [1] and lone.name == modules.name == "module"
+
+
+def _passes(values: np.ndarray, rows: int):
+    """Return a callable that makes one pass over ``values`` in blocks of ``rows`` rows."""
+    return lambda: (
+        values[start : start + rows] for start in range(0, len(values), rows)
+    )
+
+
+@pytest.mark.parametrize(
+    ("n_cells", "n_regulons", "n_groups"),
+    [(200, 6, 4), (1500, 25, 40), (60, 3, 60)],
+)
+def test_specificity_scores_sum_any_blocks_of_cells_into_the_pyscenic_scores(
+    n_cells, n_regulons, n_groups
+):
+    from cytearc.regulons.specificity import specificity_scores
+
+    rng = np.random.default_rng(n_cells)
+    values = rng.uniform(0, 0.4, size=(n_cells, n_regulons)).astype(np.float32)
+    # A regulon without activity, one active in three cells, and a group of
+    # one cell.
+    values[:, :2] = 0.0
+    values[rng.choice(n_cells, 3, replace=False), 1] = 0.7
+    labels = np.asarray([f"g{code}" for code in rng.integers(0, n_groups, n_cells)])
+    labels[0] = "lone"
+    expected = rss_by_definition(values, labels)
+    codes = pd.Index(expected.index).get_indexer(labels)
+
+    for rows in (1, 7, 64, n_cells):
+        scores = specificity_scores(
+            _passes(values, rows), codes, len(expected), n_regulons
+        )
+        np.testing.assert_allclose(scores, expected.to_numpy(), rtol=0, atol=1e-12)
+    assert np.isnan(scores[:, 0]).all()
+    assert not np.isnan(scores[:, 1:]).any()
+
+
+def test_regulon_specificity_gives_the_scores_derived_by_hand():
+    activity = pd.DataFrame({"X": [2.0, 2.0, 0.0, 0.0], "Y": [1.0, 1.0, 1.0, 1.0]})
+
+    rss = regulon_specificity(activity, ["a", "a", "b", "b"])
+
+    # X is active only, and evenly, in group a, and none of its activity is
+    # in b's cells, so the divergence from b is ln 2.
+    assert rss.loc["a", "X"] == 1.0
+    assert rss.loc["b", "X"] == pytest.approx(1 - np.sqrt(np.log(2)), abs=1e-15)
+    # Even activity puts 1/4 on each cell against 1/2 on each of the group's
+    # two, a divergence of 3/4 ln(4/3).
+    even = 1 - np.sqrt(0.75 * np.log(4 / 3))
+    assert rss["Y"].tolist() == pytest.approx([even, even], abs=1e-15)
+
+
+@pytest.mark.parametrize("size", [3, 7, 29])
+@pytest.mark.parametrize("value", [0.1, 1 / 3, 0.987, 1e-5])
+def test_a_regulon_active_only_and_evenly_in_a_group_scores_one(size, value):
+    # The activity of each cell over the total and the group's 1 / size can
+    # differ in their last bits; none of the regulon's activity lies outside
+    # the group, so its divergence holds no rounding of the other groups.
+    values = np.zeros((size + 5, 1), dtype=np.float32)
+    values[:size, 0] = value
+    labels = ["in"] * size + ["out"] * 5
+
+    rss = regulon_specificity(pd.DataFrame(values), labels)
+
+    assert rss.loc["in", 0] == 1.0
+    assert rss.loc["out", 0] == pytest.approx(1 - np.sqrt(np.log(2)), abs=1e-12)
+
+
+def test_in_memory_specificity_reads_its_table_a_block_of_rows_at_a_time(
+    monkeypatch,
+):
+    from cytearc.regulons import specificity
+
+    rng = np.random.default_rng(5)
+    values = rng.integers(0, 9, size=(101, 5))
+    labels = np.asarray([None, "B", "C"] * 33 + ["B", "C"], dtype=object)
+    labels[50] = np.nan
+    # Blocks of three rows of five regulons, beside the default of one.
+    monkeypatch.setattr(specificity, "_TABLE_BLOCK_BYTES", 8 * 5 * 3)
+    reads: list[int] = []
+    add_totals = specificity._add_totals
+
+    def counted(block, totals):
+        reads.append(len(block))
+        return add_totals(block, totals)
+
+    monkeypatch.setattr(specificity, "_add_totals", counted)
+    activity = pd.DataFrame(values, columns=list("VWXYZ"))
+
+    rss = regulon_specificity(activity, labels)
+    csi = connection_specificity(activity)
+
+    assert reads == [3] * 33 + [2]
+    # A label that matches no cell, as NaN does, scores NaN, and its cell
+    # counts in each regulon's total only, as pySCENIC's scores count it.
+    expected = rss_by_definition(values, labels)
+    assert rss.index[1:3].tolist() == ["B", "C"] and rss.index[[0, 3]].isna().all()
+    assert np.isnan(rss.iloc[3]).all() and not np.isnan(rss.iloc[0]).any()
+    np.testing.assert_allclose(rss.to_numpy(), expected.to_numpy(), atol=1e-12)
+    np.testing.assert_array_equal(csi.to_numpy(), csi_by_definition(values))
+
+
+def test_the_specificity_sums_let_each_block_go_before_the_next_is_read():
+    import weakref
+
+    from cytearc.regulons.specificity import activity_correlation, specificity_scores
+
+    still_held: list[int] = []
+
+    def blocks(values: np.ndarray):
+        # A stream that notes each block that is still alive when the next is
+        # asked for, which a stream of large blocks would hold twice over.
+        previous = None
+        for start in range(0, len(values), 4):
+            if previous is not None and previous() is not None:
+                still_held.append(start)
+            block = np.array(values[start : start + 4])
+            previous = weakref.ref(block)
+            yield block
+            del block
+
+    values = np.random.default_rng(6).uniform(size=(30, 5))
+    codes = np.arange(30) % 3
+
+    specificity_scores(lambda: blocks(values), codes, 3, 5)
+    activity_correlation(blocks(values), 5)
+
+    assert still_held == []
+
+
+@pytest.mark.parametrize("rows", [1, 5, 97, 5000])
+def test_activity_correlation_merges_blocks_without_cancelling_large_sums(rows):
+    from cytearc.regulons.specificity import activity_correlation
+
+    rng = np.random.default_rng(3)
+    # Activity far from 0 beside its spread, where a correlation from sums of
+    # squares and products loses all but about two of its digits.
+    values = 1e4 + rng.normal(scale=1e-2, size=(5000, 6))
+    values[:, 2] = values[:, 0] + rng.normal(scale=1e-3, size=5000)
+    values[:, 5] = 3.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        reference = np.corrcoef(values.T)
+
+    correlation = activity_correlation(
+        (values[start : start + rows] for start in range(0, len(values), rows)), 6
+    )
+
+    np.testing.assert_allclose(
+        correlation[:5, :5], reference[:5, :5], rtol=0, atol=1e-9
+    )
+    # A regulon of constant activity correlates 0 with every regulon.
+    assert not correlation[5].any() and not correlation[:, 5].any()
+
+
+@pytest.mark.parametrize("margin", [0.0, 0.05, 0.3])
+def test_connection_specificity_counts_the_regulons_below_each_pair(margin):
+    rng = np.random.default_rng(4)
+    base = rng.normal(size=(400, 3))
+    values = np.column_stack(
+        [base[:, k % 3] + rng.normal(0, 0.5 + k / 10, 400) for k in range(12)]
+    )
+    values[:, 11] = 1.0
+    activity = pd.DataFrame(values, columns=[f"R{k}" for k in range(12)])
+
+    csi = connection_specificity(activity, margin=margin)
+
+    np.testing.assert_array_equal(csi.to_numpy(), csi_by_definition(values, margin))
+    assert csi.index.tolist() == csi.columns.tolist() == list(activity.columns)
+
+
+@pytest.mark.parametrize("value", [-0.5, np.nan, np.inf])
+def test_specificity_scores_refuse_negative_or_non_finite_activity(value):
+    from cytearc.regulons.specificity import specificity_scores
+
+    values = np.asarray([[1.0, 2.0], [3.0, value]])
+
+    with pytest.raises(ValueError, match="AUCs must be finite and non-negative"):
+        specificity_scores(_passes(values, 1), np.asarray([0, 1]), 2, 2, name="AUCs")
+
+
+def test_specificity_scores_check_their_codes_and_blocks():
+    from cytearc.regulons.specificity import specificity_scores
+
+    values = np.ones((3, 2))
+    with pytest.raises(ValueError, match="codes must name groups from 0 to 1, or -1"):
+        specificity_scores(_passes(values, 2), np.asarray([0, 2, 1]), 2, 2)
+    with pytest.raises(ValueError, match="codes must name groups"):
+        specificity_scores(_passes(values, 2), np.asarray([0, -2, 1]), 2, 2)
+    with pytest.raises(ValueError, match="must hold 3 columns"):
+        specificity_scores(_passes(values, 2), np.asarray([0, 1, 1]), 2, 3)
+    with pytest.raises(ValueError, match="activity holds 3 rows for 4 cells"):
+        specificity_scores(_passes(values, 2), np.asarray([0, 1, 1, 0]), 2, 2)
+    # A second pass must read the rows of the first.
+    passes = iter([values, np.ones((4, 2))])
+    with pytest.raises(ValueError, match="more rows than its 3 cells"):
+        specificity_scores(lambda: [next(passes)], np.asarray([0, 1, 1]), 2, 2)
+    passes = iter([values, np.ones((2, 2))])
+    with pytest.raises(ValueError, match="activity holds 2 rows for 3 cells"):
+        specificity_scores(lambda: [next(passes)], np.asarray([0, 1, 1]), 2, 2)
+
+
+def test_connection_specificity_checks_its_margin_and_shapes():
+    from cytearc.regulons.specificity import (
+        activity_correlation,
+        connection_specificity_from_correlation,
+    )
+
+    activity = pd.DataFrame(np.eye(3))
+    with pytest.raises(ValueError, match="margin must be finite"):
+        connection_specificity(activity, margin=np.nan)
+    with pytest.raises(TypeError, match="margin must be a real number"):
+        connection_specificity(activity, margin=True)
+    with pytest.raises(ValueError, match="cells-by-regulons"):
+        connection_specificity(pd.Series([1.0, 2.0]))
+    with pytest.raises(ValueError, match="square"):
+        connection_specificity_from_correlation(np.zeros((2, 3)), 0.05)
+    with pytest.raises(ValueError, match="must hold 2 columns"):
+        activity_correlation([np.zeros((2, 3))], 2)

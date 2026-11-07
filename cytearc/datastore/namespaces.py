@@ -296,6 +296,10 @@ class RegulonsAccessor(_Accessor):
     grn = _bind(_RegulonOperationsMixin._regulons_grn)
     load_grn = _bind(_RegulonOperationsMixin._regulons_load_grn)
     profiles = _bind(_RegulonOperationsMixin._regulons_profiles)
+    specificity = _bind(_RegulonOperationsMixin._regulons_specificity)
+    connection_specificity = _bind(
+        _RegulonOperationsMixin._regulons_connection_specificity
+    )
 
 
 class RepertoireAccessor(_Accessor):
@@ -352,6 +356,13 @@ class TrajectoryAccessor(_Accessor):
     curves_in_layout = _bind(_TrajectoryOperationsMixin._trajectory_curves_in_layout)
     lineage_tree = _bind(_TrajectoryOperationsMixin._trajectory_lineage_tree)
     load_lineage_tree = _bind(_TrajectoryOperationsMixin._trajectory_load_lineage_tree)
+    lineage_membership = _bind(
+        _TrajectoryOperationsMixin._trajectory_lineage_membership
+    )
+    load_lineage_membership = _bind(
+        _TrajectoryOperationsMixin._trajectory_load_lineage_membership
+    )
+    branch_cells = _bind(_TrajectoryOperationsMixin._trajectory_branch_cells)
 
 
 class VariantsAccessor(_Accessor):

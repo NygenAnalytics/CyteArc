@@ -178,7 +178,7 @@ def _composite_counts(joint: DataStore) -> np.ndarray:
 
 
 def _build_folder(
-    sources: Path, derived: Path
+    sources: Path, derived: Path, *, relative_sources: bool
 ) -> tuple[ArtifactRef, ArtifactRef, ArtifactRef]:
     """Write a source in ``sources`` and a mount and a composite of it in ``derived``.
 
@@ -201,11 +201,16 @@ def _build_folder(
         at=str(derived / "mount.zarr"),
         min_features_per_cell=-1,
         nthreads=1,
+        relative_sources=relative_sources,
     )
     assert mounted.snapshot_cell_selection() == in_source
     in_mount = mounted.features.detected(in_source, min_cells=1)
     joint = create_composite(
-        {"a": source}, at=derived / "joint.zarr", features="union", nthreads=1
+        {"a": source},
+        at=derived / "joint.zarr",
+        features="union",
+        nthreads=1,
+        relative_sources=relative_sources,
     )
     in_joint = joint.snapshot_cell_selection()
     for store in (source, mounted, joint):
@@ -223,9 +228,63 @@ def _recorded(folder: Path) -> tuple[str, str]:
     )
 
 
+def test_sources_are_recorded_by_absolute_paths_unless_relative_ones_are_asked_for(
+    tmp_path,
+):
+    folder = tmp_path / "project"
+    _build_folder(folder, folder, relative_sources=False)
+    # As in every earlier release, which can read these records.
+    assert _recorded(folder) == (
+        str(folder / "source.zarr"),
+        str((folder / "source.zarr").resolve()),
+    )
+    np.testing.assert_array_equal(
+        DataStore(str(folder / "mount.zarr"), nthreads=1).RNA.rawData.compute(),
+        _COUNTS,
+    )
+    reopened = DataStore(str(folder / "joint.zarr"), nthreads=1)
+    np.testing.assert_array_equal(
+        reopened.RNA.rawData.compute(), _composite_counts(reopened)
+    )
+    reopened.z.store.close()
+
+    # An absolute record keeps naming the folder the stores were written in.
+    moved = tmp_path / "moved"
+    folder.rename(moved)
+    looked_for = re.escape(str((folder / "source.zarr").resolve()))
+    for name in ("mount.zarr", "joint.zarr"):
+        with pytest.raises(FileNotFoundError, match=looked_for):
+            DataStore(str(moved / name), nthreads=1)
+
+
+def test_relative_sources_must_be_a_boolean(tmp_path):
+    _write_store(str(tmp_path / "source.zarr"))
+    source = DataStore(
+        str(tmp_path / "source.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=-1,
+        nthreads=1,
+    )
+    with pytest.raises(TypeError, match="^relative_sources must be a boolean$"):
+        mount_datastore(
+            str(tmp_path / "source.zarr"),
+            at=str(tmp_path / "mount.zarr"),
+            relative_sources="yes",
+        )
+    with pytest.raises(TypeError, match="^relative_sources must be a boolean$"):
+        create_composite(
+            {"a": source},
+            at=tmp_path / "joint.zarr",
+            features="union",
+            relative_sources=1,
+        )
+    assert not (tmp_path / "mount.zarr").exists()
+    assert not (tmp_path / "joint.zarr").exists()
+
+
 def test_a_moved_folder_of_a_source_a_mount_and_a_composite_still_opens(tmp_path):
     folder = tmp_path / "project"
-    in_source, in_mount, in_joint = _build_folder(folder, folder)
+    in_source, in_mount, in_joint = _build_folder(folder, folder, relative_sources=True)
     # A source beside the stores built on it is recorded relative to them.
     assert _recorded(folder) == ("source.zarr", "source.zarr")
 
@@ -253,9 +312,12 @@ def test_a_moved_folder_of_a_source_a_mount_and_a_composite_still_opens(tmp_path
     np.testing.assert_array_equal(repacked.RNA.rawData.compute(), _COUNTS)
 
 
-def test_a_source_moved_alone_is_reported_where_it_was_looked_for(tmp_path):
+@pytest.mark.parametrize("relative_sources", [False, True])
+def test_a_source_moved_alone_is_reported_where_it_was_looked_for(
+    tmp_path, relative_sources
+):
     folder = tmp_path / "project"
-    _build_folder(folder, folder)
+    _build_folder(folder, folder, relative_sources=relative_sources)
     (folder / "source.zarr").rename(tmp_path / "source.zarr")
 
     looked_for = re.escape(str((folder / "source.zarr").resolve()))
@@ -265,34 +327,8 @@ def test_a_source_moved_alone_is_reported_where_it_was_looked_for(tmp_path):
         DataStore(str(folder / "joint.zarr"), nthreads=1)
 
 
-def test_absolute_source_locations_of_earlier_releases_still_open(tmp_path):
-    folder = tmp_path / "project"
-    _build_folder(folder, folder)
-    # Earlier releases recorded every local source by its absolute path.
-    absolute = str((folder / "source.zarr").resolve())
-    mount = zarr.open_group(str(folder / "mount.zarr"), mode="r+")
-    mount.attrs[MATRIX_SOURCE_ATTR] = {
-        **mount.attrs[MATRIX_SOURCE_ATTR],
-        "location": absolute,
-    }
-    joint = zarr.open_group(str(folder / "joint.zarr"), mode="r+")
-    record = joint.attrs["composite"]
-    record["sources"][0]["location"] = absolute
-    joint.attrs["composite"] = record
-    assert _recorded(folder) == (absolute, absolute)
-
-    np.testing.assert_array_equal(
-        DataStore(str(folder / "mount.zarr"), nthreads=1).RNA.rawData.compute(),
-        _COUNTS,
-    )
-    reopened = DataStore(str(folder / "joint.zarr"), nthreads=1)
-    np.testing.assert_array_equal(
-        reopened.RNA.rawData.compute(), _composite_counts(reopened)
-    )
-
-
 def test_a_source_kept_elsewhere_stays_absolute_when_its_stores_move(tmp_path):
-    _build_folder(tmp_path / "data", tmp_path / "analyses")
+    _build_folder(tmp_path / "data", tmp_path / "analyses", relative_sources=True)
     absolute = str((tmp_path / "data" / "source.zarr").resolve())
     assert _recorded(tmp_path / "analyses") == (absolute, absolute)
 
@@ -309,7 +345,7 @@ def test_a_source_kept_elsewhere_stays_absolute_when_its_stores_move(tmp_path):
 
 def test_a_folder_served_from_a_bucket_finds_its_sources_there(tmp_path, monkeypatch):
     folder = tmp_path / "project"
-    in_source, _, in_joint = _build_folder(folder, folder)
+    in_source, _, in_joint = _build_folder(folder, folder, relative_sources=True)
     bucket = "s3://bucket/published/project"
     serve_uris(
         monkeypatch,
@@ -331,7 +367,7 @@ def test_a_folder_served_from_a_bucket_finds_its_sources_there(tmp_path, monkeyp
 
 def test_a_relative_source_needs_the_location_of_its_store(tmp_path):
     folder = tmp_path / "project"
-    _build_folder(folder, folder)
+    _build_folder(folder, folder, relative_sources=True)
 
     # An object store does not say where it is, so a relative source cannot be found.
     for name, subject in (
@@ -402,7 +438,9 @@ def test_a_relative_source_is_found_from_where_its_store_is_opened(tmp_path):
         resolve("a.zarr", None)
 
 
-def test_a_mount_in_the_bucket_of_its_source_records_it_relative(tmp_path, monkeypatch):
+def test_a_mount_in_the_bucket_of_its_source_records_it_relative_when_asked(
+    tmp_path, monkeypatch
+):
     from obstore.store import MemoryStore as ObjectMemoryStore
     from zarr.storage import ObjectStore
 
@@ -414,8 +452,8 @@ def test_a_mount_in_the_bucket_of_its_source_records_it_relative(tmp_path, monke
         nthreads=1,
     )
     targets = {
-        "s3://bucket/project/mount.zarr": ObjectStore(ObjectMemoryStore()),
-        "s3://bucket/project/other.zarr": ObjectStore(ObjectMemoryStore()),
+        f"s3://bucket/project/{name}.zarr": ObjectStore(ObjectMemoryStore())
+        for name in ("relative", "absolute", "other")
     }
     serve_uris(
         monkeypatch,
@@ -432,15 +470,28 @@ def test_a_mount_in_the_bucket_of_its_source_records_it_relative(tmp_path, monke
         },
     )
 
-    for source, target, recorded in (
+    for source, target, relative_sources, recorded in (
         (
             "s3://bucket/project/source.zarr",
-            "s3://bucket/project/mount.zarr",
+            "s3://bucket/project/relative.zarr",
+            True,
             "source.zarr",
         ),
-        ("s3://other/source.zarr", "s3://bucket/project/other.zarr", None),
+        (
+            "s3://bucket/project/source.zarr",
+            "s3://bucket/project/absolute.zarr",
+            False,
+            None,
+        ),
+        ("s3://other/source.zarr", "s3://bucket/project/other.zarr", True, None),
     ):
-        mount_datastore(source, at=target, min_features_per_cell=-1, nthreads=1)
+        mount_datastore(
+            source,
+            at=target,
+            min_features_per_cell=-1,
+            nthreads=1,
+            relative_sources=relative_sources,
+        )
         root = zarr.open_group(store=targets[target], mode="r")
         assert root.attrs[MATRIX_SOURCE_ATTR]["location"] == (
             source if recorded is None else recorded
