@@ -31,6 +31,7 @@ from ..stages import (
 from ..summaries import summarize_stage
 from ....utils.arguments import bool_argument
 from .common import (
+    check_harmony_labels,
     cell_snapshots,
     check_tsne,
     harmony_config,
@@ -150,6 +151,7 @@ def resolve_atac(
     )
     # The settings are checked, so the run's cells are checked last.
     source = resolve_cells(store, cells, assays=(assay_name,), operation=OPERATION)
+    check_harmony_labels(store, source, harmony_columns)
     filtering_config = resolve_run_filtering(
         store,
         filtering,
