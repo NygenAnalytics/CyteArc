@@ -183,15 +183,16 @@ def test_umap_layout_uses_the_requested_threads_up_to_the_numba_pool(
     monkeypatch,
 ) -> None:
     import numba
-    import umap.layouts
+
+    from cytearc.embeddings import umap
 
     observed: list[int] = []
 
-    def layout(**kwargs):
+    def layout(embedding, *_args):
         observed.append(numba.get_num_threads())
-        return kwargs["head_embedding"]
+        return embedding
 
-    monkeypatch.setattr(umap.layouts, "optimize_layout_euclidean", layout)
+    monkeypatch.setattr(umap, "_optimize_layout", layout)
     pool = numba.config.NUMBA_NUM_THREADS
     graph = _ring_graph(6)
     previous = numba.get_num_threads()

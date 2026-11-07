@@ -2205,6 +2205,12 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         simulated-doublet scores (Otsu's threshold when they are not
         bimodal).
 
+        Samples are scored at once on the store's workers, as many as the
+        memory budget holds, and each sample's index is built on one thread
+        unless the graph's ANN index was built in parallel. A sample's scores
+        depend only on its cells and ``random_seed``, so they are the same
+        for any ``nthreads``.
+
         The ``doublet_score`` artifact holds, for each cell of the graph's
         selection, the score in ``values``, the fraction of simulated
         doublets among its neighbors in ``raw_scores``, and the call in

@@ -1,4 +1,5 @@
 import locale
+from functools import cache
 from typing import Any
 
 import numpy as np
@@ -8,7 +9,7 @@ from ..utils.arguments import integer_argument
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
 from ..utils.numba import enable_dispatcher_cache, import_umap, numba_threads
-from ..utils.progress import tqdm_params as default_tqdm_params
+from ..utils.progress import iter_progress
 
 locale.setlocale(locale.LC_NUMERIC, "C")
 
@@ -185,6 +186,181 @@ def layout_threads(parallel: bool, nthreads: int) -> int:
     return max(1, min(int(nthreads), int(numba.config.NUMBA_NUM_THREADS)))
 
 
+@cache
+def _serial_epoch_kernel() -> Any:
+    """Return umap-learn's serial layout epoch compiled to release the GIL.
+
+    umap-learn compiles its serial epoch without Numba's ``nogil`` option, so
+    a call holds the GIL for a whole epoch, which stalls every other Python
+    thread of the process. This kernel compiles the same Python function with
+    the same options and ``nogil``, which changes no arithmetic. With
+    ``NUMBA_DISABLE_JIT`` set, umap-learn's epoch is the Python function,
+    which is returned as it is.
+    """
+    from numba.core.dispatcher import Dispatcher
+
+    import_umap()
+    from umap import layouts
+
+    epoch = layouts._nb_optimize_layout_euclidean_single_epoch
+    if not isinstance(epoch, Dispatcher):
+        return epoch
+    return type(epoch)(
+        epoch.py_func,
+        locals=epoch.locals,
+        targetoptions={**epoch.targetoptions, "nogil": True},
+    )
+
+
+@cache
+def _densmap_kernel(parallel: bool) -> Any:
+    """Return umap-learn's densMAP terms of an epoch, compiled once per process.
+
+    umap-learn compiles them in every densMAP layout, without a cache or
+    Numba's ``nogil`` option. This kernel compiles the same Python function
+    with the same options and ``nogil``.
+    """
+    import numba
+
+    import_umap()
+    from umap import layouts
+
+    return numba.njit(
+        layouts._optimize_layout_euclidean_densmap_epoch_init,
+        fastmath=True,
+        parallel=parallel,
+        nogil=True,
+    )
+
+
+def _optimize_layout(
+    embedding: np.ndarray,
+    head: np.ndarray,
+    tail: np.ndarray,
+    n_epochs: int,
+    n_vertices: int,
+    epochs_per_sample: np.ndarray,
+    a: float,
+    b: float,
+    rng_state: np.ndarray,
+    gamma: float,
+    initial_alpha: float,
+    negative_sample_rate: float,
+    densmap_kwds: dict[str, Any],
+    parallel: bool,
+    verbose: bool,
+) -> np.ndarray:
+    """Optimize ``embedding`` in place by UMAP's stochastic gradient descent.
+
+    The loop is umap-learn's ``optimize_layout_euclidean`` for one embedding
+    that each edge moves at both ends, adapted from umap-learn 0.5.12, and
+    each epoch runs umap-learn's own epoch function. A serial layout runs it
+    through :func:`_serial_epoch_kernel`, so other Python threads keep running
+    during an epoch and the layout is umap-learn's to the bit. umap-learn's
+    parallel epoch, which a parallel layout runs, releases the GIL while its
+    threads work.
+
+    Args:
+        densmap_kwds: densMAP's settings and terms, or an empty dictionary
+            without densMAP.
+        verbose: Whether to show a progress bar of the epochs.
+
+    Returns:
+        ``embedding``, optimized.
+    """
+    import_umap()
+    from umap import layouts
+
+    epoch = (
+        layouts._nb_optimize_layout_euclidean_single_epoch_parallel
+        if parallel
+        else _serial_epoch_kernel()
+    )
+    densmap = bool(densmap_kwds)
+    density = _densmap_kernel(parallel) if densmap else None
+    enable_dispatcher_cache(epoch, density)
+    dim = embedding.shape[1]
+    alpha = initial_alpha
+    epochs_per_negative_sample = epochs_per_sample / negative_sample_rate
+    epoch_of_next_negative_sample = epochs_per_negative_sample.copy()
+    epoch_of_next_sample = epochs_per_sample.copy()
+    if densmap:
+        dens_mu_tot = np.sum(densmap_kwds["mu_sum"]) / 2
+        dens_lambda = densmap_kwds["lambda"]
+        dens_R = densmap_kwds["R"]
+        dens_mu = densmap_kwds["mu"]
+        dens_phi_sum = np.zeros(n_vertices, dtype=np.float32)
+        dens_re_sum = np.zeros(n_vertices, dtype=np.float32)
+        dens_var_shift = densmap_kwds["var_shift"]
+    else:
+        dens_mu_tot = 0
+        dens_lambda = 0
+        dens_R = np.zeros(1, dtype=np.float32)
+        dens_mu = np.zeros(1, dtype=np.float32)
+        dens_phi_sum = np.zeros(1, dtype=np.float32)
+        dens_re_sum = np.zeros(1, dtype=np.float32)
+    # Each cell's random state starts from the layout's, offset by the bits
+    # of its first coordinate.
+    rng_state_per_sample = np.full(
+        (embedding.shape[0], len(rng_state)), rng_state, dtype=np.int64
+    ) + embedding[:, 0].astype(np.float64).view(np.int64).reshape(-1, 1)
+    # densMAP's terms are float32 in the epochs that use them and the integer 0
+    # in the others, the types that umap-learn passes its epochs.
+    dens_re_std: Any
+    dens_re_mean: Any
+    dens_re_cov: Any
+    for n in iter_progress(
+        range(n_epochs), desc="Training UMAP", total=n_epochs, disable=not verbose
+    ):
+        # densMAP adds its density term over the last ``frac`` of the epochs.
+        densmap_flag = (
+            densmap
+            and densmap_kwds["lambda"] > 0
+            and (n + 1) / float(n_epochs) > 1 - densmap_kwds["frac"]
+        )
+        if densmap_flag:
+            assert density is not None
+            density(embedding, embedding, head, tail, a, b, dens_re_sum, dens_phi_sum)
+            dens_re_std = np.sqrt(np.var(dens_re_sum) + dens_var_shift)
+            dens_re_mean = np.mean(dens_re_sum)
+            dens_re_cov = np.dot(dens_re_sum, dens_R) / (n_vertices - 1)
+        else:
+            dens_re_std = 0
+            dens_re_mean = 0
+            dens_re_cov = 0
+        epoch(
+            embedding,
+            embedding,
+            head,
+            tail,
+            n_vertices,
+            epochs_per_sample,
+            a,
+            b,
+            rng_state_per_sample,
+            gamma,
+            dim,
+            True,
+            alpha,
+            epochs_per_negative_sample,
+            epoch_of_next_negative_sample,
+            epoch_of_next_sample,
+            n,
+            densmap_flag,
+            dens_phi_sum,
+            dens_re_sum,
+            dens_re_cov,
+            dens_re_std,
+            dens_re_mean,
+            dens_lambda,
+            dens_R,
+            dens_mu,
+            dens_mu_tot,
+        )
+        alpha = initial_alpha * (1.0 - (float(n) / float(n_epochs)))
+    return embedding
+
+
 def simplicial_set_embedding(
     g: Any,
     embedding: np.ndarray,
@@ -248,19 +424,8 @@ def _embed_simplicial_set(
     from sklearn.utils import check_random_state
 
     import_umap()
-    from umap import layouts as umap_layouts
-    from umap.layouts import optimize_layout_euclidean
     from umap.umap_ import make_epochs_per_sample
 
-    # umap-learn compiles the serial and parallel layout epochs, which it
-    # keeps under these private names, without an on-disk cache. A release
-    # that renames them lays out uncached.
-    enable_dispatcher_cache(
-        getattr(umap_layouts, "_nb_optimize_layout_euclidean_single_epoch", None),
-        getattr(
-            umap_layouts, "_nb_optimize_layout_euclidean_single_epoch_parallel", None
-        ),
-    )
     epochs_per_sample = make_epochs_per_sample(g.data, n_epochs)
     logger.trace("calculated epochs_per_sample")
     rng_state = (
@@ -280,37 +445,26 @@ def _embed_simplicial_set(
             densmap_kwds["mu_sum"] = mu_sum
             densmap_kwds["R"] = standardized_ro
             densmap_kwds["mu"] = g.data
-            densmap = True
             logger.trace("calculated densmap params")
-        else:
-            densmap = False
-
-        tqdm_params = dict(default_tqdm_params)
-        tqdm_params["desc"] = "Training UMAP"
-        tqdm_params["disable"] = not verbose
 
         # Numba's thread count is per thread, so the layout needs no process-wide
         # BLAS limit.
-        embedding = optimize_layout_euclidean(
-            head_embedding=embedding,
-            tail_embedding=embedding,
-            head=g.row,
-            tail=g.col,
-            n_epochs=n_epochs,
-            n_vertices=g.shape[1],
-            epochs_per_sample=epochs_per_sample,
-            a=a,
-            b=b,
-            rng_state=rng_state,
-            gamma=gamma,
-            initial_alpha=initial_alpha,
-            negative_sample_rate=negative_sample_rate,
-            parallel=parallel,
-            verbose=False,
-            densmap=densmap,
-            densmap_kwds=densmap_kwds,
-            tqdm_kwds=tqdm_params,
-            move_other=True,
+        embedding = _optimize_layout(
+            embedding,
+            g.row,
+            g.col,
+            n_epochs,
+            g.shape[1],
+            epochs_per_sample,
+            a,
+            b,
+            rng_state,
+            gamma,
+            initial_alpha,
+            negative_sample_rate,
+            densmap_kwds,
+            parallel,
+            verbose,
         )
     return np.asarray(embedding), span
 

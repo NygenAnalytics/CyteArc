@@ -9,7 +9,9 @@ expected doublet rate, following Scrublet (Wolock, Lopez and Klein, Cell
 Systems 2019, doi:10.1016/j.cels.2018.11.005).
 """
 
-from collections.abc import Iterator, Sequence
+import threading
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -69,6 +71,9 @@ __all__ = [
 # the minimum method smooths one at most this many times.
 THRESHOLD_BINS = 256
 THRESHOLD_SMOOTHING_STEPS = 10_000
+# A sample scored beside others queries its index for at most this many points
+# at once, so that its query block stays small beside its index.
+_SAMPLE_QUERY_ROWS = 4_096
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,12 +506,79 @@ def doublet_threshold(simulated_scores: NDArray[np.floating]) -> tuple[float, st
     return otsu_threshold(simulated_scores), "otsu"
 
 
+class _ScoringRoom:
+    """The memory and workers that samples scored on worker threads hold.
+
+    The calling thread simulates one sample at a time and plans each step of
+    a simulation as it would alone, so the step's batches are those of a
+    simulation without other samples. Before the step runs, it waits until the
+    step fits beside the samples being scored. Only the calling thread adds a
+    sample, so their memory falls while it waits, and a step that fits the
+    budget alone always runs.
+    """
+
+    def __init__(self, budget: int, workers: int) -> None:
+        self._budget = budget
+        self._workers = workers
+        self._held = 0
+        self._scoring = 0
+        self._condition = threading.Condition()
+
+    def _fits(self, needed: int) -> bool:
+        # What fits the budget alone fits once no sample is scored.
+        return self._held == 0 or self._held + needed <= self._budget
+
+    def wait(self, needed: int) -> None:
+        """Wait until ``needed`` bytes fit beside the samples being scored."""
+        with self._condition:
+            self._condition.wait_for(lambda: self._fits(needed))
+
+    def hold(self, needed: int, charge: int) -> None:
+        """Wait until a worker is free and ``needed`` bytes fit, then charge
+        ``charge`` bytes to a sample being scored."""
+        with self._condition:
+            self._condition.wait_for(
+                lambda: self._scoring < self._workers and self._fits(needed)
+            )
+            self._held += charge
+            self._scoring += 1
+
+    def release(self, charge: int) -> None:
+        """Let go of the ``charge`` bytes of a sample that has been scored."""
+        with self._condition:
+            self._held -= charge
+            self._scoring -= 1
+            self._condition.notify_all()
+
+
+def _admit(
+    resources: ResourceBudget,
+    *,
+    block_bytes: int,
+    resident_bytes: int,
+    decode_bytes: int = 0,
+    room: _ScoringRoom | None = None,
+) -> None:
+    """Admit one block beside the resident bytes, then wait for it in ``room``."""
+    admit_stream(
+        resources,
+        nBlocks=1,
+        blockBytes=block_bytes,
+        decodeBytes=decode_bytes,
+        residentBytes=resident_bytes,
+        requested=1,
+    )
+    if room is not None:
+        room.wait(resident_bytes + block_bytes + decode_bytes)
+
+
 def _doublet_batch_rows(
     resources: ResourceBudget,
     preferred: int,
     row_bytes: int,
     resident_bytes: int,
     decode_bytes: int = 0,
+    room: _ScoringRoom | None = None,
 ) -> int:
     rows = affordable_width(
         lambda n: (
@@ -514,13 +586,12 @@ def _doublet_batch_rows(
         ),
         preferred,
     )
-    admit_stream(
+    _admit(
         resources,
-        nBlocks=1,
-        blockBytes=max(1, rows) * row_bytes,
-        decodeBytes=decode_bytes,
-        residentBytes=resident_bytes,
-        requested=1,
+        block_bytes=max(1, rows) * row_bytes,
+        resident_bytes=resident_bytes,
+        decode_bytes=decode_bytes,
+        room=room,
     )
     return rows
 
@@ -531,8 +602,12 @@ def _load_parent_counts(
     feature_indices: np.ndarray,
     resources: ResourceBudget,
     resident_bytes: int,
+    room: _ScoringRoom | None = None,
 ) -> csr_matrix:
-    """Read the selected features of parent rows in admitted blocks."""
+    """Read the selected features of parent rows in admitted blocks.
+
+    Each block also waits for its bytes in ``room``, when one is given.
+    """
     backing = raw._backing
     geometry = array_geometry(backing)
     preferred = row_band(geometry, unit="chunk", fallback=1_000)
@@ -554,6 +629,7 @@ def _load_parent_counts(
                 row_bytes,
                 resident_bytes + columns.nbytes + 2 * retained,
                 decode_bytes,
+                room,
             )
             yield start, start + rows
             start += rows
@@ -578,12 +654,11 @@ def _load_parent_counts(
         parts.append(part)
         # Concatenation may promote sparse indices to int64.
         retained += part.nnz * (raw.dtype.itemsize + 8) + 8 * (part.shape[0] + 1)
-    admit_stream(
+    _admit(
         resources,
-        nBlocks=1,
-        blockBytes=max(1, retained),
-        residentBytes=resident_bytes + retained,
-        requested=1,
+        block_bytes=max(1, retained),
+        resident_bytes=resident_bytes + retained,
+        room=room,
     )
     return vstack(parts, format="csr")
 
@@ -592,6 +667,82 @@ def _pair_row_bytes(pool: csr_matrix) -> int:
     largest = int(np.diff(pool.indptr).max(initial=0))
     # Row gathers, widening, addition, and checked 64-bit overflow scratch.
     return int(6 * (2 * largest * (max(8, pool.dtype.itemsize) + 8) + 16))
+
+
+def _neighbor_count_bytes(
+    n_points: int,
+    dims: int,
+    k: int,
+    settings: DoubletIndexSettings,
+    threads: int,
+) -> tuple[int, Callable[[int], int]]:
+    """Return the bytes of one sample's index and those of a query block of
+    a given number of points, which ``threads`` threads build and query."""
+    build_threads = threads if settings.parallel else 1
+    ef = max(settings.ef, k + 1)
+    index_bytes = ann_index_peak_bytes(
+        n_points, dims, settings.m, nthreads=max(build_threads, threads)
+    )
+    # Beside hnswlib's own query memory, each query row holds its labels and
+    # distances, their copies without the point itself, and a doublet mask.
+    own_row_bytes = 2 * 12 * (k + 1) + (k + 1)
+
+    def block_bytes(rows: int) -> int:
+        return (
+            ann_query_block_bytes(max(1, rows), k + 1, ef=ef, nthreads=threads)
+            + rows * own_row_bytes
+        )
+
+    return index_bytes, block_bytes
+
+
+def _sample_charge(
+    plan: DoubletSamplePlan,
+    dims: int,
+    settings: DoubletIndexSettings,
+    threads: int,
+) -> int:
+    """Return the bytes that one sample holds while it is scored beside others.
+
+    They are its float32 points, the neighbor count of each point, the int64
+    positions of its cells, its index, and a query block of at most
+    ``_SAMPLE_QUERY_ROWS`` points.
+    """
+    n_points = plan.cells + plan.simulated
+    index_bytes, block_bytes = _neighbor_count_bytes(
+        n_points, dims, plan.adjusted_neighbors, settings, threads
+    )
+    return (
+        4 * dims * n_points
+        + 8 * n_points
+        + 8 * plan.cells
+        + index_bytes
+        + block_bytes(min(n_points, _SAMPLE_QUERY_ROWS))
+    )
+
+
+def _samples_in_flight(
+    plans: Sequence[DoubletSamplePlan],
+    dims: int,
+    settings: DoubletIndexSettings,
+    resources: ResourceBudget,
+    resident_bytes: int,
+) -> tuple[int, int]:
+    """Return how many samples to score at once and the threads of each.
+
+    As many samples as the workers allow are scored at once, fewer when the
+    budget beside ``resident_bytes`` holds fewer of the largest sample's
+    charge (:func:`_sample_charge`), with the workers shared among them. One
+    sample at a time is scored on every worker.
+    """
+    workers = resources.workers
+    available = resources.memoryBytes - resident_bytes
+    for samples in range(min(workers, len(plans)), 1, -1):
+        threads = workers // samples
+        largest = max(_sample_charge(plan, dims, settings, threads) for plan in plans)
+        if samples * largest <= available:
+            return samples, threads
+    return 1, workers
 
 
 def count_simulated_neighbors(
@@ -611,7 +762,8 @@ def count_simulated_neighbors(
     rows, and then its simulated doublets. An hnswlib index over all of them
     is queried for each point's ``adjusted_neighbors`` nearest other points.
     The index is built on one thread unless ``settings.parallel`` is set, so
-    the counts are the same on every run; queries use ``workers`` threads.
+    the counts are the same on every run; queries use ``workers`` threads, in
+    blocks of as many points as the budget holds.
 
     Raises:
         MemoryError: If the index and one query block exceed the memory budget.
@@ -629,8 +781,8 @@ def count_simulated_neighbors(
     threads = integer_argument(workers, "workers", minimum=1)
     build_threads = threads if settings.parallel else 1
     ef = max(settings.ef, k + 1)
-    index_bytes = ann_index_peak_bytes(
-        n_points, dims, settings.m, nthreads=max(build_threads, threads)
+    index_bytes, block_bytes = _neighbor_count_bytes(
+        n_points, dims, k, settings, threads
     )
     resident = int(resident_bytes) + values.nbytes + 8 * n_points
     admit_stream(
@@ -641,16 +793,6 @@ def count_simulated_neighbors(
         requested=1,
     )
     resident += index_bytes
-    # Beside hnswlib's own query memory, each query row holds its labels and
-    # distances, their copies without the point itself, and a doublet mask.
-    own_row_bytes = 2 * 12 * (k + 1) + (k + 1)
-
-    def block_bytes(rows: int) -> int:
-        return (
-            ann_query_block_bytes(max(1, rows), k + 1, ef=ef, nthreads=threads)
-            + rows * own_row_bytes
-        )
-
     batch_rows = max(
         1,
         affordable_width(
@@ -702,8 +844,11 @@ def _simulate_sample(
     heterotypic_fraction: float,
     resources: ResourceBudget,
     resident_bytes: int,
+    room: _ScoringRoom | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Simulate one sample's doublets and project them onto the reference PCA.
+
+    Each step also waits for its bytes in ``room``, when one is given.
 
     Returns:
         The float32 coordinates of the doublets, the positions of their two
@@ -724,13 +869,12 @@ def _simulate_sample(
     # Pair generation holds both parent indices, the forced-doublet mask, and
     # integer scratch for the forced doublets, at most 72 bytes per doublet,
     # and sorts the pool labels into cluster codes and a cluster order.
-    admit_stream(
+    _admit(
         resources,
-        nBlocks=1,
-        blockBytes=72 * plan.simulated
+        block_bytes=72 * plan.simulated
         + (2 * pool_labels.dtype.itemsize + 48) * len(pool),
-        residentBytes=resident_bytes + pool_labels.nbytes + 8 * len(pool),
-        requested=1,
+        resident_bytes=resident_bytes + pool_labels.nbytes + 8 * len(pool),
+        room=room,
     )
     left, right = simulate_doublet_pairs(pool_labels, plan.simulated, fraction, rng)
     pool_positions = members[pool]
@@ -744,6 +888,7 @@ def _simulate_sample(
         feature_indices,
         resources,
         resident,
+        room,
     )
     totals = None if cell_totals is None else cell_totals[pool_positions]
     coordinates = np.empty((plan.simulated, model.n_dims), dtype=np.float32)
@@ -759,7 +904,7 @@ def _simulate_sample(
         array_geometry(assay.rawData._backing), unit="chunk", fallback=1_000
     )
     batch_rows = _doublet_batch_rows(
-        resources, min(preferred, plan.simulated), row_bytes, resident
+        resources, min(preferred, plan.simulated), row_bytes, resident, room=room
     )
     parameters = reference.normalization_parameters
     with process_thread_limit(resources.workers):
@@ -817,6 +962,16 @@ def score_synthetic_doublets(
     (:func:`count_simulated_neighbors`), and a cell is called a doublet when
     its score is above the sample's threshold: ``threshold``, or the one
     :func:`doublet_threshold` chooses from the sample's simulated doublets.
+
+    Samples are scored ``resources.workers`` at a time, fewer when the memory
+    budget holds fewer of the largest sample's points, index and query block
+    of at most 4,096 points, with the workers shared among them. The calling
+    thread simulates the samples one at a time, in sample code order, plans
+    each simulation as it would alone, and waits before each of its steps
+    until the step fits beside the samples being scored, so scoring samples
+    at once adds no refusal of its own. Each sample's index is built on one
+    thread unless ``index.parallel`` is set, so its scores, calls and
+    threshold are the same for any number of workers.
 
     Args:
         assay: The RNA assay whose counts the parents are read from.
@@ -912,15 +1067,22 @@ def score_synthetic_doublets(
     predicted = np.zeros(n_cells, dtype=bool)
     simulated_scores = np.empty(n_simulated, dtype=np.float64)
     simulated_parents = np.empty((n_simulated, 2), dtype=np.int64)
-    results = []
-    offset = 0
     seeds = np.random.SeedSequence(random_seed).spawn(len(plans))
-    for code, (plan, seed) in enumerate(zip(plans, seeds, strict=True)):
+    # The simulated doublets of each sample follow those of the samples before it.
+    offsets = np.cumsum([0, *(plan.simulated for plan in plans)])
+
+    def simulate(
+        code: int, room: _ScoringRoom | None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+        """Simulate a sample's doublets and return its cells' positions, its
+        observed and simulated points, the doublets' parents and the
+        heterotypic fraction used."""
+        plan = plans[code]
         members = np.flatnonzero(codes == code)
         simulated, parents, fraction = _simulate_sample(
             assay,
             reference,
-            np.random.default_rng(seed),
+            np.random.default_rng(seeds[code]),
             members,
             plan,
             active_indices=active_indices,
@@ -932,31 +1094,31 @@ def score_synthetic_doublets(
             heterotypic_fraction=heterotypic_fraction,
             resources=resources,
             resident_bytes=resident + members.nbytes,
+            room=room,
         )
         observed_bytes = plan.cells * model.n_dims * 4
-        admit_stream(
+        _admit(
             resources,
-            nBlocks=1,
-            blockBytes=2 * observed_bytes + simulated.nbytes,
-            residentBytes=resident + members.nbytes + simulated.nbytes,
-            requested=1,
+            block_bytes=2 * observed_bytes + simulated.nbytes,
+            resident_bytes=resident + members.nbytes + simulated.nbytes,
+            room=room,
         )
         observed = np.asarray(
             read_array_rows_chunkwise(coordinates, members), dtype=np.float32
         )
         points = np.concatenate((observed, simulated))
-        del observed, simulated
-        counts = count_simulated_neighbors(
-            points,
-            plan.cells,
-            plan.adjusted_neighbors,
-            index,
-            random_seed=random_seed,
-            workers=resources.workers,
-            resources=resources,
-            resident_bytes=resident + members.nbytes,
-        )
-        del points
+        return members, points, parents, fraction
+
+    def record(
+        code: int,
+        counts: NDArray[np.int64],
+        members: np.ndarray,
+        parents: np.ndarray,
+        fraction: float,
+    ) -> DoubletSampleResult:
+        """Score a sample's cells and doublets from their neighbor counts,
+        call its doublets and store both in the outputs."""
+        plan = plans[code]
         likelihood = doublet_likelihood(
             counts,
             plan.adjusted_neighbors,
@@ -973,19 +1135,48 @@ def score_synthetic_doublets(
         scores[members] = observed_scores
         raw_scores[members] = counts[: plan.cells] / plan.adjusted_neighbors
         predicted[members] = calls
-        end = offset + plan.simulated
-        simulated_scores[offset:end] = sample_simulated
-        simulated_parents[offset:end] = parents
-        offset = end
-        results.append(
-            DoubletSampleResult(
-                plan=plan,
-                heterotypic_fraction=fraction,
-                threshold=cutoff,
-                threshold_method=method,
-                predicted=int(np.count_nonzero(calls)),
-                detectable_fraction=float(np.mean(sample_simulated > cutoff)),
+        simulated_scores[offsets[code] : offsets[code + 1]] = sample_simulated
+        simulated_parents[offsets[code] : offsets[code + 1]] = parents
+        return DoubletSampleResult(
+            plan=plan,
+            heterotypic_fraction=fraction,
+            threshold=cutoff,
+            threshold_method=method,
+            predicted=int(np.count_nonzero(calls)),
+            detectable_fraction=float(np.mean(sample_simulated > cutoff)),
+        )
+
+    samples_at_once, threads = _samples_in_flight(
+        plans, model.n_dims, index, resources, resident
+    )
+    results: list[DoubletSampleResult] = []
+    if samples_at_once == 1:
+        for code, plan in enumerate(plans):
+            members, points, parents, fraction = simulate(code, None)
+            counts = count_simulated_neighbors(
+                points,
+                plan.cells,
+                plan.adjusted_neighbors,
+                index,
+                random_seed=random_seed,
+                workers=resources.workers,
+                resources=resources,
+                resident_bytes=resident + members.nbytes,
             )
+            del points
+            results.append(record(code, counts, members, parents, fraction))
+    else:
+        results = _score_samples_at_once(
+            plans,
+            simulate,
+            record,
+            index=index,
+            random_seed=random_seed,
+            samples_at_once=samples_at_once,
+            threads=threads,
+            resources=resources,
+            resident_bytes=resident,
+            dims=model.n_dims,
         )
     return DoubletScores(
         scores=scores,
@@ -995,6 +1186,87 @@ def score_synthetic_doublets(
         simulated_parents=simulated_parents,
         samples=tuple(results),
     )
+
+
+def _score_samples_at_once(
+    plans: Sequence[DoubletSamplePlan],
+    simulate: Callable[
+        [int, _ScoringRoom | None], tuple[np.ndarray, np.ndarray, np.ndarray, float]
+    ],
+    record: Callable[
+        [int, NDArray[np.int64], np.ndarray, np.ndarray, float], DoubletSampleResult
+    ],
+    *,
+    index: DoubletIndexSettings,
+    random_seed: int,
+    samples_at_once: int,
+    threads: int,
+    resources: ResourceBudget,
+    resident_bytes: int,
+    dims: int,
+) -> list[DoubletSampleResult]:
+    """Score ``samples_at_once`` samples at a time on worker threads.
+
+    The calling thread simulates the samples one at a time, in sample code
+    order, and hands each to a worker, which builds its index and queries it
+    on ``threads`` threads and records its scores. Each sample being scored
+    holds its charge (:func:`_sample_charge`) of the memory beside
+    ``resident_bytes``; a simulation waits before each step until the step
+    fits beside them, and a sample waits for a worker until its charge fits.
+
+    Returns:
+        Each sample's result, in sample code order.
+    """
+    room = _ScoringRoom(resources.memoryBytes, samples_at_once)
+
+    def score(
+        code: int,
+        members: np.ndarray,
+        points: np.ndarray,
+        parents: np.ndarray,
+        fraction: float,
+        charge: int,
+    ) -> DoubletSampleResult:
+        plan = plans[code]
+        try:
+            # The sample's budget holds its index and a query block of
+            # _SAMPLE_QUERY_ROWS points beside its points and positions.
+            counts = count_simulated_neighbors(
+                points,
+                plan.cells,
+                plan.adjusted_neighbors,
+                index,
+                random_seed=random_seed,
+                workers=threads,
+                resources=ResourceBudget(resident_bytes + charge, threads),
+                resident_bytes=resident_bytes + members.nbytes,
+            )
+            return record(code, counts, members, parents, fraction)
+        finally:
+            room.release(charge)
+
+    def raise_failure(futures: list[Future[DoubletSampleResult]]) -> None:
+        for future in futures:
+            if future.done():
+                future.result()
+
+    futures: list[Future[DoubletSampleResult]] = []
+    pool = ThreadPoolExecutor(
+        max_workers=samples_at_once, thread_name_prefix="cytearc-doublets"
+    )
+    try:
+        for code, plan in enumerate(plans):
+            raise_failure(futures)
+            members, points, parents, fraction = simulate(code, room)
+            charge = _sample_charge(plan, dims, index, threads)
+            room.hold(resident_bytes + charge, charge)
+            futures.append(
+                pool.submit(score, code, members, points, parents, fraction, charge)
+            )
+            del members, points, parents
+        return [future.result() for future in futures]
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
 
 
 def minmax_doublet_scores(scores: np.ndarray) -> np.ndarray:

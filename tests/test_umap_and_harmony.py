@@ -159,12 +159,13 @@ def test_calc_dens_map_params_rejects_undefined_radii():
 
 def test_simplicial_embedding_restores_numba_threads_on_failure(monkeypatch):
     import numba
-    import umap.layouts
 
-    def fail(**_kwargs):
+    from cytearc.embeddings import umap
+
+    def fail(*_args):
         raise RuntimeError("injected UMAP failure")
 
-    monkeypatch.setattr(umap.layouts, "optimize_layout_euclidean", fail)
+    monkeypatch.setattr(umap, "_optimize_layout", fail)
     graph = _ring_graph(4)
     previous_threads = numba.get_num_threads()
     with pytest.raises(RuntimeError, match="injected UMAP failure"):
@@ -254,6 +255,164 @@ def test_fit_transform_runs_short_embedding():
     )
     np.testing.assert_allclose([a, b], [expected_a, expected_b], rtol=1e-6)
     np.testing.assert_allclose([a, b], [repeated_a, repeated_b], rtol=0, atol=0)
+
+
+def _random_graph(n_cells: int, k: int, seed: int) -> coo_matrix:
+    """``k`` random neighbors of each cell, with random membership strengths."""
+    rng = np.random.default_rng(seed)
+    rows = np.repeat(np.arange(n_cells), k)
+    cols = rng.integers(0, n_cells, n_cells * k)
+    keep = rows != cols
+    return coo_matrix(
+        (rng.uniform(0.05, 1.0, keep.sum()), (rows[keep], cols[keep])),
+        shape=(n_cells, n_cells),
+    )
+
+
+@pytest.mark.parametrize("densmap", [False, True])
+@pytest.mark.parametrize("initial_alpha", [1, 0.7])
+def test_serial_layouts_are_those_of_umap_learn_to_the_bit(densmap, initial_alpha):
+    from sklearn.utils import check_random_state
+    from umap.layouts import optimize_layout_euclidean
+    from umap.umap_ import make_epochs_per_sample
+
+    n_cells, k, n_epochs, seed = 400, 8, 25, 7
+    graph = fuzzy_simplicial_set(_random_graph(n_cells, k, seed=3), 1.0)
+    initial = np.random.default_rng(5).normal(size=(n_cells, 2)).astype(np.float32)
+    rng = np.random.default_rng(9)
+    indices = np.stack(
+        [
+            rng.choice(np.delete(np.arange(n_cells), cell), k, replace=False)
+            for cell in range(n_cells)
+        ]
+    )
+    distances = np.sort(rng.uniform(0.5, 2.0, (n_cells, k)), axis=1)
+    settings = (
+        {
+            "lambda": 2.0,
+            "frac": 0.3,
+            "var_shift": 0.1,
+            "knn_dists": densmap_distance_graph(indices, distances.astype(np.float32)),
+        }
+        if densmap
+        else {}
+    )
+    arguments = (n_epochs, 1.2, 0.9, seed, 1.0, initial_alpha, 5)
+
+    layout = simplicial_set_embedding(
+        graph, initial.copy(), *arguments, dict(settings), False, 1, False
+    )
+
+    # umap-learn's own loop and serial kernel, seeded as the layout seeds them.
+    reference = initial.copy()
+    terms = {}
+    if densmap:
+        mu_sum, radii = calc_dens_map_params(graph, settings["knn_dists"])
+        terms = {**settings, "mu_sum": mu_sum, "R": radii, "mu": graph.data}
+    optimize_layout_euclidean(
+        reference,
+        reference,
+        graph.row,
+        graph.col,
+        n_epochs,
+        n_cells,
+        make_epochs_per_sample(graph.data, n_epochs),
+        1.2,
+        0.9,
+        check_random_state(seed)
+        .randint(np.iinfo(np.int32).min + 1, np.iinfo(np.int32).max - 1, 3)
+        .astype(np.int64),
+        gamma=1.0,
+        initial_alpha=initial_alpha,
+        negative_sample_rate=5,
+        parallel=False,
+        densmap=densmap,
+        densmap_kwds=terms,
+        move_other=True,
+    )
+    assert not np.array_equal(reference, initial)
+    np.testing.assert_array_equal(layout, reference)
+
+
+def test_serial_epoch_compiles_umap_learns_function_with_its_options_and_nogil(
+    monkeypatch,
+):
+    import umap.layouts
+
+    from cytearc.embeddings import umap as layouts
+
+    epoch = umap.layouts._nb_optimize_layout_euclidean_single_epoch
+    kernel = layouts._serial_epoch_kernel()
+    assert kernel is not epoch
+    assert kernel.py_func is epoch.py_func
+    assert kernel.targetoptions == {**epoch.targetoptions, "nogil": True}
+
+    # With NUMBA_DISABLE_JIT set, umap-learn's epoch is its Python function,
+    # which a serial layout runs as it is.
+    python_epoch = umap.layouts._optimize_layout_euclidean_single_epoch
+    monkeypatch.setattr(
+        umap.layouts, "_nb_optimize_layout_euclidean_single_epoch", python_epoch
+    )
+    layouts._serial_epoch_kernel.cache_clear()
+    try:
+        assert layouts._serial_epoch_kernel() is python_epoch
+    finally:
+        layouts._serial_epoch_kernel.cache_clear()
+
+
+@pytest.mark.slow
+def test_serial_layout_lets_other_threads_run_during_its_epochs():
+    import threading
+    import time
+
+    # An epoch of 100,000 cells with 15 neighbors takes 0.1 to 0.2 s on one
+    # core. umap-learn's serial kernel held the GIL through each epoch, so a
+    # thread that sleeps 10 ms waited at least that long between its wakes.
+    graph = _random_graph(100_000, 15, seed=0)
+    start = np.random.default_rng(1).normal(size=(100_000, 2)).astype(np.float32)
+
+    def layout(n_epochs: int) -> np.ndarray:
+        return fit_transform(
+            graph,
+            start.copy(),
+            spread=1.0,
+            min_dist=0.5,
+            n_epochs=n_epochs,
+            random_seed=1,
+            repulsion_strength=1.0,
+            initial_alpha=1.0,
+            negative_sample_rate=5,
+            densmap_kwds={},
+            parallel=False,
+            nthreads=1,
+            verbose=False,
+        )[0]
+
+    # The first layout compiles the epoch kernel.
+    layout(1)
+    waits: list[float] = []
+    stop = threading.Event()
+
+    def beat() -> None:
+        last = time.perf_counter()
+        while not stop.is_set():
+            time.sleep(0.01)
+            now = time.perf_counter()
+            waits.append(now - last)
+            last = now
+
+    thread = threading.Thread(target=beat, daemon=True)
+    thread.start()
+    began = time.perf_counter()
+    try:
+        layout(6)
+    finally:
+        elapsed = time.perf_counter() - began
+        stop.set()
+        thread.join()
+
+    epoch = elapsed / 6
+    assert max(waits) < max(0.05, epoch / 2), (max(waits), epoch)
 
 
 def test_initial_embedding_matches_regression_values():

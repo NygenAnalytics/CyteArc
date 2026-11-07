@@ -1,3 +1,4 @@
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -602,3 +603,339 @@ def test_doublets_without_selected_feature_counts_are_scored(tmp_path, monkeypat
             random_seed=91,
             resources=ResourceBudget(128 * 1024**2, 1),
         )
+
+
+@dataclass(frozen=True)
+class _Samples:
+    """A reference store of four samples and what scoring them takes."""
+
+    store: DataStore
+    reference: object
+    labels: np.ndarray
+    codes: np.ndarray
+    features: np.ndarray
+    totals: np.ndarray
+
+
+_SAMPLE_CELLS = 60
+
+
+@pytest.fixture(scope="module")
+def four_samples(tmp_path_factory) -> _Samples:
+    """Four samples of 60 cells, each of two of four cell types."""
+    rng = np.random.default_rng(57)
+    profiles = rng.gamma(1.0, 2.0, size=(4, 24))
+    half = _SAMPLE_CELLS // 2
+    types = np.concatenate(
+        [np.repeat([sample, (sample + 1) % 4], half) for sample in range(4)]
+    )
+    counts = rng.poisson(3 * profiles[types]).astype(np.uint16)
+    path = tmp_path_factory.mktemp("four_samples") / "reference.zarr"
+    _write_counts(path, counts)
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    features = np.arange(counts.shape[1])
+    normalized = store.features.normalize(
+        store.snapshot_cell_selection("I"),
+        store.features.snapshot(feature_indexes=features),
+        renormalize_subset=False,
+    )
+    pca = store.reduction.pca(normalized, dims=4, local_cache=False)
+    neighbors = store.graph.neighbors(store.graph.ann_index(pca), coordinates=pca, k=5)
+    reference = store.mapping.load_reference(store.mapping.build_reference(neighbors))
+    return _Samples(
+        store,
+        reference,
+        types,
+        np.repeat(np.arange(4), _SAMPLE_CELLS),
+        features,
+        store.RNA._cell_count_totals(np.arange(len(counts))),
+    )
+
+
+def _score_samples(
+    samples: _Samples,
+    resources: ResourceBudget,
+    codes: np.ndarray | None = None,
+    n_neighbors: int = 5,
+) -> doublets.DoubletScores:
+    return doublets.score_synthetic_doublets(
+        samples.store.RNA,
+        samples.reference,
+        np.arange(len(samples.codes)),
+        samples.labels,
+        samples.codes if codes is None else codes,
+        samples.features,
+        samples.totals,
+        index=_EXACT_INDEX,
+        cluster_sample_fraction=1.0,
+        max_cells_per_cluster=None,
+        simulation_ratio=2.0,
+        heterotypic_fraction=0.0,
+        n_neighbors=n_neighbors,
+        expected_doublet_rate=0.05,
+        threshold=None,
+        random_seed=_SEED,
+        resources=resources,
+    )
+
+
+def _assert_same_scores(
+    actual: doublets.DoubletScores, expected: doublets.DoubletScores
+) -> None:
+    for name in (
+        "scores",
+        "raw_scores",
+        "predicted",
+        "simulated_scores",
+        "simulated_parents",
+    ):
+        np.testing.assert_array_equal(getattr(actual, name), getattr(expected, name))
+    # The thresholds, calls and detectable fractions of each sample, exactly.
+    assert actual.samples == expected.samples
+
+
+_LARGE_BUDGET = 256 * 1024**2
+
+
+def _scoring_threads() -> list[threading.Thread]:
+    return [
+        thread
+        for thread in threading.enumerate()
+        if thread.name.startswith("cytearc-doublets")
+    ]
+
+
+def test_samples_scored_at_once_have_the_scores_of_samples_scored_one_at_a_time(
+    four_samples, monkeypatch
+):
+    one_at_a_time = _score_samples(four_samples, ResourceBudget(_LARGE_BUDGET, 1))
+    build_threads: list[int] = []
+    count_neighbors = doublets.count_simulated_neighbors
+    instantiate = doublets.instantiate_knn_index
+    # Every sample waits here for the other three, which only samples scored
+    # at once can pass.
+    meeting = threading.Barrier(4, timeout=60)
+
+    def meet(*args, **kwargs):
+        meeting.wait()
+        return count_neighbors(*args, **kwargs)
+
+    def record_build_threads(*args):
+        build_threads.append(args[-1])
+        return instantiate(*args)
+
+    monkeypatch.setattr(doublets, "count_simulated_neighbors", meet)
+    monkeypatch.setattr(doublets, "instantiate_knn_index", record_build_threads)
+    at_once = _score_samples(four_samples, ResourceBudget(_LARGE_BUDGET, 4))
+
+    # Each index is built on one thread, so it is the index of one at a time.
+    assert build_threads == [1, 1, 1, 1]
+    _assert_same_scores(at_once, one_at_a_time)
+    assert len(at_once.samples) == 4
+    assert _scoring_threads() == []
+
+
+def test_samples_scored_at_once_are_as_many_as_the_budget_holds(
+    four_samples, monkeypatch
+):
+    observed: dict[str, object] = {}
+    plan_samples = doublets._samples_in_flight
+
+    def observe(plans, dims, settings, resources, resident_bytes):
+        observed.update(plans=plans, dims=dims, settings=settings)
+        observed["resident"] = resident_bytes
+        return plan_samples(plans, dims, settings, resources, resident_bytes)
+
+    monkeypatch.setattr(doublets, "_samples_in_flight", observe)
+    # Each cell counts its 59 other cells, so a sample's query block, which
+    # its charge holds with its points and index, is larger than the batches
+    # of a simulation, and a simulation fits beside one sample being scored.
+    one_at_a_time = _score_samples(
+        four_samples, ResourceBudget(_LARGE_BUDGET, 1), n_neighbors=59
+    )
+    # Each sample charges its points, its index and its query block.
+    charge = max(
+        doublets._sample_charge(plan, observed["dims"], observed["settings"], 2)
+        for plan in observed["plans"]
+    )
+    holds_two = observed["resident"] + 2 * charge
+    count_neighbors = doublets.count_simulated_neighbors
+    lock = threading.Lock()
+    scoring = [0, 0]
+
+    def track(meeting: threading.Barrier | None):
+        def counted(*args, **kwargs):
+            with lock:
+                scoring[0] += 1
+                scoring[1] = max(scoring)
+            try:
+                if meeting is not None:
+                    meeting.wait()
+                return count_neighbors(*args, **kwargs)
+            finally:
+                with lock:
+                    scoring[0] -= 1
+
+        return counted
+
+    # Two samples fit, so they are scored in pairs that meet, never three at
+    # once, and the simulations wait for the memory that the pairs hold.
+    monkeypatch.setattr(
+        doublets, "count_simulated_neighbors", track(threading.Barrier(2, timeout=60))
+    )
+    in_pairs = _score_samples(
+        four_samples, ResourceBudget(holds_two, 4), n_neighbors=59
+    )
+    assert scoring == [0, 2]
+    _assert_same_scores(in_pairs, one_at_a_time)
+
+    # A byte less holds one sample, so the samples are scored one at a time.
+    scoring[:] = [0, 0]
+    monkeypatch.setattr(doublets, "count_simulated_neighbors", track(None))
+    alone = _score_samples(
+        four_samples, ResourceBudget(holds_two - 1, 4), n_neighbors=59
+    )
+    assert scoring == [0, 1]
+    _assert_same_scores(alone, one_at_a_time)
+
+
+def test_one_sample_is_scored_alone_on_every_worker(four_samples, monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("one sample was scored beside others")
+
+    workers: list[int] = []
+    count_neighbors = doublets.count_simulated_neighbors
+
+    def record_workers(*args, **kwargs):
+        workers.append(kwargs["workers"])
+        return count_neighbors(*args, **kwargs)
+
+    monkeypatch.setattr(doublets, "_score_samples_at_once", forbidden)
+    monkeypatch.setattr(doublets, "count_simulated_neighbors", record_workers)
+    codes = np.zeros(len(four_samples.codes), dtype=np.int64)
+
+    scores = _score_samples(four_samples, ResourceBudget(_LARGE_BUDGET, 4), codes)
+
+    assert workers == [4]
+    assert len(scores.samples) == 1
+
+
+def test_a_failed_sample_stops_the_samples_scored_at_once(four_samples, monkeypatch):
+    count_neighbors = doublets.count_simulated_neighbors
+    simulate = doublets._simulate_sample
+    lock = threading.Lock()
+    calls = [0]
+
+    def fail_second(*args, **kwargs):
+        with lock:
+            calls[0] += 1
+            second = calls[0] == 2
+        if second:
+            raise RuntimeError("injected neighbor failure")
+        return count_neighbors(*args, **kwargs)
+
+    monkeypatch.setattr(doublets, "count_simulated_neighbors", fail_second)
+    with pytest.raises(RuntimeError, match="injected neighbor failure"):
+        _score_samples(four_samples, ResourceBudget(_LARGE_BUDGET, 4))
+    assert _scoring_threads() == []
+
+    # A simulation that fails while other samples are scored ends the call
+    # once they finish.
+    monkeypatch.setattr(doublets, "count_simulated_neighbors", count_neighbors)
+
+    def fail_third(assay, reference, rng, members, plan, **kwargs):
+        if members[0] == 2 * _SAMPLE_CELLS:
+            raise RuntimeError("injected simulation failure")
+        return simulate(assay, reference, rng, members, plan, **kwargs)
+
+    monkeypatch.setattr(doublets, "_simulate_sample", fail_third)
+    with pytest.raises(RuntimeError, match="injected simulation failure"):
+        _score_samples(four_samples, ResourceBudget(_LARGE_BUDGET, 4))
+    assert _scoring_threads() == []
+
+
+def test_samples_scored_at_once_refuse_where_one_at_a_time_refuses(
+    four_samples, monkeypatch
+):
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    def outcome(budget: int) -> doublets.DoubletScores | tuple[str, int]:
+        try:
+            return _score_samples(four_samples, ResourceBudget(budget, 4))
+        except MemoryBudgetError as error:
+            return str(error), error.needed_bytes
+
+    # From budgets that refuse the first simulation to budgets that score two
+    # and four samples at once.
+    budgets = [5_000, 40_000, 120_000, 600_000, 1_000_000, 4_000_000, _LARGE_BUDGET]
+    at_once = [outcome(budget) for budget in budgets]
+    monkeypatch.setattr(doublets, "_samples_in_flight", lambda *_args: (1, 4))
+    one_at_a_time = [outcome(budget) for budget in budgets]
+
+    refused = 0
+    for actual, expected in zip(at_once, one_at_a_time, strict=True):
+        if isinstance(expected, tuple):
+            refused += 1
+            assert actual == expected
+        else:
+            assert isinstance(actual, doublets.DoubletScores)
+            _assert_same_scores(actual, expected)
+    assert 0 < refused < len(budgets)
+
+
+class _RecordedQueries:
+    """An hnswlib index that records the points of each query."""
+
+    def __init__(self, index, queried: list[int]) -> None:
+        self._index = index
+        self._queried = queried
+
+    def add_items(self, *args, **kwargs):
+        return self._index.add_items(*args, **kwargs)
+
+    def set_num_threads(self, threads):
+        return self._index.set_num_threads(threads)
+
+    def knn_query(self, values, k):
+        self._queried.append(len(values))
+        return self._index.knn_query(values, k=k)
+
+
+def test_a_sample_charge_holds_its_index_and_a_bounded_query_block(monkeypatch):
+    plan = doublets.DoubletSamplePlan(
+        cells=2_000, simulated=4_000, neighbors=10, adjusted_neighbors=30
+    )
+    points = np.random.default_rng(3).normal(size=(6_000, 3)).astype(np.float32)
+    queried: list[int] = []
+    instantiate = doublets.instantiate_knn_index
+    monkeypatch.setattr(
+        doublets,
+        "instantiate_knn_index",
+        lambda *args: _RecordedQueries(instantiate(*args), queried),
+    )
+    settings = doublets.DoubletIndexSettings("l2", 16, 50, 50, False)
+    charge = doublets._sample_charge(plan, 3, settings, 2)
+    # The scoring holds the cells' int64 positions beside the charge's other
+    # parts, and the call's own resident bytes beside them.
+    resident = 1_000 + 8 * plan.cells
+
+    def count(budget: int) -> np.ndarray:
+        return doublets.count_simulated_neighbors(
+            points,
+            plan.cells,
+            plan.adjusted_neighbors,
+            settings,
+            random_seed=1,
+            workers=2,
+            resources=ResourceBudget(budget, 2),
+            resident_bytes=resident,
+        )
+
+    counts = count(1_000 + charge)
+    assert queried == [4_096, 6_000 - 4_096]
+    # A byte less holds a block of one point fewer.
+    queried.clear()
+    np.testing.assert_array_equal(count(1_000 + charge - 1), counts)
+    assert queried == [4_095, 6_000 - 4_095]

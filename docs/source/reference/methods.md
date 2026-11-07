@@ -172,14 +172,7 @@ from the cells outside its first parent's cluster. The doublets are normalized l
 cells, their library size the sum of their parents', and projected onto the graph's PCA without
 refitting it.
 
-Each cell and simulated doublet is then scored on its `k = round(save_k * (1 + r))` nearest
-neighbors among the sample's cells and simulated doublets, with `r` simulated doublets per cell, so
-that about `save_k` of them are cells where doublets are as dense as cells. These neighbors come
-from an hnswlib index of the sample, built with the settings of the graph's ANN index, on one thread
-unless that index was parallel. With `d` simulated doublets among the neighbors, `q = (d + 1) /
-(k + 2)` estimates their fraction, and `q / ((1 - q) r)` how much denser doublets are than singlets
-around the cell. Bayes' rule with the prior `expected_doublet_rate` gives the score, the probability
-that the cell is a doublet. `raw_scores` keeps `d / k`.
+Each cell and simulated doublet is then scored on its `k = round(save_k * (1 + r))` nearest neighbors among the sample's cells and simulated doublets, with `r` simulated doublets per cell, so that about `save_k` of them are cells where doublets are as dense as cells. These neighbors come from an hnswlib index of the sample, built with the settings of the graph's ANN index, on one thread unless that index was parallel. Samples are scored at once, as many as the workers and the memory budget hold, and a sample's scores depend only on its cells and `random_seed`, so they are the same for any thread count. With `d` simulated doublets among the neighbors, `q = (d + 1) / (k + 2)` estimates their fraction, and `q / ((1 - q) r)` how much denser doublets are than singlets around the cell. Bayes' rule with the prior `expected_doublet_rate` gives the score, the probability that the cell is a doublet. `raw_scores` keeps `d / k`.
 
 The scores of a sample's simulated doublets are bimodal: doublets of two cells of one type, which
 look like a singlet, score low and the others high. The threshold is the minimum between the two

@@ -609,7 +609,9 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             dens_var_shift: Variance shift for density correction (Default value: 0.1).
             random_seed: (Default value: 4444)
             parallel: Whether to run UMAP in parallel mode. Setting value to True will use `nthreads` threads.
-                      The results are not reproducible in parallel mode. (Default value: False)
+                      The results are not reproducible in parallel mode. A serial layout runs on one thread
+                      and releases the GIL during each epoch, so the process's other Python threads keep
+                      running. (Default value: False)
             nthreads: If parallel=True then this number of threads will be used to run UMAP. By default, the `nthreads`
                       attribute of the class is used. (Default value: None)
 

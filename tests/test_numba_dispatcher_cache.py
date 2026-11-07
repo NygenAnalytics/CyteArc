@@ -52,10 +52,13 @@ from cytearc.utils.numba import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CYTEARC_DIR = REPOSITORY_ROOT / "cytearc"
+# The kernels of connectivity maps and UMAP layouts, each held by a module
+# attribute or returned by a call of one. The serial layout epoch is
+# umap-learn's epoch function, which CyteArc compiles to release the GIL.
 UMAP_KERNELS = {
     "smooth_knn_dist": ("umap.umap_", "smooth_knn_dist"),
     "compute_membership_strengths": ("umap.umap_", "compute_membership_strengths"),
-    "serial_epoch": ("umap.layouts", "_nb_optimize_layout_euclidean_single_epoch"),
+    "serial_epoch": ("cytearc.embeddings.umap", "_serial_epoch_kernel"),
     "parallel_epoch": (
         "umap.layouts",
         "_nb_optimize_layout_euclidean_single_epoch_parallel",
@@ -597,7 +600,8 @@ def _layout(graph: sparse.coo_matrix, *, parallel: bool) -> np.ndarray:
 
 def _umap_kernel(name: str) -> Any:
     module, attribute = UMAP_KERNELS[name]
-    return getattr(importlib.import_module(module), attribute)
+    holder = getattr(importlib.import_module(module), attribute)
+    return holder if isinstance(holder, Dispatcher) else holder()
 
 
 def run_umap_kernels() -> dict[str, Any]:
@@ -640,7 +644,12 @@ def _fresh_umap_kernels(monkeypatch: pytest.MonkeyPatch) -> None:
         fresh = type(kernel)(
             kernel.py_func, locals=kernel.locals, targetoptions=kernel.targetoptions
         )
-        monkeypatch.setattr(importlib.import_module(module), attribute, fresh)
+        holder = getattr(importlib.import_module(module), attribute)
+        monkeypatch.setattr(
+            importlib.import_module(module),
+            attribute,
+            fresh if isinstance(holder, Dispatcher) else lambda fresh=fresh: fresh,
+        )
 
 
 def test_connectivity_and_umap_layouts_cache_their_umap_learn_kernels() -> None:

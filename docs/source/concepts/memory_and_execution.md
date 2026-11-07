@@ -123,6 +123,8 @@ On shared hosts, multiprocess jobs, or remote object stores, set `CYTEARC_WORKER
 More workers can increase concurrent buffers or remote requests, so pair a large worker budget with an explicit `mem_budget`.
 Opt-in parallel UMAP layouts and ANN index builds are faster but not reproducible: two runs on several threads can differ even with the same thread count.
 Their artifact identities therefore record only the `parallel` or `ann_parallel` flag, and the thread counts are execution options, so the same request reuses its result on any machine.
+A serial UMAP layout runs on one thread and releases the GIL during each epoch, so other Python threads of the process, such as an application's heartbeat, keep running.
+Doublet detection scores as many samples at once as the workers and the memory budget hold, each sample's index built on one thread, so its scores are the same for any thread count.
 Leiden clustering with the default `"cytearc"` backend runs on the worker budget and returns identical labels for any thread count, so its artifacts record no worker count either; the optional `"igraph"` and `"leidenalg"` backends run on one thread.
 t-SNE always runs on one thread through the optional `sgtsnepi` package, so its artifacts record no worker count.
 
