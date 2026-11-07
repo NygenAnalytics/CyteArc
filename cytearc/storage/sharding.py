@@ -65,10 +65,16 @@ class CountLayoutMemoryError(MemoryBudgetError):
 
 
 @dataclass(frozen=True, slots=True)
-class _DenseWriteBand:
+class DenseRowBand:
     start: int
     end: int
     values: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class DenseWriteBand:
+    destination: zarr.Array
+    band: DenseRowBand
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,6 +537,135 @@ class SparseShardBuffer:
         return values
 
 
+class DenseBandBuffer:
+    """Copy dense source rows into the complete row bands of one destination.
+
+    A band ends at a shard boundary of the destination or at ``endRow``, and
+    holds ``dtype``, the destination dtype by default. A value that an integer
+    ``dtype`` cannot hold raises OverflowError instead of wrapping. With
+    ``finiteOperation``, the operation that produced the values, a NaN or
+    infinite value raises NonFiniteArtifactError, which names the destination
+    array and the row.
+    """
+
+    def __init__(
+        self,
+        destination: zarr.Array | ZarrArraySpec,
+        *,
+        dtype: Any | None = None,
+        startRow: int = 0,
+        endRow: int | None = None,
+        finiteOperation: str | None = None,
+    ) -> None:
+        geometry, destination_dtype = _destination_geometry(destination)
+        self.nRows = max(0, int(geometry.shape[0]))
+        self.nColumns = max(0, int(geometry.shape[1]))
+        self.shardRows = geometry.axisShard(0)
+        self.destinationDtype = destination_dtype
+        self.dtype = np.dtype(destination_dtype if dtype is None else dtype)
+        self.startRow = max(0, int(startRow))
+        self.endRow = self.nRows if endRow is None else int(endRow)
+        if self.startRow > self.endRow or self.endRow > self.nRows:
+            raise ValueError("Dense buffer row window is outside the destination")
+        self._finite: tuple[str, str] | None = None
+        if finiteOperation is not None:
+            if not isinstance(destination, zarr.Array):
+                raise TypeError(
+                    "finiteOperation needs a destination array, whose name its "
+                    "refusal of a NaN or infinite value gives"
+                )
+            self._finite = (finiteOperation, destination.basename)
+        self.rows = self.startRow
+        self._band: np.ndarray | None = None
+        self._bandStart = self.startRow
+        self._filled = 0
+
+    @property
+    def residentBytes(self) -> int:
+        return 0 if self._band is None else int(self._band.nbytes)
+
+    def add(self, values: Any) -> Iterator[DenseRowBand]:
+        rows = np.asarray(values)
+        if rows.ndim != 2 or rows.shape[1] != self.nColumns:
+            raise ValueError("Dense source batch has an invalid shape")
+        n_rows = int(rows.shape[0])
+        if self.rows + n_rows > self.endRow:
+            raise ValueError("Dense stream contains more rows than its destination")
+        source_start = 0
+        while source_start < n_rows:
+            if self._band is None:
+                end = min(
+                    self.endRow,
+                    (self._bandStart // self.shardRows + 1) * self.shardRows,
+                )
+                self._band = np.empty(
+                    (end - self._bandStart, self.nColumns), dtype=self.dtype
+                )
+                self._filled = 0
+            band = self._band
+            copied = min(band.shape[0] - self._filled, n_rows - source_start)
+            piece = rows[source_start : source_start + copied]
+            if self.dtype.kind in "biu":
+                # A value the integer dtype cannot hold raises instead of
+                # wrapping.
+                piece = checked_sparse_cast(piece, self.dtype)
+            band_rows = band[self._filled : self._filled + copied]
+            if self._finite is not None:
+                # A value that overflows the band dtype, or the destination
+                # dtype that the write casts it to, becomes infinite, so the
+                # cast rows are checked.
+                with np.errstate(over="ignore", invalid="ignore"):
+                    band_rows[...] = piece
+                    stored_rows = band_rows.astype(self.destinationDtype, copy=False)
+                bad_row = first_nonfinite_row(stored_rows)
+                if bad_row is not None:
+                    operation, name = self._finite
+                    raise NonFiniteArtifactError(
+                        operation, name, self._bandStart + self._filled + bad_row
+                    )
+            else:
+                band_rows[...] = piece
+            self._filled += copied
+            self.rows += copied
+            source_start += copied
+            if self._filled == band.shape[0]:
+                start = self._bandStart
+                self._bandStart += band.shape[0]
+                self._band = None
+                yield DenseRowBand(start, self._bandStart, band)
+
+    def finish(self) -> None:
+        """Check that every row of the window arrived.
+
+        A band is handed over with its last row, so no band remains here.
+
+        Raises:
+            ValueError: If the rows added fall short of the window.
+        """
+        if self.rows != self.endRow:
+            raise ValueError(
+                f"Dense stream contains {self.rows - self.startRow} rows, "
+                f"expected {self.endRow - self.startRow}"
+            )
+
+
+def filling_band_bytes(destinations: Sequence[zarr.Array | ZarrArraySpec]) -> int:
+    """Return the bytes of the bands that a producer fills beside its writes.
+
+    A producer that copies each source batch into a band of every destination,
+    through one :class:`DenseBandBuffer` each, holds a partly filled band of
+    every destination but the one whose band it handed over last, so at most
+    every band but the smallest. The band that one destination's producer
+    fills takes the place of a finished write, so it needs nothing beside the
+    writes' own bands.
+    """
+    sizes = [
+        _band_geometry(_destination_geometry(destination)[0])[0]
+        for destination in destinations
+    ]
+    return sum(sizes) - min(sizes) if sizes else 0
+
+
 def _band_geometry(
     destination: zarr.Array | ArrayGeometry,
     nRows: int | None = None,
@@ -633,6 +768,69 @@ def plan_dense_write(
             nUnits=max(1, int(nTasks)),
             unitBytes=unit_bytes,
             residentBytes=residentBytes + resultBytes,
+            innerReadBytes=inner_bytes,
+            maxInnerReads=n_chunks,
+            writes=True,
+            chunksPerShard=max(1, n_chunks),
+        ),
+        policy=io,
+    )
+
+
+def plan_dense_band_writes(
+    destinations: Sequence[zarr.Array | ZarrArraySpec],
+    resources: ResourceBudget,
+    nTasks: int,
+    io: StorageIoPolicy | None = None,
+    *,
+    residentBytes: int = 0,
+    producerBytes: int = 0,
+) -> OperationPlan:
+    """Plan writing the dense row bands of several destinations together.
+
+    Each worker writes one band of any destination, as :func:`plan_dense_write`
+    plans the write of one, so a unit holds what the most demanding band
+    needs. One destination is planned by :func:`plan_dense_write`. A producer
+    that fills the bands holds them beside the writes; add
+    :func:`filling_band_bytes` to ``residentBytes`` for it.
+
+    Raises:
+        ValueError: If ``destinations`` is empty.
+        MemoryBudgetError: If one band write does not fit beside
+            ``residentBytes``.
+    """
+    specs = tuple(destinations)
+    if not specs:
+        raise ValueError("At least one dense write destination is required")
+    if len(specs) == 1:
+        return plan_dense_write(
+            specs[0],
+            resources,
+            nTasks,
+            io=io,
+            residentBytes=residentBytes,
+            producerBytes=producerBytes,
+        )
+    geometries = [_band_geometry(_destination_geometry(spec)[0]) for spec in specs]
+    unit_bytes = max(
+        _row_band_task_peak(
+            sourceBytes=producerBytes,
+            denseBytes=dense_bytes,
+            innerChunkBytes=inner_bytes,
+            nChunks=n_chunks,
+            innerConcurrency=1,
+        )
+        - inner_bytes
+        for dense_bytes, inner_bytes, n_chunks in geometries
+    )
+    inner_bytes = max(inner for _dense, inner, _chunks in geometries)
+    n_chunks = max(chunks for _dense, _inner, chunks in geometries)
+    return plan_operation(
+        resources,
+        WorkShape(
+            nUnits=max(1, int(nTasks)),
+            unitBytes=unit_bytes,
+            residentBytes=residentBytes,
             innerReadBytes=inner_bytes,
             maxInnerReads=n_chunks,
             writes=True,
@@ -907,10 +1105,9 @@ def write_dense_from_row_batches(
         finally:
             _close_iterator(source)
         return 0
-    shard_rows = array_shard_rows(dst)
-    target_dtype = np.dtype(dst.dtype if dtype is None else dtype)
     first: list[np.ndarray] = []
     try:
+        buffer = DenseBandBuffer(dst, dtype=dtype, finiteOperation=checked_operation)
         for batch in source:
             values = np.asarray(batch)
             if values.ndim != 2 or values.shape[1] != dst.shape[1]:
@@ -928,16 +1125,16 @@ def write_dense_from_row_batches(
             if producerReserveBytes is None
             else producerReserveBytes
         )
-        n_bands = (int(dst.shape[0]) + shard_rows - 1) // shard_rows
+        n_bands = row_band_task_count(int(dst.shape[0]), buffer.shardRows)
         write_plan = plan_dense_write(
             dst,
             resources,
             n_bands,
             io=io,
             residentBytes=residentBytes + producer_bytes,
-            producerBytes=shard_rows
+            producerBytes=buffer.shardRows
             * dst.shape[1]
-            * max(0, target_dtype.itemsize - dst.dtype.itemsize),
+            * max(0, buffer.dtype.itemsize - dst.dtype.itemsize),
         )
         del batch, values, allocation
     except BaseException:
@@ -948,18 +1145,12 @@ def write_dense_from_row_batches(
         yield first.pop()
         yield from source
 
-    def aligned() -> Iterator[_DenseWriteBand]:
-        n_columns = int(dst.shape[1])
-        buffer = np.empty((shard_rows, n_columns), dtype=target_dtype)
-        buffered_rows = 0
-        position = 0
+    def bands() -> Iterator[DenseWriteBand]:
         try:
             for batch in source_batches():
                 values = np.asarray(batch)
                 if values.ndim != 2 or values.shape[1] != dst.shape[1]:
                     raise ValueError("Dense source batch has an invalid shape")
-                if values.shape[0] == 0:
-                    continue
                 if values.nbytes > producer_bytes:
                     # The write reserved its plan beside the producer's
                     # reservation; with this batch in its place it would
@@ -973,92 +1164,63 @@ def write_dense_from_row_batches(
                         budget_bytes=int(resources.memoryBytes),
                         item="a source batch beyond its producer reservation",
                     )
-                if position + buffered_rows + values.shape[0] > dst.shape[0]:
-                    raise ValueError(
-                        "Dense stream contains more rows than its destination"
-                    )
-                source_start = 0
-                while source_start < int(values.shape[0]):
-                    copied = min(
-                        shard_rows - buffered_rows,
-                        int(values.shape[0]) - source_start,
-                    )
-                    rows = values[source_start : source_start + copied]
-                    if target_dtype.kind in "biu":
-                        # A value the integer dtype cannot hold raises instead
-                        # of wrapping.
-                        rows = checked_sparse_cast(rows, target_dtype)
-                    band_rows = buffer[buffered_rows : buffered_rows + copied]
-                    if checked_operation is not None:
-                        # A value that overflows the band dtype, or the
-                        # destination dtype that the write casts it to,
-                        # becomes infinite, so the cast rows are checked.
-                        with np.errstate(over="ignore", invalid="ignore"):
-                            band_rows[...] = rows
-                            stored_rows = band_rows.astype(dst.dtype, copy=False)
-                        bad_row = first_nonfinite_row(stored_rows)
-                        if bad_row is not None:
-                            raise NonFiniteArtifactError(
-                                checked_operation,
-                                dst.basename,
-                                position + buffered_rows + bad_row,
-                            )
-                    else:
-                        band_rows[...] = rows
-                    buffered_rows += copied
-                    source_start += copied
-                    if buffered_rows == shard_rows:
-                        yield _DenseWriteBand(
-                            position,
-                            position + shard_rows,
-                            buffer,
-                        )
-                        position += shard_rows
-                        buffer = np.empty(
-                            (shard_rows, n_columns),
-                            dtype=target_dtype,
-                        )
-                        buffered_rows = 0
-            if buffered_rows:
-                yield _DenseWriteBand(
-                    position,
-                    position + buffered_rows,
-                    buffer[:buffered_rows],
-                )
+                for band in buffer.add(values):
+                    yield DenseWriteBand(dst, band)
+            buffer.finish()
         finally:
             _close_iterator(source)
 
-    target = writable(dst)
-    workers = min(write_plan.computeWorkers, write_plan.writeWorkers)
+    return write_dense_bands(
+        bands(),
+        plan=write_plan,
+        countSummaries=None if countSummary is None else {dst.path: countSummary},
+        msg=msg,
+        total=n_bands,
+    )
+
+
+def write_dense_bands(
+    writes: Iterator[DenseWriteBand],
+    *,
+    plan: OperationPlan,
+    countSummaries: Mapping[str, "CountSummary"] | None = None,
+    msg: str | None = None,
+    total: int | None = None,
+) -> int:
+    """Write complete dense row bands with the workers that ``plan`` admits.
+
+    The bands may belong to several destinations and arrive in any order, as
+    from producers of disjoint row windows. ``countSummaries`` maps
+    destination paths to summaries filled from each band. Returns the rows
+    written.
+    """
+    workers = min(plan.computeWorkers, plan.writeWorkers)
     write_seconds: list[float] = []
 
-    def write_band(band: _DenseWriteBand) -> int:
+    def write_band(item: DenseWriteBand) -> int:
         started = time.perf_counter()
-        if countSummary is not None:
-            countSummary.update(band.start, band.values)
-        target[band.start : band.end, :] = band.values
+        band = item.band
+        if countSummaries is not None:
+            countSummaries[item.destination.path].update(band.start, band.values)
+        writable(item.destination)[band.start : band.end, :] = band.values
         write_seconds.append(time.perf_counter() - started)
         return band.end - band.start
 
     total_rows = int(
         sum(
             stream_shards(
-                aligned(),
+                writes,
                 write_band,
                 workers=workers,
-                io_concurrency=write_plan.ioConcurrency,
+                io_concurrency=plan.ioConcurrency,
                 msg=msg or "Writing Zarr array",
-                total=n_bands,
+                total=total,
             )
         )
     )
-    if total_rows != int(dst.shape[0]):
-        raise ValueError(
-            f"Dense stream contains {total_rows} rows, expected {dst.shape[0]}"
-        )
     record_execution_report(
         ExecutionReport(
-            plan=write_plan,
+            plan=plan,
             unitKind="denseRowBand",
             actualReadWorkers=1,
             actualComputeWorkers=workers,
@@ -1395,20 +1557,21 @@ def dense_counts_admission(
 ) -> Callable[[tuple[ZarrArraySpec, ...], ResourceBudget], object]:
     """Return the ``admitCounts`` of a dense write for :func:`fit_count_layout`.
 
-    A layout is admitted when one worker writes one destination row band of
-    each counts array beside ``residentBytes``, while its producer holds
-    ``producerBytes`` of the band's rows.
+    A layout is admitted when one worker writes one destination row band
+    beside ``residentBytes``, while its producer holds ``producerBytes`` of
+    the rows of the shortest band. Several counts arrays are written in one
+    pass over the rows, as :func:`plan_dense_band_writes` plans them, so the
+    producer also holds the bands that :func:`filling_band_bytes` counts.
     """
 
     def admit(specs: tuple[ZarrArraySpec, ...], resources: ResourceBudget) -> object:
-        for spec in specs:
-            plan_dense_write(
-                spec,
-                resources,
-                1,
-                residentBytes=residentBytes,
-                producerBytes=producerBytes(_band_rows(spec)),
-            )
+        plan_dense_band_writes(
+            specs,
+            resources,
+            1,
+            residentBytes=residentBytes + filling_band_bytes(specs),
+            producerBytes=producerBytes(min(map(_band_rows, specs))),
+        )
         return None
 
     return admit

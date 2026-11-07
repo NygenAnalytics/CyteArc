@@ -1,6 +1,6 @@
 import math
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, cast
@@ -34,6 +34,10 @@ from ..utils.matrix_values import ImportValues, MatrixValuesKind
 # makes a categorical of any text that repeats a value, so a column of nearly
 # unique text can hold about one category per row.
 _MAX_STORED_CATEGORIES = 10_000
+# A dense matrix is read about this many values at a time, as its value scan
+# reads it, or in whole rows of its HDF5 chunks. Each batch is copied into a
+# band of every assay, so a batch need not hold a destination row band.
+_DENSE_BATCH_VALUES = 1 << 20
 _MISSING_DISPLAY = {"missing_label": "NA", "missing_color": "#bdbdbd"}
 
 
@@ -202,6 +206,47 @@ def _finished_count_bands(
         for band in buffer.finish():
             producer_bytes = sum(item.residentBytes for item in buffers.values())
             yield assay_name, band, producer_bytes
+
+
+def _dense_count_bands(
+    reader: H5adReader,
+    batch_rows: int,
+    row_start: int,
+    row_end: int,
+    buffers: Mapping[str, Any],
+    columns: Mapping[str, np.ndarray] | None,
+    linear: Mapping[str, MatrixValuesKind],
+    stop: Any | None = None,
+) -> Iterator[tuple[str, Any]]:
+    """Copy dense rows ``[row_start, row_end)`` into the bands of each assay.
+
+    Yields each assay's complete bands from its :class:`DenseBandBuffer` in
+    ``buffers``. ``columns`` holds the source columns of each assay, or None
+    for one assay of every column, and ``linear`` maps an assay to the log
+    kind whose log its values undo. A ``stop`` that is set ends the rows
+    early.
+    """
+    from ..utils.matrix_values import linear_values
+
+    for values in reader.consume_dense_rows(batch_rows, row_start, row_end):
+        if stop is not None and stop.is_set():
+            return
+        for assay_name, buffer in buffers.items():
+            part = values if columns is None else values[:, columns[assay_name]]
+            if assay_name in linear:
+                part = linear_values(
+                    part, linear[assay_name], buffer.dtype, assay=assay_name
+                )
+            if part.dtype.kind == "f" and buffer.dtype.kind == "f":
+                # A sparse batch leaves out negative zeros, so the zeros that
+                # dense files stored were positive, as adding zero makes them.
+                np.add(part, 0, out=part)
+            for band in buffer.add(part):
+                yield assay_name, band
+            del part
+        del values
+    for buffer in buffers.values():
+        buffer.finish()
 
 
 def _producer_process_bytes(producers: int, reserveBytes: int) -> int:
@@ -458,6 +503,158 @@ def _write_h5ad_process_window(
             connection.send(("done", (reports, windows)))
 
     _run_worker(reader_kwargs, connection, work)
+
+
+def _read_dense_h5ad_process_window(
+    reader_kwargs: dict[str, Any],
+    batch_rows: int,
+    row_start: int,
+    row_end: int,
+    destination_specs: dict[str, Any],
+    columns: Mapping[str, np.ndarray] | None,
+    connection: Any,
+    stop: Any,
+    linear: Mapping[str, MatrixValuesKind],
+) -> None:
+    """Send the dense bands of each assay over a row window to the parent."""
+    from ..storage.sharding import DenseBandBuffer
+
+    def work(reader: H5adReader) -> None:
+        buffers = {
+            assay_name: DenseBandBuffer(spec, startRow=row_start, endRow=row_end)
+            for assay_name, spec in destination_specs.items()
+        }
+        for item in _dense_count_bands(
+            reader, batch_rows, row_start, row_end, buffers, columns, linear, stop
+        ):
+            if stop.is_set():
+                return
+            connection.send(("band", item))
+            if stop.is_set():
+                return
+        if not stop.is_set():
+            connection.send(("done", None))
+
+    _run_worker(reader_kwargs, connection, work)
+
+
+def _write_dense_h5ad_process_window(
+    reader_kwargs: dict[str, Any],
+    batch_rows: int,
+    row_start: int,
+    row_end: int,
+    zarr_location: str,
+    storage_options: dict[str, Any] | None,
+    workspace: str | None,
+    assay_names: tuple[str, ...],
+    columns: Mapping[str, np.ndarray] | None,
+    plan: Any,
+    connection: Any,
+    stop: Any,
+    linear: Mapping[str, MatrixValuesKind],
+) -> None:
+    """Write the dense bands of each assay over a row window with ``plan``."""
+    from ..storage.execution import execution_report_scope
+    from ..storage.identity import CountSummary
+    from ..storage.schema import load_count_array
+    from ..storage.sharding import DenseBandBuffer, DenseWriteBand, write_dense_bands
+    from ..storage.stores import load_zarr
+
+    def work(reader: H5adReader) -> None:
+        root = load_zarr(zarr_location, mode="a", storage_options=storage_options)
+        destinations = {
+            assay_name: load_count_array(root, assay_name, workspace)
+            for assay_name in assay_names
+        }
+        buffers = {
+            assay_name: DenseBandBuffer(destination, startRow=row_start, endRow=row_end)
+            for assay_name, destination in destinations.items()
+        }
+        summaries = {
+            assay_name: CountSummary(destination, rows=(row_start, row_end))
+            for assay_name, destination in destinations.items()
+        }
+        writes = (
+            DenseWriteBand(destinations[assay_name], band)
+            for assay_name, band in _dense_count_bands(
+                reader, batch_rows, row_start, row_end, buffers, columns, linear, stop
+            )
+        )
+        with execution_report_scope() as reports:
+            write_dense_bands(
+                writes,
+                plan=plan,
+                countSummaries={
+                    destinations[name].path: summary
+                    for name, summary in summaries.items()
+                },
+            )
+        if not stop.is_set():
+            windows = {name: summary.window() for name, summary in summaries.items()}
+            connection.send(("done", (reports, windows)))
+
+    _run_worker(reader_kwargs, connection, work)
+
+
+def _producer_messages(
+    target: Callable[..., None],
+    windows: Sequence[tuple[int, int]],
+    arguments: Callable[[int, int], tuple[Any, ...]],
+    linear: Mapping[str, MatrixValuesKind],
+    *,
+    role: str,
+    duplex: bool,
+) -> Generator[tuple[int, str, Any], None, None]:
+    """Run ``target`` in a spawned process for each row window, yielding messages.
+
+    A window's process takes the leading arguments that ``arguments`` gives
+    for the window's rows, then its end of a pipe, the shared stop event, and
+    ``linear``. The messages end once every process is done, and closing the
+    iterator stops the processes.
+    """
+    from multiprocessing import get_context
+
+    context = get_context("spawn")
+    stop = context.Event()
+    connections: dict[Any, int] = {}
+    workers: list[Any] = []
+    try:
+        for index, (row_start, row_end) in enumerate(windows):
+            parent_connection, child_connection = context.Pipe(duplex=duplex)
+            worker = context.Process(
+                target=target,
+                args=(*arguments(row_start, row_end), child_connection, stop, linear),
+                name=f"h5ad-{role}-{index}",
+                daemon=True,
+            )
+            worker.start()
+            child_connection.close()
+            connections[parent_connection] = index
+            workers.append(worker)
+        yield from _worker_messages(connections, workers, role)
+    finally:
+        _stop_workers(stop, workers, list(connections))
+
+
+def _merge_window_writes(
+    messages: Generator[tuple[int, str, Any], None, None],
+    summaries: dict[str, Any],
+) -> None:
+    """Record the reports and merge the count summaries that writer processes send.
+
+    A writer sends only its done message; its errors raise here.
+    """
+    from contextlib import closing
+
+    from ..storage.execution import record_execution_report
+
+    with closing(messages):
+        for _index, _kind, payload in messages:
+            reports, summary_windows = payload
+            for report in reports:
+                record_execution_report(report)
+            for assay_name, window in summary_windows.items():
+                summaries[assay_name].merge(window)
 
 
 def _validate_assay_names(names: tuple[str, ...]) -> None:
@@ -946,7 +1143,11 @@ class H5adToZarr:
 
         Args:
             batch_size: Number of source cells per batch, at most one
-                        destination row band, which is the default.
+                        destination row band, which is the default for a
+                        sparse matrix. A dense matrix is copied into dense
+                        row bands, so its batches hold about a million values
+                        or whole rows of its HDF5 chunks by default, and this
+                        caps them.
 
         Raises:
             ValueError: If ``batch_size`` is not positive.
@@ -1274,19 +1475,14 @@ class H5adToZarr:
             for name in self.assayNames
         }
 
-    def _count_import_requirements(
-        self,
-    ) -> tuple[int, Callable[[int], int], bool]:
-        """Return the resident and extra producer bytes of the counts write.
+    def _count_resident_bytes(self) -> int:
+        """Return the bytes that the counts write holds from start to end.
 
-        The third value says whether every source batch arrives marked
-        canonical, which a split into assays and an undone log keep, so the
-        write sorts and sums none. The layout fit and the write plan the
-        same import from these.
+        They are the reader's row counts or converted rows, the count
+        summaries of every cell, and the features of each assay.
         """
         from ..storage.identity import CountSummary
 
-        self.h5ad._prepare_sparse_import()
         resident = (
             self.h5ad.materialized_csr_bytes()
             + max(0, int(self.h5ad._sparse_import_resident_bytes()))
@@ -1301,6 +1497,20 @@ class H5adToZarr:
             )
         if self._projection is not None:
             resident += sum(array.nbytes for array in self._projection)
+        return resident
+
+    def _count_import_requirements(
+        self,
+    ) -> tuple[int, Callable[[int], int], bool]:
+        """Return the resident and extra producer bytes of a sparse counts write.
+
+        The third value says whether every source batch arrives marked
+        canonical, which a split into assays and an undone log keep, so the
+        write sorts and sums none. The layout fit and the write plan the
+        same import from these.
+        """
+        self.h5ad._prepare_sparse_import()
+        resident = self._count_resident_bytes()
         source_itemsize = self.h5ad.consumeDtype.itemsize
         projection_value_bytes = max(
             [
@@ -1310,33 +1520,120 @@ class H5adToZarr:
         )
 
         def extra_producer_bytes(rows: int) -> int:
-            source_rows = min(rows, self.h5ad.nCells)
-            extra = (
-                source_rows * self.h5ad.nFeatures * source_itemsize
-                if self.h5ad.matrixOrientation == "dense"
-                else 0
+            if self.assayFeatures is None:
+                return 0
+            source_values = max(0, int(self.h5ad.max_batch_nnz(rows)))
+            return source_values * (
+                projection_value_bytes
+                + 4 * np.dtype(np.int64).itemsize
+                + np.dtype(np.bool_).itemsize
             )
-            if self.assayFeatures is not None:
-                source_values = max(0, int(self.h5ad.max_batch_nnz(rows)))
-                extra += source_values * (
-                    projection_value_bytes
-                    + 4 * np.dtype(np.int64).itemsize
-                    + np.dtype(np.bool_).itemsize
-                )
-            return extra
 
         return resident, extra_producer_bytes, self.h5ad._canonical_batches()
+
+    def _dense_batch_rows(self, bandRows: int, requested: int | None = None) -> int:
+        """Return the rows of each batch that a dense counts write reads.
+
+        A batch holds about a million values, as the value scan reads them,
+        or one row of the matrix's HDF5 chunks when that holds more. It holds
+        no more rows than ``requested``, nor than leave its producer holding
+        more bytes than ``bandRows`` rows of every assay hold in storage, so a
+        batch never outweighs the bands that it fills. Within these limits a
+        batch of a chunked matrix holds whole rows of chunks, which HDF5 then
+        decompresses once each.
+        """
+        band_bytes = int(bandRows) * sum(
+            width * np.dtype(self.storageDtypes[assay_name]).itemsize
+            for assay_name, width in self._assay_widths().items()
+        )
+        value_rows = _DENSE_BATCH_VALUES // max(1, int(self.h5ad.nFeatures))
+        chunk_rows = self.h5ad._dense_chunk_rows()
+        if chunk_rows is not None:
+            value_rows = max(value_rows, chunk_rows)
+        rows = max(
+            1,
+            min(
+                int(bandRows),
+                value_rows,
+                band_bytes // max(1, self._dense_producer_bytes(1)),
+            ),
+        )
+        if chunk_rows is not None and rows >= chunk_rows:
+            rows -= rows % chunk_rows
+        return rows if requested is None else max(1, min(rows, int(requested)))
+
+    def _dense_producer_bytes(self, rows: int) -> int:
+        """Return the bytes that a dense counts write holds for ``rows`` source rows.
+
+        The producer holds the batch in the source dtype and transforms the
+        columns of one assay at a time: a copy of them when the matrix splits
+        into assays, beside either the float64 products and exponentials of
+        undoing a log, or the truncated values and comparison that check a
+        cast to an integer storage dtype, or that cast's result.
+        """
+        source_itemsize = int(np.dtype(self.h5ad.sourceMatrixDtype).itemsize)
+        widths = self._assay_widths()
+
+        def transform_bytes(assay_name: str) -> int:
+            per_value = source_itemsize if self.assayFeatures is not None else 0
+            storage = np.dtype(self.storageDtypes[assay_name])
+            if assay_name in self._linear:
+                per_value += 2 * np.dtype(np.float64).itemsize
+            elif storage.kind in "biu":
+                per_value += max(
+                    source_itemsize + np.dtype(np.bool_).itemsize, storage.itemsize
+                )
+            return widths[assay_name] * per_value
+
+        return int(rows) * (
+            int(self.h5ad.nFeatures) * source_itemsize
+            + max(transform_bytes(assay_name) for assay_name in self.assayNames)
+        )
+
+    def _dense_columns(self) -> dict[str, np.ndarray] | None:
+        """Return the source columns of each assay, or None for one assay of all."""
+        if self.assayFeatures is None:
+            return None
+        return {
+            assay_name: self.assayFeatures[assay_name].featureIndexes
+            for assay_name in self.assayNames
+        }
 
     def _fit_count_layout(
         self, requested: CountMatrixPolicy | None
     ) -> CountMatrixPolicy:
-        """Return the requested or default count layout if its writes fit the budget."""
-        from ..storage.sharding import fit_count_layout, sparse_counts_admission
+        """Return the requested or default count layout if its writes fit the budget.
+
+        A dense matrix is admitted as its write runs, through dense row bands
+        of every assay, and a sparse one through the sparse band writer.
+        """
+        from ..storage.sharding import (
+            dense_counts_admission,
+            fit_count_layout,
+            sparse_counts_admission,
+        )
         from .counts_t import counts_t_assays
 
-        resident, extra_producer_bytes, canonical_batches = (
-            self._count_import_requirements()
-        )
+        if self.h5ad.matrixOrientation == "dense":
+            admit_counts = dense_counts_admission(
+                self._count_resident_bytes(),
+                lambda band_rows: self._dense_producer_bytes(
+                    self._dense_batch_rows(band_rows)
+                ),
+            )
+        else:
+            resident, extra_producer_bytes, canonical_batches = (
+                self._count_import_requirements()
+            )
+            admit_counts = sparse_counts_admission(
+                nRows=self.h5ad.nCells,
+                maxWindowNnz=self.h5ad.max_batch_nnz,
+                sourceDtype=self.h5ad.consumeDtype,
+                residentBytes=resident,
+                producerStagingBytes=self.h5ad.producer_batch_staging_bytes,
+                extraProducerBytes=extra_producer_bytes,
+                canonicalBatches=canonical_batches,
+            )
         widths = self._assay_widths()
         return fit_count_layout(
             {
@@ -1347,28 +1644,13 @@ class H5adToZarr:
             profile=self.profile,
             memoryBytes=self.resources.memoryBytes,
             transposed=counts_t_assays(self.assayNames, self.assayTypes),
-            admitCounts=sparse_counts_admission(
-                nRows=self.h5ad.nCells,
-                maxWindowNnz=self.h5ad.max_batch_nnz,
-                sourceDtype=self.h5ad.consumeDtype,
-                residentBytes=resident,
-                producerStagingBytes=self.h5ad.producer_batch_staging_bytes,
-                extraProducerBytes=extra_producer_bytes,
-                canonicalBatches=canonical_batches,
-            ),
+            admitCounts=admit_counts,
             requested=DEFAULT_COUNT_MATRIX_POLICY if requested is None else requested,
         )
 
     def _write_counts(self, batch_size: int | None = None) -> None:
         """Write and finalize cell-major ``counts`` (profiling stage split helper)."""
         from ..storage.identity import CountSummary, finalize_counts
-        from ..storage.layout import array_shard_rows
-        from ..storage.sharding import (
-            SparseShardBuffer,
-            aligned_row_windows,
-            resolve_sparse_import_batch,
-            write_sparse_bands,
-        )
         from ..storage.schema import load_count_array
 
         if batch_size is not None and batch_size <= 0:
@@ -1378,10 +1660,6 @@ class H5adToZarr:
             assay_name: load_count_array(self.z, assay_name, self.workspace)
             for assay_name in self.assayNames
         }
-        buffers = {
-            assay_name: SparseShardBuffer(destination)
-            for assay_name, destination in destinations.items()
-        }
         summaries = {
             assay_name: CountSummary(destination)
             for assay_name, destination in destinations.items()
@@ -1390,6 +1668,259 @@ class H5adToZarr:
             f"Writing counts with up to {self.resources.workers} row-band writer(s)"
         )
         started = time.perf_counter()
+        if self.h5ad.matrixOrientation == "dense":
+            self._write_dense_counts(batch_size, destinations, summaries)
+        else:
+            self._write_sparse_counts(batch_size, destinations, summaries)
+        counts_seconds = time.perf_counter() - started
+        # counts is the durable physical orientation for H5AD imports. Public
+        # dump() always finalizes paired RNA countsT after this step.
+        logger.debug(f"Counts written in {counts_seconds:.1f}s")
+        logger.info(
+            f"Wrote {self.h5ad.nCells} cells and {self.h5ad.nFeatures} features "
+            f"from H5AD to {len(destinations)} assay(s)"
+        )
+        for assay_name, summary in summaries.items():
+            finalize_counts(destinations[assay_name], summary=summary)
+
+    def _producer_window_limit(self, shard_rows: int) -> int:
+        """Return how many producers may read disjoint row windows.
+
+        Half the workers read, at most ``io.readWorkers`` of them, and each
+        window holds at least one band of ``shard_rows`` rows.
+        """
+        limit = max(1, (int(self.resources.workers) + 1) // 2)
+        if self.io is not None and self.io.readWorkers is not None:
+            limit = min(limit, max(1, int(self.io.readWorkers)))
+        if self.h5ad.matrixOrientation == "csc":
+            limit = 1
+        return max(1, min(limit, (self.h5ad.nCells + shard_rows - 1) // shard_rows))
+
+    def _write_dense_counts(
+        self,
+        batch_size: int | None,
+        destinations: dict[str, Any],
+        summaries: dict[str, Any],
+    ) -> None:
+        """Write a dense matrix's counts through dense row bands of every assay.
+
+        Each batch of about a million values is copied into a band of every
+        assay, so the write holds bands, never a sparse copy of the values.
+        Producer processes read and write disjoint row windows when the
+        budget holds their writes side by side: each process writes its own
+        window when the destination is a path, and otherwise sends its bands
+        to this process to write.
+        """
+        from ..storage.identity import CountSummary
+        from ..storage.layout import array_shard_rows
+        from ..storage.sharding import (
+            aligned_row_windows,
+            filling_band_bytes,
+            plan_dense_band_writes,
+            row_band_task_count,
+            write_dense_bands,
+        )
+
+        arrays = tuple(destinations.values())
+        n_cells = self.h5ad.nCells
+        band_rows = [array_shard_rows(array) for array in arrays]
+        band_bytes = [
+            rows * int(array.shape[1]) * np.dtype(array.dtype).itemsize
+            for rows, array in zip(band_rows, arrays, strict=True)
+        ]
+        batch_rows = self._dense_batch_rows(min(band_rows), batch_size)
+        producer_bytes = self._dense_producer_bytes(batch_rows)
+        resident = self._count_resident_bytes()
+        filling = filling_band_bytes(arrays)
+
+        def window_tasks(start: int, stop: int) -> int:
+            return sum(row_band_task_count(stop - start, rows) for rows in band_rows)
+
+        tasks = window_tasks(0, n_cells)
+        # The layout fit admitted this plan with one worker.
+        plan = plan_dense_band_writes(
+            arrays,
+            self.resources,
+            tasks,
+            self.io,
+            residentBytes=resident + producer_bytes + filling,
+        )
+        shard_rows = math.lcm(*band_rows)
+        direct = isinstance(self._parallelWriteLocation, str)
+        workers = int(self.resources.workers)
+        n_producers = 1
+        write_workers = workers
+        workers_per_process: int | None = None
+        for candidate in range(self._producer_window_limit(shard_rows), 1, -1):
+            candidate_windows = aligned_row_windows(n_cells, shard_rows, candidate)
+            if direct:
+                # Each writer process holds its batch, the bands it fills, and
+                # the count summaries of its window.
+                window_rows = max(stop - start for start, stop in candidate_windows)
+                candidate_resources = ResourceBudget(
+                    (self.resources.memoryBytes - resident) // candidate,
+                    max(1, workers // candidate),
+                )
+                candidate_tasks = max(
+                    window_tasks(start, stop) for start, stop in candidate_windows
+                )
+                candidate_resident = (
+                    resident
+                    + sum(
+                        CountSummary.nbytes_for(window_rows, array.shape[1])
+                        for array in arrays
+                    )
+                    + producer_bytes
+                    + filling
+                )
+            else:
+                # Each reader process holds its batch, a band of every assay,
+                # and the pickled copy of the band it sends; this process
+                # unpickles one band beside its writes.
+                held = producer_bytes + sum(band_bytes) + max(band_bytes)
+                candidate_resources = ResourceBudget(
+                    self.resources.memoryBytes, max(1, workers - candidate)
+                )
+                candidate_tasks = tasks
+                candidate_resident = resident + candidate * held + max(band_bytes)
+            try:
+                candidate_plan = plan_dense_band_writes(
+                    arrays,
+                    candidate_resources,
+                    candidate_tasks,
+                    self.io,
+                    residentBytes=candidate_resident,
+                )
+            except MemoryBudgetError:
+                continue
+            n_producers = len(candidate_windows)
+            plan = candidate_plan
+            if direct:
+                workers_per_process = candidate_resources.workers
+                write_workers = n_producers * workers_per_process
+            else:
+                write_workers = candidate_resources.workers
+            break
+        windows = aligned_row_windows(n_cells, shard_rows, n_producers)
+        direct_process_writes = direct and n_producers > 1
+        self._lastDenseBatchRows = batch_rows
+        self._lastImportProducerCount = n_producers
+        self._lastImportWorkersPerProcess = workers_per_process
+        self._lastImportWriteWorkers = write_workers
+        logger.info(
+            f"Resolved H5AD dense source batch rows={batch_rows} "
+            f"write_tasks={tasks} producers={n_producers} writers={write_workers} "
+            f"workers_per_process={workers_per_process}"
+        )
+        if direct_process_writes:
+            _merge_window_writes(
+                _producer_messages(
+                    _write_dense_h5ad_process_window,
+                    windows,
+                    lambda row_start, row_end: (
+                        self.h5ad._clone_kwargs(),
+                        batch_rows,
+                        row_start,
+                        row_end,
+                        self._parallelWriteLocation,
+                        self.storage_options,
+                        self.workspace,
+                        self.assayNames,
+                        self._dense_columns(),
+                        plan,
+                    ),
+                    self._linear,
+                    role="writer",
+                    duplex=False,
+                ),
+                summaries,
+            )
+            return
+        write_dense_bands(
+            self._dense_count_writes(batch_rows, destinations, windows),
+            plan=plan,
+            countSummaries={
+                destinations[name].path: summary for name, summary in summaries.items()
+            },
+            msg="Writing counts",
+            total=tasks,
+        )
+
+    def _dense_count_writes(
+        self,
+        batch_rows: int,
+        destinations: dict[str, Any],
+        windows: list[tuple[int, int]],
+    ) -> Iterator[Any]:
+        """Yield the dense band writes of every assay, from this process or readers.
+
+        One window is read here; several are read by producer processes,
+        which send their bands.
+        """
+        from contextlib import closing
+
+        from ..storage.sharding import DenseBandBuffer, DenseWriteBand
+
+        if len(windows) <= 1:
+            buffers = {
+                assay_name: DenseBandBuffer(destination)
+                for assay_name, destination in destinations.items()
+            }
+            for assay_name, band in _dense_count_bands(
+                self.h5ad,
+                batch_rows,
+                0,
+                self.h5ad.nCells,
+                buffers,
+                self._dense_columns(),
+                self._linear,
+            ):
+                yield DenseWriteBand(destinations[assay_name], band)
+            return
+        destination_specs = self._destination_specs(destinations)
+        with closing(
+            _producer_messages(
+                _read_dense_h5ad_process_window,
+                windows,
+                lambda row_start, row_end: (
+                    self.h5ad._clone_kwargs(),
+                    batch_rows,
+                    row_start,
+                    row_end,
+                    destination_specs,
+                    self._dense_columns(),
+                ),
+                self._linear,
+                role="producer",
+                duplex=True,
+            )
+        ) as messages:
+            for _index, kind, payload in messages:
+                if kind == "done":
+                    continue
+                assay_name, band = payload
+                yield DenseWriteBand(destinations[assay_name], band)
+
+    def _write_sparse_counts(
+        self,
+        batch_size: int | None,
+        destinations: dict[str, Any],
+        summaries: dict[str, Any],
+    ) -> None:
+        """Write a sparse matrix's counts through sparse bands of every assay."""
+        from ..storage.identity import CountSummary
+        from ..storage.layout import array_shard_rows
+        from ..storage.sharding import (
+            SparseShardBuffer,
+            aligned_row_windows,
+            resolve_sparse_import_batch,
+            write_sparse_bands,
+        )
+
+        buffers = {
+            assay_name: SparseShardBuffer(destination)
+            for assay_name, destination in destinations.items()
+        }
         projection = self._projection
         resident_source_bytes, extra_producer_bytes, canonical_batches = (
             self._count_import_requirements()
@@ -1412,21 +1943,7 @@ class H5adToZarr:
         shard_rows = math.lcm(
             *(array_shard_rows(destination) for destination in destinations.values())
         )
-        producer_worker_limit = max(1, (int(self.resources.workers) + 1) // 2)
-        if self.io is not None and self.io.readWorkers is not None:
-            producer_worker_limit = min(
-                producer_worker_limit,
-                max(1, int(self.io.readWorkers)),
-            )
-        if self.h5ad.matrixOrientation == "csc":
-            producer_worker_limit = 1
-        available_windows = max(
-            1,
-            min(
-                producer_worker_limit,
-                (self.h5ad.nCells + shard_rows - 1) // shard_rows,
-            ),
-        )
+        available_windows = self._producer_window_limit(shard_rows)
         n_producers = 1
         process_resources: ResourceBudget | None = None
         process_plan = None
@@ -1561,16 +2078,6 @@ class H5adToZarr:
                     for name, summary in summaries.items()
                 },
             )
-        counts_seconds = time.perf_counter() - started
-        # counts is the durable physical orientation for H5AD imports. Public
-        # dump() always finalizes paired RNA countsT after this step.
-        logger.debug(f"Counts written in {counts_seconds:.1f}s")
-        logger.info(
-            f"Wrote {self.h5ad.nCells} cells and {self.h5ad.nFeatures} features "
-            f"from H5AD to {len(destinations)} assay(s)"
-        )
-        for assay_name, summary in summaries.items():
-            finalize_counts(destinations[assay_name], summary=summary)
 
     def _write_parallel_count_windows(
         self,
@@ -1583,56 +2090,31 @@ class H5adToZarr:
         producerReserveBytes: int,
         summaries: dict[str, Any],
     ) -> None:
-        from multiprocessing import get_context
-
-        from ..storage.execution import record_execution_report
-
-        context = get_context("spawn")
-        stop = context.Event()
-        connections: dict[Any, int] = {}
-        workers: list[Any] = []
-        try:
-            for index, (row_start, row_end) in enumerate(windows):
-                parent_connection, child_connection = context.Pipe(duplex=False)
-                worker = context.Process(
-                    target=_write_h5ad_process_window,
-                    args=(
-                        self.h5ad._clone_kwargs(),
-                        batch_size,
-                        row_start,
-                        row_end,
-                        self._parallelWriteLocation,
-                        self.storage_options,
-                        self.workspace,
-                        self.assayNames,
-                        projection,
-                        resources,
-                        residentBytes,
-                        producerReserveBytes,
-                        self.io,
-                        child_connection,
-                        stop,
-                        self._linear,
-                    ),
-                    name=f"h5ad-writer-{index}",
-                    daemon=True,
-                )
-                worker.start()
-                child_connection.close()
-                connections[parent_connection] = index
-                workers.append(worker)
-
-            # A writer sends only its done message; its errors raise here.
-            for _index, _kind, payload in _worker_messages(
-                connections, workers, "writer"
-            ):
-                reports, summary_windows = payload
-                for report in reports:
-                    record_execution_report(report)
-                for assay_name, window in summary_windows.items():
-                    summaries[assay_name].merge(window)
-        finally:
-            _stop_workers(stop, workers, list(connections))
+        _merge_window_writes(
+            _producer_messages(
+                _write_h5ad_process_window,
+                windows,
+                lambda row_start, row_end: (
+                    self.h5ad._clone_kwargs(),
+                    batch_size,
+                    row_start,
+                    row_end,
+                    self._parallelWriteLocation,
+                    self.storage_options,
+                    self.workspace,
+                    self.assayNames,
+                    projection,
+                    resources,
+                    residentBytes,
+                    producerReserveBytes,
+                    self.io,
+                ),
+                self._linear,
+                role="writer",
+                duplex=False,
+            ),
+            summaries,
+        )
 
     def _count_shard_tasks(
         self,
@@ -1669,57 +2151,31 @@ class H5adToZarr:
         projection: tuple[np.ndarray, np.ndarray] | None,
         windows: list[tuple[int, int]],
     ) -> Iterator[Any]:
-        from multiprocessing import get_context
+        from contextlib import closing
 
-        from ..storage.geometry import array_geometry
-        from ..storage.layout import ZarrArraySpec
         from ..storage.sharding import SparseWriteBand
 
-        context = get_context("spawn")
-        stop = context.Event()
-        connections: dict[Any, int] = {}
-        workers: list[Any] = []
-        destination_specs: dict[str, ZarrArraySpec] = {}
-        for assay_name, destination in destinations.items():
-            geometry = array_geometry(destination)
-            # Count arrays are always chunked.
-            assert geometry is not None
-            destination_specs[assay_name] = ZarrArraySpec(
-                shape=geometry.shape,
-                chunks=geometry.chunks,
-                shards=geometry.shards,
-                dtype=destination.dtype,
-                compressors=(),
+        destination_specs = self._destination_specs(destinations)
+        # A producer sends bands and then done; its errors raise here.
+        with closing(
+            _producer_messages(
+                _read_h5ad_process_window,
+                windows,
+                lambda row_start, row_end: (
+                    self.h5ad._clone_kwargs(),
+                    batch_size,
+                    row_start,
+                    row_end,
+                    destination_specs,
+                    self.assayNames,
+                    projection,
+                ),
+                self._linear,
+                role="producer",
+                duplex=True,
             )
-        try:
-            for index, (row_start, row_end) in enumerate(windows):
-                parent_connection, child_connection = context.Pipe(duplex=True)
-                worker = context.Process(
-                    target=_read_h5ad_process_window,
-                    args=(
-                        self.h5ad._clone_kwargs(),
-                        batch_size,
-                        row_start,
-                        row_end,
-                        destination_specs,
-                        self.assayNames,
-                        projection,
-                        child_connection,
-                        stop,
-                        self._linear,
-                    ),
-                    name=f"h5ad-producer-{index}",
-                    daemon=True,
-                )
-                worker.start()
-                child_connection.close()
-                connections[parent_connection] = index
-                workers.append(worker)
-
-            # A producer sends bands and then done; its errors raise here.
-            for _index, kind, payload in _worker_messages(
-                connections, workers, "producer"
-            ):
+        ) as messages:
+            for _index, kind, payload in messages:
                 if kind == "done":
                     continue
                 assay_name, band, producer_bytes = payload
@@ -1728,8 +2184,26 @@ class H5adToZarr:
                     band,
                     producer_bytes,
                 )
-        finally:
-            _stop_workers(stop, workers, list(connections))
+
+    @staticmethod
+    def _destination_specs(destinations: dict[str, Any]) -> dict[str, Any]:
+        """Return the geometry of each count array, which producer processes take."""
+        from ..storage.geometry import array_geometry
+        from ..storage.layout import ZarrArraySpec
+
+        specs: dict[str, Any] = {}
+        for assay_name, destination in destinations.items():
+            geometry = array_geometry(destination)
+            # Count arrays are always chunked.
+            assert geometry is not None
+            specs[assay_name] = ZarrArraySpec(
+                shape=geometry.shape,
+                chunks=geometry.chunks,
+                shards=geometry.shards,
+                dtype=destination.dtype,
+                compressors=(),
+            )
+        return specs
 
     def _emit_count_bands(
         self,

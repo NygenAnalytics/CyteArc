@@ -808,6 +808,182 @@ def test_dense_row_batches_reject_values_an_integer_dtype_cannot_hold(value, mes
     np.testing.assert_array_equal(destination[:], batch.astype(np.uint8))
 
 
+def _sharded(root: zarr.Group, name: str, shape, shard_rows: int, dtype=np.uint16):
+    return root.create_array(
+        name,
+        shape=shape,
+        chunks=(shard_rows, shape[1]),
+        shards=(shard_rows, shape[1]),
+        dtype=dtype,
+        fill_value=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("window", "bands"),
+    [
+        ((0, 10), [(0, 4), (4, 8), (8, 10)]),
+        ((4, 10), [(4, 8), (8, 10)]),
+        # A window that starts inside a shard ends its first band at the next
+        # shard boundary.
+        ((2, 7), [(2, 4), (4, 7)]),
+        ((3, 3), []),
+    ],
+)
+def test_dense_band_buffer_hands_over_each_band_with_its_last_row(window, bands):
+    from cytearc.storage.sharding import DenseBandBuffer
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    destination = _sharded(root, "counts", (10, 3), 4)
+    values = np.arange(30, dtype=np.int64).reshape(10, 3)
+    start, end = window
+    buffer = DenseBandBuffer(destination, startRow=start, endRow=end)
+    handed = []
+    # Batches of one, four and the remaining rows cross band boundaries.
+    for batch_start, batch_end in ((start, start + 1), (start + 1, start + 5)):
+        batch = values[batch_start : min(batch_end, end)]
+        handed.extend(buffer.add(batch))
+    handed.extend(buffer.add(values[min(start + 5, end) : end]))
+    buffer.finish()
+    assert [(band.start, band.end) for band in handed] == bands
+    for band in handed:
+        assert band.values.dtype == np.uint16
+        np.testing.assert_array_equal(band.values, values[band.start : band.end])
+    # No partly filled band stays behind once the window is complete.
+    assert buffer.residentBytes == 0
+
+
+def test_dense_band_buffer_refuses_rows_that_do_not_fit_its_window():
+    from cytearc.storage.sharding import DenseBandBuffer
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    destination = _sharded(root, "counts", (6, 2), 4, dtype=np.uint8)
+    with pytest.raises(ValueError, match="outside the destination"):
+        DenseBandBuffer(destination, startRow=4, endRow=7)
+    buffer = DenseBandBuffer(destination, startRow=0, endRow=5)
+    with pytest.raises(ValueError, match="invalid shape"):
+        list(buffer.add(np.ones((1, 3))))
+    with pytest.raises(ValueError, match="more rows than its destination"):
+        list(buffer.add(np.ones((6, 2))))
+    # A partly filled band is held until its last row arrives.
+    assert list(buffer.add(np.ones((2, 2)))) == []
+    assert buffer.residentBytes == 4 * 2
+    with pytest.raises(ValueError, match="contains 2 rows, expected 5"):
+        buffer.finish()
+    with pytest.raises(OverflowError, match="exceed the destination dtype"):
+        list(buffer.add(np.full((1, 2), 256)))
+    spec = ZarrArraySpec(
+        shape=(6, 2), chunks=(4, 2), shards=(4, 2), dtype=np.float32, compressors=()
+    )
+    with pytest.raises(TypeError, match="destination array"):
+        DenseBandBuffer(spec, finiteOperation="score")
+
+
+def test_dense_band_buffer_names_the_row_of_a_non_finite_value():
+    from cytearc.storage.finite_values import NonFiniteArtifactError
+    from cytearc.storage.sharding import DenseBandBuffer
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    destination = _sharded(root, "scores", (8, 2), 4, dtype=np.float32)
+    values = np.ones((8, 2))
+    # A float64 value past float32's range becomes infinite when stored.
+    values[6, 1] = 1e300
+    buffer = DenseBandBuffer(
+        destination, startRow=4, endRow=8, finiteOperation="score_cells"
+    )
+    with pytest.raises(NonFiniteArtifactError, match="score_cells") as refused:
+        list(buffer.add(values[4:8]))
+    # The row counts from the start of the destination, not of the window.
+    assert (refused.value.array, refused.value.row) == ("scores", 6)
+
+
+def test_dense_bands_of_several_destinations_write_in_any_order():
+    from cytearc.storage.execution import execution_report_scope
+    from cytearc.storage.identity import CountSummary
+    from cytearc.storage.sharding import (
+        DenseRowBand,
+        DenseWriteBand,
+        plan_dense_band_writes,
+        write_dense_bands,
+    )
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    wide = _sharded(root, "wide", (6, 4), 3)
+    narrow = _sharded(root, "narrow", (6, 1), 6)
+    values = np.arange(1, 25, dtype=np.uint16).reshape(6, 4)
+    column = np.arange(6, dtype=np.uint16).reshape(6, 1)
+    writes = [
+        DenseWriteBand(wide, DenseRowBand(3, 6, values[3:])),
+        DenseWriteBand(narrow, DenseRowBand(0, 6, column)),
+        DenseWriteBand(wide, DenseRowBand(0, 3, values[:3])),
+    ]
+    summaries = {wide.path: CountSummary(wide), narrow.path: CountSummary(narrow)}
+    plan = plan_dense_band_writes((wide, narrow), ResourceBudget(1024**2, 2), 3)
+    with execution_report_scope() as reports:
+        rows = write_dense_bands(iter(writes), plan=plan, countSummaries=summaries)
+    assert rows == 6 + 6
+    np.testing.assert_array_equal(wide[:], values)
+    np.testing.assert_array_equal(narrow[:], column)
+    assert [report.unitKind for report in reports] == ["denseRowBand"]
+    assert reports[0].unitsCompleted == 3
+    # Each summary covers its whole array, so each gives a fingerprint.
+    assert summaries[wide.path].hexdigest() != summaries[narrow.path].hexdigest()
+
+
+def test_dense_band_plans_of_several_destinations_hold_the_largest_band():
+    from cytearc.storage.sharding import (
+        dense_counts_admission,
+        filling_band_bytes,
+        plan_dense_band_writes,
+        plan_dense_write,
+    )
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    wide = _sharded(root, "wide", (100, 50), 10)
+    narrow = _sharded(root, "narrow", (100, 3), 100)
+    single = _sharded(root, "single", (100, 1), 25)
+    # Bands of 10 x 50, 100 x 3 and 25 x 1 uint16 values hold 1,000, 600 and
+    # 50 bytes. A producer fills every band but the smallest beside a write.
+    wide_band, narrow_band = 1_000, 600
+    assert filling_band_bytes((wide,)) == 0
+    assert filling_band_bytes((wide, narrow)) == wide_band
+    assert filling_band_bytes((wide, narrow, single)) == wide_band + narrow_band
+
+    budget = ResourceBudget(1024**2, 1)
+    assert plan_dense_band_writes((wide,), budget, 3, residentBytes=7) == (
+        plan_dense_write(wide, budget, 3, residentBytes=7)
+    )
+    with pytest.raises(ValueError, match="At least one"):
+        plan_dense_band_writes((), budget, 1)
+
+    def needed(admit) -> int:
+        with pytest.raises(MemoryError) as refused:
+            admit(ResourceBudget(1_000, 1))
+        return refused.value.needed_bytes
+
+    alone = needed(lambda resources: plan_dense_write(wide, resources, 1))
+    # The wide band needs the most, so a unit of both destinations holds it.
+    assert (
+        needed(lambda resources: plan_dense_band_writes((wide, narrow), resources, 1))
+        == alone
+    )
+    # A layout fit of both also holds the partly filled band of the other
+    # destination, the wide band, beside the write.
+    specs = tuple(
+        ZarrArraySpec(
+            shape=array.shape,
+            chunks=array.chunks,
+            shards=array.shards,
+            dtype=array.dtype,
+            compressors=(),
+        )
+        for array in (wide, narrow)
+    )
+    admit = dense_counts_admission(0)
+    assert needed(lambda resources: admit(specs, resources)) == alone + wide_band
+    assert needed(lambda resources: admit(specs[:1], resources)) == alone
+
+
 def test_dense_shard_summaries_are_merged_incrementally():
     root = zarr.open_group(store=MemoryStore(), mode="w")
     destination = root.create_array(

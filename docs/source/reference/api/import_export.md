@@ -210,26 +210,7 @@ The default count layout writes shards of up to 1 GB, which the narrow assays of
 
 ## Storage controls
 
-Writers, merge, subset, and ``DataStore`` accept the same optional storage
-controls. ``profile`` chooses the physical encoding. ``policy`` chooses paired
-count-matrix geometry, and a writer uses it exactly. Without it, the imports
-write the default geometry, and an import whose counts write or ``countsT``
-transpose does not fit ``mem_budget`` raises ``MemoryError`` naming the largest
-policy, with the default ``unitBytes`` and ``chunkBytes`` halved together, that
-fits. A smaller geometry makes every later ``countsT`` read slower. Subset,
-``repack_zarr``, merge, and ``add_grouped_assay`` instead fit the geometry to
-``mem_budget``: they halve the default ``unitBytes`` and ``chunkBytes`` together
-until their writes fit. Writers that choose their source batches (the sparse
-and Seurat imports, and merge) admit batches of one destination row band, so a
-geometry never leaves the write narrower batches than its bands. A write that
-does not fit, with one-row count shards or with its explicit ``policy``, fails
-before it creates the destination: writers raise when they are constructed,
-and merge when it plans. ``MtxToZarr`` and ``CrToZarr`` take ``lines_in_mem`` in the
-constructor, so the fit reserves the Matrix Market parse buffer that the write
-uses. A resumed merge keeps the geometry of its completed counts. The geometry
-never changes the store's identity. ``io`` overrides automatic read, compute,
-and write widths. Unset values stay under automatic planning from
-``mem_budget`` and ``nthreads``.
+Writers, merge, subset, and ``DataStore`` accept the same optional storage controls. ``profile`` chooses the physical encoding. ``policy`` chooses paired count-matrix geometry, and a writer uses it exactly. Without it, the imports write the default geometry, and an import whose counts write or ``countsT`` transpose does not fit ``mem_budget`` raises ``MemoryError`` naming the largest policy, with the default ``unitBytes`` and ``chunkBytes`` halved together, that fits. A smaller geometry makes every later ``countsT`` read slower. Subset, ``repack_zarr``, merge, and ``add_grouped_assay`` instead fit the geometry to ``mem_budget``: they halve the default ``unitBytes`` and ``chunkBytes`` together until their writes fit. Writers that choose their source batches (the sparse and Seurat imports, and merge) admit batches of one destination row band, so a geometry never leaves the write narrower batches than its bands. ``H5adToZarr`` writes a dense matrix through dense row bands, as ``CSVtoZarr`` does, copying about a million values at a time, or whole rows of its HDF5 chunks, into a band of each assay, so its plan holds no sparse copy of the values and does not grow with the share of nonzero values. A float32 matrix of 310,385 cells by 8,563 genes with 42% of its values nonzero writes the default geometry within a 3 GiB budget this way, where the sparse writer needs 33 GiB. A write that does not fit, with one-row count shards or with its explicit ``policy``, fails before it creates the destination: writers raise when they are constructed, and merge when it plans. ``MtxToZarr`` and ``CrToZarr`` take ``lines_in_mem`` in the constructor, so the fit reserves the Matrix Market parse buffer that the write uses. A resumed merge keeps the geometry of its completed counts. The geometry never changes the store's identity. ``io`` overrides automatic read, compute, and write widths. Unset values stay under automatic planning from ``mem_budget`` and ``nthreads``.
 
 ```{eval-rst}
 .. autoclass:: cytearc.storage.io_policy.StorageIoPolicy
