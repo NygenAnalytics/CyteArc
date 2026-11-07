@@ -532,6 +532,8 @@ def test_hto_identity_is_artifact_backed(
     datastore_ephemeral,
     monkeypatch,
 ) -> None:
+    from tests.storage_helpers import rechunk_feature_tables
+
     datastore = datastore_ephemeral
     keep = np.asarray(datastore.cells.fetch_all("I"), dtype=bool).copy()
     keep[np.flatnonzero(keep)[::4]] = False
@@ -549,6 +551,9 @@ def test_hto_identity_is_artifact_backed(
     monkeypatch.setattr(
         "cytearc.datastore._operations.quality_control._hto_calls", demultiplex
     )
+    # In chunks of their rows, as a new store holds them, the hashtag IDs read
+    # little, so the budget below holds little beside them.
+    rechunk_feature_tables(datastore.zarr_loc)
     datastore = _declare_hto(datastore)
 
     ref = datastore.qc.hto_demultiplexing(selection, from_assay="assay2", random_seed=5)

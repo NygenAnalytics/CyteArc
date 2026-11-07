@@ -33,6 +33,7 @@ from cytearc.quality_control.hto import (
     _validated_hto_counts,
     _warn_unseparated_htos,
     checked_hashtags,
+    checked_sample_hashtags,
     hto_demux,
 )
 from cytearc.storage.artifacts import ArtifactRef, make_provenance, provenance_hash
@@ -881,6 +882,8 @@ def test_default_hto_identity_is_the_one_cytearc_1_2_recorded():
     )
     record = arguments.to_record()
     assert "hashtags" not in record.parameters
+    assert "sample_column" not in record.parameters
+    assert "sample_assignments_fingerprint" not in record.inputs
     assert (
         effective_revision(
             arguments.operation,
@@ -1090,6 +1093,223 @@ def test_hto_demultiplexing_checks_its_hashtags_before_reading_counts(
     with pytest.raises(error, match=f"^{re.escape(message)}$"):
         store.qc.hto_demultiplexing(selection, hashtags=hashtags)
     assert store.artifacts.list(kind="hto_identity", from_assay="HTO") == []
+
+
+def _pool_store(tmp_path: Path, counts: pd.DataFrame) -> DataStore:
+    """Write ``counts`` with each cell's pool, "a" or "b", as the column "pool"."""
+    store = _hto_store(tmp_path, counts)
+    first = np.arange(len(counts)) < 60
+    store.cells.insert("pool", np.where(first, "a", "b"), overwrite=True)
+    store.cells.insert("pool_a", first, overwrite=True)
+    store.cells.insert("pool_b", ~first, overwrite=True)
+    return store
+
+
+def test_each_sample_is_demultiplexed_as_a_call_on_its_own_cells(tmp_path: Path):
+    counts, truth = two_pool_hto_counts()
+    store = _pool_store(tmp_path, counts)
+    first = np.arange(len(counts)) < 60
+
+    with threadpool_limits(limits=1):
+        ref = store.qc.hto_demultiplexing(
+            store.snapshot_cell_selection("I"), sample_column="pool"
+        )
+        apart = {
+            "a": store.qc.hto_demultiplexing(
+                store.snapshot_cell_selection("pool_a"), hashtags=["HTO0", "HTO1"]
+            ),
+            "b": store.qc.hto_demultiplexing(
+                store.snapshot_cell_selection("pool_b"), hashtags=["HTO2", "HTO3"]
+            ),
+        }
+
+    payload = store.artifacts.load(ref)
+    np.testing.assert_array_equal(payload["values"][:], truth)
+    for label, rows in (("a", first), ("b", ~first)):
+        separate = store.artifacts.load(apart[label])
+        for name in ("values", "max_id", "second_id"):
+            np.testing.assert_array_equal(payload[name][:][rows], separate[name][:])
+        np.testing.assert_allclose(
+            payload["margin"][:][rows], separate["margin"][:], rtol=0, atol=1e-12
+        )
+    entries = payload.attrs["samples"]
+    assert [
+        (entry["label"], entry["cells"], entry["hashtags"], entry["withoutCounts"])
+        for entry in entries
+    ] == [
+        ("a", 60, ["HTO0", "HTO1"], ["HTO2", "HTO3"]),
+        ("b", 60, ["HTO2", "HTO3"], ["HTO0", "HTO1"]),
+    ]
+    for entry in entries:
+        (alone,) = store.artifacts.load(apart[entry["label"]]).attrs["samples"]
+        assert entry["cutoffs"] == alone["cutoffs"]
+        assert alone["label"] is None
+    status = store.artifacts.inspect(ref)
+    assert status.parameters["sample_column"] == "pool"
+    assert "hashtags" not in status.parameters
+    assert (
+        store.qc.hto_demultiplexing(
+            store.snapshot_cell_selection("I"), sample_column="pool"
+        )
+        == ref
+    )
+
+    # Other labels for the same pools make another artifact with the same calls.
+    store.cells.insert("pool", np.where(first, "a", "c"), overwrite=True)
+    with threadpool_limits(limits=1):
+        relabelled = store.qc.hto_demultiplexing(
+            store.snapshot_cell_selection("I"), sample_column="pool"
+        )
+    assert relabelled != ref
+    np.testing.assert_array_equal(store.artifacts.load(relabelled)["values"][:], truth)
+
+
+def test_a_mapping_leaves_out_another_pools_hashtag_with_a_stray_count(
+    tmp_path: Path,
+):
+    counts, truth = two_pool_hto_counts()
+    # One stray count of the second pool's HTO2 in a cell of the first pool.
+    counts.iloc[0, 2] = 1
+    store = _pool_store(tmp_path, counts)
+    everything = store.snapshot_cell_selection("I")
+
+    with threadpool_limits(limits=1), pytest.raises(ValueError) as refused:
+        store.qc.hto_demultiplexing(everything, sample_column="pool")
+    assert str(refused.value).startswith(
+        "Sample 'a' of 'pool': HTO demultiplexing cannot place a cutoff for 'HTO2': "
+    )
+
+    with threadpool_limits(limits=1):
+        ref = store.qc.hto_demultiplexing(
+            everything,
+            sample_column="pool",
+            hashtags={"b": ["HTO3", "HTO2"], "a": ["HTO1", "HTO0"]},
+        )
+    np.testing.assert_array_equal(store.artifacts.load(ref)["values"][:], truth)
+    assert store.artifacts.inspect(ref).parameters["hashtags"] == {
+        "a": ["HTO0", "HTO1"],
+        "b": ["HTO2", "HTO3"],
+    }
+    assert [
+        entry["withoutCounts"] for entry in store.artifacts.load(ref).attrs["samples"]
+    ] == [[], []]
+
+
+@pytest.mark.parametrize(
+    ("options", "error", "message"),
+    [
+        (
+            {"sample_column": "lane"},
+            ValueError,
+            "sample_column 'lane' not found in cell metadata",
+        ),
+        (
+            {"sample_column": 3},
+            TypeError,
+            "sample_column must be a cell metadata column name or None",
+        ),
+        (
+            {"hashtags": {"a": ["HTO0", "HTO1"]}},
+            ValueError,
+            "hashtags maps samples to their hashtags, which needs sample_column, "
+            "the cell metadata column of each cell's sample",
+        ),
+    ],
+)
+def test_hto_demultiplexing_checks_its_samples_before_reading_counts(
+    tmp_path: Path, monkeypatch, options, error, message
+):
+    counts, _ = two_pool_hto_counts()
+    store = _pool_store(tmp_path, counts)
+
+    def unread(*args, **kwargs):
+        raise AssertionError("the selection was read")
+
+    monkeypatch.setattr(
+        "cytearc.datastore._operations.quality_control.read_stored_selection_indices",
+        unread,
+    )
+    with pytest.raises(error, match=f"^{re.escape(message)}$"):
+        store.qc.hto_demultiplexing(store.snapshot_cell_selection("I"), **options)
+    assert store.artifacts.list(kind="hto_identity", from_assay="HTO") == []
+
+
+@pytest.mark.parametrize(
+    ("labels", "hashtags", "message"),
+    [
+        (
+            np.where(np.arange(120) < 60, "a", None),
+            None,
+            "Sample column 'pool' has no label for 60 selected cells. Hashtags are "
+            "demultiplexed within each sample, so every selected cell needs one",
+        ),
+        (
+            np.where(np.arange(120) < 118, "a", "b"),
+            None,
+            "HTO demultiplexing requires at least 5 selected cells in sample 'b' of "
+            "'pool'",
+        ),
+        (
+            np.where(np.arange(120) < 60, "a", "b"),
+            {"a": ["HTO0", "HTO1"]},
+            "hashtags gives no hashtags for samples ['b'] of 'pool'; give each "
+            "sample of the selected cells its hashtags",
+        ),
+        (
+            np.where(np.arange(120) < 60, "a", "b"),
+            {"a": ["HTO0"], "b": ["HTO2"], "c": ["HTO3"]},
+            "hashtags names samples ['c'] that no selected cell has in 'pool'; the "
+            "selected cells' samples are ['a', 'b']",
+        ),
+        (
+            np.where(np.arange(120) < 60, "a", "b"),
+            {"a": ["HTO0"], "b": ["HTO9"]},
+            "For sample 'b', hashtags names ['HTO9'], which the HTO assay does not "
+            "hold; its hashtags are ['HTO0', 'HTO1', 'HTO2', 'HTO3']",
+        ),
+    ],
+)
+def test_hto_demultiplexing_checks_its_samples_before_reading_counts_of_them(
+    tmp_path: Path, monkeypatch, labels, hashtags, message
+):
+    counts, _ = two_pool_hto_counts()
+    store = _hto_store(tmp_path, counts)
+    store.cells.insert("pool", labels, overwrite=True)
+
+    def unread(*args, **kwargs):
+        raise AssertionError("the counts were read")
+
+    monkeypatch.setattr(
+        "cytearc.datastore._operations.quality_control.controlled_compute", unread
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        store.qc.hto_demultiplexing(
+            store.snapshot_cell_selection("I"),
+            sample_column="pool",
+            hashtags=hashtags,
+        )
+    assert store.artifacts.list(kind="hto_identity", from_assay="HTO") == []
+
+
+def test_each_sample_takes_every_hashtag_or_its_own():
+    ids = ["HTO_A", "HTO_B", "HTO_C"]
+    assert checked_sample_hashtags(None, ids, ["x", "y"], sample_column="pool") == (
+        [ids, ids],
+        None,
+    )
+    assert checked_sample_hashtags(
+        ["HTO_C", "HTO_A"], ids, [None], sample_column=None
+    ) == ([["HTO_A", "HTO_C"]], ["HTO_A", "HTO_C"])
+    assert checked_sample_hashtags(
+        {"y": ["HTO_B"], "x": ["HTO_C", "HTO_A"]}, ids, ["x", "y"], sample_column="pool"
+    ) == (
+        [["HTO_A", "HTO_C"], ["HTO_B"]],
+        {"x": ["HTO_A", "HTO_C"], "y": ["HTO_B"]},
+    )
+    with pytest.raises(TypeError, match="as text, to its hashtag IDs"):
+        checked_sample_hashtags({1: ["HTO_A"]}, ids, ["1"], sample_column="pool")
+    with pytest.raises(TypeError, match="^For sample 'x', hashtags must be a list"):
+        checked_sample_hashtags({"x": "HTO_A"}, ids, ["x"], sample_column="pool")
 
 
 def test_each_positive_quantile_has_its_own_hto_identity_artifact(tmp_path: Path):

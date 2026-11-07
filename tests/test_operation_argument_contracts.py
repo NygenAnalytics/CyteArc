@@ -616,6 +616,7 @@ _CONTRACTS = (
             **_classified(
                 "resolved_input",
                 "feature_ids_fingerprint",
+                "sample_assignments_fingerprint",
             ),
         },
         signature_only={

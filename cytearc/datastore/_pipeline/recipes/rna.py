@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from ....quality_control.hto import checked_hashtags
+from ....quality_control.hto import checked_hashtag_mapping, checked_hashtags
 from ....assay import ADTassay, RNAassay
 from ....metadata.rows import apply_missing_mask
 from ....storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
@@ -13,6 +13,7 @@ from ....storage.selections import (
     read_stored_selection_indices,
     resolve_generated_selection_artifact,
 )
+from ..._operations.cell_samples import require_cell_column
 from ..cluster_selection import cluster_label_values
 from ..executor import PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
@@ -214,6 +215,39 @@ def _resolve_hto_assay(store: Any, settings: dict[str, Any]) -> str:
     return name
 
 
+def _check_hashing_samples(
+    store: Any, hto_assay: str, settings: dict[str, Any]
+) -> None:
+    """Check the hashing stage's samples and hashtags before the run starts.
+
+    ``sample_column`` must name a cell column. ``hashtags`` is checked against
+    the HTO assay's hashtags and recorded in the assay's order, as a mapping
+    of each sample's hashtags only beside ``sample_column``; the stage itself
+    checks the mapping's labels against the samples of its cells.
+    """
+    column = settings.get("sample_column")
+    if column is not None and (not isinstance(column, str) or not column.strip()):
+        raise TypeError("hashing['sample_column'] must be a cell column name or None")
+    require_cell_column(store, column, "hashing['sample_column']")
+    hashtags = settings.get("hashtags")
+    if hashtags is None:
+        return
+    hashtag_ids = [
+        str(name) for name in store._get_assay(hto_assay).feats.fetch_all("ids")
+    ]
+    if isinstance(hashtags, Mapping):
+        if column is None:
+            raise ValueError(
+                "hashing['hashtags'] maps samples to their hashtags, which needs "
+                "hashing['sample_column'], the cell column of each cell's sample"
+            )
+        settings["hashtags"] = dict(
+            sorted(checked_hashtag_mapping(hashtags, hashtag_ids).items())
+        )
+    else:
+        settings["hashtags"] = checked_hashtags(hashtags, hashtag_ids)
+
+
 def _resolve_doublet_samples(
     store: Any,
     settings: Mapping[str, Any],
@@ -355,12 +389,8 @@ def resolve_rna(
         "hashing", hashing, optional=True
     )
     hto_assay = _resolve_hto_assay(store, hashing_settings) if hashing_enabled else None
-    if hto_assay is not None and hashing_settings.get("hashtags") is not None:
-        # Hashtags that the assay lacks are refused before the run starts.
-        hashing_settings["hashtags"] = checked_hashtags(
-            hashing_settings["hashtags"],
-            [str(name) for name in store._get_assay(hto_assay).feats.fetch_all("ids")],
-        )
+    if hto_assay is not None:
+        _check_hashing_samples(store, hto_assay, hashing_settings)
     resolved_species = resolve_species(species)
     membership_strength = bool_argument(membership_strength, "membership_strength")
     markers = bool_argument(markers, "markers")

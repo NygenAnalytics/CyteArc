@@ -89,8 +89,20 @@ def execution(default: Any = MISSING) -> Any:
     return field(metadata={"argument_role": "execution"})
 
 
-def artifact_input() -> Any:
-    return field(metadata={"argument_role": "input"})
+def artifact_input(
+    default: Any = MISSING,
+    *,
+    omit_if_none: bool = False,
+) -> Any:
+    """Declare an identity input.
+
+    ``omit_if_none`` leaves an unset input out of the argument record, so
+    adding it keeps the identities of artifacts that do not use it.
+    """
+    metadata = {"argument_role": "input", "omit_if_none": omit_if_none}
+    if default is not MISSING:
+        return field(default=default, metadata=metadata)
+    return field(metadata=metadata)
 
 
 @dataclass(frozen=True, slots=True)

@@ -454,8 +454,16 @@ class HtoIdentityArguments(OperationArguments):
     method: dict[str, object] = parameter()
     random_seed: int = parameter()
     invalidate_cache: bool = execution()
-    # The hashtags demultiplexed, in the assay's order; None for all of them.
-    hashtags: list[str] | None = parameter(None, omit_if_none=True)
+    # The hashtags demultiplexed, in the assay's order: one list for every
+    # sample, or each sample's list by its label; None for all of them.
+    hashtags: list[str] | dict[str, list[str]] | None = parameter(
+        None, omit_if_none=True
+    )
+    # The cell metadata column of each cell's sample, within which hashtags
+    # are demultiplexed, and the fingerprint of the cells' samples; None for
+    # one sample of every selected cell.
+    sample_column: str | None = parameter(None, omit_if_none=True)
+    sample_assignments_fingerprint: str | None = artifact_input(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)

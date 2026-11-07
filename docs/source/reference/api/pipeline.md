@@ -274,7 +274,7 @@ run = ds.pipeline.rna(
 | Keyword | Recipes | Method | Settings |
 | --- | --- | --- | --- |
 | `cell_calling` | `rna` | {py:meth}`~cytearc.datastore.namespaces.QcAccessor.call_cells` | `lower`, `retain`, `n_iter`, `alpha`, `fdr`, `random_seed`, and `sample_column`, a cell column of captures |
-| `hashing` | `rna` | {py:meth}`~cytearc.datastore.namespaces.QcAccessor.hto_demultiplexing` | `assay`, the HTO assay; `random_seed`, `positive_quantile`, `hashtags` |
+| `hashing` | `rna` | {py:meth}`~cytearc.datastore.namespaces.QcAccessor.hto_demultiplexing` | `assay`, the HTO assay; `random_seed`, `positive_quantile`, `hashtags`, `sample_column` |
 | `filtering` | `rna`, `atac`, `adt`, `perturbation` | the rules of {py:meth}`~cytearc.datastore.namespaces.QcAccessor.auto_filter` | `method`, `attrs`, `n_mads`, `sample_column`, `min_cells_per_sample`, `min_p`, `max_p`; with `method="manual"`, `attrs`, `lows`, `highs`, `keep_bounds` |
 | `cell_cycle` | `rna` | {py:meth}`~cytearc.datastore.namespaces.ScoresAccessor.cell_cycle` | `s_genes`, `g2m_genes`, `ctrl_size`, `log_transform`, `n_bins`, `rand_seed` |
 | `hvg` | `rna`, `perturbation` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.hvgs` | `top_n`, `flavor`, `batch` (a cell metadata column), `min_cells`, `max_cells`, `min_mean`, `max_mean`, `min_var`, `max_var` (the last four are log2 values), `n_bins`, `lowess_frac`, `blacklist`, `keep_bounds`, `bin_strategy`, `span`, `theta`, `clip` |
@@ -487,7 +487,7 @@ gains the `hashing` labels. With MAD filtering and no `sample_column`, the filte
 within each hashtag, and the run records `"sampleSource": "hashing"` in its filtering settings. A
 hashing stage that calls no cell a singlet fails.
 
-`hashing={"hashtags": [...]}` demultiplexes only the named hashtags, which the run checks against the HTO assay before it starts and records in the assay's order. When pools of cells used different hashtags, run each pool apart, with `cells` naming the pool's cells and `hashtags` its hashtags: one run over every pool is refused, because each hashtag's background then lies in a pool that did not use it.
+When pools of cells used different hashtags, `hashing={"sample_column": ...}` names the cell column of each cell's pool, and each pool is demultiplexed on its own, as a run of its cells would. One fit over every pool is refused, because each hashtag's background then lies in a pool that did not use it. `hashing={"hashtags": [...]}` demultiplexes only the named hashtags, in every pool, and a mapping from each pool's label to its hashtags names them pool by pool. The run checks the column and the hashtags before it starts and records each list in the assay's order; the stage checks the mapping's labels against the pools of its cells.
 
 ### Filtering
 

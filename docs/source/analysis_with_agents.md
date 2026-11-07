@@ -174,7 +174,7 @@ Two optional RNA stages run before QC filtering, in this order:
   multiplets of different hashtags leave the run. MAD filtering bounds are then computed within
   each hashtag's cells unless `filtering` names a `sample_column`. Hashing cannot see a doublet of
   two cells with the same hashtag, so keep doublet scoring on.
-- When pools of cells used different hashtags, such as lanes that each pooled a few samples, demultiplex each pool apart: name its cells with `cells` and its hashtags with `hashing={"hashtags": [...]}`. A hashtag that a pool did not use has no ambient counts in that pool's cells, so one call over every pool finds backgrounds of zeros and is refused, naming the hashtags. Leave out a hashtag that the experiment did not use, which the same refusal names when its few ambient counts would otherwise call cells doublets.
+- When pools of cells used different hashtags, such as lanes that each pooled a few samples, demultiplex each pool on its own: name the cell column of each cell's pool with `hashing={"sample_column": ...}`, and give `hashtags` as a mapping from each pool's label to its hashtags when a pool holds stray counts of another pool's hashtag. A hashtag that a pool did not use has no ambient counts in that pool's cells, so one fit over every pool finds backgrounds of zeros and is refused, naming the hashtags. Leave out a hashtag that the experiment did not use, which the same refusal names when its few ambient counts would otherwise call cells doublets.
 
 Report each stage's summary: the knee and the number of called cells, which a run that calls its
 captures apart reports for each capture as `kneePerCapture` and `calledPerCapture`, and the cells

@@ -104,11 +104,10 @@ from .cell_barcodes import (
     join_bytes,
 )
 from .cell_barcodes import barcode_pattern as checked_barcode_pattern
+from .cell_samples import read_cell_samples, require_cell_column
 from .perturbation_store import (
-    _cell_samples,
     _count_stream,
     _plan_cells,
-    _require_cell_column,
     _require_ref,
     _require_status_names,
     _stored_samples,
@@ -1634,7 +1633,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             method, min_umi, fraction_threshold, sample_column
         )
         fitted = method in FITTED_METHODS
-        _require_cell_column(self, sample_column, "sample_column")
+        require_cell_column(self, sample_column, "sample_column")
         assay, ledger, guide_ids, selection = self._guide_call_cells(
             from_assay,
             cell_selection,
@@ -1649,7 +1648,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         cell_index = read_cell_selection(
             ledger, self.zw, selection, item="the selected cells' positions"
         )
-        cell_samples = _cell_samples(
+        cell_samples = read_cell_samples(
             self,
             ledger,
             sample_column,

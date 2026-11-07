@@ -1899,6 +1899,75 @@ def test_pools_that_use_different_hashtags_run_apart(tmp_path) -> None:
         }
 
 
+def test_hashing_demultiplexes_each_sample_with_its_own_hashtags(tmp_path) -> None:
+    hto, truth = two_pool_hto_counts()
+    location = tmp_path / "data.zarr"
+    write_count_store(
+        str(location),
+        {"RNA": _counts(len(hto), 200, seed=5), "HTO": hto.to_numpy()},
+        "uint16",
+    )
+    datastore = _open_hashed(location)
+    datastore.cells.insert(
+        "pool", np.where(np.arange(len(hto)) < 60, "a", "b"), overwrite=True
+    )
+    before = _run_ids(datastore)
+
+    # The samples and their hashtags are checked before the run starts.
+    for hashing, error, message in (
+        (
+            {"sample_column": "lane"},
+            ValueError,
+            "hashing['sample_column'] 'lane' not found in cell metadata",
+        ),
+        (
+            {"hashtags": {"a": ["HTO0"]}},
+            ValueError,
+            "hashing['hashtags'] maps samples to their hashtags, which needs "
+            "hashing['sample_column'], the cell column of each cell's sample",
+        ),
+        (
+            {"sample_column": "pool", "hashtags": {"a": ["HTO0"], "b": ["HTO9"]}},
+            ValueError,
+            "For sample 'b', hashtags names ['HTO9'], which the HTO assay does not "
+            "hold; its hashtags are ['HTO0', 'HTO1', 'HTO2', 'HTO3']",
+        ),
+    ):
+        with pytest.raises(error) as caught:
+            datastore.pipeline.rna(hashing=hashing, **SMALL_RNA_SETTINGS)
+        assert str(caught.value) == message
+    assert _run_ids(datastore) == before
+
+    run = datastore.pipeline.rna(
+        hashing={"sample_column": "pool"}, **SMALL_RNA_SETTINGS
+    )
+    assert _config(run)["stages"]["hashing"] == {
+        "assay": "HTO",
+        "sample_column": "pool",
+    }
+    assert run["hashing"] == datastore.qc.hto_demultiplexing(
+        run["input_cell_selection"], from_assay="HTO", sample_column="pool"
+    )
+    np.testing.assert_array_equal(
+        _mask(datastore, run["hashed_cell_selection"]),
+        ~np.isin(truth, ["Doublet", "Negative"]),
+    )
+    # A mapping is recorded by label, each sample's hashtags in the assay's order.
+    plan = _resolve(
+        "rna",
+        datastore,
+        hashing={
+            "sample_column": "pool",
+            "hashtags": {"b": ["HTO3", "HTO2"], "a": ["HTO1", "HTO0"]},
+        },
+        **SMALL_RNA_SETTINGS,
+    )
+    assert plan.config["stages"]["hashing"]["hashtags"] == {
+        "a": ["HTO0", "HTO1"],
+        "b": ["HTO2", "HTO3"],
+    }
+
+
 def test_hashing_reads_the_hto_assay_that_it_names(hashed) -> None:
     plan = _resolve(
         "rna", hashed.datastore, hashing={"assay": "HTO"}, **SMALL_RNA_SETTINGS
