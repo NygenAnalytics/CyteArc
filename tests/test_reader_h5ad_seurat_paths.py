@@ -514,3 +514,24 @@ def test_renamed_source_counts_its_names_and_its_child() -> None:
     assert renamed.row_names == ("f1", "f2")
     assert renamed.resident_bytes == child.resident_bytes + 2 * (2 + 8)
     np.testing.assert_array_equal(renamed.read_cells(0, 3), np.ones((3, 2)))
+
+
+def test_an_h5ad_without_embeddings_opens_without_a_warning(tmp_path) -> None:
+    from cytearc.utils.logging import logger
+
+    path = _write_h5ad(tmp_path / "plain.h5ad")
+    # AnnData writes an empty obsm whenever a file holds no embeddings.
+    with h5py.File(path, "a") as h5:
+        h5.create_group("obsm")
+    warnings: list[str] = []
+    sink = logger.add(
+        lambda message: warnings.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        H5adReader(str(path)).close()
+    finally:
+        logger.remove(sink)
+    assert warnings == []
+    # An embedding asked of the empty obsm is still refused, naming it.
+    with pytest.raises(KeyError, match="'X_umap' was not found in obsm"):
+        H5adReader(str(path), embedding_roles={"X_umap": "umap"})

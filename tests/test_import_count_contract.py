@@ -839,6 +839,184 @@ def test_split_assays_store_the_dtype_of_their_own_counts(tmp_path, writer, enco
         assert counts.attrs["content_fingerprint"] == _fingerprint(values, dtype)
 
 
+def _cite_assays(values: np.ndarray) -> dict[str, Any]:
+    """The RNA and ADT columns of ``values`` as SparseToZarr's mappings take them."""
+    features = _features(values)
+    return {
+        "csr_mat": {"RNA": csr_matrix(values[:, :4]), "ADT": csr_matrix(values[:, 4:])},
+        "feature_ids": {"RNA": features[:4], "ADT": features[4:]},
+    }
+
+
+def test_in_memory_assays_store_what_a_split_file_stores(tmp_path) -> None:
+    split = _import_split("h5ad", tmp_path, _CITE_VALUES, "int64")
+    destination = tmp_path / "in_memory.zarr"
+    SparseToZarr(
+        zarr_loc=str(destination),
+        cell_ids=_cells(_CITE_VALUES),
+        nthreads=1,
+        **_cite_assays(_CITE_VALUES),
+    ).dump()
+    root = zarr.open_group(str(destination), mode="r")
+
+    for name in ("RNA", "ADT"):
+        for array in ("counts", "featureData/ids", "featureData/names"):
+            np.testing.assert_array_equal(
+                root[f"{name}/{array}"][:], split[f"{name}/{array}"][:]
+            )
+        assert (
+            root[f"{name}/counts"].attrs["content_fingerprint"]
+            == split[f"{name}/counts"].attrs["content_fingerprint"]
+        )
+    # countsT is written for the same assays as from the split file.
+    np.testing.assert_array_equal(root["RNA/countsT"][:], split["RNA/countsT"][:])
+    assert ("countsT" in root["ADT"]) == ("countsT" in split["ADT"])
+    np.testing.assert_array_equal(root["cellData/ids"][:], _cells(_CITE_VALUES))
+    # The assays open with the types that their names give them.
+    store = DataStore(str(destination), default_assay="RNA", min_features_per_cell=0)
+    assert type(store.RNA).__name__ == "RNAassay"
+    assert type(store.ADT).__name__ == "ADTassay"
+
+
+def test_in_memory_assays_decide_their_dtypes_and_values_apart(tmp_path) -> None:
+    values = _CITE_VALUES.astype(np.float64)
+    values[1, 5] = 0.5
+    writer = SparseToZarr(
+        zarr_loc=str(tmp_path / "counts.zarr"),
+        cell_ids=_cells(values),
+        nthreads=1,
+        # The fractional ADT values are counts here; RNA decides from its own.
+        values={"ADT": "counts"},
+        **_cite_assays(values),
+    )
+    writer.dump()
+    root = zarr.open_group(str(tmp_path / "counts.zarr"), mode="r")
+
+    assert writer.assayNames == ("RNA", "ADT")
+    assert writer.assayName is None
+    assert {name: decided.kind for name, decided in writer.values.items()} == {
+        "RNA": "counts",
+        "ADT": "counts",
+    }
+    assert root["RNA/counts"].dtype == np.uint16
+    # Fractional counts keep the dtype of the matrix they came in.
+    assert root["ADT/counts"].dtype == np.float64
+    np.testing.assert_array_equal(root["ADT/counts"][:], values[:, 4:])
+
+
+def test_a_feature_id_needs_to_be_unique_only_within_its_assay(tmp_path) -> None:
+    assays = _cite_assays(_CITE_VALUES)
+    # CD86 names a gene and an antibody.
+    assays["feature_ids"] = {
+        "RNA": ["CD86", "g1", "g2", "g3"],
+        "ADT": ["CD86", "a1", "a2"],
+    }
+    SparseToZarr(
+        zarr_loc=str(tmp_path / "shared.zarr"),
+        cell_ids=_cells(_CITE_VALUES),
+        nthreads=1,
+        **assays,
+    ).dump()
+    root = zarr.open_group(str(tmp_path / "shared.zarr"), mode="r")
+    assert root["RNA/featureData/ids"][0] == root["ADT/featureData/ids"][0] == "CD86"
+
+    assays["feature_ids"] = {"RNA": ["g0", "g1", "g2", "g3"], "ADT": ["a0", "a0", "a2"]}
+    with pytest.raises(
+        ValueError, match="Feature IDs of assay 'ADT' must contain unique values"
+    ):
+        SparseToZarr(
+            zarr_loc=str(tmp_path / "repeated.zarr"),
+            cell_ids=_cells(_CITE_VALUES),
+            **assays,
+        )
+    assert not (tmp_path / "repeated.zarr").exists()
+
+
+@pytest.mark.parametrize(
+    ("change", "error", "message"),
+    [
+        (
+            lambda a: a["csr_mat"].update(ADT=csr_matrix(_CITE_VALUES[:5, 4:])),
+            ValueError,
+            "Number of cell ids are not same as number of cells in the matrix of assay 'ADT'",
+        ),
+        (
+            lambda a: a["feature_ids"].pop("ADT"),
+            ValueError,
+            r"feature_ids has no IDs for the assays \['ADT'\]",
+        ),
+        (
+            lambda a: a["feature_ids"].update(HTO=["h0"]),
+            ValueError,
+            r"feature_ids names \['HTO'\], which the matrices do not",
+        ),
+        (
+            lambda a: a.update(assay_type={"HTO": "ADT"}),
+            ValueError,
+            r"assay_type names \['HTO'\], which the matrices do not",
+        ),
+        (
+            lambda a: a.update(values={"HTO": "counts"}),
+            ValueError,
+            "HTO",
+        ),
+        (
+            lambda a: a.update(assay_name="RNA"),
+            ValueError,
+            "assay_name names the assay of a single matrix",
+        ),
+        (
+            lambda a: a.update(feature_ids=_features(_CITE_VALUES)),
+            TypeError,
+            "feature_ids must map each assay to its feature IDs",
+        ),
+        (
+            lambda a: a.update(csr_mat={}),
+            ValueError,
+            "needs at least one assay",
+        ),
+    ],
+    ids=[
+        "cell counts differ",
+        "IDs missing for an assay",
+        "IDs of no assay",
+        "type of no assay",
+        "values of no assay",
+        "assay_name beside a mapping",
+        "feature_ids not a mapping",
+        "no assay",
+    ],
+)
+def test_in_memory_assays_are_refused_before_the_destination_exists(
+    tmp_path, change, error, message
+) -> None:
+    assays = _cite_assays(_CITE_VALUES)
+    change(assays)
+    destination = tmp_path / "refused.zarr"
+    with pytest.raises(error, match=message):
+        SparseToZarr(zarr_loc=str(destination), cell_ids=_cells(_CITE_VALUES), **assays)
+    assert not destination.exists()
+
+
+def test_per_assay_arguments_beside_a_single_matrix_are_refused(tmp_path) -> None:
+    with pytest.raises(TypeError, match="beside a mapping of matrices"):
+        SparseToZarr(
+            csr_matrix(_VALUES),
+            str(tmp_path / "single.zarr"),
+            _cells(_VALUES),
+            {"RNA": _features(_VALUES)},
+        )
+    with pytest.raises(TypeError, match="assay_type maps assays"):
+        SparseToZarr(
+            csr_matrix(_VALUES),
+            str(tmp_path / "single.zarr"),
+            _cells(_VALUES),
+            _features(_VALUES),
+            assay_type={"RNA": "RNA"},
+        )
+    assert not (tmp_path / "single.zarr").exists()
+
+
 @pytest.mark.parametrize("writer", ["cellranger", "h5ad"])
 def test_a_fractional_assay_keeps_its_dtype_without_widening_the_others(
     tmp_path, writer

@@ -315,7 +315,20 @@ imported assay, in an H5AD file without the declaration or from `CSVtoZarr`, `Cr
 `MtxToZarr`, is skipped with a warning, as `I` is. `SeuratToZarr` writes the membership itself
 and raises for a metadata column named for any imported assay. A column named for an assay that
 the import does not write, such as `ADT_I` in an RNA-only import, stays an ordinary column.
-`SparseToZarr` imports no cell metadata.
+`SparseToZarr` imports no cell metadata; add columns afterwards with `ds.cells.insert`.
+
+Tables of several modalities held in memory, such as RNA, guide, hashtag and protein counts read from GEO, become one store through `SparseToZarr` without a file between them. Pass a mapping of assay names to matrices of the same cells, with `feature_ids` mapping each assay to its IDs, and `feature_names`, `assay_type` and `values` mapping the assays they apply to. Each assay resolves its own dtype, values decision and count layout, and a feature ID needs to be unique only within its assay, so a gene and an antibody may both be `CD86`. `assay_name` names the assay of a single matrix and is refused beside a mapping.
+
+```python
+from cytearc.writers import SparseToZarr
+
+SparseToZarr(
+    {"RNA": rna_counts, "CRISPR": guide_counts, "ADT": protein_counts},
+    "screen.zarr",
+    cell_ids,
+    {"RNA": gene_ids, "CRISPR": guide_ids, "ADT": antibody_ids},
+).dump()
+```
 
 Import writers take their assay type from the assay name. Pass `assay_type` (or
 `assay_types` on `CrToZarr`) to declare a custom-named assay as a preset such as `RNA`. A value
