@@ -469,7 +469,9 @@ the measured cells from a subset that `SubsetZarr(..., cell_key="<assay>_I")` wr
 
 `to_h5ad` streams the matrix into the file one block of rows at a time, so it never holds the
 complete matrix, and it converts a dense block to CSR a bounded step of rows at a time, which the
-block's stream charges against the memory budget. It writes a temporary file in the same directory
+block's stream charges against the memory budget.
+It compresses the stored values and column indices with gzip, as h5py's gzip filter does, on `nthreads` threads, or on the datastore's threads for a run, and the file is the same for any number of threads. Column indices are stored as 32-bit integers when every feature's index fits one, as SciPy and AnnData keep them, and row offsets as 64-bit integers.
+It writes a temporary file in the same directory
 and moves it onto the target once complete, so a failed export leaves no partial file and keeps an
 earlier file of the same name; a replaced file keeps its permissions. Without a `run`, text without missing values is a string array and
 both indexes are stored as `_index`. A column named `_index`, which AnnData reserves, as stores

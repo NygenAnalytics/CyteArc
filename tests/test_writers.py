@@ -2248,9 +2248,9 @@ def test_h5ad_plan_writer_keeps_the_permissions_of_a_replaced_file(
     write_plan = export._write_plan
     modes = []
 
-    def recorded(h5, plan):
+    def recorded(h5, plan, threads):
         modes.append(stat.S_IMODE(os.stat(h5.filename).st_mode))
-        write_plan(h5, plan)
+        write_plan(h5, plan, threads)
 
     monkeypatch.setattr(export, "_write_plan", recorded)
     previous = os.umask(0o022)
@@ -2433,6 +2433,250 @@ def test_h5ad_writer_converts_dense_blocks_to_csr_in_steps(tmp_path, monkeypatch
     np.testing.assert_array_equal(stored.toarray(), dense)
 
 
+def _sparse_blocks(row_values, n_cols, dtype, seed):
+    """CSR row blocks whose rows hold the given numbers of values, from 1 up."""
+    from scipy.sparse import csr_matrix
+
+    rng = np.random.default_rng(seed)
+    blocks = []
+    for counts in row_values:
+        indptr = np.concatenate([[0], np.cumsum(counts)]).astype(np.int32)
+        indices = np.concatenate(
+            [np.sort(rng.choice(n_cols, size=count, replace=False)) for count in counts]
+            or [np.zeros(0, dtype=np.int64)]
+        ).astype(np.int32)
+        data = rng.integers(1, 200, size=int(indptr[-1])).astype(dtype)
+        blocks.append(csr_matrix((data, indices, indptr), shape=(len(counts), n_cols)))
+    return blocks
+
+
+def _stored_csr(path):
+    import h5py
+    from scipy.sparse import csr_matrix
+
+    with h5py.File(path, "r") as h5:
+        group = h5["X"]
+        shape = tuple(int(size) for size in group.attrs["shape"])
+        matrix = csr_matrix(
+            (group["data"][:], group["indices"][:], group["indptr"][:]), shape=shape
+        )
+        dtypes = (group["data"].dtype, group["indices"].dtype, group["indptr"].dtype)
+    return matrix, dtypes
+
+
+def _chunk_payloads(path, name):
+    """Each stored chunk of ``X/<name>``: its filter mask and stored bytes."""
+    import h5py
+
+    with h5py.File(path, "r") as h5:
+        dataset = h5[f"X/{name}"]
+        return [
+            dataset.id.read_direct_chunk((offset,))
+            for offset in range(0, dataset.shape[0], dataset.chunks[0])
+        ]
+
+
+# Rows of values per block, against chunks of 8 values: blocks that end inside
+# a chunk and a short last chunk, fewer values than one chunk, exactly one
+# chunk, blocks of empty rows, and no values at all.
+_CHUNK_LAYOUTS = {
+    "uneven blocks": [[3, 0, 6], [5], [2, 2, 2, 1], [9, 4]],
+    "less than a chunk": [[2, 3]],
+    "one whole chunk": [[4, 4]],
+    "empty rows between": [[0, 0], [8, 8], [0], [1]],
+    "no values": [[0, 0, 0]],
+}
+
+
+@pytest.mark.parametrize("layout", _CHUNK_LAYOUTS)
+def test_h5ad_writer_stores_the_chunks_that_its_gzip_filter_would_store(
+    tmp_path, monkeypatch, layout
+):
+    import zlib
+
+    import h5py
+    from scipy.sparse import vstack
+
+    import cytearc.writers.export as export
+    from cytearc.writers.export import write_h5ad_plan
+
+    monkeypatch.setattr(export, "_CSR_CHUNK", 8)
+    blocks = _sparse_blocks(_CHUNK_LAYOUTS[layout], 12, np.float32, seed=3)
+    expected = vstack(blocks, format="csr")
+    n_rows = expected.shape[0]
+    path = tmp_path / "export.h5ad"
+    write_h5ad_plan(
+        _plan(blocks, shape=(n_rows, 12), dtype=np.float32), path, threads=3
+    )
+
+    stored, dtypes = _stored_csr(path)
+    assert dtypes == (np.float32, np.int32, np.int64)
+    np.testing.assert_array_equal(stored.indptr, expected.indptr)
+    np.testing.assert_array_equal(stored.indices, expected.indices)
+    np.testing.assert_array_equal(stored.data, expected.data)
+    # h5py's own gzip filter writes the reference chunks, the last one with
+    # zeros after its values.
+    reference = tmp_path / "reference.h5"
+    with h5py.File(reference, "w") as h5:
+        for name, values in (("data", expected.data), ("indices", expected.indices)):
+            h5.create_dataset(
+                name,
+                data=values.astype(dtypes[0] if name == "data" else np.int32),
+                maxshape=(None,),
+                chunks=(8,),
+                compression="gzip",
+            )
+    with h5py.File(reference, "r") as h5:
+        for name in ("data", "indices"):
+            written = _chunk_payloads(path, name)
+            filtered = [
+                h5[name].id.read_direct_chunk((offset,))
+                for offset in range(0, h5[name].shape[0], 8)
+            ]
+            assert len(written) == len(filtered) == -(-expected.nnz // 8)
+            for (mask, payload), (_, reference_payload) in zip(
+                written, filtered, strict=True
+            ):
+                assert mask == 0
+                assert zlib.decompress(payload) == zlib.decompress(reference_payload)
+
+    anndata = pytest.importorskip("anndata")
+    exported = anndata.read_h5ad(path)
+    np.testing.assert_array_equal(exported.X.toarray(), expected.toarray())
+
+
+def test_h5ad_writer_writes_the_same_file_on_any_number_of_threads(tmp_path):
+    from scipy.sparse import csr_matrix, vstack
+
+    from cytearc.writers.export import write_h5ad_plan
+
+    # About 300,000 values, several of the 65,536-value chunks, in blocks of
+    # uneven sizes, with a dense block among them.
+    rng = np.random.default_rng(11)
+    sizes = [rng.integers(0, 400, size=rows) for rows in (300, 1, 450, 120, 600)]
+    blocks = _sparse_blocks(sizes, 2_000, np.float64, seed=5)
+    blocks[3] = blocks[3].toarray()
+    expected = vstack([csr_matrix(block) for block in blocks], format="csr")
+    plan = _plan(blocks, shape=expected.shape, dtype=np.float64)
+    paths = {threads: tmp_path / f"threads_{threads}.h5ad" for threads in (1, 2, 5)}
+    for threads, path in paths.items():
+        write_h5ad_plan(plan, path, threads=threads)
+
+    for path in paths.values():
+        stored, dtypes = _stored_csr(path)
+        assert dtypes == (np.float64, np.int32, np.int64)
+        np.testing.assert_array_equal(stored.indptr, expected.indptr)
+        np.testing.assert_array_equal(stored.indices, expected.indices)
+        np.testing.assert_array_equal(stored.data, expected.data)
+    for name in ("data", "indices"):
+        chunks = {
+            threads: _chunk_payloads(path, name) for threads, path in paths.items()
+        }
+        assert len(chunks[1]) == -(-expected.nnz // 65_536) > 2
+        assert chunks[2] == chunks[1] and chunks[5] == chunks[1]
+
+
+@pytest.mark.parametrize("fits", [True, False])
+def test_h5ad_writer_stores_32_bit_column_indices_when_the_features_fit(
+    tmp_path, monkeypatch, fits
+):
+    from scipy.sparse import csr_matrix, vstack
+
+    import cytearc.writers.export as export
+    from cytearc.writers.export import write_h5ad_plan
+
+    n_cols = 40
+    if not fits:
+        # A matrix of more than 2**31 features is too large for the suite, so
+        # the limit moves below the features instead.
+        monkeypatch.setattr(export, "_INT32_MAX", n_cols - 2)
+    blocks = _sparse_blocks([[5, 39, 0, 40], [1, 2]], n_cols, np.uint32, seed=7)
+    blocks.append(np.eye(2, n_cols, k=n_cols - 2, dtype=np.uint32) * 9)
+    expected = vstack([csr_matrix(block) for block in blocks], format="csr")
+    path = tmp_path / "export.h5ad"
+    write_h5ad_plan(_plan(blocks, shape=expected.shape, dtype=np.uint32), path)
+
+    stored, dtypes = _stored_csr(path)
+    assert dtypes == (np.uint32, np.int32 if fits else np.int64, np.int64)
+    assert stored.indices.max() == n_cols - 1
+    np.testing.assert_array_equal(stored.toarray(), expected.toarray())
+    anndata = pytest.importorskip("anndata")
+    exported = anndata.read_h5ad(path)
+    assert exported.X.dtype == np.uint32
+    np.testing.assert_array_equal(exported.X.toarray(), expected.toarray())
+
+
+@pytest.mark.parametrize(
+    "dtype", [np.uint8, np.uint16, np.uint32, np.int64, np.float32, np.float64]
+)
+def test_h5ad_writer_reads_back_counts_of_every_dtype(tmp_path, dtype):
+    from scipy.sparse import csr_matrix, vstack
+
+    from cytearc.writers.export import write_h5ad_plan
+
+    blocks = _sparse_blocks([[3, 0, 7], [12]], 30, dtype, seed=13)
+    blocks.insert(1, np.diag(np.arange(1, 31, dtype=dtype))[:4])
+    expected = vstack([csr_matrix(block) for block in blocks], format="csr")
+    path = tmp_path / "export.h5ad"
+    write_h5ad_plan(_plan(blocks, shape=expected.shape, dtype=dtype), path)
+
+    stored, dtypes = _stored_csr(path)
+    assert dtypes[0] == dtype
+    np.testing.assert_array_equal(stored.toarray(), expected.toarray())
+    anndata = pytest.importorskip("anndata")
+    exported = anndata.read_h5ad(path)
+    assert exported.X.dtype == dtype
+    np.testing.assert_array_equal(exported.X.toarray(), expected.toarray())
+
+
+@pytest.mark.parametrize(
+    ("threads", "error", "message"),
+    [
+        (0, ValueError, "threads must be at least 1"),
+        (-1, ValueError, "threads must be at least 1"),
+        (1.5, TypeError, "threads must be an integer"),
+        (True, TypeError, "threads must be an integer"),
+        ("2", TypeError, "threads must be an integer"),
+    ],
+)
+def test_h5ad_writer_refuses_a_thread_count_that_is_not_a_whole_number(
+    export_assay_store, tmp_path, threads, error, message
+):
+    from cytearc.writers import to_h5ad
+    from cytearc.writers.export import write_h5ad_plan
+
+    output = tmp_path / "output"
+    output.mkdir()
+    path = output / "export.h5ad"
+    with pytest.raises(error, match=f"^{message}$"):
+        write_h5ad_plan(_plan([np.ones((3, 2), dtype=np.int32)]), path, threads=threads)
+    with pytest.raises(error, match=f"^n{message}$"):
+        to_h5ad(export_assay_store.RNA, str(path), nthreads=threads)
+    assert list(output.iterdir()) == []
+
+
+def test_to_h5ad_compresses_on_the_threads_that_read_the_counts(
+    export_assay_store, tmp_path, monkeypatch
+):
+    import cytearc.writers.export as export
+    from cytearc.writers import to_h5ad
+
+    threads = []
+    write = export.write_h5ad_plan
+
+    def recorded(plan, path, **options):
+        threads.append(options["threads"])
+        write(plan, path, **options)
+
+    monkeypatch.setattr(export, "write_h5ad_plan", recorded)
+    to_h5ad(export_assay_store.RNA, str(tmp_path / "live.h5ad"), nthreads=3)
+    # A run export compresses on the threads of the run's datastore.
+    assay, _owner, run = _completed_export_run()
+    to_h5ad(assay, str(tmp_path / "run.h5ad"), run=run)
+
+    assert threads == [3, 2]
+
+
 @pytest.mark.parametrize(
     ("shape", "dtype", "order"),
     [
@@ -2483,7 +2727,7 @@ def _completed_export_run(umap=True):
     from cytearc.storage.pipeline_runs import PipelineRunRecord
     from cytearc.writers.export import H5adColumn, H5adExportPlan, H5adMatrix
 
-    assay = SimpleNamespace(name="RNA")
+    assay = SimpleNamespace(name="RNA", nthreads=2)
 
     def frozen(name, values, missing=None):
         array = np.asarray(values)
