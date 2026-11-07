@@ -38,6 +38,7 @@ from ...storage.artifacts import (
     artifact_group,
     canonical_bytes,
 )
+from ...storage.categorical import CategoricalColumn
 from ...storage.refs import ArtifactRef
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scope
@@ -209,7 +210,8 @@ def _column_values(
 
     Each string beyond ASCII is charged beside it the UTF-8 form that coding
     the labels leaves in it, as
-    :func:`~cytearc.metadata.selection.hashed_text_bytes` counts it.
+    :func:`~cytearc.metadata.selection.hashed_text_bytes` counts it; the
+    rows of a categorical column share one string per category.
 
     Returns:
         The values, the mask or None, and the bytes that both keep charged.
@@ -219,7 +221,12 @@ def _column_values(
     charged = ledger.charged
     if np.dtype(array.dtype).kind == "U":
         values = read_text_rows(ledger, array, cell_index, item=item)
-        ledger.hold(item, hashed_text_bytes(values))
+        strings = (
+            array.categories.tolist()
+            if isinstance(array, CategoricalColumn)
+            else values
+        )
+        ledger.hold(item, hashed_text_bytes(strings))
     else:
         values = read_rows(ledger, array, cell_index, item=item)
     mask = metadata_missing_mask(cells, column)

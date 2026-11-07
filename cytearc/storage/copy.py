@@ -9,6 +9,7 @@ from .types import as_zarr_array
 from .arrays import (
     MISSING_MASK_PREFIX,
     _decode_metadata_values,
+    create_metadata_column,
     create_numeric_array,
     linked_missing_mask,
     MetadataBlock,
@@ -16,6 +17,13 @@ from .arrays import (
     stored_metadata_dtype,
 )
 from .budget import ResourceBudget
+from .categorical import (
+    CATEGORIES_LINK,
+    CATEGORIES_PREFIX,
+    ORDERED_ATTRIBUTE,
+    categories_name,
+    linked_categories,
+)
 from .geometry import array_geometry
 from .layout import PROFILE_METADATA_CHUNK, ChunkRows, normed_array_spec
 from .partition import affordable_width, row_band, scan_band
@@ -117,6 +125,7 @@ def _copy_metadata_array(
     copy_attributes: bool = True,
     block_rows: int | None = None,
     chunk_rows: ChunkRows | None = None,
+    categories: zarr.Array | None = None,
 ) -> None:
     """Stream-copy one metadata column, its rows ``row_indices`` or all.
 
@@ -125,7 +134,9 @@ def _copy_metadata_array(
     are part of the copy's first metadata write. ``chunk_rows`` gives the
     copy's chunks from its rows and the bytes of each value as stored, such
     as :func:`~cytearc.storage.layout.column_chunk_rows` for a column of a
-    cell or feature table; without it, chunks hold 100,000 rows.
+    cell or feature table; without it, chunks hold 100,000 rows. A
+    categorical column's codes pass its ``categories``, which are copied
+    whole, with their ``ordered`` attribute, before the codes that link them.
     """
     if src.ndim != 1:
         raise ValueError(
@@ -176,6 +187,19 @@ def _copy_metadata_array(
         if copy_attributes
         else {}
     )
+    if categories is not None:
+        labels = np.asarray(categories[:])
+        create_metadata_column(
+            dst,
+            categories_name(name),
+            data=labels,
+            dtype=labels.dtype,
+            overwrite=overwrite,
+            chunkSize=_copy_chunk_rows(len(labels), labels.dtype.itemsize, chunk_rows),
+            profile=profile,
+            attributes={ORDERED_ATTRIBUTE: bool(categories.attrs[ORDERED_ATTRIBUTE])},
+        )
+        attributes[CATEGORIES_LINK] = categories_name(name)
     create_streamed_metadata_column(
         dst,
         name,
@@ -226,7 +250,9 @@ def copy_zarr_group_tree(
     ``exclude_members`` applies only to immediate members of ``src``. Child
     groups are copied recursively without inheriting the parent exclusions.
     ``chunk_rows`` gives each copied column's chunks, as
-    :func:`_copy_metadata_array` takes it, and child groups take it too.
+    :func:`_copy_metadata_array` takes it, and child groups take it too. A
+    categorical column keeps its layout: the codes of the copied rows, and
+    every category.
     """
     if row_indices is None:
         from .stores import prefetch_metadata_listing
@@ -235,18 +261,26 @@ def copy_zarr_group_tree(
     masks = validate_metadata_dependencies(src, exclude_members=exclude_members)
     from .stores import metadata_workers, run_concurrently
 
+    members = list(src.members())
+    opened = dict(members)
     arrays: list[tuple[str, zarr.Array]] = []
     groups: list[tuple[str, zarr.Group]] = []
-    for name, node in src.members():
+    linked: dict[str, zarr.Array] = {}
+    for name, node in members:
         if exclude_members is not None and name in exclude_members:
             continue
-        # A mask is copied together with the column that links it.
-        if name.startswith(MISSING_MASK_PREFIX):
+        # A mask and categories are copied together with the column that
+        # links them.
+        if name.startswith((MISSING_MASK_PREFIX, CATEGORIES_PREFIX)):
             continue
         if isinstance(node, zarr.Group):
             groups.append((name, node))
-        else:
-            arrays.append((name, as_zarr_array(node, name=name)))
+            continue
+        array = as_zarr_array(node, name=name)
+        arrays.append((name, array))
+        categories = linked_categories(src, name, values=array, opened=opened)
+        if categories is not None:
+            linked[name] = categories
 
     planned_rows: dict[str, int] = {}
     workers = 1
@@ -311,6 +345,7 @@ def copy_zarr_group_tree(
             profile=profile,
             block_rows=planned_rows.get(name),
             chunk_rows=chunk_rows,
+            categories=linked.get(name),
         )
 
     run_concurrently(
@@ -342,11 +377,18 @@ def validate_metadata_dependencies(
     *,
     exclude_members: set[str] | frozenset[str] | None = None,
 ) -> dict[str, zarr.Array]:
+    """Return each column's missing mask, checking the masks and categories that columns link.
+
+    Raises:
+        ValueError: If a column links a mask or categories in a malformed way.
+    """
     masks = {}
     for name, array in group.arrays():
         if exclude_members is not None and name in exclude_members:
             continue
-        mask = linked_missing_mask(group, name, label=f"Column {name!r}", values=array)
+        label = f"Column {name!r}"
+        mask = linked_missing_mask(group, name, label=label, values=array)
+        linked_categories(group, name, label=label, values=array)
         if mask is not None:
             masks[name] = mask
     return masks

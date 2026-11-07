@@ -35,6 +35,7 @@ from ..metadata.membership import resolve_assay_membership
 from ..metadata.rows import default_block_rows
 from ..storage.artifacts import fingerprint_stored_arrays
 from ..storage.budget import ResourceBudget, resolve_budget
+from ..storage.categorical import CategoricalColumn
 from ..storage.count_matrix import (
     DEFAULT_COUNT_MATRIX_POLICY,
     CountMatrixPairPlan,
@@ -121,7 +122,7 @@ class _CachedMetadataTable:
         self._table = table
         self.N = table.N
         self.columns = table.columns
-        self._arrays: dict[str, zarr.Array] = {}
+        self._arrays: dict[str, zarr.Array | CategoricalColumn] = {}
         self._masks: dict[str, zarr.Array | None] = {}
         self._source_cache: SourceCache | None = None
 
@@ -139,10 +140,18 @@ class _CachedMetadataTable:
         store = _PrefetchingMetadataStore(array, self._source_cache)
         return zarr.open_array(store=store, path=array.path, mode="r")
 
-    def _get_array(self, column: str) -> zarr.Array:
+    def _cache_column(
+        self, array: zarr.Array | CategoricalColumn
+    ) -> zarr.Array | CategoricalColumn:
+        # A categorical column reads its codes through the cache.
+        if isinstance(array, CategoricalColumn):
+            return array.with_codes(self._cache_array(array.codes))
+        return self._cache_array(array)
+
+    def _get_array(self, column: str) -> zarr.Array | CategoricalColumn:
         if column not in self._arrays:
             self._arrays[column] = self._table._get_array(column)
-        self._arrays[column] = self._cache_array(self._arrays[column])
+        self._arrays[column] = self._cache_column(self._arrays[column])
         return self._arrays[column]
 
     def get_dtype(self, column: str) -> np.dtype[Any]:
@@ -156,7 +165,7 @@ class _CachedMetadataTable:
             self._masks[column] = self._cache_array(array)
         return self._masks[column]
 
-    def _bool_array(self, key: str) -> zarr.Array:
+    def _bool_array(self, key: str) -> zarr.Array | CategoricalColumn:
         array = self._get_array(key)
         if array.dtype != np.dtype(bool):
             raise TypeError(f"Metadata column {key!r} must have boolean dtype")
@@ -183,9 +192,15 @@ def _prefetch_metadata_schema(
             identity = column in {"ids", "names"}
             if not identity and (column == "I" or column in excluded):
                 continue
-            array = table._get_array(column)
-            if not identity and array.dtype.kind not in {"U", "S", "O"}:
+            column_array = table._get_array(column)
+            if not identity and column_array.dtype.kind not in {"U", "S", "O"}:
                 continue
+            # A categorical column's scan reads its codes.
+            array = (
+                column_array.codes
+                if isinstance(column_array, CategoricalColumn)
+                else column_array
+            )
             geometry = array_geometry(array)
             assert geometry is not None
             objects = -(-array.shape[0] // geometry.axisShard(0))

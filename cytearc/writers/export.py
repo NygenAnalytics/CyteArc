@@ -18,8 +18,10 @@ import re
 import secrets
 import stat
 import unicodedata
-from collections import defaultdict
+import zlib
+from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -33,7 +35,7 @@ from ..storage.refs import ArtifactRef
 from ..utils.compute import compute_with_progress
 from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError, MemoryLedger
-from ..utils.arguments import bool_argument
+from ..utils.arguments import bool_argument, integer_argument
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -45,6 +47,8 @@ type H5adSource = ArtifactRef | tuple[ArtifactRef, str]
 
 # Element storage of a streamed CSR matrix.
 _CSR_CHUNK = 65_536
+# The level of h5py's gzip filter, at which the export compresses its chunks.
+_GZIP_LEVEL = 4
 # Value kinds that hold text: strings, bytes, objects, and NumPy strings.
 _TEXT_KINDS = frozenset("USOT")
 # AnnData stores an unnamed dataframe index under this name, which no
@@ -129,6 +133,8 @@ _CSR_STEP_VALUES = 1 << 20
 # Bytes of one value of the widest export dtype, which a converted piece may
 # be cast to.
 _CAST_ITEMSIZE = 8
+# The largest index that a 32-bit index array holds.
+_INT32_MAX = int(np.iinfo(np.int32).max)
 
 
 def _csr_step_rows(n_cols: int) -> int:
@@ -136,15 +142,14 @@ def _csr_step_rows(n_cols: int) -> int:
     return max(1, _CSR_STEP_VALUES // max(1, int(n_cols)))
 
 
-def _csr_index_dtype(n_cols: int, step_values: int) -> np.dtype[Any]:
-    """Return the dtype of a piece's column indices and row offsets.
+def _csr_index_dtype(n_cols: int, step_values: int = 0) -> np.dtype[Any]:
+    """Return the dtype of indices below ``n_cols`` and offsets up to ``step_values``.
 
     SciPy keeps int32 indexes that it can hold as they are, and would copy
     int64 indexes that fit into int32.
     """
-    limit = int(np.iinfo(np.int32).max)
     return np.dtype(
-        np.int32 if max(int(n_cols), int(step_values)) <= limit else np.int64
+        np.int32 if max(int(n_cols), int(step_values)) <= _INT32_MAX else np.int64
     )
 
 
@@ -692,8 +697,72 @@ def _write_frame(
     return set(written), colors
 
 
-def _write_csr(group: Any, matrix: H5adMatrix, label: str) -> None:
-    """Append ``matrix`` to a CSR group row block by row block."""
+def _gzip_chunk(values: np.ndarray) -> bytes:
+    """Compress one chunk's values as HDF5's gzip filter compresses them."""
+    return zlib.compress(values, _GZIP_LEVEL)
+
+
+class _GzipChunks:
+    """Append values to a one-dimensional gzip dataset, a chunk at a time.
+
+    Each full chunk of ``_CSR_CHUNK`` values is compressed on ``pool``, and
+    the calling thread stores the compressed chunks in order with direct chunk
+    writes, which HDF5 reads as chunks that its own filter compressed. Values
+    that do not fill a chunk wait for the next ``extend``, and ``finish``
+    stores the last chunk with zeros after its values, as the filter stores an
+    edge chunk. At most ``window`` chunks are compressed or wait at once. The
+    dataset's extent must reach each chunk before it is stored.
+    """
+
+    def __init__(self, dataset: Any, pool: ThreadPoolExecutor, window: int) -> None:
+        self._dataset = dataset
+        self._pool = pool
+        self._window = window
+        self._chunk = np.empty(_CSR_CHUNK, dtype=dataset.dtype)
+        self._filled = 0
+        self._offset = 0
+        self._compressed: deque[tuple[int, Future[bytes]]] = deque()
+
+    def extend(self, values: np.ndarray) -> None:
+        start = 0
+        while start < values.size:
+            taken = min(_CSR_CHUNK - self._filled, values.size - start)
+            self._chunk[self._filled : self._filled + taken] = values[
+                start : start + taken
+            ]
+            self._filled += taken
+            start += taken
+            if self._filled == _CSR_CHUNK:
+                self._compress()
+
+    def finish(self) -> None:
+        if self._filled:
+            self._chunk[self._filled :] = 0
+            self._compress()
+        while self._compressed:
+            self._store()
+
+    def _compress(self) -> None:
+        chunk = self._chunk
+        self._compressed.append((self._offset, self._pool.submit(_gzip_chunk, chunk)))
+        self._chunk = np.empty(_CSR_CHUNK, dtype=chunk.dtype)
+        self._filled = 0
+        self._offset += _CSR_CHUNK
+        while len(self._compressed) > self._window:
+            self._store()
+
+    def _store(self) -> None:
+        offset, compressed = self._compressed.popleft()
+        self._dataset.id.write_direct_chunk((offset,), compressed.result())
+
+
+def _write_csr(group: Any, matrix: H5adMatrix, label: str, threads: int) -> None:
+    """Append ``matrix`` to a CSR group row block by row block.
+
+    The values and column indices are compressed on ``threads`` threads.
+    Column indices are 32-bit integers when every feature's index fits one,
+    as SciPy keeps them, and 64-bit otherwise; row offsets are 64-bit.
+    """
     n_rows, n_cols = matrix.shape
     capacity = 0 if matrix.reserve is None else int(matrix.reserve())
     # The blocks define the row boundaries, even when stored QC is stale.
@@ -718,22 +787,27 @@ def _write_csr(group: Any, matrix: H5adMatrix, label: str) -> None:
         maxshape=(None,),
         chunks=(_CSR_CHUNK,),
         compression="gzip",
-        dtype="int64",
+        dtype=_csr_index_dtype(n_cols),
     )
     row = offset = 0
     indptr[0] = 0
-    for block in iter_h5ad_blocks(matrix, label):
-        end_row = row + block.shape[0]
-        end = offset + block.nnz
-        if end > data.shape[0]:
-            data.resize((end,))
-            indices.resize((end,))
-        data[offset:end] = block.data
-        indices[offset:end] = block.indices
-        indptr[row + 1 : end_row + 1] = block.indptr[1:].astype(np.int64) + offset
-        row, offset = end_row, end
-        # Each piece is released before the next one is converted.
-        del block
+    with ThreadPoolExecutor(threads, thread_name_prefix="h5ad_gzip") as pool:
+        values = _GzipChunks(data, pool, threads)
+        columns = _GzipChunks(indices, pool, threads)
+        for block in iter_h5ad_blocks(matrix, label):
+            end_row = row + block.shape[0]
+            end = offset + block.nnz
+            if end > data.shape[0]:
+                data.resize((end,))
+                indices.resize((end,))
+            values.extend(block.data)
+            columns.extend(block.indices)
+            indptr[row + 1 : end_row + 1] = block.indptr[1:].astype(np.int64) + offset
+            row, offset = end_row, end
+            # Each piece is released before the next one is converted.
+            del block
+        values.finish()
+        columns.finish()
     data.resize((offset,))
     indices.resize((offset,))
     group.attrs["encoding-type"] = "csr_matrix"
@@ -869,13 +943,13 @@ def read_obsm(plan: H5adExportPlan, name: str) -> np.ndarray:
     return values
 
 
-def _write_plan(h5: Any, plan: H5adExportPlan) -> None:
+def _write_plan(h5: Any, plan: H5adExportPlan, threads: int) -> None:
     n_obs, n_vars = plan.x.shape
     _encoded(h5, "anndata", "0.1.0")
     for name in ("X", "obs", "var"):
         h5.create_group(name)
     obsm = _encoded(h5.create_group("obsm"), "dict", "0.1.0")
-    _write_csr(h5["X"], plan.x, "The X matrix")
+    _write_csr(h5["X"], plan.x, "The X matrix", threads)
     obs_columns, colors = _write_frame(h5["obs"], plan.obs_index, plan.obs, n_obs)
     _write_frame(h5["var"], plan.var_index, plan.var, n_vars)
     for name in plan.obsm:
@@ -883,7 +957,7 @@ def _write_plan(h5: Any, plan: H5adExportPlan) -> None:
     if plan.layers:
         layers = _encoded(h5.create_group("layers"), "dict", "0.1.0")
         for name, layer in plan.layers.items():
-            _write_csr(layers.create_group(name), layer, f"Layer {name!r}")
+            _write_csr(layers.create_group(name), layer, f"Layer {name!r}", threads)
     if plan.obsp:
         obsp = _encoded(h5.create_group("obsp"), "dict", "0.1.0")
         for name in plan.obsp:
@@ -899,10 +973,24 @@ def _write_plan(h5: Any, plan: H5adExportPlan) -> None:
             _write_uns_value(group, name, value)
 
 
-def write_h5ad_plan(plan: H5adExportPlan, path: str | os.PathLike[str]) -> None:
-    """Stream ``plan`` to an H5AD file at ``path``, replacing it only once complete."""
+def write_h5ad_plan(
+    plan: H5adExportPlan,
+    path: str | os.PathLike[str],
+    *,
+    threads: int = 1,
+) -> None:
+    """Stream ``plan`` to an H5AD file at ``path``, replacing it only once complete.
+
+    Each sparse matrix's values and column indices are compressed on
+    ``threads`` threads, with the same file for any number of threads.
+
+    Raises:
+        TypeError: If ``threads`` is not an integer.
+        ValueError: If ``threads`` is less than 1.
+    """
     import h5py
 
+    threads = integer_argument(threads, "threads", minimum=1)
     _check_plan(plan)
     directory = os.path.dirname(os.path.abspath(path))
     temporary = os.path.join(directory, f".{secrets.token_hex(8)}.h5ad.tmp")
@@ -915,7 +1003,7 @@ def write_h5ad_plan(plan: H5adExportPlan, path: str | os.PathLike[str]) -> None:
     os.close(os.open(temporary, flags, 0o666 if mode is None else 0o600))
     try:
         with h5py.File(temporary, "w") as h5:
-            _write_plan(h5, plan)
+            _write_plan(h5, plan, threads)
         if mode is not None:
             os.chmod(temporary, mode)
         os.replace(temporary, path)
@@ -1858,7 +1946,8 @@ def to_h5ad(
                          ``["UMAP", "tSNE"]``. Pass an empty list to skip
                          embeddings.
         skip_recalc_nfeats: Skip a preliminary nonzero-count pass. (Default value: True)
-        nthreads: Number of processing threads to use (Default value: 4)
+        nthreads: Threads that read the counts and compress them into the
+                  file. (Default value: 4)
         run: Completed pipeline run opened from the datastore that owns
              ``assay``. The frozen run selections and fields are exported.
              Consecutive frozen UMAP fields are in ``obsm['X_umap']`` and
@@ -1866,7 +1955,8 @@ def to_h5ad(
              ``to_anndata(run=...)``; cluster labels (``clusters``,
              ``leiden_*``, ``paris``) are categoricals in ``obs``. Live
              embedding columns, a cell selection, and feature-count
-             recalculation options do not apply to run export.
+             recalculation options do not apply to run export, which reads
+             and compresses on the threads of the run's datastore.
         matrix: ``"raw"`` counts, or ``"normed"`` values, which require
                 ``run``: the run's stored normalized values over its highly
                 variable features.
@@ -1892,6 +1982,7 @@ def to_h5ad(
     leaves no file.
     """
     skip_recalc_nfeats = bool_argument(skip_recalc_nfeats, "skip_recalc_nfeats")
+    nthreads = integer_argument(nthreads, "nthreads", minimum=1)
     if matrix not in ("raw", "normed"):
         raise ValueError("matrix must be either 'raw' or 'normed'")
     if dtype is not None:
@@ -1929,7 +2020,9 @@ def to_h5ad(
                 max_bytes=int(assay.resources.memoryBytes),
                 codec_threads=int(assay.resources.workers),
             )
-        write_h5ad_plan(with_count_dtype(plan, dtype, raw_x=True), h5ad_filename)
+        write_h5ad_plan(
+            with_count_dtype(plan, dtype, raw_x=True), h5ad_filename, threads=nthreads
+        )
         logger.info(
             f"Exported {plan.x.shape[0]} cells and {assay.feats.N} features "
             f"to {h5ad_filename}"
@@ -1983,7 +2076,11 @@ def to_h5ad(
             max_bytes=int(assay.resources.memoryBytes),
             codec_threads=int(assay.resources.workers),
         )
-    write_h5ad_plan(with_count_dtype(plan, dtype, raw_x=matrix == "raw"), h5ad_filename)
+    write_h5ad_plan(
+        with_count_dtype(plan, dtype, raw_x=matrix == "raw"),
+        h5ad_filename,
+        threads=int(assay.nthreads),
+    )
     n_cells, n_features = plan.x.shape
     logger.info(
         f"Exported pipeline run {pipeline_run.run_id} with {n_cells} cells and "

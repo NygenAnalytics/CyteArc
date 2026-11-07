@@ -88,6 +88,7 @@ from ...storage.artifacts import (
     require_complete_artifact,
 )
 from ...storage.async_execution import zarr_decoding_threads, zarr_io_concurrency
+from ...storage.categorical import CategoricalColumn
 from ...storage.diagnostics import ExportSummary, export_summary, warn_diagnostics
 from ...storage.geometry import ROW_INDEX_BYTES, array_geometry
 from ...storage.types import as_zarr_array, read_array
@@ -2587,7 +2588,7 @@ def _even_rows(chunk: int, wanted: int) -> int:
 
 def _packed_text(
     ledger: MemoryLedger,
-    array: zarr.Array,
+    array: zarr.Array | CategoricalColumn,
     rows: np.ndarray | None,
     slice_bytes: int,
     *,

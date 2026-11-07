@@ -1,6 +1,7 @@
 """Cells grouped by columns, label artifacts and kept-apart labels, checked by hand."""
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from cytearc.datastore._operations.cell_groups import (
@@ -12,6 +13,7 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.artifacts import plan_cell_data_artifact
 from cytearc.storage.arrays import MISSING_MASK_PREFIX
 from cytearc.storage.artifact_writer import artifact_transaction
+from cytearc.storage.categorical import CategoricalColumn
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 from tests.storage_helpers import (
@@ -27,20 +29,30 @@ BATCHES = np.asarray(["a", "a", "b", "b", "a", "a", "b", "b"])
 CLUSTERS = np.asarray(["x", "y", "x", "y", "x", "y", "x", "y"])
 
 
-@pytest.fixture(scope="module")
-def store(tmp_path_factory) -> DataStore:
+@pytest.fixture(scope="module", params=["text", "categorical"])
+def store(request, tmp_path_factory) -> DataStore:
+    # Every grouping reads the same labels from text columns and from
+    # categorical columns, whose codes the reads decode.
     path = tmp_path_factory.mktemp("cell_groups") / "store.zarr"
     write_count_store(str(path), {"RNA": np.ones((N_CELLS, 3), dtype=int)}, "uint16")
     store = open_store(path)
-    store.cells.insert("sample", SAMPLES.astype(object))
-    store.cells.insert("batch", BATCHES.astype(object))
-    store.cells.insert("cluster", CLUSTERS.astype(object))
+    missing = np.zeros(N_CELLS, dtype=bool)
+    missing[[0, 5]] = True
+    if request.param == "text":
+        store.cells.insert("sample", SAMPLES.astype(object))
+        store.cells.insert("batch", BATCHES.astype(object))
+        store.cells.insert("cluster", CLUSTERS.astype(object))
+        insert_nullable_cell_column(store, "partial", SAMPLES, missing)
+    else:
+        store.cells.insert("sample", pd.Categorical(SAMPLES))
+        store.cells.insert("batch", pd.Categorical(BATCHES, categories=["b", "a", "c"]))
+        store.cells.insert("cluster", pd.Categorical(CLUSTERS))
+        store.cells.insert("partial", pd.Categorical(np.where(missing, None, SAMPLES)))
+        for column in ("sample", "batch", "cluster", "partial"):
+            assert isinstance(store.cells._get_array(column), CategoricalColumn)
     store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
     store.cells.insert("first_four", np.arange(N_CELLS) < 4)
     store.cells.insert("odd", np.arange(N_CELLS) % 2 == 1)
-    missing = np.zeros(N_CELLS, dtype=bool)
-    missing[[0, 5]] = True
-    insert_nullable_cell_column(store, "partial", SAMPLES, missing)
     return store
 
 

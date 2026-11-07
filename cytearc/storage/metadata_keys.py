@@ -3,8 +3,10 @@
 Zarr reads ``/`` and ``\\`` in an array name as path separators, so a column
 named with either one would nest into groups instead of forming one array.
 Imports store such source columns under a key with ``_`` in place of each
-separator. CyteArc's own ``I``, ``ids``, and ``names`` columns and the
-missing-value masks linked through ``__cytearc_missing__<name>`` are reserved.
+separator. CyteArc's own ``I``, ``ids``, and ``names`` columns, the
+missing-value masks linked through ``__cytearc_missing__<name>``, and the
+categories of categorical columns linked through
+``__cytearc_categories__<name>`` are reserved.
 The cell column named by :func:`assay_membership_column` records which cells
 an assay measures.
 """
@@ -12,6 +14,9 @@ an assay measures.
 from collections.abc import Iterable
 
 from .arrays import MISSING_MASK_PREFIX
+from .categorical import CATEGORIES_PREFIX
+
+_LINKED_PREFIXES = (MISSING_MASK_PREFIX, CATEGORIES_PREFIX)
 
 RESERVED_METADATA_COLUMNS = frozenset({"I", "ids", "names"})
 """Columns that CyteArc writes into every cell and feature table."""
@@ -38,7 +43,7 @@ _UNSTORABLE_NAMES = frozenset({"", ".", ".."})
 
 def is_reserved_metadata_name(name: str) -> bool:
     """Return whether a column name collides with CyteArc's own columns."""
-    return name in RESERVED_METADATA_COLUMNS or name.startswith(MISSING_MASK_PREFIX)
+    return name in RESERVED_METADATA_COLUMNS or name.startswith(_LINKED_PREFIXES)
 
 
 def metadata_column_key(name: str) -> str:
@@ -72,8 +77,9 @@ def nested_group_error(column: str) -> TypeError:
 def validate_metadata_column_name(name: str) -> None:
     """Reject a metadata column name that Zarr cannot store as one array.
 
-    Names that start with the missing-value mask prefix are rejected too, so
-    a written column can never replace or orphan a linked mask.
+    Names that start with the prefix of missing-value masks or of the
+    categories of categorical columns are rejected too, so a written column
+    can never replace or orphan a linked array.
 
     Args:
         name: Column name to check.
@@ -81,7 +87,8 @@ def validate_metadata_column_name(name: str) -> None:
     Raises:
         TypeError: If ``name`` is not a string.
         ValueError: If ``name`` is empty, ``.``, or ``..``, contains ``/`` or
-            ``\\``, or starts with ``__cytearc_missing__``.
+            ``\\``, or starts with ``__cytearc_missing__`` or
+            ``__cytearc_categories__``.
     """
     if not isinstance(name, str):
         raise TypeError(
@@ -94,6 +101,12 @@ def validate_metadata_column_name(name: str) -> None:
         raise ValueError(
             f"Metadata column name {name!r} uses the prefix "
             f"{MISSING_MASK_PREFIX!r}, which CyteArc reserves for missing-value masks"
+        )
+    if key.startswith(CATEGORIES_PREFIX):
+        raise ValueError(
+            f"Metadata column name {name!r} uses the prefix "
+            f"{CATEGORIES_PREFIX!r}, which CyteArc reserves for the categories of "
+            "categorical columns"
         )
     if key != name:
         raise ValueError(

@@ -32,6 +32,7 @@ from .artifacts import (
     inspect_artifact,
     open_artifact,
 )
+from .categorical import CATEGORIES_PREFIX, CategoricalColumn
 from .errors import ArtifactErrorContextValue, ArtifactResolutionError
 from .geometry import array_geometry
 from .metadata_keys import (
@@ -788,20 +789,28 @@ def resolve_generated_selection_artifact(
 @dataclass(frozen=True, slots=True)
 class _SnapshotColumn:
     name: str
-    values: zarr.Array
+    values: zarr.Array | CategoricalColumn
     missing: zarr.Array | None
     dtype: np.dtype[Any]
     fingerprint: str
 
 
-def _snapshot_block_rows(*arrays: zarr.Array) -> int:
+def _snapshot_block_rows(*arrays: zarr.Array | CategoricalColumn) -> int:
     return min(
         int(row_band(array_geometry(array), unit="chunk", fallback=1))
         for array in arrays
     )
 
 
-def _snapshot_values_dtype(values: zarr.Array) -> np.dtype[Any]:
+def _snapshot_values_dtype(values: zarr.Array | CategoricalColumn) -> np.dtype[Any]:
+    """The dtype that a snapshot stores a column's values in: text as unicode.
+
+    A categorical column's labels take the dtype that a column storing them
+    has, so its snapshot and fingerprint are those of the same labels stored
+    as text.
+    """
+    if isinstance(values, CategoricalColumn):
+        return values.stored_labels_dtype()
     rows = row_band(array_geometry(values), unit="chunk", fallback=1)
     n_rows = int(values.shape[0])
     return stored_metadata_dtype(
@@ -811,7 +820,7 @@ def _snapshot_values_dtype(values: zarr.Array) -> np.dtype[Any]:
 
 
 def _snapshot_values_block(
-    values: zarr.Array,
+    values: zarr.Array | CategoricalColumn,
     start: int,
     stop: int,
     dtype: np.dtype[Any],
@@ -822,7 +831,7 @@ def _snapshot_values_block(
 
 
 def _fingerprint_snapshot_column(
-    values: zarr.Array,
+    values: zarr.Array | CategoricalColumn,
     missing: zarr.Array | None,
     *,
     dtype: np.dtype[Any] | None = None,
@@ -874,7 +883,7 @@ def _snapshot_source_columns(
         for name in names
         if metadata_column_key(name) != name
         or name in {".", ".."}
-        or name.startswith(MISSING_MASK_PREFIX)
+        or name.startswith((MISSING_MASK_PREFIX, CATEGORIES_PREFIX))
     ]
     if invalid_names:
         described = ", ".join(
@@ -884,23 +893,25 @@ def _snapshot_source_columns(
             for name in invalid_names
         )
         raise ValueError(
-            "Snapshot column names cannot be paths or internal missing-mask "
-            f"names: {described}"
+            "Snapshot column names cannot be paths or the internal names of "
+            f"missing-value masks and categories: {described}"
         )
 
     resolved: list[_SnapshotColumn] = []
     for name in names:
         if name not in table:
             raise KeyError(f"Snapshot column {name!r} is unavailable in {table_path!r}")
-        values = as_zarr_array(table[name], name=name)
-        if values.ndim != 1 or int(values.shape[0]) != row_count:
+        stored = as_zarr_array(table[name], name=name)
+        if stored.ndim != 1 or int(stored.shape[0]) != row_count:
             raise ValueError(
                 f"Snapshot column {name!r} must align with the full metadata axis"
             )
+        label = f"Snapshot column {name!r}"
+        # A categorical column is copied as its labels.
+        categorical = CategoricalColumn.open(table, name, values=stored)
+        values = stored if categorical is None else categorical
         snapshot_dtype = _snapshot_values_dtype(values)
-        missing = linked_missing_mask(
-            table, name, label=f"Snapshot column {name!r}", values=values
-        )
+        missing = linked_missing_mask(table, name, label=label, values=stored)
         resolved.append(
             _SnapshotColumn(
                 name=name,

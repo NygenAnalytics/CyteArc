@@ -65,6 +65,7 @@ _METHODS = {
     "drop",
     "fetch",
     "fetch_all",
+    "fetch_categorical",
     "get_dtype",
     "get_index_by",
     "grep",
@@ -120,7 +121,7 @@ def test_metadata_method_ownership_and_signatures_remain_stable():
     methods = {name: getattr(metadata.MetaData, name) for name in _METHODS}
 
     assert signature_digest(methods) == (
-        "85c8760f6875db7c709191cf13f871f3ace951cfa8cb0dd21b0a49f58c217352"
+        "cc715f0b377ffc86eaaaf0a708a854ca20e7bab9020dbb31cf9b4092f3f2cbb4"
     )
 
 
