@@ -329,14 +329,24 @@ def write_embedding(
     store: "DataStore", column: str, coordinates: np.ndarray
 ) -> "ArtifactRef":
     """Save an imported embedding at these coordinates of the cells that a column selects."""
+    return write_selection_embedding(
+        store, store.snapshot_cell_selection(column), coordinates
+    )
+
+
+def write_selection_embedding(
+    store: "DataStore", cell_selection: "ArtifactRef", coordinates: np.ndarray
+) -> "ArtifactRef":
+    """Save an imported embedding at these coordinates of the cells of a cell selection."""
     import hashlib
 
     from cytearc.embeddings.imported import write_imported_embedding
+    from cytearc.metadata.selection import cell_selection_indices
     from cytearc.storage.artifacts import fingerprint_array
 
     values = np.asarray(coordinates, dtype=np.float32)
     ids = np.asarray(store.cells.fetch_all("ids")).astype(str)
-    rows = np.asarray(store.cells.fetch_all(column), dtype=bool)
+    rows = cell_selection_indices(store.zw, cell_selection)
     return write_imported_embedding(
         store.zw,
         assay="RNA",
@@ -346,7 +356,7 @@ def write_embedding(
         source_digest=hashlib.sha256(values.tobytes()).digest(),
         payload_fingerprints={"values": fingerprint_array(values)},
         source_cell_ids=ids[rows],
-        cell_selection=store.snapshot_cell_selection(column),
+        cell_selection=cell_selection,
         block_rows=4,
     )
 

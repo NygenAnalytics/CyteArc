@@ -726,14 +726,15 @@ def genotypes(
     group cells, named by their labels joined by commas. Without either,
     each site has one bar of all cells. Cells without a group are left out.
 
-    With ``layout``, an embedding artifact of the genotypes' cells, such as a
-    UMAP whose cell selection is the genotypes' own, the second panel draws
-    the cells at the embedding's coordinates, as ``embedding(layout=...)``
-    draws them, coloured by their call at the one site that ``sites`` names
-    or the genotypes hold; cells without a call there are drawn under the
-    others. The calls take one palette, named in words under one legend
-    beside the last panel, missing in the grey of no value and filtered in
-    the muted grey.
+    With ``layout``, an embedding artifact of the genotypes' cells, whichever
+    operation made its cell selection, such as a UMAP of the cells whose
+    counts were imported, the second panel draws the cells at the
+    embedding's coordinates, as ``embedding(layout=...)`` draws them,
+    coloured by their call at the one site that ``sites`` names or the
+    genotypes hold; cells without a call there are drawn under the others.
+    The calls take one palette, named in words under one legend beside the
+    last panel, missing in the grey of no value and filtered in the muted
+    grey.
 
     Tables: ``calls`` (``site``, ``group``, ``call``, ``n_cells``,
     ``share``) and, with a layout, ``cells`` (``ids``, ``x``, ``y``,
@@ -812,14 +813,18 @@ def genotypes(
     coordinates = np.empty((0, 2), dtype=np.float64)
     if layout is not None:
         from ..storage.artifacts import inspect_artifact
+        from ..storage.selections import selections_hold_same_cells
         from ._data import _resolve_layout
 
         coordinates, _layout_cells, layout_selection = _resolve_layout(store, layout)
         selection = inspect_artifact(store.zw, genotypes).input_ref("cell_selection")
-        if layout_selection != selection:
+        # The layout's rows are the genotypes' cells: another selection of the
+        # same cells serves.
+        if not selections_hold_same_cells(store.zw, layout_selection, selection):
             raise ValueError(
-                "layout must be an embedding of the genotypes' cells: its cell "
-                "selection must be the genotypes' own"
+                "The layout holds other cells than the genotypes; draw an "
+                "embedding of the genotypes' cells, such as a UMAP of the cells "
+                "whose counts were imported"
             )
         chosen = np.full(n_cells, missing, dtype=np.int64)
         chosen[row_cells] = row_calls

@@ -170,6 +170,31 @@ def validate_cell_selection(
     )
 
 
+def selections_hold_same_cells(
+    root: zarr.Group,
+    first: ArtifactRef,
+    second: ArtifactRef,
+) -> bool:
+    """Return whether two cell selections hold the same cells, whichever operations made them.
+
+    A selection holds its own cells. Two different selections are each
+    validated against the cell table, which raises ``ArtifactResolutionError``
+    for one that is incomplete, whose flags changed, or that was made over
+    other cell IDs; they hold the same cells when they fingerprint the same
+    ordered cell IDs and the same flags.
+    """
+    if first == second:
+        return True
+    identities = []
+    for selection in (first, second):
+        validated = validate_cell_selection(root, selection)
+        # Validation checked the recorded fingerprint of the flags against
+        # the stored flags.
+        inputs = inspect_artifact(root, selection).inputs or {}
+        identities.append((validated.row_ids_fingerprint, inputs["values_fingerprint"]))
+    return identities[0] == identities[1]
+
+
 def _validate_stored_selection_integrity(
     root: zarr.Group,
     ref: ArtifactRef,

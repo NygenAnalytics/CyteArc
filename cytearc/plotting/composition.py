@@ -11,6 +11,7 @@ from ._data import (
     _artifact_cell_selection,
     _category_universe,
     _fetch_cell_column,
+    _labels_for_cells,
     _resolve_grouping,
 )
 from ._deps import require_matplotlib
@@ -367,7 +368,10 @@ def composition(
     per sample; without it, one bar for the whole dataset.
     ``grouping`` is the immutable artifact counterpart to ``sample_by`` for
     analytical groupings such as clusters. It is available only for stacked
-    composition and must share the exact selection used by ``categories``.
+    composition. Beside ``categories``, its labels are read for the cells of
+    ``categories``, which its own cells must include, so a grouping of more
+    cells, such as labels of every cell, serves; a grouping that holds no
+    label for some of them raises ``ValueError``.
     ``kind="per_sample"`` draws one point per sample in each category (requires
     ``sample_by`` or a :class:`StudyDesign`).
 
@@ -431,18 +435,41 @@ def composition(
         )
     if (category_by is None) == (categories is None):
         raise ValueError("Provide exactly one of category_by or categories")
+    if categories is not None and cell_key != "I":
+        raise ValueError("cell_key cannot override an artifact's stored cell selection")
     cell_indices: np.ndarray | None = None
-    grouping_values: np.ndarray | None = None
-    grouping_selection: ArtifactRef | None = None
-    if grouping is not None:
-        _, cell_indices, resolved_grouping, _ = _resolve_grouping(
+    category_values: list[np.ndarray] | None = None
+    category_selection: ArtifactRef | None = None
+    if categories is not None:
+        _, cell_indices, category_values, _ = _resolve_grouping(
             store,
             group_by=None,
-            groups=grouping,
+            groups=categories,
             cell_key="I",
         )
+        category_selection = _artifact_cell_selection(store, categories)
+    grouping_values: np.ndarray | None = None
+    if grouping is not None:
+        # The grouping is read for the cells of categories, which its own
+        # cells must include, and for its own cells beside category_by.
+        _, grouping_indices, resolved_grouping, _ = _labels_for_cells(
+            store,
+            grouping,
+            cell_selection=category_selection,
+            refusal=(
+                f"The {grouping.kind} artifact of grouping holds no label for "
+                "some cells of categories; compute it on cells that include "
+                "those of categories, such as the cell selection of categories"
+            ),
+        )
+        if cell_indices is not None and not np.array_equal(
+            grouping_indices, cell_indices
+        ):
+            raise ValueError(
+                "categories and grouping select cells in a different order"
+            )
+        cell_indices = grouping_indices
         grouping_values = np.asarray(resolved_grouping[0], dtype=object)
-        grouping_selection = _artifact_cell_selection(store, grouping)
     if categories is None:
         assert category_by is not None
         categorical_scale = resolve_categorical_scale(
@@ -459,29 +486,7 @@ def composition(
         ).astype(object)
         category_axis_label = category_by
     else:
-        if cell_key != "I":
-            raise ValueError(
-                "cell_key cannot override an artifact's stored cell selection"
-            )
-        _, category_indices, category_values, _ = _resolve_grouping(
-            store,
-            group_by=None,
-            groups=categories,
-            cell_key="I",
-        )
-        category_selection = _artifact_cell_selection(store, categories)
-        if grouping_selection is not None:
-            assert cell_indices is not None
-            if category_selection != grouping_selection:
-                raise ValueError(
-                    "categories and grouping must share the same cell selection"
-                )
-            if not np.array_equal(category_indices, cell_indices):
-                raise ValueError(
-                    "categories and grouping select cells in a different order"
-                )
-        else:
-            cell_indices = category_indices
+        assert category_values is not None
         cats = np.asarray(category_values[0], dtype=object).copy()
         category_axis_label = "categories"
     if len(cats) == 0:

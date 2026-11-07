@@ -22,6 +22,7 @@ from cytearc.storage.selections import (
     resolve_metadata_snapshot,
     resolve_stored_selection,
     resolve_stored_selection_artifact,
+    selections_hold_same_cells,
     snapshot_run_metadata,
     validate_cell_selection,
     validate_run_metadata_snapshot,
@@ -233,6 +234,39 @@ def test_cell_selection_validator_accepts_only_datastore_cell_selections() -> No
     with pytest.raises(ArtifactResolutionError) as caught:
         validate_cell_selection(root, features)
     assert caught.value.code == "artifact_reference_mismatch"
+
+
+def test_selections_hold_the_same_cells_whichever_operation_made_them() -> None:
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    flags = np.array([True, False, True, False, True])
+    snapshot = _create_stored_cell_selection(root, flags)
+
+    def select(values: np.ndarray) -> ArtifactRef:
+        """Select cells as another operation, over the same cell IDs."""
+        return resolve_generated_selection_artifact(
+            root,
+            scope="datastore",
+            kind="cell_selection",
+            values=values,
+            row_ids=root["cellData/ids"],
+            operation="select_again",
+            parameters={},
+            inputs={},
+            source_column="artifact",
+        )[0]
+
+    same, other = select(flags), select(~flags)
+
+    assert same != snapshot
+    assert selections_hold_same_cells(root, snapshot, snapshot)
+    assert selections_hold_same_cells(root, snapshot, same)
+    assert selections_hold_same_cells(root, same, snapshot)
+    assert not selections_hold_same_cells(root, snapshot, other)
+    # Flags changed after the selection was made are refused, not compared.
+    root[artifact_path(same)]["values"][1] = True
+    with pytest.raises(ArtifactResolutionError) as caught:
+        selections_hold_same_cells(root, snapshot, same)
+    assert caught.value.code == "selection_values_changed"
 
 
 def test_selection_block_helpers_preserve_compact_and_full_axis_alignment() -> None:

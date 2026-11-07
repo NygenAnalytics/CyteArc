@@ -250,6 +250,35 @@ def _resolve_grouping(
     )
 
 
+def _labels_for_cells(
+    store: Any,
+    labels: ArtifactRef,
+    *,
+    cell_selection: ArtifactRef | None,
+    refusal: str,
+) -> tuple[tuple[str, ...], np.ndarray, list[np.ndarray], np.ndarray | None]:
+    """Resolve a label artifact for the cells of ``cell_selection``, as :func:`_resolve_grouping` does.
+
+    The artifact's own cell selection must contain those cells: it may be
+    another selection of the same cells, or one of more cells. An artifact
+    that holds no label for some of them raises ``ValueError`` with
+    ``refusal``, which names the cells to compute it on. Without
+    ``cell_selection``, the artifact's own cells are read.
+    """
+    try:
+        return _resolve_grouping(
+            store,
+            group_by=None,
+            groups=labels,
+            cell_key="I",
+            cell_selection=cell_selection,
+        )
+    except ValueError as error:
+        if "must be a subset of the artifact cell selection" not in str(error):
+            raise
+        raise ValueError(refusal) from error
+
+
 def _resolve_layout(
     store: Any,
     layout: ArtifactRef,

@@ -244,23 +244,6 @@ def test_modality_weights_rejects_invalid_plot_options(
     assert raised.value.args == (message,)
 
 
-def test_modality_weights_requires_exact_layout_selection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store, graph, layout, _selection = _wnn_store(
-        np.full((3, 2), 0.5, dtype=np.float32)
-    )
-    other_selection = _ref("cell_selection", "9")
-    monkeypatch.setattr(
-        modality_weights_module,
-        "_resolve_layout",
-        lambda *_args: _resolved_layout(other_selection),
-    )
-
-    with pytest.raises(ValueError, match="exact cell-selection artifact"):
-        modality_weights(store, graph=graph, layout=layout, show=False)
-
-
 @pytest.mark.parametrize(
     ("weights", "error", "message"),
     [

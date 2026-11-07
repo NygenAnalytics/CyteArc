@@ -17,6 +17,7 @@ from tests.clone_helpers import (
     names_every_nth_item,
     names_keep_apart,
     write_embedding,
+    write_selection_embedding,
 )
 from tests.storage_helpers import open_store, write_count_store
 
@@ -715,8 +716,13 @@ def test_genotypes_refuse_an_embedding_of_as_many_other_cells(
     called = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
     # Four cells of an embedding are not the genotypes' four cells.
     others = write_embedding(store, "last_four", np.zeros((4, 2)))
-    with pytest.raises(ValueError, match="embedding of the genotypes' cells"):
+    with pytest.raises(ValueError) as raised:
         genotypes(store, called, layout=others, show=False)
+    assert raised.value.args == (
+        "The layout holds other cells than the genotypes; draw an embedding of "
+        "the genotypes' cells, such as a UMAP of the cells whose counts were "
+        "imported",
+    )
     own = write_embedding(store, "first_four", np.arange(8).reshape(4, 2))
     drawn = genotypes(store, called, layout=own, show=False)
     cells = drawn.tables["cells"]
@@ -729,6 +735,42 @@ def test_genotypes_refuse_an_embedding_of_as_many_other_cells(
         "missing",
     ]
     plt.close(drawn.figure)
+
+
+def test_genotypes_colour_a_layout_of_their_cells_that_another_selection_holds(
+    plotted,
+) -> None:
+    store, targets, _positions = plotted
+    called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
+    every = store.snapshot_cell_selection("every_cell")
+    store.cells.insert(
+        "letter", np.asarray(list("abcde"), dtype=object), overwrite=True
+    )
+    letters = store.snapshot_cluster_labels("letter", cell_selection=every)
+    # select_cells makes another selection of the genotypes' five cells.
+    selected = store.select_cells(letters, include=list("abcde"))
+    assert selected != every
+    layout = write_selection_embedding(
+        store, selected, np.column_stack([np.arange(5), np.arange(5, 10)])
+    )
+
+    result = genotypes(store, called, layout=layout, sites=["CALR"], show=False)
+
+    # Each cell stands at its own coordinates, in its call at CALR: c0 and c2
+    # read a mutant UMI and c1 none, and c3 and c4 are missing.
+    cells = result.tables["cells"]
+    assert cells["ids"].tolist() == CELLS
+    assert cells["x"].tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert cells["y"].tolist() == [5.0, 6.0, 7.0, 8.0, 9.0]
+    assert cells["call"].tolist() == [
+        "alternative_present",
+        "wild_type",
+        "alternative_present",
+        "missing",
+        "missing",
+    ]
+    assert result.provenance.extras["layout"] == layout.to_dict()
+    plt.close(result.figure)
 
 
 def test_genotypes_show_and_close_the_figure_they_own(plotted) -> None:

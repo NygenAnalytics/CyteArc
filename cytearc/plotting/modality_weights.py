@@ -12,6 +12,7 @@ from ..storage.artifacts import (
     inspect_artifact,
     parse_artifact_ref,
 )
+from ..storage.selections import selections_hold_same_cells
 from ..storage.types import as_zarr_array
 from ._contracts import ColorScale, PlotProvenance
 from ._data import _artifact_cell_selection, _resolve_layout
@@ -148,7 +149,11 @@ def modality_weights(
     rasterize_threshold: int = DEFAULT_RASTERIZE_THRESHOLD,
     show: bool = True,
 ) -> PlotResult:
-    """Plot each assay's WNN contribution over an explicit embedding."""
+    """Plot each assay's WNN contribution over an explicit embedding.
+
+    ``layout`` must hold the graph's cells, whichever operation made its cell
+    selection; a layout of other cells raises ``ValueError``.
+    """
     show = bool_argument(show, "show")
     if point_size is not None and (not np.isfinite(point_size) or point_size <= 0):
         raise ValueError("point_size must be positive and finite")
@@ -165,9 +170,12 @@ def modality_weights(
 
     assays, graph_selection = _wnn_assays(store, graph)
     coordinates, cell_indices, layout_selection = _resolve_layout(store, layout)
-    if graph_selection != layout_selection:
+    # The weights' rows are the layout's: another selection of the same cells
+    # serves.
+    if not selections_hold_same_cells(store.zw, graph_selection, layout_selection):
         raise ValueError(
-            "WNN graph and layout must share the exact cell-selection artifact"
+            "The layout holds other cells than the WNN graph; draw an embedding "
+            "of the graph's cells, such as a UMAP of the graph"
         )
     weights = _load_weights(
         store,

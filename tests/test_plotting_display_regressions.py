@@ -697,8 +697,8 @@ def test_embedding_draws_label_artifacts_as_categories(monkeypatch):
     labels = np.arange(300) % 150
     monkeypatch.setattr(
         embedding_module,
-        "_resolve_grouping",
-        lambda store, **_: (("groups",), np.arange(300), [labels], None),
+        "_labels_for_cells",
+        lambda store, ref, **_: (("groups",), np.arange(300), [labels], None),
     )
     for kind, categorical in (("cluster_labels", True), ("embedding", False)):
         ref = ArtifactRef(scope="assay", assay="RNA", kind=kind, artifact_id="a" * 64)

@@ -279,6 +279,7 @@
   "tests/test_pipeline_view_edge_coverage.py": 4.0,
   "tests/test_plotting_barcode_calls.py": 3.4,
   "tests/test_plotting_category_colors.py": 2.0,
+  "tests/test_plotting_cell_selections.py": 4.1,
   "tests/test_plotting_charts.py": 2.4,
   "tests/test_plotting_clones.py": 21.4,
   "tests/test_plotting_cluster_connectivity.py": 0.2,

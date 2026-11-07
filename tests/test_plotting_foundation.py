@@ -759,7 +759,7 @@ def _artifact_color_cache(monkeypatch, values, *, kind, grouping_indices=None):
     resolved_indices = indices if grouping_indices is None else grouping_indices
     monkeypatch.setattr(
         embedding_module,
-        "_resolve_grouping",
+        "_labels_for_cells",
         lambda *_args, **_kwargs: (("groups",), resolved_indices, [values], None),
     )
     cache = embedding_module._prefetch_colors(
@@ -2864,24 +2864,25 @@ def test_artifact_composition_rejects_inputs_it_cannot_align(
         )
     assert raised.value.args == ("Provide exactly one of category_by or categories",)
 
-    selections = {
-        _COMPOSITION_GROUPING: ArtifactRef(
-            scope="datastore", kind="cell_selection", artifact_id="7" * 64
-        ),
-        categories: ArtifactRef(
-            scope="datastore", kind="cell_selection", artifact_id="7" * 64
-        ),
-    }
+    selection = ArtifactRef(
+        scope="datastore", kind="cell_selection", artifact_id="7" * 64
+    )
     indices = {_COMPOSITION_GROUPING: [0, 1, 2], categories: [0, 1, 2]}
+    values = np.array(["x", "y", "x"], dtype=object)
+    grouping_reads = []
 
     def resolve_grouping(_store, *, group_by, groups, cell_key):
-        assert (group_by, cell_key) == (None, "I")
-        values = np.array(["x", "y", "x"], dtype=object)
-        return ("groups",), np.asarray(indices[groups]), [values], None
+        assert (group_by, groups, cell_key) == (None, categories, "I")
+        return ("groups",), np.asarray(indices[categories]), [values], None
+
+    def labels_for_cells(_store, labels, *, cell_selection, refusal):
+        grouping_reads.append((labels, cell_selection))
+        return ("groups",), np.asarray(indices[labels]), [values], None
 
     monkeypatch.setattr(module, "_resolve_grouping", resolve_grouping)
+    monkeypatch.setattr(module, "_labels_for_cells", labels_for_cells)
     monkeypatch.setattr(
-        module, "_artifact_cell_selection", lambda _store, ref: selections[ref]
+        module, "_artifact_cell_selection", lambda _store, _ref: selection
     )
     result = splt.composition(
         synthetic_plot_store,
@@ -2889,7 +2890,10 @@ def test_artifact_composition_rejects_inputs_it_cannot_align(
         grouping=_COMPOSITION_GROUPING,
         show=False,
     )
-    # Group "x" holds cells 0 and 2 (both category "x"); group "y" holds cell 1.
+    # The grouping is read for the cells of categories, of which group "x"
+    # holds cells 0 and 2 (both category "x") and group "y" cell 1;
+    # tests/test_plotting_cell_selections.py reads groupings of other cells.
+    assert grouping_reads == [(_COMPOSITION_GROUPING, selection)]
     per_group = result.tables["per_group"].set_index(["sample", "category"])
     assert per_group.loc[("x", "x"), "proportion"] == 1.0
     assert per_group.loc[("y", "y"), "proportion"] == 1.0
@@ -2906,20 +2910,6 @@ def test_artifact_composition_rejects_inputs_it_cannot_align(
         )
     assert raised.value.args == (
         "categories and grouping select cells in a different order",
-    )
-
-    selections[categories] = ArtifactRef(
-        scope="datastore", kind="cell_selection", artifact_id="8" * 64
-    )
-    with pytest.raises(ValueError) as raised:
-        splt.composition(
-            synthetic_plot_store,
-            categories=categories,
-            grouping=_COMPOSITION_GROUPING,
-            show=False,
-        )
-    assert raised.value.args == (
-        "categories and grouping must share the same cell selection",
     )
 
 

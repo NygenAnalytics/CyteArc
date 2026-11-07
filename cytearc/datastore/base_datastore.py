@@ -46,8 +46,8 @@ from ..storage.stores import (
 from ..storage.selections import (
     ValidatedStoredSelection,
     resolve_stored_selection,
+    selections_hold_same_cells,
     validate_cell_selection,
-    validate_stored_selection_integrity,
 )
 from ..utils.logging import logger
 from ..utils.memory_budget import MemoryLedger
@@ -1247,37 +1247,10 @@ class BaseDataStore:
         first: ArtifactRef,
         second: ArtifactRef,
     ) -> bool:
-        table_path = "cellData"
         try:
-            first_status = inspect_artifact(self.zw, first)
-            second_status = inspect_artifact(self.zw, second)
-            validate_stored_selection_integrity(
-                self.zw,
-                first,
-                kind=first.kind,
-                scope=first.scope,
-                assay=first.assay,
-                table_path=table_path,
-            )
-            if first == second:
-                return True
-            validate_stored_selection_integrity(
-                self.zw,
-                second,
-                kind=second.kind,
-                scope=second.scope,
-                assay=second.assay,
-                table_path=table_path,
-            )
-            # Both are complete and fingerprint the live cell rows, so equal
-            # values fingerprints select the same cells.
-            first_inputs = first_status.inputs or {}
-            second_inputs = second_status.inputs or {}
+            return selections_hold_same_cells(self.zw, first, second)
         except (KeyError, TypeError, ValueError):
             return False
-        return first_inputs.get("values_fingerprint") == second_inputs.get(
-            "values_fingerprint"
-        )
 
     def _ini_cell_props(
         self,
