@@ -1,6 +1,7 @@
 import os
 import time
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -38,6 +39,12 @@ from ...storage.artifacts import (
     callable_identity,
     fingerprint_array,
     inspect_artifact,
+)
+from ...storage.diagnostics import (
+    EXAMPLES,
+    DiagnosticRule,
+    declare_diagnostics,
+    warn_diagnostics,
 )
 from ...storage.feature_selection import (
     _feature_selection_plan,
@@ -235,6 +242,107 @@ def _hvg_batch_argument(batch: object, columns: Sequence[str]) -> None:
     if not isinstance(batch, ArtifactRef):
         raise TypeError("batch must be a cell metadata column name or an ArtifactRef")
     grouping_value_name(batch.kind)
+
+
+#: The diagnostics that an HVG selection saves: how many features it selected,
+#: and with a batch, how many batches it ranked and how many of them, with up
+#: to five examples, held fewer candidates than ``top_n``. A selection warns
+#: from them when it is computed and when it is reused.
+HVG_DIAGNOSTICS = (
+    "selectedFeatures",
+    "batches",
+    "batchesBelowTopN",
+    "batchBelowTopNExamples",
+)
+declare_diagnostics("select_hvgs", HVG_DIAGNOSTICS, call="ds.features.hvgs")
+
+
+@dataclass(frozen=True, slots=True)
+class _HvgSelection:
+    """The operation that names an HVG selection's warnings."""
+
+    operation: str = "select_hvgs"
+
+
+def _hvg_diagnostics(
+    selected: np.ndarray,
+    *,
+    top_n: int,
+    batch_names: Sequence[str] | None = None,
+    batch_candidates: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """The diagnostics of an HVG selection, by batch when ``batch_names`` is given."""
+    diagnostics: dict[str, Any] = {
+        "selectedFeatures": int(np.count_nonzero(selected)),
+        "batches": None,
+        "batchesBelowTopN": None,
+        "batchBelowTopNExamples": [],
+    }
+    if batch_names is None:
+        return diagnostics
+    assert batch_candidates is not None
+    # One batch is the whole selection, whose shortfall the selected count reports.
+    short = (
+        [index for index, count in enumerate(batch_candidates) if count < top_n]
+        if len(batch_names) > 1
+        else []
+    )
+    diagnostics.update(
+        batches=len(batch_names),
+        batchesBelowTopN=len(short),
+        batchBelowTopNExamples=[
+            f"{batch_names[index]} ({int(batch_candidates[index])})"
+            for index in short[:EXAMPLES]
+        ],
+    )
+    return diagnostics
+
+
+def _hvg_rules(top_n: int) -> tuple[DiagnosticRule, ...]:
+    """The warnings of an HVG selection for ``top_n``, from its diagnostics."""
+
+    def short_batches(numbers: Any) -> str:
+        examples = list(numbers["batchBelowTopNExamples"])
+        others = (
+            "" if len(examples) == numbers["batchesBelowTopN"] else ", among others"
+        )
+        return (
+            f"{numbers['batchesBelowTopN']} of {numbers['batches']} batches have "
+            f"fewer HVG candidates than top_n={top_n}, so all of their candidates "
+            f"count as highly variable in them: {', '.join(examples)}{others}"
+        )
+
+    def few_selected(numbers: Any) -> str:
+        n_selected = numbers["selectedFeatures"]
+        if numbers["batches"] is not None and numbers["batches"] > 1:
+            return (
+                f"Only {n_selected} features are highly variable in some batch, "
+                f"fewer than top_n={top_n}; all of them are selected"
+            )
+        return (
+            f"Only {n_selected} features passed the HVG candidate filters, fewer "
+            f"than top_n={top_n}; all of them are selected"
+        )
+
+    return (
+        DiagnosticRule(
+            "batchesBelowTopN",
+            applies=lambda numbers: bool(numbers["batchesBelowTopN"]),
+            message=short_batches,
+        ),
+        DiagnosticRule(
+            "selectedFeatures",
+            applies=lambda numbers: int(numbers["selectedFeatures"]) < top_n,
+            message=few_selected,
+        ),
+    )
+
+
+def _warn_hvg_selection(root: zarr.Group, ref: ArtifactRef, top_n: int) -> None:
+    """Warn from a selection's saved diagnostics, whether computed or reused."""
+    warn_diagnostics(
+        _HvgSelection(), inspect_artifact(root, ref).diagnostics, _hvg_rules(top_n)
+    )
 
 
 # Why each gene selection flavor that models counts needs them.
@@ -706,7 +814,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 max_mean=max_mean,
                 blacklist=blacklist,
                 keep_bounds=keep_bounds,
-                batch_names=names,
             )
             logger.info(f"{int(ranking.selected.sum())} genes marked as HVGs")
             payload = {
@@ -723,7 +830,14 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 ordered_feature_ids_fingerprint=feature_ids_fingerprint,
                 payload=payload,
                 payload_names=payload_names,
+                diagnostics=_hvg_diagnostics(
+                    ranking.selected,
+                    top_n=top_n,
+                    batch_names=None if batch is None else names,
+                    batch_candidates=ranking.batch_candidates,
+                ),
             )
+        _warn_hvg_selection(self.zw, planned.ref, top_n)
         if show_plot:
             from ...plotting import highly_variable_features
 
@@ -816,7 +930,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     "corrected_variance": corrected_variance,
                 },
                 payload_names=("values", "corrected_variance"),
+                diagnostics=_hvg_diagnostics(values, top_n=parameters["top_n"]),
             )
+        _warn_hvg_selection(self.zw, planned.ref, parameters["top_n"])
         if show_plot:
             if summary is None:
                 summary = feature_summary_values(
@@ -912,6 +1028,16 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         ``corrected_variance`` (the flavor's score). seurat_v3,
         pearson_residuals, and batch-aware selections also store each gene's
         ``mean_nonzero`` and ``detected`` count, which their plot shows.
+
+        The selection saves its diagnostics, which
+        ``ds.artifacts.inspect(ref).diagnostics`` returns:
+        ``selectedFeatures``, the genes selected, and with ``batch``,
+        ``batches``, ``batchesBelowTopN``, the batches with fewer candidates
+        than ``top_n``, and ``batchBelowTopNExamples``, up to five of them with
+        their candidate counts. When fewer than ``top_n`` genes are selected,
+        or some batch holds fewer candidates than ``top_n``, a
+        ``DiagnosticWarning`` says so each time the selection is computed or
+        reused.
 
         Extra keyword arguments are options of
         :func:`cytearc.plotting.highly_variable_features`, used when

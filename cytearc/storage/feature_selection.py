@@ -12,6 +12,7 @@ from .artifact_writer import (
     PlannedArtifact,
     artifact_transaction,
     plan_artifact,
+    planned_diagnostics,
 )
 from .artifacts import (
     ArtifactRef,
@@ -23,6 +24,7 @@ from .artifacts import (
     inspect_artifact,
     open_artifact,
 )
+from .diagnostics import DIAGNOSTICS_ATTRIBUTE
 from .errors import ArtifactResolutionError
 from .geometry import array_geometry
 from .partition import row_band
@@ -117,9 +119,17 @@ def _write_feature_selection(
     ordered_feature_ids_fingerprint: str,
     payload: dict[str, np.ndarray],
     payload_names: tuple[str, ...] = ("values",),
+    diagnostics: Mapping[str, Any] | None = None,
 ) -> None:
+    """Write a planned feature selection, with the diagnostics its operation declares.
+
+    Raises:
+        ValueError: If an array has another length than ``values``, or the
+            diagnostics are not those that the operation declares.
+    """
     if planned.reused:
         return
+    saved = planned_diagnostics(planned, diagnostics)
     with artifact_transaction(root, planned) as group:
         n_features = int(np.asarray(payload["values"]).shape[0])
         chunks = (min(max(n_features, 1), 100_000),)
@@ -146,6 +156,8 @@ def _write_feature_selection(
             group,
             payload_names,
         )
+        if saved is not None:
+            group.attrs[DIAGNOSTICS_ATTRIBUTE] = saved
 
 
 def _feature_selection_values(
