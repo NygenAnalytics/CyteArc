@@ -296,6 +296,10 @@ class RegulonsAccessor(_Accessor):
     grn = _bind(_RegulonOperationsMixin._regulons_grn)
     load_grn = _bind(_RegulonOperationsMixin._regulons_load_grn)
     profiles = _bind(_RegulonOperationsMixin._regulons_profiles)
+    specificity = _bind(_RegulonOperationsMixin._regulons_specificity)
+    connection_specificity = _bind(
+        _RegulonOperationsMixin._regulons_connection_specificity
+    )
 
 
 class RepertoireAccessor(_Accessor):

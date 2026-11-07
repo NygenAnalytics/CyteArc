@@ -327,12 +327,15 @@ def repack_store(
     nthreads: int | None = None,
     *,
     data_only: bool = False,
+    source_storage_options: dict | None = None,
 ) -> None:
     """Copy prepared data, or rebuild raw data, into a fresh Zarr v3 destination.
 
     A mounted target is read with its source's counts and artifacts, so the
     destination is a self-contained store that no longer needs the source. A
     repack that fails after it creates the destination removes it.
+    ``storage_options`` open the input and the output, and a mounted input's
+    source too unless ``source_storage_options`` give the source its own.
     """
     from ..assay import RNAassay, preset_assay_types
     from ..assay.classification import (
@@ -361,7 +364,11 @@ def repack_store(
             raise ValueError("Malformed matrix source location")
         if locations_overlap(manifest["location"], output_path):
             raise ValueError("The destination overlaps the mounted count owner")
-    resolved = resolve_matrix_source(src, storage_options=storage_options)
+    resolved = resolve_matrix_source(
+        src,
+        storage_options=storage_options,
+        source_storage_options=source_storage_options,
+    )
     mounted_owner = None if resolved is None else resolved[0]
     if resolved is not None:
         # A mount's results can use its source's artifacts, so the copy reads
@@ -571,15 +578,17 @@ def repack_store(
         raise
 
 
-def _parse_storage_options(raw: str | None) -> dict | None:
+def _parse_storage_options(
+    raw: str | None, flag: str = "--storage-options"
+) -> dict | None:
     if raw is None:
         return None
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"--storage-options must be valid JSON: {exc}") from exc
+        raise SystemExit(f"{flag} must be valid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
-        raise SystemExit("--storage-options must be a JSON object")
+        raise SystemExit(f"{flag} must be a JSON object")
     return parsed
 
 
@@ -620,6 +629,14 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--source-storage-options",
+        default=None,
+        help=(
+            "JSON object of backend options for the count source of a mounted "
+            "input; the input's --storage-options when omitted"
+        ),
+    )
+    parser.add_argument(
         "--data-only",
         action="store_true",
         help="Rebuild raw data without saved analyses or generated summaries",
@@ -633,6 +650,9 @@ def main() -> None:
         mem_budget=args.mem_budget,
         nthreads=args.nthreads,
         data_only=args.data_only,
+        source_storage_options=_parse_storage_options(
+            args.source_storage_options, "--source-storage-options"
+        ),
     )
     print(f"Repacked {args.input} -> {args.output}")
 

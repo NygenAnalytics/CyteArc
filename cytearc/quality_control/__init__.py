@@ -7,9 +7,11 @@ from .cell_calling import (
 )
 from .cell_cycle import assign_cell_cycle_phase
 from .cell_cycle_genes import (
+    GeneMatch,
     cell_cycle_previous_symbols,
     g2m_phase_genes,
     g2m_phase_genes_mouse,
+    match_gene_names,
     s_phase_genes,
     s_phase_genes_mouse,
 )
@@ -20,6 +22,7 @@ from .hto import hto_demux
 __all__ = [
     "BarcodeRanks",
     "EmptyDropsResult",
+    "GeneMatch",
     "assign_cell_cycle_phase",
     "barcode_ranks",
     "cell_cycle_previous_symbols",
@@ -29,6 +32,7 @@ __all__ = [
     "gaussian_quantile_bounds",
     "good_turing_proportions",
     "hto_demux",
+    "match_gene_names",
     "s_phase_genes",
     "s_phase_genes_mouse",
     "sample_cluster_pool",

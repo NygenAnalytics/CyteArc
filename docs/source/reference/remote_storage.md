@@ -49,6 +49,39 @@ mounted = cytearc.mount_datastore(
 The source must remain available at the recorded URI whenever the target is opened.
 Use a new or empty target outside the source and any other store.
 
+### Give the source its own options
+
+`storage_options` opens the target, and the source too unless the source has options of its own. When the two need different options, such as a target in your own bucket over a public Hugging Face source, pass the source's options as `source_storage_options`, and pass both again whenever the target is reopened. Neither is saved in the target.
+
+```python
+# Read the bucket credentials from the environment.
+import os
+
+# Open count stores and run CyteArc analyses.
+import cytearc
+
+# Mount a public Hugging Face source into a target in your own bucket.
+bucket_options = {
+    "access_key_id": os.environ["AWS_ACCESS_KEY_ID"],
+    "secret_access_key": os.environ["AWS_SECRET_ACCESS_KEY"],
+}
+mounted = cytearc.mount_datastore(
+    "hf://buckets/org/name/atlas.zarr",
+    at="s3://my-bucket/project/analysis.zarr",
+    storage_options=bucket_options,
+    source_storage_options={"token": False},
+)
+
+# Reopen the target later with the options of both stores.
+analysis = cytearc.DataStore(
+    "s3://my-bucket/project/analysis.zarr",
+    storage_options=bucket_options,
+    source_storage_options={"token": False},
+)
+```
+
+Without `source_storage_options`, the source opens with the target's options, which a store on another backend refuses. `python -m cytearc.tools.repack_zarr` takes the source's options as `--source-storage-options`.
+
 ### Open a datastore directly
 
 Pass an object-store URI as `zarr_loc` and provider options as `storage_options`. This anonymous

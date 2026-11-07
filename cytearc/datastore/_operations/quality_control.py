@@ -2513,7 +2513,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
           ``cytearc.quality_control.cell_cycle_previous_symbols``, such as
           FAM64A for PIMREG; the artifact records such genes as
           ``gene_aliases`` and the log names them. A gene matched more than
-          once counts once.
+          once counts once. ``cytearc.quality_control.match_gene_names``
+          matches a list of genes to feature names the same way.
         - Normalized expression is log1p transformed when `log_transform` is True.
         - Every feature's mean over the selected cells sets its expression
           bin, as in scanpy's ``score_genes``: with ``N`` features a bin holds
