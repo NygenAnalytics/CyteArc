@@ -1,7 +1,11 @@
 """Fitting or naming the count-matrix layout for a memory budget."""
 
+import pickle
 import re
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
@@ -430,3 +434,383 @@ def test_h5ad_import_below_one_row_shards_fails_before_the_destination_exists(
     with pytest.raises(MemoryError, match="count shards of one row"):
         _build(path, destination, mem_budget=128 * 1024)
     assert not destination.exists()
+
+
+def test_a_refused_layout_holds_the_largest_halving_that_fits():
+    def admit(specs, resources: ResourceBudget) -> None:
+        if specs[0].shards[0] > 100_000:
+            raise _refusal("band too tall", resources)
+
+    with pytest.raises(CountLayoutMemoryError) as default:
+        _fit(admit, requested=DEFAULT_COUNT_MATRIX_POLICY)
+    # The policy that the message names, which a fit without a policy chooses.
+    assert default.value.fittingPolicy == _named_policy(default.value) == _fit(admit)
+
+    # Shards of 150,000 rows, three chunks each, fit once halved.
+    explicit = CountMatrixPolicy(unitBytes=300_000_000, chunkBytes=100_000_000)
+    with pytest.raises(CountLayoutMemoryError, match="requested") as requested:
+        _fit(admit, requested=explicit)
+    assert requested.value.fittingPolicy == _named_policy(requested.value)
+    assert requested.value.fittingPolicy == CountMatrixPolicy(
+        unitBytes=150_000_000, chunkBytes=50_000_000
+    )
+
+    def refuse(specs, resources: ResourceBudget) -> None:
+        raise _refusal("does not fit", resources)
+
+    with pytest.raises(
+        CountLayoutMemoryError, match="even count shards of one row do not fit"
+    ) as nothing:
+        _fit(refuse, requested=DEFAULT_COUNT_MATRIX_POLICY)
+    assert nothing.value.fittingPolicy is None
+
+    # Errors cross process boundaries, so the policy survives pickling.
+    for error in (default.value, requested.value, nothing.value):
+        restored = pickle.loads(pickle.dumps(error))
+        assert type(restored) is CountLayoutMemoryError
+        assert restored.fittingPolicy == error.fittingPolicy
+        assert str(restored) == str(error)
+        assert (restored.needed_bytes, restored.budget_bytes, restored.item) == (
+            error.needed_bytes,
+            error.budget_bytes,
+            error.item,
+        )
+
+
+def test_an_import_policy_requests_the_default_an_exact_layout_or_a_fit():
+    from cytearc.storage.sharding import count_layout_request
+
+    explicit = CountMatrixPolicy(unitBytes=64_000, chunkBytes=16_000)
+    assert count_layout_request(None) == DEFAULT_COUNT_MATRIX_POLICY
+    assert count_layout_request(explicit) is explicit
+    assert count_layout_request("fit") is None
+    with pytest.raises(
+        ValueError, match="CountMatrixPolicy, \"fit\" or None, not 'auto'"
+    ):
+        count_layout_request("auto")
+    with pytest.raises(TypeError, match='CountMatrixPolicy, "fit" or None, not int'):
+        count_layout_request(3)
+
+
+@dataclass(frozen=True)
+class _Import:
+    """An import of a source whose default layout ``budget`` refuses.
+
+    ``build(destination, policy, mem_budget, dump)`` constructs the writer,
+    writes the store when ``dump`` is true, and closes the reader.
+    """
+
+    build: Callable[[str, Any, int, bool], Any]
+    budget: int
+    counts: Mapping[str, np.ndarray] | None
+
+
+def _write_csv(path: Path, values: np.ndarray) -> Path:
+    header = "cell," + ",".join(f"g{j}" for j in range(values.shape[1]))
+    rows = (f"c{i}," + ",".join(map(str, row)) for i, row in enumerate(values))
+    path.write_text(header + "\n" + "\n".join(rows) + "\n")
+    return path
+
+
+def _write_10x_h5(path: Path, values: np.ndarray) -> Path:
+    matrix = csr_matrix(values)
+    n_cells, n_features = values.shape
+    with h5py.File(path, "w") as h5:
+        group = h5.create_group("matrix")
+        group.create_dataset("data", data=matrix.data.astype(np.int32))
+        group.create_dataset("indices", data=matrix.indices.astype(np.int64))
+        group.create_dataset("indptr", data=matrix.indptr.astype(np.int64))
+        group.create_dataset("shape", data=np.array([n_features, n_cells], np.int32))
+        group.create_dataset(
+            "barcodes", data=np.array([f"c{i}".encode() for i in range(n_cells)])
+        )
+        features = group.create_group("features")
+        names = np.array([f"g{j}".encode() for j in range(n_features)])
+        features.create_dataset("id", data=names)
+        features.create_dataset("name", data=names)
+        features.create_dataset(
+            "feature_type", data=np.array([b"Gene Expression"] * n_features)
+        )
+    return path
+
+
+def _write_seurat(path: Path, values: np.ndarray) -> Path:
+    """Write a Seurat object whose RNA assay holds ``values`` as dense counts."""
+    from tests.test_seurat_reader import _Wire
+
+    wire = _Wire()
+    cells = [f"c{i}" for i in range(values.shape[0])]
+    genes = [f"g{j}" for j in range(values.shape[1])]
+    # An R matrix of genes by cells, stored column by column.
+    counts = wire.matrix(
+        values.reshape(-1).tolist(), values.T.shape, rows=genes, columns=cells
+    )
+    assay = wire.s4(
+        [
+            ("counts", counts),
+            (
+                "meta.features",
+                wire.data_frame([("symbol", wire.string_vector(genes))], genes),
+            ),
+            ("class", wire.string_vector(["Assay"])),
+        ]
+    )
+    root = wire.s4(
+        [
+            ("assays", wire.vector([assay], names=["RNA"])),
+            (
+                "meta.data",
+                wire.data_frame(
+                    [("group", wire.string_vector(["a"] * len(cells)))], cells
+                ),
+            ),
+            ("active.assay", wire.string_vector(["RNA"])),
+            ("active.ident", wire.factor([1] * len(cells), ["cells"], names=cells)),
+            ("reductions", wire.vector([], names=[])),
+            ("class", wire.string_vector(["Seurat"])),
+        ]
+    )
+    path.write_bytes(wire.document(root))
+    return path
+
+
+def _writing(writer: Any, dump: bool) -> Any:
+    if dump:
+        writer.dump()
+    return writer
+
+
+@pytest.fixture(scope="module")
+def imports(wide_counts, tmp_path_factory) -> dict[str, _Import]:
+    """Each import writer, at a budget that refuses its default layout.
+
+    The budgets are fixed for the sources' sizes: each lies below what the
+    default layout needs and above what a halving of it needs.
+    """
+    from cytearc.readers import CrH5Reader, CSVReader, TapestriReader
+    from cytearc.readers.seurat import SeuratReader
+    from cytearc.writers import CrToZarr, CSVtoZarr, SeuratToZarr, TapestriToZarr
+    from tests.variant_truth import tapestri_truth, write_tapestri
+
+    path, values = wide_counts
+    directory = tmp_path_factory.mktemp("imports")
+    dense = _write_h5ad(directory / "dense.h5ad", values.astype(np.float32), dense=True)
+    csv = _write_csv(directory / "counts.csv", values)
+    h5 = _write_10x_h5(directory / "counts.h5", values)
+    tapestri = write_tapestri(tapestri_truth(), directory / "run.dna+protein.h5")
+    seurat_values = values[:600, :300]
+    seurat = _write_seurat(directory / "counts.rds", seurat_values)
+    sparse = csr_matrix(values.astype(np.float32))
+
+    def h5ad(source: Path) -> Callable[[str, Any, int, bool], Any]:
+        def build(destination: str, policy: Any, budget: int, dump: bool) -> Any:
+            reader = H5adReader(str(source), feature_name_key="feature_name")
+            try:
+                return _writing(
+                    H5adToZarr(
+                        reader,
+                        destination,
+                        mem_budget=budget,
+                        nthreads=1,
+                        policy=policy,
+                    ),
+                    dump,
+                )
+            finally:
+                reader.close()
+
+        return build
+
+    def sparse_build(destination: str, policy: Any, budget: int, dump: bool) -> Any:
+        writer = SparseToZarr(
+            sparse,
+            destination,
+            cell_ids=[f"c{i}" for i in range(sparse.shape[0])],
+            feature_ids=[f"g{j}" for j in range(sparse.shape[1])],
+            mem_budget=budget,
+            nthreads=1,
+            policy=policy,
+        )
+        return _writing(writer, dump)
+
+    def csv_build(destination: str, policy: Any, budget: int, dump: bool) -> Any:
+        # Reader batches of 100 rows keep the file's chunk below the budget.
+        reader = CSVReader(str(csv), id_column=0, batch_size=100)
+        writer = CSVtoZarr(
+            reader,
+            destination,
+            assay_name="RNA",
+            mem_budget=budget,
+            nthreads=1,
+            policy=policy,
+        )
+        return _writing(writer, dump)
+
+    def reader_build(open_reader: Callable[[], Any], writer_class: Any) -> Any:
+        def build(destination: str, policy: Any, budget: int, dump: bool) -> Any:
+            reader = open_reader()
+            try:
+                return _writing(
+                    writer_class(
+                        reader,
+                        destination,
+                        mem_budget=budget,
+                        nthreads=1,
+                        policy=policy,
+                    ),
+                    dump,
+                )
+            finally:
+                reader.close()
+
+        return build
+
+    def seurat_build(destination: str, policy: Any, budget: int, dump: bool) -> Any:
+        with SeuratReader(str(seurat), assays=["RNA"], reductions=[]) as reader:
+            writer = SeuratToZarr(
+                reader, destination, mem_budget=budget, nthreads=1, policy=policy
+            )
+            return _writing(writer, dump)
+
+    return {
+        "h5ad_csr": _Import(h5ad(path), 12 * 1024**2, {"RNA": values}),
+        "h5ad_dense": _Import(h5ad(dense), 3 * 1024**2, {"RNA": values}),
+        "sparse": _Import(sparse_build, 12 * 1024**2, {"RNA": values}),
+        "csv": _Import(csv_build, 8 * 1024**2, {"RNA": values}),
+        "cellranger_h5": _Import(
+            reader_build(lambda: CrH5Reader(str(h5)), CrToZarr),
+            12 * 1024**2,
+            {"RNA": values},
+        ),
+        "tapestri": _Import(
+            reader_build(lambda: TapestriReader(str(tapestri)), TapestriToZarr),
+            64 * 1024,
+            None,
+        ),
+        "seurat": _Import(seurat_build, 2 * 1024**2, {"RNA": seurat_values}),
+    }
+
+
+_IMPORT_NAMES = (
+    "h5ad_csr",
+    "h5ad_dense",
+    "sparse",
+    "csv",
+    "cellranger_h5",
+    "tapestri",
+    "seurat",
+)
+
+
+def _layouts(writer: Any) -> set[CountMatrixPolicy]:
+    """The layouts that a writer reports, one per assay or one for all."""
+    policy = writer.policy
+    return set(policy.values()) if isinstance(policy, dict) else {policy}
+
+
+def _count_assays(root: zarr.Group) -> list[str]:
+    return sorted(name for name in root.group_keys() if "counts" in root[name])
+
+
+@pytest.mark.parametrize("name", _IMPORT_NAMES)
+def test_policy_fit_writes_the_layout_that_the_default_refusal_names(
+    name, imports, tmp_path
+):
+    case = imports[name]
+    with pytest.raises(
+        CountLayoutMemoryError, match="default count-matrix policy"
+    ) as refused:
+        case.build(str(tmp_path / "default.zarr"), None, case.budget, False)
+    assert not (tmp_path / "default.zarr").exists()
+    fitting = refused.value.fittingPolicy
+    assert fitting == _named_policy(refused.value)
+    assert fitting.unitBytes < DEFAULT_COUNT_MATRIX_POLICY.unitBytes
+
+    fitted = case.build(str(tmp_path / "fit.zarr"), "fit", case.budget, True)
+    explicit = case.build(str(tmp_path / "explicit.zarr"), fitting, case.budget, True)
+    assert _layouts(fitted) == _layouts(explicit) == {fitting}
+    roots = [
+        zarr.open_group(str(tmp_path / f"{store}.zarr"), mode="r")
+        for store in ("fit", "explicit")
+    ]
+    assays = _count_assays(roots[0])
+    assert assays and assays == _count_assays(roots[1])
+    for assay in assays:
+        stored = [root[f"{assay}/counts"] for root in roots]
+        # The same counts, identity and layout record as the explicit import.
+        assert {_policy(root, assay) for root in roots} == {fitting}
+        assert load_count_matrix_plan(stored[0]) == load_count_matrix_plan(stored[1])
+        np.testing.assert_array_equal(stored[0][:], stored[1][:])
+        assert (
+            stored[0].attrs["content_fingerprint"]
+            == stored[1].attrs["content_fingerprint"]
+        )
+        if case.counts is not None:
+            np.testing.assert_array_equal(stored[0][:], case.counts[assay])
+
+
+@pytest.mark.parametrize("name", _IMPORT_NAMES)
+def test_policy_fit_keeps_the_default_layout_when_it_fits(name, imports, tmp_path):
+    writer = imports[name].build(
+        str(tmp_path / "roomy.zarr"), "fit", 256 * 1024**2, False
+    )
+    assert _layouts(writer) == {DEFAULT_COUNT_MATRIX_POLICY}
+
+
+def test_policy_fit_below_count_shards_of_one_row_refuses_as_subset_does(
+    wide_counts, tmp_path
+):
+    path, _values = wide_counts
+    destination = tmp_path / "tiny.zarr"
+    with pytest.raises(MemoryBudgetError, match="count shards of one row") as fitted:
+        _build(path, destination, mem_budget=128 * 1024, policy="fit")
+    assert type(fitted.value) is MemoryBudgetError
+    with pytest.raises(CountLayoutMemoryError, match="even count shards") as default:
+        _build(path, destination, mem_budget=128 * 1024)
+    assert default.value.fittingPolicy is None
+    assert not destination.exists()
+
+
+def test_policy_fit_fits_each_assay_of_a_sparse_import_on_its_own(wide_counts):
+    _path, values = wide_counts
+    narrow = np.random.default_rng(2).poisson(0.3, size=(values.shape[0], 40))
+    matrices = {
+        "RNA": csr_matrix(values.astype(np.float32)),
+        "ADT": csr_matrix(narrow.astype(np.float32)),
+    }
+    options = {
+        "cell_ids": [f"c{i}" for i in range(values.shape[0])],
+        "feature_ids": {
+            name: [f"{name}{j}" for j in range(matrix.shape[1])]
+            for name, matrix in matrices.items()
+        },
+        "mem_budget": 12 * 1024**2,
+        "nthreads": 1,
+    }
+    with pytest.raises(CountLayoutMemoryError) as refused:
+        SparseToZarr(matrices, MemoryStore(), **options)
+    store = MemoryStore()
+    writer = SparseToZarr(matrices, store, policy="fit", **options)
+
+    # Only the wide assay needs smaller shards than the default.
+    assert writer.policy == {
+        "RNA": refused.value.fittingPolicy,
+        "ADT": DEFAULT_COUNT_MATRIX_POLICY,
+    }
+    writer.dump()
+    root = zarr.open_group(store=store, mode="r")
+    for name, matrix in matrices.items():
+        assert _policy(root, name) == writer.policy[name]
+        np.testing.assert_array_equal(root[f"{name}/counts"][:], matrix.toarray())
+
+
+@pytest.mark.parametrize(("policy", "error"), [("auto", ValueError), (3, TypeError)])
+def test_an_import_refuses_a_policy_it_cannot_read_before_the_destination_exists(
+    policy, error, wide_counts, tmp_path
+):
+    path, _values = wide_counts
+    with pytest.raises(
+        error, match='policy must be a CountMatrixPolicy, "fit" or None'
+    ):
+        _build(path, tmp_path / "unread.zarr", policy=policy)
+    assert not (tmp_path / "unread.zarr").exists()

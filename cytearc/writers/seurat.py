@@ -2,7 +2,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import numpy as np
 import zarr
@@ -24,7 +24,7 @@ from ..readers.seurat import (
 )
 from ..storage.arrays import MISSING_MASK_PREFIX
 from ..storage.count_dtype import count_storage_dtype
-from ..storage.count_matrix import DEFAULT_COUNT_MATRIX_POLICY, CountMatrixPolicy
+from ..storage.count_matrix import CountMatrixPolicy
 from ..storage.artifact_writer import (
     ArrayRequirement,
     artifact_transaction,
@@ -180,11 +180,14 @@ class SeuratToZarr:
                   auto-detected.
         profile: Zarr encoding profile (``fast_local`` or ``cloud``). When
                  None, chosen from the destination location.
-        policy: Count-matrix geometry policy, used exactly for every assay.
-                When None, every assay uses the default policy. An import
-                that does not fit ``mem_budget`` raises MemoryError before
-                the destination is created, naming the largest smaller policy
-                that fits.
+        policy: Count-matrix layout of every assay: a ``CountMatrixPolicy``,
+                used exactly; None, the default layout; or ``"fit"``, for
+                each assay the largest halving of the default ``unitBytes``
+                and ``chunkBytes`` whose counts write and ``countsT`` fit
+                ``mem_budget``. A policy or the default that does not fit
+                raises ``CountLayoutMemoryError``, a ``MemoryError``, before
+                the destination is created, with the largest halving that
+                fits as its ``fittingPolicy``.
         io: Optional explicit read, compute, and write widths. Unset values
             stay under automatic planning.
         overwrite: Replace an existing CyteArc store that no ``DataStore`` has opened.
@@ -223,6 +226,10 @@ class SeuratToZarr:
         ValueError: If the default assay is not imported, or a selected assay
             or reduction cannot be imported; an assay raises its own
             ``SeuratImportError``, which is a ``ValueError``.
+
+    Attributes:
+        policy: The count-matrix layout that each imported assay was written
+            with, by assay name.
     """
 
     def __init__(
@@ -234,7 +241,7 @@ class SeuratToZarr:
         mem_budget: int | str | None = None,
         nthreads: int | None = None,
         profile: StorageProfile | None = None,
-        policy: CountMatrixPolicy | None = None,
+        policy: CountMatrixPolicy | Literal["fit"] | None = None,
         io: StorageIoPolicy | None = None,
         *,
         overwrite: bool = False,
@@ -253,7 +260,9 @@ class SeuratToZarr:
             validate_assay_name,
         )
         from ..storage.destinations import check_destination, create_destination
+        from ..storage.sharding import count_layout_request
 
+        layout_request = count_layout_request(policy)
         resources = resolve_budget(mem_budget, nthreads)
         inspection = reader.inspection
         selection_notices: list[SeuratNotice] = []
@@ -396,8 +405,10 @@ class SeuratToZarr:
         self.values: dict[str, "MatrixValues"] = {}
         count_dtypes = {assay.name: self._prepare_counts(assay) for assay in assays}
         self._residentSourceBytes = self._source_resident_bytes()
-        layouts = {
-            assay.name: self._fit_count_layout(assay, count_dtypes[assay.name], policy)
+        self.policy = {
+            assay.name: self._fit_count_layout(
+                assay, count_dtypes[assay.name], layout_request
+            )
             for assay in assays
         }
 
@@ -442,7 +453,7 @@ class SeuratToZarr:
                 feature_dtype,
                 dtype=count_dtypes[assay.name],
                 profile=self.profile,
-                policy=layouts[assay.name],
+                policy=self.policy[assay.name],
                 normalized_values=normalized_values_record(self.values[assay.name]),
             )
             self.counts[assay.name] = counts
@@ -1040,9 +1051,9 @@ class SeuratToZarr:
         storage_dtype: Any,
         requested: CountMatrixPolicy | None,
     ) -> CountMatrixPolicy:
-        """Return the requested or default layout if its writes fit the budget.
+        """Return the ``requested`` layout if its writes fit the budget.
 
-        Both writes read source batches of one destination row band, so the
+        None fits the default layout to the budget. Both writes read source batches of one destination row band, so the
         fit estimates the source once per band, not once per cell.
         """
         from ..storage.identity import CountSummary
@@ -1076,7 +1087,7 @@ class SeuratToZarr:
                 if source.is_sparse
                 else dense_counts_admission(resident, staging)
             ),
-            requested=DEFAULT_COUNT_MATRIX_POLICY if requested is None else requested,
+            requested=requested,
         )
 
     def _write_counts(

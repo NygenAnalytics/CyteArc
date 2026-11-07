@@ -783,6 +783,7 @@ CyteArc validates persisted data and public arguments against the following cont
   `repack_zarr`, `DataStoreMerge`, and `add_grouped_assay`. The imports write the default layout
   unless they are given a `policy`, as before, and a layout that does not fit raises MemoryError
   naming the largest halving of it, with `unitBytes` and `chunkBytes` halved together, that fits.
+  That error is a `CountLayoutMemoryError`, which holds the halving as `fittingPolicy`, and an import given `policy="fit"` writes the halving instead of refusing. Every import writer reports the layout it wrote as its `policy` attribute.
   The other writers, which wrote the default layout at every budget, now halve the default
   `unitBytes` and `chunkBytes` together until the counts write and the countsT transpose fit, and
   a write that does not fit with one-row count shards, or with its explicit `policy`, raises

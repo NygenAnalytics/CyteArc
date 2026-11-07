@@ -3,18 +3,18 @@ import time
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 from scipy.sparse import coo_matrix
 
 from ..storage.types import as_zarr_array, as_zarr_group
 from ..readers import H5adReader
-from ..readers.h5ad import _H5adAssayFeatures
+from ..readers.h5ad import CategoryCodes, TableColumn, _H5adAssayFeatures
 from ..storage import ArtifactRef
 from ..storage.budget import ResourceBudget
 from ..storage.count_dtype import count_storage_dtype
-from ..storage.count_matrix import DEFAULT_COUNT_MATRIX_POLICY, CountMatrixPolicy
+from ..storage.count_matrix import CountMatrixPolicy
 from ..storage.io_policy import StorageIoPolicy
 from ..storage.profiles import (
     StorageProfile,
@@ -134,6 +134,40 @@ def _categorical_attributes(
         if contract is not None:
             attributes["display"] = contract
     return attributes
+
+
+def _column_rows(column: TableColumn, rows: np.ndarray | None) -> TableColumn:
+    """Return the given rows of a source column, or all of them for None."""
+    if rows is None:
+        return column
+    if isinstance(column, CategoryCodes):
+        return CategoryCodes(column.codes[rows], column.categories)
+    values, missing = column
+    return values[rows], missing[rows]
+
+
+def _write_column(
+    group: Any,
+    name: str,
+    column: TableColumn,
+    *,
+    profile: StorageProfile,
+) -> np.ndarray:
+    """Write a source column as a metadata column and return its missing rows.
+
+    A categorical is written from its codes, so its categories are converted
+    once each rather than once per row.
+    """
+    from ._store import write_metadata_column
+
+    if isinstance(column, CategoryCodes):
+        write_metadata_column(
+            group, name, column.codes, profile=profile, categories=column.categories
+        )
+        return column.missing
+    values, missing = column
+    write_metadata_column(group, name, values, missing, profile=profile)
+    return missing
 
 
 def _count_matrix_bands(
@@ -733,10 +767,13 @@ class H5adToZarr:
         nthreads: Worker count for write-time concurrency. When None, auto-detected.
         profile: Zarr encoding profile (``fast_local`` or ``cloud``). When
                  None, chosen from the destination location.
-        policy: Count-matrix geometry policy, used exactly. When None, the
-                default policy is used. An import that does not fit
-                ``mem_budget`` raises MemoryError before the destination is
-                created, naming the largest smaller policy that fits.
+        policy: Count-matrix layout: a ``CountMatrixPolicy``, used exactly;
+                None, the default layout; or ``"fit"``, the largest halving
+                of the default ``unitBytes`` and ``chunkBytes`` whose counts
+                write and ``countsT`` fit ``mem_budget``. A policy or the
+                default that does not fit raises ``CountLayoutMemoryError``,
+                a ``MemoryError``, before the destination is created, with
+                the largest halving that fits as its ``fittingPolicy``.
         io: Optional explicit read, compute, and write widths. Unset values
             stay under automatic planning.
         analysis_assay: Imported assay that owns explicitly selected H5AD
@@ -764,7 +801,8 @@ class H5adToZarr:
         assayName: Name of the imported assay; None with ``assay_split_key``.
         z: The Zarr hierarchy (array or group).
         storageDtypes: Count storage dtype of each imported assay.
-        policy: Count-matrix layout policy of every imported assay.
+        policy: The count-matrix layout that every imported assay was written
+            with.
     """
 
     def __init__(
@@ -777,7 +815,7 @@ class H5adToZarr:
         mem_budget: int | str | None = None,
         nthreads: int | None = None,
         profile: StorageProfile | None = None,
-        policy: CountMatrixPolicy | None = None,
+        policy: CountMatrixPolicy | Literal["fit"] | None = None,
         io: StorageIoPolicy | None = None,
         assay_split_key: str | None = None,
         assay_name_map: dict[str, str] | None = None,
@@ -793,9 +831,12 @@ class H5adToZarr:
         import_values_argument(values)
         from ..storage.budget import resolve_budget
         from ..storage.schema import create_zarr_count_assay, normalized_values_record
+        from ..storage.sharding import count_layout_request
         from ._store import resolve_import_values
         from ..storage.destinations import check_destination, create_destination
         from ..assay.classification import validate_assay_type
+
+        layout_request = count_layout_request(policy)
 
         validate_assay_type(
             assay_type, assay="RNA" if assay_name is None else assay_name
@@ -919,7 +960,7 @@ class H5adToZarr:
             if decision.kind in ("log_normalized", "log2_normalized")
         }
         # A layout that does not fit fails here, before the destination exists.
-        self.policy = self._fit_count_layout(policy)
+        self.policy = self._fit_count_layout(layout_request)
         # The destination must be empty, or with overwrite an unprepared store.
         self.z = create_destination(
             zarr_loc, overwrite=overwrite, storage_options=storage_options
@@ -1016,11 +1057,7 @@ class H5adToZarr:
             metadata_column_keys,
         )
         from ..storage.schema import create_cell_data
-        from ._store import (
-            keyed_metadata_columns,
-            write_membership_column,
-            write_metadata_column,
-        )
+        from ._store import keyed_metadata_columns, write_membership_column
 
         ids = self.h5ad.cell_ids()
         g = create_cell_data(
@@ -1042,17 +1079,17 @@ class H5adToZarr:
             self.h5ad._source_column_names(self.h5ad.cellAttrsKey),
             taken=[*g.keys(), *reserved],
         )
-        for key, (name, values, missing, categories) in keyed_metadata_columns(
+        for key, (name, column, categories) in keyed_metadata_columns(
             (
-                (name, (name, values, missing, categories))
-                for name, values, missing, categories in self.h5ad._cell_columns()
+                (name, (name, column, categories))
+                for name, column, categories in self.h5ad._cell_columns()
                 if name not in restored
             ),
             keys,
             "cell",
             membership=reserved,
         ):
-            write_metadata_column(g, key, values, missing, profile=self.profile)
+            missing = _write_column(g, key, column, profile=self.profile)
             if categories is not None:
                 self._keep_categories(
                     as_zarr_array(g[key], name=key),
@@ -1086,7 +1123,7 @@ class H5adToZarr:
 
     def _ini_feature_data(self) -> None:
         from ..storage.metadata_keys import metadata_column_keys
-        from ._store import keyed_metadata_columns, write_metadata_column
+        from ._store import keyed_metadata_columns
 
         targets: list[tuple[Any, np.ndarray | None]] = []
         for assay_name in self.assayNames:
@@ -1108,25 +1145,19 @@ class H5adToZarr:
         )
         # Stream one column at a time so a single decoded var column is held in
         # memory rather than every column for the full feature axis at once.
-        for column_name, (values, missing, categories) in keyed_metadata_columns(
+        for column_name, (column, categories) in keyed_metadata_columns(
             (
-                (name, (values, missing, categories))
-                for name, values, missing, categories in self.h5ad._feature_columns()
+                (name, (column, categories))
+                for name, column, categories in self.h5ad._feature_columns()
             ),
             keys,
             "feature",
         ):
             for feat_group, feature_indexes in targets:
-                if feature_indexes is None:
-                    selected, selected_missing = values, missing
-                else:
-                    selected = values[feature_indexes]
-                    selected_missing = missing[feature_indexes]
-                write_metadata_column(
+                selected_missing = _write_column(
                     feat_group,
                     column_name,
-                    selected,
-                    selected_missing,
+                    _column_rows(column, feature_indexes),
                     profile=self.profile,
                 )
                 if categories is not None:
@@ -1602,9 +1633,9 @@ class H5adToZarr:
     def _fit_count_layout(
         self, requested: CountMatrixPolicy | None
     ) -> CountMatrixPolicy:
-        """Return the requested or default count layout if its writes fit the budget.
+        """Return the ``requested`` count layout if its writes fit the budget.
 
-        A dense matrix is admitted as its write runs, through dense row bands
+        None fits the default layout to the budget. A dense matrix is admitted as its write runs, through dense row bands
         of every assay, and a sparse one through the sparse band writer.
         """
         from ..storage.sharding import (
@@ -1645,7 +1676,7 @@ class H5adToZarr:
             memoryBytes=self.resources.memoryBytes,
             transposed=counts_t_assays(self.assayNames, self.assayTypes),
             admitCounts=admit_counts,
-            requested=DEFAULT_COUNT_MATRIX_POLICY if requested is None else requested,
+            requested=requested,
         )
 
     def _write_counts(self, batch_size: int | None = None) -> None:

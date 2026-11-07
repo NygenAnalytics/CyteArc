@@ -61,7 +61,27 @@ class CountLayoutMemoryError(MemoryBudgetError):
     Its ``needed_bytes`` is the smallest budget that admits the requested
     layout at the step that refused it, and its message names the largest
     halving of the layout that fits.
+
+    Attributes:
+        fittingPolicy: The largest halving of the requested layout that fits
+            the budget, which an import given ``policy="fit"`` writes when it
+            refuses the default layout, or None when not even count shards of
+            one row fit.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        needed_bytes: int,
+        budget_bytes: int,
+        item: str,
+        fittingPolicy: CountMatrixPolicy | None,
+    ) -> None:
+        super().__init__(
+            message, needed_bytes=needed_bytes, budget_bytes=budget_bytes, item=item
+        )
+        self.fittingPolicy = fittingPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -1577,6 +1597,32 @@ def dense_counts_admission(
     return admit
 
 
+def count_layout_request(policy: object) -> CountMatrixPolicy | None:
+    """Return the layout that an import's ``policy`` requests of :func:`fit_count_layout`.
+
+    An import writes the default layout when ``policy`` is None, so that the
+    layout of its store does not depend on the budget of the import, and a
+    ``CountMatrixPolicy`` exactly. ``"fit"`` returns None, which halves the
+    default layout until the import's writes fit its budget, as subset and
+    merge fit theirs.
+
+    Raises:
+        TypeError: If ``policy`` is neither None, ``"fit"`` nor a
+            ``CountMatrixPolicy``.
+        ValueError: If ``policy`` is a string other than ``"fit"``.
+    """
+    if policy is None:
+        return DEFAULT_COUNT_MATRIX_POLICY
+    if isinstance(policy, CountMatrixPolicy):
+        return policy
+    expected = 'policy must be a CountMatrixPolicy, "fit" or None'
+    if isinstance(policy, str):
+        if policy == "fit":
+            return None
+        raise ValueError(f"{expected}, not {policy!r}")
+    raise TypeError(f"{expected}, not {type(policy).__name__}")
+
+
 def fit_count_layout(
     assays: Mapping[str, tuple[int, Any]],
     *,
@@ -1592,7 +1638,8 @@ def fit_count_layout(
 
     An explicit ``requested`` policy is used exactly: when its writes do not
     fit, a :class:`CountLayoutMemoryError` is raised before the writer creates
-    its destination and names the largest halving of the policy that fits. Otherwise
+    its destination, naming the largest halving of the policy that fits and
+    holding it as ``fittingPolicy``. Otherwise
     ``unitBytes`` and ``chunkBytes`` of the default policy are halved
     together, keeping its chunks per shard, until the counts write of every
     assay and the ``countsT`` transpose of every transposed assay fit.
@@ -1617,7 +1664,8 @@ def fit_count_layout(
 
     Raises:
         CountLayoutMemoryError: If ``requested`` does not fit.
-        MemoryBudgetError: If nothing fits, not even count shards of one row.
+        MemoryBudgetError: If ``requested`` is None and nothing fits, not even
+            count shards of one row.
     """
     resources = ResourceBudget(int(memoryBytes), 1)
 
@@ -1669,9 +1717,11 @@ def fit_count_layout(
         try:
             admit(requested)
         except MemoryBudgetError as error:
+            smaller: CountMatrixPolicy | None
             try:
                 smaller = largest_fit(requested)
             except MemoryBudgetError:
+                smaller = None
                 advice = "Increase mem_budget; even count shards of one row do not fit."
             else:
                 advice = (
@@ -1691,6 +1741,7 @@ def fit_count_layout(
                 needed_bytes=error.needed_bytes,
                 budget_bytes=int(memoryBytes),
                 item=f"the {kind} count-matrix policy",
+                fittingPolicy=smaller,
             ) from error
         return requested
     policy = largest_fit(DEFAULT_COUNT_MATRIX_POLICY)

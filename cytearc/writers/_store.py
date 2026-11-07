@@ -5,7 +5,11 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import zarr
 
-from ..metadata.encoding import missing_rows, stored_values
+from ..metadata.encoding import (
+    missing_rows,
+    stored_categorical_values,
+    stored_values,
+)
 from ..storage.arrays import (
     MISSING_MASK_PREFIX,
     create_zarr_dataset as _create_zarr_dataset,
@@ -131,6 +135,7 @@ def write_metadata_column(
     missing: Any = None,
     *,
     profile: StorageProfile | None = None,
+    categories: Any = None,
 ) -> None:
     """Write one metadata column and link a missing-value mask when needed.
 
@@ -141,15 +146,23 @@ def write_metadata_column(
     Args:
         group: Destination metadata group.
         name: Column name.
-        values: One value per row.
+        values: One value per row, or with ``categories`` each row's integer
+            code into them.
         missing: Rows to flag as missing. When None, ``None``, NaN, ``pd.NA``,
-            and NaT entries of an object array are missing.
+            and NaT entries of an object array are missing. With
+            ``categories`` it must be None: a negative code, or one past the
+            last category, is missing.
         profile: Zarr encoding profile. When None, chosen from the store.
+        categories: The categories of a categorical column, which
+            :func:`~cytearc.metadata.encoding.stored_categorical_values`
+            converts once each and takes by code. The column stores what the
+            decoded labels store.
 
     Raises:
-        TypeError: If ``name`` is not a string.
-        ValueError: If ``name`` cannot name one Zarr array, or the values are
-            not one-dimensional or the mask does not align with them.
+        TypeError: If ``name`` is not a string, or codes are not integers.
+        ValueError: If ``name`` cannot name one Zarr array, the values are
+            not one-dimensional, the mask does not align with them, or
+            ``missing`` is given with ``categories``.
     """
     from ..storage.arrays import (
         MetadataBlock,
@@ -164,15 +177,26 @@ def write_metadata_column(
             f"Metadata column {name!r} must hold one value per row; "
             f"found shape {array.shape}"
         )
-    mask = missing_rows(array) if missing is None else np.asarray(missing, dtype=bool)
-    if mask.shape != array.shape:
-        raise ValueError(f"Metadata column {name!r} has a misaligned missing mask")
-    has_missing = bool(mask.any())
-    stored = (
-        stored_values(array, mask, name=name)
-        if has_missing or array.dtype.kind == "O"
-        else array
-    )
+    if categories is not None:
+        if missing is not None:
+            raise ValueError(
+                f"Metadata column {name!r} takes its missing rows from its "
+                "category codes; pass missing=None with categories"
+            )
+        stored, mask = stored_categorical_values(array, categories, name=name)
+        has_missing = bool(mask.any())
+    else:
+        mask = (
+            missing_rows(array) if missing is None else np.asarray(missing, dtype=bool)
+        )
+        if mask.shape != array.shape:
+            raise ValueError(f"Metadata column {name!r} has a misaligned missing mask")
+        has_missing = bool(mask.any())
+        stored = (
+            stored_values(array, mask, name=name)
+            if has_missing or array.dtype.kind == "O"
+            else array
+        )
     # The stored width sets the chunk, so byte strings are decoded first; the
     # write then copies them no further.
     stored = encode_metadata_values(stored, stored.dtype, name=name)

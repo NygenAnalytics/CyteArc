@@ -35,6 +35,7 @@ from cytearc.readers._seurat.errors import (
     UnsupportedMatrixOperation,
 )
 from cytearc.readers.seurat import SeuratImportError
+from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.finite_values import NonFiniteArtifactError
 from cytearc.perturbation.histograms import HistogramMemoryError
@@ -82,6 +83,7 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
         needed_bytes=8 * 10**9,
         budget_bytes=10**9,
         item="the requested count-matrix policy",
+        fittingPolicy=CountMatrixPolicy(unitBytes=125_000_000, chunkBytes=12_500_000),
     ),
     HistogramMemoryError: lambda: HistogramMemoryError(
         "Counting guide UMIs holds about 4096 bytes for the guide count histograms "

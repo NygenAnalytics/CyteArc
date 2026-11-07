@@ -22,13 +22,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..storage.arrays import encode_metadata_values, text_value
+from ..storage.arrays import encode_metadata_values, text_array
 
 __all__ = [
     "checked_fill_value",
     "missing_placeholder",
     "missing_rows",
     "nullable_values",
+    "stored_categorical_values",
     "stored_values",
 ]
 
@@ -63,18 +64,20 @@ def missing_placeholder(dtype: np.dtype[Any]) -> Any:
 
 
 def _text(values: np.ndarray, missing: np.ndarray, *, name: str) -> np.ndarray:
+    """Return values as text, empty in missing rows, as wide as the longest."""
+    absent = bool(missing.any())
     try:
-        text = [
-            "" if absent else text_value(value)
-            for value, absent in zip(values.tolist(), missing.tolist(), strict=True)
-        ]
+        present = text_array(values[~missing] if absent else values)
     except UnicodeDecodeError as exc:
         raise ValueError(
             f"Column {name!r} holds text that is not valid UTF-8; pass str values "
             "or UTF-8 encoded bytes"
         ) from exc
-    width = max((len(value) for value in text), default=1)
-    return np.asarray(text, dtype=f"U{max(width, 1)}")
+    if not absent:
+        return present
+    text = np.zeros(values.shape, dtype=present.dtype)
+    text[~missing] = present
+    return text
 
 
 def _is_integer(value: Any) -> bool:
@@ -172,6 +175,62 @@ def stored_values(
     if missing.any():
         stored[missing] = missing_placeholder(values.dtype)
     return stored
+
+
+def stored_categorical_values(
+    codes: np.ndarray,
+    categories: np.ndarray,
+    *,
+    name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a categorical column as :func:`stored_values` stores its labels.
+
+    Each row holds the category at its code, and a negative code, or one past
+    the last category, is missing. The categories that present rows use are
+    typed once each, as ``stored_values`` types the labels of a column, and
+    taken by code, so the column equals ``stored_values`` of the decoded
+    labels, dtype and width included, without a conversion per row.
+
+    Args:
+        codes: One integer code per row.
+        categories: The categories that the codes index.
+        name: Column name, for errors.
+
+    Returns:
+        The stored column, with a placeholder in missing rows, and the
+        missing rows.
+
+    Raises:
+        TypeError: If the codes are not integers.
+        ValueError: If the categories are not one-dimensional, or as
+            ``stored_values`` raises for the categories that rows use.
+    """
+    codes = np.asarray(codes)
+    categories = np.asarray(categories)
+    if codes.dtype.kind not in "iu":
+        raise TypeError(
+            f"Column {name!r} needs integer category codes, not values of dtype "
+            f"{codes.dtype}"
+        )
+    if categories.ndim != 1:
+        raise ValueError(
+            f"Column {name!r} needs one category per position, not categories of "
+            f"shape {categories.shape}"
+        )
+    present = (codes >= 0) & (codes < len(categories))
+    present_codes = codes[present].astype(np.intp)
+    used = np.zeros(len(categories), dtype=bool)
+    used[present_codes] = True
+    positions = np.flatnonzero(used)
+    # Python objects, as an array of decoded labels holds them.
+    labels = np.empty(len(positions), dtype=object)
+    labels[:] = categories[positions]
+    typed = stored_values(labels, np.zeros(len(positions), dtype=bool), name=name)
+    rank = np.zeros(len(categories), dtype=np.intp)
+    rank[positions] = np.arange(len(positions))
+    stored = np.full(codes.shape, missing_placeholder(typed.dtype), dtype=typed.dtype)
+    stored[present] = typed[rank[present_codes]]
+    return stored, ~present
 
 
 def _is_pandas_values(values: Any) -> bool:
