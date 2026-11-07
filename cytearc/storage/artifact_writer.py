@@ -141,6 +141,9 @@ class ArtifactComputationRequired(BaseException):
         super().__init__(computation.describe())
         self.computation = computation
 
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+        return (type(self), (self.computation,), self.__dict__)
+
 
 _FORECAST: ContextVar[bool] = ContextVar("cytearc_artifact_forecast", default=False)
 
