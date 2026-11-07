@@ -47,11 +47,9 @@ Subset, repack and mount copy a categorical column as codes and categories: the 
 
 ## Composite sources and virtual counts
 
-A composite has ordinary local cell and feature metadata, preparation summaries, and analysis
-artifacts. Its root `composite` attribute records `assay`, `sources`, `arrays`, `maps`, and
-`complete`. Each source binding holds its `name`, `location`, `workspace`, `datasetFingerprint`,
-and `countsFingerprint`. Source credentials are supplied at reopen through
-`DataStore(source_storage_options={source_name: options})` and are never persisted.
+A composite has ordinary cell and feature metadata, preparation summaries, and analysis artifacts. Its root `composite` attribute records `assay`, `sources`, `arrays`, `maps`, and `complete`. Each source binding holds its `name`, `location`, `workspace`, `datasetFingerprint`, and `countsFingerprint`. Source credentials are supplied at reopen through `DataStore(source_storage_options={source_name: options})` and are never persisted.
+
+`create_composite` writes the composite to any destination that the store layer opens: a local path, a URL with the `storage_options` that open it, or a Zarr store. New arrays take the storage profile of the destination, as other writers' do, and a destination that holds anything raises `FileExistsError`. The cell column of source names is `dataset` unless `source_column` names another, checked as `DataStoreMerge` checks its own.
 
 (source_locations)=
 
